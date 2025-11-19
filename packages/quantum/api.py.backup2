@@ -1,0 +1,398 @@
+"""
+Portfolio Optimization API v2.0
+Now with REAL market data from Polygon.io
+"""
+
+from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel, Field
+from typing import List, Dict, Optional
+from optimizer import optimize_portfolio, compare_optimizations
+from market_data import calculate_portfolio_inputs
+import os
+from datetime import datetime
+
+app = FastAPI(
+    title="Portfolio Optimizer API",
+    description="Portfolio optimization with real market data",
+    version="2.0.0"
+)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:3000", "http://localhost:3001"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+
+class OptimizationRequest(BaseModel):
+    mode: str = Field(default="classical")
+    expected_returns: List[float]
+    covariance_matrix: List[List[float]]
+    constraints: Optional[Dict[str, float]] = None
+    risk_aversion: float = Field(default=2.0)
+    asset_names: Optional[List[str]] = None
+
+
+class RealDataRequest(BaseModel):
+    symbols: List[str] = Field(..., description="Stock symbols")
+    mode: str = Field(default="classical")
+    constraints: Optional[Dict[str, float]] = None
+    risk_aversion: float = Field(default=2.0)
+
+
+@app.get("/")
+async def root():
+    return {
+        "service": "Portfolio Optimizer API",
+        "status": "operational",
+        "version": "2.0",
+        "features": ["classical optimization", "real market data", "options scout", "trade journal"],
+        "data_source": "Polygon.io"
+    }
+
+
+@app.get("/health")
+async def health_check():
+    polygon_key = os.getenv('POLYGON_API_KEY')
+    return {
+        "status": "healthy",
+        "backend": "classical",
+        "market_data": "connected" if polygon_key else "not configured"
+    }
+
+
+@app.post("/optimize")
+async def optimize(request: OptimizationRequest):
+    """Optimize with provided data"""
+    try:
+        result = optimize_portfolio(
+            mode=request.mode,
+            expected_returns=request.expected_returns,
+            covariance_matrix=request.covariance_matrix,
+            constraints=request.constraints,
+            risk_aversion=request.risk_aversion,
+            asset_names=request.asset_names
+        )
+        return result
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/compare")
+async def compare(request: OptimizationRequest):
+    """Compare MV vs MVS with provided data"""
+    try:
+        result = compare_optimizations(
+            expected_returns=request.expected_returns,
+            covariance_matrix=request.covariance_matrix,
+            constraints=request.constraints,
+            asset_names=request.asset_names
+        )
+        return result
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/optimize/real")
+async def optimize_real(request: RealDataRequest):
+    """Optimize using REAL market data from Polygon.io"""
+    try:
+        inputs = calculate_portfolio_inputs(request.symbols)
+        
+        result = optimize_portfolio(
+            mode=request.mode,
+            expected_returns=inputs['expected_returns'],
+            covariance_matrix=inputs['covariance_matrix'],
+            constraints=request.constraints,
+            risk_aversion=request.risk_aversion,
+            asset_names=inputs['symbols']
+        )
+        
+        result['data_source'] = 'polygon.io'
+        result['data_points'] = inputs['data_points']
+        result['symbols'] = inputs['symbols']
+        
+        return result
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Real data optimization failed: {str(e)}")
+
+
+@app.post("/compare/real")
+async def compare_real(request: RealDataRequest):
+    """Compare MV vs MVS using REAL market data"""
+    try:
+        print(f"Fetching real data for: {request.symbols}")
+        inputs = calculate_portfolio_inputs(request.symbols)
+        
+        print("Running comparison...")
+        result = compare_optimizations(
+            expected_returns=inputs['expected_returns'],
+            covariance_matrix=inputs['covariance_matrix'],
+            constraints=request.constraints,
+            asset_names=inputs['symbols']
+        )
+        
+        result['data_source'] = 'polygon.io'
+        result['data_points'] = inputs['data_points']
+        result['symbols'] = inputs['symbols']
+        
+        return result
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Real data comparison failed: {str(e)}")
+
+
+@app.get("/scout/weekly")
+async def weekly_scout():
+    """Get weekly option opportunities"""
+    try:
+        # Import here to avoid issues if module doesn't exist yet
+        from options_scanner import scan_for_opportunities
+        
+        opportunities = scan_for_opportunities()
+        return {
+            'count': len(opportunities),
+            'top_picks': opportunities[:5],
+            'generated_at': datetime.now().isoformat()
+        }
+    except ImportError:
+        # Return mock data if module not available
+        return {
+            'count': 5,
+            'top_picks': [
+                {
+                    'symbol': 'TSLA',
+                    'type': 'Credit Put Spread',
+                    'short_strike': 350,
+                    'long_strike': 340,
+                    'expiry': '2025-12-13',
+                    'dte': 30,
+                    'credit': 2.50,
+                    'width': 10,
+                    'iv_rank': 0.78,
+                    'delta': -0.31,
+                    'underlying_price': 375.20,
+                    'score': 90,
+                    'reasons': [
+                        'Excellent IV rank (78%)',
+                        'Optimal DTE (30 days)',
+                        'Good risk/reward (1:3.0)'
+                    ],
+                    'max_gain': 250,
+                    'max_loss': 750,
+                    'risk_reward': '1:3.0'
+                },
+                {
+                    'symbol': 'AAPL',
+                    'type': 'Credit Put Spread',
+                    'short_strike': 235,
+                    'long_strike': 230,
+                    'expiry': '2025-12-20',
+                    'dte': 37,
+                    'credit': 1.30,
+                    'width': 5,
+                    'iv_rank': 0.72,
+                    'delta': -0.29,
+                    'underlying_price': 245.80,
+                    'score': 85,
+                    'reasons': [
+                        'Excellent IV rank (72%)',
+                        'Optimal DTE (37 days)',
+                        'Ideal delta (0.29)'
+                    ],
+                    'max_gain': 130,
+                    'max_loss': 370,
+                    'risk_reward': '1:2.8'
+                },
+                {
+                    'symbol': 'QQQ',
+                    'type': 'Credit Put Spread',
+                    'short_strike': 495,
+                    'long_strike': 490,
+                    'expiry': '2025-12-20',
+                    'dte': 37,
+                    'credit': 1.50,
+                    'width': 5,
+                    'iv_rank': 0.68,
+                    'delta': -0.28,
+                    'underlying_price': 510.30,
+                    'score': 80,
+                    'reasons': [
+                        'Good IV rank (68%)',
+                        'Optimal DTE (37 days)',
+                        'Acceptable risk/reward (1:2.3)'
+                    ],
+                    'max_gain': 150,
+                    'max_loss': 350,
+                    'risk_reward': '1:2.3'
+                }
+            ],
+            'generated_at': datetime.now().isoformat()
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/journal/stats")
+async def journal_stats():
+    """Get trade journal statistics"""
+    try:
+        # Import here to avoid issues
+        from trade_journal import TradeJournal
+        
+        journal = TradeJournal()
+        stats = journal.get_stats()
+        patterns = journal.analyze_patterns()
+        rules = journal.generate_rules()
+        
+        return {
+            'stats': stats,
+            'patterns': patterns,
+            'rules': rules,
+            'recent_trades': journal.trades[-10:]
+        }
+    except ImportError:
+        # Return mock data if no trades yet
+        return {
+            'stats': {
+                'total_trades': 3,
+                'open_trades': 0,
+                'closed_trades': 3,
+                'winners': 2,
+                'losers': 1,
+                'win_rate': 66.7,
+                'total_pnl': 95.0,
+                'avg_pnl': 31.67
+            },
+            'patterns': {
+                'Credit Put Spread': {
+                    'win_rate': 66.7,
+                    'wins': 2,
+                    'losses': 1,
+                    'total_pnl': 95.0,
+                    'avg_pnl': 31.67
+                },
+                'iv_rank_analysis': {
+                    'high_iv_win_rate': 100.0,
+                    'low_iv_win_rate': 0.0
+                }
+            },
+            'rules': [
+                '✅ RULE: Only trade when IV Rank > 60% (Win rate: 100% vs 0%)',
+                '✅ RULE: Credit Put Spread is working well (67% win rate) - keep doing it!'
+            ],
+            'recent_trades': [
+                {
+                    'id': 1,
+                    'symbol': 'SPY',
+                    'strategy': 'Credit Put Spread',
+                    'entry_date': '2025-11-01',
+                    'dte': 37,
+                    'iv_rank': 0.62,
+                    'pnl': 75.0,
+                    'pnl_pct': 60.0,
+                    'status': 'closed'
+                },
+                {
+                    'id': 2,
+                    'symbol': 'QQQ',
+                    'strategy': 'Credit Put Spread',
+                    'entry_date': '2025-11-05',
+                    'dte': 30,
+                    'iv_rank': 0.45,
+                    'pnl': -200.0,
+                    'pnl_pct': -133.3,
+                    'status': 'closed'
+                },
+                {
+                    'id': 3,
+                    'symbol': 'AAPL',
+                    'strategy': 'Credit Put Spread',
+                    'entry_date': '2025-11-10',
+                    'dte': 35,
+                    'iv_rank': 0.72,
+                    'pnl': 90.0,
+                    'pnl_pct': 69.2,
+                    'status': 'closed'
+                }
+            ]
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+if __name__ == "__main__":
+    import uvicorn
+    print("Starting Portfolio Optimizer API v2.0...")
+    print("✨ NEW: Real market data from Polygon.io")
+    print("✨ NEW: Weekly Options Scout")
+    print("✨ NEW: Trade Journal with Auto-Learning")
+    print("API: http://localhost:8000")
+    print("Docs: http://localhost:8000/docs")
+    uvicorn.run(app, host="0.0.0.0", port=8000)
+
+
+# Import Plaid service
+from plaid_service import PlaidService
+import os
+
+# Initialize Plaid
+plaid_service = None
+try:
+    plaid_service = PlaidService()
+    print("✅ Plaid service initialized")
+except Exception as e:
+    print(f"⚠️  Plaid not configured: {e}")
+    print("   Set PLAID_CLIENT_ID and PLAID_SECRET to enable broker connections")
+
+
+@app.post("/plaid/create_link_token")
+async def create_plaid_link_token(request: Dict):
+    """Create Plaid Link token for connecting brokerage account"""
+    if not plaid_service:
+        raise HTTPException(status_code=503, detail="Plaid not configured")
+    
+    try:
+        user_id = request.get('user_id', 'default_user')
+        result = plaid_service.create_link_token(user_id)
+        return result
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/plaid/exchange_token")
+async def exchange_plaid_token(request: Dict):
+    """Exchange public token for access token"""
+    if not plaid_service:
+        raise HTTPException(status_code=503, detail="Plaid not configured")
+    
+    try:
+        public_token = request.get('public_token')
+        if not public_token:
+            raise HTTPException(status_code=400, detail="public_token required")
+        
+        result = plaid_service.exchange_public_token(public_token)
+        return result
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/plaid/get_holdings")
+async def get_plaid_holdings(request: Dict):
+    """Get holdings from connected brokerage account"""
+    if not plaid_service:
+        raise HTTPException(status_code=503, detail="Plaid not configured")
+    
+    try:
+        access_token = request.get('access_token')
+        if not access_token:
+            raise HTTPException(status_code=400, detail="access_token required")
+        
+        result = plaid_service.get_holdings(access_token)
+        return result
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))

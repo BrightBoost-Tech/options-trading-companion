@@ -1,0 +1,25 @@
+{
+  "name": "options-trading-companion",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Personal options trading companion with AI-powered scouting and guardrails",
+  "scripts": {
+    "dev": "pnpm --parallel --filter \"./apps/**\" dev",
+    "build": "pnpm --filter \"./packages/**\" build && pnpm --filter \"./apps/**\" build",
+    "test": "vitest",
+    "lint": "eslint .",
+    "type-check": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@types/node": "^20.10.0",
+    "eslint": "^8.57.0",
+    "eslint-config-next": "^14.0.4",
+    "prettier": "^3.1.1",
+    "typescript": "^5.3.3",
+    "vitest": "^1.1.0"
+  },
+  "engines": {
+    "node": ">=18.0.0",
+    "pnpm": ">=8.0.0"
+  }
+}

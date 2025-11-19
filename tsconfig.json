@@ -1,0 +1,26 @@
+﻿{
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": ["ES2022"],
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "resolveJsonModule": true,
+    "allowJs": true,
+    "checkJs": false,
+    "strict": true,
+    "noEmit": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true,
+    "isolatedModules": true,
+    "incremental": true,
+    "paths": {
+      "@core/*": ["./packages/core/src/*"],
+      "@server/*": ["./packages/server/src/*"],
+      "@data/*": ["./packages/data/src/*"],
+      "@ai/*": ["./packages/ai/src/*"],
+      "@risk/*": ["./packages/risk/src/*"]
+    }
+  },
+  "exclude": ["node_modules", ".next", "dist", "build"]
+}

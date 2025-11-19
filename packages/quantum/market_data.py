@@ -1,0 +1,124 @@
+"""Market data integration with caching"""
+import os
+import requests
+from datetime import datetime, timedelta
+from typing import List, Dict
+import numpy as np
+from cache import get_cached_data, save_to_cache
+
+
+class PolygonService:
+    def __init__(self, api_key: str = None):
+        self.api_key = api_key or os.getenv('POLYGON_API_KEY')
+        if not self.api_key:
+            raise ValueError("POLYGON_API_KEY required")
+        self.base_url = "https://api.polygon.io"
+    
+    def get_historical_prices(self, symbol: str, days: int = 252) -> Dict:
+        to_date = datetime.now()
+        from_date = to_date - timedelta(days=days + 30)
+        
+        from_str = from_date.strftime('%Y-%m-%d')
+        to_str = to_date.strftime('%Y-%m-%d')
+        
+        url = f"{self.base_url}/v2/aggs/ticker/{symbol}/range/1/day/{from_str}/{to_str}"
+        params = {
+            'adjusted': 'true',
+            'sort': 'asc',
+            'apiKey': self.api_key
+        }
+        
+        response = requests.get(url, params=params, timeout=10)
+        response.raise_for_status()
+        
+        data = response.json()
+        if 'results' not in data or len(data['results']) == 0:
+            raise ValueError(f"No data returned for {symbol}")
+        
+        prices = [bar['c'] for bar in data['results']]
+        dates = [datetime.fromtimestamp(bar['t'] / 1000).strftime('%Y-%m-%d') 
+                for bar in data['results']]
+        
+        returns = []
+        for i in range(1, len(prices)):
+            returns.append((prices[i] - prices[i-1]) / prices[i-1])
+        
+        return {
+            'symbol': symbol,
+            'prices': prices,
+            'returns': returns,
+            'dates': dates
+        }
+
+
+def calculate_portfolio_inputs(symbols: List[str], api_key: str = None) -> Dict:
+    """Calculate with caching to avoid rate limits"""
+    
+    # Check cache first
+    symbols_tuple = tuple(sorted(symbols))
+    cached = get_cached_data(symbols_tuple)
+    
+    if cached:
+        return cached
+    
+    # Fetch fresh data
+    service = PolygonService(api_key)
+    print(f"Fetching historical data for: {', '.join(symbols)}")
+    
+    all_data = []
+    for symbol in symbols:
+        try:
+            data = service.get_historical_prices(symbol)
+            all_data.append(data)
+            print(f"  ✓ {symbol}: {len(data['prices'])} days")
+        except Exception as e:
+            print(f"  ✗ {symbol}: {str(e)}")
+            raise
+    
+    expected_returns = []
+    for data in all_data:
+        mean_daily_return = np.mean(data['returns'])
+        annualized_return = mean_daily_return * 252
+        expected_returns.append(float(annualized_return))
+    
+    min_length = min(len(data['returns']) for data in all_data)
+    aligned_returns = [data['returns'][-min_length:] for data in all_data]
+    
+    returns_matrix = np.array(aligned_returns)
+    cov_matrix = np.cov(returns_matrix) * 252
+    
+    result = {
+        'expected_returns': expected_returns,
+        'covariance_matrix': cov_matrix.tolist(),
+        'symbols': symbols,
+        'data_points': min_length
+    }
+    
+    # Cache for next time
+    save_to_cache(symbols_tuple, result)
+    
+    return result
+
+
+if __name__ == '__main__':
+    symbols = ['SPY', 'QQQ', 'IWM', 'DIA']
+    
+    try:
+        inputs = calculate_portfolio_inputs(symbols)
+        
+        print("\nPortfolio Inputs from Real Market Data:")
+        print("="*50)
+        print(f"\nSymbols: {inputs['symbols']}")
+        print(f"Data points: {inputs['data_points']} days")
+        
+        print("\nExpected Returns (annualized):")
+        for symbol, ret in zip(inputs['symbols'], inputs['expected_returns']):
+            print(f"  {symbol}: {ret*100:.2f}%")
+        
+        print("\nCovariance Matrix:")
+        cov = np.array(inputs['covariance_matrix'])
+        print(f"  Shape: {cov.shape}")
+        print(f"  Avg volatility: {np.sqrt(np.diag(cov)).mean()*100:.2f}%")
+        
+    except Exception as e:
+        print(f"\nError: {e}")

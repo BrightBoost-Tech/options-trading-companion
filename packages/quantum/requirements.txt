@@ -1,0 +1,21 @@
+# To install these dependencies, navigate to this directory in your terminal and run:
+# cd packages/quantum
+# pip install -r requirements.txt
+
+# Core web framework
+fastapi>=0.104.0
+uvicorn>=0.24.0
+pydantic>=2.5.0
+
+# Scientific computing (as originally specified)
+numpy>=1.24.0
+scipy>=1.10.0
+pandas>=2.0.0
+
+# External Services
+supabase>=1.0.0
+plaid-python>=10.0.0
+python-dotenv>=1.0.0
+
+# Testing
+pytest>=7.4.0

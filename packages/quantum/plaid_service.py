@@ -25,8 +25,8 @@ if not plaid_host:
 configuration = plaid.Configuration(
     host=plaid_host,
     api_key={
-        'clientId': os.getenv("PLAID_CLIENT_ID"),
-        'secret': os.getenv("PLAID_SECRET"),
+        'clientId': os.getenv("PLAID_CLIENT_ID") or "",
+        'secret': os.getenv("PLAID_SECRET") or "",
     }
 )
 api_client = plaid.ApiClient(configuration)

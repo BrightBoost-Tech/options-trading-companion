@@ -1,10 +1,14 @@
 import os
+from dotenv import load_dotenv
 from typing import List, Optional
 from fastapi import FastAPI, HTTPException, Header
 from fastapi.middleware.cors import CORSMiddleware
 from supabase import create_client, Client
 from models import Holding, SyncResponse
 import plaid_service
+
+# 1. Load environment variables BEFORE importing other things
+load_dotenv()
  
 app = FastAPI()
 
@@ -17,10 +21,21 @@ app.add_middleware(
     allow_headers=["*"],
 )
  
-# Initialize Supabase Client (Server-side)
-SUPABASE_URL = os.getenv("NEXT_PUBLIC_SUPABASE_URL")  # Reading shared env
-SUPABASE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY")  # Must use Service Role for backend writes
-supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
+# Initialize Supabase Client
+# We check if the vars exist to give a better error message if they are missing
+url = os.getenv("NEXT_PUBLIC_SUPABASE_URL")
+key = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
+
+if not url or not key:
+    print("CRITICAL ERROR: Missing Supabase Environment Variables.")
+    print(f"NEXT_PUBLIC_SUPABASE_URL found? {'Yes' if url else 'No'}")
+    print(f"SUPABASE_SERVICE_ROLE_KEY found? {'Yes' if key else 'No'}")
+    # We don't raise immediately to let the server start, but endpoints will fail
+else:
+    print("Supabase config loaded successfully.")
+
+# Initialize client only if vars exist to prevent crash on startup
+supabase: Client = create_client(url, key) if url and key else None
  
 @app.get("/")
 def read_root():
@@ -29,10 +44,10 @@ def read_root():
 @app.post("/plaid/sync_holdings", response_model=SyncResponse)
 async def sync_holdings(
     authorization: Optional[str] = Header(None),
-    # In a real app, we would accept the access_token or look it up via user_id
-    # For this phase, we will assume we look up the access_token from Supabase 
-    # based on the user ID in the JWT.
 ):
+    if not supabase:
+         raise HTTPException(status_code=500, detail="Server Error: Database not configured")
+
     if not authorization:
         raise HTTPException(status_code=401, detail="Missing Authorization header")
  
@@ -45,14 +60,9 @@ async def sync_holdings(
         raise HTTPException(status_code=401, detail="Invalid Token")
  
     # 2. Retrieve Plaid Access Token for this User
-    # NOTE: Assuming a 'plaid_items' table exists. If not, you might need to pass 
-    # the access_token temporarily from frontend for dev, but let's try to query it.
-    # This is a placeholder query logic:
     response = supabase.table("plaid_items").select("access_token").eq("user_id", user_id).execute()
     
     if not response.data:
-        # FALLBACK FOR DEV ONLY: If no DB record, check if passed in headers (insecure but useful for quick testing)
-        # or return error. Let's return error to force proper setup.
         raise HTTPException(status_code=404, detail="No linked Plaid account found for user.")
         
     access_token = response.data[0]['access_token']
@@ -70,14 +80,12 @@ async def sync_holdings(
         row['user_id'] = user_id
         data_to_insert.append(row)
 
-    if not data_to_insert:
-        return SyncResponse(status="success", count=0, holdings=[])
- 
-    try:
-        # Upsert based on (user_id, symbol)
-        supabase.table("holdings").upsert(data_to_insert, on_conflict="user_id,symbol").execute()
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to save holdings: {e}")
+    if data_to_insert:
+        supabase.table("holdings").upsert(
+            data_to_insert, 
+            on_conflict="user_id,symbol"
+        ).execute()
+
     return SyncResponse(
         status="success",
         count=len(holdings),

@@ -6,7 +6,6 @@ from typing import List, Dict
 import numpy as np
 from cache import get_cached_data, save_to_cache
 
-
 class PolygonService:
     def __init__(self, api_key: str = None):
         self.api_key = api_key or os.getenv('POLYGON_API_KEY')
@@ -50,54 +49,102 @@ class PolygonService:
             'dates': dates
         }
 
+def generate_mock_market_data(symbols: List[str]) -> Dict:
+    """Generate consistent mock data for testing without API key"""
+    print(f"⚠️  Using MOCK market data for {symbols} (Polygon Key missing)")
+    
+    # Seed for reproducibility based on symbols
+    seed_val = sum(ord(c) for s in symbols for c in s)
+    np.random.seed(seed_val)
+    
+    n_assets = len(symbols)
+    
+    # Generate random returns
+    # Annualized returns between -5% and +15%
+    expected_returns = np.random.uniform(-0.05, 0.15, n_assets).tolist()
+    
+    # Generate random covariance matrix
+    # Create a random matrix A
+    A = np.random.rand(n_assets, n_assets)
+    # Make it symmetric positive definite: A * A.T
+    cov_matrix = np.dot(A, A.T)
+    
+    # Scale covariance to reasonable volatility (10% - 30% annual vol)
+    # Diagonal elements are variances. sqrt(variance) = vol
+    # We want vol ~ 0.2, so variance ~ 0.04
+    scale_factor = 0.04 / np.mean(np.diag(cov_matrix))
+    cov_matrix = cov_matrix * scale_factor
+    
+    return {
+        'expected_returns': expected_returns,
+        'covariance_matrix': cov_matrix.tolist(),
+        'symbols': symbols,
+        'data_points': 252, # Mocking 1 year of data
+        'is_mock': True
+    }
 
 def calculate_portfolio_inputs(symbols: List[str], api_key: str = None) -> Dict:
     """Calculate with caching to avoid rate limits"""
     
+    if not symbols:
+        raise ValueError("No symbols provided")
+
     # Check cache first
     symbols_tuple = tuple(sorted(symbols))
     cached = get_cached_data(symbols_tuple)
     
     if cached:
         return cached
-    
+
+    # Check for API Key
+    real_api_key = api_key or os.getenv('POLYGON_API_KEY')
+    if not real_api_key:
+        return generate_mock_market_data(symbols)
+
     # Fetch fresh data
-    service = PolygonService(api_key)
-    print(f"Fetching historical data for: {', '.join(symbols)}")
-    
-    all_data = []
-    for symbol in symbols:
-        try:
-            data = service.get_historical_prices(symbol)
-            all_data.append(data)
-            print(f"  ✓ {symbol}: {len(data['prices'])} days")
-        except Exception as e:
-            print(f"  ✗ {symbol}: {str(e)}")
-            raise
-    
-    expected_returns = []
-    for data in all_data:
-        mean_daily_return = np.mean(data['returns'])
-        annualized_return = mean_daily_return * 252
-        expected_returns.append(float(annualized_return))
-    
-    min_length = min(len(data['returns']) for data in all_data)
-    aligned_returns = [data['returns'][-min_length:] for data in all_data]
-    
-    returns_matrix = np.array(aligned_returns)
-    cov_matrix = np.cov(returns_matrix) * 252
-    
-    result = {
-        'expected_returns': expected_returns,
-        'covariance_matrix': cov_matrix.tolist(),
-        'symbols': symbols,
-        'data_points': min_length
-    }
-    
-    # Cache for next time
-    save_to_cache(symbols_tuple, result)
-    
-    return result
+    try:
+        service = PolygonService(real_api_key)
+        print(f"Fetching historical data for: {', '.join(symbols)}")
+
+        all_data = []
+        for symbol in symbols:
+            try:
+                data = service.get_historical_prices(symbol)
+                all_data.append(data)
+                print(f"  ✓ {symbol}: {len(data['prices'])} days")
+            except Exception as e:
+                print(f"  ✗ {symbol}: {str(e)}")
+                raise
+
+        expected_returns = []
+        for data in all_data:
+            mean_daily_return = np.mean(data['returns'])
+            annualized_return = mean_daily_return * 252
+            expected_returns.append(float(annualized_return))
+
+        min_length = min(len(data['returns']) for data in all_data)
+        aligned_returns = [data['returns'][-min_length:] for data in all_data]
+
+        returns_matrix = np.array(aligned_returns)
+        cov_matrix = np.cov(returns_matrix) * 252
+
+        result = {
+            'expected_returns': expected_returns,
+            'covariance_matrix': cov_matrix.tolist(),
+            'symbols': symbols,
+            'data_points': min_length,
+            'is_mock': False
+        }
+
+        # Cache for next time
+        save_to_cache(symbols_tuple, result)
+
+        return result
+
+    except Exception as e:
+        print(f"Error fetching real data: {e}")
+        print("Falling back to mock data...")
+        return generate_mock_market_data(symbols)
 
 
 if __name__ == '__main__':
@@ -106,8 +153,9 @@ if __name__ == '__main__':
     try:
         inputs = calculate_portfolio_inputs(symbols)
         
-        print("\nPortfolio Inputs from Real Market Data:")
+        print("\nPortfolio Inputs:")
         print("="*50)
+        print(f"Source: {'Mock Data' if inputs.get('is_mock') else 'Real Market Data'}")
         print(f"\nSymbols: {inputs['symbols']}")
         print(f"Data points: {inputs['data_points']} days")
         

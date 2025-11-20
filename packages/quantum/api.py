@@ -1,3 +1,10 @@
+ backend-dashboard-routes-fix
+"""
+Portfolio Optimization API v2.0
+Now with REAL market data from Polygon.io
+"""
+
+=======
 import os
 from dotenv import load_dotenv
 from typing import List, Optional, Dict
@@ -6,8 +13,18 @@ from pydantic import BaseModel
 =======
 from datetime import datetime
  main
+ main
 from fastapi import FastAPI, HTTPException, Header
 from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel, Field
+from typing import List, Dict, Optional
+from optimizer import optimize_portfolio, compare_optimizations
+from market_data import calculate_portfolio_inputs
+from options_scanner import scan_for_opportunities
+from trade_journal import TradeJournal
+import os
+from datetime import datetime
+from dotenv import load_dotenv
 from supabase import create_client, Client
 from pydantic import BaseModel, Field
 from models import Holding, SyncResponse
@@ -26,7 +43,11 @@ from market_data import calculate_portfolio_inputs
 # 1. Load environment variables BEFORE importing other things
 load_dotenv()
  
-app = FastAPI()
+app = FastAPI(
+    title="Portfolio Optimizer API",
+    description="Portfolio optimization with real market data",
+    version="2.0.0"
+)
 
 # CORS Setup
 app.add_middleware(
@@ -50,7 +71,12 @@ else:
 
 supabase: Client = create_client(url, key) if url and key else None
 
+ backend-dashboard-routes-fix
+
+# --- Models ---
+=======
 # --- Models for New Endpoints ---
+ main
 
 class OptimizationRequest(BaseModel):
     mode: str = Field(default="classical")
@@ -67,16 +93,28 @@ class RealDataRequest(BaseModel):
     constraints: Optional[Dict[str, float]] = None
     risk_aversion: float = Field(default=2.0)
 
-# --- Routes ---
+ backend-dashboard-routes-fix
+
+# --- Endpoints ---
+=======
+ main
 
 @app.get("/")
 def read_root():
     return {
+ backend-dashboard-routes-fix
+        "service": "Portfolio Optimizer API",
+        "status": "operational",
+        "version": "2.0",
+        "features": ["classical optimization", "real market data", "options scout", "trade journal"],
+        "data_source": "Polygon.io" if os.getenv('POLYGON_API_KEY') else "Mock Data"
+=======
         "status": "Quantum API operational",
         "service": "Portfolio Optimizer API",
         "version": "2.0",
         "features": ["classical optimization", "real market data", "options scout", "trade journal"],
         "data_source": "Polygon.io"
+ main
     }
 
 @app.get("/health")
@@ -85,6 +123,10 @@ def health_check():
     return {
         "status": "ok",
         "backend": "classical",
+ backend-dashboard-routes-fix
+        "market_data": "connected" if polygon_key else "mock"
+    }
+=======
         "market_data": "connected" if polygon_key else "not configured"
     }
  
@@ -147,6 +189,7 @@ def compare_real(request: OptimizeRequest):
         return result
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+ main
 
 @app.post("/plaid/sync_holdings", response_model=SyncResponse)
 async def sync_holdings(
@@ -199,8 +242,11 @@ async def sync_holdings(
         holdings=holdings
     )
 
+ backend-dashboard-routes-fix
+=======
 # --- New Endpoints from api.py.backup2 ---
 
+ main
 @app.post("/optimize")
 async def optimize(request: OptimizationRequest):
     """Optimize with provided data"""
@@ -248,7 +294,11 @@ async def optimize_real(request: RealDataRequest):
             asset_names=inputs['symbols']
         )
 
+ backend-dashboard-routes-fix
+        result['data_source'] = 'polygon.io' if not inputs.get('is_mock') else 'mock'
+=======
         result['data_source'] = 'polygon.io'
+ main
         result['data_points'] = inputs['data_points']
         result['symbols'] = inputs['symbols']
 
@@ -273,7 +323,11 @@ async def compare_real(request: RealDataRequest):
             asset_names=inputs['symbols']
         )
 
+ backend-dashboard-routes-fix
+        result['data_source'] = 'polygon.io' if not inputs.get('is_mock') else 'mock'
+=======
         result['data_source'] = 'polygon.io'
+ main
         result['data_points'] = inputs['data_points']
         result['symbols'] = inputs['symbols']
 

@@ -10,7 +10,7 @@ class PolygonService:
     def __init__(self, api_key: str = None):
         self.api_key = api_key or os.getenv('POLYGON_API_KEY')
         if not self.api_key:
-            raise ValueError("POLYGON_API_KEY required")
+            print("Warning: POLYGON_API_KEY not found. Service will use mock data.")
         self.base_url = "https://api.polygon.io"
     
     def get_historical_prices(self, symbol: str, days: int = 252) -> Dict:
@@ -53,9 +53,38 @@ def generate_mock_market_data(symbols: List[str]) -> Dict:
     """Generate consistent mock data for testing without API key"""
     print(f"⚠️  Using MOCK market data for {symbols} (Polygon Key missing)")
     
+ backend-dashboard-routes-fix
     # Seed for reproducibility based on symbols
     seed_val = sum(ord(c) for s in symbols for c in s)
     np.random.seed(seed_val)
+=======
+    # Fetch fresh data
+    service = PolygonService(api_key)
+
+    # Fallback to mock data if no API key
+    if not service.api_key:
+        print(f"Using MOCK data for: {', '.join(symbols)}")
+        n_assets = len(symbols)
+        # Generate deterministic mock data based on symbol names to be consistent
+        rng = np.random.RandomState(sum(ord(c) for c in ''.join(symbols)))
+
+        expected_returns = rng.uniform(0.05, 0.25, n_assets).tolist()
+
+        # Random covariance matrix
+        A = rng.rand(n_assets, n_assets)
+        cov_matrix = np.dot(A, A.transpose()) * 0.05  # Scale volatility
+
+        result = {
+            'expected_returns': expected_returns,
+            'covariance_matrix': cov_matrix.tolist(),
+            'symbols': symbols,
+            'data_points': 252,
+            'is_mock': True
+        }
+        return result
+
+    print(f"Fetching historical data for: {', '.join(symbols)}")
+ main
     
     n_assets = len(symbols)
     

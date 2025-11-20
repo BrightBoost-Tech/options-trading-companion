@@ -1,43 +1,20 @@
- backend-dashboard-routes-fix
-"""
-Portfolio Optimization API v2.0
-Now with REAL market data from Polygon.io
-"""
-
-=======
 import os
 from dotenv import load_dotenv
-from typing import List, Optional, Dict
- backend-routes-and-startup-fix
-from pydantic import BaseModel
-=======
 from datetime import datetime
- main
- main
 from fastapi import FastAPI, HTTPException, Header
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
-from typing import List, Dict, Optional
-from optimizer import optimize_portfolio, compare_optimizations
-from market_data import calculate_portfolio_inputs
-from options_scanner import scan_for_opportunities
-from trade_journal import TradeJournal
-import os
-from datetime import datetime
-from dotenv import load_dotenv
+from typing import List, Optional, Dict
 from supabase import create_client, Client
-from pydantic import BaseModel, Field
+
+# Import models and services
 from models import Holding, SyncResponse
 import plaid_service
-from options_scanner import scan_for_opportunities
-from trade_journal import TradeJournal
-from optimizer import optimize_portfolio, compare_optimizations, OptimizationMode
-from market_data import calculate_portfolio_inputs
 
 # Import functionalities
 from options_scanner import scan_for_opportunities
 from trade_journal import TradeJournal
-from optimizer import optimize_portfolio, compare_optimizations, OptimizationMode
+from optimizer import optimize_portfolio, compare_optimizations
 from market_data import calculate_portfolio_inputs
 
 # 1. Load environment variables BEFORE importing other things
@@ -71,50 +48,32 @@ else:
 
 supabase: Client = create_client(url, key) if url and key else None
 
- backend-dashboard-routes-fix
-
 # --- Models ---
-=======
-# --- Models for New Endpoints ---
- main
 
 class OptimizationRequest(BaseModel):
-    mode: str = Field(default="classical")
     expected_returns: List[float]
     covariance_matrix: List[List[float]]
+    mode: str = Field(default="classical")
     constraints: Optional[Dict[str, float]] = None
     risk_aversion: float = Field(default=2.0)
     asset_names: Optional[List[str]] = None
-
-
+    
 class RealDataRequest(BaseModel):
     symbols: List[str] = Field(..., description="Stock symbols")
     mode: str = Field(default="classical")
     constraints: Optional[Dict[str, float]] = None
     risk_aversion: float = Field(default=2.0)
 
- backend-dashboard-routes-fix
-
 # --- Endpoints ---
-=======
- main
 
 @app.get("/")
 def read_root():
     return {
- backend-dashboard-routes-fix
-        "service": "Portfolio Optimizer API",
-        "status": "operational",
-        "version": "2.0",
-        "features": ["classical optimization", "real market data", "options scout", "trade journal"],
-        "data_source": "Polygon.io" if os.getenv('POLYGON_API_KEY') else "Mock Data"
-=======
         "status": "Quantum API operational",
         "service": "Portfolio Optimizer API",
         "version": "2.0",
         "features": ["classical optimization", "real market data", "options scout", "trade journal"],
-        "data_source": "Polygon.io"
- main
+        "data_source": "Polygon.io" if os.getenv('POLYGON_API_KEY') else "Mock Data"
     }
 
 @app.get("/health")
@@ -122,74 +81,8 @@ def health_check():
     polygon_key = os.getenv('POLYGON_API_KEY')
     return {
         "status": "ok",
-        "backend": "classical",
- backend-dashboard-routes-fix
-        "market_data": "connected" if polygon_key else "mock"
+        "market_data": "connected" if polygon_key else "not configured",
     }
-=======
-        "market_data": "connected" if polygon_key else "not configured"
-    }
- 
-class OptimizeRequest(BaseModel):
-    tickers: List[str]
-    risk_tolerance: float = 2.0
-
-@app.get("/scout/weekly")
-def get_weekly_scout():
-    try:
-        opportunities = scan_for_opportunities()
-        return opportunities
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-@app.get("/journal/stats")
-def get_journal_stats():
-    try:
-        journal = TradeJournal()
-        stats = journal.get_stats()
-        return stats
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-@app.post("/optimize/real")
-def optimize_real(request: OptimizeRequest):
-    try:
-        # 1. Get Market Data (Real or Mock)
-        inputs = calculate_portfolio_inputs(request.tickers)
-
-        # 2. Optimize
-        result = optimize_portfolio(
-            mode=OptimizationMode.MV,
-            expected_returns=inputs['expected_returns'],
-            covariance_matrix=inputs['covariance_matrix'],
-            risk_aversion=request.risk_tolerance,
-            asset_names=inputs['symbols']
-        )
-
-        # Add metadata about data source
-        result['data_source'] = 'mock' if inputs.get('is_mock') else 'real_polygon'
-        return result
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-@app.post("/compare/real")
-def compare_real(request: OptimizeRequest):
-    try:
-        # 1. Get Market Data (Real or Mock)
-        inputs = calculate_portfolio_inputs(request.tickers)
-
-        # 2. Compare Optimizations
-        result = compare_optimizations(
-            expected_returns=inputs['expected_returns'],
-            covariance_matrix=inputs['covariance_matrix'],
-            asset_names=inputs['symbols']
-        )
-
-        result['data_source'] = 'mock' if inputs.get('is_mock') else 'real_polygon'
-        return result
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
- main
 
 @app.post("/plaid/sync_holdings", response_model=SyncResponse)
 async def sync_holdings(
@@ -242,11 +135,6 @@ async def sync_holdings(
         holdings=holdings
     )
 
- backend-dashboard-routes-fix
-=======
-# --- New Endpoints from api.py.backup2 ---
-
- main
 @app.post("/optimize")
 async def optimize(request: OptimizationRequest):
     """Optimize with provided data"""
@@ -263,7 +151,6 @@ async def optimize(request: OptimizationRequest):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-
 @app.post("/compare")
 async def compare(request: OptimizationRequest):
     """Compare MV vs MVS with provided data"""
@@ -277,7 +164,6 @@ async def compare(request: OptimizationRequest):
         return result
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
-
 
 @app.post("/optimize/real")
 async def optimize_real(request: RealDataRequest):
@@ -294,11 +180,7 @@ async def optimize_real(request: RealDataRequest):
             asset_names=inputs['symbols']
         )
 
- backend-dashboard-routes-fix
         result['data_source'] = 'polygon.io' if not inputs.get('is_mock') else 'mock'
-=======
-        result['data_source'] = 'polygon.io'
- main
         result['data_points'] = inputs['data_points']
         result['symbols'] = inputs['symbols']
 
@@ -306,7 +188,6 @@ async def optimize_real(request: RealDataRequest):
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Real data optimization failed: {str(e)}")
-
 
 @app.post("/compare/real")
 async def compare_real(request: RealDataRequest):
@@ -323,11 +204,7 @@ async def compare_real(request: RealDataRequest):
             asset_names=inputs['symbols']
         )
 
- backend-dashboard-routes-fix
         result['data_source'] = 'polygon.io' if not inputs.get('is_mock') else 'mock'
-=======
-        result['data_source'] = 'polygon.io'
- main
         result['data_points'] = inputs['data_points']
         result['symbols'] = inputs['symbols']
 
@@ -335,7 +212,6 @@ async def compare_real(request: RealDataRequest):
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Real data comparison failed: {str(e)}")
-
 
 @app.get("/scout/weekly")
 async def weekly_scout():
@@ -349,7 +225,6 @@ async def weekly_scout():
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
-
 
 @app.get("/journal/stats")
 async def journal_stats():
@@ -368,7 +243,6 @@ async def journal_stats():
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
-
 
 if __name__ == "__main__":
     import uvicorn

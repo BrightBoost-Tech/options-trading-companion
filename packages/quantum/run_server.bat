@@ -13,9 +13,14 @@ IF NOT EXIST "venv" (
 REM Activate venv
 CALL venv\Scripts\activate
 
+REM Print environment info for debugging
+echo Using Python executable:
+where python
+python -c "import sys; print(f'Python executable path: {sys.executable}'); print(f'Python version: {sys.version}')"
+
 REM Install dependencies
 echo Installing dependencies...
-pip install -r requirements.txt
+python -m pip install -r requirements.txt
 
 REM Run server
 echo Starting server...

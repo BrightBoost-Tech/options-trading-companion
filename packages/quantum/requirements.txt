@@ -11,6 +11,7 @@ pydantic>=2.5.0 # For data validation and settings management
 supabase>=1.0.0 # Supabase Python client
 plaid-python>=10.0.0 # Plaid API client
 python-dotenv>=1.0.0 # For loading .env files
+requests>=2.0.0 # For HTTP requests
 
 # Scientific computing
 numpy>=1.24.0

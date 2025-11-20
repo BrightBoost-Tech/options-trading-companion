@@ -40,6 +40,10 @@ supabase: Client = create_client(url, key) if url and key else None
 @app.get("/")
 def read_root():
     return {"status": "Quantum API operational"}
+
+@app.get("/health")
+def health_check():
+    return {"status": "ok"}
  
 @app.post("/plaid/sync_holdings", response_model=SyncResponse)
 async def sync_holdings(

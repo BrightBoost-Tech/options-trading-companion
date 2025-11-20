@@ -94,6 +94,15 @@ options-trading-companion/
 
 ## 🚀 Getting Started
 
+### Local Startup (Windows)
+
+If you are on Windows, you can start the entire application with one click:
+
+1. Double-click `start_app.bat` in the root folder.
+   - This opens two terminal windows (one for the API, one for the frontend).
+   - The API runs on http://localhost:8000
+   - The Frontend runs on http://localhost:3000
+
 ### Prerequisites
 
 - **Node.js** 18+ and pnpm

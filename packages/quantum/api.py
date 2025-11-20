@@ -1,13 +1,21 @@
 import os
 from dotenv import load_dotenv
 from typing import List, Optional, Dict
+ backend-routes-and-startup-fix
+from pydantic import BaseModel
+=======
 from datetime import datetime
+ main
 from fastapi import FastAPI, HTTPException, Header
 from fastapi.middleware.cors import CORSMiddleware
 from supabase import create_client, Client
 from pydantic import BaseModel, Field
 from models import Holding, SyncResponse
 import plaid_service
+from options_scanner import scan_for_opportunities
+from trade_journal import TradeJournal
+from optimizer import optimize_portfolio, compare_optimizations, OptimizationMode
+from market_data import calculate_portfolio_inputs
 
 # Import functionalities
 from options_scanner import scan_for_opportunities
@@ -80,6 +88,66 @@ def health_check():
         "market_data": "connected" if polygon_key else "not configured"
     }
  
+class OptimizeRequest(BaseModel):
+    tickers: List[str]
+    risk_tolerance: float = 2.0
+
+@app.get("/scout/weekly")
+def get_weekly_scout():
+    try:
+        opportunities = scan_for_opportunities()
+        return opportunities
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/journal/stats")
+def get_journal_stats():
+    try:
+        journal = TradeJournal()
+        stats = journal.get_stats()
+        return stats
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/optimize/real")
+def optimize_real(request: OptimizeRequest):
+    try:
+        # 1. Get Market Data (Real or Mock)
+        inputs = calculate_portfolio_inputs(request.tickers)
+
+        # 2. Optimize
+        result = optimize_portfolio(
+            mode=OptimizationMode.MV,
+            expected_returns=inputs['expected_returns'],
+            covariance_matrix=inputs['covariance_matrix'],
+            risk_aversion=request.risk_tolerance,
+            asset_names=inputs['symbols']
+        )
+
+        # Add metadata about data source
+        result['data_source'] = 'mock' if inputs.get('is_mock') else 'real_polygon'
+        return result
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/compare/real")
+def compare_real(request: OptimizeRequest):
+    try:
+        # 1. Get Market Data (Real or Mock)
+        inputs = calculate_portfolio_inputs(request.tickers)
+
+        # 2. Compare Optimizations
+        result = compare_optimizations(
+            expected_returns=inputs['expected_returns'],
+            covariance_matrix=inputs['covariance_matrix'],
+            asset_names=inputs['symbols']
+        )
+
+        result['data_source'] = 'mock' if inputs.get('is_mock') else 'real_polygon'
+        return result
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
 @app.post("/plaid/sync_holdings", response_model=SyncResponse)
 async def sync_holdings(
     authorization: Optional[str] = Header(None),

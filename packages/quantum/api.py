@@ -1,11 +1,19 @@
 import os
 from dotenv import load_dotenv
-from typing import List, Optional
+from typing import List, Optional, Dict
+from datetime import datetime
 from fastapi import FastAPI, HTTPException, Header
 from fastapi.middleware.cors import CORSMiddleware
 from supabase import create_client, Client
+from pydantic import BaseModel, Field
 from models import Holding, SyncResponse
 import plaid_service
+
+# Import functionalities
+from options_scanner import scan_for_opportunities
+from trade_journal import TradeJournal
+from optimizer import optimize_portfolio, compare_optimizations, OptimizationMode
+from market_data import calculate_portfolio_inputs
 
 # 1. Load environment variables BEFORE importing other things
 load_dotenv()
@@ -22,7 +30,6 @@ app.add_middleware(
 )
  
 # Initialize Supabase Client
-# We check if the vars exist to give a better error message if they are missing
 url = os.getenv("NEXT_PUBLIC_SUPABASE_URL")
 key = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
 
@@ -30,20 +37,48 @@ if not url or not key:
     print("CRITICAL ERROR: Missing Supabase Environment Variables.")
     print(f"NEXT_PUBLIC_SUPABASE_URL found? {'Yes' if url else 'No'}")
     print(f"SUPABASE_SERVICE_ROLE_KEY found? {'Yes' if key else 'No'}")
-    # We don't raise immediately to let the server start, but endpoints will fail
 else:
     print("Supabase config loaded successfully.")
 
-# Initialize client only if vars exist to prevent crash on startup
 supabase: Client = create_client(url, key) if url and key else None
- 
+
+# --- Models for New Endpoints ---
+
+class OptimizationRequest(BaseModel):
+    mode: str = Field(default="classical")
+    expected_returns: List[float]
+    covariance_matrix: List[List[float]]
+    constraints: Optional[Dict[str, float]] = None
+    risk_aversion: float = Field(default=2.0)
+    asset_names: Optional[List[str]] = None
+
+
+class RealDataRequest(BaseModel):
+    symbols: List[str] = Field(..., description="Stock symbols")
+    mode: str = Field(default="classical")
+    constraints: Optional[Dict[str, float]] = None
+    risk_aversion: float = Field(default=2.0)
+
+# --- Routes ---
+
 @app.get("/")
 def read_root():
-    return {"status": "Quantum API operational"}
+    return {
+        "status": "Quantum API operational",
+        "service": "Portfolio Optimizer API",
+        "version": "2.0",
+        "features": ["classical optimization", "real market data", "options scout", "trade journal"],
+        "data_source": "Polygon.io"
+    }
 
 @app.get("/health")
 def health_check():
-    return {"status": "ok"}
+    polygon_key = os.getenv('POLYGON_API_KEY')
+    return {
+        "status": "ok",
+        "backend": "classical",
+        "market_data": "connected" if polygon_key else "not configured"
+    }
  
 @app.post("/plaid/sync_holdings", response_model=SyncResponse)
 async def sync_holdings(
@@ -95,3 +130,130 @@ async def sync_holdings(
         count=len(holdings),
         holdings=holdings
     )
+
+# --- New Endpoints from api.py.backup2 ---
+
+@app.post("/optimize")
+async def optimize(request: OptimizationRequest):
+    """Optimize with provided data"""
+    try:
+        result = optimize_portfolio(
+            mode=request.mode,
+            expected_returns=request.expected_returns,
+            covariance_matrix=request.covariance_matrix,
+            constraints=request.constraints,
+            risk_aversion=request.risk_aversion,
+            asset_names=request.asset_names
+        )
+        return result
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/compare")
+async def compare(request: OptimizationRequest):
+    """Compare MV vs MVS with provided data"""
+    try:
+        result = compare_optimizations(
+            expected_returns=request.expected_returns,
+            covariance_matrix=request.covariance_matrix,
+            constraints=request.constraints,
+            asset_names=request.asset_names
+        )
+        return result
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/optimize/real")
+async def optimize_real(request: RealDataRequest):
+    """Optimize using REAL market data from Polygon.io"""
+    try:
+        inputs = calculate_portfolio_inputs(request.symbols)
+
+        result = optimize_portfolio(
+            mode=request.mode,
+            expected_returns=inputs['expected_returns'],
+            covariance_matrix=inputs['covariance_matrix'],
+            constraints=request.constraints,
+            risk_aversion=request.risk_aversion,
+            asset_names=inputs['symbols']
+        )
+
+        result['data_source'] = 'polygon.io'
+        result['data_points'] = inputs['data_points']
+        result['symbols'] = inputs['symbols']
+
+        return result
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Real data optimization failed: {str(e)}")
+
+
+@app.post("/compare/real")
+async def compare_real(request: RealDataRequest):
+    """Compare MV vs MVS using REAL market data"""
+    try:
+        print(f"Fetching real data for: {request.symbols}")
+        inputs = calculate_portfolio_inputs(request.symbols)
+
+        print("Running comparison...")
+        result = compare_optimizations(
+            expected_returns=inputs['expected_returns'],
+            covariance_matrix=inputs['covariance_matrix'],
+            constraints=request.constraints,
+            asset_names=inputs['symbols']
+        )
+
+        result['data_source'] = 'polygon.io'
+        result['data_points'] = inputs['data_points']
+        result['symbols'] = inputs['symbols']
+
+        return result
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Real data comparison failed: {str(e)}")
+
+
+@app.get("/scout/weekly")
+async def weekly_scout():
+    """Get weekly option opportunities"""
+    try:
+        opportunities = scan_for_opportunities()
+        return {
+            'count': len(opportunities),
+            'top_picks': opportunities[:5],
+            'generated_at': datetime.now().isoformat()
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/journal/stats")
+async def journal_stats():
+    """Get trade journal statistics"""
+    try:
+        journal = TradeJournal()
+        stats = journal.get_stats()
+        patterns = journal.analyze_patterns()
+        rules = journal.generate_rules()
+
+        return {
+            'stats': stats,
+            'patterns': patterns,
+            'rules': rules,
+            'recent_trades': journal.trades[-10:]
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+if __name__ == "__main__":
+    import uvicorn
+    print("Starting Portfolio Optimizer API v2.0...")
+    print("✨ NEW: Real market data from Polygon.io")
+    print("✨ NEW: Weekly Options Scout")
+    print("✨ NEW: Trade Journal with Auto-Learning")
+    print("API: http://localhost:8000")
+    print("Docs: http://localhost:8000/docs")
+    uvicorn.run(app, host="0.0.0.0", port=8000)

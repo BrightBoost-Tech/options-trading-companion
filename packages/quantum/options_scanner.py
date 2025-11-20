@@ -4,7 +4,7 @@ Weekly Options Scout - Find high-probability credit spread opportunities
 import numpy as np
 from typing import List, Dict
 from datetime import datetime, timedelta
-
+from market_data import PolygonService
 
 def calculate_iv_rank(current_iv: float, iv_history: List[float]) -> float:
     """Calculate IV rank (percentile)"""
@@ -87,7 +87,8 @@ def scan_for_opportunities() -> List[Dict]:
     Scan for weekly option opportunities
     Returns top opportunities ranked by score
     """
-    # Mock data - in production, this would fetch real option chains
+
+    # Mock data structure to be filled/updated
     opportunities = [
         {
             'symbol': 'SPY',
@@ -100,7 +101,7 @@ def scan_for_opportunities() -> List[Dict]:
             'width': 5,
             'iv_rank': 0.62,
             'delta': -0.30,
-            'underlying_price': 590.50
+            'underlying_price': 590.50 # Fallback
         },
         {
             'symbol': 'QQQ',
@@ -113,7 +114,7 @@ def scan_for_opportunities() -> List[Dict]:
             'width': 5,
             'iv_rank': 0.68,
             'delta': -0.28,
-            'underlying_price': 510.30
+            'underlying_price': 510.30 # Fallback
         },
         {
             'symbol': 'IWM',
@@ -126,7 +127,7 @@ def scan_for_opportunities() -> List[Dict]:
             'width': 5,
             'iv_rank': 0.55,
             'delta': -0.32,
-            'underlying_price': 228.75
+            'underlying_price': 228.75 # Fallback
         },
         {
             'symbol': 'AAPL',
@@ -139,7 +140,7 @@ def scan_for_opportunities() -> List[Dict]:
             'width': 5,
             'iv_rank': 0.72,
             'delta': -0.29,
-            'underlying_price': 245.80
+            'underlying_price': 245.80 # Fallback
         },
         {
             'symbol': 'TSLA',
@@ -152,10 +153,46 @@ def scan_for_opportunities() -> List[Dict]:
             'width': 10,
             'iv_rank': 0.78,
             'delta': -0.31,
-            'underlying_price': 375.20
+            'underlying_price': 375.20 # Fallback
         }
     ]
     
+    # Try to update with real prices if available
+    try:
+        # Check if API key is available implicitly via PolygonService initialization
+        service = PolygonService()
+        for opp in opportunities:
+            try:
+                # Get latest daily bar (approximate current price)
+                hist = service.get_historical_prices(opp['symbol'], days=5)
+                if hist['prices']:
+                    current_price = hist['prices'][-1]
+                    opp['underlying_price'] = current_price
+
+                    # Adjust strikes to be relative to current price to keep the "mock" trade realistic
+                    # This is a heuristic to make the mock data look consistent with real market levels
+                    # Assuming 'Credit Put Spread' usually OTM
+                    # Put spread: Short Strike < Price (OTM)
+                    # Let's say roughly 3-5% OTM
+
+                    target_short = current_price * 0.97 # 3% OTM
+                    # Round to nearest 5 or 1
+                    step = 5 if current_price > 200 else 1
+                    short_strike = round(target_short / step) * step
+                    width = opp['width']
+                    long_strike = short_strike - width
+
+                    opp['short_strike'] = short_strike
+                    opp['long_strike'] = long_strike
+
+            except Exception as e:
+                print(f"Could not fetch price for {opp['symbol']}: {e}")
+                continue
+    except Exception as e:
+        print(f"Polygon service not available: {e}")
+        # Continue with fallback data
+        pass
+
     # Score each opportunity
     scored_opportunities = []
     for opp in opportunities:

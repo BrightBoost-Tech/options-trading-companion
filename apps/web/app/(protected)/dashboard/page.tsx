@@ -21,6 +21,8 @@ const PORTFOLIO_PRESETS = {
   custom: { name: 'Custom', symbols: ['SPY', 'QQQ', 'IWM', 'DIA', 'VTI'] }
 };
 
+const API_URL = 'http://127.0.0.1:8000';
+
 export default function DashboardPage() {
   const [showQuantum, setShowQuantum] = useState(false);
   const [optimizationResults, setOptimizationResults] = useState<any>(null);
@@ -30,10 +32,12 @@ export default function DashboardPage() {
   // Options Scout state
   const [weeklyScout, setWeeklyScout] = useState<any>(null);
   const [scoutLoading, setScoutLoading] = useState(false);
+  const [scoutError, setScoutError] = useState<string | null>(null);
   
   // Journal state
   const [journalStats, setJournalStats] = useState<any>(null);
   const [journalLoading, setJournalLoading] = useState(false);
+  const [journalError, setJournalError] = useState<string | null>(null);
   const [showJournal, setShowJournal] = useState(false);
   
   const [portfolioType, setPortfolioType] = useState('broad_market');
@@ -56,13 +60,18 @@ export default function DashboardPage() {
 
   const loadWeeklyScout = async () => {
     setScoutLoading(true);
+    setScoutError(null);
     try {
-      const response = await fetch('http://localhost:8000/scout/weekly');
+      const response = await fetch(`${API_URL}/scout/weekly`);
       if (response.ok) {
         const data = await response.json();
         setWeeklyScout(data);
+      } else {
+        setScoutError(`Failed to load data: ${response.statusText}`);
+        console.error('Scout failed:', response.statusText);
       }
-    } catch (err) {
+    } catch (err: any) {
+      setScoutError('Failed to connect to server');
       console.error('Failed to load scout:', err);
     } finally {
       setScoutLoading(false);
@@ -71,13 +80,18 @@ export default function DashboardPage() {
 
   const loadJournalStats = async () => {
     setJournalLoading(true);
+    setJournalError(null);
     try {
-      const response = await fetch('http://localhost:8000/journal/stats');
+      const response = await fetch(`${API_URL}/journal/stats`);
       if (response.ok) {
         const data = await response.json();
         setJournalStats(data);
+      } else {
+        setJournalError(`Failed to load stats: ${response.statusText}`);
+        console.error('Journal failed:', response.statusText);
       }
-    } catch (err) {
+    } catch (err: any) {
+      setJournalError('Failed to connect to server');
       console.error('Failed to load journal:', err);
     } finally {
       setJournalLoading(false);
@@ -97,7 +111,7 @@ export default function DashboardPage() {
     
     try {
       const symbols = getSymbols();
-      const response = await fetch('http://localhost:8000/compare/real', {
+      const response = await fetch(`${API_URL}/compare/real`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -106,13 +120,16 @@ export default function DashboardPage() {
         })
       });
       
-      if (!response.ok) throw new Error('Optimization failed');
+      if (!response.ok) {
+        const errorData = await response.json().catch(() => ({}));
+        throw new Error(errorData.detail || 'Optimization failed');
+      }
       
       const data = await response.json();
       setOptimizationResults(data);
       
     } catch (err: any) {
-      setError(err.message);
+      setError(err.message || 'Unknown error');
       console.error('Optimization error:', err);
     } finally {
       setLoading(false);
@@ -215,6 +232,12 @@ export default function DashboardPage() {
             </button>
           </div>
 
+          {scoutError && (
+            <div className="bg-red-50 p-3 rounded border border-red-200 mb-3 text-sm text-red-600">
+              {scoutError}
+            </div>
+          )}
+
           {weeklyScout && weeklyScout.top_picks && (
             <div className="space-y-3">
               {weeklyScout.top_picks.slice(0, 3).map((opp: any, idx: number) => (
@@ -292,6 +315,12 @@ export default function DashboardPage() {
               </button>
             </div>
           </div>
+
+          {journalError && (
+             <div className="bg-red-50 p-3 rounded border border-red-200 mb-3 text-sm text-red-600">
+               {journalError}
+             </div>
+          )}
 
           {journalStats && (
             <div className="space-y-4">

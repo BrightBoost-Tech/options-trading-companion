@@ -2,29 +2,27 @@ import os
 import plaid
 from datetime import datetime
 from plaid.api import plaid_api
+from plaid.model.link_token_create_request import LinkTokenCreateRequest
+from plaid.model.link_token_create_request_user import LinkTokenCreateRequestUser
+from plaid.model.products import Products
+from plaid.model.country_code import CountryCode
+from plaid.model.item_public_token_exchange_request import ItemPublicTokenExchangeRequest
 from plaid.model.investments_holdings_get_request import InvestmentsHoldingsGetRequest
 from models import Holding
 
-# Define Plaid Environments manually to avoid AttributeError
-PLAID_ENVIRONMENTS = {
-    "sandbox": "https://sandbox.plaid.com",
-    "development": "https://development.plaid.com",
-    "production": "https://production.plaid.com"
-}
-
 # Get the current environment (default to sandbox)
-# FIX: Added .strip() to remove any accidental whitespace from the .env file
 current_env = os.getenv("PLAID_ENV", "sandbox").lower().strip()
-plaid_host = PLAID_ENVIRONMENTS.get(current_env)
 
-if not plaid_host:
-    # Debug print to see exactly what is being read if it fails again
-    print(f"DEBUG: Loaded PLAID_ENV='{current_env}'") 
-    raise ValueError(f"Invalid PLAID_ENV: '{current_env}'. Must be one of: {list(PLAID_ENVIRONMENTS.keys())}")
+# Map to Plaid Environment Enum
+host_env = plaid.Environment.Sandbox
+if current_env == 'development':
+    host_env = plaid.Environment.Development
+elif current_env == 'production':
+    host_env = plaid.Environment.Production
 
 # Initialize Plaid Client
 configuration = plaid.Configuration(
-    host=plaid_host,
+    host=host_env,
     api_key={
         'clientId': os.getenv("PLAID_CLIENT_ID") or "",
         'secret': os.getenv("PLAID_SECRET") or "",
@@ -44,12 +42,12 @@ def create_link_token(user_id: str):
         return {"link_token": "link-sandbox-mock-token-123", "expiration": "2024-12-31T23:59:59Z"}
 
     try:
-        request = plaid_api.LinkTokenCreateRequest(
-            products=[plaid_api.Products('investments')],
+        request = LinkTokenCreateRequest(
+            products=[Products('investments')],
             client_name="Options Trading Companion",
-            country_codes=[plaid_api.CountryCode('US')],
+            country_codes=[CountryCode('US')],
             language='en',
-            user=plaid_api.LinkTokenCreateRequestUser(
+            user=LinkTokenCreateRequestUser(
                 client_user_id=user_id
             )
         )
@@ -68,7 +66,7 @@ def exchange_public_token(public_token: str):
          return {"access_token": "access-sandbox-mock-token-123", "item_id": "mock-item-id"}
 
     try:
-        request = plaid_api.ItemPublicTokenExchangeRequest(
+        request = ItemPublicTokenExchangeRequest(
             public_token=public_token
         )
         response = client.item_public_token_exchange(request)

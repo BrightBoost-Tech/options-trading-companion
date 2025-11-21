@@ -11,6 +11,7 @@ export default function SettingsPage() {
   const [uploading, setUploading] = useState(false);
   const [uploadStatus, setUploadStatus] = useState<string | null>(null);
   const [connectedInstitution, setConnectedInstitution] = useState<string | null>(null);
+  const [connectionError, setConnectionError] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   
   // Use a fake user ID for testing
@@ -19,6 +20,43 @@ export default function SettingsPage() {
   const handleConnectClick = () => {
     console.log('🔵 Connect clicked');
     setShowPlaidConnect(true);
+    setConnectionError(null);
+  };
+
+  const handlePlaidSuccess = async (publicToken: string, metadata: any) => {
+      console.log('Plaid success:', metadata);
+
+      try {
+          const response = await fetch(`${API_URL}/plaid/exchange_token`, {
+              method: 'POST',
+              headers: {
+                  'Content-Type': 'application/json',
+              },
+              body: JSON.stringify({ public_token: publicToken })
+          });
+
+          if (!response.ok) {
+              const errorData = await response.json();
+              throw new Error(errorData.detail || 'Failed to exchange token');
+          }
+
+          const data = await response.json();
+          console.log('Exchange success:', data);
+
+          setConnectedInstitution(metadata.institution?.name || 'Unknown Broker');
+          setShowPlaidConnect(false);
+          setConnectionError(null);
+
+          // Optionally save the item_id or update local state to reflect "Connected" permanently
+          // For now, we just show the connected state in UI
+
+      } catch (error: any) {
+          console.error('Exchange token failed:', error);
+          setConnectionError(`Connection failed: ${error.message}`);
+          // Don't close the modal immediately so user can see error?
+          // Or close and show error.
+          setShowPlaidConnect(false);
+      }
   };
 
   const handleFileUpload = async (event: React.ChangeEvent<HTMLInputElement>) => {
@@ -78,6 +116,12 @@ export default function SettingsPage() {
         <div className="bg-white rounded-lg shadow p-6">
           <h2 className="text-xl font-semibold mb-4">🔗 Broker Connection (Plaid)</h2>
           
+          {connectionError && (
+              <div className="bg-red-50 border border-red-200 p-3 rounded mb-4 text-red-700 text-sm">
+                  {connectionError}
+              </div>
+          )}
+
           {connectedInstitution ? (
              <div className="bg-green-50 border border-green-200 p-4 rounded-lg flex items-center justify-between">
                 <div>
@@ -116,11 +160,7 @@ export default function SettingsPage() {
               <div className="bg-white p-4 border rounded shadow-sm">
                 <PlaidLink 
                   userId={testUserId}
-                  onSuccess={(token: string, meta: any) => {
-                    console.log('Plaid success:', meta);
-                    setConnectedInstitution(meta.institution?.name || 'Unknown Broker');
-                    setShowPlaidConnect(false);
-                  }}
+                  onSuccess={handlePlaidSuccess}
                   onExit={() => {
                     // Optional: handle exit without success
                   }}

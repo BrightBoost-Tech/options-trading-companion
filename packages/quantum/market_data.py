@@ -27,7 +27,8 @@ class PolygonService:
             'apiKey': self.api_key
         }
         
-        response = requests.get(url, params=params, timeout=10)
+        # Reduced timeout to 5s to prevent hanging
+        response = requests.get(url, params=params, timeout=5)
         response.raise_for_status()
         
         data = response.json()

@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import DashboardLayout from '@/components/DashboardLayout';
 import SyncHoldingsButton from '@/components/SyncHoldingsButton';
 import { supabase } from '@/lib/supabase';
@@ -18,6 +18,22 @@ const PORTFOLIO_PRESETS = {
   growth: { name: 'High Growth', symbols: ['TSLA', 'AMZN', 'NFLX', 'SHOP', 'SQ'] },
   dividend: { name: 'Dividend', symbols: ['SCHD', 'VYM', 'DVY', 'VIG', 'DGRO'] },
   custom: { name: 'Custom', symbols: ['SPY', 'QQQ', 'IWM', 'DIA', 'VTI'] }
+};
+
+// Helper to prevent hanging indefinitely
+const fetchWithTimeout = async (resource: RequestInfo, options: RequestInit = {}) => {
+  const { timeout = 15000 } = options as any; // 15s timeout default
+
+  const controller = new AbortController();
+  const id = setTimeout(() => controller.abort(), timeout);
+
+  const response = await fetch(resource, {
+    ...options,
+    signal: controller.signal
+  });
+
+  clearTimeout(id);
+  return response;
 };
 
 export default function DashboardPage() {
@@ -72,11 +88,8 @@ export default function DashboardPage() {
 
        setCurrentHoldings(holdingsMap);
 
-       // If we have holdings, switch to "Custom" or specific logic to use them in optimizer
-       // For now, let's just default to "broad_market" or update custom symbols
        if (snapshot.holdings.length > 0) {
          setCustomSymbols(snapshot.holdings.map((h: any) => h.symbol));
-         // setPortfolioType('custom'); // Optional: auto-switch
        }
     }
   }, [snapshot]);
@@ -86,8 +99,9 @@ export default function DashboardPage() {
       const { data: { session } } = await supabase.auth.getSession();
       if (!session) return;
 
-      const response = await fetch(`${API_URL}/portfolio/snapshot`, {
-         headers: { 'Authorization': `Bearer ${session.access_token}` }
+      const response = await fetchWithTimeout(`${API_URL}/portfolio/snapshot`, {
+         headers: { 'Authorization': `Bearer ${session.access_token}` },
+         timeout: 10000
       });
 
       if (response.ok) {
@@ -103,16 +117,16 @@ export default function DashboardPage() {
     setScoutLoading(true);
     setScoutError(null);
     try {
-      const response = await fetch(`${API_URL}/scout/weekly`);
+      const response = await fetchWithTimeout(`${API_URL}/scout/weekly`, { timeout: 20000 });
       if (response.ok) {
         const data = await response.json();
         setWeeklyScout(data);
       } else {
-        setScoutError(`Failed to load data: ${response.statusText}`);
+        setScoutError(`Failed to load data`);
         console.error('Scout failed:', response.statusText);
       }
     } catch (err: any) {
-      setScoutError('Failed to connect to server');
+      setScoutError('Unable to connect');
       console.error('Failed to load scout:', err);
     } finally {
       setScoutLoading(false);
@@ -123,28 +137,32 @@ export default function DashboardPage() {
     setJournalLoading(true);
     setJournalError(null);
     try {
-      const response = await fetch(`${API_URL}/journal/stats`);
+      const response = await fetchWithTimeout(`${API_URL}/journal/stats`, { timeout: 10000 });
       if (response.ok) {
         const data = await response.json();
         setJournalStats(data);
       } else {
-        setJournalError(`Failed to load stats: ${response.statusText}`);
+        setJournalError(`Failed to load stats`);
         console.error('Journal failed:', response.statusText);
       }
     } catch (err: any) {
-      setJournalError('Failed to connect to server');
+      setJournalError('Unable to connect');
       console.error('Failed to load journal:', err);
     } finally {
       setJournalLoading(false);
     }
   };
 
-  const getSymbols = () => {
+  const getSymbols = useCallback(() => {
     if (portfolioType === 'custom') {
+      // Ensure we have valid symbols, fallback to defaults if empty
+      if (!customSymbols || customSymbols.length === 0) {
+          return PORTFOLIO_PRESETS.broad_market.symbols;
+      }
       return customSymbols;
     }
     return PORTFOLIO_PRESETS[portfolioType as keyof typeof PORTFOLIO_PRESETS].symbols;
-  };
+  }, [portfolioType, customSymbols]);
 
   const runOptimization = async () => {
     setLoading(true);
@@ -152,13 +170,14 @@ export default function DashboardPage() {
     
     try {
       const symbols = getSymbols();
-      const response = await fetch(`${API_URL}/compare/real`, {
+      const response = await fetchWithTimeout(`${API_URL}/compare/real`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           symbols: symbols,
           risk_aversion: riskAversion
-        })
+        }),
+        timeout: 45000 // Long timeout for optimization
       });
       
       if (!response.ok) {
@@ -170,23 +189,31 @@ export default function DashboardPage() {
       setOptimizationResults(data);
       
     } catch (err: any) {
-      setError(err.message || 'Unknown error');
+      setError(err.message || 'Timed out or failed');
       console.error('Optimization error:', err);
     } finally {
       setLoading(false);
     }
   };
 
+  // Trigger initial optimization when enabling quantum mode
   useEffect(() => {
     if (showQuantum && !optimizationResults && !loading) {
       runOptimization();
     }
   }, [showQuantum]);
 
+  // Re-run when inputs change (but wait for user to stop dragging slider ideally, debounce maybe?
+  // For now, just simple effect is fine as per original code, but guarded)
   useEffect(() => {
-    if (showQuantum && !loading) {
-      setOptimizationResults(null);
-      runOptimization();
+    if (showQuantum && !loading && optimizationResults) {
+       // Only re-run if we already have results (meaning user is tweaking)
+       // But we must reset results first to show loading?
+       // Original code: setOptimizationResults(null); runOptimization();
+       // This causes a flash. Let's just keep results until new ones arrive or show spinner over them.
+       // But to keep it simple and matching original logic:
+       setOptimizationResults(null);
+       runOptimization();
     }
   }, [portfolioType, riskAversion]);
 
@@ -251,12 +278,19 @@ export default function DashboardPage() {
           </div>
 
           {scoutError && (
-            <div className="bg-red-50 p-3 rounded border border-red-200 mb-3 text-sm text-red-600">
-              {scoutError}
+            <div className="bg-red-50 p-3 rounded border border-red-200 mb-3 text-sm text-red-600 flex justify-between items-center">
+              <span>{scoutError}</span>
+              <button onClick={loadWeeklyScout} className="underline hover:text-red-800">Retry</button>
             </div>
           )}
 
-          {weeklyScout && weeklyScout.top_picks && (
+          {scoutLoading && !weeklyScout && (
+              <div className="py-4 text-center text-green-800 text-sm animate-pulse">
+                  Scanning market data...
+              </div>
+          )}
+
+          {!scoutLoading && weeklyScout && weeklyScout.top_picks && (
             <div className="space-y-3">
               {weeklyScout.top_picks.slice(0, 3).map((opp: any, idx: number) => (
                 <div key={idx} className="bg-white rounded-lg p-4 border border-green-200">
@@ -335,9 +369,16 @@ export default function DashboardPage() {
           </div>
 
           {journalError && (
-             <div className="bg-red-50 p-3 rounded border border-red-200 mb-3 text-sm text-red-600">
-               {journalError}
+             <div className="bg-red-50 p-3 rounded border border-red-200 mb-3 text-sm text-red-600 flex justify-between items-center">
+               <span>{journalError}</span>
+               <button onClick={loadJournalStats} className="underline hover:text-red-800">Retry</button>
              </div>
+          )}
+
+          {journalLoading && !journalStats && (
+              <div className="py-4 text-center text-purple-800 text-sm animate-pulse">
+                  Analyzing trade patterns...
+              </div>
           )}
 
           {journalStats && (
@@ -415,7 +456,7 @@ export default function DashboardPage() {
             </div>
           )}
 
-          {!journalStats && !journalLoading && (
+          {!journalStats && !journalLoading && !journalError && (
             <div className="text-center py-8 text-purple-700">
               <p className="text-sm">No trades yet. Start logging your trades to see auto-learning in action!</p>
             </div>

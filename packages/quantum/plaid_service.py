@@ -1,5 +1,6 @@
 import os
 import plaid
+from datetime import datetime
 from plaid.api import plaid_api
 from plaid.model.investments_holdings_get_request import InvestmentsHoldingsGetRequest
 from models import Holding
@@ -31,6 +32,7 @@ configuration = plaid.Configuration(
 )
 api_client = plaid.ApiClient(configuration)
 client = plaid_api.PlaidApi(api_client)
+
 def fetch_and_normalize_holdings(access_token: str) -> list[Holding]:
     """
     Fetches holdings from Plaid and normalizes them into our internal Holding model.
@@ -41,6 +43,7 @@ def fetch_and_normalize_holdings(access_token: str) -> list[Holding]:
 
         holdings_data = response.get('holdings', [])
         securities_data = {s['security_id']: s for s in response.get('securities', [])}
+        # accounts_data = {a['account_id']: a for a in response.get('accounts', [])} # Not used yet but available
 
         normalized_holdings = []
 
@@ -69,7 +72,10 @@ def fetch_and_normalize_holdings(access_token: str) -> list[Holding]:
                 quantity=qty,
                 cost_basis=cost_basis,
                 current_price=price,
-                currency=item.get('iso_currency_code', 'USD')
+                currency=item.get('iso_currency_code', 'USD'),
+                source="plaid",
+                account_id=item.get('account_id'),
+                last_updated=datetime.now()
             )
             normalized_holdings.append(holding)
 

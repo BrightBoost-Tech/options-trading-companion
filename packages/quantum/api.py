@@ -225,9 +225,14 @@ async def upload_holdings_csv(
         symbol = row.get("Symbol") or row.get("symbol")
         if not symbol: continue
 
-        qty = float(row.get("Quantity") or row.get("quantity") or 0)
-        cost = float(row.get("Average Cost") or row.get("average_cost") or row.get("cost_basis") or 0)
-        price = float(row.get("Current Price") or row.get("current_price") or row.get("price") or 0)
+        def parse_float(val):
+            if not val: return 0.0
+            if isinstance(val, (float, int)): return float(val)
+            return float(str(val).replace('$', '').replace(',', '').strip())
+
+        qty = parse_float(row.get("Quantity") or row.get("quantity"))
+        cost = parse_float(row.get("Average Cost") or row.get("average_cost") or row.get("cost_basis"))
+        price = parse_float(row.get("Current Price") or row.get("current_price") or row.get("price"))
 
         holdings.append({
             "user_id": user_id,

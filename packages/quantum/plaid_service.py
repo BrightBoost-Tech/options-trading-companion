@@ -20,12 +20,23 @@ if current_env == 'development':
 elif current_env == 'production':
     host_env = plaid.Environment.Production
 
+# Fetch and validate credentials
+PLAID_CLIENT_ID = os.getenv("PLAID_CLIENT_ID", "")
+PLAID_SECRET = os.getenv("PLAID_SECRET", "")
+
+# If using MOCK mode (no secret), we don't need to initialize the real client fully,
+# or we can initialize it with dummy values to avoid NoneType errors.
+# But if we have a secret, we MUST have a client ID.
+if PLAID_SECRET and not PLAID_CLIENT_ID:
+    print("⚠️  PLAID_SECRET is set but PLAID_CLIENT_ID is missing. Plaid calls will fail.")
+
 # Initialize Plaid Client
+# Ensure we never pass None to api_key values
 configuration = plaid.Configuration(
     host=host_env,
     api_key={
-        'clientId': os.getenv("PLAID_CLIENT_ID") or "",
-        'secret': os.getenv("PLAID_SECRET") or "",
+        'clientId': PLAID_CLIENT_ID or "dummy_client_id",
+        'secret': PLAID_SECRET or "dummy_secret",
     }
 )
 api_client = plaid.ApiClient(configuration)
@@ -36,10 +47,19 @@ def create_link_token(user_id: str):
     Create a link token for a given user.
     If in sandbox/dev with no real keys, return a mock token.
     """
-    if not os.getenv("PLAID_SECRET"):
-        # MOCK MODE for local dev if no secret
-        print("⚠️  Plaid Secret missing - returning MOCK link token")
-        return {"link_token": "link-sandbox-mock-token-123", "expiration": "2024-12-31T23:59:59Z"}
+    # Check if we have valid credentials to make a real call
+    # We need BOTH Client ID and Secret.
+    if not PLAID_SECRET or not PLAID_CLIENT_ID:
+        if not PLAID_SECRET:
+            # MOCK MODE for local dev if no secret
+            print("⚠️  Plaid Secret missing - returning MOCK link token")
+            return {"link_token": "link-sandbox-mock-token-123", "expiration": "2024-12-31T23:59:59Z"}
+
+        # If we have secret but no client ID, this is a configuration error
+        raise ValueError("Missing PLAID_CLIENT_ID environment variable")
+
+    if not user_id:
+        raise ValueError("user_id is required for Plaid Link Token creation")
 
     try:
         request = LinkTokenCreateRequest(
@@ -48,7 +68,7 @@ def create_link_token(user_id: str):
             country_codes=[CountryCode('US')],
             language='en',
             user=LinkTokenCreateRequestUser(
-                client_user_id=user_id
+                client_user_id=str(user_id) # Ensure string
             )
         )
         response = client.link_token_create(request)
@@ -61,9 +81,12 @@ def exchange_public_token(public_token: str):
     """
     Exchange public token for access token.
     """
-    if not os.getenv("PLAID_SECRET"):
+    if not PLAID_SECRET:
          print("⚠️  Plaid Secret missing - returning MOCK access token")
          return {"access_token": "access-sandbox-mock-token-123", "item_id": "mock-item-id"}
+
+    if not PLAID_CLIENT_ID:
+         raise ValueError("Missing PLAID_CLIENT_ID environment variable")
 
     try:
         request = ItemPublicTokenExchangeRequest(
@@ -79,7 +102,7 @@ def get_holdings(access_token: str):
     """
     Get holdings wrapper (calls fetch_and_normalize_holdings but returns dict for endpoint).
     """
-    if not os.getenv("PLAID_SECRET"):
+    if not PLAID_SECRET:
         print("⚠️  Plaid Secret missing - returning MOCK holdings")
         return {"holdings": [{"symbol": "MOCK", "quantity": 10, "price": 100}]}
 
@@ -90,6 +113,9 @@ def fetch_and_normalize_holdings(access_token: str) -> list[Holding]:
     """
     Fetches holdings from Plaid and normalizes them into our internal Holding model.
     """
+    if not PLAID_CLIENT_ID:
+        raise ValueError("Missing PLAID_CLIENT_ID environment variable")
+
     try:
         request = InvestmentsHoldingsGetRequest(access_token=access_token)
         response = client.investments_holdings_get(request)

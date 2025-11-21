@@ -30,6 +30,9 @@ def register_plaid_endpoints(app, plaid_service):
             user_id = request.get('user_id', 'default_user')
             result = plaid_service.create_link_token(user_id)
             return result
+        except ValueError as e:
+            print(f"❌ Plaid Configuration Error: {e}")
+            raise HTTPException(status_code=400, detail=str(e))
         except ApiException as e:
             error_msg = parse_plaid_error(e)
             print(f"❌ Plaid Link Token Error: {error_msg}")
@@ -48,6 +51,9 @@ def register_plaid_endpoints(app, plaid_service):
             
             result = plaid_service.exchange_public_token(public_token)
             return result
+        except ValueError as e:
+            print(f"❌ Plaid Configuration Error: {e}")
+            raise HTTPException(status_code=400, detail=str(e))
         except ApiException as e:
             error_msg = parse_plaid_error(e)
             print(f"❌ Plaid Exchange Token Error: {error_msg}")
@@ -66,6 +72,9 @@ def register_plaid_endpoints(app, plaid_service):
             
             result = plaid_service.get_holdings(access_token)
             return result
+        except ValueError as e:
+            print(f"❌ Plaid Configuration Error: {e}")
+            raise HTTPException(status_code=400, detail=str(e))
         except ApiException as e:
             error_msg = parse_plaid_error(e)
             print(f"❌ Plaid Holdings Error: {error_msg}")

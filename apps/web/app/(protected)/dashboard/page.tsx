@@ -1,11 +1,10 @@
 'use client';
 
 import { useState, useEffect } from 'react';
-
-const mockPositions = [
-  { id: '1', symbol: 'SPY', qty: 2, avg_price: 480.50, greek_delta: 0.45, greek_theta: -0.12, greek_vega: 0.08, iv_rank: 0.42 },
-  { id: '2', symbol: 'QQQ', qty: 1, avg_price: 420.30, greek_delta: 0.38, greek_theta: -0.10, greek_vega: 0.06, iv_rank: 0.55 },
-];
+import DashboardLayout from '@/components/DashboardLayout';
+import SyncHoldingsButton from '@/components/SyncHoldingsButton';
+import { supabase } from '@/lib/supabase';
+import { API_URL } from '@/lib/constants';
 
 const mockAlerts = [
   { id: '1', message: 'SPY credit put spread scout: 475/470 for $1.50 credit', time: '2 min ago' },
@@ -21,14 +20,15 @@ const PORTFOLIO_PRESETS = {
   custom: { name: 'Custom', symbols: ['SPY', 'QQQ', 'IWM', 'DIA', 'VTI'] }
 };
 
-const API_URL = 'http://127.0.0.1:8000';
-
 export default function DashboardPage() {
   const [showQuantum, setShowQuantum] = useState(false);
   const [optimizationResults, setOptimizationResults] = useState<any>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   
+  // Snapshot data
+  const [snapshot, setSnapshot] = useState<any>(null);
+
   // Options Scout state
   const [weeklyScout, setWeeklyScout] = useState<any>(null);
   const [scoutLoading, setScoutLoading] = useState(false);
@@ -42,21 +42,62 @@ export default function DashboardPage() {
   
   const [portfolioType, setPortfolioType] = useState('broad_market');
   const [customSymbols, setCustomSymbols] = useState(['SPY', 'QQQ', 'IWM', 'DIA', 'VTI']);
-  const [editingSymbols, setEditingSymbols] = useState(false);
   const [riskAversion, setRiskAversion] = useState(2.0);
-  const [savedPortfolios, setSavedPortfolios] = useState<any[]>([]);
   
-  const [currentHoldings, setCurrentHoldings] = useState<{[key: string]: number}>({
-    'SPY': 0.40, 'QQQ': 0.30, 'IWM': 0.15, 'DIA': 0.15, 'VTI': 0.00
-  });
+  const [currentHoldings, setCurrentHoldings] = useState<{[key: string]: number}>({});
 
-  const totalDelta = mockPositions.reduce((sum, p) => sum + p.greek_delta, 0);
-
-  // Load weekly scout on mount
+  // Load data on mount
   useEffect(() => {
+    loadSnapshot();
     loadWeeklyScout();
     loadJournalStats();
   }, []);
+
+  // Update currentHoldings when snapshot changes
+  useEffect(() => {
+    if (snapshot && snapshot.holdings) {
+       const holdingsMap: {[key: string]: number} = {};
+       let totalValue = 0;
+
+       snapshot.holdings.forEach((h: any) => {
+         const value = h.quantity * h.current_price;
+         totalValue += value;
+       });
+
+       if (totalValue > 0) {
+         snapshot.holdings.forEach((h: any) => {
+           holdingsMap[h.symbol] = (h.quantity * h.current_price) / totalValue;
+         });
+       }
+
+       setCurrentHoldings(holdingsMap);
+
+       // If we have holdings, switch to "Custom" or specific logic to use them in optimizer
+       // For now, let's just default to "broad_market" or update custom symbols
+       if (snapshot.holdings.length > 0) {
+         setCustomSymbols(snapshot.holdings.map((h: any) => h.symbol));
+         // setPortfolioType('custom'); // Optional: auto-switch
+       }
+    }
+  }, [snapshot]);
+
+  const loadSnapshot = async () => {
+    try {
+      const { data: { session } } = await supabase.auth.getSession();
+      if (!session) return;
+
+      const response = await fetch(`${API_URL}/portfolio/snapshot`, {
+         headers: { 'Authorization': `Bearer ${session.access_token}` }
+      });
+
+      if (response.ok) {
+        const data = await response.json();
+        setSnapshot(data);
+      }
+    } catch (err) {
+      console.error('Failed to load snapshot:', err);
+    }
+  };
 
   const loadWeeklyScout = async () => {
     setScoutLoading(true);
@@ -184,30 +225,7 @@ export default function DashboardPage() {
   const drift = calculateDrift();
 
   return (
-    <div className="min-h-screen bg-gray-50">
-      <div className="bg-white border-b">
-        <div className="max-w-7xl mx-auto px-8 py-4 flex justify-between items-center">
-          <h1 className="text-2xl font-bold">Options Trading Companion</h1>
-          <div className="flex items-center gap-4">
-            <div className="relative">
-              <button className="p-2 rounded-full hover:bg-gray-100">
-                <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 17h5l-1.405-1.405A2.032 2.032 0 0118 14.158V11a6.002 6.002 0 00-4-5.659V5a2 2 0 10-4 0v.341C7.67 6.165 6 8.388 6 11v3.159c0 .538-.214 1.055-.595 1.436L4 17h5m6 0v1a3 3 0 11-6 0v-1m6 0H9" />
-                </svg>
-              </button>
-              <span className="absolute -top-1 -right-1 bg-red-500 text-white text-xs rounded-full w-5 h-5 flex items-center justify-center">
-                {mockAlerts.length}
-              </span>
-            </div>
-            <a href="/settings" className="text-gray-600 hover:text-gray-900">Settings</a>
-            <a href="/journal" className="text-gray-600 hover:text-gray-900">Journal</a>
-            <a href="/compose" className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700">
-              New Trade
-            </a>
-          </div>
-        </div>
-      </div>
-
+    <DashboardLayout mockAlerts={mockAlerts}>
       <div className="max-w-7xl mx-auto p-8 space-y-6">
         {/* Weekly Options Scout */}
         <div className="bg-gradient-to-r from-green-50 to-emerald-50 rounded-lg shadow p-6 border-l-4 border-green-500">
@@ -408,18 +426,25 @@ export default function DashboardPage() {
         <div className="bg-white rounded-lg shadow p-6">
           <h3 className="text-lg font-semibold mb-4">Portfolio Risk</h3>
           <div className="space-y-4">
-            <div>
-              <div className="flex justify-between mb-2">
-                <span className="text-sm font-medium">Portfolio Delta</span>
-                <span className="text-sm font-medium">{totalDelta.toFixed(2)}</span>
+            {/* If we have metrics from snapshot, use them. Else use placeholder or nothing */}
+            {/* Since snapshot.risk_metrics might be simple, let's just show what we have */}
+
+            {snapshot ? (
+              <div>
+                <div className="flex justify-between mb-2">
+                  <span className="text-sm font-medium">Last Updated</span>
+                  <span className="text-sm font-medium">
+                    {new Date(snapshot.created_at).toLocaleString()}
+                  </span>
+                </div>
+                {/* Placeholder for real metrics if available in snapshot */}
+                 <p className="text-sm text-gray-500">
+                   {snapshot.holdings.length} positions tracked.
+                 </p>
               </div>
-              <div className="w-full bg-gray-200 rounded-full h-2">
-                <div
-                  className="h-2 rounded-full bg-green-500"
-                  style={{ width: `${Math.min(Math.abs(totalDelta) / 100 * 100, 100)}%` }}
-                />
-              </div>
-            </div>
+            ) : (
+               <p className="text-sm text-gray-500">Sync your portfolio to see risk metrics.</p>
+            )}
           </div>
         </div>
 
@@ -443,8 +468,9 @@ export default function DashboardPage() {
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
           <div className="lg:col-span-2">
             <div className="bg-white rounded-lg shadow overflow-hidden">
-              <div className="px-6 py-4 border-b">
+              <div className="px-6 py-4 border-b flex justify-between items-center">
                 <h2 className="text-xl font-semibold">Positions</h2>
+                <SyncHoldingsButton onSyncComplete={loadSnapshot} />
               </div>
               <div className="overflow-x-auto">
                 <table className="w-full">
@@ -452,23 +478,33 @@ export default function DashboardPage() {
                     <tr>
                       <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Symbol</th>
                       <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Qty</th>
-                      <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Avg Price</th>
-                      <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Delta</th>
-                      <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Theta</th>
-                      <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">IVR</th>
+                      <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Avg Cost</th>
+                      <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Price</th>
+                      <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Source</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-gray-200">
-                    {mockPositions.map((position) => (
-                      <tr key={position.id} className="hover:bg-gray-50">
-                        <td className="px-6 py-4 whitespace-nowrap font-medium">{position.symbol}</td>
-                        <td className="px-6 py-4 whitespace-nowrap">{position.qty}</td>
-                        <td className="px-6 py-4 whitespace-nowrap">${position.avg_price.toFixed(2)}</td>
-                        <td className="px-6 py-4 whitespace-nowrap">{position.greek_delta.toFixed(2)}</td>
-                        <td className="px-6 py-4 whitespace-nowrap">{position.greek_theta.toFixed(2)}</td>
-                        <td className="px-6 py-4 whitespace-nowrap">{(position.iv_rank * 100).toFixed(0)}%</td>
+                    {snapshot?.holdings?.length > 0 ? (
+                      snapshot.holdings.map((position: any, idx: number) => (
+                        <tr key={idx} className="hover:bg-gray-50">
+                          <td className="px-6 py-4 whitespace-nowrap font-medium">{position.symbol}</td>
+                          <td className="px-6 py-4 whitespace-nowrap">{position.quantity}</td>
+                          <td className="px-6 py-4 whitespace-nowrap">${position.cost_basis?.toFixed(2) || '-'}</td>
+                          <td className="px-6 py-4 whitespace-nowrap">${position.current_price?.toFixed(2) || '-'}</td>
+                          <td className="px-6 py-4 whitespace-nowrap">
+                             <span className={`px-2 py-1 rounded text-xs ${position.source === 'plaid' ? 'bg-green-100 text-green-800' : 'bg-yellow-100 text-yellow-800'}`}>
+                               {position.source}
+                             </span>
+                          </td>
+                        </tr>
+                      ))
+                    ) : (
+                      <tr>
+                        <td colSpan={5} className="px-6 py-8 text-center text-gray-500">
+                          No positions found. Sync via Plaid or Import CSV in Settings.
+                        </td>
                       </tr>
-                    ))}
+                    )}
                   </tbody>
                 </table>
               </div>
@@ -668,6 +704,6 @@ export default function DashboardPage() {
           </div>
         </div>
       </div>
-    </div>
+    </DashboardLayout>
   );
 }

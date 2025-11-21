@@ -4,24 +4,27 @@ set -e
 # Navigate to the directory of the script
 cd "$(dirname "$0")"
 
-# Check if venv exists
-if [ ! -d "venv" ]; then
+# Check if venv/bin/python exists
+if [ ! -f "venv/bin/python" ]; then
     echo "Creating virtual environment..."
     # Try python3 first, then python
     if command -v python3 &> /dev/null; then
         python3 -m venv venv
-    else
+    elif command -v python &> /dev/null; then
         python -m venv venv
+    else
+        echo "Error: Python not found. Please install python3 or python."
+        exit 1
     fi
 fi
 
 # Define Python executable
 PYTHON_EXEC="venv/bin/python"
 
-# Fallback if not found (though venv creation should ensure it)
+# Verify it exists
 if [ ! -f "$PYTHON_EXEC" ]; then
-    echo "Warning: venv python not found. Falling back to system python."
-    PYTHON_EXEC="python"
+    echo "Error: Failed to create virtual environment or find python executable at $PYTHON_EXEC"
+    exit 1
 fi
 
 # Print environment info for debugging

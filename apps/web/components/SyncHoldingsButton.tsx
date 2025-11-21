@@ -11,11 +11,12 @@ interface SyncHoldingsButtonProps {
 export default function SyncHoldingsButton({ onSyncComplete }: SyncHoldingsButtonProps) {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [lastSynced, setLastSynced] = useState<string | null>(null);
+  const [statusMsg, setStatusMsg] = useState<string | null>(null);
 
   const handleSync = async () => {
     setLoading(true);
     setError(null);
+    setStatusMsg(null);
 
     try {
       const { data: { session } } = await supabase.auth.getSession();
@@ -34,11 +35,22 @@ export default function SyncHoldingsButton({ onSyncComplete }: SyncHoldingsButto
 
       if (!response.ok) {
          const errorData = await response.json().catch(() => ({}));
+
+         // Specific handling for "No Plaid account" (404)
+         if (response.status === 404) {
+            console.warn("Plaid sync skipped: No linked account.");
+            setStatusMsg("No Plaid linked");
+            // Even if Plaid is missing, we treat this as "done" so the table can refresh
+            // (e.g. if CSV was uploaded but table is stale)
+            if (onSyncComplete) onSyncComplete();
+            return;
+         }
+
          throw new Error(errorData.detail || 'Sync failed');
       }
 
       const data = await response.json();
-      setLastSynced(new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }));
+      setStatusMsg(`Synced ${new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`);
       if (onSyncComplete) onSyncComplete();
 
     } catch (err: any) {
@@ -51,14 +63,14 @@ export default function SyncHoldingsButton({ onSyncComplete }: SyncHoldingsButto
 
   return (
     <div className="flex items-center gap-2">
-       {lastSynced && (
+       {statusMsg && (
         <span className="text-xs text-gray-500 hidden sm:inline">
-          Synced {lastSynced}
+          {statusMsg}
         </span>
       )}
       {error && (
          <span className="text-xs text-red-500 hidden sm:inline" title={error}>
-           Failed
+           {error}
          </span>
       )}
       <button

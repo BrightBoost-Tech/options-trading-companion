@@ -27,14 +27,11 @@ if [ ! -f "$PYTHON_EXEC" ]; then
     exit 1
 fi
 
-# Print environment info for debugging
-echo "Using Python executable: $PYTHON_EXEC"
-"$PYTHON_EXEC" -c "import sys; print(f'Python executable path: {sys.executable}'); print(f'Python version: {sys.version}')"
-
 # Install dependencies
 echo "Installing dependencies..."
+"$PYTHON_EXEC" -m pip install --upgrade pip
 "$PYTHON_EXEC" -m pip install -r requirements.txt
 
 # Run server
 echo "Starting server..."
-"$PYTHON_EXEC" -m uvicorn api:app --reload
+"$PYTHON_EXEC" -m uvicorn api:app --reload --host 127.0.0.1 --port 8000

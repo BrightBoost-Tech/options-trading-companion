@@ -14,6 +14,7 @@ import json
 from models import Holding, SyncResponse, PortfolioSnapshot
 import plaid_service
 import plaid_endpoints
+from snaptrade_client import snaptrade_client
 
 # Import functionalities
 from options_scanner import scan_for_opportunities
@@ -171,10 +172,54 @@ async def sync_holdings(
     access_token = response.data[0]['access_token']
  
     # 3. Fetch from Plaid
+    errors = []
+    sync_attempted = False
+
     try:
         holdings = plaid_service.fetch_and_normalize_holdings(access_token)
+        sync_attempted = True
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        print(f"Plaid Sync Error: {e}")
+        holdings = []
+        errors.append(f"Plaid: {str(e)}")
+        # Continue to try SnapTrade
+
+    # 3.5. Fetch from SnapTrade (Fallback or Parallel)
+    snap_user_response = supabase.table("snaptrade_users").select("*").eq("user_id", user_id).execute()
+    if snap_user_response.data:
+        snap_user = snap_user_response.data[0]
+        st_user_id = snap_user.get("snaptrade_user_id")
+        st_user_secret = snap_user.get("snaptrade_user_secret")
+
+        try:
+            accounts = snaptrade_client.get_accounts(st_user_id, st_user_secret)
+            for acc in accounts:
+                # acc contains 'id', 'name', 'number', 'institution_name' etc.
+                # We pass institution_name or name to normalize for the CSV export 'brokerage' field
+                acc_name = acc.get('institution_name') or acc.get('name')
+                acc_holdings = snaptrade_client.get_account_holdings(st_user_id, st_user_secret, acc['id'])
+                normalized = snaptrade_client.normalize_holdings(acc_holdings, acc['id'], account_name=acc_name)
+                holdings.extend(normalized)
+            sync_attempted = True
+        except Exception as e:
+             print(f"SnapTrade Sync Error: {e}")
+             errors.append(f"SnapTrade: {str(e)}")
+
+    # If we attempted sync and got empty holdings, that's valid (user might have sold everything).
+    # We only error if we FAILED to sync from all sources that we attempted.
+    if not holdings and errors and not sync_attempted:
+         # If no sync was even attempted (e.g. no Plaid token AND no SnapTrade user), that might be a setup error?
+         # Actually, code above raises 404 if no Plaid token earlier.
+         # So here, if we tried at least one source, we proceed.
+         # If we tried and failed all sources, we should probably raise.
+         pass
+
+    if errors and not holdings:
+        # If we have errors and NO data, we assume failure.
+        # If we have errors but SOME data (e.g. Plaid worked, SnapTrade failed), we return partial data.
+        # But if holdings is empty and we have errors, it likely means the only source failed.
+        # However, if Plaid failed but SnapTrade wasn't configured, errors is not empty, holdings is empty.
+        raise HTTPException(status_code=500, detail=f"Failed to sync holdings: {'; '.join(errors)}")
  
     # 4. Upsert into Supabase
     data_to_insert = []
@@ -283,6 +328,144 @@ async def upload_holdings_csv(
         await create_portfolio_snapshot(user_id)
 
     return {"status": "success", "count": len(holdings)}
+
+@app.get("/holdings/export")
+async def export_holdings_csv(
+    brokerage: Optional[str] = None,
+    authorization: Optional[str] = Header(None)
+):
+    """
+    Exports holdings to a CSV file.
+    """
+    if not supabase:
+        raise HTTPException(status_code=500, detail="Server Error: Database not configured")
+
+    if not authorization:
+        raise HTTPException(status_code=401, detail="Missing Authorization header")
+
+    try:
+        token = authorization.split(" ")[1]
+        user = supabase.auth.get_user(token)
+        user_id = user.user.id
+    except Exception as e:
+        raise HTTPException(status_code=401, detail="Invalid Token")
+
+    # Fetch holdings from DB
+    query = supabase.table("holdings").select("*").eq("user_id", user_id)
+
+    # If brokerage is specified, we might want to filter by source or institution name
+    # Currently 'source' is 'plaid', 'snaptrade', or 'robinhood-csv'
+    # 'institution_name' might be populated for Plaid/SnapTrade.
+    # The prompt specifically asks for: ?brokerage=robinhood
+
+    response = query.execute()
+    holdings = response.data
+
+    if brokerage:
+        brokerage_lower = brokerage.lower()
+        holdings = [
+            h for h in holdings
+            if (h.get('source') == 'robinhood-csv') or
+               (brokerage_lower in (h.get('institution_name') or '').lower()) or
+               (brokerage_lower in (h.get('source') or '').lower())
+        ]
+
+    if not holdings:
+        raise HTTPException(status_code=404, detail="No holdings found to export")
+
+    # Generate CSV
+    output = io.StringIO()
+    writer = csv.writer(output)
+
+    # Headers: accountId,symbol,name,quantity,price,marketValue,currency,brokerage,source
+    writer.writerow(["accountId", "symbol", "name", "quantity", "price", "marketValue", "currency", "brokerage", "source"])
+
+    for h in holdings:
+        qty = float(h.get('quantity', 0))
+        price = float(h.get('current_price', 0))
+        market_value = qty * price
+        writer.writerow([
+            h.get('account_id', ''),
+            h.get('symbol', ''),
+            h.get('name', ''),
+            qty,
+            price,
+            market_value,
+            h.get('currency', 'USD'),
+            h.get('institution_name', ''),
+            h.get('source', '')
+        ])
+
+    output.seek(0)
+    filename = f"holdings_{brokerage or 'all'}_{datetime.now().strftime('%Y-%m-%d')}.csv"
+
+    from fastapi.responses import StreamingResponse
+    return StreamingResponse(
+        io.StringIO(output.getvalue()),
+        media_type="text/csv",
+        headers={"Content-Disposition": f"attachment; filename={filename}"}
+    )
+
+# --- SnapTrade Endpoints ---
+
+class SnapTradeConnectRequest(BaseModel):
+    user_id: str # Internal user ID (optional if we take from auth token)
+
+@app.post("/snaptrade/connect")
+async def snaptrade_connect(
+    authorization: Optional[str] = Header(None)
+):
+    """
+    Registers the user with SnapTrade (if needed) and returns a connection link.
+    """
+    if not authorization:
+        raise HTTPException(status_code=401, detail="Missing Authorization header")
+
+    try:
+        token = authorization.split(" ")[1]
+        user = supabase.auth.get_user(token)
+        user_id = user.user.id
+    except Exception:
+        raise HTTPException(status_code=401, detail="Invalid Token")
+
+    if not supabase:
+        # Mock response if no DB
+        if snaptrade_client.is_mock:
+             return {"redirectURI": "https://app.snaptrade.com/demo/connect"}
+        raise HTTPException(status_code=500, detail="DB not configured")
+
+    # 1. Check if we already have SnapTrade credentials for this user
+    response = supabase.table("snaptrade_users").select("*").eq("user_id", user_id).execute()
+
+    st_user_id = None
+    st_user_secret = None
+
+    if response.data:
+        st_user_id = response.data[0]['snaptrade_user_id']
+        st_user_secret = response.data[0]['snaptrade_user_secret']
+    else:
+        # 2. Register with SnapTrade
+        try:
+            reg_data = snaptrade_client.register_user(user_id)
+            st_user_id = reg_data['userId']
+            st_user_secret = reg_data['userSecret']
+
+            # Store in DB
+            supabase.table("snaptrade_users").insert({
+                "user_id": user_id,
+                "snaptrade_user_id": st_user_id,
+                "snaptrade_user_secret": st_user_secret,
+                "created_at": datetime.now().isoformat()
+            }).execute()
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Failed to register SnapTrade user: {e}")
+
+    # 3. Generate Connection Link
+    try:
+        link = snaptrade_client.get_connection_url(st_user_id, st_user_secret)
+        return {"redirectURI": link}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to generate connection link: {e}")
 
 @app.get("/portfolio/snapshot")
 async def get_portfolio_snapshot(

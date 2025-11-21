@@ -10,20 +10,25 @@ IF NOT EXIST "venv" (
     python -m venv venv
 )
 
-REM Activate venv
-CALL venv\Scripts\activate
+REM Define the Python executable path within the virtual environment
+SET PYTHON_EXEC=venv\Scripts\python.exe
+
+REM Fallback to global python if venv python is missing (unlikely if venv creation succeeded)
+IF NOT EXIST "%PYTHON_EXEC%" (
+    echo Warning: venv python not found. Falling back to system python.
+    SET PYTHON_EXEC=python
+)
 
 REM Print environment info for debugging
-echo Using Python executable:
-where python
-python -c "import sys; print(f'Python executable path: {sys.executable}'); print(f'Python version: {sys.version}')"
+echo Using Python executable: %PYTHON_EXEC%
+"%PYTHON_EXEC%" -c "import sys; print(f'Python executable path: {sys.executable}'); print(f'Python version: {sys.version}')"
 
 REM Install dependencies
 echo Installing dependencies...
-python -m pip install -r requirements.txt
+"%PYTHON_EXEC%" -m pip install -r requirements.txt
 
 REM Run server
 echo Starting server...
-python -m uvicorn api:app --reload
+"%PYTHON_EXEC%" -m uvicorn api:app --reload
 
 ENDLOCAL

@@ -33,6 +33,61 @@ configuration = plaid.Configuration(
 api_client = plaid.ApiClient(configuration)
 client = plaid_api.PlaidApi(api_client)
 
+def create_link_token(user_id: str):
+    """
+    Create a link token for a given user.
+    If in sandbox/dev with no real keys, return a mock token.
+    """
+    if not os.getenv("PLAID_SECRET"):
+        # MOCK MODE for local dev if no secret
+        print("⚠️  Plaid Secret missing - returning MOCK link token")
+        return {"link_token": "link-sandbox-mock-token-123", "expiration": "2024-12-31T23:59:59Z"}
+
+    try:
+        request = plaid_api.LinkTokenCreateRequest(
+            products=[plaid_api.Products('investments')],
+            client_name="Options Trading Companion",
+            country_codes=[plaid_api.CountryCode('US')],
+            language='en',
+            user=plaid_api.LinkTokenCreateRequestUser(
+                client_user_id=user_id
+            )
+        )
+        response = client.link_token_create(request)
+        return response.to_dict()
+    except plaid.ApiException as e:
+        print(f"Plaid API Error (Create Link Token): {e}")
+        raise e
+
+def exchange_public_token(public_token: str):
+    """
+    Exchange public token for access token.
+    """
+    if not os.getenv("PLAID_SECRET"):
+         print("⚠️  Plaid Secret missing - returning MOCK access token")
+         return {"access_token": "access-sandbox-mock-token-123", "item_id": "mock-item-id"}
+
+    try:
+        request = plaid_api.ItemPublicTokenExchangeRequest(
+            public_token=public_token
+        )
+        response = client.item_public_token_exchange(request)
+        return response.to_dict()
+    except plaid.ApiException as e:
+        print(f"Plaid API Error (Exchange Token): {e}")
+        raise e
+
+def get_holdings(access_token: str):
+    """
+    Get holdings wrapper (calls fetch_and_normalize_holdings but returns dict for endpoint).
+    """
+    if not os.getenv("PLAID_SECRET"):
+        print("⚠️  Plaid Secret missing - returning MOCK holdings")
+        return {"holdings": [{"symbol": "MOCK", "quantity": 10, "price": 100}]}
+
+    holdings = fetch_and_normalize_holdings(access_token)
+    return {"holdings": [h.dict() for h in holdings]}
+
 def fetch_and_normalize_holdings(access_token: str) -> list[Holding]:
     """
     Fetches holdings from Plaid and normalizes them into our internal Holding model.

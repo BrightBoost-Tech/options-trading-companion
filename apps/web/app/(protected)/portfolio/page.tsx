@@ -3,15 +3,31 @@
 import { useState, useEffect } from 'react';
 import { supabase } from '@/lib/supabase';
 import { useRouter } from 'next/navigation';
-import PlaidLink from '@/components/PlaidLink';
+import DashboardLayout from '@/components/DashboardLayout';
+import SyncHoldingsButton from '@/components/SyncHoldingsButton';
+import { API_URL } from '@/lib/constants';
+
+// Helper to prevent hanging indefinitely (reused from Dashboard)
+const fetchWithTimeout = async (resource: RequestInfo, options: RequestInit = {}) => {
+  const { timeout = 15000 } = options as any;
+
+  const controller = new AbortController();
+  const id = setTimeout(() => controller.abort(), timeout);
+
+  const response = await fetch(resource, {
+    ...options,
+    signal: controller.signal
+  });
+
+  clearTimeout(id);
+  return response;
+};
 
 export default function PortfolioPage() {
   const [user, setUser] = useState<any>(null);
-  const [portfolios, setPortfolios] = useState<any[]>([]);
-  const [selectedPortfolio, setSelectedPortfolio] = useState<string>('');
-  const [positions, setPositions] = useState<any[]>([]);
-  const [loading, setLoading] = useState(false);
-  const [showPlaidImport, setShowPlaidImport] = useState(false);
+  const [holdings, setHoldings] = useState<any[]>([]);
+  const [snapshot, setSnapshot] = useState<any>(null);
+  const [loading, setLoading] = useState(true);
   const router = useRouter();
 
   useEffect(() => {
@@ -20,206 +36,106 @@ export default function PortfolioPage() {
 
   useEffect(() => {
     if (user) {
-      loadPortfolios();
+      loadSnapshot();
     }
   }, [user]);
 
-  useEffect(() => {
-    if (selectedPortfolio) {
-      loadPositions();
-    }
-  }, [selectedPortfolio]);
-
   const loadUser = async () => {
     const { data: { user } } = await supabase.auth.getUser();
-    setUser(user);
-  };
 
-  const loadPortfolios = async () => {
-    const { data } = await supabase
-      .from('portfolios')
-      .select('*')
-      .eq('user_id', user.id)
-      .order('created_at', { ascending: false });
-
-    if (data) {
-      setPortfolios(data);
-      if (data.length > 0 && !selectedPortfolio) {
-        setSelectedPortfolio(data[0].id);
-      }
+    if (user) {
+        setUser(user);
+    } else {
+        // Test Mode / Dev Fallback
+        // If no user found, we can assume test mode if explicitly checking or if we want to support
+        // unauthenticated viewing in dev.
+        // For the purpose of the "Test Mode" requirement:
+        console.log("⚠️ No user found, using Test Mode user.");
+        setUser({ id: 'test-user-123', email: 'test@example.com' });
     }
   };
 
-  const loadPositions = async () => {
-    const { data: stockData } = await supabase
-      .from('positions')
-      .select('*')
-      .eq('portfolio_id', selectedPortfolio);
-
-    const { data: optionData } = await supabase
-      .from('option_positions')
-      .select('*')
-      .eq('portfolio_id', selectedPortfolio);
-
-    setPositions([
-      ...(stockData || []).map(p => ({ ...p, type: 'stock' })),
-      ...(optionData || []).map(p => ({ ...p, type: 'option' }))
-    ]);
-  };
-
-  const createPortfolio = async () => {
-    const name = prompt('Portfolio name:');
-    if (!name) return;
-
-    const { data } = await supabase
-      .from('portfolios')
-      .insert([{
-        user_id: user.id,
-        name: name,
-        type: 'mixed',
-        is_default: portfolios.length === 0
-      }])
-      .select()
-      .single();
-
-    if (data) {
-      setPortfolios([...portfolios, data]);
-      setSelectedPortfolio(data.id);
-      alert('Portfolio created!');
-    }
-  };
-
-  const handlePlaidSuccess = async (publicToken: string, metadata: any) => {
+  const loadSnapshot = async () => {
     setLoading(true);
-    
     try {
-      const tokenResponse = await fetch('http://localhost:8000/plaid/exchange_token', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ public_token: publicToken })
+      const { data: { session } } = await supabase.auth.getSession();
+      
+      let headers: any = {};
+      if (session) {
+          headers['Authorization'] = `Bearer ${session.access_token}`;
+      } else {
+           // Test Mode Header
+           headers['X-Test-Mode-User'] = 'test-user-123';
+      }
+
+      const response = await fetchWithTimeout(`${API_URL}/portfolio/snapshot`, {
+         headers: headers,
+         timeout: 10000
       });
-      
-      const { access_token } = await tokenResponse.json();
-      
-      const holdingsResponse = await fetch('http://localhost:8000/plaid/get_holdings', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ access_token })
-      });
-      
-      const holdingsData = await holdingsResponse.json();
-      await importHoldingsToDatabase(holdingsData);
-      
-      alert(`Successfully imported ${holdingsData.holdings.length} positions!`);
-      setShowPlaidImport(false);
-      
+
+      if (response.ok) {
+        const data = await response.json();
+        setSnapshot(data);
+        setHoldings(data.holdings || []);
+      }
     } catch (err) {
-      console.error('Import error:', err);
-      alert('Failed to import. Check console.');
+      console.error('Failed to load snapshot:', err);
     } finally {
       setLoading(false);
     }
   };
 
-  const importHoldingsToDatabase = async (holdingsData: any) => {
-    if (!selectedPortfolio) return;
-
-    for (const holding of holdingsData.holdings) {
-      if (!holding.symbol) continue;
-
-      if (holding.type === 'derivative' && holding.option_contract) {
-        const contract = holding.option_contract;
-        await supabase.from('option_positions').insert([{
-          portfolio_id: selectedPortfolio,
-          symbol: holding.symbol,
-          option_type: contract.option_type,
-          strike: contract.strike_price,
-          expiry: contract.expiration_date,
-          quantity: holding.quantity,
-          premium: holding.institution_price || 0,
-          status: 'open'
-        }]);
-      } else {
-        await supabase.from('positions').insert([{
-          portfolio_id: selectedPortfolio,
-          symbol: holding.symbol,
-          quantity: holding.quantity,
-          avg_cost: holding.cost_basis ? holding.cost_basis / holding.quantity : holding.institution_price,
-          current_price: holding.institution_price,
-          position_type: 'stock'
-        }]);
-      }
-    }
-
-    await loadPositions();
-  };
-
-  const deletePosition = async (id: string, type: string) => {
-    if (!confirm('Delete?')) return;
-    const table = type === 'stock' ? 'positions' : 'option_positions';
-    await supabase.from(table).delete().eq('id', id);
-    await loadPositions();
-  };
-
-  const analyzePortfolio = () => {
-    const symbols = positions.filter(p => p.type === 'stock').map(p => p.symbol);
-    if (symbols.length === 0) {
-      alert('Add positions first!');
-      return;
-    }
-    localStorage.setItem('portfolio_symbols', JSON.stringify(symbols));
-    router.push('/dashboard');
-  };
-
   if (!user) return <div className="p-8">Loading...</div>;
 
+  // Group holdings by type or other logic if needed. For now, flat list matching dashboard.
+  const stockHoldings = holdings.filter(h => !h.option_contract);
+  const optionHoldings = holdings.filter(h => h.option_contract);
+
   return (
-    <div className="min-h-screen bg-gray-50">
+    <DashboardLayout>
       <div className="max-w-7xl mx-auto p-8">
         <div className="flex justify-between items-center mb-6">
           <h1 className="text-3xl font-bold">My Portfolio</h1>
           <div className="flex gap-3">
-            <button onClick={createPortfolio} className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700">
-              + New Portfolio
-            </button>
-            <button onClick={() => setShowPlaidImport(!showPlaidImport)} className="px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700">
-              🔗 Connect Broker
-            </button>
-            <button onClick={analyzePortfolio} disabled={positions.length === 0} className="px-4 py-2 bg-purple-600 text-white rounded-lg hover:bg-purple-700 disabled:bg-gray-400">
-              📊 Analyze
-            </button>
+             <SyncHoldingsButton onSyncComplete={loadSnapshot} />
           </div>
         </div>
 
-        {showPlaidImport && selectedPortfolio && (
-          <div className="mb-6 bg-gradient-to-r from-green-50 to-emerald-50 rounded-lg shadow p-6 border-l-4 border-green-500">
-            <h3 className="text-lg font-semibold mb-2">Connect Your Brokerage Account</h3>
-            <p className="text-sm text-gray-700 mb-4">
-              Securely connect Robinhood, TD Ameritrade, Fidelity, Schwab, E*TRADE, or any other broker.
-            </p>
-            {user && <PlaidLink userId={user.id} onSuccess={handlePlaidSuccess} onExit={() => setShowPlaidImport(false)} />}
-            <p className="text-xs text-gray-600 mt-3">🔒 Secured by Plaid</p>
-          </div>
-        )}
+        {/* Risk Metrics / Summary Card */}
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-6 mb-8">
+             <div className="bg-white rounded-lg shadow p-6">
+                <h3 className="text-sm font-medium text-gray-500 mb-2">Total Positions</h3>
+                <p className="text-3xl font-bold text-gray-900">{holdings.length}</p>
+             </div>
+             <div className="bg-white rounded-lg shadow p-6">
+                 <h3 className="text-sm font-medium text-gray-500 mb-2">Data Source</h3>
+                 <p className="text-xl font-semibold text-gray-900 capitalize">
+                     {snapshot?.risk_metrics?.data_source || 'Unknown'}
+                 </p>
+             </div>
+             <div className="bg-white rounded-lg shadow p-6">
+                 <h3 className="text-sm font-medium text-gray-500 mb-2">Last Updated</h3>
+                 <p className="text-sm text-gray-900">
+                     {snapshot?.created_at ? new Date(snapshot.created_at).toLocaleString() : 'Never'}
+                 </p>
+             </div>
+        </div>
 
-        {portfolios.length > 0 && (
-          <div className="mb-6">
-            <select value={selectedPortfolio} onChange={(e) => setSelectedPortfolio(e.target.value)} className="px-4 py-2 border rounded-lg">
-              {portfolios.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
-            </select>
-          </div>
-        )}
-
-        {selectedPortfolio && (
-          <div className="bg-white rounded-lg shadow overflow-hidden">
+        <div className="bg-white rounded-lg shadow overflow-hidden">
             <div className="px-6 py-4 border-b">
-              <h3 className="text-lg font-semibold">Positions ({positions.length})</h3>
+              <h3 className="text-lg font-semibold">Current Holdings</h3>
             </div>
 
-            {positions.length === 0 ? (
-              <div className="p-8 text-center text-gray-500">
-                <p className="mb-4">No positions yet!</p>
-                <p className="text-sm">Click "Connect Broker" to import automatically</p>
+            {holdings.length === 0 ? (
+              <div className="p-12 text-center text-gray-500">
+                <p className="mb-4 text-lg">No positions found.</p>
+                <p className="text-sm">Sync via Plaid or Import CSV in Settings to get started.</p>
+                <button
+                    onClick={() => router.push('/settings')}
+                    className="mt-4 px-4 py-2 bg-blue-600 text-white rounded hover:bg-blue-700"
+                >
+                    Go to Settings
+                </button>
               </div>
             ) : (
               <div className="overflow-x-auto">
@@ -228,49 +144,41 @@ export default function PortfolioPage() {
                     <tr>
                       <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Symbol</th>
                       <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Type</th>
-                      <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Details</th>
                       <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Qty</th>
-                      <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Cost</th>
-                      <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Actions</th>
+                      <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Avg Cost</th>
+                      <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Current Price</th>
+                      <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Value</th>
+                      <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Source</th>
                     </tr>
                   </thead>
-                  <tbody className="divide-y">
-                    {positions.map((pos) => (
-                      <tr key={pos.id} className="hover:bg-gray-50">
+                  <tbody className="divide-y divide-gray-200">
+                    {holdings.map((pos, idx) => {
+                        const value = (pos.quantity || 0) * (pos.current_price || 0);
+                        return (
+                      <tr key={idx} className="hover:bg-gray-50">
                         <td className="px-6 py-4 font-medium">{pos.symbol}</td>
                         <td className="px-6 py-4">
-                          <span className={`px-2 py-1 rounded text-xs ${pos.type === 'stock' ? 'bg-blue-100 text-blue-800' : 'bg-purple-100 text-purple-800'}`}>
-                            {pos.type === 'stock' ? 'Stock' : pos.option_type?.toUpperCase()}
+                          <span className={`px-2 py-1 rounded text-xs ${!pos.option_contract ? 'bg-blue-100 text-blue-800' : 'bg-purple-100 text-purple-800'}`}>
+                            {!pos.option_contract ? 'Stock' : 'Option'}
                           </span>
                         </td>
-                        <td className="px-6 py-4 text-sm">
-                          {pos.type === 'option' ? `$${pos.strike} ${pos.expiry}` : '-'}
-                        </td>
                         <td className="px-6 py-4">{pos.quantity}</td>
-                        <td className="px-6 py-4">${(pos.avg_cost || pos.premium || 0).toFixed(2)}</td>
+                        <td className="px-6 py-4">${(pos.cost_basis || 0).toFixed(2)}</td>
+                        <td className="px-6 py-4">${(pos.current_price || 0).toFixed(2)}</td>
+                        <td className="px-6 py-4 font-medium">${value.toFixed(2)}</td>
                         <td className="px-6 py-4">
-                          <button onClick={() => deletePosition(pos.id, pos.type)} className="text-red-600 hover:text-red-800 text-sm">
-                            Delete
-                          </button>
+                             <span className={`px-2 py-1 rounded text-xs ${pos.source === 'plaid' ? 'bg-green-100 text-green-800' : 'bg-yellow-100 text-yellow-800'}`}>
+                               {pos.source || 'Manual'}
+                             </span>
                         </td>
                       </tr>
-                    ))}
+                    )})}
                   </tbody>
                 </table>
               </div>
             )}
           </div>
-        )}
-
-        {portfolios.length === 0 && (
-          <div className="text-center py-12 bg-white rounded-lg shadow">
-            <p className="text-gray-600 mb-4">No portfolios yet!</p>
-            <button onClick={createPortfolio} className="px-6 py-3 bg-blue-600 text-white rounded-lg hover:bg-blue-700">
-              Create Your First Portfolio
-            </button>
-          </div>
-        )}
       </div>
-    </div>
+    </DashboardLayout>
   );
 }

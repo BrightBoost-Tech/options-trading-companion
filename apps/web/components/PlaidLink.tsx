@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from 'react';
 import { usePlaidLink } from 'react-plaid-link';
+import { API_URL } from '@/lib/constants';
 
 export default function PlaidLink({ userId, onSuccess, onExit }: any) {
   const [linkToken, setLinkToken] = useState<string | null>(null);
@@ -20,7 +21,7 @@ export default function PlaidLink({ userId, onSuccess, onExit }: any) {
     try {
       console.log('🟡 Fetching link token...');
       
-      const response = await fetch('http://localhost:8000/plaid/create_link_token', {
+      const response = await fetch(`${API_URL}/plaid/create_link_token`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ user_id: userId })

@@ -53,64 +53,29 @@ def generate_mock_market_data(symbols: List[str]) -> Dict:
     """Generate consistent mock data for testing without API key"""
     print(f"⚠️  Using MOCK market data for {symbols} (Polygon Key missing)")
     
- backend-dashboard-routes-fix
-    # Seed for reproducibility based on symbols
-    seed_val = sum(ord(c) for s in symbols for c in s)
-    np.random.seed(seed_val)
-=======
-    # Fetch fresh data
-    service = PolygonService(api_key)
-
-    # Fallback to mock data if no API key
-    if not service.api_key:
-        print(f"Using MOCK data for: {', '.join(symbols)}")
-        n_assets = len(symbols)
-        # Generate deterministic mock data based on symbol names to be consistent
-        rng = np.random.RandomState(sum(ord(c) for c in ''.join(symbols)))
-
-        expected_returns = rng.uniform(0.05, 0.25, n_assets).tolist()
-
-        # Random covariance matrix
-        A = rng.rand(n_assets, n_assets)
-        cov_matrix = np.dot(A, A.transpose()) * 0.05  # Scale volatility
-
-        result = {
-            'expected_returns': expected_returns,
-            'covariance_matrix': cov_matrix.tolist(),
-            'symbols': symbols,
-            'data_points': 252,
-            'is_mock': True
-        }
-        return result
-
-    print(f"Fetching historical data for: {', '.join(symbols)}")
- main
-    
     n_assets = len(symbols)
-    
-    # Generate random returns
-    # Annualized returns between -5% and +15%
-    expected_returns = np.random.uniform(-0.05, 0.15, n_assets).tolist()
-    
-    # Generate random covariance matrix
-    # Create a random matrix A
-    A = np.random.rand(n_assets, n_assets)
+    # Generate deterministic mock data based on symbol names to be consistent
+    # Use a seed so that the same symbols always produce the same mock stats
+    seed_val = sum(ord(c) for c in ''.join(symbols))
+    rng = np.random.RandomState(seed_val)
+
+    # Annualized returns between 5% and 25%
+    expected_returns = rng.uniform(0.05, 0.25, n_assets).tolist()
+
+    # Random covariance matrix
+    A = rng.rand(n_assets, n_assets)
     # Make it symmetric positive definite: A * A.T
-    cov_matrix = np.dot(A, A.T)
-    
-    # Scale covariance to reasonable volatility (10% - 30% annual vol)
-    # Diagonal elements are variances. sqrt(variance) = vol
-    # We want vol ~ 0.2, so variance ~ 0.04
-    scale_factor = 0.04 / np.mean(np.diag(cov_matrix))
-    cov_matrix = cov_matrix * scale_factor
-    
-    return {
+    # Scale volatility to be somewhat realistic
+    cov_matrix = np.dot(A, A.transpose()) * 0.05
+
+    result = {
         'expected_returns': expected_returns,
         'covariance_matrix': cov_matrix.tolist(),
         'symbols': symbols,
-        'data_points': 252, # Mocking 1 year of data
+        'data_points': 252,
         'is_mock': True
     }
+    return result
 
 def calculate_portfolio_inputs(symbols: List[str], api_key: str = None) -> Dict:
     """Calculate with caching to avoid rate limits"""

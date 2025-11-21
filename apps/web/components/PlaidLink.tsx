@@ -30,7 +30,16 @@ export default function PlaidLink({ userId, onSuccess, onExit }: any) {
       console.log('🟡 Response status:', response.status);
       
       if (!response.ok) {
-        throw new Error(`API error ${response.status}`);
+        let errorMsg = `API error ${response.status}`;
+        try {
+          const errorData = await response.json();
+          if (errorData.detail) {
+            errorMsg = errorData.detail;
+          }
+        } catch (e) {
+          // ignore json parse error
+        }
+        throw new Error(errorMsg);
       }
 
       const data = await response.json();

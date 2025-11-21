@@ -10,6 +10,7 @@ export default function SettingsPage() {
   const [showPlaidConnect, setShowPlaidConnect] = useState(false);
   const [uploading, setUploading] = useState(false);
   const [uploadStatus, setUploadStatus] = useState<string | null>(null);
+  const [connectedInstitution, setConnectedInstitution] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   
   // Use a fake user ID for testing
@@ -17,7 +18,6 @@ export default function SettingsPage() {
 
   const handleConnectClick = () => {
     console.log('🔵 Connect clicked');
-    alert('Showing Plaid connection...');
     setShowPlaidConnect(true);
   };
 
@@ -78,7 +78,20 @@ export default function SettingsPage() {
         <div className="bg-white rounded-lg shadow p-6">
           <h2 className="text-xl font-semibold mb-4">🔗 Broker Connection (Plaid)</h2>
           
-          {!showPlaidConnect ? (
+          {connectedInstitution ? (
+             <div className="bg-green-50 border border-green-200 p-4 rounded-lg flex items-center justify-between">
+                <div>
+                   <h3 className="text-lg font-medium text-green-900">Broker Connected</h3>
+                   <p className="text-sm text-green-700">Linked to: {connectedInstitution}</p>
+                </div>
+                <button
+                  onClick={() => setConnectedInstitution(null)}
+                  className="px-3 py-1 text-sm text-green-800 underline hover:text-green-900"
+                >
+                  Disconnect
+                </button>
+             </div>
+          ) : !showPlaidConnect ? (
             <div>
               <p className="text-gray-600 mb-4">Connect your broker securely via Plaid to automatically sync holdings.</p>
               <button
@@ -89,31 +102,30 @@ export default function SettingsPage() {
               </button>
             </div>
           ) : (
-            <div className="bg-green-50 border-2 border-green-500 p-6 rounded-lg">
-              <h3 className="text-lg font-semibold mb-4">✅ Connect Your Brokerage</h3>
-              <p className="text-sm mb-4">User ID: {testUserId}</p>
+            <div className="bg-gray-50 border border-gray-200 p-6 rounded-lg">
+              <div className="flex justify-between items-center mb-4">
+                <h3 className="text-lg font-semibold">Connect Your Brokerage</h3>
+                <button
+                  onClick={() => setShowPlaidConnect(false)}
+                  className="text-gray-500 hover:text-gray-700"
+                >
+                  Cancel
+                </button>
+              </div>
               
-              <div className="bg-white p-4 border-2 border-purple-300 rounded">
-                <p className="text-sm font-bold mb-2">PlaidLink Component:</p>
+              <div className="bg-white p-4 border rounded shadow-sm">
                 <PlaidLink 
                   userId={testUserId}
                   onSuccess={(token: string, meta: any) => {
-                    alert(`Success! Connected to ${meta.institution.name}`);
                     console.log('Plaid success:', meta);
+                    setConnectedInstitution(meta.institution?.name || 'Unknown Broker');
+                    setShowPlaidConnect(false);
                   }}
                   onExit={() => {
-                    alert('Plaid closed');
-                    setShowPlaidConnect(false);
+                    // Optional: handle exit without success
                   }}
                 />
               </div>
-              
-              <button 
-                onClick={() => setShowPlaidConnect(false)} 
-                className="mt-4 px-4 py-2 bg-gray-500 text-white rounded"
-              >
-                Cancel
-              </button>
             </div>
           )}
         </div>

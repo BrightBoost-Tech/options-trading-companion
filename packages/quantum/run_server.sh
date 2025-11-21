@@ -15,17 +15,23 @@ if [ ! -d "venv" ]; then
     fi
 fi
 
-# Activate venv
-source venv/bin/activate
+# Define Python executable
+PYTHON_EXEC="venv/bin/python"
+
+# Fallback if not found (though venv creation should ensure it)
+if [ ! -f "$PYTHON_EXEC" ]; then
+    echo "Warning: venv python not found. Falling back to system python."
+    PYTHON_EXEC="python"
+fi
 
 # Print environment info for debugging
-echo "Using Python executable: $(which python)"
-python -c "import sys; print(f'Python executable path: {sys.executable}'); print(f'Python version: {sys.version}')"
+echo "Using Python executable: $PYTHON_EXEC"
+"$PYTHON_EXEC" -c "import sys; print(f'Python executable path: {sys.executable}'); print(f'Python version: {sys.version}')"
 
 # Install dependencies
 echo "Installing dependencies..."
-python -m pip install -r requirements.txt
+"$PYTHON_EXEC" -m pip install -r requirements.txt
 
 # Run server
 echo "Starting server..."
-python -m uvicorn api:app --reload
+"$PYTHON_EXEC" -m uvicorn api:app --reload

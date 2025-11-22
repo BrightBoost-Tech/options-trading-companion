@@ -59,7 +59,8 @@ else:
 supabase: Client = create_client(url, key) if url and key else None
 
 # --- Register Plaid Endpoints ---
-plaid_endpoints.register_plaid_endpoints(app, plaid_service)
+# Pass supabase client to plaid_endpoints
+plaid_endpoints.register_plaid_endpoints(app, plaid_service, supabase)
 
 # --- Models ---
 
@@ -149,91 +150,100 @@ def health_check():
 @app.post("/plaid/sync_holdings", response_model=SyncResponse)
 async def sync_holdings(
     authorization: Optional[str] = Header(None),
+    x_test_mode_user: Optional[str] = Header(None, alias="X-Test-Mode-User")
 ):
-    if not supabase:
-         raise HTTPException(status_code=500, detail="Server Error: Database not configured")
+    """
+    Syncs holdings from all connected sources (Plaid, SnapTrade).
+    """
+    user_id = None
+    is_dev_mode = os.getenv("APP_ENV") != "production"
 
-    if not authorization:
-        raise HTTPException(status_code=401, detail="Missing Authorization header")
- 
-    # 1. Verify User via Supabase Auth
-    try:
-        token = authorization.split(" ")[1]
-        user = supabase.auth.get_user(token)
-        user_id = user.user.id
-    except Exception as e:
-        raise HTTPException(status_code=401, detail="Invalid Token")
+    if x_test_mode_user:
+        if not is_dev_mode:
+            raise HTTPException(status_code=403, detail="Test Mode disabled in production")
+        user_id = x_test_mode_user
+        if not supabase:
+             # Mock mode for no DB
+             return SyncResponse(status="success", count=0, holdings=[])
+    else:
+        if not supabase:
+             raise HTTPException(status_code=500, detail="Server Error: Database not configured")
+
+        if not authorization:
+            raise HTTPException(status_code=401, detail="Missing Authorization header")
+
+        # 1. Verify User via Supabase Auth
+        try:
+            token = authorization.split(" ")[1]
+            user = supabase.auth.get_user(token)
+            user_id = user.user.id
+        except Exception as e:
+            raise HTTPException(status_code=401, detail="Invalid Token")
  
     # 2. Retrieve Plaid Access Token for this User
-    response = supabase.table("plaid_items").select("access_token").eq("user_id", user_id).execute()
+    plaid_access_token = None
+    if supabase:
+        response = supabase.table("plaid_items").select("access_token").eq("user_id", user_id).execute()
+        if response.data:
+            plaid_access_token = response.data[0]['access_token']
     
-    if not response.data:
-        # If no Plaid item, return empty success or error?
-        # Requirement: "Make sure the dashboard still works in 'mock/local dev' mode"
-        # If we are in dev mode, maybe we simulate a sync?
-        # For now, let's just error if no token, unless we want to fallback.
-        raise HTTPException(status_code=404, detail="No linked Plaid account found for user.")
-        
-    access_token = response.data[0]['access_token']
- 
     # 3. Fetch from Plaid
     errors = []
+    holdings = []
     sync_attempted = False
 
-    try:
-        holdings = plaid_service.fetch_and_normalize_holdings(access_token)
-        sync_attempted = True
-    except Exception as e:
-        print(f"Plaid Sync Error: {e}")
-        holdings = []
-        errors.append(f"Plaid: {str(e)}")
-        # Continue to try SnapTrade
-
-    # 3.5. Fetch from SnapTrade (Fallback or Parallel)
-    snap_user_response = supabase.table("snaptrade_users").select("*").eq("user_id", user_id).execute()
-    if snap_user_response.data:
-        snap_user = snap_user_response.data[0]
-        st_user_id = snap_user.get("snaptrade_user_id")
-        st_user_secret = snap_user.get("snaptrade_user_secret")
-
+    if plaid_access_token:
         try:
-            accounts = snaptrade_client.get_accounts(st_user_id, st_user_secret)
-            for acc in accounts:
-                # acc contains 'id', 'name', 'number', 'institution_name' etc.
-                # We pass institution_name or name to normalize for the CSV export 'brokerage' field
-                acc_name = acc.get('institution_name') or acc.get('name')
-                acc_holdings = snaptrade_client.get_account_holdings(st_user_id, st_user_secret, acc['id'])
-                normalized = snaptrade_client.normalize_holdings(acc_holdings, acc['id'], account_name=acc_name)
-                holdings.extend(normalized)
+            print("Fetching Plaid holdings...")
+            plaid_holdings = plaid_service.fetch_and_normalize_holdings(plaid_access_token)
+            holdings.extend(plaid_holdings)
             sync_attempted = True
         except Exception as e:
-             print(f"SnapTrade Sync Error: {e}")
-             errors.append(f"SnapTrade: {str(e)}")
+            print(f"Plaid Sync Error: {e}")
+            errors.append(f"Plaid: {str(e)}")
 
-    # If we attempted sync and got empty holdings, that's valid (user might have sold everything).
-    # We only error if we FAILED to sync from all sources that we attempted.
-    if not holdings and errors and not sync_attempted:
-         # If no sync was even attempted (e.g. no Plaid token AND no SnapTrade user), that might be a setup error?
-         # Actually, code above raises 404 if no Plaid token earlier.
-         # So here, if we tried at least one source, we proceed.
-         # If we tried and failed all sources, we should probably raise.
-         pass
+    # 3.5. Fetch from SnapTrade (Fallback or Parallel)
+    if supabase:
+        snap_user_response = supabase.table("snaptrade_users").select("*").eq("user_id", user_id).execute()
+        if snap_user_response.data:
+            snap_user = snap_user_response.data[0]
+            st_user_id = snap_user.get("snaptrade_user_id")
+            st_user_secret = snap_user.get("snaptrade_user_secret")
+
+            try:
+                accounts = snaptrade_client.get_accounts(st_user_id, st_user_secret)
+                for acc in accounts:
+                    # acc contains 'id', 'name', 'number', 'institution_name' etc.
+                    # We pass institution_name or name to normalize for the CSV export 'brokerage' field
+                    acc_name = acc.get('institution_name') or acc.get('name')
+                    acc_holdings = snaptrade_client.get_account_holdings(st_user_id, st_user_secret, acc['id'])
+                    normalized = snaptrade_client.normalize_holdings(acc_holdings, acc['id'], account_name=acc_name)
+                    holdings.extend(normalized)
+                sync_attempted = True
+            except Exception as e:
+                print(f"SnapTrade Sync Error: {e}")
+                errors.append(f"SnapTrade: {str(e)}")
+
+    # If we didn't attempt any sync (no tokens), that's a 404 for now unless we want to handle empty state differently
+    if not sync_attempted:
+         # If in test mode, return empty success
+         if x_test_mode_user:
+             return SyncResponse(status="success", count=0, holdings=[])
+
+         raise HTTPException(status_code=404, detail="No linked broker accounts found.")
 
     if errors and not holdings:
-        # If we have errors and NO data, we assume failure.
-        # If we have errors but SOME data (e.g. Plaid worked, SnapTrade failed), we return partial data.
-        # But if holdings is empty and we have errors, it likely means the only source failed.
-        # However, if Plaid failed but SnapTrade wasn't configured, errors is not empty, holdings is empty.
+        # Failed everywhere
         raise HTTPException(status_code=500, detail=f"Failed to sync holdings: {'; '.join(errors)}")
  
     # 4. Upsert into Supabase
-    data_to_insert = []
-    for h in holdings:
-        row = h.dict()
-        row['user_id'] = user_id
-        data_to_insert.append(row)
+    if supabase and holdings:
+        data_to_insert = []
+        for h in holdings:
+            row = h.dict()
+            row['user_id'] = user_id
+            data_to_insert.append(row)
 
-    if data_to_insert:
         supabase.table("holdings").upsert(
             data_to_insert, 
             on_conflict="user_id,symbol"

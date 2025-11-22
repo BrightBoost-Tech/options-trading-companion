@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useRef } from 'react';
+import { useState, useRef, useCallback } from 'react';
 import PlaidLink from '@/components/PlaidLink';
 import DashboardLayout from '@/components/DashboardLayout';
 import { supabase } from '@/lib/supabase';
@@ -16,7 +16,7 @@ export default function SettingsPage() {
   // Use a fake user ID for testing
   const testUserId = 'test-user-123';
 
-  const handlePlaidSuccess = async (publicToken: string, metadata: any) => {
+  const handlePlaidSuccess = useCallback(async (publicToken: string, metadata: any) => {
       console.log('Plaid success:', metadata);
 
       try {
@@ -46,7 +46,7 @@ export default function SettingsPage() {
           console.error('Exchange token failed:', error);
           setConnectionError(`Connection failed: ${error.message}`);
       }
-  };
+  }, []);
 
   const handleFileUpload = async (event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];

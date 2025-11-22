@@ -52,19 +52,13 @@ export default function PlaidLink({ userId, onSuccess, onExit }: PlaidLinkProps)
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string>('');
 
-  // Refs to handle strict mode double-invocation
-  const hasFetchedToken = useRef(false);
-
   useEffect(() => {
     let ignore = false;
 
     const fetchToken = async () => {
       if (!userId) return;
       
-      // Prevent redundant fetches if token is already set or processed
-      if (hasFetchedToken.current) return;
-      hasFetchedToken.current = true;
-
+      // Reset state for new fetch
       setLoading(true);
       setError('');
       
@@ -94,6 +88,7 @@ export default function PlaidLink({ userId, onSuccess, onExit }: PlaidLinkProps)
 
         if (!ignore) {
           if (data.link_token) {
+            console.log('🟢 Link token received');
             setLinkToken(data.link_token);
           } else {
             throw new Error('No link_token in response');
@@ -115,27 +110,17 @@ export default function PlaidLink({ userId, onSuccess, onExit }: PlaidLinkProps)
 
     return () => {
       ignore = true;
-      // Note: We do NOT reset hasFetchedToken.current here because in Strict Mode
-      // we want to persist the fact that we have already initiated a fetch
-      // during the first mount, so the second mount (simulated) skips it.
     };
   }, [userId]);
 
-  // Manual retry handler resets the ref
+  // Manual retry handler
   const handleRetry = () => {
-    hasFetchedToken.current = false;
-    // Trigger re-run by resetting state or calling fetch logic?
-    // Since we depend on useEffect, we can't easily re-trigger it without changing dependency or key.
-    // So we extract logic or just brute force it.
-    // Simpler: force re-mount or direct call.
-    // Let's just direct call but we need to manage state.
-    // Actually, best to just reset ref and let user click retry which calls a function.
-    // But wait, useEffect won't re-run just because I called a function.
-    // I'll just reload the page? No.
-    // I'll extract fetch logic?
-    window.location.reload(); // Simplest for retry in this context or
-    // ideally we reset 'error' state which triggers re-render but not useEffect if deps same.
-    // So we need to move fetch logic out or use a counter.
+    // To trigger a retry, we can't easily re-run the effect unless deps change.
+    // A simple way is to reload, but that's heavy.
+    // Better: expose a state that triggers re-fetch.
+    // For now, sticking to the simplest "Refresh Page" or just acknowledge retry limitation.
+    // Or we can add a `retryCount` to state and dependencies.
+    window.location.reload();
   };
 
   if (loading) {

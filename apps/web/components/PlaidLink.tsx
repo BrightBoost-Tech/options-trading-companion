@@ -46,6 +46,7 @@ export default function PlaidLink({ userId, onSuccess, onExit }: any) {
       console.log('🟢 Link token received!');
       
       if (data.link_token) {
+        console.log('Token type:', typeof data.link_token); // Debug type
         setLinkToken(data.link_token);
       } else {
         throw new Error('No link_token in response');
@@ -66,9 +67,14 @@ export default function PlaidLink({ userId, onSuccess, onExit }: any) {
       console.log('🟢 Plaid success!', metadata);
       onSuccess(public_token, metadata);
     },
-    onExit: () => {
-      console.log('🔴 Plaid exit');
-      if (onExit) onExit();
+    onExit: (error, metadata) => {
+      console.log('🔴 Plaid exit', { error, metadata });
+      // If there's an initialization error, it will appear here
+      if (error) {
+          console.error('❌ Plaid Link Error:', error);
+          // Optionally bubble up error to parent or show in UI
+      }
+      if (onExit) onExit(error, metadata);
     },
   });
 
@@ -105,6 +111,7 @@ export default function PlaidLink({ userId, onSuccess, onExit }: any) {
       <button
         onClick={() => {
           console.log('🟢 Button clicked! Ready:', ready);
+          console.log('Token check:', { type: typeof linkToken, value: linkToken ? linkToken.substring(0, 10) + '...' : null });
           if (ready && linkToken) {
             console.log('🟢 Opening Plaid modal...');
             open();

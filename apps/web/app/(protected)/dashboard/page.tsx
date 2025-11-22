@@ -20,15 +20,19 @@ const PORTFOLIO_PRESETS = {
   custom: { name: 'Custom', symbols: ['SPY', 'QQQ', 'IWM', 'DIA', 'VTI'] }
 };
 
+interface FetchOptions extends RequestInit {
+  timeout?: number;
+}
+
 // Helper to prevent hanging indefinitely
-const fetchWithTimeout = async (resource: RequestInfo, options: RequestInit = {}) => {
-  const { timeout = 15000 } = options as any; // 15s timeout default
+const fetchWithTimeout = async (resource: RequestInfo, options: FetchOptions = {}) => {
+  const { timeout = 15000, ...rest } = options; // 15s timeout default
 
   const controller = new AbortController();
   const id = setTimeout(() => controller.abort(), timeout);
 
   const response = await fetch(resource, {
-    ...options,
+    ...rest,
     signal: controller.signal
   });
 

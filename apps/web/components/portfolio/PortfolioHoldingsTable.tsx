@@ -1,13 +1,12 @@
 'use client';
 
 import { useEffect, useState } from 'react';
-import { createClientComponentClient } from "@supabase/auth-helpers-nextjs";
+import { supabase } from '@/lib/supabase';
 import { Holding } from "@/types";
 
 export default function PortfolioHoldingsTable() {
   const [holdings, setHoldings] = useState<Holding[] | null>(null);
   const [loading, setLoading] = useState(true);
-  const supabase = createClientComponentClient();
 
   useEffect(() => {
     fetchHoldings();
@@ -74,15 +73,15 @@ export default function PortfolioHoldingsTable() {
                   {h.quantity.toFixed(2)}
                 </td>
                 <td className="px-6 py-4 whitespace-nowrap text-sm text-right text-gray-300">
-                  \${h.current_price.toFixed(2)}
+                  ${h.current_price.toFixed(2)}
                 </td>
                 <td className="px-6 py-4 whitespace-nowrap text-sm text-right text-gray-400">
-                  {costBasis > 0 ? `\$${costBasis.toFixed(2)}` : '-'}
+                  {costBasis > 0 ? `$${costBasis.toFixed(2)}` : '-'}
                 </td>
                 <td className="px-6 py-4 whitespace-nowrap text-sm text-right text-white font-medium">
-                  {`\$${totalValue.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`}
+                  {`$${totalValue.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`}
                 </td>
-                <td className={\`px-6 py-4 whitespace-nowrap text-sm text-right font-medium \${isProfitable ? 'text-green-400' : 'text-red-400'}\`}>
+                <td className={`px-6 py-4 whitespace-nowrap text-sm text-right font-medium ${isProfitable ? 'text-green-400' : 'text-red-400'}`}>
                   {costBasis > 0 ? (
                     <span>
                       {isProfitable ? '+' : ''}{gainLoss.toFixed(2)} ({isProfitable ? '+' : ''}{gainLossPercent.toFixed(2)}%)

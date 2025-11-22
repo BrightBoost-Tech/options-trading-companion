@@ -62,17 +62,34 @@ def create_link_token(user_id: str):
         raise ValueError("user_id is required for Plaid Link Token creation")
 
     try:
+        # Use Enum values for Products and CountryCode to ensure correct serialization
+        # Products.INVESTMENTS maps to "investments"
+        # CountryCode.US maps to "US"
+
+        # Note: redirect_uri is often required for OAuth institutions (most US banks now).
+        # However, it requires whitelisting in Plaid Dashboard.
+        # If missing, Link might fail for OAuth banks.
+        # For now, we leave it out as requested, assuming "investments" product in Sandbox works without it.
+
         request = LinkTokenCreateRequest(
-            products=[Products('investments')],
+            products=[Products.INVESTMENTS],
             client_name="Options Trading Companion",
-            country_codes=[CountryCode('US')],
+            country_codes=[CountryCode.US],
             language='en',
             user=LinkTokenCreateRequestUser(
                 client_user_id=str(user_id) # Ensure string
             )
         )
+
+        # Debug log request (excluding sensitive user info if any)
+        print(f"Creating Plaid Link Token for user {user_id}...")
+
         response = client.link_token_create(request)
-        return response.to_dict()
+        response_dict = response.to_dict()
+
+        print(f"✅ Plaid Link Token Created: {response_dict.get('link_token', 'N/A')[:10]}...")
+        return response_dict
+
     except plaid.ApiException as e:
         print(f"Plaid API Error (Create Link Token): {e}")
         raise e

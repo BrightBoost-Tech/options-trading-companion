@@ -7,7 +7,6 @@ import { supabase } from '@/lib/supabase';
 import { API_URL } from '@/lib/constants';
 
 export default function SettingsPage() {
-  const [showPlaidConnect, setShowPlaidConnect] = useState(false);
   const [uploading, setUploading] = useState(false);
   const [uploadStatus, setUploadStatus] = useState<string | null>(null);
   const [connectedInstitution, setConnectedInstitution] = useState<string | null>(null);
@@ -16,12 +15,6 @@ export default function SettingsPage() {
   
   // Use a fake user ID for testing
   const testUserId = 'test-user-123';
-
-  const handleConnectClick = () => {
-    console.log('🔵 Connect clicked');
-    setShowPlaidConnect(true);
-    setConnectionError(null);
-  };
 
   const handlePlaidSuccess = async (publicToken: string, metadata: any) => {
       console.log('Plaid success:', metadata);
@@ -44,7 +37,6 @@ export default function SettingsPage() {
           console.log('Exchange success:', data);
 
           setConnectedInstitution(metadata.institution?.name || 'Unknown Broker');
-          setShowPlaidConnect(false);
           setConnectionError(null);
 
           // Optionally save the item_id or update local state to reflect "Connected" permanently
@@ -53,9 +45,6 @@ export default function SettingsPage() {
       } catch (error: any) {
           console.error('Exchange token failed:', error);
           setConnectionError(`Connection failed: ${error.message}`);
-          // Don't close the modal immediately so user can see error?
-          // Or close and show error.
-          setShowPlaidConnect(false);
       }
   };
 
@@ -135,28 +124,14 @@ export default function SettingsPage() {
                   Disconnect
                 </button>
              </div>
-          ) : !showPlaidConnect ? (
-            <div>
-              <p className="text-gray-600 mb-4">Connect your broker securely via Plaid to automatically sync holdings.</p>
-              <button
-                onClick={handleConnectClick}
-                className="px-6 py-3 bg-blue-600 text-white rounded-lg hover:bg-blue-700 font-medium"
-              >
-                Connect Broker (Test Mode)
-              </button>
-            </div>
           ) : (
             <div className="bg-gray-50 border border-gray-200 p-6 rounded-lg">
               <div className="flex justify-between items-center mb-4">
                 <h3 className="text-lg font-semibold">Connect Your Brokerage</h3>
-                <button
-                  onClick={() => setShowPlaidConnect(false)}
-                  className="text-gray-500 hover:text-gray-700"
-                >
-                  Cancel
-                </button>
               </div>
               
+              <p className="text-gray-600 mb-4">Connect your broker securely via Plaid to automatically sync holdings.</p>
+
               <div className="bg-white p-4 border rounded shadow-sm">
                 <PlaidLink 
                   userId={testUserId}

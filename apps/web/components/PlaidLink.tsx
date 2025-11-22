@@ -4,15 +4,53 @@ import { useEffect, useState } from 'react';
 import { usePlaidLink } from 'react-plaid-link';
 import { API_URL } from '@/lib/constants';
 
-export default function PlaidLink({ userId, onSuccess, onExit }: any) {
+interface PlaidLinkProps {
+  userId: string;
+  onSuccess: (public_token: string, metadata: any) => void;
+  onExit?: (error: any, metadata: any) => void;
+}
+
+// Inner component that only mounts when we have a token
+// This ensures usePlaidLink is only called with a valid token, preventing multiple initializations
+function PlaidButton({ token, onSuccess, onExit }: { token: string } & Omit<PlaidLinkProps, 'userId'>) {
+  const { open, ready } = usePlaidLink({
+    token,
+    onSuccess: (public_token, metadata) => {
+      console.log('🟢 Plaid success!', metadata);
+      onSuccess(public_token, metadata);
+    },
+    onExit: (error, metadata) => {
+      console.log('🔴 Plaid exit', { error, metadata });
+      if (error) {
+        console.error('❌ Plaid Link Error:', error);
+      }
+      if (onExit) onExit(error, metadata);
+    },
+  });
+
+  return (
+    <div className="space-y-3">
+      <button
+        onClick={() => ready && open()}
+        disabled={!ready}
+        className="px-6 py-3 bg-green-600 text-white rounded-lg hover:bg-green-700 disabled:bg-gray-400 disabled:cursor-not-allowed font-medium transition-colors shadow-lg"
+      >
+        {ready ? '✅ Connect Broker Account' : '⏳ Loading Plaid...'}
+      </button>
+
+      {ready && (
+        <p className="text-xs text-gray-600">
+          🔒 Ready to connect • Click above to open secure Plaid window
+        </p>
+      )}
+    </div>
+  );
+}
+
+export default function PlaidLink({ userId, onSuccess, onExit }: PlaidLinkProps) {
   const [linkToken, setLinkToken] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string>('');
-
-  useEffect(() => {
-    console.log('🟡 PlaidLink mounted, userId:', userId);
-    createLinkToken();
-  }, [userId]);
 
   const createLinkToken = async () => {
     setLoading(true);
@@ -26,8 +64,6 @@ export default function PlaidLink({ userId, onSuccess, onExit }: any) {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ user_id: userId })
       });
-
-      console.log('🟡 Response status:', response.status);
       
       if (!response.ok) {
         let errorMsg = `API error ${response.status}`;
@@ -43,10 +79,8 @@ export default function PlaidLink({ userId, onSuccess, onExit }: any) {
       }
 
       const data = await response.json();
-      console.log('🟢 Link token received!');
       
       if (data.link_token) {
-        console.log('Token type:', typeof data.link_token); // Debug type
         setLinkToken(data.link_token);
       } else {
         throw new Error('No link_token in response');
@@ -59,26 +93,11 @@ export default function PlaidLink({ userId, onSuccess, onExit }: any) {
     }
   };
 
-  // CRITICAL: Always provide a valid config to usePlaidLink
-  // Pass token as null initially, it will be updated when token arrives
-  const { open, ready } = usePlaidLink({
-    token: linkToken,
-    onSuccess: (public_token: string, metadata: any) => {
-      console.log('🟢 Plaid success!', metadata);
-      onSuccess(public_token, metadata);
-    },
-    onExit: (error, metadata) => {
-      console.log('🔴 Plaid exit', { error, metadata });
-      // If there's an initialization error, it will appear here
-      if (error) {
-          console.error('❌ Plaid Link Error:', error);
-          // Optionally bubble up error to parent or show in UI
-      }
-      if (onExit) onExit(error, metadata);
-    },
-  });
-
-  console.log('🟡 Render:', { loading, error, hasToken: !!linkToken, ready });
+  useEffect(() => {
+    if (userId) {
+      createLinkToken();
+    }
+  }, [userId]);
 
   if (loading) {
     return (
@@ -106,30 +125,16 @@ export default function PlaidLink({ userId, onSuccess, onExit }: any) {
     );
   }
 
+  // Only render PlaidButton when we have a token
+  if (!linkToken) {
+    return null;
+  }
+
   return (
-    <div className="space-y-3">
-      <button
-        onClick={() => {
-          console.log('🟢 Button clicked! Ready:', ready);
-          console.log('Token check:', { type: typeof linkToken, value: linkToken ? linkToken.substring(0, 10) + '...' : null });
-          if (ready && linkToken) {
-            console.log('🟢 Opening Plaid modal...');
-            open();
-          } else {
-            alert('Plaid is not ready yet. Please wait a moment...');
-          }
-        }}
-        disabled={!ready || !linkToken}
-        className="px-6 py-3 bg-green-600 text-white rounded-lg hover:bg-green-700 disabled:bg-gray-400 disabled:cursor-not-allowed font-medium transition-colors shadow-lg"
-      >
-        {!linkToken ? '⏳ Initializing...' : ready ? '✅ Connect Broker Account' : '⏳ Loading...'}
-      </button>
-      
-      {linkToken && ready && (
-        <p className="text-xs text-gray-600">
-          🔒 Ready to connect • Click above to open secure Plaid window
-        </p>
-      )}
-    </div>
+    <PlaidButton
+      token={linkToken}
+      onSuccess={onSuccess}
+      onExit={onExit}
+    />
   );
 }

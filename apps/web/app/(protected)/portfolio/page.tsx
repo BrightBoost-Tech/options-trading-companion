@@ -7,15 +7,19 @@ import DashboardLayout from '@/components/DashboardLayout';
 import SyncHoldingsButton from '@/components/SyncHoldingsButton';
 import { API_URL } from '@/lib/constants';
 
+interface FetchOptions extends RequestInit {
+  timeout?: number;
+}
+
 // Helper to prevent hanging indefinitely (reused from Dashboard)
-const fetchWithTimeout = async (resource: RequestInfo, options: RequestInit = {}) => {
-  const { timeout = 15000 } = options as any;
+const fetchWithTimeout = async (resource: RequestInfo, options: FetchOptions = {}) => {
+  const { timeout = 15000, ...rest } = options;
 
   const controller = new AbortController();
   const id = setTimeout(() => controller.abort(), timeout);
 
   const response = await fetch(resource, {
-    ...options,
+    ...rest,
     signal: controller.signal
   });
 

@@ -214,9 +214,9 @@ export default function SettingsPage() {
           )}
         </div>
 
-        <div className="bg-yellow-50 border border-yellow-300 rounded-lg p-4 mt-8">
-          <p className="text-xs text-yellow-800">
-            ⚠️ <strong>Development Mode:</strong> Using User ID <code>{userId}</code> for Plaid connection.
+        <div className="bg-blue-50 border border-blue-300 rounded-lg p-4 mt-8">
+          <p className="text-xs text-blue-800">
+            🧪 <strong>Sandbox Mode Active:</strong> Use Plaid Sandbox credentials (user_good / pass_good) to test connection.
           </p>
         </div>
       </div>

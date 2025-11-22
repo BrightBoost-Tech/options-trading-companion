@@ -13,19 +13,39 @@ export default function SettingsPage() {
   const [connectionError, setConnectionError] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   
-  // Use a fake user ID for testing
-  const testUserId = 'test-user-123';
+  // In a real app, we'd get this from Auth Context
+  // For now, assuming user is logged in or we use a test user if explicitly enabled
+  const [testUserId] = useState('test-user-123');
+
+  // We need to know the REAL user ID for proper backend saving
+  // If not logged in (dev mode), we might use testUserId
+  const [userId, setUserId] = useState<string>(testUserId);
+
+  // Fetch real user on mount
+  useState(() => {
+      supabase.auth.getUser().then(({ data: { user } }) => {
+          if (user) {
+              setUserId(user.id);
+          }
+      });
+  });
 
   const handlePlaidSuccess = useCallback(async (publicToken: string, metadata: any) => {
       console.log('Plaid success:', metadata);
+      setConnectionError(null);
 
       try {
+          // Exchange token
           const response = await fetch(`${API_URL}/plaid/exchange_token`, {
               method: 'POST',
               headers: {
                   'Content-Type': 'application/json',
               },
-              body: JSON.stringify({ public_token: publicToken })
+              // We must pass user_id so the backend can save the item to the right user
+              body: JSON.stringify({
+                  public_token: publicToken,
+                  user_id: userId
+              })
           });
 
           if (!response.ok) {
@@ -36,17 +56,30 @@ export default function SettingsPage() {
           const data = await response.json();
           console.log('Exchange success:', data);
 
-          setConnectedInstitution(metadata.institution?.name || 'Unknown Broker');
-          setConnectionError(null);
+          setConnectedInstitution(metadata.institution?.name || 'Connected Broker');
 
-          // Optionally save the item_id or update local state to reflect "Connected" permanently
-          // For now, we just show the connected state in UI
+          // Trigger a sync immediately after connection
+          // We can do this silently or show a message
+          try {
+             const { data: { session } } = await supabase.auth.getSession();
+             if (session) {
+                 await fetch(`${API_URL}/plaid/sync_holdings`, {
+                     method: 'POST',
+                     headers: {
+                         'Authorization': `Bearer ${session.access_token}`
+                     }
+                 });
+                 console.log("Initial sync triggered");
+             }
+          } catch (e) {
+              console.warn("Initial sync failed:", e);
+          }
 
       } catch (error: any) {
           console.error('Exchange token failed:', error);
           setConnectionError(`Connection failed: ${error.message}`);
       }
-  }, []);
+  }, [userId]);
 
   const handleFileUpload = async (event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
@@ -66,9 +99,6 @@ export default function SettingsPage() {
       if (session) {
           headers['Authorization'] = `Bearer ${session.access_token}`;
       } else {
-          // Fallback to test mode if no session (but warn user)
-          // Ideally we only do this if we are in a "dev" mode or user explicitly opts in?
-          // For now, if no session, we assume test mode as per request to "support local test mode"
           console.log('⚠️ No session found, attempting upload in Test Mode');
           headers['X-Test-Mode-User'] = testUserId;
       }
@@ -114,7 +144,7 @@ export default function SettingsPage() {
           {connectedInstitution ? (
              <div className="bg-green-50 border border-green-200 p-4 rounded-lg flex items-center justify-between">
                 <div>
-                   <h3 className="text-lg font-medium text-green-900">Broker Connected</h3>
+                   <h3 className="text-lg font-medium text-green-900">✅ Connected</h3>
                    <p className="text-sm text-green-700">Linked to: {connectedInstitution}</p>
                 </div>
                 <button
@@ -133,11 +163,13 @@ export default function SettingsPage() {
               <p className="text-gray-600 mb-4">Connect your broker securely via Plaid to automatically sync holdings.</p>
 
               <div className="bg-white p-4 border rounded shadow-sm">
+                {/* Key userId to remount if it changes */}
                 <PlaidLink 
-                  userId={testUserId}
+                  key={userId}
+                  userId={userId}
                   onSuccess={handlePlaidSuccess}
-                  onExit={() => {
-                    // Optional: handle exit without success
+                  onExit={(err, metadata) => {
+                     if (err) setConnectionError(err.display_message || err.error_message || 'Connection cancelled');
                   }}
                 />
               </div>
@@ -182,9 +214,9 @@ export default function SettingsPage() {
           )}
         </div>
 
-        <div className="bg-yellow-50 border border-yellow-300 rounded-lg p-4">
-          <p className="text-sm">
-            ⚠️ Test Mode: Using fake user ID for Plaid. Auth is required for CSV upload.
+        <div className="bg-yellow-50 border border-yellow-300 rounded-lg p-4 mt-8">
+          <p className="text-xs text-yellow-800">
+            ⚠️ <strong>Development Mode:</strong> Using User ID <code>{userId}</code> for Plaid connection.
           </p>
         </div>
       </div>

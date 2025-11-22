@@ -142,9 +142,12 @@ export default function PlaidLink({ userId, onSuccess, onExit }: PlaidLinkProps)
       </button>
 
       {ready && (
-        <p className="text-xs text-gray-500 flex items-center gap-1">
-          <span className="text-green-500">🔒</span> Secure connection via Plaid
-        </p>
+        <div className="flex flex-col gap-1">
+            <p className="text-xs text-gray-500 flex items-center gap-1">
+            <span className="text-green-500">🔒</span> Secure connection via Plaid
+            </p>
+            <p className="text-[10px] text-blue-600">Sandbox Environment</p>
+        </div>
       )}
     </div>
   );

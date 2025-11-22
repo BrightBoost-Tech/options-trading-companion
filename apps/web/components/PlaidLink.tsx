@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState, useRef } from 'react';
+import { useEffect, useState, useCallback } from 'react';
 import { usePlaidLink } from 'react-plaid-link';
 import { API_URL } from '@/lib/constants';
 
@@ -13,19 +13,23 @@ interface PlaidLinkProps {
 // Inner component that only mounts when we have a token
 // This ensures usePlaidLink is only called with a valid token, preventing multiple initializations
 function PlaidButton({ token, onSuccess, onExit }: { token: string } & Omit<PlaidLinkProps, 'userId'>) {
+  const handleSuccess = useCallback((public_token: string, metadata: any) => {
+    console.log('🟢 Plaid success!', metadata);
+    onSuccess(public_token, metadata);
+  }, [onSuccess]);
+
+  const handleExit = useCallback((error: any, metadata: any) => {
+    console.log('🔴 Plaid exit', { error, metadata });
+    if (error) {
+      console.error('❌ Plaid Link Error:', error);
+    }
+    if (onExit) onExit(error, metadata);
+  }, [onExit]);
+
   const { open, ready } = usePlaidLink({
     token,
-    onSuccess: (public_token, metadata) => {
-      console.log('🟢 Plaid success!', metadata);
-      onSuccess(public_token, metadata);
-    },
-    onExit: (error, metadata) => {
-      console.log('🔴 Plaid exit', { error, metadata });
-      if (error) {
-        console.error('❌ Plaid Link Error:', error);
-      }
-      if (onExit) onExit(error, metadata);
-    },
+    onSuccess: handleSuccess,
+    onExit: handleExit,
   });
 
   return (

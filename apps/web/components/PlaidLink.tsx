@@ -11,11 +11,41 @@ interface PlaidLinkProps {
 }
 
 /**
+ * Headless component that actually initializes Plaid Link.
+ * This is only rendered when we have a valid link_token.
+ */
+function PlaidLinkHeadless({ token, onSuccess, onExit }: {
+    token: string,
+    onSuccess: (public_token: string, metadata: any) => void,
+    onExit: (error: any, metadata: any) => void
+}) {
+    const config = {
+        token,
+        onSuccess,
+        onExit,
+    };
+
+    const { open, ready, error } = usePlaidLink(config);
+
+    useEffect(() => {
+        if (ready && !error) {
+            open();
+        }
+    }, [ready, open, error]);
+
+    if (error) {
+        return <div className="text-red-600 text-xs">Error initializing Link: {error.message}</div>;
+    }
+
+    return null; // Headless
+}
+
+/**
  * PlaidLink Component
  *
- * Uses react-plaid-link to handle the integration.
- * Ensures single script loading and proper lifecycle management.
- * Initiates connection ONLY on user interaction.
+ * Manages the "Connect" button state and fetches the link_token.
+ * Only mounts the PlaidLinkHeadless component (which injects the script)
+ * AFTER a token is successfully retrieved.
  */
 export default function PlaidLink({ userId, onSuccess, onExit }: PlaidLinkProps) {
   const [linkToken, setLinkToken] = useState<string | null>(null);
@@ -40,8 +70,8 @@ export default function PlaidLink({ userId, onSuccess, onExit }: PlaidLinkProps)
       if (!response.ok) {
         let errorMsg = `API error ${response.status}`;
         try {
-          const errorData = await response.json();
-          if (errorData.detail) errorMsg = errorData.detail;
+            const errorData = await response.json();
+            if (errorData.detail) errorMsg = errorData.detail;
         } catch (e) { /* ignore */ }
         throw new Error(errorMsg);
       }
@@ -62,42 +92,15 @@ export default function PlaidLink({ userId, onSuccess, onExit }: PlaidLinkProps)
     }
   }, [userId]);
 
-
-  // 2. Initialize Plaid Link Hook
-  // Only initialize when we have a token
-  const config = {
-    token: linkToken,
-    onSuccess: useCallback((public_token: string, metadata: any) => {
-      console.log('🟢 Plaid Link Success', metadata);
-      // Reset token to prevent re-use
-      setLinkToken(null);
+  const handleSuccess = useCallback((public_token: string, metadata: any) => {
+      setLinkToken(null); // Unmount headless to cleanup
       onSuccess(public_token, metadata);
-    }, [onSuccess]),
-    onExit: useCallback((err: any, metadata: any) => {
-      if (err) console.error('🔴 Plaid Link Exit Error:', err);
-      // Reset token so user can try again with a fresh one
-      setLinkToken(null);
+  }, [onSuccess]);
+
+  const handleExit = useCallback((err: any, metadata: any) => {
+      setLinkToken(null); // Unmount headless to cleanup
       if (onExit) onExit(err, metadata);
-    }, [onExit]),
-  };
-
-  const { open, ready, error: linkError } = usePlaidLink(config);
-
-  // Auto-open when ready (since user already clicked "Connect")
-  useEffect(() => {
-      if (ready && linkToken) {
-          open();
-      }
-  }, [ready, linkToken, open]);
-
-  // Handle errors from the hook itself
-  useEffect(() => {
-    if (linkError) {
-      console.error("Plaid Link Hook Error:", linkError);
-      setError(linkError.message || "Error initializing Plaid Link");
-      setLinkToken(null); // Reset on error
-    }
-  }, [linkError]);
+  }, [onExit]);
 
   // Render States
 
@@ -116,7 +119,6 @@ export default function PlaidLink({ userId, onSuccess, onExit }: PlaidLinkProps)
     );
   }
 
-  // Initial State: Button to start flow
   return (
     <div className="space-y-3">
       <button
@@ -144,6 +146,15 @@ export default function PlaidLink({ userId, onSuccess, onExit }: PlaidLinkProps)
             <span className="text-green-500">🔒</span> Secure connection via Plaid
           </p>
       </div>
+
+      {/* Conditionally render the hook/script wrapper */}
+      {linkToken && (
+          <PlaidLinkHeadless
+              token={linkToken}
+              onSuccess={handleSuccess}
+              onExit={handleExit}
+          />
+      )}
     </div>
   );
 }

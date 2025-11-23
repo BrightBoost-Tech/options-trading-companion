@@ -7,11 +7,8 @@ import { supabase } from '@/lib/supabase';
 import { API_URL } from '@/lib/constants';
 
 export default function SettingsPage() {
-  const [uploading, setUploading] = useState(false);
-  const [uploadStatus, setUploadStatus] = useState<string | null>(null);
   const [connectedInstitution, setConnectedInstitution] = useState<string | null>(null);
   const [connectionError, setConnectionError] = useState<string | null>(null);
-  const fileInputRef = useRef<HTMLInputElement>(null);
   
   // In a real app, we'd get this from Auth Context
   // For now, assuming user is logged in or we use a test user if explicitly enabled
@@ -63,6 +60,7 @@ export default function SettingsPage() {
           try {
              const { data: { session } } = await supabase.auth.getSession();
              if (session) {
+                 // Use sync_holdings which now fetches from Plaid only
                  await fetch(`${API_URL}/plaid/sync_holdings`, {
                      method: 'POST',
                      headers: {
@@ -80,51 +78,6 @@ export default function SettingsPage() {
           setConnectionError(`Connection failed: ${error.message}`);
       }
   }, [userId]);
-
-  const handleFileUpload = async (event: React.ChangeEvent<HTMLInputElement>) => {
-    const file = event.target.files?.[0];
-    if (!file) return;
-
-    setUploading(true);
-    setUploadStatus(null);
-
-    try {
-      const { data: { session } } = await supabase.auth.getSession();
-
-      const formData = new FormData();
-      formData.append('file', file);
-
-      const headers: any = {};
-
-      if (session) {
-          headers['Authorization'] = `Bearer ${session.access_token}`;
-      } else {
-          console.log('⚠️ No session found, attempting upload in Test Mode');
-          headers['X-Test-Mode-User'] = testUserId;
-      }
-
-      const response = await fetch(`${API_URL}/holdings/upload_csv`, {
-        method: 'POST',
-        headers: headers,
-        body: formData
-      });
-
-      if (!response.ok) {
-        throw new Error('Upload failed');
-      }
-
-      const data = await response.json();
-      setUploadStatus(`Success! Imported ${data.count} holdings.`);
-
-      if (fileInputRef.current) {
-        fileInputRef.current.value = '';
-      }
-    } catch (err: any) {
-      setUploadStatus(`Error: ${err.message}`);
-    } finally {
-      setUploading(false);
-    }
-  };
 
   return (
     <DashboardLayout>
@@ -177,46 +130,9 @@ export default function SettingsPage() {
           )}
         </div>
 
-        {/* Robinhood CSV Import */}
-        <div className="bg-white rounded-lg shadow p-6">
-          <h2 className="text-xl font-semibold mb-4">📂 Import Holdings (CSV)</h2>
-          <p className="text-gray-600 mb-4 text-sm">
-             If you cannot connect via Plaid, you can upload a CSV export from Robinhood or other brokers.
-             <br />
-             Expected headers: <code>Symbol, Quantity, Average Cost, Current Price</code>
-          </p>
-
-          <div className="flex items-center gap-4">
-             <label className="block">
-               <span className="sr-only">Choose file</span>
-               <input
-                 type="file"
-                 accept=".csv"
-                 onChange={handleFileUpload}
-                 ref={fileInputRef}
-                 disabled={uploading}
-                 className="block w-full text-sm text-gray-500
-                   file:mr-4 file:py-2 file:px-4
-                   file:rounded-full file:border-0
-                   file:text-sm file:font-semibold
-                   file:bg-blue-50 file:text-blue-700
-                   hover:file:bg-blue-100
-                 "
-               />
-             </label>
-             {uploading && <span className="text-sm text-gray-500">Uploading...</span>}
-          </div>
-
-          {uploadStatus && (
-            <div className={`mt-4 p-3 rounded text-sm ${uploadStatus.startsWith('Success') ? 'bg-green-50 text-green-700' : 'bg-red-50 text-red-700'}`}>
-              {uploadStatus}
-            </div>
-          )}
-        </div>
-
         <div className="bg-blue-50 border border-blue-300 rounded-lg p-4 mt-8">
           <p className="text-xs text-blue-800">
-            🧪 <strong>Sandbox Mode Active:</strong> Use Plaid Sandbox credentials (user_good / pass_good) to test connection.
+            🧪 <strong>Development Mode Active:</strong> Use real brokerage credentials.
           </p>
         </div>
       </div>

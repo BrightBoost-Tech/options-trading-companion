@@ -82,7 +82,8 @@ def create_link_token(user_id: str):
         response_dict = response.to_dict()
 
         print(f"✅ Plaid Link Token Created: {response_dict.get('link_token', 'N/A')[:10]}...")
-        return response_dict
+        # Return exact JSON structure as requested
+        return {"link_token": response_dict.get("link_token")}
 
     except plaid.ApiException as e:
         print(f"❌ Plaid API Error (Create Link Token): {e}")

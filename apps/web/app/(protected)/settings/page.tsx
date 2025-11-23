@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useRef, useCallback } from 'react';
+import { useState, useRef, useCallback, useEffect } from 'react';
 import PlaidLink from '@/components/PlaidLink';
 import DashboardLayout from '@/components/DashboardLayout';
 import { supabase } from '@/lib/supabase';
@@ -19,13 +19,13 @@ export default function SettingsPage() {
   const [userId, setUserId] = useState<string>(testUserId);
 
   // Fetch real user on mount
-  useState(() => {
+  useEffect(() => {
       supabase.auth.getUser().then(({ data: { user } }) => {
           if (user) {
               setUserId(user.id);
           }
       });
-  });
+  }, []);
 
   const handlePlaidSuccess = useCallback(async (publicToken: string, metadata: any) => {
       console.log('Plaid success:', metadata);

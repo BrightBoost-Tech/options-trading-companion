@@ -13,18 +13,16 @@ from models import Holding
 # 1. Verify and correct backend environment mapping
 current_env_str = os.getenv("PLAID_ENV", "sandbox").lower().strip()
 
-if current_env_str == "sandbox":
-    host_env = plaid.Environment.Sandbox
-    env_log_msg = "Plaid environment: sandbox"
+if current_env_str == "development":
+    host_env = plaid.Environment.Development
+    env_log_msg = "Plaid environment: DEVELOPMENT"
+elif current_env_str == "production":
+    host_env = plaid.Environment.Production
+    env_log_msg = "Plaid environment: PRODUCTION"
 else:
-    # Fallback or strict error? User said: "Remove or disable any defaulting logic that silently switches to development or production."
-    # But if they put something else, we should probably warn and default to sandbox or fail.
-    # For safety in this task, I will enforce sandbox if it's not explicitly something else, OR just fail if not sandbox?
-    # User said: "Ensure that exact string 'sandbox' maps to: plaid.Environment.Sandbox"
-    # User said: "Remove or disable any defaulting logic that silently switches to development or production."
-    # So if it is NOT sandbox, we should perhaps warn. But let's stick to logic that prioritizes sandbox.
+    # Default to sandbox or strict sandbox
     host_env = plaid.Environment.Sandbox
-    env_log_msg = f"Plaid environment forced to: sandbox (was {current_env_str})"
+    env_log_msg = f"Plaid environment: SANDBOX (configured: {current_env_str})"
 
 # Fetch credentials
 PLAID_CLIENT_ID = os.getenv("PLAID_CLIENT_ID")
@@ -34,7 +32,7 @@ PLAID_SECRET = os.getenv("PLAID_SECRET")
 print("-" * 40)
 print(env_log_msg)
 if PLAID_CLIENT_ID and PLAID_SECRET:
-    print("Using Plaid sandbox keys")
+    print(f"Using Plaid {current_env_str} keys")
 else:
     print("⚠️  MISSING Plaid Credentials. Plaid Link will not work correctly.")
     if not PLAID_CLIENT_ID: print("   - PLAID_CLIENT_ID is missing")
@@ -42,7 +40,6 @@ else:
 print("-" * 40)
 
 # Initialize Plaid Client
-# We use dummy values if missing to prevent crash, but actual calls will fail or return mocks.
 configuration = plaid.Configuration(
     host=host_env,
     api_key={
@@ -70,7 +67,7 @@ def create_link_token(user_id: str):
     try:
         client_user_id = str(user_id)
 
-        # 3. Update /plaid/create_link_token to generate a Sandbox-compliant link token
+        # 3. Update /plaid/create_link_token to generate a link token for Investments
         request = LinkTokenCreateRequest(
             products=[Products.INVESTMENTS],
             client_name="Options Trading Companion",
@@ -142,7 +139,7 @@ def fetch_and_normalize_holdings(access_token: str) -> list[Holding]:
         raise ValueError("Missing PLAID_CLIENT_ID environment variable")
 
     try:
-        # 4. Ensure holdings sync uses the Sandbox investments endpoint
+        # 4. Ensure holdings sync uses the investments endpoint
         request = InvestmentsHoldingsGetRequest(access_token=access_token)
         response = client.investments_holdings_get(request)
 
@@ -156,8 +153,11 @@ def fetch_and_normalize_holdings(access_token: str) -> list[Holding]:
             security = securities_data.get(security_id, {})
 
             ticker = security.get('ticker_symbol')
+            # Fallback to name if ticker is missing, or skip? Prompt implies we match security.
+            # "For each holding in holdings, find the corresponding security to get its ticker_symbol"
+            # "symbol – use the security’s ticker if available (or a composite name if no ticker...)"
             if not ticker:
-                continue
+                ticker = security.get('name', 'Unknown')
 
             qty = float(item.get('quantity', 0) or 0)
             cost_basis = float(item.get('cost_basis', 0) or 0)
@@ -167,6 +167,8 @@ def fetch_and_normalize_holdings(access_token: str) -> list[Holding]:
                 price = float(security.get('close_price'))
             elif item.get('institution_price'):
                 price = float(item.get('institution_price'))
+            # Fallback to institution value / quantity if price missing?
+            # Plaid usually provides institution_price.
 
             holding = Holding(
                 symbol=ticker,

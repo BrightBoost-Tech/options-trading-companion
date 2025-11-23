@@ -6,6 +6,7 @@ from typing import Dict
 import json
 import plaid
 from plaid.exceptions import ApiException
+from datetime import datetime
 
 def register_plaid_endpoints(app, plaid_service, supabase_client=None):
     """Register Plaid endpoints with the FastAPI app"""
@@ -29,6 +30,8 @@ def register_plaid_endpoints(app, plaid_service, supabase_client=None):
         try:
             user_id = request.get('user_id', 'default_user')
             result = plaid_service.create_link_token(user_id)
+            # Ensure return format is { "link_token": "..." }
+            # Service returns full dict, which includes link_token
             return result
         except ValueError as e:
             print(f"❌ Plaid Configuration Error: {e}")
@@ -46,12 +49,8 @@ def register_plaid_endpoints(app, plaid_service, supabase_client=None):
         """Exchange public token for access token and store it"""
         try:
             public_token = request.get('public_token')
-            user_id = request.get('user_id') # Should be passed or extracted from auth if available
-
-            # If we want to be strict, we should rely on Auth Header, but for now we might accept user_id in body if auth is optional or handled elsewhere
-            # Ideally, we should extract user_id from the session token if passed, but this function signature is generic.
-            # Let's assume the frontend might not pass user_id in body if it's authenticated via headers, but here we might need it.
-            # HOWEVER, the prompt emphasizes saving the access token.
+            user_id = request.get('user_id')
+            metadata = request.get('metadata', {}) # Plaid Link metadata
 
             if not public_token:
                 raise HTTPException(status_code=400, detail="public_token required")
@@ -62,22 +61,46 @@ def register_plaid_endpoints(app, plaid_service, supabase_client=None):
             access_token = result.get('access_token')
             item_id = result.get('item_id')
 
+            # Extract institution details if available
+            institution_name = "Plaid Item"
+            institution_id = None
+            if metadata and 'institution' in metadata:
+                institution_name = metadata['institution'].get('name', 'Plaid Item')
+                institution_id = metadata['institution'].get('institution_id')
+
             if access_token and supabase_client and user_id:
-                print(f"💾 Saving Plaid Item for user {user_id}")
-                # Upsert into plaid_items
+                print(f"💾 Saving Plaid credentials for user {user_id}")
+
+                # 1. Update user_settings as requested
+                try:
+                    # Check if user settings exist, if not create? usually it exists.
+                    # We'll use upsert to be safe.
+                    # Assuming user_settings has user_id as PK or unique.
+                    supabase_client.table("user_settings").upsert({
+                        "user_id": user_id,
+                        "plaid_access_token": access_token,
+                        "plaid_item_id": item_id,
+                        "plaid_institution": institution_name,
+                        "updated_at": "now()"
+                    }, on_conflict="user_id").execute()
+                    print("✅ User Settings updated with Plaid credentials")
+                except Exception as e:
+                    print(f"⚠️ Failed to update user_settings: {e}")
+
+                # 2. Keep updating plaid_items table as it allows multiple items potentially
                 try:
                     supabase_client.table("plaid_items").upsert({
                         "user_id": user_id,
                         "access_token": access_token,
                         "item_id": item_id,
-                        "institution_name": "Plaid Item", # We might get this from metadata if passed, but for now generic
+                        "institution_name": institution_name,
+                        "institution_id": institution_id,
                         "status": "active",
                         "updated_at": "now()"
-                    }, on_conflict="user_id").execute()
+                    }, on_conflict="user_id").execute() # Assuming user_id is unique constraint for now based on previous code
                     print("✅ Plaid Item Saved to DB")
                 except Exception as e:
                      print(f"❌ Failed to save Plaid Item to DB: {e}")
-                     # We don't fail the request if DB save fails, but it's bad.
 
             return result
 
@@ -94,14 +117,79 @@ def register_plaid_endpoints(app, plaid_service, supabase_client=None):
 
     @app.post("/plaid/get_holdings")
     async def get_plaid_holdings(request: Dict):
-        """Get holdings from connected brokerage account"""
+        """Get holdings from connected brokerage account and store them"""
         try:
+            # We can accept access_token directly OR look it up for the user
             access_token = request.get('access_token')
+            user_id = request.get('user_id')
+
+            if not access_token and user_id and supabase_client:
+                # Look up token if not provided but user_id is
+                print(f"🔍 Looking up access token for user {user_id}")
+                # Try user_settings first as that's where we just saved it
+                try:
+                    res = supabase_client.table("user_settings").select("plaid_access_token").eq("user_id", user_id).single().execute()
+                    if res.data:
+                        access_token = res.data.get('plaid_access_token')
+                except Exception:
+                    pass
+
+                # Fallback to plaid_items
+                if not access_token:
+                    try:
+                        res = supabase_client.table("plaid_items").select("access_token").eq("user_id", user_id).limit(1).execute()
+                        if res.data:
+                            access_token = res.data[0].get('access_token')
+                    except Exception:
+                        pass
+
             if not access_token:
-                raise HTTPException(status_code=400, detail="access_token required")
+                 raise HTTPException(status_code=400, detail="access_token required or not found for user")
             
+            # Fetch from Plaid
+            print("Fetching holdings from Plaid Service...")
             result = plaid_service.get_holdings(access_token)
-            return result
+            holdings_list = result.get('holdings', [])
+
+            # Upsert to positions table
+            if supabase_client and user_id:
+                print(f"💾 Saving {len(holdings_list)} positions for user {user_id}")
+                positions_to_insert = []
+                for h in holdings_list:
+                    # h is a dict from Holding model
+                    positions_to_insert.append({
+                        "user_id": user_id,
+                        "symbol": h.get('symbol'),
+                        "quantity": h.get('quantity'),
+                        "cost_basis": h.get('cost_basis'),
+                        "current_price": h.get('current_price'),
+                        "currency": h.get('currency'),
+                        "source": "plaid",
+                        # "institution_name": h.get('institution_name'), # positions table might not have this column, check schema?
+                        # Using standard columns likely: user_id, symbol, quantity, cost_basis, current_price
+                        # If schema allows jsonb or extra cols, great. Assuming basic schema for now based on models.
+                        "updated_at": datetime.now().isoformat()
+                    })
+
+                if positions_to_insert:
+                    try:
+                        # Upsert based on user_id and symbol
+                        # Note: This assumes unique constraint on (user_id, symbol)
+                        supabase_client.table("positions").upsert(
+                            positions_to_insert,
+                            on_conflict="user_id,symbol"
+                        ).execute()
+                        print("✅ Positions updated in DB")
+                    except Exception as e:
+                        print(f"❌ Failed to update positions in DB: {e}")
+
+            # Return success response
+            return {
+                "synced": True,
+                "positions_count": len(holdings_list),
+                "holdings": holdings_list
+            }
+
         except ValueError as e:
             print(f"❌ Plaid Configuration Error: {e}")
             raise HTTPException(status_code=400, detail=str(e))

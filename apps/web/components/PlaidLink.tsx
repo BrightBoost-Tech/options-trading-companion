@@ -10,13 +10,15 @@ interface PlaidLinkProps {
   onExit?: (error: any, metadata: any) => void;
 }
 
-/**
- * Headless Component
- * 
- * This component is only mounted AFTER we have a link_token.
- * Its sole job is to initialize the Plaid hook and open the modal immediately.
- */
-function PlaidLinkHeadless({ token, onSuccess, onExit, onCleanup }: {
+// -- HEADLESS COMPONENT --
+// This component is strictly responsible for the Plaid Hook lifecycle.
+// It is only rendered when a valid 'token' exists.
+function PlaidLinkHeadless({ 
+  token, 
+  onSuccess, 
+  onExit,
+  onCleanup 
+}: {
     token: string,
     onSuccess: (public_token: string, metadata: any) => void,
     onExit: (error: any, metadata: any) => void,
@@ -24,19 +26,21 @@ function PlaidLinkHeadless({ token, onSuccess, onExit, onCleanup }: {
 }) {
     const config: PlaidLinkOptions = {
         token,
-        onSuccess: (public_token, metadata) => {
+        onSuccess: useCallback((public_token: string, metadata: any) => {
+            // 1. Pass data up
             onSuccess(public_token, metadata);
-            onCleanup(); // Unmount this component
-        },
-        onExit: (err, metadata) => {
+            // 2. Unmount this component to clean up the hook
+            onCleanup();
+        }, [onSuccess, onCleanup]),
+        onExit: useCallback((err: any, metadata: any) => {
             if (onExit) onExit(err, metadata);
-            onCleanup(); // Unmount this component
-        },
+            onCleanup();
+        }, [onExit, onCleanup]),
     };
 
     const { open, ready, error } = usePlaidLink(config);
 
-    // Auto-open when ready
+    // Auto-open modal when script is loaded and ready
     useEffect(() => {
         if (ready && !error) {
             open();
@@ -47,28 +51,23 @@ function PlaidLinkHeadless({ token, onSuccess, onExit, onCleanup }: {
         return <div className="text-red-600 text-xs mt-2">Error initializing Link: {error.message}</div>;
     }
 
-    return null; // This component is invisible
+    return null; // Invisible component
 }
 
-/**
- * Main PlaidLink Component
- * 
- * Manages the "Connect" UI state and the API call to fetch the token.
- * Does NOT load the Plaid script until the token is successfully retrieved.
- */
+// -- MAIN COMPONENT --
 export default function PlaidLink({ userId, onSuccess, onExit }: PlaidLinkProps) {
   const [linkToken, setLinkToken] = useState<string | null>(null);
-  const [isLoading, setIsLoading] = useState(false);
-  const [fetchError, setFetchError] = useState<string>('');
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string>('');
 
-  const handleFetchToken = useCallback(async () => {
+  // Fetch token only on user interaction
+  const fetchToken = useCallback(async () => {
     if (!userId) return;
-
-    setIsLoading(true);
-    setFetchError('');
+    setLoading(true);
+    setError('');
 
     try {
-      console.log('🟡 Fetching Plaid Link Token...');
+      console.log('🟡 Fetching link token...');
       const response = await fetch(`${API_URL}/plaid/create_link_token`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -76,39 +75,37 @@ export default function PlaidLink({ userId, onSuccess, onExit }: PlaidLinkProps)
       });
 
       if (!response.ok) {
-        const errorData = await response.json().catch(() => ({}));
-        throw new Error(errorData.detail || `API error ${response.status}`);
+        const errData = await response.json().catch(() => ({}));
+        throw new Error(errData.detail || `API Error: ${response.status}`);
       }
 
       const data = await response.json();
+      if (!data.link_token) throw new Error('No link_token in response');
 
-      if (data.link_token) {
-        console.log('🟢 Link token received');
-        setLinkToken(data.link_token);
-      } else {
-        throw new Error('No link_token returned from API');
-      }
+      console.log('🟢 Link token received');
+      setLinkToken(data.link_token);
+
     } catch (err: any) {
-      console.error('🔴 Error fetching link token:', err);
-      setFetchError(err.message || 'Failed to initialize connection');
+      console.error('🔴 Error fetching token:', err);
+      setError(err.message || 'Connection failed');
     } finally {
-      setIsLoading(false);
+      setLoading(false);
     }
   }, [userId]);
 
-  const cleanup = useCallback(() => {
+  // Cleanup handler to reset state and unmount the headless component
+  const handleCleanup = useCallback(() => {
       setLinkToken(null);
   }, []);
 
-  // If initial fetch failed, show error UI
-  if (fetchError) {
+  if (error) {
     return (
       <div className="bg-red-50 border border-red-200 rounded-lg p-4">
-        <p className="text-sm font-medium text-red-800">Connection Initialization Failed</p>
-        <p className="text-xs text-red-600 mt-1">{fetchError}</p>
+        <p className="text-sm font-medium text-red-800">Connection Failed</p>
+        <p className="text-xs text-red-600 mt-1">{error}</p>
         <button 
-          onClick={() => { setFetchError(''); setLinkToken(null); }}
-          className="mt-2 text-xs text-red-700 underline hover:text-red-800"
+          onClick={() => { setError(''); setLinkToken(null); }}
+          className="mt-2 text-xs text-red-700 underline"
         >
           Try Again
         </button>
@@ -119,21 +116,18 @@ export default function PlaidLink({ userId, onSuccess, onExit }: PlaidLinkProps)
   return (
     <div className="space-y-3">
       <button
-        type="button"
-        onClick={handleFetchToken}
-        disabled={isLoading || !!linkToken}
+        onClick={fetchToken}
+        disabled={loading || !!linkToken}
         className={`px-6 py-3 rounded-lg font-medium transition-all shadow-sm flex items-center gap-2
-          ${isLoading || linkToken
+          ${loading || linkToken
             ? 'bg-gray-100 text-gray-500 cursor-wait'
             : 'bg-green-600 text-white hover:bg-green-700 hover:shadow-md'}
         `}
       >
-        {isLoading || linkToken ? (
+        {loading || linkToken ? (
            <>
              <div className="h-4 w-4 border-2 border-gray-400 border-t-transparent rounded-full animate-spin"></div>
-             <span>
-                 {isLoading ? 'Preparing Secure Connection...' : 'Opening Plaid...'}
-             </span>
+             <span>{loading ? 'Preparing...' : 'Opening Plaid...'}</span>
            </>
         ) : (
            'Connect Broker Account'
@@ -147,16 +141,15 @@ export default function PlaidLink({ userId, onSuccess, onExit }: PlaidLinkProps)
       </div>
 
       {/* 
-        This is the Key Fix:
-        We only render the component (and thus load the script) 
-        when we have a valid linkToken.
+         Mounting this component triggers the script injection via usePlaidLink.
+         We only do this AFTER we have the token.
       */}
       {linkToken && (
           <PlaidLinkHeadless
               token={linkToken}
               onSuccess={onSuccess}
               onExit={onExit}
-              onCleanup={cleanup}
+              onCleanup={handleCleanup}
           />
       )}
     </div>

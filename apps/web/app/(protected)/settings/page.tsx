@@ -12,7 +12,7 @@ export default function SettingsPage() {
   
   // In a real app, we'd get this from Auth Context
   // For now, assuming user is logged in or we use a test user if explicitly enabled
-  const [testUserId] = useState('test-user-123');
+  const [testUserId] = useState('75ee12ad-b119-4f32-aeea-19b4ef55d587');
 
   // We need to know the REAL user ID for proper backend saving
   // If not logged in (dev mode), we might use testUserId

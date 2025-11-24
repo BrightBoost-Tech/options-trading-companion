@@ -40,6 +40,9 @@ const fetchWithTimeout = async (resource: RequestInfo, options: FetchOptions = {
   return response;
 };
 
+// 🛠️ DEV MODE: Use the specific User ID found in your backend logs
+const TEST_USER_ID = '75ee12ad-b119-4f32-aeea-19b4ef55d587';
+
 export default function DashboardPage() {
   const [showQuantum, setShowQuantum] = useState(false);
   const [optimizationResults, setOptimizationResults] = useState<any>(null);
@@ -94,6 +97,8 @@ export default function DashboardPage() {
 
        if (snapshot.holdings.length > 0) {
          setCustomSymbols(snapshot.holdings.map((h: any) => h.symbol));
+         // Automatically switch to Custom view if we have real holdings
+         setPortfolioType('custom'); 
        }
     }
   }, [snapshot]);
@@ -101,10 +106,20 @@ export default function DashboardPage() {
   const loadSnapshot = async () => {
     try {
       const { data: { session } } = await supabase.auth.getSession();
-      if (!session) return;
+      
+      const headers: Record<string, string> = {
+          'Content-Type': 'application/json'
+      };
+
+      if (session) {
+          headers['Authorization'] = `Bearer ${session.access_token}`;
+      } else {
+          // 🛠️ FIX: Pass Test User ID if not logged in
+          headers['X-Test-Mode-User'] = TEST_USER_ID;
+      }
 
       const response = await fetchWithTimeout(`${API_URL}/portfolio/snapshot`, {
-         headers: { 'Authorization': `Bearer ${session.access_token}` },
+         headers,
          timeout: 10000
       });
 
@@ -122,9 +137,15 @@ export default function DashboardPage() {
     setScoutError(null);
     try {
       const { data: { session } } = await supabase.auth.getSession();
-      const headers: any = {};
+      
+      const headers: Record<string, string> = {
+          'Content-Type': 'application/json'
+      };
+
       if (session) {
         headers['Authorization'] = `Bearer ${session.access_token}`;
+      } else {
+         headers['X-Test-Mode-User'] = TEST_USER_ID;
       }
 
       const response = await fetchWithTimeout(`${API_URL}/scout/weekly`, {
@@ -151,7 +172,21 @@ export default function DashboardPage() {
     setJournalLoading(true);
     setJournalError(null);
     try {
-      const response = await fetchWithTimeout(`${API_URL}/journal/stats`, { timeout: 10000 });
+      const { data: { session } } = await supabase.auth.getSession();
+      const headers: Record<string, string> = {
+          'Content-Type': 'application/json'
+      };
+      // Note: Journal endpoint might not need auth in current API implementation, 
+      // but good practice to pass it if user specific
+      if (session) {
+        headers['Authorization'] = `Bearer ${session.access_token}`;
+      }
+
+      const response = await fetchWithTimeout(`${API_URL}/journal/stats`, { 
+          headers,
+          timeout: 10000 
+      });
+      
       if (response.ok) {
         const data = await response.json();
         setJournalStats(data);
@@ -185,8 +220,11 @@ export default function DashboardPage() {
     try {
       const { data: { session } } = await supabase.auth.getSession();
       const headers: any = { 'Content-Type': 'application/json' };
+      
       if (session) {
         headers['Authorization'] = `Bearer ${session.access_token}`;
+      } else {
+         headers['X-Test-Mode-User'] = TEST_USER_ID;
       }
 
       const symbols = getSymbols();
@@ -223,15 +261,9 @@ export default function DashboardPage() {
     }
   }, [showQuantum]);
 
-  // Re-run when inputs change (but wait for user to stop dragging slider ideally, debounce maybe?
-  // For now, just simple effect is fine as per original code, but guarded)
+  // Re-run when inputs change
   useEffect(() => {
     if (showQuantum && !loading && optimizationResults) {
-       // Only re-run if we already have results (meaning user is tweaking)
-       // But we must reset results first to show loading?
-       // Original code: setOptimizationResults(null); runOptimization();
-       // This causes a flash. Let's just keep results until new ones arrive or show spinner over them.
-       // But to keep it simple and matching original logic:
        setOptimizationResults(null);
        runOptimization();
     }
@@ -487,9 +519,6 @@ export default function DashboardPage() {
         <div className="bg-white rounded-lg shadow p-6">
           <h3 className="text-lg font-semibold mb-4">Portfolio Risk</h3>
           <div className="space-y-4">
-            {/* If we have metrics from snapshot, use them. Else use placeholder or nothing */}
-            {/* Since snapshot.risk_metrics might be simple, let's just show what we have */}
-
             {snapshot ? (
               <div>
                 <div className="flex justify-between mb-2">
@@ -498,7 +527,6 @@ export default function DashboardPage() {
                     {new Date(snapshot.created_at).toLocaleString()}
                   </span>
                 </div>
-                {/* Placeholder for real metrics if available in snapshot */}
                  <p className="text-sm text-gray-500">
                    {snapshot.holdings.length} positions tracked.
                  </p>

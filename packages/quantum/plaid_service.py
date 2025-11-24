@@ -1,4 +1,7 @@
 import os
+from dotenv import load_dotenv
+# Force load .env immediately
+load_dotenv() 
 import plaid
 from datetime import datetime
 from plaid.api import plaid_api

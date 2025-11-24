@@ -121,7 +121,17 @@ export default function DashboardPage() {
     setScoutLoading(true);
     setScoutError(null);
     try {
-      const response = await fetchWithTimeout(`${API_URL}/scout/weekly`, { timeout: 20000 });
+      const { data: { session } } = await supabase.auth.getSession();
+      const headers: any = {};
+      if (session) {
+        headers['Authorization'] = `Bearer ${session.access_token}`;
+      }
+
+      const response = await fetchWithTimeout(`${API_URL}/scout/weekly`, {
+        headers: headers,
+        timeout: 20000
+      });
+
       if (response.ok) {
         const data = await response.json();
         setWeeklyScout(data);
@@ -173,10 +183,16 @@ export default function DashboardPage() {
     setError(null);
     
     try {
+      const { data: { session } } = await supabase.auth.getSession();
+      const headers: any = { 'Content-Type': 'application/json' };
+      if (session) {
+        headers['Authorization'] = `Bearer ${session.access_token}`;
+      }
+
       const symbols = getSymbols();
       const response = await fetchWithTimeout(`${API_URL}/compare/real`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: headers,
         body: JSON.stringify({
           symbols: symbols,
           risk_aversion: riskAversion

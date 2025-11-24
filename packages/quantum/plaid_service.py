@@ -35,6 +35,7 @@ from plaid.model.country_code import CountryCode
 from plaid.model.item_public_token_exchange_request import ItemPublicTokenExchangeRequest
 from plaid.model.investments_holdings_get_request import InvestmentsHoldingsGetRequest
 from models import Holding
+from market_data import get_polygon_price
 
 # 1. Verify and correct backend environment mapping
 current_env_str = (current_plaid_env or "sandbox").lower().strip()
@@ -193,11 +194,15 @@ def fetch_and_normalize_holdings(access_token: str) -> list[Holding]:
             qty = float(item.get('quantity', 0) or 0)
             cost_basis = float(item.get('cost_basis', 0) or 0)
             
-            price = 0.0
-            if security.get('close_price'):
-                price = float(security.get('close_price'))
-            elif item.get('institution_price'):
-                price = float(item.get('institution_price'))
+            # Fetch real price from Polygon if available
+            price = get_polygon_price(ticker)
+
+            if price == 0.0:
+                if security.get('close_price'):
+                    price = float(security.get('close_price'))
+                elif item.get('institution_price'):
+                    price = float(item.get('institution_price'))
+
             # Fallback to institution value / quantity if price missing?
             # Plaid usually provides institution_price.
 

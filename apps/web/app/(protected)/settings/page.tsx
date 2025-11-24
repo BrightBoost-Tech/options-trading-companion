@@ -23,9 +23,29 @@ export default function SettingsPage() {
       supabase.auth.getUser().then(({ data: { user } }) => {
           if (user) {
               setUserId(user.id);
+              checkPlaidStatus(user.id);
           }
       });
   }, []);
+
+  const checkPlaidStatus = async (currentUserId: string) => {
+      try {
+          const { data: { session } } = await supabase.auth.getSession();
+          if (!session) return;
+
+          const res = await fetch(`${API_URL}/plaid/status`, {
+              headers: {
+                  'Authorization': `Bearer ${session.access_token}`
+              }
+          });
+          const data = await res.json();
+          if (data.connected) {
+              setConnectedInstitution(data.institution || 'Connected Broker');
+          }
+      } catch (e) {
+          console.error("Failed to check Plaid status", e);
+      }
+  };
 
   const handlePlaidSuccess = useCallback(async (publicToken: string, metadata: any) => {
       console.log('Plaid success:', metadata);

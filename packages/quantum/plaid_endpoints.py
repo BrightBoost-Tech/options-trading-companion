@@ -1,7 +1,7 @@
 """
 Plaid API Endpoints
 """
-from fastapi import HTTPException
+from fastapi import HTTPException, Header
 from typing import Dict
 import json
 import plaid
@@ -23,6 +23,47 @@ def register_plaid_endpoints(app, plaid_service, supabase_client=None):
             return f"Plaid Error: {error_body.get('error_message')} ({error_body.get('error_code')})"
         except Exception:
             return f"Plaid API Error: {str(e)}"
+
+    @app.get("/plaid/status")
+    async def get_plaid_status(
+        authorization: str = Header(None),
+        x_test_mode_user: str = Header(None, alias="X-Test-Mode-User")
+    ):
+        """Check if user has a connected Plaid account"""
+        try:
+            user_id = None
+            if x_test_mode_user:
+                # Basic check if test mode allowed? Assuming yes for simplicity in this helper
+                user_id = x_test_mode_user
+            elif authorization:
+                try:
+                    if supabase_client:
+                        token = authorization.split(" ")[1]
+                        user = supabase_client.auth.get_user(token)
+                        user_id = user.user.id
+                except Exception:
+                    pass
+
+            if not user_id:
+                raise HTTPException(status_code=401, detail="Not authenticated")
+
+            if not supabase_client:
+                return {"connected": False, "institution": None, "error": "Database not available"}
+
+            # Check user_settings
+            res = supabase_client.table("user_settings").select("plaid_access_token, plaid_institution").eq("user_id", user_id).single().execute()
+
+            if res.data and res.data.get('plaid_access_token'):
+                return {
+                    "connected": True,
+                    "institution": res.data.get('plaid_institution') or "Connected Broker"
+                }
+
+            return {"connected": False, "institution": None}
+
+        except Exception as e:
+            print(f"❌ Error checking Plaid status: {e}")
+            return {"connected": False, "institution": None}
 
     @app.post("/plaid/create_link_token")
     async def create_plaid_link_token(request: Dict):

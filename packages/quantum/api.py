@@ -72,7 +72,7 @@ class OptimizationRequest(BaseModel):
     asset_names: Optional[List[str]] = None
     
 class RealDataRequest(BaseModel):
-    symbols: List[str] = Field(..., description="Stock symbols")
+    symbols: Optional[List[str]] = Field(None, description="Stock symbols (optional if authenticated)")
     mode: str = Field(default="classical")
     constraints: Optional[Dict[str, float]] = None
     risk_aversion: float = Field(default=2.0)
@@ -182,15 +182,21 @@ async def sync_holdings(
     plaid_access_token = None
     if supabase:
         # Check user_settings first (preferred)
-        res = supabase.table("user_settings").select("plaid_access_token").eq("user_id", user_id).single().execute()
-        if res.data:
-            plaid_access_token = res.data.get('plaid_access_token')
+        try:
+            res = supabase.table("user_settings").select("plaid_access_token").eq("user_id", user_id).single().execute()
+            if res.data:
+                plaid_access_token = res.data.get('plaid_access_token')
+        except Exception:
+            pass
 
-        # Fallback to plaid_items
+        # Fallback to plaid_items if not in user_settings
         if not plaid_access_token:
-             response = supabase.table("plaid_items").select("access_token").eq("user_id", user_id).limit(1).execute()
-             if response.data:
-                 plaid_access_token = response.data[0]['access_token']
+             try:
+                 response = supabase.table("plaid_items").select("access_token").eq("user_id", user_id).limit(1).execute()
+                 if response.data:
+                     plaid_access_token = response.data[0]['access_token']
+             except Exception:
+                 pass
     
     # 3. Fetch from Plaid
     errors = []
@@ -209,6 +215,8 @@ async def sync_holdings(
             errors.append(f"Plaid: {str(e)}")
 
     if not sync_attempted:
+         # If no Plaid token, maybe we have other sources?
+         # For now, just return empty if test mode, else error.
          if x_test_mode_user:
              return SyncResponse(status="success", count=0, holdings=[])
          raise HTTPException(status_code=404, detail="No linked broker accounts found.")
@@ -221,11 +229,6 @@ async def sync_holdings(
         data_to_insert = []
         for h in holdings:
             row = h.dict()
-            # Map Holding model to positions table schema if needed
-            # positions table usually has: user_id, symbol, quantity, cost_basis, current_price, currency, source
-
-            # Remove keys that might not be in positions table if strict?
-            # Or just pass matching keys.
             position_row = {
                 "user_id": user_id,
                 "symbol": row['symbol'],
@@ -238,10 +241,14 @@ async def sync_holdings(
             }
             data_to_insert.append(position_row)
 
-        supabase.table("positions").upsert(
-            data_to_insert, 
-            on_conflict="user_id,symbol"
-        ).execute()
+        try:
+            supabase.table("positions").upsert(
+                data_to_insert,
+                on_conflict="user_id,symbol"
+            ).execute()
+        except Exception as e:
+            print(f"Failed to upsert positions: {e}")
+            raise HTTPException(status_code=500, detail=f"Database Error: {e}")
 
         # 5. Create Snapshot
         await create_portfolio_snapshot(user_id)
@@ -400,11 +407,50 @@ async def compare(request: OptimizationRequest):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+async def _get_user_symbols(authorization: str = None, x_test_mode_user: str = None) -> List[str]:
+    """Helper to retrieve user's symbols from DB"""
+    user_id = None
+
+    # 1. Check Test Mode (Dev Only)
+    is_dev_mode = os.getenv("APP_ENV") != "production"
+    if x_test_mode_user and is_dev_mode:
+         user_id = x_test_mode_user
+
+    # 2. Check Real Auth
+    elif authorization and supabase:
+        try:
+            token = authorization.split(" ")[1]
+            user = supabase.auth.get_user(token)
+            user_id = user.user.id
+        except Exception:
+            pass
+
+    if user_id and supabase:
+        res = supabase.table("positions").select("symbol").eq("user_id", user_id).execute()
+        if res.data:
+            return [p['symbol'] for p in res.data]
+
+    return []
+
+
 @app.post("/optimize/real")
-async def optimize_real(request: RealDataRequest):
+async def optimize_real(
+    request: RealDataRequest,
+    authorization: Optional[str] = Header(None),
+    x_test_mode_user: Optional[str] = Header(None, alias="X-Test-Mode-User")
+):
     """Optimize using REAL market data from Polygon.io"""
     try:
-        inputs = calculate_portfolio_inputs(request.symbols)
+        symbols = request.symbols
+        if not symbols:
+             # Try to get from user
+             symbols = await _get_user_symbols(authorization, x_test_mode_user)
+
+        if not symbols:
+            # Fallback to demo symbols
+            symbols = ['SPY', 'QQQ', 'IWM', 'AAPL', 'MSFT']
+
+        inputs = calculate_portfolio_inputs(symbols)
 
         result = optimize_portfolio(
             mode=request.mode,
@@ -425,11 +471,23 @@ async def optimize_real(request: RealDataRequest):
         raise HTTPException(status_code=500, detail=f"Real data optimization failed: {str(e)}")
 
 @app.post("/compare/real")
-async def compare_real(request: RealDataRequest):
+async def compare_real(
+    request: RealDataRequest,
+    authorization: Optional[str] = Header(None),
+    x_test_mode_user: Optional[str] = Header(None, alias="X-Test-Mode-User")
+):
     """Compare MV vs MVS using REAL market data"""
     try:
-        print(f"Fetching real data for: {request.symbols}")
-        inputs = calculate_portfolio_inputs(request.symbols)
+        symbols = request.symbols
+        if not symbols:
+             # Try to get from user
+             symbols = await _get_user_symbols(authorization, x_test_mode_user)
+
+        if not symbols:
+            symbols = ['SPY', 'QQQ', 'IWM', 'AAPL', 'MSFT']
+
+        print(f"Fetching real data for: {symbols}")
+        inputs = calculate_portfolio_inputs(symbols)
 
         print("Running comparison...")
         result = compare_optimizations(
@@ -449,14 +507,22 @@ async def compare_real(request: RealDataRequest):
         raise HTTPException(status_code=500, detail=f"Real data comparison failed: {str(e)}")
 
 @app.get("/scout/weekly")
-async def weekly_scout():
-    """Get weekly option opportunities"""
+async def weekly_scout(
+    authorization: Optional[str] = Header(None),
+    x_test_mode_user: Optional[str] = Header(None, alias="X-Test-Mode-User")
+):
+    """Get weekly option opportunities, tailored to user portfolio if available"""
     try:
-        opportunities = scan_for_opportunities()
+        symbols = await _get_user_symbols(authorization, x_test_mode_user)
+
+        # If no user symbols, scan_for_opportunities will default to major indices
+        opportunities = scan_for_opportunities(symbols)
+
         return {
             'count': len(opportunities),
             'top_picks': opportunities[:5],
-            'generated_at': datetime.now().isoformat()
+            'generated_at': datetime.now().isoformat(),
+            'source': 'user-holdings' if symbols else 'market-scan'
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))

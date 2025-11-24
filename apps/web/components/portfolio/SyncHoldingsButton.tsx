@@ -21,7 +21,11 @@ export default function SyncHoldingsButton({ onSyncComplete }: { onSyncComplete?
       if (session) {
          headers['Authorization'] = `Bearer ${session.access_token}`;
       } else {
-         console.warn("No session found, using test mode header if configured.");
+         // Force error or login prompt if no session
+         console.warn("No session found for sync.");
+         // alert("Please log in to sync holdings.");
+         // return;
+         // Fallback for test mode if needed locally
          headers['X-Test-Mode-User'] = 'test-user-123';
       }
  
@@ -34,8 +38,11 @@ export default function SyncHoldingsButton({ onSyncComplete }: { onSyncComplete?
         // Check if it's a 404 (meaning no items to sync) which is fine
         if (response.status === 404) {
             console.log("No Plaid items found to sync, likely manual/csv user.");
+        } else if (response.status === 401) {
+            throw new Error("Not authenticated. Please log in.");
         } else {
-            throw new Error(`Failed to sync holdings: ${response.statusText}`);
+            const errJson = await response.json().catch(() => ({}));
+            throw new Error(errJson.detail || `Failed to sync holdings: ${response.statusText}`);
         }
       }
  

@@ -51,12 +51,13 @@ api_client = plaid.ApiClient(configuration)
 client = plaid_api.PlaidApi(api_client)
 
 def create_link_token(user_id: str):
+         # DEBUG: Check what the function actually sees
+    print(f"🕵️ DEBUG: PLAID_CLIENT_ID exists? {bool(PLAID_CLIENT_ID)}")
+    print(f"🕵️ DEBUG: PLAID_SECRET exists? {bool(PLAID_SECRET)}")
     """
     Create a link token for a given user.
     """
-      # DEBUG: Check what the function actually sees
-    print(f"🕵️ DEBUG: PLAID_CLIENT_ID exists? {bool(PLAID_CLIENT_ID)}")
-    print(f"🕵️ DEBUG: PLAID_SECRET exists? {bool(PLAID_SECRET)}")
+
     # Check if we have valid credentials to make a real call
     if not PLAID_SECRET or not PLAID_CLIENT_ID:
         if not PLAID_SECRET:

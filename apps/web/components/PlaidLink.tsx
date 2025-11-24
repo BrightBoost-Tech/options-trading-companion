@@ -121,7 +121,7 @@ export default function PlaidLink({ userId, onSuccess, onExit }: PlaidLinkProps)
       const data = await response.json();
       if (!data.link_token) throw new Error('No link_token in response');
 
-      console.log('🟢 Script Loaded & Token Received');
+      console.log('🟢 TOKEN VALUE:', data.link_token);
       setScriptLoaded(true);
       setLinkToken(data.link_token);
 

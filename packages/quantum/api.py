@@ -231,7 +231,7 @@ async def sync_holdings(
     if supabase and holdings:
         data_to_insert = []
         for h in holdings:
-            row = h.dict()
+            row = h.model_dump()
             position_row = {
                 "user_id": user_id,
                 "symbol": row['symbol'],

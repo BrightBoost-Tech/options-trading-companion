@@ -78,7 +78,7 @@ def create_link_token(user_id: str):
         request = LinkTokenCreateRequest(
              products=["investments"], 
             client_name="Options Trading Companion",
-            country_codes=[CountryCode.US],
+            country_codes=["US"],
             language='en',
             user=LinkTokenCreateRequestUser(
         client_user_id=client_user_id

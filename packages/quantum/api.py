@@ -368,7 +368,7 @@ async def get_portfolio_snapshot(
     is_stale = True
     if snapshot:
         created_at = datetime.fromisoformat(snapshot['created_at'])
-        if datetime.now() - created_at < timedelta(minutes=15):
+        if datetime.now(timezone.utc) - created_at < timedelta(minutes=15):
             is_stale = False
 
     if (not snapshot or is_stale) and refresh:

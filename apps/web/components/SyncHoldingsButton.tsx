@@ -21,16 +21,21 @@ export default function SyncHoldingsButton({ onSyncComplete }: SyncHoldingsButto
     try {
       const { data: { session } } = await supabase.auth.getSession();
 
-      if (!session) {
-        throw new Error("Not authenticated");
+      // Define Headers
+      const headers: Record<string, string> = {
+          'Content-Type': 'application/json'
+      };
+
+      if (session) {
+          headers['Authorization'] = `Bearer ${session.access_token}`;
+      } else {
+          // 🛠️ FIX: If no session, send the Test User ID header
+          headers['X-Test-Mode-User'] = 'test-user-123';
       }
 
       const response = await fetch(`${API_URL}/plaid/sync_holdings`, {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${session.access_token}`
-        }
+        headers: headers
       });
 
       if (!response.ok) {

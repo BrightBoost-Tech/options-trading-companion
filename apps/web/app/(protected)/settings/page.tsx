@@ -75,20 +75,33 @@ export default function SettingsPage() {
 
           setConnectedInstitution(metadata.institution?.name || 'Connected Broker');
 
-          // Trigger a sync immediately after connection
-          // We can do this silently or show a message
+          // ✅ FIX: Trigger sync with correct headers for Dev Mode
           try {
-             const { data: { session } } = await supabase.auth.getSession();
-             if (session) {
-                 // Use sync_holdings which now fetches from Plaid only
-                 await fetch(`${API_URL}/plaid/sync_holdings`, {
-                     method: 'POST',
-                     headers: {
-                         'Authorization': `Bearer ${session.access_token}`
-                     }
-                 });
-                 console.log("Initial sync triggered");
-             }
+              const { data: { session } } = await supabase.auth.getSession();
+
+              const headers: Record<string, string> = {
+                  'Content-Type': 'application/json'
+              };
+
+              if (session) {
+                  // Real User Login
+                  headers['Authorization'] = `Bearer ${session.access_token}`;
+              } else if (userId) {
+                  // 🛠️ DEV MODE BYPASS: Pass the user ID explicitly
+                  headers['X-Test-Mode-User'] = userId;
+              }
+
+              const syncRes = await fetch(`${API_URL}/plaid/sync_holdings`, {
+                  method: 'POST',
+                  headers: headers
+              });
+
+              if (syncRes.ok) {
+                  console.log("✅ Initial sync successful");
+              } else {
+                  console.warn("⚠️ Initial sync failed", await syncRes.text());
+              }
+
           } catch (e) {
               console.warn("Initial sync failed:", e);
           }

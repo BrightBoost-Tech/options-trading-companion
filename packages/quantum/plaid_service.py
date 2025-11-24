@@ -39,16 +39,16 @@ from models import Holding
 # 1. Verify and correct backend environment mapping
 current_env_str = (current_plaid_env or "sandbox").lower().strip()
 
-# ✅ THE FIX: Use raw URLs to bypass the AttributeError
 if current_env_str == "development":
-    host_env = "https://development.plaid.com"
-    env_log_msg = "Plaid environment: DEVELOPMENT"  # <--- Added this back
+    # ✅ FIX: Use the Production URL for Development keys
+    host_env = "https://production.plaid.com"  
+    env_log_msg = "Plaid environment: DEVELOPMENT (Using Production URL)"
 elif current_env_str == "production":
     host_env = "https://production.plaid.com"
-    env_log_msg = "Plaid environment: PRODUCTION"   # <--- Added this back
+    env_log_msg = "Plaid environment: PRODUCTION"
 else:
     host_env = "https://sandbox.plaid.com"
-    env_log_msg = f"Plaid environment: SANDBOX (configured: {current_env_str})" # <--- Added this back
+    env_log_msg = f"Plaid environment: SANDBOX (configured: {current_env_str})"
 
 # Fetch credentials
 PLAID_CLIENT_ID = os.getenv("PLAID_CLIENT_ID")

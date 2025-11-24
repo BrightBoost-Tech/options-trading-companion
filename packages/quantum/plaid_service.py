@@ -1,7 +1,30 @@
 import os
+import sys
+from pathlib import Path
 from dotenv import load_dotenv
-# Force load .env immediately
-load_dotenv() 
+
+# --- FORCE LOAD .ENV ---
+# Explicitly target the .env file in the same directory as this script
+env_path = Path(__file__).resolve().parent / ".env"
+
+print("!" * 60)
+print(f"🕵️  PLAID SERVICE: Loading environment configuration...")
+print(f"📍  Targeting .env path: {env_path}")
+print(f"📂  File exists? {env_path.exists()}")
+
+# Force load the specific .env file
+load_dotenv(dotenv_path=env_path, override=True)
+
+# Interrogate loaded values
+current_plaid_env = os.getenv("PLAID_ENV")
+plaid_secret = os.getenv("PLAID_SECRET")
+plaid_secret_preview = plaid_secret[:4] if plaid_secret else "NONE"
+
+print(f"🌍  PLAID_ENV: {current_plaid_env}")
+print(f"🔑  PLAID_SECRET (first 4): {plaid_secret_preview}")
+print("!" * 60)
+# -----------------------
+
 import plaid
 from datetime import datetime
 from plaid.api import plaid_api
@@ -14,7 +37,7 @@ from plaid.model.investments_holdings_get_request import InvestmentsHoldingsGetR
 from models import Holding
 
 # 1. Verify and correct backend environment mapping
-current_env_str = os.getenv("PLAID_ENV", "sandbox").lower().strip()
+current_env_str = (current_plaid_env or "sandbox").lower().strip()
 
 if current_env_str == "development":
     host_env = plaid.Environment.Development
@@ -29,7 +52,7 @@ else:
 
 # Fetch credentials
 PLAID_CLIENT_ID = os.getenv("PLAID_CLIENT_ID")
-PLAID_SECRET = os.getenv("PLAID_SECRET")
+PLAID_SECRET = plaid_secret # Already loaded
 
 # Startup Logging
 print("-" * 40)
@@ -54,12 +77,12 @@ api_client = plaid.ApiClient(configuration)
 client = plaid_api.PlaidApi(api_client)
 
 def create_link_token(user_id: str):
-         # DEBUG: Check what the function actually sees
-    print(f"🕵️ DEBUG: PLAID_CLIENT_ID exists? {bool(PLAID_CLIENT_ID)}")
-    print(f"🕵️ DEBUG: PLAID_SECRET exists? {bool(PLAID_SECRET)}")
     """
     Create a link token for a given user.
     """
+    # DEBUG: Check what the function actually sees
+    print(f"🕵️ DEBUG: PLAID_CLIENT_ID exists? {bool(PLAID_CLIENT_ID)}")
+    print(f"🕵️ DEBUG: PLAID_SECRET exists? {bool(PLAID_SECRET)}")
 
     # Check if we have valid credentials to make a real call
     if not PLAID_SECRET or not PLAID_CLIENT_ID:

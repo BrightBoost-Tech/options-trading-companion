@@ -41,11 +41,14 @@ current_env_str = (current_plaid_env or "sandbox").lower().strip()
 
 # ✅ THE FIX: Use raw URLs to bypass the AttributeError
 if current_env_str == "development":
-    host_env = "https://development.plaid.com"  # Direct URL
+    host_env = "https://development.plaid.com"
+    env_log_msg = "Plaid environment: DEVELOPMENT"  # <--- Added this back
 elif current_env_str == "production":
-    host_env = "https://production.plaid.com"   # Direct URL
+    host_env = "https://production.plaid.com"
+    env_log_msg = "Plaid environment: PRODUCTION"   # <--- Added this back
 else:
-    host_env = "https://sandbox.plaid.com"      # Direct URL
+    host_env = "https://sandbox.plaid.com"
+    env_log_msg = f"Plaid environment: SANDBOX (configured: {current_env_str})" # <--- Added this back
 
 # Fetch credentials
 PLAID_CLIENT_ID = os.getenv("PLAID_CLIENT_ID")

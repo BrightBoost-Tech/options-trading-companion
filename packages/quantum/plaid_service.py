@@ -76,12 +76,12 @@ def create_link_token(user_id: str):
 
         # 3. Update /plaid/create_link_token to generate a link token for Investments
         request = LinkTokenCreateRequest(
-            products=[Products('investments')],
+             products=["investments"], 
             client_name="Options Trading Companion",
             country_codes=[CountryCode.US],
             language='en',
             user=LinkTokenCreateRequestUser(
-                client_user_id=client_user_id
+        client_user_id=client_user_id
             )
         )
 

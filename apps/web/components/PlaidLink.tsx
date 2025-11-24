@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState, useCallback } from 'react';
+import { useEffect, useState, useCallback, useRef } from 'react';
 import { usePlaidLink, PlaidLinkOptions } from 'react-plaid-link';
 import { API_URL } from '@/lib/constants';
 
@@ -10,26 +10,52 @@ interface PlaidLinkProps {
   onExit?: (error: any, metadata: any) => void;
 }
 
-// -- HEADLESS COMPONENT --
-// This component is strictly responsible for the Plaid Hook lifecycle.
-// It is only rendered when a valid 'token' exists.
-function PlaidLinkHeadless({ 
-  token, 
-  onSuccess, 
-  onExit,
-  onCleanup 
-}: {
+// -- HELPER: Manually Load Plaid Script Singleton --
+// This ensures we never fetch the script twice, regardless of React renders.
+const loadPlaidScript = () => {
+  return new Promise<void>((resolve, reject) => {
+    // 1. If window.Plaid already exists, we are good.
+    if ((window as any).Plaid) {
+      resolve();
+      return;
+    }
+
+    // 2. If the script tag exists but is loading, attach listener
+    const existingScript = document.getElementById('plaid-link-initialize');
+    if (existingScript) {
+      existingScript.addEventListener('load', () => resolve());
+      existingScript.addEventListener('error', () => reject(new Error('Plaid script failed to load')));
+      return;
+    }
+
+    // 3. Inject script manually
+    const script = document.createElement('script');
+    script.id = 'plaid-link-initialize';
+    script.src = 'https://cdn.plaid.com/link/v2/stable/link-initialize.js';
+    script.async = true;
+    script.onload = () => resolve();
+    script.onerror = () => reject(new Error('Failed to load Plaid script'));
+    document.body.appendChild(script);
+  });
+};
+
+/**
+ * Headless Component
+ * Purely responsible for OPENING the modal.
+ * It assumes the script is ALREADY loaded by the parent.
+ */
+function PlaidLinkHeadless({ token, onSuccess, onExit, onCleanup }: {
     token: string,
     onSuccess: (public_token: string, metadata: any) => void,
     onExit: (error: any, metadata: any) => void,
     onCleanup: () => void
 }) {
+    // Config: We rely on the fact that window.Plaid exists.
+    // The hook will detect it and skip internal script injection.
     const config: PlaidLinkOptions = {
         token,
         onSuccess: useCallback((public_token: string, metadata: any) => {
-            // 1. Pass data up
             onSuccess(public_token, metadata);
-            // 2. Unmount this component to clean up the hook
             onCleanup();
         }, [onSuccess, onCleanup]),
         onExit: useCallback((err: any, metadata: any) => {
@@ -40,7 +66,7 @@ function PlaidLinkHeadless({
 
     const { open, ready, error } = usePlaidLink(config);
 
-    // Auto-open modal when script is loaded and ready
+    // Auto-open
     useEffect(() => {
         if (ready && !error) {
             open();
@@ -51,51 +77,65 @@ function PlaidLinkHeadless({
         return <div className="text-red-600 text-xs mt-2">Error initializing Link: {error.message}</div>;
     }
 
-    return null; // Invisible component
+    return null;
 }
 
-// -- MAIN COMPONENT --
+/**
+ * Main Component
+ * Orchestrates:
+ * 1. Fetching Link Token
+ * 2. ensuring Script is Loaded (Singleton)
+ * 3. Mounting the Headless component
+ */
 export default function PlaidLink({ userId, onSuccess, onExit }: PlaidLinkProps) {
   const [linkToken, setLinkToken] = useState<string | null>(null);
+  const [scriptLoaded, setScriptLoaded] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string>('');
 
-  // Fetch token only on user interaction
   const fetchToken = useCallback(async () => {
     if (!userId) return;
     setLoading(true);
     setError('');
 
     try {
-      console.log('🟡 Fetching link token...');
-      const response = await fetch(`${API_URL}/plaid/create_link_token`, {
+      // Step A: Load Script & Fetch Token in Parallel
+      console.log('🟡 Initializing Plaid Connection...');
+      
+      const scriptPromise = loadPlaidScript();
+      
+      const tokenPromise = fetch(`${API_URL}/plaid/create_link_token`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ user_id: userId })
       });
 
+      // Wait for both
+      const [_, response] = await Promise.all([scriptPromise, tokenPromise]);
+
       if (!response.ok) {
         const errData = await response.json().catch(() => ({}));
-        throw new Error(errData.detail || `API Error: ${response.status}`);
+        throw new Error(errData.detail || `API Error ${response.status}`);
       }
 
       const data = await response.json();
       if (!data.link_token) throw new Error('No link_token in response');
 
-      console.log('🟢 Link token received');
+      console.log('🟢 Script Loaded & Token Received');
+      setScriptLoaded(true);
       setLinkToken(data.link_token);
 
     } catch (err: any) {
-      console.error('🔴 Error fetching token:', err);
+      console.error('🔴 Initialization Error:', err);
       setError(err.message || 'Connection failed');
     } finally {
       setLoading(false);
     }
   }, [userId]);
 
-  // Cleanup handler to reset state and unmount the headless component
-  const handleCleanup = useCallback(() => {
+  const cleanup = useCallback(() => {
       setLinkToken(null);
+      // We do NOT reset scriptLoaded. Once loaded, it stays loaded.
   }, []);
 
   if (error) {
@@ -141,15 +181,15 @@ export default function PlaidLink({ userId, onSuccess, onExit }: PlaidLinkProps)
       </div>
 
       {/* 
-         Mounting this component triggers the script injection via usePlaidLink.
-         We only do this AFTER we have the token.
+         We only mount Headless if we have the TOKEN *AND* the SCRIPT is ready.
+         This prevents the hook from trying to inject the script itself.
       */}
-      {linkToken && (
+      {linkToken && scriptLoaded && (
           <PlaidLinkHeadless
               token={linkToken}
               onSuccess={onSuccess}
               onExit={onExit}
-              onCleanup={handleCleanup}
+              onCleanup={cleanup}
           />
       )}
     </div>

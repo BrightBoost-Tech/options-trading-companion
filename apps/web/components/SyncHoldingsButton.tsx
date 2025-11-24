@@ -30,7 +30,7 @@ export default function SyncHoldingsButton({ onSyncComplete }: SyncHoldingsButto
           headers['Authorization'] = `Bearer ${session.access_token}`;
       } else {
           // 🛠️ FIX: If no session, send the Test User ID header
-          headers['X-Test-Mode-User'] = 'test-user-123';
+          headers['X-Test-Mode-User'] = '75ee12ad-b119-4f32-aeea-19b4ef55d587';
       }
 
       const response = await fetch(`${API_URL}/plaid/sync_holdings`, {

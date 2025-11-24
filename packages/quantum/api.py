@@ -208,9 +208,9 @@ async def sync_holdings(
             print("Fetching Plaid holdings...")
             # This returns normalized Holding objects
             plaid_holdings = plaid_service.fetch_and_normalize_holdings(plaid_access_token)
-          print(f"✅ PLAID RAW RETURN: Found {len(plaid_holdings)} holdings.")
+            print(f"✅ PLAID RAW RETURN: Found {len(plaid_holdings)} holdings.")
             for h in plaid_holdings:
-                 print(f"   - Symbol: {h.symbol}, Qty: {h.quantity}, Price: {h.current_price}")
+               print(f"   - Symbol: {h.symbol}, Qty: {h.quantity}, Price: {h.current_price}")
             holdings.extend(plaid_holdings)
             sync_attempted = True
         except Exception as e:

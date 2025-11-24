@@ -20,7 +20,12 @@ class PolygonService:
         from_str = from_date.strftime('%Y-%m-%d')
         to_str = to_date.strftime('%Y-%m-%d')
         
-        url = f"{self.base_url}/v2/aggs/ticker/{symbol}/range/1/day/{from_str}/{to_str}"
+        # Handle Options formatting
+        search_symbol = symbol
+        if len(symbol) > 5 and not symbol.startswith('O:'):
+            search_symbol = f"O:{symbol}"
+
+        url = f"{self.base_url}/v2/aggs/ticker/{search_symbol}/range/1/day/{from_str}/{to_str}"
         params = {
             'adjusted': 'true',
             'sort': 'asc',
@@ -49,6 +54,43 @@ class PolygonService:
             'returns': returns,
             'dates': dates
         }
+
+def get_polygon_price(symbol: str) -> float:
+    # FIX 1: Handle Cash Manually
+    if symbol == 'CUR:USD':
+        return 1.0
+
+    # FIX 2: Format Options for Polygon (Prepend 'O:')
+    # Plaid sends "AMZN251219...", Polygon needs "O:AMZN251219..."
+    search_symbol = symbol
+    if len(symbol) > 5 and not symbol.startswith('O:'):
+        search_symbol = f"O:{symbol}"
+
+    try:
+        # Use existing service to reuse API key logic
+        service = PolygonService()
+        if not service.api_key:
+             return 0.0
+
+        # We use get_previous_close_agg for fast latest price
+        # URL: /v2/aggs/ticker/{stocksTicker}/prev
+        url = f"{service.base_url}/v2/aggs/ticker/{search_symbol}/prev"
+        params = {
+            'adjusted': 'true',
+            'apiKey': service.api_key
+        }
+
+        response = requests.get(url, params=params, timeout=5)
+
+        if response.status_code == 200:
+             data = response.json()
+             if data.get('resultsCount', 0) > 0 and data.get('results'):
+                 return float(data['results'][0]['c'])
+
+        return 0.0
+    except Exception as e:
+        print(f"⚠️ Error fetching {search_symbol}: {e}")
+        return 0.0 # Fallback
 
 def generate_mock_market_data(symbols: List[str]) -> Dict:
     """Generate consistent mock data for testing without API key"""

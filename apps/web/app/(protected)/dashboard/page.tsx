@@ -573,21 +573,54 @@ export default function DashboardPage() {
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-gray-200">
-                    {snapshot?.holdings?.length > 0 ? (
-                      snapshot.holdings.map((position: any, idx: number) => (
-                        <tr key={idx} className="hover:bg-gray-50">
-                          <td className="px-6 py-4 whitespace-nowrap font-medium">{position.symbol}</td>
-                          <td className="px-6 py-4 whitespace-nowrap">{position.quantity}</td>
-                          <td className="px-6 py-4 whitespace-nowrap">${position.cost_basis?.toFixed(2) || '-'}</td>
-                          <td className="px-6 py-4 whitespace-nowrap">${position.current_price?.toFixed(2) || '-'}</td>
-                          <td className="px-6 py-4 whitespace-nowrap">
-                             <span className={`px-2 py-1 rounded text-xs ${position.source === 'plaid' ? 'bg-green-100 text-green-800' : 'bg-yellow-100 text-yellow-800'}`}>
-                               {position.source}
-                             </span>
-                          </td>
-                        </tr>
-                      ))
-                    ) : (
+                    {/* 1. OPTIONS PLAYS */}
+                    {snapshot?.holdings?.filter((h:any) => h.symbol.length > 6 && h.symbol !== 'CUR:USD').length > 0 && (
+                      <tr className="bg-purple-50">
+                        <td colSpan={5} className="px-6 py-2 text-xs font-bold text-purple-800 uppercase tracking-wider">
+                          🎯 Option Plays
+                        </td>
+                      </tr>
+                    )}
+                    {snapshot?.holdings?.filter((h:any) => h.symbol.length > 6 && h.symbol !== 'CUR:USD').map((position: any, idx: number) => (
+                      <tr key={`opt-${idx}`} className="hover:bg-gray-50">
+                          <td className="px-6 py-4 font-medium text-purple-600">{position.symbol}</td>
+                          <td className="px-6 py-4">{position.quantity}</td>
+                          <td className="px-6 py-4">${position.cost_basis?.toFixed(2)}</td>
+                          <td className="px-6 py-4 font-bold">${position.current_price?.toFixed(2)}</td>
+                          <td className="px-6 py-4"><span className="text-xs bg-green-100 text-green-800 px-2 py-1 rounded">Plaid</span></td>
+                      </tr>
+                    ))}
+
+                    {/* 2. STOCK HOLDINGS */}
+                    {snapshot?.holdings?.filter((h:any) => h.symbol.length <= 6 && h.symbol !== 'CUR:USD').length > 0 && (
+                      <tr className="bg-blue-50">
+                        <td colSpan={5} className="px-6 py-2 text-xs font-bold text-blue-800 uppercase tracking-wider">
+                          📈 Long Term Holds
+                        </td>
+                      </tr>
+                    )}
+                    {snapshot?.holdings?.filter((h:any) => h.symbol.length <= 6 && h.symbol !== 'CUR:USD').map((position: any, idx: number) => (
+                      <tr key={`stk-${idx}`} className="hover:bg-gray-50">
+                          <td className="px-6 py-4 font-medium text-gray-900">{position.symbol}</td>
+                          <td className="px-6 py-4">{position.quantity}</td>
+                          <td className="px-6 py-4">${position.cost_basis?.toFixed(2)}</td>
+                          <td className="px-6 py-4">${position.current_price?.toFixed(2)}</td>
+                          <td className="px-6 py-4"><span className="text-xs bg-green-100 text-green-800 px-2 py-1 rounded">Plaid</span></td>
+                      </tr>
+                    ))}
+
+                    {/* 3. CASH */}
+                    {snapshot?.holdings?.filter((h:any) => h.symbol === 'CUR:USD').map((position: any, idx: number) => (
+                      <tr key={`cash-${idx}`} className="bg-green-50 border-t-2 border-green-100">
+                          <td className="px-6 py-4 font-bold text-green-800">💵 CASH</td>
+                          <td className="px-6 py-4 text-green-800">---</td>
+                          <td className="px-6 py-4 text-green-800">---</td>
+                          <td className="px-6 py-4 font-bold text-green-800">${position.quantity?.toFixed(2)}</td>
+                          <td className="px-6 py-4"><span className="text-xs bg-green-200 text-green-800 px-2 py-1 rounded">Sweep</span></td>
+                      </tr>
+                    ))}
+
+                    {(!snapshot?.holdings || snapshot?.holdings?.length === 0) && (
                       <tr>
                         <td colSpan={5} className="px-6 py-8 text-center text-gray-500">
                           No positions found. Sync via Plaid or Import CSV in Settings.

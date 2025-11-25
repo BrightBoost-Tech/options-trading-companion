@@ -1,188 +1,133 @@
 'use client';
 
 import { useState } from 'react';
-
-const mockGuardrails = [
-  { id: '1', rule_key: 'earnings_buffer', rule_text: 'if days_to_earnings < 7 then reject', priority: 'high', enabled: true, added_ts: '2025-01-10' },
-  { id: '2', rule_key: 'iv_rank_minimum', rule_text: 'if iv_rank < 0.30 then reject', priority: 'medium', enabled: true, added_ts: '2025-01-08' },
-  { id: '3', rule_key: 'spread_width', rule_text: 'if spread_bps > 50 then reject', priority: 'low', enabled: false, added_ts: '2025-01-05' },
-];
-
-const mockTrades = [
-  { id: '1', symbol: 'SPY', strategy: 'Credit Put Spread', open_ts: '2025-01-15', close_ts: '2025-01-20', pnl_pct: 45.5 },
-  { id: '2', symbol: 'QQQ', strategy: 'Iron Condor', open_ts: '2025-01-12', close_ts: '2025-01-18', pnl_pct: -25.3 },
-  { id: '3', symbol: 'IWM', strategy: 'Credit Put Spread', open_ts: '2025-01-08', close_ts: '2025-01-15', pnl_pct: 50.0 },
-];
-
-const mockLossReviews = [
-  { 
-    id: '1', 
-    trade_id: '2',
-    symbol: 'QQQ',
-    root_cause: 'vol_crush', 
-    confidence: 0.85,
-    created_at: '2025-01-18',
-    recommended_rule: 'Avoid opening new positions within 3 days after major earnings announcements in high-correlation names'
-  },
-];
+import DashboardLayout from '@/components/DashboardLayout';
 
 export default function JournalPage() {
-  const [activeTab, setActiveTab] = useState<'guardrails' | 'trades' | 'reviews'>('guardrails');
-
-  const priorityColors = {
-    high: 'bg-red-100 text-red-800',
-    medium: 'bg-yellow-100 text-yellow-800',
-    low: 'bg-green-100 text-green-800',
-  };
+  const [rules, setRules] = useState([
+    { id: 1, type: 'high', label: 'Earnings Buffer', condition: 'if days_to_earnings < 7 then reject', active: true },
+    { id: 2, type: 'medium', label: 'IV Rank Minimum', condition: 'if iv_rank < 0.30 then reject', active: true },
+    { id: 3, type: 'low', label: 'Spread Width', condition: 'if spread_bps > 50 then reject', active: false },
+  ]);
 
   return (
-    <div className="min-h-screen bg-gray-50">
-      {/* Header */}
-      <div className="bg-white border-b">
-        <div className="max-w-7xl mx-auto px-8 py-4 flex justify-between items-center">
-          <h1 className="text-2xl font-bold">Journal</h1>
-          <a href="/dashboard" className="text-gray-600 hover:text-gray-900">
-            ← Back to Dashboard
-          </a>
-        </div>
-      </div>
+    <DashboardLayout>
+      <div className="max-w-7xl mx-auto p-8 space-y-8">
 
-      <div className="max-w-7xl mx-auto p-8">
-        {/* Tabs */}
-        <div className="bg-white rounded-lg shadow mb-6">
-          <div className="border-b">
-            <nav className="flex">
-              <button
-                onClick={() => setActiveTab('guardrails')}
-                className={`px-6 py-3 font-medium border-b-2 ${
-                  activeTab === 'guardrails'
-                    ? 'border-blue-600 text-blue-600'
-                    : 'border-transparent text-gray-500 hover:text-gray-700'
-                }`}
-              >
-                Active Guardrails
-              </button>
-              <button
-                onClick={() => setActiveTab('reviews')}
-                className={`px-6 py-3 font-medium border-b-2 ${
-                  activeTab === 'reviews'
-                    ? 'border-blue-600 text-blue-600'
-                    : 'border-transparent text-gray-500 hover:text-gray-700'
-                }`}
-              >
-                Loss Reviews
-              </button>
-              <button
-                onClick={() => setActiveTab('trades')}
-                className={`px-6 py-3 font-medium border-b-2 ${
-                  activeTab === 'trades'
-                    ? 'border-blue-600 text-blue-600'
-                    : 'border-transparent text-gray-500 hover:text-gray-700'
-                }`}
-              >
-                Closed Trades
-              </button>
-            </nav>
+        {/* Header Section */}
+        <div className="flex flex-col md:flex-row justify-between items-start md:items-center gap-4">
+          <div>
+            <h1 className="text-3xl font-bold text-gray-900">Trade Journal</h1>
+            <p className="text-gray-600 mt-1">Manage guardrails and review performance analysis.</p>
           </div>
+          <div className="flex gap-2">
+             <span className="px-3 py-1 bg-purple-100 text-purple-800 text-xs font-bold rounded-full uppercase tracking-wide">
+               Auto-Learning Active
+             </span>
+          </div>
+        </div>
 
-          <div className="p-6">
-            {activeTab === 'guardrails' && (
-              <div className="space-y-4">
-                {mockGuardrails.map((rule) => (
-                  <div key={rule.id} className="flex items-start gap-4 p-4 border rounded-lg">
-                    <input
-                      type="checkbox"
-                      checked={rule.enabled}
-                      className="mt-1"
-                      readOnly
-                    />
+        {/* Stats Cards */}
+        <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
+          {[
+            { label: 'Win Rate', value: '68.5%', color: 'text-green-600' },
+            { label: 'Total Trades', value: '42', color: 'text-gray-900' },
+            { label: 'Profit Factor', value: '2.1', color: 'text-blue-600' },
+            { label: 'Avg Return', value: '+12%', color: 'text-green-600' },
+          ].map((stat, i) => (
+            <div key={i} className="bg-white p-4 rounded-xl shadow-sm border border-gray-100">
+              <p className="text-xs text-gray-500 font-medium uppercase">{stat.label}</p>
+              <p className={`text-2xl font-bold mt-1 ${stat.color}`}>{stat.value}</p>
+            </div>
+          ))}
+        </div>
+
+        {/* Main Content Grid */}
+        <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
+
+          {/* Left Column: Active Guardrails */}
+          <div className="lg:col-span-2 space-y-6">
+            <div className="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
+              <div className="p-6 border-b border-gray-100 bg-gray-50 flex justify-between items-center">
+                <h3 className="font-semibold text-gray-800 flex items-center gap-2">
+                  🛡️ Active Guardrails
+                </h3>
+                <button className="text-sm text-blue-600 font-medium hover:underline">+ Add Rule</button>
+              </div>
+
+              <div className="p-6 space-y-4">
+                {rules.map((rule) => (
+                  <div key={rule.id} className={`group flex items-start gap-4 p-4 rounded-lg border transition-all duration-200 ${rule.active ? 'bg-white border-gray-200 shadow-sm hover:shadow-md' : 'bg-gray-50 border-gray-100 opacity-75'}`}>
+                    <div className="pt-1">
+                      <input
+                        type="checkbox"
+                        checked={rule.active}
+                        onChange={() => {
+                           const newRules = rules.map(r => r.id === rule.id ? {...r, active: !r.active} : r);
+                           setRules(newRules);
+                        }}
+                        className="w-5 h-5 text-blue-600 rounded focus:ring-blue-500 border-gray-300 cursor-pointer"
+                      />
+                    </div>
                     <div className="flex-1">
-                      <div className="flex items-center gap-2 mb-2">
-                        <span className={`px-2 py-1 text-xs font-medium rounded ${priorityColors[rule.priority as keyof typeof priorityColors]}`}>
-                          {rule.priority}
-                        </span>
-                        <span className="text-sm text-gray-500">
-                          Added {new Date(rule.added_ts).toLocaleDateString()}
-                        </span>
-                      </div>
-                      <p className="font-medium mb-1">{rule.rule_key}</p>
-                      <p className="text-gray-700 text-sm">{rule.rule_text}</p>
-                    </div>
-                  </div>
-                ))}
-              </div>
-            )}
-
-            {activeTab === 'reviews' && (
-              <div className="space-y-4">
-                {mockLossReviews.map((review) => (
-                  <div key={review.id} className="p-6 border rounded-lg">
-                    <div className="flex justify-between mb-4">
-                      <div>
-                        <span className="font-medium text-lg">{review.symbol}</span>
-                        <span className="ml-2 text-sm text-gray-500">
-                          {new Date(review.created_at).toLocaleDateString()}
-                        </span>
-                      </div>
-                      <div className="text-sm">
-                        <span className="font-medium">Confidence:</span>{' '}
-                        <span className={review.confidence >= 0.7 ? 'text-green-600' : 'text-yellow-600'}>
-                          {(review.confidence * 100).toFixed(0)}%
-                        </span>
-                      </div>
-                    </div>
-                    <div className="space-y-3">
-                      <div>
-                        <p className="text-sm font-medium text-gray-600 mb-1">Root Cause</p>
-                        <p className="text-gray-900">{review.root_cause.replace('_', ' ')}</p>
-                      </div>
-                      <div>
-                        <p className="text-sm font-medium text-gray-600 mb-1">Recommended Guardrail</p>
-                        <p className="text-gray-900 bg-blue-50 p-3 rounded">{review.recommended_rule}</p>
-                      </div>
-                    </div>
-                  </div>
-                ))}
-              </div>
-            )}
-
-            {activeTab === 'trades' && (
-              <div className="overflow-x-auto">
-                <table className="w-full">
-                  <thead className="bg-gray-50 border-b">
-                    <tr>
-                      <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Symbol</th>
-                      <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Strategy</th>
-                      <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Open</th>
-                      <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Close</th>
-                      <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">P&L %</th>
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-gray-200">
-                    {mockTrades.map((trade) => (
-                      <tr key={trade.id} className="hover:bg-gray-50">
-                        <td className="px-6 py-4 whitespace-nowrap font-medium">{trade.symbol}</td>
-                        <td className="px-6 py-4 whitespace-nowrap text-sm">{trade.strategy}</td>
-                        <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-600">
-                          {new Date(trade.open_ts).toLocaleDateString()}
-                        </td>
-                        <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-600">
-                          {new Date(trade.close_ts).toLocaleDateString()}
-                        </td>
-                        <td className={`px-6 py-4 whitespace-nowrap text-sm font-medium ${
-                          trade.pnl_pct >= 0 ? 'text-green-600' : 'text-red-600'
+                      <div className="flex items-center gap-2 mb-1">
+                        <span className={`text-xs font-bold px-2 py-0.5 rounded uppercase ${
+                          rule.type === 'high' ? 'bg-red-100 text-red-700' :
+                          rule.type === 'medium' ? 'bg-yellow-100 text-yellow-800' :
+                          'bg-green-100 text-green-800'
                         }`}>
-                          {trade.pnl_pct >= 0 ? '+' : ''}{trade.pnl_pct.toFixed(2)}%
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
+                          {rule.type} Priority
+                        </span>
+                        <span className="text-xs text-gray-400">• Added today</span>
+                      </div>
+                      <h4 className={`font-medium ${rule.active ? 'text-gray-900' : 'text-gray-500'}`}>
+                        {rule.label}
+                      </h4>
+                      <p className="text-sm text-gray-600 font-mono mt-1 bg-gray-50 px-2 py-1 rounded inline-block">
+                        {rule.condition}
+                      </p>
+                    </div>
+                  </div>
+                ))}
               </div>
-            )}
+            </div>
           </div>
+
+          {/* Right Column: Recent Analysis */}
+          <div className="space-y-6">
+            <div className="bg-gradient-to-br from-blue-50 to-indigo-50 rounded-xl shadow-sm p-6 border border-blue-100">
+              <h3 className="font-semibold text-blue-900 mb-4">🧠 AI Insights</h3>
+              <ul className="space-y-3">
+                <li className="flex gap-3 items-start text-sm text-blue-800">
+                  <span className="mt-1">💡</span>
+                  <span>You perform <strong>32% better</strong> on Credit Spreads when VIX is above 20.</span>
+                </li>
+                <li className="flex gap-3 items-start text-sm text-blue-800">
+                  <span className="mt-1">⚠️</span>
+                  <span>High failure rate detected on <strong>0DTE</strong> trades in the last 7 days.</span>
+                </li>
+              </ul>
+            </div>
+
+            <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-6">
+              <h3 className="font-semibold text-gray-800 mb-4">Review Queue</h3>
+              <div className="space-y-3">
+                <div className="p-3 rounded bg-red-50 border border-red-100">
+                  <div className="flex justify-between text-sm mb-1">
+                    <span className="font-bold text-red-700">TSLA Put Spread</span>
+                    <span className="text-red-600">-$450</span>
+                  </div>
+                  <p className="text-xs text-red-600">Loss exceeds 2x risk. Review needed.</p>
+                  <button className="mt-2 w-full text-center py-1.5 text-xs font-medium bg-white border border-red-200 text-red-700 rounded hover:bg-red-50">
+                    Start Review
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+
         </div>
       </div>
-    </div>
+    </DashboardLayout>
   );
 }

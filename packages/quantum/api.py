@@ -25,6 +25,9 @@ from options_scanner import scan_for_opportunities
 from trade_journal import TradeJournal
 from optimizer import optimize_portfolio, compare_optimizations
 from market_data import calculate_portfolio_inputs
+from ev_calculator import calculate_ev, calculate_position_size
+from typing import Optional, Literal
+
 
 # 1. Load environment variables BEFORE importing other things
 load_dotenv()
@@ -517,22 +520,17 @@ async def compare_real(
         raise HTTPException(status_code=500, detail=f"Real data comparison failed: {str(e)}")
 
 @app.get("/scout/weekly")
-async def weekly_scout(
-    authorization: Optional[str] = Header(None),
-    x_test_mode_user: Optional[str] = Header(None, alias="X-Test-Mode-User")
-):
-    """Get weekly option opportunities, tailored to user portfolio if available"""
+async def weekly_scout():
+    """Get weekly option opportunities from a market-wide scan."""
     try:
-        symbols = await _get_user_symbols(authorization, x_test_mode_user)
-
-        # If no user symbols, scan_for_opportunities will default to major indices
-        opportunities = scan_for_opportunities(symbols)
+        # scan_for_opportunities now scans a predefined market list by default
+        opportunities = scan_for_opportunities()
 
         return {
             'count': len(opportunities),
             'top_picks': opportunities[:5],
             'generated_at': datetime.now().isoformat(),
-            'source': 'user-holdings' if symbols else 'market-scan'
+            'source': 'market-scan'
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -554,6 +552,42 @@ async def journal_stats():
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+class EVRequest(BaseModel):
+    premium: float
+    strike: float
+    current_price: float
+    delta: float
+    strategy: Literal["long_call", "long_put", "short_call", "short_put",
+                      "credit_spread", "debit_spread", "iron_condor", "strangle"]
+    width: Optional[float] = None
+    contracts: int = 1
+    account_value: Optional[float] = None
+    max_risk_percent: Optional[float] = 2.0
+
+@app.post("/ev")
+async def get_expected_value(request: EVRequest):
+    result = calculate_ev(
+        premium=request.premium,
+        strike=request.strike,
+        current_price=request.current_price,
+        delta=request.delta,
+        strategy=request.strategy,
+        width=request.width,
+        contracts=request.contracts
+    )
+
+    response = result.to_dict()
+
+    if request.account_value and result.max_loss > 0:
+        position_size = calculate_position_size(
+            account_value=request.account_value,
+            max_risk_percent=request.max_risk_percent,
+            max_loss_per_contract=result.max_loss
+        )
+        response["position_sizing"] = position_size
+
+    return response
 
 if __name__ == "__main__":
     import uvicorn

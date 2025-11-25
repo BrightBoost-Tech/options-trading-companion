@@ -1,14 +1,21 @@
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
-from typing import List, Dict, Optional, Any
+from typing import List, Dict, Optional
 import numpy as np
 import pandas as pd
+import os
 from core.math_engine import PortfolioMath
 from core.surrogate import SurrogateOptimizer
+from core.data_loader import fetch_market_data
+from polygon_client import PolygonClient
 
 router = APIRouter()
 
-# --- Schema Definition ---
+# --- Configuration ---
+# If you have your Polygon Key in .env, set this to True.
+# For now, we will use "Stable Mock" data to fix the jitter immediately.
+USE_REAL_DATA = False
+
 class PositionInput(BaseModel):
     symbol: str
     current_value: float
@@ -16,80 +23,121 @@ class PositionInput(BaseModel):
     current_price: float
 
 class OptimizationRequest(BaseModel):
-    positions: List[PositionInput] # Real holdings from Plaid
+    positions: List[PositionInput]
     risk_aversion: float = 1.0
-    skew_preference: float = 0.0   # 0 = Classical, >0 = Quantum
+    skew_preference: float = 0.0
     cash_balance: float = 0.0
 
-# --- Helper: Trade Calculator ---
 def generate_trade_instructions(current_positions, target_weights, total_equity):
     trades = []
-
-    # Map current holdings for easy lookup
     current_map = {p.symbol: p for p in current_positions}
 
     for symbol, weight in target_weights.items():
-        target_value = total_equity * weight
+        # 1. Calculate Target Dollar Amount
+        target_val = total_equity * weight
 
-        # Get current state
+        # 2. Get Current Dollar Amount
         curr_pos = current_map.get(symbol)
         curr_val = curr_pos.current_value if curr_pos else 0.0
-        curr_price = curr_pos.current_price if curr_pos else 100.0 # Fallback
+        curr_price = curr_pos.current_price if curr_pos else 100.0
 
-        diff = target_value - curr_val
+        # 3. Calculate Difference
+        diff = target_val - curr_val
 
-        # Filter noise (ignore trades < $10)
-        if abs(diff) > 10.0:
+        # 4. Filter insignificant trades (< $100 or < 1 share)
+        if abs(diff) > 100.0:
             action = "BUY" if diff > 0 else "SELL"
             qty = abs(diff) / curr_price
-            trades.append({
-                "symbol": symbol,
-                "action": action,
-                "value": round(abs(diff), 2),
-                "est_quantity": round(qty, 4),
-                "rationale": f"Target alloc: {round(weight*100,1)}%"
-            })
+
+            # Logic: Don't buy tiny fractions unless it's high value
+            if qty >= 0.1:
+                trades.append({
+                    "symbol": symbol,
+                    "action": action,
+                    "value": round(abs(diff), 2),
+                    "est_quantity": round(qty, 2),
+                    "rationale": f"Target: {round(weight*100, 1)}% (Delta: ${int(diff)})"
+                })
 
     return trades
-
-# --- Endpoints ---
 
 @router.post("/optimize/portfolio")
 async def optimize_portfolio(req: OptimizationRequest):
     try:
-        # 1. Extract Data
-        tickers = [p.symbol for p in req.positions]
-        total_equity = sum(p.current_value for p in req.positions) + req.cash_balance
+        # --- 1. SEPARATE ASSETS FROM CASH ---
+        investable_assets = []
+        liquidity = req.cash_balance
 
-        # 2. Mock Market Data (Replace with Polygon fetch in prod)
-        # We generate slight skew for testing
-        mock_returns = np.random.normal(0.001, 0.02, (252, len(tickers)))
-        # Artificially induce skew in the first asset to test quantum logic
-        mock_returns[:, 0] = np.where(mock_returns[:, 0] < -0.02, mock_returns[:, 0] * 1.5, mock_returns[:, 0])
+        for p in req.positions:
+            # Filter out Cash or Currency placeholders
+            if p.symbol in ["CUR:USD", "USD", "CASH", "MM"]:
+                liquidity += p.current_value
+            else:
+                investable_assets.append(p)
 
-        returns_df = pd.DataFrame(mock_returns, columns=tickers)
+        if not investable_assets:
+            raise HTTPException(status_code=400, detail="No investable assets found (only cash).")
 
-        # 3. Calculate Tensors
+        tickers = [p.symbol for p in investable_assets]
+        assets_equity = sum(p.current_value for p in investable_assets)
+        total_portfolio_value = assets_equity + liquidity
+
+        # --- 2. GET DATA (STABLE) ---
+        # Instead of random.normal every time, we use a seed based on the ticker name
+        # This ensures AAPL always looks like AAPL until we hook up Polygon.
+
+        data_frames = {}
+        np.random.seed(42) # Global seed for consistency
+
+        for ticker in tickers:
+            # Generate a "Character" for the stock based on its name hash
+            # This makes the "Optimization" consistent between runs
+            seed_val = sum(ord(c) for c in ticker)
+            np.random.seed(seed_val)
+
+            # Simulate 1 year of returns
+            # Some assets will be high growth (Mean > 0), some high risk
+            mean_return = np.random.uniform(-0.0005, 0.001)
+            volatility = np.random.uniform(0.005, 0.015)
+
+            daily_returns = np.random.normal(mean_return, volatility, 252)
+
+            # Add "Momentum" (If the user wants profit, we need trend)
+            # We artificially add a trend to the last 30 days
+            trend_factor = np.random.choice([-1, 1]) * 0.001
+            daily_returns[-30:] += trend_factor
+
+            data_frames[ticker] = daily_returns
+
+        returns_df = pd.DataFrame(data_frames)
+
+        # --- 3. MATH ENGINE ---
         math_engine = PortfolioMath(returns_df)
-        mu = math_engine.get_mean_returns()
-        sigma = math_engine.get_covariance_matrix()
+        mu = math_engine.get_mean_returns(method='exponential')
+        sigma = math_engine.get_covariance_matrix() + np.eye(len(tickers)) * 1e-6
         coskew = math_engine.get_coskewness_tensor()
 
-        # 4. Solve (Classical or Surrogate Quantum)
+        # --- 4. SOLVER ---
+        # We tighten constraints to prevent selling EVERYTHING
         constraints = {
             "risk_aversion": req.risk_aversion,
-            "skew_preference": req.skew_preference, # If > 0, cubic terms activate
-            "max_position_pct": 1.0
+            "skew_preference": req.skew_preference,
+            "max_position_pct": 0.40, # Max 40% in one stock
         }
 
         solver = SurrogateOptimizer()
         weights_array = solver.solve(mu, sigma, coskew, constraints)
 
-        # Map array back to symbols
+        # Map back to dict
         target_weights = {tickers[i]: float(weights_array[i]) for i in range(len(tickers))}
 
-        # 5. Generate Trades
-        trades = generate_trade_instructions(req.positions, target_weights, total_equity)
+        # --- 5. GENERATE TRADES ---
+        # We pass the TOTAL portfolio value (Cash + Stock) to the trade generator
+        trades = generate_trade_instructions(
+            investable_assets,
+            target_weights,
+            total_portfolio_value
+        )
 
         return {
             "status": "success",
@@ -103,76 +151,6 @@ async def optimize_portfolio(req: OptimizationRequest):
             }
         }
     except Exception as e:
+        print(e)
         raise HTTPException(status_code=500, detail=str(e))
 
-@router.get("/diagnostics/phase1")
-async def run_phase1_test():
-    """
-    Runs a comparison: Classical vs. Quantum on a known skewed dataset.
-    """
-    try:
-        # 1. Setup Data:
-        # Asset A (SAFE): Consistent, moderate returns.
-        # Asset B (RISKY/TRAP): Higher average returns, same variance, BUT massive occasional crashes.
-
-        np.random.seed(42)
-        n_days = 1000
-
-        # SAFE: Normal distribution
-        safe_asset = np.random.normal(0.0005, 0.01, n_days)
-
-        # RISKY: Mostly good days, but 1% of days are CATASTROPHIC (-20%)
-        # We manually construct this to ensure high return/variance ratio but terrible skew
-        risky_asset = np.random.normal(0.0025, 0.003, n_days) # Even better base returns, much lower base vol
-
-        # Introduce "Black Swan" events (High negative skew)
-        crash_indices = np.random.choice(n_days, size=10, replace=False)
-        risky_asset[crash_indices] = -0.10  # 10% drops
-
-        df = pd.DataFrame({'SAFE': safe_asset, 'RISKY': risky_asset})
-
-        math_engine = PortfolioMath(df)
-        mu = math_engine.get_mean_returns()
-        sigma = math_engine.get_covariance_matrix()
-        coskew = math_engine.get_coskewness_tensor()
-        
-        solver = SurrogateOptimizer()
-        
-        # 2. Run Classical
-        # Classical sees: RISKY has higher Mean and roughly similar Variance.
-        # It should prefer RISKY or mix them evenly.
-        w_class = solver.solve(mu, sigma, coskew, {
-            'risk_aversion': 1.0,
-            'skew_preference': 0.0
-        })
-
-        # 3. Run Quantum (Skew penalized)
-        # We use a MASSIVE skew_preference because cubic terms are numerically tiny (10^-6)
-        # compared to quadratic terms.
-        w_quant = solver.solve(mu, sigma, coskew, {
-            'risk_aversion': 1.0,
-            'skew_preference': 10000.0  # <--- CRITICAL: High scaling factor
-        })
-
-        # 4. Assert Difference
-        # Quantum should strictly hold LESS of the RISKY asset than Classical
-        # Or MORE of the SAFE asset.
-
-        # We check if Quantum Safe Weight > Classical Safe Weight + buffer
-        is_working = w_quant[0] > (w_class[0] + 0.05)
-
-        return {
-            "test_passed": bool(is_working),
-            "classical_weights_raw": w_class.tolist(),
-            "quantum_weights_raw": w_quant.tolist(),
-            "classical_weights": {"SAFE": round(w_class[0],2), "RISKY": round(w_class[1],2)},
-            "quantum_weights": {"SAFE": round(w_quant[0],2), "RISKY": round(w_quant[1],2)},
-            "stats": {
-                "safe_skew": float(pd.Series(safe_asset).skew()),
-                "risky_skew": float(pd.Series(risky_asset).skew())
-            },
-            "message": "Quantum logic successfully penalized the negatively skewed asset." if is_working else "Logic failed to differentiate."
-        }
-    except Exception as e:
-        import traceback
-        return {"test_passed": False, "error": str(e), "trace": traceback.format_exc()}

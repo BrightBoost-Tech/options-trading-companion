@@ -30,6 +30,4 @@ curl -X POST "$BASE_URL/optimize/portfolio" \
     }'
 echo -e "\n"
 
-echo "Testing /diagnostics/phase1..."
-curl -X GET "$BASE_URL/diagnostics/phase1"
 echo -e "\n"

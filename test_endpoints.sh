@@ -1,10 +1,22 @@
 #!/bin/bash
-echo "Testing /compare/real..."
-curl -v -X POST http://localhost:8000/compare/real \
+echo "Testing /optimize/quantum-ready (Standard)..."
+curl -v -X POST http://localhost:8000/optimize/quantum-ready \
   -H "Content-Type: application/json" \
   -d '{
-    "symbols": ["SPY", "QQQ", "IWM", "DIA", "VTI"],
-    "risk_aversion": 2.0
+    "tickers": ["AAPL", "GOOGL", "TSLA", "AMD"],
+    "risk_aversion": 1.0,
+    "skew_preference": 0.0,
+    "max_position_pct": 1.0
+  }'
+
+echo -e "\n\nTesting /optimize/quantum-ready (Skew Aware)..."
+curl -v -X POST http://localhost:8000/optimize/quantum-ready \
+  -H "Content-Type: application/json" \
+  -d '{
+    "tickers": ["AAPL", "GOOGL", "TSLA", "AMD"],
+    "risk_aversion": 1.0,
+    "skew_preference": 10.0,
+    "max_position_pct": 1.0
   }'
 
 echo -e "\n\nTesting /scout/weekly..."

@@ -8,37 +8,30 @@ class PortfolioMath:
         self.n_assets = len(self.assets)
         self.n_obs = len(returns_df)
 
-    def get_mean_returns(self):
-        # Annualized Mean Returns
-        # Simple mean * 252 trading days
-        return np.mean(self.returns, axis=0) * 252
+    def get_mean_returns(self, method='exponential'):
+        """
+        Calculates expected returns.
+        'simple': Standard average (Past performance = Future performance)
+        'exponential': Recent days matter more (Momentum / "Learned Behavior")
+        """
+        if method == 'simple':
+            return np.mean(self.returns, axis=0) * 252
+
+        # Exponential Moving Average of returns (Momentum Proxy)
+        # We treat the mean of the last 60 days with higher weight
+        T, N = self.returns.shape
+        weights = np.exp(np.linspace(-1., 0., T)) # Increasing weights
+        weights /= weights.sum()
+
+        # Weighted average of columns
+        weighted_returns = np.dot(weights, self.returns)
+        return weighted_returns * 252
 
     def get_covariance_matrix(self):
-        # Annualized Covariance
         return np.cov(self.returns, rowvar=False) * 252
 
     def get_coskewness_tensor(self):
-        """
-        Calculates the 3D Co-skewness tensor (N x N x N).
-        This represents the joint tail risk between assets.
-        Formula: E[(r_i - mu_i)(r_j - mu_j)(r_k - mu_k)] / TimeScaling
-        """
-        # 1. Center the returns (r - mu)
+        # ... (Keep existing tensor logic) ...
         centered = self.returns - np.mean(self.returns, axis=0)
-
-        # 2. Initialize 3D tensor
-        N = self.n_assets
-        T = self.n_obs
-        M3 = np.zeros((N, N, N))
-
-        # 3. Vectorized calculation (faster than 3 loops)
-        # We use Einstein Summation to compute the outer product of the centered returns
-        # 'ti,tj,tk->ijk' means: for every timepoint t, take product of asset i, j, and k
         M3 = np.einsum('ti,tj,tk->ijk', centered, centered, centered)
-
-        # 4. Normalize by time (unbiased estimator roughly 1/T) and Annualize
-        # Note: Annualization for skewness is roughly * sqrt(252), but often treated as raw moment
-        # For optimization weights, scaling consistency matters more than absolute units.
-        M3 = M3 / (T - 1)
-
-        return M3
+        return M3 / (len(self.returns) - 1)

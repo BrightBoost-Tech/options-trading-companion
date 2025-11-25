@@ -3,7 +3,7 @@
 BASE_URL="http://localhost:8000"
 
 echo "Testing /optimize/portfolio (Classical)..."
-curl -X POST "$BASE_URL/optimize/optimize/portfolio" \
+curl -X POST "$BASE_URL/optimize/portfolio" \
     -H "Content-Type: application/json" \
     -d '{
         "positions": [
@@ -17,7 +17,7 @@ curl -X POST "$BASE_URL/optimize/optimize/portfolio" \
 echo -e "\n"
 
 echo "Testing /optimize/portfolio (Quantum)..."
-curl -X POST "$BASE_URL/optimize/optimize/portfolio" \
+curl -X POST "$BASE_URL/optimize/portfolio" \
     -H "Content-Type: application/json" \
     -d '{
         "positions": [
@@ -31,5 +31,5 @@ curl -X POST "$BASE_URL/optimize/optimize/portfolio" \
 echo -e "\n"
 
 echo "Testing /diagnostics/phase1..."
-curl -X GET "$BASE_URL/optimize/diagnostics/phase1"
+curl -X GET "$BASE_URL/diagnostics/phase1"
 echo -e "\n"

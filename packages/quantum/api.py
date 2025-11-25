@@ -70,7 +70,7 @@ supabase: Client = create_client(url, key) if url and key else None
 plaid_endpoints.register_plaid_endpoints(app, plaid_service, supabase)
 
 # --- Register Optimizer Endpoints ---
-app.include_router(optimizer_router, prefix="/optimize")
+app.include_router(optimizer_router)
 
 # --- Models ---
 

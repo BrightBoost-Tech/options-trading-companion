@@ -123,11 +123,11 @@ async def run_phase1_test():
 
         # RISKY: Mostly good days, but 1% of days are CATASTROPHIC (-20%)
         # We manually construct this to ensure high return/variance ratio but terrible skew
-        risky_asset = np.random.normal(0.001, 0.005, n_days) # Even better base returns, much lower base vol
+        risky_asset = np.random.normal(0.0025, 0.003, n_days) # Even better base returns, much lower base vol
 
         # Introduce "Black Swan" events (High negative skew)
         crash_indices = np.random.choice(n_days, size=10, replace=False)
-        risky_asset[crash_indices] = -0.20  # 20% drops
+        risky_asset[crash_indices] = -0.10  # 10% drops
 
         df = pd.DataFrame({'SAFE': safe_asset, 'RISKY': risky_asset})
 
@@ -163,6 +163,8 @@ async def run_phase1_test():
 
         return {
             "test_passed": bool(is_working),
+            "classical_weights_raw": w_class.tolist(),
+            "quantum_weights_raw": w_quant.tolist(),
             "classical_weights": {"SAFE": round(w_class[0],2), "RISKY": round(w_class[1],2)},
             "quantum_weights": {"SAFE": round(w_quant[0],2), "RISKY": round(w_quant[1],2)},
             "stats": {

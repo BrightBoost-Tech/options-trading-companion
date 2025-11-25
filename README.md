@@ -24,7 +24,8 @@ options-trading-companion/
 │       │   │   ├── dashboard/
 │       │   │   ├── portfolio/
 │       │   │   ├── settings/
-│       │   │   └── journal/
+│       │   │   ├── journal/
+│       │   │   └── compose/
 │       │   ├── login/
 │       │   └── signup/
 │       ├── components/
@@ -89,6 +90,12 @@ options-trading-companion/
   - IV rank
   - Technical indicators
 - Customizable criteria
+
+### 7. **Compose Trade** 🆕
+- AI-powered trade validation
+- Strategy gating checks
+- Smart alternative suggestions
+- Risk validation before submission
 
 ---
 
@@ -259,16 +266,17 @@ pnpm dev
 ### Portfolio Optimization
 - `POST /optimize` - Generate optimized portfolio
 - `POST /compare` - Compare multiple strategies
-- `POST /backtest` - Backtest portfolio performance
+- `POST /portfolio/snapshot` - Get portfolio state
+- `GET /holdings/export` - Export holdings to CSV
 
 ### Market Data
 - `GET /quote/{symbol}` - Real-time quote
-- `GET /quotes/batch` - Multiple quotes
-- `GET /options/{symbol}` - Options chain
+- `POST /optimize/real` - Optimization with real market data
+- `POST /compare/real` - Strategy comparison with real market data
 
 ### Plaid Integration
 - `POST /plaid/create_link_token` - Create Plaid Link token
-- `POST /plaid/exchange_token` - Exchange public token
+- `POST /plaid/sync_holdings` - Sync account holdings
 - `POST /plaid/get_holdings` - Fetch account holdings
 
 ### Options Analysis
@@ -298,23 +306,27 @@ pnpm dev
 ### Key Pages
 
 1. **Dashboard** (`/dashboard`)
-   - Portfolio overview
+   - Portfolio overview & Risk metrics
+   - Integrated Options Scout
+   - Holdings breakdown (Options vs Long Term)
    - Real-time P&L
-   - Quick actions
-   - Recent trades
 
-2. **Portfolio** (`/portfolio`)
+2. **Compose** (`/compose`)
+   - New trade entry
+   - AI validation
+   - Strategy selector
+
+3. **Portfolio** (`/portfolio`)
    - Position management
    - Optimization suggestions
-   - Risk analysis
    - Broker import
 
-3. **Settings** (`/settings`)
+4. **Settings** (`/settings`)
    - Broker connection (Plaid)
    - Risk preferences
    - Account management
 
-4. **Trade Journal** (`/journal`)
+5. **Trade Journal** (`/journal`)
    - Trade logging
    - Performance tracking
    - AI insights
@@ -371,7 +383,8 @@ curl -X POST http://localhost:8000/plaid/create_link_token \
 - [x] Real-time market data
 - [x] Options Greeks calculations
 - [x] Weekly options scout
-- [x] Trade journal structure
+- [x] Trade journal with AI learning
+- [x] Compose Trade with AI validation
 - [x] Responsive UI
 
 ### 🚧 In Progress

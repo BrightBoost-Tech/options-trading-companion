@@ -7,6 +7,7 @@ import json
 import plaid
 from plaid.exceptions import ApiException
 from datetime import datetime
+from security import encrypt_token, decrypt_token
 
 def register_plaid_endpoints(app, plaid_service, supabase_client=None):
     """Register Plaid endpoints with the FastAPI app"""
@@ -112,6 +113,9 @@ def register_plaid_endpoints(app, plaid_service, supabase_client=None):
             if access_token and supabase_client and user_id:
                 print(f"💾 Saving Plaid credentials for user {user_id}")
 
+                # Encrypt token before saving
+                encrypted_access_token = encrypt_token(access_token)
+
                 # 1. Update user_settings as requested
                 try:
                     # Check if user settings exist, if not create? usually it exists.
@@ -119,7 +123,7 @@ def register_plaid_endpoints(app, plaid_service, supabase_client=None):
                     # Assuming user_settings has user_id as PK or unique.
                     supabase_client.table("user_settings").upsert({
                         "user_id": user_id,
-                        "plaid_access_token": access_token,
+                        "plaid_access_token": encrypted_access_token,
                         "plaid_item_id": item_id,
                         "plaid_institution": institution_name,
                         "updated_at": "now()"
@@ -132,7 +136,7 @@ def register_plaid_endpoints(app, plaid_service, supabase_client=None):
                 try:
                     supabase_client.table("plaid_items").upsert({
                         "user_id": user_id,
-                        "access_token": access_token,
+                        "access_token": encrypted_access_token,
                         "item_id": item_id,
                         "institution_name": institution_name,
                         "institution_id": institution_id,
@@ -171,7 +175,11 @@ def register_plaid_endpoints(app, plaid_service, supabase_client=None):
                 try:
                     res = supabase_client.table("user_settings").select("plaid_access_token").eq("user_id", user_id).single().execute()
                     if res.data:
-                        access_token = res.data.get('plaid_access_token')
+                        raw_token = res.data.get('plaid_access_token')
+                        try:
+                            access_token = decrypt_token(raw_token)
+                        except:
+                            access_token = raw_token
                 except Exception:
                     pass
 
@@ -180,7 +188,11 @@ def register_plaid_endpoints(app, plaid_service, supabase_client=None):
                     try:
                         res = supabase_client.table("plaid_items").select("access_token").eq("user_id", user_id).limit(1).execute()
                         if res.data:
-                            access_token = res.data[0].get('access_token')
+                            raw_token = res.data[0].get('access_token')
+                            try:
+                                access_token = decrypt_token(raw_token)
+                            except:
+                                access_token = raw_token
                     except Exception:
                         pass
 

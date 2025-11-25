@@ -3,12 +3,17 @@ import io
 import csv
 from dotenv import load_dotenv
 from datetime import datetime, timedelta, timezone
-from fastapi import FastAPI, HTTPException, Header, UploadFile, File
+from fastapi import FastAPI, HTTPException, Header, UploadFile, File, Request, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from typing import List, Optional, Dict
 from supabase import create_client, Client
 import json
+
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.util import get_remote_address
+from slowapi.errors import RateLimitExceeded
+from security import encrypt_token, decrypt_token, get_current_user
 
 # Import models and services
 from models import Holding, SyncResponse, PortfolioSnapshot
@@ -30,18 +35,18 @@ app = FastAPI(
     version="2.0.0"
 )
 
+# Initialize Limiter
+limiter = Limiter(key_func=get_remote_address)
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+
 # CORS Setup
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:3000",
-        "http://127.0.0.1:3000",
-        "http://localhost:3001",
-        "http://127.0.0.1:3001"
-    ],
+    allow_origins=["http://localhost:3000", "https://your-production-domain.com"], # No more "*"
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_headers=["Authorization", "Content-Type"],
 )
  
 # Initialize Supabase Client
@@ -148,35 +153,28 @@ def health_check():
     }
 
 @app.post("/plaid/sync_holdings", response_model=SyncResponse)
+@limiter.limit("5/minute") # Rate Limit: 5 syncs per minute per IP
 async def sync_holdings(
-    authorization: Optional[str] = Header(None),
-    x_test_mode_user: Optional[str] = Header(None, alias="X-Test-Mode-User")
+    request: Request,
+    user_id: str = Depends(get_current_user) # NOW REQUIRES REAL JWT
 ):
     """
     Syncs holdings from Plaid and updates the positions table.
     """
-    user_id = None
-    is_dev_mode = os.getenv("APP_ENV") != "production"
-
-    if x_test_mode_user:
-        if not is_dev_mode:
-            raise HTTPException(status_code=403, detail="Test Mode disabled in production")
-        user_id = x_test_mode_user
-        if not supabase:
-             return SyncResponse(status="success", count=0, holdings=[])
-    else:
-        if not supabase:
-             raise HTTPException(status_code=500, detail="Server Error: Database not configured")
-
-        if not authorization:
-            raise HTTPException(status_code=401, detail="Missing Authorization header")
-
+    # 1. Log Audit
+    if supabase:
         try:
-            token = authorization.split(" ")[1]
-            user = supabase.auth.get_user(token)
-            user_id = user.user.id
-        except Exception as e:
-            raise HTTPException(status_code=401, detail="Invalid Token")
+            supabase.table("audit_logs").insert({
+                "user_id": user_id,
+                "action": "SYNC_HOLDINGS",
+                "ip_address": request.client.host
+            }).execute()
+        except Exception:
+            # Audit log failure shouldn't stop the sync
+            pass
+
+    if not supabase:
+        raise HTTPException(status_code=500, detail="Server Error: Database not configured")
  
     # 2. Retrieve Plaid Access Token
     plaid_access_token = None
@@ -185,7 +183,12 @@ async def sync_holdings(
         try:
             res = supabase.table("user_settings").select("plaid_access_token").eq("user_id", user_id).single().execute()
             if res.data:
-                plaid_access_token = res.data.get('plaid_access_token')
+                raw_token = res.data.get('plaid_access_token')
+                try:
+                    plaid_access_token = decrypt_token(raw_token)
+                except Exception:
+                    # Fallback to raw if decryption fails (e.g. migration)
+                    plaid_access_token = raw_token
         except Exception:
             pass
 
@@ -194,7 +197,11 @@ async def sync_holdings(
              try:
                  response = supabase.table("plaid_items").select("access_token").eq("user_id", user_id).limit(1).execute()
                  if response.data:
-                     plaid_access_token = response.data[0]['access_token']
+                     raw_token = response.data[0]['access_token']
+                     try:
+                        plaid_access_token = decrypt_token(raw_token)
+                     except Exception:
+                        plaid_access_token = raw_token
              except Exception:
                  pass
     

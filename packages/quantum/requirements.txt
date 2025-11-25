@@ -18,3 +18,8 @@ requests>=2.0.0 # For HTTP requests
 numpy>=1.24.0
 scipy>=1.10.0
 pandas>=2.0.0
+
+# Security & Rate Limiting
+cryptography>=41.0.0
+pyjwt>=2.8.0
+slowapi>=0.1.9

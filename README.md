@@ -154,93 +154,36 @@ PLAID_ENV=sandbox
 
 #### 3. Set Up Database (Supabase)
 
-Run these SQL commands in Supabase SQL Editor:
+> For full schema, see `supabase/migrations/20240101000000_initial_schema.sql`.
+> Below is a simplified excerpt of the core tables.
+
 ```sql
--- Users table (handled by Supabase Auth)
-
--- Portfolios table
-CREATE TABLE portfolios (
-  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-  user_id UUID REFERENCES auth.users NOT NULL,
-  name TEXT NOT NULL,
-  description TEXT,
-  type TEXT DEFAULT 'custom',
-  created_at TIMESTAMP DEFAULT NOW()
+-- App-level users (Supabase Auth users live in auth.users)
+CREATE TABLE IF NOT EXISTS users (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  email TEXT UNIQUE NOT NULL,
+  created_at TIMESTAMPTZ DEFAULT NOW()
 );
 
--- Positions table
+-- Positions (per-user holdings)
 CREATE TABLE positions (
-  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-  portfolio_id UUID REFERENCES portfolios NOT NULL,
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
   symbol TEXT NOT NULL,
-  quantity DECIMAL NOT NULL,
-  cost_basis DECIMAL,
-  current_price DECIMAL,
-  created_at TIMESTAMP DEFAULT NOW()
+  qty NUMERIC NOT NULL,
+  avg_price NUMERIC NOT NULL,
+  greek_delta NUMERIC,
+  greek_theta NUMERIC,
+  greek_vega NUMERIC,
+  iv_rank NUMERIC,
+  updated_at TIMESTAMPTZ DEFAULT NOW()
 );
 
--- Trade journal table
-CREATE TABLE trades (
-  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-  user_id UUID REFERENCES auth.users NOT NULL,
-  symbol TEXT NOT NULL,
-  type TEXT NOT NULL, -- 'option' or 'stock'
-  strategy TEXT,
-  entry_date DATE NOT NULL,
-  exit_date DATE,
-  entry_price DECIMAL NOT NULL,
-  exit_price DECIMAL,
-  quantity INTEGER NOT NULL,
-  profit_loss DECIMAL,
-  notes TEXT,
-  created_at TIMESTAMP DEFAULT NOW()
-);
+-- Trades (per-user trade history)
+CREATE TABLE trades (...);
 
--- User settings table
-CREATE TABLE user_settings (
-  user_id UUID PRIMARY KEY REFERENCES auth.users,
-  quantum_mode BOOLEAN DEFAULT false,
-  risk_aversion DECIMAL DEFAULT 2.0,
-  llm_budget_cents INTEGER DEFAULT 1000,
-  default_portfolio_type TEXT DEFAULT 'broad_market',
-  plaid_access_token TEXT,
-  plaid_item_id TEXT,
-  plaid_institution TEXT,
-  created_at TIMESTAMP DEFAULT NOW(),
-  updated_at TIMESTAMP DEFAULT NOW()
-);
-
--- Enable Row Level Security
-ALTER TABLE portfolios ENABLE ROW LEVEL SECURITY;
-ALTER TABLE positions ENABLE ROW LEVEL SECURITY;
-ALTER TABLE trades ENABLE ROW LEVEL SECURITY;
-ALTER TABLE user_settings ENABLE ROW LEVEL SECURITY;
-
--- RLS Policies
-CREATE POLICY "Users can view own portfolios" ON portfolios
-  FOR SELECT USING (auth.uid() = user_id);
-
-CREATE POLICY "Users can create own portfolios" ON portfolios
-  FOR INSERT WITH CHECK (auth.uid() = user_id);
-
-CREATE POLICY "Users can view own positions" ON positions
-  FOR SELECT USING (
-    portfolio_id IN (
-      SELECT id FROM portfolios WHERE user_id = auth.uid()
-    )
-  );
-
-CREATE POLICY "Users can view own trades" ON trades
-  FOR SELECT USING (auth.uid() = user_id);
-
-CREATE POLICY "Users can insert own trades" ON trades
-  FOR INSERT WITH CHECK (auth.uid() = user_id);
-
-CREATE POLICY "Users can view own settings" ON user_settings
-  FOR SELECT USING (auth.uid() = user_id);
-
-CREATE POLICY "Users can update own settings" ON user_settings
-  FOR ALL USING (auth.uid() = user_id);
+-- Settings (quantum mode, LLM budget, etc.)
+CREATE TABLE settings (...);
 ```
 
 #### 4. Start the Application
@@ -386,14 +329,15 @@ curl -X POST http://localhost:8000/plaid/create_link_token \
 - [x] Trade journal with AI learning
 - [x] Compose Trade with AI validation
 - [x] Responsive UI
+- [x] Import real holdings from broker (Plaid)
+- [x] Display positions in portfolio (Dashboard Positions table)
 
 ### 🚧 In Progress
 
 - [ ] Plaid Production approval (submitted)
-- [ ] Import real holdings from broker
-- [ ] Display positions in portfolio
 - [ ] Advanced charting
 - [ ] Options strategy builder
+- [ ] Risk metrics dashboard (expanded)
 
 ### 📋 Roadmap
 
@@ -408,14 +352,14 @@ curl -X POST http://localhost:8000/plaid/create_link_token \
    - Account syncing
 
 3. **Phase 3: Advanced Analytics** (Current)
-   - Real holdings display
-   - Performance tracking
-   - Risk metrics dashboard
+   - Performance tracking / P&L history
+   - Advanced risk metrics dashboard
+   - Deeper holdings visualizations (charts)
 
 4. **Phase 4: AI Features** (Next)
-   - Trade pattern recognition
+   - Trade pattern recognition (multi-trade analysis)
    - Predictive modeling
-   - Automated recommendations
+   - Automated recommendations / weekly playbook
 
 5. **Phase 5: Production** (Future)
    - Real broker connections

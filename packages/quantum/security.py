@@ -2,6 +2,7 @@ import os
 from cryptography.fernet import Fernet
 from fastapi import HTTPException, Security, Request
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+from typing import Optional
 import jwt
 from dotenv import load_dotenv
 
@@ -37,24 +38,41 @@ def decrypt_token(encrypted_token: str) -> str:
     return cipher_suite.decrypt(encrypted_token.encode()).decode()
 
 # --- JWT Auth Setup ---
-security = HTTPBearer()
-SUPABASE_JWT_SECRET = os.getenv("SUPABASE_JWT_SECRET") # Get this from Supabase Dashboard -> API -> JWT Settings
+# Use auto_error=False so we can handle missing tokens manually (for Dev fallback)
+security = HTTPBearer(auto_error=False)
+SUPABASE_JWT_SECRET = os.getenv("SUPABASE_JWT_SECRET")
 
-def get_current_user(credentials: HTTPAuthorizationCredentials = Security(security)):
+async def get_current_user(
+    request: Request,
+    credentials: Optional[HTTPAuthorizationCredentials] = Security(security)
+):
     """
-    Validates the Supabase JWT sent by the frontend.
-    Returns the user_id (sub) from the token.
+    1. Tries to validate a real Supabase JWT.
+    2. If missing, and in DEV mode, accepts X-Test-Mode-User header.
     """
-    try:
-        # In production, verifying the signature is crucial.
-        # For Supabase, we use the project JWT secret.
-        if not SUPABASE_JWT_SECRET:
-             # Fallback for dev if secret isn't set (NOT RECOMMENDED FOR PROD)
-             # Note: This is dangerous, but following user snippet.
-             payload = jwt.decode(credentials.credentials, options={"verify_signature": False})
-        else:
-             payload = jwt.decode(credentials.credentials, SUPABASE_JWT_SECRET, algorithms=["HS256"], audience="authenticated")
+    # 1. Try JWT Auth (Production Standard)
+    if credentials:
+        try:
+            token = credentials.credentials
+            # If secret is set, verify signature. If not (local dev), decode unverified.
+            if SUPABASE_JWT_SECRET:
+                payload = jwt.decode(token, SUPABASE_JWT_SECRET, algorithms=["HS256"], audience="authenticated")
+            else:
+                # WARNING: Dev only. Accepts any token format.
+                payload = jwt.decode(token, options={"verify_signature": False})
 
-        return payload.get("sub") # The UUID
-    except Exception as e:
-        raise HTTPException(status_code=401, detail="Invalid authentication credentials")
+            return payload.get("sub")
+        except Exception as e:
+            print(f"⚠️ JWT Validation Failed: {e}")
+            # Don't raise yet, check for fallback
+
+    # 2. Dev Mode Fallback (The "Test User" Header)
+    # Only allow this if we are NOT in production
+    if os.getenv("APP_ENV", "development") != "production":
+        test_user_header = request.headers.get("X-Test-Mode-User")
+        if test_user_header:
+            # print(f"🔓 Using Dev Header Auth: {test_user_header}")
+            return test_user_header
+
+    # 3. If both fail, Reject.
+    raise HTTPException(status_code=401, detail="Not authenticated. Log in or use Dev Header.")

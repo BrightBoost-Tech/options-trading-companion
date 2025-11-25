@@ -1,8 +1,9 @@
 'use client';
 
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect } from 'react';
 import DashboardLayout from '@/components/DashboardLayout';
 import SyncHoldingsButton from '@/components/SyncHoldingsButton';
+import PortfolioOptimizer from '@/components/dashboard/PortfolioOptimizer';
 import { supabase } from '@/lib/supabase';
 import { API_URL } from '@/lib/constants';
 
@@ -10,15 +11,6 @@ const mockAlerts = [
   { id: '1', message: 'SPY credit put spread scout: 475/470 for $1.50 credit', time: '2 min ago' },
   { id: '2', message: 'QQQ IV rank above 50% - consider premium selling', time: '15 min ago' },
 ];
-
-const PORTFOLIO_PRESETS = {
-  broad_market: { name: 'Broad Market', symbols: ['SPY', 'QQQ', 'IWM', 'DIA', 'VTI'] },
-  tech: { name: 'Tech Growth', symbols: ['AAPL', 'MSFT', 'GOOGL', 'NVDA', 'META'] },
-  value: { name: 'Value', symbols: ['BRK.B', 'JPM', 'JNJ', 'PG', 'XOM'] },
-  growth: { name: 'High Growth', symbols: ['TSLA', 'AMZN', 'NFLX', 'SHOP', 'SQ'] },
-  dividend: { name: 'Dividend', symbols: ['SCHD', 'VYM', 'DVY', 'VIG', 'DGRO'] },
-  custom: { name: 'Custom', symbols: ['SPY', 'QQQ', 'IWM', 'DIA', 'VTI'] }
-};
 
 interface FetchOptions extends RequestInit {
   timeout?: number;
@@ -37,11 +29,6 @@ const fetchWithTimeout = async (resource: RequestInfo, options: FetchOptions = {
 const TEST_USER_ID = '75ee12ad-b119-4f32-aeea-19b4ef55d587';
 
 export default function DashboardPage() {
-  const [showQuantum, setShowQuantum] = useState(false);
-  const [optimizationResults, setOptimizationResults] = useState<any>(null);
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  
   // Snapshot data
   const [snapshot, setSnapshot] = useState<any>(null);
 
@@ -55,12 +42,6 @@ export default function DashboardPage() {
   const [journalLoading, setJournalLoading] = useState(false);
   const [journalError, setJournalError] = useState<string | null>(null);
   const [showJournal, setShowJournal] = useState(false);
-  
-  const [portfolioType, setPortfolioType] = useState('broad_market');
-  const [customSymbols, setCustomSymbols] = useState(['SPY', 'QQQ', 'IWM', 'DIA', 'VTI']);
-  const [riskAversion, setRiskAversion] = useState(2.0);
-  
-  const [currentHoldings, setCurrentHoldings] = useState<{[key: string]: number}>({});
 
   // Load data on mount
   useEffect(() => {
@@ -68,44 +49,6 @@ export default function DashboardPage() {
     loadWeeklyScout();
     loadJournalStats();
   }, []);
-
-  // Update currentHoldings when snapshot changes
-  useEffect(() => {
-    if (snapshot && snapshot.holdings) {
-       const holdingsMap: {[key: string]: number} = {};
-       let totalValue = 0;
-
-       snapshot.holdings.forEach((h: any) => {
-         // Skip Cash for allocation math
-         if (h.symbol !== 'CUR:USD') {
-             const value = h.quantity * h.current_price;
-             totalValue += value;
-         }
-       });
-
-       if (totalValue > 0) {
-         snapshot.holdings.forEach((h: any) => {
-           if (h.symbol !== 'CUR:USD') {
-               holdingsMap[h.symbol] = (h.quantity * h.current_price) / totalValue;
-           }
-         });
-       }
-
-       setCurrentHoldings(holdingsMap);
-
-       if (snapshot.holdings.length > 0) {
-         // Filter out cash from optimizer
-         const validSymbols = snapshot.holdings
-            .filter((h: any) => h.symbol !== 'CUR:USD')
-            .map((h: any) => h.symbol);
-            
-         if (validSymbols.length > 0) {
-             setCustomSymbols(validSymbols);
-             setPortfolioType('custom'); 
-         }
-       }
-    }
-  }, [snapshot]);
 
   const getAuthHeaders = async () => {
       const { data: { session } } = await supabase.auth.getSession();
@@ -182,93 +125,6 @@ export default function DashboardPage() {
       setJournalLoading(false);
     }
   };
-
-  const getSymbols = useCallback(() => {
-    if (portfolioType === 'custom') {
-      if (!customSymbols || customSymbols.length === 0) {
-          return PORTFOLIO_PRESETS.broad_market.symbols;
-      }
-      return customSymbols;
-    }
-    return PORTFOLIO_PRESETS[portfolioType as keyof typeof PORTFOLIO_PRESETS].symbols;
-  }, [portfolioType, customSymbols]);
-
-  const runOptimization = async () => {
-    setLoading(true);
-    setError(null);
-    
-    try {
-      const headers = await getAuthHeaders();
-      const symbols = getSymbols();
-      const response = await fetchWithTimeout(`${API_URL}/compare/real`, {
-        method: 'POST',
-        headers,
-        body: JSON.stringify({
-          symbols: symbols,
-          risk_aversion: riskAversion
-        }),
-        timeout: 45000 
-      });
-      
-      if (!response.ok) {
-        const errorData = await response.json().catch(() => ({}));
-        throw new Error(errorData.detail || 'Optimization failed');
-      }
-      
-      const data = await response.json();
-      setOptimizationResults(data);
-      
-    } catch (err: any) {
-      setError(err.message || 'Timed out or failed');
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  useEffect(() => {
-    if (showQuantum && !optimizationResults && !loading) {
-      runOptimization();
-    }
-  }, [showQuantum]);
-
-  useEffect(() => {
-    if (showQuantum && !loading && optimizationResults) {
-       setOptimizationResults(null);
-       runOptimization();
-    }
-  }, [portfolioType, riskAversion]);
-
-  useEffect(() => {
-    const saved = localStorage.getItem('user_settings');
-    if (saved) {
-      const settings = JSON.parse(saved);
-      setShowQuantum(settings.quantum_mode || false);
-    }
-  }, []);
-
-  const calculateDrift = () => {
-    if (!optimizationResults) return null;
-    const optimal = optimizationResults.mean_variance.weights;
-    const symbols = getSymbols();
-    let totalDrift = 0;
-    const drifts: {[key: string]: number} = {};
-    
-    symbols.forEach(symbol => {
-      const current = currentHoldings[symbol] || 0;
-      const target = optimal[symbol] || 0;
-      const drift = target - current;
-      drifts[symbol] = drift;
-      totalDrift += Math.abs(drift);
-    });
-    
-    return {
-      total: totalDrift,
-      bySymbol: drifts,
-      needsRebalance: totalDrift > 0.10
-    };
-  };
-
-  const drift = calculateDrift();
 
   // --- RENDER HELPERS ---
   const renderPositionRow = (position: any, idx: number, type: 'option' | 'stock') => {
@@ -375,79 +231,8 @@ export default function DashboardPage() {
           </div>
 
           {/* OPTIMIZER PANEL */}
-          <div>
-            <div className="bg-white rounded-lg shadow p-6">
-              <div className="flex items-center justify-between mb-4">
-                <h3 className="text-lg font-semibold">Portfolio Optimizer</h3>
-                <label className="relative inline-flex items-center cursor-pointer">
-                  <input
-                    type="checkbox"
-                    checked={showQuantum}
-                    onChange={(e) => {
-                      const enabled = e.target.checked;
-                      setShowQuantum(enabled);
-                      const settings = JSON.parse(localStorage.getItem('user_settings') || '{}');
-                      settings.quantum_mode = enabled;
-                      localStorage.setItem('user_settings', JSON.stringify(settings));
-                    }}
-                    className="sr-only peer"
-                  />
-                  <div className="w-11 h-6 bg-gray-200 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-blue-600"></div>
-                </label>
-              </div>
-
-              {!showQuantum ? (
-                <div className="space-y-3">
-                  <p className="text-gray-600 text-sm">Enable optimizer to analyze portfolios</p>
-                  <div>
-                    <label className="block text-xs font-medium text-gray-700 mb-2">Portfolio Type</label>
-                    <select
-                      value={portfolioType}
-                      onChange={(e) => setPortfolioType(e.target.value)}
-                      className="w-full px-3 py-2 text-sm border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
-                    >
-                      {Object.entries(PORTFOLIO_PRESETS).map(([key, preset]) => (
-                        <option key={key} value={key}>{preset.name}</option>
-                      ))}
-                    </select>
-                  </div>
-                  <div>
-                    <label className="block text-xs font-medium text-gray-700 mb-2">
-                      Risk: {riskAversion === 1 ? 'Aggressive' : riskAversion === 2 ? 'Moderate' : 'Conservative'}
-                    </label>
-                    <input
-                      type="range" min="1" max="3" step="0.5"
-                      value={riskAversion}
-                      onChange={(e) => setRiskAversion(parseFloat(e.target.value))}
-                      className="w-full"
-                    />
-                  </div>
-                </div>
-              ) : loading ? (
-                <div className="text-center py-8">
-                  <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-600 mx-auto"></div>
-                  <p className="mt-4 text-sm text-gray-600">Optimizing...</p>
-                </div>
-              ) : optimizationResults ? (
-                <div className="space-y-4">
-                  {/* Optimizer Results UI */}
-                  <div className="bg-blue-50 p-4 rounded border border-blue-200">
-                    <p className="text-sm font-medium text-blue-900 mb-3">Mean-Variance (MV)</p>
-                    <div className="space-y-2 text-sm">
-                      <div className="flex justify-between">
-                        <span className="text-blue-700">Sharpe:</span>
-                        <span className="font-bold text-blue-900">{optimizationResults.mean_variance.sharpe_est.toFixed(3)}</span>
-                      </div>
-                      <div className="flex justify-between">
-                        <span className="text-blue-700">Return:</span>
-                        <span className="font-bold text-blue-900">{(optimizationResults.mean_variance.portfolio_return * 100).toFixed(2)}%</span>
-                      </div>
-                    </div>
-                  </div>
-                  <button onClick={runOptimization} disabled={loading} className="w-full py-2 px-4 bg-blue-600 text-white rounded text-sm font-medium hover:bg-blue-700">Recompute</button>
-                </div>
-              ) : null}
-            </div>
+          <div className="h-full">
+            <PortfolioOptimizer positions={snapshot?.holdings} />
           </div>
         </div>
 

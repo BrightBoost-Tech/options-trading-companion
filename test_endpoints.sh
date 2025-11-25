@@ -1,26 +1,35 @@
 #!/bin/bash
-echo "Testing /optimize/quantum-ready (Standard)..."
-curl -v -X POST http://localhost:8000/optimize/quantum-ready \
-  -H "Content-Type: application/json" \
-  -d '{
-    "tickers": ["AAPL", "GOOGL", "TSLA", "AMD"],
-    "risk_aversion": 1.0,
-    "skew_preference": 0.0,
-    "max_position_pct": 1.0
-  }'
 
-echo -e "\n\nTesting /optimize/quantum-ready (Skew Aware)..."
-curl -v -X POST http://localhost:8000/optimize/quantum-ready \
-  -H "Content-Type: application/json" \
-  -d '{
-    "tickers": ["AAPL", "GOOGL", "TSLA", "AMD"],
-    "risk_aversion": 1.0,
-    "skew_preference": 10.0,
-    "max_position_pct": 1.0
-  }'
+BASE_URL="http://localhost:8000"
 
-echo -e "\n\nTesting /scout/weekly..."
-curl -v http://localhost:8000/scout/weekly
+echo "Testing /optimize/portfolio (Classical)..."
+curl -X POST "$BASE_URL/optimize/optimize/portfolio" \
+    -H "Content-Type: application/json" \
+    -d '{
+        "positions": [
+            {"symbol": "AAPL", "current_value": 15000, "current_quantity": 100, "current_price": 150},
+            {"symbol": "GOOG", "current_value": 20000, "current_quantity": 10, "current_price": 2000}
+        ],
+        "risk_aversion": 1.0,
+        "skew_preference": 0.0,
+        "cash_balance": 5000
+    }'
+echo -e "\n"
 
-echo -e "\n\nTesting /journal/stats..."
-curl -v http://localhost:8000/journal/stats
+echo "Testing /optimize/portfolio (Quantum)..."
+curl -X POST "$BASE_URL/optimize/optimize/portfolio" \
+    -H "Content-Type: application/json" \
+    -d '{
+        "positions": [
+            {"symbol": "AAPL", "current_value": 15000, "current_quantity": 100, "current_price": 150},
+            {"symbol": "GOOG", "current_value": 20000, "current_quantity": 10, "current_price": 2000}
+        ],
+        "risk_aversion": 1.0,
+        "skew_preference": 10.0,
+        "cash_balance": 5000
+    }'
+echo -e "\n"
+
+echo "Testing /diagnostics/phase1..."
+curl -X GET "$BASE_URL/optimize/diagnostics/phase1"
+echo -e "\n"

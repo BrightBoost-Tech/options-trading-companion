@@ -37,14 +37,14 @@ class SurrogateOptimizer:
         )
 
         # 3. Bounds (0% to Max%)
-        max_w = constraints.get('max_position_pct', 0.20)
+        max_w = constraints.get('max_position_pct', 1.0) # Allow up to 100% in one asset
         bounds = tuple((0.0, max_w) for _ in range(num_assets))
 
         # 4. Initial Guess (Equal Weight)
         init_guess = np.array([1/num_assets] * num_assets)
 
         # 5. Run Optimization
-        result = minimize(objective, init_guess, method='SLSQP', bounds=bounds, constraints=cons)
+        result = minimize(objective, init_guess, method='SLSQP', bounds=bounds, constraints=cons, options={'maxiter': 1000})
 
         if not result.success:
             raise ValueError(f"Optimization failed: {result.message}")

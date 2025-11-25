@@ -18,20 +18,14 @@ if [ ! -f "venv/bin/python" ]; then
     fi
 fi
 
-# Define Python executable
-PYTHON_EXEC="venv/bin/python"
-
-# Verify it exists
-if [ ! -f "$PYTHON_EXEC" ]; then
-    echo "Error: Failed to create virtual environment or find python executable at $PYTHON_EXEC"
-    exit 1
-fi
+# Activate the virtual environment
+source venv/bin/activate
 
 # Install dependencies
 echo "Installing dependencies..."
-"$PYTHON_EXEC" -m pip install --upgrade pip
-"$PYTHON_EXEC" -m pip install -r requirements.txt
+pip install --upgrade pip
+pip install -r requirements.txt
 
 # Run server
 echo "Starting server..."
-"$PYTHON_EXEC" -m uvicorn api:app --reload --host 127.0.0.1 --port 8000
+uvicorn api:app --reload --host 127.0.0.1 --port 8000

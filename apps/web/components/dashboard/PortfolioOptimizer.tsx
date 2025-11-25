@@ -29,21 +29,38 @@ export default function PortfolioOptimizer({ positions }) {
 
   const handleOptimize = async () => {
     setIsOptimizing(true)
+    setResults(null) // Reset previous results
     try {
       const res = await fetch(`${API_URL}/optimize/portfolio`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          positions: positions || [], // Pass real props
+          positions: positions || [],
           risk_aversion: 1.0,
-          skew_preference: isQuantum ? 10.0 : 0.0, // The Switch!
+          skew_preference: isQuantum ? 10000.0 : 0.0, // Updated scaling factor
           cash_balance: 1000.0
         })
       })
+
+      // SAFETY CHECK: Stop if the backend errors out
+      if (!res.ok) {
+        const errorText = await res.text();
+        console.error("Optimization failed:", res.status, errorText);
+        alert(`Optimization Failed (Status ${res.status}): Please check backend logs.`);
+        return;
+      }
+
       const data = await res.json()
+
+      // Validation: Ensure data actually has the shape we expect
+      if (!data.metrics) {
+        throw new Error("Invalid response format from backend");
+      }
+
       setResults(data)
     } catch (e) {
-      console.error(e)
+      console.error("Network or Parsing Error:", e)
+      alert("System Error: Could not connect to Optimization Engine.")
     } finally {
       setIsOptimizing(false)
     }

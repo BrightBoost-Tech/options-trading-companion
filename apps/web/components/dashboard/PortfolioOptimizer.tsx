@@ -20,7 +20,13 @@ interface Metrics {
   tail_risk_score: number;
 }
 
-export default function PortfolioOptimizer({ positions }) {
+interface Position {
+  symbol: string;
+  quantity: number;
+  current_price: number;
+}
+
+export default function PortfolioOptimizer({ positions }: { positions: Position[] }) {
   const [isQuantum, setIsQuantum] = useState(false)
   const [isOptimizing, setIsOptimizing] = useState(false)
   const [results, setResults] = useState<{ trades: Trade[], metrics: Metrics } | null>(null)
@@ -29,30 +35,44 @@ export default function PortfolioOptimizer({ positions }) {
 
   const handleOptimize = async () => {
     setIsOptimizing(true)
-    setResults(null) // Reset previous results
+    setResults(null)
     try {
+      // 1. MAP THE DATA: Convert DB shape to API Schema
+      // The API expects: { symbol, current_quantity, current_price, current_value }
+      const formattedPositions = (positions || []).map((p: Position) => ({
+        symbol: p.symbol,
+        current_quantity: Number(p.quantity), // Rename 'quantity' -> 'current_quantity'
+        current_price: Number(p.current_price),
+        // Calculate total value if missing
+        current_value: Number(p.quantity) * Number(p.current_price),
+      }));
+
       const res = await fetch(`${API_URL}/optimize/portfolio`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          positions: positions || [],
+          positions: formattedPositions, // Use the mapped data here
           risk_aversion: 1.0,
-          skew_preference: isQuantum ? 10000.0 : 0.0, // Updated scaling factor
-          cash_balance: 1000.0
+          skew_preference: isQuantum ? 10000.0 : 0.0,
+          cash_balance: 1000.0 // You can replace this with real cash if available in props
         })
       })
 
-      // SAFETY CHECK: Stop if the backend errors out
       if (!res.ok) {
         const errorText = await res.text();
         console.error("Optimization failed:", res.status, errorText);
-        alert(`Optimization Failed (Status ${res.status}): Please check backend logs.`);
+        // parser the error to be friendly
+        try {
+           const errJson = JSON.parse(errorText);
+           alert(`Optimization Error: ${errJson.detail?.[0]?.msg || "Invalid Data Sent"}`);
+        } catch {
+           alert(`Optimization Failed (Status ${res.status}). Check console.`);
+        }
         return;
       }
 
       const data = await res.json()
 
-      // Validation: Ensure data actually has the shape we expect
       if (!data.metrics) {
         throw new Error("Invalid response format from backend");
       }

@@ -150,6 +150,7 @@ POLYGON_API_KEY=your-polygon-key
 PLAID_CLIENT_ID=your-plaid-client-id
 PLAID_SECRET=your-plaid-sandbox-secret
 PLAID_ENV=sandbox
+SUPABASE_SERVICE_ROLE_KEY=your-supabase-service-role-key
 ```
 
 #### 3. Set Up Database (Supabase)
@@ -157,6 +158,7 @@ PLAID_ENV=sandbox
 > For full schema, see `supabase/migrations/20240101000000_initial_schema.sql`.
 > Below is a simplified excerpt of the core tables.
 
+The positions table is the single source of truth for holdings; portfolio_snapshots stores time-stamped cached views used by the dashboard and portfolio pages.
 ```sql
 -- App-level users (Supabase Auth users live in auth.users)
 CREATE TABLE IF NOT EXISTS users (
@@ -167,22 +169,32 @@ CREATE TABLE IF NOT EXISTS users (
 
 -- Positions (per-user holdings)
 CREATE TABLE positions (
-  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  user_id UUID REFERENCES auth.users NOT NULL,
   symbol TEXT NOT NULL,
-  qty NUMERIC NOT NULL,
-  avg_price NUMERIC NOT NULL,
-  greek_delta NUMERIC,
-  greek_theta NUMERIC,
-  greek_vega NUMERIC,
-  iv_rank NUMERIC,
+  quantity NUMERIC NOT NULL,
+  cost_basis NUMERIC,
+  current_price NUMERIC,
+  currency TEXT DEFAULT 'USD',
+  source TEXT,
   updated_at TIMESTAMPTZ DEFAULT NOW()
 );
 
 -- Trades (per-user trade history)
 CREATE TABLE trades (...);
 
+CREATE TABLE portfolio_snapshots (
+  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  user_id UUID REFERENCES auth.users NOT NULL,
+  created_at TIMESTAMPTZ DEFAULT NOW(),
+  snapshot_type TEXT,
+  holdings JSONB NOT NULL,
+  risk_metrics JSONB,
+  optimizer_status TEXT
+);
+
 -- Settings (quantum mode, LLM budget, etc.)
+-- Note: user_settings.plaid_access_token is stored encrypted.
 CREATE TABLE settings (...);
 ```
 
@@ -251,8 +263,9 @@ pnpm dev
 1. **Dashboard** (`/dashboard`)
    - Portfolio overview & Risk metrics
    - Integrated Options Scout
-   - Holdings breakdown (Options vs Long Term)
-   - Real-time P&L
+   - Holdings breakdown (Option Plays, Long Term Holds, Cash) from live snapshots
+   - Portfolio Optimizer with quantum toggle, drift detection, and Sharpe/return/vol tiles
+   - Trade Journal auto-learning stats (win rate, P&L, rules)
 
 2. **Compose** (`/compose`)
    - New trade entry
@@ -260,9 +273,9 @@ pnpm dev
    - Strategy selector
 
 3. **Portfolio** (`/portfolio`)
-   - Position management
-   - Optimization suggestions
-   - Broker import
+   - Real holdings table (stock + options) sourced from Plaid / CSV
+   - Per-position quantity, cost basis, current price, and total value
+   - Sync holdings button that refreshes from Plaid and regenerates portfolio snapshot
 
 4. **Settings** (`/settings`)
    - Broker connection (Plaid)
@@ -329,8 +342,8 @@ curl -X POST http://localhost:8000/plaid/create_link_token \
 - [x] Trade journal with AI learning
 - [x] Compose Trade with AI validation
 - [x] Responsive UI
-- [x] Import real holdings from broker (Plaid)
-- [x] Display positions in portfolio (Dashboard Positions table)
+- [x] Import real holdings from broker
+- [x] Display positions in portfolio (Dashboard & Portfolio pages)
 
 ### 🚧 In Progress
 
@@ -352,9 +365,9 @@ curl -X POST http://localhost:8000/plaid/create_link_token \
    - Account syncing
 
 3. **Phase 3: Advanced Analytics** (Current)
-   - Performance tracking / P&L history
-   - Advanced risk metrics dashboard
-   - Deeper holdings visualizations (charts)
+   - Performance tracking & P&L history
+   - Expanded risk metrics dashboard (volatility, concentration, correlations)
+   - Rebalance suggestions based on drift metrics
 
 4. **Phase 4: AI Features** (Next)
    - Trade pattern recognition (multi-trade analysis)
@@ -452,6 +465,7 @@ POLYGON_API_KEY=                   # Polygon.io API key
 PLAID_CLIENT_ID=                   # Plaid client ID
 PLAID_SECRET=                      # Plaid secret (sandbox or production)
 PLAID_ENV=sandbox                  # 'sandbox' or 'production'
+SUPABASE_SERVICE_ROLE_KEY=         # Supabase service role key (for backend Supabase client)
 ```
 
 ### Optional Variables
@@ -514,7 +528,7 @@ For issues or questions:
 
 ---
 
-**Last Updated**: November 14, 2025
+**Last Updated**: November 25, 2025
 **Version**: 1.0.0-beta
 **Status**: MVP Complete - Testing Phase
 
@@ -524,10 +538,8 @@ For issues or questions:
 
 Now that Plaid is integrated, the next steps are:
 
-1. **Display Real Holdings** - Show imported positions in portfolio
-2. **Sync Button** - Refresh holdings from broker
-3. **Production Access** - Get Plaid approved for real accounts
-4. **Advanced Analytics** - Greek analysis on imported options
-5. **Automated Rebalancing** - Suggestions based on real positions
-
-Ready to build the next feature! 🎉
+- Production Access – Get Plaid approved for real brokerage accounts
+- Enhanced Performance Tracking – Time-series P&L and equity curve per portfolio
+- Greek Overlays – Show Delta/Theta/Vega per holding and at portfolio level
+- Automated Rebalancing – Turn drift metrics into actionable rebalance checklists
+- UX & Mobile Polish – Refine dashboard/portfolio layout and loading states

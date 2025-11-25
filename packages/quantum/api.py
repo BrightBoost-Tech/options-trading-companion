@@ -23,7 +23,7 @@ import plaid_endpoints
 # Import functionalities
 from options_scanner import scan_for_opportunities
 from trade_journal import TradeJournal
-from optimizer import optimize_portfolio, compare_optimizations
+from optimizer import router as optimizer_router
 from market_data import calculate_portfolio_inputs
 from ev_calculator import calculate_ev, calculate_position_size
 from typing import Optional, Literal
@@ -68,6 +68,9 @@ supabase: Client = create_client(url, key) if url and key else None
 # --- Register Plaid Endpoints ---
 # Pass supabase client to plaid_endpoints
 plaid_endpoints.register_plaid_endpoints(app, plaid_service, supabase)
+
+# --- Register Optimizer Endpoints ---
+app.include_router(optimizer_router, prefix="/optimize")
 
 # --- Models ---
 
@@ -390,35 +393,7 @@ async def get_portfolio_snapshot(
     else:
         return {"message": "No snapshot found", "holdings": []}
 
-@app.post("/optimize")
-async def optimize(request: OptimizationRequest):
-    """Optimize with provided data"""
-    try:
-        result = optimize_portfolio(
-            mode=request.mode,
-            expected_returns=request.expected_returns,
-            covariance_matrix=request.covariance_matrix,
-            constraints=request.constraints,
-            risk_aversion=request.risk_aversion,
-            asset_names=request.asset_names
-        )
-        return result
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
 
-@app.post("/compare")
-async def compare(request: OptimizationRequest):
-    """Compare MV vs MVS with provided data"""
-    try:
-        result = compare_optimizations(
-            expected_returns=request.expected_returns,
-            covariance_matrix=request.covariance_matrix,
-            constraints=request.constraints,
-            asset_names=request.asset_names
-        )
-        return result
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
 
 async def _get_user_symbols(authorization: str = None, x_test_mode_user: str = None) -> List[str]:
     """Helper to retrieve user's symbols from DB"""
@@ -446,78 +421,7 @@ async def _get_user_symbols(authorization: str = None, x_test_mode_user: str = N
     return []
 
 
-@app.post("/optimize/real")
-async def optimize_real(
-    request: RealDataRequest,
-    authorization: Optional[str] = Header(None),
-    x_test_mode_user: Optional[str] = Header(None, alias="X-Test-Mode-User")
-):
-    """Optimize using REAL market data from Polygon.io"""
-    try:
-        symbols = request.symbols
-        if not symbols:
-             # Try to get from user
-             symbols = await _get_user_symbols(authorization, x_test_mode_user)
 
-        if not symbols:
-            # Fallback to demo symbols
-            symbols = ['SPY', 'QQQ', 'IWM', 'AAPL', 'MSFT']
-
-        inputs = calculate_portfolio_inputs(symbols)
-
-        result = optimize_portfolio(
-            mode=request.mode,
-            expected_returns=inputs['expected_returns'],
-            covariance_matrix=inputs['covariance_matrix'],
-            constraints=request.constraints,
-            risk_aversion=request.risk_aversion,
-            asset_names=inputs['symbols']
-        )
-
-        result['data_source'] = 'polygon.io' if not inputs.get('is_mock') else 'mock'
-        result['data_points'] = inputs['data_points']
-        result['symbols'] = inputs['symbols']
-
-        return result
-
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Real data optimization failed: {str(e)}")
-
-@app.post("/compare/real")
-async def compare_real(
-    request: RealDataRequest,
-    authorization: Optional[str] = Header(None),
-    x_test_mode_user: Optional[str] = Header(None, alias="X-Test-Mode-User")
-):
-    """Compare MV vs MVS using REAL market data"""
-    try:
-        symbols = request.symbols
-        if not symbols:
-             # Try to get from user
-             symbols = await _get_user_symbols(authorization, x_test_mode_user)
-
-        if not symbols:
-            symbols = ['SPY', 'QQQ', 'IWM', 'AAPL', 'MSFT']
-
-        print(f"Fetching real data for: {symbols}")
-        inputs = calculate_portfolio_inputs(symbols)
-
-        print("Running comparison...")
-        result = compare_optimizations(
-            expected_returns=inputs['expected_returns'],
-            covariance_matrix=inputs['covariance_matrix'],
-            constraints=request.constraints,
-            asset_names=inputs['symbols']
-        )
-
-        result['data_source'] = 'polygon.io' if not inputs.get('is_mock') else 'mock'
-        result['data_points'] = inputs['data_points']
-        result['symbols'] = inputs['symbols']
-
-        return result
-
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Real data comparison failed: {str(e)}")
 
 @app.get("/scout/weekly")
 async def weekly_scout():

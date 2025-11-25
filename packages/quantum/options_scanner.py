@@ -85,23 +85,34 @@ def score_opportunity(
 def scan_for_opportunities(symbols: List[str] = None) -> List[Dict]:
     """
     Scan for weekly option opportunities.
-    If symbols provided, scans those. Otherwise defaults to major indices/tech.
-    Returns top opportunities ranked by score
+    This function scans a predefined market-wide universe of tickers for opportunities.
+    It does NOT use the user's holdings, which is the job of the Optimizer.
     """
 
-    # Default symbols if none provided
+    # If symbols are provided, it uses them (e.g. for custom scans).
+    # Otherwise, it defaults to a broad market scan list.
     if not symbols:
-        opportunities = [
+        market_scan_universe = [
             {'symbol': 'SPY', 'width': 5, 'credit_target': 1.25},
             {'symbol': 'QQQ', 'width': 5, 'credit_target': 1.50},
             {'symbol': 'IWM', 'width': 5, 'credit_target': 1.10},
+            {'symbol': 'DIA', 'width': 5, 'credit_target': 1.00},
+            {'symbol': 'TLT', 'width': 2, 'credit_target': 0.50},
+            {'symbol': 'GLD', 'width': 2, 'credit_target': 0.40},
+            {'symbol': 'XLF', 'width': 1, 'credit_target': 0.25},
             {'symbol': 'AAPL', 'width': 5, 'credit_target': 1.30},
-            {'symbol': 'TSLA', 'width': 10, 'credit_target': 2.50}
+            {'symbol': 'MSFT', 'width': 5, 'credit_target': 1.20},
+            {'symbol': 'AMZN', 'width': 5, 'credit_target': 1.80},
+            {'symbol': 'GOOGL', 'width': 5, 'credit_target': 1.70},
+            {'symbol': 'NVDA', 'width': 10, 'credit_target': 3.00},
+            {'symbol': 'TSLA', 'width': 10, 'credit_target': 2.50},
+            {'symbol': 'META', 'width': 5, 'credit_target': 1.50},
         ]
+        opportunities = market_scan_universe
     else:
         # Create opportunity skeletons for provided symbols
         opportunities = []
-        for sym in symbols[:10]: # Limit to top 10 holdings to avoid timeout
+        for sym in symbols[:15]: # Limit to 15 symbols to avoid timeout
             opportunities.append({
                 'symbol': sym,
                 'width': 5, # Default width

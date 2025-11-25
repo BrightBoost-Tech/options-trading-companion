@@ -306,256 +306,10 @@ export default function DashboardPage() {
   return (
     <DashboardLayout mockAlerts={mockAlerts}>
       <div className="max-w-7xl mx-auto p-8 space-y-6">
-        {/* Weekly Options Scout */}
-        <div className="bg-gradient-to-r from-green-50 to-emerald-50 rounded-lg shadow p-6 border-l-4 border-green-500">
-          <div className="flex justify-between items-start mb-4">
-            <div>
-              <h3 className="text-lg font-semibold text-green-900 flex items-center gap-2">
-                🎯 Weekly Options Scout
-                <span className="text-xs font-normal bg-green-200 text-green-800 px-2 py-1 rounded">
-                  AUTO-UPDATED
-                </span>
-              </h3>
-              <p className="text-sm text-green-700 mt-1">
-                Top credit spread opportunities based on IV rank, delta, and risk/reward
-              </p>
-            </div>
-            <button
-              onClick={loadWeeklyScout}
-              disabled={scoutLoading}
-              className="text-sm text-green-700 hover:text-green-900 underline disabled:opacity-50"
-            >
-              {scoutLoading ? 'Loading...' : 'Refresh'}
-            </button>
-          </div>
-
-          {scoutError && (
-            <div className="bg-red-50 p-3 rounded border border-red-200 mb-3 text-sm text-red-600 flex justify-between items-center">
-              <span>{scoutError}</span>
-              <button onClick={loadWeeklyScout} className="underline hover:text-red-800">Retry</button>
-            </div>
-          )}
-
-          {scoutLoading && !weeklyScout && (
-              <div className="py-4 text-center text-green-800 text-sm animate-pulse">
-                  Scanning market data...
-              </div>
-          )}
-
-          {!scoutLoading && weeklyScout && weeklyScout.top_picks && (
-            <div className="space-y-3">
-              {weeklyScout.top_picks.slice(0, 3).map((opp: any, idx: number) => (
-                <div key={idx} className="bg-white rounded-lg p-4 border border-green-200">
-                  <div className="flex justify-between items-start mb-2">
-                    <div>
-                      <div className="flex items-center gap-2">
-                        <span className="text-lg font-bold text-gray-900">#{idx + 1} {opp.symbol}</span>
-                        <span className="text-xs bg-green-100 text-green-800 px-2 py-1 rounded font-medium">
-                          Score: {opp.score}/100
-                        </span>
-                      </div>
-                      <p className="text-sm text-gray-600 mt-1">{opp.type}</p>
-                    </div>
-                    <div className="text-right">
-                      <p className="text-sm font-medium text-gray-900">${opp.credit.toFixed(2)} credit</p>
-                      <p className="text-xs text-gray-600">{opp.risk_reward}</p>
-                    </div>
-                  </div>
-                  
-                  <div className="grid grid-cols-3 gap-2 text-xs mt-3 mb-3">
-                    <div>
-                      <span className="text-gray-600">Strikes:</span>
-                      <span className="font-medium ml-1">{opp.short_strike}/{opp.long_strike}</span>
-                    </div>
-                    <div>
-                      <span className="text-gray-600">DTE:</span>
-                      <span className="font-medium ml-1">{opp.dte}</span>
-                    </div>
-                    <div>
-                      <span className="text-gray-600">IV Rank:</span>
-                      <span className="font-medium ml-1">{(opp.iv_rank * 100).toFixed(0)}%</span>
-                    </div>
-                  </div>
-
-                  <div className="border-t pt-2">
-                    <p className="text-xs text-gray-600 mb-1 font-medium">Why this trade:</p>
-                    {opp.reasons.slice(0, 2).map((reason: string, i: number) => (
-                      <p key={i} className="text-xs text-gray-700">• {reason}</p>
-                    ))}
-                  </div>
-                </div>
-              ))}
-            </div>
-          )}
-        </div>
-
-        {/* Trade Journal Stats */}
-        <div className="bg-gradient-to-r from-purple-50 to-pink-50 rounded-lg shadow p-6 border-l-4 border-purple-500">
-          <div className="flex justify-between items-start mb-4">
-            <div>
-              <h3 className="text-lg font-semibold text-purple-900 flex items-center gap-2">
-                📊 Trade Journal
-                <span className="text-xs font-normal bg-purple-200 text-purple-800 px-2 py-1 rounded">
-                  AUTO-LEARNING
-                </span>
-              </h3>
-              <p className="text-sm text-purple-700 mt-1">
-                System learns from every trade and generates rules
-              </p>
-            </div>
-            <div className="flex gap-2">
-              <button
-                onClick={() => setShowJournal(!showJournal)}
-                className="text-sm text-purple-700 hover:text-purple-900 underline"
-              >
-                {showJournal ? 'Hide Details' : 'Show Details'}
-              </button>
-              <button
-                onClick={loadJournalStats}
-                disabled={journalLoading}
-                className="text-sm text-purple-700 hover:text-purple-900 underline disabled:opacity-50"
-              >
-                {journalLoading ? 'Loading...' : 'Refresh'}
-              </button>
-            </div>
-          </div>
-
-          {journalError && (
-             <div className="bg-red-50 p-3 rounded border border-red-200 mb-3 text-sm text-red-600 flex justify-between items-center">
-               <span>{journalError}</span>
-               <button onClick={loadJournalStats} className="underline hover:text-red-800">Retry</button>
-             </div>
-          )}
-
-          {journalLoading && !journalStats && (
-              <div className="py-4 text-center text-purple-800 text-sm animate-pulse">
-                  Analyzing trade patterns...
-              </div>
-          )}
-
-          {journalStats && (
-            <div className="space-y-4">
-              {/* Stats Summary */}
-              <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-                <div className="bg-white rounded-lg p-3 border border-purple-200">
-                  <p className="text-xs text-gray-600">Win Rate</p>
-                  <p className="text-2xl font-bold text-purple-900">
-                    {journalStats.stats.win_rate?.toFixed(1) || 0}%
-                  </p>
-                </div>
-                <div className="bg-white rounded-lg p-3 border border-purple-200">
-                  <p className="text-xs text-gray-600">Total Trades</p>
-                  <p className="text-2xl font-bold text-purple-900">
-                    {journalStats.stats.closed_trades || 0}
-                  </p>
-                </div>
-                <div className="bg-white rounded-lg p-3 border border-purple-200">
-                  <p className="text-xs text-gray-600">Total P&L</p>
-                  <p className={`text-2xl font-bold ${(journalStats.stats.total_pnl || 0) >= 0 ? 'text-green-600' : 'text-red-600'}`}>
-                    ${(journalStats.stats.total_pnl || 0).toFixed(0)}
-                  </p>
-                </div>
-                <div className="bg-white rounded-lg p-3 border border-purple-200">
-                  <p className="text-xs text-gray-600">Avg P&L</p>
-                  <p className={`text-2xl font-bold ${(journalStats.stats.avg_pnl || 0) >= 0 ? 'text-green-600' : 'text-red-600'}`}>
-                    ${(journalStats.stats.avg_pnl || 0).toFixed(0)}
-                  </p>
-                </div>
-              </div>
-
-              {/* Auto-Generated Rules */}
-              {journalStats.rules && journalStats.rules.length > 0 && (
-                <div className="bg-white rounded-lg p-4 border border-purple-200">
-                  <p className="text-sm font-semibold text-purple-900 mb-2">🤖 Auto-Generated Rules:</p>
-                  <div className="space-y-1">
-                    {journalStats.rules.map((rule: string, i: number) => (
-                      <p key={i} className="text-sm text-gray-700">{rule}</p>
-                    ))}
-                  </div>
-                </div>
-              )}
-
-              {/* Detailed Analysis */}
-              {showJournal && journalStats.patterns && (
-                <div className="bg-white rounded-lg p-4 border border-purple-200">
-                  <p className="text-sm font-semibold text-purple-900 mb-3">Pattern Analysis:</p>
-                  {Object.entries(journalStats.patterns).map(([strategy, stats]: any) => {
-                    if (strategy === 'iv_rank_analysis') return null;
-                    return (
-                      <div key={strategy} className="mb-3 pb-3 border-b last:border-b-0">
-                        <p className="text-sm font-medium text-gray-900">{strategy}</p>
-                        <div className="grid grid-cols-3 gap-2 mt-2 text-xs">
-                          <div>
-                            <span className="text-gray-600">Win Rate:</span>
-                            <span className="font-medium ml-1">{stats.win_rate?.toFixed(1)}%</span>
-                          </div>
-                          <div>
-                            <span className="text-gray-600">Trades:</span>
-                            <span className="font-medium ml-1">{stats.wins + stats.losses}</span>
-                          </div>
-                          <div>
-                            <span className="text-gray-600">P&L:</span>
-                            <span className={`font-medium ml-1 ${stats.total_pnl >= 0 ? 'text-green-600' : 'text-red-600'}`}>
-                              ${stats.total_pnl?.toFixed(0)}
-                            </span>
-                          </div>
-                        </div>
-                      </div>
-                    );
-                  })}
-                </div>
-              )}
-            </div>
-          )}
-
-          {!journalStats && !journalLoading && !journalError && (
-            <div className="text-center py-8 text-purple-700">
-              <p className="text-sm">No trades yet. Start logging your trades to see auto-learning in action!</p>
-            </div>
-          )}
-        </div>
-
-        {/* Existing sections... */}
-        <div className="bg-white rounded-lg shadow p-6">
-          <h3 className="text-lg font-semibold mb-4">Portfolio Risk</h3>
-          <div className="space-y-4">
-            {snapshot ? (
-              <div>
-                <div className="flex justify-between mb-2">
-                  <span className="text-sm font-medium">Last Updated</span>
-                  <span className="text-sm font-medium">
-                    {new Date(snapshot.created_at).toLocaleString()}
-                  </span>
-                </div>
-                 <p className="text-sm text-gray-500">
-                   {snapshot.holdings.length} positions tracked.
-                 </p>
-              </div>
-            ) : (
-               <p className="text-sm text-gray-500">Sync your portfolio to see risk metrics.</p>
-            )}
-          </div>
-        </div>
-
-        <div className="bg-white rounded-lg shadow p-6">
-          <h3 className="text-lg font-semibold mb-4">Recent Alerts</h3>
-          <div className="space-y-3">
-            {mockAlerts.map((alert) => (
-              <div key={alert.id} className="flex items-start gap-3 p-3 bg-blue-50 rounded-lg">
-                <svg className="w-5 h-5 text-blue-600 mt-0.5" fill="currentColor" viewBox="0 0 20 20">
-                  <path d="M10 2a6 6 0 00-6 6v3.586l-.707.707A1 1 0 004 14h12a1 1 0 00.707-1.707L16 11.586V8a6 6 0 00-6-6z" />
-                </svg>
-                <div className="flex-1">
-                  <p className="text-sm font-medium text-gray-900">{alert.message}</p>
-                  <p className="text-xs text-gray-500 mt-1">{alert.time}</p>
-                </div>
-              </div>
-            ))}
-          </div>
-        </div>
-
+        {/* 1. Positions + Optimizer at top */}
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
           <div className="lg:col-span-2">
+            {/* Positions table card */}
             <div className="bg-white rounded-lg shadow overflow-hidden">
               <div className="px-6 py-4 border-b flex justify-between items-center">
                 <h2 className="text-xl font-semibold">Positions</h2>
@@ -568,8 +322,8 @@ export default function DashboardPage() {
                       <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Symbol</th>
                       <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Qty</th>
                       <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Avg Cost</th>
-                      <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Price</th>
-                      <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Source</th>
+                      <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Current Value</th>
+                      <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">P&amp;L</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-gray-200">
@@ -581,15 +335,36 @@ export default function DashboardPage() {
                         </td>
                       </tr>
                     )}
-                    {snapshot?.holdings?.filter((h:any) => h.symbol.length > 6 && h.symbol !== 'CUR:USD').map((position: any, idx: number) => (
-                      <tr key={`opt-${idx}`} className="hover:bg-gray-50">
+                    {snapshot?.holdings?.filter((h:any) => h.symbol.length > 6 && h.symbol !== 'CUR:USD').map((position: any, idx: number) => {
+                      const cost = position.cost_basis * position.quantity;
+                      const value = position.current_price * position.quantity;
+                      const pnl = value - cost;
+                      const pnlPercent = position.cost_basis > 0 ? (pnl / cost) * 100 : 0;
+
+                      return (
+                        <tr key={idx} className="hover:bg-gray-50">
                           <td className="px-6 py-4 font-medium text-purple-600">{position.symbol}</td>
                           <td className="px-6 py-4">{position.quantity}</td>
-                          <td className="px-6 py-4">${position.cost_basis?.toFixed(2)}</td>
-                          <td className="px-6 py-4 font-bold">${position.current_price?.toFixed(2)}</td>
-                          <td className="px-6 py-4"><span className="text-xs bg-green-100 text-green-800 px-2 py-1 rounded">Plaid</span></td>
-                      </tr>
-                    ))}
+                          <td className="px-6 py-4 whitespace-nowrap font-medium">
+                            ${position.cost_basis?.toFixed(2)}
+                          </td>
+                          <td className="px-6 py-4 whitespace-nowrap">
+                            <div>${position.current_price?.toFixed(2)}</div>
+                            <div className="text-xs text-gray-400">Total: ${value.toFixed(0)}</div>
+                          </td>
+                          <td className="px-6 py-4 whitespace-nowrap">
+                            <div className={`font-bold ${pnl >= 0 ? 'text-green-600' : 'text-red-600'}`}>
+                              {pnl >= 0 ? '+' : ''}{pnl.toFixed(2)} ({pnlPercent.toFixed(1)}%)
+                            </div>
+                            {pnlPercent >= 50 && (
+                              <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-green-100 text-green-800 animate-pulse">
+                                TARGET HIT 🎯
+                              </span>
+                            )}
+                          </td>
+                        </tr>
+                      );
+                    })}
 
                     {/* 2. STOCK HOLDINGS */}
                     {snapshot?.holdings?.filter((h:any) => h.symbol.length <= 6 && h.symbol !== 'CUR:USD').length > 0 && (
@@ -599,15 +374,36 @@ export default function DashboardPage() {
                         </td>
                       </tr>
                     )}
-                    {snapshot?.holdings?.filter((h:any) => h.symbol.length <= 6 && h.symbol !== 'CUR:USD').map((position: any, idx: number) => (
-                      <tr key={`stk-${idx}`} className="hover:bg-gray-50">
-                          <td className="px-6 py-4 font-medium text-gray-900">{position.symbol}</td>
+                    {snapshot?.holdings?.filter((h:any) => h.symbol.length <= 6 && h.symbol !== 'CUR:USD').map((position: any, idx: number) => {
+                      const cost = position.cost_basis * position.quantity;
+                      const value = position.current_price * position.quantity;
+                      const pnl = value - cost;
+                      const pnlPercent = position.cost_basis > 0 ? (pnl / cost) * 100 : 0;
+
+                      return (
+                        <tr key={idx} className="hover:bg-gray-50">
+                          <td className="px-6 py-4 font-medium">{position.symbol}</td>
                           <td className="px-6 py-4">{position.quantity}</td>
-                          <td className="px-6 py-4">${position.cost_basis?.toFixed(2)}</td>
-                          <td className="px-6 py-4">${position.current_price?.toFixed(2)}</td>
-                          <td className="px-6 py-4"><span className="text-xs bg-green-100 text-green-800 px-2 py-1 rounded">Plaid</span></td>
-                      </tr>
-                    ))}
+                          <td className="px-6 py-4 whitespace-nowrap font-medium">
+                            ${position.cost_basis?.toFixed(2)}
+                          </td>
+                          <td className="px-6 py-4 whitespace-nowrap">
+                            <div>${position.current_price?.toFixed(2)}</div>
+                            <div className="text-xs text-gray-400">Total: ${value.toFixed(0)}</div>
+                          </td>
+                          <td className="px-6 py-4 whitespace-nowrap">
+                            <div className={`font-bold ${pnl >= 0 ? 'text-green-600' : 'text-red-600'}`}>
+                              {pnl >= 0 ? '+' : ''}{pnl.toFixed(2)} ({pnlPercent.toFixed(1)}%)
+                            </div>
+                            {pnlPercent >= 50 && (
+                              <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-green-100 text-green-800 animate-pulse">
+                                TARGET HIT 🎯
+                              </span>
+                            )}
+                          </td>
+                        </tr>
+                      );
+                    })}
 
                     {/* 3. CASH */}
                     {snapshot?.holdings?.filter((h:any) => h.symbol === 'CUR:USD').map((position: any, idx: number) => (
@@ -632,8 +428,8 @@ export default function DashboardPage() {
               </div>
             </div>
           </div>
-
           <div>
+            {/* Portfolio Optimizer sidebar card */}
             <div className="bg-white rounded-lg shadow p-6">
               <div className="flex items-center justify-between mb-4">
                 <h3 className="text-lg font-semibold">Portfolio Optimizer</h3>
@@ -823,6 +619,179 @@ export default function DashboardPage() {
                 </div>
               ) : null}
             </div>
+          </div>
+        </div>
+
+        {/* 2. Weekly Scout + Journal BELOW */}
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+          {/* Weekly Options Scout component */}
+          <div className="bg-gradient-to-r from-green-50 to-emerald-50 rounded-lg shadow p-6 border-l-4 border-green-500">
+            <div className="flex justify-between items-start mb-4">
+              <div>
+                <h3 className="text-lg font-semibold text-green-900 flex items-center gap-2">
+                  🎯 Weekly Options Scout
+                  <span className="text-xs font-normal bg-green-200 text-green-800 px-2 py-1 rounded">
+                    AUTO-UPDATED
+                  </span>
+                </h3>
+                <p className="text-sm text-green-700 mt-1">
+                  Top credit spread opportunities based on IV rank, delta, and risk/reward
+                </p>
+              </div>
+              <button
+                onClick={loadWeeklyScout}
+                disabled={scoutLoading}
+                className="text-sm text-green-700 hover:text-green-900 underline disabled:opacity-50"
+              >
+                {scoutLoading ? 'Loading...' : 'Refresh'}
+              </button>
+            </div>
+
+            {scoutError && (
+              <div className="bg-red-50 p-3 rounded border border-red-200 mb-3 text-sm text-red-600 flex justify-between items-center">
+                <span>{scoutError}</span>
+                <button onClick={loadWeeklyScout} className="underline hover:text-red-800">Retry</button>
+              </div>
+            )}
+
+            {scoutLoading && !weeklyScout && (
+                <div className="py-4 text-center text-green-800 text-sm animate-pulse">
+                    Scanning market data...
+                </div>
+            )}
+
+            {!scoutLoading && weeklyScout && weeklyScout.top_picks && (
+              <div className="space-y-3">
+                {weeklyScout.top_picks.slice(0, 3).map((idea: any, idx: number) => (
+                  <ScoutIdea key={idx} idea={idea} />
+                ))}
+              </div>
+            )}
+          </div>
+          {/* Trade Journal component */}
+          <div className="bg-gradient-to-r from-purple-50 to-pink-50 rounded-lg shadow p-6 border-l-4 border-purple-500">
+            <div className="flex justify-between items-start mb-4">
+              <div>
+                <h3 className="text-lg font-semibold text-purple-900 flex items-center gap-2">
+                  📊 Trade Journal
+                  <span className="text-xs font-normal bg-purple-200 text-purple-800 px-2 py-1 rounded">
+                    AUTO-LEARNING
+                  </span>
+                </h3>
+                <p className="text-sm text-purple-700 mt-1">
+                  System learns from every trade and generates rules
+                </p>
+              </div>
+              <div className="flex gap-2">
+                <button
+                  onClick={() => setShowJournal(!showJournal)}
+                  className="text-sm text-purple-700 hover:text-purple-900 underline"
+                >
+                  {showJournal ? 'Hide Details' : 'Show Details'}
+                </button>
+                <button
+                  onClick={loadJournalStats}
+                  disabled={journalLoading}
+                  className="text-sm text-purple-700 hover:text-purple-900 underline disabled:opacity-50"
+                >
+                  {journalLoading ? 'Loading...' : 'Refresh'}
+                </button>
+              </div>
+            </div>
+
+            {journalError && (
+               <div className="bg-red-50 p-3 rounded border border-red-200 mb-3 text-sm text-red-600 flex justify-between items-center">
+                 <span>{journalError}</span>
+                 <button onClick={loadJournalStats} className="underline hover:text-red-800">Retry</button>
+               </div>
+            )}
+
+            {journalLoading && !journalStats && (
+                <div className="py-4 text-center text-purple-800 text-sm animate-pulse">
+                    Analyzing trade patterns...
+                </div>
+            )}
+
+            {journalStats && (
+              <div className="space-y-4">
+                {/* Stats Summary */}
+                <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+                  <div className="bg-white rounded-lg p-3 border border-purple-200">
+                    <p className="text-xs text-gray-600">Win Rate</p>
+                    <p className="text-2xl font-bold text-purple-900">
+                      {journalStats.stats.win_rate?.toFixed(1) || 0}%
+                    </p>
+                  </div>
+                  <div className="bg-white rounded-lg p-3 border border-purple-200">
+                    <p className="text-xs text-gray-600">Total Trades</p>
+                    <p className="text-2xl font-bold text-purple-900">
+                      {journalStats.stats.closed_trades || 0}
+                    </p>
+                  </div>
+                  <div className="bg-white rounded-lg p-3 border border-purple-200">
+                    <p className="text-xs text-gray-600">Total P&L</p>
+                    <p className={`text-2xl font-bold ${(journalStats.stats.total_pnl || 0) >= 0 ? 'text-green-600' : 'text-red-600'}`}>
+                      ${(journalStats.stats.total_pnl || 0).toFixed(0)}
+                    </p>
+                  </div>
+                  <div className="bg-white rounded-lg p-3 border border-purple-200">
+                    <p className="text-xs text-gray-600">Avg P&L</p>
+                    <p className={`text-2xl font-bold ${(journalStats.stats.avg_pnl || 0) >= 0 ? 'text-green-600' : 'text-red-600'}`}>
+                      ${(journalStats.stats.avg_pnl || 0).toFixed(0)}
+                    </p>
+                  </div>
+                </div>
+
+                {/* Auto-Generated Rules */}
+                {journalStats.rules && journalStats.rules.length > 0 && (
+                  <div className="bg-white rounded-lg p-4 border border-purple-200">
+                    <p className="text-sm font-semibold text-purple-900 mb-2">🤖 Auto-Generated Rules:</p>
+                    <div className="space-y-1">
+                      {journalStats.rules.map((rule: string, i: number) => (
+                        <p key={i} className="text-sm text-gray-700">{rule}</p>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {/* Detailed Analysis */}
+                {showJournal && journalStats.patterns && (
+                  <div className="bg-white rounded-lg p-4 border border-purple-200">
+                    <p className="text-sm font-semibold text-purple-900 mb-3">Pattern Analysis:</p>
+                    {Object.entries(journalStats.patterns).map(([strategy, stats]: any) => {
+                      if (strategy === 'iv_rank_analysis') return null;
+                      return (
+                        <div key={strategy} className="mb-3 pb-3 border-b last:border-b-0">
+                          <p className="text-sm font-medium text-gray-900">{strategy}</p>
+                          <div className="grid grid-cols-3 gap-2 mt-2 text-xs">
+                            <div>
+                              <span className="text-gray-600">Win Rate:</span>
+                              <span className="font-medium ml-1">{stats.win_rate?.toFixed(1)}%</span>
+                            </div>
+                            <div>
+                              <span className="text-gray-600">Trades:</span>
+                              <span className="font-medium ml-1">{stats.wins + stats.losses}</span>
+                            </div>
+                            <div>
+                              <span className="text-gray-600">P&L:</span>
+                              <span className={`font-medium ml-1 ${stats.total_pnl >= 0 ? 'text-green-600' : 'text-red-600'}`}>
+                                ${stats.total_pnl?.toFixed(0)}
+                              </span>
+                            </div>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+            )}
+
+            {!journalStats && !journalLoading && !journalError && (
+              <div className="text-center py-8 text-purple-700">
+                <p className="text-sm">No trades yet. Start logging your trades to see auto-learning in action!</p>
+              </div>
+            )}
           </div>
         </div>
       </div>

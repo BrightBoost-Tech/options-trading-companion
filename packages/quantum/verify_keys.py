@@ -23,8 +23,15 @@ if not client_id or not secret:
     exit(1)
 
 # Configure Plaid
+if env == "development":
+    host = plaid.Environment.Development
+elif env == "production":
+    host = plaid.Environment.Production
+else:
+    host = plaid.Environment.Sandbox
+
 configuration = plaid.Configuration(
-    host=plaid.Environment.Sandbox,
+    host=host,
     api_key={'clientId': client_id, 'secret': secret}
 )
 api_client = plaid.ApiClient(configuration)

@@ -18,9 +18,11 @@ load_dotenv()
 
 class PlaidService:
     def __init__(self):
+        # PLAID_ENV controls which Plaid host is used (sandbox, development, production).
+        # PLAID_SECRET must match the key for the selected environment.
         self.PLAID_CLIENT_ID = os.getenv("PLAID_CLIENT_ID")
         self.PLAID_SECRET = os.getenv("PLAID_SECRET")
-        self.PLAID_ENV = os.getenv("PLAID_ENV", "sandbox")
+        self.PLAID_ENV = os.getenv("PLAID_ENV", "sandbox").strip().lower()
 
         if self.PLAID_ENV == "development":
             host = plaid.Environment.Development
@@ -28,6 +30,8 @@ class PlaidService:
             host = plaid.Environment.Production
         else:
             host = plaid.Environment.Sandbox
+
+        print(f"💳 Plaid Service Initialized in: {self.PLAID_ENV.upper()} mode")
 
         configuration = plaid.Configuration(
             host=host,

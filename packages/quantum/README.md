@@ -43,3 +43,15 @@ If you prefer to run it manually, ensure you are using a virtual environment:
    ```bash
    uvicorn api:app --reload
    ```
+
+## Verification
+
+Once running, you should see a confirmation in your terminal:
+```
+🚀 Starting Quantum API on http://127.0.0.1:8000
+INFO:     Uvicorn running on http://127.0.0.1:8000 (Press CTRL+C to quit)
+```
+
+You can verify the API is working by accessing these endpoints in your browser or with a tool like `curl`:
+- **Plaid Status:** `http://127.0.0.1:8000/plaid/status?user_id=TEST_USER`
+- **Weekly Scout:** `http://127.0.0.1:8000/scout/weekly`

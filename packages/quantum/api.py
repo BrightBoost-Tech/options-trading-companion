@@ -23,6 +23,8 @@ import plaid_endpoints
 # Import functionalities
 from options_scanner import scan_for_opportunities
 from trade_journal import TradeJournal
+from filters import TradeGuardrails
+from greeks_engine import score_trade, calculate_iv_rank
 from optimizer import router as optimizer_router
 from market_data import calculate_portfolio_inputs
 from ev_calculator import calculate_ev, calculate_position_size
@@ -444,20 +446,70 @@ async def _get_user_symbols(authorization: str = None, x_test_mode_user: str = N
 
 
 @app.get("/scout/weekly")
-async def weekly_scout():
-    """Get weekly option opportunities from a market-wide scan."""
-    try:
-        # scan_for_opportunities now scans a predefined market list by default
-        opportunities = scan_for_opportunities()
+async def get_weekly_scout(user_id: str = Depends(get_current_user)):
+    # 1. Fetch Candidates (Mock or Real Polygon Scan)
+    candidates = scan_for_opportunities() # Returns list of dicts
 
-        return {
-            'count': len(opportunities),
-            'top_picks': opportunities[:5],
-            'generated_at': datetime.now().isoformat(),
-            'source': 'market-scan'
-        }
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    # 2. Fetch Portfolio Context for Rules
+    positions = []
+    port_value = 0
+    if supabase:
+        try:
+            # Fetch positions
+            pos_res = supabase.table("positions").select("*").eq("user_id", user_id).execute()
+            positions = pos_res.data
+            # Calculate portfolio value
+            if positions:
+                port_value = sum(p.get('current_value', 0) for p in positions)
+        except Exception as e:
+            print(f"Could not fetch portfolio context for user {user_id}: {e}")
+
+    guard = TradeGuardrails(positions, port_value)
+
+    valid_trades = []
+
+    for trade in candidates:
+        # --- Analytics Injection ---
+        # Assume Polygon returns basics, we enhance here
+        # These would be fetched from a real data source
+        trade['iv_rank'] = calculate_iv_rank(trade.get('iv', 0.3), trade.get('low_iv', 0.15), trade.get('high_iv', 0.45))
+        trade['earnings_date'] = (datetime.now() + timedelta(days=10)).strftime('%Y-%m-%d') # Mock earnings date
+        trade['oi'] = 1000 # Mock open interest
+        trade['vol'] = 500 # Mock volume
+        trade['strategy'] = 'credit_spread' # Mock strategy
+        trade['greeks'] = {'delta': -0.25, 'theta': 2.5} # Mock greeks
+        trade['prob_profit'] = 0.70 # Mock probability of profit
+        trade['margin_req'] = 500 # Mock margin requirement
+        trade['expected_value'] = 50 # Mock expected value
+
+        # --- Guardrails ---
+        if not guard.check_earnings_risk(trade['symbol'], trade.get('earnings_date')):
+            trade['rejection_reason'] = "Earnings imminent"
+            trade['status'] = 'blocked'
+        elif not guard.check_liquidity(trade.get('oi', 0), trade.get('vol', 0)):
+            trade['status'] = 'blocked'
+            trade['rejection_reason'] = "Low Liquidity"
+        elif not guard.check_iv_regime(trade['iv_rank'], trade.get('strategy', '')):
+            trade['status'] = 'blocked'
+            trade['rejection_reason'] = "IV Mismatch"
+        elif not guard.check_concentration(trade['symbol'], trade.get('margin_req', 0)):
+            trade['status'] = 'blocked'
+            trade['rejection_reason'] = "Concentration Risk"
+        else:
+            trade['status'] = 'active'
+
+        # --- Scoring ---
+        if trade['status'] == 'active':
+            trade['alpha_score'] = score_trade(trade)
+        else:
+            trade['alpha_score'] = 0
+
+        valid_trades.append(trade)
+
+    # Sort by Alpha Score
+    valid_trades.sort(key=lambda x: x['alpha_score'], reverse=True)
+
+    return {"scout_results": valid_trades}
 
 @app.get("/journal/stats")
 async def journal_stats():

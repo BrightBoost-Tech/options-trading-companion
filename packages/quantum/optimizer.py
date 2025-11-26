@@ -4,6 +4,10 @@ from typing import List, Dict, Optional, Any
 import numpy as np
 import pandas as pd
 import os
+from supabase import create_client, Client
+from .heuristics import TradeGuardrails
+from .analytics import OptionsAnalytics
+
 
 # Core Imports
 from core.math_engine import PortfolioMath
@@ -19,6 +23,12 @@ dirac3 = Dirac3Client()
 
 router = APIRouter()
 
+# Supabase Client
+url = os.getenv("NEXT_PUBLIC_SUPABASE_URL")
+key = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
+supabase: Client = create_client(url, key) if url and key else None
+
+
 # --- Schemas ---
 class PositionInput(BaseModel):
     symbol: str
@@ -27,6 +37,7 @@ class PositionInput(BaseModel):
     current_price: float
 
 class OptimizationRequest(BaseModel):
+    user_id: str # Added user_id
     positions: List[PositionInput]
     risk_aversion: float = 1.0
     skew_preference: float = 0.0
@@ -209,23 +220,45 @@ async def optimize_portfolio(req: OptimizationRequest):
         target_weights = {tickers[i]: float(weights_array[i]) for i in range(len(tickers))}
 
         # Pass TOTAL value (Assets + Cash) so we buy using the cash
-        trades = generate_trade_instructions(
+        raw_optimizer_output = generate_trade_instructions(
             investable_assets,
             target_weights,
             total_portfolio_value
         )
 
-        return {
-            "status": "success",
-            "mode": solver_type,
-            "target_weights": target_weights,
-            "trades": trades,
-            "metrics": {
-                "expected_return": float(np.dot(weights_array, mu)),
-                "sharpe_ratio": float(np.dot(weights_array, mu) / np.sqrt(np.dot(weights_array.T, np.dot(sigma, weights_array)))),
-                "tail_risk_score": float(np.einsum('ijk,i,j,k->', coskew, weights_array, weights_array, weights_array))
-            }
-        }
+        # 6. Get User Context for Guardrails
+        positions = supabase.table('positions').select("*").eq('user_id', req.user_id).execute().data
+        portfolio_value = sum(float(p['market_value']) for p in positions) + float(req.cash_balance)
+        guardrails = TradeGuardrails(positions, portfolio_value)
+
+        refined_suggestions = []
+
+        # 7. Filter & Score Suggestions
+        for trade in raw_optimizer_output:
+            # Mocking IV data fetching for the example
+            iv_rank = OptionsAnalytics.calculate_iv_rank(trade.get('iv', 0.3), trade.get('iv_low', 0.15), trade.get('iv_high', 0.45))
+            trade['iv_rank'] = iv_rank
+
+            # Check Guardrails
+            check = guardrails.validate_trade(trade['symbol'], trade.get('strategy', ''), trade.get('cost', 0), trade)
+
+            if check['valid']:
+                # Calculate Alpha Score
+                trade['alpha_score'] = OptionsAnalytics.calculate_alpha_score(trade)
+                trade['status'] = 'recommended'
+                refined_suggestions.append(trade)
+            else:
+                # Keep rejected trades but flag them
+                trade['status'] = 'rejected'
+                trade['rejection_reason'] = check['reason']
+                trade['alpha_score'] = 0
+                refined_suggestions.append(trade)
+
+        # 8. Sort by Alpha Score
+        refined_suggestions.sort(key=lambda x: x['alpha_score'], reverse=True)
+
+        return {"optimized_portfolio": refined_suggestions}
+
     except Exception as e:
         print(f"Optimizer Error: {e}")
         raise HTTPException(status_code=500, detail=str(e))

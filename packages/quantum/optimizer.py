@@ -192,12 +192,23 @@ async def run_phase1_test():
     try:
         np.random.seed(42)
         n_days = 1000
-        # Safe Asset: Normal distribution
+
+        # 1. SAFE ASSET: Steady, low return
+        # Mean: ~0.05% daily, Vol: 1%
         safe_asset = np.random.normal(0.0005, 0.01, n_days)
-        # Risky Asset: 'Trap' - good mean, but 1% chance of -15% crash
-        risky_asset = np.random.normal(0.0008, 0.008, n_days)
-        crash_indices = np.random.choice(n_days, size=10, replace=False)
-        risky_asset[crash_indices] = -0.15
+
+        # 2. RISKY ASSET (The Trap):
+        # Base: High return (0.15% daily), similar volatility
+        # We want Classical MVO to prefer this because of the higher return.
+        risky_asset = np.random.normal(0.0015, 0.01, n_days)
+
+        # 3. ADD SKEW (The Hidden Risk):
+        # We add 5 major crashes (-10%).
+        # Math: 5 * -0.10 / 1000 = -0.0005 drag on mean.
+        # Net Mean becomes ~0.0010, which is STILL HIGHER than Safe (0.0005).
+        # result: Classical BUYS Risky (for yield), Quantum SELLS Risky (for safety).
+        crash_indices = np.random.choice(n_days, size=5, replace=False)
+        risky_asset[crash_indices] = -0.10
 
         df = pd.DataFrame({'SAFE': safe_asset, 'RISKY': risky_asset})
 
@@ -209,7 +220,7 @@ async def run_phase1_test():
         solver = SurrogateOptimizer()
 
         # Classical (Skew ignored)
-        # Explicitly set max_position_pct to 1.0 so 2 assets can sum to 1.0
+        # Should allocate significantly to RISKY because Mean(Risky) > Mean(Safe)
         w_class = solver.solve(mu, sigma, coskew, {
             'risk_aversion': 1.0,
             'skew_preference': 0.0,
@@ -217,20 +228,26 @@ async def run_phase1_test():
         })
 
         # Quantum Logic (Skew penalized heavily)
+        # Should flee to SAFE because of the negative skew events
         w_quant = solver.solve(mu, sigma, coskew, {
             'risk_aversion': 1.0,
-            'skew_preference': 10000.0,
+            'skew_preference': 100000.0, # Increased penalty to force the shift
             'max_position_pct': 1.0
         })
 
-        # Success if Quantum holds LESS Risky asset than Classical
-        is_working = w_quant[0] > (w_class[0] + 0.05)
+        # Success if Quantum Safe Weight is significantly higher than Classical Safe Weight
+        # e.g. Classical might be 50/50, Quantum should be 90/10 or 100/0
+        is_working = w_quant[0] > (w_class[0] + 0.10)
 
         return {
             "test_passed": bool(is_working),
             "classical_weights": {"SAFE": round(w_class[0],2), "RISKY": round(w_class[1],2)},
             "quantum_weights": {"SAFE": round(w_quant[0],2), "RISKY": round(w_quant[1],2)},
-            "message": "Quantum logic successfully penalized the negatively skewed asset." if is_working else "Logic failed."
+            "metrics": {
+                "safe_mean_annual": round(safe_asset.mean()*252, 3),
+                "risky_mean_annual": round(risky_asset.mean()*252, 3), # Should be higher than safe
+            },
+            "message": "Quantum logic successfully penalized the negatively skewed asset." if is_working else "Logic failed to differentiate."
         }
     except Exception as e:
         return {"test_passed": False, "error": str(e)}

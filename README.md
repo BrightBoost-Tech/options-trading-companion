@@ -23,8 +23,8 @@ options-trading-companion/
 │       │   │   ├── dashboard/
 │       │   │   ├── portfolio/
 │       │   │   ├── settings/
-│       │   │   ├── journal/
-│       │   │   └── compose/
+│       │   │   ├── journal/   # <-- New
+│       │   │   └── compose/   # <-- New
 │       │   ├── login/
 │       │   └── signup/
 │       ├── components/
@@ -38,6 +38,7 @@ options-trading-companion/
         ├── optimizer.py      # Portfolio optimization engine
         ├── plaid_service.py  # Plaid integration
         ├── polygon_client.py # Market data client
+        ├── trade_journal.py  # Trade journal logic
         └── .env             # Environment variables
 ```
 
@@ -63,10 +64,13 @@ options-trading-companion/
 ### 4. **Options Analytics & Scouting**
 - **Weekly Options Scout**: Scans the market for high-probability trade opportunities based on predefined criteria.
 - **Expected Value (EV) Calculator**: An endpoint (`/ev`) calculates the expected value and max loss for various options strategies.
+- **Position Size Calculator**: A `/position-size` endpoint provides trade size suggestions using the Half-Kelly Criterion.
 
-### 5. **Trade Journal (Foundational)**
-- **Backend Service**: Includes a `TradeJournal` class to load, analyze, and generate statistics from a local JSON file.
-- **Frontend Display**: The dashboard shows basic journal stats like win rate and total P&L.
+### 5. **Trade Journal & Nested Learning**
+- **Database-Backed Journal**: Trades are stored in the database, not a local JSON file, enabling persistent, per-user logging.
+- **Guardrails System**: Users can define custom risk rules (e.g., "no earnings plays," "max loss per trade") that are stored in the `rules_guardrails` table.
+- **AI-Powered Loss Review**: A system (`loss_reviews` table) to analyze losing trades, identify root causes, and suggest new guardrails, creating a feedback loop for continual learning.
+- **Frontend Display**: The dashboard and a dedicated journal page display key statistics and trade history.
 
 ---
 
@@ -116,37 +120,93 @@ NEXT_PUBLIC_SUPABASE_ANON_KEY=your-anon-key
 
 **Backend** (`packages/quantum/.env`):
 ```env
+# -- Required --
 POLYGON_API_KEY=your-polygon-key
 PLAID_CLIENT_ID=your-plaid-client-id
 PLAID_SECRET=your-plaid-sandbox-secret
-PLAID_ENV=sandbox
+PLAID_ENV=sandbox # Or 'development', 'production'
+SUPABASE_URL=https://your-project.supabase.co
 SUPABASE_SERVICE_ROLE_KEY=your-supabase-service-role-key
-ENCRYPTION_KEY=your-32-byte-fernet-key
-# Optional for quantum optimization
+ENCRYPTION_KEY=your-32-byte-fernet-key # See below for generation command
+
+# -- Optional for AI / Quantum Features --
 QCI_API_TOKEN=your-qci-api-token
-# Optional for development
-APP_ENV=development
+GEMINI_API_KEY=your-google-gemini-key # For AI-powered loss reviews
+
+# -- Optional for Development --
+APP_ENV=development # Enables test users and other dev-only features
+```
+
+To generate a valid `ENCRYPTION_KEY`, run the following command from the project root:
+```bash
+# Activate virtual environment first
+source packages/quantum/venv/bin/activate
+# Generate key
+python3 -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
 ```
 
 #### 3. Set Up Database (Supabase)
 
 > For full schema, see `supabase/migrations/20240101000000_initial_schema.sql`.
-> The core table for holdings is `positions`.
 
+The database schema is designed to support real-time portfolio tracking, trade journaling, and a nested-learning feedback loop.
+
+### Core Tables
+
+**1. `positions`**: The single source of truth for a user's current holdings, synced from their broker via Plaid.
 ```sql
--- Positions (per-user holdings)
--- This table is the single source of truth for user holdings.
 CREATE TABLE positions (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
   symbol TEXT NOT NULL,
-  qty NUMERIC NOT NULL,
-  avg_price NUMERIC NOT NULL,
-  greek_delta NUMERIC,
-  greek_theta NUMERIC,
-  greek_vega NUMERIC,
-  iv_rank NUMERIC,
-  updated_at TIMESTAMTz DEFAULT NOW()
+  quantity NUMERIC NOT NULL,
+  cost_basis NUMERIC NOT NULL,
+  current_price NUMERIC,
+  currency TEXT,
+  source TEXT DEFAULT 'plaid', -- Data source (e.g., plaid, csv)
+  updated_at TIMESTAMPTZ DEFAULT NOW(),
+  UNIQUE(user_id, symbol)
+);
+```
+
+**2. `trades`**: An immutable log of all trading activity, forming the backbone of the journal.
+```sql
+CREATE TABLE trades (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  symbol TEXT NOT NULL,
+  strategy_id TEXT NOT NULL,
+  open_ts TIMESTAMPTZ NOT NULL,
+  close_ts TIMESTAMPTZ,
+  pnl_pct NUMERIC,
+  legs_json JSONB NOT NULL, -- Details of the options legs
+  thesis_json JSONB,        -- User's rationale for the trade
+  market_snapshot_json JSONB -- Market conditions at time of entry
+);
+```
+
+**3. `rules_guardrails`**: A user-defined set of risk management rules that the system can check against.
+```sql
+CREATE TABLE rules_guardrails (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  rule_key TEXT NOT NULL,      -- e.g., "NO_EARNINGS_HOLDS"
+  rule_text TEXT NOT NULL,     -- "Avoid holding positions through earnings reports."
+  priority TEXT NOT NULL,      -- 'low', 'medium', 'high'
+  enabled BOOLEAN DEFAULT TRUE,
+  UNIQUE(user_id, rule_key)
+);
+```
+
+**4. `loss_reviews`**: The "learning" part of the loop, where AI analyzes losing trades and suggests new guardrails.
+```sql
+CREATE TABLE loss_reviews (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  trade_id UUID NOT NULL REFERENCES trades(id) ON DELETE CASCADE,
+  root_cause TEXT NOT NULL,            -- e.g., "Held through earnings"
+  evidence_json JSONB NOT NULL,        -- Data supporting the cause
+  recommended_rule_json JSONB NOT NULL, -- A new rule suggested by the AI
+  confidence NUMERIC NOT NULL          -- AI's confidence in the analysis
 );
 ```
 
@@ -176,17 +236,18 @@ npm run dev
 - `POST /optimize/diagnostics/phase2/qci_uplink` - Live test to verify connection to QCI quantum hardware (requires `QCI_API_TOKEN`).
 
 ### Plaid Integration
-- `GET /plaid/status` - Check if the current user has a connected Plaid account.
+- `GET /plaid/status` - Check if the current user has a connected Plaid account by checking for a valid access token in the `user_settings` table.
 - `POST /plaid/create_link_token` - Create a Plaid Link token to initialize the connection flow.
-- `POST /plaid/exchange_token` - Exchange a public token for a permanent access token and save it.
-- `POST /plaid/sync_holdings` - Trigger a sync to fetch holdings from the linked Plaid item.
+- `POST /plaid/exchange_public_token` - Exchange a public token for a permanent, encrypted access token and save it.
+- `POST /plaid/sync_holdings` - Trigger a sync to fetch holdings from the linked Plaid item, upsert them into the `positions` table, and create a new portfolio snapshot.
 
 ### Data & Analytics
-- `GET /portfolio/snapshot` - Retrieve the latest cached portfolio snapshot, including holdings and risk metrics.
-- `GET /holdings/export` - Export user's current holdings to a CSV file.
+- `GET /portfolio/snapshot` - Retrieve the latest portfolio snapshot from the `portfolio_snapshots` table. It includes holdings with calculated P&L and risk metrics.
+- `GET /holdings/export` - Export user's current holdings from the `positions` table to a CSV file.
 - `GET /scout/weekly` - Scan for weekly options trade opportunities.
-- `GET /journal/stats` - Get statistics from the trade journal.
-- `POST /ev` - Calculate expected value and position size for an options trade.
+- `GET /journal/stats` - Get statistics and risk-rule analysis from the `trades` and `rules_guardrails` tables.
+- `POST /ev` - Calculate expected value for an options trade.
+- `POST /position-size` - Calculate optimal position size using the Half-Kelly Criterion to balance risk and reward.
 
 ---
 
@@ -195,17 +256,24 @@ npm run dev
 ### Key Pages
 
 1. **Dashboard** (`/dashboard`)
-   - **Positions**: Displays current holdings grouped by "Option Plays", "Long Term Holds", and "Cash", fetched from the latest portfolio snapshot.
-   - **Portfolio Optimizer**: An interactive panel to run the backend optimizer and view suggested trades.
-   - **Weekly Options Scout**: A card showing top trade ideas from the weekly scan.
-   - **Trade Journal**: A card displaying key stats like win rate and P&L.
+   - **Layout**: The dashboard is organized with the most critical components—`Positions` and `Portfolio Optimizer`—at the top.
+   - **Positions**: Displays current holdings grouped by "Option Plays", "Long Term Holds", and "Cash", fetched from the `/portfolio/snapshot` endpoint.
+   - **Portfolio Optimizer**: An interactive panel to run the backend optimizer and view suggested trades based on risk tolerance and market outlook.
+   - **Weekly Options Scout**: A card showing top trade ideas from the weekly market scan (`/scout/weekly`).
+   - **Trade Journal**: A summary card displaying key stats like win rate and total P&L from the `/journal/stats` endpoint.
 
 2. **Portfolio** (`/portfolio`)
-   - **Holdings Table**: A detailed view of all positions with columns for quantity, cost basis, current price, and total value.
-   - **Sync Button**: Manually triggers a Plaid holdings sync.
+   - **Holdings Table**: A detailed, sortable view of all positions with columns for quantity, cost basis, current price, and total value.
+   - **Sync Button**: Manually triggers a Plaid holdings sync via the `/plaid/sync_holdings` endpoint.
 
-3. **Settings** (`/settings`)
+3. **Journal** (`/journal`)
+   - **Trade History**: A complete log of all trades, filterable by symbol, strategy, and date.
+   - **Performance Analytics**: Visualizations of P&L over time, win rate by strategy, and other key metrics.
+   - **Guardrail Management**: An interface to view, add, and disable the trading rules that are actively protecting the account.
+
+4. **Settings** (`/settings`)
    - **Broker Connection**: A simple interface for connecting and disconnecting a brokerage account using Plaid Link.
+   - **Learning Configuration**: Toggles and settings for the nested learning and AI loss-review features.
 
 ---
 
@@ -213,21 +281,36 @@ npm run dev
 
 ### ✅ Completed Features
 
-- [x] FastAPI backend with CORS and rate limiting.
-- [x] Next.js 14 frontend with protected routes.
-- [x] Supabase authentication and database.
-- [x] **Plaid broker integration** for syncing holdings.
-- [x] **Portfolio optimization engine** with classical and quantum-ready solvers.
-- [x] **Weekly options scout** for trade ideas.
-- [x] Mock data fallbacks for stable development.
-- [x] Display of positions in Dashboard and Portfolio pages.
+- [x] **Core Architecture**: FastAPI backend, Next.js 14 frontend, and Supabase for auth/database.
+- [x] **Plaid Broker Integration**: Securely link brokerage accounts to sync holdings in real-time.
+- [x] **Portfolio Optimization Engine**: Includes both classical and quantum-ready solvers for generating trade recommendations.
+- [x] **Market Data & Analytics**: Real-time pricing from Polygon.io, an EV calculator, and a position size tool.
+- [x] **Database-Backed Trade Journal**: Log trades to a persistent database for analysis.
+- [x] **Nested Learning System**:
+    - [x] **Guardrails**: Define custom risk rules to guide trading decisions.
+    - [x] **AI Loss Review**: An AI-powered system analyzes losses and suggests new rules to improve over time.
+- [x] **Comprehensive UI**: Dashboard, Portfolio, and Journal pages to view data and manage features.
 
-### 🚧 In Progress / Planned
+---
 
-- [ ] **Advanced Options Analytics**: Display Greeks, IV rank, and other metrics per position.
-- [ ] **Trade Journal Enhancements**: Move from a local JSON file to a database-backed system with a dedicated UI.
-- [ ] **Historical Performance**: Track portfolio value and P&L over time with charts.
-- [ ] **Plaid Production Approval**: Complete the process to use Plaid with real brokerage accounts.
+## 🚀 Roadmap & What's Next
+
+With a robust foundation for portfolio tracking, optimization, and journaling, the focus now shifts to deepening the analytical capabilities and preparing for a production environment.
+
+### Phase 1: Deepen Analytics & User Experience
+- **Advanced Options Analytics**: Integrate and display Greeks (Delta, Gamma, Theta, Vega), IV Rank, and other key options metrics for each position in the portfolio.
+- **Historical Performance Tracking**: Develop backend services and frontend charts to track and visualize portfolio value, P&L, and key metrics over time.
+- **Enhanced Journal UI**: While the core journal is functional, future enhancements will include rich text editing for trade theses, advanced filtering (e.g., by market conditions at entry), and a dedicated view for visualizing the impact of specific guardrails on performance.
+
+### Phase 2: Production Readiness
+- **Plaid Production Approval**: Complete the official Plaid application process to enable connections to live brokerage accounts.
+- **Multi-User Scaling & Security**: Implement robust, scalable multi-tenancy, and conduct a thorough security audit of all authentication and data-handling services.
+- **End-to-End Testing**: Expand the testing suite to include comprehensive end-to-end tests for all critical user flows, from Plaid connection to trade optimization and journaling.
+
+### Phase 3: Advanced Features & Intelligence
+- **Proactive Guardrail Alerts**: Implement a system to proactively alert users when a potential trade or existing position violates one of their defined guardrails.
+- **Strategy Backtesting Engine**: Build a service that allows users to backtest their trading strategies and guardrails against historical market data.
+- **Smarter Scouting**: Enhance the "Weekly Scout" with more sophisticated models, potentially incorporating user-specific data from their journal and risk profile.
 
 ---
 

@@ -5,8 +5,8 @@ import numpy as np
 import pandas as pd
 import os
 from supabase import create_client, Client
-from .heuristics import TradeGuardrails
-from .analytics import OptionsAnalytics
+from heuristics import TradeGuardrails
+from analytics import OptionsAnalytics
 
 
 # Core Imports

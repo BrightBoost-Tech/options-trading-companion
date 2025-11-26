@@ -10,8 +10,8 @@ from collections import defaultdict
 
 
 class TradeJournal:
-    def __init__(self, journal_file='trade_journal.json'):
-        self.journal_file = journal_file
+    def __init__(self):
+        self.journal_file = 'trade_journal.json'
         self.trades = self._load_trades()
     
     def _load_trades(self) -> List[Dict]:

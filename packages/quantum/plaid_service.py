@@ -1,32 +1,6 @@
 import os
-import sys
-from pathlib import Path
 from dotenv import load_dotenv
-
-# --- FORCE LOAD .ENV ---
-# Explicitly target the .env file in the same directory as this script
-env_path = Path(__file__).resolve().parent / ".env"
-
-print("!" * 60)
-print(f"🕵️  PLAID SERVICE: Loading environment configuration...")
-print(f"📍  Targeting .env path: {env_path}")
-print(f"📂  File exists? {env_path.exists()}")
-
-# Force load the specific .env file
-load_dotenv(dotenv_path=env_path, override=True)
-
-# Interrogate loaded values
-current_plaid_env = os.getenv("PLAID_ENV")
-plaid_secret = os.getenv("PLAID_SECRET")
-plaid_secret_preview = plaid_secret[:4] if plaid_secret else "NONE"
-
-print(f"🌍  PLAID_ENV: {current_plaid_env}")
-print(f"🔑  PLAID_SECRET (first 4): {plaid_secret_preview}")
-print("!" * 60)
-# -----------------------
-
 import plaid
-from datetime import datetime
 from plaid.api import plaid_api
 from plaid.model.link_token_create_request import LinkTokenCreateRequest
 from plaid.model.link_token_create_request_user import LinkTokenCreateRequestUser
@@ -36,217 +10,94 @@ from plaid.model.item_public_token_exchange_request import ItemPublicTokenExchan
 from plaid.model.investments_holdings_get_request import InvestmentsHoldingsGetRequest
 from models import Holding
 from market_data import get_polygon_price
+from security import encrypt_token, decrypt_token
+from database import supabase
+from datetime import datetime
 
-# 1. Verify and correct backend environment mapping
-current_env_str = (current_plaid_env or "sandbox").lower().strip()
+load_dotenv()
 
-if current_env_str == "development":
-    # ✅ FIX: Use the Production URL for Development keys
-    host_env = "https://production.plaid.com"  
-    env_log_msg = "Plaid environment: DEVELOPMENT (Using Production URL)"
-elif current_env_str == "production":
-    host_env = "https://production.plaid.com"
-    env_log_msg = "Plaid environment: PRODUCTION"
-else:
-    host_env = "https://sandbox.plaid.com"
-    env_log_msg = f"Plaid environment: SANDBOX (configured: {current_env_str})"
+class PlaidService:
+    def __init__(self):
+        self.PLAID_CLIENT_ID = os.getenv("PLAID_CLIENT_ID")
+        self.PLAID_SECRET = os.getenv("PLAID_SECRET")
+        self.PLAID_ENV = os.getenv("PLAID_ENV", "sandbox")
 
-# Fetch credentials
-PLAID_CLIENT_ID = os.getenv("PLAID_CLIENT_ID")
-PLAID_SECRET = plaid_secret # Already loaded
+        if self.PLAID_ENV == "development":
+            host = plaid.Environment.Development
+        elif self.PLAID_ENV == "production":
+            host = plaid.Environment.Production
+        else:
+            host = plaid.Environment.Sandbox
 
-# Startup Logging
-print("-" * 40)
-print(env_log_msg)
-if PLAID_CLIENT_ID and PLAID_SECRET:
-    print(f"Using Plaid {current_env_str} keys")
-else:
-    print("⚠️  MISSING Plaid Credentials. Plaid Link will not work correctly.")
-    if not PLAID_CLIENT_ID: print("   - PLAID_CLIENT_ID is missing")
-    if not PLAID_SECRET: print("   - PLAID_SECRET is missing")
-print("-" * 40)
+        configuration = plaid.Configuration(
+            host=host,
+            api_key={
+                'clientId': self.PLAID_CLIENT_ID,
+                'secret': self.PLAID_SECRET,
+            }
+        )
+        api_client = plaid.ApiClient(configuration)
+        self.client = plaid_api.PlaidApi(api_client)
 
-# Initialize Plaid Client
-configuration = plaid.Configuration(
-    host=host_env,
-    api_key={
-        'clientId': PLAID_CLIENT_ID or "dummy_client_id",
-        'secret': PLAID_SECRET or "dummy_secret",
-    }
-)
-api_client = plaid.ApiClient(configuration)
-client = plaid_api.PlaidApi(api_client)
+    def create_link_token(self, user_id: str):
+        if not self.PLAID_SECRET or not self.PLAID_CLIENT_ID:
+            return "link-sandbox-mock-token-123"
 
-def create_link_token(user_id: str):
-    """
-    Create a link token for a given user.
-    """
-    # DEBUG: Check what the function actually sees
-    print(f"🕵️ DEBUG: PLAID_CLIENT_ID exists? {bool(PLAID_CLIENT_ID)}")
-    print(f"🕵️ DEBUG: PLAID_SECRET exists? {bool(PLAID_SECRET)}")
-
-    # Check if we have valid credentials to make a real call
-    if not PLAID_SECRET or not PLAID_CLIENT_ID:
-        if not PLAID_SECRET:
-            print("⚠️  Plaid Secret missing - returning MOCK link token")
-            return {"link_token": "link-sandbox-mock-token-123", "expiration": "2024-12-31T23:59:59Z"}
-        raise ValueError("Missing PLAID_CLIENT_ID environment variable")
-
-    if not user_id:
-        raise ValueError("user_id is required for Plaid Link Token creation")
-
-    try:
-        client_user_id = str(user_id)
-
-        # 3. Update /plaid/create_link_token to generate a link token for Investments
         request = LinkTokenCreateRequest(
-            products=[Products('investments')], 
+            products=[Products('investments')],
             client_name="Options Trading Companion",
-            country_codes=[CountryCode('US')], 
+            country_codes=[CountryCode('US')],
             language='en',
-            user=LinkTokenCreateRequestUser(
-                client_user_id=client_user_id
-            )
+            user=LinkTokenCreateRequestUser(client_user_id=str(user_id))
         )
+        response = self.client.link_token_create(request)
+        return response['link_token']
 
-        response = client.link_token_create(request)
-        response_dict = response.to_dict()
+    def exchange_public_token(self, public_token: str):
+        request = ItemPublicTokenExchangeRequest(public_token=public_token)
+        response = self.client.item_public_token_exchange(request)
+        return response['access_token']
 
-        print(f"✅ Plaid Link Token Created: {response_dict.get('link_token', 'N/A')[:10]}...")
-        # Return exact JSON structure as requested
-        return {"link_token": response_dict.get("link_token")}
+    def store_access_token(self, user_id: str, access_token: str):
+        encrypted_token = encrypt_token(access_token)
+        supabase.table('user_settings').upsert({
+            "user_id": user_id,
+            "plaid_access_token": encrypted_token
+        }, on_conflict="user_id").execute()
 
-    except plaid.ApiException as e:
-        print(f"❌ Plaid API Error (Create Link Token): {e}")
-        try:
-            import json
-            body = json.loads(e.body)
-            print(f"   Error Code: {body.get('error_code')}")
-            print(f"   Error Message: {body.get('error_message')}")
-        except:
-            pass
-        raise e
+    def get_access_token(self, user_id: str):
+        response = supabase.table('user_settings').select("plaid_access_token").eq("user_id", user_id).execute()
+        if response.data:
+            encrypted_token = response.data[0]['plaid_access_token']
+            return decrypt_token(encrypted_token)
+        return None
 
-def exchange_public_token(public_token: str):
-    """
-    Exchange public token for access token.
-    """
-    # Mock Handling
-    if not PLAID_SECRET or public_token == "mock-public-token":
-         print("⚠️  Returning MOCK access token")
-         return {"access_token": "access-sandbox-mock-token-123", "item_id": "mock-item-id"}
-
-    try:
-        request = ItemPublicTokenExchangeRequest(
-            public_token=public_token
-        )
-        response = client.item_public_token_exchange(request)
-        return response.to_dict()
-    except plaid.ApiException as e:
-        print(f"Plaid API Error (Exchange Token): {e}")
-        raise e
-
-def get_holdings(access_token: str):
-    """
-    Get holdings wrapper.
-    """
-    if not PLAID_SECRET or access_token.startswith("access-sandbox-mock-"):
-        print("⚠️  Returning MOCK holdings")
-        holdings = _get_mock_holdings()
-        return {"holdings": [h.dict() for h in holdings]}
-
-    holdings = fetch_and_normalize_holdings(access_token)
-    return {"holdings": [h.dict() for h in holdings]}
-
-def fetch_and_normalize_holdings(access_token: str) -> list[Holding]:
-    """
-    Fetches holdings from Plaid and normalizes them into our internal Holding model.
-    """
-    # Mock Handling inside the fetcher logic too
-    if not PLAID_SECRET or access_token.startswith("access-sandbox-mock-"):
-        print("⚠️  Returning MOCK holdings (Internal Fetch)")
-        return _get_mock_holdings()
-
-    if not PLAID_CLIENT_ID:
-        raise ValueError("Missing PLAID_CLIENT_ID environment variable")
-
-    try:
-        # 4. Ensure holdings sync uses the investments endpoint
+    def get_holdings(self, access_token: str):
         request = InvestmentsHoldingsGetRequest(access_token=access_token)
-        response = client.investments_holdings_get(request)
+        response = self.client.investments_holdings_get(request)
+        return self._normalize_holdings(response.to_dict())
 
-        holdings_data = response.get('holdings', [])
-        securities_data = {s['security_id']: s for s in response.get('securities', [])}
+    def _normalize_holdings(self, data):
+        holdings = data.get('holdings', [])
+        securities = {s['security_id']: s for s in data.get('securities', [])}
+        normalized = []
+        for h in holdings:
+            sec = securities.get(h['security_id'], {})
+            symbol = sec.get('ticker_symbol') or h.get('unofficial_currency_code')
+            if not symbol:
+                continue
 
-        normalized_holdings = []
-
-        for item in holdings_data:
-            security_id = item.get('security_id')
-            security = securities_data.get(security_id, {})
-
-            ticker = security.get('ticker_symbol')
-            # Fallback to name if ticker is missing, or skip? Prompt implies we match security.
-            # "For each holding in holdings, find the corresponding security to get its ticker_symbol"
-            # "symbol – use the security’s ticker if available (or a composite name if no ticker...)"
-            if not ticker:
-                ticker = security.get('name', 'Unknown')
-
-            qty = float(item.get('quantity', 0) or 0)
-            cost_basis = float(item.get('cost_basis', 0) or 0)
-            
-            # Fetch real price from Polygon if available
-            price = get_polygon_price(ticker)
-
-            if price == 0.0:
-                if security.get('close_price'):
-                    price = float(security.get('close_price'))
-                elif item.get('institution_price'):
-                    price = float(item.get('institution_price'))
-
-            # Fallback to institution value / quantity if price missing?
-            # Plaid usually provides institution_price.
-
-            holding = Holding(
-                symbol=ticker,
-                name=security.get('name'),
-                quantity=qty,
-                cost_basis=cost_basis,
-                current_price=price,
-                currency=item.get('iso_currency_code', 'USD'),
-                institution_name="Plaid",
-                source="plaid",
-                account_id=item.get('account_id'),
-                last_updated=datetime.now()
+            current_price = get_polygon_price(symbol)
+            normalized.append(
+                Holding(
+                    symbol=symbol,
+                    name=sec.get('name'),
+                    quantity=h['quantity'],
+                    cost_basis=h['cost_basis'],
+                    current_price=current_price or sec.get('close_price') or 0,
+                    currency=h['iso_currency_code'],
+                    last_updated=datetime.now()
+                ).dict()
             )
-            normalized_holdings.append(holding)
+        return normalized
 
-        return normalized_holdings
-
-    except plaid.ApiException as e:
-        print(f"Plaid API Error (Fetch Holdings): {e}")
-        raise e
-
-def _get_mock_holdings() -> list[Holding]:
-    """Return a list of mock holdings for testing"""
-    return [
-        Holding(
-            symbol="MOCK-AAPL",
-            name="Mock Apple Inc",
-            quantity=10.0,
-            cost_basis=150.0,
-            current_price=175.0,
-            institution_name="Mock Broker",
-            source="plaid",
-            last_updated=datetime.now()
-        ),
-        Holding(
-            symbol="MOCK-SPY",
-            name="Mock SPDR S&P 500",
-            quantity=5.0,
-            cost_basis=400.0,
-            current_price=450.0,
-            institution_name="Mock Broker",
-            source="plaid",
-            last_updated=datetime.now()
-        )
-    ]

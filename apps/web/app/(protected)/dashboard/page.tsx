@@ -3,7 +3,7 @@
 import { useState, useEffect } from 'react';
 import DashboardLayout from '@/components/DashboardLayout';
 import SyncHoldingsButton from '@/components/SyncHoldingsButton';
-import PortfolioOptimizer from '@/components/dashboard/PortfolioOptimizer';
+import { OptimizerWidget } from '@/components/dashboard/OptimizerWidget';
 import { supabase } from '@/lib/supabase';
 import { API_URL } from '@/lib/constants';
 
@@ -234,7 +234,7 @@ export default function DashboardPage() {
 
           {/* OPTIMIZER PANEL */}
           <div className="h-full">
-            <PortfolioOptimizer positions={snapshot?.holdings} />
+            <OptimizerWidget positions={snapshot?.holdings || []} />
           </div>
         </div>
 

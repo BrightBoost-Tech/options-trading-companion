@@ -6,6 +6,7 @@ echo "Testing /optimize/portfolio (Classical)..."
 curl -X POST "$BASE_URL/optimize/portfolio" \
     -H "Content-Type: application/json" \
     -d '{
+        "user_id": "75ee12ad-b119-4f32-aeea-19b4ef55d587",
         "positions": [
             {"symbol": "AAPL", "current_value": 15000, "current_quantity": 100, "current_price": 150},
             {"symbol": "GOOG", "current_value": 20000, "current_quantity": 10, "current_price": 2000}
@@ -20,6 +21,7 @@ echo "Testing /optimize/portfolio (Quantum)..."
 curl -X POST "$BASE_URL/optimize/portfolio" \
     -H "Content-Type: application/json" \
     -d '{
+        "user_id": "75ee12ad-b119-4f32-aeea-19b4ef55d587",
         "positions": [
             {"symbol": "AAPL", "current_value": 15000, "current_quantity": 100, "current_price": 150},
             {"symbol": "GOOG", "current_value": 20000, "current_quantity": 10, "current_price": 2000}

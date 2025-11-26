@@ -116,9 +116,6 @@ async def optimize_portfolio(req: OptimizationRequest):
         sigma = math_engine.get_covariance_matrix() + np.eye(len(tickers)) * 1e-6
         coskew = math_engine.get_coskewness_tensor()
 
-        # 4. SOLVER SELECTION (Quantum Bridge)
-        use_real_quantum = (req.skew_preference > 0) and (os.getenv("QCI_API_TOKEN") is not None) and (QciDiracAdapter is not None)
-
         # --- DYNAMIC CONSTRAINT LOGIC ---
         # If user has only 2 assets, 40% max weight is mathematically impossible (0.4 + 0.4 = 0.8 < 1.0).
         # We must relax the limit for small portfolios.
@@ -137,22 +134,53 @@ async def optimize_portfolio(req: OptimizationRequest):
             "max_position_pct": effective_max_pct, # Use the calculated limit
         }
 
-        weights_array = []
-        solver_type = "Classical"
+        # 4. SOLVER SELECTION (Quantum Bridge)
+        # Check environment
+        has_qci_token = (os.getenv("QCI_API_TOKEN") is not None)
 
-        if use_real_quantum:
+        # --- TRIAL MODE LOGIC ---
+        # If using Real Quantum, we MUST limit the number of assets to respect trial quotas.
+        # Dirac-3 is fast, but upload/processing times for N=50+ can act flaky on trial tiers.
+        TRIAL_ASSET_LIMIT = 15
+
+        solver_type = "Classical"
+        weights_array = []
+
+        if (req.skew_preference > 0) and has_qci_token and (QciDiracAdapter is not None):
             try:
-                print("🚀 Establishing uplink to QCI Dirac-3...")
-                q_solver = QciDiracAdapter()
-                weights_array = q_solver.solve_portfolio(mu, sigma, coskew, constraints)
-                solver_type = "QCI Dirac-3"
+                # A. ASSET THROTTLING
+                # If we have too many assets, slicing them effectively is hard without losing context.
+                # Strategy: If N > Limit, fall back to Classical immediately to save Credit
+                # unless the user explicitly forced it (advanced feature).
+                if len(tickers) > TRIAL_ASSET_LIMIT:
+                    print(f"⚠️ Portfolio size ({len(tickers)}) exceeds Trial Limit ({TRIAL_ASSET_LIMIT}).")
+                    print("   -> Fallback to Surrogate to save credits.")
+                    # Fallback logic
+                    s_solver = SurrogateOptimizer()
+                    weights_array = s_solver.solve(mu, sigma, coskew, constraints)
+                    solver_type = "Surrogate (Trial Limit)"
+
+                else:
+                    # B. EXECUTE QUANTUM JOB
+                    print(f"🚀 Uplinking {len(tickers)} assets to QCI Dirac-3 (Trial)...")
+                    q_solver = QciDiracAdapter()
+                    weights_array = q_solver.solve_portfolio(mu, sigma, coskew, constraints)
+                    solver_type = "QCI Dirac-3"
+
+            except ConnectionRefusedError as e:
+                # Specific handling for Quota Exceeded
+                print(f"⚠️ {e}. Switching to Surrogate.")
+                s_solver = SurrogateOptimizer()
+                weights_array = s_solver.solve(mu, sigma, coskew, constraints)
+                solver_type = "Surrogate (Quota Hit)"
+
             except Exception as e:
-                print(f"⚠️ Quantum Uplink Failed: {e}. Reverting to Surrogate.")
+                print(f"⚠️ Quantum Uplink Failed: {e}. Reverting.")
                 s_solver = SurrogateOptimizer()
                 weights_array = s_solver.solve(mu, sigma, coskew, constraints)
                 solver_type = "Surrogate (Fallback)"
         else:
-            # Standard Classical / Surrogate
+            # Standard Classical
             s_solver = SurrogateOptimizer()
             weights_array = s_solver.solve(mu, sigma, coskew, constraints)
             solver_type = "Surrogate (Simulated)"

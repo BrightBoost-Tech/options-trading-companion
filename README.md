@@ -5,12 +5,11 @@ A sophisticated portfolio optimization platform that helps retail investors make
 ## 🎯 Project Overview
 
 This application combines modern portfolio theory with advanced options analytics to provide:
-- **Portfolio Optimization**: Quantum-inspired algorithms for risk-adjusted returns
-- **Real-time Market Data**: Live pricing via Polygon.io API
-- **Options Analysis**: Greeks calculations and strategy recommendations
-- **Broker Integration**: Secure account connections via Plaid
-- **Trade Journal**: AI-powered learning from past trades
-- **Weekly Scout**: Automated discovery of high-probability options trades
+- **Portfolio Optimization**: Quantum-inspired algorithms for risk-adjusted returns.
+- **Real-time Market Data**: Live pricing via Polygon.io API.
+- **Broker Integration**: Secure account connections via Plaid.
+- **Trade Journal**: Foundational support for trade logging and analysis.
+- **Weekly Scout**: Automated discovery of high-probability options trades.
 
 ---
 
@@ -47,55 +46,27 @@ options-trading-companion/
 ## ✨ Features Implemented
 
 ### 1. **Portfolio Optimization Engine**
-- Mean-variance optimization using `scipy`
-- Risk-adjusted portfolio suggestions
-- Support for multiple portfolio types (growth, value, dividend, etc.)
-- Real-time Sharpe ratio calculations
+- **Surrogate Classical Solver**: Mean-variance-skew optimization for robust performance.
+- **Quantum-Ready**: Optional integration with QCI Dirac-3 via `QciDiracAdapter` for advanced, skew-aware optimization (requires `QCI_API_TOKEN`).
+- **Dynamic Constraints**: Automatically adjusts position limits for small portfolios to ensure mathematical solvability.
+- **Diagnostic Endpoints**: Includes local and remote tests to verify the optimizer's logic.
 
 ### 2. **Real-time Market Data**
-- Integration with Polygon.io for live stock prices
-- Options chain data retrieval
-- Historical data analysis
-- Support for 10+ ticker symbols
+- **Polygon.io Integration**: Live stock and options pricing.
+- **Mock Data Fallback**: Provides deterministic mock data for development and testing when API keys are not configured, ensuring stability.
 
-### 3. **Broker Account Integration** ⭐ *Just Completed!*
-- Secure connection via Plaid Link
-- Read-only access to brokerage accounts
-- Automatic position imports
-- Support for:
-  - Robinhood
-  - TD Ameritrade
-  - Fidelity
-  - Schwab
-  - E*TRADE
-  - And 12,000+ other institutions
+### 3. **Broker Account Integration (Plaid)**
+- **Secure Connection**: Uses Plaid Link for read-only access to brokerage accounts.
+- **Automated Position Syncing**: Imports and normalizes holdings from linked accounts into the `positions` table.
+- **Encrypted Storage**: Plaid access tokens are encrypted using Fernet before being stored.
 
-### 4. **Options Analytics**
-- Greeks calculations (Delta, Gamma, Theta, Vega)
-- Implied volatility analysis
-- Strategy recommendations
-- Risk/reward profiling
+### 4. **Options Analytics & Scouting**
+- **Weekly Options Scout**: Scans the market for high-probability trade opportunities based on predefined criteria.
+- **Expected Value (EV) Calculator**: An endpoint (`/ev`) calculates the expected value and max loss for various options strategies.
 
-### 5. **Trade Journal with AI Learning**
-- Record and track all trades
-- AI-powered pattern recognition
-- Performance analytics
-- Personalized insights based on history
-
-### 6. **Weekly Options Scout**
-- Automated scanning for high-probability trades
-- Filters based on:
-  - Volume
-  - Open interest
-  - IV rank
-  - Technical indicators
-- Customizable criteria
-
-### 7. **Compose Trade** 🆕
-- AI-powered trade validation
-- Strategy gating checks
-- Smart alternative suggestions
-- Risk validation before submission
+### 5. **Trade Journal (Foundational)**
+- **Backend Service**: Includes a `TradeJournal` class to load, analyze, and generate statistics from a local JSON file.
+- **Frontend Display**: The dashboard shows basic journal stats like win rate and total P&L.
 
 ---
 
@@ -107,12 +78,12 @@ If you are on Windows, you can start the entire application with one click:
 
 1. Double-click `start_app.bat` in the root folder.
    - This opens two terminal windows (one for the API, one for the frontend).
-   - The API runs on http://localhost:8000
+   - The API runs on http://127.0.0.1:8000
    - The Frontend runs on http://localhost:3000
 
 ### Prerequisites
 
-- **Node.js** 18+ and pnpm
+- **Node.js** 18+ and npm/pnpm
 - **Python** 3.9+
 - **Supabase** account (free tier works)
 - **Polygon.io** API key (free tier: 5 calls/min)
@@ -128,11 +99,11 @@ cd options-trading-companion
 
 # Install frontend dependencies
 cd apps/web
-pnpm install
+npm install
 
 # Install backend dependencies
 cd ../../packages/quantum
-pip install -r requirements.txt --break-system-packages
+pip install -r requirements.txt
 ```
 
 #### 2. Set Up Environment Variables
@@ -141,7 +112,6 @@ pip install -r requirements.txt --break-system-packages
 ```env
 NEXT_PUBLIC_SUPABASE_URL=https://your-project.supabase.co
 NEXT_PUBLIC_SUPABASE_ANON_KEY=your-anon-key
-NEXT_PUBLIC_POLYGON_API_KEY=your-polygon-key
 ```
 
 **Backend** (`packages/quantum/.env`):
@@ -151,66 +121,48 @@ PLAID_CLIENT_ID=your-plaid-client-id
 PLAID_SECRET=your-plaid-sandbox-secret
 PLAID_ENV=sandbox
 SUPABASE_SERVICE_ROLE_KEY=your-supabase-service-role-key
+ENCRYPTION_KEY=your-32-byte-fernet-key
+# Optional for quantum optimization
+QCI_API_TOKEN=your-qci-api-token
+# Optional for development
+APP_ENV=development
 ```
 
 #### 3. Set Up Database (Supabase)
 
 > For full schema, see `supabase/migrations/20240101000000_initial_schema.sql`.
-> Below is a simplified excerpt of the core tables.
+> The core table for holdings is `positions`.
 
-The positions table is the single source of truth for holdings; portfolio_snapshots stores time-stamped cached views used by the dashboard and portfolio pages.
 ```sql
--- App-level users (Supabase Auth users live in auth.users)
-CREATE TABLE IF NOT EXISTS users (
-  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  email TEXT UNIQUE NOT NULL,
-  created_at TIMESTAMPTZ DEFAULT NOW()
-);
-
 -- Positions (per-user holdings)
+-- This table is the single source of truth for user holdings.
 CREATE TABLE positions (
-  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-  user_id UUID REFERENCES auth.users NOT NULL,
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
   symbol TEXT NOT NULL,
-  quantity NUMERIC NOT NULL,
-  cost_basis NUMERIC,
-  current_price NUMERIC,
-  currency TEXT DEFAULT 'USD',
-  source TEXT,
-  updated_at TIMESTAMPTZ DEFAULT NOW()
+  qty NUMERIC NOT NULL,
+  avg_price NUMERIC NOT NULL,
+  greek_delta NUMERIC,
+  greek_theta NUMERIC,
+  greek_vega NUMERIC,
+  iv_rank NUMERIC,
+  updated_at TIMESTAMTz DEFAULT NOW()
 );
-
--- Trades (per-user trade history)
-CREATE TABLE trades (...);
-
-CREATE TABLE portfolio_snapshots (
-  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-  user_id UUID REFERENCES auth.users NOT NULL,
-  created_at TIMESTAMPTZ DEFAULT NOW(),
-  snapshot_type TEXT,
-  holdings JSONB NOT NULL,
-  risk_metrics JSONB,
-  optimizer_status TEXT
-);
-
--- Settings (quantum mode, LLM budget, etc.)
--- Note: user_settings.plaid_access_token is stored encrypted.
-CREATE TABLE settings (...);
 ```
 
 #### 4. Start the Application
 
 **Terminal 1 - Backend API:**
 ```bash
-cd packages/quantum
-python api.py
-# Runs on http://localhost:8000
+# From root directory
+./packages/quantum/run_server.sh
+# Runs on http://127.0.0.1:8000
 ```
 
 **Terminal 2 - Frontend:**
 ```bash
 cd apps/web
-pnpm dev
+npm run dev
 # Runs on http://localhost:3000
 ```
 
@@ -219,40 +171,22 @@ pnpm dev
 ## 📡 API Endpoints
 
 ### Portfolio Optimization
-- `POST /optimize` - Generate optimized portfolio
-- `POST /compare` - Compare multiple strategies
-- `POST /portfolio/snapshot` - Get portfolio state
-- `GET /holdings/export` - Export holdings to CSV
-
-### Market Data
-- `GET /quote/{symbol}` - Real-time quote
-- `POST /optimize/real` - Optimization with real market data
-- `POST /compare/real` - Strategy comparison with real market data
+- `POST /optimize/portfolio` - Generate an optimized portfolio based on current holdings, returning target weights and suggested trades.
+- `GET /optimize/diagnostics/phase1` - Local test to verify the skew-aware optimizer logic.
+- `POST /optimize/diagnostics/phase2/qci_uplink` - Live test to verify connection to QCI quantum hardware (requires `QCI_API_TOKEN`).
 
 ### Plaid Integration
-- `POST /plaid/create_link_token` - Create Plaid Link token
-- `POST /plaid/sync_holdings` - Sync account holdings
-- `POST /plaid/get_holdings` - Fetch account holdings
+- `GET /plaid/status` - Check if the current user has a connected Plaid account.
+- `POST /plaid/create_link_token` - Create a Plaid Link token to initialize the connection flow.
+- `POST /plaid/exchange_token` - Exchange a public token for a permanent access token and save it.
+- `POST /plaid/sync_holdings` - Trigger a sync to fetch holdings from the linked Plaid item.
 
-### Options Analysis
-- `POST /scout/weekly` - Weekly options scout
-- `POST /greeks` - Calculate Greeks
-- `POST /iv` - Implied volatility analysis
-
-### Trade Journal
-- `POST /journal/stats` - Get trading statistics
-- `POST /journal/learn` - AI learning from trades
-
----
-
-## 🔐 Security Features
-
-- **Authentication**: Supabase Auth with JWT tokens
-- **Row Level Security**: Database-level access control
-- **Encrypted Storage**: Plaid tokens stored encrypted
-- **Read-only Broker Access**: No trade execution permissions
-- **CORS Protection**: Configured for production domains
-- **Environment Variables**: Sensitive data never committed
+### Data & Analytics
+- `GET /portfolio/snapshot` - Retrieve the latest cached portfolio snapshot, including holdings and risk metrics.
+- `GET /holdings/export` - Export user's current holdings to a CSV file.
+- `GET /scout/weekly` - Scan for weekly options trade opportunities.
+- `GET /journal/stats` - Get statistics from the trade journal.
+- `POST /ev` - Calculate expected value and position size for an options trade.
 
 ---
 
@@ -261,68 +195,17 @@ pnpm dev
 ### Key Pages
 
 1. **Dashboard** (`/dashboard`)
-   - Portfolio overview & Risk metrics
-   - Integrated Options Scout
-   - Holdings breakdown (Option Plays, Long Term Holds, Cash) from live snapshots
-   - Portfolio Optimizer with quantum toggle, drift detection, and Sharpe/return/vol tiles
-   - Trade Journal auto-learning stats (win rate, P&L, rules)
+   - **Positions**: Displays current holdings grouped by "Option Plays", "Long Term Holds", and "Cash", fetched from the latest portfolio snapshot.
+   - **Portfolio Optimizer**: An interactive panel to run the backend optimizer and view suggested trades.
+   - **Weekly Options Scout**: A card showing top trade ideas from the weekly scan.
+   - **Trade Journal**: A card displaying key stats like win rate and P&L.
 
-2. **Compose** (`/compose`)
-   - New trade entry
-   - AI validation
-   - Strategy selector
+2. **Portfolio** (`/portfolio`)
+   - **Holdings Table**: A detailed view of all positions with columns for quantity, cost basis, current price, and total value.
+   - **Sync Button**: Manually triggers a Plaid holdings sync.
 
-3. **Portfolio** (`/portfolio`)
-   - Real holdings table (stock + options) sourced from Plaid / CSV
-   - Per-position quantity, cost basis, current price, and total value
-   - Sync holdings button that refreshes from Plaid and regenerates portfolio snapshot
-
-4. **Settings** (`/settings`)
-   - Broker connection (Plaid)
-   - Risk preferences
-   - Account management
-
-5. **Trade Journal** (`/journal`)
-   - Trade logging
-   - Performance tracking
-   - AI insights
-
-### Reusable Components
-
-- `PlaidLink.tsx` - Broker connection modal
-- Portfolio cards
-- Trade forms
-- Charts (via Chart.js)
-
----
-
-## 🧪 Testing
-
-### Test Plaid Integration (Sandbox)
-
-1. Go to Settings → Connect Broker
-2. Select "First Platypus Bank" (test institution)
-3. Login with:
-   - **Username**: `user_good`
-   - **Password**: `pass_good`
-4. Select any account
-5. Success! (fake data will be imported)
-
-### Test API Endpoints
-```bash
-# Test quote endpoint
-curl http://localhost:8000/quote/AAPL
-
-# Test optimization
-curl -X POST http://localhost:8000/optimize \
-  -H "Content-Type: application/json" \
-  -d '{"tickers":["AAPL","MSFT","GOOGL"],"risk_tolerance":2.0}'
-
-# Test Plaid
-curl -X POST http://localhost:8000/plaid/create_link_token \
-  -H "Content-Type: application/json" \
-  -d '{"user_id":"test123"}'
-```
+3. **Settings** (`/settings`)
+   - **Broker Connection**: A simple interface for connecting and disconnecting a brokerage account using Plaid Link.
 
 ---
 
@@ -330,97 +213,21 @@ curl -X POST http://localhost:8000/plaid/create_link_token \
 
 ### ✅ Completed Features
 
-- [x] FastAPI backend with CORS
-- [x] Next.js 14 frontend (App Router)
-- [x] Supabase authentication
-- [x] Portfolio optimization engine
-- [x] Polygon.io integration
-- [x] **Plaid broker integration** ⭐
-- [x] Real-time market data
-- [x] Options Greeks calculations
-- [x] Weekly options scout
-- [x] Trade journal with AI learning
-- [x] Compose Trade with AI validation
-- [x] Responsive UI
-- [x] Import real holdings from broker
-- [x] Display positions in portfolio (Dashboard & Portfolio pages)
+- [x] FastAPI backend with CORS and rate limiting.
+- [x] Next.js 14 frontend with protected routes.
+- [x] Supabase authentication and database.
+- [x] **Plaid broker integration** for syncing holdings.
+- [x] **Portfolio optimization engine** with classical and quantum-ready solvers.
+- [x] **Weekly options scout** for trade ideas.
+- [x] Mock data fallbacks for stable development.
+- [x] Display of positions in Dashboard and Portfolio pages.
 
-### 🚧 In Progress
+### 🚧 In Progress / Planned
 
-- [ ] Plaid Production approval (submitted)
-- [ ] Advanced charting
-- [ ] Options strategy builder
-- [ ] Risk metrics dashboard (expanded)
-
-### 📋 Roadmap
-
-1. **Phase 1: Core Functionality** ✅
-   - Authentication
-   - Portfolio management
-   - Market data integration
-
-2. **Phase 2: Broker Integration** ✅
-   - Plaid implementation
-   - Position imports
-   - Account syncing
-
-3. **Phase 3: Advanced Analytics** (Current)
-   - Performance tracking & P&L history
-   - Expanded risk metrics dashboard (volatility, concentration, correlations)
-   - Rebalance suggestions based on drift metrics
-
-4. **Phase 4: AI Features** (Next)
-   - Trade pattern recognition (multi-trade analysis)
-   - Predictive modeling
-   - Automated recommendations / weekly playbook
-
-5. **Phase 5: Production** (Future)
-   - Real broker connections
-   - Live trading alerts
-   - Mobile app
-
----
-
-## 🐛 Troubleshooting
-
-### Common Issues
-
-**1. Module not found errors (Next.js)**
-```bash
-# Clear cache and reinstall
-rm -rf .next node_modules
-pnpm install
-pnpm dev
-```
-
-**2. Plaid "INVALID_API_KEYS" error**
-```bash
-# Check .env file has no quotes or extra spaces
-cat packages/quantum/.env
-
-# Verify keys in Plaid dashboard
-# https://dashboard.plaid.com/team/keys
-```
-
-**3. Database connection errors**
-```bash
-# Verify Supabase URL and anon key
-# Check RLS policies are enabled
-# Confirm user is authenticated
-```
-
-**4. CORS errors**
-```bash
-# Ensure API is running on port 8000
-# Check frontend is on port 3000
-# Restart both servers
-```
-
-**5. Python dependency issues**
-```bash
-# Use --break-system-packages flag
-pip install pandas --break-system-packages
-```
+- [ ] **Advanced Options Analytics**: Display Greeks, IV rank, and other metrics per position.
+- [ ] **Trade Journal Enhancements**: Move from a local JSON file to a database-backed system with a dedicated UI.
+- [ ] **Historical Performance**: Track portfolio value and P&L over time with charts.
+- [ ] **Plaid Production Approval**: Complete the process to use Plaid with real brokerage accounts.
 
 ---
 
@@ -431,20 +238,17 @@ pip install pandas --break-system-packages
 - **Language**: TypeScript
 - **Styling**: Tailwind CSS
 - **Auth**: Supabase Auth
-- **State**: React Hooks
-- **Charts**: Chart.js / Recharts
 
 ### Backend
 - **Framework**: FastAPI
 - **Language**: Python 3.9+
-- **Optimization**: SciPy, NumPy, Pandas
+- **Optimization**: NumPy, Pandas, SciPy
 - **Data**: Polygon.io API
 - **Broker**: Plaid API
 
 ### Infrastructure
 - **Database**: Supabase (PostgreSQL)
 - **Auth**: Supabase Auth
-- **Hosting**: TBD (Vercel + Railway recommended)
 
 ---
 
@@ -452,94 +256,31 @@ pip install pandas --break-system-packages
 
 ### Required Variables
 
-**Frontend:**
+**Frontend (`apps/web/.env.local`):**
 ```env
 NEXT_PUBLIC_SUPABASE_URL=          # Supabase project URL
 NEXT_PUBLIC_SUPABASE_ANON_KEY=     # Supabase anonymous key
-NEXT_PUBLIC_POLYGON_API_KEY=       # Polygon.io API key
 ```
 
-**Backend:**
+**Backend (`packages/quantum/.env`):**
 ```env
-POLYGON_API_KEY=                   # Polygon.io API key
+POLYGON_API_KEY=                   # Polygon.io API key for market data
 PLAID_CLIENT_ID=                   # Plaid client ID
-PLAID_SECRET=                      # Plaid secret (sandbox or production)
-PLAID_ENV=sandbox                  # 'sandbox' or 'production'
-SUPABASE_SERVICE_ROLE_KEY=         # Supabase service role key (for backend Supabase client)
+PLAID_SECRET=                      # Plaid secret (for sandbox or production)
+PLAID_ENV=sandbox                  # Plaid environment ('sandbox', 'development', or 'production')
+SUPABASE_SERVICE_ROLE_KEY=         # Supabase service role key for backend access
+ENCRYPTION_KEY=                    # 32-byte Fernet key for encrypting Plaid tokens
 ```
 
 ### Optional Variables
+
+**Backend (`packages/quantum/.env`):**
 ```env
-ANTHROPIC_API_KEY=                 # For AI features (future)
-REDIS_URL=                         # For caching (future)
+QCI_API_TOKEN=                     # API token for QCI quantum computer access
+APP_ENV=development                # Set to 'development' to enable test mode features
 ```
 
 ---
 
-## 🤝 Contributing
-
-This is currently a personal project. If you'd like to contribute:
-
-1. Fork the repository
-2. Create a feature branch
-3. Make your changes
-4. Submit a pull review
-
----
-
-## 📜 License
-
-MIT License - feel free to use this for your own projects!
-
----
-
-## 🙏 Acknowledgments
-
-- **Polygon.io** - Real-time market data
-- **Plaid** - Secure broker connections
-- **Supabase** - Backend infrastructure
-- **Anthropic** - AI assistance in development
-
----
-
-## 📞 Support
-
-For issues or questions:
-- Check the troubleshooting section above
-- Review API documentation at http://localhost:8000/docs
-- Check console logs for detailed errors
-
----
-
-## 🎯 Quick Start Checklist
-
-- [ ] Clone repository
-- [ ] Install dependencies (pnpm + pip)
-- [ ] Create Supabase project
-- [ ] Get Polygon.io API key
-- [ ] Create Plaid account
-- [ ] Set up .env files
-- [ ] Run database migrations
-- [ ] Start backend (`python api.py`)
-- [ ] Start frontend (`pnpm dev`)
-- [ ] Create account at http://localhost:3000/signup
-- [ ] Connect test broker in Settings
-- [ ] Test portfolio optimization
-
----
-
-**Last Updated**: November 25, 2025
-**Version**: 1.0.0-beta
-**Status**: MVP Complete - Testing Phase
-
----
-
-## 🚀 What's Next?
-
-Now that Plaid is integrated, the next steps are:
-
-- Production Access – Get Plaid approved for real brokerage accounts
-- Enhanced Performance Tracking – Time-series P&L and equity curve per portfolio
-- Greek Overlays – Show Delta/Theta/Vega per holding and at portfolio level
-- Automated Rebalancing – Turn drift metrics into actionable rebalance checklists
-- UX & Mobile Polish – Refine dashboard/portfolio layout and loading states
+**Last Updated**: November 25, 2024
+**Version**: 2.0.0

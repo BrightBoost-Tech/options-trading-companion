@@ -1,65 +1,87 @@
-// apps/web/app/(protected)/portfolio/page.tsx
 'use client';
 
-// ... imports
-import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
+import { useEffect, useState } from 'react';
+import { createClientComponentClient } from '@supabase/auth-helpers-nextjs';
+import { PortfolioHeader } from '@/components/portfolio/PortfolioHeader';
+import { DataTable } from '@/components/portfolio/data-table'; // Ensure this file exists
+import { columns } from '@/components/portfolio/columns'; // Define your columns here
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
-import { DataTable } from '@/components/portfolio/data-table'; // Assuming this component exists
-import { optionColumns, stockColumns } from '@/components/portfolio/columns'; // Assuming these exist
-import { usePortfolio } from '@/hooks/usePortfolio'; // Assuming this hook exists
+import { Button } from '@/components/ui/button';
+import { RefreshCw } from 'lucide-react';
 
 export default function PortfolioPage() {
-  const { positions, isLoading } = usePortfolio();
+  const [positions, setPositions] = useState<any[]>([]);
+  const [metrics, setMetrics] = useState({
+    totalDelta: 0,
+    totalTheta: 0,
+    netLiquidity: 0,
+    buyingPower: 0
+  });
+  const [loading, setLoading] = useState(true);
+  const supabase = createClientComponentClient();
 
-  // Helper: Aggregate Portfolio Greeks
-  const portfolioDelta = positions.reduce((acc, pos) => acc + (pos.greeks?.delta || 0), 0);
-  const portfolioTheta = positions.reduce((acc, pos) => acc + (pos.greeks?.theta || 0), 0);
+  const fetchPortfolio = async () => {
+    setLoading(true);
+    // 1. Fetch Positions
+    const { data: posData } = await supabase.from('positions').select('*');
 
-  if (isLoading) {
-    return <div>Loading...</div>;
-  }
+    if (posData) {
+      setPositions(posData);
+
+      // 2. Calculate Aggregated Metrics (The "Efficient" Logic)
+      // In a real app, these greeks would come from the database/API
+      const totalDelta = posData.reduce((acc, p) => acc + (p.greeks?.delta || 0), 0);
+      const totalTheta = posData.reduce((acc, p) => acc + (p.greeks?.theta || 0), 0);
+      const netLiq = posData.reduce((acc, p) => acc + (p.quantity * p.current_price), 0); // Simplified
+
+      setMetrics({
+        totalDelta,
+        totalTheta,
+        netLiquidity: netLiq,
+        buyingPower: 10000 // Mock or fetch from User table
+      });
+    }
+    setLoading(false);
+  };
+
+  useEffect(() => {
+    fetchPortfolio();
+  }, []);
 
   return (
-    <div className="space-y-6 p-4">
-      {/* 1. Portfolio Health Header */}
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-        <Card>
-           <CardHeader className="pb-2"><CardTitle className="text-sm">Net Portfolio Delta</CardTitle></CardHeader>
-           <CardContent>
-             <div className="text-2xl font-bold">{portfolioDelta.toFixed(2)}</div>
-             <p className="text-xs text-muted-foreground">Market Direction Bias</p>
-           </CardContent>
-        </Card>
-        <Card>
-           <CardHeader className="pb-2"><CardTitle className="text-sm">Daily Theta Decay</CardTitle></CardHeader>
-           <CardContent>
-             <div className="text-2xl font-bold text-green-400">${portfolioTheta.toFixed(2)}</div>
-             <p className="text-xs text-muted-foreground">Time value collected/day</p>
-           </CardContent>
-        </Card>
-        {/* ... Liquidity / Cash metrics ... */}
+    <div className="flex-1 space-y-4 p-8 pt-6">
+      <div className="flex items-center justify-between space-y-2">
+        <h2 className="text-3xl font-bold tracking-tight">Portfolio</h2>
+        <div className="flex items-center space-x-2">
+          <Button onClick={fetchPortfolio} disabled={loading}>
+            <RefreshCw className={`mr-2 h-4 w-4 ${loading ? 'animate-spin' : ''}`} />
+            Sync
+          </Button>
+        </div>
       </div>
 
-      {/* 2. Grouped Holdings Table */}
-      <Tabs defaultValue="options" className="w-full">
+      {/* 1. High-Level Metrics */}
+      <PortfolioHeader metrics={metrics} />
+
+      {/* 2. Optimized Tabbed View */}
+      <Tabs defaultValue="options" className="space-y-4">
         <TabsList>
-          <TabsTrigger value="options">Active Options</TabsTrigger>
-          <TabsTrigger value="shares">Long Term Holds</TabsTrigger>
+          <TabsTrigger value="options">Option Plays</TabsTrigger>
+          <TabsTrigger value="stocks">Long Term Holds</TabsTrigger>
+          <TabsTrigger value="all">All Positions</TabsTrigger>
         </TabsList>
 
-        <TabsContent value="options">
-          <DataTable
-             columns={optionColumns}
-             data={positions.filter(p => p.type === 'option')}
-             filterKey="symbol"
-          />
+        <TabsContent value="options" className="space-y-4">
+           {/* Filter logic happens here or in the DataTable */}
+           <DataTable columns={columns} data={positions.filter(p => p.asset_class === 'option')} />
         </TabsContent>
-        <TabsContent value="shares">
-          <DataTable
-             columns={stockColumns}
-             data={positions.filter(p => p.type === 'equity')}
-             filterKey="symbol"
-          />
+
+        <TabsContent value="stocks" className="space-y-4">
+           <DataTable columns={columns} data={positions.filter(p => p.asset_class === 'equity')} />
+        </TabsContent>
+
+        <TabsContent value="all" className="space-y-4">
+           <DataTable columns={columns} data={positions} />
         </TabsContent>
       </Tabs>
     </div>

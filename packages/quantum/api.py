@@ -389,6 +389,26 @@ async def get_portfolio_snapshot(
         pass
 
     if snapshot:
+        processed_holdings = []
+        holdings_data = snapshot.get('holdings', [])
+        if holdings_data:
+            for pos in holdings_data:
+                qty = float(pos.get('quantity') or 0)
+                cost_basis = float(pos.get('cost_basis') or 0)
+                current_price = float(pos.get('current_price') or 0)
+                current_value = qty * current_price
+
+                unrealized_pnl_pct = 0.0
+                if cost_basis > 0:
+                    unrealized_pnl = current_value - cost_basis
+                    unrealized_pnl_pct = (unrealized_pnl / cost_basis) * 100.0
+
+                pos_with_pnl = pos.copy()
+                pos_with_pnl['current_value'] = current_value
+                pos_with_pnl['unrealized_pnl_pct'] = unrealized_pnl_pct
+                processed_holdings.append(pos_with_pnl)
+
+        snapshot['holdings'] = processed_holdings
         return snapshot
     else:
         return {"message": "No snapshot found", "holdings": []}
@@ -492,6 +512,37 @@ async def get_expected_value(request: EVRequest):
         response["position_sizing"] = position_size
 
     return response
+
+class PositionSizeRequest(BaseModel):
+    win_probability: float  # e.g., 0.65
+    win_amount: float       # profit if win
+    loss_amount: float      # loss if lose
+    portfolio_value: float  # total account value
+
+@app.post("/position-size")
+def calculate_position_size_endpoint(req: PositionSizeRequest):
+    """Kelly Criterion for optimal position sizing."""
+    p = req.win_probability
+    q = 1 - p
+    b = req.win_amount / req.loss_amount  # win/loss ratio
+
+    # Kelly formula: f* = (bp - q) / b
+    kelly_fraction = (b * p - q) / b
+
+    # Use half-Kelly for safety
+    half_kelly = max(0, kelly_fraction / 2)
+
+    suggested_risk = half_kelly * req.portfolio_value
+    max_contracts = int(suggested_risk / req.loss_amount)
+
+    return {
+        "full_kelly_pct": round(kelly_fraction * 100, 2),
+        "half_kelly_pct": round(half_kelly * 100, 2),
+        "suggested_risk_dollars": round(suggested_risk, 2),
+        "max_contracts": max_contracts,
+        "rationale": "Half-Kelly balances growth with drawdown protection",
+    }
+
 
 if __name__ == "__main__":
     import uvicorn

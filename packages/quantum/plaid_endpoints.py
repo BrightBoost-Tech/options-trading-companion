@@ -1,10 +1,12 @@
 """
 Plaid API Endpoints
 """
-from fastapi import HTTPException, Header
-from typing import Dict
+from fastapi import HTTPException, Header, Depends
+from typing import Dict, Optional
 import json
 import plaid
+import secrets
+from security import get_current_user
 from plaid.exceptions import ApiException
 from datetime import datetime
 from security import encrypt_token, decrypt_token
@@ -12,6 +14,8 @@ from security import encrypt_token, decrypt_token
 def register_plaid_endpoints(app, plaid_service, supabase_client=None):
     """Register Plaid endpoints with the FastAPI app"""
     
+    pending_link_sessions: dict[str, str] = {}  # state -> user_id
+
     if not plaid_service:
         print("⚠️  Plaid service not available - endpoints disabled")
         return
@@ -67,13 +71,14 @@ def register_plaid_endpoints(app, plaid_service, supabase_client=None):
             return {"connected": False, "institution": None}
 
     @app.post("/plaid/create_link_token")
-    async def create_plaid_link_token(request: Dict):
+    async def create_plaid_link_token(user_id: str = Depends(get_current_user)):
         """Create Plaid Link token for connecting brokerage account"""
         try:
-            user_id = request.get('user_id', 'default_user')
+            state = secrets.token_urlsafe(32)
+            pending_link_sessions[state] = user_id
+
             result = plaid_service.create_link_token(user_id)
-            # Ensure return format is { "link_token": "..." }
-            # Service returns full dict, which includes link_token
+            result['state'] = state
             return result
         except ValueError as e:
             print(f"❌ Plaid Configuration Error: {e}")
@@ -87,16 +92,24 @@ def register_plaid_endpoints(app, plaid_service, supabase_client=None):
             raise HTTPException(status_code=500, detail=f"Internal Server Error: {str(e)}")
 
     @app.post("/plaid/exchange_token")
-    async def exchange_plaid_token(request: Dict):
+    async def exchange_plaid_token(request: Dict, user_id: str = Depends(get_current_user)):
         """Exchange public token for access token and store it"""
         try:
             public_token = request.get('public_token')
-            user_id = request.get('user_id')
-            metadata = request.get('metadata', {}) # Plaid Link metadata
+            state = request.get('state')
+            metadata = request.get('metadata', {})
 
-            if not public_token:
-                raise HTTPException(status_code=400, detail="public_token required")
-            
+            if not public_token or not state:
+                raise HTTPException(status_code=400, detail="public_token and state are required")
+
+            if state not in pending_link_sessions:
+                raise HTTPException(status_code=403, detail="Invalid or expired session")
+
+            if pending_link_sessions[state] != user_id:
+                raise HTTPException(status_code=403, detail="Session mismatch")
+
+            del pending_link_sessions[state]
+
             print(f"🔄 Exchanging public token for user {user_id}...")
             result = plaid_service.exchange_public_token(public_token)
 

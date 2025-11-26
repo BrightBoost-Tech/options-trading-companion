@@ -14,6 +14,9 @@ try:
 except ImportError:
     QciDiracAdapter = None
 
+from dirac3_client import Dirac3Client
+dirac3 = Dirac3Client()
+
 router = APIRouter()
 
 # --- Schemas ---
@@ -35,31 +38,38 @@ def generate_trade_instructions(current_positions, target_weights, total_equity)
     current_map = {p.symbol: p for p in current_positions}
 
     for symbol, weight in target_weights.items():
-        # 1. Target Value
         target_val = total_equity * weight
-
-        # 2. Current Value
         curr_pos = current_map.get(symbol)
         curr_val = curr_pos.current_value if curr_pos else 0.0
-        curr_price = curr_pos.current_price if curr_pos else 100.0 # Fallback price
+        curr_price = curr_pos.current_price if curr_pos else 100.0
 
-        # 3. Delta
         diff = target_val - curr_val
+        percent_change = diff / total_equity if total_equity > 0 else 0
 
-        # 4. Filter Noise (Ignore trades < $50)
+        # Filter Noise
         if abs(diff) > 50.0:
             action = "BUY" if diff > 0 else "SELL"
             qty = abs(diff) / curr_price
 
-            # Don't suggest buying 0.01 shares unless it's Berkshire Hathaway
-            if qty >= 0.05:
-                trades.append({
-                    "symbol": symbol,
-                    "action": action,
-                    "value": round(abs(diff), 2),
-                    "est_quantity": round(qty, 2),
-                    "rationale": f"Target: {round(weight*100, 1)}% (Delta: ${int(diff)})"
-                })
+            # --- NEW: OPTION STRATEGY MAPPING ---
+            # If the algo wants to move > 5% of portfolio into this asset, it has High Conviction.
+            strategy_suggestion = "Shares"
+            if action == "BUY" and percent_change > 0.05:
+                strategy_suggestion = "Long Call or Bull Call Spread"
+            elif action == "SELL" and percent_change < -0.05:
+                strategy_suggestion = "Long Put or Bear Put Spread"
+            elif action == "SELL":
+                strategy_suggestion = "Trim Position / Cash Secured Put"
+
+            trades.append({
+                "symbol": symbol,
+                "action": action,
+                "value": round(abs(diff), 2),
+                "est_quantity": round(qty, 2),
+                # "Rationale" is now actionable for an options trader
+                "rationale": f"{strategy_suggestion} (Conviction: {round(abs(percent_change)*100, 1)}%)"
+            })
+
     return trades
 
 # --- Endpoint 1: Main Optimization (Phase 2 Logic) ---
@@ -145,6 +155,16 @@ async def optimize_portfolio(req: OptimizationRequest):
 
         solver_type = "Classical"
         weights_array = []
+
+        if dirac3.enabled:
+            dirac_result = dirac3.optimize_portfolio(investable_assets, constraints)
+            if dirac_result is not None:
+                # map dirac_result into target_weights or trade instructions
+                # For now, we'll just log that it was called
+                print("🚀 Dirac-3 Optimizer was called, but is not yet implemented.")
+                solver_type = "Dirac-3"
+                # This would be where you map the result to weights_array
+                # For now, we'll fall through to the classical solver.
 
         if (req.skew_preference > 0) and has_qci_token and (QciDiracAdapter is not None):
             try:

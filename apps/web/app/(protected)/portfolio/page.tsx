@@ -152,12 +152,15 @@ export default function PortfolioPage() {
                       <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Avg Cost</th>
                       <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Current Price</th>
                       <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Value</th>
+                      <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">P&L $</th>
+                      <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">P&amp;L %</th>
                       <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Source</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-gray-200">
                     {holdings.map((pos, idx) => {
-                        const value = (pos.quantity || 0) * (pos.current_price || 0);
+                        const value = pos.current_value || ((pos.quantity || 0) * (pos.current_price || 0));
+                        const pnl = value - pos.cost_basis;
                         return (
                       <tr key={idx} className="hover:bg-gray-50">
                         <td className="px-6 py-4 font-medium">{pos.symbol}</td>
@@ -170,6 +173,17 @@ export default function PortfolioPage() {
                         <td className="px-6 py-4">${(pos.cost_basis || 0).toFixed(2)}</td>
                         <td className="px-6 py-4">${(pos.current_price || 0).toFixed(2)}</td>
                         <td className="px-6 py-4 font-medium">${value.toFixed(2)}</td>
+                        <td className={`px-6 py-4 font-medium ${pnl >= 0 ? 'text-green-600' : 'text-red-600'}`}>
+                            {pnl.toFixed(2)}
+                        </td>
+                        <td className="px-6 py-4">
+                          {(() => {
+                            const pnl_pct = pos.unrealized_pnl_pct ?? 0;
+                            const color =
+                              pnl_pct > 0 ? "text-green-500" : pnl_pct < 0 ? "text-red-500" : "text-gray-500";
+                            return <span className={color}>{pnl_pct.toFixed(1)}%</span>;
+                          })()}
+                        </td>
                         <td className="px-6 py-4">
                              <span className={`px-2 py-1 rounded text-xs ${pos.source === 'plaid' ? 'bg-green-100 text-green-800' : 'bg-yellow-100 text-yellow-800'}`}>
                                {pos.source || 'Manual'}

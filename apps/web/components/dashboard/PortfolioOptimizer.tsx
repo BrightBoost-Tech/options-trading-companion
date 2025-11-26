@@ -10,7 +10,9 @@ import {
   RefreshCw,
   Cpu,
   ShieldCheck,
-  Zap
+  Zap,
+  ArrowUpRight,
+  ArrowDownRight
 } from 'lucide-react'
 import clsx from 'clsx'
 import { API_URL } from '@/lib/constants'
@@ -248,26 +250,59 @@ export default function PortfolioOptimizer({ positions }: { positions: any[] }) 
                         <p className="text-sm text-slate-600">Portfolio is optimal.</p>
                     </div>
                 ) : (
-                    results.trades.map((trade, idx) => (
-                      <div key={idx} className="flex items-center justify-between p-3 bg-white rounded-lg border border-slate-100 shadow-sm hover:shadow-md transition-shadow">
-                        <div className="flex items-center gap-3">
-                          <span className={clsx(
-                              "px-2.5 py-1 rounded text-[10px] font-bold uppercase tracking-wider",
-                              trade.action === 'BUY' ? 'bg-emerald-100 text-emerald-700' : 'bg-rose-100 text-rose-700'
-                          )}>
-                            {trade.action}
-                          </span>
-                          <div>
-                            <span className="font-bold text-sm text-slate-800">{trade.symbol}</span>
-                            <span className="text-xs text-slate-500 ml-2">x {trade.est_quantity}</span>
-                          </div>
-                        </div>
-                        <div className="text-right">
-                            <div className="text-sm font-bold text-slate-700">${trade.value.toLocaleString()}</div>
-                            <div className="text-[10px] text-slate-400">{trade.rationale}</div>
-                        </div>
-                      </div>
-                    ))
+                  results.trades.map((trade, idx) => (
+  <div
+    key={idx}
+    className="group flex items-center justify-between p-4 bg-white rounded-xl border border-slate-100 shadow-sm hover:shadow-md hover:border-indigo-100 transition-all cursor-pointer"
+  >
+    {/* Left: Symbol & Strategy */}
+    <div className="flex items-center gap-4">
+      <div
+        className={clsx(
+          "flex items-center justify-center w-10 h-10 rounded-full bg-opacity-10",
+          trade.action === "BUY"
+            ? "bg-emerald-500 text-emerald-600"
+            : "bg-rose-500 text-rose-600"
+        )}
+      >
+        {trade.action === "BUY" ? (
+          <ArrowUpRight className="w-5 h-5" strokeWidth={3} />
+        ) : (
+          <ArrowDownRight className="w-5 h-5" strokeWidth={3} />
+        )}
+      </div>
+      <div>
+        <div className="flex items-baseline gap-2">
+          <span className="font-bold text-lg text-slate-800">{trade.symbol}</span>
+          <span
+            className={clsx(
+              "text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded-full",
+              trade.action === "BUY"
+                ? "bg-emerald-50 text-emerald-700"
+                : "bg-rose-50 text-rose-700"
+            )}
+          >
+            {trade.action}
+          </span>
+        </div>
+        {/* Shows the new Option Strategy from Fix #1 */}
+        <span className="text-xs font-medium text-slate-500">
+          {trade.rationale}
+        </span>
+      </div>
+    </div>
+
+    {/* Right: Money & Execution */}
+    <div className="text-right">
+      <div className="text-sm font-bold text-slate-700">
+        ${trade.value.toLocaleString()}
+      </div>
+      <div className="text-xs text-slate-400">
+        Est. {trade.est_quantity} shares equiv.
+      </div>
+    </div>
+  </div>
+))
                 )}
               </div>
             </div>

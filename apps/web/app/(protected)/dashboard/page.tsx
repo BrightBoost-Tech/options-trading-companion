@@ -128,10 +128,8 @@ export default function DashboardPage() {
 
   // --- RENDER HELPERS ---
   const renderPositionRow = (position: any, idx: number, type: 'option' | 'stock') => {
-      const cost = position.cost_basis * position.quantity;
-      const value = position.current_price * position.quantity;
-      const pnl = value - cost;
-      const pnlPercent = position.cost_basis > 0 ? (pnl / cost) * 100 : 0;
+      const value = position.current_value || (position.current_price * position.quantity);
+      const pnl = value - position.cost_basis;
 
       return (
         <tr key={`${type}-${idx}`} className="hover:bg-gray-50">
@@ -146,13 +144,16 @@ export default function DashboardPage() {
             </td>
             <td className="px-6 py-4 whitespace-nowrap">
                 <div className={`font-bold ${pnl >= 0 ? 'text-green-600' : 'text-red-600'}`}>
-                {pnl >= 0 ? '+' : ''}{pnl.toFixed(2)} ({pnlPercent.toFixed(1)}%)
+                    {pnl >= 0 ? '+' : ''}{pnl.toFixed(2)}
                 </div>
-                {type === 'option' && pnlPercent >= 50 && (
-                    <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-green-100 text-green-800 animate-pulse">
-                    TARGET HIT 🎯
-                    </span>
-                )}
+            </td>
+            <td className="px-6 py-4 whitespace-nowrap">
+              {(() => {
+                const pnl = position.unrealized_pnl_pct ?? 0;
+                const color =
+                  pnl > 0 ? "text-green-500" : pnl < 0 ? "text-red-500" : "text-gray-500";
+                return <span className={color}>{pnl.toFixed(1)}%</span>;
+              })()}
             </td>
         </tr>
       );
@@ -178,7 +179,8 @@ export default function DashboardPage() {
                       <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Qty</th>
                       <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Avg Cost</th>
                       <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Price</th>
-                      <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">P&L</th>
+                      <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">P&L $</th>
+                      <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">P&amp;L %</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-gray-200">

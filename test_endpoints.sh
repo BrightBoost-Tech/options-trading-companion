@@ -2,34 +2,20 @@
 
 BASE_URL="http://localhost:8000"
 
-echo "Testing /optimize/portfolio (Classical)..."
+echo "Testing /optimize/portfolio..."
 curl -X POST "$BASE_URL/optimize/portfolio" \
     -H "Content-Type: application/json" \
     -d '{
         "user_id": "75ee12ad-b119-4f32-aeea-19b4ef55d587",
-        "positions": [
-            {"symbol": "AAPL", "current_value": 15000, "current_quantity": 100, "current_price": 150},
-            {"symbol": "GOOG", "current_value": 20000, "current_quantity": 10, "current_price": 2000}
+        "current_positions": [
+            {"symbol": "AAPL", "quantity": 100, "current_price": 150, "market_value": 15000, "pnl_pct": 10},
+            {"symbol": "GOOG", "quantity": 10, "current_price": 2000, "market_value": 20000, "pnl_pct": -60}
         ],
-        "risk_aversion": 1.0,
-        "skew_preference": 0.0,
+        "risk_tolerance": 0.5,
         "cash_balance": 5000
     }'
 echo -e "\n"
 
-echo "Testing /optimize/portfolio (Quantum)..."
-curl -X POST "$BASE_URL/optimize/portfolio" \
-    -H "Content-Type: application/json" \
-    -d '{
-        "user_id": "75ee12ad-b119-4f32-aeea-19b4ef55d587",
-        "positions": [
-            {"symbol": "AAPL", "current_value": 15000, "current_quantity": 100, "current_price": 150},
-            {"symbol": "GOOG", "current_value": 20000, "current_quantity": 10, "current_price": 2000}
-        ],
-        "risk_aversion": 1.0,
-        "skew_preference": 10.0,
-        "cash_balance": 5000
-    }'
-echo -e "\n"
-
+echo "Testing /scout/weekly..."
+curl -X GET "$BASE_URL/scout/weekly?risk_tolerance=0.5"
 echo -e "\n"

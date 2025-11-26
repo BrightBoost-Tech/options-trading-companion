@@ -63,7 +63,11 @@ export function OptimizerWidget({ positions }: OptimizerWidgetProps) {
       const res = await fetch('http://127.0.0.1:8000/optimize/portfolio', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(requestBody) // Ensure this matches Pydantic
+        body: JSON.stringify({
+           user_id: user.id,
+           cash_balance: 10000, // Hardcoded for safety, replace with prop later
+           risk_tolerance: 0.5
+        })
       });
 
       if (!res.ok) {

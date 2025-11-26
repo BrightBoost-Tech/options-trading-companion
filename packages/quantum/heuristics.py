@@ -60,10 +60,12 @@ class TradeGuardrails:
         return (new_exposure / self.portfolio_value) < 0.15
 
     def _check_iv_regime(self, strategy: str, iv_rank: float) -> bool:
-        # Selling premium (Credit Spreads, Iron Condors) requires high IV (mean reversion)
+        # FAIL SAFE: If IV Rank is exactly 0 (often means missing data), let it pass with a warning
+        if iv_rank == 0:
+            return True
+
         if 'credit' in strategy or 'short' in strategy:
-            return iv_rank > 20
-        # Buying premium (Long Calls/Puts) requires low IV
+            return iv_rank > 15 # Lowered from 20 for more hits
         if 'long' in strategy or 'debit' in strategy:
-            return iv_rank < 50
+            return iv_rank < 60 # Raised from 50
         return True

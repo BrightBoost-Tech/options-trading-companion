@@ -38,7 +38,12 @@ interface OptimizationResult {
   metrics: Metrics;
 }
 
-export default function PortfolioOptimizer({ positions }: { positions: any[] }) {
+interface PortfolioOptimizerProps {
+  positions: any[];
+  onOptimizationComplete: (metrics: Metrics | null) => void;
+}
+
+export default function PortfolioOptimizer({ positions, onOptimizationComplete }: PortfolioOptimizerProps) {
   const [isQuantum, setIsQuantum] = useState(false)
   const [isOptimizing, setIsOptimizing] = useState(false)
   const [results, setResults] = useState<OptimizationResult | null>(null)
@@ -87,6 +92,7 @@ export default function PortfolioOptimizer({ positions }: { positions: any[] }) 
 
       const data = await res.json()
       setResults(data)
+      onOptimizationComplete(data.metrics)
 
     } catch (e) {
       console.error("Optimization Error:", e)

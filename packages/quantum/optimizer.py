@@ -18,6 +18,8 @@ except ImportError:
 from analytics.strategy_selector import StrategySelector
 from analytics.guardrails import apply_guardrails, compute_conviction_score
 from analytics.analytics import OptionsAnalytics
+from services.trade_builder import enrich_trade_suggestions
+from market_data import PolygonService
 
 router = APIRouter()
 
@@ -201,35 +203,26 @@ async def optimize_portfolio(req: OptimizationRequest):
         )
 
         # --- New Decision Funnel ---
-        strategy_selector = StrategySelector()
-        processed_trades = []
-        for trade in trades:
-            # 1. Strategy Selection
-            # TODO: Replace mock iv_rank with real data from a market data provider.
-            iv_rank = np.random.uniform(10, 60) # Mock IV rank
-            sentiment = "BULLISH" if trade['action'] == "BUY" else "BEARISH"
-            strategy = strategy_selector.determine_strategy(
-                trade['symbol'],
-                sentiment,
-                100, # Mock current price
-                iv_rank
-            )
-            trade.update(strategy)
-            trade['iv_rank'] = iv_rank
-            processed_trades.append(trade)
+        market_data = {}
+        try:
+            service = PolygonService()
+            for ticker in tickers:
+                hist_data = service.get_historical_prices(ticker, days=5)
+                market_data[ticker] = {
+                    "price": hist_data['prices'][-1] if hist_data and hist_data['prices'] else 0,
+                    "iv_rank": service.get_iv_rank(ticker),
+                    "trend": service.get_trend(ticker),
+                    "sector": service.get_ticker_details(ticker).get('sic_description')
+                }
+        except Exception as e:
+            print(f"Market data fetch failed: {e}")
 
-        # 2. Guardrails
-        processed_trades = apply_guardrails(processed_trades, investable_assets)
-
-        # 3. Conviction Score
-        for trade in processed_trades:
-            trade['conviction_score'] = compute_conviction_score(trade)
-            if trade['conviction_score'] >= 80:
-                trade['conviction_label'] = "HIGH"
-            elif 50 <= trade['conviction_score'] < 80:
-                trade['conviction_label'] = "SPECULATIVE"
-            else:
-                trade['conviction_label'] = "LOW"
+        processed_trades = enrich_trade_suggestions(
+            trades,
+            total_portfolio_value,
+            market_data,
+            investable_assets
+        )
 
         # 4. Analytics
         portfolio_analytics = {

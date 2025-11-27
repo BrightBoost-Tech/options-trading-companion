@@ -55,6 +55,41 @@ class PolygonService:
             'dates': dates
         }
 
+    def get_ticker_details(self, symbol: str) -> Dict:
+        """Fetches details for a given ticker, including sector."""
+        url = f"{self.base_url}/v3/reference/tickers/{symbol}"
+        params = {'apiKey': self.api_key}
+        response = requests.get(url, params=params, timeout=5)
+        response.raise_for_status()
+        data = response.json()
+        return data.get('results', {})
+
+    def get_iv_rank(self, symbol: str) -> float:
+        """Calculates IV Rank from historical data."""
+        # This is a proxy for IV Rank. A real implementation would use a more direct data source.
+        try:
+            data = self.get_historical_prices(symbol, days=365)
+            returns = np.array(data['returns'])
+            volatility = np.std(returns) * np.sqrt(252)
+            # Simple rank calculation (not a true IV Rank)
+            return min(volatility / 0.5, 1.0)
+        except Exception:
+            return 0.5 # Default
+
+    def get_trend(self, symbol: str) -> str:
+        """Determines trend using simple moving averages."""
+        try:
+            data = self.get_historical_prices(symbol, days=100)
+            prices = np.array(data['prices'])
+            sma_20 = np.mean(prices[-20:])
+            sma_50 = np.mean(prices[-50:])
+            if sma_20 > sma_50:
+                return "UP"
+            else:
+                return "DOWN"
+        except Exception:
+            return "NEUTRAL"
+
 def get_polygon_price(symbol: str) -> float:
     # FIX 1: Handle Cash Manually
     if symbol == 'CUR:USD':

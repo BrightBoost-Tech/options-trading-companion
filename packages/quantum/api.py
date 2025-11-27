@@ -393,6 +393,13 @@ async def get_portfolio_snapshot(
         pass
 
     if snapshot:
+        # Add buying power if available
+        try:
+            res = supabase.table("plaid_items").select("buying_power").eq("user_id", user_id).single().execute()
+            if res.data:
+                snapshot['buying_power'] = res.data.get('buying_power')
+        except Exception:
+            pass # Ignore if not found
         return snapshot
     else:
         return {"message": "No snapshot found", "holdings": []}

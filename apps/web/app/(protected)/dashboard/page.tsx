@@ -6,7 +6,7 @@ import SyncHoldingsButton from '@/components/SyncHoldingsButton';
 import PortfolioOptimizer from '@/components/dashboard/PortfolioOptimizer';
 import TradeSuggestionCard from '@/components/tradeSuggestionCard';
 import { supabase } from '@/lib/supabase';
-import { API_URL } from '@/lib/constants';
+import { API_URL, TEST_USER_ID } from '@/lib/constants';
 
 const mockAlerts = [
   { id: '1', message: 'SPY credit put spread scout: 475/470 for $1.50 credit', time: '2 min ago' },
@@ -25,9 +25,6 @@ const fetchWithTimeout = async (resource: RequestInfo, options: FetchOptions = {
   clearTimeout(id);
   return response;
 };
-
-// 🛠️ DEV MODE: Use the specific User ID found in your backend logs
-const TEST_USER_ID = '75ee12ad-b119-4f32-aeea-19b4ef55d587';
 
 export default function DashboardPage() {
   // Snapshot data

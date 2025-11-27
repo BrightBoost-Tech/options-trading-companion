@@ -5,7 +5,7 @@ import { supabase } from '@/lib/supabase';
 import { useRouter } from 'next/navigation';
 import DashboardLayout from '@/components/DashboardLayout';
 import SyncHoldingsButton from '@/components/SyncHoldingsButton';
-import { API_URL } from '@/lib/constants';
+import { API_URL, TEST_USER_ID } from '@/lib/constants';
 
 interface FetchOptions extends RequestInit {
   timeout?: number;
@@ -55,7 +55,7 @@ export default function PortfolioPage() {
         // unauthenticated viewing in dev.
         // For the purpose of the "Test Mode" requirement:
         console.log("⚠️ No user found, using Test Mode user.");
-        setUser({ id: 'test-user-123', email: 'test@example.com' });
+        setUser({ id: TEST_USER_ID, email: 'test@example.com' });
     }
   };
 
@@ -69,7 +69,7 @@ export default function PortfolioPage() {
           headers['Authorization'] = `Bearer ${session.access_token}`;
       } else {
            // Test Mode Header
-           headers['X-Test-Mode-User'] = 'test-user-123';
+           headers['X-Test-Mode-User'] = TEST_USER_ID;
       }
 
       const response = await fetchWithTimeout(`${API_URL}/portfolio/snapshot`, {

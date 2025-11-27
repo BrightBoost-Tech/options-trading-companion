@@ -6,7 +6,7 @@ from typing import List, Dict
 from datetime import datetime, timedelta
 from market_data import PolygonService
 from analytics.strategy_selector import StrategySelector
-from analytics.guardrails import apply_guardrails, compute_conviction_score
+from services.trade_builder import enrich_trade_suggestions
 
 
 def scan_for_opportunities(symbols: List[str] = None) -> List[Dict]:
@@ -118,37 +118,28 @@ def scan_for_opportunities(symbols: List[str] = None) -> List[Dict]:
         processed_opportunities.append(opp)
 
     # --- New Decision Funnel ---
-    strategy_selector = StrategySelector()
-    final_opportunities = []
-    for opp in processed_opportunities:
-        # 1. Strategy Selection
-        sentiment = "BULLISH" # Scout is currently bullish only
-        strategy = strategy_selector.determine_strategy(
-            opp['symbol'],
-            sentiment,
-            opp['underlying_price'],
-            opp['iv_rank']
-        )
-        opp.update(strategy)
-        final_opportunities.append(opp)
+    market_data = {}
+    if service:
+        for opp in processed_opportunities:
+            symbol = opp['symbol']
+            market_data[symbol] = {
+                "price": opp['underlying_price'],
+                "iv_rank": service.get_iv_rank(symbol),
+                "trend": service.get_trend(symbol),
+                "sector": service.get_ticker_details(symbol).get('sic_description')
+            }
 
-    # 2. Guardrails
-    final_opportunities = apply_guardrails(final_opportunities, [])
+    enriched_opportunities = enrich_trade_suggestions(
+        processed_opportunities,
+        100000, # Mock portfolio value for sizing
+        market_data,
+        [] # No existing positions for scanner
+    )
 
-    # 3. Conviction Score
-    for opp in final_opportunities:
-        opp['conviction_score'] = compute_conviction_score(opp)
-        if opp['conviction_score'] >= 80:
-            opp['conviction_label'] = "HIGH"
-        elif 50 <= opp['conviction_score'] < 80:
-            opp['conviction_label'] = "SPECULATIVE"
-        else:
-            opp['conviction_label'] = "LOW"
+    # Sort by score (highest first)
+    enriched_opportunities.sort(key=lambda x: x.get('score', 0), reverse=True)
     
-    # Sort by conviction_score (highest first)
-    final_opportunities.sort(key=lambda x: x['conviction_score'], reverse=True)
-    
-    return final_opportunities
+    return enriched_opportunities
 
 
 if __name__ == '__main__':
@@ -164,7 +155,7 @@ if __name__ == '__main__':
     
     for i, opp in enumerate(opportunities[:3], 1):
         print(f"\n#{i} - {opp['symbol']} {opp['type']}")
-        print(f"   Score: {opp['score']}/100")
+        print(f"   Score: {opp.get('score', 'N/A')}/100")
         print(f"   Strikes: {opp['short_strike']}/{opp['long_strike']}")
         print(f"   Credit: ${opp['credit']:.2f} (Max Gain: ${opp['max_gain']:.0f})")
         print(f"   Risk/Reward: {opp['risk_reward']}")

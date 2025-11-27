@@ -6,7 +6,7 @@ from typing import List, Dict
 from datetime import datetime, timedelta
 from market_data import PolygonService
 from analytics.strategy_selector import StrategySelector
-from analytics.guardrails import apply_guardrails, compute_conviction_score
+from analytics.guardrails import apply_guardrails
 
 
 def scan_for_opportunities(symbols: List[str] = None) -> List[Dict]:
@@ -134,19 +134,6 @@ def scan_for_opportunities(symbols: List[str] = None) -> List[Dict]:
 
     # 2. Guardrails
     final_opportunities = apply_guardrails(final_opportunities, [])
-
-    # 3. Conviction Score
-    for opp in final_opportunities:
-        opp['conviction_score'] = compute_conviction_score(opp)
-        if opp['conviction_score'] >= 80:
-            opp['conviction_label'] = "HIGH"
-        elif 50 <= opp['conviction_score'] < 80:
-            opp['conviction_label'] = "SPECULATIVE"
-        else:
-            opp['conviction_label'] = "LOW"
-    
-    # Sort by conviction_score (highest first)
-    final_opportunities.sort(key=lambda x: x['conviction_score'], reverse=True)
     
     return final_opportunities
 

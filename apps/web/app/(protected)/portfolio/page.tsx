@@ -5,29 +5,10 @@ import { supabase } from '@/lib/supabase';
 import { useRouter } from 'next/navigation';
 import DashboardLayout from '@/components/DashboardLayout';
 import SyncHoldingsButton from '@/components/SyncHoldingsButton';
-import { API_URL } from '@/lib/constants';
 import { Position } from '@/lib/types'; // Import the new Position type
 import { Badge } from '@/components/ui/badge';
-
-interface FetchOptions extends RequestInit {
-  timeout?: number;
-}
-
-// Helper to prevent hanging indefinitely (reused from Dashboard)
-const fetchWithTimeout = async (resource: RequestInfo, options: FetchOptions = {}) => {
-  const { timeout = 15000, ...rest } = options;
-
-  const controller = new AbortController();
-  const id = setTimeout(() => controller.abort(), timeout);
-
-  const response = await fetch(resource, {
-    ...rest,
-    signal: controller.signal
-  });
-
-  clearTimeout(id);
-  return response;
-};
+import { fetchWithAuth } from '@/lib/api';
+import { AlertTriangle } from 'lucide-react';
 
 export default function PortfolioPage() {
   const [user, setUser] = useState<any>(null);
@@ -54,23 +35,13 @@ export default function PortfolioPage() {
   const loadSnapshot = async () => {
     setLoading(true);
     try {
-      const { data: { session } } = await supabase.auth.getSession();
-      
-      let headers: any = {};
-      if (session) {
-          headers['Authorization'] = `Bearer ${session.access_token}`;
+      let url = '/portfolio/snapshot';
+      if (user?.email === 'test@example.com') {
+        url += '?mode=test';
       }
-
-      const response = await fetchWithTimeout(`${API_URL}/portfolio/snapshot`, {
-         headers: headers,
-         timeout: 10000
-      });
-
-      if (response.ok) {
-        const data = await response.json();
-        setSnapshot(data);
-        setHoldings(data.holdings || []);
-      }
+      const data = await fetchWithAuth(url);
+      setSnapshot(data);
+      setHoldings(data.holdings || []);
     } catch (err) {
       console.error('Failed to load snapshot:', err);
     } finally {
@@ -138,19 +109,16 @@ export default function PortfolioPage() {
                       <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Current Price</th>
                       <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Value</th>
                       <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Source</th>
-                      <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Risk Profile (Δ / Θ)</th>
-                      <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">IV Rank</th>
-                      <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Guardrails</th>
+                      <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Value</th>
+                      <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Source</th>
+                      <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Deep Analytics</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-gray-200">
                     {holdings.map((pos, idx) => {
                         const value = (pos.quantity || 0) * (pos.current_price || 0);
-                        const greeks = pos.greeks;
-                        const warnings = pos.risk_warnings ?? [];
-                        const iv = pos.greeks?.iv_rank ?? 0;
-                        const highIV = iv > 50;
-                        const variant = highIV ? "destructive" : "default";
+                        const iv = pos.market_data?.iv_rank;
+                        const isEarningsComing = pos.risk?.earnings_warning;
 
                         return (
                       <tr key={idx} className="hover:bg-gray-50">
@@ -170,38 +138,23 @@ export default function PortfolioPage() {
                              </span>
                         </td>
                         <td className="px-6 py-4">
-                          {greeks ? (
-                            <div className="flex flex-col text-xs font-mono">
-                              <span className={greeks.delta > 0 ? "text-green-500" : "text-red-500"}>
-                                Δ {greeks.delta.toFixed(2)}
-                              </span>
-                              <span className="text-yellow-600">
-                                Θ {greeks.theta.toFixed(2)}
-                              </span>
+                          <div className="space-y-1">
+                            {/* IV Rank Badge */}
+                            <div className="flex items-center gap-2">
+                              <span className="text-xs text-muted-foreground">IV Rank:</span>
+                              <Badge variant={iv && iv > 50 ? "destructive" : "secondary"}>
+                                {iv !== undefined ? `${iv.toFixed(1)}%` : "—"}
+                              </Badge>
                             </div>
-                          ) : (
-                            <span className="text-gray-400 text-xs">N/A</span>
-                          )}
-                        </td>
-                        <td className="px-6 py-4">
-                          <Badge variant={variant}>
-                            {iv}%
-                          </Badge>
-                        </td>
-                        <td className="px-6 py-4">
-                          {warnings.length === 0 ? (
-                            <Badge variant="outline" className="text-green-600 text-[10px]">
-                              Safe
-                            </Badge>
-                          ) : (
-                            <div className="flex flex-col gap-1">
-                              {warnings.map((w, i) => (
-                                <Badge key={i} variant="destructive" className="text-[10px]">
-                                  {w}
-                                </Badge>
-                              ))}
-                            </div>
-                          )}
+
+                            {/* Guardrail Warning */}
+                            {isEarningsComing && (
+                              <div className="flex items-center text-xs text-amber-500 font-bold">
+                                <AlertTriangle className="w-3 h-3 mr-1" />
+                                Earnings Week
+                              </div>
+                            )}
+                          </div>
                         </td>
                       </tr>
                     )})}

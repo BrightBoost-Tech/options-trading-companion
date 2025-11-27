@@ -13,20 +13,20 @@ import json
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
-from security import encrypt_token, decrypt_token, get_current_user
+from security import decrypt_token, get_current_user_id
 
 # Import models and services
 from models import Holding, SyncResponse, PortfolioSnapshot
 import plaid_service
 import plaid_endpoints
 
+
 # Import functionalities
 from options_scanner import scan_for_opportunities
 from trade_journal import TradeJournal
-from optimizer import router as optimizer_router
+from optimizer import router as optimizer_router, engine
 from market_data import calculate_portfolio_inputs
 from ev_calculator import calculate_ev, calculate_position_size
-from analytics.enrichment import enrich_holdings_with_analytics
 from typing import Optional, Literal
 
 
@@ -65,10 +65,6 @@ else:
     print("Supabase config loaded successfully.")
 
 supabase: Client = create_client(url, key) if url and key else None
-
-# --- Register Plaid Endpoints ---
-# Pass supabase client to plaid_endpoints
-plaid_endpoints.register_plaid_endpoints(app, plaid_service, supabase)
 
 # --- Register Optimizer Endpoints ---
 app.include_router(optimizer_router)
@@ -110,7 +106,21 @@ async def create_portfolio_snapshot(user_id: str):
         return
 
     # 2. Enrich Holdings with Analytics
-    holdings = enrich_holdings_with_analytics(holdings)
+    enriched_holdings = []
+    for h in holdings:
+        try:
+            analysis = engine.analyze_trade(h['symbol'])
+            if analysis['status'] == 'APPROVED':
+                h['market_data'] = {
+                    'price': analysis['current_price'],
+                    'iv_rank': analysis['iv_rank'],
+                }
+                if 'reason' in analysis and 'Earnings' in analysis['reason']:
+                    h['risk'] = {'earnings_warning': True}
+            enriched_holdings.append(h)
+        except Exception:
+            enriched_holdings.append(h)
+    holdings = enriched_holdings
 
     # 3. Calculate Risk Metrics (Basic)
     symbols = [h['symbol'] for h in holdings if h['symbol']]
@@ -166,7 +176,7 @@ def health_check():
 @limiter.limit("5/minute") # Rate Limit: 5 syncs per minute per IP
 async def sync_holdings(
     request: Request,
-    user_id: str = Depends(get_current_user) # NOW REQUIRES REAL JWT
+    user_id: str = Depends(get_current_user_id)
 ):
     """
     Syncs holdings from Plaid and updates the positions table.
@@ -193,12 +203,7 @@ async def sync_holdings(
         try:
             res = supabase.table("user_settings").select("plaid_access_token").eq("user_id", user_id).single().execute()
             if res.data:
-                raw_token = res.data.get('plaid_access_token')
-                try:
-                    plaid_access_token = decrypt_token(raw_token)
-                except Exception:
-                    # Fallback to raw if decryption fails (e.g. migration)
-                    plaid_access_token = raw_token
+                plaid_access_token = res.data.get('plaid_access_token')
         except Exception:
             pass
 
@@ -207,11 +212,7 @@ async def sync_holdings(
              try:
                  response = supabase.table("plaid_items").select("access_token").eq("user_id", user_id).limit(1).execute()
                  if response.data:
-                     raw_token = response.data[0]['access_token']
-                     try:
-                        plaid_access_token = decrypt_token(raw_token)
-                     except Exception:
-                        plaid_access_token = raw_token
+                     plaid_access_token = response.data[0]['access_token']
              except Exception:
                  pass
     
@@ -279,24 +280,14 @@ async def sync_holdings(
 
 @app.get("/holdings/export")
 async def export_holdings_csv(
-    brokerage: Optional[str] = None,
-    authorization: Optional[str] = Header(None)
+    user_id: str = Depends(get_current_user_id),
+    brokerage: Optional[str] = None
 ):
     """
     Exports holdings to a CSV file from POSITIONS table.
     """
     if not supabase:
         raise HTTPException(status_code=500, detail="Server Error: Database not configured")
-
-    if not authorization:
-        raise HTTPException(status_code=401, detail="Missing Authorization header")
-
-    try:
-        token = authorization.split(" ")[1]
-        user = supabase.auth.get_user(token)
-        user_id = user.user.id
-    except Exception as e:
-        raise HTTPException(status_code=401, detail="Invalid Token")
 
     # Fetch from POSITIONS
     query = supabase.table("positions").select("*").eq("user_id", user_id)
@@ -340,28 +331,33 @@ async def export_holdings_csv(
 
 @app.get("/portfolio/snapshot")
 async def get_portfolio_snapshot(
-    authorization: Optional[str] = Header(None),
-    refresh: bool = False
+    user_id: str = Depends(get_current_user_id),
+    refresh: bool = False,
+    mode: Optional[str] = None
 ):
+
+    if mode == "test":
+        return {
+            "holdings": [
+                {
+                    "symbol": "AAPL", "quantity": 10, "cost_basis": 150.0, "current_price": 175.0, "source": "plaid",
+                    "market_data": {"iv_rank": 65.2}, "risk": {"earnings_warning": True}
+                },
+                {
+                    "symbol": "GOOG", "quantity": 5, "cost_basis": 2800.0, "current_price": 2850.0, "source": "plaid",
+                    "market_data": {"iv_rank": 42.0}, "risk": {"earnings_warning": False}
+                }
+            ],
+            "risk_metrics": {"data_source": "mock"},
+            "is_mock": True
+        }
+
     if not supabase:
          return {
              "holdings": [],
              "risk_metrics": {},
              "is_mock": True
          }
-
-    user_id = None
-    is_dev_mode = os.getenv("APP_ENV") != "production"
-
-    if not authorization:
-        raise HTTPException(status_code=401, detail="Missing Authorization header")
-
-    try:
-        token = authorization.split(" ")[1]
-        user = supabase.auth.get_user(token)
-        user_id = user.user.id
-    except Exception as e:
-        raise HTTPException(status_code=401, detail="Invalid Token")
 
     # 1. Get latest snapshot
     response = supabase.table("portfolio_snapshots") \

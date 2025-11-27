@@ -5,81 +5,8 @@ import numpy as np
 from typing import List, Dict
 from datetime import datetime, timedelta
 from market_data import PolygonService
-
-def calculate_iv_rank(current_iv: float, iv_history: List[float]) -> float:
-    """Calculate IV rank (percentile)"""
-    if not iv_history:
-        return 0.5
-    
-    below_current = sum(1 for iv in iv_history if iv < current_iv)
-    return below_current / len(iv_history)
-
-
-def score_opportunity(
-    symbol: str,
-    iv_rank: float,
-    dte: int,
-    delta: float,
-    credit: float,
-    width: float,
-    underlying_price: float
-) -> Dict:
-    """
-    Score an option opportunity based on key factors
-    Higher score = better opportunity
-    """
-    score = 0
-    reasons = []
-    
-    # IV Rank scoring (higher is better for selling premium)
-    if iv_rank > 0.70:
-        score += 40
-        reasons.append(f"Excellent IV rank ({iv_rank*100:.0f}%)")
-    elif iv_rank > 0.50:
-        score += 25
-        reasons.append(f"Good IV rank ({iv_rank*100:.0f}%)")
-    elif iv_rank > 0.30:
-        score += 10
-        reasons.append(f"Moderate IV rank ({iv_rank*100:.0f}%)")
-    else:
-        reasons.append(f"Low IV rank ({iv_rank*100:.0f}%) - not ideal for premium selling")
-    
-    # DTE scoring (30-45 days optimal for credit spreads)
-    if 30 <= dte <= 45:
-        score += 30
-        reasons.append(f"Optimal DTE ({dte} days)")
-    elif 21 <= dte <= 60:
-        score += 15
-        reasons.append(f"Acceptable DTE ({dte} days)")
-    
-    # Risk/Reward scoring
-    max_loss = (width * 100) - (credit * 100)
-    max_gain = credit * 100
-    if max_loss > 0:
-        risk_reward_ratio = max_gain / max_loss
-        if risk_reward_ratio > 0.33:  # Getting $1 for every $3 risked
-            score += 20
-            reasons.append(f"Good risk/reward (1:{max_loss/max_gain:.1f})")
-        elif risk_reward_ratio > 0.20:
-            score += 10
-            reasons.append(f"Acceptable risk/reward (1:{max_loss/max_gain:.1f})")
-    
-    # Delta scoring (0.25-0.35 is sweet spot)
-    delta_abs = abs(delta)
-    if 0.25 <= delta_abs <= 0.35:
-        score += 10
-        reasons.append(f"Ideal delta ({delta_abs:.2f})")
-    elif 0.15 <= delta_abs <= 0.45:
-        score += 5
-        reasons.append(f"Acceptable delta ({delta_abs:.2f})")
-    
-    return {
-        'score': score,
-        'reasons': reasons,
-        'max_gain': max_gain,
-        'max_loss': max_loss,
-        'risk_reward': f"1:{max_loss/max_gain:.1f}" if max_gain > 0 else "N/A"
-    }
+from analytics.strategy_selector import StrategySelector
+from analytics.guardrails import apply_guardrails, compute_conviction_score
 
 
 def scan_for_opportunities(symbols: List[str] = None) -> List[Dict]:
@@ -146,7 +73,9 @@ def scan_for_opportunities(symbols: List[str] = None) -> List[Dict]:
             'delta': -0.30,
             'underlying_price': 105.00,
             'max_gain': opp_config.get('credit_target', 1.0) * 100,
-            'max_loss': (opp_config.get('width', 5) - opp_config.get('credit_target', 1.0)) * 100
+            'max_loss': (opp_config.get('width', 5) - opp_config.get('credit_target', 1.0)) * 100,
+            'trend': 'UP', # Mock trend
+            'reward_risk': 0.33 # Mock reward/risk
         }
 
         if service:
@@ -177,7 +106,7 @@ def scan_for_opportunities(symbols: List[str] = None) -> List[Dict]:
                     opp['short_strike'] = short_strike
                     opp['long_strike'] = long_strike
 
-                    # Randomize IV rank slightly based on symbol hash for consistency
+                    # TODO: Replace mock iv_rank with real data from a market data provider.
                     seed = sum(ord(c) for c in symbol)
                     opp['iv_rank'] = 0.3 + (seed % 50) / 100.0  # 0.30 to 0.80
 
@@ -188,29 +117,38 @@ def scan_for_opportunities(symbols: List[str] = None) -> List[Dict]:
 
         processed_opportunities.append(opp)
 
-    # Use the processed list
-    opportunities = processed_opportunities
-
-    # Score each opportunity
-    scored_opportunities = []
-    for opp in opportunities:
-        analysis = score_opportunity(
+    # --- New Decision Funnel ---
+    strategy_selector = StrategySelector()
+    final_opportunities = []
+    for opp in processed_opportunities:
+        # 1. Strategy Selection
+        sentiment = "BULLISH" # Scout is currently bullish only
+        strategy = strategy_selector.determine_strategy(
             opp['symbol'],
-            opp['iv_rank'],
-            opp['dte'],
-            opp['delta'],
-            opp['credit'],
-            opp['width'],
-            opp['underlying_price']
+            sentiment,
+            opp['underlying_price'],
+            opp['iv_rank']
         )
-        
-        opp.update(analysis)
-        scored_opportunities.append(opp)
+        opp.update(strategy)
+        final_opportunities.append(opp)
+
+    # 2. Guardrails
+    final_opportunities = apply_guardrails(final_opportunities, [])
+
+    # 3. Conviction Score
+    for opp in final_opportunities:
+        opp['conviction_score'] = compute_conviction_score(opp)
+        if opp['conviction_score'] >= 80:
+            opp['conviction_label'] = "HIGH"
+        elif 50 <= opp['conviction_score'] < 80:
+            opp['conviction_label'] = "SPECULATIVE"
+        else:
+            opp['conviction_label'] = "LOW"
     
-    # Sort by score (highest first)
-    scored_opportunities.sort(key=lambda x: x['score'], reverse=True)
+    # Sort by conviction_score (highest first)
+    final_opportunities.sort(key=lambda x: x['conviction_score'], reverse=True)
     
-    return scored_opportunities
+    return final_opportunities
 
 
 if __name__ == '__main__':

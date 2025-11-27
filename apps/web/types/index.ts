@@ -7,6 +7,9 @@ export interface Holding {
   current_price: number;
   currency: string;
   institution_name?: string;
+  delta?: number;
+  theta?: number;
+  iv_rank?: number;
 };
 
 export interface SyncResponse {

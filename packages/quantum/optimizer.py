@@ -19,7 +19,7 @@ from analytics.strategy_selector import StrategySelector
 from analytics.guardrails import apply_guardrails, compute_conviction_score
 from analytics.analytics import OptionsAnalytics
 from services.trade_builder import enrich_trade_suggestions
-from market_data import PolygonService
+from market_data import PolygonService, calculate_portfolio_inputs
 
 router = APIRouter()
 
@@ -91,37 +91,20 @@ async def optimize_portfolio(req: OptimizationRequest):
         assets_equity = sum(p.current_value for p in investable_assets)
         total_portfolio_value = assets_equity + liquidity
 
-        # 2. GET DATA (Stability Fix)
-        # We use deterministic seeding based on ticker name so results don't jump around
-        data_frames = {}
-        np.random.seed(42)
+        # 2. GET DATA (Real Market Data)
+        try:
+            portfolio_inputs = calculate_portfolio_inputs(tickers)
+            mu = np.array(portfolio_inputs['expected_returns'])
+            sigma = np.array(portfolio_inputs['covariance_matrix'])
 
-        for ticker in tickers:
-            # Create a unique seed per ticker
-            seed_val = sum(ord(c) for c in ticker)
-            np.random.seed(seed_val)
+            # For now, we'll use a zero coskewness tensor as it's not provided by the market data service
+            coskew = np.zeros((len(tickers), len(tickers), len(tickers)))
 
-            # Simulate 1 year of data
-            # Trend: -0.1% to +0.2% daily mean
-            mean_return = np.random.uniform(-0.001, 0.002)
-            volatility = np.random.uniform(0.01, 0.03)
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Failed to fetch market data: {e}")
 
-            daily_returns = np.random.normal(mean_return, volatility, 252)
-
-            # Add "Learned Behavior" (Momentum) to recent history
-            trend_factor = np.random.choice([-1, 1]) * 0.005
-            daily_returns[-30:] += trend_factor
-
-            data_frames[ticker] = daily_returns
-
-        returns_df = pd.DataFrame(data_frames)
-
-        # 3. MATH ENGINE (Exponential Mean for Profit Maximization)
-        math_engine = PortfolioMath(returns_df)
-        # 'exponential' weights recent data higher -> captures momentum
-        mu = math_engine.get_mean_returns(method='exponential')
-        sigma = math_engine.get_covariance_matrix() + np.eye(len(tickers)) * 1e-6
-        coskew = math_engine.get_coskewness_tensor()
+        # 3. MATH ENGINE (Using Real Data)
+        # The data is already processed, so we can directly use mu and sigma
 
         # --- DYNAMIC CONSTRAINT LOGIC ---
         # If user has only 2 assets, 40% max weight is mathematically impossible (0.4 + 0.4 = 0.8 < 1.0).

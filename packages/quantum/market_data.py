@@ -66,15 +66,30 @@ class PolygonService:
 
     def get_iv_rank(self, symbol: str) -> float:
         """Calculates IV Rank from historical data."""
-        # This is a proxy for IV Rank. A real implementation would use a more direct data source.
         try:
             data = self.get_historical_prices(symbol, days=365)
             returns = np.array(data['returns'])
-            volatility = np.std(returns) * np.sqrt(252)
-            # Simple rank calculation (not a true IV Rank)
-            return min(volatility / 0.5, 1.0)
+
+            # Calculate 30-day rolling volatility
+            rolling_vol = np.std([returns[i-30:i] for i in range(30, len(returns))], axis=1) * np.sqrt(252)
+
+            if len(rolling_vol) == 0:
+                return 50.0 # Default if not enough data
+
+            # Get 52-week high and low of volatility
+            high_52_week = np.max(rolling_vol)
+            low_52_week = np.min(rolling_vol)
+
+            # Current volatility (last 30 days)
+            current_vol = rolling_vol[-1]
+
+            # IV Rank formula
+            iv_rank = ((current_vol - low_52_week) / (high_52_week - low_52_week)) * 100
+
+            return np.clip(iv_rank, 0, 100)
+
         except Exception:
-            return 0.5 # Default
+            return 50.0 # Default
 
     def get_trend(self, symbol: str) -> str:
         """Determines trend using simple moving averages."""
@@ -127,34 +142,6 @@ def get_polygon_price(symbol: str) -> float:
         print(f"⚠️ Error fetching {search_symbol}: {e}")
         return 0.0 # Fallback
 
-def generate_mock_market_data(symbols: List[str]) -> Dict:
-    """Generate consistent mock data for testing without API key"""
-    print(f"⚠️  Using MOCK market data for {symbols} (Polygon Key missing)")
-    
-    n_assets = len(symbols)
-    # Generate deterministic mock data based on symbol names to be consistent
-    # Use a seed so that the same symbols always produce the same mock stats
-    seed_val = sum(ord(c) for c in ''.join(symbols))
-    rng = np.random.RandomState(seed_val)
-
-    # Annualized returns between 5% and 25%
-    expected_returns = rng.uniform(0.05, 0.25, n_assets).tolist()
-
-    # Random covariance matrix
-    A = rng.rand(n_assets, n_assets)
-    # Make it symmetric positive definite: A * A.T
-    # Scale volatility to be somewhat realistic
-    cov_matrix = np.dot(A, A.transpose()) * 0.05
-
-    result = {
-        'expected_returns': expected_returns,
-        'covariance_matrix': cov_matrix.tolist(),
-        'symbols': symbols,
-        'data_points': 252,
-        'is_mock': True
-    }
-    return result
-
 def calculate_portfolio_inputs(symbols: List[str], api_key: str = None) -> Dict:
     """Calculate with caching to avoid rate limits"""
     
@@ -171,7 +158,7 @@ def calculate_portfolio_inputs(symbols: List[str], api_key: str = None) -> Dict:
     # Check for API Key
     real_api_key = api_key or os.getenv('POLYGON_API_KEY')
     if not real_api_key:
-        return generate_mock_market_data(symbols)
+        raise ValueError("POLYGON_API_KEY not found.")
 
     # Fetch fresh data
     try:
@@ -215,8 +202,7 @@ def calculate_portfolio_inputs(symbols: List[str], api_key: str = None) -> Dict:
 
     except Exception as e:
         print(f"Error fetching real data: {e}")
-        print("Falling back to mock data...")
-        return generate_mock_market_data(symbols)
+        raise e
 
 
 if __name__ == '__main__':

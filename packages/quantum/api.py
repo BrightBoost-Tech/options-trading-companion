@@ -26,6 +26,7 @@ from trade_journal import TradeJournal
 from optimizer import router as optimizer_router
 from market_data import calculate_portfolio_inputs
 from ev_calculator import calculate_ev, calculate_position_size
+from analytics.enrichment import enrich_holdings_with_analytics
 from typing import Optional, Literal
 
 
@@ -108,7 +109,10 @@ async def create_portfolio_snapshot(user_id: str):
     if not holdings:
         return
 
-    # 2. Calculate Risk Metrics (Basic)
+    # 2. Enrich Holdings with Analytics
+    holdings = enrich_holdings_with_analytics(holdings)
+
+    # 3. Calculate Risk Metrics (Basic)
     symbols = [h['symbol'] for h in holdings if h['symbol']]
     risk_metrics = {}
 
@@ -126,7 +130,7 @@ async def create_portfolio_snapshot(user_id: str):
         print(f"Failed to calculate risk metrics for snapshot: {e}")
         risk_metrics = {"error": str(e)}
 
-    # 3. Create Snapshot
+    # 4. Create Snapshot
     snapshot = {
         "user_id": user_id,
         "created_at": datetime.now().isoformat(),

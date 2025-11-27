@@ -3,6 +3,7 @@
 import { useEffect, useState } from 'react';
 import { supabase } from '@/lib/supabase';
 import { Holding } from "@/types";
+import { Badge } from '@/components/ui/Badge';
 
 export default function PortfolioHoldingsTable() {
   const [holdings, setHoldings] = useState<Holding[] | null>(null);
@@ -53,6 +54,8 @@ export default function PortfolioHoldingsTable() {
             <th className="px-6 py-3 text-right text-xs font-medium text-gray-400 uppercase tracking-wider">Cost Basis</th>
             <th className="px-6 py-3 text-right text-xs font-medium text-gray-400 uppercase tracking-wider">Total Value</th>
             <th className="px-6 py-3 text-right text-xs font-medium text-gray-400 uppercase tracking-wider">Gain/Loss</th>
+            <th className="px-6 py-3 text-left text-xs font-medium text-gray-400 uppercase tracking-wider">Risk Profile</th>
+            <th className="px-6 py-3 text-left text-xs font-medium text-gray-400 uppercase tracking-wider">IV Rank</th>
           </tr>
         </thead>
         <tbody className="divide-y divide-gray-800">
@@ -63,6 +66,11 @@ export default function PortfolioHoldingsTable() {
             const gainLoss = costBasis > 0 ? totalValue - totalCost : 0;
             const gainLossPercent = costBasis > 0 ? (gainLoss / totalCost) * 100 : 0;
             const isProfitable = gainLoss >= 0;
+
+            const delta = h.delta ?? 0;
+            const theta = h.theta ?? 0;
+            const ivRank = h.iv_rank ?? 0;
+            const highIV = ivRank > 50;
 
             return ( // Using symbol as key, assuming it's unique per user portfolio
               <tr key={h.symbol} className="hover:bg-gray-800/50 transition-colors">
@@ -87,6 +95,21 @@ export default function PortfolioHoldingsTable() {
                       {isProfitable ? '+' : ''}{gainLoss.toFixed(2)} ({isProfitable ? '+' : ''}{gainLossPercent.toFixed(2)}%)
                     </span>
                   ) : '-'}
+                </td>
+                <td className="px-6 py-4 whitespace-nowrap text-sm">
+                  <div className="flex flex-col text-xs">
+                    <span className={delta > 0 ? "text-green-500" : "text-red-500"}>
+                      Δ {delta.toFixed(2)}
+                    </span>
+                    <span className="text-gray-400">
+                      Θ {theta.toFixed(2)}
+                    </span>
+                  </div>
+                </td>
+                <td className="px-6 py-4 whitespace-nowrap text-sm">
+                  <Badge variant={highIV ? "destructive" : "outline"}>
+                    {ivRank}%
+                  </Badge>
                 </td>
               </tr>
             );

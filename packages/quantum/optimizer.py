@@ -14,6 +14,11 @@ try:
 except ImportError:
     QciDiracAdapter = None
 
+# Analytics Imports
+from analytics.strategy_selector import StrategySelector
+from analytics.guardrails import apply_guardrails, compute_conviction_score
+from analytics.analytics import OptionsAnalytics
+
 router = APIRouter()
 
 # --- Schemas ---
@@ -195,15 +200,53 @@ async def optimize_portfolio(req: OptimizationRequest):
             total_portfolio_value
         )
 
+        # --- New Decision Funnel ---
+        strategy_selector = StrategySelector()
+        processed_trades = []
+        for trade in trades:
+            # 1. Strategy Selection
+            # TODO: Replace mock iv_rank with real data from a market data provider.
+            iv_rank = np.random.uniform(10, 60) # Mock IV rank
+            sentiment = "BULLISH" if trade['action'] == "BUY" else "BEARISH"
+            strategy = strategy_selector.determine_strategy(
+                trade['symbol'],
+                sentiment,
+                100, # Mock current price
+                iv_rank
+            )
+            trade.update(strategy)
+            trade['iv_rank'] = iv_rank
+            processed_trades.append(trade)
+
+        # 2. Guardrails
+        processed_trades = apply_guardrails(processed_trades, investable_assets)
+
+        # 3. Conviction Score
+        for trade in processed_trades:
+            trade['conviction_score'] = compute_conviction_score(trade)
+            if trade['conviction_score'] >= 80:
+                trade['conviction_label'] = "HIGH"
+            elif 50 <= trade['conviction_score'] < 80:
+                trade['conviction_label'] = "SPECULATIVE"
+            else:
+                trade['conviction_label'] = "LOW"
+
+        # 4. Analytics
+        portfolio_analytics = {
+            "beta_delta": OptionsAnalytics.portfolio_beta_delta(investable_assets),
+            "theta_efficiency": OptionsAnalytics.theta_efficiency(investable_assets, total_portfolio_value)
+        }
+
         return {
             "status": "success",
             "mode": solver_type,
             "target_weights": target_weights,
-            "trades": trades,
+            "trades": processed_trades,
             "metrics": {
                 "expected_return": float(np.dot(weights_array, mu)),
                 "sharpe_ratio": float(np.dot(weights_array, mu) / np.sqrt(np.dot(weights_array.T, np.dot(sigma, weights_array)))),
-                "tail_risk_score": float(np.einsum('ijk,i,j,k->', coskew, weights_array, weights_array, weights_array))
+                "tail_risk_score": float(np.einsum('ijk,i,j,k->', coskew, weights_array, weights_array, weights_array)),
+                "analytics": portfolio_analytics
             }
         }
     except Exception as e:

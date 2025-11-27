@@ -32,6 +32,8 @@ from typing import Optional, Literal
 
 # 1. Load environment variables BEFORE importing other things
 load_dotenv()
+
+TEST_USER_UUID = '75ee12ad-b119-4f32-aeea-19b4ef55d587'
  
 app = FastAPI(
     title="Portfolio Optimizer API",
@@ -359,7 +361,7 @@ async def get_portfolio_snapshot(
     if x_test_mode_user:
         if not is_dev_mode:
             raise HTTPException(status_code=403, detail="Test Mode disabled in production")
-        user_id = x_test_mode_user
+        user_id = TEST_USER_UUID
     else:
         if not authorization:
             raise HTTPException(status_code=401, detail="Missing Authorization header")
@@ -393,6 +395,13 @@ async def get_portfolio_snapshot(
         pass
 
     if snapshot:
+        # Add buying power if available
+        try:
+            res = supabase.table("plaid_items").select("buying_power").eq("user_id", user_id).single().execute()
+            if res.data:
+                snapshot['buying_power'] = res.data.get('buying_power')
+        except Exception:
+            pass # Ignore if not found
         return snapshot
     else:
         return {"message": "No snapshot found", "holdings": []}

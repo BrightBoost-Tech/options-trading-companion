@@ -5,7 +5,7 @@ import { supabase } from '@/lib/supabase';
 import { useRouter } from 'next/navigation';
 import DashboardLayout from '@/components/DashboardLayout';
 import SyncHoldingsButton from '@/components/SyncHoldingsButton';
-import { API_URL } from '@/lib/constants';
+import { API_URL, TEST_USER_ID } from '@/lib/constants';
 
 interface FetchOptions extends RequestInit {
   timeout?: number;
@@ -55,7 +55,7 @@ export default function PortfolioPage() {
         // unauthenticated viewing in dev.
         // For the purpose of the "Test Mode" requirement:
         console.log("⚠️ No user found, using Test Mode user.");
-        setUser({ id: 'test-user-123', email: 'test@example.com' });
+        setUser({ id: TEST_USER_ID, email: 'test@example.com' });
     }
   };
 
@@ -69,7 +69,7 @@ export default function PortfolioPage() {
           headers['Authorization'] = `Bearer ${session.access_token}`;
       } else {
            // Test Mode Header
-           headers['X-Test-Mode-User'] = 'test-user-123';
+           headers['X-Test-Mode-User'] = TEST_USER_ID;
       }
 
       const response = await fetchWithTimeout(`${API_URL}/portfolio/snapshot`, {
@@ -151,6 +151,8 @@ export default function PortfolioPage() {
                       <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Qty</th>
                       <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Avg Cost</th>
                       <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Current Price</th>
+                      <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">IV Rank</th>
+                      <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">DTE</th>
                       <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Value</th>
                       <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Source</th>
                     </tr>
@@ -158,8 +160,9 @@ export default function PortfolioPage() {
                   <tbody className="divide-y divide-gray-200">
                     {holdings.map((pos, idx) => {
                         const value = (pos.quantity || 0) * (pos.current_price || 0);
+                        const isLowDTE = pos.option_contract && pos.dte < 3;
                         return (
-                      <tr key={idx} className="hover:bg-gray-50">
+                      <tr key={idx} className={`hover:bg-gray-50 ${isLowDTE ? 'bg-red-100' : ''}`}>
                         <td className="px-6 py-4 font-medium">{pos.symbol}</td>
                         <td className="px-6 py-4">
                           <span className={`px-2 py-1 rounded text-xs ${!pos.option_contract ? 'bg-blue-100 text-blue-800' : 'bg-purple-100 text-purple-800'}`}>
@@ -169,6 +172,8 @@ export default function PortfolioPage() {
                         <td className="px-6 py-4">{pos.quantity}</td>
                         <td className="px-6 py-4">${(pos.cost_basis || 0).toFixed(2)}</td>
                         <td className="px-6 py-4">${(pos.current_price || 0).toFixed(2)}</td>
+                        <td className="px-6 py-4">{pos.iv_rank ? `${(pos.iv_rank * 100).toFixed(0)}%` : 'N/A'}</td>
+                        <td className="px-6 py-4">{pos.dte || 'N/A'}</td>
                         <td className="px-6 py-4 font-medium">${value.toFixed(2)}</td>
                         <td className="px-6 py-4">
                              <span className={`px-2 py-1 rounded text-xs ${pos.source === 'plaid' ? 'bg-green-100 text-green-800' : 'bg-yellow-100 text-yellow-800'}`}>

@@ -4,8 +4,9 @@ import { useState, useEffect } from 'react';
 import DashboardLayout from '@/components/DashboardLayout';
 import SyncHoldingsButton from '@/components/SyncHoldingsButton';
 import PortfolioOptimizer from '@/components/dashboard/PortfolioOptimizer';
+import TradeSuggestionCard from '@/components/tradeSuggestionCard';
 import { supabase } from '@/lib/supabase';
-import { API_URL } from '@/lib/constants';
+import { API_URL, TEST_USER_ID } from '@/lib/constants';
 
 const mockAlerts = [
   { id: '1', message: 'SPY credit put spread scout: 475/470 for $1.50 credit', time: '2 min ago' },
@@ -25,12 +26,10 @@ const fetchWithTimeout = async (resource: RequestInfo, options: FetchOptions = {
   return response;
 };
 
-// 🛠️ DEV MODE: Use the specific User ID found in your backend logs
-const TEST_USER_ID = '75ee12ad-b119-4f32-aeea-19b4ef55d587';
-
 export default function DashboardPage() {
   // Snapshot data
   const [snapshot, setSnapshot] = useState<any>(null);
+  const [metrics, setMetrics] = useState<any>(null);
 
   // Options Scout state
   const [weeklyScout, setWeeklyScout] = useState<any>(null);
@@ -232,8 +231,24 @@ export default function DashboardPage() {
 
           {/* OPTIMIZER PANEL */}
           <div className="h-full">
-            <PortfolioOptimizer positions={snapshot?.holdings} />
+            <PortfolioOptimizer positions={snapshot?.holdings} onOptimizationComplete={setMetrics} />
           </div>
+        </div>
+
+        {/* Risk Header */}
+        <div className="grid grid-cols-3 gap-4">
+            <div className="bg-white p-4 rounded-lg shadow">
+                <h4 className="text-sm font-medium text-gray-500">Beta-weighted Delta</h4>
+                <p className="text-2xl font-bold">${metrics?.analytics?.beta_delta?.toFixed(2) || '0.00'}</p>
+            </div>
+            <div className="bg-white p-4 rounded-lg shadow">
+                <h4 className="text-sm font-medium text-gray-500">Theta</h4>
+                <p className="text-2xl font-bold">${metrics?.analytics?.theta_efficiency?.toFixed(2) || '0.00'}</p>
+            </div>
+            <div className="bg-white p-4 rounded-lg shadow">
+                <h4 className="text-sm font-medium text-gray-500">Buying Power</h4>
+                <p className="text-2xl font-bold">${snapshot?.buying_power?.toFixed(2) || '0.00'}</p>
+            </div>
         </div>
 
         {/* SECTION 2: SCOUT & JOURNAL (Moved Below) */}
@@ -247,15 +262,9 @@ export default function DashboardPage() {
                 {scoutLoading && <div className="py-4 text-center text-sm animate-pulse">Scanning...</div>}
                 {weeklyScout?.top_picks && (
                     <div className="space-y-3">
-                    {weeklyScout.top_picks.slice(0, 3).map((opp: any, idx: number) => (
-                        <div key={idx} className="bg-white rounded-lg p-4 border border-green-200">
-                            <div className="flex justify-between items-start mb-2">
-                                <span className="text-lg font-bold text-gray-900">#{idx + 1} {opp.symbol}</span>
-                                <span className="text-sm font-medium">${opp.credit.toFixed(2)} credit</span>
-                            </div>
-                            <p className="text-sm text-gray-600">{opp.type} • IV Rank: {(opp.iv_rank * 100).toFixed(0)}%</p>
-                        </div>
-                    ))}
+                        {weeklyScout.top_picks.slice(0, 3).map((opp: any, idx: number) => (
+                            <TradeSuggestionCard key={idx} trade={opp} />
+                        ))}
                     </div>
                 )}
             </div>

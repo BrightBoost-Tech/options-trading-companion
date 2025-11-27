@@ -150,25 +150,19 @@ def get_holdings(access_token: str):
     """
     Get holdings wrapper.
     """
-    if not PLAID_SECRET or access_token.startswith("access-sandbox-mock-"):
-        print("⚠️  Returning MOCK holdings")
-        holdings = _get_mock_holdings()
-        return {"holdings": [h.dict() for h in holdings]}
+    if not PLAID_SECRET or not PLAID_CLIENT_ID:
+        raise ValueError("Plaid credentials are not configured.")
 
     holdings = fetch_and_normalize_holdings(access_token)
     return {"holdings": [h.dict() for h in holdings]}
+
 
 def fetch_and_normalize_holdings(access_token: str) -> list[Holding]:
     """
     Fetches holdings from Plaid and normalizes them into our internal Holding model.
     """
-    # Mock Handling inside the fetcher logic too
-    if not PLAID_SECRET or access_token.startswith("access-sandbox-mock-"):
-        print("⚠️  Returning MOCK holdings (Internal Fetch)")
-        return _get_mock_holdings()
-
-    if not PLAID_CLIENT_ID:
-        raise ValueError("Missing PLAID_CLIENT_ID environment variable")
+    if not PLAID_SECRET or not PLAID_CLIENT_ID:
+        raise ValueError("Plaid credentials are not configured.")
 
     try:
         # 4. Ensure holdings sync uses the investments endpoint
@@ -226,27 +220,3 @@ def fetch_and_normalize_holdings(access_token: str) -> list[Holding]:
         print(f"Plaid API Error (Fetch Holdings): {e}")
         raise e
 
-def _get_mock_holdings() -> list[Holding]:
-    """Return a list of mock holdings for testing"""
-    return [
-        Holding(
-            symbol="MOCK-AAPL",
-            name="Mock Apple Inc",
-            quantity=10.0,
-            cost_basis=150.0,
-            current_price=175.0,
-            institution_name="Mock Broker",
-            source="plaid",
-            last_updated=datetime.now()
-        ),
-        Holding(
-            symbol="MOCK-SPY",
-            name="Mock SPDR S&P 500",
-            quantity=5.0,
-            cost_basis=400.0,
-            current_price=450.0,
-            institution_name="Mock Broker",
-            source="plaid",
-            last_updated=datetime.now()
-        )
-    ]

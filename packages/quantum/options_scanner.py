@@ -106,9 +106,7 @@ def scan_for_opportunities(symbols: List[str] = None) -> List[Dict]:
                     opp['short_strike'] = short_strike
                     opp['long_strike'] = long_strike
 
-                    # TODO: Replace mock iv_rank with real data from a market data provider.
-                    seed = sum(ord(c) for c in symbol)
-                    opp['iv_rank'] = 0.3 + (seed % 50) / 100.0  # 0.30 to 0.80
+                    opp['iv_rank'] = service.get_iv_rank(symbol)
 
             except Exception as e:
                 # print(f"Could not fetch price for {symbol}: {e}")

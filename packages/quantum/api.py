@@ -237,10 +237,6 @@ async def sync_holdings(
             errors.append(f"Plaid: {str(e)}")
 
     if not sync_attempted:
-         # If no Plaid token, maybe we have other sources?
-         # For now, just return empty if test mode, else error.
-         if x_test_mode_user:
-             return SyncResponse(status="success", count=0, holdings=[])
          raise HTTPException(status_code=404, detail="No linked broker accounts found.")
 
     if errors and not holdings:
@@ -344,94 +340,45 @@ async def export_holdings_csv(
 
 @app.get("/portfolio/snapshot")
 async def get_portfolio_snapshot(
-    authorization: Optional[str] = Header(None),
-    x_test_mode_user: Optional[str] = Header(None, alias="X-Test-Mode-User"),
+    user_id: str = Depends(get_current_user),
     refresh: bool = False
 ):
+    """Retrieves the most recent portfolio snapshot for the authenticated user."""
     if not supabase:
-         return {
-             "holdings": [],
-             "risk_metrics": {},
-             "is_mock": True
-         }
+        raise HTTPException(status_code=503, detail="Database service unavailable")
 
-    user_id = None
-    is_dev_mode = os.getenv("APP_ENV") != "production"
+    # 1. Get latest snapshot from the database
+    try:
+        response = supabase.table("portfolio_snapshots") \
+            .select("*") \
+            .eq("user_id", user_id) \
+            .order("created_at", desc=True) \
+            .limit(1) \
+            .execute()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Database query failed: {e}")
 
-    if x_test_mode_user:
-        if not is_dev_mode:
-            raise HTTPException(status_code=403, detail="Test Mode disabled in production")
-        user_id = TEST_USER_UUID
-    else:
-        if not authorization:
-            raise HTTPException(status_code=401, detail="Missing Authorization header")
+    snapshot_data = response.data[0] if response.data else None
 
-        try:
-            token = authorization.split(" ")[1]
-            user = supabase.auth.get_user(token)
-            user_id = user.user.id
-        except Exception as e:
-            raise HTTPException(status_code=401, detail="Invalid Token")
+    # 2. Check for staleness (e.g., older than 15 minutes) - Note: refresh logic is a stub
+    if snapshot_data:
+        created_at_str = snapshot_data['created_at']
+        # Ensure timezone awareness for correct comparison
+        created_at = datetime.fromisoformat(created_at_str).replace(tzinfo=timezone.utc)
+        is_stale = (datetime.now(timezone.utc) - created_at) > timedelta(minutes=15)
 
-    # 1. Get latest snapshot
-    response = supabase.table("portfolio_snapshots") \
-        .select("*") \
-        .eq("user_id", user_id) \
-        .order("created_at", desc=True) \
-        .limit(1) \
-        .execute()
-
-    snapshot = response.data[0] if response.data else None
-
-    # 2. Check staleness (e.g. 15 minutes)
-    is_stale = True
-    if snapshot:
-        created_at = datetime.fromisoformat(snapshot['created_at'])
-        if datetime.now(timezone.utc) - created_at < timedelta(minutes=15):
-            is_stale = False
-
-    if (not snapshot or is_stale) and refresh:
-        # Trigger sync?
-        pass
-
-    if snapshot:
-        # Add buying power if available
+    if snapshot_data:
+        # Add buying power if available from a related table
         try:
             res = supabase.table("plaid_items").select("buying_power").eq("user_id", user_id).single().execute()
-            if res.data:
-                snapshot['buying_power'] = res.data.get('buying_power')
+            if res.data and res.data.get('buying_power') is not None:
+                snapshot_data['buying_power'] = res.data.get('buying_power')
         except Exception:
-            pass # Ignore if not found
-        return snapshot
+            pass  # Non-critical, ignore if it fails
+        return snapshot_data
     else:
+        # Return the same structure as before for consistency
         return {"message": "No snapshot found", "holdings": []}
-
-
-
-async def _get_user_symbols(authorization: str = None, x_test_mode_user: str = None) -> List[str]:
-    """Helper to retrieve user's symbols from DB"""
-    user_id = None
-
-    # 1. Check Test Mode (Dev Only)
-    is_dev_mode = os.getenv("APP_ENV") != "production"
-    if x_test_mode_user and is_dev_mode:
-         user_id = x_test_mode_user
-
-    # 2. Check Real Auth
-    elif authorization and supabase:
-        try:
-            token = authorization.split(" ")[1]
-            user = supabase.auth.get_user(token)
-            user_id = user.user.id
-        except Exception:
-            pass
-
-    if user_id and supabase:
-        res = supabase.table("positions").select("symbol").eq("user_id", user_id).execute()
-        if res.data:
-            return [p['symbol'] for p in res.data]
-
-    return []
 
 
 
@@ -505,6 +452,41 @@ async def get_expected_value(request: EVRequest):
         response["position_sizing"] = position_size
 
     return response
+
+# --- Trade Journal Endpoints ---
+
+@app.post("/journal/trades")
+async def add_trade_to_journal(trade: dict):
+    """Adds a new trade to the journal."""
+    try:
+        journal = TradeJournal()
+        new_trade = journal.add_trade(
+            symbol=trade['symbol'],
+            strategy=trade['strategy'],
+            entry_date=trade['entry_date'],
+            entry_price=trade['entry_price'],
+            strikes=trade['strikes'],
+            dte=trade['dte'],
+            iv_rank=trade['iv_rank'],
+            max_gain=trade['max_gain'],
+            max_loss=trade['max_loss'],
+            notes=trade.get('notes', '')
+        )
+        return new_trade
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+@app.put("/journal/trades/{trade_id}/close")
+async def close_trade_in_journal(trade_id: int, exit_date: str, exit_price: float):
+    """Closes an existing trade in the journal."""
+    try:
+        journal = TradeJournal()
+        closed_trade = journal.close_trade(trade_id, exit_date, exit_price)
+        return closed_trade
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
 if __name__ == "__main__":
     import uvicorn

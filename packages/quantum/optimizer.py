@@ -4,6 +4,7 @@ from typing import List, Dict, Optional, Any
 import numpy as np
 import pandas as pd
 import os
+import asyncio
 
 # Core Imports
 from core.math_engine import PortfolioMath
@@ -18,6 +19,11 @@ except ImportError:
 from logic.strategies import StrategyEngine
 from analytics.guardrails import apply_guardrails
 from analytics.analytics import OptionsAnalytics
+from logic.decision_engine import DecisionEngine
+
+# --- Instantiate Services ---
+# This requires POLYGON_API_KEY to be in the environment
+engine = DecisionEngine(os.getenv("POLYGON_API_KEY"))
 
 router = APIRouter()
 
@@ -200,44 +206,43 @@ async def optimize_portfolio(req: OptimizationRequest):
             total_portfolio_value
         )
 
-        # --- New Decision Funnel ---
-        strategy_engine = StrategyEngine()
-        processed_trades = []
-        for trade in trades:
-            # 1. Strategy Selection
-            # TODO: Replace mock iv_rank with real data from a market data provider.
-            iv_rank = np.random.uniform(10, 60) # Mock IV rank
-            sentiment = "BULLISH" if trade['action'] == "BUY" else "BEARISH"
-            strategy = strategy_engine.match_strategy(
-                trade['symbol'],
-                sentiment,
-                iv_rank,
-                100 # Mock current price
-            )
-            trade.update(strategy)
-            trade['iv_rank'] = iv_rank
-            processed_trades.append(trade)
+        # --- New Decision Funnel (Replaces old StrategyEngine) ---
+        tasks = []
+        for ticker, weight in target_weights.items():
+            if weight > 0.01:  # Ignore tiny weights
+                tasks.append(engine.analyze_trade(ticker, intended_action="LONG"))
 
-        # 2. Guardrails
-        processed_trades = apply_guardrails(processed_trades)
+        results = await asyncio.gather(*tasks)
+
+        final_suggestions = []
+        for analysis in results:
+            if analysis["status"] == "APPROVED":
+                # Find the original weight for this ticker
+                weight = target_weights.get(analysis["ticker"], 0)
+                final_suggestions.append({
+                    "ticker": analysis["ticker"],
+                    "target_weight": weight,
+                    "strategy": analysis["suggested_strategy"],
+                    "market_data": {
+                        "price": analysis["current_price"],
+                        "iv_rank": analysis["iv_rank"],
+                    },
+                })
 
 
-        # 4. Analytics
-        portfolio_analytics = {
-            "beta_delta": OptionsAnalytics.portfolio_beta_delta(investable_assets),
-            "theta_efficiency": OptionsAnalytics.theta_efficiency(investable_assets, total_portfolio_value)
-        }
+        # Rank by "Conviction" (weight)
+        final_suggestions.sort(key=lambda x: x["target_weight"], reverse=True)
+
 
         return {
             "status": "success",
             "mode": solver_type,
             "target_weights": target_weights,
-            "trades": processed_trades,
+            "trades": final_suggestions,
             "metrics": {
                 "expected_return": float(np.dot(weights_array, mu)),
                 "sharpe_ratio": float(np.dot(weights_array, mu) / np.sqrt(np.dot(weights_array.T, np.dot(sigma, weights_array)))),
                 "tail_risk_score": float(np.einsum('ijk,i,j,k->', coskew, weights_array, weights_array, weights_array)),
-                "analytics": portfolio_analytics
             }
         }
     except Exception as e:

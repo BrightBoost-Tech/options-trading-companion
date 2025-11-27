@@ -75,6 +75,7 @@ configuration = plaid.Configuration(
     }
 )
 api_client = plaid.ApiClient(configuration)
+api_client.configuration.timeout = 30  # Set a 30-second timeout
 client = plaid_api.PlaidApi(api_client)
 
 def create_link_token(user_id: str):

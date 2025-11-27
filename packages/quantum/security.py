@@ -66,13 +66,5 @@ async def get_current_user(
             print(f"⚠️ JWT Validation Failed: {e}")
             # Don't raise yet, check for fallback
 
-    # 2. Dev Mode Fallback (The "Test User" Header)
-    # Only allow this if we are NOT in production
-    if os.getenv("APP_ENV", "development") != "production":
-        test_user_header = request.headers.get("X-Test-Mode-User")
-        if test_user_header:
-            # print(f"🔓 Using Dev Header Auth: {test_user_header}")
-            return test_user_header
-
-    # 3. If both fail, Reject.
-    raise HTTPException(status_code=401, detail="Not authenticated. Log in or use Dev Header.")
+    # 2. If JWT fails, Reject.
+    raise HTTPException(status_code=401, detail="Not authenticated.")

@@ -87,10 +87,7 @@ def create_link_token(user_id: str):
 
     # Check if we have valid credentials to make a real call
     if not PLAID_SECRET or not PLAID_CLIENT_ID:
-        if not PLAID_SECRET:
-            print("⚠️  Plaid Secret missing - returning MOCK link token")
-            return {"link_token": "link-sandbox-mock-token-123", "expiration": "2024-12-31T23:59:59Z"}
-        raise ValueError("Missing PLAID_CLIENT_ID environment variable")
+        raise ValueError("Missing PLAID_CLIENT_ID or PLAID_SECRET environment variable")
 
     if not user_id:
         raise ValueError("user_id is required for Plaid Link Token creation")
@@ -132,9 +129,8 @@ def exchange_public_token(public_token: str):
     Exchange public token for access token.
     """
     # Mock Handling
-    if not PLAID_SECRET or public_token == "mock-public-token":
-         print("⚠️  Returning MOCK access token")
-         return {"access_token": "access-sandbox-mock-token-123", "item_id": "mock-item-id"}
+    if not PLAID_SECRET:
+         raise ValueError("Missing PLAID_SECRET environment variable")
 
     try:
         request = ItemPublicTokenExchangeRequest(
@@ -150,10 +146,8 @@ def get_holdings(access_token: str):
     """
     Get holdings wrapper.
     """
-    if not PLAID_SECRET or access_token.startswith("access-sandbox-mock-"):
-        print("⚠️  Returning MOCK holdings")
-        holdings = _get_mock_holdings()
-        return {"holdings": [h.dict() for h in holdings]}
+    if not PLAID_SECRET:
+        raise ValueError("Missing PLAID_SECRET environment variable")
 
     holdings = fetch_and_normalize_holdings(access_token)
     return {"holdings": [h.dict() for h in holdings]}
@@ -163,9 +157,8 @@ def fetch_and_normalize_holdings(access_token: str) -> list[Holding]:
     Fetches holdings from Plaid and normalizes them into our internal Holding model.
     """
     # Mock Handling inside the fetcher logic too
-    if not PLAID_SECRET or access_token.startswith("access-sandbox-mock-"):
-        print("⚠️  Returning MOCK holdings (Internal Fetch)")
-        return _get_mock_holdings()
+    if not PLAID_SECRET:
+        raise ValueError("Missing PLAID_SECRET environment variable")
 
     if not PLAID_CLIENT_ID:
         raise ValueError("Missing PLAID_CLIENT_ID environment variable")
@@ -225,28 +218,3 @@ def fetch_and_normalize_holdings(access_token: str) -> list[Holding]:
     except plaid.ApiException as e:
         print(f"Plaid API Error (Fetch Holdings): {e}")
         raise e
-
-def _get_mock_holdings() -> list[Holding]:
-    """Return a list of mock holdings for testing"""
-    return [
-        Holding(
-            symbol="MOCK-AAPL",
-            name="Mock Apple Inc",
-            quantity=10.0,
-            cost_basis=150.0,
-            current_price=175.0,
-            institution_name="Mock Broker",
-            source="plaid",
-            last_updated=datetime.now()
-        ),
-        Holding(
-            symbol="MOCK-SPY",
-            name="Mock SPDR S&P 500",
-            quantity=5.0,
-            cost_basis=400.0,
-            current_price=450.0,
-            institution_name="Mock Broker",
-            source="plaid",
-            last_updated=datetime.now()
-        )
-    ]

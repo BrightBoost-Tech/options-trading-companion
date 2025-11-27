@@ -15,8 +15,8 @@ except ImportError:
     QciDiracAdapter = None
 
 # Analytics Imports
-from analytics.strategy_selector import StrategySelector
-from analytics.guardrails import apply_guardrails, compute_conviction_score
+from logic.strategies import StrategyEngine
+from analytics.guardrails import apply_guardrails
 from analytics.analytics import OptionsAnalytics
 
 router = APIRouter()
@@ -201,35 +201,26 @@ async def optimize_portfolio(req: OptimizationRequest):
         )
 
         # --- New Decision Funnel ---
-        strategy_selector = StrategySelector()
+        strategy_engine = StrategyEngine()
         processed_trades = []
         for trade in trades:
             # 1. Strategy Selection
             # TODO: Replace mock iv_rank with real data from a market data provider.
             iv_rank = np.random.uniform(10, 60) # Mock IV rank
             sentiment = "BULLISH" if trade['action'] == "BUY" else "BEARISH"
-            strategy = strategy_selector.determine_strategy(
+            strategy = strategy_engine.match_strategy(
                 trade['symbol'],
                 sentiment,
-                100, # Mock current price
-                iv_rank
+                iv_rank,
+                100 # Mock current price
             )
             trade.update(strategy)
             trade['iv_rank'] = iv_rank
             processed_trades.append(trade)
 
         # 2. Guardrails
-        processed_trades = apply_guardrails(processed_trades, investable_assets)
+        processed_trades = apply_guardrails(processed_trades)
 
-        # 3. Conviction Score
-        for trade in processed_trades:
-            trade['conviction_score'] = compute_conviction_score(trade)
-            if trade['conviction_score'] >= 80:
-                trade['conviction_label'] = "HIGH"
-            elif 50 <= trade['conviction_score'] < 80:
-                trade['conviction_label'] = "SPECULATIVE"
-            else:
-                trade['conviction_label'] = "LOW"
 
         # 4. Analytics
         portfolio_analytics = {

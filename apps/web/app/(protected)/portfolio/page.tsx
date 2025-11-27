@@ -6,6 +6,8 @@ import { useRouter } from 'next/navigation';
 import DashboardLayout from '@/components/DashboardLayout';
 import SyncHoldingsButton from '@/components/SyncHoldingsButton';
 import { API_URL } from '@/lib/constants';
+import { Position } from '@/lib/types'; // Import the new Position type
+import { Badge } from '@/components/ui/badge';
 
 interface FetchOptions extends RequestInit {
   timeout?: number;
@@ -29,7 +31,7 @@ const fetchWithTimeout = async (resource: RequestInfo, options: FetchOptions = {
 
 export default function PortfolioPage() {
   const [user, setUser] = useState<any>(null);
-  const [holdings, setHoldings] = useState<any[]>([]);
+  const [holdings, setHoldings] = useState<Position[]>([]); // Use the new Position type
   const [snapshot, setSnapshot] = useState<any>(null);
   const [loading, setLoading] = useState(true);
   const router = useRouter();
@@ -46,17 +48,7 @@ export default function PortfolioPage() {
 
   const loadUser = async () => {
     const { data: { user } } = await supabase.auth.getUser();
-
-    if (user) {
-        setUser(user);
-    } else {
-        // Test Mode / Dev Fallback
-        // If no user found, we can assume test mode if explicitly checking or if we want to support
-        // unauthenticated viewing in dev.
-        // For the purpose of the "Test Mode" requirement:
-        console.log("⚠️ No user found, using Test Mode user.");
-        setUser({ id: 'test-user-123', email: 'test@example.com' });
-    }
+    setUser(user);
   };
 
   const loadSnapshot = async () => {
@@ -67,9 +59,6 @@ export default function PortfolioPage() {
       let headers: any = {};
       if (session) {
           headers['Authorization'] = `Bearer ${session.access_token}`;
-      } else {
-           // Test Mode Header
-           headers['X-Test-Mode-User'] = 'test-user-123';
       }
 
       const response = await fetchWithTimeout(`${API_URL}/portfolio/snapshot`, {
@@ -89,11 +78,7 @@ export default function PortfolioPage() {
     }
   };
 
-  if (!user) return <div className="p-8">Loading...</div>;
-
-  // Group holdings by type or other logic if needed. For now, flat list matching dashboard.
-  const stockHoldings = holdings.filter(h => !h.option_contract);
-  const optionHoldings = holdings.filter(h => h.option_contract);
+  if (loading) return <div className="p-8">Loading...</div>;
 
   return (
     <DashboardLayout>
@@ -153,11 +138,20 @@ export default function PortfolioPage() {
                       <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Current Price</th>
                       <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Value</th>
                       <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Source</th>
+                      <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Risk Profile (Δ / Θ)</th>
+                      <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">IV Rank</th>
+                      <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Guardrails</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-gray-200">
                     {holdings.map((pos, idx) => {
                         const value = (pos.quantity || 0) * (pos.current_price || 0);
+                        const greeks = pos.greeks;
+                        const warnings = pos.risk_warnings ?? [];
+                        const iv = pos.greeks?.iv_rank ?? 0;
+                        const highIV = iv > 50;
+                        const variant = highIV ? "destructive" : "default";
+
                         return (
                       <tr key={idx} className="hover:bg-gray-50">
                         <td className="px-6 py-4 font-medium">{pos.symbol}</td>
@@ -174,6 +168,40 @@ export default function PortfolioPage() {
                              <span className={`px-2 py-1 rounded text-xs ${pos.source === 'plaid' ? 'bg-green-100 text-green-800' : 'bg-yellow-100 text-yellow-800'}`}>
                                {pos.source || 'Manual'}
                              </span>
+                        </td>
+                        <td className="px-6 py-4">
+                          {greeks ? (
+                            <div className="flex flex-col text-xs font-mono">
+                              <span className={greeks.delta > 0 ? "text-green-500" : "text-red-500"}>
+                                Δ {greeks.delta.toFixed(2)}
+                              </span>
+                              <span className="text-yellow-600">
+                                Θ {greeks.theta.toFixed(2)}
+                              </span>
+                            </div>
+                          ) : (
+                            <span className="text-gray-400 text-xs">N/A</span>
+                          )}
+                        </td>
+                        <td className="px-6 py-4">
+                          <Badge variant={variant}>
+                            {iv}%
+                          </Badge>
+                        </td>
+                        <td className="px-6 py-4">
+                          {warnings.length === 0 ? (
+                            <Badge variant="outline" className="text-green-600 text-[10px]">
+                              Safe
+                            </Badge>
+                          ) : (
+                            <div className="flex flex-col gap-1">
+                              {warnings.map((w, i) => (
+                                <Badge key={i} variant="destructive" className="text-[10px]">
+                                  {w}
+                                </Badge>
+                              ))}
+                            </div>
+                          )}
                         </td>
                       </tr>
                     )})}

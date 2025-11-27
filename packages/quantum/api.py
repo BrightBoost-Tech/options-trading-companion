@@ -47,7 +47,7 @@ app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 # CORS Setup
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000", "https://your-production-domain.com"], # No more "*"
+    allow_origins=["http://localhost:3000", "http://127.0.0.1:3000", "https://your-production-domain.com"], # No more "*"
     allow_credentials=True,
     allow_methods=["GET", "POST", "OPTIONS"],
     allow_headers=["*"],
@@ -237,8 +237,6 @@ async def sync_holdings(
     if not sync_attempted:
          # If no Plaid token, maybe we have other sources?
          # For now, just return empty if test mode, else error.
-         if x_test_mode_user:
-             return SyncResponse(status="success", count=0, holdings=[])
          raise HTTPException(status_code=404, detail="No linked broker accounts found.")
 
     if errors and not holdings:
@@ -343,7 +341,6 @@ async def export_holdings_csv(
 @app.get("/portfolio/snapshot")
 async def get_portfolio_snapshot(
     authorization: Optional[str] = Header(None),
-    x_test_mode_user: Optional[str] = Header(None, alias="X-Test-Mode-User"),
     refresh: bool = False
 ):
     if not supabase:
@@ -356,20 +353,15 @@ async def get_portfolio_snapshot(
     user_id = None
     is_dev_mode = os.getenv("APP_ENV") != "production"
 
-    if x_test_mode_user:
-        if not is_dev_mode:
-            raise HTTPException(status_code=403, detail="Test Mode disabled in production")
-        user_id = x_test_mode_user
-    else:
-        if not authorization:
-            raise HTTPException(status_code=401, detail="Missing Authorization header")
+    if not authorization:
+        raise HTTPException(status_code=401, detail="Missing Authorization header")
 
-        try:
-            token = authorization.split(" ")[1]
-            user = supabase.auth.get_user(token)
-            user_id = user.user.id
-        except Exception as e:
-            raise HTTPException(status_code=401, detail="Invalid Token")
+    try:
+        token = authorization.split(" ")[1]
+        user = supabase.auth.get_user(token)
+        user_id = user.user.id
+    except Exception as e:
+        raise HTTPException(status_code=401, detail="Invalid Token")
 
     # 1. Get latest snapshot
     response = supabase.table("portfolio_snapshots") \
@@ -396,34 +388,6 @@ async def get_portfolio_snapshot(
         return snapshot
     else:
         return {"message": "No snapshot found", "holdings": []}
-
-
-
-async def _get_user_symbols(authorization: str = None, x_test_mode_user: str = None) -> List[str]:
-    """Helper to retrieve user's symbols from DB"""
-    user_id = None
-
-    # 1. Check Test Mode (Dev Only)
-    is_dev_mode = os.getenv("APP_ENV") != "production"
-    if x_test_mode_user and is_dev_mode:
-         user_id = x_test_mode_user
-
-    # 2. Check Real Auth
-    elif authorization and supabase:
-        try:
-            token = authorization.split(" ")[1]
-            user = supabase.auth.get_user(token)
-            user_id = user.user.id
-        except Exception:
-            pass
-
-    if user_id and supabase:
-        res = supabase.table("positions").select("symbol").eq("user_id", user_id).execute()
-        if res.data:
-            return [p['symbol'] for p in res.data]
-
-    return []
-
 
 
 

@@ -427,7 +427,7 @@ async def weekly_scout(user_id: str = Depends(get_current_user)):
             'source': 'user-holdings'
         }
     except Exception as e:
- fix/indentation-error
+fix/indentation-error
       print(f"Error in weekly_scout: {e}")
       return {
           "top_picks": [],

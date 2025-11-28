@@ -27,10 +27,7 @@ def enrich_holdings_with_analytics(holdings: list) -> list:
                 iv_rank = None
             else:
                 iv = float(raw_iv_rank)
-                # Normalize 0-1 float to 0-100
-                if 0 <= iv <= 1:
-                    iv *= 100
-                # Clamp 0-100
+                # Clamp 0-100 (Service now guarantees 0-100 scale)
                 iv_rank = max(0.0, min(100.0, iv))
 
             holding['iv_rank'] = iv_rank

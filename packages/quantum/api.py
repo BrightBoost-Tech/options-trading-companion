@@ -427,16 +427,14 @@ async def weekly_scout(user_id: str = Depends(get_current_user)):
             'source': 'user-holdings'
         }
     except Exception as e:
-fix/indentation-error
       print(f"Error in weekly_scout: {e}")
       return {
           "top_picks": [],
           "error": "scout_unavailable",
           "message": f"An error occurred while scouting for opportunities: {e}"
       }
-=======
+
         print(f"Error in weekly_scout: {e}")
-      fix/scout-and-journal-endpoints
         return {
             "top_picks": [],
             "error": "scout_unavailable",
@@ -459,9 +457,6 @@ async def get_journal_entries(user_id: str = Depends(get_current_user)):
 @app.get("/journal/stats")
 async def get_journal_stats(user_id: str = Depends(get_current_user)):
     """Gets trade journal statistics for the authenticated user."""
- fix/indentation-error
-=======
-=======
         raise HTTPException(status_code=500, detail=f"An error occurred while scouting for opportunities: {e}")
 
 @app.get("/journal/entries")
@@ -474,10 +469,6 @@ async def get_journal_entries(user_id: str = Depends(get_current_user)):
     try:
         journal_service = JournalService(supabase)
         entries = journal_service.get_journal_entries(user_id)
- fix/indentation-error
-=======
-fix/scout-and-journal-endpoints
- main
 
         if isinstance(entries, str):
             try:

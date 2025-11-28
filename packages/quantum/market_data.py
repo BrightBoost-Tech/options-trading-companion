@@ -6,6 +6,12 @@ from typing import List, Dict
 import numpy as np
 from cache import get_cached_data, save_to_cache
 
+def normalize_option_symbol(symbol: str) -> str:
+    """Ensures option symbols have the 'O:' prefix required by Polygon."""
+    if len(symbol) > 5 and not symbol.startswith('O:'):
+        return f"O:{symbol}"
+    return symbol
+
 class PolygonService:
     def __init__(self, api_key: str = None):
         self.api_key = api_key or os.getenv('POLYGON_API_KEY')
@@ -21,9 +27,7 @@ class PolygonService:
         to_str = to_date.strftime('%Y-%m-%d')
         
         # Handle Options formatting
-        search_symbol = symbol
-        if len(symbol) > 5 and not symbol.startswith('O:'):
-            search_symbol = f"O:{symbol}"
+        search_symbol = normalize_option_symbol(symbol)
 
         url = f"{self.base_url}/v2/aggs/ticker/{search_symbol}/range/1/day/{from_str}/{to_str}"
         params = {
@@ -57,7 +61,18 @@ class PolygonService:
 
     def get_ticker_details(self, symbol: str) -> Dict:
         """Fetches details for a given ticker, including sector."""
-        url = f"{self.base_url}/v3/reference/tickers/{symbol}"
+
+        # Check if it is an option (heuristic: length > 5 chars or starts with O:)
+        is_option = len(symbol) > 5 or symbol.startswith('O:')
+
+        if is_option:
+            search_symbol = normalize_option_symbol(symbol)
+            # Options Contract Endpoint
+            url = f"{self.base_url}/v3/reference/options/contracts/{search_symbol}"
+        else:
+            # Stock Ticker Endpoint
+            url = f"{self.base_url}/v3/reference/tickers/{symbol}"
+
         params = {'apiKey': self.api_key}
         response = requests.get(url, params=params, timeout=5)
         response.raise_for_status()
@@ -112,9 +127,7 @@ def get_polygon_price(symbol: str) -> float:
 
     # FIX 2: Format Options for Polygon (Prepend 'O:')
     # Plaid sends "AMZN251219...", Polygon needs "O:AMZN251219..."
-    search_symbol = symbol
-    if len(symbol) > 5 and not symbol.startswith('O:'):
-        search_symbol = f"O:{symbol}"
+    search_symbol = normalize_option_symbol(symbol)
 
     try:
         # Use existing service to reuse API key logic

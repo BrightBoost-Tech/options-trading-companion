@@ -114,7 +114,7 @@ export default function PortfolioPage() {
              <div className="bg-white rounded-lg shadow p-6">
                  <h3 className="text-sm font-medium text-gray-500 mb-2">Data Source</h3>
                  <p className="text-xl font-semibold text-gray-900 capitalize">
-                     {snapshot?.risk_metrics?.data_source || 'Unknown'}
+                     {snapshot?.data_source || 'Unknown'}
                  </p>
              </div>
              <div className="bg-white rounded-lg shadow p-6">
@@ -172,7 +172,7 @@ export default function PortfolioPage() {
                         <td className="px-6 py-4">{pos.quantity}</td>
                         <td className="px-6 py-4">${(pos.cost_basis || 0).toFixed(2)}</td>
                         <td className="px-6 py-4">${(pos.current_price || 0).toFixed(2)}</td>
-                        <td className="px-6 py-4">{pos.iv_rank ? `${(pos.iv_rank * 100).toFixed(0)}%` : 'N/A'}</td>
+                        <td className="px-6 py-4">{pos.iv_rank ? `${pos.iv_rank.toFixed(0)}%` : 'N/A'}</td>
                         <td className="px-6 py-4">{pos.dte || 'N/A'}</td>
                         <td className="px-6 py-4 font-medium">${value.toFixed(2)}</td>
                         <td className="px-6 py-4">

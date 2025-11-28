@@ -460,7 +460,7 @@ async def get_journal_entries(user_id: str = Depends(get_current_user)):
 async def get_journal_stats(user_id: str = Depends(get_current_user)):
     """Gets trade journal statistics for the authenticated user."""
     if not supabase:
-        raise HTTPException(status_co_
+        raise HTTPException(status_co_)
 
 
         if not isinstance(entries, list):

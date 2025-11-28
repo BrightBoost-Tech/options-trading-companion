@@ -22,11 +22,11 @@ import plaid_endpoints
 
 # Import functionalities
 from options_scanner import scan_for_opportunities
-from trade_journal import TradeJournal
+from services.journal_service import JournalService
 from optimizer import router as optimizer_router
 from market_data import calculate_portfolio_inputs
 from ev_calculator import calculate_ev, calculate_position_size
-from analytics.enrichment import enrich_holdings_with_analytics
+from services.enrichment_service import enrich_holdings_with_analytics
 from typing import Optional, Literal
 
 
@@ -137,6 +137,7 @@ async def create_portfolio_snapshot(user_id: str):
         "user_id": user_id,
         "created_at": datetime.now().isoformat(),
         "snapshot_type": "on-sync",
+        "data_source": "plaid",
         "holdings": holdings, # Storing the positions snapshot
         "risk_metrics": risk_metrics,
         "optimizer_status": "ready"
@@ -384,38 +385,61 @@ async def get_portfolio_snapshot(
 
 
 @app.get("/scout/weekly")
-async def weekly_scout():
-    """Get weekly option opportunities from a market-wide scan."""
+async def weekly_scout(user_id: str = Depends(get_current_user)):
+    """Get weekly option opportunities based on the user's current holdings."""
+    if not supabase:
+        raise HTTPException(status_code=503, detail="Database service unavailable")
+
     try:
-        # scan_for_opportunities now scans a predefined market list by default
-        opportunities = scan_for_opportunities()
+        # 1. Fetch user's holdings from the single source of truth
+        response = supabase.table("positions").select("symbol").eq("user_id", user_id).execute()
+        holdings = response.data
+
+        if not holdings:
+            return {
+                'count': 0,
+                'top_picks': [],
+                'generated_at': datetime.now().isoformat(),
+                'source': 'user-holdings',
+                'message': 'No holdings found to generate opportunities.'
+            }
+
+        # 2. Extract symbols to scan
+        symbols = list(set([h['symbol'] for h in holdings if h.get('symbol') and "USD" not in h['symbol'] and "CASH" not in h['symbol']]))
+
+        if not symbols:
+            return {
+                'count': 0,
+                'top_picks': [],
+                'generated_at': datetime.now().isoformat(),
+                'source': 'user-holdings',
+                'message': 'No scannable assets in your portfolio.'
+            }
+
+        # 3. Scan for opportunities based on these symbols
+        opportunities = scan_for_opportunities(symbols=symbols)
 
         return {
             'count': len(opportunities),
             'top_picks': opportunities[:5],
             'generated_at': datetime.now().isoformat(),
-            'source': 'market-scan'
+            'source': 'user-holdings'
         }
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        print(f"Error in weekly_scout: {e}")
+        raise HTTPException(status_code=500, detail=f"An error occurred while scouting for opportunities: {e}")
 
-@app.get("/journal/stats")
-async def journal_stats():
-    """Get trade journal statistics"""
+@app.get("/journal/entries")
+async def get_journal_entries(user_id: str = Depends(get_current_user)):
+    """Retrieves all journal entries for the authenticated user."""
+    if not supabase:
+        raise HTTPException(status_code=503, detail="Database service unavailable")
     try:
-        journal = TradeJournal()
-        stats = journal.get_stats()
-        patterns = journal.analyze_patterns()
-        rules = journal.generate_rules()
-
-        return {
-            'stats': stats,
-            'patterns': patterns,
-            'rules': rules,
-            'recent_trades': journal.trades[-10:]
-        }
+        journal_service = JournalService(supabase)
+        entries = journal_service.get_journal_entries(user_id)
+        return {"count": len(entries), "entries": entries}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=f"An error occurred: {e}")
 
 class EVRequest(BaseModel):
     premium: float
@@ -455,38 +479,31 @@ async def get_expected_value(request: EVRequest):
 
 # --- Trade Journal Endpoints ---
 
-@app.post("/journal/trades")
-async def add_trade_to_journal(trade: dict):
-    """Adds a new trade to the journal."""
+@app.post("/journal/trades", status_code=201)
+async def add_trade_to_journal(trade: Dict, user_id: str = Depends(get_current_user)):
+    """Adds a new trade to the journal for the authenticated user."""
+    if not supabase:
+        raise HTTPException(status_code=503, detail="Database service unavailable")
     try:
-        journal = TradeJournal()
-        new_trade = journal.add_trade(
-            symbol=trade['symbol'],
-            strategy=trade['strategy'],
-            entry_date=trade['entry_date'],
-            entry_price=trade['entry_price'],
-            strikes=trade['strikes'],
-            dte=trade['dte'],
-            iv_rank=trade['iv_rank'],
-            max_gain=trade['max_gain'],
-            max_loss=trade['max_loss'],
-            notes=trade.get('notes', '')
-        )
+        journal_service = JournalService(supabase)
+        new_trade = journal_service.add_trade(user_id, trade)
         return new_trade
     except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(status_code=400, detail=f"Failed to add trade: {e}")
 
 @app.put("/journal/trades/{trade_id}/close")
-async def close_trade_in_journal(trade_id: int, exit_date: str, exit_price: float):
-    """Closes an existing trade in the journal."""
+async def close_trade_in_journal(trade_id: int, exit_date: str, exit_price: float, user_id: str = Depends(get_current_user)):
+    """Closes an existing trade in the journal for the authenticated user."""
+    if not supabase:
+        raise HTTPException(status_code=503, detail="Database service unavailable")
     try:
-        journal = TradeJournal()
-        closed_trade = journal.close_trade(trade_id, exit_date, exit_price)
+        journal_service = JournalService(supabase)
+        closed_trade = journal_service.close_trade(user_id, trade_id, exit_date, exit_price)
         return closed_trade
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
     except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(status_code=400, detail=f"Failed to close trade: {e}")
 
 if __name__ == "__main__":
     import uvicorn

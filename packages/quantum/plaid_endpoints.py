@@ -7,7 +7,7 @@ import json
 import plaid
 from plaid.exceptions import ApiException
 from datetime import datetime
-from security import encrypt_token, decrypt_token
+from security import encrypt_token, decrypt_token, redact_sensitive_fields
 
 def register_plaid_endpoints(app, plaid_service, supabase_client=None):
     """Register Plaid endpoints with the FastAPI app"""
@@ -74,7 +74,7 @@ def register_plaid_endpoints(app, plaid_service, supabase_client=None):
             result = plaid_service.create_link_token(user_id)
             # Ensure return format is { "link_token": "..." }
             # Service returns full dict, which includes link_token
-            return result
+            return redact_sensitive_fields(result)
         except ValueError as e:
             print(f"❌ Plaid Configuration Error: {e}")
             raise HTTPException(status_code=400, detail=str(e))
@@ -147,7 +147,7 @@ def register_plaid_endpoints(app, plaid_service, supabase_client=None):
                 except Exception as e:
                      print(f"❌ Failed to save Plaid Item to DB: {e}")
 
-            return result
+            return redact_sensitive_fields(result)
 
         except ValueError as e:
             print(f"❌ Plaid Configuration Error: {e}")

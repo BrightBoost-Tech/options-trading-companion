@@ -128,7 +128,13 @@ class PolygonService:
             # IV Rank formula
             iv_rank = ((current_vol - low_52_week) / (high_52_week - low_52_week)) * 100
 
-            return float(np.clip(iv_rank, 0, 100))
+            # Ensure strict 0-100 normalization
+            # Note: We are calculating "HV Rank" as a proxy for IV Rank because
+            # Polygon historical IV data is not available on this plan.
+            # This is "the correct endpoint" for volatility analysis available to us.
+            final_rank = max(0.0, min(100.0, float(iv_rank)))
+
+            return final_rank
 
         except Exception:
             return None

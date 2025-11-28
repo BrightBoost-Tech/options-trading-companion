@@ -428,6 +428,7 @@ async def weekly_scout(user_id: str = Depends(get_current_user)):
         }
     except Exception as e:
         print(f"Error in weekly_scout: {e}")
+ fix/scout-and-journal-endpoints
         return {
             "top_picks": [],
             "error": "scout_unavailable",
@@ -449,11 +450,19 @@ async def get_journal_entries(user_id: str = Depends(get_current_user)):
 @app.get("/journal/stats")
 async def get_journal_stats(user_id: str = Depends(get_current_user)):
     """Gets trade journal statistics for the authenticated user."""
+=======
+        raise HTTPException(status_code=500, detail=f"An error occurred while scouting for opportunities: {e}")
+
+@app.get("/journal/entries")
+async def get_journal_entries(user_id: str = Depends(get_current_user)):
+    """Retrieves all journal entries for the authenticated user."""
+ main
     if not supabase:
         raise HTTPException(status_code=503, detail="Database service unavailable")
     try:
         journal_service = JournalService(supabase)
         entries = journal_service.get_journal_entries(user_id)
+fix/scout-and-journal-endpoints
 
         if isinstance(entries, str):
             try:
@@ -479,6 +488,11 @@ async def get_journal_stats(user_id: str = Depends(get_current_user)):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"An error occurred: {e}")
 
+=======
+        return {"count": len(entries), "entries": entries}
+    except Exception as e:
+
+    main
 
 class EVRequest(BaseModel):
     premium: float

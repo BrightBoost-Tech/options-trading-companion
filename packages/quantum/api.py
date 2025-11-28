@@ -438,34 +438,30 @@ async def get_journal_entries(user_id: str = Depends(get_current_user)):
     """Retrieves all journal entries for the authenticated user."""
     if not supabase:
         raise HTTPException(status_code=503, detail="Database service unavailable")
-    try:
-        journal_service = JournalService(supabase)
-        entries = journal_service.get_journal_entries(user_id)
-        return {"count": len(entries), "entries": entries}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"An error occurred: {e}")
 
-@app.get("/journal/stats")
-async def get_journal_stats(user_id: str = Depends(get_current_user)):
-    """Gets trade journal statistics for the authenticated user."""
-        raise HTTPException(status_code=500, detail=f"An error occurred while scouting for opportunities: {e}")
-
-@app.get("/journal/entries")
-async def get_journal_entries(user_id: str = Depends(get_current_user)):
-    """Retrieves all journal entries for the authenticated user."""
- main
- main
-    if not supabase:
-        raise HTTPException(status_code=503, detail="Database service unavailable")
     try:
         journal_service = JournalService(supabase)
         entries = journal_service.get_journal_entries(user_id)
 
+        # Normalize entries shape defensively
         if isinstance(entries, str):
             try:
                 entries = json.loads(entries)
             except json.JSONDecodeError:
                 entries = []
+
+        if not isinstance(entries, list):
+            entries = []
+
+        return {"count": len(entries), "entries": entries}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"An error occurred: {e}")
+@app.get("/journal/stats")
+async def get_journal_stats(user_id: str = Depends(get_current_user)):
+    """Gets trade journal statistics for the authenticated user."""
+    if not supabase:
+        raise HTTPException(status_co_
+
 
         if not isinstance(entries, list):
             entries = []

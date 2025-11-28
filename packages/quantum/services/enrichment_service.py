@@ -21,7 +21,18 @@ def enrich_holdings_with_analytics(holdings: list) -> list:
 
         try:
             # Get real IV Rank
-            iv_rank = service.get_iv_rank(symbol)
+            raw_iv_rank = service.get_iv_rank(symbol)
+
+            if raw_iv_rank is None:
+                iv_rank = None
+            else:
+                iv = float(raw_iv_rank)
+                # Normalize 0-1 float to 0-100
+                if 0 <= iv <= 1:
+                    iv *= 100
+                # Clamp 0-100
+                iv_rank = max(0.0, min(100.0, iv))
+
             holding['iv_rank'] = iv_rank
 
             # Use static defaults for other analytics until real calculations are available

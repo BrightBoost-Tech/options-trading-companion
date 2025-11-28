@@ -204,7 +204,7 @@ async def optimize_portfolio(req: OptimizationRequest):
             trades,
             total_portfolio_value,
             market_data,
-            investable_assets
+            [p.model_dump() for p in investable_assets]
         )
 
         # 4. Analytics

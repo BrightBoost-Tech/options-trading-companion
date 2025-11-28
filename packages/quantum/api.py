@@ -9,6 +9,7 @@ from pydantic import BaseModel, Field
 from typing import List, Optional, Dict
 from supabase import create_client, Client
 import json
+import requests
 
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.util import get_remote_address
@@ -427,7 +428,12 @@ async def weekly_scout(user_id: str = Depends(get_current_user)):
         }
     except Exception as e:
         print(f"Error in weekly_scout: {e}")
-        raise HTTPException(status_code=500, detail=f"An error occurred while scouting for opportunities: {e}")
+ fix/scout-and-journal-endpoints
+        return {
+            "top_picks": [],
+            "error": "scout_unavailable",
+            "message": f"An error occurred while scouting for opportunities: {e}"
+        }
 
 @app.get("/journal/entries")
 async def get_journal_entries(user_id: str = Depends(get_current_user)):
@@ -440,6 +446,53 @@ async def get_journal_entries(user_id: str = Depends(get_current_user)):
         return {"count": len(entries), "entries": entries}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"An error occurred: {e}")
+
+@app.get("/journal/stats")
+async def get_journal_stats(user_id: str = Depends(get_current_user)):
+    """Gets trade journal statistics for the authenticated user."""
+=======
+        raise HTTPException(status_code=500, detail=f"An error occurred while scouting for opportunities: {e}")
+
+@app.get("/journal/entries")
+async def get_journal_entries(user_id: str = Depends(get_current_user)):
+    """Retrieves all journal entries for the authenticated user."""
+ main
+    if not supabase:
+        raise HTTPException(status_code=503, detail="Database service unavailable")
+    try:
+        journal_service = JournalService(supabase)
+        entries = journal_service.get_journal_entries(user_id)
+fix/scout-and-journal-endpoints
+
+        if isinstance(entries, str):
+            try:
+                entries = json.loads(entries)
+            except json.JSONDecodeError:
+                entries = []
+
+        if not isinstance(entries, list):
+            entries = []
+
+        if not entries:
+            return {
+                "stats": {"win_rate": 0, "total_trades": 0, "profit_factor": 0, "avg_return": 0},
+                "recent_trades": []
+            }
+
+        # Placeholder for real stats calculation
+        return {
+             "stats": {"win_rate": 50, "total_trades": len(entries), "profit_factor": 1.5, "avg_return": 10},
+             "recent_trades": entries
+        }
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"An error occurred: {e}")
+
+=======
+        return {"count": len(entries), "entries": entries}
+    except Exception as e:
+
+    main
 
 class EVRequest(BaseModel):
     premium: float

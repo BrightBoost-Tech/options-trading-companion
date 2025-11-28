@@ -433,15 +433,6 @@ async def weekly_scout(user_id: str = Depends(get_current_user)):
           "error": "scout_unavailable",
           "message": f"An error occurred while scouting for opportunities: {e}"
       }
-
-       print(f"Error in weekly_scout: {e}")
-        return {
-            "top_picks": [],
-            "error": "scout_unavailable",
-            "message": f"An error occurred while scouting for opportunities: {e}"
-        }
- main
-
 @app.get("/journal/entries")
 async def get_journal_entries(user_id: str = Depends(get_current_user)):
     """Retrieves all journal entries for the authenticated user."""

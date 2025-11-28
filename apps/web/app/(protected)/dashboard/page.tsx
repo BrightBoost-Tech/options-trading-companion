@@ -4,6 +4,7 @@ import { useState, useEffect } from 'react';
 import DashboardLayout from '@/components/DashboardLayout';
 import SyncHoldingsButton from '@/components/SyncHoldingsButton';
 import PortfolioOptimizer from '@/components/dashboard/PortfolioOptimizer';
+import SuggestionTabs from '@/components/SuggestionTabs';
 import TradeSuggestionCard from '@/components/tradeSuggestionCard';
 import { supabase } from '@/lib/supabase';
 import { API_URL, TEST_USER_ID } from '@/lib/constants';
@@ -30,6 +31,9 @@ export default function DashboardPage() {
   // Snapshot data
   const [snapshot, setSnapshot] = useState<any>(null);
   const [metrics, setMetrics] = useState<any>(null);
+
+  // Optimizer suggestions (lifted state)
+  const [optimizerSuggestions, setOptimizerSuggestions] = useState<any[]>([]);
 
   // Options Scout state
   const [weeklyScout, setWeeklyScout] = useState<any>(null);
@@ -229,9 +233,18 @@ export default function DashboardPage() {
             </div>
           </div>
 
-          {/* OPTIMIZER PANEL */}
-          <div className="h-full">
-            <PortfolioOptimizer positions={snapshot?.holdings} onOptimizationComplete={setMetrics} />
+          {/* OPTIMIZER PANEL & SUGGESTION HUB */}
+          <div className="flex flex-col gap-6">
+            {/* Optimizer Control */}
+            <div className="h-[500px]">
+              <PortfolioOptimizer
+                positions={snapshot?.holdings}
+                onOptimizationComplete={(m, suggestions) => {
+                  setMetrics(m);
+                  if (suggestions) setOptimizerSuggestions(suggestions);
+                }}
+              />
+            </div>
           </div>
         </div>
 
@@ -251,26 +264,21 @@ export default function DashboardPage() {
             </div>
         </div>
 
-        {/* SECTION 2: SCOUT & JOURNAL (Moved Below) */}
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-            {/* Weekly Options Scout */}
-            <div className="bg-gradient-to-r from-green-50 to-emerald-50 rounded-lg shadow p-6 border-l-4 border-green-500">
-                <div className="flex justify-between items-start mb-4">
-                    <h3 className="text-lg font-semibold text-green-900 flex items-center gap-2">🎯 Weekly Options Scout</h3>
-                    <button onClick={loadWeeklyScout} className="text-sm text-green-700 underline">Refresh</button>
-                </div>
-                {scoutLoading && <div className="py-4 text-center text-sm animate-pulse">Scanning...</div>}
-                {weeklyScout?.top_picks && (
-                    <div className="space-y-3">
-                        {weeklyScout.top_picks.slice(0, 3).map((opp: any, idx: number) => (
-                            <TradeSuggestionCard key={idx} trade={opp} />
-                        ))}
-                    </div>
-                )}
+        {/* SECTION 2: UNIFIED SUGGESTION HUB */}
+        <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+            <div className="lg:col-span-2">
+                <SuggestionTabs
+                  optimizerSuggestions={optimizerSuggestions}
+                  scoutSuggestions={weeklyScout?.top_picks || []}
+                  journalQueue={[]} // TODO: Connect to journal service
+                  onRefreshScout={loadWeeklyScout}
+                  scoutLoading={scoutLoading}
+                  onRefreshJournal={() => {}}
+                />
             </div>
 
-            {/* Trade Journal Stats */}
-            <div className="bg-gradient-to-r from-purple-50 to-pink-50 rounded-lg shadow p-6 border-l-4 border-purple-500">
+            {/* Trade Journal Stats (Side Panel) */}
+            <div className="bg-gradient-to-r from-purple-50 to-pink-50 rounded-lg shadow p-6 border-l-4 border-purple-500 h-fit">
                 <div className="flex justify-between items-start mb-4">
                     <h3 className="text-lg font-semibold text-purple-900 flex items-center gap-2">📊 Trade Journal</h3>
                     <button onClick={loadJournalStats} className="text-sm text-purple-700 underline">Refresh</button>

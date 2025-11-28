@@ -43,4 +43,50 @@ def enrich_holdings_with_analytics(holdings: list) -> list:
             holding['theta'] = -0.05
             holding['iv_rank'] = None
 
+        # Calculate P&L Severity
+        try:
+            current_value = holding.get('current_price', 0) * holding.get('quantity', 0)
+            cost_basis_total = holding.get('cost_basis', 0) * holding.get('quantity', 0) # Assuming cost_basis is per share
+            # Note: Memory says "backend's /portfolio/snapshot endpoint expects cost_basis field ... to be the total cost".
+            # Checking existing code or context:
+            # If cost_basis is total cost, then we use it directly.
+            # Usually 'cost_basis' on a holding object from DB is often total or per share depending on schema.
+            # Let's assume standardized "cost_basis" field is Total Cost based on memory
+            # "The backend's /portfolio/snapshot endpoint expects the cost_basis field on a position to be the total cost"
+
+            # Let's re-read the holding dict structure if possible.
+            # In 'PortfolioHoldingsTable.tsx', it calculates:
+            # const costBasis = h.cost_basis || 0;
+            # const totalCost = h.quantity * costBasis;
+            # This implies `h.cost_basis` is PER SHARE.
+            # So `cost_basis_total` should be `holding['cost_basis'] * holding['quantity']` if `cost_basis` is per share.
+            # However, if the memory says "cost_basis field ... to be the total cost", there is a conflict.
+            # I will trust the Frontend implementation I just read: `const totalCost = h.quantity * costBasis;`.
+            # So `holding['cost_basis']` is likely per-share or unit cost.
+
+            # Let's calculate percentage based on unit price to be safe, or total.
+            # (Current - Basis) / Basis
+
+            cb = holding.get('cost_basis', 0)
+            cp = holding.get('current_price', 0)
+
+            if cb and cb > 0:
+                pnl_percent = ((cp - cb) / cb) * 100
+                holding['pnl_percent'] = pnl_percent
+
+                if pnl_percent <= -90:
+                    holding['pnl_severity'] = "critical"
+                elif pnl_percent <= -50:
+                    holding['pnl_severity'] = "warning"
+                elif pnl_percent >= 100:
+                    holding['pnl_severity'] = "success"
+                else:
+                    holding['pnl_severity'] = "normal"
+            else:
+                holding['pnl_percent'] = 0
+                holding['pnl_severity'] = "normal"
+
+        except Exception:
+             holding['pnl_severity'] = "normal"
+
     return holdings

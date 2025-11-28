@@ -20,6 +20,7 @@ from analytics.guardrails import apply_guardrails, compute_conviction_score
 from analytics.analytics import OptionsAnalytics
 from services.trade_builder import enrich_trade_suggestions
 from market_data import PolygonService, calculate_portfolio_inputs
+from ev_calculator import calculate_ev
 
 router = APIRouter()
 
@@ -206,6 +207,43 @@ async def optimize_portfolio(req: OptimizationRequest):
             market_data,
             [p.model_dump() for p in investable_assets]
         )
+
+        # 3b. Enrich with EV and PoP
+        for trade in processed_trades:
+            try:
+                # Default values for EV calculation
+                strategy = trade.get('strategy_type', 'long_call').lower().replace(' ', '_')
+
+                # Map strategies to ev_calculator supported types
+                # Simple mapping: assume basic strategies for now if not explicit
+                if 'call' in strategy and 'long' in strategy: strategy = 'long_call'
+                elif 'put' in strategy and 'long' in strategy: strategy = 'long_put'
+                elif 'call' in strategy and 'short' in strategy: strategy = 'short_call'
+                elif 'put' in strategy and 'short' in strategy: strategy = 'short_put'
+                # Fallback for 'covered call' -> short_call logic for EV
+                elif 'covered' in strategy: strategy = 'short_call'
+
+                ev_result = calculate_ev(
+                    premium=trade.get('price', 0),
+                    strike=trade.get('strike_price', 0) or trade.get('entry_price', 0), # Fallback
+                    current_price=market_data.get(trade['symbol'], {}).get('price', 0),
+                    delta=0.5, # Default if not available (TODO: Get real delta from market_data)
+                    strategy=strategy,
+                    width=None, # Only for spreads
+                    contracts=1
+                )
+
+                # Attach metrics
+                if 'metrics' not in trade:
+                    trade['metrics'] = {}
+
+                trade['metrics']['expected_value'] = ev_result.expected_value
+                trade['metrics']['probability_of_profit'] = ev_result.win_probability * 100 # Scale 0-100
+
+            except Exception as e:
+                # Don't fail the whole request for EV calc failure
+                # print(f"EV Calc failed for {trade['symbol']}: {e}")
+                pass
 
         # 4. Analytics
         portfolio_analytics = {

@@ -1,6 +1,6 @@
 import os
 from cryptography.fernet import Fernet
-from fastapi import HTTPException, Security, Request
+from fastapi import HTTPException, Security, Request, Depends
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from typing import Optional
 import jwt
@@ -76,3 +76,37 @@ async def get_current_user(
 
     # 3. If both fail, Reject.
     raise HTTPException(status_code=401, detail="Not authenticated. Log in or use Dev Header.")
+
+def get_current_user_id(user_id: str = Depends(get_current_user)):
+    """
+    Dependency that returns the user ID from the JWT token.
+    This can be injected into route handlers.
+    """
+    return user_id
+
+SENSITIVE_TOKEN_FIELDS = {
+    "access_token",
+    "public_token",
+    "processor_token",
+    "item_id",
+    "account_number",
+    "routing_number",
+}
+
+def is_sensitive_token_field(field_name: str) -> bool:
+    return field_name in SENSITIVE_TOKEN_FIELDS
+
+def redact_sensitive_fields(obj):
+    """
+    Recursively walk dict/list structures and redact sensitive fields.
+    Returns a new sanitized structure.
+    """
+    if isinstance(obj, dict):
+        return {
+            k: ("****" if is_sensitive_token_field(k) else redact_sensitive_fields(v))
+            for k, v in obj.items()
+        }
+    elif isinstance(obj, list):
+        return [redact_sensitive_fields(v) for v in obj]
+    else:
+        return obj

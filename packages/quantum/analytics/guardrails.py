@@ -76,6 +76,32 @@ def compute_conviction_score(trade):
     # Clamp 0–100
     return max(0, min(100, int(score)))
 
+def apply_slippage_guardrail(trade: Dict[str, Any], quote: Dict[str, float]) -> float:
+    """
+    Returns a slippage penalty multiplier in [0,1] based on bid/ask spread.
+    trade: suggestion or candidate (unused in simple logic but kept for context)
+    quote: bid/ask data {'bid': float, 'ask': float}
+    """
+    bid = quote.get('bid', 0.0)
+    ask = quote.get('ask', 0.0)
+
+    if bid <= 0:
+        return 0.0 # No liquidity
+
+    width = ask - bid
+    ratio = width / bid
+
+    # 15% spread -> 0 (reject)
+    if ratio > 0.15:
+        return 0.0
+
+    # 5-15% spread -> 0.8 (penalty)
+    if ratio > 0.05:
+        return 0.8
+
+    # <= 5% -> 1.0 (pass)
+    return 1.0
+
 # --- New Functions ---
 
 def is_earnings_safe(symbol: str, market_data: Dict[str, Any]) -> bool:

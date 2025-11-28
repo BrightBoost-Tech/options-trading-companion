@@ -477,22 +477,12 @@ async def get_journal_stats(user_id: str = Depends(get_current_user)):
              "stats": {"win_rate": 50, "total_trades": len(entries), "profit_factor": 1.5, "avg_return": 10},
              "recent_trades": entries
         }
-
- fix/indentation-error
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"An error occurred: {e}")
-
-=======
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"An error occurred: {e}")
-
-=======
         return {"count": len(entries), "entries": entries}
     except Exception as e:
-
-    main
- main
-
 class EVRequest(BaseModel):
     premium: float
     strike: float

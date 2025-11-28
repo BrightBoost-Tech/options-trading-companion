@@ -460,26 +460,14 @@ async def get_journal_entries(user_id: str = Depends(get_current_user)):
 async def get_journal_stats(user_id: str = Depends(get_current_user)):
     """Gets trade journal statistics for the authenticated user."""
     if not supabase:
-        raise HTTPException(status_co_)
+        raise HTTPException(status_code=503, detail="Database service unavailable")
 
-
-        if not isinstance(entries, list):
-            entries = []
-
-        if not entries:
-            return {
-                "stats": {"win_rate": 0, "total_trades": 0, "profit_factor": 0, "avg_return": 0},
-                "recent_trades": []
-            }
-
-        # Placeholder for real stats calculation
-        return {
-             "stats": {"win_rate": 50, "total_trades": len(entries), "profit_factor": 1.5, "avg_return": 10},
-             "recent_trades": entries
-        }
+    try:
+        journal_service = JournalService(supabase)
+        stats = journal_service.get_journal_stats(user_id)
+        return stats
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"An error occurred: {e}")
-        return {"count": len(entries), "entries": entries}
 class EVRequest(BaseModel):
     premium: float
     strike: float

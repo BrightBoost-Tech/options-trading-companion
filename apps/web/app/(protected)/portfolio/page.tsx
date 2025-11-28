@@ -172,7 +172,7 @@ export default function PortfolioPage() {
                         <td className="px-6 py-4">{pos.quantity}</td>
                         <td className="px-6 py-4">${(pos.cost_basis || 0).toFixed(2)}</td>
                         <td className="px-6 py-4">${(pos.current_price || 0).toFixed(2)}</td>
-                        <td className="px-6 py-4">{pos.iv_rank ? `${pos.iv_rank.toFixed(0)}%` : 'N/A'}</td>
+                        <td className="px-6 py-4">{pos.iv_rank !== null && pos.iv_rank !== undefined ? `${Math.round(pos.iv_rank)}%` : 'N/A'}</td>
                         <td className="px-6 py-4">{pos.dte || 'N/A'}</td>
                         <td className="px-6 py-4 font-medium">${value.toFixed(2)}</td>
                         <td className="px-6 py-4">

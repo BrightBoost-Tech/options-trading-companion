@@ -506,9 +506,13 @@ async def weekly_scout(user_id: str = Depends(get_current_user)):
         # 3. Scan for opportunities based on these symbols
         opportunities = scan_for_opportunities(symbols=symbols)
 
+        # 4. Filter and sort by score safely
+        cleaned = [o for o in opportunities if o.get("score") is not None]
+        cleaned.sort(key=lambda o: o.get("score", 0), reverse=True)
+
         return {
-            "count": len(opportunities),
-            "top_picks": opportunities[:5],
+            "count": len(cleaned),
+            "top_picks": cleaned[:5],
             "generated_at": datetime.now().isoformat(),
             "source": "user-holdings",
         }

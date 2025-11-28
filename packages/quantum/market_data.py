@@ -89,7 +89,7 @@ class PolygonService:
             rolling_vol = np.std([returns[i-30:i] for i in range(30, len(returns))], axis=1) * np.sqrt(252)
 
             if len(rolling_vol) == 0:
-                return 50.0 # Default if not enough data
+                return None # Default if not enough data
 
             # Get 52-week high and low of volatility
             high_52_week = np.max(rolling_vol)
@@ -104,7 +104,7 @@ class PolygonService:
             return np.clip(iv_rank, 0, 100)
 
         except Exception:
-            return 50.0 # Default
+            return None
 
     def get_trend(self, symbol: str) -> str:
         """Determines trend using simple moving averages."""

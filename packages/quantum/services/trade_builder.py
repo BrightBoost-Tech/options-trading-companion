@@ -40,7 +40,7 @@ def enrich_trade_suggestions(
 
         # 4. Calculate Contract Size
         trade['contracts'] = calculate_contract_size(
-            target_dollar_exposure=trade['value'],
+            target_dollar_exposure=trade.get('value', 0),
             share_price=symbol_market_data.get('price', trade.get('est_price', 100)),
             option_delta=trade.get('delta', 0.5),
             max_loss_per_contract=trade.get('max_loss', 500),
@@ -49,8 +49,9 @@ def enrich_trade_suggestions(
 
         # 5. Generate Rationale
         rationale_parts = []
-        if trade.get('iv_rank', 0) > 0.5:
-            rationale_parts.append(f"High IV Rank ({trade.get('iv_rank', 0):.2f})")
+        iv_rank_val = trade.get('iv_rank')
+        if iv_rank_val is not None and iv_rank_val > 50:
+            rationale_parts.append(f"High IV Rank ({iv_rank_val:.2f})")
         if trade.get('trend') == "UP":
             rationale_parts.append("Bullish trend")
         if trade['is_earnings_safe']:

@@ -6,7 +6,8 @@ import { Badge } from "@/components/ui/badge";
 interface TradeSuggestionCardProps {
   trade: {
     symbol: string;
-    strategy: string;
+    strategy?: string;
+    type?: string;
     score: number;
     badges: string[];
     rationale: string;
@@ -17,7 +18,7 @@ const TradeSuggestionCard: React.FC<TradeSuggestionCardProps> = ({ trade }) => {
   return (
     <Card>
       <CardHeader>
-        <CardTitle>{trade.symbol} - {trade.strategy}</CardTitle>
+        <CardTitle>{trade.symbol} - {trade.strategy || trade.type}</CardTitle>
       </CardHeader>
       <CardContent>
         <div className="flex justify-between items-center mb-4">

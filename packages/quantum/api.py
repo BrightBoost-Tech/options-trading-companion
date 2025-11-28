@@ -550,15 +550,56 @@ async def get_journal_entries(user_id: str = Depends(get_current_user)):
 @app.get("/journal/stats")
 async def get_journal_stats(user_id: str = Depends(get_current_user)):
     """Gets trade journal statistics for the authenticated user."""
+    # Define safe defaults
+    default_stats = {
+        "stats": {
+            "win_rate": 0.0,
+            "total_trades": 0,
+            "total_pnl": 0.0,
+            "profit_factor": 0.0,
+            "avg_return": 0.0
+        },
+        "recent_trades": []
+    }
+
     if not supabase:
-        raise HTTPException(status_code=503, detail="Database service unavailable")
+        print("Journal stats: Database unavailable, returning defaults.")
+        return default_stats
 
     try:
         journal_service = JournalService(supabase)
+        # Check if the method exists to avoid AttributeError
+        if not hasattr(journal_service, "get_journal_stats"):
+             print("JournalService.get_journal_stats not implemented.")
+             return default_stats
+
         stats = journal_service.get_journal_stats(user_id)
+
+        if not stats:
+            return default_stats
+
+        # Normalize if flat dict
+        if isinstance(stats, dict) and "stats" not in stats:
+             normalized_stats = default_stats.copy()
+             normalized_stats["stats"] = {
+                 "win_rate": stats.get("win_rate", 0.0),
+                 "total_trades": stats.get("total_trades", 0),
+                 "total_pnl": stats.get("total_pnl", 0.0),
+                 "profit_factor": stats.get("profit_factor", 0.0),
+                 "avg_return": stats.get("avg_return", 0.0)
+             }
+             if "recent_trades" in stats:
+                 normalized_stats["recent_trades"] = stats["recent_trades"]
+
+             return normalized_stats
+
         return stats
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"An error occurred: {e}")
+        print(f"Error fetching journal stats: {e}")
+        # Return safe defaults with error flag
+        result = default_stats.copy()
+        result["error"] = "journal_unavailable"
+        return result
 
 
 class EVRequest(BaseModel):

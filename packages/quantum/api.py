@@ -428,7 +428,7 @@ async def weekly_scout(user_id: str = Depends(get_current_user)):
         }
     except Exception as e:
         print(f"Error in weekly_scout: {e}")
- fix/scout-and-journal-endpoints
+      fix/scout-and-journal-endpoints
         return {
             "top_picks": [],
             "error": "scout_unavailable",

@@ -4,6 +4,7 @@ import requests
 from datetime import datetime, timedelta
 from typing import List, Dict
 import numpy as np
+import re
 from cache import get_cached_data, save_to_cache
 
 def normalize_option_symbol(symbol: str) -> str:
@@ -11,6 +12,22 @@ def normalize_option_symbol(symbol: str) -> str:
     if len(symbol) > 5 and not symbol.startswith('O:'):
         return f"O:{symbol}"
     return symbol
+
+def extract_underlying_symbol(symbol: str) -> str:
+    """
+    Extracts the underlying equity ticker from an option symbol.
+    Handles 'O:' prefix and standard/compact option formats.
+    Example: O:AMZN230616C00125000 -> AMZN
+    """
+    # Remove Polygon prefix
+    clean = symbol.replace("O:", "")
+
+    # Extract ticker (letters, dots, hyphens before the first digit)
+    match = re.match(r"^([A-Z\.-]+)\d", clean)
+    if match:
+        return match.group(1)
+
+    return clean
 
 class PolygonService:
     def __init__(self, api_key: str = None):
@@ -82,7 +99,13 @@ class PolygonService:
     def get_iv_rank(self, symbol: str) -> float:
         """Calculates IV Rank from historical data."""
         try:
-            data = self.get_historical_prices(symbol, days=365)
+            # Use underlying equity data for IV Rank
+            underlying = extract_underlying_symbol(symbol)
+            data = self.get_historical_prices(underlying, days=365)
+
+            if not data or 'returns' not in data:
+                return None
+
             returns = np.array(data['returns'])
 
             # Calculate 30-day rolling volatility
@@ -95,13 +118,17 @@ class PolygonService:
             high_52_week = np.max(rolling_vol)
             low_52_week = np.min(rolling_vol)
 
+            # Avoid division by zero
+            if high_52_week == low_52_week:
+                return None
+
             # Current volatility (last 30 days)
             current_vol = rolling_vol[-1]
 
             # IV Rank formula
             iv_rank = ((current_vol - low_52_week) / (high_52_week - low_52_week)) * 100
 
-            return np.clip(iv_rank, 0, 100)
+            return float(np.clip(iv_rank, 0, 100))
 
         except Exception:
             return None

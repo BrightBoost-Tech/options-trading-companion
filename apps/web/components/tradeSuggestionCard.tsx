@@ -22,7 +22,10 @@ const TradeSuggestionCard: React.FC<TradeSuggestionCardProps> = ({ trade }) => {
       </CardHeader>
       <CardContent>
         <div className="flex justify-between items-center mb-4">
-          <div className="text-2xl font-bold">{trade.score}</div>
+          <div className="flex flex-col">
+            <span className="text-xs text-gray-500 font-medium uppercase tracking-wider">OTC Score</span>
+            <span className="text-2xl font-bold">{trade.score}/100</span>
+          </div>
           <div className="flex space-x-2">
             {trade.badges.map((badge) => (
               <Badge key={badge}>{badge}</Badge>

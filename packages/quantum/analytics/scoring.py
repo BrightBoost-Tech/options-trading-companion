@@ -51,7 +51,10 @@ def generate_badges(trade: Dict[str, Any], market_data: Dict[str, Any]) -> List[
         badges.append("Earnings Safe")
 
     # IV Edge
-    iv_rank = trade.get('iv_rank', 0)
+    iv_rank = trade.get('iv_rank')
+    if iv_rank is None:
+        iv_rank = 0
+
     if trade['strategy_type'] == 'credit' and iv_rank > 50:
         badges.append("IV Edge")
     elif trade['strategy_type'] == 'debit' and iv_rank < 30:

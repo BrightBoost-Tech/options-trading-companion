@@ -16,7 +16,7 @@ def enrich_holdings_with_analytics(holdings: list) -> list:
         if not symbol or not service:
             holding['delta'] = 0.5
             holding['theta'] = -0.05
-            holding['iv_rank'] = 50.0  # Default IV Rank
+            holding['iv_rank'] = None
             continue
 
         try:
@@ -33,6 +33,6 @@ def enrich_holdings_with_analytics(holdings: list) -> list:
             # Fallback to defaults on a per-holding basis
             holding['delta'] = 0.5
             holding['theta'] = -0.05
-            holding['iv_rank'] = 50.0
+            holding['iv_rank'] = None
 
     return holdings

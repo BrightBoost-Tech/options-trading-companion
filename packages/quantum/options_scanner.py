@@ -69,7 +69,7 @@ def scan_for_opportunities(symbols: List[str] = None) -> List[Dict]:
             'dte': 30,
             'credit': opp_config.get('credit_target', 1.0),
             'width': opp_config.get('width', 5),
-            'iv_rank': 0.5,
+            'iv_rank': None,
             'delta': -0.30,
             'underlying_price': 105.00,
             'max_gain': opp_config.get('credit_target', 1.0) * 100,

@@ -2,7 +2,7 @@
 
 import { useState, useEffect } from 'react';
 import DashboardLayout from '@/components/DashboardLayout';
-import { API_URL } from '@/lib/constants';
+import { API_URL, TEST_USER_ID } from '@/lib/constants';
 import { supabase } from '@/lib/supabase';
 
 export default function JournalPage() {
@@ -17,17 +17,26 @@ export default function JournalPage() {
     setLoading(true);
     try {
       const { data: { session } } = await supabase.auth.getSession();
-      const response = await fetch(`${API_URL}/journal/entries`, {
-        headers: {
-          'Authorization': `Bearer ${session?.access_token}`,
-        },
-      });
+      const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+
+      if (session?.access_token) {
+        headers['Authorization'] = `Bearer ${session.access_token}`;
+      } else {
+        headers['X-Test-Mode-User'] = TEST_USER_ID;
+      }
+
+      const response = await fetch(`${API_URL}/journal/entries`, { headers });
+
       if (response.ok) {
         const data = await response.json();
         setEntries(data.entries || []);
+      } else {
+        console.warn(`Journal entries fetch failed: ${response.status}`);
+        setEntries([]);
       }
     } catch (error) {
       console.error('Failed to load journal entries:', error);
+      setEntries([]);
     } finally {
       setLoading(false);
     }

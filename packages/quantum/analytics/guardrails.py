@@ -85,10 +85,16 @@ def apply_slippage_guardrail(trade: Dict[str, Any], quote: Dict[str, float]) -> 
     bid = quote.get('bid', 0.0)
     ask = quote.get('ask', 0.0)
 
-    if bid <= 0:
+    # STRICT: Reject if bid or ask is missing/zero
+    if bid <= 0 or ask <= 0:
         return 0.0 # No liquidity
 
     width = ask - bid
+
+    # Avoid division by zero (redundant with bid<=0 check but safe)
+    if bid == 0:
+        return 0.0
+
     ratio = width / bid
 
     # 15% spread -> 0 (reject)

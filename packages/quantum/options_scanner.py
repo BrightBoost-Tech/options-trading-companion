@@ -120,11 +120,14 @@ def scan_for_opportunities(symbols: List[str] = None) -> List[Dict]:
     if service:
         for opp in processed_opportunities:
             symbol = opp['symbol']
+            quote = service.get_recent_quote(symbol)
             market_data[symbol] = {
                 "price": opp['underlying_price'],
                 "iv_rank": service.get_iv_rank(symbol),
                 "trend": service.get_trend(symbol),
-                "sector": service.get_ticker_details(symbol).get('sic_description')
+                "sector": service.get_ticker_details(symbol).get('sic_description'),
+                "bid": quote.get("bid", 0.0),
+                "ask": quote.get("ask", 0.0)
             }
 
     enriched_opportunities = enrich_trade_suggestions(

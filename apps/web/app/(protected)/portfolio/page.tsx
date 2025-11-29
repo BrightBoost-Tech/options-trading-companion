@@ -153,6 +153,7 @@ export default function PortfolioPage() {
                       <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Current Price</th>
                       <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">IV Rank</th>
                       <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">DTE</th>
+                      <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">P&L %</th>
                       <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Value</th>
                       <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Source</th>
                     </tr>
@@ -161,6 +162,14 @@ export default function PortfolioPage() {
                     {holdings.map((pos, idx) => {
                         const value = (pos.quantity || 0) * (pos.current_price || 0);
                         const isLowDTE = pos.option_contract && pos.dte < 3;
+
+                        const getSeverityClass = (s?: string) => {
+                          if (s === 'critical') return 'bg-red-50 text-red-700';
+                          if (s === 'warning') return 'bg-yellow-50 text-yellow-700';
+                          if (s === 'success') return 'bg-green-50 text-green-700';
+                          return '';
+                        };
+
                         return (
                       <tr key={idx} className={`hover:bg-gray-50 ${isLowDTE ? 'bg-red-100' : ''}`}>
                         <td className="px-6 py-4 font-medium">{pos.symbol}</td>
@@ -174,6 +183,13 @@ export default function PortfolioPage() {
                         <td className="px-6 py-4">${(pos.current_price || 0).toFixed(2)}</td>
                         <td className="px-6 py-4">{pos.iv_rank !== null && pos.iv_rank !== undefined ? `${Math.round(pos.iv_rank)}%` : 'N/A'}</td>
                         <td className="px-6 py-4">{pos.dte || 'N/A'}</td>
+                        <td className="px-6 py-4">
+                          {pos.pnl_percent !== undefined ? (
+                            <span className={`px-2 py-1 rounded text-xs font-semibold ${getSeverityClass(pos.pnl_severity)}`}>
+                              {pos.pnl_percent.toFixed(1)}%
+                            </span>
+                          ) : '—'}
+                        </td>
                         <td className="px-6 py-4 font-medium">${value.toFixed(2)}</td>
                         <td className="px-6 py-4">
                              <span className={`px-2 py-1 rounded text-xs ${pos.source === 'plaid' ? 'bg-green-100 text-green-800' : 'bg-yellow-100 text-yellow-800'}`}>

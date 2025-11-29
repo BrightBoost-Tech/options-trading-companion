@@ -9,8 +9,13 @@ class JournalService:
 
     def get_journal_entries(self, user_id: str) -> List[Dict[str, Any]]:
         """Retrieves all journal entries for a given user."""
-        response = self.supabase.table("trade_journal_entries").select("*").eq("user_id", user_id).order("entry_date", desc=True).execute()
-        return response.data
+        try:
+            response = self.supabase.table("trade_journal_entries").select("*").eq("user_id", user_id).order("entry_date", desc=True).execute()
+            return response.data if response.data else []
+        except Exception as e:
+            # Log error if possible, or return empty list to prevent crash
+            print(f"Error fetching journal entries: {e}")
+            return []
 
     def add_trade(self, user_id: str, trade_data: Dict[str, Any]) -> Dict[str, Any]:
         """Adds a new trade to the journal."""

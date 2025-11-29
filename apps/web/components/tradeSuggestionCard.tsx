@@ -40,8 +40,8 @@ export default function TradeSuggestionCard({ suggestion }: TradeSuggestionCardP
         premium: suggestion.price ?? 1.0,
         strike: suggestion.strike_price ?? suggestion.entry_price ?? 100,
         current_price: suggestion.underlying_price ?? suggestion.entry_price ?? 100,
-        delta: 0.5,
-        strategy: 'credit_spread', // or map from suggestion.strategy
+        delta: -0.3,
+        strategy: suggestion.strategy ?? 'credit_spread',
         width: suggestion.width ?? 5,
         contracts: 1,
         account_value: undefined,

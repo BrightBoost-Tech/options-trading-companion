@@ -153,6 +153,66 @@ class PolygonService:
         except Exception:
             return "NEUTRAL"
 
+    def get_recent_quote(self, symbol: str) -> Dict[str, float]:
+        """
+        Returns a dict with 'bid' and 'ask' for the given symbol.
+        Uses Polygon's quotes endpoint.
+        Returns {'bid': 0.0, 'ask': 0.0} on failure.
+        """
+        # 1. Normalize Symbol
+        search_symbol = normalize_option_symbol(symbol)
+        is_option = search_symbol.startswith('O:')
+
+        try:
+            if is_option:
+                # Options: Use v3 Quotes (latest)
+                # We fetch the most recent quote
+                url = f"{self.base_url}/v3/quotes/{search_symbol}"
+                params = {
+                    'limit': 1,
+                    'order': 'desc',
+                    'sort': 'timestamp',
+                    'apiKey': self.api_key
+                }
+                response = requests.get(url, params=params, timeout=5)
+                # Use raise_for_status to catch 4xx/5xx errors
+                if response.status_code != 200:
+                     return {"bid": 0.0, "ask": 0.0}
+
+                data = response.json()
+
+                if 'results' in data and len(data['results']) > 0:
+                    quote = data['results'][0]
+                    return {
+                        "bid": float(quote.get('bid_price', 0.0)),
+                        "ask": float(quote.get('ask_price', 0.0))
+                    }
+            else:
+                # Stocks: Use v2 NBBO (Last Quote)
+                url = f"{self.base_url}/v2/last/nbbo/{search_symbol}"
+                params = {'apiKey': self.api_key}
+                response = requests.get(url, params=params, timeout=5)
+
+                # NBBO endpoint might return 404 if no data, or 200 with empty results
+                if response.status_code != 200:
+                    return {"bid": 0.0, "ask": 0.0}
+
+                data = response.json()
+
+                if 'results' in data:
+                    res = data['results']
+                    # Polygon v2/last/nbbo: p = bid price, P = ask price
+                    return {
+                        "bid": float(res.get('p', 0.0)),
+                        "ask": float(res.get('P', 0.0))
+                    }
+
+        except Exception as e:
+            # Fallback for any network/parsing errors
+            print(f"Quote fetch failed for {search_symbol}: {e}")
+
+        return {"bid": 0.0, "ask": 0.0}
+
 def get_polygon_price(symbol: str) -> float:
     # FIX 1: Handle Cash Manually
     if symbol == 'CUR:USD':

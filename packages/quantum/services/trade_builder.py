@@ -1,6 +1,6 @@
 
 from typing import List, Dict, Any
-from analytics.guardrails import is_earnings_safe, check_liquidity, sector_penalty
+from analytics.guardrails import is_earnings_safe, check_liquidity, sector_penalty, apply_slippage_guardrail
 from analytics.scoring import calculate_otc_score, generate_badges
 from analytics.sizing import calculate_contract_size
 
@@ -34,6 +34,19 @@ def enrich_trade_suggestions(
 
         # 2. Calculate OTC Score
         trade['score'] = calculate_otc_score(trade, symbol_market_data)
+
+        # 2b. Slippage Guardrail
+        quote = {
+            "bid": symbol_market_data.get("bid", 0.0),
+            "ask": symbol_market_data.get("ask", 0.0),
+        }
+        slippage_mult = apply_slippage_guardrail(trade, quote)
+
+        if slippage_mult == 0.0:
+            # Hard reject this trade – skip adding
+            continue
+
+        trade['score'] *= slippage_mult
 
         # 3. Generate Badges
         trade['badges'] = generate_badges(trade, symbol_market_data)

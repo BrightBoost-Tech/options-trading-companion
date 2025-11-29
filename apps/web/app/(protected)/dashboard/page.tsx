@@ -134,7 +134,18 @@ export default function DashboardPage() {
       const cost = position.cost_basis * position.quantity;
       const value = position.current_price * position.quantity;
       const pnl = value - cost;
-      const pnlPercent = position.cost_basis > 0 ? (pnl / cost) * 100 : 0;
+
+      // Use backend P&L metrics if available, otherwise compute fallback
+      const pnlPercent = position.pnl_percent !== undefined
+        ? position.pnl_percent
+        : (position.cost_basis > 0 ? (pnl / cost) * 100 : 0);
+
+      const getSeverityClass = (s?: string) => {
+        if (s === 'critical') return 'bg-red-100 text-red-800';
+        if (s === 'warning') return 'bg-yellow-100 text-yellow-800';
+        if (s === 'success') return 'bg-green-100 text-green-800';
+        return '';
+      };
 
       return (
         <tr key={`${type}-${idx}`} className="hover:bg-gray-50">
@@ -151,7 +162,15 @@ export default function DashboardPage() {
                 <div className={`font-bold ${pnl >= 0 ? 'text-green-600' : 'text-red-600'}`}>
                 {pnl >= 0 ? '+' : ''}{pnl.toFixed(2)} ({pnlPercent.toFixed(1)}%)
                 </div>
-                {type === 'option' && pnlPercent >= 50 && (
+
+                {position.pnl_severity && (
+                   <span className={`inline-flex ml-2 items-center px-2 py-0.5 rounded text-xs font-medium ${getSeverityClass(position.pnl_severity)}`}>
+                      {position.pnl_severity.toUpperCase()}
+                   </span>
+                )}
+
+                {/* Legacy / Special Case Badge */}
+                {type === 'option' && pnlPercent >= 50 && !position.pnl_severity && (
                     <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-green-100 text-green-800 animate-pulse">
                     TARGET HIT 🎯
                     </span>

@@ -28,6 +28,8 @@ from options_scanner import scan_for_opportunities
 from services.journal_service import JournalService
 from optimizer import router as optimizer_router
 from market_data import calculate_portfolio_inputs
+# New Services for Cash-Aware Workflow
+from services.workflow_orchestrator import run_morning_cycle, run_midday_cycle, run_weekly_report
 from ev_calculator import calculate_ev, calculate_position_size
 from services.enrichment_service import enrich_holdings_with_analytics
 
@@ -36,6 +38,10 @@ from services.enrichment_service import enrich_holdings_with_analytics
 load_dotenv()
 
 TEST_USER_UUID = "75ee12ad-b119-4f32-aeea-19b4ef55d587"
+
+# New Table Constants
+TRADE_SUGGESTIONS_TABLE = "trade_suggestions"
+WEEKLY_REPORTS_TABLE = "weekly_trade_reports"
 
 app = FastAPI(
     title="Portfolio Optimizer API",
@@ -100,6 +106,26 @@ class RealDataRequest(BaseModel):
 
 
 # --- Helper Functions ---
+
+
+def get_active_user_ids() -> List[str]:
+    """Helper to get list of active user IDs."""
+    if not supabase:
+        return []
+    try:
+        # For now, derive from user_settings table
+        res = supabase.table("user_settings").select("user_id").execute()
+        return [r["user_id"] for r in res.data or []]
+    except Exception as e:
+        print(f"Error fetching active users: {e}")
+        return []
+
+
+def verify_cron_secret(x_cron_secret: str = Header(None, alias="X-Cron-Secret")):
+    """Dependency to verify the Cron Secret header."""
+    cron_secret = os.getenv("CRON_SECRET")
+    if not cron_secret or x_cron_secret != cron_secret:
+        raise HTTPException(status_code=401, detail="Unauthorized task caller")
 
 
 async def create_portfolio_snapshot(user_id: str) -> None:
@@ -181,6 +207,98 @@ def health_check():
         "status": "ok",
         "market_data": "connected" if polygon_key else "not configured",
     }
+
+
+# --- Cron Task Endpoints ---
+
+
+@app.post("/tasks/morning-brief")
+async def morning_brief(
+    _: None = Depends(verify_cron_secret)
+):
+    if not supabase:
+        raise HTTPException(status_code=503, detail="Database not available")
+
+    active_users = get_active_user_ids()
+    for uid in active_users:
+        await run_morning_cycle(supabase, uid)
+
+    return {"status": "ok", "processed": len(active_users)}
+
+
+@app.post("/tasks/midday-scan")
+async def midday_scan(
+    _: None = Depends(verify_cron_secret)
+):
+    if not supabase:
+        raise HTTPException(status_code=503, detail="Database not available")
+
+    active_users = get_active_user_ids()
+    for uid in active_users:
+        await run_midday_cycle(supabase, uid)
+
+    return {"status": "ok", "processed": len(active_users)}
+
+
+@app.post("/tasks/weekly-report")
+async def weekly_report_task(
+    _: None = Depends(verify_cron_secret)
+):
+    if not supabase:
+        raise HTTPException(status_code=503, detail="Database not available")
+
+    active_users = get_active_user_ids()
+    for uid in active_users:
+        await run_weekly_report(supabase, uid)
+
+    return {"status": "ok", "processed": len(active_users)}
+
+
+# --- New Data Endpoints ---
+
+
+@app.get("/suggestions")
+async def get_suggestions(
+    window: Optional[str] = None,
+    status: Optional[str] = "pending",
+    user_id: str = Depends(get_current_user),
+):
+    if not supabase:
+        raise HTTPException(status_code=503, detail="Database not available")
+
+    try:
+        query = supabase.table(TRADE_SUGGESTIONS_TABLE).select("*").eq("user_id", user_id)
+        if window:
+            query = query.eq("window", window)
+        if status:
+            query = query.eq("status", status)
+        res = query.order("created_at", desc=True).execute()
+        return {"suggestions": res.data or []}
+    except Exception as e:
+        print(f"Error fetching suggestions: {e}")
+        raise HTTPException(status_code=500, detail="Failed to fetch suggestions")
+
+
+@app.get("/weekly-reports")
+async def get_weekly_reports(
+    limit: int = 4,
+    user_id: str = Depends(get_current_user),
+):
+    if not supabase:
+        raise HTTPException(status_code=503, detail="Database not available")
+    try:
+        res = (
+            supabase.table(WEEKLY_REPORTS_TABLE)
+            .select("*")
+            .eq("user_id", user_id)
+            .order("week_ending", desc=True)
+            .limit(limit)
+            .execute()
+        )
+        return {"reports": res.data or []}
+    except Exception as e:
+        print(f"Error fetching weekly reports: {e}")
+        raise HTTPException(status_code=500, detail="Failed to fetch weekly reports")
 
 
 @app.post("/plaid/sync_holdings", response_model=SyncResponse)

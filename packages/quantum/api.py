@@ -832,6 +832,120 @@ async def close_trade_in_journal(
         raise HTTPException(status_code=400, detail=f"Failed to close trade: {e}")
 
 
+@app.post("/suggestions/{suggestion_id}/log-trade")
+async def log_trade_from_suggestion(
+    suggestion_id: str,
+    user_id: str = Depends(get_current_user),
+):
+    """
+    Lookup trade_suggestions row by id and create a corresponding journal_entry.
+    Does NOT close the trade; only logs entry information.
+    """
+    if not supabase:
+        raise HTTPException(status_code=503, detail="Database service unavailable")
+
+    try:
+        # 1. Fetch suggestion
+        res = supabase.table(TRADE_SUGGESTIONS_TABLE).select("*").eq("id", suggestion_id).eq("user_id", user_id).single().execute()
+        suggestion = res.data
+        if not suggestion:
+            raise HTTPException(status_code=404, detail="Suggestion not found")
+
+        # 2. Extract Data
+        # Ensure we handle fields safely
+        order_json = suggestion.get("order_json") or {}
+        entry_price = order_json.get("price") or order_json.get("limit_price") or 0.0
+
+        # Check if already logged? Optional but good practice.
+        # For now, we assume user might want to log it multiple times (e.g. scaling in).
+
+        trade_data = {
+            "user_id": user_id,
+            "symbol": suggestion.get("symbol"),
+            "direction": suggestion.get("direction", "Long"),
+            "entry_date": datetime.now().isoformat(),
+            "entry_price": entry_price,
+            "strategy": suggestion.get("strategy", "Stock"),
+            "contracts": 1, # Default
+            "status": "open",
+            "notes": f"Logged from suggestion {suggestion_id}"
+        }
+
+        # 3. Create Journal Entry
+        journal_service = JournalService(supabase)
+        new_entry = journal_service.add_trade(user_id, trade_data)
+
+        # 4. Update suggestion status
+        supabase.table(TRADE_SUGGESTIONS_TABLE).update({"status": "executed"}).eq("id", suggestion_id).execute()
+
+        return new_entry
+
+    except Exception as e:
+        print(f"Error logging trade from suggestion: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to log trade: {e}")
+
+
+@app.post("/journal/trades/{trade_id}/close-from-position")
+async def close_trade_from_position(
+    trade_id: int,
+    user_id: str = Depends(get_current_user),
+):
+    """
+    Convenience: looks up latest price from positions/snapshot and closes the journal trade
+    at that price and today's date.
+    """
+    if not supabase:
+        raise HTTPException(status_code=503, detail="Database service unavailable")
+
+    try:
+        # 1. Fetch Journal Entry
+        res = supabase.table("trade_journal_entries").select("*").eq("id", trade_id).eq("user_id", user_id).single().execute()
+        trade = res.data
+        if not trade:
+            raise HTTPException(status_code=404, detail="Trade not found")
+
+        symbol = trade.get("symbol")
+
+        # 2. Find Current Price from Positions (Live) or Snapshot
+        # Try live positions table first
+        pos_res = supabase.table("positions").select("current_price").eq("user_id", user_id).eq("symbol", symbol).single().execute()
+
+        exit_price = 0.0
+        if pos_res.data:
+            exit_price = pos_res.data.get("current_price", 0.0)
+
+        # If not in positions (maybe closed already?), check last snapshot or market data?
+        # Fallback to market data service if available, but for now strict compliance with instructions:
+        # "Find matching holding in positions (if still open) or look at last snapshot."
+
+        if exit_price == 0.0:
+            snap_res = supabase.table("portfolio_snapshots").select("holdings").eq("user_id", user_id).order("created_at", desc=True).limit(1).execute()
+            if snap_res.data:
+                holdings = snap_res.data[0].get("holdings", [])
+                # Find symbol
+                for h in holdings:
+                    if h.get("symbol") == symbol:
+                        exit_price = h.get("current_price", 0.0)
+                        break
+
+        if exit_price == 0.0:
+             raise HTTPException(status_code=400, detail=f"Could not determine current price for {symbol}. Sync holdings first.")
+
+        # 3. Close Trade
+        journal_service = JournalService(supabase)
+        closed_trade = journal_service.close_trade(
+            user_id,
+            trade_id,
+            datetime.now().isoformat(),
+            exit_price
+        )
+        return closed_trade
+
+    except Exception as e:
+        print(f"Error closing trade from position: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to close trade: {e}")
+
+
 if __name__ == "__main__":
     import uvicorn
 

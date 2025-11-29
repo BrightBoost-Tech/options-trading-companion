@@ -38,7 +38,15 @@ class JournalService:
             raise ValueError(f"Trade {trade_id} not found or user does not have access.")
 
         entry_price = trade.get('entry_price', 0)
-        pnl = exit_price - entry_price
+        direction = trade.get('direction', 'Long')
+
+        # Calculate P&L based on direction
+        # Assuming 'Short' or 'Sell' means short position
+        if direction and direction.upper() in ['SHORT', 'SELL']:
+            pnl = entry_price - exit_price
+        else:
+            pnl = exit_price - entry_price
+
         pnl_pct = (pnl / abs(entry_price)) * 100 if entry_price != 0 else 0
 
         update_data = {

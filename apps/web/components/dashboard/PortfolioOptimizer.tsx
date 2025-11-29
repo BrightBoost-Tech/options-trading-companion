@@ -45,6 +45,7 @@ interface PortfolioOptimizerProps {
 
 export default function PortfolioOptimizer({ positions, onOptimizationComplete }: PortfolioOptimizerProps) {
   const [isQuantum, setIsQuantum] = useState(false)
+  const [profile, setProfile] = useState<"balanced" | "aggressive">("aggressive") // Default to aggressive per user request
   const [isOptimizing, setIsOptimizing] = useState(false)
   const [results, setResults] = useState<OptimizationResult | null>(null)
 
@@ -75,7 +76,8 @@ export default function PortfolioOptimizer({ positions, onOptimizationComplete }
           positions: formattedPositions,
           risk_aversion: 1.0,
           skew_preference: isQuantum ? 10000.0 : 0.0, // High skew penalty triggers Quantum logic
-          cash_balance: 1000.0
+          cash_balance: 1000.0,
+          profile: profile
         })
       })
 
@@ -144,6 +146,17 @@ export default function PortfolioOptimizer({ positions, onOptimizationComplete }
              <button onClick={runDiagnostics} className="text-[10px] font-mono text-slate-400 hover:text-indigo-600 transition-colors">
                 TEST_CORE_SYSTEM
              </button>
+
+             {/* Profile Badge (User Request) */}
+             <div className={clsx(
+                "px-2 py-0.5 rounded text-[10px] font-bold uppercase tracking-wide cursor-pointer",
+                profile === 'aggressive' ? "bg-rose-100 text-rose-700" : "bg-blue-100 text-blue-700"
+             )}
+             onClick={() => setProfile(prev => prev === 'aggressive' ? 'balanced' : 'aggressive')}
+             title="Click to toggle profile"
+             >
+                Profile: {profile}
+             </div>
 
              {/* The requested Toggle */}
              <div className="flex items-center gap-2">

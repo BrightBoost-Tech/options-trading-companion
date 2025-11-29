@@ -33,14 +33,32 @@ class PositionInput(BaseModel):
 
 class OptimizationRequest(BaseModel):
     positions: List[PositionInput]
-    risk_aversion: float = 1.0
+    risk_aversion: float = 2.0
     skew_preference: float = 0.0
     cash_balance: float = 0.0
+    profile: str = "balanced"  # "aggressive" | "balanced" | "conservative"
+
+# Constants
+MIN_DOLLAR_DIFF_BALANCED = 50.0
+MIN_QTY_BALANCED = 0.05
+
+MIN_DOLLAR_DIFF_AGGRESSIVE = 10.0
+MIN_QTY_AGGRESSIVE = 0.02
 
 # --- Helper: Trade Generator ---
-def generate_trade_instructions(current_positions, target_weights, total_equity):
+def generate_trade_instructions(current_positions, target_weights, total_equity, profile: str = "balanced"):
     trades = []
     current_map = {p.symbol: p for p in current_positions}
+
+    # Determine thresholds based on profile
+    if profile == "aggressive":
+        min_diff = MIN_DOLLAR_DIFF_AGGRESSIVE
+        min_qty = MIN_QTY_AGGRESSIVE
+    else:
+        min_diff = MIN_DOLLAR_DIFF_BALANCED
+        min_qty = MIN_QTY_BALANCED
+
+    raw_trades = []
 
     for symbol, weight in target_weights.items():
         # 1. Target Value
@@ -53,27 +71,60 @@ def generate_trade_instructions(current_positions, target_weights, total_equity)
 
         # 3. Delta
         diff = target_val - curr_val
+        qty = abs(diff) / curr_price
 
-        # 4. Filter Noise (Ignore trades < $50)
-        if abs(diff) > 50.0:
-            action = "BUY" if diff > 0 else "SELL"
-            qty = abs(diff) / curr_price
+        raw_trades.append({
+            "symbol": symbol,
+            "diff": diff,
+            "qty": qty,
+            "curr_price": curr_price,
+            "weight": weight
+        })
 
-            # Don't suggest buying 0.01 shares unless it's Berkshire Hathaway
-            if qty >= 0.05:
-                trades.append({
-                    "symbol": symbol,
-                    "action": action,
-                    "value": round(abs(diff), 2),
-                    "est_quantity": round(qty, 2),
-                    "rationale": f"Target: {round(weight*100, 1)}% (Delta: ${int(diff)})"
-                })
+    # 4. Filter Noise
+    filtered_candidates = []
+    for t in raw_trades:
+        if abs(t["diff"]) > min_diff and t["qty"] >= min_qty:
+            filtered_candidates.append(t)
+
+    # 5. For Aggressive profile, ensure at least top 3 trades
+    if profile == "aggressive":
+        if len(filtered_candidates) < 3 and len(raw_trades) > 0:
+            # Sort by absolute dollar difference
+            extra = sorted(raw_trades, key=lambda x: abs(x["diff"]), reverse=True)
+            for cand in extra:
+                # Add if not already present
+                if not any(f["symbol"] == cand["symbol"] for f in filtered_candidates):
+                    filtered_candidates.append(cand)
+
+                if len(filtered_candidates) >= 3:
+                    break
+
+    # 6. Format Final Trades
+    for t in filtered_candidates:
+        diff = t["diff"]
+        qty = t["qty"]
+        action = "BUY" if diff > 0 else "SELL"
+        weight = t["weight"]
+
+        trades.append({
+            "symbol": t["symbol"],
+            "action": action,
+            "value": round(abs(diff), 2),
+            "est_quantity": round(qty, 2),
+            "rationale": f"Target: {round(weight*100, 1)}% (Delta: ${int(diff)})"
+        })
+
     return trades
 
 # --- Endpoint 1: Main Optimization (Phase 2 Logic) ---
 @router.post("/optimize/portfolio")
 async def optimize_portfolio(req: OptimizationRequest):
     try:
+        # Tune Risk Aversion for Aggressive Profile if default
+        if req.profile == "aggressive" and req.risk_aversion == 2.0:
+            req.risk_aversion = 1.0
+
         # 1. SEPARATE ASSETS FROM CASH (Fixes "Sell my cash" bug)
         investable_assets = []
         liquidity = req.cash_balance
@@ -183,7 +234,8 @@ async def optimize_portfolio(req: OptimizationRequest):
         trades = generate_trade_instructions(
             investable_assets,
             target_weights,
-            total_portfolio_value
+            total_portfolio_value,
+            profile=req.profile
         )
 
         # --- New Decision Funnel ---

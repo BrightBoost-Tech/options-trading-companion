@@ -2,34 +2,81 @@
 
 import { useState } from 'react';
 import TradeSuggestionCard from './tradeSuggestionCard';
-import { Sparkles, RefreshCw, Activity } from 'lucide-react';
+import MorningOrdersList from './suggestions/MorningOrdersList';
+import MiddayEntriesList from './suggestions/MiddayEntriesList';
+import WeeklyReportList from './suggestions/WeeklyReportList';
+import { Sparkles, RefreshCw, Activity, Sun, Clock, FileText } from 'lucide-react';
 
 interface SuggestionTabsProps {
   optimizerSuggestions: any[];
   scoutSuggestions: any[];
   journalQueue: any[];
+  morningSuggestions: any[];
+  middaySuggestions: any[];
+  weeklyReports: any[];
   onRefreshScout: () => void;
   scoutLoading: boolean;
-  onRefreshJournal: () => void; // Placeholder for future queue refresh
+  onRefreshJournal: () => void;
 }
 
 export default function SuggestionTabs({
   optimizerSuggestions,
   scoutSuggestions,
   journalQueue,
+  morningSuggestions,
+  middaySuggestions,
+  weeklyReports,
   onRefreshScout,
   scoutLoading,
   onRefreshJournal
 }: SuggestionTabsProps) {
-  const [activeTab, setActiveTab] = useState<'rebalance' | 'scout' | 'journal'>('rebalance');
+  const [activeTab, setActiveTab] = useState<'morning' | 'midday' | 'rebalance' | 'scout' | 'journal' | 'weekly'>('morning');
 
   return (
     <div className="bg-white rounded-lg shadow overflow-hidden h-full flex flex-col">
       {/* Tabs Header */}
-      <div className="flex border-b border-gray-100">
+      <div className="flex border-b border-gray-100 overflow-x-auto no-scrollbar">
+        <button
+          onClick={() => setActiveTab('morning')}
+          className={`flex-1 py-4 px-2 min-w-[120px] text-sm font-medium text-center border-b-2 transition-colors whitespace-nowrap ${
+            activeTab === 'morning'
+              ? 'border-orange-500 text-orange-600 bg-orange-50/50'
+              : 'border-transparent text-gray-500 hover:text-gray-700'
+          }`}
+        >
+          <div className="flex items-center justify-center gap-2">
+            <Sun className="w-4 h-4" />
+            Morning
+            {morningSuggestions.length > 0 && (
+              <span className="bg-orange-100 text-orange-600 py-0.5 px-2 rounded-full text-xs">
+                {morningSuggestions.length}
+              </span>
+            )}
+          </div>
+        </button>
+
+        <button
+          onClick={() => setActiveTab('midday')}
+          className={`flex-1 py-4 px-2 min-w-[120px] text-sm font-medium text-center border-b-2 transition-colors whitespace-nowrap ${
+            activeTab === 'midday'
+              ? 'border-blue-500 text-blue-600 bg-blue-50/50'
+              : 'border-transparent text-gray-500 hover:text-gray-700'
+          }`}
+        >
+          <div className="flex items-center justify-center gap-2">
+            <Clock className="w-4 h-4" />
+            Midday
+            {middaySuggestions.length > 0 && (
+              <span className="bg-blue-100 text-blue-600 py-0.5 px-2 rounded-full text-xs">
+                {middaySuggestions.length}
+              </span>
+            )}
+          </div>
+        </button>
+
         <button
           onClick={() => setActiveTab('rebalance')}
-          className={`flex-1 py-4 text-sm font-medium text-center border-b-2 transition-colors ${
+          className={`flex-1 py-4 px-2 min-w-[120px] text-sm font-medium text-center border-b-2 transition-colors whitespace-nowrap ${
             activeTab === 'rebalance'
               ? 'border-indigo-500 text-indigo-600 bg-indigo-50/50'
               : 'border-transparent text-gray-500 hover:text-gray-700'
@@ -48,7 +95,7 @@ export default function SuggestionTabs({
 
         <button
           onClick={() => setActiveTab('scout')}
-          className={`flex-1 py-4 text-sm font-medium text-center border-b-2 transition-colors ${
+          className={`flex-1 py-4 px-2 min-w-[120px] text-sm font-medium text-center border-b-2 transition-colors whitespace-nowrap ${
             activeTab === 'scout'
               ? 'border-green-500 text-green-600 bg-green-50/50'
               : 'border-transparent text-gray-500 hover:text-gray-700'
@@ -56,7 +103,7 @@ export default function SuggestionTabs({
         >
           <div className="flex items-center justify-center gap-2">
             <Sparkles className="w-4 h-4" />
-            Scout Picks
+            Scout
             {scoutSuggestions.length > 0 && (
               <span className="bg-green-100 text-green-600 py-0.5 px-2 rounded-full text-xs">
                 {scoutSuggestions.length}
@@ -67,7 +114,7 @@ export default function SuggestionTabs({
 
         <button
           onClick={() => setActiveTab('journal')}
-          className={`flex-1 py-4 text-sm font-medium text-center border-b-2 transition-colors ${
+          className={`flex-1 py-4 px-2 min-w-[120px] text-sm font-medium text-center border-b-2 transition-colors whitespace-nowrap ${
             activeTab === 'journal'
               ? 'border-purple-500 text-purple-600 bg-purple-50/50'
               : 'border-transparent text-gray-500 hover:text-gray-700'
@@ -75,7 +122,7 @@ export default function SuggestionTabs({
         >
           <div className="flex items-center justify-center gap-2">
             <span>📖</span>
-            Journal Queue
+            Journal
             {journalQueue.length > 0 && (
               <span className="bg-purple-100 text-purple-600 py-0.5 px-2 rounded-full text-xs">
                 {journalQueue.length}
@@ -83,10 +130,36 @@ export default function SuggestionTabs({
             )}
           </div>
         </button>
+
+        <button
+          onClick={() => setActiveTab('weekly')}
+          className={`flex-1 py-4 px-2 min-w-[120px] text-sm font-medium text-center border-b-2 transition-colors whitespace-nowrap ${
+            activeTab === 'weekly'
+              ? 'border-slate-500 text-slate-600 bg-slate-50/50'
+              : 'border-transparent text-gray-500 hover:text-gray-700'
+          }`}
+        >
+          <div className="flex items-center justify-center gap-2">
+            <FileText className="w-4 h-4" />
+            Reports
+          </div>
+        </button>
       </div>
 
       {/* Tab Content */}
       <div className="p-4 flex-1 overflow-y-auto bg-gray-50/50 min-h-[400px]">
+
+        {activeTab === 'morning' && (
+          <MorningOrdersList suggestions={morningSuggestions} />
+        )}
+
+        {activeTab === 'midday' && (
+          <MiddayEntriesList suggestions={middaySuggestions} />
+        )}
+
+        {activeTab === 'weekly' && (
+          <WeeklyReportList reports={weeklyReports} />
+        )}
 
         {activeTab === 'rebalance' && (
           <div className="space-y-4">
@@ -98,13 +171,6 @@ export default function SuggestionTabs({
                </div>
              ) : (
                optimizerSuggestions.map((trade, idx) => (
-                 // Using TradeSuggestionCard for optimizer trades if they fit the shape,
-                 // or a custom row. The optimizer returns simple trade dicts currently.
-                 // We might need to adapt them to TradeSuggestionCard props or render differently.
-                 // The optimizer trades look like: { symbol, action, value, rationale ... }
-                 // TradeSuggestionCard expects: { symbol, strategy_type, entry_price, otc_score ... }
-                 // Since they are different, we will stick to the existing list format for Rebalance
-                 // BUT wrapped in a card style similar to suggestions for consistency.
                  <div key={idx} className="bg-white p-4 rounded-lg border border-gray-200 shadow-sm">
                    <div className="flex justify-between items-start mb-2">
                      <div className="flex items-center gap-2">
@@ -116,7 +182,6 @@ export default function SuggestionTabs({
                      <span className="text-sm font-semibold text-gray-600">${trade.value?.toLocaleString()}</span>
                    </div>
                    <p className="text-xs text-gray-500 italic">{trade.rationale}</p>
-                   {/* If metrics exist (added in step 2) */}
                    {trade.metrics && (
                      <div className="mt-2 flex gap-2 text-xs">
                        {trade.metrics.expected_value && (

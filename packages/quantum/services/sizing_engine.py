@@ -72,5 +72,7 @@ def calculate_sizing(
     return {
         "contracts": contracts,
         "reason": reason,
-        "capital_required": capital_required
+        "capital_required": capital_required,
+        "stop_loss": round(contract_ask * 0.5, 2),  # Example: 50% stop loss
+        "target_price": round(contract_ask * 1.5, 2) # Example: 50% profit target
     }

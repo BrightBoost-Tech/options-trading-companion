@@ -47,7 +47,7 @@ const loadPlaidScript = () => {
 function PlaidLinkHeadless({ token, onSuccess, onExit, onCleanup }: {
     token: string,
     onSuccess: (public_token: string, metadata: any) => void,
-    onExit: (error: any, metadata: any) => void,
+    onExit: ((error: any, metadata: any) => void) | undefined,
     onCleanup: () => void
 }) {
     // Config: We rely on the fact that window.Plaid exists.

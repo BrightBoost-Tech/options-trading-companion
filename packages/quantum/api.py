@@ -254,6 +254,26 @@ async def weekly_report_task(
     return {"status": "ok", "processed": len(active_users)}
 
 
+# --- Development Endpoints ---
+
+@app.post("/tasks/run-all")
+async def run_all(user_id: str = Depends(get_current_user)):
+    """Dev-only: Manually trigger all workflows for the current user."""
+    if not supabase:
+        raise HTTPException(status_code=503, detail="Database not available")
+
+    print(f"DEV: Running Morning Cycle for {user_id}")
+    await run_morning_cycle(supabase, user_id)
+
+    print(f"DEV: Running Midday Cycle for {user_id}")
+    await run_midday_cycle(supabase, user_id)
+
+    print(f"DEV: Running Weekly Report for {user_id}")
+    await run_weekly_report(supabase, user_id)
+
+    return {"status": "ok", "message": "All workflows triggered manually"}
+
+
 # --- New Data Endpoints ---
 
 

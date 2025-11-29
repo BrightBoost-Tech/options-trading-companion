@@ -3,7 +3,7 @@
 import { useEffect, useState } from 'react';
 import { supabase } from '@/lib/supabase';
 import { Holding } from "@/types";
-import { Badge } from '@/components/ui/Badge';
+import { Badge } from '@/components/ui/badge';
 
 export default function PortfolioHoldingsTable() {
   const [holdings, setHoldings] = useState<Holding[] | null>(null);

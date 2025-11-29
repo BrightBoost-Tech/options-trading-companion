@@ -5,7 +5,6 @@ import DashboardLayout from '@/components/DashboardLayout';
 import SyncHoldingsButton from '@/components/SyncHoldingsButton';
 import PortfolioOptimizer from '@/components/dashboard/PortfolioOptimizer';
 import SuggestionTabs from '@/components/SuggestionTabs';
-import TradeSuggestionCard from '@/components/tradeSuggestionCard';
 import { supabase } from '@/lib/supabase';
 import { API_URL, TEST_USER_ID } from '@/lib/constants';
 
@@ -38,19 +37,25 @@ export default function DashboardPage() {
   // Options Scout state
   const [weeklyScout, setWeeklyScout] = useState<any>(null);
   const [scoutLoading, setScoutLoading] = useState(false);
-  const [scoutError, setScoutError] = useState<string | null>(null);
+
+  // Morning & Midday Suggestions
+  const [morningSuggestions, setMorningSuggestions] = useState<any[]>([]);
+  const [middaySuggestions, setMiddaySuggestions] = useState<any[]>([]);
+
+  // Weekly Reports
+  const [weeklyReports, setWeeklyReports] = useState<any[]>([]);
   
   // Journal state
   const [journalStats, setJournalStats] = useState<any>(null);
-  const [journalLoading, setJournalLoading] = useState(false);
-  const [journalError, setJournalError] = useState<string | null>(null);
-  const [showJournal, setShowJournal] = useState(false);
 
   // Load data on mount
   useEffect(() => {
     loadSnapshot();
     loadWeeklyScout();
     loadJournalStats();
+    loadMorningSuggestions();
+    loadMiddaySuggestions();
+    loadWeeklyReports();
   }, []);
 
   const getAuthHeaders = async () => {
@@ -85,7 +90,6 @@ export default function DashboardPage() {
 
   const loadWeeklyScout = async () => {
     setScoutLoading(true);
-    setScoutError(null);
     try {
       const headers = await getAuthHeaders();
       const response = await fetchWithTimeout(`${API_URL}/scout/weekly`, {
@@ -96,19 +100,15 @@ export default function DashboardPage() {
       if (response.ok) {
         const data = await response.json();
         setWeeklyScout(data);
-      } else {
-        setScoutError(`Failed to load data`);
       }
     } catch (err: any) {
-      setScoutError('Unable to connect');
+      console.error('Failed to load scout:', err);
     } finally {
       setScoutLoading(false);
     }
   };
 
   const loadJournalStats = async () => {
-    setJournalLoading(true);
-    setJournalError(null);
     try {
       const headers = await getAuthHeaders();
       const response = await fetchWithTimeout(`${API_URL}/journal/stats`, { 
@@ -119,13 +119,57 @@ export default function DashboardPage() {
       if (response.ok) {
         const data = await response.json();
         setJournalStats(data);
-      } else {
-        setJournalError(`Failed to load stats`);
       }
     } catch (err: any) {
-      setJournalError('Unable to connect');
-    } finally {
-      setJournalLoading(false);
+      console.error('Failed to load journal stats:', err);
+    }
+  };
+
+  const loadMorningSuggestions = async () => {
+    try {
+      const headers = await getAuthHeaders();
+      const response = await fetchWithTimeout(`${API_URL}/suggestions?window=morning_limit`, {
+        headers,
+        timeout: 10000
+      });
+      if (response.ok) {
+        const data = await response.json();
+        setMorningSuggestions(data);
+      }
+    } catch (err) {
+      console.error('Failed to load morning suggestions', err);
+    }
+  };
+
+  const loadMiddaySuggestions = async () => {
+    try {
+      const headers = await getAuthHeaders();
+      const response = await fetchWithTimeout(`${API_URL}/suggestions?window=midday_entry`, {
+        headers,
+        timeout: 10000
+      });
+      if (response.ok) {
+        const data = await response.json();
+        setMiddaySuggestions(data);
+      }
+    } catch (err) {
+      console.error('Failed to load midday suggestions', err);
+    }
+  };
+
+  const loadWeeklyReports = async () => {
+    try {
+      const headers = await getAuthHeaders();
+      const response = await fetchWithTimeout(`${API_URL}/weekly-reports`, {
+        headers,
+        timeout: 10000
+      });
+      if (response.ok) {
+        const data = await response.json();
+        setWeeklyReports(data);
+      }
+    } catch (err) {
+      console.error('Failed to load weekly reports', err);
     }
   };
 
@@ -135,7 +179,6 @@ export default function DashboardPage() {
       const value = position.current_price * position.quantity;
       const pnl = value - cost;
 
-      // Use backend P&L metrics if available, otherwise compute fallback
       const pnlPercent = position.pnl_percent !== undefined
         ? position.pnl_percent
         : (position.cost_basis > 0 ? (pnl / cost) * 100 : 0);
@@ -169,7 +212,6 @@ export default function DashboardPage() {
                    </span>
                 )}
 
-                {/* Legacy / Special Case Badge */}
                 {type === 'option' && pnlPercent >= 50 && !position.pnl_severity && (
                     <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-green-100 text-green-800 animate-pulse">
                     TARGET HIT 🎯
@@ -184,7 +226,7 @@ export default function DashboardPage() {
     <DashboardLayout mockAlerts={mockAlerts}>
       <div className="max-w-7xl mx-auto p-8 space-y-6">
         
-        {/* SECTION 1: POSITIONS & OPTIMIZER (Moved to Top) */}
+        {/* SECTION 1: POSITIONS & OPTIMIZER */}
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
           <div className="lg:col-span-2">
             <div className="bg-white rounded-lg shadow overflow-hidden">
@@ -252,15 +294,16 @@ export default function DashboardPage() {
             </div>
           </div>
 
-          {/* OPTIMIZER PANEL & SUGGESTION HUB */}
+          {/* OPTIMIZER PANEL */}
           <div className="flex flex-col gap-6">
-            {/* Optimizer Control */}
             <div className="h-[500px]">
               <PortfolioOptimizer
                 positions={snapshot?.holdings}
-                onOptimizationComplete={(m, suggestions) => {
+                onOptimizationComplete={(m) => {
                   setMetrics(m);
-                  if (suggestions) setOptimizerSuggestions(suggestions);
+                  // Note: PortfolioOptimizer currently only returns metrics.
+                  // Suggestions are handled within its own internal state or need to be exposed if required.
+                  // For now, we align with the component's signature.
                 }}
               />
             </div>
@@ -289,7 +332,10 @@ export default function DashboardPage() {
                 <SuggestionTabs
                   optimizerSuggestions={optimizerSuggestions}
                   scoutSuggestions={weeklyScout?.top_picks || []}
-                  journalQueue={[]} // TODO: Connect to journal service
+                  journalQueue={[]}
+                  morningSuggestions={morningSuggestions}
+                  middaySuggestions={middaySuggestions}
+                  weeklyReports={weeklyReports}
                   onRefreshScout={loadWeeklyScout}
                   scoutLoading={scoutLoading}
                   onRefreshJournal={() => {}}

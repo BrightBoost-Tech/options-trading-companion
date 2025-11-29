@@ -196,7 +196,9 @@ async def optimize_portfolio(req: OptimizationRequest):
                     "price": hist_data['prices'][-1] if hist_data and hist_data['prices'] else 0,
                     "iv_rank": service.get_iv_rank(ticker),
                     "trend": service.get_trend(ticker),
-                    "sector": service.get_ticker_details(ticker).get('sic_description')
+                    "sector": service.get_ticker_details(ticker).get('sic_description'),
+                    "bid": hist_data.get("bid", 0.0),
+                    "ask": hist_data.get("ask", 0.0),
                 }
         except Exception as e:
             print(f"Market data fetch failed: {e}")

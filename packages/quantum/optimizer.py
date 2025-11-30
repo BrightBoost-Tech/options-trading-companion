@@ -155,11 +155,19 @@ def _compute_portfolio_weights(
     # Determine flags
     # Nested logic requires: 1) nested_enabled=True, 2) Global Env=True
     nested_global_env = os.getenv("NESTED_GLOBAL_ENABLED", "False").lower() == "true"
-    nested_req_active = req.nested_enabled and nested_global_env
 
-    use_l2 = False if force_baseline else (nested_req_active and os.getenv("NESTED_L2_ENABLED", "False").lower() == "true")
-    use_l1 = False if force_baseline else (nested_req_active and os.getenv("NESTED_L1_ENABLED", "False").lower() == "true")
-    use_l0 = False if force_baseline else (nested_req_active and os.getenv("NESTED_L0_ENABLED", "False").lower() == "true")
+    # Master switch: Only active if request enabled AND global env enabled AND one of sub-envs enabled
+    nested_env_enabled = nested_global_env and (
+        os.getenv("NESTED_L2_ENABLED", "False").lower() == "true"
+        or os.getenv("NESTED_L1_ENABLED", "False").lower() == "true"
+        or os.getenv("NESTED_L0_ENABLED", "False").lower() == "true"
+    )
+    nested_active = req.nested_enabled and nested_env_enabled
+
+    # Explicit toggles
+    use_l2 = False if force_baseline else (nested_active and os.getenv("NESTED_L2_ENABLED", "False").lower() == "true")
+    use_l1 = False if force_baseline else (nested_active and os.getenv("NESTED_L1_ENABLED", "False").lower() == "true")
+    use_l0 = False if force_baseline else (nested_active and os.getenv("NESTED_L0_ENABLED", "False").lower() == "true")
 
     # --- PHASE 3: NESTED LEARNING PIPELINE ---
 
@@ -230,7 +238,7 @@ def _compute_portfolio_weights(
 
     # --- MICRO-LIVE BLENDING ---
     live_mult_str = os.getenv("NESTED_LIVE_RISK_MULTIPLIER", "0.0")
-    if (not force_baseline) and nested_req_active and live_mult_str:
+    if (not force_baseline) and nested_active and live_mult_str:
         try:
             live_mult = float(live_mult_str)
             live_mult = max(0.0, min(1.0, live_mult))

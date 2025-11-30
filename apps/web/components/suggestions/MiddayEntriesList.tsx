@@ -7,7 +7,9 @@ interface MiddayEntriesListProps {
 }
 
 export default function MiddayEntriesList({ suggestions }: MiddayEntriesListProps) {
-  if (!suggestions || suggestions.length === 0) {
+  const safeSuggestions = Array.isArray(suggestions) ? suggestions : [];
+
+  if (safeSuggestions.length === 0) {
     return (
       <div className="text-center py-10 text-gray-400">
         <Clock className="w-10 h-10 mx-auto mb-3 opacity-20" />
@@ -19,7 +21,7 @@ export default function MiddayEntriesList({ suggestions }: MiddayEntriesListProp
 
   return (
     <div className="space-y-4">
-      {suggestions.map((item, idx) => (
+      {safeSuggestions.map((item, idx) => (
         <TradeSuggestionCard key={idx} suggestion={item} />
       ))}
     </div>

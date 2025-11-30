@@ -16,41 +16,45 @@ class CashService:
         4. Subtract estimated capital reserved in pending trade_suggestions.
         Returns a float deployable_capital (>= 0).
         """
-        buying_power = 0.0
+        buying_power = None
 
-        # 1. Try to get buying_power from latest snapshot or plaid_items (similar to api.py logic)
+        # 1. Try to get buying_power from latest portfolio_snapshots
         try:
-            # Check plaid_items first as it's often more up-to-date for buying_power
             res = (
-                self.supabase.table("plaid_items")
+                self.supabase.table("portfolio_snapshots")
                 .select("buying_power")
                 .eq("user_id", user_id)
-                .single()
+                .order("created_at", desc=True)
+                .limit(1)
                 .execute()
             )
-            if res.data and res.data.get("buying_power") is not None:
-                buying_power = float(res.data.get("buying_power"))
-            else:
-                # Fallback to sum of CASH positions
-                pos_res = (
+            if res.data and res.data[0].get("buying_power") is not None:
+                buying_power = float(res.data[0]["buying_power"])
+        except Exception as e:
+            print(f"CashService: error reading portfolio_snapshots.buying_power: {e}")
+
+        # 2. Fallback: sum CUR:USD / CASH positions
+        if buying_power is None:
+            try:
+                res = (
                     self.supabase.table("positions")
-                    .select("quantity, current_price, symbol")
+                    .select("symbol, quantity, current_price")
                     .eq("user_id", user_id)
                     .execute()
                 )
-                if pos_res.data:
-                    for p in pos_res.data:
-                        symbol = p.get("symbol", "").upper()
-                        if "CUR:USD" in symbol or symbol == "CASH" or symbol == "USD":
-                            qty = float(p.get("quantity", 0))
-                            price = float(p.get("current_price", 1))
-                            buying_power += qty * price
-        except Exception as e:
-            print(f"Error fetching buying power: {e}")
-            # If we can't get buying power, we default to 0 to be safe
-            buying_power = 0.0
+                cash_total = 0.0
+                for row in res.data or []:
+                    sym = (row.get("symbol") or "").upper()
+                    if sym in ["CUR:USD", "USD", "CASH", "MM", "USDOLLAR"]:
+                        qty = float(row.get("quantity") or 0.0)
+                        price = float(row.get("current_price") or 1.0)
+                        cash_total += qty * price
+                buying_power = cash_total
+            except Exception as e:
+                print(f"CashService: error aggregating cash from positions: {e}")
+                buying_power = 0.0
 
-        # 2. Get Cash Buffer
+        # 3. Get Cash Buffer
         cash_buffer = 0.0
         try:
             settings_res = (
@@ -63,9 +67,10 @@ class CashService:
             if settings_res.data and settings_res.data.get("cash_buffer") is not None:
                 cash_buffer = float(settings_res.data.get("cash_buffer"))
         except Exception as e:
-            print(f"Error fetching cash buffer: {e}")
+            # print(f"Error fetching cash buffer: {e}") # Harmless if missing
+            pass
 
-        # 3. Calculate Reserved Capital (Pending Suggestions)
+        # 4. Calculate Reserved Capital (Pending Suggestions)
         reserved_capital = 0.0
         try:
             pending_res = (
@@ -84,7 +89,7 @@ class CashService:
         except Exception as e:
             print(f"Error fetching reserved capital: {e}")
 
-        # 4. Final Calculation
+        # 5. Final Calculation
         deployable = buying_power - cash_buffer - reserved_capital
         return max(0.0, deployable)
 

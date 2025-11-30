@@ -92,7 +92,11 @@ export default function PortfolioOptimizer({ positions, onOptimizationComplete }
           risk_aversion: 1.0,
           skew_preference: isQuantum ? 10000.0 : 0.0, // High skew penalty triggers Quantum logic
           cash_balance: cashBalance,
-          profile: profile
+          profile: profile,
+          nested_enabled: false,   // baseline only
+          nested_shadow: false     // no shadow in UI yet
+          // TODO: when ready, allow nested_shadow=true for QA runs.
+          // TODO: nested_enabled should remain false until nested has been validated in replay.
         })
       })
 

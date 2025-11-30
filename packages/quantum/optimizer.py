@@ -46,16 +46,21 @@ MIN_DOLLAR_DIFF_AGGRESSIVE = 10.0
 MIN_QTY_AGGRESSIVE = 0.02
 
 # --- Helper: Trade Generator ---
-def generate_trade_instructions(current_positions, target_weights, total_equity, profile: str = "balanced"):
+def generate_trade_instructions(current_positions, target_weights, total_equity, profile: str = "balanced", deployable: Optional[float] = None):
     trades = []
     current_map = {p.symbol: p for p in current_positions}
 
     # Determine thresholds based on profile
+    # Use deployable if provided, else total_equity as scale
+    scale = deployable if (deployable is not None and deployable > 0) else total_equity
+
     if profile == "aggressive":
-        min_diff = MIN_DOLLAR_DIFF_AGGRESSIVE
+        base_min_diff = MIN_DOLLAR_DIFF_AGGRESSIVE
+        min_diff = max(base_min_diff, 0.01 * scale) # at least 1% of scale
         min_qty = MIN_QTY_AGGRESSIVE
     else:
-        min_diff = MIN_DOLLAR_DIFF_BALANCED
+        base_min_diff = MIN_DOLLAR_DIFF_BALANCED
+        min_diff = max(base_min_diff, 0.02 * scale) # 2% of scale
         min_qty = MIN_QTY_BALANCED
 
     raw_trades = []
@@ -127,14 +132,19 @@ async def optimize_portfolio(req: OptimizationRequest):
 
         # 1. SEPARATE ASSETS FROM CASH (Fixes "Sell my cash" bug)
         investable_assets = []
-        liquidity = req.cash_balance
+        liquidity = 0.0
+        cash_from_positions = 0.0
 
         for p in req.positions:
             # Treat these symbols as Cash, not Stocks
             if p.symbol.upper() in ["CUR:USD", "USD", "CASH", "MM", "USDOLLAR"]:
-                liquidity += p.current_value
+                cash_from_positions += p.current_value
             else:
                 investable_assets.append(p)
+
+        # cash_balance is an override / supplement (e.g. external cash), not an additional copy
+        # Use max to prevent double counting if cash_balance includes the positions sum
+        liquidity = max(cash_from_positions, req.cash_balance)
 
         if not investable_assets:
             raise HTTPException(status_code=400, detail="No investable assets found. Add stocks to portfolio.")
@@ -231,12 +241,30 @@ async def optimize_portfolio(req: OptimizationRequest):
         target_weights = {tickers[i]: float(weights_array[i]) for i in range(len(tickers))}
 
         # Pass TOTAL value (Assets + Cash) so we buy using the cash
+        deployable_capital = None
+        # In this endpoint we don't call CashService; use liquidity as deployable for now
+        deployable_capital = liquidity
+
         trades = generate_trade_instructions(
             investable_assets,
             target_weights,
             total_portfolio_value,
-            profile=req.profile
+            profile=req.profile,
+            deployable=deployable_capital
         )
+
+        if deployable_capital is not None and deployable_capital > 0:
+            safe_trades = []
+            for t in trades:
+                if t["value"] <= deployable_capital:
+                    t["capital_fraction"] = t["value"] / deployable_capital
+                    safe_trades.append(t)
+                else:
+                    # Keep it but mark as over-budget
+                    t["capital_fraction"] = t["value"] / deployable_capital
+                    t["over_budget"] = True
+                    safe_trades.append(t)
+            trades = safe_trades
 
         # --- New Decision Funnel ---
         market_data = {}
@@ -362,7 +390,9 @@ async def optimize_portfolio(req: OptimizationRequest):
                 "sharpe_ratio": float(np.dot(weights_array, mu) / np.sqrt(np.dot(weights_array.T, np.dot(sigma, weights_array)))),
                 "tail_risk_score": float(np.einsum('ijk,i,j,k->', coskew, weights_array, weights_array, weights_array)),
                 "analytics": portfolio_analytics
-            }
+            },
+            "profile": req.profile,
+            "deployable_capital": deployable_capital
         }
     except Exception as e:
         print(f"Optimizer Error: {e}")

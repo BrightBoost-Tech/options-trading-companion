@@ -27,6 +27,16 @@ interface TradeSuggestion {
   window?: string;
   order_json?: Record<string, any>;
   sizing_metadata?: Record<string, any>;
+
+  // Compounding Mode
+  sizing?: {
+      recommended_contracts: number;
+      ev_percent: number;
+      ev_amount: number;
+      rationale: string;
+      kelly_fraction?: number;
+  };
+  compound_score?: number;
 }
 
 interface TradeSuggestionCardProps {
@@ -191,6 +201,18 @@ export default function TradeSuggestionCard({ suggestion }: TradeSuggestionCardP
          suggestion.window === 'midday_entry' ? renderMiddayContent() : (
            /* Default / Scout View */
            <>
+             {suggestion.sizing && (
+               <div className="mt-3 p-3 bg-indigo-50 border border-indigo-100 rounded text-xs text-indigo-900">
+                 <div className="flex justify-between font-bold mb-1">
+                   <span>Rec. Size: {suggestion.sizing.recommended_contracts} contracts</span>
+                   <span>EV: {suggestion.sizing.ev_percent.toFixed(1)}%</span>
+                 </div>
+                 <div className="text-[10px] opacity-80 leading-tight">
+                   {suggestion.sizing.rationale}
+                 </div>
+               </div>
+             )}
+
              <p className="text-sm mt-2 text-gray-700">
                {suggestion.rationale}
              </p>

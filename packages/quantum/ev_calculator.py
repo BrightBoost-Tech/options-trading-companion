@@ -142,3 +142,88 @@ def calculate_position_size(
         risk_per_trade_usd=risk_per_trade_usd,
         max_loss_per_contract=max_loss_per_contract
     )
+
+
+class PositionSizingResult(BaseModel):
+    ev_amount: float
+    ev_percent: float
+    win_rate: float
+    recommended_contracts: int
+    risk_of_ruin_contribution: float
+    kelly_fraction: float
+    rationale: str
+
+def calculate_kelly_sizing(
+    entry_price: float,
+    max_loss: float,
+    max_profit: float,
+    prob_profit: float,
+    account_value: float,
+    kelly_multiplier: float = 0.5,
+) -> PositionSizingResult:
+    """
+    Compounding Small-Edge mode sizing:
+    - Uses a simplified Kelly-style fraction.
+    - Applies fractional Kelly via `kelly_multiplier` (default: half-Kelly).
+    - Hard-caps risk per trade at 5% of account_value.
+    - Returns 0 contracts if EV is non-positive or invalid.
+    """
+    prob_loss = 1.0 - prob_profit
+    ev = (prob_profit * max_profit) - (prob_loss * max_loss)
+
+    # Avoid division by zero in ev_percent
+    denominator = max_loss if max_loss > 0 else 1.0
+    ev_percent = (ev / denominator) * 100.0
+
+    # Basic validity checks
+    if max_loss <= 0 or ev <= 0:
+        return PositionSizingResult(
+            ev_amount=ev,
+            ev_percent=ev_percent,
+            win_rate=prob_profit,
+            recommended_contracts=0,
+            risk_of_ruin_contribution=0.0,
+            kelly_fraction=0.0,
+            rationale="Negative EV or invalid risk profile"
+        )
+
+    # Kelly Calculation
+    # b = odds received on the wager = (profit / loss)
+    b = max_profit / max_loss
+
+    # Kelly fraction f = (p * b - q) / b
+    # where p = win probability, q = loss probability
+    raw_kelly = ((prob_profit * b) - prob_loss) / b
+    safe_kelly = max(0.0, raw_kelly * kelly_multiplier)
+
+    # Sizing Logic
+    max_risk_dollars = account_value * 0.05  # Hard cap 5% risk
+    kelly_allocation = account_value * safe_kelly
+
+    # Allowable risk is min of Kelly allocation and Hard cap
+    allowed_risk = min(kelly_allocation, max_risk_dollars)
+
+    # Contract sizing (assuming max_loss is risk per contract)
+    risk_per_contract = max_loss
+    ideal_size = int(allowed_risk // risk_per_contract)
+    ideal_size = max(0, ideal_size)
+
+    # Heuristic for Risk of Ruin Contribution
+    # Simplified: Higher allocation + lower win rate = higher ruin risk
+    # This is a qualitative score 0.0 - 1.0
+    ruin_risk = 0.0
+    if ideal_size > 0:
+        actual_risk_pct = (ideal_size * risk_per_contract) / account_value
+        ruin_risk = actual_risk_pct * (1.0 - prob_profit) * 10.0 # Scaling factor
+
+    rationale = f"Kelly {safe_kelly:.2f} -> {ideal_size} contracts"
+
+    return PositionSizingResult(
+        ev_amount=ev,
+        ev_percent=ev_percent,
+        win_rate=prob_profit,
+        recommended_contracts=ideal_size,
+        risk_of_ruin_contribution=ruin_risk,
+        kelly_fraction=safe_kelly,
+        rationale=rationale
+    )

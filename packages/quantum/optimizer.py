@@ -7,7 +7,7 @@ import os
 
 # Core Imports
 from core.math_engine import PortfolioMath
-from core.surrogate import SurrogateOptimizer
+from core.surrogate import SurrogateOptimizer, optimize_for_compounding
 # Only import QCI Adapter if you have created the file from the previous step
 try:
     from core.qci_adapter import QciDiracAdapter
@@ -16,11 +16,11 @@ except ImportError:
 
 # Analytics Imports
 from analytics.strategy_selector import StrategySelector
-from analytics.guardrails import apply_guardrails, compute_conviction_score
+from analytics.guardrails import apply_guardrails, compute_conviction_score, SmallAccountCompounder
 from analytics.analytics import OptionsAnalytics
 from services.trade_builder import enrich_trade_suggestions
 from market_data import PolygonService, calculate_portfolio_inputs
-from ev_calculator import calculate_ev
+from ev_calculator import calculate_ev, calculate_kelly_sizing
 
 router = APIRouter()
 
@@ -307,11 +307,56 @@ async def optimize_portfolio(req: OptimizationRequest):
             "theta_efficiency": OptionsAnalytics.theta_efficiency(investable_assets, total_portfolio_value)
         }
 
+        # --- COMPOUNDING MODE ENRICHMENT ---
+        # "Small-Edge" Mode Logic
+
+        # 1. Filter candidates for compounding suitability
+        # We treat 'processed_trades' as candidates here.
+        compounding_trades = SmallAccountCompounder.apply(processed_trades, total_portfolio_value)
+
+        # 2. Apply Kelly Sizing
+        final_compounding_trades = []
+        for trade in compounding_trades:
+             price = float(trade.get("price", 0.0) or 0.0)
+
+             # Calculate Prob Profit from metrics or default
+             p_profit = float(trade.get("metrics", {}).get("probability_of_profit", 50.0)) / 100.0
+
+             sizing = calculate_kelly_sizing(
+                entry_price=price,
+                max_loss=float(trade.get("max_loss", 0.0)),
+                max_profit=float(trade.get("max_profit", 0.0)),
+                prob_profit=p_profit,
+                account_value=total_portfolio_value,
+                kelly_multiplier=0.5
+            )
+
+             if sizing.recommended_contracts > 0:
+                 trade["sizing"] = sizing.model_dump()
+                 # Append rationale
+                 trade["rationale"] = f"{trade.get('rationale','')}. {sizing.rationale}"
+                 final_compounding_trades.append(trade)
+
+        # 3. Optimize (Sort)
+        optimized_compounding = optimize_for_compounding(
+            final_compounding_trades,
+            investable_assets,
+            total_portfolio_value
+        )
+
+        # Use compounding trades if available and valid, else standard MVO trades
+        output_trades = optimized_compounding if optimized_compounding else processed_trades
+
         return {
             "status": "success",
-            "mode": solver_type,
+            "mode": "Compounding Small-Edge" if optimized_compounding else solver_type,
+            "account_goal": "1k -> 5k (Compounding Mode)",
             "target_weights": target_weights,
-            "trades": processed_trades,
+            "trades": output_trades,
+            "portfolio_stats": {
+                "projected_drawdown_risk": "Low" if total_portfolio_value > 2000 else "Medium",
+                "growth_velocity": "Steady"
+            },
             "metrics": {
                 "expected_return": float(np.dot(weights_array, mu)),
                 "sharpe_ratio": float(np.dot(weights_array, mu) / np.sqrt(np.dot(weights_array.T, np.dot(sigma, weights_array)))),

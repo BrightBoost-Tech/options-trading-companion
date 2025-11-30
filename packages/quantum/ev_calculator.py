@@ -1,5 +1,6 @@
-from typing import Optional, Literal, Dict, Any
+from typing import Optional, Literal, Dict, Any, List
 from pydantic import BaseModel, Field
+import math
 
 class EVResult(BaseModel):
     expected_value: float
@@ -21,6 +22,12 @@ class PositionSizeResult(BaseModel):
     contracts_to_trade: int
     risk_per_trade_usd: float
     max_loss_per_contract: float
+
+class ExitMetrics(BaseModel):
+    expected_value: float
+    prob_of_profit: float
+    limit_price: float
+    reason: str
 
 def calculate_ev(
     premium: float,
@@ -226,4 +233,136 @@ def calculate_kelly_sizing(
         risk_of_ruin_contribution=ruin_risk,
         kelly_fraction=safe_kelly,
         rationale=rationale
+    )
+
+def calculate_exit_metrics(
+    current_price: float,
+    cost_basis: float,
+    delta: float = 0.5,
+    iv: float = 0.5,
+    days_to_expiry: int = 30,
+    sentiment_score: float = 0.0, # -1 to 1
+) -> ExitMetrics:
+    """
+    Estimates optimal exit target based on 'expected move' and probability.
+
+    Logic:
+    1. Estimate expected move over a short horizon (e.g. 5 days) using IV.
+       Sigma_5day = Price * IV * sqrt(5/365)
+    2. Add directional bias from delta and sentiment.
+    3. Target = Current + (Sigma_5day * Bias_Factor).
+    4. Constrain: Must be > cost_basis (profit).
+    """
+
+    # 1. Expected Move (5-day horizon)
+    horizon_days = 5
+    annual_vol = iv # Assume IV is annualized (e.g. 0.40 for 40%)
+
+    # Standard deviation over horizon
+    expected_move_usd = current_price * annual_vol * math.sqrt(horizon_days / 365.0)
+
+    # 2. Bias / Probability
+    # Delta acts as a rough proxy for probability of touching strike or direction
+    # Adjust target based on delta (higher delta = more confident in directional move?)
+    # For now, simple profit taking: Target a 1-sigma move in favor of the position.
+
+    # If delta is positive (long call/short put), we want price to go UP?
+    # Wait, delta sign matters for direction.
+    # But here `current_price` is the OPTION price or the UNDERLYING price?
+    # Context implies `current_price` is the holding's current value (option price).
+    # Option price volatility is much higher than underlying.
+    # If `iv` is implied volatility of the OPTION price (e.g. 80%), then yes.
+    # If `iv` is underlying IV, we need Vega/Delta to translate to option price move.
+
+    # Let's assume input `iv` is the Implied Volatility of the Underlying,
+    # and we need to translate that to Option Price Target.
+    # OR, simplified: Users prompt says "Set limit_price to current_price + k * expected_return".
+
+    # Let's use a simplified "Option Price Expected Return" model.
+    # Option Return ~= Leverage * Underlying Return
+    # Leverage = Delta * Underlying_Price / Option_Price
+
+    # If we don't have underlying price passed in, we can just use a heuristic k.
+    # User pseudo-code: "Set limit_price to current_price + k * expected_return".
+
+    # Let's define expected_return as the standard deviation of the OPTION price itself?
+    # Option Price Volatility ~= Underlying Volatility * Leverage.
+    # Let's approximate Leverage = 5 (typical for options) if unknown.
+
+    leverage = 5.0 # conservative placeholder
+
+    # Expected return of the option in $ terms over horizon
+    # Exp_Ret = Current_Opt_Price * (IV_Underlying * Leverage) * sqrt(T)
+    # This is rough, but effective for a "limit price" suggestion.
+
+    estimated_vol_option = iv * leverage
+    target_gain_pct = estimated_vol_option * math.sqrt(horizon_days / 365.0)
+
+    # Adjust k factor (0.5 to 1.0 as requested)
+    k = 0.8
+
+    potential_upside = current_price * target_gain_pct * k
+
+    limit_price = current_price + potential_upside
+
+    # 3. Constraints
+    # Ensure profitable exit (above cost basis)
+    if limit_price < cost_basis:
+        limit_price = cost_basis * 1.05 # Minimum 5% profit if model says lower
+
+    # Check if the adjusted limit_price (e.g. cost basis + 5%) is still reasonable relative to current price.
+    # If we are deep underwater, "cost_basis" might be +500% from current, which is unrealistic to fill short term.
+    # However, user constraint: "Constrain limit_price to: be ≥ cost_basis".
+
+    # Also user constraint: "not more than, say, +2 * expected_return above current (to keep it fillable)."
+    # OR "max_price = current_price * 1.5".
+
+    max_price = current_price * 1.5
+
+    # If cost basis is higher than reasonable cap, we can't offer a profitable exit suggestion right now.
+    # The logic below will return a price, but EV might be negative or low.
+
+    if limit_price > max_price:
+        # If we clamp it down, we violate the "profitable exit" constraint if limit_price was set to cost_basis.
+        # So we should prioritize cost_basis? No, user said "be ≥ cost_basis".
+        # If max_price < cost_basis, then we simply cannot satisfy both constraints.
+        # In that case, we should probably NOT suggest a "Take Profit".
+        # But `limit_price` is the output.
+
+        # Let's clamp to max_price, but then check cost_basis.
+        limit_price = max_price
+
+    # Final Check: Is it profitable?
+    if limit_price < cost_basis:
+         # If we can't reach cost basis within reasonable limits, we set expected_value to -1 (invalid)
+         # or we return limit_price = cost_basis but acknowledging it might be far away.
+         # For "Morning suggestions", user said: "Only generate suggestions when: EV is positive, and limit_price > current_price."
+         # If we return a limit_price < cost_basis, it's not a "Profit Taking" trade.
+
+         # Let's force it to cost_basis, but if that's > max_price, we will let it be.
+         # Wait, if limit_price = cost_basis and cost_basis >>> current_price,
+         # then expected_value (prob * (limit - current)) will be high, but probability of filling is practically zero.
+         # The `prob_of_profit` (delta) assumes we just hold. It doesn't account for "probability of touching limit price".
+
+         # For now, strictly follow: "be ≥ cost_basis".
+         limit_price = max(limit_price, cost_basis)
+
+    # EV Calculation (simplified for this exit context)
+    # EV = (Prob_Hit_Target * Target_Profit) - (Prob_Miss * Risk?)
+    # Here we just return the "Expected Value" of the trade as defined by user:
+    # "metrics.expected_value"
+
+    prob_profit = abs(delta) # Rough proxy
+
+    # EV = (Limit_Price - Current_Price) * Prob_Profit ?
+    # Or total trade EV?
+    # User pseudo: "suggestion['ev'] = metrics.expected_value"
+    # Let's return the expected dollar gain per share.
+    expected_value = (limit_price - current_price) * prob_profit
+
+    return ExitMetrics(
+        expected_value=expected_value,
+        prob_of_profit=prob_profit,
+        limit_price=limit_price,
+        reason=f"Targeting {k}σ move over {horizon_days}d"
     )

@@ -23,6 +23,7 @@ from services.trade_builder import enrich_trade_suggestions
 from market_data import PolygonService, calculate_portfolio_inputs
 from ev_calculator import calculate_ev, calculate_kelly_sizing
 from nested_logging import log_inference
+from nested.adapters import load_symbol_adapters, apply_biases
 
 router = APIRouter()
 
@@ -164,6 +165,24 @@ async def optimize_portfolio(req: OptimizationRequest):
 
         # 3. MATH ENGINE (Using Real Data)
         # The data is already processed, so we can directly use mu and sigma
+
+        # --- PHASE 2: LEVEL-1 SYMBOL ADAPTERS ---
+        if os.getenv("NESTED_L1_ENABLED", "False").lower() == "true":
+            try:
+                # 1. Load adapters for this symbol universe
+                adapters = load_symbol_adapters(tickers)
+
+                # 2. Apply biases (clamped)
+                # Note: We overwrite mu/sigma so downstream solvers see the adjusted view
+                mu, sigma = apply_biases(mu, sigma, tickers, adapters)
+
+                print(f"Phase 2 L1: Applied adapters to {len(adapters)} symbols.")
+            except Exception as e:
+                print(f"Phase 2 L1 Error: Failed to apply adapters: {e}")
+                # Continue with raw mu/sigma
+        else:
+            # print("Phase 2 L1: Disabled.")
+            pass
 
         # --- DYNAMIC CONSTRAINT LOGIC ---
         # If user has only 2 assets, 40% max weight is mathematically impossible (0.4 + 0.4 = 0.8 < 1.0).

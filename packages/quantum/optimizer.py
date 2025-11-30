@@ -1,10 +1,11 @@
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Depends
 from pydantic import BaseModel
 from typing import List, Dict, Optional, Any
 import numpy as np
 import pandas as pd
 import os
 import uuid
+from dataclasses import asdict
 
 # Core Imports
 from core.math_engine import PortfolioMath
@@ -27,8 +28,6 @@ from nested.adapters import load_symbol_adapters, apply_biases
 from nested.backbone import compute_macro_features, infer_global_context, log_global_context
 from nested.session import load_session_state, refresh_session_from_db, get_session_sigma_scale
 from security import get_current_user_id
-from dataclasses import asdict
-from fastapi import Depends
 
 router = APIRouter()
 
@@ -45,6 +44,7 @@ class OptimizationRequest(BaseModel):
     skew_preference: float = 0.0
     cash_balance: float = 0.0
     profile: str = "balanced"  # "aggressive" | "balanced" | "conservative"
+    nested_shadow: bool = False  # if True, compute nested path but DO NOT change trades
 
 # Constants
 MIN_DOLLAR_DIFF_BALANCED = 50.0
@@ -130,6 +130,193 @@ def generate_trade_instructions(current_positions, target_weights, total_equity,
 
     return trades
 
+def _compute_portfolio_weights(
+    mu: np.ndarray,
+    sigma: np.ndarray,
+    coskew: np.ndarray,
+    tickers: List[str],
+    investable_assets: List[PositionInput],
+    req: OptimizationRequest,
+    user_id: str,
+    total_portfolio_value: float,
+    liquidity: float,
+    force_baseline: bool = False
+):
+    """
+    Internal helper to run the optimization logic once (either baseline or nested).
+    """
+    local_req = req.model_copy()
+    diagnostics_nested = {}
+
+    sigma_original = sigma.copy()
+
+    # Determine flags
+    use_l2 = False if force_baseline else os.getenv("NESTED_L2_ENABLED", "False").lower() == "true"
+    use_l1 = False if force_baseline else os.getenv("NESTED_L1_ENABLED", "False").lower() == "true"
+    use_l0 = False if force_baseline else os.getenv("NESTED_L0_ENABLED", "False").lower() == "true"
+
+    # --- PHASE 3: NESTED LEARNING PIPELINE ---
+
+    # --- LAYER 2: GLOBAL BACKBONE ---
+    if use_l2:
+        try:
+            # 1. Compute macro features (PolygonService implicitly used)
+            macro_service = PolygonService()
+            macro_features = compute_macro_features(macro_service)
+
+            # 2. Infer Regime
+            global_ctx = infer_global_context(macro_features)
+
+            # 3. Log (fire & forget)
+            log_global_context(global_ctx)
+
+            # 4. Apply Global Risk Scaler to Sigma
+            g_scaler = global_ctx.global_risk_scaler
+            if g_scaler < 0.01: g_scaler = 0.01 # Safety clamp
+            sigma_multiplier = 1.0 / g_scaler
+            sigma = sigma * (sigma_multiplier ** 2)
+
+            diagnostics_nested["l2"] = asdict(global_ctx)
+
+            # CRISIS MODE TRIGGER
+            if global_ctx.global_regime == "shock":
+                local_req.profile = "conservative"
+                diagnostics_nested["crisis_mode_triggered_by"] = "l2_shock"
+
+        except Exception as e:
+            print(f"Phase 3 L2 Error: {e}")
+
+    # --- PHASE 2: LEVEL-1 SYMBOL ADAPTERS ---
+    if use_l1:
+        try:
+            # 1. Load adapters for this symbol universe
+            adapters = load_symbol_adapters(tickers)
+
+            # 2. Apply biases (clamped)
+            mu, sigma = apply_biases(mu, sigma, tickers, adapters)
+
+            # print(f"Phase 2 L1: Applied adapters to {len(adapters)} symbols.")
+        except Exception as e:
+            print(f"Phase 2 L1 Error: Failed to apply adapters: {e}")
+
+    # --- LAYER 0: SESSION ADAPTER ---
+    if use_l0:
+        try:
+            # 1. Refresh & Load Session State
+            session_state = refresh_session_from_db(user_id)
+
+            # 2. Apply Confidence Scaler
+            conf_scaler = get_session_sigma_scale(session_state.confidence)
+            sigma = sigma * (conf_scaler ** 2)
+
+            diagnostics_nested["l0"] = {
+                "confidence": session_state.confidence,
+                "sigma_scaler": conf_scaler
+            }
+
+            # CRISIS MODE L0
+            if session_state.confidence < 0.4:
+                 local_req.profile = "conservative"
+                 diagnostics_nested["crisis_mode_triggered_by"] = "l0_low_confidence"
+
+        except Exception as e:
+            print(f"Phase 3 L0 Error: {e}")
+
+    # --- MICRO-LIVE BLENDING ---
+    live_mult_str = os.getenv("NESTED_LIVE_RISK_MULTIPLIER")
+    if (not force_baseline) and (not req.nested_shadow) and live_mult_str:
+        try:
+            live_mult = float(live_mult_str)
+            # Blend sigma: original * (1 - k) + nested * k
+            sigma = sigma_original * (1.0 - live_mult) + sigma * live_mult
+        except ValueError:
+            pass
+
+    # --- DYNAMIC CONSTRAINT LOGIC ---
+    # If user has only 2 assets, 40% max weight is mathematically impossible (0.4 + 0.4 = 0.8 < 1.0).
+    default_max_pct = 0.40
+    num_assets = len(tickers)
+
+    if num_assets * default_max_pct < 1.0:
+        effective_max_pct = 1.0  # Allow up to 100% allocation if portfolio is tiny
+    else:
+        effective_max_pct = default_max_pct
+
+    constraints = {
+        "risk_aversion": local_req.risk_aversion,
+        "skew_preference": local_req.skew_preference,
+        "max_position_pct": effective_max_pct, # Use the calculated limit
+    }
+
+    # 4. SOLVER SELECTION (Quantum Bridge)
+    has_qci_token = (os.getenv("QCI_API_TOKEN") is not None)
+    TRIAL_ASSET_LIMIT = 15
+    solver_type = "Classical"
+    weights_array = []
+
+    if (local_req.skew_preference > 0) and has_qci_token and (QciDiracAdapter is not None):
+        try:
+            if len(tickers) > TRIAL_ASSET_LIMIT:
+                print(f"⚠️ Portfolio size ({len(tickers)}) exceeds Trial Limit ({TRIAL_ASSET_LIMIT}).")
+                print("   -> Fallback to Surrogate to save credits.")
+                s_solver = SurrogateOptimizer()
+                weights_array = s_solver.solve(mu, sigma, coskew, constraints)
+                solver_type = "Surrogate (Trial Limit)"
+            else:
+                print(f"🚀 Uplinking {len(tickers)} assets to QCI Dirac-3 (Trial)...")
+                q_solver = QciDiracAdapter()
+                weights_array = q_solver.solve_portfolio(mu, sigma, coskew, constraints)
+                solver_type = "QCI Dirac-3"
+        except ConnectionRefusedError as e:
+            print(f"⚠️ {e}. Switching to Surrogate.")
+            s_solver = SurrogateOptimizer()
+            weights_array = s_solver.solve(mu, sigma, coskew, constraints)
+            solver_type = "Surrogate (Quota Hit)"
+        except Exception as e:
+            print(f"⚠️ Quantum Uplink Failed: {e}. Reverting.")
+            s_solver = SurrogateOptimizer()
+            weights_array = s_solver.solve(mu, sigma, coskew, constraints)
+            solver_type = "Surrogate (Fallback)"
+    else:
+        # Standard Classical
+        s_solver = SurrogateOptimizer()
+        weights_array = s_solver.solve(mu, sigma, coskew, constraints)
+        solver_type = "Surrogate (Simulated)"
+
+    # 5. RESULT MAPPING
+    target_weights = {tickers[i]: float(weights_array[i]) for i in range(len(tickers))}
+
+    # --- NESTED LEARNING LOGGING ---
+    trace_id = None
+    try:
+        mu_dict = {ticker: float(mu[i]) for i, ticker in enumerate(tickers)}
+        sigma_list = sigma.tolist() if isinstance(sigma, np.ndarray) else sigma
+
+        inputs_snapshot = {
+            "positions_count": len(investable_assets),
+            "positions": [p.model_dump() for p in investable_assets],
+            "total_equity": total_portfolio_value,
+            "cash": liquidity,
+            "risk_aversion": local_req.risk_aversion,
+            "skew_preference": local_req.skew_preference,
+            "constraints": constraints,
+            "solver_type": solver_type,
+            "force_baseline": force_baseline,
+            "shadow_mode": req.nested_shadow
+        }
+
+        trace_id = log_inference(
+            symbol_universe=tickers,
+            inputs_snapshot=inputs_snapshot,
+            predicted_mu=mu_dict,
+            predicted_sigma={"sigma_matrix": sigma_list},
+            optimizer_profile=local_req.profile
+        )
+    except Exception as e:
+        print(f"Logging Integration Error: {e}")
+
+    return target_weights, diagnostics_nested, solver_type, trace_id, local_req.profile, weights_array, mu, sigma
+
 # --- Endpoint 1: Main Optimization (Phase 2 Logic) ---
 @router.post("/optimize/portfolio")
 async def optimize_portfolio(req: OptimizationRequest, user_id: str = Depends(get_current_user_id)):
@@ -178,184 +365,82 @@ async def optimize_portfolio(req: OptimizationRequest, user_id: str = Depends(ge
         except Exception as e:
             raise HTTPException(status_code=500, detail=f"Failed to fetch market data: {e}")
 
-        # 3. MATH ENGINE (Using Real Data)
-        # The data is already processed, so we can directly use mu and sigma
+        # 3. COMPUTE WEIGHTS (BASELINE VS NESTED)
 
-        # --- PHASE 3: NESTED LEARNING PIPELINE ---
-        # L2 (Global) -> L1 (Symbol) -> L0 (Session)
-
+        target_weights = {}
+        solver_type = ""
         diagnostics_nested = {}
-
-        # --- LAYER 2: GLOBAL BACKBONE ---
-        if os.getenv("NESTED_L2_ENABLED", "False").lower() == "true":
-            try:
-                # 1. Compute macro features (PolygonService implicitly used)
-                macro_service = PolygonService()
-                macro_features = compute_macro_features(macro_service)
-
-                # 2. Infer Regime
-                global_ctx = infer_global_context(macro_features)
-
-                # 3. Log (fire & forget)
-                log_global_context(global_ctx)
-
-                # 4. Apply Global Risk Scaler to Sigma
-                # If risk_scaler < 1.0 (bad regime), we scale sigma UP to reduce position sizes
-                # Formula: sigma_new = sigma * (1/scaler)^2 or simply (1/scaler)
-                # Let's use (1/scaler) on the standard deviation perspective, so (1/scaler)^2 on variance
-                # Wait, if scaler is 0.5 (shock), we want high volatility perception.
-                # Multiplier M = 1.0 / global_ctx.global_risk_scaler
-                # sigma_new = sigma * (M**2) (since sigma is cov matrix)
-                # But let's check what 'global_risk_scaler' meant in backbone.
-                # If scaler=0.6, we want to be conservative.
-
-                g_scaler = global_ctx.global_risk_scaler
-                if g_scaler < 0.01: g_scaler = 0.01 # Safety clamp
-
-                # We interpret scaler as "Percent of normal risk we are willing to take".
-                # So we should inflate sigma by 1/scaler.
-                sigma_multiplier = 1.0 / g_scaler
-
-                # Apply to Covariance Matrix
-                sigma = sigma * (sigma_multiplier ** 2)
-
-                diagnostics_nested["l2"] = asdict(global_ctx)
-
-                # CRISIS MODE TRIGGER
-                if global_ctx.global_regime == "shock":
-                    req.profile = "conservative"
-                    diagnostics_nested["crisis_mode_triggered_by"] = "l2_shock"
-
-            except Exception as e:
-                print(f"Phase 3 L2 Error: {e}")
-
-        # --- PHASE 2: LEVEL-1 SYMBOL ADAPTERS ---
-        if os.getenv("NESTED_L1_ENABLED", "False").lower() == "true":
-            try:
-                # 1. Load adapters for this symbol universe
-                adapters = load_symbol_adapters(tickers)
-
-                # 2. Apply biases (clamped)
-                # Note: We overwrite mu/sigma so downstream solvers see the adjusted view
-                mu, sigma = apply_biases(mu, sigma, tickers, adapters)
-
-                print(f"Phase 2 L1: Applied adapters to {len(adapters)} symbols.")
-            except Exception as e:
-                print(f"Phase 2 L1 Error: Failed to apply adapters: {e}")
-                # Continue with raw mu/sigma
-        else:
-            # print("Phase 2 L1: Disabled.")
-            pass
-
-        # --- LAYER 0: SESSION ADAPTER ---
-        if os.getenv("NESTED_L0_ENABLED", "False").lower() == "true":
-            try:
-                # 1. Refresh & Load Session State
-                # This fetches recent outcomes from DB to update confidence dynamically
-                session_state = refresh_session_from_db(user_id)
-
-                # 2. Apply Confidence Scaler
-                conf_scaler = get_session_sigma_scale(session_state.confidence)
-
-                # If scaler > 1.0 (low confidence), we increase sigma
-                # sigma_new = sigma * (conf_scaler^2)
-                sigma = sigma * (conf_scaler ** 2)
-
-                diagnostics_nested["l0"] = {
-                    "confidence": session_state.confidence,
-                    "sigma_scaler": conf_scaler
-                }
-
-                # CRISIS MODE L0
-                if session_state.confidence < 0.4:
-                     req.profile = "conservative"
-                     diagnostics_nested["crisis_mode_triggered_by"] = "l0_low_confidence"
-
-            except Exception as e:
-                print(f"Phase 3 L0 Error: {e}")
-
-        # --- DYNAMIC CONSTRAINT LOGIC ---
-        # If user has only 2 assets, 40% max weight is mathematically impossible (0.4 + 0.4 = 0.8 < 1.0).
-        # We must relax the limit for small portfolios.
-        default_max_pct = 0.40
-        num_assets = len(tickers)
-
-        # If we can't fill the bucket with the default scoop size, get a bigger scoop.
-        if num_assets * default_max_pct < 1.0:
-            effective_max_pct = 1.0  # Allow up to 100% allocation if portfolio is tiny
-        else:
-            effective_max_pct = default_max_pct
-
-        constraints = {
-            "risk_aversion": req.risk_aversion,
-            "skew_preference": req.skew_preference,
-            "max_position_pct": effective_max_pct, # Use the calculated limit
-        }
-
-        # 4. SOLVER SELECTION (Quantum Bridge)
-        # Check environment
-        has_qci_token = (os.getenv("QCI_API_TOKEN") is not None)
-
-        # --- TRIAL MODE LOGIC ---
-        # If using Real Quantum, we MUST limit the number of assets to respect trial quotas.
-        # Dirac-3 is fast, but upload/processing times for N=50+ can act flaky on trial tiers.
-        TRIAL_ASSET_LIMIT = 15
-
-        solver_type = "Classical"
+        trace_id = None
+        final_profile = req.profile
         weights_array = []
+        diagnostics_shadow = {}
 
-        if (req.skew_preference > 0) and has_qci_token and (QciDiracAdapter is not None):
-            try:
-                # A. ASSET THROTTLING
-                # If we have too many assets, slicing them effectively is hard without losing context.
-                # Strategy: If N > Limit, fall back to Classical immediately to save Credit
-                # unless the user explicitly forced it (advanced feature).
-                if len(tickers) > TRIAL_ASSET_LIMIT:
-                    print(f"⚠️ Portfolio size ({len(tickers)}) exceeds Trial Limit ({TRIAL_ASSET_LIMIT}).")
-                    print("   -> Fallback to Surrogate to save credits.")
-                    # Fallback logic
-                    s_solver = SurrogateOptimizer()
-                    weights_array = s_solver.solve(mu, sigma, coskew, constraints)
-                    solver_type = "Surrogate (Trial Limit)"
-
-                else:
-                    # B. EXECUTE QUANTUM JOB
-                    print(f"🚀 Uplinking {len(tickers)} assets to QCI Dirac-3 (Trial)...")
-                    q_solver = QciDiracAdapter()
-                    weights_array = q_solver.solve_portfolio(mu, sigma, coskew, constraints)
-                    solver_type = "QCI Dirac-3"
-
-            except ConnectionRefusedError as e:
-                # Specific handling for Quota Exceeded
-                print(f"⚠️ {e}. Switching to Surrogate.")
-                s_solver = SurrogateOptimizer()
-                weights_array = s_solver.solve(mu, sigma, coskew, constraints)
-                solver_type = "Surrogate (Quota Hit)"
-
-            except Exception as e:
-                print(f"⚠️ Quantum Uplink Failed: {e}. Reverting.")
-                s_solver = SurrogateOptimizer()
-                weights_array = s_solver.solve(mu, sigma, coskew, constraints)
-                solver_type = "Surrogate (Fallback)"
-        else:
-            # Standard Classical
-            s_solver = SurrogateOptimizer()
-            weights_array = s_solver.solve(mu, sigma, coskew, constraints)
-            solver_type = "Surrogate (Simulated)"
-
-        # 5. RESULT MAPPING
-        target_weights = {tickers[i]: float(weights_array[i]) for i in range(len(tickers))}
-
-        # Pass TOTAL value (Assets + Cash) so we buy using the cash
-        deployable_capital = None
         # In this endpoint we don't call CashService; use liquidity as deployable for now
         deployable_capital = liquidity
 
+        if req.nested_shadow:
+            # PATH A: Baseline (Force Baseline)
+            tw_base, diag_base, st_base, tid_base, fp_base, wa_base, mu_base, sigma_base = _compute_portfolio_weights(
+                mu, sigma, coskew, tickers, investable_assets, req, user_id,
+                total_portfolio_value, liquidity, force_baseline=True
+            )
+
+            # PATH B: Nested (Force Nested if env vars enabled, or just normal env check)
+            tw_nest, diag_nest, st_nest, tid_nest, fp_nest, wa_nest, mu_nest, sigma_nest = _compute_portfolio_weights(
+                mu, sigma, coskew, tickers, investable_assets, req, user_id,
+                total_portfolio_value, liquidity, force_baseline=False
+            )
+
+            # Generate summary trades for shadow logs
+            trades_base = generate_trade_instructions(investable_assets, tw_base, total_portfolio_value, fp_base, deployable_capital)
+            trades_nest = generate_trade_instructions(investable_assets, tw_nest, total_portfolio_value, fp_nest, deployable_capital)
+
+            def summarize_trades(ts):
+                return [{"symbol": t["symbol"], "action": t["action"], "value": t["value"]} for t in ts]
+
+            # Calculate metrics for both paths for replay analysis
+            def calc_metrics(w_arr, m_mu, m_sigma):
+                if len(w_arr) == 0: return {"expected_return": 0.0, "sharpe_ratio": 0.0}
+                er = float(np.dot(w_arr, m_mu))
+                vol = np.sqrt(np.dot(w_arr.T, np.dot(m_sigma, w_arr)))
+                sr = float(er / vol) if vol > 1e-9 else 0.0
+                return {"expected_return": er, "sharpe_ratio": sr}
+
+            metrics_base_shadow = calc_metrics(wa_base, mu_base, sigma_base)
+            metrics_nest_shadow = calc_metrics(wa_nest, mu_nest, sigma_nest)
+
+            diagnostics_shadow = {
+                "baseline_mode": st_base,
+                "nested_mode": st_nest,
+                "baseline_trades": summarize_trades(trades_base),
+                "nested_trades": summarize_trades(trades_nest),
+                "baseline_metrics": metrics_base_shadow,
+                "nested_metrics": metrics_nest_shadow
+            }
+
+            # Use Baseline for response
+            target_weights = tw_base
+            solver_type = st_base
+            diagnostics_nested = diag_base # Usually empty for baseline
+            trace_id = tid_base
+            final_profile = fp_base
+            weights_array = wa_base
+            metrics_mu = mu_base
+            metrics_sigma = sigma_base
+
+        else:
+            # Standard execution (Live or Baseline depending on env vars)
+            target_weights, diagnostics_nested, solver_type, trace_id, final_profile, weights_array, metrics_mu, metrics_sigma = _compute_portfolio_weights(
+                mu, sigma, coskew, tickers, investable_assets, req, user_id,
+                total_portfolio_value, liquidity, force_baseline=False
+            )
+
+        # 4. GENERATE TRADES
         trades = generate_trade_instructions(
             investable_assets,
             target_weights,
             total_portfolio_value,
-            profile=req.profile,
+            profile=final_profile,
             deployable=deployable_capital
         )
 
@@ -481,35 +566,12 @@ async def optimize_portfolio(req: OptimizationRequest, user_id: str = Depends(ge
         # Use compounding trades if available and valid, else standard MVO trades
         output_trades = optimized_compounding if optimized_compounding else processed_trades
 
-        # --- NESTED LEARNING LOGGING ---
-        trace_id: Optional[uuid.UUID] = None
-        try:
-            # Prepare inputs for logging
-            # Convert numpy arrays to lists/dicts for JSON serialization
-            mu_dict = {ticker: float(mu[i]) for i, ticker in enumerate(tickers)}
-            sigma_list = sigma.tolist() if isinstance(sigma, np.ndarray) else sigma
-
-            inputs_snapshot = {
-                "positions_count": len(investable_assets),
-                "positions": [p.model_dump() for p in investable_assets],
-                "total_equity": total_portfolio_value,
-                "cash": liquidity,
-                "risk_aversion": req.risk_aversion,
-                "skew_preference": req.skew_preference,
-                "constraints": constraints,
-                "solver_type": solver_type
-            }
-
-            trace_id = log_inference(
-                symbol_universe=tickers,
-                inputs_snapshot=inputs_snapshot,
-                predicted_mu=mu_dict,
-                predicted_sigma={"sigma_matrix": sigma_list},
-                optimizer_profile=req.profile
-            )
-        except Exception as e:
-            print(f"Logging Integration Error: {e}")
-            # Do not fail request
+        final_diagnostics = {
+             "trace_id": str(trace_id) if trace_id else None,
+             "nested": diagnostics_nested
+        }
+        if req.nested_shadow:
+            final_diagnostics["nested_shadow"] = diagnostics_shadow
 
         return {
             "status": "success",
@@ -522,17 +584,14 @@ async def optimize_portfolio(req: OptimizationRequest, user_id: str = Depends(ge
                 "growth_velocity": "Steady"
             },
             "metrics": {
-                "expected_return": float(np.dot(weights_array, mu)),
-                "sharpe_ratio": float(np.dot(weights_array, mu) / np.sqrt(np.dot(weights_array.T, np.dot(sigma, weights_array)))),
+                "expected_return": float(np.dot(weights_array, metrics_mu)),
+                "sharpe_ratio": float(np.dot(weights_array, metrics_mu) / np.sqrt(np.dot(weights_array.T, np.dot(metrics_sigma, weights_array)))),
                 "tail_risk_score": float(np.einsum('ijk,i,j,k->', coskew, weights_array, weights_array, weights_array)),
                 "analytics": portfolio_analytics
             },
             "profile": req.profile,
             "deployable_capital": deployable_capital,
-            "diagnostics": {
-                "trace_id": str(trace_id) if trace_id else None,
-                "nested": diagnostics_nested
-            }
+            "diagnostics": final_diagnostics
         }
     except Exception as e:
         print(f"Optimizer Error: {e}")

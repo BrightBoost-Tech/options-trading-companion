@@ -82,3 +82,35 @@ The `/optimize/portfolio` response now includes a `diagnostics.nested` object:
 
 *   **Additive Risk Only**: Both L2 and L0 only *increase* perceived risk (inflate sigma) or reduce constraints. They never artificially deflate risk to encourage gambling.
 *   **Crisis Mode**: Acts as a hard circuit breaker to enforce conservative profiling.
+
+## Shadow Mode (QA)
+
+To validate Nested Learning changes without affecting live trades, use the `nested_shadow` flag.
+
+*   **Request**: `POST /optimize/portfolio` with `{"nested_shadow": true, ...}`
+*   **Behavior**:
+    *   Calculates **Baseline** (Path A): Standard optimization (flags forced off).
+    *   Calculates **Nested** (Path B): Full L2/L1/L0 pipeline (flags respected).
+    *   **Returns**: Path A (Baseline) trades and metrics.
+    *   **Logs**: Both paths are logged to `inference_log`.
+    *   **Diagnostics**: Includes a `nested_shadow` object:
+        ```json
+        "diagnostics": {
+          "nested_shadow": {
+            "baseline_mode": "Surrogate",
+            "nested_mode": "Surrogate",
+            "baseline_trades": [{"symbol": "AAPL", "action": "BUY", "value": 100}],
+            "nested_trades": [{"symbol": "AAPL", "action": "BUY", "value": 80}]
+          }
+        }
+        ```
+
+## Micro-Live Rollout
+
+To gradually introduce Nested Learning influence on live sizing:
+
+*   **Env Var**: `NESTED_LIVE_RISK_MULTIPLIER` (float, e.g., `0.25`).
+*   **Logic**:
+    *   If `nested_shadow=False` and flags are enabled:
+    *   `sigma_final = sigma_baseline * (1 - multiplier) + sigma_nested * multiplier`
+*   **Effect**: Allows us to blend the "fear" (inflated sigma) of the nested model into production at partial strength (e.g., 25% influence).

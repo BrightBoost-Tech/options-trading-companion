@@ -140,11 +140,14 @@ export default function DashboardPage() {
       });
       if (response.ok) {
         const data = await response.json();
-        setMorningSuggestions(data);
+        setMorningSuggestions(Array.isArray(data.suggestions) ? data.suggestions : []);
+      } else {
+        setMorningSuggestions([]);
       }
     } catch (err: any) {
       if (isAbortError(err)) return;
       console.error('Failed to load morning suggestions', err);
+      setMorningSuggestions([]);
     }
   };
 
@@ -157,11 +160,14 @@ export default function DashboardPage() {
       });
       if (response.ok) {
         const data = await response.json();
-        setMiddaySuggestions(data);
+        setMiddaySuggestions(Array.isArray(data.suggestions) ? data.suggestions : []);
+      } else {
+        setMiddaySuggestions([]);
       }
     } catch (err: any) {
       if (isAbortError(err)) return;
       console.error('Failed to load midday suggestions', err);
+      setMiddaySuggestions([]);
     }
   };
 
@@ -174,11 +180,14 @@ export default function DashboardPage() {
       });
       if (response.ok) {
         const data = await response.json();
-        setWeeklyReports(data);
+        setWeeklyReports(Array.isArray(data.reports) ? data.reports : []);
+      } else {
+        setWeeklyReports([]);
       }
     } catch (err: any) {
       if (isAbortError(err)) return;
       console.error('Failed to load weekly reports', err);
+      setWeeklyReports([]);
     }
   };
 

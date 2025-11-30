@@ -254,7 +254,10 @@ async def run_weekly_report(supabase: Client, user_id: str):
     }
 
     try:
-        supabase.table(WEEKLY_REPORTS_TABLE).insert(report_data).execute()
-        print("Inserted weekly report.")
+        supabase.table(WEEKLY_REPORTS_TABLE).upsert(
+            report_data,
+            on_conflict="user_id,week_ending"
+        ).execute()
+        print("Upserted weekly report.")
     except Exception as e:
-        print(f"Error inserting weekly report: {e}")
+        print(f"Error upserting weekly report: {e}")

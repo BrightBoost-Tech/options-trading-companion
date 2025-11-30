@@ -17,6 +17,54 @@ class JournalService:
             print(f"Error fetching journal entries: {e}")
             return []
 
+    def get_journal_stats(self, user_id: str) -> Dict[str, Any]:
+        """Calculates journal statistics for a given user."""
+        try:
+            # Fetch all trades
+            response = self.supabase.table("trade_journal_entries").select("*").eq("user_id", user_id).order("entry_date", desc=True).execute()
+            trades = response.data if response.data else []
+
+            if not trades:
+                return {
+                    "stats": {
+                        "win_rate": 0.0,
+                        "total_pnl": 0.0,
+                        "trade_count": 0,
+                    },
+                    "recent_trades": [],
+                }
+
+            # Filter for closed trades for stats calculation
+            closed_trades = [t for t in trades if t.get('status') == 'closed']
+            total_closed = len(closed_trades)
+
+            wins = len([t for t in closed_trades if t.get('pnl', 0) > 0])
+            total_pnl = sum([t.get('pnl', 0) for t in closed_trades])
+            win_rate = (wins / total_closed * 100) if total_closed > 0 else 0.0
+
+            # Recent trades (already sorted by entry_date desc from query)
+            recent_trades = trades[:5]
+
+            return {
+                "stats": {
+                    "win_rate": win_rate,
+                    "total_pnl": total_pnl,
+                    "trade_count": total_closed,
+                },
+                "recent_trades": recent_trades,
+            }
+
+        except Exception as e:
+            print(f"Error calculating journal stats: {e}")
+            return {
+                "stats": {
+                    "win_rate": 0.0,
+                    "total_pnl": 0.0,
+                    "trade_count": 0,
+                },
+                "recent_trades": [],
+            }
+
     def add_trade(self, user_id: str, trade_data: Dict[str, Any]) -> Dict[str, Any]:
         """Adds a new trade to the journal."""
         trade_data['user_id'] = user_id

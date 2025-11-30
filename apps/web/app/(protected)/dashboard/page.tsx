@@ -26,6 +26,9 @@ const fetchWithTimeout = async (resource: RequestInfo, options: FetchOptions = {
   return response;
 };
 
+const isAbortError = (err: any) =>
+  err?.name === 'AbortError' || err?.message?.toLowerCase()?.includes('aborted');
+
 export default function DashboardPage() {
   // Snapshot data
   const [snapshot, setSnapshot] = useState<any>(null);
@@ -76,14 +79,15 @@ export default function DashboardPage() {
       const headers = await getAuthHeaders();
       const response = await fetchWithTimeout(`${API_URL}/portfolio/snapshot`, {
          headers,
-         timeout: 10000
+         timeout: 15000
       });
 
       if (response.ok) {
         const data = await response.json();
         setSnapshot(data);
       }
-    } catch (err) {
+    } catch (err: any) {
+      if (isAbortError(err)) return;
       console.error('Failed to load snapshot:', err);
     }
   };
@@ -102,6 +106,7 @@ export default function DashboardPage() {
         setWeeklyScout(data);
       }
     } catch (err: any) {
+      if (isAbortError(err)) return;
       console.error('Failed to load scout:', err);
     } finally {
       setScoutLoading(false);
@@ -121,6 +126,7 @@ export default function DashboardPage() {
         setJournalStats(data);
       }
     } catch (err: any) {
+      if (isAbortError(err)) return;
       console.error('Failed to load journal stats:', err);
     }
   };
@@ -130,13 +136,14 @@ export default function DashboardPage() {
       const headers = await getAuthHeaders();
       const response = await fetchWithTimeout(`${API_URL}/suggestions?window=morning_limit`, {
         headers,
-        timeout: 10000
+        timeout: 15000
       });
       if (response.ok) {
         const data = await response.json();
         setMorningSuggestions(data);
       }
-    } catch (err) {
+    } catch (err: any) {
+      if (isAbortError(err)) return;
       console.error('Failed to load morning suggestions', err);
     }
   };
@@ -146,13 +153,14 @@ export default function DashboardPage() {
       const headers = await getAuthHeaders();
       const response = await fetchWithTimeout(`${API_URL}/suggestions?window=midday_entry`, {
         headers,
-        timeout: 10000
+        timeout: 15000
       });
       if (response.ok) {
         const data = await response.json();
         setMiddaySuggestions(data);
       }
-    } catch (err) {
+    } catch (err: any) {
+      if (isAbortError(err)) return;
       console.error('Failed to load midday suggestions', err);
     }
   };
@@ -162,14 +170,39 @@ export default function DashboardPage() {
       const headers = await getAuthHeaders();
       const response = await fetchWithTimeout(`${API_URL}/weekly-reports`, {
         headers,
-        timeout: 10000
+        timeout: 15000
       });
       if (response.ok) {
         const data = await response.json();
         setWeeklyReports(data);
       }
-    } catch (err) {
+    } catch (err: any) {
+      if (isAbortError(err)) return;
       console.error('Failed to load weekly reports', err);
+    }
+  };
+
+  const runAllWorkflows = async () => {
+    try {
+      const headers = await getAuthHeaders();
+      const res = await fetchWithTimeout(`${API_URL}/tasks/run-all`, {
+        method: 'POST',
+        headers,
+        timeout: 30000,
+      });
+      if (!res.ok) {
+        console.error('Failed to run workflows', await res.text());
+        return;
+      }
+      // After triggering, reload suggestions and weekly reports
+      await Promise.all([
+        loadMorningSuggestions(),
+        loadMiddaySuggestions(),
+        loadWeeklyReports(),
+      ]);
+    } catch (err: any) {
+      if (isAbortError(err)) return;
+      console.error('Failed to run workflows', err);
     }
   };
 
@@ -232,7 +265,15 @@ export default function DashboardPage() {
             <div className="bg-white rounded-lg shadow overflow-hidden">
               <div className="px-6 py-4 border-b flex justify-between items-center">
                 <h2 className="text-xl font-semibold">Positions</h2>
-                <SyncHoldingsButton onSyncComplete={loadSnapshot} />
+                <div className="flex gap-2">
+                  <SyncHoldingsButton onSyncComplete={loadSnapshot} />
+                  <button
+                    onClick={runAllWorkflows}
+                    className="text-xs px-3 py-1 rounded border border-purple-200 text-purple-700 hover:bg-purple-50"
+                  >
+                    Generate Suggestions (Dev)
+                  </button>
+                </div>
               </div>
               <div className="overflow-x-auto">
                 <table className="w-full">

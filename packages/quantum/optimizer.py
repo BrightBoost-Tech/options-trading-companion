@@ -24,6 +24,11 @@ from market_data import PolygonService, calculate_portfolio_inputs
 from ev_calculator import calculate_ev, calculate_kelly_sizing
 from nested_logging import log_inference
 from nested.adapters import load_symbol_adapters, apply_biases
+from nested.backbone import compute_macro_features, infer_global_context, log_global_context
+from nested.session import load_session_state, refresh_session_from_db, get_session_sigma_scale
+from security import get_current_user_id
+from dataclasses import asdict
+from fastapi import Depends
 
 router = APIRouter()
 
@@ -127,7 +132,7 @@ def generate_trade_instructions(current_positions, target_weights, total_equity,
 
 # --- Endpoint 1: Main Optimization (Phase 2 Logic) ---
 @router.post("/optimize/portfolio")
-async def optimize_portfolio(req: OptimizationRequest):
+async def optimize_portfolio(req: OptimizationRequest, user_id: str = Depends(get_current_user_id)):
     try:
         # Tune Risk Aversion for Aggressive Profile if default
         if req.profile == "aggressive" and req.risk_aversion == 2.0:
@@ -176,6 +181,54 @@ async def optimize_portfolio(req: OptimizationRequest):
         # 3. MATH ENGINE (Using Real Data)
         # The data is already processed, so we can directly use mu and sigma
 
+        # --- PHASE 3: NESTED LEARNING PIPELINE ---
+        # L2 (Global) -> L1 (Symbol) -> L0 (Session)
+
+        diagnostics_nested = {}
+
+        # --- LAYER 2: GLOBAL BACKBONE ---
+        if os.getenv("NESTED_L2_ENABLED", "False").lower() == "true":
+            try:
+                # 1. Compute macro features (PolygonService implicitly used)
+                macro_service = PolygonService()
+                macro_features = compute_macro_features(macro_service)
+
+                # 2. Infer Regime
+                global_ctx = infer_global_context(macro_features)
+
+                # 3. Log (fire & forget)
+                log_global_context(global_ctx)
+
+                # 4. Apply Global Risk Scaler to Sigma
+                # If risk_scaler < 1.0 (bad regime), we scale sigma UP to reduce position sizes
+                # Formula: sigma_new = sigma * (1/scaler)^2 or simply (1/scaler)
+                # Let's use (1/scaler) on the standard deviation perspective, so (1/scaler)^2 on variance
+                # Wait, if scaler is 0.5 (shock), we want high volatility perception.
+                # Multiplier M = 1.0 / global_ctx.global_risk_scaler
+                # sigma_new = sigma * (M**2) (since sigma is cov matrix)
+                # But let's check what 'global_risk_scaler' meant in backbone.
+                # If scaler=0.6, we want to be conservative.
+
+                g_scaler = global_ctx.global_risk_scaler
+                if g_scaler < 0.01: g_scaler = 0.01 # Safety clamp
+
+                # We interpret scaler as "Percent of normal risk we are willing to take".
+                # So we should inflate sigma by 1/scaler.
+                sigma_multiplier = 1.0 / g_scaler
+
+                # Apply to Covariance Matrix
+                sigma = sigma * (sigma_multiplier ** 2)
+
+                diagnostics_nested["l2"] = asdict(global_ctx)
+
+                # CRISIS MODE TRIGGER
+                if global_ctx.global_regime == "shock":
+                    req.profile = "conservative"
+                    diagnostics_nested["crisis_mode_triggered_by"] = "l2_shock"
+
+            except Exception as e:
+                print(f"Phase 3 L2 Error: {e}")
+
         # --- PHASE 2: LEVEL-1 SYMBOL ADAPTERS ---
         if os.getenv("NESTED_L1_ENABLED", "False").lower() == "true":
             try:
@@ -193,6 +246,33 @@ async def optimize_portfolio(req: OptimizationRequest):
         else:
             # print("Phase 2 L1: Disabled.")
             pass
+
+        # --- LAYER 0: SESSION ADAPTER ---
+        if os.getenv("NESTED_L0_ENABLED", "False").lower() == "true":
+            try:
+                # 1. Refresh & Load Session State
+                # This fetches recent outcomes from DB to update confidence dynamically
+                session_state = refresh_session_from_db(user_id)
+
+                # 2. Apply Confidence Scaler
+                conf_scaler = get_session_sigma_scale(session_state.confidence)
+
+                # If scaler > 1.0 (low confidence), we increase sigma
+                # sigma_new = sigma * (conf_scaler^2)
+                sigma = sigma * (conf_scaler ** 2)
+
+                diagnostics_nested["l0"] = {
+                    "confidence": session_state.confidence,
+                    "sigma_scaler": conf_scaler
+                }
+
+                # CRISIS MODE L0
+                if session_state.confidence < 0.4:
+                     req.profile = "conservative"
+                     diagnostics_nested["crisis_mode_triggered_by"] = "l0_low_confidence"
+
+            except Exception as e:
+                print(f"Phase 3 L0 Error: {e}")
 
         # --- DYNAMIC CONSTRAINT LOGIC ---
         # If user has only 2 assets, 40% max weight is mathematically impossible (0.4 + 0.4 = 0.8 < 1.0).
@@ -448,9 +528,10 @@ async def optimize_portfolio(req: OptimizationRequest):
                 "analytics": portfolio_analytics
             },
             "profile": req.profile,
-            "deployable_capital": deployable_capital
+            "deployable_capital": deployable_capital,
             "diagnostics": {
-                "trace_id": str(trace_id) if trace_id else None
+                "trace_id": str(trace_id) if trace_id else None,
+                "nested": diagnostics_nested
             }
         }
     except Exception as e:

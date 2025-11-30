@@ -4,6 +4,7 @@ from typing import List, Dict, Optional, Any
 import numpy as np
 import pandas as pd
 import os
+import uuid
 
 # Core Imports
 from core.math_engine import PortfolioMath
@@ -21,6 +22,7 @@ from analytics.analytics import OptionsAnalytics
 from services.trade_builder import enrich_trade_suggestions
 from market_data import PolygonService, calculate_portfolio_inputs
 from ev_calculator import calculate_ev, calculate_kelly_sizing
+from nested_logging import log_inference
 
 router = APIRouter()
 
@@ -144,6 +146,11 @@ async def optimize_portfolio(req: OptimizationRequest):
         total_portfolio_value = assets_equity + liquidity
 
         # 2. GET DATA (Real Market Data)
+        portfolio_inputs = {}
+        mu = np.array([])
+        sigma = np.array([])
+        coskew = None
+
         try:
             portfolio_inputs = calculate_portfolio_inputs(tickers)
             mu = np.array(portfolio_inputs['expected_returns'])
@@ -347,6 +354,36 @@ async def optimize_portfolio(req: OptimizationRequest):
         # Use compounding trades if available and valid, else standard MVO trades
         output_trades = optimized_compounding if optimized_compounding else processed_trades
 
+        # --- NESTED LEARNING LOGGING ---
+        trace_id: Optional[uuid.UUID] = None
+        try:
+            # Prepare inputs for logging
+            # Convert numpy arrays to lists/dicts for JSON serialization
+            mu_dict = {ticker: float(mu[i]) for i, ticker in enumerate(tickers)}
+            sigma_list = sigma.tolist() if isinstance(sigma, np.ndarray) else sigma
+
+            inputs_snapshot = {
+                "positions_count": len(investable_assets),
+                "positions": [p.model_dump() for p in investable_assets],
+                "total_equity": total_portfolio_value,
+                "cash": liquidity,
+                "risk_aversion": req.risk_aversion,
+                "skew_preference": req.skew_preference,
+                "constraints": constraints,
+                "solver_type": solver_type
+            }
+
+            trace_id = log_inference(
+                symbol_universe=tickers,
+                inputs_snapshot=inputs_snapshot,
+                predicted_mu=mu_dict,
+                predicted_sigma={"sigma_matrix": sigma_list},
+                optimizer_profile=req.profile
+            )
+        except Exception as e:
+            print(f"Logging Integration Error: {e}")
+            # Do not fail request
+
         return {
             "status": "success",
             "mode": "Compounding Small-Edge" if optimized_compounding else solver_type,
@@ -362,6 +399,9 @@ async def optimize_portfolio(req: OptimizationRequest):
                 "sharpe_ratio": float(np.dot(weights_array, mu) / np.sqrt(np.dot(weights_array.T, np.dot(sigma, weights_array)))),
                 "tail_risk_score": float(np.einsum('ijk,i,j,k->', coskew, weights_array, weights_array, weights_array)),
                 "analytics": portfolio_analytics
+            },
+            "diagnostics": {
+                "trace_id": str(trace_id) if trace_id else None
             }
         }
     except Exception as e:

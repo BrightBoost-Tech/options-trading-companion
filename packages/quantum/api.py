@@ -7,7 +7,7 @@ from typing import List, Optional, Dict, Literal
 
 import requests
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException, Header, UploadFile, File, Request, Depends
+from fastapi import FastAPI, HTTPException, Header, UploadFile, File, Request, Depends, Body
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
@@ -30,6 +30,7 @@ from optimizer import router as optimizer_router
 from market_data import calculate_portfolio_inputs
 # New Services for Cash-Aware Workflow
 from services.workflow_orchestrator import run_morning_cycle, run_midday_cycle, run_weekly_report
+from services.plaid_history_service import PlaidHistoryService
 from ev_calculator import calculate_ev, calculate_position_size
 from services.enrichment_service import enrich_holdings_with_analytics
 
@@ -252,6 +253,24 @@ async def weekly_report_task(
         await run_weekly_report(supabase, uid)
 
     return {"status": "ok", "processed": len(active_users)}
+
+
+@app.post("/tasks/plaid/backfill-history")
+async def backfill_history(
+    start_date: str = Body(..., embed=True),
+    end_date: str = Body(..., embed=True),
+    x_cron_secret: str = Header(None, alias="X-Cron-Secret")
+):
+    verify_cron_secret(x_cron_secret)
+    if not supabase:
+        raise HTTPException(status_code=503, detail="Database not available")
+
+    user_ids = get_active_user_ids()
+    service = PlaidHistoryService(plaid_service.client, supabase)
+    counts = {}
+    for uid in user_ids:
+        counts[uid] = await service.backfill_snapshots(uid, start_date, end_date)
+    return {"status": "ok", "counts": counts}
 
 
 # --- Development Endpoints ---

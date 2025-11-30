@@ -213,6 +213,41 @@ class PolygonService:
 
         return {"bid": 0.0, "ask": 0.0}
 
+    def get_option_snapshot(self, symbol: str) -> Dict:
+        """
+        Fetches snapshot data (price, greeks, iv) for a single option contract.
+        Endpoint: /v3/snapshot/options/{underlyingAsset}/{optionContract}
+        """
+        search_symbol = normalize_option_symbol(symbol)
+        underlying = extract_underlying_symbol(symbol)
+
+        # Construct URL
+        # Note: underlying is required in path
+        url = f"{self.base_url}/v3/snapshot/options/{underlying}/{search_symbol}"
+
+        params = {'apiKey': self.api_key}
+
+        try:
+            response = requests.get(url, params=params, timeout=5)
+            if response.status_code != 200:
+                print(f"Snapshot fetch failed: {response.status_code} {response.text}")
+                return {}
+
+            data = response.json()
+            if 'results' in data:
+                # API returns a single object in 'results' for this endpoint?
+                # Or a list? Usually list if bulk, but specific path might return object.
+                # Let's handle both.
+                res = data['results']
+                if isinstance(res, list):
+                    return res[0] if res else {}
+                return res
+
+        except Exception as e:
+            print(f"Error fetching option snapshot for {symbol}: {e}")
+
+        return {}
+
 def get_polygon_price(symbol: str) -> float:
     # FIX 1: Handle Cash Manually
     if symbol == 'CUR:USD':

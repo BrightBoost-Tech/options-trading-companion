@@ -61,16 +61,26 @@ async def run_replay(args):
         day_end = current_date.isoformat() + "T23:59:59"
 
         try:
+            # Try to fetch historical backfill first, then fall back to any snapshot
+            # Logic: We might have a 'historical' snapshot for that day.
             res = supabase.table("portfolio_snapshots") \
                 .select("*") \
                 .eq("user_id", user_id) \
                 .gte("created_at", day_start) \
                 .lte("created_at", day_end) \
                 .order("created_at", desc=True) \
-                .limit(1) \
                 .execute()
 
-            snapshot = res.data[0] if res.data else None
+            snapshots = res.data or []
+            snapshot = None
+
+            # Prefer 'historical' type if available
+            hist = [s for s in snapshots if s.get("snapshot_type") == "historical"]
+            if hist:
+                snapshot = hist[0]
+            elif snapshots:
+                snapshot = snapshots[0]
+
         except Exception as e:
             print(f"Error fetching snapshot for {current_date}: {e}")
             current_date += delta

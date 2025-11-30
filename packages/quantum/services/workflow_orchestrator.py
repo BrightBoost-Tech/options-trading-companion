@@ -2,26 +2,32 @@ from supabase import Client
 from datetime import datetime, timedelta, timezone
 import json
 import asyncio
+import os
+import sys
+
+# Ensure imports work regardless of execution context
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 from .cash_service import CashService
 from .sizing_engine import calculate_sizing
 from .journal_service import JournalService
+from .options_utils import group_spread_positions
 
 # Importing existing logic
-# Assuming these are available in the parent package or imported via absolute path
-# from optimizer import optimize_portfolio # This is an endpoint, not a logic function in optimizer.py
 from options_scanner import scan_for_opportunities
 from models import Holding
+from market_data import PolygonService
+from ev_calculator import calculate_exit_metrics
 
-# Constants for table names (matching those we will add to api.py)
+# Constants for table names
 TRADE_SUGGESTIONS_TABLE = "trade_suggestions"
 WEEKLY_REPORTS_TABLE = "weekly_trade_reports"
 
 async def run_morning_cycle(supabase: Client, user_id: str):
     """
     1. Read latest portfolio snapshot + positions.
-    2. Enrich with risk / P&L (already done by enrichment_service when snapshot is created).
-    3. Generate 'limit order' suggestions (take-profit & stop-loss) for existing positions.
+    2. Group into spreads using group_spread_positions.
+    3. Generate EV-based profit-taking suggestions (and skip stop-loss).
     4. Insert records into trade_suggestions table with window='morning_limit'.
     """
     print(f"Running morning cycle for user {user_id}")
@@ -34,59 +40,143 @@ async def run_morning_cycle(supabase: Client, user_id: str):
         print(f"Error fetching positions for morning cycle: {e}")
         return
 
+    # 2. Group into Spreads
+    spreads = group_spread_positions(positions)
+
+    # Initialize Polygon Service for Greeks
+    poly = PolygonService()
+
     suggestions = []
 
-    # 2. Generate Exit Suggestions (Simple logic for now)
-    # Stop Loss at -50%, Take Profit at +50%
-    for pos in positions:
-        symbol = pos.get("symbol", "")
-        # Skip cash
-        if "USD" in symbol or "CASH" in symbol:
+    # 3. Generate Exit Suggestions per Spread
+    for spread in spreads:
+        legs = spread.get("legs", [])
+        if not legs:
             continue
 
-        cost_basis = float(pos.get("cost_basis", 0) or 0)
-        current_price = float(pos.get("current_price", 0) or 0)
-        qty = float(pos.get("quantity", 0) or 0)
+        # Calculate aggregate cost basis and current value
+        # cost_basis/current_price are per share. Quantity is usually number of contracts.
+        # Contract size is 100.
 
-        if qty == 0 or cost_basis == 0:
-            continue
+        total_cost = 0.0
+        total_value = 0.0
+        total_quantity = 0.0
 
-        # Basic logic: If we have an option, suggest a limit order
-        # This is a placeholder for more advanced "Exit Strategy" logic
-        # For now, we just suggest watching positions that are nearing thresholds
+        # We need a representative symbol for market data fetch
+        # If it's a spread, we might need Greeks of the legs or underlying.
+        # For simple EV exit, let's look at the underlying IV and Price action.
+        underlying = spread.get("underlying")
 
-        pnl_pct = (current_price - cost_basis) / cost_basis
+        # Check liquidity / Greeks
+        # We need Delta and IV.
+        # Option 1: Fetch Greeks for each leg and sum them (Portfolio Delta).
+        # Option 2: Use underlying IV and approximation.
 
-        strategy = "hold"
-        limit_price = 0.0
-        reason = ""
+        net_delta = 0.0
 
-        if pnl_pct <= -0.4:
-            strategy = "stop_loss_alert"
-            limit_price = current_price # Sell at market/current
-            reason = "Stop Loss Alert: Position down > 40%"
-        elif pnl_pct >= 0.5:
-             strategy = "take_profit_alert"
-             limit_price = current_price
-             reason = "Take Profit Alert: Position up > 50%"
+        # We'll use the first leg to get IV reference if possible
+        ref_symbol = legs[0]["symbol"]
 
-        if strategy != "hold":
+        iv_rank = 0.5 # Default
+
+        try:
+            # Get Snapshot for Greeks of the first leg (approximation for spread environment)
+            # Ideally we sum deltas.
+            for leg in legs:
+                sym = leg["symbol"]
+                qty = float(leg.get("quantity", 0))
+
+                # Snapshot
+                snap = poly.get_option_snapshot(sym)
+                greeks = snap.get("greeks", {})
+                delta = greeks.get("delta", 0.0) or 0.0
+
+                # Add to net delta (weighted by qty)
+                # Note: spread["type"] might be "C" or "P" or "MIXED".
+                # If we are Long the spread, we own the legs.
+                # Plaid quantities are usually positive for long.
+                # Wait, Plaid 'quantity' can be negative for short?
+                # Need to check data source. Usually Plaid returns positive quantity for long.
+                # If short, it might be negative?
+                # Assuming positive for now, logic below might need refinement for short legs.
+
+                # Polygon delta is usually -1 to 1.
+                net_delta += delta * qty
+
+                # Capture IV from one of the legs
+                if "implied_volatility" in snap:
+                    iv_rank = snap["implied_volatility"]
+
+        except Exception as e:
+            print(f"Error fetching greeks for {ref_symbol}: {e}")
+
+        # Calculate spread financials
+        for leg in legs:
+            qty = float(leg.get("quantity", 0))
+            cost = float(leg.get("cost_basis", 0))
+            curr = float(leg.get("current_price", 0))
+
+            total_cost += cost * qty * 100
+            total_value += curr * qty * 100
+            total_quantity += qty # This is sum of legs, not spread count.
+
+        # Assume spread count is min(qty of legs) roughly?
+        # For simplicity, treat the suggestion as "Close this entire spread group".
+
+        # Avoid div by zero
+        if total_cost == 0: total_cost = 0.01
+
+        spread_price = total_value / 100.0 # Aggregate price per unit (if quantity normalized)
+        # Actually, let's work with Totals for metrics, then divide by "unit" count?
+        # Or just use the total value.
+
+        # We need a "Current Price" per spread unit to suggest a "Limit Price".
+        # Let's assume quantity is homogeneous (e.g. 1 spread = 1 of each leg).
+        # If not, it's messy. We will assume 1:1 ratio for morning suggestions.
+        # So "Current Price" = Net Value / Quantity of first leg.
+
+        qty_unit = float(legs[0].get("quantity", 1))
+        if qty_unit == 0: qty_unit = 1
+
+        unit_price = (total_value / 100.0) / qty_unit
+        unit_cost = (total_cost / 100.0) / qty_unit
+
+        # Calculate EV-based Target
+        # Use our new helper
+        metrics = calculate_exit_metrics(
+            current_price=unit_price,
+            cost_basis=unit_cost,
+            delta=net_delta / qty_unit, # Average delta per unit
+            iv=iv_rank,
+            days_to_expiry=30 # Placeholder, could parse from expiry
+        )
+
+        # Only suggest if profitable and positive expectation
+        if metrics.expected_value > 0 and metrics.limit_price > unit_price:
             suggestion = {
                 "user_id": user_id,
                 "created_at": datetime.now(timezone.utc).isoformat(),
-                "valid_until": (datetime.now(timezone.utc) + timedelta(hours=12)).isoformat(), # End of day
+                "valid_until": (datetime.now(timezone.utc) + timedelta(hours=12)).isoformat(),
                 "window": "morning_limit",
-                "ticker": symbol,
-                "strategy": strategy,
-                "direction": "sell" if qty > 0 else "cover",
+                "ticker": spread.get("ticker"), # e.g. "KURA 04/17/26 Call Spread"
+                "strategy": "take_profit_limit",
+                "direction": "close",
+                "ev": metrics.expected_value,
+                "probability_of_profit": metrics.prob_of_profit,
                 "order_json": {
-                    "side": "sell" if qty > 0 else "buy",
-                    "limit_price": limit_price,
-                    "contracts": abs(qty)
+                    "side": "close_spread",
+                    "limit_price": round(metrics.limit_price, 2),
+                    "legs": [
+                        {"symbol": l["symbol"], "quantity": l["quantity"]} for l in legs
+                    ]
                 },
                 "sizing_metadata": {
-                    "capital_required": 0, # Exits don't require capital usually
-                    "reason": reason
+                    "reason": metrics.reason,
+                    "spread_details": {
+                        "underlying": underlying,
+                        "expiry": spread.get("expiry"),
+                        "type": spread.get("type")
+                    }
                 },
                 "status": "pending"
             }

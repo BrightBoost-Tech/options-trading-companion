@@ -13,7 +13,8 @@ import {
   Zap
 } from 'lucide-react'
 import clsx from 'clsx'
-import { API_URL } from '@/lib/constants'
+import { API_URL, TEST_USER_ID } from '@/lib/constants'
+import { supabase } from '@/lib/supabase'
 
 // --- Types ---
 interface Trade {
@@ -72,6 +73,18 @@ export default function PortfolioOptimizer({ positions, onOptimizationComplete }
     setResults(null)
 
     try {
+      const { data: { session } } = await supabase.auth.getSession();
+      const headers: Record<string, string> = {
+        'Content-Type': 'application/json',
+      };
+
+      if (session) {
+        headers['Authorization'] = `Bearer ${session.access_token}`;
+      } else {
+        // Dev/Test mode – use X-Test-Mode-User fallback
+        headers['X-Test-Mode-User'] = TEST_USER_ID;
+      }
+
       const cashBalance = computeCashFromPositions();
 
       // 1. Data Mapping (DB -> API Schema)
@@ -86,7 +99,7 @@ export default function PortfolioOptimizer({ positions, onOptimizationComplete }
       // 2. API Call
       const res = await fetch(`${API_URL}/optimize/portfolio`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers,
         body: JSON.stringify({
           positions: formattedPositions,
           risk_aversion: 1.0,

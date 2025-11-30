@@ -6,6 +6,7 @@ import { useRouter } from 'next/navigation';
 import DashboardLayout from '@/components/DashboardLayout';
 import SyncHoldingsButton from '@/components/SyncHoldingsButton';
 import { API_URL, TEST_USER_ID } from '@/lib/constants';
+import { formatOptionDisplay } from '@/lib/formatters';
 
 interface FetchOptions extends RequestInit {
   timeout?: number;
@@ -172,7 +173,9 @@ export default function PortfolioPage() {
 
                         return (
                       <tr key={idx} className={`hover:bg-gray-50 ${isLowDTE ? 'bg-red-100' : ''}`}>
-                        <td className="px-6 py-4 font-medium">{pos.symbol}</td>
+                        <td className="px-6 py-4 font-medium">
+                          {pos.option_contract ? formatOptionDisplay(pos.symbol) : pos.symbol}
+                        </td>
                         <td className="px-6 py-4">
                           <span className={`px-2 py-1 rounded text-xs ${!pos.option_contract ? 'bg-blue-100 text-blue-800' : 'bg-purple-100 text-purple-800'}`}>
                             {!pos.option_contract ? 'Stock' : 'Option'}

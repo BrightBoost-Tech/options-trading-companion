@@ -60,11 +60,20 @@ export default function PortfolioOptimizer({ positions, onOptimizationComplete }
   const [showDiag, setShowDiag] = useState(false)
   const [isDiagLoading, setIsDiagLoading] = useState(false)
 
+  const computeCashFromPositions = () => {
+    if (!positions) return 0;
+    return positions
+      .filter((p: any) => typeof p.symbol === 'string' && (p.symbol === 'CUR:USD' || p.symbol.toUpperCase().includes('USD') || p.symbol === 'CASH'))
+      .reduce((sum: number, p: any) => sum + Number(p.quantity || 0) * Number(p.current_price || p.price || 1), 0);
+  };
+
   const handleOptimize = async () => {
     setIsOptimizing(true)
     setResults(null)
 
     try {
+      const cashBalance = computeCashFromPositions();
+
       // 1. Data Mapping (DB -> API Schema)
       const formattedPositions = (positions || []).map((p: any) => ({
         symbol: p.symbol,
@@ -82,7 +91,7 @@ export default function PortfolioOptimizer({ positions, onOptimizationComplete }
           positions: formattedPositions,
           risk_aversion: 1.0,
           skew_preference: isQuantum ? 10000.0 : 0.0, // High skew penalty triggers Quantum logic
-          cash_balance: 1000.0,
+          cash_balance: cashBalance,
           profile: profile
         })
       })

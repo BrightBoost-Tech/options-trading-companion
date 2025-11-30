@@ -157,6 +157,7 @@ def _compute_portfolio_weights(
     nested_global_env = os.getenv("NESTED_GLOBAL_ENABLED", "False").lower() == "true"
 
     # Master switch: Only active if request enabled AND global env enabled AND one of sub-envs enabled
+    # Explicitly guarding against accidental live influence
     nested_env_enabled = nested_global_env and (
         os.getenv("NESTED_L2_ENABLED", "False").lower() == "true"
         or os.getenv("NESTED_L1_ENABLED", "False").lower() == "true"

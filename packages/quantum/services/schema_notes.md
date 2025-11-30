@@ -21,6 +21,7 @@ Stores generated trade ideas and their lifecycle status.
 | `order_json` | jsonb | Details: { "side": "buy", "limit_price": 1.50, "contracts": 1 } |
 | `sizing_metadata` | jsonb | Details: { "capital_required": 500.0, "reason": "Risk capped" } |
 | `status` | text | 'pending', 'dismissed', 'executed', 'expired' |
+| `ev` | numeric | Scalar Expected Value ($) |
 
 ### `weekly_trade_reports`
 

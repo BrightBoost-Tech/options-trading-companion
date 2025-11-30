@@ -83,34 +83,40 @@ The `/optimize/portfolio` response now includes a `diagnostics.nested` object:
 *   **Additive Risk Only**: Both L2 and L0 only *increase* perceived risk (inflate sigma) or reduce constraints. They never artificially deflate risk to encourage gambling.
 *   **Crisis Mode**: Acts as a hard circuit breaker to enforce conservative profiling.
 
-## Shadow Mode (QA)
+## Gating & Rollout
 
-To validate Nested Learning changes without affecting live trades, use the `nested_shadow` flag.
+Phase 3 introduces strict gating to ensure safety during the rollout.
 
-*   **Request**: `POST /optimize/portfolio` with `{"nested_shadow": true, ...}`
+### 1. Request Flags
+*   `nested_enabled` (bool): Master toggle. Must be `True` for any nested logic (L2/L1/L0) to affect **live** trades. Defaults to `False`.
+*   `nested_shadow` (bool): Debug flag. If `True`, the optimizer forces the main execution path to **Baseline** (safe), but runs a parallel **Nested** path for diagnostics.
+
+### 2. Environment Flags
+Even if `nested_enabled=True`, logic is gated by server-side environment variables:
+*   `NESTED_GLOBAL_ENABLED`: Master kill-switch.
+*   `NESTED_L2_ENABLED`: Enables Global Backbone.
+*   `NESTED_L1_ENABLED`: Enables Symbol Adapters.
+*   `NESTED_L0_ENABLED`: Enables Session Adapters.
+
+### 3. Shadow Mode (QA)
+To validate Nested Learning changes without affecting live trades:
+
+*   **Request**: `POST /optimize/portfolio` with `{"nested_shadow": true, "nested_enabled": false}` (or true, ignored for main path).
 *   **Behavior**:
-    *   Calculates **Baseline** (Path A): Standard optimization (flags forced off).
-    *   Calculates **Nested** (Path B): Full L2/L1/L0 pipeline (flags respected).
-    *   **Returns**: Path A (Baseline) trades and metrics.
+    *   **Main Path**: Forced Baseline. Returns standard MVO trades.
+    *   **Shadow Path**: Forced Nested. Computes what *would* happen if nested were live.
+    *   **Response**: Returns Main Path trades. Includes `diagnostics.nested_shadow` with comparison metrics.
     *   **Logs**: Both paths are logged to `inference_log`.
-    *   **Diagnostics**: Includes a `nested_shadow` object:
-        ```json
-        "diagnostics": {
-          "nested_shadow": {
-            "baseline_mode": "Surrogate",
-            "nested_mode": "Surrogate",
-            "baseline_trades": [{"symbol": "AAPL", "action": "BUY", "value": 100}],
-            "nested_trades": [{"symbol": "AAPL", "action": "BUY", "value": 80}]
-          }
-        }
-        ```
 
-## Micro-Live Rollout
-
+### 4. Micro-Live Rollout
 To gradually introduce Nested Learning influence on live sizing:
 
+*   **Prerequisites**: `nested_enabled=True` in request AND `NESTED_GLOBAL_ENABLED=True` in env.
 *   **Env Var**: `NESTED_LIVE_RISK_MULTIPLIER` (float, e.g., `0.25`).
 *   **Logic**:
-    *   If `nested_shadow=False` and flags are enabled:
+    *   `mu_final = mu_baseline * (1 - multiplier) + mu_nested * multiplier`
     *   `sigma_final = sigma_baseline * (1 - multiplier) + sigma_nested * multiplier`
-*   **Effect**: Allows us to blend the "fear" (inflated sigma) of the nested model into production at partial strength (e.g., 25% influence).
+*   **Effect**:
+    *   If `0.0` (default): Nested logic runs and logs to diagnostics, but **does not affect trades** (Safe Mode).
+    *   If `0.0 < m < 1.0`: Blends the nested view with the baseline view.
+    *   If `1.0`: Full Nested Learning.

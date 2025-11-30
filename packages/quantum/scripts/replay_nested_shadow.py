@@ -2,164 +2,188 @@ import argparse
 import asyncio
 import os
 import sys
-import json
-import numpy as np
-from datetime import datetime, timedelta
-from typing import List, Dict, Any
+from datetime import date, timedelta, datetime
+from typing import List, Optional
 
-# Add package root to path
-# We need to add the repo root (../../..) so "packages.quantum..." imports work
+# Add repo root to path
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '../../..')))
-# We ALSO need packages/quantum (../..) so internal imports like "core" work
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '../..')))
+# Add package root to path (for internal imports like 'core', 'market_data')
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 from dotenv import load_dotenv
-from supabase import create_client
+from supabase import create_client, Client
 
-from packages.quantum.optimizer import optimize_portfolio, OptimizationRequest, PositionInput
-
-# Load env vars
+# Load environment variables
 load_dotenv()
 
-def get_supabase_client():
+# Backend imports
+from packages.quantum.optimizer import OptimizationRequest, PositionInput, optimize_portfolio
+# Ensure dependencies (e.g. cryptography for security.py) are available
+try:
+    from packages.quantum.models import Holding
+except ImportError:
+    pass
+
+def get_supabase_client() -> Client:
     url = os.getenv("NEXT_PUBLIC_SUPABASE_URL")
     key = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
     if not url or not key:
-        print("Error: Missing Supabase credentials.")
-        sys.exit(1)
+        print("Error: Missing Supabase credentials (NEXT_PUBLIC_SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY).")
+        # Do not exit, try to continue if mocking or just fail later
+        # sys.exit(1)
     return create_client(url, key)
 
-async def main():
-    parser = argparse.ArgumentParser(description="Replay portfolio optimization in shadow mode.")
-    parser.add_argument("--user-id", required=True, help="User ID to replay for")
-    parser.add_argument("--start-date", required=True, help="Start date (YYYY-MM-DD)")
-    parser.add_argument("--end-date", required=True, help="End date (YYYY-MM-DD)")
-    parser.add_argument("--profile", default="aggressive", help="Risk profile")
-    args = parser.parse_args()
+async def run_replay(args):
+    try:
+        supabase = get_supabase_client()
+    except Exception as e:
+        print(f"Failed to init Supabase: {e}")
+        return
 
     user_id = args.user_id
-    start_date = datetime.strptime(args.start_date, "%Y-%m-%d")
-    end_date = datetime.strptime(args.end_date, "%Y-%m-%d")
+    start_date = datetime.strptime(args.start_date, "%Y-%m-%d").date()
+    end_date = datetime.strptime(args.end_date, "%Y-%m-%d").date()
+    profile = args.profile
 
-    print(f"Replaying for User {user_id} from {start_date.date()} to {end_date.date()} in Shadow Mode...")
-
-    supabase = get_supabase_client()
+    print(f"Starting Replay for User {user_id} from {start_date} to {end_date} (Profile: {profile})")
 
     current_date = start_date
-    results_log = []
+    delta = timedelta(days=1)
+
+    total_days = 0
+    different_recs = 0
+    sum_sharpe_diff = 0.0
+    sum_return_diff = 0.0
 
     while current_date <= end_date:
-        date_str = current_date.strftime("%Y-%m-%d")
-        print(f"Processing {date_str}...", end=" ", flush=True)
+        # 1. Fetch Snapshot for this day (latest one on or before day end)
+        day_start = current_date.isoformat() + "T00:00:00"
+        day_end = current_date.isoformat() + "T23:59:59"
 
         try:
-            # 1. Fetch Snapshot
             res = supabase.table("portfolio_snapshots") \
                 .select("*") \
                 .eq("user_id", user_id) \
-                .gte("created_at", date_str + "T00:00:00") \
-                .lte("created_at", date_str + "T23:59:59") \
+                .gte("created_at", day_start) \
+                .lte("created_at", day_end) \
                 .order("created_at", desc=True) \
                 .limit(1) \
                 .execute()
 
-            snapshots = res.data
-            if not snapshots:
-                print("No snapshot.")
-                current_date += timedelta(days=1)
-                continue
+            snapshot = res.data[0] if res.data else None
+        except Exception as e:
+            print(f"Error fetching snapshot for {current_date}: {e}")
+            current_date += delta
+            continue
 
-            snapshot_data = snapshots[0]
-            holdings = snapshot_data.get("holdings", [])
+        if not snapshot:
+            # print(f"[{current_date}] No snapshot found.")
+            current_date += delta
+            continue
 
-            positions = []
-            cash_balance = 0.0
+        print(f"[{current_date}] Processing snapshot {snapshot['id']}...")
 
-            for h in holdings:
-                sym = h.get("symbol")
-                qty = float(h.get("quantity", 0))
-                price = float(h.get("current_price", 0))
+        # 2. Reconstruct OptimizationRequest
+        # Assuming 'positions' column stores list of holdings
+        positions_data = snapshot.get("positions", [])
+        if not positions_data:
+             positions_data = snapshot.get("holdings", [])
+
+        pos_inputs = []
+
+        # Use buying_power as cash proxy if available
+        stored_bp = float(snapshot.get("buying_power", 0.0))
+
+        for p in positions_data:
+            sym = p.get("symbol")
+            if not sym: continue
+
+            qty = float(p.get("quantity", 0) or p.get("current_quantity", 0))
+            price = float(p.get("current_price", 0) or p.get("price", 0))
+            val = float(p.get("current_value", 0) or p.get("value", 0))
+            if val == 0 and qty > 0 and price > 0:
                 val = qty * price
 
-                if sym in ["USD", "CUR:USD", "CASH"]:
-                    cash_balance += val
-                    positions.append(PositionInput(
-                        symbol=sym,
-                        current_value=val,
-                        current_quantity=qty,
-                        current_price=price
-                    ))
-                else:
-                    positions.append(PositionInput(
-                        symbol=sym,
-                        current_value=val,
-                        current_quantity=qty,
-                        current_price=price
-                    ))
+            pos_inputs.append(PositionInput(
+                symbol=sym,
+                current_quantity=qty,
+                current_price=price,
+                current_value=val
+            ))
 
-            if not positions:
-                print("Empty portfolio.")
-                current_date += timedelta(days=1)
-                continue
+        req = OptimizationRequest(
+            positions=pos_inputs,
+            cash_balance=stored_bp,
+            profile=profile,
+            nested_enabled=False,
+            nested_shadow=True # Enable Shadow Mode!
+        )
 
-            req = OptimizationRequest(
-                positions=positions,
-                risk_aversion=1.0 if args.profile == "aggressive" else 2.0,
-                skew_preference=0.0,
-                cash_balance=cash_balance,
-                profile=args.profile,
-                nested_shadow=True
-            )
-
-            # 2. Run Optimizer
+        # 3. Run Optimization (Internal)
+        try:
+            # We call the endpoint function as a coroutine
+            # Note: optimize_portfolio uses 'user_id' for session state lookup.
             result = await optimize_portfolio(req, user_id=user_id)
 
-            # 3. Collect Metrics
+            # 4. Analyze Diagnostics
             diag = result.get("diagnostics", {})
             shadow = diag.get("nested_shadow", {})
 
-            m_base = shadow.get("baseline_metrics", {})
-            m_nest = shadow.get("nested_metrics", {})
+            if not shadow:
+                print("  Warning: No shadow diagnostics returned.")
+                current_date += delta
+                continue
 
-            diff_er = m_nest.get("expected_return", 0) - m_base.get("expected_return", 0)
-            diff_sr = m_nest.get("sharpe_ratio", 0) - m_base.get("sharpe_ratio", 0)
+            base_m = shadow.get("baseline_metrics", {})
+            nest_m = shadow.get("nested_metrics", {})
 
-            t_base = len(shadow.get("baseline_trades", []))
-            t_nest = len(shadow.get("nested_trades", []))
+            sharpe_diff = nest_m.get("sharpe_ratio", 0) - base_m.get("sharpe_ratio", 0)
+            ret_diff = nest_m.get("expected_return", 0) - base_m.get("expected_return", 0)
 
-            crisis_triggered = diag.get("nested", {}).get("crisis_mode_triggered_by") is not None
+            base_trades = shadow.get("baseline_trades", [])
+            nest_trades = shadow.get("nested_trades", [])
 
-            print(f"Diff ER: {diff_er:.4f}, Diff SR: {diff_sr:.2f}, Trades: {t_base}->{t_nest}, Crisis: {crisis_triggered}")
+            # Simple diff check
+            def fmt_trades(ts):
+                return sorted([f"{t['action']}:{t['symbol']}" for t in ts])
 
-            results_log.append({
-                "date": date_str,
-                "diff_er": diff_er,
-                "diff_sr": diff_sr,
-                "trades_base": t_base,
-                "trades_nest": t_nest,
-                "crisis": 1 if crisis_triggered else 0
-            })
+            is_diff = (fmt_trades(base_trades) != fmt_trades(nest_trades))
+
+            sum_sharpe_diff += sharpe_diff
+            sum_return_diff += ret_diff
+            total_days += 1
+            if is_diff:
+                different_recs += 1
+
+            print(f"  Diff: Sharpe {sharpe_diff:.4f}, Ret {ret_diff:.4f}, Trades Changed: {is_diff}")
+            if is_diff:
+                print(f"    Baseline: {fmt_trades(base_trades)}")
+                print(f"    Nested:   {fmt_trades(nest_trades)}")
 
         except Exception as e:
-            print(f"Error: {e}")
-            # import traceback
-            # traceback.print_exc()
+            print(f"  Error running optimizer: {e}")
 
-        current_date += timedelta(days=1)
+        current_date += delta
 
-    # Summary Table
-    if results_log:
-        avg_diff_er = np.mean([r["diff_er"] for r in results_log])
-        avg_diff_sr = np.mean([r["diff_sr"] for r in results_log])
-        total_crisis = sum([r["crisis"] for r in results_log])
-
-        print("\n--- Summary ---")
-        print(f"Avg Diff Expected Return: {avg_diff_er:.6f}")
-        print(f"Avg Diff Sharpe Ratio:    {avg_diff_sr:.4f}")
-        print(f"Total Crisis Days:        {total_crisis}")
-        print("----------------")
+    print("\n--- REPLAY SUMMARY ---")
+    print(f"Days Processed: {total_days}")
+    if total_days > 0:
+        print(f"Avg Sharpe Diff: {sum_sharpe_diff/total_days:.4f}")
+        print(f"Avg Return Diff: {sum_return_diff/total_days:.6f}")
+        print(f"Days with Different Trades: {different_recs} ({different_recs/total_days*100:.1f}%)")
     else:
-        print("\nNo days processed.")
+        print("No days processed.")
+
+def main():
+    parser = argparse.ArgumentParser(description="Replay Nested Shadow Optimization")
+    parser.add_argument("--user-id", required=True, help="User UUID")
+    parser.add_argument("--start-date", required=True, help="YYYY-MM-DD")
+    parser.add_argument("--end-date", required=True, help="YYYY-MM-DD")
+    parser.add_argument("--profile", default="balanced", help="Risk profile")
+
+    args = parser.parse_args()
+
+    asyncio.run(run_replay(args))
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()

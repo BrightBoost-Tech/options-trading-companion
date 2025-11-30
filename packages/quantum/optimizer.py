@@ -44,6 +44,7 @@ class OptimizationRequest(BaseModel):
     skew_preference: float = 0.0
     cash_balance: float = 0.0
     profile: str = "balanced"  # "aggressive" | "balanced" | "conservative"
+    nested_enabled: bool = False # if False -> pure baseline
     nested_shadow: bool = False  # if True, compute nested path but DO NOT change trades
 
 # Constants
@@ -149,11 +150,16 @@ def _compute_portfolio_weights(
     diagnostics_nested = {}
 
     sigma_original = sigma.copy()
+    mu_original = mu.copy()
 
     # Determine flags
-    use_l2 = False if force_baseline else os.getenv("NESTED_L2_ENABLED", "False").lower() == "true"
-    use_l1 = False if force_baseline else os.getenv("NESTED_L1_ENABLED", "False").lower() == "true"
-    use_l0 = False if force_baseline else os.getenv("NESTED_L0_ENABLED", "False").lower() == "true"
+    # Nested logic requires: 1) nested_enabled=True, 2) Global Env=True
+    nested_global_env = os.getenv("NESTED_GLOBAL_ENABLED", "False").lower() == "true"
+    nested_req_active = req.nested_enabled and nested_global_env
+
+    use_l2 = False if force_baseline else (nested_req_active and os.getenv("NESTED_L2_ENABLED", "False").lower() == "true")
+    use_l1 = False if force_baseline else (nested_req_active and os.getenv("NESTED_L1_ENABLED", "False").lower() == "true")
+    use_l0 = False if force_baseline else (nested_req_active and os.getenv("NESTED_L0_ENABLED", "False").lower() == "true")
 
     # --- PHASE 3: NESTED LEARNING PIPELINE ---
 
@@ -223,12 +229,15 @@ def _compute_portfolio_weights(
             print(f"Phase 3 L0 Error: {e}")
 
     # --- MICRO-LIVE BLENDING ---
-    live_mult_str = os.getenv("NESTED_LIVE_RISK_MULTIPLIER")
-    if (not force_baseline) and (not req.nested_shadow) and live_mult_str:
+    live_mult_str = os.getenv("NESTED_LIVE_RISK_MULTIPLIER", "0.0")
+    if (not force_baseline) and nested_req_active and live_mult_str:
         try:
             live_mult = float(live_mult_str)
-            # Blend sigma: original * (1 - k) + nested * k
-            sigma = sigma_original * (1.0 - live_mult) + sigma * live_mult
+            live_mult = max(0.0, min(1.0, live_mult))
+            if live_mult > 0.0:
+                # Blend mu/sigma: original * (1 - k) + nested * k
+                sigma = sigma_original * (1.0 - live_mult) + sigma * live_mult
+                mu = mu_original * (1.0 - live_mult) + mu * live_mult
         except ValueError:
             pass
 
@@ -378,21 +387,32 @@ async def optimize_portfolio(req: OptimizationRequest, user_id: str = Depends(ge
         # In this endpoint we don't call CashService; use liquidity as deployable for now
         deployable_capital = liquidity
 
-        if req.nested_shadow:
-            # PATH A: Baseline (Force Baseline)
-            tw_base, diag_base, st_base, tid_base, fp_base, wa_base, mu_base, sigma_base = _compute_portfolio_weights(
-                mu, sigma, coskew, tickers, investable_assets, req, user_id,
-                total_portfolio_value, liquidity, force_baseline=True
-            )
+        # PATH A: Main Execution
+        # If Shadow is True, we FORCE Baseline for the Main Path to ensure safety.
+        # If Shadow is False, we respect nested_enabled (so if True, and envs are on, we run Nested Live).
+        force_main_baseline = req.nested_shadow
 
-            # PATH B: Nested (Force Nested if env vars enabled, or just normal env check)
+        target_weights, diagnostics_nested, solver_type, trace_id, final_profile, weights_array, metrics_mu, metrics_sigma = _compute_portfolio_weights(
+            mu, sigma, coskew, tickers, investable_assets, req, user_id,
+            total_portfolio_value, liquidity, force_baseline=force_main_baseline
+        )
+
+        if req.nested_shadow:
+            # PATH B: Nested Shadow (Diagnostics Only)
+            # We want to see what Nested WOULD do.
+            # So we create a temporary request with nested_enabled=True.
+            req_shadow = req.model_copy()
+            req_shadow.nested_enabled = True
+            req_shadow.nested_shadow = False # Disable shadow flag for internal call so it acts "Live" (e.g. Blending)
+
             tw_nest, diag_nest, st_nest, tid_nest, fp_nest, wa_nest, mu_nest, sigma_nest = _compute_portfolio_weights(
-                mu, sigma, coskew, tickers, investable_assets, req, user_id,
+                mu, sigma, coskew, tickers, investable_assets, req_shadow, user_id,
                 total_portfolio_value, liquidity, force_baseline=False
             )
 
             # Generate summary trades for shadow logs
-            trades_base = generate_trade_instructions(investable_assets, tw_base, total_portfolio_value, fp_base, deployable_capital)
+            # Note: We use the *shadow* profile/weights/deployable
+            trades_base = generate_trade_instructions(investable_assets, target_weights, total_portfolio_value, final_profile, deployable_capital)
             trades_nest = generate_trade_instructions(investable_assets, tw_nest, total_portfolio_value, fp_nest, deployable_capital)
 
             def summarize_trades(ts):
@@ -406,34 +426,17 @@ async def optimize_portfolio(req: OptimizationRequest, user_id: str = Depends(ge
                 sr = float(er / vol) if vol > 1e-9 else 0.0
                 return {"expected_return": er, "sharpe_ratio": sr}
 
-            metrics_base_shadow = calc_metrics(wa_base, mu_base, sigma_base)
+            metrics_base_shadow = calc_metrics(weights_array, metrics_mu, metrics_sigma)
             metrics_nest_shadow = calc_metrics(wa_nest, mu_nest, sigma_nest)
 
             diagnostics_shadow = {
-                "baseline_mode": st_base,
+                "baseline_mode": solver_type,
                 "nested_mode": st_nest,
                 "baseline_trades": summarize_trades(trades_base),
                 "nested_trades": summarize_trades(trades_nest),
                 "baseline_metrics": metrics_base_shadow,
                 "nested_metrics": metrics_nest_shadow
             }
-
-            # Use Baseline for response
-            target_weights = tw_base
-            solver_type = st_base
-            diagnostics_nested = diag_base # Usually empty for baseline
-            trace_id = tid_base
-            final_profile = fp_base
-            weights_array = wa_base
-            metrics_mu = mu_base
-            metrics_sigma = sigma_base
-
-        else:
-            # Standard execution (Live or Baseline depending on env vars)
-            target_weights, diagnostics_nested, solver_type, trace_id, final_profile, weights_array, metrics_mu, metrics_sigma = _compute_portfolio_weights(
-                mu, sigma, coskew, tickers, investable_assets, req, user_id,
-                total_portfolio_value, liquidity, force_baseline=False
-            )
 
         # 4. GENERATE TRADES
         trades = generate_trade_instructions(

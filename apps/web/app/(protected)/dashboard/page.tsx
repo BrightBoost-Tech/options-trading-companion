@@ -7,6 +7,7 @@ import PortfolioOptimizer from '@/components/dashboard/PortfolioOptimizer';
 import SuggestionTabs from '@/components/SuggestionTabs';
 import { supabase } from '@/lib/supabase';
 import { API_URL, TEST_USER_ID } from '@/lib/constants';
+import { groupOptionSpreads, formatOptionDisplay } from '@/lib/formatters';
 
 const mockAlerts = [
   { id: '1', message: 'SPY credit put spread scout: 475/470 for $1.50 credit', time: '2 min ago' },
@@ -216,6 +217,16 @@ export default function DashboardPage() {
   };
 
   // --- RENDER HELPERS ---
+
+  const getSpreads = (holdings: any[]) => {
+      const optionHoldings = holdings.filter((h: any) =>
+          typeof h.symbol === 'string' &&
+          h.symbol.length > 8 &&
+          h.symbol !== 'CUR:USD'
+      );
+      return groupOptionSpreads(optionHoldings);
+  };
+
   const renderPositionRow = (position: any, idx: number, type: 'option' | 'stock') => {
       const cost = position.cost_basis * position.quantity;
       const value = position.current_price * position.quantity;
@@ -232,10 +243,12 @@ export default function DashboardPage() {
         return '';
       };
 
+      const displaySymbol = type === 'option' ? formatOptionDisplay(position.symbol) : position.symbol;
+
       return (
         <tr key={`${type}-${idx}`} className="hover:bg-gray-50">
             <td className={`px-6 py-4 font-medium ${type === 'option' ? 'text-purple-600' : 'text-gray-900'}`}>
-                {position.symbol}
+                {displaySymbol}
             </td>
             <td className="px-6 py-4">{position.quantity}</td>
             <td className="px-6 py-4">${position.cost_basis?.toFixed(2)}</td>
@@ -298,16 +311,40 @@ export default function DashboardPage() {
                   <tbody className="divide-y divide-gray-200">
                     {snapshot?.holdings?.length > 0 ? (
                         <>
-                            {/* OPTIONS */}
+                            {/* OPTIONS & SPREADS */}
                             {snapshot.holdings.some((h:any) => h.symbol.length > 6 && h.symbol !== 'CUR:USD') && (
-                                <tr className="bg-purple-50">
-                                    <td colSpan={5} className="px-6 py-2 text-xs font-bold text-purple-800 uppercase">🎯 Option Plays</td>
-                                </tr>
+                                <>
+                                    <tr className="bg-purple-50">
+                                        <td colSpan={5} className="px-6 py-2 text-xs font-bold text-purple-800 uppercase">🎯 Option Plays</td>
+                                    </tr>
+                                    {getSpreads(snapshot.holdings).map((spread, idx) => {
+                                        // Use formatOptionDisplay logic but customized for spread title
+                                        // spread.expiry is YYYY-MM-DD
+                                        const [year, month, day] = spread.expiry.split('-');
+                                        const shortDate = `${month}/${day}/${year.slice(2)}`;
+                                        const label = `${spread.underlying} ${shortDate} ${spread.type} Spread`;
+
+                                        const legSummary = spread.legs
+                                            .map(leg => `${leg.parsed.strike}${leg.parsed.type} x ${leg.quantity}`)
+                                            .join(' / ');
+                                        const totalValue = spread.legs.reduce(
+                                            (sum, leg) => sum + leg.quantity * leg.current_price * 100,
+                                            0
+                                        );
+                                        return (
+                                            <tr key={`spread-${idx}`} className="hover:bg-gray-50 border-b border-gray-100">
+                                              <td className="px-6 py-4 font-medium text-purple-700">{label}</td>
+                                              <td className="px-6 py-4 text-sm text-gray-600" colSpan={3}>
+                                                  {legSummary}
+                                              </td>
+                                              <td className="px-6 py-4 text-right font-medium text-gray-900">
+                                                  ${totalValue.toFixed(2)}
+                                              </td>
+                                            </tr>
+                                        );
+                                    })}
+                                </>
                             )}
-                            {snapshot.holdings
-                                .filter((h:any) => h.symbol.length > 6 && h.symbol !== 'CUR:USD')
-                                .map((h:any, idx:number) => renderPositionRow(h, idx, 'option'))
-                            }
 
                             {/* STOCKS */}
                             {snapshot.holdings.some((h:any) => h.symbol.length <= 6 && h.symbol !== 'CUR:USD') && (

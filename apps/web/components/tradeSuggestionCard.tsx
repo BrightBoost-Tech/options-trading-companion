@@ -3,6 +3,7 @@ import { Card, CardContent } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { API_URL } from '@/lib/constants';
 import { Copy, CheckCircle2 } from 'lucide-react';
+import { formatOptionDisplay } from '@/lib/formatters';
 
 interface TradeSuggestionMetrics {
   expected_value?: number;
@@ -50,7 +51,11 @@ export default function TradeSuggestionCard({ suggestion }: TradeSuggestionCardP
   const [copied, setCopied] = useState(false);
 
   // Normalize symbol/ticker
-  const displaySymbol = suggestion.symbol || suggestion.ticker || 'UNKNOWN';
+  const rawSymbol = suggestion.symbol || suggestion.ticker || 'UNKNOWN';
+  const displaySymbol = (suggestion.type === 'option' || rawSymbol.length > 10)
+      ? formatOptionDisplay(rawSymbol)
+      : rawSymbol;
+
   const displayStrategy = suggestion.strategy || suggestion.type || 'Trade';
   const displayScore = suggestion.score || 0;
   const badges = suggestion.badges || [];

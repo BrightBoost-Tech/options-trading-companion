@@ -282,7 +282,8 @@ async def run_midday_cycle(supabase: Client, user_id: str):
                     "contracts": sizing["contracts"]
                 },
                 "sizing_metadata": sizing,
-                "status": "pending"
+                "status": "pending",
+                "ev": ev
             }
             suggestions.append(suggestion)
 

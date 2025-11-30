@@ -1,9 +1,10 @@
 import React, { useState } from 'react';
 import { Card, CardContent } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
-import { API_URL } from '@/lib/constants';
+import { API_URL, TEST_USER_ID } from '@/lib/constants';
 import { Copy, CheckCircle2 } from 'lucide-react';
 import { formatOptionDisplay } from '@/lib/formatters';
+import { createClientComponentClient } from '@supabase/auth-helpers-nextjs';
 
 interface TradeSuggestionMetrics {
   expected_value?: number;
@@ -11,6 +12,7 @@ interface TradeSuggestionMetrics {
 }
 
 interface TradeSuggestion {
+  id?: string;
   symbol?: string;
   ticker?: string;
   strategy?: string;
@@ -28,6 +30,7 @@ interface TradeSuggestion {
   window?: string;
   order_json?: Record<string, any>;
   sizing_metadata?: Record<string, any>;
+  ev?: number;
 
   // Compounding Mode
   sizing?: {
@@ -42,13 +45,16 @@ interface TradeSuggestion {
 
 interface TradeSuggestionCardProps {
   suggestion: TradeSuggestion;
+  onLogged?: (id: string) => void;
 }
 
-export default function TradeSuggestionCard({ suggestion }: TradeSuggestionCardProps) {
+export default function TradeSuggestionCard({ suggestion, onLogged }: TradeSuggestionCardProps) {
   const [evPreview, setEvPreview] = useState<any | null>(null);
   const [evLoading, setEvLoading] = useState(false);
   const [evError, setEvError] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
+  const [logging, setLogging] = useState(false);
+  const supabase = createClientComponentClient();
 
   // Normalize symbol/ticker
   const rawSymbol = suggestion.symbol || suggestion.ticker || 'UNKNOWN';
@@ -102,6 +108,36 @@ export default function TradeSuggestionCard({ suggestion }: TradeSuggestionCardP
     }
   };
 
+  const handleLogTrade = async () => {
+    if (!suggestion.id) return;
+    try {
+      setLogging(true);
+      const { data: { session } } = await supabase.auth.getSession();
+      const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+      if (session) {
+        headers['Authorization'] = `Bearer ${session.access_token}`;
+      } else {
+        headers['X-Test-Mode-User'] = TEST_USER_ID;
+      }
+
+      const res = await fetch(`${API_URL}/suggestions/${suggestion.id}/log-trade`, {
+        method: 'POST',
+        headers,
+      });
+
+      if (!res.ok) {
+        console.error('Failed to log trade from suggestion', await res.text());
+        return;
+      }
+
+      if (onLogged) onLogged(suggestion.id);
+    } catch (err) {
+      console.error('Error logging trade', err);
+    } finally {
+      setLogging(false);
+    }
+  };
+
   const renderMorningContent = () => {
     const order = suggestion.order_json || {};
     const meta = suggestion.sizing_metadata || {};
@@ -109,7 +145,7 @@ export default function TradeSuggestionCard({ suggestion }: TradeSuggestionCardP
       <div className="mt-3 p-3 bg-orange-50 rounded text-xs space-y-1 border border-orange-100">
         <div className="flex justify-between font-bold text-orange-900">
           <span>Limit Price: ${order.limit_price?.toFixed(2) || 'N/A'}</span>
-          <span>Contracts: {order.quantity || 'N/A'}</span>
+          <span>Contracts: {order.legs?.[0]?.quantity || order.quantity || 'N/A'}</span>
         </div>
         {meta.stop_loss && <div>Stop Loss: ${meta.stop_loss}</div>}
         <div className="text-gray-600 mt-1 italic">
@@ -165,6 +201,9 @@ export default function TradeSuggestionCard({ suggestion }: TradeSuggestionCardP
     );
   };
 
+  const evValue = suggestion.ev !== undefined ? suggestion.ev : suggestion.metrics?.expected_value;
+  const winRate = suggestion.metrics?.probability_of_profit;
+
   return (
     <Card className="mb-4 shadow-sm hover:shadow-md transition-shadow">
       <CardContent className="p-4">
@@ -174,8 +213,12 @@ export default function TradeSuggestionCard({ suggestion }: TradeSuggestionCardP
             <p className="text-sm text-gray-500">{displayStrategy}</p>
           </div>
           <div className="text-right">
-            <div className="text-2xl font-bold text-blue-600">{displayScore}</div>
-            <div className="text-xs text-gray-400">OTC Score</div>
+            {displayScore > 0 && (
+              <>
+                <div className="text-2xl font-bold text-blue-600">{displayScore}</div>
+                <div className="text-xs text-gray-400">OTC Score</div>
+              </>
+            )}
           </div>
         </div>
 
@@ -185,19 +228,15 @@ export default function TradeSuggestionCard({ suggestion }: TradeSuggestionCardP
           ))}
 
           {/* Always show EV/Win badges if metrics exist */}
-          {suggestion.metrics && (
-            <>
-              {suggestion.metrics.expected_value !== undefined && (
-                <Badge className="bg-blue-50 text-blue-700 border border-blue-100">
-                  EV: ${suggestion.metrics.expected_value.toFixed(2)}
-                </Badge>
-              )}
-              {suggestion.metrics.probability_of_profit !== undefined && (
-                <Badge className="bg-purple-50 text-purple-700 border border-purple-100">
-                  Win: {Math.round(suggestion.metrics.probability_of_profit)}%
-                </Badge>
-              )}
-            </>
+          {evValue !== undefined && (
+            <Badge className="bg-blue-50 text-blue-700 border border-blue-100">
+              EV: ${evValue.toFixed(2)}
+            </Badge>
+          )}
+          {winRate !== undefined && (
+            <Badge className="bg-purple-50 text-purple-700 border border-purple-100">
+              Win: {Math.round(winRate)}%
+            </Badge>
           )}
         </div>
 
@@ -240,6 +279,18 @@ export default function TradeSuggestionCard({ suggestion }: TradeSuggestionCardP
             )}
             {evError && <div className="text-red-500">{evError}</div>}
           </div>
+        )}
+
+        {(suggestion.window === 'morning_limit' || suggestion.window === 'midday_entry') && (
+            <div className="mt-3 flex justify-end gap-2">
+                <button
+                    onClick={handleLogTrade}
+                    disabled={logging}
+                    className="text-xs px-3 py-1 rounded border border-emerald-200 text-emerald-700 hover:bg-emerald-50 disabled:opacity-50"
+                >
+                    {logging ? 'Logging…' : 'Mark Executed (Log Trade)'}
+                </button>
+            </div>
         )}
       </CardContent>
     </Card>

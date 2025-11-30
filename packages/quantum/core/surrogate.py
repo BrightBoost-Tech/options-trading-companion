@@ -1,5 +1,6 @@
 import numpy as np
 from scipy.optimize import minimize
+from typing import List, Dict, Any
 
 class SurrogateOptimizer:
     def solve(self, mu, sigma, coskew, constraints):
@@ -50,3 +51,50 @@ class SurrogateOptimizer:
             raise ValueError(f"Optimization failed: {result.message}")
 
         return result.x # Returns array of float weights
+
+
+def optimize_for_compounding(
+    suggestions: List[Dict[str, Any]],
+    current_holdings: List[Any],
+    account_value: float,
+    target_value: float = 5000.0,
+) -> List[Dict[str, Any]]:
+    """
+    Given enriched trade suggestions, compute compounding-related metrics
+    and return a new list sorted by their contribution to geometric growth.
+    This is an additive helper and should not change any existing behavior.
+    """
+    for suggestion in suggestions:
+        win_amt = float(suggestion.get("max_profit", 0.0))
+        loss_amt = float(suggestion.get("max_loss", 0.0))
+        p = float(suggestion.get("prob_profit", 0.0))
+        q = 1.0 - p
+        ev_amount = float(suggestion.get("ev_amount", 0.0))
+
+        # Approximate a variance and geometric growth contribution
+        variance = ((win_amt + loss_amt) ** 2) * p * q  # simple heuristic
+
+        # Avoid div/0 if account_value is weird
+        denom = max(account_value, 1.0)
+
+        # Approx. Geometric Growth ~ Arithmetic Mean - 0.5 * Variance / Wealth
+        # (This comes from Kelly criterion derivations)
+        geo_growth = ev_amount - (variance / (2.0 * denom))
+
+        # Approximate est_trades_to_target
+        if ev_amount > 0:
+            est_trades_to_target = max(0.0, (target_value - account_value) / ev_amount)
+        else:
+            est_trades_to_target = float("inf")
+
+        suggestion.setdefault("metrics", {})
+        suggestion["metrics"].update({
+            "geometric_growth_contribution": geo_growth,
+            "est_trades_to_target": est_trades_to_target,
+            "volatility_drag_coefficient": variance / denom,
+        })
+
+    # Sort by geo_growth descending
+    suggestions.sort(key=lambda x: x["metrics"].get("geometric_growth_contribution", 0), reverse=True)
+
+    return suggestions

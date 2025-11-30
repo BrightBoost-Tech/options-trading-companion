@@ -32,7 +32,13 @@ interface Metrics {
 
 interface OptimizationResult {
   status: string;
-  mode: string; // "QCI Dirac-3" | "Surrogate (Fallback)" | "Classical"
+  mode: string; // "QCI Dirac-3" | "Surrogate (Fallback)" | "Classical" | "Compounding Small-Edge"
+  account_goal?: string;
+  portfolio_stats?: {
+    projected_drawdown_risk: string;
+    growth_velocity: string;
+    est_time_to_target?: string;
+  };
   target_weights: Record<string, number>;
   trades: Trade[];
   metrics: Metrics;
@@ -231,9 +237,28 @@ export default function PortfolioOptimizer({ positions, onOptimizationComplete }
           <div className="space-y-6 animate-in fade-in slide-in-from-bottom-4 duration-500">
 
             {/* 1. Source Badge (The requested feature) */}
-            <div className="flex justify-center">
+            <div className="flex flex-col items-center justify-center gap-2">
                 <OptimizationBadge mode={results.mode} />
+                {results.account_goal && (
+                    <span className="text-[10px] font-bold text-indigo-400 uppercase tracking-widest">
+                        {results.account_goal}
+                    </span>
+                )}
             </div>
+
+            {/* 1b. Portfolio Stats (Compounding Mode) */}
+            {results.portfolio_stats && (
+                <div className="flex justify-between px-3 py-2 bg-slate-50 border border-slate-100 rounded-lg text-xs">
+                    <div className="flex flex-col">
+                        <span className="text-[10px] text-slate-400 uppercase">Drawdown Risk</span>
+                        <span className="font-bold text-slate-700">{results.portfolio_stats.projected_drawdown_risk}</span>
+                    </div>
+                    <div className="flex flex-col text-right">
+                        <span className="text-[10px] text-slate-400 uppercase">Velocity</span>
+                        <span className="font-bold text-emerald-600">{results.portfolio_stats.growth_velocity}</span>
+                    </div>
+                </div>
+            )}
 
             {/* 2. Metrics Grid */}
             <div className="grid grid-cols-3 gap-3">
@@ -391,6 +416,14 @@ function OptimizationBadge({ mode }: { mode: string }) {
             <div className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-blue-50 text-blue-700 border border-blue-100">
                 <Cpu className="w-3 h-3" />
                 <span className="text-[10px] font-bold tracking-wide uppercase">Quantum Surrogate</span>
+            </div>
+        )
+    }
+    if (mode === 'Compounding Small-Edge') {
+        return (
+            <div className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-gradient-to-r from-emerald-500 to-teal-600 text-white shadow-sm">
+                <Zap className="w-3 h-3 text-yellow-300" />
+                <span className="text-[10px] font-bold tracking-wide uppercase">Compounding Small-Edge</span>
             </div>
         )
     }

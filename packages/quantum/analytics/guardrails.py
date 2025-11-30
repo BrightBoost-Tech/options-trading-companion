@@ -159,3 +159,68 @@ def sector_penalty(
     if concentration > 0.25: # Threshold for penalty
         return (concentration - 0.25) * 100 # Penalty score
     return 0.0
+
+
+class SmallAccountCompounder:
+    """
+    Guardrails specifically for a $1k -> $5k compounding objective.
+    This is additive and should not break existing guardrail logic.
+    """
+    MIN_POP: float = 0.60    # min probability of profit
+    MAX_RISK_PCT: float = 0.05  # max 5% of account risk per trade
+    MAX_LOSS_PCT: float = 0.10  # max 10% of account as max_loss (collateral cap)
+    MIN_EV_PCT: float = 5.0  # min expected edge (%)
+
+    @classmethod
+    def apply(cls, suggestions: List[Dict[str, Any]], account_value: float) -> List[Dict[str, Any]]:
+        """
+        Filter + score raw trade suggestions for Compounding Small-Edge mode.
+        Assumes each suggestion dict has at least:
+          - prob_profit (float)
+          - max_loss (float)
+          - ev_percent (float) or enough data to derive it
+          - undefined_risk (bool?) if available
+        Returns a new list, sorted descending by `compound_score`.
+        """
+        filtered = []
+        for trade in suggestions:
+            # 1. Reject Undefined Risk
+            if trade.get('undefined_risk') is True:
+                continue
+
+            # 2. Enforce Min POP
+            prob_profit = float(trade.get('prob_profit', 0.0))
+            if prob_profit < cls.MIN_POP:
+                continue
+
+            # 3. Max Loss Cap relative to account
+            max_loss = float(trade.get('max_loss', 0.0))
+            if max_loss > account_value * cls.MAX_LOSS_PCT:
+                continue
+
+            # 4. EV Threshold (if available)
+            # Some sources might not pre-calc EV %, so we check if key exists
+            if 'ev_percent' in trade:
+                if float(trade['ev_percent']) < cls.MIN_EV_PCT:
+                    continue
+
+            # 5. Compute Compound Score
+            # Base score = Probability * 100
+            score = prob_profit * 100.0
+
+            # Add EV boost
+            if 'ev_percent' in trade:
+                score += float(trade['ev_percent'])
+
+            # Add Risk/Reward boost
+            max_profit = float(trade.get('max_profit', 0.0))
+            if max_loss > 0:
+                rr = max_profit / max_loss
+                score += (rr * 10.0) # Weight RR reasonably
+
+            trade['compound_score'] = score
+            filtered.append(trade)
+
+        # Sort descending by score
+        filtered.sort(key=lambda x: x.get('compound_score', 0), reverse=True)
+        return filtered

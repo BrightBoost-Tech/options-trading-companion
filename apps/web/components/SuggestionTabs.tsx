@@ -19,6 +19,10 @@ interface SuggestionTabsProps {
   onRefreshJournal: () => void;
 }
 
+// Helper for safe numeric formatting (replicated locally for the Rebalance tab logic)
+const safeFixed = (value: number | null | undefined, digits = 2) =>
+  typeof value === "number" ? value.toFixed(digits) : "--";
+
 export default function SuggestionTabs({
   optimizerSuggestions,
   scoutSuggestions,
@@ -184,12 +188,12 @@ export default function SuggestionTabs({
                    <p className="text-xs text-gray-500 italic">{trade.rationale}</p>
                    {trade.metrics && (
                      <div className="mt-2 flex gap-2 text-xs">
-                       {trade.metrics.expected_value && (
+                       {typeof trade.metrics.expected_value === 'number' && (
                          <span className="text-blue-600 bg-blue-50 px-2 py-0.5 rounded">
-                           EV: ${trade.metrics.expected_value.toFixed(2)}
+                           EV: ${safeFixed(trade.metrics.expected_value)}
                          </span>
                        )}
-                       {trade.metrics.probability_of_profit && (
+                       {typeof trade.metrics.probability_of_profit === 'number' && (
                          <span className="text-purple-600 bg-purple-50 px-2 py-0.5 rounded">
                            Win: {Math.round(trade.metrics.probability_of_profit)}%
                          </span>

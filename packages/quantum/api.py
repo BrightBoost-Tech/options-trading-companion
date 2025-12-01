@@ -875,19 +875,42 @@ async def log_trade_from_suggestion(
         order_json = suggestion.get("order_json") or {}
         entry_price = order_json.get("price") or order_json.get("limit_price") or 0.0
 
-        # Check if already logged? Optional but good practice.
-        # For now, we assume user might want to log it multiple times (e.g. scaling in).
+        # ✔ Symbol selection priority
+        symbol = (
+            suggestion.get("symbol") or
+            suggestion.get("ticker") or
+            order_json.get("symbol") or
+            "<unknown>"
+        )
+
+        # ✔ Contract selection logic
+        contracts = 1
+        if "contracts" in order_json:
+            contracts = order_json["contracts"]
+        elif "legs" in order_json and len(order_json["legs"]) > 0:
+            # Use absolute quantity from first leg as proxy for spread count
+            contracts = abs(order_json["legs"][0].get("quantity", 1))
+
+        # ✔ Leg description
+        leg_notes = None
+        if "legs" in order_json:
+            leg_notes = ", ".join([f"{leg.get('symbol', 'Leg')} x {leg.get('quantity', 0)}" for leg in order_json["legs"]])
+
+        # ✔ Final notes field
+        notes = f"Logged from suggestion {suggestion_id}"
+        if leg_notes:
+            notes += f" | Legs: {leg_notes}"
 
         trade_data = {
             "user_id": user_id,
-            "symbol": suggestion.get("symbol"),
-            "direction": suggestion.get("direction", "Long"),
+            "symbol": symbol,
+            "direction": suggestion.get("direction") or "Long",
             "entry_date": datetime.now().isoformat(),
             "entry_price": entry_price,
-            "strategy": suggestion.get("strategy", "Stock"),
-            "contracts": 1, # Default
+            "strategy": suggestion.get("strategy") or "Stock",
+            "contracts": contracts,
             "status": "open",
-            "notes": f"Logged from suggestion {suggestion_id}"
+            "notes": notes
         }
 
         # 3. Create Journal Entry

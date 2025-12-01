@@ -26,6 +26,7 @@ import plaid_endpoints
 # Import functionalities
 from options_scanner import scan_for_opportunities
 from services.journal_service import JournalService
+from services.universe_service import UniverseService
 from optimizer import router as optimizer_router
 from market_data import calculate_portfolio_inputs
 # New Services for Cash-Aware Workflow
@@ -253,6 +254,26 @@ async def weekly_report_task(
         await run_weekly_report(supabase, uid)
 
     return {"status": "ok", "processed": len(active_users)}
+
+
+@app.post("/tasks/universe/sync")
+async def universe_sync_task(
+    _: None = Depends(verify_cron_secret)
+):
+    print("Universe sync task: starting")
+    if not supabase:
+        raise HTTPException(status_code=503, detail="Database not available")
+
+    try:
+        service = UniverseService(supabase)
+        service.sync_universe()
+        service.update_metrics()
+
+        print("Universe sync task: complete")
+        return {"status": "ok", "message": "Universe synced and metrics updated"}
+    except Exception as e:
+        print(f"Universe sync task failed: {e}")
+        raise HTTPException(status_code=500, detail=f"Sync failed: {e}")
 
 
 @app.post("/tasks/plaid/backfill-history")

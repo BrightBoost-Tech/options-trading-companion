@@ -243,17 +243,17 @@ async def run_midday_cycle(supabase: Client, user_id: str):
             # Sort by score (highest first)
             scout_results.sort(key=lambda x: x.get("score", 0), reverse=True)
 
-            # Guarantee midday suggestions when MIDDAY_TEST_MODE == True
-            if MIDDAY_TEST_MODE:
-                print("MIDDAY_TEST_MODE ACTIVE: ignoring score threshold.")
-                # Take top 3 regardless of score
-                candidates = scout_results[:3]
-            else:
-                # Filter by score and cap list size
-                filtered = [c for c in scout_results if c.get("score", 0) >= 20]
-                candidates = filtered[:5]  # safety cap to avoid over-trading
+            # For now, do NOT filter out low scores; just take the top 5 for visibility.
+            # This makes the pipeline tolerant of low/empty scores in short term.
+            candidates = scout_results[:5]
 
-            print(f"{len(candidates)} candidates selected for midday entries.")
+            print(f"Top {len(candidates)} scanner results for midday:")
+            for c in candidates:
+                print(f"  {c.get('ticker', c.get('symbol'))} score={c.get('score')} type={c.get('type')}")
+
+            if not candidates:
+                print("No candidates selected for midday entries.")
+                return
 
         except Exception as e:
             print(f"Scanner failed: {e}")

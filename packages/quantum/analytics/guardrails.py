@@ -1,4 +1,5 @@
 # packages/quantum/analytics/guardrails.py
+import os
 from datetime import date, timedelta, datetime
 from typing import Dict, Any, List
 
@@ -82,6 +83,17 @@ def apply_slippage_guardrail(trade: Dict[str, Any], quote: Dict[str, float]) -> 
     trade: suggestion or candidate (unused in simple logic but kept for context)
     quote: bid/ask data {'bid': float, 'ask': float}
     """
+    app_env = os.getenv("APP_ENV", "development").lower()
+
+    # Dev-mode override: if we have no real quote data, don't kill the trade.
+    if app_env == "development":
+        bid = quote.get("bid", 0.0) if isinstance(quote, dict) else 0.0
+        ask = quote.get("ask", 0.0) if isinstance(quote, dict) else 0.0
+
+        # If both bid and ask are zero / missing, treat this as "no quote" and allow the trade.
+        if (bid == 0 or bid is None) and (ask == 0 or ask is None):
+            return 1.0
+
     bid = quote.get('bid', 0.0)
     ask = quote.get('ask', 0.0)
 

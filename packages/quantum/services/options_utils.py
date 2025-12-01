@@ -195,7 +195,8 @@ def group_spread_positions(positions: List[Dict]) -> List[SpreadPosition]:
             delta=delta,
             gamma=gamma,
             vega=vega,
-            theta=theta
+            theta=theta,
+            quantity=base_qty
         )
         final_spreads.append(spread)
 

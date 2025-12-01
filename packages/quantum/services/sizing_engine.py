@@ -66,6 +66,33 @@ def calculate_sizing(
 
     capital_required = contracts * risk_per_contract
 
+    # Determine if max risk is exceeded (for dev override logic)
+    # Exceeded if raw capital required > max_dollar_risk or > account_buying_power
+    # But contracts logic above already caps it.
+    # The flag is meant to signal if the *uncapped* request would be too risky, OR
+    # if the resulting trade is at the limit.
+    # Spec: "max_risk_exceeded = capital_required > max_per_trade or capital_required > account_buying_power"
+    # But capital_required is calculated FROM contracts which is already capped.
+    # So checking `capital_required > max_dollar_risk` will usually be False (due to floor).
+    # However, if we recalculate what *would* be needed for 1 contract vs limit...
+    # Spec says: "Set max_per_trade = account_buying_power * max_risk_pct. max_risk_exceeded = capital_required > max_per_trade..."
+    # If `contracts` was clamped to 0 because 1 contract cost > max_dollar_risk, then `capital_required` is 0.
+    # In that case 0 is not > max_per_trade.
+    # But we want to flag it so dev mode doesn't override it if it's truly risky.
+    # If contracts == 0 and risk_per_contract > max_dollar_risk, then it IS exceeded.
+
+    max_risk_exceeded = False
+    if contracts > 0:
+        # If we found valid contracts, check if we hit the ceiling
+        # Actually, if we are within limits, we are fine.
+        # But let's follow the logic: is the *trade* (even 1 unit) exceeding risk?
+        if risk_per_contract > max_dollar_risk or risk_per_contract > account_buying_power:
+             max_risk_exceeded = True
+    else:
+        # If 0 contracts, check if it was due to risk
+        if risk_per_contract > max_dollar_risk or risk_per_contract > account_buying_power:
+            max_risk_exceeded = True
+
     reason = "Optimal size based on risk"
     if contracts == 0:
         if max_dollar_risk < risk_per_contract:
@@ -79,9 +106,7 @@ def calculate_sizing(
         "contracts": contracts,
         "reason": reason,
         "capital_required": capital_required,
-        "max_risk_exceeded": False, # Default to False, logic above capped it but didn't necessarily flag as "exceeded" in a fatal way unless we add specific checks.
-        # But if contracts=0 and reason is invalid risk, maybe?
-        # For now, we return False to allow dev override unless explicitly forbidden.
+        "max_risk_exceeded": max_risk_exceeded,
         "stop_loss": round(contract_ask * 0.5, 2),  # Example: 50% stop loss
         "target_price": round(contract_ask * 1.5, 2) # Example: 50% profit target
     }

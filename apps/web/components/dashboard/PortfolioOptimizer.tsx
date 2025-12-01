@@ -290,17 +290,17 @@ export default function PortfolioOptimizer({ positions, onOptimizationComplete }
             <div className="grid grid-cols-3 gap-3">
               <MetricTile
                 label="Exp. Return"
-                value={`${(results.metrics.expected_return * 100).toFixed(1)}%`}
+                value={results?.metrics?.expected_return !== undefined ? `${(results.metrics.expected_return * 100).toFixed(1)}%` : "--"}
                 color="text-slate-900"
               />
               <MetricTile
                 label="Sharpe"
-                value={results.metrics.sharpe_ratio.toFixed(2)}
+                value={results?.metrics?.sharpe_ratio !== undefined ? results.metrics.sharpe_ratio.toFixed(2) : "--"}
                 color="text-emerald-600"
               />
               <MetricTile
                 label="Tail Risk"
-                value={results.metrics.tail_risk_score.toFixed(4)}
+                value={results?.metrics?.tail_risk_score !== undefined ? results.metrics.tail_risk_score.toFixed(4) : "--"}
                 color={isQuantum ? "text-purple-600" : "text-slate-500"}
                 active={isQuantum}
               />

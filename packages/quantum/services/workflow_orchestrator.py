@@ -270,8 +270,8 @@ async def run_midday_cycle(supabase: Client, user_id: str):
 
     # 3. Size and Prepare Suggestions
     for cand in candidates:
-        ticker = cand.get("ticker")
-        strategy = cand.get("strategy", "unknown")
+        ticker = cand.get("ticker") or cand.get("symbol")
+        strategy = cand.get("strategy") or cand.get("type") or "unknown"
 
         # Extract pricing info. structure of candidate varies, assuming basic keys
         # The scanner returns dicts with 'suggested_entry', 'ev', etc.

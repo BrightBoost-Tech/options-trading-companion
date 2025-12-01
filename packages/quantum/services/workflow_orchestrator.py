@@ -23,6 +23,9 @@ from ev_calculator import calculate_exit_metrics
 TRADE_SUGGESTIONS_TABLE = "trade_suggestions"
 WEEKLY_REPORTS_TABLE = "weekly_trade_reports"
 
+# 1. Add MIDDAY_TEST_MODE flag
+MIDDAY_TEST_MODE = os.getenv("MIDDAY_TEST_MODE", "false").lower() == "true"
+
 async def run_morning_cycle(supabase: Client, user_id: str):
     """
     1. Read latest portfolio snapshot + positions.
@@ -207,11 +210,14 @@ async def run_midday_cycle(supabase: Client, user_id: str):
     """
     print(f"Running midday cycle for user {user_id}")
 
+    # 3. Add full debug logging to midday cycle
+    print("\n=== MIDDAY DEBUG ===")
+
     cash_service = CashService(supabase)
 
     # 1. Get deployable capital
     deployable_capital = await cash_service.get_deployable_capital(user_id)
-    print(f"Deployable capital: ${deployable_capital}")
+    print(f"Deployable capital: {deployable_capital}")
 
     if deployable_capital < 100: # Min threshold to bother scanning
         print("Insufficient capital to scan.")
@@ -219,10 +225,26 @@ async def run_midday_cycle(supabase: Client, user_id: str):
 
     # 2. Call Scanner (market-wide)
     candidates = []
+    scout_results = []
     try:
-        # Let scan_for_opportunities use its built-in universe and StrategySelector
+        # 5. Ensure midday scanning uses full market (no symbols passed)
         scout_results = scan_for_opportunities()  # <-- no symbols arg
-        candidates = [c for c in scout_results if c.get("score", 0) >= 20]
+        print(f"Scanner returned {len(scout_results)} raw opportunities.")
+
+        print("Top 10 scanner results:")
+        for c in scout_results[:10]:
+            print(f"- {c.get('ticker')} score={c.get('score')} ev={c.get('ev')}")
+
+        # 4. Guarantee midday suggestions when MIDDAY_TEST_MODE=true
+        # A. After scanner returns results:
+        if MIDDAY_TEST_MODE:
+            print("MIDDAY_TEST_MODE ACTIVE: ignoring score threshold.")
+            candidates = scout_results[:3]   # top 3 unfiltered
+        else:
+            candidates = [c for c in scout_results if c.get("score", 0) >= 20]
+
+        print(f"{len(candidates)} candidates with score >= 20")
+
     except Exception as e:
         print(f"Scanner failed: {e}")
         return
@@ -250,6 +272,15 @@ async def run_midday_cycle(supabase: Client, user_id: str):
             max_risk_pct=0.05 # 5% risk per trade
         )
 
+        print(f"SIZING: {ticker} price={price} ev={ev} contracts={sizing['contracts']} risk={sizing}")
+
+        # B. After sizing:
+        if MIDDAY_TEST_MODE:
+            # Force at least 1 contract for testing
+            if sizing["contracts"] <= 0:
+                sizing["contracts"] = 1
+                sizing["reason"] = "Forced by MIDDAY_TEST_MODE"
+
         if sizing["contracts"] > 0:
             suggestion = {
                 "user_id": user_id,
@@ -269,6 +300,31 @@ async def run_midday_cycle(supabase: Client, user_id: str):
                 "ev": ev
             }
             suggestions.append(suggestion)
+
+    # C. If candidates still empty:
+    if MIDDAY_TEST_MODE and len(suggestions) == 0:
+        print("MIDDAY_TEST_MODE: Forcing fallback suggestions")
+        fallback = scout_results[:3]
+        for item in fallback:
+            suggestions.append({
+                "user_id": user_id,
+                "window": "midday_entry",
+                "ticker": item.get("ticker"),
+                "strategy": item.get("strategy", "unknown"),
+                "direction": "long",
+                "ev": item.get("ev", 0),
+                "created_at": datetime.now(timezone.utc).isoformat(),
+                "valid_until": (datetime.now(timezone.utc) + timedelta(hours=6)).isoformat(),
+                "order_json": {
+                    "side": "buy",
+                    "limit_price": float(item.get("suggested_entry", 0)),
+                    "contracts": 1
+                },
+                "sizing_metadata": {"contracts": 1, "test_forced": True},
+                "status": "pending"
+            })
+
+    print(f"FINAL MIDDAY SUGGESTION COUNT: {len(suggestions)}")
 
     # Insert suggestions
     if suggestions:

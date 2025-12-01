@@ -3,7 +3,6 @@ Weekly Options Scout - Find high-probability credit spread opportunities
 """
 import numpy as np
 import os
-import asyncio
 from typing import List, Dict, Optional, Any
 from datetime import datetime, timedelta, date
 from market_data import PolygonService
@@ -11,7 +10,6 @@ from analytics.strategy_selector import StrategySelector
 from services.trade_builder import enrich_trade_suggestions
 from services.universe_service import UniverseService
 from supabase import Client
-import httpx
 
 
 # Cache for market data (simple in-memory cache with basic expiry handling concept)
@@ -99,48 +97,15 @@ def scan_for_opportunities(
     # Prepare list for processing
     processed_opportunities = []
 
-    # ASYNC BATCHING (Step 6)
-    # Check cache first to reduce calls
-    uncached_opps = []
-    for opp in opportunities:
-        if get_cached_market_data(opp['symbol']):
-            pass
-        else:
-            uncached_opps.append(opp)
-
-    poly_key = os.getenv("POLYGON_API_KEY")
-
-    if poly_key and uncached_opps:
-        async def fetch_batch_data(opps):
-            async with httpx.AsyncClient() as client:
-                tasks = []
-                for opp in opps:
-                    sym = opp['symbol']
-                    url = f"https://api.polygon.io/v2/snapshot/locale/us/markets/stocks/tickers/{sym}?apiKey={poly_key}"
-                    tasks.append(client.get(url))
-
-                responses = await asyncio.gather(*tasks, return_exceptions=True)
-                return responses
-
-        try:
-            # Batch fetch snapshots
-            results = asyncio.run(fetch_batch_data(uncached_opps))
-
-            for i, res in enumerate(results):
-                sym = uncached_opps[i]['symbol']
-                if isinstance(res, httpx.Response) and res.status_code == 200:
-                    data = res.json()
-                    t_data = data.get("ticker", {})
-                    set_cached_market_data(sym, t_data)
-        except Exception as e:
-            print(f"Async batch fetch failed: {e}")
-
-    # Fallback to sync service if needed
+    # Initialize PolygonService synchronously
     service = None
     try:
         service = PolygonService()
     except Exception:
         pass
+
+    # Removed broken async batching. Falling back to synchronous calls loop below.
+    # The subsequent logic handles fetching data via 'service' if cache is missing.
 
     for opp_config in opportunities:
         symbol = opp_config['symbol']

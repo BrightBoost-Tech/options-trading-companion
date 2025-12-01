@@ -4,7 +4,7 @@ import { Badge } from '@/components/ui/badge';
 import { API_URL, TEST_USER_ID } from '@/lib/constants';
 import { Copy, CheckCircle2 } from 'lucide-react';
 import { formatOptionDisplay } from '@/lib/formatters';
-import { createClientComponentClient } from '@supabase/auth-helpers-nextjs';
+import { supabase } from '@/lib/supabase';
 
 interface TradeSuggestionMetrics {
   expected_value?: number;
@@ -48,13 +48,16 @@ interface TradeSuggestionCardProps {
   onLogged?: (id: string) => void;
 }
 
+// Helper for safe numeric formatting
+const safeFixed = (value: number | null | undefined, digits = 2) =>
+  typeof value === "number" ? value.toFixed(digits) : "--";
+
 export default function TradeSuggestionCard({ suggestion, onLogged }: TradeSuggestionCardProps) {
   const [evPreview, setEvPreview] = useState<any | null>(null);
   const [evLoading, setEvLoading] = useState(false);
   const [evError, setEvError] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
   const [logging, setLogging] = useState(false);
-  const supabase = createClientComponentClient();
 
   // Normalize symbol/ticker
   const rawSymbol = suggestion.symbol || suggestion.ticker || 'UNKNOWN';
@@ -144,7 +147,7 @@ export default function TradeSuggestionCard({ suggestion, onLogged }: TradeSugge
     return (
       <div className="mt-3 p-3 bg-orange-50 rounded text-xs space-y-1 border border-orange-100">
         <div className="flex justify-between font-bold text-orange-900">
-          <span>Limit Price: ${order.limit_price?.toFixed(2) || 'N/A'}</span>
+          <span>Limit Price: ${typeof order.limit_price === 'number' ? safeFixed(order.limit_price) : 'N/A'}</span>
           <span>Contracts: {order.legs?.[0]?.quantity || order.quantity || 'N/A'}</span>
         </div>
         {meta.stop_loss && <div>Stop Loss: ${meta.stop_loss}</div>}
@@ -172,7 +175,7 @@ export default function TradeSuggestionCard({ suggestion, onLogged }: TradeSugge
     return (
       <div className="mt-3 p-3 bg-blue-50 rounded text-xs space-y-1 border border-blue-100">
         <div className="grid grid-cols-2 gap-2 text-blue-900 font-medium">
-          <div>Entry: ${order.limit_price?.toFixed(2) || 'MKT'}</div>
+          <div>Entry: ${typeof order.limit_price === 'number' ? safeFixed(order.limit_price) : 'MKT'}</div>
           <div>Size: {order.quantity || 1} contracts</div>
           {meta.target_price && <div>Target: ${meta.target_price}</div>}
           {meta.stop_loss && <div>Stop: ${meta.stop_loss}</div>}
@@ -228,12 +231,12 @@ export default function TradeSuggestionCard({ suggestion, onLogged }: TradeSugge
           ))}
 
           {/* Always show EV/Win badges if metrics exist */}
-          {evValue !== undefined && (
+          {typeof evValue === 'number' && (
             <Badge className="bg-blue-50 text-blue-700 border border-blue-100">
-              EV: ${evValue.toFixed(2)}
+              EV: ${safeFixed(evValue)}
             </Badge>
           )}
-          {winRate !== undefined && (
+          {typeof winRate === 'number' && (
             <Badge className="bg-purple-50 text-purple-700 border border-purple-100">
               Win: {Math.round(winRate)}%
             </Badge>
@@ -249,7 +252,7 @@ export default function TradeSuggestionCard({ suggestion, onLogged }: TradeSugge
                <div className="mt-3 p-3 bg-indigo-50 border border-indigo-100 rounded text-xs text-indigo-900">
                  <div className="flex justify-between font-bold mb-1">
                    <span>Rec. Size: {suggestion.sizing.recommended_contracts} contracts</span>
-                   <span>EV: {suggestion.sizing.ev_percent.toFixed(1)}%</span>
+                   <span>EV: {safeFixed(suggestion.sizing.ev_percent, 1)}%</span>
                  </div>
                  <div className="text-[10px] opacity-80 leading-tight">
                    {suggestion.sizing.rationale}
@@ -273,7 +276,7 @@ export default function TradeSuggestionCard({ suggestion, onLogged }: TradeSugge
 
         {evPreview && (
           <div className="mt-2 border-t pt-2 text-xs text-gray-600 space-y-1">
-            <div>EV: ${evPreview.expected_value?.toFixed(2)}</div>
+            <div>EV: ${safeFixed(evPreview.expected_value)}</div>
             {evPreview.position_sizing && (
               <div>Suggested size: {evPreview.position_sizing.contracts_to_trade} contracts</div>
             )}

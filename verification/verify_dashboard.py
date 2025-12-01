@@ -1,78 +1,98 @@
-from playwright.sync_api import sync_playwright, expect
+from playwright.sync_api import Page, expect, sync_playwright, Route
 import time
 
-def verify_dashboard():
-    with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True)
-        context = browser.new_context()
-        page = context.new_page()
+def verify_trade_suggestion_card(page: Page):
+    # Intercept the request for morning suggestions and return a mock response with NULL values
+    # to trigger the potential crash or verify the fix.
 
-        # Mock the portfolio snapshot endpoint
-        page.route("**/portfolio/snapshot", lambda route: route.fulfill(
+    def handle_suggestions(route: Route):
+        print(f"Intercepting {route.request.url}")
+        route.fulfill(
             status=200,
             content_type="application/json",
-            body="""{
-                "user_id": "test-user-123",
-                "created_at": "2023-10-27T10:00:00.000Z",
-                "snapshot_type": "on-sync",
-                "holdings": [
+            body="""
+            {
+                "suggestions": [
                     {
-                        "symbol": "AMZN251219C00100000",
-                        "quantity": 1,
-                        "cost_basis": 500.0,
-                        "current_price": 550.0,
-                        "source": "plaid",
-                        "currency": "USD"
-                    },
-                    {
-                        "symbol": "AAPL",
-                        "quantity": 10,
-                        "cost_basis": 150.0,
-                        "current_price": 175.0,
-                        "source": "plaid",
-                        "currency": "USD"
-                    },
-                    {
-                        "symbol": "CUR:USD",
-                        "quantity": 1000.0,
-                        "cost_basis": 1.0,
-                        "current_price": 1.0,
-                        "source": "plaid",
-                        "currency": "USD"
+                        "id": "mock-suggestion-1",
+                        "symbol": "SPY",
+                        "strategy": "Credit Spread",
+                        "type": "option",
+                        "score": 85,
+                        "badges": ["High Prob", "Liquid"],
+                        "rationale": "Testing null values in TradeSuggestionCard",
+                        "metrics": {
+                            "expected_value": null,
+                            "probability_of_profit": 75.5
+                        },
+                        "price": null,
+                        "strike_price": null,
+                        "entry_price": null,
+                        "underlying_price": 450.0,
+                        "width": 5,
+                        "window": "morning_limit",
+                        "order_json": {
+                            "limit_price": null,
+                            "quantity": 10
+                        },
+                        "sizing_metadata": {
+                            "stop_loss": null
+                        },
+                        "ev": null
                     }
-                ],
-                "risk_metrics": {},
-                "optimizer_status": "ready"
-            }"""
-        ))
+                ]
+            }
+            """
+        )
 
-        # Mock other endpoints to prevent errors
-        page.route("**/scout/weekly", lambda route: route.fulfill(status=200, body='{"top_picks": []}'))
-        page.route("**/journal/stats", lambda route: route.fulfill(status=200, body='{"stats": {}, "patterns": {}, "rules": []}'))
+    # Intercept any call to suggestions endpoint
+    page.route("**/suggestions?window=morning_limit", handle_suggestions)
 
-        try:
-            print("Navigating to dashboard...")
-            # Use 3002
-            page.goto("http://localhost:3002/dashboard")
+    # Go to the dashboard
+    page.goto("http://localhost:3000/dashboard")
 
-            # Wait for the table to appear
-            page.wait_for_selector("table", timeout=10000)
+    # Wait for the page to load
+    time.sleep(5)
 
-            # Check for headers
-            print("Checking for headers...")
-            expect(page.get_by_text("🎯 Option Plays")).to_be_visible()
-            expect(page.get_by_text("📈 Long Term Holds")).to_be_visible()
-            expect(page.get_by_text("💵 CASH")).to_be_visible()
+    # Scroll down to reveal the SuggestionTabs
+    page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+    time.sleep(2)
 
-            print("Taking screenshot...")
-            page.screenshot(path="verification/dashboard_grouped.png", full_page=True)
-            print("Screenshot saved to verification/dashboard_grouped.png")
+    # Check if the mock suggestion is rendered
+    # We look for "SPY" and "Testing null values"
+    try:
+        expect(page.get_by_text("Testing null values in TradeSuggestionCard")).to_be_visible(timeout=5000)
+        print("Mock suggestion rendered successfully!")
 
-        except Exception as e:
-            print(f"Error: {e}")
-            page.screenshot(path="verification/error.png")
-        finally:
-            browser.close()
+        # Verify that null values are rendered as "N/A" or safe fallbacks
+        # "Limit Price: $N/A" (or -- depending on implementation)
+        # In renderMorningContent: Limit Price: ${typeof order.limit_price === 'number' ? safeFixed(order.limit_price) : 'N/A'}
+
+        expect(page.get_by_text("Limit Price: $N/A")).to_be_visible()
+        print("Verified safe rendering of null limit price.")
+
+        # EV is null, so the badge "EV: ..." should NOT be visible?
+        # In render:
+        # {typeof evValue === 'number' && ( ... Badge ... )}
+        # So "EV:" badge should NOT appear for this card.
+        # But wait, there might be other badges.
+
+        # Taking a screenshot to confirm
+        page.screenshot(path="verification/dashboard_with_nulls.png")
+        print("Screenshot saved to verification/dashboard_with_nulls.png")
+
+    except Exception as e:
+        print(f"Verification failed: {e}")
+        page.screenshot(path="verification/error_nulls.png")
+        raise e
 
 if __name__ == "__main__":
-    verify_dashboard()
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=True)
+        page = browser.new_page()
+        try:
+            verify_trade_suggestion_card(page)
+        except Exception as e:
+            print(f"Verification failed: {e}")
+        finally:
+            browser.close()

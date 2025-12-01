@@ -185,6 +185,13 @@ async def run_morning_cycle(supabase: Client, user_id: str):
     # 4. Insert suggestions
     if suggestions:
         try:
+            # Clear old morning suggestions for this user
+            supabase.table(TRADE_SUGGESTIONS_TABLE) \
+                .delete() \
+                .eq("user_id", user_id) \
+                .eq("window", "morning_limit") \
+                .execute()
+
             supabase.table(TRADE_SUGGESTIONS_TABLE).insert(suggestions).execute()
             print(f"Inserted {len(suggestions)} morning suggestions.")
         except Exception as e:
@@ -239,7 +246,7 @@ async def run_midday_cycle(supabase: Client, user_id: str):
         # But for now direct call as per existing api.py pattern.
         scout_results = scan_for_opportunities(symbols=symbols)
         # Filter for good scores
-        candidates = [c for c in scout_results if c.get("score", 0) > 70]
+        candidates = [c for c in scout_results if c.get("score", 0) >= 20]
     except Exception as e:
         print(f"Scanner failed: {e}")
         return
@@ -290,6 +297,13 @@ async def run_midday_cycle(supabase: Client, user_id: str):
     # Insert suggestions
     if suggestions:
         try:
+            # Clear old midday suggestions for this user
+            supabase.table(TRADE_SUGGESTIONS_TABLE) \
+                .delete() \
+                .eq("user_id", user_id) \
+                .eq("window", "midday_entry") \
+                .execute()
+
             supabase.table(TRADE_SUGGESTIONS_TABLE).insert(suggestions).execute()
             print(f"Inserted {len(suggestions)} midday suggestions.")
         except Exception as e:

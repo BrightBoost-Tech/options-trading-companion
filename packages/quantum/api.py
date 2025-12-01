@@ -2,8 +2,10 @@ import os
 import io
 import csv
 import json
+import asyncio
 from datetime import datetime, timedelta, timezone
 from typing import List, Optional, Dict, Literal
+from concurrent.futures import ThreadPoolExecutor
 
 import requests
 from dotenv import load_dotenv
@@ -19,7 +21,7 @@ from supabase import create_client, Client
 from security import encrypt_token, decrypt_token, get_current_user
 
 # Import models and services
-from models import Holding, SyncResponse, PortfolioSnapshot
+from models import Holding, SyncResponse, PortfolioSnapshot, Spread
 import plaid_service
 import plaid_endpoints
 
@@ -32,6 +34,8 @@ from market_data import calculate_portfolio_inputs
 # New Services for Cash-Aware Workflow
 from services.workflow_orchestrator import run_morning_cycle, run_midday_cycle, run_weekly_report
 from services.plaid_history_service import PlaidHistoryService
+from services.rebalance_engine import RebalanceEngine
+from services.options_utils import group_spread_positions
 from ev_calculator import calculate_ev, calculate_position_size
 from services.enrichment_service import enrich_holdings_with_analytics
 
@@ -59,7 +63,7 @@ app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 # CORS Setup
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000", "https://your-production-domain.com"],  # No more "*"
+    allow_origins=["http://localhost:3000", "http://127.0.0.1:3000"],
     allow_credentials=True,
     allow_methods=["GET", "POST", "OPTIONS"],
     allow_headers=["*"],
@@ -69,43 +73,182 @@ app.add_middleware(
 url = os.getenv("NEXT_PUBLIC_SUPABASE_URL")
 key = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
 
-if not url or not key:
-    print("CRITICAL ERROR: Missing Supabase Environment Variables.")
-    print(f"NEXT_PUBLIC_SUPABASE_URL found? {'Yes' if url else 'No'}")
-    print(f"SUPABASE_SERVICE_ROLE_KEY found? {'Yes' if key else 'No'}")
-else:
-    print("Supabase config loaded successfully.")
-
 supabase: Client = create_client(url, key) if url and key else None
 
 # --- Register Plaid Endpoints ---
-# Pass supabase client to plaid_endpoints
 plaid_endpoints.register_plaid_endpoints(app, plaid_service, supabase)
 
 # --- Register Optimizer Endpoints ---
 app.include_router(optimizer_router)
 
+# --- Rebalance Engine Endpoints (Step 3) ---
 
-# --- Models ---
+@app.post("/rebalance/execute")
+async def execute_rebalance(
+    user_id: str = Depends(get_current_user)
+):
+    """
+    Runs the rebalance engine:
+    1. Fetches current portfolio.
+    2. Runs optimizer to get targets.
+    3. Generates trade instructions via RebalanceEngine.
+    4. Saves suggestions to DB.
+    """
+    if not supabase:
+        raise HTTPException(status_code=503, detail="Database not available")
 
+    # 1. Fetch Current Holdings
+    pos_res = supabase.table("positions").select("*").eq("user_id", user_id).execute()
+    raw_positions = pos_res.data or []
 
-class OptimizationRequest(BaseModel):
-    expected_returns: List[float]
-    covariance_matrix: List[List[float]]
-    mode: str = Field(default="classical")
-    constraints: Optional[Dict[str, float]] = None
-    risk_aversion: float = Field(default=2.0)
-    asset_names: Optional[List[str]] = None
+    # 2. Group into Spreads
+    spreads_dicts = group_spread_positions(raw_positions)
+    current_spreads = [Spread(**s) for s in spreads_dicts]
 
+    # Calculate Cash
+    cash = 0.0
+    for p in raw_positions:
+        sym = p.get("symbol", "").upper()
+        if sym in ["CUR:USD", "USD", "CASH", "MM", "USDOLLAR"]:
+             val = p.get("current_value", 0)
+             if val == 0:
+                 val = float(p.get("quantity", 0)) * float(p.get("current_price", 1.0))
+             cash += val
 
-class RealDataRequest(BaseModel):
-    symbols: Optional[List[str]] = Field(
-        None, description="Stock symbols (optional if authenticated)"
+    # 3. Run Optimizer directly to get targets
+    # We construct a request object mimicking the endpoint input
+    # Note: We need to import the internal logic or call the function.
+    from optimizer import _compute_portfolio_weights, OptimizationRequest
+
+    # Construct input positions for optimizer (it expects generic dicts now)
+    opt_req = OptimizationRequest(
+        positions=raw_positions, # The optimizer now handles raw grouping internally too
+        cash_balance=cash,
+        profile="balanced", # Default or fetch from user settings
+        nested_enabled=True # Default to smart rebalance
     )
-    mode: str = Field(default="classical")
-    constraints: Optional[Dict[str, float]] = None
-    risk_aversion: float = Field(default=2.0)
 
+    tickers = [s.ticker for s in current_spreads]
+    assets_equity = sum(s.current_value for s in current_spreads)
+    total_val = assets_equity + cash
+
+    if not tickers:
+        return {"status": "ok", "message": "No assets to rebalance", "count": 0}
+
+    # Helper function for heavy compute
+    def run_optimizer_logic():
+        from market_data import calculate_portfolio_inputs
+        import numpy as np
+
+        unique_underlyings = list(set([s.underlying for s in current_spreads]))
+
+        try:
+             inputs = calculate_portfolio_inputs(unique_underlyings)
+             # Map to spreads (same logic as in optimizer.py)
+             base_mu = inputs['expected_returns']
+             base_sigma = inputs['covariance_matrix']
+             base_idx_map = {u: i for i, u in enumerate(unique_underlyings)}
+
+             n = len(tickers)
+             mu = np.zeros(n)
+             sigma = np.zeros((n, n))
+             for i in range(n):
+                 u_i = current_spreads[i].underlying
+                 idx_i = base_idx_map.get(u_i)
+                 mu[i] = base_mu[idx_i] if idx_i is not None else 0.05
+                 for j in range(n):
+                     u_j = current_spreads[j].underlying
+                     idx_j = base_idx_map.get(u_j)
+                     if idx_i is not None and idx_j is not None:
+                         sigma[i, j] = base_sigma[idx_i][idx_j]
+                     else:
+                         if i==j: sigma[i, j] = 0.1
+
+             coskew = np.zeros((n, n, n))
+
+             target_weights, _, _, _, _, _, _, _ = _compute_portfolio_weights(
+                 mu, sigma, coskew, tickers, current_spreads, opt_req, user_id, total_val, cash
+             )
+
+             # Convert weights to targets list
+             targets = []
+             for sym, w in target_weights.items():
+                 targets.append({
+                     "type": "spread",
+                     "symbol": sym,
+                     "target_allocation": w
+                 })
+             return targets
+
+        except Exception as e:
+            print(f"Optimization failed during rebalance: {e}")
+            raise e
+
+    # Offload heavy compute to thread
+    loop = asyncio.get_event_loop()
+    with ThreadPoolExecutor() as pool:
+        try:
+            targets = await loop.run_in_executor(pool, run_optimizer_logic)
+        except Exception as e:
+             raise HTTPException(status_code=500, detail=f"Optimization failed: {e}")
+
+    # 4. Generate Trades
+    engine = RebalanceEngine()
+    trades = engine.generate_trades(
+        current_spreads,
+        raw_positions,
+        cash,
+        targets,
+        profile="balanced"
+    )
+
+    # 5. Save to DB
+    saved_count = 0
+    if trades:
+        # Clear old rebalance suggestions?
+        # Maybe. "window='rebalance'".
+        supabase.table(TRADE_SUGGESTIONS_TABLE).delete().eq("user_id", user_id).eq("window", "rebalance").execute()
+
+        db_rows = []
+        for t in trades:
+            db_rows.append({
+                "user_id": user_id,
+                "symbol": t["symbol"],
+                "strategy": t.get("spread_type", "custom"),
+                "direction": t["side"].title(), # Buy/Sell
+                "confidence_score": 0, # N/A
+                "ev": 0,
+                "order_json": t, # Store full details
+                "status": "pending",
+                "window": "rebalance",
+                "created_at": datetime.now().isoformat(),
+                "notes": t.get("reason", "")
+            })
+
+        res = supabase.table(TRADE_SUGGESTIONS_TABLE).insert(db_rows).execute()
+        saved_count = len(res.data) if res.data else 0
+
+    return {
+        "status": "ok",
+        "count": saved_count,
+        "trades": trades
+    }
+
+@app.get("/rebalance/suggestions")
+async def get_rebalance_suggestions(
+    user_id: str = Depends(get_current_user)
+):
+    if not supabase:
+        raise HTTPException(status_code=503, detail="Database unavailable")
+
+    res = supabase.table(TRADE_SUGGESTIONS_TABLE)\
+        .select("*")\
+        .eq("user_id", user_id)\
+        .eq("window", "rebalance")\
+        .eq("status", "pending")\
+        .execute()
+
+    return {"suggestions": res.data or []}
 
 # --- Helper Functions ---
 
@@ -167,6 +310,9 @@ async def create_portfolio_snapshot(user_id: str) -> None:
         print(f"Failed to calculate risk metrics for snapshot: {e}")
         risk_metrics = {"error": str(e)}
 
+    # Group into spreads for snapshot
+    spreads = group_spread_positions(holdings)
+
     # 4. Create Snapshot
     snapshot = {
         "user_id": user_id,
@@ -176,6 +322,12 @@ async def create_portfolio_snapshot(user_id: str) -> None:
         "holdings": holdings,  # Storing the positions snapshot
         "risk_metrics": risk_metrics,
         "optimizer_status": "ready",
+        # We can't easily store 'spreads' as a separate column unless migration adds it.
+        # But we can assume the client can derive it from holdings, or we pack it into risk_metrics?
+        # Spec says: "Ensure JSON responses for /portfolio/snapshot... include spreads".
+        # So we don't necessarily need to store it in DB if we generate it on read.
+        # But create_portfolio_snapshot saves to DB.
+        # We'll skip adding spreads to DB to avoid schema error, but ensure GET returns them.
     }
 
     supabase.table("portfolio_snapshots").insert(snapshot).execute()
@@ -333,6 +485,10 @@ async def get_suggestions(
         if status:
             query = query.eq("status", status)
         res = query.order("created_at", desc=True).execute()
+
+        # Enrich with spreads if possible?
+        # The structure is JSON, so we just return.
+
         return {"suggestions": res.data or []}
     except Exception as e:
         print(f"Error fetching suggestions: {e}")
@@ -613,6 +769,10 @@ async def get_portfolio_snapshot(
             minutes=15
         )
 
+        # Inject Spreads for the frontend
+        if "holdings" in snapshot_data:
+            snapshot_data["spreads"] = group_spread_positions(snapshot_data["holdings"])
+
     if snapshot_data:
         # Add buying power if available from a related table
         try:
@@ -631,7 +791,7 @@ async def get_portfolio_snapshot(
         return snapshot_data
     else:
         # Return the same structure as before for consistency
-        return {"message": "No snapshot found", "holdings": []}
+        return {"message": "No snapshot found", "holdings": [], "spreads": []}
 
 
 @app.get("/scout/weekly")

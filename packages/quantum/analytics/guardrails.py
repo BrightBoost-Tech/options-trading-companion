@@ -85,17 +85,12 @@ def apply_slippage_guardrail(trade: Dict[str, Any], quote: Dict[str, float]) -> 
     """
     app_env = os.getenv("APP_ENV", "development").lower()
 
+    bid = quote.get("bid", 0.0) if isinstance(quote, dict) else 0.0
+    ask = quote.get("ask", 0.0) if isinstance(quote, dict) else 0.0
+
     # Dev-mode override: if we have no real quote data, don't kill the trade.
-    if app_env == "development":
-        bid = quote.get("bid", 0.0) if isinstance(quote, dict) else 0.0
-        ask = quote.get("ask", 0.0) if isinstance(quote, dict) else 0.0
-
-        # If both bid and ask are zero / missing, treat this as "no quote" and allow the trade.
-        if (bid == 0 or bid is None) and (ask == 0 or ask is None):
-            return 1.0
-
-    bid = quote.get('bid', 0.0)
-    ask = quote.get('ask', 0.0)
+    if app_env == "development" and (bid == 0 or bid is None) and (ask == 0 or ask is None):
+        return 1.0
 
     # STRICT: Reject if bid or ask is missing/zero
     if bid <= 0 or ask <= 0:

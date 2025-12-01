@@ -35,8 +35,8 @@ export default function DashboardPage() {
   const [snapshot, setSnapshot] = useState<any>(null);
   const [metrics, setMetrics] = useState<any>(null);
 
-  // Optimizer suggestions (lifted state)
-  const [optimizerSuggestions, setOptimizerSuggestions] = useState<any[]>([]);
+  // Optimizer suggestions (rebalance)
+  const [rebalanceSuggestions, setRebalanceSuggestions] = useState<any[]>([]);
 
   // Options Scout state
   const [weeklyScout, setWeeklyScout] = useState<any>(null);
@@ -60,6 +60,8 @@ export default function DashboardPage() {
     loadMorningSuggestions();
     loadMiddaySuggestions();
     loadWeeklyReports();
+    loadRebalanceSuggestions();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const getAuthHeaders = async () => {
@@ -172,6 +174,26 @@ export default function DashboardPage() {
     }
   };
 
+  const loadRebalanceSuggestions = async () => {
+    try {
+      const headers = await getAuthHeaders();
+      const response = await fetchWithTimeout(`${API_URL}/rebalance/suggestions`, {
+        headers,
+        timeout: 15000
+      });
+      if (response.ok) {
+        const data = await response.json();
+        setRebalanceSuggestions(Array.isArray(data.suggestions) ? data.suggestions : []);
+      } else {
+        setRebalanceSuggestions([]);
+      }
+    } catch (err: any) {
+      if (isAbortError(err)) return;
+      console.error('Failed to load rebalance suggestions', err);
+      setRebalanceSuggestions([]);
+    }
+  };
+
   const loadWeeklyReports = async () => {
     try {
       const headers = await getAuthHeaders();
@@ -209,6 +231,7 @@ export default function DashboardPage() {
         loadMorningSuggestions(),
         loadMiddaySuggestions(),
         loadWeeklyReports(),
+        loadRebalanceSuggestions()
       ]);
     } catch (err: any) {
       if (isAbortError(err)) return;
@@ -388,9 +411,8 @@ export default function DashboardPage() {
                 positions={snapshot?.holdings}
                 onOptimizationComplete={(m) => {
                   setMetrics(m);
-                  // Note: PortfolioOptimizer currently only returns metrics.
-                  // Suggestions are handled within its own internal state or need to be exposed if required.
-                  // For now, we align with the component's signature.
+                  // Refresh rebalance suggestions after optimization
+                  loadRebalanceSuggestions();
                 }}
               />
             </div>
@@ -417,7 +439,7 @@ export default function DashboardPage() {
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
             <div className="lg:col-span-2">
                 <SuggestionTabs
-                  optimizerSuggestions={optimizerSuggestions}
+                  optimizerSuggestions={rebalanceSuggestions}
                   scoutSuggestions={weeklyScout?.top_picks || []}
                   journalQueue={[]}
                   morningSuggestions={morningSuggestions}

@@ -6,6 +6,8 @@ import MorningOrdersList from './suggestions/MorningOrdersList';
 import MiddayEntriesList from './suggestions/MiddayEntriesList';
 import WeeklyReportList from './suggestions/WeeklyReportList';
 import { Sparkles, RefreshCw, Activity, Sun, Clock, FileText } from 'lucide-react';
+import { Badge } from '@/components/ui/badge';
+import { Button } from '@/components/ui/button';
 
 interface SuggestionTabsProps {
   optimizerSuggestions: any[];
@@ -175,31 +177,50 @@ export default function SuggestionTabs({
                </div>
              ) : (
                optimizerSuggestions.map((trade, idx) => (
-                 <div key={idx} className="bg-white p-4 rounded-lg border border-gray-200 shadow-sm">
-                   <div className="flex justify-between items-start mb-2">
+                 <div key={idx} className="bg-white p-4 rounded-lg border border-gray-200 shadow-sm flex flex-col gap-3">
+                   {/* Header: Action & Symbol */}
+                   <div className="flex justify-between items-start">
                      <div className="flex items-center gap-2">
-                       <span className={`px-2 py-1 rounded text-xs font-bold ${trade.action === 'BUY' ? 'bg-green-100 text-green-700' : 'bg-red-100 text-red-700'}`}>
-                         {trade.action}
-                       </span>
-                       <span className="font-bold text-gray-800">{trade.symbol}</span>
+                       <Badge className={`${trade.side === 'buy' ? 'bg-green-100 text-green-800' : 'bg-red-100 text-red-800'} border-none`}>
+                         {trade.side?.toUpperCase()}
+                       </Badge>
+                       <div>
+                         <span className="font-bold text-gray-900 block">{trade.ticker || trade.symbol}</span>
+                         <span className="text-xs text-gray-500">{trade.strategy || trade.spread_type}</span>
+                       </div>
                      </div>
-                     <span className="text-sm font-semibold text-gray-600">${trade.value?.toLocaleString()}</span>
+                     <div className="text-right">
+                       <div className="text-sm font-semibold text-gray-900">
+                         {trade.limit_price ? `$${trade.limit_price.toFixed(2)}` : 'MKT'}
+                       </div>
+                       {trade.target_allocation && (
+                         <div className="text-xs text-blue-600">Target: {(trade.target_allocation * 100).toFixed(1)}%</div>
+                       )}
+                     </div>
                    </div>
-                   <p className="text-xs text-gray-500 italic">{trade.rationale}</p>
-                   {trade.metrics && (
-                     <div className="mt-2 flex gap-2 text-xs">
-                       {typeof trade.metrics.expected_value === 'number' && (
-                         <span className="text-blue-600 bg-blue-50 px-2 py-0.5 rounded">
-                           EV: ${safeFixed(trade.metrics.expected_value)}
-                         </span>
-                       )}
-                       {typeof trade.metrics.probability_of_profit === 'number' && (
-                         <span className="text-purple-600 bg-purple-50 px-2 py-0.5 rounded">
-                           Win: {Math.round(trade.metrics.probability_of_profit)}%
-                         </span>
-                       )}
-                     </div>
-                   )}
+
+                   {/* Rationale */}
+                   <div className="bg-gray-50 p-2 rounded text-xs text-gray-600 italic">
+                     {trade.notes || trade.reason}
+                   </div>
+
+                   {/* Details: Delta, Debit/Credit */}
+                   <div className="flex gap-4 text-xs text-gray-500">
+                      <div>Qty: <span className="font-medium text-gray-900">{trade.quantity}</span></div>
+                      {trade.current_allocation !== undefined && (
+                         <div>Current: <span className="font-medium text-gray-900">{(trade.current_allocation * 100).toFixed(1)}%</span></div>
+                      )}
+                   </div>
+
+                   {/* Actions */}
+                   <div className="flex gap-2 mt-1">
+                      <Button size="sm" className="w-full bg-indigo-600 hover:bg-indigo-700 text-white" disabled>
+                         Apply Rebalance
+                      </Button>
+                      <Button size="sm" variant="outline" className="w-full text-gray-600" disabled>
+                         Execute in Robinhood
+                      </Button>
+                   </div>
                  </div>
                ))
              )}

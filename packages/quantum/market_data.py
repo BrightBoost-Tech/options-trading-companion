@@ -62,6 +62,7 @@ class PolygonService:
             raise ValueError(f"No data returned for {symbol}")
         
         prices = [bar['c'] for bar in data['results']]
+        volumes = [bar.get('v', 0) for bar in data['results']]
         dates = [datetime.fromtimestamp(bar['t'] / 1000).strftime('%Y-%m-%d') 
                 for bar in data['results']]
         
@@ -72,6 +73,7 @@ class PolygonService:
         return {
             'symbol': symbol,
             'prices': prices,
+            'volumes': volumes,
             'returns': returns,
             'dates': dates
         }

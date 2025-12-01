@@ -227,24 +227,37 @@ async def run_midday_cycle(supabase: Client, user_id: str):
     candidates = []
     scout_results = []
     try:
-        # 5. Ensure midday scanning uses full market (no symbols passed)
-        scout_results = scan_for_opportunities()  # <-- no symbols arg
-        print(f"Scanner returned {len(scout_results)} raw opportunities.")
+        # 2. Call Scanner (market-wide)
+        candidates = []
+        scout_results = []
+        try:
+            # Let scan_for_opportunities use its built-in universe and StrategySelector
+            # Pass supabase client to enable UniverseService
+            scout_results = scan_for_opportunities(supabase_client=supabase)  # no symbols arg
 
-        print("Top 10 scanner results:")
-        for c in scout_results[:10]:
-            print(f"- {c.get('ticker')} score={c.get('score')} ev={c.get('ev')}")
+            print(f"Scanner returned {len(scout_results)} raw opportunities.")
+            print("Top 10 scanner results:")
+            for c in scout_results[:10]:
+                print(f"- {c.get('ticker')} score={c.get('score')} ev={c.get('ev')}")
 
-        # 4. Guarantee midday suggestions when MIDDAY_TEST_MODE=true
-        # A. After scanner returns results:
-        if MIDDAY_TEST_MODE:
-            print("MIDDAY_TEST_MODE ACTIVE: ignoring score threshold.")
-            candidates = scout_results[:3]   # top 3 unfiltered
-        else:
-            candidates = [c for c in scout_results if c.get("score", 0) >= 20]
+            # Sort by score (highest first)
+            scout_results.sort(key=lambda x: x.get("score", 0), reverse=True)
 
-        print(f"{len(candidates)} candidates with score >= 20")
+            # Guarantee midday suggestions when MIDDAY_TEST_MODE == True
+            if MIDDAY_TEST_MODE:
+                print("MIDDAY_TEST_MODE ACTIVE: ignoring score threshold.")
+                # Take top 3 regardless of score
+                candidates = scout_results[:3]
+            else:
+                # Filter by score and cap list size
+                filtered = [c for c in scout_results if c.get("score", 0) >= 20]
+                candidates = filtered[:5]  # safety cap to avoid over-trading
 
+            print(f"{len(candidates)} candidates selected for midday entries.")
+
+        except Exception as e:
+            print(f"Scanner failed: {e}")
+            return
     except Exception as e:
         print(f"Scanner failed: {e}")
         return
@@ -265,11 +278,13 @@ async def run_midday_cycle(supabase: Client, user_id: str):
             continue
 
         # 4. Sizing
+        # Use existing sizing logic with upgraded max risk parameter
+        # User requested 25% max risk per trade for midday entries
         sizing = calculate_sizing(
             account_buying_power=deployable_capital,
             ev_per_contract=ev,
             contract_ask=price,
-            max_risk_pct=0.05 # 5% risk per trade
+            max_risk_pct=0.25 # 25% risk per trade per user request
         )
 
         print(f"SIZING: {ticker} price={price} ev={ev} contracts={sizing['contracts']} risk={sizing}")

@@ -53,6 +53,7 @@ def scan_for_opportunities(
     # DEV LIMIT logic (Step 6)
     limit = 40
     if os.getenv("APP_ENV") == "development":
+        # in development we typically set SCANNER_LIMIT_DEV=15 to speed up scans
         limit = int(os.getenv("SCANNER_LIMIT_DEV", 40))
 
     if not symbols:

@@ -28,7 +28,7 @@ from nested.backbone import compute_macro_features, infer_global_context, log_gl
 from nested.session import load_session_state, refresh_session_from_db, get_session_sigma_scale
 from security import get_current_user_id
 
-from models import Spread, SpreadLeg
+from models import Spread, SpreadLeg, SpreadPosition
 from services.options_utils import group_spread_positions
 
 router = APIRouter()
@@ -65,7 +65,7 @@ def _compute_portfolio_weights(
     sigma: np.ndarray,
     coskew: np.ndarray,
     tickers: List[str],
-    investable_assets: List[Spread],
+    investable_assets: List[SpreadPosition],
     req: OptimizationRequest,
     user_id: str,
     total_portfolio_value: float,
@@ -252,13 +252,11 @@ async def optimize_portfolio(req: OptimizationRequest, user_id: str = Depends(ge
         # 1. GROUP POSITIONS INTO SPREADS
         # Input positions can be generic dicts.
         raw_positions = req.positions
+        # group_spread_positions now returns List[SpreadPosition]
         spreads = group_spread_positions(raw_positions)
 
-        # Convert to Spread objects
-        investable_assets: List[Spread] = []
-        for s in spreads:
-            # We can use the Spread model to parse/validate, but s is a dict matching the model
-            investable_assets.append(Spread(**s))
+        # Use directly
+        investable_assets: List[SpreadPosition] = spreads
 
         # Calculate Cash
         liquidity = req.cash_balance

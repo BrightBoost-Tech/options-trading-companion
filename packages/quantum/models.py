@@ -1,5 +1,5 @@
 from pydantic import BaseModel, Field
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, Literal
 from datetime import datetime
 
 class SpreadLeg(BaseModel):
@@ -10,6 +10,20 @@ class SpreadLeg(BaseModel):
     type: str  # C or P
     side: str  # long or short
     current_price: Optional[float] = 0.0
+
+class SpreadPosition(BaseModel):
+    id: str  # synthetic id
+    user_id: str
+    spread_type: Literal["debit_call", "debit_put", "credit_call", "credit_put", "vertical", "iron_condor", "other", "single", "custom", "credit_spread", "debit_spread"]
+    underlying: str
+    ticker: Optional[str] = None # Display name
+    legs: List[Dict[str, Any]]  # [{symbol, quantity, strike, expiry, side}, ...]
+    net_cost: float
+    current_value: float
+    delta: float
+    gamma: float
+    vega: float
+    theta: float
 
 class Spread(BaseModel):
     id: str # internal ID, e.g. "KURA 10C/15C" or UUID
@@ -48,7 +62,7 @@ class PortfolioSnapshot(BaseModel):
     created_at: datetime
     snapshot_type: str = "on-sync"
     holdings: List[Dict[str, Any]]
-    spreads: Optional[List[Spread]] = None
+    spreads: Optional[List[SpreadPosition]] = None
     risk_metrics: Optional[Dict[str, Any]] = None
     optimizer_status: Optional[str] = "pending"
     last_optimizer_run_at: Optional[datetime] = None

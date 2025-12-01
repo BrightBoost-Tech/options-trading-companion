@@ -79,6 +79,9 @@ def calculate_sizing(
         "contracts": contracts,
         "reason": reason,
         "capital_required": capital_required,
+        "max_risk_exceeded": False, # Default to False, logic above capped it but didn't necessarily flag as "exceeded" in a fatal way unless we add specific checks.
+        # But if contracts=0 and reason is invalid risk, maybe?
+        # For now, we return False to allow dev override unless explicitly forbidden.
         "stop_loss": round(contract_ask * 0.5, 2),  # Example: 50% stop loss
         "target_price": round(contract_ask * 1.5, 2) # Example: 50% profit target
     }

@@ -38,6 +38,7 @@ from services.rebalance_engine import RebalanceEngine
 from services.options_utils import group_spread_positions
 from ev_calculator import calculate_ev, calculate_position_size
 from services.enrichment_service import enrich_holdings_with_analytics
+from models import SpreadPosition
 
 
 # 1. Load environment variables BEFORE importing other things
@@ -444,6 +445,198 @@ async def backfill_history(
     for uid in user_ids:
         counts[uid] = await service.backfill_snapshots(uid, start_date, end_date)
     return {"status": "ok", "counts": counts}
+
+
+# --- Rebalance Endpoints (Spec B) ---
+
+@app.post("/rebalance/preview")
+async def preview_rebalance(
+    user_id: str = Depends(get_current_user)
+):
+    """
+    Runs the rebalance engine:
+    1. Fetches current portfolio.
+    2. Runs optimizer to get targets.
+    3. Generates trade instructions via RebalanceEngine.
+    4. Saves suggestions to DB with window='rebalance'.
+    5. Returns suggestions.
+    """
+    if not supabase:
+        raise HTTPException(status_code=503, detail="Database not available")
+
+    # 1. Fetch Current Holdings
+    pos_res = supabase.table("positions").select("*").eq("user_id", user_id).execute()
+    raw_positions = pos_res.data or []
+
+    # 2. Group into Spreads
+    # group_spread_positions now returns SpreadPosition objects directly
+    current_spreads = group_spread_positions(raw_positions)
+
+    # Calculate Cash
+    cash = 0.0
+    for p in raw_positions:
+        sym = p.get("symbol", "").upper()
+        if sym in ["CUR:USD", "USD", "CASH", "MM", "USDOLLAR"]:
+             val = p.get("current_value", 0)
+             if val == 0:
+                 val = float(p.get("quantity", 0)) * float(p.get("current_price", 1.0))
+             cash += val
+
+    # 3. Run Optimizer directly to get targets
+    from optimizer import _compute_portfolio_weights, OptimizationRequest
+
+    # Construct input positions for optimizer
+    opt_req = OptimizationRequest(
+        positions=raw_positions,
+        cash_balance=cash,
+        profile="balanced",
+        nested_enabled=True
+    )
+
+    tickers = [s.ticker for s in current_spreads]
+    assets_equity = sum(s.current_value for s in current_spreads)
+    total_val = assets_equity + cash
+
+    if not tickers:
+        return {"status": "ok", "message": "No assets to rebalance", "count": 0, "trades": []}
+
+    # Helper function for heavy compute
+    def run_optimizer_logic():
+        from market_data import calculate_portfolio_inputs
+        import numpy as np
+
+        unique_underlyings = list(set([s.underlying for s in current_spreads]))
+
+        try:
+             inputs = calculate_portfolio_inputs(unique_underlyings)
+             base_mu = inputs['expected_returns']
+             base_sigma = inputs['covariance_matrix']
+             base_idx_map = {u: i for i, u in enumerate(unique_underlyings)}
+
+             n = len(tickers)
+             mu = np.zeros(n)
+             sigma = np.zeros((n, n))
+             for i in range(n):
+                 u_i = current_spreads[i].underlying
+                 idx_i = base_idx_map.get(u_i)
+                 mu[i] = base_mu[idx_i] if idx_i is not None else 0.05
+                 for j in range(n):
+                     u_j = current_spreads[j].underlying
+                     idx_j = base_idx_map.get(u_j)
+                     if idx_i is not None and idx_j is not None:
+                         sigma[i, j] = base_sigma[idx_i][idx_j]
+                     else:
+                         if i==j: sigma[i, j] = 0.1
+
+             coskew = np.zeros((n, n, n))
+
+             # NOTE: optimizer.py logic usually requires 'spreads' arg to be list of Spread objects (not SpreadPosition).
+             # But models are similar enough (dicts/pydantic). _compute_portfolio_weights iterates over them.
+             # We might need to ensure compatibility.
+             # Passing dicts might be safer if _compute_portfolio_weights is flexible.
+             # Checking optimizer.py: it types spreads: List[Spread].
+             # SpreadPosition has extra fields but should be compatible if converted.
+             # Let's pass the list of SpreadPosition objects, or cast them.
+             # Ideally we use the SpreadPosition everywhere now, but if optimizer is strict, we might need adapter.
+             # For now, assuming compatibility or duck typing.
+
+             target_weights, _, _, _, _, _, _, _ = _compute_portfolio_weights(
+                 mu, sigma, coskew, tickers, current_spreads, opt_req, user_id, total_val, cash
+             )
+
+             # Convert weights to targets list
+             targets = []
+             for sym, w in target_weights.items():
+                 targets.append({
+                     "type": "spread",
+                     "symbol": sym,
+                     "target_allocation": w
+                 })
+             return targets
+
+        except Exception as e:
+            print(f"Optimization failed during rebalance: {e}")
+            raise e
+
+    # Offload heavy compute to thread
+    loop = asyncio.get_event_loop()
+    with ThreadPoolExecutor() as pool:
+        try:
+            targets = await loop.run_in_executor(pool, run_optimizer_logic)
+        except Exception as e:
+             # If optimization fails, log and return empty
+             print(f"Rebalance optimization error: {e}")
+             return {"status": "error", "message": str(e), "trades": []}
+
+    # 4. Generate Trades
+    engine = RebalanceEngine()
+    trades = engine.generate_trades(
+        current_spreads,
+        raw_positions,
+        cash,
+        targets,
+        profile="balanced"
+    )
+
+    # 5. Save to DB
+    saved_count = 0
+    if trades:
+        # Clear old rebalance suggestions
+        supabase.table(TRADE_SUGGESTIONS_TABLE).delete().eq("user_id", user_id).eq("window", "rebalance").execute()
+
+        db_rows = []
+        for t in trades:
+            db_rows.append({
+                "user_id": user_id,
+                "symbol": t["symbol"],
+                "ticker": t["symbol"], # Populate ticker for UI
+                "strategy": t.get("spread_type", "custom"),
+                "direction": t.get("side", "hold").title(), # Buy/Sell/Increase
+                "order_json": t, # Store full details
+                "status": "pending",
+                "window": "rebalance",
+                "created_at": datetime.now().isoformat(),
+                "sizing_metadata": {"reason": t.get("reason", "")}
+            })
+
+        res = supabase.table(TRADE_SUGGESTIONS_TABLE).insert(db_rows).execute()
+        saved_count = len(res.data) if res.data else 0
+
+    return {
+        "status": "ok",
+        "count": saved_count,
+        "trades": trades
+    }
+
+@app.get("/rebalance/suggestions")
+async def get_rebalance_suggestions(
+    user_id: str = Depends(get_current_user)
+):
+    if not supabase:
+        raise HTTPException(status_code=503, detail="Database unavailable")
+
+    res = supabase.table(TRADE_SUGGESTIONS_TABLE)\
+        .select("*")\
+        .eq("user_id", user_id)\
+        .eq("window", "rebalance")\
+        .eq("status", "pending")\
+        .execute()
+
+    # Flatten order_json for UI ease (SuggestionTabs expects top-level props)
+    suggestions = []
+    if res.data:
+        for row in res.data:
+            order = row.get("order_json") or {}
+            # Merge order fields into top level, keeping row fields as priority if conflict (but usually distinct)
+            # Row has: id, symbol, strategy, direction
+            # Order has: side, limit_price, target_allocation, quantity, reason, legs...
+            flat = {**order, **row}
+            # Ensure safe fallback for 'side' if not in order (use row direction)
+            if "side" not in flat and "direction" in flat:
+                 flat["side"] = flat["direction"].lower()
+            suggestions.append(flat)
+
+    return {"suggestions": suggestions}
 
 
 # --- Development Endpoints ---

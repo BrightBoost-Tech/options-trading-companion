@@ -225,6 +225,12 @@ def scan_for_opportunities(
         [] # No existing positions for scanner
     )
 
+    print(
+        f"[Scanner] filtered_opportunities={len(filtered_opportunities)}, "
+        f"enriched={len(enriched_opportunities)}, "
+        f"market_data={len(market_data)}"
+    )
+
     # SCORING UPGRADE (Step 4 of Plan)
     # Apply enhanced scoring logic tailored for directional debit/credit
     final_candidates = []
@@ -254,7 +260,13 @@ def scan_for_opportunities(
 
     # Sort by score (highest first)
     final_candidates.sort(key=lambda x: x.get('score', 0), reverse=True)
-    
+
+    if not final_candidates:
+        print("[Scanner] WARNING: final_candidates is empty after scoring. "
+              f"processed={len(processed_opportunities)}, "
+              f"filtered={len(filtered_opportunities)}, "
+              f"enriched={len(enriched_opportunities)}")
+
     return final_candidates
 
 

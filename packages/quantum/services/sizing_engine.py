@@ -4,7 +4,8 @@ def calculate_sizing(
     account_buying_power: float,
     ev_per_contract: float,
     contract_ask: float,
-    max_risk_pct: float = 0.05
+    max_risk_pct: float = 0.05,
+    profile: str = "balanced"
 ) -> dict:
     """
     Calculates the appropriate position size based on risk and account value.
@@ -14,6 +15,7 @@ def calculate_sizing(
         ev_per_contract (float): Expected Value per contract (not used for basic sizing but kept for interface).
         contract_ask (float): The cost to buy one contract (premium).
         max_risk_pct (float): Maximum percentage of account to risk on this trade.
+        profile (str): User risk profile ('balanced' or 'aggressive').
 
     Returns:
         dict: {
@@ -22,6 +24,10 @@ def calculate_sizing(
           "capital_required": float
         }
     """
+
+    # Override risk pct for aggressive profile
+    if profile.upper() == "AGGRESSIVE":
+        max_risk_pct = 0.25
 
     # Validation
     if account_buying_power <= 0:

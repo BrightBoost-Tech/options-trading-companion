@@ -217,35 +217,11 @@ async def run_midday_cycle(supabase: Client, user_id: str):
         print("Insufficient capital to scan.")
         return
 
-    # 2. Call Scanner (using existing logic)
-    # We need to fetch holdings first to exclude them or use them as basis,
-    # but scan_for_opportunities usually takes a list of symbols.
-    # For now, let's use a default list or user's watch list if available.
-    # The prompt implies re-using existing logic. `scan_for_opportunities` in `options_scanner.py`
-    # takes a list of symbols.
-
-    # Let's try to get symbols from user positions + some defaults?
-    # Or just run the weekly scout logic which defaults to positions.
-
-    # Re-using weekly scout logic pattern:
-    try:
-        res = supabase.table("positions").select("symbol").eq("user_id", user_id).execute()
-        holdings = res.data or []
-        symbols = list(set([h["symbol"] for h in holdings if "USD" not in h["symbol"] and "CASH" not in h["symbol"]]))
-    except Exception:
-        symbols = []
-
-    if not symbols:
-        # Fallback to some major tech stocks if portfolio is empty, to give them something
-        symbols = ["SPY", "QQQ", "IWM", "AAPL", "MSFT", "NVDA", "AMD", "TSLA"]
-
+    # 2. Call Scanner (market-wide)
     candidates = []
     try:
-        # scan_for_opportunities is synchronous, might block if not careful, but we are in async def.
-        # It calls API which might block. Ideally we run in executor if it's blocking.
-        # But for now direct call as per existing api.py pattern.
-        scout_results = scan_for_opportunities(symbols=symbols)
-        # Filter for good scores
+        # Let scan_for_opportunities use its built-in universe and StrategySelector
+        scout_results = scan_for_opportunities()  # <-- no symbols arg
         candidates = [c for c in scout_results if c.get("score", 0) >= 20]
     except Exception as e:
         print(f"Scanner failed: {e}")

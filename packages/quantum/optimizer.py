@@ -163,6 +163,7 @@ def _compute_portfolio_weights(
         or os.getenv("NESTED_L1_ENABLED", "False").lower() == "true"
         or os.getenv("NESTED_L0_ENABLED", "False").lower() == "true"
     )
+    # Strictly enforce: nested_enabled = req.nested_enabled and nested_env_enabled
     nested_active = req.nested_enabled and nested_env_enabled
 
     # Explicit toggles

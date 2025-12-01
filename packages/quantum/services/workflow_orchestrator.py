@@ -317,7 +317,8 @@ async def run_weekly_report(supabase: Client, user_id: str):
     # Basic content generation
     win_rate = metrics.get("win_rate", 0)
     total_pnl = metrics.get("total_pnl", 0)
-    trade_count = metrics.get("total_trades", 0)
+    # Fix: JournalService returns 'trade_count', not 'total_trades'
+    trade_count = metrics.get("trade_count", 0)
 
     report_md = f"""
 # Weekly Trading Report

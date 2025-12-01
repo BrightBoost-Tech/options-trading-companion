@@ -56,12 +56,12 @@ class UniverseService:
         """
         Iterates over active symbols and updates metrics using Polygon.
         """
-        print("Updating universe metrics...")
+        print("[UniverseService] Updating universe metrics...")
         try:
             res = self.supabase.table("scanner_universe").select("symbol").eq("is_active", True).execute()
             symbols = [r['symbol'] for r in res.data]
         except Exception as e:
-            print(f"Error fetching active symbols: {e}")
+            print(f"[UniverseService] Error fetching active symbols: {e}")
             return
 
         updates = []
@@ -122,14 +122,14 @@ class UniverseService:
                 })
 
             except Exception as e:
-                print(f"Error updating {sym}: {e}")
+                print(f"[UniverseService] Error updating {sym}: {e}")
 
         if updates:
             try:
                 self.supabase.table("scanner_universe").upsert(updates).execute()
-                print(f"Updated metrics for {len(updates)} symbols.")
+                print(f"[UniverseService] Updated metrics for {len(updates)} symbols.")
             except Exception as e:
-                print(f"Error saving metrics: {e}")
+                print(f"[UniverseService] Error saving metrics: {e}")
 
     def get_scan_candidates(self, limit: int = 30) -> List[Dict]:
         """

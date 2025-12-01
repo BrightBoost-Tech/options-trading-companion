@@ -1,6 +1,7 @@
 import re
 import uuid
 from typing import List, Dict, Any, Optional
+from models import SpreadPosition
 
 def parse_option_symbol(symbol: str) -> Dict[str, Any]:
     """
@@ -33,10 +34,10 @@ def parse_option_symbol(symbol: str) -> Dict[str, Any]:
         "strike": strike
     }
 
-def group_spread_positions(positions: List[Dict]) -> List[Dict]:
+def group_spread_positions(positions: List[Dict]) -> List[SpreadPosition]:
     """
     Groups individual positions into spreads based on underlying, expiry.
-    Returns list of Spread-like dictionaries.
+    Returns list of SpreadPosition objects.
     """
     grouped = {}
     singles = []
@@ -83,6 +84,8 @@ def group_spread_positions(positions: List[Dict]) -> List[Dict]:
         # (simplified, assumes balanced legs).
 
         base_qty = abs(legs[0].get("quantity", 0)) if legs else 1.0
+
+        user_id = legs[0].get("user_id", "")
 
         for leg in legs:
             qty = float(leg.get("quantity", 0))
@@ -165,20 +168,35 @@ def group_spread_positions(positions: List[Dict]) -> List[Dict]:
         # Construct Spread object dict
         spread_id = str(uuid.uuid4()) # Dynamic ID for now, or hash legs
 
-        spread = {
-            "id": spread_id,
-            "spread_type": strategy_type,
-            "underlying": underlying,
-            "ticker": spread_ticker,
-            "legs": formatted_legs,
-            "net_cost": net_cost,
-            "current_value": current_value,
-            "delta": delta,
-            "gamma": gamma,
-            "vega": vega,
-            "theta": theta,
-            "quantity": base_qty # Representing number of spreads roughly
+        # Ensure type matches Literal in SpreadPosition
+        # "debit_call_spread" -> "debit_call" mapping if needed?
+        # SpreadPosition expects: "debit_call", "debit_put", "credit_call", "credit_put", "vertical", "iron_condor", "other", "single", "custom", "credit_spread", "debit_spread"
+
+        # Mappings
+        type_map = {
+            "debit_call_spread": "debit_call",
+            "debit_put_spread": "debit_put",
+            "credit_call_spread": "credit_call",
+            "credit_put_spread": "credit_put"
         }
+        normalized_type = type_map.get(strategy_type, strategy_type)
+        if normalized_type not in ["debit_call", "debit_put", "credit_call", "credit_put", "vertical", "iron_condor", "single", "credit_spread", "debit_spread"]:
+             normalized_type = "other" if normalized_type == "custom" else normalized_type
+
+        spread = SpreadPosition(
+            id=spread_id,
+            user_id=user_id,
+            spread_type=normalized_type,
+            underlying=underlying,
+            ticker=spread_ticker,
+            legs=formatted_legs,
+            net_cost=net_cost,
+            current_value=current_value,
+            delta=delta,
+            gamma=gamma,
+            vega=vega,
+            theta=theta
+        )
         final_spreads.append(spread)
 
     return final_spreads

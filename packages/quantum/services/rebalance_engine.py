@@ -1,152 +1,168 @@
 from typing import List, Dict, Any, Optional
+from supabase import Client
+from datetime import datetime, timezone
 import math
-from models import Spread, SpreadLeg
+
+from models import SpreadPosition, Holding
 from services.sizing_engine import calculate_sizing
-from services.options_utils import group_spread_positions
 
 class RebalanceEngine:
-    def __init__(self, sizing_service=None):
-        self.sizing_service = sizing_service or calculate_sizing
+    """
+    Generates actionable trade instructions to rebalance a portfolio
+    based on optimizer target weights.
+    """
+
+    def __init__(self, supabase: Client = None):
+        self.supabase = supabase
 
     def generate_trades(
         self,
-        current_spreads: List[Spread],
-        current_holdings: List[Dict[str, Any]], # Raw holdings to verify details if needed
+        current_spreads: List[SpreadPosition],
+        raw_positions: List[Dict], # including stocks
         cash_balance: float,
-        targets: List[Dict[str, Any]],
+        target_weights: List[Dict], # [{type: spread|stock, symbol: str, target_weight: float}, ...]
         profile: str = "balanced"
-    ) -> List[Dict[str, Any]]:
+    ) -> List[Dict]:
         """
-        Generates buy/sell trade instructions to align current portfolio with optimizer targets.
-
-        Args:
-            current_spreads: List of currently held spreads (already grouped).
-            current_holdings: Raw positions list (used for context).
-            cash_balance: Available cash.
-            targets: List of target allocations from optimizer.
-                     Format: [{"type": "spread", "symbol": "...", "target_allocation": 0.18}, ...]
-            profile: Risk profile.
-
-        Returns:
-            List of trade suggestions suitable for inserting into 'trade_suggestions'.
+        Core logic: compare current vs target and emit trades.
         """
-
         trades = []
 
-        # Calculate Total Portfolio Value (NAV)
-        current_positions_value = sum(s.current_value for s in current_spreads)
-        total_nav = cash_balance + current_positions_value
+        # 1. Map Targets
+        # Targets structure: {"type": "spread", "symbol": "...", "target_allocation": 0.15}
+        # Note: 'symbol' in target refers to the ticker/id used in optimization.
+        # For spreads, optimizer likely used `spread.ticker` or `spread.id`.
+        # Assuming `target_weights` key matches `spread.ticker`.
 
-        deployable_capital = total_nav # Simplified. In reality, might subtract buffer.
+        target_map = {t["symbol"]: t["target_allocation"] for t in target_weights}
 
-        # 1. Map current spreads by symbol/ticker for easy lookup
-        # We use 'ticker' or constructed ID as key. Optimizer should output same key.
-        current_map = {s.ticker: s for s in current_spreads}
+        # Calculate Total Portfolio Value for sizing
+        # (Spreads value + Stocks value + Cash)
+        # Assuming current_spreads and raw_positions might overlap if we processed everything.
+        # But `current_spreads` only contains OPTIONS.
+        # We need stocks too.
 
-        # 2. Process Targets
-        for target in targets:
-            symbol = target.get("symbol")
-            target_alloc = target.get("target_allocation", 0.0)
-            target_type = target.get("type", "spread") # spread or stock
+        stocks = [p for p in raw_positions if p.get("symbol", "").upper() not in ["USD", "CUR:USD", "CASH"] and len(p.get("symbol", "")) <= 6] # Simple heuristic
 
-            # Identify if we currently hold it
-            existing_spread = current_map.get(symbol)
+        total_equity = sum(s.current_value for s in current_spreads)
+        total_equity += sum(float(s.get("current_value") or (s.get("quantity") * s.get("current_price"))) for s in stocks)
+        total_portfolio_value = total_equity + cash_balance
 
-            current_alloc = 0.0
-            current_value = 0.0
+        deployable_capital = cash_balance # Simplified
+
+        # 2. Process Spreads (Existing vs Target)
+        # We need to match existing spreads to targets.
+        # Targets might be "open new spread" or "adjust existing".
+        # If the target symbol matches an existing spread ticker, we adjust.
+        # If the target symbol is new (how? optimizer usually picks from UNIVERSE or HOLDINGS).
+        # If optimizer suggests a NEW position, it needs to provide details (legs).
+        # Assuming for now rebalance mainly adjusts existing holdings weights,
+        # unless optimizer is capable of suggesting new tickers (Universe Selection).
+        # If optimizer output includes new tickers, we need their metadata (price, legs) which might be missing in `target_weights`.
+        # *Constraint*: For this phase, we'll assume we only rebalance EXISTING assets or explicitly provided candidates.
+        # But wait, if we only rebalance existing, how do we "open" new trades?
+        # The prompt says: "Inputs: Current SpreadPosition list... Latest optimizer targets... Outputs: trade dicts".
+
+        # We will iterate through TARGETS.
+        for target in target_weights:
+            symbol = target["symbol"]
+            target_w = target["target_allocation"]
+
+            # Find matching holding
+            existing_spread = next((s for s in current_spreads if s.ticker == symbol), None)
+            existing_stock = next((s for s in stocks if s["symbol"] == symbol), None)
+
+            current_val = 0.0
+            current_w = 0.0
+
             if existing_spread:
-                current_value = existing_spread.current_value
-                current_alloc = current_value / total_nav if total_nav > 0 else 0
-
-            diff = target_alloc - current_alloc
-
-            # Threshold for action (e.g. 1% deviation)
-            if abs(diff) < 0.01:
+                current_val = existing_spread.current_value
+                item_type = "spread"
+                price_unit = abs(existing_spread.current_value / (existing_spread.quantity or 1)) # approx price per unit
+                # If short, current_value might be negative?
+                # Using absolute value for weight calc usually.
+                # But option values are tricky.
+                # Let's assume Long value.
+            elif existing_stock:
+                current_val = float(existing_stock.get("current_value") or 0)
+                item_type = "stock"
+                price_unit = float(existing_stock.get("current_price") or 0)
+            else:
+                # NEW POSITION SUGGESTION?
+                # If we don't have metadata, we can't trade it.
+                # Skip for now unless we have a way to fetch price.
                 continue
 
-            # Desired Value
-            desired_value = target_alloc * total_nav
+            if total_portfolio_value > 0:
+                current_w = current_val / total_portfolio_value
 
-            # Value to Trade
-            value_to_trade = desired_value - current_value
+            diff_w = target_w - current_w
 
-            # Determine Action
-            side = "buy" if value_to_trade > 0 else "sell"
-
-            # Pricing/Sizing
-            # If we hold it, we know the price?
-            # If buying new, we might need price. Optimizer usually returns 'current_price' in target or we look it up.
-            # Assuming target has price info or we can infer from existing.
-            # If existing, use its current value per unit?
-
-            price_per_unit = 0.0
-            if existing_spread and existing_spread.quantity > 0:
-                price_per_unit = existing_spread.current_value / existing_spread.quantity
-            elif "current_price" in target:
-                price_per_unit = float(target["current_price"]) * 100 # Option multiplier
-
-            # If we don't know the price (e.g. new buy without price info), we can't generate specific quantity.
-            # But the optimizer *should* have used a price to generate the target.
-            # For now, if price is missing, we skip or flag.
-
-            if price_per_unit <= 0:
-                 # Try to get from metadata if available
-                 if "price" in target:
-                     price_per_unit = float(target["price"]) * 100
-                 else:
-                     # Log warning or skip
-                     continue
-
-            quantity_delta = value_to_trade / price_per_unit
-
-            # Integer contracts
-            qty = abs(int(round(quantity_delta)))
-
-            if qty == 0:
+            # Threshold to trade (e.g. 2% deviation)
+            if abs(diff_w) < 0.02:
                 continue
 
-            # Sizing Check (for Buys)
+            # ACTION
+            desired_val_change = diff_w * total_portfolio_value
+
+            if desired_val_change > 0:
+                side = "buy" # or "increase"
+                action = "increase"
+            else:
+                side = "sell" # or "decrease"
+                action = "decrease"
+
+            # Sizing
+            # contracts/shares = desired_change / price_unit
+            if price_unit <= 0: continue
+
+            qty_delta = abs(desired_val_change) / price_unit
+            qty_delta = math.floor(qty_delta)
+
+            if qty_delta == 0: continue
+
+            # Risk Check (for buys)
+            reason = "Rebalance to target"
             if side == "buy":
-                # Check constraints via sizing engine or manually here as we are rebalancing
-                # The Rebalance Engine logic spec says: "Use existing calculate_sizing()"
-                # But calculate_sizing is for NEW trades usually. Here we have a target weight.
-                # We should ensure we don't violate max risk per trade.
+                # Use sizing engine for safety check
+                # Note: Sizing engine is for "opening" trades usually.
+                # Here we are adding to position.
+                # We check if we have enough cash.
+                cost = qty_delta * price_unit
 
-                # Check 25% cap
-                trade_cost = qty * price_per_unit
-                if trade_cost > 0.25 * deployable_capital:
-                    # Cap it
-                    max_cost = 0.25 * deployable_capital
-                    qty = int(max_cost / price_per_unit)
+                # Max 25% deployable capital per NEW spread (or addition)
+                # Requirement: "max 25% deployable capital per new spread"
+                max_allocation = deployable_capital * 0.25
+                if cost > max_allocation:
+                     qty_delta = math.floor(max_allocation / price_unit)
+                     reason = "Rebalance (capped by 25% rule)"
+                     cost = qty_delta * price_unit # Recalculate
 
-            if qty == 0:
-                continue
+                if cost > deployable_capital:
+                    # Cap it further if cash is tight (though 25% rule usually covers it unless capital is tiny)
+                    qty_delta = math.floor(deployable_capital / price_unit)
+                    reason = "Rebalance (capped by cash)"
+
+                if qty_delta == 0: continue
 
             # Construct Trade
             trade = {
-                "window": "rebalance",
-                "status": "pending",
+                "side": action, # open/close/increase/decrease
+                "kind": item_type,
                 "symbol": symbol,
-                "ticker": symbol, # Duplicate for compatibility
-                "order_type": "limit", # Rebalance usually limit
-                "side": side,
-                "quantity": qty,
-                "limit_price": price_per_unit / 100.0, # Per share/contract price
-                "reason": f"Rebalance to target {target_alloc:.1%} (Current: {current_alloc:.1%})",
-                "target_allocation": target_alloc,
-                "current_allocation": current_alloc,
-                "trade_type": target_type # spread or stock
+                "quantity": qty_delta,
+                "limit_price": price_unit, # Using current price as limit
+                "reason": f"Target: {target_w:.1%}, Current: {current_w:.1%}. {reason}",
+                "target_weight": target_w,
+                "current_weight": current_w,
+                "target_allocation": target_w,
+                "current_allocation": current_w,
+                "spread_type": existing_spread.spread_type if existing_spread else "stock",
+                "legs": existing_spread.legs if existing_spread else [], # Copy legs if spread
+                "risk_metadata": {
+                    "diff_value": desired_val_change
+                }
             }
-
-            # Populate legs if available (for new buys, need to know what to buy)
-            # If existing spread, we have legs.
-            if existing_spread:
-                trade["legs"] = [l.dict() for l in existing_spread.legs]
-                trade["spread_type"] = existing_spread.spread_type
-            elif "legs" in target:
-                trade["legs"] = target["legs"]
-                trade["spread_type"] = target.get("spread_type", "custom")
-
             trades.append(trade)
 
         return trades

@@ -614,54 +614,72 @@ async def get_portfolio_snapshot(
 
 
 @app.get("/scout/weekly")
-async def weekly_scout(user_id: str = Depends(get_current_user)):
-    """Get weekly option opportunities based on the user's current holdings."""
+async def weekly_scout(
+    mode: str = "holdings",
+    user_id: str = Depends(get_current_user)
+):
+    """
+    Get weekly option opportunities.
+    mode="holdings": Scan only assets in user's portfolio (default).
+    mode="market": Scan the broader market universe.
+    """
     if not supabase:
         raise HTTPException(status_code=503, detail="Database service unavailable")
 
     try:
-        # 1. Fetch user's holdings from the single source of truth
-        response = (
-            supabase.table("positions")
-            .select("symbol")
-            .eq("user_id", user_id)
-            .execute()
-        )
-        holdings = response.data
+        symbols_to_scan = None
+        source_label = "user-holdings"
 
-        if not holdings:
-            return {
-                "count": 0,
-                "top_picks": [],
-                "generated_at": datetime.now().isoformat(),
-                "source": "user-holdings",
-                "message": "No holdings found to generate opportunities.",
-            }
-
-        # 2. Extract symbols to scan
-        symbols = list(
-            set(
-                [
-                    h["symbol"]
-                    for h in holdings
-                    if h.get("symbol")
-                    and "USD" not in h["symbol"]
-                    and "CASH" not in h["symbol"]
-                ]
+        if mode == "holdings":
+            # 1. Fetch user's holdings from the single source of truth
+            response = (
+                supabase.table("positions")
+                .select("symbol")
+                .eq("user_id", user_id)
+                .execute()
             )
+            holdings = response.data
+
+            if not holdings:
+                return {
+                    "count": 0,
+                    "top_picks": [],
+                    "generated_at": datetime.now().isoformat(),
+                    "source": source_label,
+                    "message": "No holdings found to generate opportunities.",
+                }
+
+            # 2. Extract symbols to scan
+            symbols_to_scan = list(
+                set(
+                    [
+                        h["symbol"]
+                        for h in holdings
+                        if h.get("symbol")
+                        and "USD" not in h["symbol"]
+                        and "CASH" not in h["symbol"]
+                    ]
+                )
+            )
+
+            if not symbols_to_scan:
+                return {
+                    "count": 0,
+                    "top_picks": [],
+                    "generated_at": datetime.now().isoformat(),
+                    "source": source_label,
+                    "message": "No scannable assets in your portfolio.",
+                }
+        else:
+            # Market mode: leave symbols_to_scan as None to trigger Universe scan
+            source_label = "market-universe"
+
+        # 3. Scan for opportunities
+        # Pass supabase client so scanner can use UniverseService if symbols is None
+        opportunities = scan_for_opportunities(
+            symbols=symbols_to_scan,
+            supabase_client=supabase
         )
-
-        if not symbols:
-            return {
-                "count": 0,
-                "top_picks": [],
-                "generated_at": datetime.now().isoformat(),
-                "source": "user-holdings",
-                "message": "No scannable assets in your portfolio.",
-            }
-
-        # 3. Scan for opportunities based on these symbols
-        opportunities = scan_for_opportunities(symbols=symbols)
 
         # 4. Filter and sort by score safely
         cleaned = [o for o in opportunities if o.get("score") is not None]
@@ -671,7 +689,7 @@ async def weekly_scout(user_id: str = Depends(get_current_user)):
             "count": len(cleaned),
             "top_picks": cleaned[:5],
             "generated_at": datetime.now().isoformat(),
-            "source": "user-holdings",
+            "source": source_label,
         }
 
     except Exception as e:

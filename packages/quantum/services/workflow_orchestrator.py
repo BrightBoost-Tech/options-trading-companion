@@ -221,8 +221,17 @@ async def run_midday_cycle(supabase: Client, user_id: str):
     candidates = []
     try:
         # Let scan_for_opportunities use its built-in universe and StrategySelector
-        scout_results = scan_for_opportunities()  # <-- no symbols arg
+        # Pass supabase client to enable UniverseService
+        scout_results = scan_for_opportunities(supabase_client=supabase)  # <-- no symbols arg, but pass supabase
+        # Sort by score descending
+        scout_results.sort(key=lambda x: x.get("score", 0), reverse=True)
+
+        # Filter by score
         candidates = [c for c in scout_results if c.get("score", 0) >= 20]
+
+        # SAFETY: Cap at top 5 to avoid over-trading/margin risk
+        candidates = candidates[:5]
+
     except Exception as e:
         print(f"Scanner failed: {e}")
         return
@@ -243,11 +252,13 @@ async def run_midday_cycle(supabase: Client, user_id: str):
             continue
 
         # 4. Sizing
+        # Use existing sizing logic with upgraded max risk parameter
+        # User requested 25% max risk per trade for midday entries
         sizing = calculate_sizing(
             account_buying_power=deployable_capital,
             ev_per_contract=ev,
             contract_ask=price,
-            max_risk_pct=0.05 # 5% risk per trade
+            max_risk_pct=0.25 # 25% risk per trade per user request
         )
 
         if sizing["contracts"] > 0:

@@ -37,30 +37,19 @@ export function WeeklyProgressCard() {
     useEffect(() => {
         const load = async () => {
             try {
-                // We use the new endpoint
-                // Note: The backend route is /api/progress/weekly
-                // But existing API calls in this project often use constants.API_URL
-                // Check if fetchWithAuth handles base URL. Usually it does if we pass relative path?
-                // Actually fetchWithAuth in this repo typically expects full URL or path depending on implementation.
-                // Assuming standard practice or relative to API_URL if implemented that way.
-                // Let's assume we need to import API_URL if fetchWithAuth doesn't handle it.
-                // Re-reading memory: "A reusable fetchWithAuth helper... centralizes frontend API calls".
-                // I will import API_URL from constants just in case.
-
-                const res = await fetchWithAuth('/api/progress/weekly'); // Assuming proxy or base URL handled
-                if (res.ok) {
-                    const json = await res.json();
-                    setData(json);
+                // fetchWithAuth now returns parsed JSON and throws on error
+                // It automatically prepends API_URL if path starts with '/'
+                const json = await fetchWithAuth<WeeklySnapshot>('/api/progress/weekly');
+                setData(json);
+            } catch (e: any) {
+                // Check for 404 by message if possible, or just treat as error/empty
+                // Current fetchWithAuth throws generic error with status code in message
+                if (e.message && e.message.includes('404')) {
+                     // No data yet, handled by null state
                 } else {
-                    if (res.status === 404) {
-                         // No data yet, handled by null state
-                    } else {
-                         setError(true);
-                    }
+                     console.error(e);
+                     setError(true);
                 }
-            } catch (e) {
-                console.error(e);
-                setError(true);
             } finally {
                 setLoading(false);
             }

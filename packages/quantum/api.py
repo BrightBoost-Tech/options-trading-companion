@@ -86,6 +86,10 @@ plaid_endpoints.register_plaid_endpoints(app, plaid_service, supabase)
 # --- Register Optimizer Endpoints ---
 app.include_router(optimizer_router)
 
+# --- Register Strategy Endpoints ---
+from strategy_endpoints import router as strategy_router
+app.include_router(strategy_router)
+
 # --- Rebalance Engine Endpoints (Step 3) ---
 
 @app.post("/rebalance/execute")

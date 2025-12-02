@@ -1,3 +1,4 @@
+import os
 from typing import Dict, Any, List, Optional
 from pydantic import BaseModel
 
@@ -9,14 +10,18 @@ class LossAnalysisResult(BaseModel):
     warning: str
 
 class LossMinimizer:
-    DEFAULT_THRESHOLD = 100.0
+    # Allow override via env, default to 100
+    DEFAULT_THRESHOLD = float(os.getenv("LOSS_SALVAGE_THRESHOLD_USD", "100.0"))
 
     @staticmethod
     def analyze_position(
         position: Dict[str, Any],
-        user_threshold: float = DEFAULT_THRESHOLD,
+        user_threshold: Optional[float] = None,
         market_data: Optional[Dict[str, Any]] = None
     ) -> LossAnalysisResult:
+        if user_threshold is None:
+            user_threshold = LossMinimizer.DEFAULT_THRESHOLD
+
         """
         Analyzes a deep losing options position and provides a recommendation
         to minimize losses and preserve capital based on the 'Jules' persona framework.

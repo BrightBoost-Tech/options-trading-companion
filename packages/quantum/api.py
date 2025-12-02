@@ -44,6 +44,7 @@ from models import SpreadPosition
 from services.historical_simulation import HistoricalCycleService
 from analytics.loss_minimizer import LossMinimizer, LossAnalysisResult
 from analytics.drift_auditor import audit_plan_vs_execution
+from analytics.greeks_aggregator import aggregate_portfolio_greeks, build_greek_alerts
 
 
 # 1. Load environment variables BEFORE importing other things
@@ -128,7 +129,8 @@ async def execute_rebalance(
     # 3. Run Optimizer directly to get targets
     # We construct a request object mimicking the endpoint input
     # Note: We need to import the internal logic or call the function.
-    from optimizer import _compute_portfolio_weights, OptimizationRequest
+    from optimizer import _compute_portfolio_weights, OptimizationRequest, calculate_dynamic_target
+    from analytics.iv_regime_service import IVRegimeService
 
     # Construct input positions for optimizer (it expects generic dicts now)
     opt_req = OptimizationRequest(
@@ -180,13 +182,29 @@ async def execute_rebalance(
                  mu, sigma, coskew, tickers, current_spreads, opt_req, user_id, total_val, cash
              )
 
-             # Convert weights to targets list
+             # Phase 3: Post-process weights with Regime-Elastic Caps
+             # We need to map back to strategy_type
+             spread_map = {s.ticker: s for s in current_spreads}
+
              targets = []
              for sym, w in target_weights.items():
+                 # Elastic Logic
+                 spread_obj = spread_map.get(sym)
+                 strat_type = spread_obj.spread_type if spread_obj else "other"
+
+                 # Apply Dynamic Constraint
+                 # Placeholder regime="default", conviction=1.0 until full wire-up
+                 adjusted_w = calculate_dynamic_target(
+                     base_weight=w,
+                     strategy_type=strat_type,
+                     regime="default",
+                     conviction=1.0
+                 )
+
                  targets.append({
                      "type": "spread",
                      "symbol": sym,
-                     "target_allocation": w
+                     "target_allocation": adjusted_w
                  })
              return targets
 
@@ -219,16 +237,30 @@ async def execute_rebalance(
         # Maybe. "window='rebalance'".
         supabase.table(TRADE_SUGGESTIONS_TABLE).delete().eq("user_id", user_id).eq("window", "rebalance").execute()
 
+        # Phase 3 B: Attach IV Context
+        iv_service = IVRegimeService(supabase)
+        symbols_to_check = [t["symbol"] for t in trades]
+        iv_ctx_map = iv_service.get_iv_context_for_symbols(symbols_to_check)
+
         db_rows = []
         for t in trades:
+            sym = t["symbol"]
+            ctx = iv_ctx_map.get(sym, {})
+
+            # Enrich order_json or top level?
+            # Storing in order_json['context'] for UI consistency if UI looks there
+            if "context" not in t:
+                t["context"] = {}
+            t["context"].update(ctx)
+
             db_rows.append({
                 "user_id": user_id,
-                "symbol": t["symbol"],
+                "symbol": sym,
                 "strategy": t.get("spread_type", "custom"),
                 "direction": t["side"].title(), # Buy/Sell
                 "confidence_score": 0, # N/A
                 "ev": 0,
-                "order_json": t, # Store full details
+                "order_json": t, # Store full details (now has context)
                 "status": "pending",
                 "window": "rebalance",
                 "created_at": datetime.now().isoformat(),
@@ -321,7 +353,25 @@ async def create_portfolio_snapshot(user_id: str) -> None:
         risk_metrics = {"error": str(e)}
 
     # Group into spreads for snapshot
+    # group_spread_positions returns a list of SpreadPosition objects (Pydantic models) or dicts?
+    # Checking import: usually returns SpreadPosition objects in this codebase context.
     spreads = group_spread_positions(holdings)
+
+    # Ensure they are SpreadPosition objects for aggregator
+    # If they are already models, this is fine. If dicts, convert.
+    # group_spread_positions in this repo returns List[SpreadPosition] as seen in rebalance/preview.
+    # But just in case, we cast if needed (though it likely returns models).
+    spread_models = spreads
+    if spreads and isinstance(spreads[0], dict):
+        spread_models = [SpreadPosition(**s) for s in spreads]
+
+    # Compute Portfolio Greeks
+    portfolio_greeks = aggregate_portfolio_greeks(spread_models)
+    greek_alerts = build_greek_alerts(portfolio_greeks)
+
+    # Attach to risk_metrics
+    risk_metrics["greeks"] = portfolio_greeks
+    risk_metrics["greek_alerts"] = greek_alerts
 
     # 4. Create Snapshot
     snapshot = {

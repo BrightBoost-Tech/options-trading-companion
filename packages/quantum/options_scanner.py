@@ -11,6 +11,16 @@ from services.trade_builder import enrich_trade_suggestions
 from services.universe_service import UniverseService
 from supabase import Client
 
+# Constants for Regime Classification
+IV_RANK_SUPPRESSED_THRESHOLD = 20
+IV_RANK_ELEVATED_THRESHOLD = 60
+
+def classify_iv_regime(iv_rank: float | None) -> str | None:
+    if iv_rank is None:
+        return None
+    if iv_rank < IV_RANK_SUPPRESSED_THRESHOLD: return "suppressed"
+    if iv_rank < IV_RANK_ELEVATED_THRESHOLD: return "normal"
+    return "elevated"
 
 # Cache for market data (simple in-memory cache with basic expiry handling concept)
 # In a real system, use Redis or similar.
@@ -146,6 +156,7 @@ def scan_for_opportunities(
             try:
                 opp['trend'] = service.get_trend(symbol)
                 opp['iv_rank'] = service.get_iv_rank(symbol)
+                opp['iv_regime'] = classify_iv_regime(opp['iv_rank'])
 
                 if opp['trend'] == "DOWN":
                     opp['type'] = 'Debit Put Spread'
@@ -196,6 +207,7 @@ def scan_for_opportunities(
             market_data_enrich[symbol] = {
                 "price": opp['underlying_price'],
                 "iv_rank": opp.get("iv_rank"),
+                "iv_regime": opp.get("iv_regime"),
                 "trend": opp.get("trend"),
                 "sector": "Unknown",
                 "bid": bid,

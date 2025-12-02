@@ -39,6 +39,7 @@ from services.options_utils import group_spread_positions
 from ev_calculator import calculate_ev, calculate_position_size
 from services.enrichment_service import enrich_holdings_with_analytics
 from models import SpreadPosition
+from services.historical_simulation import HistoricalCycleService
 
 
 # 1. Load environment variables BEFORE importing other things
@@ -660,6 +661,23 @@ async def run_all(user_id: str = Depends(get_current_user)):
 
 
 # --- New Data Endpoints ---
+
+@app.post("/historical/run-cycle")
+async def run_historical_cycle(
+    cursor: str = Body(..., embed=True),
+    symbol: Optional[str] = Body("SPY", embed=True),
+):
+    """
+    Runs exactly one historical trade cycle (Entry -> Exit) starting from cursor date.
+    Uses regime-aware scoring and conviction logic on historical data slices.
+    """
+    try:
+        service = HistoricalCycleService() # Inits with PolygonService
+        result = service.run_cycle(cursor, symbol)
+        return result
+    except Exception as e:
+        print(f"Historical cycle error: {e}")
+        raise HTTPException(status_code=500, detail=f"Simulation failed: {str(e)}")
 
 
 @app.get("/suggestions")

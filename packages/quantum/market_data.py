@@ -6,6 +6,7 @@ from typing import List, Dict
 import numpy as np
 import re
 from cache import get_cached_data, save_to_cache
+from analytics.factors import calculate_trend, calculate_iv_rank
 
 def normalize_option_symbol(symbol: str) -> str:
     """Ensures option symbols have the 'O:' prefix required by Polygon."""
@@ -36,8 +37,8 @@ class PolygonService:
             print("Warning: POLYGON_API_KEY not found. Service will use mock data.")
         self.base_url = "https://api.polygon.io"
     
-    def get_historical_prices(self, symbol: str, days: int = 252) -> Dict:
-        to_date = datetime.now()
+    def get_historical_prices(self, symbol: str, days: int = 252, to_date: datetime = None) -> Dict:
+        to_date = to_date or datetime.now()
         from_date = to_date - timedelta(days=days + 30)
         
         from_str = from_date.strftime('%Y-%m-%d')
@@ -108,35 +109,7 @@ class PolygonService:
             if not data or 'returns' not in data:
                 return None
 
-            returns = np.array(data['returns'])
-
-            # Calculate 30-day rolling volatility
-            rolling_vol = np.std([returns[i-30:i] for i in range(30, len(returns))], axis=1) * np.sqrt(252)
-
-            if len(rolling_vol) == 0:
-                return None # Default if not enough data
-
-            # Get 52-week high and low of volatility
-            high_52_week = np.max(rolling_vol)
-            low_52_week = np.min(rolling_vol)
-
-            # Avoid division by zero
-            if high_52_week == low_52_week:
-                return None
-
-            # Current volatility (last 30 days)
-            current_vol = rolling_vol[-1]
-
-            # IV Rank formula
-            iv_rank = ((current_vol - low_52_week) / (high_52_week - low_52_week)) * 100
-
-            # Ensure strict 0-100 normalization
-            # Note: We are calculating "HV Rank" as a proxy for IV Rank because
-            # Polygon historical IV data is not available on this plan.
-            # This is "the correct endpoint" for volatility analysis available to us.
-            final_rank = max(0.0, min(100.0, float(iv_rank)))
-
-            return final_rank
+            return calculate_iv_rank(data['returns'])
 
         except Exception:
             return None
@@ -145,13 +118,7 @@ class PolygonService:
         """Determines trend using simple moving averages."""
         try:
             data = self.get_historical_prices(symbol, days=100)
-            prices = np.array(data['prices'])
-            sma_20 = np.mean(prices[-20:])
-            sma_50 = np.mean(prices[-50:])
-            if sma_20 > sma_50:
-                return "UP"
-            else:
-                return "DOWN"
+            return calculate_trend(data['prices'])
         except Exception:
             return "NEUTRAL"
 

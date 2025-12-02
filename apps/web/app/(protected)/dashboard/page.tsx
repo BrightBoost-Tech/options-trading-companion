@@ -53,6 +53,11 @@ export default function DashboardPage() {
   // Journal state
   const [journalStats, setJournalStats] = useState<any>(null);
 
+  // Historical Simulation State
+  const [simCursor, setSimCursor] = useState<string>('2023-01-01');
+  const [simResult, setSimResult] = useState<any>(null);
+  const [simLoading, setSimLoading] = useState(false);
+
   // Load data on mount
   useEffect(() => {
     loadSnapshot();
@@ -237,6 +242,32 @@ export default function DashboardPage() {
     } catch (err: any) {
       if (isAbortError(err)) return;
       console.error('Failed to run workflows', err);
+    }
+  };
+
+  const runHistoricalCycle = async () => {
+    setSimLoading(true);
+    try {
+      const headers = await getAuthHeaders();
+      const res = await fetch(`${API_URL}/historical/run-cycle`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({ cursor: simCursor, symbol: 'SPY' }),
+      });
+
+      if (res.ok) {
+        const data = await res.json();
+        setSimResult(data);
+        if (data.nextCursor) {
+            setSimCursor(data.nextCursor);
+        }
+      } else {
+        console.error('Simulation failed', await res.text());
+      }
+    } catch (err) {
+      console.error('Simulation error', err);
+    } finally {
+      setSimLoading(false);
     }
   };
 
@@ -437,6 +468,81 @@ export default function DashboardPage() {
                 <h4 className="text-sm font-medium text-gray-500">Buying Power</h4>
                 <p className="text-2xl font-bold">${snapshot?.buying_power?.toFixed(2) || '0.00'}</p>
             </div>
+        </div>
+
+        {/* SECTION 1.5: HISTORICAL SIMULATION */}
+        <div className="bg-white rounded-lg shadow p-6">
+            <div className="flex justify-between items-center mb-4">
+                <div>
+                    <h2 className="text-lg font-bold text-gray-900">Historical Regime Cycle</h2>
+                    <p className="text-sm text-gray-500">Test the Regime Engine on past data. Step through history one cycle at a time.</p>
+                </div>
+                <div className="flex items-center gap-4">
+                    <div className="text-sm text-gray-600">
+                        Current Date: <span className="font-mono font-bold">{simCursor}</span>
+                    </div>
+                    <button
+                        onClick={runHistoricalCycle}
+                        disabled={simLoading || simResult?.done}
+                        className={`px-4 py-2 rounded text-white font-medium ${
+                            simLoading ? 'bg-gray-400 cursor-not-allowed' : 'bg-indigo-600 hover:bg-indigo-700'
+                        }`}
+                    >
+                        {simLoading ? 'Simulating...' : simResult?.done ? 'End of Data' : 'Run 1 Historical Cycle'}
+                    </button>
+                </div>
+            </div>
+
+            {/* Simulation Results Display */}
+            {simResult && !simResult.error && (
+                <div className="bg-gray-50 rounded p-4 border border-gray-200">
+                    {simResult.done && !simResult.entryTime ? (
+                         <p className="text-gray-500 italic">{simResult.message || "No trades found in remaining data."}</p>
+                    ) : (
+                        <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+                            <div>
+                                <p className="text-xs text-gray-500 uppercase">Entry</p>
+                                <p className="font-semibold text-gray-900">{simResult.entryTime} @ ${simResult.entryPrice?.toFixed(2)}</p>
+                                <span className={`text-xs px-2 py-0.5 rounded ${simResult.direction === 'long' ? 'bg-green-100 text-green-800' : 'bg-red-100 text-red-800'}`}>
+                                    {simResult.direction?.toUpperCase()}
+                                </span>
+                            </div>
+                            <div>
+                                <p className="text-xs text-gray-500 uppercase">Exit</p>
+                                {simResult.exitTime ? (
+                                    <p className="font-semibold text-gray-900">{simResult.exitTime} @ ${simResult.exitPrice?.toFixed(2)}</p>
+                                ) : (
+                                    <p className="text-sm text-gray-400 italic">Open...</p>
+                                )}
+                            </div>
+                            <div>
+                                <p className="text-xs text-gray-500 uppercase">P&L</p>
+                                {simResult.pnl !== undefined ? (
+                                    <p className={`font-bold text-lg ${simResult.pnl >= 0 ? 'text-green-600' : 'text-red-600'}`}>
+                                        ${simResult.pnl.toFixed(2)}
+                                    </p>
+                                ) : (
+                                    <p className="text-gray-400">---</p>
+                                )}
+                            </div>
+                            <div>
+                                <p className="text-xs text-gray-500 uppercase">Conviction (Entry/Exit)</p>
+                                <div className="flex items-center gap-2">
+                                    <span className="font-mono text-sm">{simResult.entryConviction?.toFixed(2) || '--'}</span>
+                                    <span className="text-gray-400">→</span>
+                                    <span className="font-mono text-sm">{simResult.exitConviction?.toFixed(2) || '--'}</span>
+                                </div>
+                                <p className="text-xs text-purple-600 mt-1">Regime: {simResult.regime}</p>
+                            </div>
+                        </div>
+                    )}
+                </div>
+            )}
+            {simResult?.error && (
+                <div className="bg-red-50 text-red-700 p-3 rounded text-sm mt-2">
+                    Error: {simResult.error}
+                </div>
+            )}
         </div>
 
         {/* SECTION 2: UNIFIED SUGGESTION HUB */}

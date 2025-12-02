@@ -54,6 +54,33 @@ DEFAULT_RISK_BUDGETS = {
 
 # --- Integration Logic ---
 
+def map_market_regime(global_context: Dict[str, Any]) -> str:
+    """
+    Maps global context/state to effective scoring regime.
+    Input fields expected:
+      - state: 'bull' | 'bear' | 'crab' | 'shock' (from nested/backbone)
+      - vol_annual: float (optional, overrides if high)
+    Output: 'normal' | 'high_vol' | 'panic'
+    """
+    state = global_context.get('state', 'normal')
+    vol = global_context.get('vol_annual', 0.0)
+
+    # 1. Hard Overrides (Shock -> Panic)
+    if state == 'shock':
+        return 'panic'
+
+    # 2. Volatility Check
+    # If vol > 20%, force high_vol even if state is bull/crab
+    if vol > 0.20:
+        return 'high_vol'
+
+    # 3. State Mapping
+    if state == 'bear':
+        return 'high_vol'
+
+    return 'normal'
+
+
 def run_scoring_pipeline(
     universe_data: List[Dict[str, Any]],
     current_regime: str,
@@ -116,6 +143,39 @@ def run_scoring_pipeline(
 
     return final_results
 
+def run_historical_scoring(
+    symbol_data: Dict[str, Any],
+    regime: str,
+    scoring_engine: ScoringEngine = None,
+    conviction_transform: ConvictionTransform = None,
+    universe_median: Any = None
+) -> Dict[str, Any]:
+    """
+    Helper for single-symbol historical scoring to align with live pipeline.
+    """
+    if not scoring_engine:
+        scoring_engine = ScoringEngine(
+            DEFAULT_WEIGHT_MATRIX,
+            DEFAULT_CATALYST_PROFILES,
+            DEFAULT_LIQUIDITY_SCALAR
+        )
+    if not conviction_transform:
+        conviction_transform = ConvictionTransform(DEFAULT_REGIME_PROFILES)
+
+    # 1. Score
+    score_res = scoring_engine.calculate_score(symbol_data, regime)
+
+    # 2. Conviction
+    c_i = conviction_transform.get_conviction(
+        score_res['raw_score'],
+        regime,
+        universe_median=universe_median
+    )
+
+    return {
+        **score_res,
+        "conviction": c_i
+    }
 
 def evaluate_trade_risk(
     trade_proposal: Dict[str, Any],

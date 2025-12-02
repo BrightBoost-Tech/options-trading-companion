@@ -36,7 +36,7 @@ from services.workflow_orchestrator import run_morning_cycle, run_midday_cycle, 
 from services.plaid_history_service import PlaidHistoryService
 from services.rebalance_engine import RebalanceEngine
 from services.execution_service import ExecutionService
-from analytics.progress_engine import ProgressEngine
+from analytics.progress_engine import ProgressEngine, get_week_id_for_last_full_week
 from services.options_utils import group_spread_positions
 from ev_calculator import calculate_ev, calculate_position_size
 from services.enrichment_service import enrich_holdings_with_analytics
@@ -1430,31 +1430,34 @@ async def get_weekly_progress(
 ):
     """
     Returns the WeeklySnapshot for the specified week (or latest full week).
-    Generates it on the fly if missing (or reuse logic).
+    Generates it on the fly if missing.
     """
     if not supabase:
         raise HTTPException(status_code=503, detail="Database service unavailable")
 
     try:
+        # Resolve default week_id if missing to pass to engine (or engine handles it)
+        # The engine handles None -> default logic.
         engine = ProgressEngine(supabase)
         snapshot = engine.generate_weekly_snapshot(user_id, week_id)
         return snapshot
     except Exception as e:
         print(f"Error generating weekly progress: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to get weekly progress: {e}")
+
 class LossAnalysisRequest(BaseModel):
     position: Dict[str, Any]
     user_threshold: Optional[float] = 100.0
     market_data: Optional[Dict[str, Any]] = None
 
-@app.post("/analysis/loss-minimization", response_model=LossAnalysisResult)
-async def analyze_loss(
+@app.post("/risk/loss-analysis", response_model=LossAnalysisResult)
+async def risk_loss_analysis(
     request: LossAnalysisRequest,
     user_id: str = Depends(get_current_user)
 ):
     """
-    Analyzes a deep losing options position to provide a loss minimization strategy
-    using the 'Jules' framework (Scrap Value vs. Lottery Ticket).
+    Analyzes a deep losing options position to provide a loss minimization strategy.
+    Alias/Replacement for /analysis/loss-minimization per new specs.
     """
     try:
         result = LossMinimizer.analyze_position(
@@ -1465,6 +1468,14 @@ async def analyze_loss(
         return result
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Loss analysis failed: {e}")
+
+# Maintain backward compatibility if needed, or redirect
+@app.post("/analysis/loss-minimization", include_in_schema=False)
+async def analyze_loss_legacy(
+    request: LossAnalysisRequest,
+    user_id: str = Depends(get_current_user)
+):
+    return await risk_loss_analysis(request, user_id)
 
 
 if __name__ == "__main__":

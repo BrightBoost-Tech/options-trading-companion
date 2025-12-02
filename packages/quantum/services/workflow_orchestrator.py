@@ -18,6 +18,7 @@ from options_scanner import scan_for_opportunities
 from models import Holding
 from market_data import PolygonService
 from ev_calculator import calculate_exit_metrics
+from analytics.loss_minimizer import LossMinimizer
 
 # Constants for table names
 TRADE_SUGGESTIONS_TABLE = "trade_suggestions"
@@ -157,6 +158,14 @@ async def run_morning_cycle(supabase: Client, user_id: str):
             iv=iv_rank,
             days_to_expiry=30 # Placeholder, could parse from expiry
         )
+
+        # Check for deep loss salvage (LossMinimizer Hook)
+        # If position is losing badly (e.g. current_price < 0.5 * cost_basis), consider salvage
+        if unit_price < unit_cost * 0.5:
+             # Placeholder Hook: Future integration will call LossMinimizer here
+             # salvage_res = LossMinimizer.analyze_position({...}, user_threshold=...)
+             # log_salvage_opportunity(salvage_res)
+             pass
 
         # Only suggest if profitable and positive expectation
         if metrics.expected_value > 0 and metrics.limit_price > unit_price:

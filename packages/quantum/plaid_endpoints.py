@@ -101,51 +101,20 @@ def register_plaid_endpoints(app, plaid_service, supabase_client=None):
             result = plaid_service.exchange_public_token(public_token)
 
             access_token = result.get('access_token')
-            item_id = result.get('item_id')
-
-            # Extract institution details if available
-            institution_name = "Plaid Item"
-            institution_id = None
-            if metadata and 'institution' in metadata:
-                institution_name = metadata['institution'].get('name', 'Plaid Item')
-                institution_id = metadata['institution'].get('institution_id')
 
             if access_token and supabase_client and user_id:
                 print(f"💾 Saving Plaid credentials for user {user_id}")
+                from services.token_store import PlaidTokenStore
+                token_store = PlaidTokenStore(supabase_client)
 
-                # Encrypt token before saving
-                encrypted_access_token = encrypt_token(access_token)
+                # Metadata is passed to help constructing item info inside store
+                # We inject 'item_id' from result into metadata for completeness if needed,
+                # though token_store currently expects metadata to have 'institution' etc.
+                # Let's enrich metadata with item_id from result
+                if result.get('item_id'):
+                    metadata['item_id'] = result.get('item_id')
 
-                # 1. Update user_settings as requested
-                try:
-                    # Check if user settings exist, if not create? usually it exists.
-                    # We'll use upsert to be safe.
-                    # Assuming user_settings has user_id as PK or unique.
-                    supabase_client.table("user_settings").upsert({
-                        "user_id": user_id,
-                        "plaid_access_token": encrypted_access_token,
-                        "plaid_item_id": item_id,
-                        "plaid_institution": institution_name,
-                        "updated_at": "now()"
-                    }, on_conflict="user_id").execute()
-                    print("✅ User Settings updated with Plaid credentials")
-                except Exception as e:
-                    print(f"⚠️ Failed to update user_settings: {e}")
-
-                # 2. Keep updating plaid_items table as it allows multiple items potentially
-                try:
-                    supabase_client.table("plaid_items").upsert({
-                        "user_id": user_id,
-                        "access_token": encrypted_access_token,
-                        "item_id": item_id,
-                        "institution_name": institution_name,
-                        "institution_id": institution_id,
-                        "status": "active",
-                        "updated_at": "now()"
-                    }, on_conflict="user_id").execute() # Assuming user_id is unique constraint for now based on previous code
-                    print("✅ Plaid Item Saved to DB")
-                except Exception as e:
-                     print(f"❌ Failed to save Plaid Item to DB: {e}")
+                token_store.save_access_token(user_id, access_token, metadata)
 
             return redact_sensitive_fields(result)
 
@@ -171,30 +140,9 @@ def register_plaid_endpoints(app, plaid_service, supabase_client=None):
             if not access_token and user_id and supabase_client:
                 # Look up token if not provided but user_id is
                 print(f"🔍 Looking up access token for user {user_id}")
-                # Try user_settings first as that's where we just saved it
-                try:
-                    res = supabase_client.table("user_settings").select("plaid_access_token").eq("user_id", user_id).single().execute()
-                    if res.data:
-                        raw_token = res.data.get('plaid_access_token')
-                        try:
-                            access_token = decrypt_token(raw_token)
-                        except:
-                            access_token = raw_token
-                except Exception:
-                    pass
-
-                # Fallback to plaid_items
-                if not access_token:
-                    try:
-                        res = supabase_client.table("plaid_items").select("access_token").eq("user_id", user_id).limit(1).execute()
-                        if res.data:
-                            raw_token = res.data[0].get('access_token')
-                            try:
-                                access_token = decrypt_token(raw_token)
-                            except:
-                                access_token = raw_token
-                    except Exception:
-                        pass
+                from services.token_store import PlaidTokenStore
+                token_store = PlaidTokenStore(supabase_client)
+                access_token = token_store.get_access_token(user_id)
 
             if not access_token:
                  raise HTTPException(status_code=400, detail="access_token required or not found for user")

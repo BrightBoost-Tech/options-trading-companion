@@ -41,6 +41,7 @@ from services.options_utils import group_spread_positions
 from ev_calculator import calculate_ev, calculate_position_size
 from services.enrichment_service import enrich_holdings_with_analytics
 from models import SpreadPosition
+from analytics.loss_minimizer import LossMinimizer, LossAnalysisResult
 
 
 # 1. Load environment variables BEFORE importing other things
@@ -1423,6 +1424,29 @@ async def get_weekly_progress(
     except Exception as e:
         print(f"Error generating weekly progress: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to get weekly progress: {e}")
+class LossAnalysisRequest(BaseModel):
+    position: Dict[str, Any]
+    user_threshold: Optional[float] = 100.0
+    market_data: Optional[Dict[str, Any]] = None
+
+@app.post("/analysis/loss-minimization", response_model=LossAnalysisResult)
+async def analyze_loss(
+    request: LossAnalysisRequest,
+    user_id: str = Depends(get_current_user)
+):
+    """
+    Analyzes a deep losing options position to provide a loss minimization strategy
+    using the 'Jules' framework (Scrap Value vs. Lottery Ticket).
+    """
+    try:
+        result = LossMinimizer.analyze_position(
+            position=request.position,
+            user_threshold=request.user_threshold,
+            market_data=request.market_data
+        )
+        return result
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Loss analysis failed: {e}")
 
 
 if __name__ == "__main__":

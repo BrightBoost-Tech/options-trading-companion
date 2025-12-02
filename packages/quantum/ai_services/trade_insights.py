@@ -25,6 +25,13 @@ Follow this analytical framework:
 4. Note similar strategies and their typical outcomes
 5. Provide a specific, actionable recommendation
 
+If this is a deep losing position, prioritize Capital Preservation over Profit Maximization.
+Follow the 'Jules' framework:
+- Check if remaining value > $100 (Salvage Operation) vs <= $100 (Lottery Ticket).
+- If Salvage: Recommend LIMIT SELL at mid-price. Ignore high take-profit targets.
+- If Lottery: Recommend GTC LIMIT SELL at 3-4x current price (Volatility Trap).
+- Warn that high take-profit limits are not guarantees.
+
 Trade data:
 {trade_json}
 
@@ -34,7 +41,7 @@ Output your analysis as structured JSON matching this exact schema:
   "risk_assessment": "Key risks to watch for this trade",
   "success_probability": 0.0 to 1.0,
   "similar_strategies": ["list", "of", "related", "strategies"],
-  "recommendation": "Specific actionable advice",
+  "recommendation": "Specific actionable advice following the Jules framework if applicable",
   "confidence": 0.0 to 1.0
 }}
 """
@@ -93,11 +100,14 @@ if __name__ == "__main__":
     }
     
     print("Analyzing trade...")
-    insight = analyze_trade(test_trade)
-    
-    print("\n✅ Trade Analysis Complete!")
-    print(f"Pattern: {insight.pattern_detected}")
-    print(f"Risk: {insight.risk_assessment}")
-    print(f"Success Probability: {insight.success_probability:.0%}")
-    print(f"Recommendation: {insight.recommendation}")
-    print(f"Confidence: {insight.confidence:.0%}")
+    try:
+        insight = analyze_trade(test_trade)
+
+        print("\n✅ Trade Analysis Complete!")
+        print(f"Pattern: {insight.pattern_detected}")
+        print(f"Risk: {insight.risk_assessment}")
+        print(f"Success Probability: {insight.success_probability:.0%}")
+        print(f"Recommendation: {insight.recommendation}")
+        print(f"Confidence: {insight.confidence:.0%}")
+    except Exception as e:
+        print(f"\n❌ Analysis failed (check API key): {e}")

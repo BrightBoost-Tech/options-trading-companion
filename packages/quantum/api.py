@@ -4,7 +4,7 @@ import csv
 import json
 import asyncio
 from datetime import datetime, timedelta, timezone
-from typing import List, Optional, Dict, Literal
+from typing import List, Optional, Dict, Literal, Any
 from concurrent.futures import ThreadPoolExecutor
 
 import requests
@@ -35,11 +35,14 @@ from market_data import calculate_portfolio_inputs
 from services.workflow_orchestrator import run_morning_cycle, run_midday_cycle, run_weekly_report
 from services.plaid_history_service import PlaidHistoryService
 from services.rebalance_engine import RebalanceEngine
+from services.execution_service import ExecutionService
+from analytics.progress_engine import ProgressEngine
 from services.options_utils import group_spread_positions
 from ev_calculator import calculate_ev, calculate_position_size
 from services.enrichment_service import enrich_holdings_with_analytics
 from models import SpreadPosition
 from services.historical_simulation import HistoricalCycleService
+from analytics.loss_minimizer import LossMinimizer, LossAnalysisResult
 
 
 # 1. Load environment variables BEFORE importing other things
@@ -1396,6 +1399,72 @@ async def close_trade_from_position(
     except Exception as e:
         print(f"Error closing trade from position: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to close trade: {e}")
+
+
+# --- Progress Engine Endpoints (New) ---
+
+@app.post("/suggestions/{suggestion_id}/execute")
+async def execute_suggestion(
+    suggestion_id: str,
+    fill_details: Dict[str, Any] = Body(...),
+    user_id: str = Depends(get_current_user)
+):
+    """
+    Explicitly marks a suggestion as executed and creates a TradeExecution record.
+    """
+    if not supabase:
+        raise HTTPException(status_code=503, detail="Database service unavailable")
+
+    try:
+        service = ExecutionService(supabase)
+        execution = service.register_execution(user_id, suggestion_id, fill_details)
+        return execution
+    except Exception as e:
+        print(f"Error executing suggestion: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to execute suggestion: {e}")
+
+@app.get("/api/progress/weekly")
+async def get_weekly_progress(
+    week_id: Optional[str] = None,
+    user_id: str = Depends(get_current_user)
+):
+    """
+    Returns the WeeklySnapshot for the specified week (or latest full week).
+    Generates it on the fly if missing (or reuse logic).
+    """
+    if not supabase:
+        raise HTTPException(status_code=503, detail="Database service unavailable")
+
+    try:
+        engine = ProgressEngine(supabase)
+        snapshot = engine.generate_weekly_snapshot(user_id, week_id)
+        return snapshot
+    except Exception as e:
+        print(f"Error generating weekly progress: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to get weekly progress: {e}")
+class LossAnalysisRequest(BaseModel):
+    position: Dict[str, Any]
+    user_threshold: Optional[float] = 100.0
+    market_data: Optional[Dict[str, Any]] = None
+
+@app.post("/analysis/loss-minimization", response_model=LossAnalysisResult)
+async def analyze_loss(
+    request: LossAnalysisRequest,
+    user_id: str = Depends(get_current_user)
+):
+    """
+    Analyzes a deep losing options position to provide a loss minimization strategy
+    using the 'Jules' framework (Scrap Value vs. Lottery Ticket).
+    """
+    try:
+        result = LossMinimizer.analyze_position(
+            position=request.position,
+            user_threshold=request.user_threshold,
+            market_data=request.market_data
+        )
+        return result
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Loss analysis failed: {e}")
 
 
 if __name__ == "__main__":

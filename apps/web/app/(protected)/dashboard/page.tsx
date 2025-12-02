@@ -4,6 +4,7 @@ import { useState, useEffect } from 'react';
 import DashboardLayout from '@/components/DashboardLayout';
 import SyncHoldingsButton from '@/components/SyncHoldingsButton';
 import PortfolioOptimizer from '@/components/dashboard/PortfolioOptimizer';
+import { WeeklyProgressCard } from '@/components/dashboard/WeeklyProgressCard';
 import SuggestionTabs from '@/components/SuggestionTabs';
 import { supabase } from '@/lib/supabase';
 import { API_URL, TEST_USER_ID } from '@/lib/constants';
@@ -335,6 +336,9 @@ export default function DashboardPage() {
     <DashboardLayout mockAlerts={mockAlerts}>
       <div className="max-w-7xl mx-auto p-8 space-y-6">
         
+        {/* SECTION 0: PROGRESS CARD */}
+        <WeeklyProgressCard />
+
         {/* SECTION 1: POSITIONS & OPTIMIZER */}
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
           <div className="lg:col-span-2">

@@ -60,6 +60,49 @@ MIN_QTY_BALANCED = 0.05
 MIN_DOLLAR_DIFF_AGGRESSIVE = 10.0
 MIN_QTY_AGGRESSIVE = 0.02
 
+# --- REGIME ELASTIC CONFIG ---
+REGIME_STRATEGY_CAPS = {
+    "default": {
+        "debit_call": 0.10,
+        "debit_put": 0.10,
+        "credit_call": 0.08,
+        "credit_put": 0.08,
+        "iron_condor": 0.05,
+        "vertical": 0.07,
+        "single": 0.10,
+        "other": 0.05,
+    },
+    "high_vol": {
+        "credit_call": 0.12,
+        "credit_put": 0.12,
+        "debit_call": 0.06,
+        "debit_put": 0.06,
+        "iron_condor": 0.03,
+    },
+}
+
+def calculate_dynamic_target(
+    base_weight: float,
+    strategy_type: str,
+    regime: str,
+    conviction: float,
+) -> float:
+    """
+    Returns adjusted_target ∈ [0, cap] based on:
+      - REGIME_STRATEGY_CAPS[regime][strategy_type] as a hard cap.
+      - Conviction scaling factor: 0.5 + 0.5 * conviction.
+    """
+
+    caps = REGIME_STRATEGY_CAPS.get(regime, REGIME_STRATEGY_CAPS["default"])
+    # Fallback keys logic
+    cap = caps.get(strategy_type, caps.get("other", base_weight))
+
+    # Conviction scaling: low conviction => ~0.5x, high => ~1.0x
+    scale = 0.5 + 0.5 * max(0.0, min(1.0, conviction))
+
+    target = base_weight * scale
+    return min(target, cap)
+
 def _compute_portfolio_weights(
     mu: np.ndarray,
     sigma: np.ndarray,

@@ -14,7 +14,7 @@ from .journal_service import JournalService
 from .options_utils import group_spread_positions
 
 # Importing existing logic
-from options_scanner import scan_for_opportunities
+from options_scanner import scan_for_opportunities, classify_iv_regime
 from models import Holding
 from market_data import PolygonService
 from ev_calculator import calculate_exit_metrics
@@ -118,6 +118,9 @@ async def run_morning_cycle(supabase: Client, user_id: str):
         except Exception as e:
             print(f"Error fetching greeks for {ref_symbol}: {e}")
 
+        # Determine Regime
+        iv_regime = classify_iv_regime(iv_rank)
+
         # Calculate spread financials
         for leg in legs:
             qty = float(leg.get("quantity", 0))
@@ -188,6 +191,10 @@ async def run_morning_cycle(supabase: Client, user_id: str):
                 },
                 "sizing_metadata": {
                     "reason": metrics.reason,
+                    "context": {
+                        "iv_rank": iv_rank,
+                        "iv_regime": iv_regime
+                    },
                     "spread_details": {
                         "underlying": underlying,
                         "expiry": legs[0]["expiry"], # Extract from leg
@@ -367,6 +374,13 @@ async def run_midday_cycle(supabase: Client, user_id: str):
              sizing["reason"] = (sizing.get("reason", "") or "") + " | dev_override=1_contract"
 
         if sizing["contracts"] > 0:
+            # Inject IV context into sizing_metadata if not present
+            if "context" not in sizing:
+                sizing["context"] = {
+                    "iv_rank": cand.get("iv_rank"),
+                    "iv_regime": cand.get("iv_regime") or classify_iv_regime(cand.get("iv_rank"))
+                }
+
             suggestion = {
                 "user_id": user_id,
                 "created_at": datetime.now(timezone.utc).isoformat(),

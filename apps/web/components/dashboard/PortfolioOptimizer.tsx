@@ -61,6 +61,10 @@ export default function PortfolioOptimizer({ positions, onOptimizationComplete }
   const [showDiag, setShowDiag] = useState(false)
   const [isDiagLoading, setIsDiagLoading] = useState(false)
 
+  // Defensive Data Access
+  const trades = Array.isArray(results?.trades) ? results.trades : []
+  const metrics = results?.metrics
+
   const computeCashFromPositions = () => {
     if (!positions) return 0;
     return positions
@@ -290,17 +294,17 @@ export default function PortfolioOptimizer({ positions, onOptimizationComplete }
             <div className="grid grid-cols-3 gap-3">
               <MetricTile
                 label="Exp. Return"
-                value={results?.metrics?.expected_return !== undefined ? `${(results.metrics.expected_return * 100).toFixed(1)}%` : "--"}
+                value={metrics?.expected_return !== undefined ? `${(metrics.expected_return * 100).toFixed(1)}%` : "--"}
                 color="text-slate-900"
               />
               <MetricTile
                 label="Sharpe"
-                value={results?.metrics?.sharpe_ratio !== undefined ? results.metrics.sharpe_ratio.toFixed(2) : "--"}
+                value={metrics?.sharpe_ratio !== undefined ? metrics.sharpe_ratio.toFixed(2) : "--"}
                 color="text-emerald-600"
               />
               <MetricTile
                 label="Tail Risk"
-                value={results?.metrics?.tail_risk_score !== undefined ? results.metrics.tail_risk_score.toFixed(4) : "--"}
+                value={metrics?.tail_risk_score !== undefined ? metrics.tail_risk_score.toFixed(4) : "--"}
                 color={isQuantum ? "text-purple-600" : "text-slate-500"}
                 active={isQuantum}
               />
@@ -312,13 +316,13 @@ export default function PortfolioOptimizer({ positions, onOptimizationComplete }
                 Strategic Rebalance
               </h3>
               <div className="space-y-2">
-                {results.trades.length === 0 ? (
+                {trades.length === 0 ? (
                     <div className="p-4 bg-slate-50 rounded-lg text-center border border-slate-100">
                         <CheckCircle className="w-5 h-5 text-emerald-500 mx-auto mb-2" />
                         <p className="text-sm text-slate-600">Portfolio is optimal.</p>
                     </div>
                 ) : (
-                    results.trades.map((trade, idx) => (
+                    trades.map((trade, idx) => (
                       <div key={idx} className="flex items-center justify-between p-3 bg-white rounded-lg border border-slate-100 shadow-sm hover:shadow-md transition-shadow">
                         <div className="flex items-center gap-3">
                           <span className={clsx(

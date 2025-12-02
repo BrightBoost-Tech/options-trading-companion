@@ -43,6 +43,7 @@ from services.enrichment_service import enrich_holdings_with_analytics
 from models import SpreadPosition
 from services.historical_simulation import HistoricalCycleService
 from analytics.loss_minimizer import LossMinimizer, LossAnalysisResult
+from analytics.drift_auditor import audit_plan_vs_execution
 
 
 # 1. Load environment variables BEFORE importing other things
@@ -868,6 +869,27 @@ async def sync_holdings(
 
         # 5. Create Snapshot
         await create_portfolio_snapshot(user_id)
+
+        # 6. Drift Audit (Phase 2)
+        # Check Execution (Reality) vs Plan (Suggestions)
+        if supabase:
+            try:
+                # Retrieve latest snapshot just created
+                snap_res = supabase.table("portfolio_snapshots").select("*").eq("user_id", user_id).order("created_at", desc=True).limit(1).execute()
+                current_snapshot = snap_res.data[0] if snap_res.data else None
+
+                # Retrieve recent suggestions (last 48h)
+                cutoff = (datetime.now(timezone.utc) - timedelta(hours=48)).isoformat()
+                sugg_res = supabase.table(TRADE_SUGGESTIONS_TABLE).select("*").eq("user_id", user_id).gte("created_at", cutoff).execute()
+                recent_suggestions = sugg_res.data or []
+
+                if current_snapshot:
+                    print(f"🕵️  Running Drift Auditor for user {user_id}")
+                    audit_plan_vs_execution(user_id, current_snapshot, recent_suggestions, supabase)
+
+            except Exception as e:
+                # Do not break sync if auditor fails
+                print(f"⚠️  Drift Auditor failed: {e}")
 
     return SyncResponse(status="success", count=len(holdings), holdings=holdings)
 

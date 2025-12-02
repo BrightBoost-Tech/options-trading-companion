@@ -1,7 +1,15 @@
 import os
+import sys
 import numpy as np
 from datetime import datetime, timedelta
 from typing import List, Dict, Any, Optional
+
+# Add parent directory to path to allow importing strategy_profiles
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+try:
+    from strategy_profiles import StrategyConfig
+except ImportError:
+    StrategyConfig = None # Fallback or type alias
 
 from analytics.regime_scoring import ScoringEngine, ConvictionTransform
 from analytics.regime_integration import (
@@ -46,10 +54,30 @@ class HistoricalCycleService:
         self.lookback_window = 60 # Days needed for indicators
         self.enable_learning = os.getenv("ENABLE_HISTORICAL_NESTED_LEARNING", "false").lower() == "true"
 
-    def run_cycle(self, cursor_date_str: str, symbol: str = "SPY") -> Dict[str, Any]:
+    def run_cycle(
+        self,
+        cursor_date_str: str,
+        symbol: str = "SPY",
+        config: Optional[Any] = None # Using Any to avoid runtime issues if import fails, but verified via logic
+    ) -> Dict[str, Any]:
         """
         Runs exactly one historical trade cycle (Entry -> Exit) starting from cursor_date.
+        Accepts optional StrategyConfig to parameterize rules.
         """
+        # 0. Setup Parameters
+        entry_threshold = 0.70
+        tp_pct = 0.08
+        sl_pct = 0.05
+        max_days = 365
+        regime_whitelist = []
+
+        if config:
+            entry_threshold = config.conviction_floor
+            tp_pct = config.take_profit_pct
+            sl_pct = config.stop_loss_pct
+            max_days = config.max_holding_days
+            regime_whitelist = config.regime_whitelist
+
         # 1. Parse Cursor
         try:
             start_date = datetime.strptime(cursor_date_str, "%Y-%m-%d")
@@ -58,7 +86,7 @@ class HistoricalCycleService:
             start_date = datetime.now() - timedelta(days=365*2)
 
         # 2. Fetch Data Chunk (Start Date -> 1 Year Forward + Lookback)
-        simulation_end_date = start_date + timedelta(days=365)
+        simulation_end_date = start_date + timedelta(days=365) # Fetch ample data
         days_needed = 365 + self.lookback_window
 
         try:
@@ -97,6 +125,7 @@ class HistoricalCycleService:
         entry_details = {}
         trajectory = [] # Capture state at each step for learning
         current_idx = start_idx
+        days_in_trade = 0
 
         while current_idx < len(dates):
             # GUARD: Future Leakage Check
@@ -172,7 +201,14 @@ class HistoricalCycleService:
 
             # 6. State Machine
             if not in_trade:
-                if c_i >= 0.70: # High conviction entry
+                # ENTRY LOGIC
+
+                # Check Regime Whitelist
+                regime_ok = True
+                if regime_whitelist and regime_mapped not in regime_whitelist:
+                    regime_ok = False
+
+                if regime_ok and c_i >= entry_threshold:
                     in_trade = True
                     entry_details = {
                         "entryIndex": current_idx,
@@ -183,20 +219,26 @@ class HistoricalCycleService:
                         "convictionAtEntry": c_i
                     }
                     trajectory = [step_snapshot] # Start trajectory
+                    days_in_trade = 0
                 # else: pass (continue scanning)
 
             else:
                 # In Trade - Monitor for Exit
                 trajectory.append(step_snapshot)
+                days_in_trade += 1
                 should_exit = False
 
                 # Exit Rule 1: Loss of Conviction
                 if c_i < 0.5: should_exit = True
 
-                # Exit Rule 2: Hard Stops / Targets (simplified)
+                # Exit Rule 2: Hard Stops / Targets (Dynamic)
                 pnl_pct = (current_price - entry_details['entryPrice']) / entry_details['entryPrice']
-                if pnl_pct < -0.05: should_exit = True
-                if pnl_pct > 0.08: should_exit = True
+
+                if pnl_pct < -sl_pct: should_exit = True
+                if pnl_pct > tp_pct: should_exit = True
+
+                # Exit Rule 3: Max Holding Days
+                if days_in_trade > max_days: should_exit = True
 
                 if should_exit:
                     pnl_amount = (current_price - entry_details['entryPrice'])
@@ -206,7 +248,8 @@ class HistoricalCycleService:
                         "exitTime": current_date_str,
                         "exitPrice": current_price,
                         "regimeAtExit": regime_mapped,
-                        "convictionAtExit": c_i
+                        "convictionAtExit": c_i,
+                        "daysInTrade": days_in_trade
                     }
 
                     # Nested Learning Trigger
@@ -223,6 +266,7 @@ class HistoricalCycleService:
                         **entry_details,
                         **exit_details,
                         "pnl": pnl_amount,
+                        "pnl_pct": pnl_pct,
                         "done": False,
                         "status": "normal_exit",
                         "nextCursor": dates[current_idx + 1] if current_idx + 1 < len(dates) else dates[-1]
@@ -234,12 +278,14 @@ class HistoricalCycleService:
         if in_trade:
             # Forced Exit
             pnl_amount = (prices[-1] - entry_details['entryPrice'])
+            pnl_pct = pnl_amount / entry_details['entryPrice']
             exit_details = {
                 "exitIndex": len(dates)-1,
                 "exitTime": dates[-1],
                 "exitPrice": prices[-1],
                 "regimeAtExit": "unknown", # Data ended
-                "convictionAtExit": 0.5
+                "convictionAtExit": 0.5,
+                "daysInTrade": days_in_trade
             }
 
             if self.enable_learning:
@@ -255,6 +301,7 @@ class HistoricalCycleService:
                 **entry_details,
                 **exit_details,
                 "pnl": pnl_amount,
+                "pnl_pct": pnl_pct,
                 "done": True,
                 "status": "forced_exit",
                 "message": "Data ended during trade",

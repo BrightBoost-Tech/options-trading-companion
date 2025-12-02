@@ -1,6 +1,65 @@
 from pydantic import BaseModel, Field
 from typing import Optional, List, Dict, Any, Literal
-from datetime import datetime
+from datetime import datetime, timezone
+
+class SuggestionLog(BaseModel):
+    id: Optional[str] = None # UUID
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    user_id: str
+
+    # Context
+    regime_context: Dict[str, Any]
+
+    # Suggestion identity
+    symbol: str
+    strategy_type: str
+    direction: str
+
+    # Plan
+    target_price: float
+    stop_loss: Optional[float] = None
+    confidence_score: float
+
+    # Linkage
+    was_accepted: bool = False
+    trade_execution_id: Optional[str] = None
+
+
+class TradeExecution(BaseModel):
+    id: Optional[str] = None # UUID
+    user_id: str
+    timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+    # Broker / fill data
+    symbol: str
+    fill_price: float
+    quantity: int
+    fees: float = 0.0
+
+    # Linkage
+    suggestion_id: Optional[str] = None
+
+    # Outcome
+    realized_pnl: Optional[float] = None
+    exit_timestamp: Optional[datetime] = None
+
+
+class WeeklySnapshot(BaseModel):
+    id: Optional[str] = None
+    user_id: str
+    week_id: str          # e.g. "2025-W48"
+    date_start: datetime
+    date_end: datetime
+
+    dominant_regime: Optional[str] = None
+    avg_ivr: Optional[float] = None
+
+    user_metrics: Dict[str, Any]    # JSONB in DB
+    system_metrics: Dict[str, Any]  # JSONB in DB
+    synthesis: Dict[str, Any]       # JSONB in DB
+
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
 
 class SpreadLeg(BaseModel):
     symbol: str

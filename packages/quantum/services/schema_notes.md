@@ -38,6 +38,47 @@ Stores the weekly summary generated for users.
 | `missed_opportunities` | jsonb | List of potential missed trades |
 | `report_markdown` | text | AI-generated summary text |
 
+### `suggestion_logs` (New)
+
+Logs suggestion creation context and lifecycle for analysis.
+
+| Column | Type | Notes |
+|---|---|---|
+| `id` | uuid | Primary Key |
+| `user_id` | uuid | Foreign Key |
+| `regime_context` | jsonb | Snapshot of market regime at creation |
+| `symbol` | text | Ticker |
+| `strategy_type` | text | e.g. "vertical_spread" |
+| `confidence_score` | numeric | Algorithm score |
+| `was_accepted` | boolean | True if executed |
+| `trade_execution_id` | uuid | Link to execution |
+
+### `trade_executions` (New)
+
+Logs actual executions, linked to suggestions or standalone.
+
+| Column | Type | Notes |
+|---|---|---|
+| `id` | uuid | Primary Key |
+| `user_id` | uuid | Foreign Key |
+| `symbol` | text | Ticker |
+| `fill_price` | numeric | Executed price |
+| `quantity` | integer | Executed quantity |
+| `suggestion_id` | uuid | Optional link to suggestion |
+| `realized_pnl` | numeric | P&L after exit |
+
+### `weekly_snapshots` (New)
+
+Aggregated weekly progress metrics.
+
+| Column | Type | Notes |
+|---|---|---|
+| `id` | uuid | Primary Key |
+| `week_id` | text | e.g. "2025-W48" |
+| `user_metrics` | jsonb | Adherence, Risk Compliance, Efficiency |
+| `system_metrics` | jsonb | Win Rate, Regime Stability |
+| `synthesis` | jsonb | Headline & Action Items |
+
 ### `portfolio_snapshots` (Updates)
 
 Existing table `portfolio_snapshots` should expect these additional fields in the future, though code handles their absence gracefully.

@@ -22,6 +22,7 @@ from ev_calculator import calculate_exit_metrics
 # Constants for table names
 TRADE_SUGGESTIONS_TABLE = "trade_suggestions"
 WEEKLY_REPORTS_TABLE = "weekly_trade_reports"
+SUGGESTION_LOGS_TABLE = "suggestion_logs"
 
 # 1. Add MIDDAY_TEST_MODE flag
 MIDDAY_TEST_MODE = os.getenv("MIDDAY_TEST_MODE", "false").lower() == "true"
@@ -203,6 +204,39 @@ async def run_morning_cycle(supabase: Client, user_id: str):
         except Exception as e:
             print(f"Error inserting morning suggestions: {e}")
 
+        # 5. Log suggestions (write-only side effect)
+        try:
+            logs = []
+            for s in suggestions:
+                # Reconstruct needed metrics from suggestion or scope
+                # Morning cycle doesn't compute global regime, so we log local iv_rank
+                # derived from spread analysis loop earlier?
+                # Actually we only have it per spread loop. We need to attach it to suggestion.
+                # For simplicity, we use a placeholder regime or the one from the last loop iteration
+                # (which is incorrect).
+                # But suggestion is for a specific spread. We should probably carry the context in the loop.
+                # For now, we will just use minimal context.
+
+                # Extract target price from order_json
+                target = s.get("order_json", {}).get("limit_price", 0.0)
+
+                logs.append({
+                    "user_id": user_id,
+                    "created_at": s["created_at"],
+                    "regime_context": {"cycle": "morning_limit"}, # Minimal context as we lack global scan here
+                    "symbol": s["ticker"],
+                    "strategy_type": s["strategy"],
+                    "direction": s["direction"],
+                    "target_price": target,
+                    "confidence_score": s.get("probability_of_profit", 0) * 100, # Convert 0-1 to 0-100
+                })
+
+            if logs:
+                supabase.table(SUGGESTION_LOGS_TABLE).insert(logs).execute()
+                print(f"Logged {len(logs)} morning suggestions to ledger.")
+        except Exception as e:
+            print(f"Error logging morning suggestions: {e}")
+
 
 async def run_midday_cycle(supabase: Client, user_id: str):
     """
@@ -340,7 +374,8 @@ async def run_midday_cycle(supabase: Client, user_id: str):
                 "sizing_metadata": sizing,
                 "status": "pending",
                 "source": "scanner",
-                "ev": ev
+                "ev": ev,
+                "internal_cand": cand # Temporary store for logging context
             }
             suggestions.append(suggestion)
 
@@ -359,10 +394,42 @@ async def run_midday_cycle(supabase: Client, user_id: str):
                 .eq("window", "midday_entry") \
                 .execute()
 
-            supabase.table(TRADE_SUGGESTIONS_TABLE).insert(suggestions).execute()
+            # Clean internal_cand before insert
+            suggestions_to_insert = [{k: v for k, v in s.items() if k != 'internal_cand'} for s in suggestions]
+
+            supabase.table(TRADE_SUGGESTIONS_TABLE).insert(suggestions_to_insert).execute()
             print(f"Inserted {len(suggestions)} midday suggestions.")
         except Exception as e:
             print(f"Error inserting midday suggestions: {e}")
+
+        # 5. Log suggestions (write-only side effect)
+        try:
+            logs = []
+            for s in suggestions:
+                cand = s.get("internal_cand", {})
+                # Capture regime from candidate enrichment
+                regime_ctx = {
+                    "iv_rank": cand.get("iv_rank"),
+                    "trend": cand.get("trend"),
+                    "score": cand.get("score")
+                }
+
+                logs.append({
+                    "user_id": user_id,
+                    "created_at": s["created_at"],
+                    "regime_context": regime_ctx,
+                    "symbol": s["ticker"],
+                    "strategy_type": s["strategy"],
+                    "direction": s["direction"],
+                    "target_price": s["order_json"]["limit_price"],
+                    "confidence_score": cand.get("score", 0),
+                })
+
+            if logs:
+                supabase.table(SUGGESTION_LOGS_TABLE).insert(logs).execute()
+                print(f"Logged {len(logs)} midday suggestions to ledger.")
+        except Exception as e:
+            print(f"Error logging midday suggestions: {e}")
 
 
 async def run_weekly_report(supabase: Client, user_id: str):

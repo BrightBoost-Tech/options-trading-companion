@@ -3,27 +3,8 @@ import sys
 from pathlib import Path
 from dotenv import load_dotenv
 
-# --- FORCE LOAD .ENV ---
-# Explicitly target the .env file in the same directory as this script
-env_path = Path(__file__).resolve().parent / ".env"
-
-print("!" * 60)
-print(f"🕵️  PLAID SERVICE: Loading environment configuration...")
-print(f"📍  Targeting .env path: {env_path}")
-print(f"📂  File exists? {env_path.exists()}")
-
-# Force load the specific .env file
-load_dotenv(dotenv_path=env_path, override=True)
-
-# Interrogate loaded values
-current_plaid_env = os.getenv("PLAID_ENV")
-plaid_secret = os.getenv("PLAID_SECRET")
-plaid_secret_preview = plaid_secret[:4] if plaid_secret else "NONE"
-
-print(f"🌍  PLAID_ENV: {current_plaid_env}")
-print(f"🔑  PLAID_SECRET (first 4): {plaid_secret_preview}")
-print("!" * 60)
-# -----------------------
+# --- REMOVED DIRECT LOAD_DOTENV ---
+# We now rely on api.py or the entry point to load env vars via SecretsProvider
 
 import plaid
 from datetime import datetime
@@ -36,6 +17,20 @@ from plaid.model.item_public_token_exchange_request import ItemPublicTokenExchan
 from plaid.model.investments_holdings_get_request import InvestmentsHoldingsGetRequest
 from models import Holding
 from market_data import get_polygon_price
+from security.secrets_provider import SecretsProvider
+
+# Initialize SecretsProvider
+secrets_provider = SecretsProvider()
+plaid_secrets = secrets_provider.get_plaid_secrets()
+
+# Derive constants
+current_plaid_env = plaid_secrets.env
+PLAID_CLIENT_ID = plaid_secrets.client_id
+PLAID_SECRET = plaid_secrets.secret
+
+# Startup Logging
+print("-" * 40)
+print(f"Plaid Environment Config: {current_plaid_env}")
 
 # 1. Verify and correct backend environment mapping
 current_env_str = (current_plaid_env or "sandbox").lower().strip()
@@ -51,12 +46,6 @@ else:
     host_env = "https://sandbox.plaid.com"
     env_log_msg = f"Plaid environment: SANDBOX (configured: {current_env_str})"
 
-# Fetch credentials
-PLAID_CLIENT_ID = os.getenv("PLAID_CLIENT_ID")
-PLAID_SECRET = plaid_secret # Already loaded
-
-# Startup Logging
-print("-" * 40)
 print(env_log_msg)
 if PLAID_CLIENT_ID and PLAID_SECRET:
     print(f"Using Plaid {current_env_str} keys")
@@ -219,4 +208,3 @@ def fetch_and_normalize_holdings(access_token: str) -> list[Holding]:
     except plaid.ApiException as e:
         print(f"Plaid API Error (Fetch Holdings): {e}")
         raise e
-

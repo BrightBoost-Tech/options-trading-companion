@@ -161,28 +161,9 @@ class PlaidHistoryService:
             return 0
 
     def _get_access_token(self, user_id: str) -> Optional[str]:
-        # Try user_settings then plaid_items
-        # Reusing logic from api.py is hard without circular imports or code duplication.
-        # I'll just query directly.
-        from security import decrypt_token # Need to ensure this is importable
-
-        try:
-            res = self.supabase.table("user_settings").select("plaid_access_token").eq("user_id", user_id).single().execute()
-            if res.data:
-                token = res.data.get("plaid_access_token")
-                try: return decrypt_token(token)
-                except: return token
-        except: pass
-
-        try:
-            res = self.supabase.table("plaid_items").select("access_token").eq("user_id", user_id).limit(1).execute()
-            if res.data:
-                token = res.data[0].get("access_token")
-                try: return decrypt_token(token)
-                except: return token
-        except: pass
-
-        return None
+        from services.token_store import PlaidTokenStore
+        token_store = PlaidTokenStore(self.supabase)
+        return token_store.get_access_token(user_id)
 
     def _reverse_transaction(self, positions: Dict[str, float], tx, sec_map):
         """

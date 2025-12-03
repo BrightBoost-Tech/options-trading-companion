@@ -19,6 +19,7 @@ from slowapi.util import get_remote_address
 from supabase import create_client, Client
 
 from security import encrypt_token, decrypt_token, get_current_user
+from security.secrets_provider import SecretsProvider
 
 # Import models and services
 from models import Holding, SyncResponse, PortfolioSnapshot, Spread
@@ -77,8 +78,10 @@ app.add_middleware(
 )
 
 # Initialize Supabase Client
-url = os.getenv("NEXT_PUBLIC_SUPABASE_URL")
-key = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
+secrets_provider = SecretsProvider()
+supa_secrets = secrets_provider.get_supabase_secrets()
+url = supa_secrets.url
+key = supa_secrets.service_role_key
 
 supabase: Client = create_client(url, key) if url and key else None
 
@@ -817,43 +820,9 @@ async def sync_holdings(
     # 2. Retrieve Plaid Access Token
     plaid_access_token: Optional[str] = None
     if supabase:
-        # Check user_settings first (preferred)
-        try:
-            res = (
-                supabase.table("user_settings")
-                .select("plaid_access_token")
-                .eq("user_id", user_id)
-                .single()
-                .execute()
-            )
-            if res.data:
-                raw_token = res.data.get("plaid_access_token")
-                try:
-                    plaid_access_token = decrypt_token(raw_token)
-                except Exception:
-                    # Fallback to raw if decryption fails (e.g. migration)
-                    plaid_access_token = raw_token
-        except Exception:
-            pass
-
-        # Fallback to plaid_items if not in user_settings
-        if not plaid_access_token:
-            try:
-                response = (
-                    supabase.table("plaid_items")
-                    .select("access_token")
-                    .eq("user_id", user_id)
-                    .limit(1)
-                    .execute()
-                )
-                if response.data:
-                    raw_token = response.data[0]["access_token"]
-                    try:
-                        plaid_access_token = decrypt_token(raw_token)
-                    except Exception:
-                        plaid_access_token = raw_token
-            except Exception:
-                pass
+        from services.token_store import PlaidTokenStore
+        token_store = PlaidTokenStore(supabase)
+        plaid_access_token = token_store.get_access_token(user_id)
 
     # 3. Fetch from Plaid
     errors: List[str] = []

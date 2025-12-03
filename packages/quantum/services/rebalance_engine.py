@@ -5,6 +5,7 @@ import math
 
 from models import SpreadPosition, Holding
 from services.sizing_engine import calculate_sizing
+from analytics.iv_regime_service import IVRegimeService
 
 class RebalanceEngine:
     """
@@ -14,6 +15,7 @@ class RebalanceEngine:
 
     def __init__(self, supabase: Client = None):
         self.supabase = supabase
+        self.iv_service = IVRegimeService(supabase) if supabase else None
 
     def generate_trades(
         self,

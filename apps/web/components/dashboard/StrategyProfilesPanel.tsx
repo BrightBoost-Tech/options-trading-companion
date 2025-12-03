@@ -5,7 +5,7 @@ import { Card, CardHeader, CardTitle, CardContent, CardDescription } from '@/com
 import { API_URL, TEST_USER_ID } from '@/lib/constants';
 import { supabase } from '@/lib/supabase';
 import { StrategyConfig, BacktestRequest, BacktestResult } from '@/lib/types';
-import { Badge } from '@/components/ui/badge'; // Assuming Badge exists or will use basic styling
+import { Badge } from '@/components/ui/badge';
 
 interface StrategyProfilesPanelProps {
     className?: string;
@@ -25,11 +25,18 @@ export default function StrategyProfilesPanel({ className }: StrategyProfilesPan
         ticker: 'SPY',
         strategy_name: ''
     });
-    const [backtestResults, setBacktestResults] = useState<BacktestResult[]>([]);
+    const [backtestResults, setBacktestResults] = useState<any[]>([]);
 
     useEffect(() => {
         loadStrategies();
     }, []);
+
+    // Load backtests when a strategy is selected
+    useEffect(() => {
+        if (selectedStrategy && selectedStrategy.name) {
+            loadStrategyBacktests(selectedStrategy.name);
+        }
+    }, [selectedStrategy]);
 
     const getAuthHeaders = async () => {
         const { data: { session } } = await supabase.auth.getSession();
@@ -51,9 +58,6 @@ export default function StrategyProfilesPanel({ className }: StrategyProfilesPan
             const res = await fetch(`${API_URL}/strategies`, { headers });
             if (res.ok) {
                 const data = await res.json();
-                // Extract params and merge with name/version if needed,
-                // but the API returns rows with 'params' column.
-                // We need to map the DB row to StrategyConfig.
                 const configs = data.strategies.map((row: any) => ({
                     ...row.params,
                     name: row.name,
@@ -66,6 +70,19 @@ export default function StrategyProfilesPanel({ className }: StrategyProfilesPan
             console.error('Failed to load strategies', err);
         } finally {
             setLoading(false);
+        }
+    };
+
+    const loadStrategyBacktests = async (strategyName: string) => {
+        try {
+            const headers = await getAuthHeaders();
+            const res = await fetch(`${API_URL}/strategies/${strategyName}/backtests?limit=20`, { headers });
+            if (res.ok) {
+                const data = await res.json();
+                setBacktestResults(data);
+            }
+        } catch (err) {
+            console.error('Failed to load backtests', err);
         }
     };
 
@@ -108,8 +125,8 @@ export default function StrategyProfilesPanel({ className }: StrategyProfilesPan
                 const data = await res.json();
                 alert(`Backtest queued! Batch ID: ${data.batch_id}`);
                 setShowBacktestModal(false);
-                // Optionally poll for results or add to a "Recent Batches" list
-                loadBacktestResults(data.batch_id);
+                // Optionally poll for results
+                pollBacktestResults(selectedStrategy.name);
             } else {
                 console.error("Failed to queue backtest");
             }
@@ -118,22 +135,14 @@ export default function StrategyProfilesPanel({ className }: StrategyProfilesPan
         }
     };
 
-    const loadBacktestResults = async (batchId: string) => {
-        // Simple polling for demo purposes
-        const headers = await getAuthHeaders();
+    const pollBacktestResults = (strategyName: string) => {
+        // Simple polling: refresh every 2s for 10s
+        let attempts = 0;
         const interval = setInterval(async () => {
-            const res = await fetch(`${API_URL}/simulation/batch/${batchId}`, { headers });
-            if (res.ok) {
-                const data = await res.json();
-                if (data.results && data.results.length > 0) {
-                     setBacktestResults(prev => [...data.results, ...prev]); // Prepend new results
-                     clearInterval(interval);
-                }
-            }
+            attempts++;
+            await loadStrategyBacktests(strategyName);
+            if (attempts >= 5) clearInterval(interval);
         }, 2000);
-
-        // Stop polling after 30 seconds
-        setTimeout(() => clearInterval(interval), 30000);
     };
 
     return (
@@ -171,8 +180,8 @@ export default function StrategyProfilesPanel({ className }: StrategyProfilesPan
                 {/* Strategy List */}
                 <div className="space-y-4">
                     {loading ? <p>Loading...</p> : strategies.map((s, i) => (
-                        <div key={`${s.name}-${s.version}`} className="border p-4 rounded flex justify-between items-center">
-                            <div>
+                        <div key={`${s.name}-${s.version}`} className={`border p-4 rounded flex justify-between items-center ${selectedStrategy?.name === s.name ? 'border-indigo-500 bg-indigo-50' : ''}`}>
+                            <div onClick={() => setSelectedStrategy(s)} className="cursor-pointer flex-1">
                                 <h4 className="font-bold">{s.name} <span className="text-xs text-gray-500">v{s.version}</span></h4>
                                 <p className="text-sm text-gray-600">{s.description || 'No description'}</p>
                                 <div className="text-xs text-gray-500 mt-1 space-x-2">
@@ -206,37 +215,55 @@ export default function StrategyProfilesPanel({ className }: StrategyProfilesPan
                 </div>
 
                 {/* Backtest Results Table */}
-                {backtestResults.length > 0 && (
-                    <div className="mt-8">
-                        <h3 className="font-semibold mb-2">Recent Backtest Results</h3>
-                        <div className="overflow-x-auto">
-                            <table className="w-full text-sm">
-                                <thead className="bg-gray-50">
-                                    <tr>
-                                        <th className="p-2 text-left">Strategy</th>
-                                        <th className="p-2 text-left">Ticker</th>
-                                        <th className="p-2 text-left">Period</th>
-                                        <th className="p-2 text-right">Trades</th>
-                                        <th className="p-2 text-right">Win Rate</th>
-                                        <th className="p-2 text-right">P&L</th>
-                                    </tr>
-                                </thead>
-                                <tbody>
-                                    {backtestResults.map((res, idx) => (
-                                        <tr key={idx} className="border-t hover:bg-gray-50">
-                                            <td className="p-2">{res.strategy_name} v{res.version}</td>
-                                            <td className="p-2">{res.ticker}</td>
-                                            <td className="p-2 text-xs text-gray-500">{res.start_date} - {res.end_date}</td>
-                                            <td className="p-2 text-right">{res.trades_count}</td>
-                                            <td className="p-2 text-right">{(res.win_rate * 100).toFixed(1)}%</td>
-                                            <td className={`p-2 text-right font-medium ${res.total_pnl >= 0 ? 'text-green-600' : 'text-red-600'}`}>
-                                                ${res.total_pnl.toFixed(2)}
-                                            </td>
+                {selectedStrategy && (
+                    <div className="mt-8 border-t pt-4">
+                        <h3 className="font-semibold mb-2">Backtest Results: {selectedStrategy.name}</h3>
+                        {backtestResults.length === 0 ? (
+                            <p className="text-sm text-gray-500">No backtests found.</p>
+                        ) : (
+                            <div className="overflow-x-auto">
+                                <table className="w-full text-sm">
+                                    <thead className="bg-gray-50">
+                                        <tr>
+                                            <th className="p-2 text-left">Date</th>
+                                            <th className="p-2 text-left">Ticker</th>
+                                            <th className="p-2 text-left">Period</th>
+                                            <th className="p-2 text-right">Trades</th>
+                                            <th className="p-2 text-right">Win Rate</th>
+                                            <th className="p-2 text-right">Max DD</th>
+                                            <th className="p-2 text-right">P&L</th>
+                                            <th className="p-2 text-center">Status</th>
                                         </tr>
-                                    ))}
-                                </tbody>
-                            </table>
-                        </div>
+                                    </thead>
+                                    <tbody>
+                                        {backtestResults.map((res, idx) => (
+                                            <tr key={idx} className="border-t hover:bg-gray-50">
+                                                <td className="p-2 text-xs text-gray-500">
+                                                    {new Date(res.created_at).toLocaleDateString()}
+                                                </td>
+                                                <td className="p-2">{res.ticker}</td>
+                                                <td className="p-2 text-xs text-gray-500">{res.start_date} to {res.end_date}</td>
+                                                <td className="p-2 text-right">{res.trades_count}</td>
+                                                <td className="p-2 text-right">{res.win_rate != null ? (res.win_rate * 100).toFixed(1) + '%' : '-'}</td>
+                                                <td className="p-2 text-right">{res.max_drawdown != null ? (res.max_drawdown * 100).toFixed(1) + '%' : '-'}</td>
+                                                <td className={`p-2 text-right font-medium ${res.total_pnl >= 0 ? 'text-green-600' : 'text-red-600'}`}>
+                                                    {res.total_pnl != null ? `$${res.total_pnl.toFixed(2)}` : '-'}
+                                                </td>
+                                                <td className="p-2 text-center">
+                                                    <Badge variant="outline" className={
+                                                        res.status === 'completed' ? 'text-green-600 border-green-200 bg-green-50' :
+                                                        res.status === 'error' ? 'text-red-600 border-red-200 bg-red-50' :
+                                                        'text-yellow-600 border-yellow-200 bg-yellow-50'
+                                                    }>
+                                                        {res.status}
+                                                    </Badge>
+                                                </td>
+                                            </tr>
+                                        ))}
+                                    </tbody>
+                                </table>
+                            </div>
+                        )}
                     </div>
                 )}
             </CardContent>

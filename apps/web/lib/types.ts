@@ -35,6 +35,8 @@ export interface BacktestResult {
   trades_count: number;
   win_rate: number;
   total_pnl: number;
+  max_drawdown?: number; // Added optional field
+  avg_roi?: number; // Added optional field
   metrics: {
     avg_pnl?: number;
     max_drawdown?: number;
@@ -42,7 +44,7 @@ export interface BacktestResult {
   };
   status: string;
   batch_id?: string;
-  created_at?: string;
+  created_at: string; // Made required as it's used in UI
 }
 
 export interface SuggestionLeg {
@@ -52,6 +54,7 @@ export interface SuggestionLeg {
   strike: number;
   type: 'call' | 'put';
   expiry: string;
+  option_symbol?: string; // Added for flexibility
 }
 
 export interface SuggestionMetrics {
@@ -64,30 +67,41 @@ export interface SuggestionMetrics {
 
 export interface Suggestion {
   id: string;
-  type: string;
-  symbol: string; // e.g. "SPY"
-  strategy: string; // e.g. "Bull Put Spread"
+  type?: string; // Optional as backend might not send it or use 'kind'
+  kind?: string;
+  window?: string; // Added window for tabs
+  status?: string;
+  symbol: string;
+  ticker?: string; // Added
+  direction: string; // Added (Buy/Sell)
+  strategy: string;
   expiration?: string;
   order_json: {
     legs: SuggestionLeg[];
     max_loss?: number;
     max_profit?: number;
+    price?: number;
+    limit_price?: number;
+    metrics?: SuggestionMetrics; // Nested metrics
+    context?: {
+        iv_rank?: number;
+        iv_regime?: string;
+        [key: string]: any;
+    };
   };
+  ev?: number; // Top level or nested
   score?: number;
-  metrics?: SuggestionMetrics;
+  risk_score?: number; // For High Risk flag
 
-  // New context fields
+  // Flattened Context Helpers
   iv_rank?: number;
   iv_regime?: string;
   conviction?: number;
 
-  // Risk impact (placeholders or real if backend sends them)
-  delta_impact?: number;
-  theta_impact?: number;
-
   timestamp?: string;
+  created_at?: string;
 
-  // Frontend state (not from backend)
+  // Frontend state
   staged?: boolean;
 }
 
@@ -109,4 +123,14 @@ export interface RiskMetrics {
     greeks?: Greeks;
     greek_alerts?: GreekAlerts;
     [key: string]: any;
+}
+
+export interface PortfolioSnapshot {
+    user_id: string;
+    created_at: string;
+    buying_power?: number;
+    net_liquidity?: number;
+    risk_metrics?: RiskMetrics;
+    holdings?: any[];
+    spreads?: any[];
 }

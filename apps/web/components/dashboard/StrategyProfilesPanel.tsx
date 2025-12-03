@@ -79,7 +79,7 @@ export default function StrategyProfilesPanel({ className }: StrategyProfilesPan
             const res = await fetch(`${API_URL}/strategies/${strategyName}/backtests?limit=20`, { headers });
             if (res.ok) {
                 const data = await res.json();
-                setBacktestResults(data);
+                setBacktestResults(data.backtests || []);
             }
         } catch (err) {
             console.error('Failed to load backtests', err);

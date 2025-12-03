@@ -4,7 +4,6 @@ import { useState } from 'react';
 import SuggestionCard from './SuggestionCard';
 import { Suggestion } from '@/lib/types';
 import { Sparkles, Activity, Sun, Clock, FileText } from 'lucide-react';
-import { Badge } from '@/components/ui/badge';
 import WeeklyReportList from '../suggestions/WeeklyReportList';
 import { RefreshCw } from 'lucide-react';
 

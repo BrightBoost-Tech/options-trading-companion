@@ -67,36 +67,42 @@ export interface SuggestionMetrics {
 
 export interface Suggestion {
   id: string;
-  type?: string; // Optional as backend might not send it or use 'kind'
+  type?: string;
   kind?: string;
-  window?: string; // Added window for tabs
+  window?: string;
   status?: string;
   symbol: string;
-  ticker?: string; // Added
-  direction: string; // Added (Buy/Sell)
+  ticker?: string;
+  direction: string;
   strategy: string;
   expiration?: string;
   order_json: {
-    legs: SuggestionLeg[];
+    legs?: SuggestionLeg[];
     max_loss?: number;
     max_profit?: number;
     price?: number;
     limit_price?: number;
-    metrics?: SuggestionMetrics; // Nested metrics
+    metrics?: SuggestionMetrics;
     context?: {
         iv_rank?: number;
         iv_regime?: string;
         [key: string]: any;
     };
+    [key: string]: any; // Catch-all for other order fields
   };
-  ev?: number; // Top level or nested
+  metrics?: SuggestionMetrics; // Top level metrics convenience
+  ev?: number;
   score?: number;
-  risk_score?: number; // For High Risk flag
+  risk_score?: number;
 
   // Flattened Context Helpers
   iv_rank?: number;
   iv_regime?: string;
   conviction?: number;
+
+  // Greeks Impact (Top Level or Derived)
+  delta_impact?: number;
+  theta_impact?: number;
 
   timestamp?: string;
   created_at?: string;

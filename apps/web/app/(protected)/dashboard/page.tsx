@@ -7,10 +7,11 @@ import PortfolioOptimizer from '@/components/dashboard/PortfolioOptimizer';
 import { WeeklyProgressCard } from '@/components/dashboard/WeeklyProgressCard';
 import SuggestionTabs from '@/components/dashboard/SuggestionTabs';
 import StrategyProfilesPanel from '@/components/dashboard/StrategyProfilesPanel';
+import DisciplineSummary from '@/components/dashboard/DisciplineSummary';
 import { supabase } from '@/lib/supabase';
 import { API_URL, TEST_USER_ID } from '@/lib/constants';
 import { groupOptionSpreads, formatOptionDisplay } from '@/lib/formatters';
-import { AlertTriangle, AlertCircle } from 'lucide-react';
+import { AlertTriangle, AlertCircle, Activity } from 'lucide-react';
 
 const mockAlerts = [
   { id: '1', message: 'SPY credit put spread scout: 475/470 for $1.50 credit', time: '2 min ago' },
@@ -621,50 +622,33 @@ export default function DashboardPage() {
             </div>
 
             {/* Trade Journal Stats (Side Panel) */}
-            <div className="bg-gradient-to-r from-purple-50 to-pink-50 rounded-lg shadow p-6 border-l-4 border-purple-500 h-fit">
-                <div className="flex justify-between items-start mb-4">
-                    <h3 className="text-lg font-semibold text-purple-900 flex items-center gap-2">📊 Trade Journal</h3>
-                    <button onClick={loadJournalStats} className="text-sm text-purple-700 underline">Refresh</button>
-                </div>
-                {journalStats ? (
-                    <div className="space-y-4">
-                         <div className="grid grid-cols-2 gap-4">
-                            <div className="bg-white p-3 rounded border border-purple-200">
-                                <p className="text-xs text-gray-600">Win Rate</p>
-                                <p className="text-xl font-bold text-purple-900">{journalStats.stats.win_rate?.toFixed(1) || 0}%</p>
-                            </div>
-                            <div className="bg-white p-3 rounded border border-purple-200">
-                                <p className="text-xs text-gray-600">Total P&L</p>
-                                <p className={`text-xl font-bold ${(journalStats.stats.total_pnl || 0) >= 0 ? 'text-green-600' : 'text-red-600'}`}>
-                                    ${(journalStats.stats.total_pnl || 0).toFixed(0)}
-                                </p>
-                            </div>
-                        </div>
-                        {/* Drift / Discipline Placeholder */}
-                        <div className="bg-white p-3 rounded border border-purple-200">
-                             <div className="flex items-center justify-between mb-2">
-                                <p className="text-xs text-gray-600 font-medium uppercase">Discipline (Last 30d)</p>
-                                <Activity className="w-3 h-3 text-gray-400" />
-                             </div>
-                             <div className="space-y-1 text-sm">
-                                <div className="flex justify-between">
-                                    <span>Plan Adherence</span>
-                                    <span className="font-bold text-green-600">92%</span>
-                                </div>
-                                <div className="flex justify-between text-gray-500">
-                                    <span>Impulse Trades</span>
-                                    <span>0</span>
-                                </div>
-                                <div className="flex justify-between text-gray-500">
-                                    <span>Size Violations</span>
-                                    <span>0</span>
-                                </div>
-                             </div>
-                        </div>
+            <div className="space-y-6">
+                <div className="bg-gradient-to-r from-purple-50 to-pink-50 rounded-lg shadow p-6 border-l-4 border-purple-500 h-fit">
+                    <div className="flex justify-between items-start mb-4">
+                        <h3 className="text-lg font-semibold text-purple-900 flex items-center gap-2">📊 Trade Journal</h3>
+                        <button onClick={loadJournalStats} className="text-sm text-purple-700 underline">Refresh</button>
                     </div>
-                ) : (
-                    <div className="text-center py-8 text-purple-700 text-sm">No trades logged yet.</div>
-                )}
+                    {journalStats ? (
+                        <div className="space-y-4">
+                             <div className="grid grid-cols-2 gap-4">
+                                <div className="bg-white p-3 rounded border border-purple-200">
+                                    <p className="text-xs text-gray-600">Win Rate</p>
+                                    <p className="text-xl font-bold text-purple-900">{journalStats.stats.win_rate?.toFixed(1) || 0}%</p>
+                                </div>
+                                <div className="bg-white p-3 rounded border border-purple-200">
+                                    <p className="text-xs text-gray-600">Total P&L</p>
+                                    <p className={`text-xl font-bold ${(journalStats.stats.total_pnl || 0) >= 0 ? 'text-green-600' : 'text-red-600'}`}>
+                                        ${(journalStats.stats.total_pnl || 0).toFixed(0)}
+                                    </p>
+                                </div>
+                            </div>
+                        </div>
+                    ) : (
+                        <div className="text-center py-8 text-purple-700 text-sm">No trades logged yet.</div>
+                    )}
+                </div>
+
+                <DisciplineSummary />
             </div>
         </div>
 

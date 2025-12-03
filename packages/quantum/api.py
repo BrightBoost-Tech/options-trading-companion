@@ -104,7 +104,7 @@ async def execute_rebalance(
     """
     Runs the rebalance engine:
     1. Fetches current portfolio.
-    2. Runs optimizer to get targets.
+    2. Runs optimizer to get targets (using real regime/conviction).
     3. Generates trade instructions via RebalanceEngine.
     4. Saves suggestions to DB.
     """
@@ -130,17 +130,20 @@ async def execute_rebalance(
              cash += val
 
     # 3. Run Optimizer directly to get targets
-    # We construct a request object mimicking the endpoint input
-    # Note: We need to import the internal logic or call the function.
     from optimizer import _compute_portfolio_weights, OptimizationRequest, calculate_dynamic_target
     from analytics.iv_regime_service import IVRegimeService
 
-    # Construct input positions for optimizer (it expects generic dicts now)
+    # Pre-fetch IV Context for existing holdings (needed for regime-elastic caps)
+    iv_service = IVRegimeService(supabase)
+    unique_tickers = [s.ticker for s in current_spreads]
+    iv_ctx_map = iv_service.get_iv_context_for_symbols(unique_tickers)
+
+    # Construct input positions for optimizer
     opt_req = OptimizationRequest(
-        positions=raw_positions, # The optimizer now handles raw grouping internally too
+        positions=raw_positions,
         cash_balance=cash,
-        profile="balanced", # Default or fetch from user settings
-        nested_enabled=True # Default to smart rebalance
+        profile="balanced",
+        nested_enabled=True
     )
 
     tickers = [s.ticker for s in current_spreads]
@@ -159,7 +162,6 @@ async def execute_rebalance(
 
         try:
              inputs = calculate_portfolio_inputs(unique_underlyings)
-             # Map to spreads (same logic as in optimizer.py)
              base_mu = inputs['expected_returns']
              base_sigma = inputs['covariance_matrix']
              base_idx_map = {u: i for i, u in enumerate(unique_underlyings)}
@@ -186,7 +188,6 @@ async def execute_rebalance(
              )
 
              # Phase 3: Post-process weights with Regime-Elastic Caps
-             # We need to map back to strategy_type
              spread_map = {s.ticker: s for s in current_spreads}
 
              targets = []
@@ -195,13 +196,22 @@ async def execute_rebalance(
                  spread_obj = spread_map.get(sym)
                  strat_type = spread_obj.spread_type if spread_obj else "other"
 
-                 # Apply Dynamic Constraint
-                 # Placeholder regime="default", conviction=1.0 until full wire-up
+                 # Retrieve Regime & Conviction
+                 # Note: iv_ctx_map keys are typically tickers or symbols.
+                 ctx = iv_ctx_map.get(sym, {})
+                 regime = ctx.get("iv_regime", "normal") # e.g. "suppressed", "normal", "elevated"
+
+                 # Fallback conviction: we don't have a live conviction score for *holdings* in this flow yet,
+                 # unless we ran a full rescore. For now, default to 1.0 (neutral) or try to find it.
+                 # If we had a "conviction_map" passed in, we'd use it.
+                 conviction = 1.0
+
+                 # Apply Dynamic Constraint with REAL regime
                  adjusted_w = calculate_dynamic_target(
                      base_weight=w,
                      strategy_type=strat_type,
-                     regime="default",
-                     conviction=1.0
+                     regime=regime,
+                     conviction=conviction
                  )
 
                  targets.append({
@@ -236,22 +246,23 @@ async def execute_rebalance(
     # 5. Save to DB
     saved_count = 0
     if trades:
-        # Clear old rebalance suggestions?
-        # Maybe. "window='rebalance'".
+        # Clear old rebalance suggestions
         supabase.table(TRADE_SUGGESTIONS_TABLE).delete().eq("user_id", user_id).eq("window", "rebalance").execute()
 
-        # Phase 3 B: Attach IV Context
-        iv_service = IVRegimeService(supabase)
-        symbols_to_check = [t["symbol"] for t in trades]
-        iv_ctx_map = iv_service.get_iv_context_for_symbols(symbols_to_check)
+        # We already have iv_ctx_map for holding symbols, but trades might be new legs/spreads?
+        # The trades are usually adjustments to existing or closes.
+        # If new symbols appear (rare in rebalance unless specific strategy), we might need to fetch again.
+        # But let's reuse what we have or fetch for trades.
+
+        trade_symbols = [t["symbol"] for t in trades]
+        # Fetch fresh context for trades (some might be new)
+        trade_iv_ctx = iv_service.get_iv_context_for_symbols(trade_symbols)
 
         db_rows = []
         for t in trades:
             sym = t["symbol"]
-            ctx = iv_ctx_map.get(sym, {})
+            ctx = trade_iv_ctx.get(sym, {})
 
-            # Enrich order_json or top level?
-            # Storing in order_json['context'] for UI consistency if UI looks there
             if "context" not in t:
                 t["context"] = {}
             t["context"].update(ctx)
@@ -1165,6 +1176,88 @@ async def get_journal_entries(user_id: str = Depends(get_current_user)):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"An error occurred: {e}")
 
+
+@app.get("/journal/drift-summary")
+async def get_drift_summary(user_id: str = Depends(get_current_user)):
+    """
+    Returns aggregate execution discipline stats for the drift summary widget.
+    (Phase 6 B)
+    """
+    if not supabase:
+         # Return zeroed struct if DB missing
+         return {
+             "window_days": 7,
+             "total_suggestions": 0,
+             "disciplined_execution": 0,
+             "impulse_trades": 0,
+             "size_violations": 0,
+             "disciplined_rate": 0.0,
+             "impulse_rate": 0.0,
+             "size_violation_rate": 0.0
+         }
+
+    try:
+        # Window: last 7 days
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=7)).isoformat()
+
+        # We need a table for drift logs. Assuming "execution_drift_logs" exists (from Phase 2).
+        # We'll just count rows by tag or aggregate.
+        # drift logs structure: id, user_id, suggestion_id, match_type, discipline_tags (list), created_at
+
+        res = supabase.table("execution_drift_logs")\
+            .select("*")\
+            .eq("user_id", user_id)\
+            .gte("created_at", cutoff)\
+            .execute()
+
+        logs = res.data or []
+
+        total = len(logs)
+        disciplined = 0
+        impulse = 0
+        size = 0
+
+        for log in logs:
+            tags = log.get("discipline_tags", [])
+            if "disciplined_execution" in tags:
+                disciplined += 1
+            if "impulse_trade" in tags:
+                impulse += 1
+            if "size_violation" in tags:
+                size += 1
+
+        # If total suggests drift check events, use that.
+        # But drift logs might only be created on *events*.
+        # Let's assume total = count of logs for now.
+
+        d_rate = disciplined / total if total > 0 else 0.0
+        i_rate = impulse / total if total > 0 else 0.0
+        s_rate = size / total if total > 0 else 0.0
+
+        return {
+             "window_days": 7,
+             "total_suggestions": total,
+             "disciplined_execution": disciplined,
+             "impulse_trades": impulse,
+             "size_violations": size,
+             "disciplined_rate": round(d_rate, 2),
+             "impulse_rate": round(i_rate, 2),
+             "size_violation_rate": round(s_rate, 2)
+        }
+
+    except Exception as e:
+        print(f"Error fetching drift summary: {e}")
+        # Fail gracefully
+        return {
+             "window_days": 7,
+             "total_suggestions": 0,
+             "disciplined_execution": 0,
+             "impulse_trades": 0,
+             "size_violations": 0,
+             "disciplined_rate": 0.0,
+             "impulse_rate": 0.0,
+             "size_violation_rate": 0.0
+        }
 
 @app.get("/journal/stats")
 async def get_journal_stats(user_id: str = Depends(get_current_user)):

@@ -273,3 +273,49 @@ def get_batch_status(
 
     res = supabase.table("strategy_backtests").select("*").eq("batch_id", batch_id).execute()
     return {"results": res.data}
+
+@router.get("/strategies/{name}/backtests")
+def list_strategy_backtests(
+    name: str,
+    limit: int = 20,
+    offset: int = 0,
+    user_id: str = Depends(get_current_user_id)
+):
+    supabase = get_supabase()
+    if not supabase:
+        raise HTTPException(status_code=503, detail="Database not available")
+
+    # Verify strategy existence/ownership
+    # (Optional strict check, or just query backtests directly by user_id+strategy_name)
+
+    res = (
+        supabase.table("strategy_backtests")
+        .select("id, strategy_name, version, param_hash, start_date, end_date, ticker, trades_count, win_rate, max_drawdown, avg_roi, total_pnl, metrics, status, created_at")
+        .eq("user_id", user_id)
+        .eq("strategy_name", name)
+        .order("created_at", desc=True)
+        .range(offset, offset + limit - 1)
+        .execute()
+    )
+
+    return {"backtests": res.data}
+
+@router.get("/strategy_backtests/recent")
+def list_recent_backtests(
+    limit: int = 10,
+    user_id: str = Depends(get_current_user_id)
+):
+    supabase = get_supabase()
+    if not supabase:
+        raise HTTPException(status_code=503, detail="Database not available")
+
+    res = (
+        supabase.table("strategy_backtests")
+        .select("id, strategy_name, version, param_hash, start_date, end_date, ticker, trades_count, win_rate, total_pnl, status, created_at")
+        .eq("user_id", user_id)
+        .order("created_at", desc=True)
+        .limit(limit)
+        .execute()
+    )
+
+    return {"recent_backtests": res.data}

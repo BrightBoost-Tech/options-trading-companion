@@ -1,39 +1,29 @@
-import React, { useState } from 'react';
-import TradeSuggestionCard from '../tradeSuggestionCard';
-import { Clock } from 'lucide-react';
+'use client';
+
+import React from 'react';
+import { Suggestion } from '@/lib/types';
+import SuggestionCard from '../dashboard/SuggestionCard';
 
 interface MiddayEntriesListProps {
-  suggestions: any[];
+  suggestions: Suggestion[];
 }
 
 export default function MiddayEntriesList({ suggestions }: MiddayEntriesListProps) {
-  const [loggedIds, setLoggedIds] = useState<Set<string>>(new Set());
-
-  const handleLogged = (id: string) => {
-    setLoggedIds(prev => {
-      const next = new Set(prev);
-      next.add(id);
-      return next;
-    });
-  };
-
-  const safeSuggestions = Array.isArray(suggestions) ? suggestions : [];
-  const displayItems = safeSuggestions.filter(s => !loggedIds.has(s.id));
-
-  if (displayItems.length === 0) {
-    return (
-      <div className="text-center py-10 text-gray-400">
-        <Clock className="w-10 h-10 mx-auto mb-3 opacity-20" />
-        <p>No midday entries found.</p>
-        <p className="text-xs mt-1">Scan runs around 12:00 PM EST.</p>
-      </div>
-    );
+  if (suggestions.length === 0) {
+      return (
+        <div className="text-center py-10 text-gray-400">
+          <p>No midday suggestions.</p>
+        </div>
+      );
   }
 
   return (
     <div className="space-y-4">
-      {displayItems.map((item, idx) => (
-        <TradeSuggestionCard key={item.id ?? idx} suggestion={item} onLogged={handleLogged} />
+      {suggestions.map((s, i) => (
+         <SuggestionCard
+            key={i}
+            suggestion={s}
+        />
       ))}
     </div>
   );

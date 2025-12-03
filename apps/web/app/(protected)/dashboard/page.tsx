@@ -5,10 +5,12 @@ import DashboardLayout from '@/components/DashboardLayout';
 import SyncHoldingsButton from '@/components/SyncHoldingsButton';
 import PortfolioOptimizer from '@/components/dashboard/PortfolioOptimizer';
 import { WeeklyProgressCard } from '@/components/dashboard/WeeklyProgressCard';
-import SuggestionTabs from '@/components/SuggestionTabs';
+import SuggestionTabs from '@/components/dashboard/SuggestionTabs';
+import StrategyProfilesPanel from '@/components/dashboard/StrategyProfilesPanel';
 import { supabase } from '@/lib/supabase';
 import { API_URL, TEST_USER_ID } from '@/lib/constants';
 import { groupOptionSpreads, formatOptionDisplay } from '@/lib/formatters';
+import { AlertTriangle, AlertCircle } from 'lucide-react';
 
 const mockAlerts = [
   { id: '1', message: 'SPY credit put spread scout: 475/470 for $1.50 credit', time: '2 min ago' },
@@ -332,6 +334,13 @@ export default function DashboardPage() {
       );
   };
 
+  // --- DERIVED STATE ---
+
+  // Use snapshot risk metrics if available
+  const riskMetrics = snapshot?.risk_metrics || {};
+  const greeks = riskMetrics.greeks || {};
+  const greekAlerts = riskMetrics.greek_alerts || {};
+
   return (
     <DashboardLayout mockAlerts={mockAlerts}>
       <div className="max-w-7xl mx-auto p-8 space-y-6">
@@ -454,92 +463,142 @@ export default function DashboardPage() {
           </div>
         </div>
 
-        {/* Risk Header */}
-        <div className="grid grid-cols-3 gap-4">
-            <div className="bg-white p-4 rounded-lg shadow">
-                <h4 className="text-sm font-medium text-gray-500">Beta-weighted Delta</h4>
-                <p className="text-2xl font-bold">${metrics?.analytics?.beta_delta?.toFixed(2) || '0.00'}</p>
+        {/* Risk Header (Enhanced) */}
+        <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+            <div className="bg-white p-4 rounded-lg shadow relative">
+                <h4 className="text-xs font-medium text-gray-500 uppercase">Beta-weighted Delta</h4>
+                <div className="flex items-center gap-2 mt-1">
+                     <p className="text-2xl font-bold">
+                        {greeks.delta ? greeks.delta.toFixed(2) : (metrics?.analytics?.beta_delta?.toFixed(2) || '0.00')}
+                     </p>
+                     {greekAlerts.delta_over_limit && (
+                        <div title="Delta exceeds threshold">
+                           <AlertCircle className="text-red-500 w-5 h-5 animate-pulse" />
+                        </div>
+                     )}
+                </div>
             </div>
             <div className="bg-white p-4 rounded-lg shadow">
-                <h4 className="text-sm font-medium text-gray-500">Theta</h4>
-                <p className="text-2xl font-bold">${metrics?.analytics?.theta_efficiency?.toFixed(2) || '0.00'}</p>
+                <h4 className="text-xs font-medium text-gray-500 uppercase">Net Theta</h4>
+                <div className="flex items-center gap-2 mt-1">
+                     <p className="text-2xl font-bold">
+                        {greeks.theta ? greeks.theta.toFixed(2) : (metrics?.analytics?.theta_efficiency?.toFixed(2) || '0.00')}
+                     </p>
+                     {greekAlerts.theta_over_limit && (
+                        <div title="Theta exceeds threshold">
+                           <AlertCircle className="text-yellow-500 w-5 h-5" />
+                        </div>
+                     )}
+                </div>
             </div>
             <div className="bg-white p-4 rounded-lg shadow">
-                <h4 className="text-sm font-medium text-gray-500">Buying Power</h4>
-                <p className="text-2xl font-bold">${snapshot?.buying_power?.toFixed(2) || '0.00'}</p>
+                <h4 className="text-xs font-medium text-gray-500 uppercase">Net Vega</h4>
+                 <div className="flex items-center gap-2 mt-1">
+                     <p className="text-2xl font-bold">
+                        {greeks.vega ? greeks.vega.toFixed(2) : '--'}
+                     </p>
+                </div>
+            </div>
+             <div className="bg-white p-4 rounded-lg shadow">
+                <h4 className="text-xs font-medium text-gray-500 uppercase">Buying Power</h4>
+                <p className="text-2xl font-bold mt-1">${snapshot?.buying_power?.toFixed(2) || '0.00'}</p>
             </div>
         </div>
 
-        {/* SECTION 1.5: HISTORICAL SIMULATION */}
-        <div className="bg-white rounded-lg shadow p-6">
+        {/* NEW SECTION: STRATEGY PROFILES */}
+        <StrategyProfilesPanel />
+
+        {/* SECTION 1.5: HISTORICAL SIMULATION (Polished) */}
+        <div className="bg-white rounded-lg shadow p-6 border-l-4 border-indigo-500">
             <div className="flex justify-between items-center mb-4">
                 <div>
                     <h2 className="text-lg font-bold text-gray-900">Historical Regime Cycle</h2>
-                    <p className="text-sm text-gray-500">Test the Regime Engine on past data. Step through history one cycle at a time.</p>
+                    <p className="text-sm text-gray-500">Manual verification of regime transitions & strategy logic.</p>
                 </div>
                 <div className="flex items-center gap-4">
-                    <div className="text-sm text-gray-600">
-                        Current Date: <span className="font-mono font-bold">{simCursor}</span>
+                    <div className="text-sm text-gray-600 bg-gray-100 px-3 py-1 rounded">
+                        Date: <span className="font-mono font-bold">{simCursor}</span>
                     </div>
                     <button
                         onClick={runHistoricalCycle}
                         disabled={simLoading || simResult?.done}
-                        className={`px-4 py-2 rounded text-white font-medium ${
+                        className={`px-4 py-2 rounded text-white font-medium shadow-sm transition-colors ${
                             simLoading ? 'bg-gray-400 cursor-not-allowed' : 'bg-indigo-600 hover:bg-indigo-700'
                         }`}
                     >
-                        {simLoading ? 'Simulating...' : simResult?.done ? 'End of Data' : 'Run 1 Historical Cycle'}
+                        {simLoading ? 'Processing...' : simResult?.done ? 'End of Data' : 'Step Forward 1 Cycle'}
                     </button>
                 </div>
             </div>
 
             {/* Simulation Results Display */}
             {simResult && !simResult.error && (
-                <div className="bg-gray-50 rounded p-4 border border-gray-200">
+                <div className="bg-gray-50 rounded-lg p-5 border border-gray-200">
                     {simResult.done && !simResult.entryTime ? (
-                         <p className="text-gray-500 italic">{simResult.message || "No trades found in remaining data."}</p>
+                         <p className="text-gray-500 italic flex items-center gap-2">
+                             <AlertTriangle className="w-4 h-4" />
+                             {simResult.message || "No trades triggered in remaining data."}
+                         </p>
                     ) : (
-                        <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+                        <div className="grid grid-cols-2 md:grid-cols-5 gap-6">
                             <div>
-                                <p className="text-xs text-gray-500 uppercase">Entry</p>
-                                <p className="font-semibold text-gray-900">{simResult.entryTime} @ ${simResult.entryPrice?.toFixed(2)}</p>
-                                <span className={`text-xs px-2 py-0.5 rounded ${simResult.direction === 'long' ? 'bg-green-100 text-green-800' : 'bg-red-100 text-red-800'}`}>
-                                    {simResult.direction?.toUpperCase()}
+                                <p className="text-xs text-gray-500 uppercase tracking-wide">Strategy / Regime</p>
+                                <p className="font-semibold text-gray-900 mt-1">{simResult.strategy || 'Standard'}</p>
+                                <div className="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-purple-100 text-purple-800 mt-1">
+                                    {simResult.regime || 'Neutral'}
+                                </div>
+                            </div>
+
+                            <div>
+                                <p className="text-xs text-gray-500 uppercase tracking-wide">Entry</p>
+                                <p className="font-semibold text-gray-900 mt-1">{simResult.entryTime}</p>
+                                <p className="text-sm text-gray-600">@ ${simResult.entryPrice?.toFixed(2)}</p>
+                                <span className={`text-[10px] px-1.5 py-0.5 rounded uppercase mt-1 inline-block ${simResult.direction === 'long' ? 'bg-green-100 text-green-800' : 'bg-red-100 text-red-800'}`}>
+                                    {simResult.direction}
                                 </span>
                             </div>
+
                             <div>
-                                <p className="text-xs text-gray-500 uppercase">Exit</p>
+                                <p className="text-xs text-gray-500 uppercase tracking-wide">Exit</p>
                                 {simResult.exitTime ? (
-                                    <p className="font-semibold text-gray-900">{simResult.exitTime} @ ${simResult.exitPrice?.toFixed(2)}</p>
+                                    <>
+                                        <p className="font-semibold text-gray-900 mt-1">{simResult.exitTime}</p>
+                                        <p className="text-sm text-gray-600">@ ${simResult.exitPrice?.toFixed(2)}</p>
+                                    </>
                                 ) : (
-                                    <p className="text-sm text-gray-400 italic">Open...</p>
+                                    <p className="text-sm text-gray-400 italic mt-1">Position Open</p>
                                 )}
                             </div>
+
                             <div>
-                                <p className="text-xs text-gray-500 uppercase">P&L</p>
+                                <p className="text-xs text-gray-500 uppercase tracking-wide">P&L</p>
                                 {simResult.pnl !== undefined ? (
-                                    <p className={`font-bold text-lg ${simResult.pnl >= 0 ? 'text-green-600' : 'text-red-600'}`}>
-                                        ${simResult.pnl.toFixed(2)}
+                                    <p className={`font-bold text-2xl mt-1 ${simResult.pnl >= 0 ? 'text-green-600' : 'text-red-600'}`}>
+                                        {simResult.pnl >= 0 ? '+' : ''}{simResult.pnl.toFixed(2)}
                                     </p>
                                 ) : (
-                                    <p className="text-gray-400">---</p>
+                                    <p className="text-gray-400 text-xl mt-1">---</p>
                                 )}
                             </div>
-                            <div>
-                                <p className="text-xs text-gray-500 uppercase">Conviction (Entry/Exit)</p>
-                                <div className="flex items-center gap-2">
-                                    <span className="font-mono text-sm">{simResult.entryConviction?.toFixed(2) || '--'}</span>
-                                    <span className="text-gray-400">→</span>
-                                    <span className="font-mono text-sm">{simResult.exitConviction?.toFixed(2) || '--'}</span>
+
+                            <div className="bg-white p-2 rounded border border-gray-100">
+                                <p className="text-xs text-gray-500 uppercase tracking-wide mb-1">Conviction</p>
+                                <div className="flex items-center justify-between text-sm">
+                                    <span className="text-gray-500">Entry:</span>
+                                    <span className="font-mono font-bold">{simResult.entryConviction?.toFixed(2) || '--'}</span>
                                 </div>
-                                <p className="text-xs text-purple-600 mt-1">Regime: {simResult.regime}</p>
+                                <div className="flex items-center justify-between text-sm mt-1">
+                                    <span className="text-gray-500">Exit:</span>
+                                    <span className="font-mono font-bold">{simResult.exitConviction?.toFixed(2) || '--'}</span>
+                                </div>
                             </div>
                         </div>
                     )}
                 </div>
             )}
             {simResult?.error && (
-                <div className="bg-red-50 text-red-700 p-3 rounded text-sm mt-2">
+                <div className="bg-red-50 text-red-700 p-3 rounded text-sm mt-2 flex items-center gap-2">
+                    <AlertTriangle className="w-4 h-4" />
                     Error: {simResult.error}
                 </div>
             )}
@@ -568,16 +627,39 @@ export default function DashboardPage() {
                     <button onClick={loadJournalStats} className="text-sm text-purple-700 underline">Refresh</button>
                 </div>
                 {journalStats ? (
-                    <div className="grid grid-cols-2 gap-4">
-                        <div className="bg-white p-3 rounded border border-purple-200">
-                            <p className="text-xs text-gray-600">Win Rate</p>
-                            <p className="text-xl font-bold text-purple-900">{journalStats.stats.win_rate?.toFixed(1) || 0}%</p>
+                    <div className="space-y-4">
+                         <div className="grid grid-cols-2 gap-4">
+                            <div className="bg-white p-3 rounded border border-purple-200">
+                                <p className="text-xs text-gray-600">Win Rate</p>
+                                <p className="text-xl font-bold text-purple-900">{journalStats.stats.win_rate?.toFixed(1) || 0}%</p>
+                            </div>
+                            <div className="bg-white p-3 rounded border border-purple-200">
+                                <p className="text-xs text-gray-600">Total P&L</p>
+                                <p className={`text-xl font-bold ${(journalStats.stats.total_pnl || 0) >= 0 ? 'text-green-600' : 'text-red-600'}`}>
+                                    ${(journalStats.stats.total_pnl || 0).toFixed(0)}
+                                </p>
+                            </div>
                         </div>
+                        {/* Drift / Discipline Placeholder */}
                         <div className="bg-white p-3 rounded border border-purple-200">
-                            <p className="text-xs text-gray-600">Total P&L</p>
-                            <p className={`text-xl font-bold ${(journalStats.stats.total_pnl || 0) >= 0 ? 'text-green-600' : 'text-red-600'}`}>
-                                ${(journalStats.stats.total_pnl || 0).toFixed(0)}
-                            </p>
+                             <div className="flex items-center justify-between mb-2">
+                                <p className="text-xs text-gray-600 font-medium uppercase">Discipline (Last 30d)</p>
+                                <Activity className="w-3 h-3 text-gray-400" />
+                             </div>
+                             <div className="space-y-1 text-sm">
+                                <div className="flex justify-between">
+                                    <span>Plan Adherence</span>
+                                    <span className="font-bold text-green-600">92%</span>
+                                </div>
+                                <div className="flex justify-between text-gray-500">
+                                    <span>Impulse Trades</span>
+                                    <span>0</span>
+                                </div>
+                                <div className="flex justify-between text-gray-500">
+                                    <span>Size Violations</span>
+                                    <span>0</span>
+                                </div>
+                             </div>
                         </div>
                     </div>
                 ) : (

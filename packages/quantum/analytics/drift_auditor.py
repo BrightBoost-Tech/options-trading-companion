@@ -211,6 +211,37 @@ def audit_plan_vs_execution(
                         "details_json": details,
                         "created_at": datetime.now(timezone.utc).isoformat()
                     })
+
+                    # Phase 7: Log Learning Loop Entry (Optional)
+                    # "Suggestion + Optimizer State" -> "Actual Execution Outcome"
+                    # If we have suggestion_id/trace_id, link it.
+                    try:
+                        trace_id = sugg.get("order_json", {}).get("context", {}).get("trace_id")
+                        if trace_id:
+                            # We found a trace_id. Log to learning_feedback_loops.
+                            # We don't have realized PnL yet (entry just happened).
+                            # We log the 'event' of execution. Later exits will update PnL.
+                            # For now, we can just ensure the link exists or log a 'disciplined_entry' event.
+
+                            # However, 'learning_feedback_loops' expects an outcome.
+                            # Maybe we wait for exit? Or log entry as 'disciplined_entry' outcome type?
+                            # Prompt says: "audit_plan_vs_execution: ... optionally log a learning_feedback_loops row"
+                            # outcome_type: 'disciplined_execution'
+
+                            learning_data = {
+                                "source_event_id": None, # Could be suggestion ID if UUID
+                                "trace_id": trace_id,
+                                "user_id": user_id,
+                                "outcome_type": tag, # 'disciplined_execution' or 'size_violation'
+                                "pnl_realized": None,
+                                "pnl_predicted": sugg.get("ev"), # Use EV as predicted PnL proxy
+                                "drift_tags": [tag],
+                                "details_json": details
+                            }
+                            supabase.table("learning_feedback_loops").insert(learning_data).execute()
+                    except Exception as le:
+                        print(f"Learning Loop Log Error: {le}")
+
                     break
 
             if not match_found:

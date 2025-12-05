@@ -138,6 +138,14 @@ async def execute_rebalance(
     unique_tickers = [s.ticker for s in current_spreads]
     iv_ctx_map = iv_service.get_iv_context_for_symbols(unique_tickers)
 
+    # Phase 6: Wire Real Conviction
+    # We ideally compute this via ScoringEngine. For now, we wire the map structure.
+    conviction_map = {}
+    for sym in unique_tickers:
+        # Placeholder: If we had factors, we'd run ScoringEngine here.
+        # Currently defaults to 1.0 (Neutral) to ensure stability until factors are cached.
+        conviction_map[sym] = 1.0
+
     # Construct input positions for optimizer
     opt_req = OptimizationRequest(
         positions=raw_positions,
@@ -201,10 +209,8 @@ async def execute_rebalance(
                  ctx = iv_ctx_map.get(sym, {})
                  regime = ctx.get("iv_regime", "normal") # e.g. "suppressed", "normal", "elevated"
 
-                 # Fallback conviction: we don't have a live conviction score for *holdings* in this flow yet,
-                 # unless we ran a full rescore. For now, default to 1.0 (neutral) or try to find it.
-                 # If we had a "conviction_map" passed in, we'd use it.
-                 conviction = 1.0
+                 # Phase 6: Use Real Conviction Map
+                 conviction = conviction_map.get(sym, 1.0)
 
                  # Apply Dynamic Constraint with REAL regime
                  adjusted_w = calculate_dynamic_target(
@@ -1218,17 +1224,18 @@ async def get_drift_summary(user_id: str = Depends(get_current_user)):
         size = 0
 
         for log in logs:
-            tags = log.get("discipline_tags", [])
-            if "disciplined_execution" in tags:
+            # Phase 6: Use 'tag' column (single string)
+            tag = log.get("tag", "")
+            if tag == "disciplined_execution":
                 disciplined += 1
-            if "impulse_trade" in tags:
+            elif tag == "impulse_trade":
                 impulse += 1
-            if "size_violation" in tags:
+            elif tag == "size_violation":
                 size += 1
 
-        # If total suggests drift check events, use that.
-        # But drift logs might only be created on *events*.
-        # Let's assume total = count of logs for now.
+        # Total events = sum of classified events
+        total_suggestions = disciplined + impulse + size
+        total = total_suggestions # Alias for clarity
 
         d_rate = disciplined / total if total > 0 else 0.0
         i_rate = impulse / total if total > 0 else 0.0
@@ -1236,7 +1243,7 @@ async def get_drift_summary(user_id: str = Depends(get_current_user)):
 
         return {
              "window_days": 7,
-             "total_suggestions": total,
+             "total_suggestions": total_suggestions,
              "disciplined_execution": disciplined,
              "impulse_trades": impulse,
              "size_violations": size,

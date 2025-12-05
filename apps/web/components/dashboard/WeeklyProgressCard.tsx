@@ -73,6 +73,7 @@ export function WeeklyProgressCard() {
     }
 
     const { user_metrics, system_metrics, synthesis, dominant_regime } = data;
+    const headline = synthesis?.headline || "No data available";
 
     return (
         <Card className="bg-gradient-to-br from-white to-gray-50 border-l-4 border-l-blue-500">
@@ -82,7 +83,7 @@ export function WeeklyProgressCard() {
                         <CardTitle className="flex items-center gap-2">
                             Weekly Progress <Badge variant="outline">{data.week_id}</Badge>
                         </CardTitle>
-                        <CardDescription>{synthesis.headline}</CardDescription>
+                        <CardDescription>{headline}</CardDescription>
                     </div>
                     <Badge className={dominant_regime === 'Neutral' ? 'bg-gray-500' : 'bg-purple-600'}>
                         {dominant_regime} Regime

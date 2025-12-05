@@ -140,11 +140,7 @@ async def execute_rebalance(
 
     # Phase 6: Wire Real Conviction
     # We ideally compute this via ScoringEngine. For now, we wire the map structure.
-    conviction_map = {}
-    for sym in unique_tickers:
-        # Placeholder: If we had factors, we'd run ScoringEngine here.
-        # Currently defaults to 1.0 (Neutral) to ensure stability until factors are cached.
-        conviction_map[sym] = 1.0
+    conviction_map = {}  # TODO: populate with ScoringEngine + ConvictionTransform
 
     # Construct input positions for optimizer
     opt_req = OptimizationRequest(

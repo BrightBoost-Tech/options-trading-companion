@@ -74,16 +74,35 @@ export default function SuggestionCard({ suggestion, onStage, onModify, onDismis
                 <div className="grid grid-cols-1 md:grid-cols-3 gap-4 my-3 text-sm">
                     {/* Legs */}
                     <div className="col-span-2 space-y-1">
-                        {order_json?.legs?.map((leg, idx) => (
-                            <div key={idx} className="flex justify-between border-b border-gray-100 last:border-0 py-1">
-                                <span className="text-gray-600">
-                                    {leg.quantity > 0 ? '+' : ''}{leg.quantity} {leg.type === 'call' ? 'C' : 'P'} {leg.strike}
-                                </span>
-                                <span className={`text-xs font-mono ${leg.action === 'buy' ? 'text-green-600' : 'text-red-600'}`}>
-                                    {leg.action.toUpperCase()}
-                                </span>
-                            </div>
-                        ))}
+                        {order_json?.legs?.map((leg, idx) => {
+                            // Safe handling for potentially missing fields
+                            const rawAction = leg.action ?? "";
+                            const actionLabel = rawAction.toUpperCase();
+                            const actionClass =
+                                rawAction === "buy"
+                                    ? "text-green-600"
+                                    : rawAction === "sell"
+                                    ? "text-red-600"
+                                    : "text-gray-500";
+
+                            const qty = typeof leg.quantity === "number" ? leg.quantity : 0;
+                            const typeLabel =
+                                leg.type === "call" ? "C" :
+                                leg.type === "put"  ? "P"  :
+                                "";
+                            const strike = leg.strike ?? "";
+
+                            return (
+                                <div key={idx} className="flex justify-between border-b border-gray-100 last:border-0 py-1">
+                                    <span className="text-gray-600">
+                                        {qty > 0 ? "+" : ""}{qty} {typeLabel} {strike}
+                                    </span>
+                                    <span className={`text-xs font-mono ${actionClass}`}>
+                                        {actionLabel}
+                                    </span>
+                                </div>
+                            );
+                        })}
                     </div>
 
                     {/* Payoff & Impact */}

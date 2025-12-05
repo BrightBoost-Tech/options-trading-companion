@@ -8,8 +8,6 @@ REM Set environment variables if not already set
 if "%POLYGON_API_KEY%"=="" set POLYGON_API_KEY=NKZ4W0g_094QVJMEh2rebeIRhluWtabk
 if "%PLAID_CLIENT_ID%"=="" set PLAID_CLIENT_ID=6916bee0f7ef350020208272
 if "%PLAID_SECRET%"=="" set PLAID_SECRET=0abdbc650e5c27358e4c8f73353473
-REM PLAID_ENV is now controlled by .env or user environment
-if "%PLAID_ENV%"=="" set PLAID_ENV=sandbox
 
 REM Start Python API
 start "Quantum API" cmd /k "cd /d %~dp0packages\quantum && python api.py"

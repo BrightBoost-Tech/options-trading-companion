@@ -61,7 +61,7 @@ export default function JournalPage() {
           ) : entries.length === 0 ? (
             <div className="p-12 text-center text-gray-500">
               <p className="text-lg">No trades logged yet.</p>
-              <p className="text-sm mt-2">Use the "Log New Trade" button to get started.</p>
+              <p className="text-sm mt-2">Use the &quot;Log New Trade&quot; button to get started.</p>
             </div>
           ) : (
             <div className="overflow-x-auto">

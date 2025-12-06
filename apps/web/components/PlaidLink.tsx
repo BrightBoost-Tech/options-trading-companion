@@ -3,6 +3,7 @@
 import { useEffect, useState, useCallback, useRef } from 'react';
 import { usePlaidLink, PlaidLinkOptions } from 'react-plaid-link';
 import { API_URL } from '@/lib/constants';
+import { logEvent } from '@/lib/analytics';
 
 interface PlaidLinkProps {
   userId: string;
@@ -59,6 +60,13 @@ function PlaidLinkHeadless({ token, onSuccess, onExit, onCleanup }: {
             onCleanup();
         }, [onSuccess, onCleanup]),
         onExit: useCallback((err: any, metadata: any) => {
+            if (err) {
+                logEvent({
+                    eventName: 'plaid_link_error',
+                    category: 'system',
+                    properties: { error_code: err.error_code, error_message: err.error_message }
+                });
+            }
             if (onExit) onExit(err, metadata);
             onCleanup();
         }, [onExit, onCleanup]),
@@ -99,6 +107,8 @@ export default function PlaidLink({ userId, onSuccess, onExit }: PlaidLinkProps)
     setError('');
 
     try {
+      logEvent({ eventName: 'plaid_link_started', category: 'ux' });
+
       // Step A: Load Script & Fetch Token in Parallel
       console.log('🟡 Initializing Plaid Connection...');
       

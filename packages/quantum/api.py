@@ -30,6 +30,7 @@ import plaid_endpoints
 from options_scanner import scan_for_opportunities
 from services.journal_service import JournalService
 from services.universe_service import UniverseService
+from services.analytics_service import AnalyticsService
 from optimizer import router as optimizer_router
 from market_data import calculate_portfolio_inputs
 # New Services for Cash-Aware Workflow
@@ -85,8 +86,12 @@ key = supa_secrets.service_role_key
 
 supabase: Client = create_client(url, key) if url and key else None
 
+# Initialize Analytics Service
+analytics_service = AnalyticsService(supabase)
+app.state.analytics_service = analytics_service
+
 # --- Register Plaid Endpoints ---
-plaid_endpoints.register_plaid_endpoints(app, plaid_service, supabase)
+plaid_endpoints.register_plaid_endpoints(app, plaid_service, supabase, analytics_service)
 
 # --- Register Optimizer Endpoints ---
 app.include_router(optimizer_router)
@@ -251,6 +256,18 @@ async def execute_rebalance(
         # Clear old rebalance suggestions
         supabase.table(TRADE_SUGGESTIONS_TABLE).delete().eq("user_id", user_id).eq("window", "rebalance").execute()
 
+        # Log event: Suggestion Batch Generated
+        analytics_service.log_event(
+            user_id=user_id,
+            event_name="suggestion_batch_generated",
+            category="system",
+            properties={
+                "count": len(trades),
+                "window": "rebalance",
+                "profile": "balanced"
+            }
+        )
+
         # We already have iv_ctx_map for holding symbols, but trades might be new legs/spreads?
         # The trades are usually adjustments to existing or closes.
         # If new symbols appear (rare in rebalance unless specific strategy), we might need to fetch again.
@@ -285,6 +302,11 @@ async def execute_rebalance(
 
         res = supabase.table(TRADE_SUGGESTIONS_TABLE).insert(db_rows).execute()
         saved_count = len(res.data) if res.data else 0
+
+        # Log individual suggestion events for better traceability (optional but good for learning loop)
+        if res.data:
+            for row in res.data:
+                analytics_service.log_suggestion_event(user_id, row, "suggestion_generated")
 
     return {
         "status": "ok",
@@ -437,6 +459,29 @@ def health_check():
         "status": "ok",
         "market_data": "connected" if polygon_key else "not configured",
     }
+
+# --- Analytics Endpoints ---
+
+class AnalyticsEventRequest(BaseModel):
+    event_name: str
+    category: str
+    properties: Dict[str, Any] = {}
+
+@app.post("/analytics/events")
+async def log_analytics_event(
+    req: AnalyticsEventRequest,
+    user_id: str = Depends(get_current_user)
+):
+    """
+    Endpoint for frontend to log events securely.
+    """
+    analytics_service.log_event(
+        user_id=user_id,
+        event_name=req.event_name,
+        category=req.category,
+        properties=req.properties
+    )
+    return {"status": "logged"}
 
 
 # --- Cron Task Endpoints ---
@@ -873,6 +918,9 @@ async def sync_holdings(
 
     # 4. Upsert into POSITIONS (Single Truth)
     if supabase and holdings:
+        # Log Sync Started
+        analytics_service.log_event(user_id, "plaid_sync_started", "system", {"holdings_count": len(holdings)})
+
         data_to_insert = []
         for h in holdings:
             row = h.model_dump()
@@ -901,6 +949,9 @@ async def sync_holdings(
 
         # 5. Create Snapshot
         await create_portfolio_snapshot(user_id)
+
+        # Log Sync Completed
+        analytics_service.log_event(user_id, "plaid_sync_completed", "system", {"status": "success"})
 
         # 6. Drift Audit (Phase 2)
         # Check Execution (Reality) vs Plan (Suggestions)

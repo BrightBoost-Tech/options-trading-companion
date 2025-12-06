@@ -1,9 +1,10 @@
 'use client';
 
-import React from 'react';
+import React, { useEffect, useRef } from 'react';
 import { Card, CardContent } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { Suggestion } from '@/lib/types';
+import { logEvent } from '@/lib/analytics';
 
 interface SuggestionCardProps {
     suggestion: Suggestion;
@@ -14,12 +15,26 @@ interface SuggestionCardProps {
 
 export default function SuggestionCard({ suggestion, onStage, onModify, onDismiss }: SuggestionCardProps) {
     const { order_json, score, metrics, iv_regime, iv_rank, delta_impact, theta_impact, staged } = suggestion;
+    const hasLoggedView = useRef(false);
+
+    // Analytics: Log View on Mount (or IntersectionObserver for strictly viewport)
+    // For simplicity, we log on mount if not already logged.
+    useEffect(() => {
+        if (!hasLoggedView.current) {
+            logEvent("suggestion_viewed", "ux", {
+                suggestion_id: suggestion.id,
+                symbol: suggestion.symbol,
+                strategy: suggestion.strategy,
+                window: suggestion.window,
+                iv_regime,
+                score
+            });
+            hasLoggedView.current = true;
+        }
+    }, [suggestion.id, suggestion.symbol, suggestion.strategy, suggestion.window, iv_regime, score]);
 
     // Payoff Diagram Helper (Simple V-shape or hockey stick)
-    // We'll generate a tiny SVG based on strategy type and strikes
     const renderPayoffDiagram = () => {
-        // This is a visual stub. Real implementation would calculate points based on legs.
-        // For now, we draw a generic "profit zone" curve.
         return (
             <svg viewBox="0 0 100 40" className="w-full h-full text-green-500 opacity-20">
                 <path d="M0,40 L40,40 L60,10 L100,10" fill="none" stroke="currentColor" strokeWidth="2" />
@@ -34,6 +49,22 @@ export default function SuggestionCard({ suggestion, onStage, onModify, onDismis
         if (r.includes('elevated') || r.includes('high')) return 'bg-orange-100 text-orange-800';
         if (r.includes('suppressed') || r.includes('low')) return 'bg-blue-100 text-blue-800';
         return 'bg-green-100 text-green-800';
+    };
+
+    // Analytics Wrappers for Actions
+    const handleStage = () => {
+        logEvent("suggestion_staged", "ux", { suggestion_id: suggestion.id, symbol: suggestion.symbol });
+        onStage && onStage(suggestion);
+    };
+
+    const handleModify = () => {
+        logEvent("suggestion_expanded", "ux", { suggestion_id: suggestion.id, symbol: suggestion.symbol }); // Treating 'Modify' as expanding details/edit
+        onModify && onModify(suggestion);
+    };
+
+    const handleDismiss = () => {
+        logEvent("suggestion_dismissed", "ux", { suggestion_id: suggestion.id, symbol: suggestion.symbol, reason: 'skipped' });
+        onDismiss && onDismiss(suggestion, 'skipped');
     };
 
     return (
@@ -75,7 +106,6 @@ export default function SuggestionCard({ suggestion, onStage, onModify, onDismis
                     {/* Legs */}
                     <div className="col-span-2 space-y-1">
                         {order_json?.legs?.map((leg, idx) => {
-                            // Safe handling for potentially missing fields
                             const rawAction = leg.action ?? "";
                             const actionLabel = rawAction.toUpperCase();
                             const actionClass =
@@ -120,19 +150,19 @@ export default function SuggestionCard({ suggestion, onStage, onModify, onDismis
                 {/* Footer Actions */}
                 <div className="flex justify-end gap-2 mt-3 pt-2 border-t border-gray-100">
                     <button
-                        onClick={() => onDismiss && onDismiss(suggestion, 'skipped')}
+                        onClick={handleDismiss}
                         className="text-xs text-gray-400 hover:text-gray-600 px-2 py-1"
                     >
                         Dismiss
                     </button>
                     <button
-                        onClick={() => onModify && onModify(suggestion)}
+                        onClick={handleModify}
                         className="text-xs bg-white border border-gray-300 text-gray-700 px-3 py-1 rounded hover:bg-gray-50"
                     >
                         Modify
                     </button>
                     <button
-                        onClick={() => onStage && onStage(suggestion)}
+                        onClick={handleStage}
                         className={`text-xs px-3 py-1 rounded font-medium ${staged ? 'bg-green-100 text-green-800' : 'bg-purple-600 text-white hover:bg-purple-700'}`}
                     >
                         {staged ? 'Staged' : 'Stage Trade'}

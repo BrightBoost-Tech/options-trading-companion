@@ -9,7 +9,7 @@ from plaid.exceptions import ApiException
 from datetime import datetime
 from security import encrypt_token, decrypt_token, redact_sensitive_fields
 
-def register_plaid_endpoints(app, plaid_service, supabase_client=None):
+def register_plaid_endpoints(app, plaid_service, supabase_client=None, analytics_service=None):
     """Register Plaid endpoints with the FastAPI app"""
     
     if not plaid_service:
@@ -69,21 +69,30 @@ def register_plaid_endpoints(app, plaid_service, supabase_client=None):
     @app.post("/plaid/create_link_token")
     async def create_plaid_link_token(request: Dict):
         """Create Plaid Link token for connecting brokerage account"""
+        user_id = request.get('user_id', 'default_user')
+        if analytics_service:
+            analytics_service.log_event(user_id, "plaid_link_started", "ux", {})
+
         try:
-            user_id = request.get('user_id', 'default_user')
             result = plaid_service.create_link_token(user_id)
             # Ensure return format is { "link_token": "..." }
             # Service returns full dict, which includes link_token
             return redact_sensitive_fields(result)
         except ValueError as e:
             print(f"❌ Plaid Configuration Error: {e}")
+            if analytics_service:
+                analytics_service.log_event(user_id, "plaid_link_error", "system", {"error": str(e)})
             raise HTTPException(status_code=400, detail=str(e))
         except ApiException as e:
             error_msg = parse_plaid_error(e)
             print(f"❌ Plaid Link Token Error: {error_msg}")
+            if analytics_service:
+                analytics_service.log_event(user_id, "plaid_link_error", "system", {"error": error_msg})
             raise HTTPException(status_code=400, detail=error_msg)
         except Exception as e:
             print(f"❌ Unexpected Error in create_link_token: {e}")
+            if analytics_service:
+                analytics_service.log_event(user_id, "plaid_link_error", "system", {"error": str(e)})
             raise HTTPException(status_code=500, detail=f"Internal Server Error: {str(e)}")
 
     @app.post("/plaid/exchange_token")
@@ -99,6 +108,9 @@ def register_plaid_endpoints(app, plaid_service, supabase_client=None):
             
             print(f"🔄 Exchanging public token for user {user_id}...")
             result = plaid_service.exchange_public_token(public_token)
+
+            if analytics_service:
+                analytics_service.log_event(user_id, "plaid_link_completed", "ux", {"institution": metadata.get("institution", {}).get("name")})
 
             access_token = result.get('access_token')
 

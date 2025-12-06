@@ -34,13 +34,56 @@ def learn_from_cycle(
     mode: str = "historical",
 ) -> None:
     """
-    Placeholder hook for nested learning.
-    This would eventually feed (state, action, reward) tuples into the QCI/Surrogate optimizer
-    or update the regime-conditional weights.
+    Hook for nested learning.
+    Feeds (state, action, reward) into learning_feedback_loops for offline analysis.
     """
-    # For now, just log structured data for debug/analysis
+    try:
+        # Check if enabled globally (redundant check if caller checked, but safe)
+        if not os.getenv("ENABLE_HISTORICAL_NESTED_LEARNING", "false").lower() == "true":
+             return
+
+        # Lazy import to avoid circular dep at top level if it becomes an issue,
+        # though usually okay.
+        from nested_logging import _get_supabase_client
+
+        supabase = _get_supabase_client()
+        if not supabase:
+            return
+
+        # Prepare details
+        details = {
+            "entry_regime": entry.get("regimeAtEntry"),
+            "exit_regime": exit.get("regimeAtExit"),
+            "entry_conviction": entry.get("convictionAtEntry"),
+            "exit_conviction": exit.get("convictionAtExit"),
+            "days_in_trade": exit.get("daysInTrade"),
+            "mode": mode,
+            "trajectory_length": len(trajectory)
+        }
+
+        # Create a synthetic trace_id for this historical episode
+        import uuid
+        trace_id = str(uuid.uuid4())
+
+        data = {
+            "trace_id": trace_id,
+            "user_id": None, # Historical simulation is usually system-wide or anonymous
+            "outcome_type": "historical_win" if reward > 0 else "historical_loss",
+            "pnl_realized": reward,
+            "pnl_predicted": None, # Could use entry expected return if available
+            "drift_tags": [],
+            "details_json": details,
+            "created_at": datetime.now().isoformat()
+        }
+
+        supabase.table("learning_feedback_loops").insert(data).execute()
+
+    except Exception as e:
+        print(f"[NestedLearning] Failed to log cycle: {e}")
+
+    # Log to console as well
     print(f"[NestedLearning:{mode}] Cycle closed. PnL: {reward:.2f}. "
-          f"EntryRegime: {entry.get('regime')}, ExitRegime: {exit.get('regimeAtExit')}")
+          f"EntryRegime: {entry.get('regimeAtEntry')}, ExitRegime: {exit.get('regimeAtExit')}")
 
 class HistoricalCycleService:
     def __init__(self, polygon_service: PolygonService = None):

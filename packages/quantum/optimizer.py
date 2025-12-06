@@ -27,9 +27,11 @@ from nested.adapters import load_symbol_adapters, apply_biases
 from nested.backbone import compute_macro_features, infer_global_context, log_global_context
 from nested.session import load_session_state, refresh_session_from_db, get_session_sigma_scale
 from security import get_current_user_id
+from fastapi import Request
 
 from models import Spread, SpreadLeg, SpreadPosition
 from services.options_utils import group_spread_positions
+from services.analytics_service import AnalyticsService
 
 router = APIRouter()
 
@@ -287,7 +289,12 @@ def _compute_portfolio_weights(
 
 # --- Endpoint 1: Main Optimization ---
 @router.post("/optimize/portfolio")
-async def optimize_portfolio(req: OptimizationRequest, user_id: str = Depends(get_current_user_id)):
+async def optimize_portfolio(req: OptimizationRequest, request: Request, user_id: str = Depends(get_current_user_id)):
+    analytics: Optional[AnalyticsService] = getattr(request.app.state, "analytics_service", None)
+
+    if analytics:
+        analytics.log_event(user_id, "optimization_started", "system", {"profile": req.profile, "nested": req.nested_enabled})
+
     try:
         if req.profile == "aggressive" and req.risk_aversion == 2.0:
             req.risk_aversion = 1.0
@@ -404,6 +411,19 @@ async def optimize_portfolio(req: OptimizationRequest, user_id: str = Depends(ge
             mu, sigma, coskew, tickers, investable_assets, req, user_id,
             total_portfolio_value, liquidity, force_baseline=force_main_baseline
         )
+
+        if analytics and trace_id:
+            analytics.log_event(
+                user_id,
+                "optimization_completed",
+                "system",
+                {
+                    "solver": solver_type,
+                    "assets": len(tickers),
+                    "profile": final_profile
+                },
+                trace_id=str(trace_id)
+            )
 
         # Formatting Targets for JSON response
         formatted_targets = []

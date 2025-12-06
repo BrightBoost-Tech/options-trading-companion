@@ -199,21 +199,30 @@ async def execute_rebalance(
              # Phase 3: Post-process weights with Regime-Elastic Caps
              spread_map = {s.ticker: s for s in current_spreads}
 
+             # -----------------------------------------------------
+             # CONVICTION MAP PREPARATION
+             # TODO: Wire real conviction from scoring/suggestion pipeline.
+             # Currently we only have IV Rank context.
+             # For now, we default to 1.0 (neutral) for all symbols.
+             # -----------------------------------------------------
+             conviction_map: Dict[str, float] = {}
+             for sym in tickers:
+                 conviction_map[sym] = 1.0
+
              targets = []
              for sym, w in target_weights.items():
                  # Elastic Logic
                  spread_obj = spread_map.get(sym)
                  strat_type = spread_obj.spread_type if spread_obj else "other"
 
-                 # Retrieve Regime & Conviction
-                 # Note: iv_ctx_map keys are typically tickers or symbols.
+                 # Retrieve Regime
                  ctx = iv_ctx_map.get(sym, {})
                  regime = ctx.get("iv_regime", "normal") # e.g. "suppressed", "normal", "elevated"
 
                  # Phase 6: Use Real Conviction Map
                  conviction = conviction_map.get(sym, 1.0)
 
-                 # Apply Dynamic Constraint with REAL regime
+                 # Apply Dynamic Constraint with REAL regime & conviction
                  adjusted_w = calculate_dynamic_target(
                      base_weight=w,
                      strategy_type=strat_type,

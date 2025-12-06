@@ -4,7 +4,7 @@ import React, { useState, useEffect } from 'react';
 import { Card, CardHeader, CardTitle, CardContent, CardDescription } from '@/components/ui/card';
 import { API_URL, TEST_USER_ID } from '@/lib/constants';
 import { supabase } from '@/lib/supabase';
-import { StrategyConfig, BacktestRequest, BacktestResult } from '@/lib/types';
+import { StrategyConfig, BacktestRequest, StrategyBacktest } from '@/lib/types';
 import { Badge } from '@/components/ui/badge';
 
 interface StrategyProfilesPanelProps {
@@ -25,7 +25,7 @@ export default function StrategyProfilesPanel({ className }: StrategyProfilesPan
         ticker: 'SPY',
         strategy_name: ''
     });
-    const [backtestResults, setBacktestResults] = useState<any[]>([]);
+    const [backtestResults, setBacktestResults] = useState<StrategyBacktest[]>([]);
 
     useEffect(() => {
         loadStrategies();

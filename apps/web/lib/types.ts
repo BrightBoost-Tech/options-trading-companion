@@ -47,6 +47,23 @@ export interface BacktestResult {
   created_at: string; // Made required as it's used in UI
 }
 
+export interface StrategyBacktest {
+  id: string;
+  strategy_name: string;
+  version: number;
+  param_hash: string | null;
+  start_date: string;
+  end_date: string;
+  ticker: string;
+  trades_count: number;
+  win_rate: number;
+  max_drawdown: number;
+  avg_roi: number;
+  total_pnl: number;
+  status: "pending" | "completed" | "error";
+  created_at: string;
+}
+
 export interface SuggestionLeg {
   symbol: string;
   quantity: number;

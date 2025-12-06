@@ -1,3 +1,5 @@
+import { fetchWithAuth } from "@/lib/api";
+
 export type AnalyticsPayload = {
   eventName: string;
   category: 'ux' | 'system' | 'trade' | 'learning';
@@ -6,7 +8,14 @@ export type AnalyticsPayload = {
 
 export async function logEvent({ eventName, category, properties }: AnalyticsPayload) {
   try {
-    await fetch('/api/analytics/events', {
+    // Use absolute URL on client to hit the Next.js proxy.
+    // On server (SSR), fall back to relative path '/analytics/events' which fetchWithAuth
+    // will prepend with API_URL to hit the backend directly.
+    const url = typeof window !== 'undefined'
+      ? `${window.location.origin}/api/analytics/events`
+      : '/analytics/events';
+
+    await fetchWithAuth(url, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',

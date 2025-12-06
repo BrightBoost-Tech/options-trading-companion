@@ -116,6 +116,7 @@ export interface Suggestion {
   iv_rank?: number;
   iv_regime?: string;
   conviction?: number;
+  trace_id?: string;
 
   // Greeks Impact (Top Level or Derived)
   delta_impact?: number;

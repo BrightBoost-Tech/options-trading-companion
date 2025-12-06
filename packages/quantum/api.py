@@ -23,6 +23,8 @@ from security.secrets_provider import SecretsProvider
 
 # Import models and services
 from models import Holding, SyncResponse, PortfolioSnapshot, Spread
+from config import ENABLE_REBALANCE_CONVICTION, ENABLE_REBALANCE_CONVICTION_SHADOW
+from analytics.conviction_service import ConvictionService, PositionDescriptor
 import plaid_service
 import plaid_endpoints
 
@@ -143,9 +145,42 @@ async def execute_rebalance(
     unique_tickers = [s.ticker for s in current_spreads]
     iv_ctx_map = iv_service.get_iv_context_for_symbols(unique_tickers)
 
-    # Phase 6: Wire Real Conviction
-    # We ideally compute this via ScoringEngine. For now, we wire the map structure.
-    conviction_map = {}  # TODO: populate with ScoringEngine + ConvictionTransform
+    # Phase 8: Real Conviction Service
+    # Build positions for conviction service
+    positions_for_conviction: List[PositionDescriptor] = []
+    for spread in current_spreads:
+        # Get IV rank from context if available
+        ctx = iv_ctx_map.get(spread.ticker, {})
+        iv_rank = ctx.get("iv_rank")
+
+        positions_for_conviction.append(
+            PositionDescriptor(
+                symbol=spread.ticker,
+                underlying=spread.underlying or spread.ticker,
+                strategy_type=spread.spread_type or "other",
+                direction="long" if spread.net_delta >= 0 else "short",
+                iv_rank=float(iv_rank) if iv_rank is not None else None
+            )
+        )
+
+    # Determine simple regime context
+    # Use first available regime or default
+    global_regime = "normal"
+    for ctx in iv_ctx_map.values():
+        if "iv_regime" in ctx:
+            global_regime = ctx["iv_regime"]
+            break
+
+    regime_context = {
+        "current_regime": global_regime,
+        "universe_median": 50.0,  # Placeholder, usually from UniverseService
+    }
+
+    conviction_service = ConvictionService(supabase=supabase)
+    real_conviction_map = conviction_service.get_portfolio_conviction(
+        positions=positions_for_conviction,
+        regime_context=regime_context,
+    )
 
     # Construct input positions for optimizer
     opt_req = OptimizationRequest(
@@ -192,7 +227,7 @@ async def execute_rebalance(
 
              coskew = np.zeros((n, n, n))
 
-             target_weights, _, _, _, _, _, _, _ = _compute_portfolio_weights(
+             target_weights, _, _, trace_id, _, _, _, _ = _compute_portfolio_weights(
                  mu, sigma, coskew, tickers, current_spreads, opt_req, user_id, total_val, cash
              )
 
@@ -201,13 +236,7 @@ async def execute_rebalance(
 
              # -----------------------------------------------------
              # CONVICTION MAP PREPARATION
-             # TODO: Wire real conviction from scoring/suggestion pipeline.
-             # Currently we only have IV Rank context.
-             # For now, we default to 1.0 (neutral) for all symbols.
              # -----------------------------------------------------
-             conviction_map: Dict[str, float] = {}
-             for sym in tickers:
-                 conviction_map[sym] = 1.0
 
              targets = []
              for sym, w in target_weights.items():
@@ -219,15 +248,60 @@ async def execute_rebalance(
                  ctx = iv_ctx_map.get(sym, {})
                  regime = ctx.get("iv_regime", "normal") # e.g. "suppressed", "normal", "elevated"
 
-                 # Phase 6: Use Real Conviction Map
-                 conviction = conviction_map.get(sym, 1.0)
+                 # Default neutral conviction
+                 base_conviction = 1.0
+
+                 # Use real conviction if enabled
+                 if ENABLE_REBALANCE_CONVICTION:
+                     # Look up by underlying ticker if available (or symbol)
+                     key = spread_obj.underlying if spread_obj and spread_obj.underlying else sym
+                     # Fallback to symbol if underlying not in map (e.g. if map was keyed by symbol)
+                     base_conviction = real_conviction_map.get(key, real_conviction_map.get(sym, 0.5))
+
+                 # Shadow mode: log calculated conviction but still use 1.0 for sizing
+                 conviction_used = base_conviction
+                 if not ENABLE_REBALANCE_CONVICTION and ENABLE_REBALANCE_CONVICTION_SHADOW:
+                     # Calculate what it WOULD have been
+                     key = spread_obj.underlying if spread_obj and spread_obj.underlying else sym
+                     calc_conviction = real_conviction_map.get(key, real_conviction_map.get(sym, 0.5))
+
+                     analytics_service.log_event(
+                        user_id=user_id,
+                        event_name="shadow_conviction_calc",
+                        category="trade",
+                        properties={
+                            "symbol": sym,
+                            "strategy_type": strat_type,
+                            "regime": regime,
+                            "calc_conviction": calc_conviction,
+                            "default_conviction": 1.0,
+                        },
+                     )
+                     conviction_used = 1.0
+                 elif not ENABLE_REBALANCE_CONVICTION:
+                     conviction_used = 1.0
 
                  # Apply Dynamic Constraint with REAL regime & conviction
                  adjusted_w = calculate_dynamic_target(
                      base_weight=w,
                      strategy_type=strat_type,
                      regime=regime,
-                     conviction=conviction
+                     conviction=conviction_used
+                 )
+
+                 # Log sizing decision
+                 analytics_service.log_event(
+                    user_id=user_id,
+                    event_name="rebalance_sizing_decision",
+                    category="trade",
+                    properties={
+                        "symbol": sym,
+                        "strategy_type": strat_type,
+                        "regime": regime,
+                        "target_weight": float(adjusted_w),
+                        "base_weight": float(w),
+                        "conviction_used": float(conviction_used),
+                    },
                  )
 
                  targets.append({
@@ -235,7 +309,7 @@ async def execute_rebalance(
                      "symbol": sym,
                      "target_allocation": adjusted_w
                  })
-             return targets
+             return targets, trace_id
 
         except Exception as e:
             print(f"Optimization failed during rebalance: {e}")
@@ -245,7 +319,7 @@ async def execute_rebalance(
     loop = asyncio.get_event_loop()
     with ThreadPoolExecutor() as pool:
         try:
-            targets = await loop.run_in_executor(pool, run_optimizer_logic)
+            targets, trace_id = await loop.run_in_executor(pool, run_optimizer_logic)
         except Exception as e:
              raise HTTPException(status_code=500, detail=f"Optimization failed: {e}")
 
@@ -258,6 +332,15 @@ async def execute_rebalance(
         targets,
         profile="balanced"
     )
+
+    # Inject trace_id into trades context
+    if trace_id:
+        for t in trades:
+            if "context" not in t:
+                t["context"] = {}
+            t["context"]["trace_id"] = str(trace_id)
+            # Also inject at top level for UI convenience
+            t["trace_id"] = str(trace_id)
 
     # 5. Save to DB
     saved_count = 0

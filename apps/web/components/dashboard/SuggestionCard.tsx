@@ -21,13 +21,17 @@ export default function SuggestionCard({ suggestion, onStage, onModify, onDismis
     // For simplicity, we log on mount if not already logged.
     useEffect(() => {
         if (!hasLoggedView.current) {
-            logEvent("suggestion_viewed", "ux", {
-                suggestion_id: suggestion.id,
-                symbol: suggestion.symbol,
-                strategy: suggestion.strategy,
-                window: suggestion.window,
-                iv_regime,
-                score
+            logEvent({
+                eventName: "suggestion_viewed",
+                category: "ux",
+                properties: {
+                    suggestion_id: suggestion.id,
+                    symbol: suggestion.symbol,
+                    strategy: suggestion.strategy,
+                    window: suggestion.window,
+                    iv_regime,
+                    score
+                }
             });
             hasLoggedView.current = true;
         }
@@ -53,17 +57,40 @@ export default function SuggestionCard({ suggestion, onStage, onModify, onDismis
 
     // Analytics Wrappers for Actions
     const handleStage = () => {
-        logEvent("suggestion_staged", "ux", { suggestion_id: suggestion.id, symbol: suggestion.symbol });
+        logEvent({
+            eventName: "suggestion_staged",
+            category: "ux",
+            properties: {
+                suggestion_id: suggestion.id,
+                symbol: suggestion.symbol,
+                window: suggestion.window,
+                strategy: suggestion.strategy,
+                iv_regime: suggestion.iv_regime,
+                trace_id: suggestion.trace_id ?? null,
+            }
+        });
         onStage && onStage(suggestion);
     };
 
     const handleModify = () => {
-        logEvent("suggestion_expanded", "ux", { suggestion_id: suggestion.id, symbol: suggestion.symbol }); // Treating 'Modify' as expanding details/edit
+        logEvent({
+            eventName: "suggestion_modify_clicked",
+            category: "ux",
+            properties: { suggestion_id: suggestion.id, symbol: suggestion.symbol }
+        });
         onModify && onModify(suggestion);
     };
 
     const handleDismiss = () => {
-        logEvent("suggestion_dismissed", "ux", { suggestion_id: suggestion.id, symbol: suggestion.symbol, reason: 'skipped' });
+        logEvent({
+            eventName: "suggestion_dismissed",
+            category: "ux",
+            properties: {
+                suggestion_id: suggestion.id,
+                symbol: suggestion.symbol,
+                reason: 'skipped'
+            }
+        });
         onDismiss && onDismiss(suggestion, 'skipped');
     };
 

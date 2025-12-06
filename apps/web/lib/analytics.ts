@@ -1,27 +1,22 @@
-// apps/web/lib/analytics.ts
+export type AnalyticsPayload = {
+  eventName: string;
+  category: 'ux' | 'system' | 'trade' | 'learning';
+  properties?: Record<string, any>;
+};
 
-import { API_URL } from "./constants";
-import { fetchWithAuth } from "./api";
-
-/**
- * Lightweight analytics client for frontend events.
- */
-export async function logEvent(
-  eventName: string,
-  category: string,
-  properties: Record<string, any> = {}
-): Promise<void> {
+export async function logEvent({ eventName, category, properties }: AnalyticsPayload) {
   try {
-    // Fire and forget, but catch errors to prevent crashing UI
-    fetchWithAuth('/analytics/events', {
+    await fetch('/api/analytics/events', {
       method: 'POST',
-      body: JSON.stringify({
-        event_name: eventName,
-        category,
-        properties
-      })
-    }).catch(err => console.error("[Analytics] Logging failed:", err));
-  } catch (e) {
-    console.error("[Analytics] Error:", e);
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ event_name: eventName, category, properties }),
+    });
+  } catch (err) {
+    // Swallow errors – analytics must never break UX
+    if (process.env.NODE_ENV === 'development') {
+      console.warn('Analytics logEvent failed:', err);
+    }
   }
 }

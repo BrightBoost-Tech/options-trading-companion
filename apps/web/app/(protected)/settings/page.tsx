@@ -5,6 +5,7 @@ import PlaidLink from '@/components/PlaidLink';
 import DashboardLayout from '@/components/DashboardLayout';
 import { supabase } from '@/lib/supabase';
 import { API_URL } from '@/lib/constants';
+import { logEvent } from '@/lib/analytics';
 
 export default function SettingsPage() {
   const [connectedInstitution, setConnectedInstitution] = useState<string | null>(null);
@@ -50,6 +51,16 @@ export default function SettingsPage() {
   const handlePlaidSuccess = useCallback(async (publicToken: string, metadata: any) => {
       console.log('Plaid success:', metadata);
       setConnectionError(null);
+
+      logEvent({
+        eventName: 'plaid_link_completed',
+        category: 'ux',
+        properties: {
+            link_session_id: metadata.link_session_id,
+            institution: metadata.institution?.name,
+            accounts_count: metadata.accounts?.length
+        }
+      });
 
       try {
           // Exchange token

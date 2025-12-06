@@ -112,6 +112,50 @@ class Holding(BaseModel):
     account_id: Optional[str] = None
     last_updated: Optional[datetime] = None
 
+    # Phase 8.1
+    asset_type: Literal["EQUITY", "OPTION", "CASH", "CRYPTO", "UNKNOWN"] = "UNKNOWN"
+    sector: Optional[str] = None
+    industry: Optional[str] = None
+    strategy_tag: Optional[str] = None
+    is_locked: bool = False
+    optimizer_role: str = "TARGET" # 'TARGET', 'HEDGE', 'IGNORE'
+
+class UnifiedPosition(BaseModel):
+    symbol: str
+    security_id: Optional[str] = None
+    asset_type: str  # 'EQUITY' | 'OPTION' | 'CASH' | 'CRYPTO' | 'UNKNOWN'
+    quantity: float
+    cost_basis: float
+    current_price: float
+
+    sector: Optional[str] = None
+    industry: Optional[str] = None
+    strategy_tag: Optional[str] = None
+
+    delta: float = 0.0
+    beta_weighted_delta: float = 0.0
+    gamma: float = 0.0
+    theta: float = 0.0
+    vega: float = 0.0
+
+    is_locked: bool = False
+    optimizer_role: str = "TARGET"  # 'TARGET' | 'HEDGE' | 'IGNORE'
+
+class OptimizationRationale(BaseModel):
+    status: Literal["OPTIMAL", "CONSTRAINED", "FAILED"]
+    trace_id: Optional[str]
+    regime_detected: Optional[str]
+    conviction_used: Optional[float]
+    alpha_score: Optional[float]
+    risk_penalty: Optional[float]
+    constraint_cost: Optional[float]
+    active_constraints: List[str] = []
+
+class RiskDashboardResponse(BaseModel):
+    summary: Dict[str, Any]
+    exposure: Dict[str, Any]
+    greeks: Dict[str, float]
+
 class SyncResponse(BaseModel):
     status: str
     count: int

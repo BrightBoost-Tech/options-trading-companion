@@ -1,10 +1,12 @@
 # packages/quantum/services/enrichment_service.py
 from market_data import PolygonService
 import numpy as np
+from analytics.sector_mapper import SectorMapper
 
 def enrich_holdings_with_analytics(holdings: list) -> list:
     """
     Enriches a list of holdings with analytics data from Polygon.
+    Also maps sectors/industries via SectorMapper (Phase 8.1).
     """
     try:
         service = PolygonService()
@@ -88,5 +90,14 @@ def enrich_holdings_with_analytics(holdings: list) -> list:
 
         except Exception:
              holding['pnl_severity'] = "normal"
+
+        # Sector Mapping (Phase 8.1)
+        # Only populate if missing or if we want to overwrite
+        if not holding.get('sector'):
+             sector, industry = SectorMapper.get_sector_industry(symbol)
+             if sector:
+                 holding['sector'] = sector
+             if industry:
+                 holding['industry'] = industry
 
     return holdings

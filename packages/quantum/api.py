@@ -44,11 +44,12 @@ from analytics.progress_engine import ProgressEngine, get_week_id_for_last_full_
 from services.options_utils import group_spread_positions
 from ev_calculator import calculate_ev, calculate_position_size
 from services.enrichment_service import enrich_holdings_with_analytics
-from models import SpreadPosition
+from models import SpreadPosition, RiskDashboardResponse, UnifiedPosition, OptimizationRationale
 from services.historical_simulation import HistoricalCycleService
 from analytics.loss_minimizer import LossMinimizer, LossAnalysisResult
 from analytics.drift_auditor import audit_plan_vs_execution
 from analytics.greeks_aggregator import aggregate_portfolio_greeks, build_greek_alerts
+from services.risk_engine import RiskEngine
 
 
 # 1. Load environment variables BEFORE importing other things
@@ -1147,6 +1148,32 @@ async def export_holdings_csv(
     )
 
 
+@app.get("/risk/dashboard", response_model=RiskDashboardResponse)
+async def get_risk_dashboard(user_id: str = Depends(get_current_user)):
+    """
+    Returns unified risk metrics (Greeks, Sector Exposure, Net Liq).
+    """
+    if not supabase:
+        raise HTTPException(status_code=503, detail="Database not available")
+
+    # 1. Fetch positions
+    res = supabase.table("positions").select("*").eq("user_id", user_id).execute()
+    raw_positions = res.data or []
+
+    # 2. Enrich (to ensure we have analytics like delta/gamma if not stored)
+    # Ideally enriched data is stored or cached.
+    # We call enrich_holdings_with_analytics which hits Polygon.
+    # To avoid rate limits, we should rely on stored data if fresh, but enrich handles missing.
+    enriched = enrich_holdings_with_analytics(raw_positions)
+
+    # 3. Build unified positions
+    unified_positions = RiskEngine.build_unified_positions(enriched)
+
+    # 4. Compute summary
+    summary = RiskEngine.compute_risk_summary(unified_positions)
+
+    return RiskDashboardResponse(**summary)
+
 @app.get("/portfolio/snapshot")
 async def get_portfolio_snapshot(
     user_id: str = Depends(get_current_user),
@@ -1522,6 +1549,81 @@ async def get_expected_value(request: EVRequest):
         response["position_sizing"] = position_size
 
     return response
+
+
+@app.post("/optimizer/explain", response_model=OptimizationRationale)
+async def explain_optimizer_run(
+    run_id: str = Body("latest", embed=True),
+    user_id: str = Depends(get_current_user)
+):
+    """
+    Returns an explanation of the last or given optimization run.
+    For now, look up the latest inference_log by user_id and build a narrative.
+    """
+    if not supabase:
+        raise HTTPException(status_code=503, detail="Database not available")
+
+    # 1. Query nested_logging's inference_log
+    try:
+        query = supabase.table("inference_log").select("*").eq("user_id", user_id)
+
+        if run_id != "latest":
+            query = query.eq("trace_id", run_id)
+
+        # Get latest
+        res = query.order("created_at", desc=True).limit(1).execute()
+
+        if not res.data:
+            # Return default if no run found
+            return OptimizationRationale(
+                status="OPTIMAL",
+                trace_id=None,
+                regime_detected="unknown",
+                conviction_used=1.0,
+                active_constraints=["No optimization run found."]
+            )
+
+        log_entry = res.data[0]
+
+        # Extract details
+        diagnostics = log_entry.get("diagnostics") or {}
+
+        # Determine status
+        status = "OPTIMAL"
+        if diagnostics.get("error"):
+            status = "FAILED"
+        elif diagnostics.get("constrained") or diagnostics.get("solver_fallback"):
+            status = "CONSTRAINED"
+
+        # Build constraints list
+        constraints = []
+        if diagnostics.get("solver_fallback"):
+            constraints.append("Fallback: Classical Solver used (Quantum unavailable/failed)")
+        if diagnostics.get("clamped_weights"):
+            constraints.append("Risk Guardrail: Weights clamped to safety limits")
+        if diagnostics.get("high_volatility"):
+            constraints.append("Regime: High Volatility dampeners active")
+
+        # Mocking some fields if not in log, or extracting if available
+        # Ideally optimizer logs these into diagnostics.
+
+        return OptimizationRationale(
+            status=status,
+            trace_id=log_entry.get("trace_id"),
+            regime_detected=log_entry.get("regime_context", {}).get("current_regime", "normal"),
+            conviction_used=float(log_entry.get("confidence_score") or 1.0),
+            alpha_score=None, # Not explicitly in log usually
+            active_constraints=constraints
+        )
+
+    except Exception as e:
+        print(f"Error in optimizer/explain: {e}")
+        # Graceful fallback
+        return OptimizationRationale(
+            status="FAILED",
+            trace_id=None,
+            active_constraints=[f"Error retrieving explanation: {str(e)}"]
+        )
 
 
 # --- Trade Journal Mutation Endpoints ---

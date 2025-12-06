@@ -178,7 +178,7 @@ export default function PortfolioOptimizer({ positions, onOptimizationComplete }
           )}
         </div>
 
-        <div className="flex items-center gap-4">
+        <div className="flex items-center gap-4 flex-wrap justify-end">
              <button onClick={runDiagnostics} className="text-[10px] font-mono text-slate-400 hover:text-indigo-600 transition-colors">
                 TEST_CORE_SYSTEM
              </button>
@@ -197,7 +197,8 @@ export default function PortfolioOptimizer({ positions, onOptimizationComplete }
              {/* The requested Toggle */}
              <div className="flex items-center gap-2">
                 <span className={`text-xs font-medium transition-colors ${isQuantum ? 'text-purple-700' : 'text-slate-500'}`}>
-                  Optimize Tail Risk
+                  <span className="hidden sm:inline">Optimize Tail Risk</span>
+                  <span className="sm:hidden">Tail Risk</span>
                 </span>
                 <button
                   onClick={() => setIsQuantum(!isQuantum)}

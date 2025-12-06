@@ -7,6 +7,14 @@ interface PortfolioHoldingsTableProps {
   onGenerateSuggestions: () => void;
 }
 
+const isLikelyOptionSymbol = (symbol: string | undefined): boolean => {
+  if (!symbol) return false;
+  // Mirror the OCC regex used in asset_classifier.is_occ_option_symbol:
+  // r"^([A-Z\.-]+)(\d{6})([CP])(\d{8})$"
+  const clean = symbol.replace("O:", "");
+  return /^[A-Z\.-]+(\d{6})([CP])(\d{8})$/.test(clean);
+};
+
 export default function PortfolioHoldingsTable({ holdings, onSync, onGenerateSuggestions }: PortfolioHoldingsTableProps) {
   // --- HELPERS ---
   const renderPositionRow = (position: any, idx: number) => {
@@ -60,9 +68,20 @@ export default function PortfolioHoldingsTable({ holdings, onSync, onGenerateSug
   };
 
   // Grouping Logic (Phase 8.1)
-  const optionHoldings = holdings.filter(h => h.asset_type === 'OPTION');
-  // VTSI fix: asset_type 'EQUITY' or missing will fall here.
-  const equityHoldings = holdings.filter(h => h.asset_type === 'EQUITY' || (!h.asset_type && h.symbol !== 'CUR:USD' && !h.symbol.includes('O:')));
+  // Treat '{}' as OPTION if asset_type says so OR symbol pattern looks like OCC.
+  const optionHoldings = holdings.filter(h =>
+    h.asset_type === 'OPTION' || (!h.asset_type && isLikelyOptionSymbol(h.symbol))
+  );
+
+  // Long Term / Equity holds:
+  // - asset_type === 'EQUITY'
+  // - OR legacy records with missing asset_type and NOT option-like and NOT cash
+  const equityHoldings = holdings.filter(h =>
+    (h.asset_type === 'EQUITY' || (!h.asset_type && !isLikelyOptionSymbol(h.symbol) && h.symbol !== 'CUR:USD')) &&
+    // Optional: restrict to "true long-term" if we have is_locked/strategy_tag in holdings
+    (h.is_locked || h.strategy_tag === 'LONG_TERM_HOLD' || h.symbol === 'VTSI')
+  );
+
   const cashHoldings = holdings.filter(h => h.asset_type === 'CASH' || h.symbol === 'CUR:USD');
 
   return (

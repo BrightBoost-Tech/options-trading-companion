@@ -6,6 +6,7 @@ import { Suggestion } from '@/lib/types';
 import { Sparkles, Activity, Sun, Clock, FileText } from 'lucide-react';
 import WeeklyReportList from '../suggestions/WeeklyReportList';
 import { RefreshCw } from 'lucide-react';
+import { logEvent } from '@/lib/analytics';
 
 interface SuggestionTabsProps {
   optimizerSuggestions: Suggestion[];
@@ -31,21 +32,42 @@ export default function SuggestionTabs({
   onRefreshJournal
 }: SuggestionTabsProps) {
   const [activeTab, setActiveTab] = useState<'morning' | 'midday' | 'rebalance' | 'scout' | 'journal' | 'weekly'>('morning');
+  const [stagedIds, setStagedIds] = useState<string[]>([]);
 
   // Placeholder handlers
   const handleStage = (s: Suggestion) => {
-      console.log('Staging', s);
       // Logic to toggle staged state or add to a staging queue
+      setStagedIds(prev =>
+        prev.includes(s.id)
+          ? prev.filter(id => id !== s.id)
+          : [...prev, s.id]
+      );
+      // Analytics for staging is handled inside SuggestionCard
   };
-  const handleModify = (s: Suggestion) => console.log('Modify', s);
-  const handleDismiss = (s: Suggestion, tag: string) => console.log('Dismiss', s, tag);
+
+  const handleModify = (s: Suggestion) => {
+    // Analytics handled in SuggestionCard
+  };
+
+  const handleDismiss = (s: Suggestion, tag: string) => {
+    // Analytics handled in SuggestionCard
+  };
+
+  const handleTabChange = (tab: 'morning' | 'midday' | 'rebalance' | 'scout' | 'journal' | 'weekly') => {
+      setActiveTab(tab);
+      logEvent({
+          eventName: 'suggestion_tab_changed',
+          category: 'ux',
+          properties: { tab }
+      });
+  };
 
   return (
     <div className="bg-white rounded-lg shadow overflow-hidden h-full flex flex-col">
       {/* Tabs Header */}
       <div className="flex border-b border-gray-100 overflow-x-auto no-scrollbar">
         <button
-          onClick={() => setActiveTab('morning')}
+          onClick={() => handleTabChange('morning')}
           className={`flex-1 py-4 px-2 min-w-[120px] text-sm font-medium text-center border-b-2 transition-colors whitespace-nowrap ${
             activeTab === 'morning'
               ? 'border-orange-500 text-orange-600 bg-orange-50/50'
@@ -64,7 +86,7 @@ export default function SuggestionTabs({
         </button>
 
         <button
-          onClick={() => setActiveTab('midday')}
+          onClick={() => handleTabChange('midday')}
           className={`flex-1 py-4 px-2 min-w-[120px] text-sm font-medium text-center border-b-2 transition-colors whitespace-nowrap ${
             activeTab === 'midday'
               ? 'border-blue-500 text-blue-600 bg-blue-50/50'
@@ -83,7 +105,7 @@ export default function SuggestionTabs({
         </button>
 
         <button
-          onClick={() => setActiveTab('rebalance')}
+          onClick={() => handleTabChange('rebalance')}
           className={`flex-1 py-4 px-2 min-w-[120px] text-sm font-medium text-center border-b-2 transition-colors whitespace-nowrap ${
             activeTab === 'rebalance'
               ? 'border-indigo-500 text-indigo-600 bg-indigo-50/50'
@@ -102,7 +124,7 @@ export default function SuggestionTabs({
         </button>
 
         <button
-          onClick={() => setActiveTab('scout')}
+          onClick={() => handleTabChange('scout')}
           className={`flex-1 py-4 px-2 min-w-[120px] text-sm font-medium text-center border-b-2 transition-colors whitespace-nowrap ${
             activeTab === 'scout'
               ? 'border-green-500 text-green-600 bg-green-50/50'
@@ -121,7 +143,7 @@ export default function SuggestionTabs({
         </button>
 
         <button
-          onClick={() => setActiveTab('journal')}
+          onClick={() => handleTabChange('journal')}
           className={`flex-1 py-4 px-2 min-w-[120px] text-sm font-medium text-center border-b-2 transition-colors whitespace-nowrap ${
             activeTab === 'journal'
               ? 'border-purple-500 text-purple-600 bg-purple-50/50'
@@ -140,7 +162,7 @@ export default function SuggestionTabs({
         </button>
 
         <button
-          onClick={() => setActiveTab('weekly')}
+          onClick={() => handleTabChange('weekly')}
           className={`flex-1 py-4 px-2 min-w-[120px] text-sm font-medium text-center border-b-2 transition-colors whitespace-nowrap ${
             activeTab === 'weekly'
               ? 'border-slate-500 text-slate-600 bg-slate-50/50'

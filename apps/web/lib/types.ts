@@ -66,11 +66,11 @@ export interface StrategyBacktest {
 
 export interface SuggestionLeg {
   symbol: string;
-  action: 'buy' | 'sell';
   quantity: number;
-  strike: number;
-  type: 'call' | 'put';
-  expiry: string;
+  action?: 'buy' | 'sell';
+  strike?: number;
+  type?: 'call' | 'put';
+  expiry?: string;
   option_symbol?: string; // Added for flexibility
 }
 

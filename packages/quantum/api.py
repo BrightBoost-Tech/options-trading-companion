@@ -30,6 +30,7 @@ import plaid_endpoints
 from options_scanner import scan_for_opportunities
 from services.journal_service import JournalService
 from services.universe_service import UniverseService
+from services.analytics_service import AnalyticsService
 from optimizer import router as optimizer_router
 from market_data import calculate_portfolio_inputs
 # New Services for Cash-Aware Workflow
@@ -85,8 +86,12 @@ key = supa_secrets.service_role_key
 
 supabase: Client = create_client(url, key) if url and key else None
 
+# Initialize Analytics Service
+analytics_service = AnalyticsService(supabase)
+app.state.analytics_service = analytics_service
+
 # --- Register Plaid Endpoints ---
-plaid_endpoints.register_plaid_endpoints(app, plaid_service, supabase)
+plaid_endpoints.register_plaid_endpoints(app, plaid_service, supabase, analytics_service)
 
 # --- Register Optimizer Endpoints ---
 app.include_router(optimizer_router)
@@ -137,6 +142,10 @@ async def execute_rebalance(
     iv_service = IVRegimeService(supabase)
     unique_tickers = [s.ticker for s in current_spreads]
     iv_ctx_map = iv_service.get_iv_context_for_symbols(unique_tickers)
+
+    # Phase 6: Wire Real Conviction
+    # We ideally compute this via ScoringEngine. For now, we wire the map structure.
+    conviction_map = {}  # TODO: populate with ScoringEngine + ConvictionTransform
 
     # Construct input positions for optimizer
     opt_req = OptimizationRequest(
@@ -210,7 +219,7 @@ async def execute_rebalance(
                  ctx = iv_ctx_map.get(sym, {})
                  regime = ctx.get("iv_regime", "normal") # e.g. "suppressed", "normal", "elevated"
 
-                 # Use conviction from map (wired)
+                 # Phase 6: Use Real Conviction Map
                  conviction = conviction_map.get(sym, 1.0)
 
                  # Apply Dynamic Constraint with REAL regime & conviction
@@ -256,6 +265,18 @@ async def execute_rebalance(
         # Clear old rebalance suggestions
         supabase.table(TRADE_SUGGESTIONS_TABLE).delete().eq("user_id", user_id).eq("window", "rebalance").execute()
 
+        # Log event: Suggestion Batch Generated
+        analytics_service.log_event(
+            user_id=user_id,
+            event_name="suggestion_batch_generated",
+            category="system",
+            properties={
+                "count": len(trades),
+                "window": "rebalance",
+                "profile": "balanced"
+            }
+        )
+
         # We already have iv_ctx_map for holding symbols, but trades might be new legs/spreads?
         # The trades are usually adjustments to existing or closes.
         # If new symbols appear (rare in rebalance unless specific strategy), we might need to fetch again.
@@ -290,6 +311,11 @@ async def execute_rebalance(
 
         res = supabase.table(TRADE_SUGGESTIONS_TABLE).insert(db_rows).execute()
         saved_count = len(res.data) if res.data else 0
+
+        # Log individual suggestion events for better traceability (optional but good for learning loop)
+        if res.data:
+            for row in res.data:
+                analytics_service.log_suggestion_event(user_id, row, "suggestion_generated")
 
     return {
         "status": "ok",
@@ -442,6 +468,29 @@ def health_check():
         "status": "ok",
         "market_data": "connected" if polygon_key else "not configured",
     }
+
+# --- Analytics Endpoints ---
+
+class AnalyticsEventRequest(BaseModel):
+    event_name: str
+    category: str
+    properties: Dict[str, Any] = {}
+
+@app.post("/analytics/events")
+async def log_analytics_event(
+    req: AnalyticsEventRequest,
+    user_id: str = Depends(get_current_user)
+):
+    """
+    Endpoint for frontend to log events securely.
+    """
+    analytics_service.log_event(
+        user_id=user_id,
+        event_name=req.event_name,
+        category=req.category,
+        properties=req.properties
+    )
+    return {"status": "logged"}
 
 
 # --- Cron Task Endpoints ---
@@ -878,6 +927,9 @@ async def sync_holdings(
 
     # 4. Upsert into POSITIONS (Single Truth)
     if supabase and holdings:
+        # Log Sync Started
+        analytics_service.log_event(user_id, "plaid_sync_started", "system", {"holdings_count": len(holdings)})
+
         data_to_insert = []
         for h in holdings:
             row = h.model_dump()
@@ -906,6 +958,9 @@ async def sync_holdings(
 
         # 5. Create Snapshot
         await create_portfolio_snapshot(user_id)
+
+        # Log Sync Completed
+        analytics_service.log_event(user_id, "plaid_sync_completed", "system", {"status": "success"})
 
         # 6. Drift Audit (Phase 2)
         # Check Execution (Reality) vs Plan (Suggestions)
@@ -1184,87 +1239,106 @@ async def get_journal_entries(user_id: str = Depends(get_current_user)):
         raise HTTPException(status_code=500, detail=f"An error occurred: {e}")
 
 
-@app.get("/journal/drift-summary")
+class DriftSummaryResponse(BaseModel):
+    window_days: int
+    total_suggestions: int
+    disciplined_execution: int
+    impulse_trades: int
+    size_violations: int
+    disciplined_rate: float
+    impulse_rate: float
+    size_violation_rate: float
+
+
+@app.get("/journal/drift-summary", response_model=DriftSummaryResponse)
 async def get_drift_summary(user_id: str = Depends(get_current_user)):
     """
-    Returns aggregate execution discipline stats for the drift summary widget.
-    (Phase 6 B)
+    Returns execution-discipline metrics for the current user.
+
+    Uses the `discipline_score_per_user` view if available,
+    otherwise falls back to aggregating from execution_drift_logs.
     """
     if not supabase:
-         # Return zeroed struct if DB missing
-         return {
-             "window_days": 7,
-             "total_suggestions": 0,
-             "disciplined_execution": 0,
-             "impulse_trades": 0,
-             "size_violations": 0,
-             "disciplined_rate": 0.0,
-             "impulse_rate": 0.0,
-             "size_violation_rate": 0.0
-         }
+        raise HTTPException(status_code=503, detail="Database not available")
 
+    data = None
+
+    # Try the view first
     try:
-        # Window: last 7 days
-        cutoff = (datetime.now(timezone.utc) - timedelta(days=7)).isoformat()
-
-        # We need a table for drift logs. Assuming "execution_drift_logs" exists (from Phase 2).
-        # We'll just count rows by tag or aggregate.
-        # drift logs structure: id, user_id, suggestion_id, match_type, discipline_tags (list), created_at
-
-        res = supabase.table("execution_drift_logs")\
-            .select("*")\
-            .eq("user_id", user_id)\
-            .gte("created_at", cutoff)\
+        res = supabase.table("discipline_score_per_user") \
+            .select(
+                "window_days, total_suggestions, disciplined_execution, impulse_trades, size_violations, "
+                "disciplined_rate, impulse_rate, size_violation_rate"
+            ) \
+            .eq("user_id", user_id) \
+            .single() \
             .execute()
 
-        logs = res.data or []
-
-        total = len(logs)
-        disciplined = 0
-        impulse = 0
-        size = 0
-
-        for log in logs:
-            tags = log.get("discipline_tags", [])
-            if "disciplined_execution" in tags:
-                disciplined += 1
-            if "impulse_trade" in tags:
-                impulse += 1
-            if "size_violation" in tags:
-                size += 1
-
-        # If total suggests drift check events, use that.
-        # But drift logs might only be created on *events*.
-        # Let's assume total = count of logs for now.
-
-        d_rate = disciplined / total if total > 0 else 0.0
-        i_rate = impulse / total if total > 0 else 0.0
-        s_rate = size / total if total > 0 else 0.0
-
-        return {
-             "window_days": 7,
-             "total_suggestions": total,
-             "disciplined_execution": disciplined,
-             "impulse_trades": impulse,
-             "size_violations": size,
-             "disciplined_rate": round(d_rate, 2),
-             "impulse_rate": round(i_rate, 2),
-             "size_violation_rate": round(s_rate, 2)
-        }
-
+        if res.data:
+            data = res.data
     except Exception as e:
-        print(f"Error fetching drift summary: {e}")
-        # Fail gracefully
-        return {
-             "window_days": 7,
-             "total_suggestions": 0,
-             "disciplined_execution": 0,
-             "impulse_trades": 0,
-             "size_violations": 0,
-             "disciplined_rate": 0.0,
-             "impulse_rate": 0.0,
-             "size_violation_rate": 0.0
-        }
+        print(f"Warning: discipline_score_per_user view not available, falling back to raw aggregation: {e}")
+        data = None
+
+    if not data:
+        # Fallback: compute basic counts over last 7 days from execution_drift_logs
+        try:
+            from datetime import datetime, timedelta, timezone
+            now = datetime.now(timezone.utc)
+            window_days = 7
+            cutoff = (now - timedelta(days=window_days)).isoformat()
+
+            logs_res = supabase.table("execution_drift_logs") \
+                .select("tag") \
+                .eq("user_id", user_id) \
+                .gte("created_at", cutoff) \
+                .execute()
+
+            rows = logs_res.data or []
+            disciplined = sum(1 for r in rows if r.get("tag") == "disciplined_execution")
+            impulse = sum(1 for r in rows if r.get("tag") == "impulse_trade")
+            size_v = sum(1 for r in rows if r.get("tag") == "size_violation")
+            total = disciplined + impulse + size_v
+
+            disciplined_rate = disciplined / total if total else 0.0
+            impulse_rate = impulse / total if total else 0.0
+            size_rate = size_v / total if total else 0.0
+
+            data = {
+                "window_days": window_days,
+                "total_suggestions": total,
+                "disciplined_execution": disciplined,
+                "impulse_trades": impulse,
+                "size_violations": size_v,
+                "disciplined_rate": disciplined_rate,
+                "impulse_rate": impulse_rate,
+                "size_violation_rate": size_rate,
+            }
+        except Exception as e:
+            print(f"Error computing drift summary: {e}")
+            # Return an empty summary instead of failing
+            data = {
+                "window_days": 7,
+                "total_suggestions": 0,
+                "disciplined_execution": 0,
+                "impulse_trades": 0,
+                "size_violations": 0,
+                "disciplined_rate": 0.0,
+                "impulse_rate": 0.0,
+                "size_violation_rate": 0.0,
+            }
+
+    # Normalize numeric types (Supabase may return Decimal)
+    return DriftSummaryResponse(
+        window_days=int(data.get("window_days", 7)),
+        total_suggestions=int(data.get("total_suggestions", 0)),
+        disciplined_execution=int(data.get("disciplined_execution", 0)),
+        impulse_trades=int(data.get("impulse_trades", 0)),
+        size_violations=int(data.get("size_violations", 0)),
+        disciplined_rate=float(data.get("disciplined_rate", 0.0)),
+        impulse_rate=float(data.get("impulse_rate", 0.0)),
+        size_violation_rate=float(data.get("size_violation_rate", 0.0)),
+    )
 
 @app.get("/journal/stats")
 async def get_journal_stats(user_id: str = Depends(get_current_user)):

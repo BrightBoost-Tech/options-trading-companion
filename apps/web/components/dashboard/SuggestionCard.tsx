@@ -1,9 +1,10 @@
 'use client';
 
-import React from 'react';
+import React, { useEffect, useRef } from 'react';
 import { Card, CardContent } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { Suggestion } from '@/lib/types';
+import { logEvent } from '@/lib/analytics';
 
 interface SuggestionCardProps {
     suggestion: Suggestion;
@@ -14,12 +15,30 @@ interface SuggestionCardProps {
 
 export default function SuggestionCard({ suggestion, onStage, onModify, onDismiss }: SuggestionCardProps) {
     const { order_json, score, metrics, iv_regime, iv_rank, delta_impact, theta_impact, staged } = suggestion;
+    const hasLoggedView = useRef(false);
+
+    // Analytics: Log View on Mount (or IntersectionObserver for strictly viewport)
+    // For simplicity, we log on mount if not already logged.
+    useEffect(() => {
+        if (!hasLoggedView.current) {
+            logEvent({
+                eventName: "suggestion_viewed",
+                category: "ux",
+                properties: {
+                    suggestion_id: suggestion.id,
+                    symbol: suggestion.symbol,
+                    strategy: suggestion.strategy,
+                    window: suggestion.window,
+                    iv_regime,
+                    score
+                }
+            });
+            hasLoggedView.current = true;
+        }
+    }, [suggestion.id, suggestion.symbol, suggestion.strategy, suggestion.window, iv_regime, score]);
 
     // Payoff Diagram Helper (Simple V-shape or hockey stick)
-    // We'll generate a tiny SVG based on strategy type and strikes
     const renderPayoffDiagram = () => {
-        // This is a visual stub. Real implementation would calculate points based on legs.
-        // For now, we draw a generic "profit zone" curve.
         return (
             <svg viewBox="0 0 100 40" className="w-full h-full text-green-500 opacity-20">
                 <path d="M0,40 L40,40 L60,10 L100,10" fill="none" stroke="currentColor" strokeWidth="2" />
@@ -34,6 +53,45 @@ export default function SuggestionCard({ suggestion, onStage, onModify, onDismis
         if (r.includes('elevated') || r.includes('high')) return 'bg-orange-100 text-orange-800';
         if (r.includes('suppressed') || r.includes('low')) return 'bg-blue-100 text-blue-800';
         return 'bg-green-100 text-green-800';
+    };
+
+    // Analytics Wrappers for Actions
+    const handleStage = () => {
+        logEvent({
+            eventName: "suggestion_staged",
+            category: "ux",
+            properties: {
+                suggestion_id: suggestion.id,
+                symbol: suggestion.symbol,
+                window: suggestion.window,
+                strategy: suggestion.strategy,
+                iv_regime: suggestion.iv_regime,
+                trace_id: suggestion.trace_id ?? null,
+            }
+        });
+        onStage && onStage(suggestion);
+    };
+
+    const handleModify = () => {
+        logEvent({
+            eventName: "suggestion_modify_clicked",
+            category: "ux",
+            properties: { suggestion_id: suggestion.id, symbol: suggestion.symbol }
+        });
+        onModify && onModify(suggestion);
+    };
+
+    const handleDismiss = () => {
+        logEvent({
+            eventName: "suggestion_dismissed",
+            category: "ux",
+            properties: {
+                suggestion_id: suggestion.id,
+                symbol: suggestion.symbol,
+                reason: 'skipped'
+            }
+        });
+        onDismiss && onDismiss(suggestion, 'skipped');
     };
 
     return (
@@ -74,16 +132,34 @@ export default function SuggestionCard({ suggestion, onStage, onModify, onDismis
                 <div className="grid grid-cols-1 md:grid-cols-3 gap-4 my-3 text-sm">
                     {/* Legs */}
                     <div className="col-span-2 space-y-1">
-                        {order_json?.legs?.map((leg, idx) => (
-                            <div key={idx} className="flex justify-between border-b border-gray-100 last:border-0 py-1">
-                                <span className="text-gray-600">
-                                    {leg.quantity > 0 ? '+' : ''}{leg.quantity} {leg.type === 'call' ? 'C' : 'P'} {leg.strike}
-                                </span>
-                                <span className={`text-xs font-mono ${leg.action === 'buy' ? 'text-green-600' : 'text-red-600'}`}>
-                                    {leg.action.toUpperCase()}
-                                </span>
-                            </div>
-                        ))}
+                        {order_json?.legs?.map((leg, idx) => {
+                            const rawAction = leg.action ?? "";
+                            const actionLabel = rawAction.toUpperCase();
+                            const actionClass =
+                                rawAction === "buy"
+                                    ? "text-green-600"
+                                    : rawAction === "sell"
+                                    ? "text-red-600"
+                                    : "text-gray-500";
+
+                            const qty = typeof leg.quantity === "number" ? leg.quantity : 0;
+                            const typeLabel =
+                                leg.type === "call" ? "C" :
+                                leg.type === "put"  ? "P"  :
+                                "";
+                            const strike = leg.strike ?? "";
+
+                            return (
+                                <div key={idx} className="flex justify-between border-b border-gray-100 last:border-0 py-1">
+                                    <span className="text-gray-600">
+                                        {qty > 0 ? "+" : ""}{qty} {typeLabel} {strike}
+                                    </span>
+                                    <span className={`text-xs font-mono ${actionClass}`}>
+                                        {actionLabel}
+                                    </span>
+                                </div>
+                            );
+                        })}
                     </div>
 
                     {/* Payoff & Impact */}
@@ -101,19 +177,19 @@ export default function SuggestionCard({ suggestion, onStage, onModify, onDismis
                 {/* Footer Actions */}
                 <div className="flex justify-end gap-2 mt-3 pt-2 border-t border-gray-100">
                     <button
-                        onClick={() => onDismiss && onDismiss(suggestion, 'skipped')}
+                        onClick={handleDismiss}
                         className="text-xs text-gray-400 hover:text-gray-600 px-2 py-1"
                     >
                         Dismiss
                     </button>
                     <button
-                        onClick={() => onModify && onModify(suggestion)}
+                        onClick={handleModify}
                         className="text-xs bg-white border border-gray-300 text-gray-700 px-3 py-1 rounded hover:bg-gray-50"
                     >
                         Modify
                     </button>
                     <button
-                        onClick={() => onStage && onStage(suggestion)}
+                        onClick={handleStage}
                         className={`text-xs px-3 py-1 rounded font-medium ${staged ? 'bg-green-100 text-green-800' : 'bg-purple-600 text-white hover:bg-purple-700'}`}
                     >
                         {staged ? 'Staged' : 'Stage Trade'}

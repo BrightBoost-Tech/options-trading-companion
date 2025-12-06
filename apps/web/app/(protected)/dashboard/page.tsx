@@ -8,6 +8,10 @@ import { WeeklyProgressCard } from '@/components/dashboard/WeeklyProgressCard';
 import SuggestionTabs from '@/components/dashboard/SuggestionTabs';
 import StrategyProfilesPanel from '@/components/dashboard/StrategyProfilesPanel';
 import DisciplineSummary from '@/components/dashboard/DisciplineSummary';
+import RiskSummaryCard from '@/components/dashboard/RiskSummaryCard';
+import HoldingsTreemap from '@/components/dashboard/HoldingsTreemap';
+import OptimizerInsightCard from '@/components/dashboard/OptimizerInsightCard';
+import PortfolioHoldingsTable from '@/components/dashboard/PortfolioHoldingsTable'; // Phase 8.4
 import { supabase } from '@/lib/supabase';
 import { API_URL, TEST_USER_ID } from '@/lib/constants';
 import { groupOptionSpreads, formatOptionDisplay } from '@/lib/formatters';
@@ -38,6 +42,7 @@ export default function DashboardPage() {
   // Snapshot data
   const [snapshot, setSnapshot] = useState<any>(null);
   const [metrics, setMetrics] = useState<any>(null);
+  const [riskData, setRiskData] = useState<any>(null); // Phase 8.2 Risk Dashboard
 
   // Optimizer suggestions (rebalance)
   const [rebalanceSuggestions, setRebalanceSuggestions] = useState<any[]>([]);
@@ -64,6 +69,7 @@ export default function DashboardPage() {
   // Load data on mount
   useEffect(() => {
     loadSnapshot();
+    loadRiskDashboard(); // Phase 8.2
     loadWeeklyScout();
     loadJournalStats();
     loadMorningSuggestions();
@@ -101,6 +107,22 @@ export default function DashboardPage() {
     } catch (err: any) {
       if (isAbortError(err)) return;
       console.error('Failed to load snapshot:', err);
+    }
+  };
+
+  const loadRiskDashboard = async () => {
+    try {
+      const headers = await getAuthHeaders();
+      const response = await fetchWithTimeout(`${API_URL}/risk/dashboard`, {
+         headers,
+         timeout: 10000
+      });
+      if (response.ok) {
+         setRiskData(await response.json());
+      }
+    } catch (err: any) {
+      if (isAbortError(err)) return;
+      console.error('Failed to load risk dashboard:', err);
     }
   };
 
@@ -274,67 +296,6 @@ export default function DashboardPage() {
     }
   };
 
-  // --- RENDER HELPERS ---
-
-  const getSpreads = (holdings: any[]) => {
-      const optionHoldings = holdings.filter((h: any) =>
-          typeof h.symbol === 'string' &&
-          h.symbol.length > 8 &&
-          h.symbol !== 'CUR:USD'
-      );
-      return groupOptionSpreads(optionHoldings);
-  };
-
-  const renderPositionRow = (position: any, idx: number, type: 'option' | 'stock') => {
-      const cost = position.cost_basis * position.quantity;
-      const value = position.current_price * position.quantity;
-      const pnl = value - cost;
-
-      const pnlPercent = position.pnl_percent !== undefined
-        ? position.pnl_percent
-        : (position.cost_basis > 0 ? (pnl / cost) * 100 : 0);
-
-      const getSeverityClass = (s?: string) => {
-        if (s === 'critical') return 'bg-red-100 text-red-800';
-        if (s === 'warning') return 'bg-yellow-100 text-yellow-800';
-        if (s === 'success') return 'bg-green-100 text-green-800';
-        return '';
-      };
-
-      const displaySymbol = type === 'option' ? formatOptionDisplay(position.symbol) : position.symbol;
-
-      return (
-        <tr key={`${type}-${idx}`} className="hover:bg-gray-50">
-            <td className={`px-6 py-4 font-medium ${type === 'option' ? 'text-purple-600' : 'text-gray-900'}`}>
-                {displaySymbol}
-            </td>
-            <td className="px-6 py-4">{position.quantity}</td>
-            <td className="px-6 py-4">${position.cost_basis?.toFixed(2)}</td>
-            <td className="px-6 py-4">
-                <div>${position.current_price?.toFixed(2)}</div>
-                <div className="text-xs text-gray-400">Val: ${value.toFixed(0)}</div>
-            </td>
-            <td className="px-6 py-4 whitespace-nowrap">
-                <div className={`font-bold ${pnl >= 0 ? 'text-green-600' : 'text-red-600'}`}>
-                {pnl >= 0 ? '+' : ''}{pnl.toFixed(2)} ({pnlPercent.toFixed(1)}%)
-                </div>
-
-                {position.pnl_severity && (
-                   <span className={`inline-flex ml-2 items-center px-2 py-0.5 rounded text-xs font-medium ${getSeverityClass(position.pnl_severity)}`}>
-                      {position.pnl_severity.toUpperCase()}
-                   </span>
-                )}
-
-                {type === 'option' && pnlPercent >= 50 && !position.pnl_severity && (
-                    <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-green-100 text-green-800 animate-pulse">
-                    TARGET HIT 🎯
-                    </span>
-                )}
-            </td>
-        </tr>
-      );
-  };
-
   // --- DERIVED STATE ---
 
   // Use snapshot risk metrics if available
@@ -365,87 +326,11 @@ export default function DashboardPage() {
                   </button>
                 </div>
               </div>
-              <div className="overflow-x-auto">
-                <table className="w-full">
-                  <thead className="bg-gray-50 border-b">
-                    <tr>
-                      <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Symbol</th>
-                      <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Qty</th>
-                      <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Avg Cost</th>
-                      <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Price</th>
-                      <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">P&L</th>
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-gray-200">
-                    {snapshot?.holdings?.length > 0 ? (
-                        <>
-                            {/* OPTIONS & SPREADS */}
-                            {snapshot.holdings.some((h:any) => h.symbol.length > 6 && h.symbol !== 'CUR:USD') && (
-                                <>
-                                    <tr className="bg-purple-50">
-                                        <td colSpan={5} className="px-6 py-2 text-xs font-bold text-purple-800 uppercase">🎯 Option Plays</td>
-                                    </tr>
-                                    {getSpreads(snapshot.holdings).map((spread, idx) => {
-                                        // Use formatOptionDisplay logic but customized for spread title
-                                        // spread.expiry is YYYY-MM-DD
-                                        const [year, month, day] = spread.expiry.split('-');
-                                        const shortDate = `${month}/${day}/${year.slice(2)}`;
-                                        const label = `${spread.underlying} ${shortDate} ${spread.type} Spread`;
-
-                                        const legSummary = spread.legs
-                                            .map(leg => `${leg.parsed.strike}${leg.parsed.type} x ${leg.quantity}`)
-                                            .join(' / ');
-                                        const totalValue = spread.legs.reduce(
-                                            (sum, leg) => sum + leg.quantity * leg.current_price * 100,
-                                            0
-                                        );
-                                        return (
-                                            <tr key={`spread-${idx}`} className="hover:bg-gray-50 border-b border-gray-100">
-                                              <td className="px-6 py-4 font-medium text-purple-700">{label}</td>
-                                              <td className="px-6 py-4 text-sm text-gray-600" colSpan={3}>
-                                                  {legSummary}
-                                              </td>
-                                              <td className="px-6 py-4 text-right font-medium text-gray-900">
-                                                  ${totalValue.toFixed(2)}
-                                              </td>
-                                            </tr>
-                                        );
-                                    })}
-                                </>
-                            )}
-
-                            {/* STOCKS */}
-                            {snapshot.holdings.some((h:any) => h.symbol.length <= 6 && h.symbol !== 'CUR:USD') && (
-                                <tr className="bg-blue-50">
-                                    <td colSpan={5} className="px-6 py-2 text-xs font-bold text-blue-800 uppercase">📈 Long Term Holds</td>
-                                </tr>
-                            )}
-                            {snapshot.holdings
-                                .filter((h:any) => h.symbol.length <= 6 && h.symbol !== 'CUR:USD')
-                                .map((h:any, idx:number) => renderPositionRow(h, idx, 'stock'))
-                            }
-
-                            {/* CASH */}
-                            {snapshot.holdings.filter((h:any) => h.symbol === 'CUR:USD').map((position:any, idx:number) => (
-                                <tr key={`cash-${idx}`} className="bg-green-50 border-t-2 border-green-100">
-                                    <td className="px-6 py-4 font-bold text-green-800">💵 CASH</td>
-                                    <td className="px-6 py-4 text-green-800">---</td>
-                                    <td className="px-6 py-4 text-green-800">---</td>
-                                    <td className="px-6 py-4 font-bold text-green-800">${position.quantity?.toFixed(2)}</td>
-                                    <td className="px-6 py-4"><span className="text-xs bg-green-200 text-green-800 px-2 py-1 rounded">Sweep</span></td>
-                                </tr>
-                            ))}
-                        </>
-                    ) : (
-                      <tr>
-                        <td colSpan={5} className="px-6 py-8 text-center text-gray-500">
-                          No positions found. Sync via Plaid or Import CSV in Settings.
-                        </td>
-                      </tr>
-                    )}
-                  </tbody>
-                </table>
-              </div>
+              <PortfolioHoldingsTable
+                  holdings={snapshot?.holdings || []}
+                  onSync={loadSnapshot}
+                  onGenerateSuggestions={runAllWorkflows}
+              />
             </div>
           </div>
 
@@ -464,46 +349,20 @@ export default function DashboardPage() {
           </div>
         </div>
 
-        {/* Risk Header (Enhanced) */}
-        <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-            <div className="bg-white p-4 rounded-lg shadow relative">
-                <h4 className="text-xs font-medium text-gray-500 uppercase">Beta-weighted Delta</h4>
-                <div className="flex items-center gap-2 mt-1">
-                     <p className="text-2xl font-bold">
-                        {greeks.delta ? greeks.delta.toFixed(2) : (metrics?.analytics?.beta_delta?.toFixed(2) || '0.00')}
-                     </p>
-                     {greekAlerts.delta_over_limit && (
-                        <div title="Delta exceeds threshold">
-                           <AlertCircle className="text-red-500 w-5 h-5 animate-pulse" />
-                        </div>
-                     )}
-                </div>
-            </div>
-            <div className="bg-white p-4 rounded-lg shadow">
-                <h4 className="text-xs font-medium text-gray-500 uppercase">Net Theta</h4>
-                <div className="flex items-center gap-2 mt-1">
-                     <p className="text-2xl font-bold">
-                        {greeks.theta ? greeks.theta.toFixed(2) : (metrics?.analytics?.theta_efficiency?.toFixed(2) || '0.00')}
-                     </p>
-                     {greekAlerts.theta_over_limit && (
-                        <div title="Theta exceeds threshold">
-                           <AlertCircle className="text-yellow-500 w-5 h-5" />
-                        </div>
-                     )}
-                </div>
-            </div>
-            <div className="bg-white p-4 rounded-lg shadow">
-                <h4 className="text-xs font-medium text-gray-500 uppercase">Net Vega</h4>
-                 <div className="flex items-center gap-2 mt-1">
-                     <p className="text-2xl font-bold">
-                        {greeks.vega ? greeks.vega.toFixed(2) : '--'}
-                     </p>
-                </div>
-            </div>
-             <div className="bg-white p-4 rounded-lg shadow">
-                <h4 className="text-xs font-medium text-gray-500 uppercase">Buying Power</h4>
-                <p className="text-2xl font-bold mt-1">${snapshot?.buying_power?.toFixed(2) || '0.00'}</p>
-            </div>
+        {/* PHASE 8: RISK COCKPIT */}
+        <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-4">
+            <RiskSummaryCard
+                summary={riskData?.summary}
+                greeks={riskData?.greeks}
+                exposure={riskData?.exposure}
+                loading={!riskData}
+            />
+            <HoldingsTreemap
+                exposure={riskData?.exposure}
+                loading={!riskData}
+            />
+            <OptimizerInsightCard />
+            <DisciplineSummary />
         </div>
 
         {/* NEW SECTION: STRATEGY PROFILES */}
@@ -647,8 +506,6 @@ export default function DashboardPage() {
                         <div className="text-center py-8 text-purple-700 text-sm">No trades logged yet.</div>
                     )}
                 </div>
-
-                <DisciplineSummary />
             </div>
         </div>
 

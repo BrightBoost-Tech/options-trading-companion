@@ -18,6 +18,7 @@ from plaid.model.investments_holdings_get_request import InvestmentsHoldingsGetR
 from models import Holding
 from market_data import get_polygon_price
 from security.secrets_provider import SecretsProvider
+from analytics.asset_classifier import AssetClassifier
 
 # Initialize SecretsProvider
 secrets_provider = SecretsProvider()
@@ -189,6 +190,9 @@ def fetch_and_normalize_holdings(access_token: str) -> list[Holding]:
             # Fallback to institution value / quantity if price missing?
             # Plaid usually provides institution_price.
 
+            # Classify Asset Type (Phase 8.1)
+            asset_type = AssetClassifier.classify_plaid_security(security, item)
+
             holding = Holding(
                 symbol=ticker,
                 name=security.get('name'),
@@ -199,7 +203,8 @@ def fetch_and_normalize_holdings(access_token: str) -> list[Holding]:
                 institution_name="Plaid",
                 source="plaid",
                 account_id=item.get('account_id'),
-                last_updated=datetime.now()
+                last_updated=datetime.now(),
+                asset_type=asset_type
             )
             normalized_holdings.append(holding)
 

@@ -333,7 +333,7 @@ export default function PortfolioOptimizer({ positions, onOptimizationComplete }
                             {trade.action}
                           </span>
                           <div>
-                            <span className="font-bold text-sm text-slate-800">{trade.symbol}</span>
+                            <span className="font-bold text-sm text-slate-800">{trade.display_symbol ?? trade.symbol}</span>
                             <span className="text-xs text-slate-500 ml-2">x {trade.est_quantity}</span>
                           </div>
                         </div>

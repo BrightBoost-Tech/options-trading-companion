@@ -72,9 +72,12 @@ class JournalService:
         # Ensure dates are in the correct format
         if 'entry_date' in trade_data:
             trade_data['entry_date'] = datetime.fromisoformat(trade_data['entry_date']).isoformat()
-
-        response = self.supabase.table("trade_journal_entries").insert(trade_data).execute()
-        return response.data[0] if response.data else None
+        try:
+            response = self.supabase.table("trade_journal_entries").insert(trade_data).execute()
+            return response.data[0] if response.data else None
+        except Exception as e:
+            print(f"⚠️  Journal insertion failed softly: {e}")
+            return None
 
     def close_trade(self, user_id: str, trade_id: int, exit_date: str, exit_price: float) -> Dict[str, Any]:
         """Closes an existing trade and calculates P&L."""

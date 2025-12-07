@@ -186,7 +186,7 @@ async def run_morning_cycle(supabase: Client, user_id: str):
                 f"historical win rate for similar exits in {iv_regime or 'normal'} regime."
             )
 
-                suggestion = {
+            suggestion = {
                     "user_id": user_id,
                     "created_at": datetime.now(timezone.utc).isoformat(),
                     "valid_until": (datetime.now(timezone.utc) + timedelta(hours=12)).isoformat(),

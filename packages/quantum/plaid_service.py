@@ -18,6 +18,7 @@ from plaid.model.investments_holdings_get_request import InvestmentsHoldingsGetR
 from models import Holding
 from market_data import get_polygon_price
 from security.secrets_provider import SecretsProvider
+from services.options_utils import format_occ_symbol_readable
 from analytics.asset_classifier import AssetClassifier
 
 # Initialize SecretsProvider
@@ -144,7 +145,15 @@ def get_holdings(access_token: str):
         raise ValueError("Plaid credentials are not configured.")
 
     holdings = fetch_and_normalize_holdings(access_token)
-    return {"holdings": [h.dict() for h in holdings]}
+    serialized = []
+    for h in holdings:
+        row = h.dict()
+        sym = row.get("symbol", "")
+        if sym and ("O:" in sym or h.asset_type == "OPTION" or len(sym) > 15):
+            row["display_symbol"] = format_occ_symbol_readable(sym)
+        serialized.append(row)
+
+    return {"holdings": serialized}
 
 
 def fetch_and_normalize_holdings(access_token: str) -> list[Holding]:
@@ -177,7 +186,12 @@ def fetch_and_normalize_holdings(access_token: str) -> list[Holding]:
 
             qty = float(item.get('quantity', 0) or 0)
             total_cost = float(item.get('cost_basis', 0) or 0)
-            cost_basis = total_cost / qty if qty else 0.0  # Normalized to per-share
+
+            # Normalize Plaid cost_basis (total cost) to per-share to match frontend expectations
+            if qty > 0 and total_cost > 0:
+                cost_basis = total_cost / qty
+            else:
+                cost_basis = 0.0
             
             # Fetch real price from Polygon if available
             price = get_polygon_price(ticker)

@@ -141,7 +141,7 @@ export default function WeeklyReportList({ reports }: WeeklyReportListProps) {
             <div className="space-y-2">
               {selectedReport.missed_opportunities.map((opp: any, idx: number) => (
                 <div key={idx} className="bg-orange-50 p-2 rounded border border-orange-100 text-xs flex justify-between items-center">
-                  <span className="font-semibold text-gray-800">{opp.ticker || opp.symbol}</span>
+                  <span className="font-semibold text-gray-800">{opp.display_symbol || opp.ticker || opp.symbol}</span>
                   <span className="text-gray-600">{opp.reason || 'High probability setup missed'}</span>
                   <Badge variant="outline" className="text-[10px] bg-white text-orange-600 border-orange-200">
                     Missed

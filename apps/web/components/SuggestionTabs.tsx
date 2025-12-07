@@ -185,7 +185,7 @@ export default function SuggestionTabs({
                          {trade.side?.toUpperCase()}
                        </Badge>
                        <div>
-                         <span className="font-bold text-gray-900 block">{trade.ticker || trade.symbol}</span>
+                         <span className="font-bold text-gray-900 block">{trade.display_symbol || trade.ticker || trade.symbol}</span>
                          <span className="text-xs text-gray-500">{trade.strategy || trade.spread_type}</span>
                        </div>
                      </div>

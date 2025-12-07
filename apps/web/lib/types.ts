@@ -72,6 +72,7 @@ export interface SuggestionLeg {
   type?: 'call' | 'put';
   expiry?: string;
   option_symbol?: string; // Added for flexibility
+  display_symbol?: string;
 }
 
 export interface SuggestionMetrics {
@@ -89,10 +90,18 @@ export interface Suggestion {
   window?: string;
   status?: string;
   symbol: string;
+  display_symbol?: string;
   ticker?: string;
   direction: string;
   strategy: string;
   expiration?: string;
+  rationale?: string;
+  historical_stats?: {
+    sample_size?: number;
+    win_rate?: number;
+    avg_pnl?: number;
+    [key: string]: any;
+  };
   order_json: {
     legs?: SuggestionLeg[];
     max_loss?: number;

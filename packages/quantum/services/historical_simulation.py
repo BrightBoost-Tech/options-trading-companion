@@ -40,8 +40,9 @@ def learn_from_cycle(
     """
     try:
         # Check if enabled globally (redundant check if caller checked, but safe)
-        if not os.getenv("ENABLE_HISTORICAL_NESTED_LEARNING", "false").lower() == "true":
-             return
+        enable_learning = os.getenv("ENABLE_HISTORICAL_NESTED_LEARNING", "true").lower() == "true"
+        if not enable_learning:
+            return
 
         # Lazy import to avoid circular dep at top level if it becomes an issue,
         # though usually okay.
@@ -61,7 +62,6 @@ def learn_from_cycle(
             if not target_user:
                 # Fallback only for dev convenience, but ideally caller provides it
                 target_user = "75ee12ad-b119-4f32-aeea-19b4ef55d587"
-                # print(f"[NestedLearning] Warning: user_id not provided, using fallback {target_user}")
 
             journal_service.add_trade(
                 user_id=target_user,
@@ -79,7 +79,7 @@ def learn_from_cycle(
                 }
             )
         except Exception as j_err:
-             print(f"[NestedLearning] Journal entry failed: {j_err}")
+            print(f"[NestedLearning] Journal entry failed: {j_err}")
 
         # Prepare details
         details = {

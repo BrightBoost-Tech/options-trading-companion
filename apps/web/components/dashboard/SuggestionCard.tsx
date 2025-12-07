@@ -16,6 +16,16 @@ interface SuggestionCardProps {
 export default function SuggestionCard({ suggestion, onStage, onModify, onDismiss }: SuggestionCardProps) {
     const { order_json, score, metrics, iv_regime, iv_rank, delta_impact, theta_impact, staged } = suggestion;
     const hasLoggedView = useRef(false);
+    const displaySymbol = suggestion.display_symbol ?? suggestion.symbol ?? suggestion.ticker ?? '---';
+    const exitPrice = typeof order_json?.limit_price === 'number'
+        ? order_json.limit_price
+        : order_json?.limit_price !== undefined
+            ? Number(order_json.limit_price)
+            : undefined;
+    const histStats = suggestion.historical_stats;
+    const winRatePct = typeof histStats?.win_rate === 'number' ? histStats.win_rate * 100 : undefined;
+    const avgPnl = typeof histStats?.avg_pnl === 'number' ? histStats.avg_pnl : undefined;
+    const sampleSize = histStats?.sample_size ?? 0;
 
     // Analytics: Log View on Mount (or IntersectionObserver for strictly viewport)
     // For simplicity, we log on mount if not already logged.
@@ -101,7 +111,7 @@ export default function SuggestionCard({ suggestion, onStage, onModify, onDismis
                 <div className="flex justify-between items-start mb-2">
                     <div>
                         <div className="flex items-center gap-2">
-                            <span className="font-bold text-lg">{suggestion.symbol}</span>
+                            <span className="font-bold text-lg">{displaySymbol}</span>
                             <span className="text-sm font-medium text-gray-600">{suggestion.strategy}</span>
                             {suggestion.expiration && (
                                 <span className="text-xs text-gray-400 border px-1 rounded">{suggestion.expiration}</span>
@@ -109,20 +119,30 @@ export default function SuggestionCard({ suggestion, onStage, onModify, onDismis
                         </div>
 
                         {/* Rationale / Historical Stats (Morning Suggestions) */}
-                        <div className="mt-1 mb-1">
-                            {suggestion.rationale && (
-                                <p className="text-xs text-slate-700 italic">
-                                    {suggestion.rationale}
-                                </p>
-                            )}
-                            {suggestion.historical_stats && (
-                                <p className="text-[10px] text-slate-500 mt-0.5">
-                                    Historical: {suggestion.historical_stats.sample_size} exits |
-                                    Win Rate: {(suggestion.historical_stats.win_rate * 100).toFixed(0)}% |
-                                    Avg P&L: ${suggestion.historical_stats.avg_pnl?.toFixed(2)}
-                                </p>
-                            )}
-                        </div>
+                        {suggestion.window === 'morning_limit' && (
+                            <div className="mt-1 mb-1 space-y-0.5">
+                                {exitPrice !== undefined && !Number.isNaN(exitPrice) && (
+                                    <p className="text-xs text-slate-800 font-medium">
+                                        Exit @ ${exitPrice.toFixed(2)}
+                                    </p>
+                                )}
+                                {suggestion.rationale && (
+                                    <p className="text-xs text-slate-700 italic">
+                                        {suggestion.rationale}
+                                    </p>
+                                )}
+                                {histStats && (
+                                    <div className="text-[10px] text-slate-500">
+                                        <div className="font-semibold text-gray-600">Historical stats</div>
+                                        <p>
+                                            {sampleSize} exits |
+                                            Win Rate: {winRatePct !== undefined ? winRatePct.toFixed(0) : '--'}% |
+                                            Avg P&L: ${avgPnl !== undefined ? avgPnl.toFixed(2) : '--'}
+                                        </p>
+                                    </div>
+                                )}
+                            </div>
+                        )}
 
                         <div className="flex gap-2 mt-1">
                              {/* IV Context */}

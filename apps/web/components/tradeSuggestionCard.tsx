@@ -60,10 +60,11 @@ export default function TradeSuggestionCard({ suggestion, onLogged }: TradeSugge
   const [logging, setLogging] = useState(false);
 
   // Normalize symbol/ticker
-  const rawSymbol = suggestion.symbol || suggestion.ticker || 'UNKNOWN';
-  const displaySymbol = (suggestion.type === 'option' || rawSymbol.length > 10)
-      ? formatOptionDisplay(rawSymbol)
-      : rawSymbol;
+  const rawSymbol = suggestion.display_symbol || suggestion.symbol || suggestion.ticker || 'UNKNOWN';
+  const displaySymbol = suggestion.display_symbol
+      || ((suggestion.type === 'option' || rawSymbol.length > 10)
+          ? formatOptionDisplay(rawSymbol)
+          : rawSymbol);
 
   const displayStrategy = suggestion.strategy || suggestion.type || 'Trade';
   const displayScore = suggestion.score || 0;

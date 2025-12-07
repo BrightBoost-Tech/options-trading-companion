@@ -235,36 +235,30 @@ def scan_for_opportunities(
     # Final Scoring
     final_candidates = []
     for cand in enriched_opportunities:
-        raw_score = cand.get('score')
+        # Always recompute score to avoid stale or legacy constants
+        metrics = cand.get("metrics") or {}
+        iv_rank = metrics.get("iv_rank")
+        if iv_rank is None:
+            iv_rank = cand.get("iv_rank")
 
-        # 4.1 Real Scoring Logic (No Constant 27.0)
-        if raw_score is None:
-            metrics = cand.get("metrics") or {}
-            iv_rank = metrics.get("iv_rank") # From enrichment
-            if iv_rank is None:
-                iv_rank = cand.get("iv_rank") # Fallback
+        pop = metrics.get("probability_of_profit")
+        rr = metrics.get("reward_to_risk") or cand.get("reward_risk")
 
-            pop = metrics.get("probability_of_profit")
-            rr = metrics.get("reward_to_risk") or cand.get("reward_risk")
+        components = []
+        if iv_rank is not None:
+            # Prefer high IV for credit, low for debit?
+            # Scanner usually Debit logic in defaults (see above), but enriched might switch.
+            # Assuming simple "higher IV rank is better" for selling, but here defaults are debit spreads...
+            # Actually defaults are Debit. But let's just use raw rank as component 0-1.
+            components.append(iv_rank / 100.0)
 
-            components = []
-            if iv_rank is not None:
-                # Prefer high IV for credit, low for debit?
-                # Scanner usually Debit logic in defaults (see above), but enriched might switch.
-                # Assuming simple "higher IV rank is better" for selling, but here defaults are debit spreads...
-                # Actually defaults are Debit. But let's just use raw rank as component 0-1.
-                components.append(iv_rank / 100.0)
+        if pop is not None:
+            components.append(pop)
 
-            if pop is not None:
-                components.append(pop)
+        if rr is not None:
+            components.append(min(rr, 3.0) / 3.0) # Cap R/R at 3 for scoring normalization
 
-            if rr is not None:
-                components.append(min(rr, 3.0) / 3.0) # Cap R/R at 3 for scoring normalization
-
-            if components:
-                raw_score = 100 * sum(components) / len(components)
-            else:
-                raw_score = None
+        raw_score = 100 * sum(components) / len(components) if components else None
 
         cand['score'] = raw_score
 

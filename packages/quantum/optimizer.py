@@ -362,7 +362,15 @@ async def optimize_portfolio(req: OptimizationRequest, request: Request, user_id
 
         try:
             # Fetch for unique underlyings
-            unique_underlyings = list(set(underlying_tickers))
+            # 3.1 Exclude Cash/Bad Tickers from Inputs
+            unique_underlyings = list(set([
+                u for u in underlying_tickers
+                if u and "USD" not in u and "CASH" not in u and not u.startswith("CUR:")
+            ]))
+
+            if not unique_underlyings:
+                 raise ValueError("No valid investable underlyings found after filtering.")
+
             base_inputs = calculate_portfolio_inputs(unique_underlyings)
 
             # Map back to spreads
@@ -392,6 +400,23 @@ async def optimize_portfolio(req: OptimizationRequest, request: Request, user_id
                     else:
                         sigma[i, j] = 0.0
                         if i == j: sigma[i, j] = 0.1 # default var
+
+            # 3.2 Sanitize Sigma (Core System Hardening)
+            # Check for NaNs or Infs
+            if np.isnan(sigma).any() or np.isinf(sigma).any():
+                print("Warning: Sigma contains NaNs or Infs. Falling back to identity.")
+                sigma = np.identity(n) * 0.05
+            else:
+                 # Check PSD (Positive Semi-Definite)
+                 try:
+                     eigvals = np.linalg.eigvals(sigma)
+                     if np.any(eigvals < 0):
+                          print("Warning: Sigma not PSD. Falling back to diagonal.")
+                          sigma = np.diag(np.diag(sigma))
+                 except Exception:
+                     # e.g. convergence error
+                     print("Warning: Sigma check failed. Falling back to identity.")
+                     sigma = np.identity(n) * 0.05
 
             coskew = np.zeros((n, n, n)) # Mock coskew
 

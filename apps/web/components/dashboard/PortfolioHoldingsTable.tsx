@@ -34,7 +34,8 @@ export default function PortfolioHoldingsTable({ holdings, onSync, onGenerateSug
         return '';
       };
 
-      const displaySymbol = type === 'option' ? formatOptionDisplay(position.symbol) : position.symbol;
+      // Use backend provided display_symbol if available, otherwise format locally
+      const displaySymbol = position.display_symbol ?? (type === 'option' ? formatOptionDisplay(position.symbol) : position.symbol);
 
       return (
         <tr key={`${position.symbol}-${idx}`} className="hover:bg-gray-50">

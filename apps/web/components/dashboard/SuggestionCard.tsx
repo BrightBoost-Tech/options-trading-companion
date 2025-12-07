@@ -107,6 +107,23 @@ export default function SuggestionCard({ suggestion, onStage, onModify, onDismis
                                 <span className="text-xs text-gray-400 border px-1 rounded">{suggestion.expiration}</span>
                             )}
                         </div>
+
+                        {/* Rationale / Historical Stats (Morning Suggestions) */}
+                        <div className="mt-1 mb-1">
+                            {suggestion.rationale && (
+                                <p className="text-xs text-slate-700 italic">
+                                    {suggestion.rationale}
+                                </p>
+                            )}
+                            {suggestion.historical_stats && (
+                                <p className="text-[10px] text-slate-500 mt-0.5">
+                                    Historical: {suggestion.historical_stats.sample_size} exits |
+                                    Win Rate: {(suggestion.historical_stats.win_rate * 100).toFixed(0)}% |
+                                    Avg P&L: ${suggestion.historical_stats.avg_pnl?.toFixed(2)}
+                                </p>
+                            )}
+                        </div>
+
                         <div className="flex gap-2 mt-1">
                              {/* IV Context */}
                              {iv_regime && (
@@ -149,10 +166,30 @@ export default function SuggestionCard({ suggestion, onStage, onModify, onDismis
                                 "";
                             const strike = leg.strike ?? "";
 
+                            // Prefer friendly display symbol if available (especially for full ticker)
+                            // But for legs we often just want Qty Type Strike
+                            const legDisplay = leg.display_symbol ?? `${qty > 0 ? "+" : ""}${qty} ${typeLabel} ${strike}`;
+
+                            // If display_symbol is full string "AMZN ...", we might just want to show it.
+                            // But usually legs in this UI are "1 C 150".
+                            // If we use display_symbol from backend, it's "AMZN 12/19/25 C 255".
+                            // That might be too long for the small list?
+                            // Let's stick to compact unless it's missing.
+                            // Actually the request is "Normalize OCC symbols... in ALL views".
+                            // If I use the backend `display_symbol`, it is full format.
+                            // Let's use it but maybe truncate or handle layout.
+                            // Or, keep compact representation if we have parsed fields, but fallback to display_symbol if not.
+                            // The card logic builds compact string manually.
+
+                            // Decision: The prompt asks for friendly format. "AMZN 12/19/25 C 255" is better than "1 C 255" IF we need to know the expiry/underlying per leg.
+                            // But SuggestionCard header already shows Underlying/Expiry often.
+                            // If legs have different expiries (Calendars), we NEED full info.
+                            // So let's use display_symbol if available, as it is safest.
+
                             return (
                                 <div key={idx} className="flex justify-between border-b border-gray-100 last:border-0 py-1">
-                                    <span className="text-gray-600">
-                                        {qty > 0 ? "+" : ""}{qty} {typeLabel} {strike}
+                                    <span className="text-gray-600 text-xs truncate max-w-[200px]" title={leg.display_symbol}>
+                                        {leg.display_symbol ?? `${qty > 0 ? "+" : ""}${qty} ${typeLabel} ${strike}`}
                                     </span>
                                     <span className={`text-xs font-mono ${actionClass}`}>
                                         {actionLabel}

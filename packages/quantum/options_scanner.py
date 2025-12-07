@@ -235,16 +235,56 @@ def scan_for_opportunities(
     # Final Scoring
     final_candidates = []
     for cand in enriched_opportunities:
-        score = cand.get('score', 0)
+        raw_score = cand.get('score')
 
-        # LOGGING FIX (Step 7)
+        # 4.1 Real Scoring Logic (No Constant 27.0)
+        if raw_score is None:
+            metrics = cand.get("metrics") or {}
+            iv_rank = metrics.get("iv_rank") # From enrichment
+            if iv_rank is None:
+                iv_rank = cand.get("iv_rank") # Fallback
+
+            pop = metrics.get("probability_of_profit")
+            rr = metrics.get("reward_to_risk") or cand.get("reward_risk")
+
+            components = []
+            if iv_rank is not None:
+                # Prefer high IV for credit, low for debit?
+                # Scanner usually Debit logic in defaults (see above), but enriched might switch.
+                # Assuming simple "higher IV rank is better" for selling, but here defaults are debit spreads...
+                # Actually defaults are Debit. But let's just use raw rank as component 0-1.
+                components.append(iv_rank / 100.0)
+
+            if pop is not None:
+                components.append(pop)
+
+            if rr is not None:
+                components.append(min(rr, 3.0) / 3.0) # Cap R/R at 3 for scoring normalization
+
+            if components:
+                raw_score = 100 * sum(components) / len(components)
+            else:
+                raw_score = None
+
+        cand['score'] = raw_score
+
         symbol = cand.get("symbol") or cand.get("ticker")
-        print(f"{symbol} score={cand.get('score')} ev={cand.get('metrics', {}).get('expected_value')}")
 
-        cand['score'] = min(100, score)
+        # Logging safety: cand.get('metrics') might be None, so .get({}, {}) is safer or explicit check
+        metrics_debug = cand.get('metrics') or {}
+        print(f"{symbol} score={cand.get('score')} ev={metrics_debug.get('expected_value')}")
+
         final_candidates.append(cand)
 
-    final_candidates.sort(key=lambda x: x.get('score', 0), reverse=True)
+    # Sort with None safety: treat None as -1
+    def get_sort_key(x):
+        s = x.get('score')
+        try:
+            return float(s) if s is not None else -1.0
+        except (ValueError, TypeError):
+            return -1.0
+
+    final_candidates.sort(key=get_sort_key, reverse=True)
 
     return final_candidates
 

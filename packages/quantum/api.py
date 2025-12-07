@@ -41,7 +41,7 @@ from services.plaid_history_service import PlaidHistoryService
 from services.rebalance_engine import RebalanceEngine
 from services.execution_service import ExecutionService
 from analytics.progress_engine import ProgressEngine, get_week_id_for_last_full_week
-from services.options_utils import group_spread_positions
+from services.options_utils import group_spread_positions, format_occ_symbol_readable
 from ev_calculator import calculate_ev, calculate_position_size
 from services.enrichment_service import enrich_holdings_with_analytics
 from models import SpreadPosition, RiskDashboardResponse, UnifiedPosition, OptimizationRationale
@@ -887,6 +887,9 @@ async def run_all(user_id: str = Depends(get_current_user)):
 async def run_historical_cycle(
     cursor: str = Body(..., embed=True),
     symbol: Optional[str] = Body("SPY", embed=True),
+    # Allow user_id to be passed via Auth header implicitly, or Body if debug?
+    # Usually we get it from token.
+    user_id: str = Depends(get_current_user),
 ):
     """
     Runs exactly one historical trade cycle (Entry -> Exit) starting from cursor date.
@@ -894,7 +897,8 @@ async def run_historical_cycle(
     """
     try:
         service = HistoricalCycleService() # Inits with PolygonService
-        result = service.run_cycle(cursor, symbol)
+        # Pass user_id so journal entry is owned by caller
+        result = service.run_cycle(cursor, symbol, user_id=user_id)
         return result
     except Exception as e:
         print(f"Historical cycle error: {e}")
@@ -921,7 +925,24 @@ async def get_suggestions(
         # Enrich with spreads if possible?
         # The structure is JSON, so we just return.
 
-        return {"suggestions": res.data or []}
+        suggestions = res.data or []
+        for s in suggestions:
+            # Format main ticker if it looks like an option (simple heuristic or type check)
+            # Ticker might be "KURA 04/17/26 Call Spread" which is already readable
+            # But if it is raw OCC:
+            sym = s.get("symbol") or s.get("ticker", "")
+            if "O:" in sym or (len(sym) > 15 and any(c.isdigit() for c in sym)):
+                s["display_symbol"] = format_occ_symbol_readable(sym)
+            else:
+                s["display_symbol"] = sym
+
+            # Format legs in order_json
+            if "order_json" in s and "legs" in s["order_json"]:
+                for leg in s["order_json"]["legs"]:
+                    if "symbol" in leg:
+                        leg["display_symbol"] = format_occ_symbol_readable(leg["symbol"])
+
+        return {"suggestions": suggestions}
     except Exception as e:
         print(f"Error fetching suggestions: {e}")
         raise HTTPException(status_code=500, detail="Failed to fetch suggestions")
@@ -1026,6 +1047,12 @@ async def sync_holdings(
         data_to_insert = []
         for h in holdings:
             row = h.model_dump()
+
+            # Format display symbol if option
+            display_sym = row["symbol"]
+            if h.asset_type == "OPTION" or "O:" in row["symbol"]:
+                display_sym = format_occ_symbol_readable(row["symbol"])
+
             position_row = {
                 "user_id": user_id,
                 "symbol": row["symbol"],
@@ -1035,6 +1062,16 @@ async def sync_holdings(
                 "currency": row["currency"],
                 "source": "plaid",
                 "updated_at": datetime.now().isoformat(),
+                # Note: 'display_symbol' column might not exist in DB yet.
+                # If we want to persist it, we need a migration.
+                # OR we return it in the API response only.
+                # The task 5.2 says: "Before serializing symbol for an option, add a display_symbol"
+                # "Particularly: Positions endpoint used by PortfolioHoldingsTable."
+                # create_portfolio_snapshot reads from DB. So if DB doesn't have it, we must add it on read.
+                # We are in sync_holdings here, upserting to DB.
+                # If schema lacks display_symbol, we can't save it.
+                # Assuming no schema change allowed unless critical, I will add it to the SyncResponse below
+                # and ensure GET /portfolio/snapshot adds it dynamically.
             }
             data_to_insert.append(position_row)
 
@@ -1220,9 +1257,22 @@ async def get_portfolio_snapshot(
             minutes=15
         )
 
-        # Inject Spreads for the frontend
+        # Inject Spreads for the frontend & Format Symbols
         if "holdings" in snapshot_data:
+            # Add display_symbol to holdings
+            for h in snapshot_data["holdings"]:
+                s = h.get("symbol", "")
+                if "O:" in s or h.get("asset_type") == "OPTION" or len(s) > 15: # loose heuristic
+                    h["display_symbol"] = format_occ_symbol_readable(s)
+                else:
+                    h["display_symbol"] = s
+
             snapshot_data["spreads"] = group_spread_positions(snapshot_data["holdings"])
+
+            # Format spread legs
+            for spread in snapshot_data["spreads"]:
+                for leg in spread.legs:
+                    leg["display_symbol"] = format_occ_symbol_readable(leg["symbol"])
 
     if snapshot_data:
         # Add buying power if available from a related table

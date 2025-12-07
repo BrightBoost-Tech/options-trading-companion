@@ -176,7 +176,8 @@ def fetch_and_normalize_holdings(access_token: str) -> list[Holding]:
                 ticker = security.get('name', 'Unknown')
 
             qty = float(item.get('quantity', 0) or 0)
-            cost_basis = float(item.get('cost_basis', 0) or 0)
+            total_cost = float(item.get('cost_basis', 0) or 0)
+            cost_basis = total_cost / qty if qty else 0.0  # Normalized to per-share
             
             # Fetch real price from Polygon if available
             price = get_polygon_price(ticker)

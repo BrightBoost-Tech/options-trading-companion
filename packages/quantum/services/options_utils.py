@@ -34,6 +34,30 @@ def parse_option_symbol(symbol: str) -> Dict[str, Any]:
         "strike": strike
     }
 
+def format_occ_symbol_readable(symbol: str) -> str:
+    """
+    Convert 'AMZN251219C00255000' to 'AMZN 12/19/25 C 255'.
+    """
+    # Use existing parsing logic if possible
+    try:
+        if "O:" in symbol: symbol = symbol.replace("O:", "")
+        parsed = parse_option_symbol(symbol)
+        if not parsed:
+            return symbol # Return original if not parseable
+
+        # Expiry is YYYY-MM-DD, convert to MM/DD/YY
+        y, m, d = parsed["expiry"].split("-")
+        short_y = y[2:]
+        formatted_date = f"{m}/{d}/{short_y}"
+
+        # Strike is float, maybe remove decimals if whole number
+        strike = parsed["strike"]
+        strike_str = f"{strike:.0f}" if strike.is_integer() else f"{strike}"
+
+        return f"{parsed['underlying']} {formatted_date} {parsed['type']} {strike_str}"
+    except Exception:
+        return symbol
+
 def group_spread_positions(positions: List[Dict]) -> List[SpreadPosition]:
     """
     Groups individual positions into spreads based on underlying, expiry.

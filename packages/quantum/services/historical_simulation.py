@@ -31,6 +31,7 @@ def learn_from_cycle(
     entry: Dict[str, Any],
     exit: Dict[str, Any],
     reward: float,
+    user_id: Optional[str] = None,
     mode: str = "historical",
 ) -> None:
     """
@@ -45,10 +46,40 @@ def learn_from_cycle(
         # Lazy import to avoid circular dep at top level if it becomes an issue,
         # though usually okay.
         from nested_logging import _get_supabase_client
+        from services.journal_service import JournalService
 
         supabase = _get_supabase_client()
         if not supabase:
             return
+
+        # 1. Create Synthetic Journal Entry
+        try:
+            journal_service = JournalService(supabase)
+
+            # Use passed user_id or fallback to test user (with warning) if none provided
+            target_user = user_id
+            if not target_user:
+                # Fallback only for dev convenience, but ideally caller provides it
+                target_user = "75ee12ad-b119-4f32-aeea-19b4ef55d587"
+                # print(f"[NestedLearning] Warning: user_id not provided, using fallback {target_user}")
+
+            journal_service.add_trade(
+                user_id=target_user,
+                trade_data={
+                    "entry_type": "historical_cycle",
+                    "symbol": entry.get("symbol", "SPY"),
+                    "pnl": reward,
+                    "entry_date": entry["entryTime"],
+                    "exit_date": exit["exitTime"],
+                    "entry_price": entry["entryPrice"],
+                    "exit_price": exit["exitPrice"],
+                    "direction": "Long",
+                    "status": "closed",
+                    "notes": f"Historical regime cycle {mode}: PnL={reward:.2f} | Entry: {entry.get('regimeAtEntry')} -> Exit: {exit.get('regimeAtExit')}",
+                }
+            )
+        except Exception as j_err:
+             print(f"[NestedLearning] Journal entry failed: {j_err}")
 
         # Prepare details
         details = {
@@ -95,12 +126,13 @@ class HistoricalCycleService:
         )
         self.conviction_transform = ConvictionTransform(DEFAULT_REGIME_PROFILES)
         self.lookback_window = 60 # Days needed for indicators
-        self.enable_learning = os.getenv("ENABLE_HISTORICAL_NESTED_LEARNING", "false").lower() == "true"
+        self.enable_learning = os.getenv("ENABLE_HISTORICAL_NESTED_LEARNING", "true").lower() == "true"
 
     def run_cycle(
         self,
         cursor_date_str: str,
         symbol: str = "SPY",
+        user_id: Optional[str] = None,
         config: Optional[Any] = None # Using Any to avoid runtime issues if import fails, but verified via logic
     ) -> Dict[str, Any]:
         """
@@ -259,7 +291,8 @@ class HistoricalCycleService:
                         "entryPrice": current_price,
                         "direction": "long",
                         "regimeAtEntry": regime_mapped,
-                        "convictionAtEntry": c_i
+                        "convictionAtEntry": c_i,
+                        "symbol": symbol
                     }
                     trajectory = [step_snapshot] # Start trajectory
                     days_in_trade = 0
@@ -302,6 +335,7 @@ class HistoricalCycleService:
                             entry_details,
                             exit_details,
                             pnl_amount,
+                            user_id=user_id,
                             mode="historical"
                         )
 
@@ -337,6 +371,7 @@ class HistoricalCycleService:
                     entry_details,
                     exit_details,
                     pnl_amount,
+                    user_id=user_id,
                     mode="historical_forced"
                 )
 

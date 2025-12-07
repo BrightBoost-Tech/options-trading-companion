@@ -186,30 +186,30 @@ async def run_morning_cycle(supabase: Client, user_id: str):
                 f"historical win rate for similar exits in {iv_regime or 'normal'} regime."
             )
 
-            suggestion = {
-                "user_id": user_id,
-                "created_at": datetime.now(timezone.utc).isoformat(),
-                "valid_until": (datetime.now(timezone.utc) + timedelta(hours=12)).isoformat(),
-                "window": "morning_limit",
-                "ticker": spread.ticker, # e.g. "KURA 04/17/26 Call Spread"
-                "display_symbol": spread.ticker,
-                "strategy": "take_profit_limit",
-                "direction": "close",
-                "ev": metrics.expected_value,
-                "probability_of_profit": metrics.prob_of_profit,
-                "rationale": rationale_text,
-                "historical_stats": hist_stats,
-                "order_json": {
-                    "side": "close_spread",
-                    "limit_price": round(metrics.limit_price, 2),
-                    "legs": [
-                        {
-                            "symbol": l["symbol"],
-                            "display_symbol": format_occ_symbol_readable(l["symbol"]),
-                            "quantity": l["quantity"]
-                        } for l in legs
-                    ]
-                },
+                suggestion = {
+                    "user_id": user_id,
+                    "created_at": datetime.now(timezone.utc).isoformat(),
+                    "valid_until": (datetime.now(timezone.utc) + timedelta(hours=12)).isoformat(),
+                    "window": "morning_limit",
+                    "ticker": spread.ticker, # e.g. "KURA 04/17/26 Call Spread"
+                    "display_symbol": spread.ticker,
+                    "strategy": "take_profit_limit",
+                    "direction": "close",
+                    "ev": metrics.expected_value,
+                    "probability_of_profit": metrics.prob_of_profit,
+                    "rationale": rationale_text,
+                    "historical_stats": hist_stats,
+                    "order_json": {
+                        "side": "close_spread",
+                        "limit_price": round(metrics.limit_price, 2),
+                        "legs": [
+                            {
+                                "symbol": l["symbol"],
+                                "display_symbol": format_occ_symbol_readable(l["symbol"]),
+                                "quantity": l["quantity"]
+                            } for l in legs
+                        ]
+                    },
                 "sizing_metadata": {
                     "reason": metrics.reason,
                     "context": {

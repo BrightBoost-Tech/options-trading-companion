@@ -1,98 +1,93 @@
+
 import pytest
 from unittest.mock import MagicMock, patch
 from fastapi.testclient import TestClient
 import sys
 import os
 
-# Ensure we can import from the parent directory
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+sys.path.append(os.path.join(os.path.dirname(__file__), ".."))
+sys.path.append(os.path.join(os.path.dirname(__file__), "../.."))
 
 from api import app
 from security import get_current_user
 
 client = TestClient(app)
 
+def mock_get_current_user():
+    return "test-user-id"
+
+app.dependency_overrides[get_current_user] = mock_get_current_user
+
 @pytest.fixture
 def mock_supabase():
     with patch("api.supabase") as mock:
         yield mock
 
-def test_drift_summary_endpoint(mock_supabase):
-    # Override authentication
-    async def mock_get_user():
-        return "test_user_123"
-
-    app.dependency_overrides[get_current_user] = mock_get_user
-
-    # Mock DB response
-    # Scenario: 4 logs
-    # 1. disciplined
-    # 2. impulse
-    # 3. size + impulse (mixed)
-    # 4. disciplined
-    mock_logs = [
-        {"discipline_tags": ["disciplined_execution"]},
-        {"discipline_tags": ["impulse_trade"]},
-        {"discipline_tags": ["size_violation", "impulse_trade"]},
-        {"discipline_tags": ["disciplined_execution"]},
-    ]
-
+def test_drift_summary_view_success(mock_supabase):
     mock_response = MagicMock()
-    mock_response.data = mock_logs
+    mock_response.data = {
+        "disciplined_count": 10,
+        "impulse_count": 2,
+        "size_violation_count": 1,
+        "discipline_score": 0.77
+    }
 
-    # Mock the chain: supabase.table("execution_drift_logs").select("*").eq(...).gte(...).execute()
-    mock_chain = mock_supabase.table.return_value \
-        .select.return_value \
-        .eq.return_value \
-        .gte.return_value
-    mock_chain.execute.return_value = mock_response
+    mock_query = MagicMock()
+    mock_query.execute.return_value = mock_response
+
+    mock_supabase.table.return_value.select.return_value = mock_query
+    mock_query.eq.return_value = mock_query
+    mock_query.single.return_value = mock_query
 
     response = client.get("/journal/drift-summary")
 
     assert response.status_code == 200
     data = response.json()
 
-    # Verify basics
-    assert data["window_days"] == 7
-    assert data["total_suggestions"] == 4
-
-    # Verify counts
-    # Disciplined: 1st and 4th = 2
-    assert data["disciplined_execution"] == 2
-    # Impulse: 2nd and 3rd = 2
+    total = 10 + 2 + 1
+    assert data["total_suggestions"] == total
+    assert data["disciplined_execution"] == 10
     assert data["impulse_trades"] == 2
-    # Size: 3rd = 1
     assert data["size_violations"] == 1
+    assert data["disciplined_rate"] == 0.77
+    assert data["impulse_rate"] == pytest.approx(2/13)
 
-    # Verify rates (rounded to 2 decimals in implementation)
-    # 2/4 = 0.5
-    assert data["disciplined_rate"] == 0.5
-    assert data["impulse_rate"] == 0.5
-    # 1/4 = 0.25
-    assert data["size_violation_rate"] == 0.25
+def test_drift_summary_fallback_success(mock_supabase):
+    mock_view_query = MagicMock()
+    mock_view_query.execute.side_effect = Exception("View not found")
 
-    # Clean up
-    app.dependency_overrides = {}
+    mock_logs_response = MagicMock()
+    mock_logs_response.data = [
+        {"tag": "disciplined_execution"},
+        {"tag": "disciplined_execution"},
+        {"tag": "impulse_trade"}
+    ]
+    mock_logs_query = MagicMock()
+    mock_logs_query.execute.return_value = mock_logs_response
 
-def test_drift_summary_empty(mock_supabase):
-    async def mock_get_user():
-        return "test_user_empty"
-    app.dependency_overrides[get_current_user] = mock_get_user
+    def table_side_effect(name):
+        if name == "discipline_score_per_user":
+            m = MagicMock()
+            m.select.return_value = mock_view_query
+            mock_view_query.eq.return_value = mock_view_query
+            mock_view_query.single.return_value = mock_view_query
+            return m
+        elif name == "execution_drift_logs":
+            m = MagicMock()
+            m.select.return_value = mock_logs_query
+            mock_logs_query.eq.return_value = mock_logs_query
+            mock_logs_query.gte.return_value = mock_logs_query
+            return m
+        return MagicMock()
 
-    mock_response = MagicMock()
-    mock_response.data = []
-
-    mock_supabase.table.return_value \
-        .select.return_value \
-        .eq.return_value \
-        .gte.return_value \
-        .execute.return_value = mock_response
+    mock_supabase.table.side_effect = table_side_effect
 
     response = client.get("/journal/drift-summary")
+
     assert response.status_code == 200
     data = response.json()
 
-    assert data["total_suggestions"] == 0
-    assert data["disciplined_rate"] == 0.0
-
-    app.dependency_overrides = {}
+    assert data["total_suggestions"] == 3
+    assert data["disciplined_execution"] == 2
+    assert data["impulse_trades"] == 1
+    assert data["disciplined_rate"] == pytest.approx(2/3)

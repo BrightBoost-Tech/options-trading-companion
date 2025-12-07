@@ -143,12 +143,12 @@ class UnifiedPosition(BaseModel):
 
 class OptimizationRationale(BaseModel):
     status: Literal["OPTIMAL", "CONSTRAINED", "FAILED"]
-    trace_id: Optional[str]
-    regime_detected: Optional[str]
-    conviction_used: Optional[float]
-    alpha_score: Optional[float]
-    risk_penalty: Optional[float]
-    constraint_cost: Optional[float]
+    trace_id: Optional[str] = None
+    regime_detected: Optional[str] = None
+    conviction_used: Optional[float] = None
+    alpha_score: Optional[float] = None
+    risk_penalty: Optional[float] = None
+    constraint_cost: Optional[float] = None
     active_constraints: List[str] = []
 
 class RiskDashboardResponse(BaseModel):

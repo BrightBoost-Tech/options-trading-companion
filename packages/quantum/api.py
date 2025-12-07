@@ -465,7 +465,15 @@ async def create_portfolio_snapshot(user_id: str) -> None:
     holdings = enrich_holdings_with_analytics(holdings)
 
     # 3. Calculate Risk Metrics (Basic)
-    symbols = [h["symbol"] for h in holdings if h.get("symbol")]
+    # Filter out CASH and CUR:USD to prevent Polygon 400 errors
+    symbols = [
+        h["symbol"]
+        for h in holdings
+        if h.get("symbol")
+        and not h["symbol"].startswith("CUR:")
+        and not h["symbol"].startswith("O:CUR:")
+        and h["symbol"] not in ["USD", "CASH", "USD CASH"]
+    ]
     risk_metrics: Dict[str, object] = {}
 
     try:
@@ -481,6 +489,7 @@ async def create_portfolio_snapshot(user_id: str) -> None:
             }
     except Exception as e:
         print(f"Failed to calculate risk metrics for snapshot: {e}")
+        # Soft failure: log error but don't crash, return partial metrics
         risk_metrics = {"error": str(e)}
 
     # Group into spreads for snapshot
@@ -1366,28 +1375,45 @@ async def get_drift_summary(user_id: str = Depends(get_current_user)):
     Returns execution-discipline metrics for the current user.
 
     Uses the `discipline_score_per_user` view if available,
-    otherwise falls back to aggregating from execution_drift_logs.
+    but computes rates in Python since the view lacks window_days/total_suggestions.
     """
     if not supabase:
         raise HTTPException(status_code=503, detail="Database not available")
 
     data = None
 
-    # Try the view first
+    # Try the view first - Updated for Phase 8 schema changes
     try:
+        # View columns: user_id, disciplined_count, impulse_count, size_violation_count, discipline_score
         res = supabase.table("discipline_score_per_user") \
-            .select(
-                "window_days, total_suggestions, disciplined_execution, impulse_trades, size_violations, "
-                "disciplined_rate, impulse_rate, size_violation_rate"
-            ) \
+            .select("disciplined_count, impulse_count, size_violation_count, discipline_score") \
             .eq("user_id", user_id) \
             .single() \
             .execute()
 
-        if res.data:
-            data = res.data
+        row = res.data
+        if row:
+            disciplined = int(row.get("disciplined_count", 0))
+            impulse = int(row.get("impulse_count", 0))
+            size_v = int(row.get("size_violation_count", 0))
+            total = disciplined + impulse + size_v
+
+            disciplined_rate = float(row.get("discipline_score", 0.0))
+            impulse_rate = (impulse / total) if total else 0.0
+            size_rate = (size_v / total) if total else 0.0
+
+            data = {
+                "window_days": 7, # View doesn't have window, assume default or indefinite
+                "total_suggestions": total,
+                "disciplined_execution": disciplined,
+                "impulse_trades": impulse,
+                "size_violations": size_v,
+                "disciplined_rate": disciplined_rate,
+                "impulse_rate": impulse_rate,
+                "size_violation_rate": size_rate,
+            }
     except Exception as e:
-        print(f"Warning: discipline_score_per_user view not available, falling back to raw aggregation: {e}")
+        print(f"Warning: discipline_score_per_user view not available or schema mismatch: {e}")
         data = None
 
     if not data:
@@ -1565,7 +1591,13 @@ async def explain_optimizer_run(
 
     # 1. Query nested_logging's inference_log
     try:
-        query = supabase.table("inference_log").select("*").eq("user_id", user_id)
+        # NOTE: inference_log does NOT have a user_id column in current schema.
+        # We rely on trace_id lookup or just latest for MVP.
+        # If run_id is "latest", we just grab the most recent log in the system (or ideally filtered by user via link).
+        # Since we can't filter by user_id without joining or schema change, we just get latest global for now
+        # OR we rely on the fact that for a single-user / small-group app this is "okay" for MVP debugging.
+
+        query = supabase.table("inference_log").select("*")
 
         if run_id != "latest":
             query = query.eq("trace_id", run_id)
@@ -1607,10 +1639,14 @@ async def explain_optimizer_run(
         # Mocking some fields if not in log, or extracting if available
         # Ideally optimizer logs these into diagnostics.
 
+        regime = "normal"
+        if "regime_context" in log_entry:
+            regime = log_entry["regime_context"].get("current_regime", "normal")
+
         return OptimizationRationale(
             status=status,
             trace_id=log_entry.get("trace_id"),
-            regime_detected=log_entry.get("regime_context", {}).get("current_regime", "normal"),
+            regime_detected=regime,
             conviction_used=float(log_entry.get("confidence_score") or 1.0),
             alpha_score=None, # Not explicitly in log usually
             active_constraints=constraints

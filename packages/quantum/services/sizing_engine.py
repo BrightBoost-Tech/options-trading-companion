@@ -27,7 +27,7 @@ def calculate_sizing(
 
     # Override risk pct for aggressive profile
     if profile.upper() == "AGGRESSIVE":
-        max_risk_pct = 0.25
+        max_risk_pct = 0.40
 
     # Validation
     if account_buying_power <= 0:

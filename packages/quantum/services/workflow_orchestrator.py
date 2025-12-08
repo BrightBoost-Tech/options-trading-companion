@@ -322,7 +322,9 @@ async def run_midday_cycle(supabase: Client, user_id: str):
             # This makes the pipeline tolerant of low/empty scores in short term.
             candidates = scout_results[:5]
 
-            print(f"Top {len(candidates)} scanner results for midday:")
+            candidates = scout_results[:2]
+
+            print(f"Top {len(candidates)} scanner results for midday (top 2 by score):")
             for c in candidates:
                 print(f"  {c.get('ticker', c.get('symbol'))} score={c.get('score')} type={c.get('type')}")
 
@@ -354,19 +356,20 @@ async def run_midday_cycle(supabase: Client, user_id: str):
 
         # 4. Sizing
         # Use existing sizing logic with upgraded max risk parameter
-        # User requested 25% max risk per trade for midday entries
+        # User requested 40% max risk per trade for midday entries (AGGRESSIVE)
         sizing = calculate_sizing(
             account_buying_power=deployable_capital,
             ev_per_contract=ev,
             contract_ask=price,
-            max_risk_pct=0.25 # 25% risk per trade per user request
+            max_risk_pct=0.40,
+            profile="AGGRESSIVE",
         )
 
         # DEBUG SIZING LOGS
         print(
             f"[Midday] {ticker} sizing: contracts={sizing.get('contracts')}, "
             f"max_risk_exceeded={sizing.get('max_risk_exceeded', False)}, " # sizing engine might not return this yet, but prompts says it does
-            f"risk_pct={0.25}, "
+            f"risk_pct={0.40}, "
             f"ev_per_contract={ev}, "
             f"reason={sizing.get('reason')}"
         )

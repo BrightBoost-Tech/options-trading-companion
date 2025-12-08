@@ -422,6 +422,35 @@ async def get_rebalance_suggestions(
         .execute()
 
     return {"suggestions": res.data or []}
+@app.get("/suggestions")
+async def get_suggestions(
+    window: str,
+    user_id: str = Depends(get_current_user),
+):
+    """
+    Generic suggestions endpoint used by the dashboard:
+      /suggestions?window=morning_limit
+      /suggestions?window=midday_entry
+      /suggestions?window=rebalance (optional)
+    """
+    if not supabase:
+        raise HTTPException(status_code=503, detail="Database unavailable")
+
+    valid_windows = {"morning_limit", "midday_entry", "rebalance"}
+    if window not in valid_windows:
+        raise HTTPException(status_code=400, detail=f"Invalid window: {window}")
+
+    res = (
+        supabase.table(TRADE_SUGGESTIONS_TABLE)
+        .select("*")
+        .eq("user_id", user_id)
+        .eq("window", window)
+        .eq("status", "pending")
+        .order("created_at", desc=True)
+        .execute()
+    )
+
+    return {"suggestions": res.data or []}
 
 # --- Helper Functions ---
 

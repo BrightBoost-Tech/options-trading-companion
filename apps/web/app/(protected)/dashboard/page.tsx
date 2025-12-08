@@ -313,10 +313,27 @@ export default function DashboardPage() {
     <DashboardLayout mockAlerts={mockAlerts}>
       <div className="max-w-7xl mx-auto p-8 space-y-6">
 
+        {/* DASHBOARD TITLE */}
+        <div className="flex items-center gap-2">
+          <h1 className="text-3xl font-bold text-gray-900">Dashboard</h1>
+          <QuantumTooltip
+            content="Your command center for portfolio insights, AI-driven suggestions, and risk tracking."
+          />
+        </div>
+
         <DashboardOnboarding hasPositions={hasPositions} />
         
-        {/* SECTION 0: PROGRESS CARD */}
-        <WeeklyProgressCard />
+        {/* SECTION 0: WEEKLY SCOUT / PROGRESS */}
+        <div>
+          <div className="flex items-center gap-2 mb-2">
+             <h2 className="text-xl font-semibold">Weekly Scout</h2>
+             <QuantumTooltip
+               label="Regime Analysis"
+               content="Analyzes implied volatility and trend to suggest premium-buying or premium-selling bias."
+             />
+          </div>
+          <WeeklyProgressCard />
+        </div>
 
         {/* SECTION 1: POSITIONS & OPTIMIZER */}
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
@@ -348,8 +365,8 @@ export default function DashboardPage() {
                <div className="flex items-center gap-2 mb-2">
                  <h2 className="text-xl font-semibold">Optimizer</h2>
                  <QuantumTooltip
-                    label="Regime analysis"
-                    content="Looks at current implied volatility and trend to suggest whether it may be better to sell or buy premium this week."
+                    label="Quantum-Inspired"
+                    content="Uses constrained optimization to balance your portfolio deltas and thetas based on your holdings."
                   />
                </div>
               <PortfolioOptimizer

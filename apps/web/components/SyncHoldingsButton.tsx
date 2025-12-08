@@ -3,12 +3,14 @@
 import { useState } from 'react';
 import { supabase } from '@/lib/supabase';
 import { API_URL } from '@/lib/constants';
+import { cn } from '@/lib/utils';
 
 interface SyncHoldingsButtonProps {
   onSyncComplete?: () => void;
+  className?: string;
 }
 
-export default function SyncHoldingsButton({ onSyncComplete }: SyncHoldingsButtonProps) {
+export default function SyncHoldingsButton({ onSyncComplete, className }: SyncHoldingsButtonProps) {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [statusMsg, setStatusMsg] = useState<string | null>(null);
@@ -81,7 +83,7 @@ export default function SyncHoldingsButton({ onSyncComplete }: SyncHoldingsButto
       <button
         onClick={handleSync}
         disabled={loading}
-        className="flex items-center gap-1 px-3 py-1.5 bg-white border border-gray-300 rounded-md text-sm text-gray-700 hover:bg-gray-50 disabled:opacity-50 shadow-sm"
+        className={cn("flex items-center gap-1 px-3 py-1.5 bg-white border border-gray-300 rounded-md text-sm text-gray-700 hover:bg-gray-50 disabled:opacity-50 shadow-sm", className)}
       >
         <svg
           className={`w-4 h-4 ${loading ? 'animate-spin text-blue-600' : 'text-gray-500'}`}

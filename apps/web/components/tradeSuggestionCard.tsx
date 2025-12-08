@@ -227,7 +227,7 @@ export default function TradeSuggestionCard({ suggestion, onLogged }: TradeSugge
             )}
             <QuantumTooltip
               label="Why this trade?"
-              content="This suggestion is based on your current positions, implied volatility, and our risk guardrails. It is not financial advice—always confirm it fits your own plan before trading."
+              content="Suggested based on your positions, volatility regime, and risk model. Always confirm it fits your own plan."
             />
           </div>
         </div>
@@ -251,7 +251,7 @@ export default function TradeSuggestionCard({ suggestion, onLogged }: TradeSugge
           {(typeof evValue === 'number' || typeof winRate === 'number') && (
             <QuantumTooltip
               label="EV explained"
-              content="Expected Value (EV) is the average profit or loss if you could repeat this trade many times. It describes long-run tendencies, not a guaranteed outcome on any one trade."
+              content="Expected Value (EV) estimates long-run average profitability if the same trade were repeated many times."
             />
           )}
         </div>

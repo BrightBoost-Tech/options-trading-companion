@@ -2,6 +2,7 @@
 
 import { useState, useEffect } from 'react';
 import DashboardLayout from '@/components/DashboardLayout';
+import DashboardOnboarding from '@/components/dashboard/DashboardOnboarding';
 import SyncHoldingsButton from '@/components/SyncHoldingsButton';
 import PortfolioOptimizer from '@/components/dashboard/PortfolioOptimizer';
 import { WeeklyProgressCard } from '@/components/dashboard/WeeklyProgressCard';
@@ -15,6 +16,7 @@ import PortfolioHoldingsTable from '@/components/dashboard/PortfolioHoldingsTabl
 import { supabase } from '@/lib/supabase';
 import { API_URL, TEST_USER_ID } from '@/lib/constants';
 import { groupOptionSpreads, formatOptionDisplay } from '@/lib/formatters';
+import { QuantumTooltip } from "@/components/ui/QuantumTooltip";
 import { AlertTriangle, AlertCircle, Activity } from 'lucide-react';
 
 const mockAlerts = [
@@ -303,9 +305,15 @@ export default function DashboardPage() {
   const greeks = riskMetrics.greeks || {};
   const greekAlerts = riskMetrics.greek_alerts || {};
 
+  const hasPositions =
+    Array.isArray(snapshot?.positions ?? snapshot?.holdings) &&
+    (snapshot?.positions ?? snapshot?.holdings)?.length > 0;
+
   return (
     <DashboardLayout mockAlerts={mockAlerts}>
       <div className="max-w-7xl mx-auto p-8 space-y-6">
+
+        <DashboardOnboarding hasPositions={hasPositions} />
         
         {/* SECTION 0: PROGRESS CARD */}
         <WeeklyProgressCard />
@@ -337,6 +345,13 @@ export default function DashboardPage() {
           {/* OPTIMIZER PANEL */}
           <div className="flex flex-col gap-6">
             <div className="h-[500px]">
+               <div className="flex items-center gap-2 mb-2">
+                 <h2 className="text-xl font-semibold">Optimizer</h2>
+                 <QuantumTooltip
+                    label="Regime analysis"
+                    content="Looks at current implied volatility and trend to suggest whether it may be better to sell or buy premium this week."
+                  />
+               </div>
               <PortfolioOptimizer
                 positions={snapshot?.holdings}
                 onOptimizationComplete={(m) => {

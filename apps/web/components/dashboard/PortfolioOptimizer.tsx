@@ -19,6 +19,7 @@ import { supabase } from '@/lib/supabase'
 // --- Types ---
 interface Trade {
   symbol: string;
+  display_symbol?: string;
   action: 'BUY' | 'SELL';
   value: number;
   est_quantity: number;

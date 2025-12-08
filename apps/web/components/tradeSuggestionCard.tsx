@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { Card, CardContent } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
+import { QuantumTooltip } from '@/components/ui/QuantumTooltip';
 import { API_URL, TEST_USER_ID } from '@/lib/constants';
 import { Copy, CheckCircle2 } from 'lucide-react';
 import { formatOptionDisplay } from '@/lib/formatters';
@@ -14,6 +15,7 @@ interface TradeSuggestionMetrics {
 interface TradeSuggestion {
   id?: string;
   symbol?: string;
+  display_symbol?: string;
   ticker?: string;
   strategy?: string;
   type?: string;
@@ -216,17 +218,21 @@ export default function TradeSuggestionCard({ suggestion, onLogged }: TradeSugge
             <h4 className="font-bold text-lg">{displaySymbol}</h4>
             <p className="text-sm text-gray-500">{displayStrategy}</p>
           </div>
-          <div className="text-right">
+          <div className="flex flex-col items-end gap-1 text-right">
             {displayScore > 0 && (
               <>
                 <div className="text-2xl font-bold text-blue-600">{displayScore}</div>
                 <div className="text-xs text-gray-400">OTC Score</div>
               </>
             )}
+            <QuantumTooltip
+              label="Why this trade?"
+              content="This suggestion is based on your current positions, implied volatility, and our risk guardrails. It is not financial advice—always confirm it fits your own plan before trading."
+            />
           </div>
         </div>
 
-        <div className="flex flex-wrap gap-2 my-2">
+        <div className="flex flex-wrap gap-2 my-2 items-center">
           {badges.map((badge: string) => (
              <Badge key={badge} variant="outline">{badge}</Badge>
           ))}
@@ -241,6 +247,12 @@ export default function TradeSuggestionCard({ suggestion, onLogged }: TradeSugge
             <Badge className="bg-purple-50 text-purple-700 border border-purple-100">
               Win: {Math.round(winRate)}%
             </Badge>
+          )}
+          {(typeof evValue === 'number' || typeof winRate === 'number') && (
+            <QuantumTooltip
+              label="EV explained"
+              content="Expected Value (EV) is the average profit or loss if you could repeat this trade many times. It describes long-run tendencies, not a guaranteed outcome on any one trade."
+            />
           )}
         </div>
 

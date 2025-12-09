@@ -103,6 +103,10 @@ app.include_router(optimizer_router)
 from strategy_endpoints import router as strategy_router
 app.include_router(strategy_router)
 
+# --- Register Paper Trading Endpoints ---
+from paper_endpoints import router as paper_router
+app.include_router(paper_router)
+
 # --- Rebalance Engine Endpoints (Step 3) ---
 
 @app.post("/rebalance/execute")

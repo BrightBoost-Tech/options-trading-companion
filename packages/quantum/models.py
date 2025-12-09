@@ -1,6 +1,39 @@
 from pydantic import BaseModel, Field
 from typing import Optional, List, Dict, Any, Literal
 from datetime import datetime, timezone
+from uuid import UUID
+
+class OptionLeg(BaseModel):
+    symbol: str
+    action: Literal["buy", "sell"] = "buy"
+    type: Literal["call", "put", "stock", "other"] = "call"
+    strike: Optional[float] = None
+    expiry: Optional[str] = None  # YYYY-MM-DD
+    quantity: int = 1
+
+class TradeTicket(BaseModel):
+    # Core identity / linkage
+    ticket_id: Optional[UUID] = None
+    source_engine: Optional[str] = None  # "optimizer", "morning_suggestion", "weekly_scout", etc.
+    source_ref_id: Optional[UUID] = None  # link to trade_suggestions.id if available
+
+    # Strategy details
+    strategy_type: Optional[str] = None  # "iron_condor", "vertical_spread", "long_call", etc.
+    symbol: str
+    legs: List[OptionLeg] = []
+
+    # Execution parameters
+    order_type: Literal["market", "limit"] = "limit"
+    limit_price: Optional[float] = None
+    quantity: int = 1  # number of spreads/contracts
+
+    # Metadata for learning / context
+    catalyst_window: Optional[str] = None  # "morning_limit", "midday_entry", etc.
+    conviction_score: Optional[float] = None  # 0.0 - 1.0
+    expected_value: Optional[float] = None
+    risk_bracket: Optional[str] = None  # "conservative", "aggressive"
+    regime_context: Dict[str, Any] = {}
+
 
 class SuggestionLog(BaseModel):
     id: Optional[str] = None # UUID

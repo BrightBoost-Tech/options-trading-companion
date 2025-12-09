@@ -56,3 +56,41 @@ STRATEGY_REGISTRY = {
         "typical_holding_period": "2-10 days"
     }
 }
+
+def infer_strategy_key_from_suggestion(suggestion: dict) -> str:
+    """
+    Best-effort mapping from a suggestion record or order_json to a normalized strategy_key.
+
+    Priority order:
+    - suggestion.get("strategy_key")
+    - suggestion.get("strategy_type")
+    - suggestion.get("type") # Scanner sometimes uses this
+    - suggestion.get("strategy") # Consistency
+    - suggestion.get("order_json", {}).get("strategy_type")
+    - fallback: "unknown"
+    """
+    # 1. Explicit key
+    if suggestion.get("strategy_key"):
+        return str(suggestion["strategy_key"]).lower()
+
+    # 2. Strategy Type fields
+    candidates = [
+        suggestion.get("strategy_type"),
+        suggestion.get("strategy"),
+        suggestion.get("type")
+    ]
+
+    # Check order_json
+    order_json = suggestion.get("order_json") or {}
+    if isinstance(order_json, dict):
+        candidates.append(order_json.get("strategy_type"))
+        candidates.append(order_json.get("strategy"))
+
+    for cand in candidates:
+        if cand and isinstance(cand, str):
+            # Normalize
+            key = cand.lower().strip().replace(" ", "_").replace("-", "_")
+            # If it matches registry, great, otherwise return it as best effort
+            return key
+
+    return "unknown"

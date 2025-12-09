@@ -6,7 +6,7 @@ import logging
 
 from security import get_current_user
 from models import TradeTicket
-from strategy_registry import STRATEGY_REGISTRY
+from strategy_registry import STRATEGY_REGISTRY, infer_strategy_key_from_suggestion
 from market_data import PolygonService
 
 router = APIRouter()
@@ -104,8 +104,17 @@ def execute_paper_trade(
     }).eq("id", portfolio_id).execute()
 
     # 5. Insert/merge into paper_positions:
-    # Strategy_key can be f"{ticket.symbol}_{ticket.strategy_type or 'custom'}"
-    strategy_key = f"{ticket.symbol}_{ticket.strategy_type or 'custom'}"
+    # Use helper to normalize strategy type, then append to symbol
+    # We construct a mock "suggestion" dict from the ticket to use the helper
+    mock_suggestion = {
+        "strategy_type": ticket.strategy_type,
+        "strategy": ticket.strategy_type, # redundancy
+    }
+    normalized_strat = infer_strategy_key_from_suggestion(mock_suggestion)
+    if normalized_strat == "unknown":
+        normalized_strat = "custom"
+
+    strategy_key = f"{ticket.symbol}_{normalized_strat}"
 
     # Check existing position
     existing_pos = supabase.table("paper_positions").select("*").eq("portfolio_id", portfolio_id).eq("strategy_key", strategy_key).execute()

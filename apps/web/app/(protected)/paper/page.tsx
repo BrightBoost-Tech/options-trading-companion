@@ -8,7 +8,9 @@ import { Badge } from "@/components/ui/badge"
 import { Loader2, RefreshCw, TrendingUp, DollarSign, Wallet, AlertCircle } from "lucide-react"
 import { fetchWithAuth } from "@/lib/api"
 import { ClosePaperPositionModal } from "@/components/paper/ClosePaperPositionModal"
+import { ResetPaperAccountModal } from "@/components/paper/ResetPaperAccountModal"
 import DashboardLayout from "@/components/DashboardLayout"
+import { useStrategyRegistry } from "@/hooks/useStrategyRegistry"
 
 // Types matching backend response
 interface PaperPortfolio {
@@ -55,7 +57,10 @@ export default function PaperTradingPage() {
   const [isCloseModalOpen, setIsCloseModalOpen] = useState(false)
 
   // Reset State
+  const [isResetModalOpen, setIsResetModalOpen] = useState(false)
   const [isResetting, setIsResetting] = useState(false)
+
+  const { getMetadata } = useStrategyRegistry();
 
   const loadData = async () => {
     setLoading(true)
@@ -100,13 +105,11 @@ export default function PaperTradingPage() {
   }
 
   const handleResetPortfolio = async () => {
-    if (!confirm("Are you sure? This will erase all paper trades and reset balance to $100k.")) {
-      return
-    }
     setIsResetting(true)
     try {
       await fetchWithAuth("/paper/reset", { method: "POST" })
       await loadData()
+      setIsResetModalOpen(false)
     } catch (err) {
       console.error("Failed to reset portfolio", err)
       alert("Failed to reset portfolio")
@@ -138,7 +141,7 @@ export default function PaperTradingPage() {
               <RefreshCw className={`mr-2 h-4 w-4 ${loading ? "animate-spin" : ""}`} />
               Refresh
             </Button>
-            <Button variant="destructive" size="sm" onClick={handleResetPortfolio} disabled={isResetting}>
+            <Button variant="destructive" size="sm" onClick={() => setIsResetModalOpen(true)} disabled={isResetting}>
               {isResetting ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <AlertCircle className="mr-2 h-4 w-4" />}
               Reset Account
             </Button>
@@ -239,13 +242,39 @@ export default function PaperTradingPage() {
                 <TableBody>
                   {data.positions.map((pos) => {
                      const pl = (pos.current_mark - pos.avg_entry_price) * pos.quantity * 100
+                     // Derive friendly strategy info
+                     // strategy_key usually format "SYMBOL_strategytype"
+                     const rawKey = pos.strategy_key;
+                     let stratPart = rawKey;
+                     if (rawKey.includes('_') && rawKey.split('_').length > 1) {
+                         // heuristic: "SPY_iron_condor" -> "iron_condor"
+                         // But ticker might have underscores? Usually not.
+                         const parts = rawKey.split('_');
+                         // Assume first part is symbol if it matches pos.symbol
+                         if (parts[0] === pos.symbol) {
+                            stratPart = parts.slice(1).join('_');
+                         }
+                     }
+
+                     const meta = getMetadata(stratPart);
+
                      return (
                     <TableRow key={pos.id}>
                       <TableCell className="font-medium">{pos.symbol}</TableCell>
                       <TableCell>
-                        <Badge variant="outline" className="font-normal">
-                          {pos.strategy_key}
-                        </Badge>
+                        <div className="flex flex-col gap-1">
+                           <span className="text-sm font-medium">
+                               {meta?.display_name || stratPart}
+                           </span>
+                           {meta && (
+                             <Badge variant="secondary" className="w-fit text-[10px] px-1.5 py-0 h-5">
+                               {meta.risk_profile}
+                             </Badge>
+                           )}
+                           {!meta && stratPart !== rawKey && (
+                               <span className="text-xs text-muted-foreground">{rawKey}</span>
+                           )}
+                        </div>
                       </TableCell>
                       <TableCell className="text-right font-mono">{pos.quantity}</TableCell>
                       <TableCell className="text-right font-mono">${pos.avg_entry_price.toFixed(2)}</TableCell>
@@ -271,6 +300,13 @@ export default function PaperTradingPage() {
           open={isCloseModalOpen}
           onClose={() => setIsCloseModalOpen(false)}
           onConfirm={confirmClosePosition}
+        />
+
+        <ResetPaperAccountModal
+          open={isResetModalOpen}
+          onClose={() => setIsResetModalOpen(false)}
+          onConfirm={handleResetPortfolio}
+          isResetting={isResetting}
         />
       </div>
     </DashboardLayout>

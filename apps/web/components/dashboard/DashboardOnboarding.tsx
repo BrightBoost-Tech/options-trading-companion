@@ -7,9 +7,13 @@ import SyncHoldingsButton from "@/components/SyncHoldingsButton";
 
 interface DashboardOnboardingProps {
   hasPositions: boolean; // server-side info from snapshot
+  onSyncComplete?: () => void;
 }
 
-export default function DashboardOnboarding({ hasPositions }: DashboardOnboardingProps) {
+export default function DashboardOnboarding({
+  hasPositions,
+  onSyncComplete,
+}: DashboardOnboardingProps) {
   const { status, loading } = usePlaidStatus();
 
   const isConnected = !!status?.is_connected;
@@ -54,7 +58,10 @@ export default function DashboardOnboarding({ hasPositions }: DashboardOnboardin
           ) : (
             // STATE 2: Connected but no positions → emphasize Sync
             <div className="flex flex-col items-end">
-              <SyncHoldingsButton className="bg-green-600 hover:bg-green-500 text-white" />
+              <SyncHoldingsButton
+                className="bg-green-600 hover:bg-green-500 text-white"
+                onSyncComplete={onSyncComplete}
+              />
               <span className="text-xs text-neutral-500 mt-1">
                 Fetches from {status?.institution_name || "your broker"} in read-only mode.
               </span>

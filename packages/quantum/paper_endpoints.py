@@ -64,12 +64,27 @@ def execute_paper_trade(
     multiplier = 100
     notional = price * ticket.quantity * multiplier
 
+    # Cash guardrail: check sufficient funds for debit trades
+    # We assume positive notional means a debit (paying cash).
+    if notional > 0:
+        current_cash = float(portfolio["cash_balance"])
+        if current_cash < notional:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Insufficient paper cash. Required: ${notional:.2f}, Available: ${current_cash:.2f}. Reset portfolio or reduce size."
+            )
+
     # 3. Insert into paper_orders with status = 'filled', order_json = ticket.model_dump()
+    suggestion_id = None
+    if ticket.source_ref_id:
+        suggestion_id = str(ticket.source_ref_id)
+
     order_payload = {
         "portfolio_id": portfolio_id,
         "status": "filled",
         "order_json": ticket.model_dump(mode="json"),
-        "filled_at": datetime.now(timezone.utc).isoformat()
+        "filled_at": datetime.now(timezone.utc).isoformat(),
+        "suggestion_id": suggestion_id
     }
     order_res = supabase.table("paper_orders").insert(order_payload).execute()
     if not order_res.data:

@@ -6,26 +6,19 @@ import { API_URL, TEST_USER_ID } from '@/lib/constants';
 import { supabase } from '@/lib/supabase';
 import { StrategyConfig, BacktestRequest, StrategyBacktest } from '@/lib/types';
 import { Badge } from '@/components/ui/badge';
+import { useStrategyRegistry } from '@/hooks/useStrategyRegistry';
 
 interface StrategyProfilesPanelProps {
     className?: string;
 }
 
-interface StrategyMetadata {
-    display_name: string;
-    description: string;
-    risk_profile: string;
-    typical_holding_period: string;
-    entry_conditions?: string[];
-    exit_conditions?: string[];
-}
-
 export default function StrategyProfilesPanel({ className }: StrategyProfilesPanelProps) {
     const [strategies, setStrategies] = useState<StrategyConfig[]>([]);
-    const [registryData, setRegistryData] = useState<Record<string, StrategyMetadata>>({});
     const [loading, setLoading] = useState(false);
     const [selectedStrategy, setSelectedStrategy] = useState<StrategyConfig | null>(null);
     const [isEditing, setIsEditing] = useState(false);
+
+    const { getMetadata } = useStrategyRegistry();
 
     // Backtest Modal State
     const [showBacktestModal, setShowBacktestModal] = useState(false);
@@ -39,7 +32,6 @@ export default function StrategyProfilesPanel({ className }: StrategyProfilesPan
 
     useEffect(() => {
         loadStrategies();
-        loadRegistry();
     }, []);
 
     // Load backtests when a strategy is selected
@@ -60,19 +52,6 @@ export default function StrategyProfilesPanel({ className }: StrategyProfilesPan
             headers['X-Test-Mode-User'] = TEST_USER_ID;
         }
         return headers;
-    };
-
-    const loadRegistry = async () => {
-        try {
-            const headers = await getAuthHeaders();
-            const res = await fetch(`${API_URL}/strategies/metadata`, { headers });
-            if (res.ok) {
-                const data = await res.json();
-                setRegistryData(data.registry || {});
-            }
-        } catch (err) {
-            console.error('Failed to load strategy metadata', err);
-        }
     };
 
     const loadStrategies = async () => {
@@ -169,19 +148,6 @@ export default function StrategyProfilesPanel({ className }: StrategyProfilesPan
         }, 2000);
     };
 
-    const getMetadataForStrategy = (name: string) => {
-        // Simple fuzzy match or key lookup.
-        // The registry uses snake_case keys like 'iron_condor'.
-        // Strategy names might be free text.
-        // Let's try exact key match first, then lower case.
-        if (registryData[name]) return registryData[name];
-
-        const lowerName = name.toLowerCase().replace(/\s+/g, '_');
-        if (registryData[lowerName]) return registryData[lowerName];
-
-        return null;
-    };
-
     return (
         <Card className={className}>
             <CardHeader>
@@ -217,7 +183,7 @@ export default function StrategyProfilesPanel({ className }: StrategyProfilesPan
                 {/* Strategy List */}
                 <div className="space-y-4">
                     {loading ? <p>Loading...</p> : strategies.map((s, i) => {
-                        const meta = getMetadataForStrategy(s.name);
+                        const meta = getMetadata(s.name);
                         return (
                         <div key={`${s.name}-${s.version}`} className={`border p-4 rounded flex justify-between items-center ${selectedStrategy?.name === s.name ? 'border-indigo-500 bg-indigo-50' : ''}`}>
                             <div onClick={() => setSelectedStrategy(s)} className="cursor-pointer flex-1">

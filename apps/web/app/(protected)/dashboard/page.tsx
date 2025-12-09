@@ -321,7 +321,7 @@ export default function DashboardPage() {
           />
         </div>
 
-        <DashboardOnboarding hasPositions={hasPositions} />
+        <DashboardOnboarding hasPositions={hasPositions} onSyncComplete={loadSnapshot} />
         
         {/* SECTION 0: WEEKLY SCOUT / PROGRESS */}
         <div>

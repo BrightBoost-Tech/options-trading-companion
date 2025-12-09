@@ -60,6 +60,7 @@ export default function TradeSuggestionCard({ suggestion, onLogged }: TradeSugge
   const [evError, setEvError] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
   const [logging, setLogging] = useState(false);
+  const [paperTrading, setPaperTrading] = useState(false);
 
   // Normalize symbol/ticker
   const rawSymbol = suggestion.display_symbol || suggestion.symbol || suggestion.ticker || 'UNKNOWN';
@@ -111,6 +112,63 @@ export default function TradeSuggestionCard({ suggestion, onLogged }: TradeSugge
       navigator.clipboard.writeText(JSON.stringify(suggestion.order_json, null, 2));
       setCopied(true);
       setTimeout(() => setCopied(false), 2000);
+    }
+  };
+
+  const buildTicketFromSuggestion = () => {
+    const order = suggestion.order_json || {};
+    const symbol = suggestion.display_symbol || suggestion.symbol || suggestion.ticker || "UNKNOWN";
+
+    return {
+      ticket: {
+        ticket_id: undefined,
+        source_engine: suggestion.window || "suggestion",
+        source_ref_id: suggestion.id,
+        strategy_type: suggestion.strategy || suggestion.type || "custom",
+        symbol,
+        legs: [], // v1: leave empty, backend can infer from order_json if needed later
+        order_type: "limit",
+        limit_price: typeof order.limit_price === "number" ? order.limit_price : suggestion.price ?? null,
+        quantity: order.quantity || order.contracts || 1,
+        catalyst_window: suggestion.window,
+        conviction_score: suggestion.score ?? undefined,
+        expected_value: suggestion.ev ?? suggestion.metrics?.expected_value,
+        risk_bracket: undefined,
+        regime_context: order.context || {}
+      },
+      portfolio_id: undefined
+    };
+  };
+
+  const handlePaperTrade = async () => {
+    try {
+      setPaperTrading(true);
+      const { data: { session } } = await supabase.auth.getSession();
+      const headers: Record<string, string> = { "Content-Type": "application/json" };
+      if (session) {
+        headers["Authorization"] = `Bearer ${session.access_token}`;
+      } else {
+        headers["X-Test-Mode-User"] = TEST_USER_ID;
+      }
+
+      const payload = buildTicketFromSuggestion();
+      const res = await fetch(`${API_URL}/paper/execute`, {
+        method: "POST",
+        headers,
+        body: JSON.stringify(payload),
+      });
+
+      if (!res.ok) {
+        console.error("Failed to execute paper trade", await res.text());
+        return;
+      }
+
+      // Optional: we could surface a toast/snackbar later; for v1 just log.
+      console.log("Paper trade executed", await res.json());
+    } catch (err) {
+      console.error("Error executing paper trade", err);
+    } finally {
+      setPaperTrading(false);
     }
   };
 
@@ -299,6 +357,13 @@ export default function TradeSuggestionCard({ suggestion, onLogged }: TradeSugge
 
         {(suggestion.window === 'morning_limit' || suggestion.window === 'midday_entry') && (
             <div className="mt-3 flex justify-end gap-2">
+                <button
+                    onClick={handlePaperTrade}
+                    disabled={paperTrading}
+                    className="text-xs px-3 py-1 rounded border border-blue-200 text-blue-700 hover:bg-blue-50 disabled:opacity-50"
+                >
+                    {paperTrading ? "Simulating…" : "Paper Trade"}
+                </button>
                 <button
                     onClick={handleLogTrade}
                     disabled={logging}

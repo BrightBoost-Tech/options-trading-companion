@@ -9,6 +9,7 @@ import itertools
 from security import get_current_user_id
 from strategy_profiles import StrategyConfig, BacktestRequest
 from services.historical_simulation import HistoricalCycleService
+from strategy_registry import STRATEGY_REGISTRY
 
 router = APIRouter()
 
@@ -169,6 +170,13 @@ def _run_backtest_workflow(
 
 # --- Endpoints ---
 # Using standard 'def' to ensure they run in threadpool and don't block event loop
+
+@router.get("/strategies/metadata")
+def get_strategy_metadata(user_id: str = Depends(get_current_user_id)):
+    """
+    Returns the centralized strategy registry metadata.
+    """
+    return {"registry": STRATEGY_REGISTRY}
 
 @router.post("/strategies")
 def create_strategy_config(

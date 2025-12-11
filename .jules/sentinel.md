@@ -1,0 +1,4 @@
+## 2024-05-23 - Inconsistent Authentication Patterns
+**Vulnerability:** The `/holdings/export` endpoint was manually parsing the Authorization header and calling `supabase.auth.get_user(token)` directly, instead of using the standardized `Depends(get_current_user)` dependency used elsewhere.
+**Learning:** "Roll-your-own" auth checks in individual endpoints create inconsistent security postures and maintenance burdens. They often lack the full suite of checks (like environment-specific fallbacks or unified error handling) present in the centralized auth logic.
+**Prevention:** Always use the centralized `get_current_user` dependency for any endpoint requiring authentication. Use linters or grep searches for `Header("Authorization")` or `supabase.auth.get_user` in API routes to catch deviations.

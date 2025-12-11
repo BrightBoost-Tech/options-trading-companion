@@ -1152,7 +1152,7 @@ async def sync_holdings(
 @app.get("/holdings/export")
 async def export_holdings_csv(
     brokerage: Optional[str] = None,
-    authorization: Optional[str] = Header(None),
+    user_id: str = Depends(get_current_user),
 ):
     """
     Exports holdings to a CSV file from POSITIONS table.
@@ -1161,18 +1161,6 @@ async def export_holdings_csv(
         raise HTTPException(
             status_code=500, detail="Server Error: Database not configured"
         )
-
-    if not authorization:
-        raise HTTPException(
-            status_code=401, detail="Missing Authorization header"
-        )
-
-    try:
-        token = authorization.split(" ")[1]
-        user = supabase.auth.get_user(token)
-        user_id = user.user.id
-    except Exception:
-        raise HTTPException(status_code=401, detail="Invalid Token")
 
     # Fetch from POSITIONS
     query = supabase.table("positions").select("*").eq("user_id", user_id)

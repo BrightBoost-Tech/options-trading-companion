@@ -10,7 +10,10 @@ interface DashboardOnboardingProps {
   onSyncComplete?: () => void;
 }
 
-export default function DashboardOnboarding({ hasPositions, onSyncComplete }: DashboardOnboardingProps) {
+export default function DashboardOnboarding({
+  hasPositions,
+  onSyncComplete,
+}: DashboardOnboardingProps) {
   const { status, loading } = usePlaidStatus();
 
   const isConnected = !!status?.is_connected;

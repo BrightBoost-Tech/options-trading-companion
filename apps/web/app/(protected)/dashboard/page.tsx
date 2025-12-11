@@ -13,6 +13,7 @@ import RiskSummaryCard from '@/components/dashboard/RiskSummaryCard';
 import HoldingsTreemap from '@/components/dashboard/HoldingsTreemap';
 import OptimizerInsightCard from '@/components/dashboard/OptimizerInsightCard';
 import PortfolioHoldingsTable from '@/components/dashboard/PortfolioHoldingsTable'; // Phase 8.4
+import PaperPortfolioWidget from '@/components/dashboard/PaperPortfolioWidget';
 import { supabase } from '@/lib/supabase';
 import { API_URL, TEST_USER_ID } from '@/lib/constants';
 import { groupOptionSpreads, formatOptionDisplay } from '@/lib/formatters';
@@ -321,7 +322,10 @@ export default function DashboardPage() {
           />
         </div>
 
-        <DashboardOnboarding hasPositions={hasPositions} onSyncComplete={loadSnapshot} />
+        <DashboardOnboarding
+          hasPositions={hasPositions}
+          onSyncComplete={loadSnapshot}
+        />
         
         {/* SECTION 0: WEEKLY SCOUT / PROGRESS */}
         <div>
@@ -396,7 +400,7 @@ export default function DashboardPage() {
                 exposure={riskData?.exposure}
                 loading={!riskData}
             />
-            <OptimizerInsightCard />
+            <PaperPortfolioWidget />
             <DisciplineSummary />
         </div>
 

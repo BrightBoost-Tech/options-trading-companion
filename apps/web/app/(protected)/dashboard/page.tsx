@@ -18,7 +18,7 @@ import { supabase } from '@/lib/supabase';
 import { API_URL, TEST_USER_ID } from '@/lib/constants';
 import { groupOptionSpreads, formatOptionDisplay } from '@/lib/formatters';
 import { QuantumTooltip } from "@/components/ui/QuantumTooltip";
-import { AlertTriangle, AlertCircle, Activity } from 'lucide-react';
+import { AlertTriangle, AlertCircle, Activity, Wallet } from 'lucide-react';
 
 const mockAlerts = [
   { id: '1', message: 'SPY credit put spread scout: 475/470 for $1.50 credit', time: '2 min ago' },
@@ -347,6 +347,9 @@ export default function DashboardPage() {
                 <h2 className="text-xl font-semibold">Positions</h2>
                 <div className="flex gap-2">
                   <SyncHoldingsButton onSyncComplete={loadSnapshot} />
+                  <a href="/paper" className="text-xs px-3 py-1 flex items-center rounded bg-blue-50 text-blue-700 hover:bg-blue-100 border border-blue-200">
+                     <Wallet className="w-3 h-3 mr-1" /> Paper Portfolio
+                  </a>
                   <button
                     onClick={runAllWorkflows}
                     className="text-xs px-3 py-1 rounded border border-purple-200 text-purple-700 hover:bg-purple-50"

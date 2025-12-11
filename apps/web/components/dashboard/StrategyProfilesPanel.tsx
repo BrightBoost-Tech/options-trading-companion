@@ -6,6 +6,7 @@ import { API_URL, TEST_USER_ID } from '@/lib/constants';
 import { supabase } from '@/lib/supabase';
 import { StrategyConfig, BacktestRequest, StrategyBacktest } from '@/lib/types';
 import { Badge } from '@/components/ui/badge';
+import { useStrategyRegistry } from '@/hooks/useStrategyRegistry';
 
 interface StrategyProfilesPanelProps {
     className?: string;
@@ -16,6 +17,8 @@ export default function StrategyProfilesPanel({ className }: StrategyProfilesPan
     const [loading, setLoading] = useState(false);
     const [selectedStrategy, setSelectedStrategy] = useState<StrategyConfig | null>(null);
     const [isEditing, setIsEditing] = useState(false);
+
+    const { getMetadata } = useStrategyRegistry();
 
     // Backtest Modal State
     const [showBacktestModal, setShowBacktestModal] = useState(false);
@@ -179,15 +182,28 @@ export default function StrategyProfilesPanel({ className }: StrategyProfilesPan
             <CardContent>
                 {/* Strategy List */}
                 <div className="space-y-4">
-                    {loading ? <p>Loading...</p> : strategies.map((s, i) => (
+                    {loading ? <p>Loading...</p> : strategies.map((s, i) => {
+                        const meta = getMetadata(s.name);
+                        return (
                         <div key={`${s.name}-${s.version}`} className={`border p-4 rounded flex justify-between items-center ${selectedStrategy?.name === s.name ? 'border-indigo-500 bg-indigo-50' : ''}`}>
                             <div onClick={() => setSelectedStrategy(s)} className="cursor-pointer flex-1">
-                                <h4 className="font-bold">{s.name} <span className="text-xs text-gray-500">v{s.version}</span></h4>
-                                <p className="text-sm text-gray-600">{s.description || 'No description'}</p>
+                                <div className="flex items-center gap-2">
+                                    <h4 className="font-bold">{s.name} <span className="text-xs text-gray-500">v{s.version}</span></h4>
+                                    {meta && (
+                                        <Badge variant="outline" className="text-[10px] h-5">
+                                            {meta.risk_profile} risk
+                                        </Badge>
+                                    )}
+                                </div>
+                                <p className="text-sm text-gray-600">{meta?.description || s.description || 'No description'}</p>
+
                                 <div className="text-xs text-gray-500 mt-1 space-x-2">
                                     <span>Floor: {s.conviction_floor}</span>
                                     <span>Slope: {s.conviction_slope}</span>
                                     <span>Risk: {s.max_risk_pct_per_trade * 100}%</span>
+                                    {meta && (
+                                        <span className="text-indigo-600">Period: {meta.typical_holding_period}</span>
+                                    )}
                                 </div>
                             </div>
                             <div className="flex gap-2">
@@ -211,7 +227,7 @@ export default function StrategyProfilesPanel({ className }: StrategyProfilesPan
                                 </button>
                             </div>
                         </div>
-                    ))}
+                    )})}
                 </div>
 
                 {/* Backtest Results Table */}

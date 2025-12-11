@@ -1,7 +1,8 @@
 import os
 import sys
+import random
 import numpy as np
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import List, Dict, Any, Optional
 
 # Add parent directory to path to allow importing strategy_profiles
@@ -24,6 +25,14 @@ from market_data import PolygonService
 from analytics.factors import calculate_trend, calculate_volatility, calculate_rsi
 from nested.backbone import infer_global_context, GlobalContext
 
+# --- Configuration ---
+HISTORICAL_SIM_UNIVERSE = os.getenv("HISTORICAL_SIM_UNIVERSE", "SPY,QQQ,IWM,DIA").split(",")
+HISTORICAL_RANDOM_LOOKBACK_YEARS = int(os.getenv("HISTORICAL_RANDOM_LOOKBACK_YEARS", "5"))
+HISTORICAL_RANDOM_MIN_AGE_DAYS = int(os.getenv("HISTORICAL_RANDOM_MIN_AGE_DAYS", "365"))
+HISTORICAL_RANDOM_PARAMS = os.getenv("HISTORICAL_RANDOM_PARAMS", "false").lower() == "true"
+HISTORICAL_SIM_USER_ID = os.getenv("HISTORICAL_SIM_USER_ID")
+
+
 # --- Learning Hook ---
 
 def learn_from_cycle(
@@ -37,6 +46,7 @@ def learn_from_cycle(
     """
     Hook for nested learning.
     Feeds (state, action, reward) into learning_feedback_loops for offline analysis.
+    Uses aggregation pattern to support ConvictionService feedback loop.
     """
     try:
         # Check if enabled globally (redundant check if caller checked, but safe)
@@ -53,15 +63,16 @@ def learn_from_cycle(
         if not supabase:
             return
 
-        # 1. Create Synthetic Journal Entry
+        # 1. Determine Target User
+        # Use configured historical user, passed user, or fallback
+        target_user = HISTORICAL_SIM_USER_ID or user_id
+        if not target_user:
+            # Fallback only for dev convenience
+            target_user = "75ee12ad-b119-4f32-aeea-19b4ef55d587"
+
+        # 2. Create Synthetic Journal Entry
         try:
             journal_service = JournalService(supabase)
-
-            # Use passed user_id or fallback to test user (with warning) if none provided
-            target_user = user_id
-            if not target_user:
-                # Fallback only for dev convenience, but ideally caller provides it
-                target_user = "75ee12ad-b119-4f32-aeea-19b4ef55d587"
 
             journal_service.add_trade(
                 user_id=target_user,
@@ -81,41 +92,49 @@ def learn_from_cycle(
         except Exception as j_err:
             print(f"[NestedLearning] Journal entry failed: {j_err}")
 
-        # Prepare details
-        details = {
-            "entry_regime": entry.get("regimeAtEntry"),
-            "exit_regime": exit.get("regimeAtExit"),
-            "entry_conviction": entry.get("convictionAtEntry"),
-            "exit_conviction": exit.get("convictionAtExit"),
-            "days_in_trade": exit.get("daysInTrade"),
-            "mode": mode,
-            "trajectory_length": len(trajectory)
-        }
+        # 3. Update Aggregate Learning Stats
+        # Key: (user_id, strategy="historical_cycle", window="historical_sim")
+        strategy_key = "historical_cycle"
+        window_key = "historical_sim"
 
-        # Create a synthetic trace_id for this historical episode
-        import uuid
-        trace_id = str(uuid.uuid4())
+        try:
+            existing_feedback = supabase.table("learning_feedback_loops") \
+                .select("*") \
+                .eq("user_id", target_user) \
+                .eq("strategy", strategy_key) \
+                .eq("window", window_key) \
+                .execute()
 
-        # Ensure details are JSON serializable
-        if hasattr(journal_service, "_sanitize_for_json"):
-             details = journal_service._sanitize_for_json(details)
+            if existing_feedback.data:
+                rec = existing_feedback.data[0]
+                new_total = rec["total_trades"] + 1
+                new_wins = rec["wins"] + (1 if reward > 0 else 0)
+                new_losses = rec["losses"] + (1 if reward < 0 else 0)
+                # Update average return (simple moving average approximation)
+                current_avg = float(rec.get("avg_return", 0))
+                new_avg = ((current_avg * rec["total_trades"]) + reward) / new_total
 
-        data = {
-            "trace_id": trace_id,
-            "user_id": None, # Historical simulation is usually system-wide or anonymous
-            "outcome_type": "historical_win" if reward > 0 else "historical_loss",
-            "pnl_realized": reward,
-            "pnl_predicted": None, # Could use entry expected return if available
-            "drift_tags": [],
-            "details_json": details,
-            "created_at": datetime.now().isoformat()
-        }
-
-        # Sanitize entire data block as well to be safe
-        if hasattr(journal_service, "_sanitize_for_json"):
-             data = journal_service._sanitize_for_json(data)
-
-        supabase.table("learning_feedback_loops").insert(data).execute()
+                supabase.table("learning_feedback_loops").update({
+                    "total_trades": new_total,
+                    "wins": new_wins,
+                    "losses": new_losses,
+                    "avg_return": new_avg,
+                    "updated_at": datetime.now(timezone.utc).isoformat()
+                }).eq("id", rec["id"]).execute()
+            else:
+                feedback_payload = {
+                    "user_id": target_user,
+                    "strategy": strategy_key,
+                    "window": window_key,
+                    "total_trades": 1,
+                    "wins": 1 if reward > 0 else 0,
+                    "losses": 1 if reward < 0 else 0,
+                    "avg_return": reward,
+                    "updated_at": datetime.now(timezone.utc).isoformat()
+                }
+                supabase.table("learning_feedback_loops").insert(feedback_payload).execute()
+        except Exception as fb_err:
+            print(f"[NestedLearning] Failed to update feedback loop stats: {fb_err}")
 
     except Exception as e:
         print(f"[NestedLearning] Failed to log cycle: {e}")
@@ -141,13 +160,43 @@ class HistoricalCycleService:
         cursor_date_str: str,
         symbol: str = "SPY",
         user_id: Optional[str] = None,
-        config: Optional[Any] = None # Using Any to avoid runtime issues if import fails, but verified via logic
+        config: Optional[Any] = None, # Using Any to avoid runtime issues if import fails, but verified via logic
+        mode: str = "deterministic"
     ) -> Dict[str, Any]:
         """
-        Runs exactly one historical trade cycle (Entry -> Exit) starting from cursor_date.
-        Accepts optional StrategyConfig to parameterize rules.
+        Runs exactly one historical trade cycle (Entry -> Exit).
+        mode: "deterministic" (default) or "random".
         """
-        # 0. Setup Parameters
+        # 0. Setup Parameters & Randomness
+        if mode == "random":
+            # Randomize Symbol if not provided (or default SPY was passed by endpoint)
+            # Check if symbol is exactly "SPY" which might be the default.
+            # Ideally endpoint passes explicit None if user didn't specify, but existing API def has symbol="SPY".
+            # If user wants random, they should probably omit symbol, but API makes it hard to distinguish omitted vs default.
+            # We'll assume if mode=random and symbol is SPY (default), we CAN override it.
+            # If user explicitly set SPY, they get SPY. But we can't tell difference easily.
+            # Let's check against HISTORICAL_SIM_UNIVERSE to see if we should pick from it.
+            if not symbol or symbol == "SPY":
+                symbol = random.choice(HISTORICAL_SIM_UNIVERSE)
+
+            # Randomize Date
+            # Configurable lookback
+            now = datetime.now()
+            min_age_days = HISTORICAL_RANDOM_MIN_AGE_DAYS
+            lookback_years = HISTORICAL_RANDOM_LOOKBACK_YEARS
+
+            end_window = now - timedelta(days=min_age_days)
+            start_window = end_window - timedelta(days=365 * lookback_years)
+
+            if start_window < datetime(2000, 1, 1): # Hard floor
+                start_window = datetime(2000, 1, 1)
+
+            time_delta = end_window - start_window
+            random_days = random.randrange(time_delta.days)
+            start_date = start_window + timedelta(days=random_days)
+
+            cursor_date_str = start_date.strftime("%Y-%m-%d")
+
         entry_threshold = 0.70
         tp_pct = 0.08
         sl_pct = 0.05
@@ -161,7 +210,21 @@ class HistoricalCycleService:
             max_days = config.max_holding_days
             regime_whitelist = config.regime_whitelist
 
-        # 1. Parse Cursor
+        # Apply Jitter if enabled
+        if mode == "random" and HISTORICAL_RANDOM_PARAMS:
+            # entry_threshold ± 0.05, clamped [0.4, 0.95]
+            jitter_entry = random.uniform(-0.05, 0.05)
+            entry_threshold = max(0.4, min(0.95, entry_threshold + jitter_entry))
+
+            # tp_pct ± 0.02, clamped [0.01, 0.5]
+            jitter_tp = random.uniform(-0.02, 0.02)
+            tp_pct = max(0.01, min(0.5, tp_pct + jitter_tp))
+
+            # sl_pct ± 0.01, clamped [0.01, 0.3]
+            jitter_sl = random.uniform(-0.01, 0.01)
+            sl_pct = max(0.01, min(0.3, sl_pct + jitter_sl))
+
+        # 1. Parse Cursor (Deterministic / Finalized Random)
         try:
             start_date = datetime.strptime(cursor_date_str, "%Y-%m-%d")
         except (ValueError, TypeError):

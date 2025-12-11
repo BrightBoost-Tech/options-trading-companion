@@ -921,6 +921,7 @@ async def run_all(user_id: str = Depends(get_current_user)):
 async def run_historical_cycle(
     cursor: str = Body(..., embed=True),
     symbol: Optional[str] = Body("SPY", embed=True),
+    mode: Optional[str] = Body("deterministic", embed=True),
     # Allow user_id to be passed via Auth header implicitly, or Body if debug?
     # Usually we get it from token.
     user_id: str = Depends(get_current_user),
@@ -928,11 +929,12 @@ async def run_historical_cycle(
     """
     Runs exactly one historical trade cycle (Entry -> Exit) starting from cursor date.
     Uses regime-aware scoring and conviction logic on historical data slices.
+    Mode can be "deterministic" or "random".
     """
     try:
         service = HistoricalCycleService() # Inits with PolygonService
         # Pass user_id so journal entry is owned by caller
-        result = service.run_cycle(cursor, symbol, user_id=user_id)
+        result = service.run_cycle(cursor, symbol, user_id=user_id, mode=mode)
         return result
     except Exception as e:
         print(f"Historical cycle error: {e}")

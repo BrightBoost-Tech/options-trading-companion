@@ -68,6 +68,7 @@ export default function DashboardPage() {
   const [simCursor, setSimCursor] = useState<string>('2023-01-01');
   const [simResult, setSimResult] = useState<any>(null);
   const [simLoading, setSimLoading] = useState(false);
+  const [simMode, setSimMode] = useState<'deterministic' | 'random'>('deterministic');
 
   // Load data on mount
   useEffect(() => {
@@ -277,10 +278,23 @@ export default function DashboardPage() {
     setSimLoading(true);
     try {
       const headers = await getAuthHeaders();
+      const payload: any = { mode: simMode };
+      if (simMode === 'deterministic') {
+          payload.cursor = simCursor;
+          payload.symbol = 'SPY';
+      } else {
+          // In random mode, cursor and symbol are optional (server chooses)
+          // But API schema requires cursor. We can send a dummy or the current one.
+          // run_historical_cycle body: cursor=..., symbol=..., mode=...
+          // If random, the server overrides date. But we should send something valid.
+          payload.cursor = simCursor;
+          // symbol omitted -> server chooses random if configured
+      }
+
       const res = await fetch(`${API_URL}/historical/run-cycle`, {
         method: 'POST',
         headers,
-        body: JSON.stringify({ cursor: simCursor, symbol: 'SPY' }),
+        body: JSON.stringify(payload),
       });
 
       if (res.ok) {
@@ -288,6 +302,11 @@ export default function DashboardPage() {
         setSimResult(data);
         if (data.nextCursor) {
             setSimCursor(data.nextCursor);
+        }
+        // If random mode, we might want to update the displayed cursor/symbol to what was actually used
+        if (data.entryTime) {
+            // Optional: update simCursor to match what was chosen?
+            // setSimCursor(data.entryTime);
         }
       } else {
         console.error('Simulation failed', await res.text());
@@ -415,17 +434,35 @@ export default function DashboardPage() {
                     <p className="text-sm text-gray-500">Manual verification of regime transitions & strategy logic.</p>
                 </div>
                 <div className="flex items-center gap-4">
-                    <div className="text-sm text-gray-600 bg-gray-100 px-3 py-1 rounded">
-                        Date: <span className="font-mono font-bold">{simCursor}</span>
+                    <div className="flex items-center gap-2 bg-gray-50 p-1 rounded-lg border border-gray-200">
+                         <button
+                            onClick={() => setSimMode('deterministic')}
+                            className={`px-3 py-1 text-xs font-medium rounded transition-colors ${simMode === 'deterministic' ? 'bg-white text-indigo-700 shadow-sm border border-gray-200' : 'text-gray-500 hover:text-gray-700'}`}
+                         >
+                            Deterministic
+                         </button>
+                         <button
+                            onClick={() => setSimMode('random')}
+                            className={`px-3 py-1 text-xs font-medium rounded transition-colors ${simMode === 'random' ? 'bg-white text-indigo-700 shadow-sm border border-gray-200' : 'text-gray-500 hover:text-gray-700'}`}
+                         >
+                            Random
+                         </button>
                     </div>
+
+                    {simMode === 'deterministic' && (
+                        <div className="text-sm text-gray-600 bg-gray-100 px-3 py-1 rounded">
+                            Date: <span className="font-mono font-bold">{simCursor}</span>
+                        </div>
+                    )}
+
                     <button
                         onClick={runHistoricalCycle}
-                        disabled={simLoading || simResult?.done}
+                        disabled={simLoading || (simMode === 'deterministic' && simResult?.done)}
                         className={`px-4 py-2 rounded text-white font-medium shadow-sm transition-colors ${
                             simLoading ? 'bg-gray-400 cursor-not-allowed' : 'bg-indigo-600 hover:bg-indigo-700'
                         }`}
                     >
-                        {simLoading ? 'Processing...' : simResult?.done ? 'End of Data' : 'Step Forward 1 Cycle'}
+                        {simLoading ? 'Processing...' : (simMode === 'deterministic' && simResult?.done) ? 'End of Data' : simMode === 'random' ? 'Run Random Cycle' : 'Step Forward 1 Cycle'}
                     </button>
                 </div>
             </div>

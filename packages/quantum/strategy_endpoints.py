@@ -86,7 +86,13 @@ def _run_simulation_job(
             break
 
         # Run one cycle
-        result = service.run_cycle(cursor, request.ticker, effective_config)
+        # Fix: Pass user_id and config as keyword arguments to avoid misaligning 'effective_config' to 'user_id'
+        result = service.run_cycle(
+            cursor,
+            request.ticker,
+            user_id=user_id,
+            config=effective_config
+        )
 
         status = result.get("status")
         if status in ["normal_exit", "forced_exit"]:

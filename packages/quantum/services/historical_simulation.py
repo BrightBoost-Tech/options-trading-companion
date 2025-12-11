@@ -96,6 +96,10 @@ def learn_from_cycle(
         import uuid
         trace_id = str(uuid.uuid4())
 
+        # Ensure details are JSON serializable
+        if hasattr(journal_service, "_sanitize_for_json"):
+             details = journal_service._sanitize_for_json(details)
+
         data = {
             "trace_id": trace_id,
             "user_id": None, # Historical simulation is usually system-wide or anonymous
@@ -106,6 +110,10 @@ def learn_from_cycle(
             "details_json": details,
             "created_at": datetime.now().isoformat()
         }
+
+        # Sanitize entire data block as well to be safe
+        if hasattr(journal_service, "_sanitize_for_json"):
+             data = journal_service._sanitize_for_json(data)
 
         supabase.table("learning_feedback_loops").insert(data).execute()
 

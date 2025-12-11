@@ -21,7 +21,7 @@ export default function MiddayEntriesList({ suggestions }: MiddayEntriesListProp
     <div className="space-y-4">
       {suggestions.map((s, i) => (
          <SuggestionCard
-            key={i}
+            key={s.id || i}
             suggestion={s}
         />
       ))}

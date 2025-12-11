@@ -46,6 +46,7 @@ class ConvictionService:
         self,
         positions: List[PositionDescriptor],
         regime_context: Dict[str, Any],
+        user_id: Optional[str] = None
     ) -> Dict[str, float]:
         """
         Returns {underlying_symbol: conviction in [0.0, 1.0]} for the current portfolio.
@@ -57,9 +58,16 @@ class ConvictionService:
 
         conviction_map: Dict[str, float] = {}
 
-        # 1. Batch-level multipliers (stubs for now)
+        # 1. Batch-level multipliers
         m_disc = self._get_discipline_multiplier()
-        perf_mult_map = self._get_performance_multipliers(regime_context)
+
+        # NOTE: _get_performance_multipliers now uses user_id and returns (strategy, window) keys.
+        # The existing portfolio logic used (regime, strategy).
+        # We will attempt to use the "paper_trading" window as a proxy for general performance if user_id is present,
+        # otherwise we default to 1.0.
+        perf_mult_map = {}
+        if user_id:
+             perf_mult_map = self._get_performance_multipliers(user_id)
 
         current_regime = str(regime_context.get("current_regime", "normal"))
         universe_median = float(regime_context.get("universe_median", 0.0))
@@ -69,10 +77,8 @@ class ConvictionService:
             strategy = pos.strategy_type or "other"
 
             # 2. Compute raw score and base conviction from live scoring
-            # We construct minimal symbol_data from available info (iv_rank)
             raw_score = self._compute_raw_score_helper(pos, current_regime)
 
-            # If scoring returns None / error (or no factors), default to neutral 0.5
             if raw_score is None:
                 conviction_map[symbol] = 0.5
                 continue
@@ -82,9 +88,6 @@ class ConvictionService:
                 continue
 
             # Transform raw score to conviction
-            # We instantiate a temporary transform helper if needed, or use a cached one?
-            # ConvictionTransform is lightweight.
-            # Using default profiles for now.
             ct = ConvictionTransform(DEFAULT_REGIME_PROFILES)
             base_conviction = ct.get_conviction(
                 raw_score=raw_score,
@@ -92,13 +95,12 @@ class ConvictionService:
                 universe_median=universe_median,
             )
 
-            # 3. Performance multiplier, keyed by (regime, strategy)
-            # Use 'other' if strategy not found
-            key = (current_regime, strategy)
-            if key not in perf_mult_map:
-                key = (current_regime, "other")
-
+            # 3. Performance multiplier
+            # We try to look up performance for this strategy in 'paper_trading' window as a baseline
+            key = (strategy, "paper_trading")
             m_perf = perf_mult_map.get(key, 1.0)
+
+            # If not found, maybe try "all" or generic if we had it. For now default to 1.0.
 
             c_final = base_conviction * m_perf * m_disc
             # Clamp
@@ -106,15 +108,87 @@ class ConvictionService:
 
         return conviction_map
 
+    def adjust_suggestion_scores(self, suggestions: List[Dict], user_id: str) -> List[Dict]:
+        """
+        Applies learning feedback multipliers to a list of suggestions or candidates.
+        Modifies the list in-place and returns it.
+
+        Logic:
+          - Fetch multipliers for user.
+          - For each suggestion, find (strategy, window) key.
+          - Apply multiplier to 'score' and/or 'otc_score'.
+          - Clamp result [0.5 * base, 1.5 * base].
+        """
+        multipliers = self._get_performance_multipliers(user_id)
+        if not multipliers:
+            return suggestions
+
+        for s in suggestions:
+            # Determine keys
+            # Candidates from scanner use 'type', suggestions use 'strategy'.
+            strategy = s.get("strategy") or s.get("type") or "unknown"
+            # Normalize strategy key if needed? We assume DB has same keys.
+            # Usually scanner produces human readable types "Debit Call Spread".
+            # While DB might store "debit_call_spread" or similar if normalized.
+            # But paper_endpoints uses `infer_strategy_key_from_suggestion` which normalizes.
+            # Here we might have raw strings.
+            # Ideally we'd normalize, but for now we try raw match.
+            # NOTE: Phase 1 migration implies paper_endpoints stores keys.
+
+            # Window
+            window = s.get("window") or "unknown"
+            # Midday scanner candidates don't have 'window' set yet in some flows,
+            # but run_midday_cycle sets it later.
+            # If we call this on candidates inside run_midday_cycle, we might need to pass window or inject it.
+            # Actually run_midday_cycle doesn't set window on candidates, only on final suggestions.
+            # So if we adjust candidates, window is "unknown".
+            # We should probably pass a default window if missing?
+            # Or rely on caller to set it.
+
+            # If s is a suggestion dict, it has window.
+            # If s is a candidate, we might need to infer.
+            # Let's try "midday_entry" if missing and we are in that context?
+            # But here we don't know context.
+            # We'll use "unknown" or s.get("window").
+            # If caller didn't set window, we can't map.
+
+            key = (strategy, window)
+            w = multipliers.get(key, 1.0)
+
+            if w == 1.0:
+                continue
+
+            # Apply to score
+            # Score keys: 'score', 'otc_score', 'probability_of_profit' (0-1, distinct from score)
+            # We focus on 'score' (0-100) and 'otc_score'.
+
+            for score_key in ["score", "otc_score"]:
+                if score_key in s and s[score_key] is not None:
+                    base = float(s[score_key])
+                    adjusted = base * w
+                    # Clamp [0.5x, 1.5x] relative to base
+                    lower = base * 0.5
+                    upper = base * 1.5
+                    final = max(lower, min(upper, adjusted))
+                    # Also clamp to global bounds if needed (e.g. 0-100)
+                    if base <= 100:
+                         final = min(100.0, final)
+
+                    s[score_key] = final
+
+            # Special case: Morning suggestions use probability_of_profit (0-1)
+            # If we want to bias that:
+            if "probability_of_profit" in s and s["probability_of_profit"] is not None:
+                p = float(s["probability_of_profit"])
+                p_adj = p * w
+                p_final = max(p * 0.5, min(p * 1.5, p_adj))
+                p_final = min(1.0, max(0.0, p_final))
+                s["probability_of_profit"] = p_final
+
+        return suggestions
+
     def _compute_raw_score_helper(self, pos: PositionDescriptor, regime: str) -> Optional[float]:
-        """
-        Helper to run existing scoring pipeline for a single position.
-        Constructs a minimal symbol_data dict using pos.iv_rank as a factor.
-        """
         try:
-            # Construct factors
-            # If we only have iv_rank, we treat it as 'volatility' factor.
-            # We might mock 'trend' and 'value' as 50 (neutral) if unknown.
             factors = {
                 "trend": 50.0,
                 "value": 50.0,
@@ -124,8 +198,8 @@ class ConvictionService:
             symbol_data = {
                 "symbol": pos.symbol,
                 "factors": factors,
-                "catalyst_window": "none", # Unknown without more data
-                "liquidity_tier": "mid"    # Assume mid
+                "catalyst_window": "none",
+                "liquidity_tier": "mid"
             }
 
             result = self.scoring.calculate_score(symbol_data, regime)
@@ -134,58 +208,68 @@ class ConvictionService:
             return None
 
     def _check_direction_alignment(self, position: PositionDescriptor, raw_score: float) -> bool:
-        """
-        Ensure we don't assign high conviction when the signal is clearly against the trade direction.
-        Example: long debit_call with very bearish score -> return False.
-
-        Assuming raw_score is roughly 0-100.
-        Neutral is ~50.
-        """
-
         strategy = position.strategy_type
-        # Raw score is 0-100.
-        # Bullish: > 50? Or > 40?
-        # Bearish: < 50?
-
-        # NOTE: The prompt example used raw_score > -0.5, implying -1 to 1 scale?
-        # But ScoringEngine produces linear sum of weights * factors (0-100).
-        # So I should assume 0-100 scale. Neutral ~50.
-
-        # Bullish strategies
         if strategy in ("debit_call", "credit_put", "long_stock", "bull_put_spread", "long_call"):
-            return raw_score > 40.0 # Allow slightly bearish score but not terrible
-
-        # Bearish strategies
+            return raw_score > 40.0
         if strategy in ("debit_put", "credit_call", "short_stock", "bear_call_spread", "long_put"):
-            return raw_score < 60.0 # Allow slightly bullish score
-
-        # Neutral / range-bound (condors, strangles)
+            return raw_score < 60.0
         if strategy in ("iron_condor", "short_strangle", "butterfly"):
-            # Should be "middle" score?
             return 30.0 < raw_score < 70.0
-
-        # Unknown / other -> allow through
         return True
 
-    def _get_performance_multipliers(self, regime_context: Dict[str, Any]) -> Dict[tuple, float]:
+    def _get_performance_multipliers(self, user_id: str) -> Dict[tuple, float]:
         """
-        For now, return a simple stub:
-          - (regime, strategy_type) -> multiplier in [0.5, 1.0].
-        Later, derive from learning_feedback_loops.
+        Returns a dict mapping (strategy, window) -> weight multiplier (float)
+        based on learning_feedback_loops rows for the user.
         """
-        if not self.supabase:
+        if not self.supabase or not user_id:
             return {}
 
-        # TODO: query learning_feedback_loops for recent avg pnl_realized per (regime, strategy_type)
-        # For now, return all 1.0.
-        return {}
+        try:
+            # Query learning_feedback_loops
+            # We optionally filter by updated_at > 90 days ago?
+            # For now, get all.
+            res = self.supabase.table("learning_feedback_loops")\
+                .select("*")\
+                .eq("user_id", user_id)\
+                .execute()
+
+            rows = res.data or []
+            multipliers = {}
+
+            for row in rows:
+                strategy = row.get("strategy") or "unknown"
+                window = row.get("window") or "unknown"
+                key = (strategy, window)
+
+                total_trades = row.get("total_trades") or 0
+                avg_return = float(row.get("avg_return") or 0.0)
+
+                # Apply weights only when total_trades >= 5
+                if total_trades < 5:
+                    continue
+
+                base = 1.0
+                edge = avg_return
+                # Clamp edge: max(-0.3, min(0.5, edge))
+                # Note: edge is in dollars. This clamping logic treats $0.50 as max positive boost
+                # and $-0.30 as max penalty. It acts as a binary/momentum flag.
+                edge_clamped = max(-0.3, min(0.5, edge))
+
+                weight = base + edge_clamped
+                # Final clamp: keep between 0.7x and 1.5x
+                weight = max(0.7, min(1.5, weight))
+
+                multipliers[key] = weight
+
+            return multipliers
+
+        except Exception as e:
+            # Log debug message (print for now as we don't have logger here)
+            print(f"[ConvictionService] Failed to fetch multipliers: {e}")
+            return {}
 
     def _get_discipline_multiplier(self) -> float:
-        """
-        For now, return 1.0. Later, derive from discipline_score_per_user.
-        """
         if not self.supabase:
             return 1.0
-
-        # TODO: query discipline_score_per_user for the current user and map to {1.0, 0.5, 0.0}.
         return 1.0

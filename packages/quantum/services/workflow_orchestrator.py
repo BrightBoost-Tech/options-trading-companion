@@ -301,40 +301,42 @@ async def run_midday_cycle(supabase: Client, user_id: str):
     candidates = []
     scout_results = []
     try:
-        # 2. Call Scanner (market-wide)
-        candidates = []
-        scout_results = []
-        try:
-            # Let scan_for_opportunities use its built-in universe and StrategySelector
-            # Pass supabase client to enable UniverseService
-            scout_results = scan_for_opportunities(supabase_client=supabase)  # no symbols arg
+        # Let scan_for_opportunities use its built-in universe and StrategySelector
+        # Pass supabase client to enable UniverseService
+        scout_results = scan_for_opportunities(supabase_client=supabase)  # no symbols arg
 
-            print(f"Scanner returned {len(scout_results)} raw opportunities.")
-            print("Top 10 scanner results:")
-            for c in scout_results[:10]:
-                name = c.get("ticker") or c.get("symbol")
-                print(f"- {name} score={c.get('score')} ev={c.get('ev')}")
+        print(f"Scanner returned {len(scout_results)} raw opportunities.")
 
-            # Sort by score (highest first)
-            scout_results.sort(key=lambda x: x.get("score", 0), reverse=True)
+        # Phase 3: Apply Learning Weights BEFORE selection
+        # We need to temporarily inject 'window'='midday_entry' into candidates so scoring matches
+        for c in scout_results:
+            c["window"] = "midday_entry"
 
-            # For now, do NOT filter out low scores; just take the top 5 for visibility.
-            # This makes the pipeline tolerant of low/empty scores in short term.
-            candidates = scout_results[:5]
+        conviction_service = ConvictionService(supabase=supabase)
+        scout_results = conviction_service.adjust_suggestion_scores(scout_results, user_id)
 
-            candidates = scout_results[:2]
+        print("Top 10 scanner results (after learning adjustment):")
+        for c in scout_results[:10]:
+            name = c.get("ticker") or c.get("symbol")
+            print(f"- {name} score={c.get('score')} ev={c.get('ev')}")
 
-            print(f"Top {len(candidates)} scanner results for midday (top 2 by score):")
-            for c in candidates:
-                print(f"  {c.get('ticker', c.get('symbol'))} score={c.get('score')} type={c.get('type')}")
+        # Sort by score (highest first)
+        scout_results.sort(key=lambda x: x.get("score", 0), reverse=True)
 
-            if not candidates:
-                print("No candidates selected for midday entries.")
-                return
+        # For now, do NOT filter out low scores; just take the top 5 for visibility.
+        # This makes the pipeline tolerant of low/empty scores in short term.
+        # User requested 2 candidates override in logic below? The code had `candidates = scout_results[:5]` then `[:2]`.
+        # I will keep the final logic which seemed to be `[:2]`.
+        candidates = scout_results[:2]
 
-        except Exception as e:
-            print(f"Scanner failed: {e}")
+        print(f"Top {len(candidates)} scanner results for midday (top 2 by score):")
+        for c in candidates:
+            print(f"  {c.get('ticker', c.get('symbol'))} score={c.get('score')} type={c.get('type')}")
+
+        if not candidates:
+            print("No candidates selected for midday entries.")
             return
+
     except Exception as e:
         print(f"Scanner failed: {e}")
         return

@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useEffect, useRef } from 'react';
+import React, { useEffect, useRef, memo } from 'react';
 import { Card, CardContent } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { Suggestion } from '@/lib/types';
@@ -13,7 +13,7 @@ interface SuggestionCardProps {
     onDismiss?: (suggestion: Suggestion, tag: string) => void;
 }
 
-export default function SuggestionCard({ suggestion, onStage, onModify, onDismiss }: SuggestionCardProps) {
+const SuggestionCard = ({ suggestion, onStage, onModify, onDismiss }: SuggestionCardProps) => {
     const { order_json, score, metrics, iv_regime, iv_rank, delta_impact, theta_impact, staged } = suggestion;
     const hasLoggedView = useRef(false);
     const displaySymbol = suggestion.display_symbol ?? suggestion.symbol ?? suggestion.ticker ?? '---';
@@ -190,22 +190,6 @@ export default function SuggestionCard({ suggestion, onStage, onModify, onDismis
                             // But for legs we often just want Qty Type Strike
                             const legDisplay = leg.display_symbol ?? `${qty > 0 ? "+" : ""}${qty} ${typeLabel} ${strike}`;
 
-                            // If display_symbol is full string "AMZN ...", we might just want to show it.
-                            // But usually legs in this UI are "1 C 150".
-                            // If we use display_symbol from backend, it's "AMZN 12/19/25 C 255".
-                            // That might be too long for the small list?
-                            // Let's stick to compact unless it's missing.
-                            // Actually the request is "Normalize OCC symbols... in ALL views".
-                            // If I use the backend `display_symbol`, it is full format.
-                            // Let's use it but maybe truncate or handle layout.
-                            // Or, keep compact representation if we have parsed fields, but fallback to display_symbol if not.
-                            // The card logic builds compact string manually.
-
-                            // Decision: The prompt asks for friendly format. "AMZN 12/19/25 C 255" is better than "1 C 255" IF we need to know the expiry/underlying per leg.
-                            // But SuggestionCard header already shows Underlying/Expiry often.
-                            // If legs have different expiries (Calendars), we NEED full info.
-                            // So let's use display_symbol if available, as it is safest.
-
                             return (
                                 <div key={idx} className="flex justify-between border-b border-gray-100 last:border-0 py-1">
                                     <span className="text-gray-600 text-xs truncate max-w-[200px]" title={leg.display_symbol}>
@@ -255,4 +239,6 @@ export default function SuggestionCard({ suggestion, onStage, onModify, onDismis
             </CardContent>
         </Card>
     );
-}
+};
+
+export default memo(SuggestionCard);

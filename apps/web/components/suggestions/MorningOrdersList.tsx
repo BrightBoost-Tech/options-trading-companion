@@ -21,7 +21,7 @@ export default function MorningOrdersList({ suggestions }: MorningOrdersListProp
     <div className="space-y-4">
       {suggestions.map((s, i) => (
          <SuggestionCard
-            key={i}
+            key={s.id || i}
             suggestion={s}
             // Add default handlers if needed
         />

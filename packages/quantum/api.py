@@ -185,6 +185,7 @@ async def execute_rebalance(
     real_conviction_map = conviction_service.get_portfolio_conviction(
         positions=positions_for_conviction,
         regime_context=regime_context,
+        user_id=user_id,
     )
 
     # Construct input positions for optimizer

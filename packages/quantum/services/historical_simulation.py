@@ -1,6 +1,7 @@
 import os
 import sys
 import random
+import uuid
 import numpy as np
 from datetime import datetime, timedelta, timezone
 from typing import List, Dict, Any, Optional
@@ -161,23 +162,27 @@ class HistoricalCycleService:
         symbol: str = "SPY",
         user_id: Optional[str] = None,
         config: Optional[Any] = None, # Using Any to avoid runtime issues if import fails, but verified via logic
-        mode: str = "deterministic"
+        mode: str = "deterministic",
+        seed: Optional[int] = None # Added seed param
     ) -> Dict[str, Any]:
         """
         Runs exactly one historical trade cycle (Entry -> Exit).
         mode: "deterministic" (default) or "random".
+        seed: Optional seed for reproducibility in random mode.
         """
+        run_id = str(uuid.uuid4())
+
         # 0. Setup Parameters & Randomness
+        chosen_symbol = symbol
+
+        # Use local RNG instance for thread safety
+        # If seed is provided, use it. Else use random source (system time/entropy).
+        rng = random.Random(seed)
+
         if mode == "random":
-            # Randomize Symbol if not provided (or default SPY was passed by endpoint)
-            # Check if symbol is exactly "SPY" which might be the default.
-            # Ideally endpoint passes explicit None if user didn't specify, but existing API def has symbol="SPY".
-            # If user wants random, they should probably omit symbol, but API makes it hard to distinguish omitted vs default.
-            # We'll assume if mode=random and symbol is SPY (default), we CAN override it.
-            # If user explicitly set SPY, they get SPY. But we can't tell difference easily.
-            # Let's check against HISTORICAL_SIM_UNIVERSE to see if we should pick from it.
+            # Randomize Symbol
             if not symbol or symbol == "SPY":
-                symbol = random.choice(HISTORICAL_SIM_UNIVERSE)
+                chosen_symbol = rng.choice(HISTORICAL_SIM_UNIVERSE)
 
             # Randomize Date
             # Configurable lookback
@@ -192,10 +197,21 @@ class HistoricalCycleService:
                 start_window = datetime(2000, 1, 1)
 
             time_delta = end_window - start_window
-            random_days = random.randrange(time_delta.days)
-            start_date = start_window + timedelta(days=random_days)
+            if time_delta.days > 0:
+                random_days = rng.randrange(time_delta.days)
+                start_date = start_window + timedelta(days=random_days)
+                cursor_date_str = start_date.strftime("%Y-%m-%d")
+            else:
+                # Fallback if window is too small
+                start_date = start_window
+                cursor_date_str = start_date.strftime("%Y-%m-%d")
 
-            cursor_date_str = start_date.strftime("%Y-%m-%d")
+        # 1. Parse Cursor (Deterministic / Finalized Random)
+        try:
+            start_date = datetime.strptime(cursor_date_str, "%Y-%m-%d")
+        except (ValueError, TypeError):
+            # If invalid or empty, default to 2 years ago
+            start_date = datetime.now() - timedelta(days=365*2)
 
         entry_threshold = 0.70
         tp_pct = 0.08
@@ -213,23 +229,16 @@ class HistoricalCycleService:
         # Apply Jitter if enabled
         if mode == "random" and HISTORICAL_RANDOM_PARAMS:
             # entry_threshold ± 0.05, clamped [0.4, 0.95]
-            jitter_entry = random.uniform(-0.05, 0.05)
+            jitter_entry = rng.uniform(-0.05, 0.05)
             entry_threshold = max(0.4, min(0.95, entry_threshold + jitter_entry))
 
             # tp_pct ± 0.02, clamped [0.01, 0.5]
-            jitter_tp = random.uniform(-0.02, 0.02)
+            jitter_tp = rng.uniform(-0.02, 0.02)
             tp_pct = max(0.01, min(0.5, tp_pct + jitter_tp))
 
             # sl_pct ± 0.01, clamped [0.01, 0.3]
-            jitter_sl = random.uniform(-0.01, 0.01)
+            jitter_sl = rng.uniform(-0.01, 0.01)
             sl_pct = max(0.01, min(0.3, sl_pct + jitter_sl))
-
-        # 1. Parse Cursor (Deterministic / Finalized Random)
-        try:
-            start_date = datetime.strptime(cursor_date_str, "%Y-%m-%d")
-        except (ValueError, TypeError):
-            # If invalid or empty, default to 2 years ago
-            start_date = datetime.now() - timedelta(days=365*2)
 
         # 2. Fetch Data Chunk (Start Date -> 1 Year Forward + Lookback)
         simulation_end_date = start_date + timedelta(days=365) # Fetch ample data
@@ -237,12 +246,18 @@ class HistoricalCycleService:
 
         try:
             hist_data = self.polygon.get_historical_prices(
-                symbol,
+                chosen_symbol,
                 days=days_needed,
                 to_date=simulation_end_date
             )
         except Exception as e:
-            return {"error": f"Data fetch failed: {str(e)}", "done": True, "status": "no_data"}
+            return {
+                "error": f"Data fetch failed for {chosen_symbol}: {str(e)}",
+                "done": True,
+                "status": "no_data",
+                "run_id": run_id,
+                "chosen_symbol": chosen_symbol
+            }
 
         dates = hist_data.get('dates', [])
         prices = hist_data.get('prices', [])
@@ -260,7 +275,9 @@ class HistoricalCycleService:
             return {
                 "done": True,
                 "status": "no_data",
-                "message": "No more historical data starting from cursor"
+                "message": "No more historical data starting from cursor",
+                "run_id": run_id,
+                "chosen_symbol": chosen_symbol
             }
 
         if start_idx < self.lookback_window:
@@ -324,7 +341,7 @@ class HistoricalCycleService:
 
             scoring_result = run_historical_scoring(
                 symbol_data={
-                    "symbol": symbol,
+                    "symbol": chosen_symbol,
                     "factors": factors_input,
                     "liquidity_tier": "top"
                 },
@@ -363,7 +380,7 @@ class HistoricalCycleService:
                         "direction": "long",
                         "regimeAtEntry": regime_mapped,
                         "convictionAtEntry": c_i,
-                        "symbol": symbol
+                        "symbol": chosen_symbol
                     }
                     trajectory = [step_snapshot] # Start trajectory
                     days_in_trade = 0
@@ -417,7 +434,9 @@ class HistoricalCycleService:
                         "pnl_pct": pnl_pct,
                         "done": False,
                         "status": "normal_exit",
-                        "nextCursor": dates[current_idx + 1] if current_idx + 1 < len(dates) else dates[-1]
+                        "nextCursor": dates[current_idx + 1] if current_idx + 1 < len(dates) else dates[-1],
+                        "run_id": run_id,
+                        "chosen_symbol": chosen_symbol
                     }
 
             current_idx += 1
@@ -454,12 +473,16 @@ class HistoricalCycleService:
                 "done": True,
                 "status": "forced_exit",
                 "message": "Data ended during trade",
-                "nextCursor": None
+                "nextCursor": None,
+                "run_id": run_id,
+                "chosen_symbol": chosen_symbol
             }
 
         return {
             "done": True,
             "status": "no_entry",
             "message": "End of data reached without finding another trade.",
-            "nextCursor": None
+            "nextCursor": None,
+            "run_id": run_id,
+            "chosen_symbol": chosen_symbol
         }

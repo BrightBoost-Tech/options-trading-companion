@@ -114,9 +114,6 @@ def scan_for_opportunities(
     except Exception:
         pass
 
-    # Removed broken async batching. Falling back to synchronous calls loop below.
-    # The subsequent logic handles fetching data via 'service' if cache is missing.
-
     for opp_config in opportunities:
         symbol = opp_config['symbol']
 
@@ -149,7 +146,9 @@ def scan_for_opportunities(
             'max_gain': (opp_config.get('width', 5) - 1.0) * 100,
             'max_loss': 1.0 * 100,
             'trend': 'UP',
-            'reward_risk': 2.0
+            'reward_risk': 2.0,
+            'suggested_entry': None, # Init None
+            'last_price': None
         }
 
         if service:
@@ -177,8 +176,17 @@ def scan_for_opportunities(
                 opp['short_strike'] = short_strike
                 opp['width'] = abs(short_strike - long_strike)
 
+                estimated_price = opp['width'] * 0.35
+                opp['suggested_entry'] = estimated_price
+                opp['last_price'] = estimated_price
+
             except:
                 pass
+
+        # Ensure fallback
+        if opp.get('suggested_entry') is None:
+             opp['suggested_entry'] = opp['width'] * 0.35
+             opp['last_price'] = opp['width'] * 0.35
 
         processed_opportunities.append(opp)
 
@@ -223,7 +231,8 @@ def scan_for_opportunities(
         filtered_opportunities,
         100000,
         market_data_enrich,
-        []
+        [],
+        supabase_client=supabase_client
     )
 
     print(
@@ -246,10 +255,6 @@ def scan_for_opportunities(
 
         components = []
         if iv_rank is not None:
-            # Prefer high IV for credit, low for debit?
-            # Scanner usually Debit logic in defaults (see above), but enriched might switch.
-            # Assuming simple "higher IV rank is better" for selling, but here defaults are debit spreads...
-            # Actually defaults are Debit. But let's just use raw rank as component 0-1.
             components.append(iv_rank / 100.0)
 
         if pop is not None:
@@ -264,8 +269,16 @@ def scan_for_opportunities(
 
         symbol = cand.get("symbol") or cand.get("ticker")
 
-        # Logging safety: cand.get('metrics') might be None, so .get({}, {}) is safer or explicit check
         metrics_debug = cand.get('metrics') or {}
+
+        # Ensure suggested_entry is present
+        current_entry = cand.get("suggested_entry")
+        if current_entry is None or (isinstance(current_entry, (int, float)) and current_entry <= 0):
+             cand["suggested_entry"] = cand.get("last_price", 0.0)
+             if cand["suggested_entry"] <= 0:
+                 width = cand.get("width", 5)
+                 cand["suggested_entry"] = width * 0.35
+
         print(f"{symbol} score={cand.get('score')} ev={metrics_debug.get('expected_value')}")
 
         final_candidates.append(cand)
@@ -283,5 +296,4 @@ def scan_for_opportunities(
     return final_candidates
 
 if __name__ == '__main__':
-    # ... existing main block ...
     pass

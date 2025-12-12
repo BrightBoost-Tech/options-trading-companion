@@ -1,4 +1,6 @@
 from typing import Dict, Any, Optional
+from supabase import Client
+import statistics
 
 class ExitStatsService:
     @staticmethod
@@ -6,35 +8,62 @@ class ExitStatsService:
         underlying: str,
         regime: str,
         strategy: str,
-        supabase_client: Optional[Any] = None
+        supabase_client: Optional[Client] = None
     ) -> Dict[str, Any]:
         """
         Retrieves historical performance stats for a given exit strategy.
-        Mocks data for now or queries learning_feedback_loops if schema supported it cleanly.
-        For Phase 8 MVP, we generate realistic stats based on regime.
+        Queries trade_executions table for realized P&L on the symbol.
         """
 
-        # Default stats
-        win_rate = 0.65
-        avg_pnl = 125.0
-        sample_size = 42
+        if not supabase_client:
+             return {
+                "win_rate": None,
+                "avg_pnl": None,
+                "sample_size": 0,
+                "regime": regime,
+                "insufficient_history": True
+            }
 
-        # Regime adjustments
-        if regime == "elevated":
-            win_rate = 0.72 # Higher IV often means better premium capture? Or higher risk?
-            # Actually for take_profit_limit, volatility helps hit targets?
-            avg_pnl = 180.0
-        elif regime == "suppressed":
-            win_rate = 0.55
-            avg_pnl = 80.0
+        try:
+            # Fetch completed trades for this symbol
+            # We assume 'realized_pnl' is not null for completed trades
+            response = supabase_client.table("trade_executions") \
+                .select("realized_pnl") \
+                .eq("symbol", underlying) \
+                .not_.is_("realized_pnl", "null") \
+                .execute()
 
-        # Strategy adjustments
-        if strategy == "take_profit_limit":
-            pass # Use defaults
+            trades = response.data
 
-        return {
-            "win_rate": win_rate,
-            "avg_pnl": avg_pnl,
-            "sample_size": sample_size,
-            "regime": regime
-        }
+            if not trades or len(trades) < 5:
+                 return {
+                    "win_rate": None,
+                    "avg_pnl": None,
+                    "sample_size": len(trades) if trades else 0,
+                    "regime": regime,
+                    "insufficient_history": True
+                }
+
+            outcomes = [t["realized_pnl"] for t in trades]
+            sample_size = len(outcomes)
+            wins = len([x for x in outcomes if x > 0])
+            win_rate = wins / sample_size
+            avg_pnl = statistics.mean(outcomes)
+
+            return {
+                "win_rate": win_rate,
+                "avg_pnl": avg_pnl,
+                "sample_size": sample_size,
+                "regime": regime,
+                "insufficient_history": False
+            }
+
+        except Exception as e:
+            print(f"[ExitStatsService] Error fetching stats for {underlying}: {e}")
+            return {
+                "win_rate": None,
+                "avg_pnl": None,
+                "sample_size": 0,
+                "regime": regime,
+                "insufficient_history": True
+            }

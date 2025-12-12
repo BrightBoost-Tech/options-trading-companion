@@ -32,18 +32,9 @@ class RebalanceEngine:
 
         # 1. Map Targets
         # Targets structure: {"type": "spread", "symbol": "...", "target_allocation": 0.15}
-        # Note: 'symbol' in target refers to the ticker/id used in optimization.
-        # For spreads, optimizer likely used `spread.ticker` or `spread.id`.
-        # Assuming `target_weights` key matches `spread.ticker`.
-
         target_map = {t["symbol"]: t["target_allocation"] for t in target_weights}
 
         # Calculate Total Portfolio Value for sizing
-        # (Spreads value + Stocks value + Cash)
-        # Assuming current_spreads and raw_positions might overlap if we processed everything.
-        # But `current_spreads` only contains OPTIONS.
-        # We need stocks too.
-
         stocks = [p for p in raw_positions if p.get("symbol", "").upper() not in ["USD", "CUR:USD", "CASH"] and len(p.get("symbol", "")) <= 6] # Simple heuristic
 
         total_equity = sum(s.current_value for s in current_spreads)
@@ -53,18 +44,6 @@ class RebalanceEngine:
         deployable_capital = cash_balance # Simplified
 
         # 2. Process Spreads (Existing vs Target)
-        # We need to match existing spreads to targets.
-        # Targets might be "open new spread" or "adjust existing".
-        # If the target symbol matches an existing spread ticker, we adjust.
-        # If the target symbol is new (how? optimizer usually picks from UNIVERSE or HOLDINGS).
-        # If optimizer suggests a NEW position, it needs to provide details (legs).
-        # Assuming for now rebalance mainly adjusts existing holdings weights,
-        # unless optimizer is capable of suggesting new tickers (Universe Selection).
-        # If optimizer output includes new tickers, we need their metadata (price, legs) which might be missing in `target_weights`.
-        # *Constraint*: For this phase, we'll assume we only rebalance EXISTING assets or explicitly provided candidates.
-        # But wait, if we only rebalance existing, how do we "open" new trades?
-        # The prompt says: "Inputs: Current SpreadPosition list... Latest optimizer targets... Outputs: trade dicts".
-
         # We will iterate through TARGETS.
         for target in target_weights:
             symbol = target["symbol"]
@@ -81,18 +60,11 @@ class RebalanceEngine:
                 current_val = existing_spread.current_value
                 item_type = "spread"
                 price_unit = abs(existing_spread.current_value / (existing_spread.quantity or 1)) # approx price per unit
-                # If short, current_value might be negative?
-                # Using absolute value for weight calc usually.
-                # But option values are tricky.
-                # Let's assume Long value.
             elif existing_stock:
                 current_val = float(existing_stock.get("current_value") or 0)
                 item_type = "stock"
                 price_unit = float(existing_stock.get("current_price") or 0)
             else:
-                # NEW POSITION SUGGESTION?
-                # If we don't have metadata, we can't trade it.
-                # Skip for now unless we have a way to fetch price.
                 continue
 
             if total_portfolio_value > 0:
@@ -147,6 +119,41 @@ class RebalanceEngine:
 
                 if qty_delta == 0: continue
 
+            # --- GAP 3 FIX: Compute Confidence & EV ---
+            confidence_score = 50.0 # Default
+            ev = 0.0
+
+            # Confidence Logic
+            # 1. Use conviction if available in target (passed from optimizer logic)
+            # Not currently in `target_weights` standard structure, but we can verify if `api.py` passed it?
+            # `api.py` calls `generate_trades`.
+            # If `api.py` injected it into `target` dict, we can use it.
+            # Looking at `api.py`, `targets.append({"type":..., "symbol":..., "target_allocation":...})`.
+            # It doesn't seem to pass conviction.
+            # However, we can infer confidence from the *magnitude* of the change or alignment.
+            # Or assume default high confidence if optimizer suggested a big move.
+
+            # Heuristic:
+            # 50 base.
+            # +20 if diff > 5% (Strong signal).
+            # +10 if adding to existing winner (if we knew PnL).
+            if abs(diff_w) > 0.05:
+                confidence_score += 20
+            elif abs(diff_w) > 0.02:
+                confidence_score += 10
+
+            # EV Logic:
+            # Expected Return * Investment - Risk?
+            # EV = (Target Weight * Portfolio Value * Exp Return) - Cost?
+            # Simpler: EV of the *trade*.
+            # If we are buying X amount, EV ~ X * ExpReturn.
+            # We don't have ExpReturn here easily without recalculating inputs.
+            # BUT we can use a placeholder based on alpha score or similar if we had it.
+            # Spec says: "If the system truly cannot compute EV, store NULL".
+            # Currently we can't compute rigorous EV here without market inputs.
+            # So we set EV = None.
+            ev = None
+
             # Construct Trade
             trade = {
                 "side": action, # open/close/increase/decrease
@@ -163,7 +170,9 @@ class RebalanceEngine:
                 "legs": existing_spread.legs if existing_spread else [], # Copy legs if spread
                 "risk_metadata": {
                     "diff_value": desired_val_change
-                }
+                },
+                "confidence_score": confidence_score,
+                "ev": ev
             }
             trades.append(trade)
 

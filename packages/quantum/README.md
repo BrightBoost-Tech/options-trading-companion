@@ -2,6 +2,32 @@
 
 This directory contains the Python FastAPI backend for the Quantum application.
 
+## Security v3 Hardening
+
+The backend implements strict security controls for authentication, task execution, and database access.
+
+### 1. Authentication
+- **JWT Verification:** All protected routes require a valid Supabase JWT signed with `HS256`. The server enforces `aud`, `exp`, and `sub` claims.
+- **Fail-Fast Config:** The server will not start if critical security keys (`SUPABASE_JWT_SECRET`, `ENCRYPTION_KEY`, etc.) are missing.
+
+### 2. Dev Auth Bypass
+- A "Test Mode" user (`X-Test-Mode-User`) is available **only** if:
+    1. `APP_ENV` is NOT `production`.
+    2. `ENABLE_DEV_AUTH_BYPASS` is set to `1`.
+    3. The request originates from `localhost`.
+- Ensure `NEXT_PUBLIC_ENABLE_DEV_AUTH_BYPASS` matches the backend setting to enable UI controls.
+
+### 3. Internal Tasks
+- Scheduled tasks (Morning Brief, Midday Scan) are hosted on `/internal/tasks/...`.
+- These endpoints are protected by HMAC-SHA256 signature verification.
+- Requests must include `X-Task-Signature` and `X-Task-Timestamp`.
+- Use `TASK_SIGNING_SECRET` to sign payloads.
+
+### 4. Row Level Security (RLS)
+- The API uses a user-scoped Supabase client for all user-initiated operations.
+- RLS policies enforce that users can only access their own data.
+- The Service Role Key is used strictly for internal system tasks.
+
 ## Running Locally
 
 To ensure a consistent environment and automated setup, please use the provided helper scripts. These scripts will:

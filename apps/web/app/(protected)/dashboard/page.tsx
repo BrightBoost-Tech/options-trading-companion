@@ -92,7 +92,10 @@ export default function DashboardPage() {
       if (session) {
           headers['Authorization'] = `Bearer ${session.access_token}`;
       } else {
-          headers['X-Test-Mode-User'] = TEST_USER_ID;
+          // Gate dev auth bypass for security
+          if (process.env.NEXT_PUBLIC_ENABLE_DEV_AUTH_BYPASS === '1') {
+              headers['X-Test-Mode-User'] = TEST_USER_ID;
+          }
       }
       return headers;
   };

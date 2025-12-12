@@ -922,6 +922,7 @@ async def run_historical_cycle(
     cursor: str = Body(..., embed=True),
     symbol: Optional[str] = Body("SPY", embed=True),
     mode: Optional[str] = Body("deterministic", embed=True),
+    seed: Optional[int] = Body(None, embed=True),
     # Allow user_id to be passed via Auth header implicitly, or Body if debug?
     # Usually we get it from token.
     user_id: str = Depends(get_current_user),
@@ -934,7 +935,7 @@ async def run_historical_cycle(
     try:
         service = HistoricalCycleService() # Inits with PolygonService
         # Pass user_id so journal entry is owned by caller
-        result = service.run_cycle(cursor, symbol, user_id=user_id, mode=mode)
+        result = service.run_cycle(cursor, symbol, user_id=user_id, mode=mode, seed=seed)
         return result
     except Exception as e:
         print(f"Historical cycle error: {e}")

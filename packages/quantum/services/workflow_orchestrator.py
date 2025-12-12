@@ -178,13 +178,22 @@ async def run_morning_cycle(supabase: Client, user_id: str):
             hist_stats = ExitStatsService.get_stats(
                 underlying=underlying,
                 regime=iv_regime or "normal",
-                strategy="take_profit_limit"
+                strategy="take_profit_limit",
+                supabase_client=supabase
             )
 
-            rationale_text = (
-                f"Take profit at ${metrics.limit_price:.2f} based on {(hist_stats['win_rate']*100):.0f}% "
-                f"historical win rate for similar exits in {iv_regime or 'normal'} regime."
-            )
+            # Build rationale safely
+            if hist_stats.get("insufficient_history") or hist_stats.get("win_rate") is None:
+                rationale_text = (
+                    f"Take profit at ${metrics.limit_price:.2f} based on EV model. "
+                    f"(Insufficient history for win-rate stats in {iv_regime or 'normal'} regime.)"
+                )
+            else:
+                win_rate_pct = hist_stats['win_rate'] * 100
+                rationale_text = (
+                    f"Take profit at ${metrics.limit_price:.2f} based on {win_rate_pct:.0f}% "
+                    f"historical win rate for similar exits in {iv_regime or 'normal'} regime."
+                )
 
             suggestion = {
                     "user_id": user_id,

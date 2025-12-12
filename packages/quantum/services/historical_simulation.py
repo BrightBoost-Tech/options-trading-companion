@@ -98,44 +98,62 @@ def learn_from_cycle(
         strategy_key = "historical_cycle"
         window_key = "historical_sim"
 
+        # Safe probe to silence errors if migration not applied
+        supports_aggregate = True
         try:
-            existing_feedback = supabase.table("learning_feedback_loops") \
-                .select("*") \
-                .eq("user_id", target_user) \
-                .eq("strategy", strategy_key) \
-                .eq("window", window_key) \
-                .execute()
-
-            if existing_feedback.data:
-                rec = existing_feedback.data[0]
-                new_total = rec["total_trades"] + 1
-                new_wins = rec["wins"] + (1 if reward > 0 else 0)
-                new_losses = rec["losses"] + (1 if reward < 0 else 0)
-                # Update average return (simple moving average approximation)
-                current_avg = float(rec.get("avg_return", 0))
-                new_avg = ((current_avg * rec["total_trades"]) + reward) / new_total
-
-                supabase.table("learning_feedback_loops").update({
-                    "total_trades": new_total,
-                    "wins": new_wins,
-                    "losses": new_losses,
-                    "avg_return": new_avg,
-                    "updated_at": datetime.now(timezone.utc).isoformat()
-                }).eq("id", rec["id"]).execute()
+            # Check if columns exist by trying to select one
+            supabase.table("learning_feedback_loops").select("strategy").limit(1).execute()
+        except Exception as e:
+            if "42703" in str(e): # Undefined column
+                supports_aggregate = False
             else:
-                feedback_payload = {
-                    "user_id": target_user,
-                    "strategy": strategy_key,
-                    "window": window_key,
-                    "total_trades": 1,
-                    "wins": 1 if reward > 0 else 0,
-                    "losses": 1 if reward < 0 else 0,
-                    "avg_return": reward,
-                    "updated_at": datetime.now(timezone.utc).isoformat()
-                }
-                supabase.table("learning_feedback_loops").insert(feedback_payload).execute()
-        except Exception as fb_err:
-            print(f"[NestedLearning] Failed to update feedback loop stats: {fb_err}")
+                pass # Other error, proceed carefully
+
+        if supports_aggregate:
+            try:
+                existing_feedback = supabase.table("learning_feedback_loops") \
+                    .select("*") \
+                    .eq("user_id", target_user) \
+                    .eq("strategy", strategy_key) \
+                    .eq("window", window_key) \
+                    .eq("outcome_type", "aggregate") \
+                    .execute()
+
+                if existing_feedback.data:
+                    rec = existing_feedback.data[0]
+                    new_total = (rec.get("total_trades") or 0) + 1
+                    new_wins = (rec.get("wins") or 0) + (1 if reward > 0 else 0)
+                    new_losses = (rec.get("losses") or 0) + (1 if reward < 0 else 0)
+                    # Update average return (simple moving average approximation)
+                    current_avg = float(rec.get("avg_return", 0) or 0)
+                    old_total = rec.get("total_trades") or 0
+                    new_avg = ((current_avg * old_total) + reward) / new_total
+
+                    supabase.table("learning_feedback_loops").update({
+                        "total_trades": new_total,
+                        "wins": new_wins,
+                        "losses": new_losses,
+                        "avg_return": new_avg,
+                        "updated_at": datetime.now(timezone.utc).isoformat(),
+                        "outcome_type": "aggregate"
+                    }).eq("id", rec["id"]).execute()
+                else:
+                    feedback_payload = {
+                        "user_id": target_user,
+                        "strategy": strategy_key,
+                        "window": window_key,
+                        "total_trades": 1,
+                        "wins": 1 if reward > 0 else 0,
+                        "losses": 1 if reward < 0 else 0,
+                        "avg_return": reward,
+                        "updated_at": datetime.now(timezone.utc).isoformat(),
+                        "outcome_type": "aggregate"
+                    }
+                    supabase.table("learning_feedback_loops").insert(feedback_payload).execute()
+            except Exception as fb_err:
+                # Still catch unexpected errors but silence the known 42703 if probe failed to catch it
+                if "42703" not in str(fb_err):
+                    print(f"[NestedLearning] Failed to update feedback loop stats: {fb_err}")
 
     except Exception as e:
         print(f"[NestedLearning] Failed to log cycle: {e}")

@@ -1,0 +1,65 @@
+import hmac
+import hashlib
+import os
+import time
+from fastapi import Request, HTTPException, Header
+from typing import Optional
+
+# Configuration
+TASK_SIGNING_SECRET = os.getenv("TASK_SIGNING_SECRET")
+TASK_TTL_SECONDS = int(os.getenv("TASK_TTL_SECONDS", "300"))
+TASK_ALLOWLIST_CIDRS = os.getenv("TASK_ALLOWLIST_CIDRS", "") # Comma separated
+
+async def verify_internal_task_request(
+    request: Request,
+    x_task_signature: str = Header(..., alias="X-Task-Signature"),
+    x_task_timestamp: str = Header(..., alias="X-Task-Timestamp"),
+    x_task_key_id: Optional[str] = Header(None, alias="X-Task-Key-Id")
+):
+    """
+    Verifies that the request is a valid internal task request.
+    1. Checks Timestamp validity (TTL).
+    2. Recomputes HMAC-SHA256 signature and compares constant-time.
+    3. (Optional) Checks IP Allowlist.
+    """
+
+    if not TASK_SIGNING_SECRET:
+        # Fail safe: if secret not configured, reject all internal tasks
+        print("🚨 Internal Task Rejected: TASK_SIGNING_SECRET not configured.")
+        raise HTTPException(status_code=503, detail="Task system not configured")
+
+    # 1. Timestamp Check
+    try:
+        timestamp = int(x_task_timestamp)
+        now = int(time.time())
+        if abs(now - timestamp) > TASK_TTL_SECONDS:
+            raise HTTPException(status_code=401, detail="Request expired")
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid timestamp format")
+
+    # 2. Signature Verification
+    # Format: v1:{timestamp}:{method}:{path}:{body_hash}
+    body_bytes = await request.body()
+    body_hash = hashlib.sha256(body_bytes).hexdigest()
+    path = request.url.path
+    method = request.method
+
+    payload = f"v1:{timestamp}:{method}:{path}:{body_hash}"
+
+    expected_signature = hmac.new(
+        TASK_SIGNING_SECRET.encode(),
+        payload.encode(),
+        hashlib.sha256
+    ).hexdigest()
+
+    if not hmac.compare_digest(expected_signature, x_task_signature):
+        print(f"🚨 Invalid Task Signature. Expected: {expected_signature}, Got: {x_task_signature}, Payload: {payload}")
+        raise HTTPException(status_code=401, detail="Invalid signature")
+
+    # 3. IP Allowlist (Optional)
+    if TASK_ALLOWLIST_CIDRS:
+        # TODO: Implement CIDR check if needed.
+        # For now, simplistic check or trust the load balancer / firewall.
+        pass
+
+    return True

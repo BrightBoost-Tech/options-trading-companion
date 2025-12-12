@@ -97,7 +97,7 @@ export default function SettingsPage() {
               if (session) {
                   // Real User Login
                   headers['Authorization'] = `Bearer ${session.access_token}`;
-              } else if (userId) {
+              } else if (userId && process.env.NEXT_PUBLIC_ENABLE_DEV_AUTH_BYPASS === '1') {
                   // 🛠️ DEV MODE BYPASS: Pass the user ID explicitly
                   headers['X-Test-Mode-User'] = userId;
               }

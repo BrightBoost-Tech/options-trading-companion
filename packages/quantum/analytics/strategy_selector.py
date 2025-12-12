@@ -1,4 +1,5 @@
 # packages/quantum/analytics/strategy_selector.py
+from typing import Optional
 
 class StrategySelector:
     def determine_strategy(
@@ -8,6 +9,7 @@ class StrategySelector:
         current_price: float,
         iv_rank: float,
         days_to_expiry: int = 45,
+        effective_regime: str = "normal" # New argument
     ) -> dict:
         """
         Translates a directional sentiment into a specific option structure
@@ -20,23 +22,108 @@ class StrategySelector:
             "rationale": "",
         }
 
-        # Regime A: Low IV (IV Rank < 30) → Buy debit structures
-        if sentiment == "BULLISH":
-            if iv_rank < 30:
+        # Normalize regime
+        regime = effective_regime.lower()
+
+        # Logic Matrix
+        if regime == "suppressed":
+            # Low Vol -> Buy Vol (Debit Spreads or Long Options)
+            if sentiment == "BULLISH":
                 suggestion["strategy"] = "LONG_CALL_DEBIT_SPREAD"
-                suggestion["rationale"] = "Bullish outlook + Cheap Volatility (Low IV). Buying leverage."
+                suggestion["rationale"] = "Bullish + Suppressed IV. Buying cheap leverage."
                 suggestion["legs"] = [
-                    {"side": "buy", "type": "call", "delta_target": 0.60},
+                    {"side": "buy", "type": "call", "delta_target": 0.65},
                     {"side": "sell", "type": "call", "delta_target": 0.30},
                 ]
-            elif iv_rank > 50:
-                # Regime B: High IV (IV Rank > 50) → Sell credit structures
-                suggestion["strategy"] = "SHORT_PUT_CREDIT_SPREAD"
-                suggestion["rationale"] = "Bullish outlook + Expensive Volatility. Selling premium."
+            elif sentiment == "BEARISH":
+                suggestion["strategy"] = "LONG_PUT_DEBIT_SPREAD"
+                suggestion["rationale"] = "Bearish + Suppressed IV. Buying cheap protection."
                 suggestion["legs"] = [
-                    {"side": "sell", "type": "put", "delta_target": 0.30},
-                    {"side": "buy", "type": "put", "delta_target": 0.15},  # Wing protection
+                    {"side": "buy", "type": "put", "delta_target": -0.65},
+                    {"side": "sell", "type": "put", "delta_target": -0.30},
                 ]
 
-        # TODO: extend later for BEARISH/NEUTRAL and explicit earnings regimes
+        elif regime in ["elevated", "high_vol"]:
+            # High Vol -> Sell Vol (Credit Spreads)
+            if sentiment == "BULLISH":
+                suggestion["strategy"] = "SHORT_PUT_CREDIT_SPREAD"
+                suggestion["rationale"] = "Bullish + Elevated IV. Selling expensive premium."
+                suggestion["legs"] = [
+                    {"side": "sell", "type": "put", "delta_target": -0.30},
+                    {"side": "buy", "type": "put", "delta_target": -0.15},
+                ]
+            elif sentiment == "BEARISH":
+                suggestion["strategy"] = "SHORT_CALL_CREDIT_SPREAD"
+                suggestion["rationale"] = "Bearish + Elevated IV. Selling call premium."
+                suggestion["legs"] = [
+                    {"side": "sell", "type": "call", "delta_target": 0.30},
+                    {"side": "buy", "type": "call", "delta_target": 0.15},
+                ]
+
+        elif regime == "rebound":
+            # Volatile upside potential
+            if sentiment == "BULLISH":
+                suggestion["strategy"] = "LONG_CALL_DEBIT_SPREAD" # Or Ratio Backspread?
+                suggestion["rationale"] = "Rebound Regime. Aggressive upside capture."
+                suggestion["legs"] = [
+                    {"side": "buy", "type": "call", "delta_target": 0.60},
+                    {"side": "sell", "type": "call", "delta_target": 0.20}, # Wider spread
+                ]
+
+        elif regime == "chop":
+            # Range bound
+            suggestion["strategy"] = "IRON_CONDOR"
+            suggestion["rationale"] = "Chop Regime. Harvesting theta in range."
+            suggestion["legs"] = [
+                {"side": "sell", "type": "put", "delta_target": -0.20},
+                {"side": "buy", "type": "put", "delta_target": -0.10},
+                {"side": "sell", "type": "call", "delta_target": 0.20},
+                {"side": "buy", "type": "call", "delta_target": 0.10},
+            ]
+
+        elif regime in ["shock", "panic"]:
+            # Extreme Vol -> Stay small, maybe defined risk
+            if sentiment == "BULLISH":
+                 # Selling into panic puts is dangerous but profitable. Be careful.
+                 suggestion["strategy"] = "SHORT_PUT_CREDIT_SPREAD"
+                 suggestion["rationale"] = "Panic Regime. Selling extremely rich puts (Wide)."
+                 suggestion["legs"] = [
+                    {"side": "sell", "type": "put", "delta_target": -0.15}, # Far OTM
+                    {"side": "buy", "type": "put", "delta_target": -0.05},
+                ]
+            else:
+                 suggestion["strategy"] = "CASH"
+                 suggestion["rationale"] = "Panic Regime. Cash is king."
+
+        else: # Normal or Fallback
+            # Use IV Rank logic
+            if sentiment == "BULLISH":
+                if iv_rank < 35:
+                    suggestion["strategy"] = "LONG_CALL_DEBIT_SPREAD"
+                    suggestion["rationale"] = "Bullish + Low/Normal IV."
+                    suggestion["legs"] = [
+                        {"side": "buy", "type": "call", "delta_target": 0.60},
+                        {"side": "sell", "type": "call", "delta_target": 0.30},
+                    ]
+                elif iv_rank > 45:
+                    suggestion["strategy"] = "SHORT_PUT_CREDIT_SPREAD"
+                    suggestion["rationale"] = "Bullish + Normal/High IV."
+                    suggestion["legs"] = [
+                        {"side": "sell", "type": "put", "delta_target": -0.30},
+                        {"side": "buy", "type": "put", "delta_target": -0.15},
+                    ]
+            elif sentiment == "BEARISH":
+                 if iv_rank < 35:
+                    suggestion["strategy"] = "LONG_PUT_DEBIT_SPREAD"
+                    suggestion["legs"] = [
+                        {"side": "buy", "type": "put", "delta_target": -0.60},
+                        {"side": "sell", "type": "put", "delta_target": -0.30},
+                    ]
+                 else:
+                    suggestion["strategy"] = "SHORT_CALL_CREDIT_SPREAD"
+                    suggestion["legs"] = [
+                        {"side": "sell", "type": "call", "delta_target": 0.30},
+                        {"side": "buy", "type": "call", "delta_target": 0.15},
+                    ]
+
         return suggestion

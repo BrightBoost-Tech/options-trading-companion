@@ -13,6 +13,7 @@ from .sizing_engine import calculate_sizing
 from .journal_service import JournalService
 from .options_utils import group_spread_positions, format_occ_symbol_readable
 from .exit_stats_service import ExitStatsService
+from .market_data_truth_layer import MarketDataTruthLayer
 
 # Importing existing logic
 from options_scanner import scan_for_opportunities, classify_iv_regime
@@ -20,6 +21,7 @@ from models import Holding
 from market_data import PolygonService
 from ev_calculator import calculate_exit_metrics
 from analytics.loss_minimizer import LossMinimizer
+from analytics.conviction_service import ConvictionService
 
 # Constants for table names
 TRADE_SUGGESTIONS_TABLE = "trade_suggestions"
@@ -49,78 +51,72 @@ async def run_morning_cycle(supabase: Client, user_id: str):
     # 2. Group into Spreads
     spreads = group_spread_positions(positions)
 
-    # Initialize Polygon Service for Greeks
-    poly = PolygonService()
+    # Initialize Market Data Truth Layer
+    truth_layer = MarketDataTruthLayer()
 
     suggestions = []
 
     # 3. Generate Exit Suggestions per Spread
     for spread in spreads:
-        # Convert SpreadPosition to dict for easier access if legacy code expects it, or use object access
-        # The prompt implies we should continue to work.
-        # 'spread' is now a SpreadPosition object.
         legs = spread.legs # Object access
         if not legs:
             continue
-
-        # Calculate aggregate cost basis and current value
-        # cost_basis/current_price are per share. Quantity is usually number of contracts.
-        # Contract size is 100.
 
         total_cost = 0.0
         total_value = 0.0
         total_quantity = 0.0
 
-        # We need a representative symbol for market data fetch
-        # If it's a spread, we might need Greeks of the legs or underlying.
-        # For simple EV exit, let's look at the underlying IV and Price action.
         underlying = spread.underlying
-
-        # Check liquidity / Greeks
-        # We need Delta and IV.
-        # Option 1: Fetch Greeks for each leg and sum them (Portfolio Delta).
-        # Option 2: Use underlying IV and approximation.
-
         net_delta = 0.0
+        iv_rank = 50.0 # Default fallback
+        iv_regime = "normal"
 
-        # We'll use the first leg to get IV reference if possible
         ref_symbol = legs[0]["symbol"]
 
-        iv_rank = 0.5 # Default
-
         try:
-            # Get Snapshot for Greeks of the first leg (approximation for spread environment)
-            # Ideally we sum deltas.
+            # 3a. Use Truth Layer for Options Data
+            # We can fetch snapshot for legs to get greeks
+            leg_symbols = [l["symbol"] for l in legs]
+            # Use snapshot_many for the options
+            snapshots = truth_layer.snapshot_many(leg_symbols)
+
+            # Fetch IV Context (Rank/Regime) from Truth Layer using Underlying
+            # This fixes the bug where we were using option IV as rank
+            iv_ctx = truth_layer.iv_context(underlying)
+            iv_rank_score = iv_ctx.get("iv_rank", 50.0) # 0-100
+            if iv_rank_score is None: iv_rank_score = 50.0
+
+            iv_regime = iv_ctx.get("iv_regime") or classify_iv_regime(iv_rank_score)
+
+            # Sum Deltas
             for leg in legs:
                 sym = leg["symbol"]
                 qty = float(leg.get("quantity", 0))
 
-                # Snapshot
-                snap = poly.get_option_snapshot(sym)
+                # Normalize symbol for lookup because Truth Layer keys by normalized ticker
+                norm_sym = truth_layer.normalize_symbol(sym)
+                snap = snapshots.get(norm_sym, {})
+
                 greeks = snap.get("greeks", {})
                 delta = greeks.get("delta", 0.0) or 0.0
 
-                # Add to net delta (weighted by qty)
-                # Note: spread["type"] might be "C" or "P" or "MIXED".
-                # If we are Long the spread, we own the legs.
-                # Plaid quantities are usually positive for long.
-                # Wait, Plaid 'quantity' can be negative for short?
-                # Need to check data source. Usually Plaid returns positive quantity for long.
-                # If short, it might be negative?
-                # Assuming positive for now, logic below might need refinement for short legs.
-
-                # Polygon delta is usually -1 to 1.
                 net_delta += delta * qty
 
-                # Capture IV from one of the legs
-                if "implied_volatility" in snap:
-                    iv_rank = snap["implied_volatility"]
+            # Use IV from context as reference? Or stick to IV from options?
+            # EV calculator might need IV level (decimal) not rank.
+            # So we should get implied volatility from one of the legs.
+            # Assuming first leg is representative.
+            norm_ref = truth_layer.normalize_symbol(ref_symbol)
+            first_snap = snapshots.get(norm_ref, {})
+            iv_decimal = first_snap.get("iv")
+            if iv_decimal is None:
+                 iv_decimal = 0.5 # fallback
+
+            iv_rank = iv_decimal # variable naming in old code was confusing, using decimal for EV calc
 
         except Exception as e:
             print(f"Error fetching greeks for {ref_symbol}: {e}")
-
-        # Determine Regime
-        iv_regime = classify_iv_regime(iv_rank)
+            iv_decimal = 0.5
 
         # Calculate spread financials
         for leg in legs:
@@ -159,7 +155,7 @@ async def run_morning_cycle(supabase: Client, user_id: str):
             current_price=unit_price,
             cost_basis=unit_cost,
             delta=net_delta / qty_unit, # Average delta per unit
-            iv=iv_rank,
+            iv=iv_decimal, # Use decimal IV for BS model
             days_to_expiry=30 # Placeholder, could parse from expiry
         )
 
@@ -222,7 +218,7 @@ async def run_morning_cycle(supabase: Client, user_id: str):
                 "sizing_metadata": {
                     "reason": metrics.reason,
                     "context": {
-                        "iv_rank": iv_rank,
+                        "iv_rank": iv_rank_score, # Use the Rank (0-100) here for metadata context!
                         "iv_regime": iv_regime
                     },
                     "spread_details": {

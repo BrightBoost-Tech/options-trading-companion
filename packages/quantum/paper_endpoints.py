@@ -328,56 +328,62 @@ def close_paper_position(
 
         # Try to parse strategy from key if possible or look at orders
         strategy_key = position.get("strategy_key", "").split("_")[-1] if "_" in position.get("strategy_key", "") else "unknown"
+        window_key = "paper_trading" # Default window for paper
 
-        # Simple upsert to learning_feedback_loops
-        # We need to handle the case where the table or columns might differ, but per instructions we assume standard schema
+        # Safe probe to silence errors if migration not applied
+        supports_aggregate = True
+        try:
+             # Check if columns exist by trying to select one
+            supabase.table("learning_feedback_loops").select("strategy").limit(1).execute()
+        except Exception as e:
+            if "42703" in str(e): # Undefined column
+                supports_aggregate = False
 
-        feedback_payload = {
-            "user_id": user_id,
-            "strategy": strategy_key,
-            "window": "paper_trading", # Default window for paper
-            "total_trades": 1,
-            "wins": 1 if realized_pl > 0 else 0,
-            "losses": 1 if realized_pl < 0 else 0,
-            "avg_return": realized_pl, # This should ideally be a running average, but for upsert we might need stored proc or logic
-            "updated_at": datetime.now(timezone.utc).isoformat()
-        }
+        if supports_aggregate:
+            existing_feedback = supabase.table("learning_feedback_loops") \
+                .select("*") \
+                .eq("user_id", user_id) \
+                .eq("strategy", strategy_key) \
+                .eq("window", window_key) \
+                .eq("outcome_type", "aggregate") \
+                .execute()
 
-        # NOTE: Since simple upsert of counters is hard without SQL function, we will just insert a log entry
-        # or if the table is designed for aggregation, we might need to fetch-then-update.
-        # Given the instruction: "Upsert into learning_feedback_loops... total_trades = increment"
-        # This implies we might need a custom RPC or read-modify-write.
-        # For this implementation, let's do read-modify-write for simplicity.
+            if existing_feedback.data:
+                rec = existing_feedback.data[0]
+                new_total = (rec.get("total_trades") or 0) + 1
+                new_wins = (rec.get("wins") or 0) + (1 if realized_pl > 0 else 0)
+                new_losses = (rec.get("losses") or 0) + (1 if realized_pl < 0 else 0)
+                # Update average return (simple moving average approximation)
+                current_avg = float(rec.get("avg_return", 0) or 0)
+                old_total = rec.get("total_trades") or 0
+                new_avg = ((current_avg * old_total) + realized_pl) / new_total
 
-        existing_feedback = supabase.table("learning_feedback_loops") \
-            .select("*") \
-            .eq("user_id", user_id) \
-            .eq("strategy", strategy_key) \
-            .eq("window", "paper_trading") \
-            .execute()
-
-        if existing_feedback.data:
-            rec = existing_feedback.data[0]
-            new_total = rec["total_trades"] + 1
-            new_wins = rec["wins"] + (1 if realized_pl > 0 else 0)
-            new_losses = rec["losses"] + (1 if realized_pl < 0 else 0)
-            # Update average return (simple moving average approximation)
-            current_avg = float(rec.get("avg_return", 0))
-            new_avg = ((current_avg * rec["total_trades"]) + realized_pl) / new_total
-
-            supabase.table("learning_feedback_loops").update({
-                "total_trades": new_total,
-                "wins": new_wins,
-                "losses": new_losses,
-                "avg_return": new_avg,
-                "updated_at": datetime.now(timezone.utc).isoformat()
-            }).eq("id", rec["id"]).execute()
-        else:
-             supabase.table("learning_feedback_loops").insert(feedback_payload).execute()
+                supabase.table("learning_feedback_loops").update({
+                    "total_trades": new_total,
+                    "wins": new_wins,
+                    "losses": new_losses,
+                    "avg_return": new_avg,
+                    "updated_at": datetime.now(timezone.utc).isoformat(),
+                    "outcome_type": "aggregate"
+                }).eq("id", rec["id"]).execute()
+            else:
+                feedback_payload = {
+                    "user_id": user_id,
+                    "strategy": strategy_key,
+                    "window": window_key,
+                    "total_trades": 1,
+                    "wins": 1 if realized_pl > 0 else 0,
+                    "losses": 1 if realized_pl < 0 else 0,
+                    "avg_return": realized_pl,
+                    "updated_at": datetime.now(timezone.utc).isoformat(),
+                    "outcome_type": "aggregate"
+                }
+                supabase.table("learning_feedback_loops").insert(feedback_payload).execute()
 
     except Exception as e:
-        # Non-blocking error
-        logging.error(f"Failed to update learning loop: {e}")
+        # Non-blocking error, silence known 42703 if probe missed it
+        if "42703" not in str(e):
+             logging.error(f"Failed to update learning loop: {e}")
 
     # 7. Delete position
     supabase.table("paper_positions").delete().eq("id", position["id"]).execute()

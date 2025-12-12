@@ -90,11 +90,11 @@ export default function PortfolioHoldingsTable({ holdings, onSync, onGenerateSug
       <table className="w-full">
         <thead className="bg-gray-50 border-b">
           <tr>
-            <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Symbol</th>
-            <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Qty</th>
-            <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Avg Cost</th>
-            <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Price</th>
-            <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">P&L</th>
+            <th scope="col" className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Symbol</th>
+            <th scope="col" className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Qty</th>
+            <th scope="col" className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Avg Cost</th>
+            <th scope="col" className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Price</th>
+            <th scope="col" className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">P&L</th>
           </tr>
         </thead>
         <tbody className="divide-y divide-gray-200">

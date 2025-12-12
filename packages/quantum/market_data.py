@@ -217,6 +217,94 @@ class PolygonService:
 
         return {}
 
+    def get_option_chain_snapshot(self, underlying: str, strike_range: float = 0.20) -> List[Dict]:
+        """
+        Fetches option chain snapshot for the underlying.
+        Endpoint: /v3/snapshot/options/{underlyingAsset}
+        Filters:
+        - 20-45 DTE initially to optimize for 30d interpolation (can widen if needed)
+        - Strike range ±20% around spot (requires spot price first)
+
+        If strike_range is None, fetches full chain (careful with pagination).
+        """
+        # 1. Get spot price first to filter strikes
+        try:
+            quote = self.get_recent_quote(underlying)
+            spot = (quote['bid'] + quote['ask']) / 2.0
+        except:
+            spot = 0
+
+        if spot <= 0:
+            # Try getting price from get_historical_prices (previous close)
+            try:
+                hist = self.get_historical_prices(underlying, days=2)
+                if hist and hist.get('prices'):
+                    spot = hist['prices'][-1]
+            except:
+                pass
+
+        # If still no spot, we can't filter by strike effectively. Use wider net or fail?
+        # Let's proceed with no strike filter if spot is missing, but strict limit.
+
+        url = f"{self.base_url}/v3/snapshot/options/{underlying}"
+
+        params = {
+            'apiKey': self.api_key,
+            'limit': 250
+        }
+
+        # Add filters for efficiency
+        # Expiry: >= 15 days, <= 60 days (to bracket 30 days)
+        # Polygon filtering syntax: expiration_date.gte, etc.
+
+        today = datetime.now().date()
+        date_min = (today + timedelta(days=15)).strftime('%Y-%m-%d')
+        date_max = (today + timedelta(days=60)).strftime('%Y-%m-%d')
+
+        params['expiration_date.gte'] = date_min
+        params['expiration_date.lte'] = date_max
+
+        if spot > 0:
+            strike_min = spot * (1 - strike_range)
+            strike_max = spot * (1 + strike_range)
+            params['strike_price.gte'] = strike_min
+            params['strike_price.lte'] = strike_max
+
+        results = []
+
+        try:
+            while url:
+                response = requests.get(url, params=params, timeout=10)
+                if response.status_code != 200:
+                    print(f"Chain snapshot fetch failed for {underlying}: {response.status_code}")
+                    break
+
+                data = response.json()
+                batch = data.get('results', [])
+                results.extend(batch)
+
+                # Check for pagination
+                # Polygon uses 'next_url' in response, which includes params (but not apiKey usually?)
+                # Actually v3 snapshot often includes cursor in next_url
+                next_url = data.get('next_url')
+                if next_url:
+                    url = next_url
+                    # next_url usually has params embedded. reset params to avoid duplication/conflict
+                    # but we MUST ensure apiKey is attached if it's not in next_url
+                    params = {'apiKey': self.api_key}
+                else:
+                    break
+
+                # Safety break for massive chains
+                if len(results) > 1000:
+                    break
+
+            return results
+
+        except Exception as e:
+            print(f"Error fetching chain snapshot for {underlying}: {e}")
+            return []
+
 def get_polygon_price(symbol: str) -> float:
     # FIX 1: Handle Cash Manually
     if symbol == 'CUR:USD':

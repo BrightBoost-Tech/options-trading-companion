@@ -34,7 +34,7 @@ from services.journal_service import JournalService
 from services.universe_service import UniverseService
 from services.analytics_service import AnalyticsService
 from optimizer import router as optimizer_router
-from market_data import calculate_portfolio_inputs
+from market_data import calculate_portfolio_inputs, PolygonService
 # New Services for Cash-Aware Workflow
 from services.workflow_orchestrator import run_morning_cycle, run_midday_cycle, run_weekly_report
 from services.plaid_history_service import PlaidHistoryService
@@ -50,6 +50,8 @@ from analytics.loss_minimizer import LossMinimizer, LossAnalysisResult
 from analytics.drift_auditor import audit_plan_vs_execution
 from analytics.greeks_aggregator import aggregate_portfolio_greeks, build_greek_alerts
 from services.risk_engine import RiskEngine
+from services.iv_repository import IVRepository
+from services.iv_point_service import IVPointService
 
 
 # 1. Load environment variables BEFORE importing other things
@@ -106,6 +108,125 @@ app.include_router(strategy_router)
 # --- Register Paper Trading Endpoints ---
 from paper_endpoints import router as paper_router
 app.include_router(paper_router)
+
+# --- IV & Market Context Endpoints ---
+
+@app.get("/market/iv-context")
+async def get_iv_context(
+    symbol: str,
+    user_id: str = Depends(get_current_user)
+):
+    """
+    Returns the IV context for a symbol: 30-day IV, IV Rank, and Regime.
+    Calculated from daily snapshots.
+    """
+    if not supabase:
+        raise HTTPException(status_code=503, detail="Database not available")
+
+    try:
+        repo = IVRepository(supabase)
+        context = repo.get_iv_context(symbol.upper())
+        return context
+    except Exception as e:
+        print(f"Error getting IV context for {symbol}: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/tasks/iv/daily-refresh")
+def iv_daily_refresh_task(
+    x_cron_secret: str = Header(None, alias="X-Cron-Secret")
+):
+    """
+    Cron task to refresh IV points for the universe.
+    Defined as synchronous def to run in threadpool and avoid blocking event loop.
+    """
+    verify_cron_secret(x_cron_secret)
+    if not supabase:
+        raise HTTPException(status_code=503, detail="Database not available")
+
+    print("[IV Task] Starting daily IV refresh...")
+
+    # 1. Get Universe
+    try:
+        universe_service = UniverseService(supabase)
+        # Using scan candidates as universe, or just list all unique symbols from holdings + watchlist
+        # For simplicity, let's use the scan candidates logic which pulls from scanner_universe table
+        candidates = universe_service.get_scan_candidates(limit=200) # Limit to avoid timeouts
+        symbols = [c['symbol'] for c in candidates]
+
+        # Add common indices if not present
+        defaults = ['SPY', 'QQQ', 'IWM', 'DIA']
+        for d in defaults:
+            if d not in symbols:
+                symbols.append(d)
+
+        # Deduplicate
+        symbols = list(set(symbols))
+        print(f"[IV Task] Found {len(symbols)} symbols to process.")
+
+    except Exception as e:
+        print(f"[IV Task] Error fetching universe: {e}")
+        return {"status": "error", "message": "Failed to fetch universe"}
+
+    # 2. Process Batch
+    poly_service = PolygonService()
+    iv_repo = IVRepository(supabase)
+
+    stats = {
+        "ok": 0,
+        "failed": 0,
+        "skipped": 0,
+        "errors": []
+    }
+
+    for sym in symbols:
+        try:
+            # Check if we already have a point for today?
+            # IVRepository upsert handles idempotency, but maybe skip if recent?
+            # Let's just process.
+
+            # 1. Get spot (using market_data helper or chain snapshot fallback)
+            # Chain snapshot fetch inside IV service? No, we orchestrate here.
+
+            # Fetch chain snapshot
+            chain = poly_service.get_option_chain_snapshot(sym, strike_range=0.20)
+            if not chain:
+                stats["failed"] += 1
+                continue
+
+            # Get spot from quote or recent history (service helper logic)
+            quote = poly_service.get_recent_quote(sym)
+            spot = (quote['bid'] + quote['ask']) / 2.0
+            if spot == 0:
+                # Try getting from last trade in chain if possible? No.
+                # Fallback to historical close
+                 hist = poly_service.get_historical_prices(sym, days=2)
+                 if hist and hist.get('prices'):
+                     spot = hist['prices'][-1]
+
+            if spot <= 0:
+                stats["failed"] += 1
+                stats["errors"].append(f"{sym}: no_spot_price")
+                continue
+
+            # 2. Compute
+            as_of = datetime.now()
+            result = IVPointService.compute_atm_iv_30d_from_chain(chain, spot, as_of)
+
+            if result.get("iv_30d") is None:
+                stats["failed"] += 1
+                stats["errors"].append(f"{sym}: {result['inputs'].get('reason')}")
+            else:
+                # 3. Persist
+                iv_repo.upsert_iv_point(sym, result, as_of)
+                stats["ok"] += 1
+
+        except Exception as e:
+            print(f"[IV Task] Error processing {sym}: {e}")
+            stats["failed"] += 1
+            stats["errors"].append(f"{sym}: {str(e)}")
+
+    print(f"[IV Task] Complete. {stats}")
+    return {"status": "ok", "stats": stats}
 
 # --- Rebalance Engine Endpoints (Step 3) ---
 

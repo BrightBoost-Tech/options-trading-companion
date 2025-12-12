@@ -241,14 +241,14 @@ export default function StrategyProfilesPanel({ className }: StrategyProfilesPan
                                 <table className="w-full text-sm">
                                     <thead className="bg-gray-50">
                                         <tr>
-                                            <th className="p-2 text-left">Date</th>
-                                            <th className="p-2 text-left">Ticker</th>
-                                            <th className="p-2 text-left">Period</th>
-                                            <th className="p-2 text-right">Trades</th>
-                                            <th className="p-2 text-right">Win Rate</th>
-                                            <th className="p-2 text-right">Max DD</th>
-                                            <th className="p-2 text-right">P&L</th>
-                                            <th className="p-2 text-center">Status</th>
+                                            <th scope="col" className="p-2 text-left">Date</th>
+                                            <th scope="col" className="p-2 text-left">Ticker</th>
+                                            <th scope="col" className="p-2 text-left">Period</th>
+                                            <th scope="col" className="p-2 text-right">Trades</th>
+                                            <th scope="col" className="p-2 text-right">Win Rate</th>
+                                            <th scope="col" className="p-2 text-right">Max DD</th>
+                                            <th scope="col" className="p-2 text-right">P&L</th>
+                                            <th scope="col" className="p-2 text-center">Status</th>
                                         </tr>
                                     </thead>
                                     <tbody>

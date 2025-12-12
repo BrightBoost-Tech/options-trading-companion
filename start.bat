@@ -10,7 +10,7 @@ if "%PLAID_CLIENT_ID%"=="" set PLAID_CLIENT_ID=6916bee0f7ef350020208272
 if "%PLAID_SECRET%"=="" set PLAID_SECRET=0abdbc650e5c27358e4c8f73353473
 
 REM Start Python API
-start "Quantum API" cmd /k "cd /d %~dp0packages\quantum && python api.py"
+start "Quantum API" cmd /k "cd /d %~dp0 && python -m packages.quantum.api"
 
 REM Wait for API
 timeout /t 5 /nobreak >nul

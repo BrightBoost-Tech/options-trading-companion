@@ -58,13 +58,22 @@ async def get_current_user(
             if SUPABASE_JWT_SECRET:
                 payload = jwt.decode(token, SUPABASE_JWT_SECRET, algorithms=["HS256"], audience="authenticated")
             else:
+                # 🛡️ SECURITY FIX: Prevent insecure JWT decoding in Production
+                if os.getenv("APP_ENV", "development") == "production":
+                     print("🚨 CRITICAL: Attempted to decode JWT without secret in Production!")
+                     raise HTTPException(status_code=500, detail="Server Configuration Error: Missing JWT Secret in Production")
+
                 # WARNING: Dev only. Accepts any token format.
                 payload = jwt.decode(token, options={"verify_signature": False})
 
             return payload.get("sub")
         except Exception as e:
             print(f"⚠️ JWT Validation Failed: {e}")
-            # Don't raise yet, check for fallback
+            # Don't raise yet, check for fallback.
+            # However, if we raised 500 above, it will be caught here and logged.
+            # We should re-raise the 500 if it was a config error.
+            if isinstance(e, HTTPException) and e.status_code == 500:
+                raise e
 
     # 2. Dev Mode Fallback (The "Test User" Header)
     # Only allow this if we are NOT in production

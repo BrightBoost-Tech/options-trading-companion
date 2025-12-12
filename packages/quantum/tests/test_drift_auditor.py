@@ -5,9 +5,8 @@ from datetime import datetime, timezone
 # Adjust path if needed for import
 import sys
 import os
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
-from analytics.drift_auditor import audit_plan_vs_execution
+from packages.quantum.analytics.drift_auditor import audit_plan_vs_execution
 
 class TestDriftAuditor(unittest.TestCase):
     def setUp(self):

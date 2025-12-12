@@ -17,45 +17,48 @@ from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from slowapi.util import get_remote_address
 from supabase import create_client, Client
-
-from security import encrypt_token, decrypt_token, get_current_user
-from security.secrets_provider import SecretsProvider
-
-# Import models and services
-from models import Holding, SyncResponse, PortfolioSnapshot, Spread
-from config import ENABLE_REBALANCE_CONVICTION, ENABLE_REBALANCE_CONVICTION_SHADOW
-from analytics.conviction_service import ConvictionService, PositionDescriptor
-import plaid_service
-import plaid_endpoints
-
-# Import functionalities
-from options_scanner import scan_for_opportunities
-from services.journal_service import JournalService
-from services.universe_service import UniverseService
-from services.analytics_service import AnalyticsService
-from optimizer import router as optimizer_router
-from market_data import calculate_portfolio_inputs, PolygonService
-# New Services for Cash-Aware Workflow
-from services.workflow_orchestrator import run_morning_cycle, run_midday_cycle, run_weekly_report
-from services.plaid_history_service import PlaidHistoryService
-from services.rebalance_engine import RebalanceEngine
-from services.execution_service import ExecutionService
-from analytics.progress_engine import ProgressEngine, get_week_id_for_last_full_week
-from services.options_utils import group_spread_positions, format_occ_symbol_readable
-from ev_calculator import calculate_ev, calculate_position_size
-from services.enrichment_service import enrich_holdings_with_analytics
-from models import SpreadPosition, RiskDashboardResponse, UnifiedPosition, OptimizationRationale
-from services.historical_simulation import HistoricalCycleService
-from analytics.loss_minimizer import LossMinimizer, LossAnalysisResult
-from analytics.drift_auditor import audit_plan_vs_execution
-from analytics.greeks_aggregator import aggregate_portfolio_greeks, build_greek_alerts
-from services.risk_engine import RiskEngine
-from services.iv_repository import IVRepository
-from services.iv_point_service import IVPointService
-
+from pathlib import Path
 
 # 1. Load environment variables BEFORE importing other things
-load_dotenv()
+# When running from repo root, point to packages/quantum/.env
+env_path = Path(__file__).resolve().parent / ".env"
+load_dotenv(dotenv_path=env_path)
+
+from packages.quantum.security import encrypt_token, decrypt_token, get_current_user
+from packages.quantum.security.secrets_provider import SecretsProvider
+
+# Import models and services
+from packages.quantum.models import Holding, SyncResponse, PortfolioSnapshot, Spread
+from packages.quantum.config import ENABLE_REBALANCE_CONVICTION, ENABLE_REBALANCE_CONVICTION_SHADOW
+from packages.quantum.analytics.conviction_service import ConvictionService, PositionDescriptor
+from packages.quantum import plaid_service
+from packages.quantum import plaid_endpoints
+
+# Import functionalities
+from packages.quantum.options_scanner import scan_for_opportunities
+from packages.quantum.services.journal_service import JournalService
+from packages.quantum.services.universe_service import UniverseService
+from packages.quantum.services.analytics_service import AnalyticsService
+from packages.quantum.optimizer import router as optimizer_router
+from packages.quantum.market_data import calculate_portfolio_inputs, PolygonService
+# New Services for Cash-Aware Workflow
+from packages.quantum.services.workflow_orchestrator import run_morning_cycle, run_midday_cycle, run_weekly_report
+from packages.quantum.services.plaid_history_service import PlaidHistoryService
+from packages.quantum.services.rebalance_engine import RebalanceEngine
+from packages.quantum.services.execution_service import ExecutionService
+from packages.quantum.analytics.progress_engine import ProgressEngine, get_week_id_for_last_full_week
+from packages.quantum.services.options_utils import group_spread_positions, format_occ_symbol_readable
+from packages.quantum.ev_calculator import calculate_ev, calculate_position_size
+from packages.quantum.services.enrichment_service import enrich_holdings_with_analytics
+from packages.quantum.models import SpreadPosition, RiskDashboardResponse, UnifiedPosition, OptimizationRationale
+from packages.quantum.services.historical_simulation import HistoricalCycleService
+from packages.quantum.analytics.loss_minimizer import LossMinimizer, LossAnalysisResult
+from packages.quantum.analytics.drift_auditor import audit_plan_vs_execution
+from packages.quantum.analytics.greeks_aggregator import aggregate_portfolio_greeks, build_greek_alerts
+from packages.quantum.services.risk_engine import RiskEngine
+from packages.quantum.services.iv_repository import IVRepository
+from packages.quantum.services.iv_point_service import IVPointService
+
 
 TEST_USER_UUID = "75ee12ad-b119-4f32-aeea-19b4ef55d587"
 
@@ -102,11 +105,11 @@ plaid_endpoints.register_plaid_endpoints(app, plaid_service, supabase, analytics
 app.include_router(optimizer_router)
 
 # --- Register Strategy Endpoints ---
-from strategy_endpoints import router as strategy_router
+from packages.quantum.strategy_endpoints import router as strategy_router
 app.include_router(strategy_router)
 
 # --- Register Paper Trading Endpoints ---
-from paper_endpoints import router as paper_router
+from packages.quantum.paper_endpoints import router as paper_router
 app.include_router(paper_router)
 
 # --- IV & Market Context Endpoints ---
@@ -263,8 +266,8 @@ async def execute_rebalance(
              cash += val
 
     # 3. Run Optimizer directly to get targets
-    from optimizer import _compute_portfolio_weights, OptimizationRequest, calculate_dynamic_target
-    from analytics.iv_regime_service import IVRegimeService
+    from packages.quantum.optimizer import _compute_portfolio_weights, OptimizationRequest, calculate_dynamic_target
+    from packages.quantum.analytics.iv_regime_service import IVRegimeService
 
     # Pre-fetch IV Context for existing holdings (needed for regime-elastic caps)
     iv_service = IVRegimeService(supabase)
@@ -326,7 +329,7 @@ async def execute_rebalance(
 
     # Helper function for heavy compute
     def run_optimizer_logic():
-        from market_data import calculate_portfolio_inputs
+        from packages.quantum.market_data import calculate_portfolio_inputs
         import numpy as np
 
         unique_underlyings = list(set([s.underlying for s in current_spreads]))
@@ -860,7 +863,7 @@ async def preview_rebalance(
              cash += val
 
     # 3. Run Optimizer directly to get targets
-    from optimizer import _compute_portfolio_weights, OptimizationRequest
+    from packages.quantum.optimizer import _compute_portfolio_weights, OptimizationRequest
 
     # Construct input positions for optimizer
     opt_req = OptimizationRequest(
@@ -879,7 +882,7 @@ async def preview_rebalance(
 
     # Helper function for heavy compute
     def run_optimizer_logic():
-        from market_data import calculate_portfolio_inputs
+        from packages.quantum.market_data import calculate_portfolio_inputs
         import numpy as np
 
         unique_underlyings = list(set([s.underlying for s in current_spreads]))
@@ -1159,7 +1162,7 @@ async def sync_holdings(
     # 2. Retrieve Plaid Access Token
     plaid_access_token: Optional[str] = None
     if supabase:
-        from services.token_store import PlaidTokenStore
+        from packages.quantum.services.token_store import PlaidTokenStore
         token_store = PlaidTokenStore(supabase)
         plaid_access_token = token_store.get_access_token(user_id)
 

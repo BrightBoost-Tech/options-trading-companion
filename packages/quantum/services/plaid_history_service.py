@@ -161,7 +161,7 @@ class PlaidHistoryService:
             return 0
 
     def _get_access_token(self, user_id: str) -> Optional[str]:
-        from services.token_store import PlaidTokenStore
+        from packages.quantum.services.token_store import PlaidTokenStore
         token_store = PlaidTokenStore(self.supabase)
         return token_store.get_access_token(user_id)
 

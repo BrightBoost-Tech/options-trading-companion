@@ -4,10 +4,10 @@ from typing import Optional, Dict, Any, List
 from datetime import datetime, timezone
 import logging
 
-from security import get_current_user
-from models import TradeTicket
-from strategy_registry import STRATEGY_REGISTRY, infer_strategy_key_from_suggestion
-from market_data import PolygonService
+from packages.quantum.security import get_current_user
+from packages.quantum.models import TradeTicket
+from packages.quantum.strategy_registry import STRATEGY_REGISTRY, infer_strategy_key_from_suggestion
+from packages.quantum.market_data import PolygonService
 
 router = APIRouter()
 

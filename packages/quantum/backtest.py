@@ -86,7 +86,7 @@ def backtest_portfolio(
 
 if __name__ == '__main__':
     # Test
-    from market_data import calculate_portfolio_inputs
+    from packages.quantum.market_data import calculate_portfolio_inputs
     
     symbols = ['SPY', 'QQQ', 'IWM', 'DIA', 'VTI']
     

@@ -9,12 +9,12 @@ from typing import List, Dict, Any, Optional
 # Add parent directory to path to allow importing strategy_profiles
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 try:
-    from strategy_profiles import StrategyConfig
+    from packages.quantum.strategy_profiles import StrategyConfig
 except ImportError:
     StrategyConfig = None # Fallback or type alias
 
-from analytics.regime_scoring import ScoringEngine, ConvictionTransform
-from analytics.regime_integration import (
+from packages.quantum.analytics.regime_scoring import ScoringEngine, ConvictionTransform
+from packages.quantum.analytics.regime_integration import (
     DEFAULT_WEIGHT_MATRIX,
     DEFAULT_CATALYST_PROFILES,
     DEFAULT_LIQUIDITY_SCALAR,
@@ -22,9 +22,9 @@ from analytics.regime_integration import (
     map_market_regime,
     run_historical_scoring
 )
-from market_data import PolygonService
-from analytics.factors import calculate_trend, calculate_volatility, calculate_rsi
-from nested.backbone import infer_global_context, GlobalContext
+from packages.quantum.market_data import PolygonService
+from packages.quantum.analytics.factors import calculate_trend, calculate_volatility, calculate_rsi
+from packages.quantum.nested.backbone import infer_global_context, GlobalContext
 
 # --- Configuration ---
 HISTORICAL_SIM_UNIVERSE = os.getenv("HISTORICAL_SIM_UNIVERSE", "SPY,QQQ,IWM,DIA").split(",")
@@ -57,8 +57,8 @@ def learn_from_cycle(
 
         # Lazy import to avoid circular dep at top level if it becomes an issue,
         # though usually okay.
-        from nested_logging import _get_supabase_client
-        from services.journal_service import JournalService
+        from packages.quantum.nested_logging import _get_supabase_client
+        from packages.quantum.services.journal_service import JournalService
 
         supabase = _get_supabase_client()
         if not supabase:

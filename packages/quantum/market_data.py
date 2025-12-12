@@ -5,8 +5,8 @@ from datetime import datetime, timedelta
 from typing import List, Dict
 import numpy as np
 import re
-from cache import get_cached_data, save_to_cache
-from analytics.factors import calculate_trend, calculate_iv_rank
+from packages.quantum.cache import get_cached_data, save_to_cache
+from packages.quantum.analytics.factors import calculate_trend, calculate_iv_rank
 
 def normalize_option_symbol(symbol: str) -> str:
     """Ensures option symbols have the 'O:' prefix required by Polygon."""

@@ -1,6 +1,6 @@
 from typing import Optional, Dict
 from supabase import Client
-from security import encrypt_token, decrypt_token
+from packages.quantum.security import encrypt_token, decrypt_token
 
 class PlaidTokenStore:
     def __init__(self, supabase: Client):

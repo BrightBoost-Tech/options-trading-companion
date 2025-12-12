@@ -5,9 +5,8 @@ import sys
 import os
 
 # Add package root to path
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
-from services.historical_simulation import HistoricalCycleService
+from packages.quantum.services.historical_simulation import HistoricalCycleService
 
 class TestHistoricalCycle(unittest.TestCase):
     def test_cycle_logic(self):

@@ -5,7 +5,6 @@ import sys
 import os
 
 # Ensure we can import modules from packages.quantum
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '../../..')))
 
 from packages.quantum.nested_logging import log_inference
 

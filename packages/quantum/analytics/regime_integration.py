@@ -58,7 +58,7 @@ def map_market_regime(global_context: Dict[str, Any]) -> str:
     """
     Maps global context/state to effective scoring regime.
     Input fields expected:
-      - state: 'bull' | 'bear' | 'crab' | 'shock' (from nested/backbone)
+      - state: 'bull' | 'bear' | 'crab' | 'shock' (from packages.quantum.nested/backbone)
       - vol_annual: float (optional, overrides if high)
     Output: 'normal' | 'high_vol' | 'panic'
     """

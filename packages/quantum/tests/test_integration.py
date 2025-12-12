@@ -7,7 +7,6 @@ import json
 import numpy as np
 
 # Ensure we can import modules
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '../../..')))
 
 from packages.quantum.optimizer import optimize_portfolio, OptimizationRequest, PositionInput
 from packages.quantum.nested_logging import log_inference

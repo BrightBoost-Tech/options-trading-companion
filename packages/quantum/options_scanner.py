@@ -6,6 +6,7 @@ import os
 from typing import List, Dict, Optional, Any
 from datetime import datetime, timedelta, date
 from market_data import PolygonService
+from analytics.factors import calculate_trend, calculate_iv_rank
 from analytics.strategy_selector import StrategySelector
 from services.trade_builder import enrich_trade_suggestions
 from services.universe_service import UniverseService
@@ -119,14 +120,17 @@ def scan_for_opportunities(
 
         current_price = 100.0
         cached = get_cached_market_data(symbol)
+        hist_data = None
 
         if cached:
             current_price = cached.get("day", {}).get("c") or cached.get("lastTrade", {}).get("p") or 100.0
         elif service:
              try:
-                 hist = service.get_historical_prices(symbol, days=5)
-                 if hist and hist.get('prices'):
-                    current_price = hist['prices'][-1]
+                 # ⚡ Bolt Optimization: Fetch max history (365d) once per symbol instead of 3 separate calls
+                 # This reduces API requests by ~66% (3 -> 1) per symbol in the scanner loop.
+                 hist_data = service.get_historical_prices(symbol, days=365)
+                 if hist_data and hist_data.get('prices'):
+                    current_price = hist_data['prices'][-1]
              except:
                  pass
 
@@ -151,10 +155,17 @@ def scan_for_opportunities(
             'last_price': None
         }
 
-        if service:
+        if service and hist_data:
             try:
-                opp['trend'] = service.get_trend(symbol)
-                opp['iv_rank'] = service.get_iv_rank(symbol)
+                # Use pre-fetched data for trend (needs ~100 days)
+                # Ensure we pass the list, calculate_trend handles length checks
+                prices = hist_data['prices']
+                # Pass recent slice or full history (calculate_trend looks at last 50)
+                opp['trend'] = calculate_trend(prices)
+
+                # Use pre-fetched data for IV Rank (needs 365 days)
+                opp['iv_rank'] = calculate_iv_rank(hist_data['returns'])
+
                 opp['iv_regime'] = classify_iv_regime(opp['iv_rank'])
 
                 if opp['trend'] == "DOWN":

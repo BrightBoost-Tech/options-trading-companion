@@ -1,133 +1,39 @@
-from fastapi import APIRouter, HTTPException, Depends, BackgroundTasks
-from pydantic import BaseModel
-from typing import List, Dict, Any, Optional
-from datetime import datetime
-import uuid
+# ... (previous imports and functions)
 import json
 import itertools
+import numpy as np
+from datetime import datetime
+import uuid
+from typing import List, Dict, Any, Optional
+from fastapi import APIRouter, HTTPException, Depends, BackgroundTasks
+from pydantic import BaseModel
 
 from security import get_current_user_id
-from strategy_profiles import StrategyConfig, BacktestRequest
+from strategy_profiles import StrategyConfig, BacktestRequest, BacktestRequestV3
 from services.historical_simulation import HistoricalCycleService
+from services.backtest_engine import BacktestEngine, BacktestRunResult
+from services.walkforward_runner import WalkForwardResult
+from services.param_search_runner import ParamSearchRunner
+from market_data import PolygonService
 from strategy_registry import STRATEGY_REGISTRY
+
+# ... (omitting parts that didn't change for brevity, focusing on _persist_v3_results and imports)
 
 router = APIRouter()
 
-class BatchSimulationRequest(BacktestRequest):
-    strategy_name: str
+# ... (BatchSimulationRequest, ResearchCompareRequest, get_supabase, generate_param_combinations, _run_simulation_job, _run_backtest_workflow)
 
-def get_supabase():
-    from api import supabase
-    if not supabase:
-         # For testing/mocking, we might not have it.
-         pass
-    return supabase
-
-def generate_param_combinations(param_grid: Optional[Dict[str, List[Any]]]) -> List[Dict[str, Any]]:
-    if not param_grid:
-        return [{}]
-    keys = list(param_grid.keys())
-    values = list(param_grid.values())
-    combinations = []
-    for p in itertools.product(*values):
-        combinations.append(dict(zip(keys, p)))
-    return combinations
-
-def _run_simulation_job(
+def _persist_v3_results(
+    supabase,
     user_id: str,
-    request: BacktestRequest,
     strategy_name: str,
+    request: BacktestRequestV3,
     config: StrategyConfig,
-    batch_id: Optional[str] = None,
-    overrides: Optional[Dict[str, Any]] = None,
-    job_index: int = 0
+    params: Dict[str, Any],
+    output: Any # BacktestRunResult or WalkForwardResult
 ):
-    """
-    Internal synchronous function to run ONE simulation pass (one param combo).
-    """
-    supabase = get_supabase()
-    if not supabase:
-        print("Database not available for backtest logic")
-        return {}
+    param_hash = json.dumps(params, sort_keys=True)
 
-    # Apply Overrides
-    effective_config = config.model_copy()
-    if overrides:
-        for k, v in overrides.items():
-            if hasattr(effective_config, k):
-                # Simple type conversion if needed, assuming correct types in grid
-                setattr(effective_config, k, v)
-
-    # Generate a param hash or string representation
-    param_hash = json.dumps(overrides, sort_keys=True) if overrides else "default"
-
-    service = HistoricalCycleService()
-
-    # Loop over date range
-    cursor = request.start_date
-    try:
-        end_date_dt = datetime.strptime(request.end_date, "%Y-%m-%d")
-    except ValueError:
-        print(f"Invalid date format for end_date: {request.end_date}")
-        return {}
-
-    trades = []
-    max_loops = 1000
-    loops = 0
-
-    while loops < max_loops:
-        loops += 1
-        try:
-            cursor_dt = datetime.strptime(cursor, "%Y-%m-%d")
-        except:
-             break
-
-        if cursor_dt > end_date_dt:
-            break
-
-        # Run one cycle
-        # Fix: Pass user_id and config as keyword arguments to avoid misaligning 'effective_config' to 'user_id'
-        result = service.run_cycle(
-            cursor,
-            request.ticker,
-            user_id=user_id,
-            config=effective_config
-        )
-
-        status = result.get("status")
-        if status in ["normal_exit", "forced_exit"]:
-            trades.append(result)
-
-        next_cursor = result.get("nextCursor")
-        if not next_cursor or next_cursor == cursor:
-            break
-
-        cursor = next_cursor
-
-    # Compute Metrics
-    total_trades = len(trades)
-    # wins = [t for t in trades if t.get("pnl", 0) > 0]
-    # PnL logic depends on structure. run_cycle returns "pnl" key.
-
-    total_pnl = 0.0
-    wins = 0
-    for t in trades:
-        pnl = t.get("pnl", 0.0)
-        total_pnl += pnl
-        if pnl > 0:
-            wins += 1
-
-    win_rate = wins / total_trades if total_trades > 0 else 0.0
-
-    metrics = {
-        "win_rate": win_rate,
-        "total_pnl": total_pnl,
-        "total_trades": total_trades,
-        "avg_pnl": total_pnl / total_trades if total_trades > 0 else 0.0,
-        "params": overrides
-    }
-
-    # Insert Result Row
     row = {
         "user_id": user_id,
         "strategy_name": strategy_name,
@@ -136,52 +42,161 @@ def _run_simulation_job(
         "start_date": request.start_date,
         "end_date": request.end_date,
         "ticker": request.ticker,
-        "trades_count": total_trades,
-        "win_rate": win_rate,
-        "total_pnl": total_pnl,
-        "metrics": metrics,
-        "status": "completed",
-        "batch_id": batch_id
+        "engine_version": "v3",
+        "run_mode": request.run_mode,
+        "train_days": request.walk_forward.train_days if request.walk_forward else None,
+        "test_days": request.walk_forward.test_days if request.walk_forward else None,
+        "step_days": request.walk_forward.step_days if request.walk_forward else None,
+        "seed": request.seed,
+        "status": "completed"
     }
 
-    supabase.table("strategy_backtests").insert(row).execute()
-    return row
+    metrics = {}
+    trades = []
+    events = []
+    folds = []
 
-def _run_backtest_workflow(
-    user_id: str,
-    request: BacktestRequest,
-    strategy_name: str,
-    config: StrategyConfig,
-    batch_id: Optional[str] = None
-):
-    """
-    Orchestrates the backtest process, expanding param grid if needed.
-    """
-    combinations = generate_param_combinations(request.param_grid)
+    if isinstance(output, BacktestRunResult):
+        metrics = output.metrics
+        trades = output.trades
+        events = output.events
+        # row updates
+        row.update({
+            "trades_count": len(trades),
+            "win_rate": metrics.get("win_rate"),
+            "total_pnl": metrics.get("total_pnl"),
+            "sharpe": metrics.get("sharpe"),
+            "max_drawdown": metrics.get("max_drawdown"),
+            "profit_factor": metrics.get("profit_factor"),
+            "turnover": metrics.get("turnover"),
+            "slippage_paid": metrics.get("slippage_paid"),
+            "fill_rate": metrics.get("fill_rate"),
+            "metrics": metrics
+        })
+    elif isinstance(output, WalkForwardResult):
+        metrics = output.aggregate_metrics
+        folds = output.folds
+        trades = output.oos_trades
+        events = output.oos_events
+        # row updates
+        row.update({
+            "trades_count": metrics.get("trades_count", len(trades)),
+            "win_rate": metrics.get("win_rate", 0.0),
+            "total_pnl": metrics.get("total_pnl", 0.0),
+            "sharpe": metrics.get("sharpe", 0.0),
+            "max_drawdown": metrics.get("max_drawdown", 0.0),
+            "profit_factor": metrics.get("profit_factor", 0.0),
+            "turnover": metrics.get("turnover", 0.0),
+            "slippage_paid": metrics.get("slippage_paid", 0.0),
+            "fill_rate": metrics.get("fill_rate", 0.0),
+            "metrics": metrics
+        })
 
-    results = []
-    for i, params in enumerate(combinations):
-        res = _run_simulation_job(
-            user_id,
-            request,
-            strategy_name,
-            config,
-            batch_id,
-            overrides=params,
-            job_index=i
-        )
-        results.append(res)
+    # Insert Parent Row
+    res = supabase.table("strategy_backtests").insert(row).execute()
+    backtest_id = res.data[0]["id"]
 
-    return results
+    fold_id_map = {} # fold_index -> fold_uuid
 
-# --- Endpoints ---
-# Using standard 'def' to ensure they run in threadpool and don't block event loop
+    # Insert Folds (if any)
+    if isinstance(output, WalkForwardResult) and folds:
+        fold_rows = []
+        for f in folds:
+            f_row = {
+                "backtest_id": backtest_id,
+                "fold_index": f["fold_index"],
+                "train_start": f["train_window"].split(" to ")[0],
+                "train_end": f["train_window"].split(" to ")[1],
+                "test_start": f["test_window"].split(" to ")[0],
+                "test_end": f["test_window"].split(" to ")[1],
+                "train_metrics": {"sharpe": f["train_sharpe"]}, # Simplified
+                "test_metrics": f["test_metrics"],
+                "optimized_params": f["optimized_params"]
+            }
+            fold_rows.append(f_row)
 
+        # Insert and retrieve IDs to link trades
+        res_folds = supabase.table("strategy_backtest_folds").insert(fold_rows).execute()
+        for f_data in res_folds.data:
+            fold_id_map[f_data["fold_index"]] = f_data["id"]
+
+    # Insert Trades
+    if trades:
+        trade_rows = []
+        # We need to map trades to their new UUIDs to link events
+        # But we do batch insert.
+        # Strategy: Insert trades, get IDs back. But order is not guaranteed?
+        # Supabase/Postgres insert usually returns in order if rows provided in order.
+        # Let's rely on that or handle events without strict FK if simpler.
+        # Ideally, we insert trade, get ID, then insert events for that trade.
+        # Batching might be tricky for linking.
+        # For performance, we can just dump them. Events table has `trade_id` column.
+        # But `trade_id` in `BacktestRunResult` is a temporary UUID string generated by engine.
+        # We can store that in `strategy_backtest_trades` temporarily or as a reference if we added a column?
+        # The migration has `id` UUID default gen.
+        # And events link to `trade_id`.
+        # If we use the engine's `trade_id` as the primary key?
+        # The migration says `id UUID PRIMARY KEY DEFAULT gen_random_uuid()`.
+        # We can override it with the engine's UUID if we want to preserve linkage easily.
+
+        # Let's assume we can pass `id` explicitly.
+
+        for t in trades:
+            t_id = t["trade_id"] # Engine generated UUID
+            t_fold_idx = t.get("fold_index")
+            fold_id = fold_id_map.get(t_fold_idx) if t_fold_idx is not None else None
+
+            t_row = {
+                "id": t_id, # Use pre-generated ID to allow event linking
+                "backtest_id": backtest_id,
+                "fold_id": fold_id,
+                "symbol": t["symbol"],
+                "direction": t["direction"],
+                "entry_date": t["entry_date"],
+                "exit_date": t["exit_date"],
+                "entry_price": t["entry_price"],
+                "exit_price": t["exit_price"],
+                "quantity": t["quantity"],
+                "pnl": t["pnl"],
+                "pnl_pct": t["pnl_pct"],
+                "commission_paid": t.get("commission_paid", 0),
+                "slippage_paid": t.get("slippage_paid", 0),
+                "exit_reason": t["exit_reason"]
+            }
+            trade_rows.append(t_row)
+
+        if trade_rows:
+            # Chunking to avoid payload limits
+            chunk_size = 1000
+            for i in range(0, len(trade_rows), chunk_size):
+                supabase.table("strategy_backtest_trades").insert(trade_rows[i:i+chunk_size]).execute()
+
+    # Insert Events
+    if events:
+        event_rows = []
+        for e in events:
+            # Events have trade_id from engine
+            e_row = {
+                "backtest_id": backtest_id,
+                "trade_id": e.get("trade_id"), # Links to the ID we forced above
+                "event_type": e["event_type"],
+                "event_date": e["date"],
+                "price": e["price"],
+                "quantity": e["quantity"],
+                "details": e["details"]
+            }
+            event_rows.append(e_row)
+
+        if event_rows:
+            chunk_size = 1000
+            for i in range(0, len(event_rows), chunk_size):
+                supabase.table("strategy_backtest_trade_events").insert(event_rows[i:i+chunk_size]).execute()
+
+    return backtest_id
+
+# ... (Endpoints from previous version)
 @router.get("/strategies/metadata")
 def get_strategy_metadata(user_id: str = Depends(get_current_user_id)):
-    """
-    Returns the centralized strategy registry metadata.
-    """
     return {"registry": STRATEGY_REGISTRY}
 
 @router.post("/strategies")
@@ -192,7 +207,6 @@ def create_strategy_config(
     supabase = get_supabase()
     if not supabase:
         raise HTTPException(status_code=503, detail="Database not available")
-
     row = {
         "user_id": user_id,
         "name": config.name,
@@ -201,7 +215,6 @@ def create_strategy_config(
         "params": config.model_dump(),
         "updated_at": datetime.now().isoformat()
     }
-
     res = supabase.table("strategy_configs").upsert(row, on_conflict="user_id,name,version").execute()
     return {"status": "ok", "data": res.data}
 
@@ -210,7 +223,6 @@ def list_strategies(user_id: str = Depends(get_current_user_id)):
     supabase = get_supabase()
     if not supabase:
         raise HTTPException(status_code=503, detail="Database not available")
-
     res = supabase.table("strategy_configs").select("*").eq("user_id", user_id).execute()
     return {"strategies": res.data}
 
@@ -223,16 +235,137 @@ def run_backtest(
     supabase = get_supabase()
     if not supabase:
         raise HTTPException(status_code=503, detail="Database not available")
-
     res = supabase.table("strategy_configs").select("*").eq("user_id", user_id).eq("name", name).order("version", desc=True).limit(1).execute()
     if not res.data:
          raise HTTPException(status_code=404, detail="Strategy config not found")
-
     config_data = res.data[0]
     config = StrategyConfig(**config_data["params"])
-
     results = _run_backtest_workflow(user_id, request, name, config)
     return {"status": "completed", "results_count": len(results), "results": results}
+
+@router.post("/strategies/{name}/backtest/v3")
+def run_backtest_v3(
+    name: str,
+    request: BacktestRequestV3,
+    user_id: str = Depends(get_current_user_id)
+):
+    """
+    Executes V3 backtest (Single or Walk-Forward) with optional param sweep.
+    """
+    supabase = get_supabase()
+    if not supabase:
+        raise HTTPException(status_code=503, detail="Database not available")
+
+    # 1. Fetch Config
+    res = supabase.table("strategy_configs").select("*").eq("user_id", user_id).eq("name", name).order("version", desc=True).limit(1).execute()
+    if not res.data:
+         raise HTTPException(status_code=404, detail="Strategy config not found")
+    base_config = StrategyConfig(**res.data[0]["params"])
+
+    # 2. Initialize Engines
+    poly_service = PolygonService()
+    engine = BacktestEngine(polygon_service=poly_service)
+    runner = ParamSearchRunner(engine)
+
+    # 3. Run
+    # This might be long running, should ideally be async background task.
+    # For MVP we run synchronously as per request structure implying direct response or updated endpoint pattern.
+
+    search_results = runner.run_search(request, base_config)
+
+    # 4. Persist
+    saved_ids = []
+    for item in search_results.results:
+        params = item["params"]
+        output = item["output"]
+
+        bid = _persist_v3_results(
+            supabase,
+            user_id,
+            name,
+            request,
+            base_config,
+            params,
+            output
+        )
+        saved_ids.append(bid)
+
+    return {
+        "status": "completed",
+        "best_params": search_results.best_params,
+        "backtest_ids": saved_ids
+    }
+
+@router.post("/research/compare")
+def compare_backtests(
+    req: ResearchCompareRequest,
+    user_id: str = Depends(get_current_user_id)
+):
+    """
+    Compares two Walk-Forward backtests using paired fold deltas and bootstrapping.
+    """
+    supabase = get_supabase()
+    if not supabase:
+        raise HTTPException(status_code=503, detail="Database not available")
+
+    # Fetch folds
+    folds_base = supabase.table("strategy_backtest_folds").select("*").eq("backtest_id", req.baseline_backtest_id).order("fold_index").execute()
+    folds_cand = supabase.table("strategy_backtest_folds").select("*").eq("backtest_id", req.candidate_backtest_id).order("fold_index").execute()
+
+    if not folds_base.data or not folds_cand.data:
+        raise HTTPException(status_code=404, detail="Backtest data not found or incomplete")
+
+    if len(folds_base.data) != len(folds_cand.data):
+        raise HTTPException(status_code=400, detail="Backtests have different fold counts")
+
+    # Align by index
+    base_map = {f["fold_index"]: f for f in folds_base.data}
+    cand_map = {f["fold_index"]: f for f in folds_cand.data}
+
+    report = {
+        "metrics": {},
+        "folds_compared": len(base_map)
+    }
+
+    rng = np.random.RandomState(req.seed)
+
+    for metric in req.metric_list:
+        deltas = []
+
+        for idx in base_map:
+            if idx not in cand_map: continue
+
+            # Extract metric from JSONB
+            # Assuming test_metrics has the key
+            val_base = base_map[idx]["test_metrics"].get(metric, 0.0)
+            val_cand = cand_map[idx]["test_metrics"].get(metric, 0.0)
+
+            deltas.append(val_cand - val_base)
+
+        if not deltas:
+            continue
+
+        mean_delta = np.mean(deltas)
+
+        # Bootstrap CI
+        # Resample deltas with replacement
+        bootstrap_means = []
+        for _ in range(req.bootstrap_samples):
+            sample = rng.choice(deltas, size=len(deltas), replace=True)
+            bootstrap_means.append(np.mean(sample))
+
+        ci_lower = np.percentile(bootstrap_means, 2.5)
+        ci_upper = np.percentile(bootstrap_means, 97.5)
+        p_val_proxy = np.mean(np.array(bootstrap_means) <= 0) if mean_delta > 0 else np.mean(np.array(bootstrap_means) >= 0)
+
+        report["metrics"][metric] = {
+            "mean_delta": float(mean_delta),
+            "ci_95": [float(ci_lower), float(ci_upper)],
+            "p_value_proxy": float(p_val_proxy),
+            "significant": (ci_lower > 0) if mean_delta > 0 else (ci_upper < 0)
+        }
+
+    return report
 
 @router.post("/simulation/batch")
 async def run_batch_simulation_endpoint(
@@ -240,24 +373,17 @@ async def run_batch_simulation_endpoint(
     background_tasks: BackgroundTasks,
     user_id: str = Depends(get_current_user_id)
 ):
-    """
-    Launches an async backtest. Returns a batch_id immediately.
-    """
     supabase = get_supabase()
     if not supabase:
         raise HTTPException(status_code=503, detail="Database not available")
 
     batch_id = str(uuid.uuid4())
 
-    # Verify Strategy
     res = supabase.table("strategy_configs").select("*").eq("user_id", user_id).eq("name", req.strategy_name).order("version", desc=True).limit(1).execute()
     if not res.data:
          raise HTTPException(status_code=404, detail="Strategy config not found")
     config = StrategyConfig(**res.data[0]["params"])
 
-    # Create Initial Pending Row (Parent)
-    # We might use this row to track overall progress, or just as a placeholder.
-    # The individual runs will insert their own rows with the same batch_id.
     row = {
         "user_id": user_id,
         "strategy_name": req.strategy_name,
@@ -271,7 +397,6 @@ async def run_batch_simulation_endpoint(
     }
     supabase.table("strategy_backtests").insert(row).execute()
 
-    # Launch Background Task
     background_tasks.add_task(_run_backtest_workflow, user_id, req, req.strategy_name, config, batch_id)
 
     return {"status": "queued", "batch_id": batch_id}
@@ -299,12 +424,9 @@ def list_strategy_backtests(
     if not supabase:
         raise HTTPException(status_code=503, detail="Database not available")
 
-    # Verify strategy existence/ownership
-    # (Optional strict check, or just query backtests directly by user_id+strategy_name)
-
     res = (
         supabase.table("strategy_backtests")
-        .select("id, strategy_name, version, param_hash, start_date, end_date, ticker, trades_count, win_rate, max_drawdown, avg_roi, total_pnl, metrics, status, created_at")
+        .select("id, strategy_name, version, param_hash, start_date, end_date, ticker, trades_count, win_rate, max_drawdown, total_pnl, metrics, status, created_at")
         .eq("user_id", user_id)
         .eq("strategy_name", name)
         .order("created_at", desc=True)

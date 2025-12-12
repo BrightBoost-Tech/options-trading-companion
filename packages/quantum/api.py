@@ -59,8 +59,11 @@ from packages.quantum.services.risk_engine import RiskEngine
 from packages.quantum.services.iv_repository import IVRepository
 from packages.quantum.services.iv_point_service import IVPointService
 
+# v3 Observability
+from packages.quantum.observability.telemetry import TradeContext, compute_features_hash, emit_trade_event
 
 TEST_USER_UUID = "75ee12ad-b119-4f32-aeea-19b4ef55d587"
+APP_VERSION = os.getenv("APP_VERSION", "v2-dev")
 
 # New Table Constants
 TRADE_SUGGESTIONS_TABLE = "trade_suggestions"
@@ -361,6 +364,13 @@ async def execute_rebalance(
                  mu, sigma, coskew, tickers, current_spreads, opt_req, user_id, total_val, cash
              )
 
+             # v3 Observability: Detect fallback (missing trace_id means fallback logic triggered internally or simplified path)
+             # Actually _compute_portfolio_weights should return a trace_id from optimizer inference log
+             # If it is None, it implies classical fallback or error in logging
+             red_flags = []
+             if not trace_id:
+                 red_flags.append("optimizer_trace_missing")
+
              # Phase 3: Post-process weights with Regime-Elastic Caps
              spread_map = {s.ticker: s for s in current_spreads}
 
@@ -439,7 +449,7 @@ async def execute_rebalance(
                      "symbol": sym,
                      "target_allocation": adjusted_w
                  })
-             return targets, trace_id
+             return targets, trace_id, red_flags
 
         except Exception as e:
             print(f"Optimization failed during rebalance: {e}")
@@ -449,7 +459,7 @@ async def execute_rebalance(
     loop = asyncio.get_event_loop()
     with ThreadPoolExecutor() as pool:
         try:
-            targets, trace_id = await loop.run_in_executor(pool, run_optimizer_logic)
+            targets, trace_id, red_flags = await loop.run_in_executor(pool, run_optimizer_logic)
         except Exception as e:
              raise HTTPException(status_code=500, detail=f"Optimization failed: {e}")
 
@@ -463,16 +473,7 @@ async def execute_rebalance(
         profile="balanced"
     )
 
-    # Inject trace_id into trades context
-    if trace_id:
-        for t in trades:
-            if "context" not in t:
-                t["context"] = {}
-            t["context"]["trace_id"] = str(trace_id)
-            # Also inject at top level for UI convenience
-            t["trace_id"] = str(trace_id)
-
-    # 5. Save to DB
+    # 5. Save to DB with v3 Traceability
     saved_count = 0
     if trades:
         # Clear old rebalance suggestions
@@ -490,45 +491,81 @@ async def execute_rebalance(
             }
         )
 
-        # We already have iv_ctx_map for holding symbols, but trades might be new legs/spreads?
-        # The trades are usually adjustments to existing or closes.
-        # If new symbols appear (rare in rebalance unless specific strategy), we might need to fetch again.
-        # But let's reuse what we have or fetch for trades.
-
         trade_symbols = [t["symbol"] for t in trades]
-        # Fetch fresh context for trades (some might be new)
         trade_iv_ctx = iv_service.get_iv_context_for_symbols(trade_symbols)
 
         db_rows = []
         for t in trades:
             sym = t["symbol"]
-            ctx = trade_iv_ctx.get(sym, {})
+            iv_ctx = trade_iv_ctx.get(sym, {})
+            regime = iv_ctx.get("iv_regime") or global_regime
+            strategy = t.get("spread_type", "custom")
 
+            # Create Trace Context
+            features_dict = {
+                "symbol": sym,
+                "target_allocation": t.get("target_weight", 0),
+                "strategy": strategy,
+                "regime": regime,
+                "conviction_used": "implicit_1.0" # For now unless we thread it through
+            }
+
+            ctx = TradeContext.create_new(
+                model_version=APP_VERSION,
+                window="rebalance",
+                strategy=strategy,
+                regime=regime
+            )
+            ctx.features_hash = compute_features_hash(features_dict)
+
+            # Inject trace_id into context for downstream usage (paper trade etc)
             if "context" not in t:
                 t["context"] = {}
-            t["context"].update(ctx)
+            t["context"].update(iv_ctx)
+            t["context"]["trace_id"] = ctx.trace_id
+
+            # Attach red flags if any found earlier
+            if red_flags:
+                emit_props = {"red_flags": red_flags, "symbol": sym}
+            else:
+                emit_props = {"symbol": sym}
 
             db_rows.append({
                 "user_id": user_id,
                 "symbol": sym,
-                "strategy": t.get("spread_type", "custom"),
+                "strategy": strategy,
                 "direction": t["side"].title(), # Buy/Sell
                 "confidence_score": 0, # N/A
                 "ev": 0,
-                "order_json": t, # Store full details (now has context)
+                "order_json": t, # Store full details (now has context and trace_id)
                 "status": "pending",
                 "window": "rebalance",
                 "created_at": datetime.now().isoformat(),
-                "notes": t.get("reason", "")
+                "notes": t.get("reason", ""),
+                # v3 Fields
+                "trace_id": ctx.trace_id,
+                "model_version": ctx.model_version,
+                "features_hash": ctx.features_hash,
+                "regime": ctx.regime
             })
+
+            # Emit telemetry
+            emit_trade_event(
+                analytics_service,
+                user_id,
+                ctx,
+                "suggestion_generated",
+                properties={
+                    "target_allocation": t.get("target_weight", 0),
+                    **emit_props
+                }
+            )
 
         res = supabase.table(TRADE_SUGGESTIONS_TABLE).insert(db_rows).execute()
         saved_count = len(res.data) if res.data else 0
 
-        # Log individual suggestion events for better traceability (optional but good for learning loop)
-        if res.data:
-            for row in res.data:
-                analytics_service.log_suggestion_event(user_id, row, "suggestion_generated")
+        # Log individual suggestion events (already done via emit_trade_event, optional redundant log removed)
+        # But we previously used log_suggestion_event. Now emit_trade_event handles it better.
 
     return {
         "status": "ok",

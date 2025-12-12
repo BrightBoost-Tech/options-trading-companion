@@ -3,17 +3,27 @@ from pydantic import BaseModel
 from typing import Optional, Dict, Any, List
 from datetime import datetime, timezone
 import logging
+import uuid
+import os
 
 from packages.quantum.security import get_current_user
 from packages.quantum.models import TradeTicket
 from packages.quantum.strategy_registry import STRATEGY_REGISTRY, infer_strategy_key_from_suggestion
 from packages.quantum.market_data import PolygonService
 
+# v3 Observability
+from packages.quantum.observability.telemetry import TradeContext, emit_trade_event, TradeEventName
+from packages.quantum.services.analytics_service import AnalyticsService
+
 router = APIRouter()
 
 def get_supabase():
     from api import supabase  # reuse global supabase client
     return supabase
+
+def get_analytics_service():
+    from api import analytics_service
+    return analytics_service
 
 class PaperExecuteRequest(BaseModel):
     ticket: TradeTicket
@@ -28,6 +38,8 @@ def execute_paper_trade(
     user_id: str = Depends(get_current_user),
 ):
     supabase = get_supabase()
+    analytics = get_analytics_service()
+
     if not supabase:
         raise HTTPException(status_code=503, detail="Database not available")
 
@@ -60,15 +72,11 @@ def execute_paper_trade(
     portfolio_id = portfolio["id"]
 
     # 2. Compute notional:
-    # notional = (ticket.limit_price or 0) * ticket.quantity * 100  (options) or * 1 (stock)
-    # For v1, we can assume options with 100 multiplier when legs present or typical option strategies.
-    # Defaulting to 100 multiplier for now as this is an options platform.
     price = ticket.limit_price or 0.0
     multiplier = 100
     notional = price * ticket.quantity * multiplier
 
-    # Cash guardrail: check sufficient funds for debit trades
-    # We assume positive notional means a debit (paying cash).
+    # Cash guardrail
     if notional > 0:
         current_cash = float(portfolio["cash_balance"])
         if current_cash < notional:
@@ -77,53 +85,79 @@ def execute_paper_trade(
                 detail=f"Insufficient paper cash. Required: ${notional:.2f}, Available: ${current_cash:.2f}. Reset portfolio or reduce size."
             )
 
-    # 3. Insert into paper_orders with status = 'filled', order_json = ticket.model_dump()
+    # v3 Observability: Resolve Context from Suggestion
     suggestion_id = None
+    trace_id = None
+    model_version = "v2"
+    features_hash = "unknown"
+    regime = None
+    window = None
+    strategy = ticket.strategy_type
+
     if ticket.source_ref_id:
         suggestion_id = str(ticket.source_ref_id)
+        # Fetch suggestion for trace info
+        try:
+            s_res = supabase.table("trade_suggestions").select("*").eq("id", suggestion_id).single().execute()
+            if s_res.data:
+                s_data = s_res.data
+                trace_id = s_data.get("trace_id")
+                model_version = s_data.get("model_version", "v2")
+                features_hash = s_data.get("features_hash", "unknown")
+                regime = s_data.get("regime")
+                window = s_data.get("window")
+                strategy = s_data.get("strategy") or strategy # Prefer suggestion strategy if valid
+        except Exception as e:
+            logging.warning(f"Failed to fetch suggestion context for paper trade: {e}")
 
+    # Create TradeContext
+    if not trace_id:
+         # Fallback: create new trace if no suggestion link
+         trace_id = str(uuid.uuid4())
+
+    ctx = TradeContext(
+        trace_id=trace_id,
+        suggestion_id=suggestion_id,
+        model_version=model_version,
+        window=window,
+        strategy=strategy,
+        regime=regime,
+        features_hash=features_hash
+    )
+
+    # Emit suggestion_accepted (if linked)
+    if suggestion_id:
+        emit_trade_event(analytics, user_id, ctx, "suggestion_accepted", is_paper=True)
+
+    # 3. Insert into paper_orders with status = 'filled', order_json = ticket.model_dump()
     order_payload = {
         "portfolio_id": portfolio_id,
         "status": "filled",
         "order_json": ticket.model_dump(mode="json"),
         "filled_at": datetime.now(timezone.utc).isoformat(),
-        "suggestion_id": suggestion_id
+        "suggestion_id": suggestion_id,
+        "trace_id": trace_id # Persist trace_id
     }
     order_res = supabase.table("paper_orders").insert(order_payload).execute()
     if not order_res.data:
         raise HTTPException(status_code=500, detail="Failed to create order")
     order = order_res.data[0]
+    execution_id = order["id"]
+
+    # Emit order_filled
+    emit_trade_event(analytics, user_id, ctx, "order_filled", execution_id=execution_id, is_paper=True, properties={"symbol": ticket.symbol, "quantity": ticket.quantity, "price": price})
 
     # 4. Update portfolio cash_balance and net_liq (subtract notional)
-    # Buying (debit) reduces cash. Selling (credit) increases cash.
-    # We assume 'debit' by default if price > 0, but usually spread strategies specify net_cost (positive for debit).
-    # If the strategy was a credit spread, limit_price might be the credit received.
-    # However, standard convention often uses positive price for debit and negative for credit, or specifies 'debit'/'credit'.
-    # In TradeTicket, we don't explicitly have 'debit/credit' flag, but usually `limit_price` is the price we pay or receive.
-    # If `action` is 'buy', we pay. If 'sell', we receive.
-    # TradeTicket doesn't have top-level action, but usually suggests 'entry'.
-    # For now, let's assume a Debit entry (positive cost) reduces cash.
-    # If it's a credit entry (like short iron condor), usually represented as a credit.
-    # The prompt says: "Insert a row into paper_ledger with amount = -notional".
-    # This implies we treat the trade as a debit (cost) by default.
-
     new_cash = float(portfolio["cash_balance"]) - notional
-    # Net Liq change depends on whether we value the position immediately.
-    # If we mark-to-market immediately at entry price, Net Liq is unchanged (Cash went down, Position Value went up).
-    # But often transaction costs or spread might cause slight drop. For simplicty, keep Net Liq roughly same or just update cash.
-    # Let's update cash.
-
     supabase.table("paper_portfolios").update({
         "cash_balance": new_cash,
         "updated_at": datetime.now(timezone.utc).isoformat()
     }).eq("id", portfolio_id).execute()
 
     # 5. Insert/merge into paper_positions:
-    # Use helper to normalize strategy type, then append to symbol
-    # We construct a mock "suggestion" dict from the ticket to use the helper
     mock_suggestion = {
         "strategy_type": ticket.strategy_type,
-        "strategy": ticket.strategy_type, # redundancy
+        "strategy": ticket.strategy_type,
     }
     normalized_strat = infer_strategy_key_from_suggestion(mock_suggestion)
     if normalized_strat == "unknown":
@@ -142,7 +176,6 @@ def execute_paper_trade(
         new_qty = old_qty + ticket.quantity
 
         # Weighted average price
-        # (old_qty * old_avg + new_qty_added * price) / new_qty
         if new_qty != 0:
             new_avg = ((old_qty * old_avg) + (ticket.quantity * price)) / new_qty
         else:
@@ -163,8 +196,11 @@ def execute_paper_trade(
             "symbol": ticket.symbol,
             "quantity": ticket.quantity,
             "avg_entry_price": price,
-            "current_mark": price, # Assume mark is entry price initially
-            "unrealized_pl": 0.0
+            "current_mark": price,
+            "unrealized_pl": 0.0,
+            # We could store trace_id here too for easier close attribution, but we rely on lookup or consistent strategy keys
+            # or maybe store "opening_trace_id"?
+            # For simplicity in v3, we'll try to recover trace_id at close from paper_orders or lookup.
         }
         pos_res = supabase.table("paper_positions").insert(pos_payload).execute()
         if not pos_res.data:
@@ -200,7 +236,6 @@ def get_paper_portfolio(
     port_res = supabase.table("paper_portfolios").select("*").eq("user_id", user_id).limit(1).execute()
     if not port_res.data:
         # Check if we should auto-create, or return empty
-        # If user has no portfolio, return explicit null/empty structure
         return {"portfolio": None, "positions": [], "stats": {}}
 
     portfolio = port_res.data[0]
@@ -229,18 +264,11 @@ def get_paper_portfolio(
             zero_strategy_return_pct = (0.045 / 365.0) * days_elapsed * 100
 
             # 2. SPY Benchmark
-            # We attempt to fetch SPY price at start vs now
-            # Using PolygonService if available
             try:
                 poly = PolygonService()
                 current_spy = poly.get_recent_quote("SPY")
                 current_price = (current_spy.get("bid_price", 0) + current_spy.get("ask_price", 0)) / 2 if current_spy else 0
 
-                # For start price, we need historical.
-                # If PolygonService doesn't have easy historical fetch for exact date in this context,
-                # we might fallback or approximate.
-                # Let's assume we can use get_historical_prices if implemented or just skip if complex.
-                # However, PolygonService.get_historical_prices exists.
                 if current_price > 0:
                     start_date_str = start_dt.strftime("%Y-%m-%d")
                     # Fetch 1 day of data
@@ -273,6 +301,8 @@ def close_paper_position(
     user_id: str = Depends(get_current_user),
 ):
     supabase = get_supabase()
+    analytics = get_analytics_service()
+
     if not supabase:
         raise HTTPException(status_code=503, detail="Database not available")
 
@@ -320,40 +350,136 @@ def close_paper_position(
     }
     supabase.table("paper_ledger").insert(ledger_payload).execute()
 
-    # 6. Learning Loop Integration
+    # 6. v3 Observability: Recover Trace Context
+    # Try to find original opening order for this symbol/strategy
+    # Strategy key is in position: "SYMBOL_strategy_type"
+    strategy_key_val = position.get("strategy_key", "")
+    strategy_type = strategy_key_val.split("_")[-1] if "_" in strategy_key_val else "unknown"
+
+    # Look for most recent paper_order for this portfolio with this symbol (inside order_json)
+    # This is a bit heuristic if we don't link position->order directly.
+    # Ideally position has 'opening_order_id'.
+    # For now, we search paper_orders.
+
+    trace_id = None
+    suggestion_id = None
+    model_version = "v2"
+    features_hash = "unknown"
+    regime = None
+    window = "paper_trading"
+
     try:
-        # Attempt to find the original order to get suggestion metadata
-        # Strategy key is in position: "SYMBOL_strategy_type"
-        # We can also look up paper_orders for this portfolio/symbol
+        # Search recent order
+        # Need to query JSONB? Or just match suggestion_id if we have it?
+        # We don't have suggestion_id on position.
+        # Let's order by created_at desc.
+        # We can try to use suggestion_id if we stored it in position? No.
 
-        # Try to parse strategy from key if possible or look at orders
-        strategy_key = position.get("strategy_key", "").split("_")[-1] if "_" in position.get("strategy_key", "") else "unknown"
-        window_key = "paper_trading" # Default window for paper
+        # We will query paper_orders for this portfolio_id
+        # and iterate to find matching symbol in order_json.
+        # This is inefficient but functional for v3 MVP.
+        # Or add symbol column to paper_orders?
+        # For now, let's just emit event with limited context if trace missing.
 
-        # Safe probe to silence errors if migration not applied
+        # Better: use the trace_id we added to paper_orders.
+        # If we can find the order.
+        orders = supabase.table("paper_orders").select("*").eq("portfolio_id", portfolio_id).order("filled_at", desc=True).limit(20).execute()
+        for o in orders.data or []:
+            o_json = o.get("order_json") or {}
+            if o_json.get("symbol") == position["symbol"]:
+                 trace_id = o.get("trace_id")
+                 suggestion_id = o.get("suggestion_id")
+                 break
+
+        # If we have suggestion_id, fetch suggestion for full context
+        if suggestion_id:
+             s_res = supabase.table("trade_suggestions").select("*").eq("id", suggestion_id).single().execute()
+             if s_res.data:
+                s = s_res.data
+                trace_id = s.get("trace_id") or trace_id
+                model_version = s.get("model_version", "v2")
+                features_hash = s.get("features_hash", "unknown")
+                regime = s.get("regime")
+                window = s.get("window")
+
+    except Exception as e:
+        logging.warning(f"Failed to recover trace context for close: {e}")
+
+    # Emit trade_closed
+    ctx = TradeContext(
+        trace_id=trace_id or str(uuid.uuid4()), # New trace if disconnected
+        suggestion_id=suggestion_id,
+        model_version=model_version,
+        window=window,
+        strategy=strategy_type,
+        regime=regime,
+        features_hash=features_hash
+    )
+
+    emit_trade_event(
+        analytics,
+        user_id,
+        ctx,
+        "trade_closed",
+        is_paper=True,
+        properties={
+            "realized_pl": realized_pl,
+            "symbol": position["symbol"]
+        }
+    )
+
+    # 7. Learning Loop Integration
+    try:
+        # Update or Insert Learning Feedback Loop
+        # If we have trace_id, we can be very specific.
+        # v3 req: "Insert a learning_feedback_loops row keyed by trace_id and suggestion_id"
+
+        feedback_payload = {
+            "user_id": user_id,
+            "trace_id": trace_id,
+            "suggestion_id": suggestion_id,
+            "strategy": strategy_type,
+            "window": window,
+            "regime": regime,
+            "model_version": model_version,
+            "features_hash": features_hash,
+            "is_paper": True,
+            "pnl_realized": realized_pl,
+            # pnl_predicted? From suggestion ev.
+            # We need to fetch suggestion ev if not already.
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+            "outcome_type": "individual_trade" # Mark as per-trade
+        }
+
+        # If we have suggestion, get EV
+        if suggestion_id and 's' in locals() and s:
+             feedback_payload["pnl_predicted"] = s.get("ev")
+
+        supabase.table("learning_feedback_loops").insert(feedback_payload).execute()
+
+        # Also maintain aggregate stats (legacy support)
+        # Check if aggregate columns exist and valid strategy
         supports_aggregate = True
         try:
-             # Check if columns exist by trying to select one
-            supabase.table("learning_feedback_loops").select("strategy").limit(1).execute()
-        except Exception as e:
-            if "42703" in str(e): # Undefined column
-                supports_aggregate = False
+            supabase.table("learning_feedback_loops").select("total_trades").limit(1).execute()
+        except:
+             supports_aggregate = False # Maybe columns don't exist
 
         if supports_aggregate:
-            existing_feedback = supabase.table("learning_feedback_loops") \
+             # Find aggregate row
+            existing_agg = supabase.table("learning_feedback_loops") \
                 .select("*") \
                 .eq("user_id", user_id) \
-                .eq("strategy", strategy_key) \
-                .eq("window", window_key) \
+                .eq("strategy", strategy_type) \
+                .eq("window", window) \
                 .eq("outcome_type", "aggregate") \
                 .execute()
 
-            if existing_feedback.data:
-                rec = existing_feedback.data[0]
+            if existing_agg.data:
+                rec = existing_agg.data[0]
                 new_total = (rec.get("total_trades") or 0) + 1
                 new_wins = (rec.get("wins") or 0) + (1 if realized_pl > 0 else 0)
                 new_losses = (rec.get("losses") or 0) + (1 if realized_pl < 0 else 0)
-                # Update average return (simple moving average approximation)
                 current_avg = float(rec.get("avg_return", 0) or 0)
                 old_total = rec.get("total_trades") or 0
                 new_avg = ((current_avg * old_total) + realized_pl) / new_total
@@ -363,29 +489,29 @@ def close_paper_position(
                     "wins": new_wins,
                     "losses": new_losses,
                     "avg_return": new_avg,
-                    "updated_at": datetime.now(timezone.utc).isoformat(),
-                    "outcome_type": "aggregate"
+                    "updated_at": datetime.now(timezone.utc).isoformat()
                 }).eq("id", rec["id"]).execute()
             else:
-                feedback_payload = {
+                 # Create new aggregate row
+                 agg_payload = {
                     "user_id": user_id,
-                    "strategy": strategy_key,
-                    "window": window_key,
+                    "strategy": strategy_type,
+                    "window": window,
                     "total_trades": 1,
                     "wins": 1 if realized_pl > 0 else 0,
                     "losses": 1 if realized_pl < 0 else 0,
                     "avg_return": realized_pl,
                     "updated_at": datetime.now(timezone.utc).isoformat(),
-                    "outcome_type": "aggregate"
+                    "outcome_type": "aggregate",
+                    "model_version": "aggregate"
                 }
-                supabase.table("learning_feedback_loops").insert(feedback_payload).execute()
+                 supabase.table("learning_feedback_loops").insert(agg_payload).execute()
 
     except Exception as e:
-        # Non-blocking error, silence known 42703 if probe missed it
-        if "42703" not in str(e):
-             logging.error(f"Failed to update learning loop: {e}")
+        # Non-blocking error
+        logging.error(f"Failed to update learning loop: {e}")
 
-    # 7. Delete position
+    # 8. Delete position
     supabase.table("paper_positions").delete().eq("id", position["id"]).execute()
 
     return {
@@ -413,8 +539,6 @@ def reset_paper_portfolio(
 
     if portfolio_ids:
         # 2. Delete related data
-        # Note: Depending on foreign key constraints (CASCADE), deleting portfolio might be enough.
-        # But to be safe and explicit:
         supabase.table("paper_orders").delete().in_("portfolio_id", portfolio_ids).execute()
         supabase.table("paper_positions").delete().in_("portfolio_id", portfolio_ids).execute()
         supabase.table("paper_ledger").delete().in_("portfolio_id", portfolio_ids).execute()

@@ -9,8 +9,13 @@ from fastapi import APIRouter, HTTPException, Depends, BackgroundTasks
 from pydantic import BaseModel
 
 from packages.quantum.security import get_current_user_id
-from packages.quantum.strategy_profiles import StrategyConfig, BacktestRequest
+from packages.quantum.strategy_profiles import StrategyConfig, BacktestRequest, BacktestRequestV3
+from packages.quantum.strategy_requests import BatchSimulationRequest, ResearchCompareRequest
 from packages.quantum.services.historical_simulation import HistoricalCycleService
+from packages.quantum.services.backtest_engine import BacktestEngine, BacktestRunResult
+from packages.quantum.services.param_search_runner import ParamSearchRunner
+from packages.quantum.services.walkforward_runner import WalkForwardResult
+from packages.quantum.market_data import PolygonService
 from packages.quantum.strategy_registry import STRATEGY_REGISTRY
 
 # ... (omitting parts that didn't change for brevity, focusing on _persist_v3_results and imports)

@@ -49,10 +49,27 @@ class ParamSearchConfig(BaseModel):
     space: Optional[Dict[str, Any]] = None
 
 class BacktestRequestV3(BacktestRequest):
+    """
+    V3 backtest request supporting walk-forward validation,
+    parameter sweeps, and realistic execution assumptions.
+    """
     engine_version: Literal["v3"] = "v3"
-    run_mode: Literal["single", "walk_forward"]
+    run_mode: Literal["single", "walk_forward"] = "single"
+
+    # Existing nested configs (Required by Engine)
     walk_forward: Optional[WalkForwardConfig] = None
     param_search: Optional[ParamSearchConfig] = None
-    cost_model: CostModelConfig
+    cost_model: CostModelConfig = Field(default_factory=CostModelConfig)
+
+    # User-requested flattened fields (Optional/Compat)
+    train_window_days: Optional[int] = None
+    test_window_days: Optional[int] = None
+    step_days: Optional[int] = None
+    max_trials: Optional[int] = None
+    slippage_bps: float = 0.0
+    commission_per_contract: float = 0.0
+    allow_early_close: bool = True
+    persist_results: bool = True
+
     seed: int = 42
     initial_equity: float = 100000.0

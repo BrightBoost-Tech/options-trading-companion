@@ -11,6 +11,7 @@ from analytics.factors import calculate_trend, calculate_iv_rank
 from analytics.strategy_selector import StrategySelector
 from services.trade_builder import enrich_trade_suggestions
 from services.universe_service import UniverseService
+from packages.quantum.services.forward_atm import compute_forward_atm_from_parity
 from supabase import Client
 
 # Constants for Regime Classification
@@ -161,14 +162,38 @@ def scan_for_opportunities(
             opp['iv_rank'] = iv_ctx.get('iv_rank')
             opp['iv_regime'] = iv_ctx.get('iv_regime')
 
+            # --- Forward ATM Logic ---
+            anchor_price = current_price
+            atm_method = "spot"
+            atm_mode = os.getenv("ATM_MODE", "forward") # Default to forward
+
+            if atm_mode == "forward":
+                try:
+                    expiry_date = opp['expiry']
+                    calls_chain = truth_layer.option_chain(symbol, expiration_date=expiry_date, right="call")
+                    puts_chain = truth_layer.option_chain(symbol, expiration_date=expiry_date, right="put")
+
+                    fwd_res = compute_forward_atm_from_parity(calls_chain, puts_chain, current_price)
+                    if fwd_res.forward_price:
+                        anchor_price = fwd_res.forward_price
+                        atm_method = fwd_res.method
+                        opp['forward_price'] = fwd_res.forward_price
+                        opp['atm_strike_forward'] = fwd_res.atm_strike
+                        opp['atm_method'] = fwd_res.method
+                    else:
+                        opp['atm_method'] = "fallback_spot_computation_failed"
+                except Exception as e:
+                    print(f"[Scanner] Forward ATM failed for {symbol}: {e}")
+                    opp['atm_method'] = "fallback_spot_exception"
+
             if opp['trend'] == "DOWN":
                 opp['type'] = 'Debit Put Spread'
-                target_long = current_price * 0.95
-                target_short = current_price * 0.90
+                target_long = anchor_price * 0.95
+                target_short = anchor_price * 0.90
             else:
                 opp['type'] = 'Debit Call Spread'
-                target_long = current_price * 1.02
-                target_short = current_price * 1.07
+                target_long = anchor_price * 1.02
+                target_short = anchor_price * 1.07
 
             step = 1 if current_price < 200 else 5
             long_strike = round(target_long / step) * step

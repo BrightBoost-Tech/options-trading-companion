@@ -5,6 +5,7 @@ import numpy as np
 import os
 from typing import List, Dict, Optional, Any
 from datetime import datetime, timedelta, date
+from packages.quantum.services.market_data_truth_layer import MarketDataTruthLayer
 from market_data import PolygonService
 from analytics.factors import calculate_trend, calculate_iv_rank
 from analytics.strategy_selector import StrategySelector
@@ -22,23 +23,6 @@ def classify_iv_regime(iv_rank: float | None) -> str | None:
     if iv_rank < IV_RANK_SUPPRESSED_THRESHOLD: return "suppressed"
     if iv_rank < IV_RANK_ELEVATED_THRESHOLD: return "normal"
     return "elevated"
-
-# Cache for market data (simple in-memory cache with basic expiry handling concept)
-# In a real system, use Redis or similar.
-_MARKET_DATA_CACHE = {}
-_CACHE_EXPIRY = 24 * 3600  # 24 hours
-
-def get_cached_market_data(symbol):
-    entry = _MARKET_DATA_CACHE.get(symbol)
-    if entry:
-        timestamp, data = entry
-        if (datetime.now() - timestamp).total_seconds() < _CACHE_EXPIRY:
-            return data
-    return None
-
-def set_cached_market_data(symbol, data):
-    _MARKET_DATA_CACHE[symbol] = (datetime.now(), data)
-
 
 def scan_for_opportunities(
     symbols: List[str] = None,
@@ -108,16 +92,25 @@ def scan_for_opportunities(
     # Prepare list for processing
     processed_opportunities = []
 
-    # Initialize PolygonService synchronously
-    service = None
-    try:
-        service = PolygonService()
-    except Exception:
-        pass
+    # Initialize Truth Layer
+    truth_layer = MarketDataTruthLayer()
+
+    # Batch Fetch Price Data
+    # Collect all unique symbols
+    scan_symbols = list(set(opp['symbol'] for opp in opportunities))
+    snapshots = truth_layer.snapshot_many(scan_symbols)
 
     for opp_config in opportunities:
         symbol = opp_config['symbol']
 
+        # Use normalized lookup
+        norm_sym = truth_layer.normalize_symbol(symbol)
+        snapshot = snapshots.get(norm_sym) or {}
+        quote = snapshot.get("quote", {})
+        day = snapshot.get("day", {})
+
+        # Determine price (prefer last trade, then day close)
+        current_price = quote.get("last") or day.get("c") or 100.0
         current_price = 100.0
         cached = get_cached_market_data(symbol)
         hist_data = None
@@ -155,6 +148,44 @@ def scan_for_opportunities(
             'last_price': None
         }
 
+        try:
+            # Use Truth Layer for Analytics
+            # Note: get_trend and iv_context use caching internally, so sequential calls are okay
+            # and won't spam the API if cache hits.
+            # But initial run will be N sequential calls for historical data.
+            # Truth Layer daily_bars uses cache.
+
+            opp['trend'] = truth_layer.get_trend(symbol)
+
+            iv_ctx = truth_layer.iv_context(symbol)
+            opp['iv_rank'] = iv_ctx.get('iv_rank')
+            opp['iv_regime'] = iv_ctx.get('iv_regime')
+
+            if opp['trend'] == "DOWN":
+                opp['type'] = 'Debit Put Spread'
+                target_long = current_price * 0.95
+                target_short = current_price * 0.90
+            else:
+                opp['type'] = 'Debit Call Spread'
+                target_long = current_price * 1.02
+                target_short = current_price * 1.07
+
+            step = 1 if current_price < 200 else 5
+            long_strike = round(target_long / step) * step
+            short_strike = round(target_short / step) * step
+            if abs(short_strike - long_strike) < step:
+                 short_strike = long_strike + (step if opp['trend']!="DOWN" else -step)
+
+            opp['long_strike'] = long_strike
+            opp['short_strike'] = short_strike
+            opp['width'] = abs(short_strike - long_strike)
+
+            estimated_price = opp['width'] * 0.35
+            opp['suggested_entry'] = estimated_price
+            opp['last_price'] = estimated_price
+
+        except Exception as e:
+            print(f"Error enriching opportunity {symbol}: {e}")
         if service and hist_data:
             try:
                 # Use pre-fetched data for trend (needs ~100 days)
@@ -203,40 +234,37 @@ def scan_for_opportunities(
 
     # --- Enrich & Filter ---
     market_data_enrich = {}
-    if service:
-        for opp in processed_opportunities:
-            symbol = opp['symbol']
 
-            cached = get_cached_market_data(symbol)
-            bid, ask = 0.0, 0.0
-            if cached:
-                q = cached.get("lastQuote", {})
-                bid = q.get("P", 0.0) or q.get("b", 0.0) # Polygon variation safety
-                ask = q.get("p", 0.0) or q.get("a", 0.0)
+    # We already have snapshots from the batch call above
+    for opp in processed_opportunities:
+        symbol = opp['symbol']
 
-            if bid == 0 and ask == 0:
-                quote = service.get_recent_quote(symbol)
-                bid = quote.get("bid", 0.0)
-                ask = quote.get("ask", 0.0)
+        # Use existing snapshot data
+        norm_sym = truth_layer.normalize_symbol(symbol)
+        snapshot = snapshots.get(norm_sym) or {}
+        quote = snapshot.get("quote", {})
 
-            if bid > 0:
-                 spread_pct = (ask - bid) / bid
-                 if spread_pct > 0.10: continue
+        bid = quote.get("bid") or 0.0
+        ask = quote.get("ask") or 0.0
 
-            market_data_enrich[symbol] = {
-                "price": opp['underlying_price'],
-                "iv_rank": opp.get("iv_rank"),
-                "iv_regime": opp.get("iv_regime"),
-                "trend": opp.get("trend"),
-                "sector": "Unknown",
-                "bid": bid,
-                "ask": ask
-            }
+        if bid > 0:
+             spread_pct = (ask - bid) / bid
+             if spread_pct > 0.10: continue
+
+        market_data_enrich[symbol] = {
+            "price": opp['underlying_price'],
+            "iv_rank": opp.get("iv_rank"),
+            "iv_regime": opp.get("iv_regime"),
+            "trend": opp.get("trend"),
+            "sector": "Unknown",
+            "bid": bid,
+            "ask": ask
+        }
 
     filtered_opportunities = [
         opp for opp in processed_opportunities
         if opp['symbol'] in market_data_enrich
-    ] if service else processed_opportunities
+    ]
 
     enriched_opportunities = enrich_trade_suggestions(
         filtered_opportunities,

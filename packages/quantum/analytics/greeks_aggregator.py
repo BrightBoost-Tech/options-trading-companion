@@ -1,5 +1,5 @@
 from typing import List, Dict
-from models import SpreadPosition
+from packages.quantum.models import SpreadPosition
 
 # Configurable Thresholds for Alerts
 DELTA_LIMIT = 500.0  # Example: net delta > 500 or < -500

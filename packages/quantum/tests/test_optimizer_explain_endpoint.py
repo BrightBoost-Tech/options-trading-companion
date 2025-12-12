@@ -5,12 +5,10 @@ from fastapi.testclient import TestClient
 import sys
 import os
 
-sys.path.append(os.path.join(os.path.dirname(__file__), ".."))
-sys.path.append(os.path.join(os.path.dirname(__file__), "../.."))
 
-from api import app
+from packages.quantum.api import app
 # Import the actual dependency function to use as key
-from security import get_current_user
+from packages.quantum.security import get_current_user
 
 client = TestClient(app)
 
@@ -22,7 +20,7 @@ app.dependency_overrides[get_current_user] = mock_get_current_user
 
 @pytest.fixture
 def mock_supabase():
-    with patch("api.supabase") as mock:
+    with patch("packages.quantum.api.supabase") as mock:
         yield mock
 
 def test_explain_optimizer_run_success(mock_supabase):

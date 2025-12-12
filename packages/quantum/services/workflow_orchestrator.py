@@ -5,9 +5,6 @@ import asyncio
 import os
 import sys
 
-# Ensure imports work regardless of execution context
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
-
 from .cash_service import CashService
 from .sizing_engine import calculate_sizing
 from .journal_service import JournalService
@@ -16,12 +13,12 @@ from .exit_stats_service import ExitStatsService
 from .market_data_truth_layer import MarketDataTruthLayer
 
 # Importing existing logic
-from options_scanner import scan_for_opportunities, classify_iv_regime
-from models import Holding
-from market_data import PolygonService
-from ev_calculator import calculate_exit_metrics
-from analytics.loss_minimizer import LossMinimizer
-from analytics.conviction_service import ConvictionService
+from packages.quantum.options_scanner import scan_for_opportunities, classify_iv_regime
+from packages.quantum.models import Holding
+from packages.quantum.market_data import PolygonService
+from packages.quantum.ev_calculator import calculate_exit_metrics
+from packages.quantum.analytics.loss_minimizer import LossMinimizer
+from packages.quantum.analytics.conviction_service import ConvictionService
 
 # Constants for table names
 TRADE_SUGGESTIONS_TABLE = "trade_suggestions"

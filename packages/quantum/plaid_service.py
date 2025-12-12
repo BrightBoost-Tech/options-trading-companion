@@ -15,11 +15,11 @@ from plaid.model.products import Products
 from plaid.model.country_code import CountryCode
 from plaid.model.item_public_token_exchange_request import ItemPublicTokenExchangeRequest
 from plaid.model.investments_holdings_get_request import InvestmentsHoldingsGetRequest
-from models import Holding
-from market_data import get_polygon_price
-from security.secrets_provider import SecretsProvider
-from services.options_utils import format_occ_symbol_readable
-from analytics.asset_classifier import AssetClassifier
+from packages.quantum.models import Holding
+from packages.quantum.market_data import get_polygon_price
+from packages.quantum.security.secrets_provider import SecretsProvider
+from packages.quantum.services.options_utils import format_occ_symbol_readable
+from packages.quantum.analytics.asset_classifier import AssetClassifier
 
 # Initialize SecretsProvider
 secrets_provider = SecretsProvider()

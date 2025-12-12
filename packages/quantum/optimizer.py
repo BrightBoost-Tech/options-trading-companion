@@ -8,30 +8,30 @@ import uuid
 from dataclasses import asdict
 
 # Core Imports
-from core.math_engine import PortfolioMath
-from core.surrogate import SurrogateOptimizer, optimize_for_compounding
+from packages.quantum.core.math_engine import PortfolioMath
+from packages.quantum.core.surrogate import SurrogateOptimizer, optimize_for_compounding
 try:
-    from core.qci_adapter import QciDiracAdapter
+    from packages.quantum.core.qci_adapter import QciDiracAdapter
 except ImportError:
     QciDiracAdapter = None
 
 # Analytics Imports
-from analytics.strategy_selector import StrategySelector
-from analytics.guardrails import apply_guardrails, compute_conviction_score, SmallAccountCompounder
-from analytics.analytics import OptionsAnalytics
-from services.trade_builder import enrich_trade_suggestions
-from market_data import PolygonService, calculate_portfolio_inputs
-from ev_calculator import calculate_ev, calculate_kelly_sizing
-from nested_logging import log_inference
-from nested.adapters import load_symbol_adapters, apply_biases
-from nested.backbone import compute_macro_features, infer_global_context, log_global_context
-from nested.session import load_session_state, refresh_session_from_db, get_session_sigma_scale
-from security import get_current_user_id
+from packages.quantum.analytics.strategy_selector import StrategySelector
+from packages.quantum.analytics.guardrails import apply_guardrails, compute_conviction_score, SmallAccountCompounder
+from packages.quantum.analytics.analytics import OptionsAnalytics
+from packages.quantum.services.trade_builder import enrich_trade_suggestions
+from packages.quantum.market_data import PolygonService, calculate_portfolio_inputs
+from packages.quantum.ev_calculator import calculate_ev, calculate_kelly_sizing
+from packages.quantum.nested_logging import log_inference
+from packages.quantum.nested.adapters import load_symbol_adapters, apply_biases
+from packages.quantum.nested.backbone import compute_macro_features, infer_global_context, log_global_context
+from packages.quantum.nested.session import load_session_state, refresh_session_from_db, get_session_sigma_scale
+from packages.quantum.security import get_current_user_id
 from fastapi import Request
 
-from models import Spread, SpreadLeg, SpreadPosition
-from services.options_utils import group_spread_positions
-from services.analytics_service import AnalyticsService
+from packages.quantum.models import Spread, SpreadLeg, SpreadPosition
+from packages.quantum.services.options_utils import group_spread_positions
+from packages.quantum.services.analytics_service import AnalyticsService
 
 router = APIRouter()
 

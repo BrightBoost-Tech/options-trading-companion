@@ -1,9 +1,9 @@
 
 from typing import List, Dict, Any, Optional
-from analytics.guardrails import is_earnings_safe, check_liquidity, sector_penalty, apply_slippage_guardrail
-from analytics.scoring import calculate_otc_score, generate_badges
-from analytics.sizing import calculate_contract_size
-from services.exit_stats_service import ExitStatsService
+from packages.quantum.analytics.guardrails import is_earnings_safe, check_liquidity, sector_penalty, apply_slippage_guardrail
+from packages.quantum.analytics.scoring import calculate_otc_score, generate_badges
+from packages.quantum.analytics.sizing import calculate_contract_size
+from packages.quantum.services.exit_stats_service import ExitStatsService
 from supabase import Client
 
 def enrich_trade_suggestions(

@@ -7,7 +7,7 @@ import json
 import plaid
 from plaid.exceptions import ApiException
 from datetime import datetime
-from security import encrypt_token, decrypt_token, redact_sensitive_fields
+from packages.quantum.security import encrypt_token, decrypt_token, redact_sensitive_fields
 
 def register_plaid_endpoints(app, plaid_service, supabase_client=None, analytics_service=None):
     """Register Plaid endpoints with the FastAPI app"""
@@ -116,7 +116,7 @@ def register_plaid_endpoints(app, plaid_service, supabase_client=None, analytics
 
             if access_token and supabase_client and user_id:
                 print(f"💾 Saving Plaid credentials for user {user_id}")
-                from services.token_store import PlaidTokenStore
+                from packages.quantum.services.token_store import PlaidTokenStore
                 token_store = PlaidTokenStore(supabase_client)
 
                 # Metadata is passed to help constructing item info inside store
@@ -152,7 +152,7 @@ def register_plaid_endpoints(app, plaid_service, supabase_client=None, analytics
             if not access_token and user_id and supabase_client:
                 # Look up token if not provided but user_id is
                 print(f"🔍 Looking up access token for user {user_id}")
-                from services.token_store import PlaidTokenStore
+                from packages.quantum.services.token_store import PlaidTokenStore
                 token_store = PlaidTokenStore(supabase_client)
                 access_token = token_store.get_access_token(user_id)
 

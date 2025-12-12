@@ -6,11 +6,11 @@ import os
 from typing import List, Dict, Optional, Any
 from datetime import datetime, timedelta, date
 from packages.quantum.services.market_data_truth_layer import MarketDataTruthLayer
-from market_data import PolygonService
-from analytics.factors import calculate_trend, calculate_iv_rank
-from analytics.strategy_selector import StrategySelector
-from services.trade_builder import enrich_trade_suggestions
-from services.universe_service import UniverseService
+from packages.quantum.market_data import PolygonService
+from packages.quantum.analytics.factors import calculate_trend, calculate_iv_rank
+from packages.quantum.analytics.strategy_selector import StrategySelector
+from packages.quantum.services.trade_builder import enrich_trade_suggestions
+from packages.quantum.services.universe_service import UniverseService
 from packages.quantum.services.forward_atm import compute_forward_atm_from_parity
 from supabase import Client
 

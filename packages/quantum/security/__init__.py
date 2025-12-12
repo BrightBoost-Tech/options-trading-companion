@@ -5,8 +5,11 @@ from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from typing import Optional
 import jwt
 from dotenv import load_dotenv
+from pathlib import Path
 
-load_dotenv()
+# Load env from packages/quantum/.env
+env_path = Path(__file__).resolve().parent.parent / ".env"
+load_dotenv(dotenv_path=env_path)
 
 # --- Encryption Setup ---
 ENCRYPTION_KEY = os.getenv("ENCRYPTION_KEY")

@@ -1,5 +1,5 @@
 from typing import Dict, Any
-from optimizer import calculate_dynamic_target
+from packages.quantum.optimizer import calculate_dynamic_target
 
 def test_dynamic_constraints_with_conviction():
     # Base params

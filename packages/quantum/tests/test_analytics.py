@@ -4,10 +4,9 @@ import os
 import sys
 
 # Ensure packages path is available
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
-from services.analytics_service import AnalyticsService
-from experiments import get_experiment_cohort
+from packages.quantum.services.analytics_service import AnalyticsService
+from packages.quantum.experiments import get_experiment_cohort
 
 class TestAnalyticsService(unittest.TestCase):
     def setUp(self):

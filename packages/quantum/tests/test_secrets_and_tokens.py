@@ -1,8 +1,8 @@
 import pytest
 import os
 from unittest.mock import MagicMock, patch
-from security.secrets_provider import SecretsProvider
-from services.token_store import PlaidTokenStore
+from packages.quantum.security.secrets_provider import SecretsProvider
+from packages.quantum.services.token_store import PlaidTokenStore
 
 # In SecretsProvider, get_supabase_secrets looks for NEXT_PUBLIC_SUPABASE_URL, not SUPABASE_URL.
 # It seems weird for backend to use NEXT_PUBLIC prefix, but that's what the code says.
@@ -40,7 +40,7 @@ def test_plaid_token_store_get():
     }
 
     # Mock decryption
-    with patch("services.token_store.decrypt_token", return_value="access-sandbox-123"):
+    with patch("packages.quantum.services.token_store.decrypt_token", return_value="access-sandbox-123"):
         token = store.get_access_token("user1")
         assert token == "access-sandbox-123"
 
@@ -56,7 +56,7 @@ def test_plaid_token_store_fallback():
         {"access_token": "gAAAAAB..."}
     ]
 
-    with patch("services.token_store.decrypt_token", return_value="fallback-token"):
+    with patch("packages.quantum.services.token_store.decrypt_token", return_value="fallback-token"):
         token = store.get_access_token("user1")
         assert token == "fallback-token"
 
@@ -64,7 +64,7 @@ def test_plaid_token_store_save():
     mock_supabase = MagicMock()
     store = PlaidTokenStore(mock_supabase)
 
-    with patch("services.token_store.encrypt_token", return_value="gAAAAAB..."):
+    with patch("packages.quantum.services.token_store.encrypt_token", return_value="gAAAAAB..."):
         # Fix: Pass dictionary with item_id for metadata
         store.save_access_token("user1", "new-token", {"item_id": "item1"})
 

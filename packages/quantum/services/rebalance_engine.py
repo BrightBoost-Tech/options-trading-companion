@@ -3,9 +3,9 @@ from supabase import Client
 from datetime import datetime, timezone
 import math
 
-from models import SpreadPosition, Holding
-from services.sizing_engine import calculate_sizing
-from analytics.iv_regime_service import IVRegimeService
+from packages.quantum.models import SpreadPosition, Holding
+from packages.quantum.services.sizing_engine import calculate_sizing
+from packages.quantum.analytics.iv_regime_service import IVRegimeService
 
 class RebalanceEngine:
     """
@@ -124,7 +124,7 @@ class RebalanceEngine:
             ev = 0.0
 
             # Confidence Logic
-            # 1. Use conviction if available in target (passed from optimizer logic)
+            # 1. Use conviction if available in target (passed from packages.quantum.optimizer logic)
             # Not currently in `target_weights` standard structure, but we can verify if `api.py` passed it?
             # `api.py` calls `generate_trades`.
             # If `api.py` injected it into `target` dict, we can use it.

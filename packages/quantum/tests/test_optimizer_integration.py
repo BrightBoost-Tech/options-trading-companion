@@ -2,7 +2,7 @@ import unittest
 from unittest.mock import MagicMock, patch, ANY
 import os
 import json
-from optimizer import optimize_portfolio, OptimizationRequest, PositionInput
+from packages.quantum.optimizer import optimize_portfolio, OptimizationRequest, PositionInput
 
 class TestOptimizerIntegration(unittest.IsolatedAsyncioTestCase):
 
@@ -50,7 +50,7 @@ class TestOptimizerIntegration(unittest.IsolatedAsyncioTestCase):
         # We can't easily mock asdict unless we return a real dataclass or mock asdict
         # The code calls asdict(global_ctx). Let's return a real dataclass if possible
         # Or just ensure global_ctx is compatible.
-        from nested.backbone import GlobalContext
+        from packages.quantum.nested.backbone import GlobalContext
         mock_infer_context.return_value = GlobalContext("bull", "low", 1.0)
 
         # L0 Mocks

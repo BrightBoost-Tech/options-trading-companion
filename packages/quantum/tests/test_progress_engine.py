@@ -6,9 +6,8 @@ import sys
 import os
 
 # Adjust path to import from quantum
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
-from analytics.progress_engine import ProgressEngine
+from packages.quantum.analytics.progress_engine import ProgressEngine
 
 class TestProgressEngine(unittest.TestCase):
     def setUp(self):

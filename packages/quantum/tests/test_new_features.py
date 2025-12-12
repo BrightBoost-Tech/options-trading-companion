@@ -5,7 +5,6 @@ from unittest.mock import MagicMock, patch
 from datetime import datetime, date
 
 # Add packages/quantum to path
-sys.path.append(os.path.abspath("packages/quantum"))
 
 # Mock dependencies before imports
 sys.modules['supabase'] = MagicMock()
@@ -17,7 +16,7 @@ sys.modules['market_data.PolygonService'] = MagicMock()
 
 class TestRegimeIntegration(unittest.TestCase):
     def test_map_market_regime(self):
-        from analytics.regime_integration import map_market_regime
+        from packages.quantum.analytics.regime_integration import map_market_regime
 
         # Test 1: Shock -> Panic
         self.assertEqual(map_market_regime({'state': 'shock'}), 'panic')
@@ -35,7 +34,7 @@ class TestRegimeIntegration(unittest.TestCase):
         self.assertEqual(map_market_regime({'state': 'normal', 'vol_annual': 0.19}), 'normal')
 
     def test_run_historical_scoring(self):
-        from analytics.regime_integration import run_historical_scoring
+        from packages.quantum.analytics.regime_integration import run_historical_scoring
 
         # Mock engine and transform
         mock_engine = MagicMock()
@@ -59,7 +58,7 @@ class TestRegimeIntegration(unittest.TestCase):
 
 class TestProgressEngine(unittest.TestCase):
     def test_week_id_helper(self):
-        from analytics.progress_engine import get_week_id_for_last_full_week
+        from packages.quantum.analytics.progress_engine import get_week_id_for_last_full_week
 
         d = date(2023, 10, 30) # Monday
         wid = get_week_id_for_last_full_week(d)
@@ -71,7 +70,7 @@ class TestProgressEngine(unittest.TestCase):
 
 class TestLossMinimizer(unittest.TestCase):
     def test_loss_analysis(self):
-        from analytics.loss_minimizer import LossMinimizer
+        from packages.quantum.analytics.loss_minimizer import LossMinimizer
 
         # Scenario 1: Scrap Value
         # Position: 10 contracts at $2.00 (Current) = $2000 value
@@ -95,7 +94,7 @@ class TestLossMinimizer(unittest.TestCase):
 
 
 class TestHistoricalCycleService(unittest.TestCase):
-    @patch('services.historical_simulation.PolygonService')
+    @patch('packages.quantum.services.historical_simulation.PolygonService')
     def test_run_cycle_no_data(self, MockPolygon):
         # Explicit import inside test to avoid early resolution issues
         import services.historical_simulation as hs
@@ -111,13 +110,13 @@ class TestHistoricalCycleService(unittest.TestCase):
         self.assertTrue(result['done'])
         self.assertEqual(result['status'], "no_data")
 
-    @patch('services.historical_simulation.PolygonService')
-    @patch('services.historical_simulation.calculate_trend')
-    @patch('services.historical_simulation.calculate_volatility')
-    @patch('services.historical_simulation.calculate_rsi')
-    @patch('services.historical_simulation.infer_global_context')
-    @patch('services.historical_simulation.map_market_regime')
-    @patch('services.historical_simulation.run_historical_scoring')
+    @patch('packages.quantum.services.historical_simulation.PolygonService')
+    @patch('packages.quantum.services.historical_simulation.calculate_trend')
+    @patch('packages.quantum.services.historical_simulation.calculate_volatility')
+    @patch('packages.quantum.services.historical_simulation.calculate_rsi')
+    @patch('packages.quantum.services.historical_simulation.infer_global_context')
+    @patch('packages.quantum.services.historical_simulation.map_market_regime')
+    @patch('packages.quantum.services.historical_simulation.run_historical_scoring')
     def test_run_cycle_happy_path(self, mock_scoring, mock_map, mock_ctx, mock_rsi, mock_vol, mock_trend, MockPolygon):
         import services.historical_simulation as hs
         HistoricalCycleService = hs.HistoricalCycleService

@@ -7,12 +7,7 @@ import sys
 import os
 
 # Fix import for when running from different contexts
-try:
-    from market_data import PolygonService
-except ImportError:
-    # Try relative import
-    sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
-    from market_data import PolygonService
+from packages.quantum.market_data import PolygonService
 
 class UniverseService:
     # Top 50 liquid tickers + broad market ETFs

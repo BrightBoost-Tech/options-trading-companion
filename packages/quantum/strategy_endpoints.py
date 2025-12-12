@@ -6,10 +6,10 @@ import uuid
 import json
 import itertools
 
-from security import get_current_user_id
-from strategy_profiles import StrategyConfig, BacktestRequest
-from services.historical_simulation import HistoricalCycleService
-from strategy_registry import STRATEGY_REGISTRY
+from packages.quantum.security import get_current_user_id
+from packages.quantum.strategy_profiles import StrategyConfig, BacktestRequest
+from packages.quantum.services.historical_simulation import HistoricalCycleService
+from packages.quantum.strategy_registry import STRATEGY_REGISTRY
 
 router = APIRouter()
 

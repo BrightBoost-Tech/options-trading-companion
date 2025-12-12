@@ -1,363 +1,366 @@
-"""
-Weekly Options Scout - Find high-probability credit spread opportunities
-"""
-import numpy as np
 import os
-from typing import List, Dict, Optional, Any
-from datetime import datetime, timedelta, date
-from packages.quantum.services.market_data_truth_layer import MarketDataTruthLayer
-from packages.quantum.market_data import PolygonService
-from packages.quantum.analytics.factors import calculate_trend, calculate_iv_rank
-from packages.quantum.analytics.strategy_selector import StrategySelector
-from packages.quantum.services.trade_builder import enrich_trade_suggestions
-from packages.quantum.services.universe_service import UniverseService
-from packages.quantum.services.forward_atm import compute_forward_atm_from_parity
+import requests
+import pandas as pd
+import numpy as np
+from datetime import datetime, timedelta, timezone
+from typing import List, Dict, Any, Optional
 from supabase import Client
+import logging
 
-# Constants for Regime Classification
-IV_RANK_SUPPRESSED_THRESHOLD = 20
-IV_RANK_ELEVATED_THRESHOLD = 60
+from packages.quantum.services.universe_service import UniverseService
+from packages.quantum.analytics.strategy_selector import StrategySelector
+from packages.quantum.ev_calculator import calculate_ev
+from packages.quantum.market_data import PolygonService
+from packages.quantum.analytics.regime_integration import map_market_regime
+from packages.quantum.services.iv_repository import IVRepository
+from packages.quantum.analytics.regime_engine_v3 import RegimeState
 
-def classify_iv_regime(iv_rank: float | None) -> str | None:
-    if iv_rank is None:
-        return None
-    if iv_rank < IV_RANK_SUPPRESSED_THRESHOLD: return "suppressed"
-    if iv_rank < IV_RANK_ELEVATED_THRESHOLD: return "normal"
-    return "elevated"
+# Configuration
+SCANNER_LIMIT_DEV = int(os.getenv("SCANNER_LIMIT_DEV", "40")) # Limit universe in dev
+
+logger = logging.getLogger(__name__)
+
+def classify_iv_regime(iv_rank: float) -> str:
+    """Classifies IV Rank into Low/Normal/High/Extreme."""
+    if iv_rank < 20:
+        return "suppressed"
+    elif iv_rank < 50:
+        return "normal"
+    elif iv_rank < 80:
+        return "elevated"
+    else:
+        return "high"
 
 def scan_for_opportunities(
     symbols: List[str] = None,
-    supabase_client: Optional[Client] = None
-) -> List[Dict]:
+    supabase_client: Client = None
+) -> List[Dict[str, Any]]:
     """
-    Scan for weekly option opportunities.
-    This function scans a predefined market-wide universe of tickers for opportunities.
-    It does NOT use the user's holdings, which is the job of the Optimizer.
+    Scans the provided symbols (or universe) for option trade opportunities.
+    Returns a list of trade candidates (dictionaries).
     """
+    candidates = []
 
-    universe_service = None
-    if supabase_client:
-        try:
-            universe_service = UniverseService(supabase_client)
-        except Exception:
-            pass
+    # Initialize services
+    market_data = PolygonService()
+    strategy_selector = StrategySelector()
+    universe_service = UniverseService(supabase_client) if supabase_client else None
 
-    opportunities = []
-
-    # DEV LIMIT logic (Step 6)
-    limit = 40
-    if os.getenv("APP_ENV") == "development":
-        # in development we typically set SCANNER_LIMIT_DEV=15 to speed up scans
-        limit = int(os.getenv("SCANNER_LIMIT_DEV", 40))
-
+    # 1. Determine Universe
     if not symbols:
-        # Use Universe Funnel
         if universe_service:
-            print(f"Scanning via Universe Funnel (Limit: {limit})...")
-            candidates = universe_service.get_scan_candidates(limit=limit)
-            for cand in candidates:
-                opportunities.append({
-                    'symbol': cand['symbol'],
-                    'earnings_date': cand.get('earnings_date'),
-                    'width': 5,
-                    'credit_target': 1.0
-                })
-        else:
-            # Fallback to static list
-            market_scan_universe = [
-                {'symbol': 'SPY', 'width': 5, 'credit_target': 1.25},
-                {'symbol': 'QQQ', 'width': 5, 'credit_target': 1.50},
-                {'symbol': 'IWM', 'width': 5, 'credit_target': 1.10},
-                {'symbol': 'DIA', 'width': 5, 'credit_target': 1.00},
-                {'symbol': 'TLT', 'width': 2, 'credit_target': 0.50},
-                {'symbol': 'GLD', 'width': 2, 'credit_target': 0.40},
-                {'symbol': 'XLF', 'width': 1, 'credit_target': 0.25},
-                {'symbol': 'AAPL', 'width': 5, 'credit_target': 1.30},
-                {'symbol': 'MSFT', 'width': 5, 'credit_target': 1.20},
-                {'symbol': 'AMZN', 'width': 5, 'credit_target': 1.80},
-                {'symbol': 'GOOGL', 'width': 5, 'credit_target': 1.70},
-                {'symbol': 'NVDA', 'width': 10, 'credit_target': 3.00},
-                {'symbol': 'TSLA', 'width': 10, 'credit_target': 2.50},
-                {'symbol': 'META', 'width': 5, 'credit_target': 1.50},
-            ]
-            opportunities = market_scan_universe[:limit]
-    else:
-        limit_symbols = symbols[:limit]
-        for sym in limit_symbols:
-            opportunities.append({
-                'symbol': sym,
-                'width': 5,
-                'credit_target': 1.00
-            })
-
-    # Prepare list for processing
-    processed_opportunities = []
-
-    # Initialize Truth Layer
-    truth_layer = MarketDataTruthLayer()
-
-    # Batch Fetch Price Data
-    # Collect all unique symbols
-    scan_symbols = list(set(opp['symbol'] for opp in opportunities))
-    snapshots = truth_layer.snapshot_many(scan_symbols)
-
-    for opp_config in opportunities:
-        symbol = opp_config['symbol']
-
-        # Use normalized lookup
-        norm_sym = truth_layer.normalize_symbol(symbol)
-        snapshot = snapshots.get(norm_sym) or {}
-        quote = snapshot.get("quote", {})
-        day = snapshot.get("day", {})
-
-        # Determine price (prefer last trade, then day close)
-        current_price = quote.get("last") or day.get("c") or 100.0
-        current_price = 100.0
-        cached = get_cached_market_data(symbol)
-        hist_data = None
-
-        if cached:
-            current_price = cached.get("day", {}).get("c") or cached.get("lastTrade", {}).get("p") or 100.0
-        elif service:
-             try:
-                 # ⚡ Bolt Optimization: Fetch max history (365d) once per symbol instead of 3 separate calls
-                 # This reduces API requests by ~66% (3 -> 1) per symbol in the scanner loop.
-                 hist_data = service.get_historical_prices(symbol, days=365)
-                 if hist_data and hist_data.get('prices'):
-                    current_price = hist_data['prices'][-1]
-             except:
-                 pass
-
-        # Construct Opportunity Object
-        opp = {
-            'symbol': symbol,
-            'type': 'Debit Call Spread',
-            'short_strike': 105,
-            'long_strike': 100,
-            'expiry': (datetime.now() + timedelta(days=30)).strftime('%Y-%m-%d'),
-            'dte': 30,
-            'credit': opp_config.get('credit_target', 1.0),
-            'width': opp_config.get('width', 5),
-            'iv_rank': None,
-            'delta': 0.30,
-            'underlying_price': current_price,
-            'max_gain': (opp_config.get('width', 5) - 1.0) * 100,
-            'max_loss': 1.0 * 100,
-            'trend': 'UP',
-            'reward_risk': 2.0,
-            'suggested_entry': None, # Init None
-            'last_price': None
-        }
-
-        try:
-            # Use Truth Layer for Analytics
-            # Note: get_trend and iv_context use caching internally, so sequential calls are okay
-            # and won't spam the API if cache hits.
-            # But initial run will be N sequential calls for historical data.
-            # Truth Layer daily_bars uses cache.
-
-            opp['trend'] = truth_layer.get_trend(symbol)
-
-            iv_ctx = truth_layer.iv_context(symbol)
-            opp['iv_rank'] = iv_ctx.get('iv_rank')
-            opp['iv_regime'] = iv_ctx.get('iv_regime')
-
-            # --- Forward ATM Logic ---
-            anchor_price = current_price
-            atm_method = "spot"
-            atm_mode = os.getenv("ATM_MODE", "forward") # Default to forward
-
-            if atm_mode == "forward":
-                try:
-                    expiry_date = opp['expiry']
-                    calls_chain = truth_layer.option_chain(symbol, expiration_date=expiry_date, right="call")
-                    puts_chain = truth_layer.option_chain(symbol, expiration_date=expiry_date, right="put")
-
-                    fwd_res = compute_forward_atm_from_parity(calls_chain, puts_chain, current_price)
-                    if fwd_res.forward_price:
-                        anchor_price = fwd_res.forward_price
-                        atm_method = fwd_res.method
-                        opp['forward_price'] = fwd_res.forward_price
-                        opp['atm_strike_forward'] = fwd_res.atm_strike
-                        opp['atm_method'] = fwd_res.method
-                    else:
-                        opp['atm_method'] = "fallback_spot_computation_failed"
-                except Exception as e:
-                    print(f"[Scanner] Forward ATM failed for {symbol}: {e}")
-                    opp['atm_method'] = "fallback_spot_exception"
-
-            if opp['trend'] == "DOWN":
-                opp['type'] = 'Debit Put Spread'
-                target_long = anchor_price * 0.95
-                target_short = anchor_price * 0.90
-            else:
-                opp['type'] = 'Debit Call Spread'
-                target_long = anchor_price * 1.02
-                target_short = anchor_price * 1.07
-
-            step = 1 if current_price < 200 else 5
-            long_strike = round(target_long / step) * step
-            short_strike = round(target_short / step) * step
-            if abs(short_strike - long_strike) < step:
-                 short_strike = long_strike + (step if opp['trend']!="DOWN" else -step)
-
-            opp['long_strike'] = long_strike
-            opp['short_strike'] = short_strike
-            opp['width'] = abs(short_strike - long_strike)
-
-            estimated_price = opp['width'] * 0.35
-            opp['suggested_entry'] = estimated_price
-            opp['last_price'] = estimated_price
-
-        except Exception as e:
-            print(f"Error enriching opportunity {symbol}: {e}")
-        if service and hist_data:
             try:
-                # Use pre-fetched data for trend (needs ~100 days)
-                # Ensure we pass the list, calculate_trend handles length checks
-                prices = hist_data['prices']
-                # Pass recent slice or full history (calculate_trend looks at last 50)
-                opp['trend'] = calculate_trend(prices)
+                # Use UniverseService to fetch cached candidates
+                # This should handle syncing if stale
+                # For now, just getting the list.
+                universe = universe_service.get_universe() # returns list of dicts
+                symbols = [u['symbol'] for u in universe]
+            except Exception as e:
+                print(f"[Scanner] UniverseService failed: {e}. Using fallback.")
+                symbols = ["SPY", "QQQ", "IWM", "AAPL", "MSFT", "TSLA", "NVDA", "AMD"]
+        else:
+             symbols = ["SPY", "QQQ", "IWM", "AAPL", "MSFT", "TSLA", "NVDA", "AMD"]
 
-                # Use pre-fetched data for IV Rank (needs 365 days)
-                opp['iv_rank'] = calculate_iv_rank(hist_data['returns'])
+    # Filter symbols: Skip ETFs if we want stock only? Or include?
+    # Spec implies stocks mainly, but ETFs okay.
 
-                opp['iv_regime'] = classify_iv_regime(opp['iv_rank'])
+    # Dev mode limit
+    if os.getenv("APP_ENV") != "production":
+        symbols = symbols[:SCANNER_LIMIT_DEV]
 
-                if opp['trend'] == "DOWN":
-                    opp['type'] = 'Debit Put Spread'
-                    target_long = current_price * 0.95
-                    target_short = current_price * 0.90
-                else:
-                    opp['type'] = 'Debit Call Spread'
-                    target_long = current_price * 1.02
-                    target_short = current_price * 1.07
+    print(f"[Scanner] Processing {len(symbols)} symbols...")
 
-                step = 1 if current_price < 200 else 5
-                long_strike = round(target_long / step) * step
-                short_strike = round(target_short / step) * step
-                if abs(short_strike - long_strike) < step:
-                     short_strike = long_strike + (step if opp['trend']!="DOWN" else -step)
+    # 2. Sequential Processing (Synchronous to avoid event loop issues)
+    # We moved away from asyncio.gather to avoid "Event loop is closed" errors in non-async contexts.
 
-                opp['long_strike'] = long_strike
-                opp['short_strike'] = short_strike
-                opp['width'] = abs(short_strike - long_strike)
+    batch_size = 5 # Small batching for Polygon rate limits if needed internally
 
-                estimated_price = opp['width'] * 0.35
-                opp['suggested_entry'] = estimated_price
-                opp['last_price'] = estimated_price
+    for i in range(0, len(symbols), batch_size):
+        batch = symbols[i : i + batch_size]
 
-            except:
-                pass
+        for symbol in batch:
+            try:
+                # A. Enrich Data (Price, IV, Earnings, etc.)
+                # We can use market_data.get_recent_quote or similar.
+                # Need IV Rank.
+                # If we don't have IV repository handy, we fetch from Polygon snapshot
+                # OR use a helper.
+                # Let's use UniverseService data if available, else fetch.
 
-        # Ensure fallback
-        if opp.get('suggested_entry') is None:
-             opp['suggested_entry'] = opp['width'] * 0.35
-             opp['last_price'] = opp['width'] * 0.35
+                # Fetch recent quote (Trade/Quote)
+                quote = market_data.get_recent_quote(symbol)
+                if not quote: continue
 
-        processed_opportunities.append(opp)
+                current_price = quote.get("price")
+                if not current_price: continue
 
-    # --- Enrich & Filter ---
-    market_data_enrich = {}
+                # Check Liquidity (Bid/Ask spread)
+                # Guardrail: If spread > 10% of price, skip.
+                bid = quote.get("bid_price", 0)
+                ask = quote.get("ask_price", 0)
+                if bid > 0 and ask > 0:
+                    spread_pct = (ask - bid) / current_price
+                    if spread_pct > 0.10:
+                        # print(f"Skipping {symbol}: Wide spread {spread_pct:.1%}")
+                        continue
 
-    # We already have snapshots from the batch call above
-    for opp in processed_opportunities:
-        symbol = opp['symbol']
+                # Check Earnings Guardrail
+                # Using Polygon reference data if available, or UniverseService cache
+                # Assume UniverseService populates 'earnings_date'
+                # If not, skipping for MVP.
 
-        # Use existing snapshot data
-        norm_sym = truth_layer.normalize_symbol(symbol)
-        snapshot = snapshots.get(norm_sym) or {}
-        quote = snapshot.get("quote", {})
+                # B. Get IV Data
+                # IV Rank is critical.
+                iv_rank = 50.0 # Default
+                effective_regime = None
 
-        bid = quote.get("bid") or 0.0
-        ask = quote.get("ask") or 0.0
+                if supabase_client:
+                    # Try fetch from DB via IVRepository or UniverseService
+                    # This is slow per symbol.
+                    try:
+                        repo = IVRepository(supabase_client)
+                        iv_ctx = repo.get_iv_context(symbol)
+                        iv_rank = iv_ctx.get("iv_rank", 50.0)
+                        # Normalize None
+                        if iv_rank is None: iv_rank = 50.0
 
-        if bid > 0:
-             spread_pct = (ask - bid) / bid
-             if spread_pct > 0.10: continue
+                        # V3 Integration: Map IV Rank to Regime State roughly if engine not fully integrated here
+                        # Ideally pass effective_regime from upstream if batch processed,
+                        # but here we are scanning individual symbols.
+                        # Simple mapping for now until we inject RegimeEngineV3 here
 
-        market_data_enrich[symbol] = {
-            "price": opp['underlying_price'],
-            "iv_rank": opp.get("iv_rank"),
-            "iv_regime": opp.get("iv_regime"),
-            "trend": opp.get("trend"),
-            "sector": "Unknown",
-            "bid": bid,
-            "ask": ask
-        }
+                        # Just use helper logic or check IV Context 'regime' if updated
+                        # V3 Engine computes Symbol Snapshot. We don't have engine here easily unless we instantiate it.
+                        # For now, approximate mapping for Strategy Routing
+                        if iv_rank < 20: effective_regime = RegimeState.SUPPRESSED
+                        elif iv_rank > 80: effective_regime = RegimeState.ELEVATED
+                        elif iv_rank > 95: effective_regime = RegimeState.SHOCK
+                        else: effective_regime = RegimeState.NORMAL
 
-    filtered_opportunities = [
-        opp for opp in processed_opportunities
-        if opp['symbol'] in market_data_enrich
-    ]
+                    except Exception:
+                        pass
 
-    enriched_opportunities = enrich_trade_suggestions(
-        filtered_opportunities,
-        100000,
-        market_data_enrich,
-        [],
-        supabase_client=supabase_client
-    )
+                # C. Technical Analysis (Trend)
+                # Need historical data
+                # Fetch last 50 days
+                bars = market_data.get_historical_prices(symbol, days=60)
+                if not bars or len(bars) < 50:
+                    continue
 
-    print(
-        f"[Scanner] filtered_opportunities={len(filtered_opportunities)}, "
-        f"enriched={len(enriched_opportunities)}, "
-        f"market_data={len(market_data_enrich)}"
-    )
+                closes = [b['close'] for b in bars]
+                sma20 = np.mean(closes[-20:])
+                sma50 = np.mean(closes[-50:])
 
-    # Final Scoring
-    final_candidates = []
-    for cand in enriched_opportunities:
-        # Always recompute score to avoid stale or legacy constants
-        metrics = cand.get("metrics") or {}
-        iv_rank = metrics.get("iv_rank")
-        if iv_rank is None:
-            iv_rank = cand.get("iv_rank")
+                # Simple Trend Logic
+                trend = "NEUTRAL"
+                if closes[-1] > sma20 > sma50:
+                    trend = "BULLISH"
+                elif closes[-1] < sma20 < sma50:
+                    trend = "BEARISH"
 
-        pop = metrics.get("probability_of_profit")
-        rr = metrics.get("reward_to_risk") or cand.get("reward_risk")
+                # D. Strategy Selection
+                # Use StrategySelector with V3 Regime
+                suggestion = strategy_selector.determine_strategy(
+                    ticker=symbol,
+                    sentiment=trend,
+                    current_price=current_price,
+                    iv_rank=iv_rank,
+                    effective_regime=effective_regime
+                )
 
-        components = []
-        if iv_rank is not None:
-            components.append(iv_rank / 100.0)
+                if suggestion["strategy"] == "HOLD":
+                    continue
 
-        if pop is not None:
-            components.append(pop)
+                # E. Construct Contract & Calculate EV
+                # This requires finding a specific contract.
+                # StrategySelector returns generic instructions ("LONG_CALL", "delta_target": 0.60)
+                # We need to find the real contract.
 
-        if rr is not None:
-            components.append(min(rr, 3.0) / 3.0) # Cap R/R at 3 for scoring normalization
+                # 1. Fetch Option Chain
+                # Ideally expiration ~30-45 days out.
+                chain = market_data.get_option_chain(symbol, min_dte=25, max_dte=45)
+                if not chain: continue
 
-        raw_score = 100 * sum(components) / len(components) if components else None
+                legs = []
+                total_cost = 0.0
+                total_ev = 0.0
 
-        cand['score'] = raw_score
+                for leg_def in suggestion["legs"]:
+                     # Find matching contract
+                     target_delta = leg_def["delta_target"]
+                     side = leg_def["side"] # buy/sell
+                     op_type = leg_def["type"] # call/put
 
-        symbol = cand.get("symbol") or cand.get("ticker")
+                     # Filter chain
+                     # Need Greeks. Polygon chain endpoint might not include greeks?
+                     # PolygonService.get_option_chain usually fetches basic info.
+                     # We might need snapshot to get Greeks.
+                     # For V2, we might filter by strike vs price as proxy if greeks missing.
+                     # But assume we have greeks (or approximate).
 
-        metrics_debug = cand.get('metrics') or {}
+                     # Approximation for MVP:
+                     # Delta ~ Moneyness.
+                     # Call 0.50 delta ~ ATM. 0.60 delta ~ ITM.
+                     # Put 0.50 delta ~ ATM. 0.30 delta ~ OTM.
 
-        # Ensure suggested_entry is present
-        current_entry = cand.get("suggested_entry")
-        if current_entry is None or (isinstance(current_entry, (int, float)) and current_entry <= 0):
-             cand["suggested_entry"] = cand.get("last_price", 0.0)
-             if cand["suggested_entry"] <= 0:
-                 width = cand.get("width", 5)
-                 cand["suggested_entry"] = width * 0.35
+                     # Sort by strike
+                     if op_type == "call":
+                         # Lower strike = Higher Delta
+                         # ITM Call (High Delta) < Price
+                         filtered = [c for c in chain if c['type'] == 'call']
+                     else:
+                         filtered = [c for c in chain if c['type'] == 'put']
 
-        print(f"{symbol} score={cand.get('score')} ev={metrics_debug.get('expected_value')}")
+                     if not filtered: continue
 
-        final_candidates.append(cand)
+                     # Find contract closest to target delta
+                     # If we don't have delta, we estimate strike.
+                     # Estimate: Delta 0.5 is ATM.
+                     # Delta 0.25 is ~ 1 std dev OTM?
+                     # Rough heuristic:
+                     # 0.50 delta -> Strike = Price
+                     # 0.30 delta -> Strike = Price * (1 + 0.05 * (1 if call else -1))?? Very rough.
+                     # Let's rely on 'delta' field if available.
 
-    # Sort with None safety: treat None as -1
-    def get_sort_key(x):
-        s = x.get('score')
-        try:
-            return float(s) if s is not None else -1.0
-        except (ValueError, TypeError):
-            return -1.0
+                     has_delta = any('delta' in c and c['delta'] is not None for c in filtered)
 
-    final_candidates.sort(key=get_sort_key, reverse=True)
+                     if has_delta:
+                         # Find closest delta (abs diff)
+                         # Note: Put deltas are negative. Target is usually passed as positive magnitude.
+                         target_d = abs(target_delta)
+                         best_contract = min(filtered, key=lambda x: abs(abs(x.get('delta',0) or 0) - target_d))
+                     else:
+                         # Fallback: Moneyness
+                         # 0.50 -> ATM
+                         # 0.25 -> 5% OTM?
+                         # 0.75 -> 5% ITM?
+                         # Very crude.
+                         moneyness = 1.0
+                         if op_type == 'call':
+                             if target_delta > 0.5: moneyness = 0.95 # ITM
+                             elif target_delta < 0.5: moneyness = 1.05 # OTM
+                         else: # put
+                             if target_delta > 0.5: moneyness = 1.05 # ITM (Strike > Price)
+                             elif target_delta < 0.5: moneyness = 0.95 # OTM (Strike < Price)
 
-    return final_candidates
+                         target_k = current_price * moneyness
+                         best_contract = min(filtered, key=lambda x: abs(x['strike'] - target_k))
 
-if __name__ == '__main__':
-    pass
+                     # Get Price (Mark or Mid)
+                     # Option chain usually has price/premium
+                     premium = best_contract.get('price') or best_contract.get('close') or 0.0
+
+                     # EV Calculation per leg
+                     # Using simple EV calculator
+                     leg_ev_res = calculate_ev(
+                         premium=premium,
+                         strike=best_contract['strike'],
+                         current_price=current_price,
+                         delta=best_contract.get('delta') or target_delta, # use assumed if missing
+                         strategy=f"{side}_{op_type}", # "buy_call"
+                         contracts=1
+                     )
+
+                     # Combine
+                     # If buy, cost is premium. If sell, credit.
+                     # EV is usually computed for net strategy.
+                     # For spreads, we sum EV of legs? No, simpler to compute spread EV.
+                     # But calculate_ev supports complex strategies if passed params.
+                     # Here we do leg-sum approximation or just single leg EV for "single".
+
+                     legs.append({
+                         "symbol": best_contract['ticker'],
+                         "strike": best_contract['strike'],
+                         "expiry": best_contract['expiration'],
+                         "type": op_type,
+                         "side": side,
+                         "premium": premium,
+                         "delta": best_contract.get('delta') or target_delta
+                     })
+
+                     if side == "buy":
+                         total_cost += premium
+                     else:
+                         total_cost -= premium # Credit
+
+                # Compute Net EV and Score
+                # Simplified Score: Trend Strength + IV Alignment + Liquidity
+                # Trend score (sma20/sma50 dist)
+                trend_score = (sma20 / sma50 - 1.0) * 100 # % diff
+
+                # EV (very rough sum of legs? No, calculate_ev handles simple spreads if passed)
+                # Let's calculate EV of the *trade* structure.
+                # Assuming first leg is primary.
+                # If vertical spread:
+                if len(legs) == 2:
+                    # Vertical
+                    # Long leg, Short leg
+                    long_leg = next((l for l in legs if l['side'] == 'buy'), None)
+                    short_leg = next((l for l in legs if l['side'] == 'sell'), None)
+                    if long_leg and short_leg:
+                        width = abs(long_leg['strike'] - short_leg['strike'])
+                        net_debit = total_cost
+                        # If net_debit < 0 (credit), max profit is credit.
+
+                        # Use calculate_ev for spread?
+                        # It supports 'credit_spread' or 'debit_spread'
+                        st_type = "debit_spread" if total_cost > 0 else "credit_spread"
+
+                        ev_obj = calculate_ev(
+                            premium=abs(total_cost),
+                            strike=long_leg['strike'], # Anchor
+                            current_price=current_price,
+                            delta=long_leg['delta'],
+                            strategy=st_type,
+                            width=width
+                        )
+                        total_ev = ev_obj.expected_value
+                    else:
+                        total_ev = 0 # Complex/broken
+                elif len(legs) == 1:
+                    # Single
+                    leg = legs[0]
+                    st_type = f"{leg['side']}_{leg['type']}" # long_call
+                    ev_obj = calculate_ev(
+                        premium=leg['premium'],
+                        strike=leg['strike'],
+                        current_price=current_price,
+                        delta=leg['delta'],
+                        strategy=st_type
+                    )
+                    total_ev = ev_obj.expected_value
+
+                # Score Formula
+                # Base 50
+                # + Trend Score * 5
+                # + EV/Cost * 10?
+                score = 50.0 + (trend_score * 5.0)
+                if total_cost > 0:
+                    roi_ev = total_ev / total_cost
+                    score += roi_ev * 20.0
+
+                # IV Rank bonus
+                # If buying (Debit) and IV Low (<30) -> Good (+10)
+                # If selling (Credit) and IV High (>50) -> Good (+10)
+                is_debit = total_cost > 0
+                if is_debit and iv_rank < 30: score += 10
+                if not is_debit and iv_rank > 50: score += 10
+
+                candidates.append({
+                    "symbol": symbol,
+                    "ticker": symbol,
+                    "type": suggestion["strategy"],
+                    "strategy": suggestion["strategy"],
+                    "suggested_entry": abs(total_cost), # Net price
+                    "ev": total_ev,
+                    "score": round(score, 1),
+                    "iv_rank": iv_rank,
+                    "trend": trend,
+                    "legs": legs
+                })
+
+            except Exception as e:
+                print(f"[Scanner] Error processing {symbol}: {e}")
+                continue
+
+    return candidates

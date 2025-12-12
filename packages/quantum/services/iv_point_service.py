@@ -1,236 +1,246 @@
-import numpy as np
 from datetime import datetime, date, timedelta
-from typing import List, Dict, Optional, Tuple, Any
+from typing import List, Dict, Optional, Any
+import logging
+import numpy as np
+from ..models import OptionContract, OptionType
+
+logger = logging.getLogger(__name__)
 
 class IVPointService:
     """
-    Service for calculating 30-day ATM Implied Volatility from option chain snapshots.
-    Follows the VIX methodology logic:
-    1. Select near-term and next-term expirations bracketing 30 days.
-    2. Select ATM strikes for each expiration.
-    3. Interpolate variance in time.
+    Manages fetching and processing IV surface points for underlying assets.
     """
 
-    @staticmethod
-    def compute_atm_iv_30d_from_chain(
-        chain_results: List[Dict],
-        spot: float,
-        as_of_ts: datetime
-    ) -> Dict[str, Any]:
-        """
-        Orchestrates the calculation of 30-day IV.
-        Returns a dictionary suitable for storage in underlying_iv_points.
-        """
-        if not chain_results or spot <= 0:
-            return IVPointService._failure_result("missing_data")
+    def __init__(self, supabase_client):
+        self.supabase = supabase_client
 
-        # 1. Group by expiry
-        grouped = IVPointService._group_by_expiry(chain_results)
+    def get_points(self, symbol: str, lookback_days: int = 30) -> List[Dict]:
+        """Fetch IV points history for a symbol"""
+        try:
+            cutoff = (datetime.now() - timedelta(days=lookback_days)).isoformat()
 
-        # 2. Filter valid expiries (> 1 day, < 365 days)
-        valid_expiries = []
-        today = as_of_ts.date()
-        target_date = today + timedelta(days=30)
+            res = self.supabase.table('underlying_iv_points') \
+                .select('*') \
+                .eq('symbol', symbol) \
+                .gte('date', cutoff) \
+                .order('date', desc=True) \
+                .execute()
 
-        for exp_str, contracts in grouped.items():
-            try:
-                exp_date = datetime.strptime(exp_str, '%Y-%m-%d').date()
-                dte = (exp_date - today).days
-                if 2 <= dte <= 365:
-                    valid_expiries.append((dte, exp_date, contracts))
-            except ValueError:
-                continue
+            return res.data if res.data else []
 
-        valid_expiries.sort(key=lambda x: x[0]) # Sort by DTE
+        except Exception as e:
+            logger.error(f"Failed to fetch IV points for {symbol}: {e}")
+            return []
 
-        if not valid_expiries:
-            return IVPointService._failure_result("no_valid_expiries")
+    def get_latest_point(self, symbol: str) -> Optional[Dict]:
+        """Get most recent IV point"""
+        try:
+            res = self.supabase.table('underlying_iv_points') \
+                .select('*') \
+                .eq('symbol', symbol) \
+                .order('date', desc=True) \
+                .limit(1) \
+                .execute()
 
-        # 3. Find bracketing expiries
-        # We need T1 <= 30 <= T2
-        # Ideally T1 is closest <= 30, T2 is closest > 30
+            return res.data[0] if res.data else None
 
-        term1 = None
-        term2 = None
+        except Exception as e:
+            logger.error(f"Failed to fetch latest IV point for {symbol}: {e}")
+            return None
 
-        # Iterate to find the crossover point
-        for i in range(len(valid_expiries)):
-            dte, _, _ = valid_expiries[i]
-            if dte <= 30:
-                term1 = valid_expiries[i]
-            elif dte > 30:
-                term2 = valid_expiries[i]
-                break # Found the first one > 30
+    def upsert_point(self, point_data: Dict) -> bool:
+        """Upsert a single IV point"""
+        try:
+            self.supabase.table('underlying_iv_points') \
+                .upsert(point_data) \
+                .execute()
+            return True
+        except Exception as e:
+            logger.error(f"Failed to upsert IV point for {point_data.get('symbol')}: {e}")
+            return False
 
-        # Fallback logic if we don't have perfect brackets
-        method = "var_interp_spot_atm"
-        quality_penalty = 0
+    def compute_iv_stats(self, points: List[Dict]) -> Dict:
+        """Calculate statistics from a list of points"""
+        if not points:
+            return {}
 
-        if term1 and term2:
-            pass # Ideal case
-        elif term1 and not term2:
-            # Only have shorter terms (e.g. 29 days). Extrapolate or just use last.
-            # Using nearest for robustness.
-            term2 = term1
-            method = "nearest_expiry"
-            quality_penalty = 20
-        elif not term1 and term2:
-            # Only have longer terms (e.g. starting 35 days).
-            term1 = term2
-            method = "nearest_expiry"
-            quality_penalty = 20
-
-        # 4. Calculate IV for each term
-        # Term structure: (dte, date, contracts)
-        iv1, strike1, q1 = IVPointService._compute_atm_iv_for_expiry(term1[2], spot)
-        iv2, strike2, q2 = IVPointService._compute_atm_iv_for_expiry(term2[2], spot)
-
-        if iv1 is None or iv2 is None:
-             return IVPointService._failure_result("atm_iv_calculation_failed")
-
-        # 5. Interpolate
-        # V = sigma^2 * T
-        # T is in years = DTE / 365.0 (Standardize to 365 for crypto/stocks usually 252? VIX uses minutes/year)
-        # We will use simple calendar days / 365.0 for IV convention matching Polygon usually.
-
-        t1 = term1[0] / 365.0
-        t2 = term2[0] / 365.0
-        t_target = 30.0 / 365.0
-
-        v1 = (iv1 ** 2) * t1
-        v2 = (iv2 ** 2) * t2
-
-        # Linear interpolation of Variance
-        # V_30 = V1 + (V2 - V1) * ( (T_target - T1) / (T2 - T1) )
-
-        if term1[0] == term2[0]:
-            # Same expiry (fallback case)
-            v_target = v1
-            # If using same expiry, DTE might not match t_target (30d).
-            # If T1 != 30, then V1 = sigma^2 * T1.
-            # V_target (30d) would be sigma^2 * T_30?
-            # If we assume flat term structure for single expiry:
-            # IV_30 = IV_T1.
-            # So v_target should actually be iv1^2 * t_target.
-            # Current code: v_target = v1 = iv1^2 * t1.
-            # iv_30d = sqrt(v1 / t_target) = sqrt(iv1^2 * t1 / t_target) = iv1 * sqrt(t1 / t_target)
-            # This scales IV by sqrt(time ratio) which is incorrect for flat term structure assumption.
-            # If we assume flat IV, IV_30 = IV1.
-
-            # Correct logic for "nearest_expiry" method:
-            # Return IV1 directly.
-            iv_30d = iv1
-        else:
-            slope = (v2 - v1) / (t2 - t1)
-            v_target = v1 + slope * (t_target - t1)
-
-            if v_target < 0:
-                v_target = 0
-
-            iv_30d = np.sqrt(v_target / t_target)
+        ivs = [p['atm_iv_30d'] for p in points if p.get('atm_iv_30d')]
+        if not ivs:
+            return {}
 
         return {
-            "iv_30d": float(iv_30d),
-            "iv_30d_method": method,
-            "expiry1": term1[1].strftime('%Y-%m-%d'),
-            "expiry2": term2[1].strftime('%Y-%m-%d'),
-            "iv1": float(iv1),
-            "iv2": float(iv2),
-            "strike1": float(strike1),
-            "strike2": float(strike2),
-            "quality_score": max(0, 100 - quality_penalty - q1 - q2), # 100 is perfect
-            "inputs": {
-                "t1_dte": term1[0],
-                "t2_dte": term2[0],
-                "spot": spot
-            }
+            'avg_iv_30d': sum(ivs) / len(ivs),
+            'min_iv': min(ivs),
+            'max_iv': max(ivs),
+            'current': ivs[0],
+            'points_count': len(ivs)
         }
 
-    @staticmethod
-    def _compute_atm_iv_for_expiry(contracts: List[Dict], spot: float) -> Tuple[Optional[float], Optional[float], int]:
-        """
-        Returns (iv, strike, penalty_score)
-        Selects strike closest to spot.
-        Averages Call and Put IV if available.
-        """
-        if not contracts:
-            return None, None, 100
+    # --- IV Surface Helpers ---
 
-        # Find ATM strike
-        # Filter for valid IVs first?
-        # Polygon snapshot keys: 'implied_volatility', 'strike_price', 'contract_type' ('call'/'put')
+    def compute_atm_iv_target_from_chain(self, chain: List[Dict], spot: float, as_of_ts: datetime, target_dte: int = 30) -> Optional[float]:
+        """
+        Interpolates ATM IV for a specific DTE target from a raw option chain.
+        Expects chain to have 'strike', 'expiration', 'implied_volatility', 'type'.
+        """
+        if not chain or spot <= 0:
+            return None
 
-        # Organize by strike
-        by_strike = {}
-        for c in contracts:
-            details = c.get('details', {})
-            strike = details.get('strike_price')
-            if strike is None:
+        # 1. Filter for relevant expirations (near term)
+        target_date = as_of_ts.date() + timedelta(days=target_dte)
+
+        # Group by expiry
+        expiries = {}
+        for c in chain:
+            # Parse expiry if string
+            exp = c.get('expiration')
+            if isinstance(exp, str):
+                try:
+                    exp = datetime.strptime(exp, "%Y-%m-%d").date()
+                except ValueError:
+                    continue
+            elif isinstance(exp, (datetime, date)):
+                exp = exp if isinstance(exp, date) else exp.date()
+            else:
                 continue
 
-            if strike not in by_strike:
-                by_strike[strike] = {'call': None, 'put': None}
+            dte = (exp - as_of_ts.date()).days
+            if dte < 5 or dte > 120: continue # Focus on liquid near term
 
-            ctype = details.get('contract_type') # 'call' or 'put'
+            if dte not in expiries: expiries[dte] = []
+            expiries[dte].append(c)
 
-            # Check for IV
-            greeks = c.get('greeks') or {}
-            iv = c.get('implied_volatility') or greeks.get('iv')
+        if not expiries:
+            return None
 
-            if iv and iv > 0:
-                by_strike[strike][ctype] = iv
+        # 2. Find two closest expirations
+        sorted_dtes = sorted(expiries.keys())
+        # Ideally find one before and one after target_dte
+        lower_dte = next((d for d in reversed(sorted_dtes) if d <= target_dte), None)
+        upper_dte = next((d for d in sorted_dtes if d >= target_dte), None)
 
-        if not by_strike:
-            return None, None, 100
+        if not lower_dte and not upper_dte: return None
+        if not lower_dte: lower_dte = upper_dte
+        if not upper_dte: upper_dte = lower_dte
 
-        # Find closest strike to spot
-        available_strikes = sorted(by_strike.keys())
-        closest_strike = min(available_strikes, key=lambda x: abs(x - spot))
+        # Helper to get ATM IV for a specific expiry
+        def get_expiry_atm(dte_chain):
+            # Filter for strikes near spot
+            # Simple approach: find straddle or closest OTM call/put average
+            strikes = sorted(list(set(c['strike'] for c in dte_chain)))
+            if not strikes: return None
 
-        data = by_strike[closest_strike]
-        iv_call = data['call']
-        iv_put = data['put']
+            # Find closest strike
+            closest_strike = min(strikes, key=lambda x: abs(x - spot))
 
-        penalty = 0
-        final_iv = None
+            # Get IVs for closest strike
+            ivs = [c.get('implied_volatility') for c in dte_chain
+                   if c['strike'] == closest_strike and c.get('implied_volatility') is not None]
 
-        if iv_call and iv_put:
-            final_iv = (iv_call + iv_put) / 2.0
-        elif iv_call:
-            final_iv = iv_call
-            penalty += 10 # Missing one side
-        elif iv_put:
-            final_iv = iv_put
-            penalty += 10 # Missing one side
-        else:
-            # Should not happen given logic above, but fallback
-            # Try searching neighbors?
-            # For this Phase, simplistic fail.
-            return None, closest_strike, 100
+            valid_ivs = [iv for iv in ivs if iv > 0]
+            if not valid_ivs: return None
+            return sum(valid_ivs) / len(valid_ivs)
 
-        # Penalty for distance from spot
-        dist_pct = abs(closest_strike - spot) / spot
-        if dist_pct > 0.05:
-            penalty += int(dist_pct * 100) # 1% off = 1 penalty point
+        iv_lower = get_expiry_atm(expiries[lower_dte])
+        iv_upper = get_expiry_atm(expiries[upper_dte])
 
-        return final_iv, closest_strike, penalty
+        if iv_lower is None or iv_upper is None:
+            return iv_lower or iv_upper
 
-    @staticmethod
-    def _group_by_expiry(contracts: List[Dict]) -> Dict[str, List[Dict]]:
-        grouped = {}
-        for c in contracts:
-            details = c.get('details', {})
-            exp = details.get('expiration_date')
-            if exp:
-                if exp not in grouped:
-                    grouped[exp] = []
-                grouped[exp].append(c)
-        return grouped
+        # 3. Time Weighted Interpolation
+        if lower_dte == upper_dte:
+            return iv_lower
 
-    @staticmethod
-    def _failure_result(reason: str) -> Dict[str, Any]:
-        return {
-            "iv_30d": None,
-            "iv_30d_method": "failed",
-            "inputs": {"reason": reason}
-        }
+        # Linear interpolation by square root of time (variance)? Or just linear time?
+        # Standard: Linear in total variance (sigma^2 * t)
+        t_target = target_dte / 365.0
+        t_lower = lower_dte / 365.0
+        t_upper = upper_dte / 365.0
+
+        var_lower = (iv_lower ** 2) * t_lower
+        var_upper = (iv_upper ** 2) * t_upper
+
+        weight = (t_target - t_lower) / (t_upper - t_lower)
+        var_target = var_lower + weight * (var_upper - var_lower)
+
+        return np.sqrt(var_target / t_target)
+
+    def compute_skew_25d_from_chain(self, chain: List[Dict], spot: float, as_of_ts: datetime, target_dte: int = 30) -> float:
+        """
+        Computes 25-delta Skew (Put IV - Call IV) / ATM IV.
+        Approximates 25-delta using moneyness if delta not available.
+        """
+        # Approximate 25d strike distance (very rough, assumes BS)
+        # 25d put is approx at spot * exp(-0.67 * sigma * sqrt(t))
+
+        atm_iv = self.compute_atm_iv_target_from_chain(chain, spot, as_of_ts, target_dte)
+        if not atm_iv: return 0.0
+
+        t = target_dte / 365.0
+        sigma = atm_iv
+
+        # Estimate strikes
+        # Standard deviation move
+        std_dev = sigma * np.sqrt(t)
+
+        # 25 Delta is roughly 0.67 std devs OTM?
+        # N(d1) = 0.25 -> d1 approx -0.67
+        # Strike approx: K = S * exp(0.67 * sigma * sqrt(t)) ?? No.
+        # Let's use simple percentage OTM proxy for now if Greeks missing
+        # 25 delta put approx 90-95% moneyness for 30d?
+        # Rule of thumb: 1 SD move
+
+        put_strike_target = spot * (1 - 0.7 * std_dev) # Roughly 25d
+        call_strike_target = spot * (1 + 0.7 * std_dev) # Roughly 25d
+
+        # Find IVs at these strikes for target expiry
+        # We need to interpolate across strikes
+
+        # Re-use expiry filtering logic
+        # ... (Simplified: just grab all contracts in 20-40 DTE window)
+        relevant_contracts = []
+        for c in chain:
+            # Parse expiry
+            exp = c.get('expiration')
+            if isinstance(exp, str):
+                try: exp = datetime.strptime(exp, "%Y-%m-%d").date()
+                except: continue
+            elif isinstance(exp, (datetime, date)):
+                exp = exp if isinstance(exp, date) else exp.date()
+
+            dte = (exp - as_of_ts.date()).days
+            if 20 <= dte <= 40:
+                relevant_contracts.append(c)
+
+        if not relevant_contracts: return 0.0
+
+        # Find closest Put and Call
+        put_ivs = [c['implied_volatility'] for c in relevant_contracts
+                   if c.get('type') == 'put' and c.get('implied_volatility')]
+        put_strikes = [c['strike'] for c in relevant_contracts
+                       if c.get('type') == 'put' and c.get('implied_volatility')]
+
+        call_ivs = [c['implied_volatility'] for c in relevant_contracts
+                    if c.get('type') == 'call' and c.get('implied_volatility')]
+        call_strikes = [c['strike'] for c in relevant_contracts
+                        if c.get('type') == 'call' and c.get('implied_volatility')]
+
+        if not put_ivs or not call_ivs: return 0.0
+
+        # Interpolate Put IV
+        put_iv = np.interp(put_strike_target, put_strikes, put_ivs)
+        call_iv = np.interp(call_strike_target, call_strikes, call_ivs)
+
+        # Skew = (Put IV - Call IV)
+        return (put_iv - call_iv)
+
+    def compute_term_slope(self, chain: List[Dict], spot: float, as_of_ts: datetime) -> float:
+        """
+        Computes term structure slope: (IV_90d - IV_30d) / IV_30d
+        """
+        iv_30 = self.compute_atm_iv_target_from_chain(chain, spot, as_of_ts, target_dte=30)
+        iv_90 = self.compute_atm_iv_target_from_chain(chain, spot, as_of_ts, target_dte=90)
+
+        if iv_30 and iv_90 and iv_30 > 0:
+            return (iv_90 - iv_30) / iv_30
+        return 0.0

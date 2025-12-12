@@ -62,7 +62,7 @@ MIN_QTY_BALANCED = 0.05
 MIN_DOLLAR_DIFF_AGGRESSIVE = 10.0
 MIN_QTY_AGGRESSIVE = 0.02
 
-# --- REGIME ELASTIC CONFIG ---
+# --- REGIME ELASTIC CONFIG (V3) ---
 REGIME_STRATEGY_CAPS = {
     "default": {
         "debit_call": 0.10,
@@ -74,14 +74,55 @@ REGIME_STRATEGY_CAPS = {
         "single": 0.10,
         "other": 0.05,
     },
-    "high_vol": {
+    "suppressed": { # Low Vol: Buy Premium
+        "debit_call": 0.12,
+        "debit_put": 0.12,
+        "credit_call": 0.06,
+        "credit_put": 0.06,
+        "iron_condor": 0.04,
+        "single": 0.15, # Aggressive long delta
+    },
+    "normal": { # Balanced
+        "debit_call": 0.10,
+        "debit_put": 0.10,
+        "credit_call": 0.08,
+        "credit_put": 0.08,
+        "iron_condor": 0.06,
+        "single": 0.10,
+    },
+    "elevated": { # High Vol: Sell Premium
         "credit_call": 0.12,
         "credit_put": 0.12,
         "debit_call": 0.06,
         "debit_put": 0.06,
-        "iron_condor": 0.03,
+        "iron_condor": 0.08,
+        "single": 0.05,
     },
+    "shock": { # Crash: Defensive
+        "credit_call": 0.15, # Sell calls aggressively? Or just cash.
+        "debit_put": 0.10, # Hedges
+        "credit_put": 0.02, # Dangerous
+        "iron_condor": 0.00,
+        "single": 0.02,
+    },
+    "rebound": { # Post-Shock rally
+        "debit_call": 0.10,
+        "credit_put": 0.10,
+        "debit_put": 0.04,
+        "single": 0.08,
+    },
+    "chop": { # Range bound
+        "iron_condor": 0.10,
+        "credit_call": 0.08,
+        "credit_put": 0.08,
+        "debit_call": 0.04,
+        "debit_put": 0.04,
+    }
 }
+
+# Mapping for backwards compatibility with V2 "high_vol" etc. if passed as keys
+REGIME_STRATEGY_CAPS["high_vol"] = REGIME_STRATEGY_CAPS["elevated"]
+REGIME_STRATEGY_CAPS["panic"] = REGIME_STRATEGY_CAPS["shock"]
 
 def calculate_dynamic_target(
     base_weight: float,
@@ -95,7 +136,11 @@ def calculate_dynamic_target(
       - Conviction scaling factor: 0.5 + 0.5 * conviction.
     """
 
+    # Check for exact match, else default
+    # If regime is passed as V3 string (e.g. 'rebound'), it works.
+    # If passed as 'high_vol' (V2), it works.
     caps = REGIME_STRATEGY_CAPS.get(regime, REGIME_STRATEGY_CAPS["default"])
+
     # Fallback keys logic
     cap = caps.get(strategy_type, caps.get("other", base_weight))
 
@@ -375,7 +420,7 @@ async def optimize_portfolio(req: OptimizationRequest, request: Request, user_id
 
             # Map back to spreads
             # mu vector size = len(tickers)
-            # sigma matrix size = len(tickers) x len(tickers)
+            # sigma matrix size = len(tickers)
 
             # Create mapping: underlying -> index in base_inputs
             base_idx_map = {u: i for i, u in enumerate(unique_underlyings)}

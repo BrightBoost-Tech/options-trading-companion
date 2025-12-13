@@ -5,10 +5,10 @@ from datetime import datetime, timedelta
 from typing import List, Dict, Any, Optional, Literal
 from pydantic import BaseModel, Field
 
-from strategy_profiles import StrategyConfig, CostModelConfig, BacktestRequestV3
-from market_data import PolygonService
-from analytics.regime_scoring import ScoringEngine, ConvictionTransform
-from analytics.regime_integration import (
+from packages.quantum.strategy_profiles import StrategyConfig, CostModelConfig, BacktestRequestV3
+from packages.quantum.market_data import PolygonService
+from packages.quantum.analytics.regime_scoring import ScoringEngine, ConvictionTransform
+from packages.quantum.analytics.regime_integration import (
     DEFAULT_WEIGHT_MATRIX,
     DEFAULT_CATALYST_PROFILES,
     DEFAULT_LIQUIDITY_SCALAR,
@@ -16,6 +16,9 @@ from analytics.regime_integration import (
     map_market_regime,
     run_historical_scoring
 )
+from packages.quantum.analytics.factors import calculate_trend, calculate_volatility, calculate_rsi
+from packages.quantum.nested.backbone import infer_global_context, GlobalContext
+from packages.quantum.execution.transaction_cost_model import TransactionCostModel
 from analytics.factors import calculate_trend, calculate_volatility, calculate_rsi
 from nested.backbone import infer_global_context, GlobalContext
 from packages.quantum.services.transaction_cost_model import TransactionCostModel
@@ -302,6 +305,32 @@ class BacktestEngine:
             equity_curve=equity_curve,
             metrics=metrics
         )
+
+    def _simulate_fill(self, price: float, side: str, cost_model: CostModelConfig, rng: random.Random) -> float:
+        """
+        Simulates execution price with slippage using shared TransactionCostModel.
+        """
+        # Construct Mock Order
+        order = {
+             "order_type": "market",
+             "side": side,
+             "requested_qty": 100, # Arbitrary qty for simulation
+             "quantity": 100
+        }
+
+        # Construct Mock Quote
+        # Assuming price is close/market.
+        quote = {
+             "bid_price": price,
+             "ask_price": price,
+             "status": "ok"
+        }
+
+        # Generate int seed from rng
+        seed_val = rng.randint(0, 1000000)
+
+        res = TransactionCostModel.simulate_fill(order, quote, cost_model, seed=seed_val)
+        return res["avg_fill_price"]
 
     def _calculate_metrics(self, trades: List[Dict], equity_curve: List[Dict], initial_equity: float) -> Dict[str, Any]:
         if not trades:

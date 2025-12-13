@@ -6,6 +6,7 @@ import asyncio
 from datetime import datetime, timedelta, timezone
 from typing import List, Optional, Dict, Literal, Any
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 
 import requests
 from dotenv import load_dotenv
@@ -17,10 +18,8 @@ from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from slowapi.util import get_remote_address
 from supabase import create_client, Client
-from pathlib import Path
 
 # 1. Load environment variables BEFORE importing other things
-# When running from repo root, point to packages/quantum/.env
 env_path = Path(__file__).resolve().parent / ".env"
 load_dotenv(dotenv_path=env_path)
 
@@ -32,7 +31,7 @@ from packages.quantum.security.secrets_provider import SecretsProvider
 validate_security_config()
 
 # Import models and services
-from packages.quantum.models import Holding, SyncResponse, PortfolioSnapshot, Spread
+from packages.quantum.models import Holding, SyncResponse, PortfolioSnapshot, Spread, SpreadPosition, RiskDashboardResponse, UnifiedPosition, OptimizationRationale
 from packages.quantum.config import ENABLE_REBALANCE_CONVICTION, ENABLE_REBALANCE_CONVICTION_SHADOW
 from packages.quantum.analytics.conviction_service import ConvictionService, PositionDescriptor
 from packages.quantum import plaid_service
@@ -54,7 +53,6 @@ from packages.quantum.analytics.progress_engine import ProgressEngine, get_week_
 from packages.quantum.services.options_utils import group_spread_positions, format_occ_symbol_readable
 from packages.quantum.ev_calculator import calculate_ev, calculate_position_size
 from packages.quantum.services.enrichment_service import enrich_holdings_with_analytics
-from packages.quantum.models import SpreadPosition, RiskDashboardResponse, UnifiedPosition, OptimizationRationale
 from packages.quantum.services.historical_simulation import HistoricalCycleService
 from packages.quantum.analytics.loss_minimizer import LossMinimizer, LossAnalysisResult
 from packages.quantum.analytics.drift_auditor import audit_plan_vs_execution
@@ -63,6 +61,7 @@ from packages.quantum.services.risk_engine import RiskEngine
 from packages.quantum.services.iv_repository import IVRepository
 from packages.quantum.services.iv_point_service import IVPointService
 from packages.quantum.analytics.regime_engine_v3 import RegimeEngineV3, GlobalRegimeSnapshot, RegimeState
+from packages.quantum.analytics.iv_regime_service import IVRegimeService
 
 # v3 Observability
 from packages.quantum.observability.telemetry import TradeContext, compute_features_hash, emit_trade_event
@@ -111,7 +110,6 @@ def get_supabase_user_client(
     user_id: str = Depends(get_current_user),
     request: Request = None
 ) -> Client:
-    # ... (Same as before)
     # Check if we have a real Bearer token
     auth_header = request.headers.get("Authorization")
     is_bearer = auth_header and auth_header.startswith("Bearer ")
@@ -225,7 +223,6 @@ async def execute_rebalance(
 
     # 3. Run Optimizer directly to get targets
     from packages.quantum.optimizer import _compute_portfolio_weights, OptimizationRequest, calculate_dynamic_target
-    from packages.quantum.analytics.iv_regime_service import IVRegimeService
 
     # --- V3: Regime Engine Integration ---
     # Instantiate services
@@ -236,21 +233,16 @@ async def execute_rebalance(
 
     # Compute Global Snapshot
     now = datetime.now()
-    # Try to get universe symbols if available from UniverseService for better breadth
     universe_symbols = None
     try:
-        us = UniverseService(supabase)
-        # Assuming get_universe returns list of dicts or objects
-        # For efficiency, we might just rely on the default basket in RegimeEngineV3 if this is slow.
-        # But let's try to get a sample.
-        # universe_symbols = [u['symbol'] for u in us.get_universe()[:50]]
+        # Optimization: We could fetch universe, but default basket is usually fine
         pass
     except Exception:
         pass
 
     global_snap = regime_engine.compute_global_snapshot(now, universe_symbols)
 
-    # Store global snapshot to DB (new table)
+    # Store global snapshot to DB
     try:
         supabase.table("regime_snapshots").insert(global_snap.to_dict()).execute()
     except Exception as e:
@@ -279,20 +271,7 @@ async def execute_rebalance(
     # V3: Regime Context uses Global Snapshot mapping
     current_regime_scoring = regime_engine.map_to_scoring_regime(global_snap.state)
 
-    # Compute Real Universe Median from Risk Score
-    # Risk Score ranges from 0 to ~10+.
-    # We want a median-like anchor 0-100.
-    # Map Risk Score [0, 10] -> [100, 0]?
-    # High risk = low median?
-    # No, Median score in scoring engine usually represents "average strength".
-    # If market is bullish (low risk), scores are high -> Median ~70.
-    # If market is bearish (high risk), scores are low -> Median ~30.
-
-    # Formula: Median = 70 - (Risk Score * 5) clamped [20, 80]
-    # Risk 0 -> 70 (Bullish)
-    # Risk 6 (Shock) -> 40 (Bearish)
-    # Risk 10 -> 20.
-
+    # Compute Real Universe Median from Risk Score (0-10 scale -> 0-100 scale approximation)
     universe_median = max(20.0, min(80.0, 70.0 - (global_snap.risk_score * 5.0)))
 
     regime_context = {
@@ -301,41 +280,6 @@ async def execute_rebalance(
         "global_score": global_snap.risk_score,
         "risk_scaler": global_snap.risk_scaler,
         "universe_median": universe_median,
-    # Determine regime context via RegimeEngineV3
-    from packages.quantum.analytics.regime_engine_v3 import RegimeEngineV3
-
-    def fetch_regime_v3():
-        eng = RegimeEngineV3(supabase)
-        snap = eng.compute_global_snapshot(datetime.utcnow())
-
-        # Compute universe median from current holdings IV context
-        ranks = [d.get('iv_rank') for d in iv_ctx_map.values() if d.get('iv_rank') is not None]
-        median = 50.0
-        if ranks:
-            import numpy as np
-            median = float(np.median(ranks))
-
-        return snap, median
-
-    loop = asyncio.get_event_loop()
-    with ThreadPoolExecutor() as pool:
-         global_snap, universe_median = await loop.run_in_executor(pool, fetch_regime_v3)
-
-    # Map to legacy scoring regime
-    # We need an instance to call map methods, or static?
-    # RegimeEngineV3 is stateful (deps), but map_to_scoring_regime is pure.
-    # Let's instantiate locally or move map method to static/module level.
-    # It's an instance method in my implementation.
-    regime_engine_inst = RegimeEngineV3(supabase)
-    scoring_regime = regime_engine_inst.map_to_scoring_regime(global_snap.state)
-    global_regime = scoring_regime # For backward compat variable name
-
-    regime_context = {
-        "current_regime_scoring": scoring_regime,
-        "universe_median": universe_median,
-        "global_state": global_snap.state,
-        "global_score": global_snap.risk_score,
-        "risk_scaler": global_snap.risk_scaler
     }
 
     conviction_service = ConvictionService(supabase=supabase)
@@ -412,20 +356,14 @@ async def execute_rebalance(
 
              targets = []
              for sym, w in target_weights.items():
-                 # Elastic Logic
                  spread_obj = spread_map.get(sym)
                  strat_type = spread_obj.spread_type if spread_obj else "other"
 
-                 # Retrieve Regime (Local or Global?)
-                 # Pass the V3 Regime State string (e.g. "shock", "rebound") to dynamic target
                  regime_key = global_snap.state.value
-                 # Retrieve Regime
+
+                 # Retrieve Regime for conviction call
                  ctx = iv_ctx_map.get(sym, {})
-                 # Use global regime if symbol context missing, but prefer symbol specific?
-                 # Actually for dynamic target we usually use "current market regime" or specific?
-                 # Existing code used symbol's IV regime if available.
-                 # Let's keep that but fall back to global scoring regime.
-                 regime = ctx.get("iv_regime", global_regime)
+                 regime = ctx.get("iv_regime", current_regime_scoring)
 
                  # Default neutral conviction
                  base_conviction = 1.0
@@ -453,7 +391,7 @@ async def execute_rebalance(
                      "symbol": sym,
                      "target_allocation": adjusted_w
                  })
-             return targets, trace_id, red_flags
+             return targets, trace_id, red_flags, regime
 
         except Exception as e:
             print(f"Optimization failed during rebalance: {e}")
@@ -463,7 +401,7 @@ async def execute_rebalance(
     loop = asyncio.get_event_loop()
     with ThreadPoolExecutor() as pool:
         try:
-            targets, trace_id, red_flags = await loop.run_in_executor(pool, run_optimizer_logic)
+            targets, trace_id, red_flags, regime_val = await loop.run_in_executor(pool, run_optimizer_logic)
         except Exception as e:
              raise HTTPException(status_code=500, detail=f"Optimization failed: {e}")
 
@@ -482,25 +420,18 @@ async def execute_rebalance(
     if trades:
         supabase.table(TRADE_SUGGESTIONS_TABLE).delete().eq("user_id", user_id).eq("window", "rebalance").execute()
 
-        trade_symbols = [t["symbol"] for t in trades]
-        # trade_iv_ctx = iv_service.get_iv_context_for_symbols(trade_symbols) # Old way
-
         db_rows = []
         for t in trades:
             sym = t["symbol"]
             strategy = t.get("spread_type", "custom")
 
-            # V3 Context in Suggestion
-            # We use global state primarily here
             # Create Trace Context
             features_dict = {
                 "symbol": sym,
                 "target_allocation": t.get("target_weight", 0),
                 "strategy": strategy,
-                "regime": regime,
-                "regime_v3": global_snap.state,
-                "risk_score": global_snap.risk_score,
-                "conviction_used": "implicit_1.0" # For now unless we thread it through
+                "global_regime": global_snap.state.value,
+                "risk_score": global_snap.risk_score
             }
 
             ctx = TradeContext.create_new(
@@ -509,13 +440,6 @@ async def execute_rebalance(
                 strategy=strategy,
                 regime=global_snap.state.value
             )
-            features_dict = {
-                "symbol": sym,
-                "target_allocation": t.get("target_weight", 0),
-                "strategy": strategy,
-                "global_regime": global_snap.state.value,
-                "risk_score": global_snap.risk_score
-            }
             ctx.features_hash = compute_features_hash(features_dict)
 
             if "context" not in t:
@@ -566,60 +490,54 @@ async def execute_rebalance(
         "trades": trades
     }
 
-# ... (Rest of endpoints remain unchanged)
-# I need to include the rest of the file content that I truncated in the thought process
-# but for overwrite_file_with_block I must provide the FULL content.
-# I will append the remaining functions from the original read.
+@app.get("/suggestions")
+async def get_suggestions(
+    window: Optional[str] = None,
+    status: Optional[str] = "pending",
+    user_id: str = Depends(get_current_user),
+    supabase: Client = Depends(get_supabase_user_client)
+):
+    """
+    Generic suggestions endpoint used by the dashboard.
+    Supported windows: morning_limit, midday_entry, rebalance
+    """
+    if not supabase:
+        raise HTTPException(status_code=503, detail="Database not available")
+
+    try:
+        query = supabase.table(TRADE_SUGGESTIONS_TABLE).select("*").eq("user_id", user_id)
+        if window:
+            query = query.eq("window", window)
+        if status:
+            query = query.eq("status", status)
+        res = query.order("created_at", desc=True).execute()
+
+        suggestions = res.data or []
+        for s in suggestions:
+            sym = s.get("symbol") or s.get("ticker", "")
+            if "O:" in sym or (len(sym) > 15 and any(c.isdigit() for c in sym)):
+                s["display_symbol"] = format_occ_symbol_readable(sym)
+            else:
+                s["display_symbol"] = sym
+
+            if "order_json" in s and isinstance(s["order_json"], dict) and "legs" in s["order_json"]:
+                for leg in s["order_json"]["legs"]:
+                    if "symbol" in leg:
+                        leg["display_symbol"] = format_occ_symbol_readable(leg["symbol"])
+
+        return {"suggestions": suggestions}
+    except Exception as e:
+        print(f"Error fetching suggestions: {e}")
+        raise HTTPException(status_code=500, detail="Failed to fetch suggestions")
 
 @app.get("/rebalance/suggestions")
 async def get_rebalance_suggestions(
     user_id: str = Depends(get_current_user),
     supabase: Client = Depends(get_supabase_user_client)
 ):
-    if not supabase:
-        raise HTTPException(status_code=503, detail="Database unavailable")
-
-    res = supabase.table(TRADE_SUGGESTIONS_TABLE)\
-        .select("*")\
-        .eq("user_id", user_id)\
-        .eq("window", "rebalance")\
-        .eq("status", "pending")\
-        .execute()
-
-    return {"suggestions": res.data or []}
-@app.get("/suggestions")
-async def get_suggestions(
-    window: str,
-    user_id: str = Depends(get_current_user),
-    supabase: Client = Depends(get_supabase_user_client)
-):
-    """
-    Generic suggestions endpoint used by the dashboard:
-      /suggestions?window=morning_limit
-      /suggestions?window=midday_entry
-      /suggestions?window=rebalance (optional)
-    """
-    if not supabase:
-        raise HTTPException(status_code=503, detail="Database unavailable")
-
-    valid_windows = {"morning_limit", "midday_entry", "rebalance"}
-    if window not in valid_windows:
-        raise HTTPException(status_code=400, detail=f"Invalid window: {window}")
-
-    res = (
-        supabase.table(TRADE_SUGGESTIONS_TABLE)
-        .select("*")
-        .eq("user_id", user_id)
-        .eq("window", window)
-        .eq("status", "pending")
-        .order("created_at", desc=True)
-        .execute()
-    )
-
-    return {"suggestions": res.data or []}
+    return await get_suggestions(window="rebalance", status="pending", user_id=user_id, supabase=supabase)
 
 # --- Helper Functions ---
-
 
 def get_active_user_ids() -> List[str]:
     """Helper to get list of active user IDs."""
@@ -833,7 +751,6 @@ async def preview_rebalance(
 
     # 3. Run Optimizer directly to get targets
     from packages.quantum.optimizer import _compute_portfolio_weights, OptimizationRequest, calculate_dynamic_target
-    from packages.quantum.analytics.iv_regime_service import IVRegimeService
 
     # --- V3: Regime Engine Integration (Preview Mode: Global Only for Speed) ---
     market_data = PolygonService()
@@ -1021,32 +938,6 @@ async def preview_rebalance(
         "trades": trades
     }
 
-@app.get("/rebalance/suggestions")
-async def get_rebalance_suggestions(
-    user_id: str = Depends(get_current_user)
-):
-    if not supabase:
-        raise HTTPException(status_code=503, detail="Database unavailable")
-
-    res = supabase.table(TRADE_SUGGESTIONS_TABLE)\
-        .select("*")\
-        .eq("user_id", user_id)\
-        .eq("window", "rebalance")\
-        .eq("status", "pending")\
-        .execute()
-
-    suggestions = []
-    if res.data:
-        for row in res.data:
-            order = row.get("order_json") or {}
-            flat = {**order, **row}
-            if "side" not in flat and "direction" in flat:
-                 flat["side"] = flat["direction"].lower()
-            suggestions.append(flat)
-
-    return {"suggestions": suggestions}
-
-
 # --- Development Endpoints ---
 
 @app.post("/tasks/run-all")
@@ -1085,47 +976,15 @@ async def run_historical_cycle(
         print(f"Historical cycle error: {e}")
         raise HTTPException(status_code=500, detail=f"Simulation failed: {str(e)}")
 
-# ... (rest of journal, stats, ev, exports - ensuring full file valid)
-# I will skip re-pasting identical tail functions to save tokens, assuming they are preserved if I use overwrite carefully or if I use search/replace.
-# But `overwrite_file_with_block` requires full content.
-# I will paste the rest now.
-
-@app.get("/suggestions")
-async def get_suggestions(
-    window: Optional[str] = None,
-    status: Optional[str] = "pending",
-    user_id: str = Depends(get_current_user),
-    supabase: Client = Depends(get_supabase_user_client)
-):
-    if not supabase:
-        raise HTTPException(status_code=503, detail="Database not available")
-
-    try:
-        query = supabase.table(TRADE_SUGGESTIONS_TABLE).select("*").eq("user_id", user_id)
-        if window:
-            query = query.eq("window", window)
-        if status:
-            query = query.eq("status", status)
-        res = query.order("created_at", desc=True).execute()
-
-        suggestions = res.data or []
-        for s in suggestions:
-            sym = s.get("symbol") or s.get("ticker", "")
-            if "O:" in sym or (len(sym) > 15 and any(c.isdigit() for c in sym)):
-                s["display_symbol"] = format_occ_symbol_readable(sym)
-            else:
-                s["display_symbol"] = sym
-
-            if "order_json" in s and "legs" in s["order_json"]:
-                for leg in s["order_json"]["legs"]:
-                    if "symbol" in leg:
-                        leg["display_symbol"] = format_occ_symbol_readable(leg["symbol"])
-
-        return {"suggestions": suggestions}
-    except Exception as e:
-        print(f"Error fetching suggestions: {e}")
-        raise HTTPException(status_code=500, detail="Failed to fetch suggestions")
-
+class DriftSummaryResponse(BaseModel):
+    window_days: int
+    total_suggestions: int
+    disciplined_execution: int
+    impulse_trades: int
+    size_violations: int
+    disciplined_rate: float
+    impulse_rate: float
+    size_violation_rate: float
 
 @app.get("/weekly-reports")
 async def get_weekly_reports(
@@ -1157,9 +1016,6 @@ async def sync_holdings(
     user_id: str = Depends(get_current_user),
     supabase: Client = Depends(get_supabase_user_client)
 ):
-    # ... (Same implementation as above, elided for brevity in this manual thought block but included in output)
-    # Re-pasting the function body for completeness in the file write
-
     # 1. Log Audit
     if supabase:
         try:
@@ -1249,7 +1105,7 @@ async def sync_holdings(
         # Log Sync Completed
         analytics_service.log_event(user_id, "plaid_sync_completed", "system", {"status": "success"})
 
-        # 6. Drift Audit (Phase 2)
+        # 6. Drift Audit
         if supabase:
             try:
                 snap_res = supabase.table("portfolio_snapshots").select("*").eq("user_id", user_id).order("created_at", desc=True).limit(1).execute()

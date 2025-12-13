@@ -1,5 +1,5 @@
 from datetime import datetime, date, timedelta
-from typing import List, Dict, Optional, Any
+from typing import List, Dict, Optional, Any, Tuple
 import logging
 import numpy as np
 from ..models import OptionContract, OptionType
@@ -79,98 +79,6 @@ class IVPointService:
         }
 
     # --- IV Surface Helpers ---
-
-    def compute_atm_iv_target_from_chain(self, chain: List[Dict], spot: float, as_of_ts: datetime, target_dte: int = 30) -> Optional[float]:
-        """
-        Interpolates ATM IV for a specific DTE target from a raw option chain.
-        Expects chain to have 'strike', 'expiration', 'implied_volatility', 'type'.
-        """
-        if not chain or spot <= 0:
-            return None
-
-        # 1. Filter for relevant expirations (near term)
-        target_date = as_of_ts.date() + timedelta(days=target_dte)
-
-        # Group by expiry
-        expiries = {}
-        for c in chain:
-            # Parse expiry if string
-            exp = c.get('expiration')
-            if isinstance(exp, str):
-                try:
-                    exp = datetime.strptime(exp, "%Y-%m-%d").date()
-                except ValueError:
-                    continue
-            elif isinstance(exp, (datetime, date)):
-                exp = exp if isinstance(exp, date) else exp.date()
-            else:
-                continue
-
-            dte = (exp - as_of_ts.date()).days
-            if dte < 5 or dte > 120: continue # Focus on liquid near term
-
-            if dte not in expiries: expiries[dte] = []
-            expiries[dte].append(c)
-
-        if not expiries:
-            return None
-
-        # 2. Find two closest expirations
-        sorted_dtes = sorted(expiries.keys())
-        # Ideally find one before and one after target_dte
-        lower_dte = next((d for d in reversed(sorted_dtes) if d <= target_dte), None)
-        upper_dte = next((d for d in sorted_dtes if d >= target_dte), None)
-
-        if not lower_dte and not upper_dte: return None
-        if not lower_dte: lower_dte = upper_dte
-        if not upper_dte: upper_dte = lower_dte
-
-        # Helper to get ATM IV for a specific expiry
-        def get_expiry_atm(dte_chain):
-            # Filter for strikes near spot
-            # Simple approach: find straddle or closest OTM call/put average
-            strikes = sorted(list(set(c['strike'] for c in dte_chain)))
-            if not strikes: return None
-
-            # Find closest strike
-            closest_strike = min(strikes, key=lambda x: abs(x - spot))
-
-            # Get IVs for closest strike
-            ivs = [c.get('implied_volatility') for c in dte_chain
-                   if c['strike'] == closest_strike and c.get('implied_volatility') is not None]
-
-            valid_ivs = [iv for iv in ivs if iv > 0]
-            if not valid_ivs: return None
-            return sum(valid_ivs) / len(valid_ivs)
-
-        iv_lower = get_expiry_atm(expiries[lower_dte])
-        iv_upper = get_expiry_atm(expiries[upper_dte])
-
-        if iv_lower is None or iv_upper is None:
-            return iv_lower or iv_upper
-
-        # 3. Time Weighted Interpolation
-        if lower_dte == upper_dte:
-            return iv_lower
-
-        # Linear interpolation by square root of time (variance)? Or just linear time?
-        # Standard: Linear in total variance (sigma^2 * t)
-        t_target = target_dte / 365.0
-        t_lower = lower_dte / 365.0
-        t_upper = upper_dte / 365.0
-
-        var_lower = (iv_lower ** 2) * t_lower
-        var_upper = (iv_upper ** 2) * t_upper
-
-        weight = (t_target - t_lower) / (t_upper - t_lower)
-        var_target = var_lower + weight * (var_upper - var_lower)
-
-        return np.sqrt(var_target / t_target)
-
-    def compute_skew_25d_from_chain(self, chain: List[Dict], spot: float, as_of_ts: datetime, target_dte: int = 30) -> float:
-        Legacy wrapper for backward compatibility. Calls new generic method with target=30.
-        """
-        return IVPointService.compute_atm_iv_target_from_chain(chain_results, spot, as_of_ts, target_dte=30)
 
     @staticmethod
     def compute_atm_iv_target_from_chain(
@@ -290,7 +198,6 @@ class IVPointService:
             return None
 
         # 1. Isolate options near target DTE (e.g. 30 days)
-        # We find the single expiry closest to target_dte
         grouped = IVPointService._group_by_expiry(chain_results)
         today = as_of_ts.date()
 
@@ -312,19 +219,10 @@ class IVPointService:
             return None
 
         # 2. Find 25 delta Put and Call
-        # We need: Put with delta ~ -0.25, Call with delta ~ 0.25
-
-        call_iv_25 = None
-        put_iv_25 = None
-        atm_iv = None
-
-        # Sort by strike
-        # Try to use delta first
         calls = [c for c in best_contracts if c.get('details', {}).get('contract_type') == 'call']
         puts = [c for c in best_contracts if c.get('details', {}).get('contract_type') == 'put']
 
         def get_iv_at_delta(options, target_delta):
-            # Sort by delta distance
             candidates = []
             for opt in options:
                 greeks = opt.get('greeks') or {}
@@ -337,20 +235,12 @@ class IVPointService:
                 return None
 
             candidates.sort(key=lambda x: x[0])
-            # Check if closest is reasonable (within 0.05 delta)
-            if candidates[0][0] < 0.10:
+            if candidates[0][0] < 0.10: # Within 0.10 delta
                 return candidates[0][1]
             return None
 
         call_iv_25 = get_iv_at_delta(calls, 0.25)
         put_iv_25 = get_iv_at_delta(puts, -0.25)
-
-        # Fallback to Moneyness if Delta missing
-        # 25 delta approx OTM? It depends on vol.
-        # Rough heuristic: 5-10% OTM?
-        # Better: just use closest strikes if delta missing?
-        # Let's stick to Delta required for now to ensure quality.
-        # If delta is missing from Polygon snapshot, we can't reliably compute skew without Black-Scholes inversion.
 
         if call_iv_25 is None or put_iv_25 is None:
             return None
@@ -363,7 +253,6 @@ class IVPointService:
             return None
 
         # Skew = (PutIV - CallIV) / ATM IV
-        # Positive skew means Puts are more expensive (typical equity skew)
         skew = (put_iv_25 - call_iv_25) / atm_iv
         return skew
 
@@ -376,7 +265,6 @@ class IVPointService:
         """
         Computes Term Slope: IV_90d - IV_30d
         """
-        # We can reuse compute_atm_iv_target_from_chain
         iv_30 = IVPointService.compute_atm_iv_target_from_chain(chain_results, spot, as_of_ts, target_dte=30.0)
         iv_90 = IVPointService.compute_atm_iv_target_from_chain(chain_results, spot, as_of_ts, target_dte=90.0)
 
@@ -388,83 +276,8 @@ class IVPointService:
     @staticmethod
     def _compute_atm_iv_for_expiry(contracts: List[Dict], spot: float) -> Tuple[Optional[float], Optional[float], int]:
         """
-        Computes 25-delta Skew (Put IV - Call IV) / ATM IV.
-        Approximates 25-delta using moneyness if delta not available.
+        Computes ATM IV for a specific expiry by finding closest strike to spot.
         """
-        # Approximate 25d strike distance (very rough, assumes BS)
-        # 25d put is approx at spot * exp(-0.67 * sigma * sqrt(t))
-
-        atm_iv = self.compute_atm_iv_target_from_chain(chain, spot, as_of_ts, target_dte)
-        if not atm_iv: return 0.0
-
-        t = target_dte / 365.0
-        sigma = atm_iv
-
-        # Estimate strikes
-        # Standard deviation move
-        std_dev = sigma * np.sqrt(t)
-
-        # 25 Delta is roughly 0.67 std devs OTM?
-        # N(d1) = 0.25 -> d1 approx -0.67
-        # Strike approx: K = S * exp(0.67 * sigma * sqrt(t)) ?? No.
-        # Let's use simple percentage OTM proxy for now if Greeks missing
-        # 25 delta put approx 90-95% moneyness for 30d?
-        # Rule of thumb: 1 SD move
-
-        put_strike_target = spot * (1 - 0.7 * std_dev) # Roughly 25d
-        call_strike_target = spot * (1 + 0.7 * std_dev) # Roughly 25d
-
-        # Find IVs at these strikes for target expiry
-        # We need to interpolate across strikes
-
-        # Re-use expiry filtering logic
-        # ... (Simplified: just grab all contracts in 20-40 DTE window)
-        relevant_contracts = []
-        for c in chain:
-            # Parse expiry
-            exp = c.get('expiration')
-            if isinstance(exp, str):
-                try: exp = datetime.strptime(exp, "%Y-%m-%d").date()
-                except: continue
-            elif isinstance(exp, (datetime, date)):
-                exp = exp if isinstance(exp, date) else exp.date()
-
-            dte = (exp - as_of_ts.date()).days
-            if 20 <= dte <= 40:
-                relevant_contracts.append(c)
-
-        if not relevant_contracts: return 0.0
-
-        # Find closest Put and Call
-        put_ivs = [c['implied_volatility'] for c in relevant_contracts
-                   if c.get('type') == 'put' and c.get('implied_volatility')]
-        put_strikes = [c['strike'] for c in relevant_contracts
-                       if c.get('type') == 'put' and c.get('implied_volatility')]
-
-        call_ivs = [c['implied_volatility'] for c in relevant_contracts
-                    if c.get('type') == 'call' and c.get('implied_volatility')]
-        call_strikes = [c['strike'] for c in relevant_contracts
-                        if c.get('type') == 'call' and c.get('implied_volatility')]
-
-        if not put_ivs or not call_ivs: return 0.0
-
-        # Interpolate Put IV
-        put_iv = np.interp(put_strike_target, put_strikes, put_ivs)
-        call_iv = np.interp(call_strike_target, call_strikes, call_ivs)
-
-        # Skew = (Put IV - Call IV)
-        return (put_iv - call_iv)
-
-    def compute_term_slope(self, chain: List[Dict], spot: float, as_of_ts: datetime) -> float:
-        """
-        Computes term structure slope: (IV_90d - IV_30d) / IV_30d
-        """
-        iv_30 = self.compute_atm_iv_target_from_chain(chain, spot, as_of_ts, target_dte=30)
-        iv_90 = self.compute_atm_iv_target_from_chain(chain, spot, as_of_ts, target_dte=90)
-
-        if iv_30 and iv_90 and iv_30 > 0:
-            return (iv_90 - iv_30) / iv_30
-        return 0.0
         if not contracts:
             return None, None, 100
 

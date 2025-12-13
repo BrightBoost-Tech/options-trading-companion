@@ -15,7 +15,7 @@ from .analytics_service import AnalyticsService
 
 # Importing existing logic
 from packages.quantum.options_scanner import scan_for_opportunities, classify_iv_regime
-from packages.quantum.analytics.regime_engine_v3 import RegimeEngineV3, RegimeState
+from packages.quantum.analytics.regime_engine_v3 import RegimeEngineV3, RegimeState, GlobalRegimeSnapshot
 from packages.quantum.models import Holding
 from packages.quantum.market_data import PolygonService
 from packages.quantum.ev_calculator import calculate_exit_metrics
@@ -23,7 +23,6 @@ from packages.quantum.analytics.loss_minimizer import LossMinimizer
 from packages.quantum.analytics.conviction_service import ConvictionService
 from packages.quantum.services.iv_repository import IVRepository
 from packages.quantum.services.iv_point_service import IVPointService
-from packages.quantum.analytics.regime_engine_v3 import RegimeEngineV3, GlobalRegimeSnapshot, RegimeState
 
 # v3 Observability
 from packages.quantum.observability.telemetry import TradeContext, compute_features_hash, emit_trade_event
@@ -65,17 +64,14 @@ async def run_morning_cycle(supabase: Client, user_id: str):
     market_data = PolygonService()
     iv_repo = IVRepository(supabase)
     iv_point_service = IVPointService(supabase)
-    regime_engine = RegimeEngineV3(market_data, iv_repo, iv_point_service)
+    regime_engine = RegimeEngineV3(supabase, market_data, iv_repo, iv_point_service)
 
     global_snap = regime_engine.compute_global_snapshot(datetime.now())
     # Try to persist global snapshot
     try:
         supabase.table("regime_snapshots").insert(global_snap.to_dict()).execute()
     except Exception:
-        pass # Non-blocking
-    # Initialize Regime Engine V3
-    regime_engine = RegimeEngineV3(supabase, truth_layer)
-    global_snap = regime_engine.compute_global_snapshot(datetime.utcnow())
+        pass
 
     suggestions = []
 
@@ -93,6 +89,7 @@ async def run_morning_cycle(supabase: Client, user_id: str):
         net_delta = 0.0
         iv_rank = 50.0 # Default fallback
         iv_regime = "normal"
+        effective_regime_state = RegimeState.NORMAL
 
         ref_symbol = legs[0]["symbol"]
 
@@ -101,24 +98,11 @@ async def run_morning_cycle(supabase: Client, user_id: str):
             leg_symbols = [l["symbol"] for l in legs]
             snapshots = truth_layer.snapshot_many(leg_symbols)
 
-            # V3: Use Regime Engine for Symbol Snapshot
-            # We can use Truth Layer for IV context still, or switch to V3 Symbol Snapshot if efficient.
-            # V3 Symbol Snapshot requires IV Repository.
-            # Let's keep using truth layer for basic data but enrich with V3 state if possible.
-
-            # Calculate symbol snapshot
-            sym_snap = regime_engine.compute_symbol_snapshot(underlying, datetime.now(), global_snap)
-            # Persist symbol snapshot? Maybe too heavy for loop. Skipping persistence for now.
-
-            effective_regime = regime_engine.get_effective_regime(sym_snap, global_snap)
-            iv_regime = effective_regime.value # e.g. "shock", "suppressed"
-
-            iv_rank_score = sym_snap.features.get("iv_rank", 50.0)
-            # Fetch IV Context via Regime Engine (Symbol Snapshot)
+            # V3 Symbol Snapshot
             sym_snap = regime_engine.compute_symbol_snapshot(underlying, global_snap)
             effective_regime_state = regime_engine.get_effective_regime(sym_snap, global_snap)
 
-            # Map back to legacy string for existing consumers
+            # Legacy mapping
             iv_regime = regime_engine.map_to_scoring_regime(effective_regime_state)
             iv_rank_score = sym_snap.iv_rank if sym_snap.iv_rank is not None else 50.0
 
@@ -135,18 +119,17 @@ async def run_morning_cycle(supabase: Client, user_id: str):
 
                 net_delta += delta * qty
 
-            # Use IV from context as reference? Or stick to IV from options?
+            # Use IV from context as reference
             norm_ref = truth_layer.normalize_symbol(ref_symbol)
             first_snap = snapshots.get(norm_ref, {})
             iv_decimal = first_snap.get("iv")
             if iv_decimal is None:
                  iv_decimal = 0.5 # fallback
 
-            iv_rank = iv_decimal # variable naming in old code was confusing, using decimal for EV calc
-
         except Exception as e:
             print(f"Error fetching greeks for {ref_symbol}: {e}")
             iv_decimal = 0.5
+            iv_rank_score = 50.0
 
         # Calculate spread financials
         for leg in legs:
@@ -180,12 +163,9 @@ async def run_morning_cycle(supabase: Client, user_id: str):
 
         if metrics.expected_value > 0 and metrics.limit_price > unit_price:
 
-            # Map V3 regime to legacy string for stats lookup if needed
-            legacy_regime = regime_engine.map_to_scoring_regime(effective_regime)
-
             hist_stats = ExitStatsService.get_stats(
                 underlying=underlying,
-                regime=legacy_regime,
+                regime=iv_regime,
                 strategy="take_profit_limit",
                 supabase_client=supabase
             )
@@ -250,10 +230,10 @@ async def run_morning_cycle(supabase: Client, user_id: str):
                     "context": {
                         "iv_rank": iv_rank_score,
                         "iv_regime": iv_regime,
-                        "global_state": global_snap.state.value
-                        "regime_v3_global": global_snap.state,
-                        "regime_v3_symbol": sym_snap.state,
-                        "regime_v3_effective": effective_regime_state
+                        "global_state": global_snap.state.value,
+                        "regime_v3_global": global_snap.state.value,
+                        "regime_v3_symbol": sym_snap.state.value,
+                        "regime_v3_effective": effective_regime_state.value
                     },
                     "spread_details": {
                         "underlying": underlying,
@@ -337,7 +317,7 @@ async def run_midday_cycle(supabase: Client, user_id: str):
     market_data = PolygonService()
     iv_repo = IVRepository(supabase)
     iv_point_service = IVPointService(supabase)
-    regime_engine = RegimeEngineV3(market_data, iv_repo, iv_point_service)
+    regime_engine = RegimeEngineV3(supabase, market_data, iv_repo, iv_point_service)
 
     global_snap = regime_engine.compute_global_snapshot(datetime.now())
     # Try to persist global snapshot
@@ -349,11 +329,6 @@ async def run_midday_cycle(supabase: Client, user_id: str):
     # 2. Call Scanner (market-wide)
     candidates = []
     scout_results = []
-
-    # Initialize Regime Engine V3
-    truth_layer = MarketDataTruthLayer()
-    regime_engine = RegimeEngineV3(supabase, truth_layer)
-    global_snap = regime_engine.compute_global_snapshot(datetime.utcnow())
 
     try:
         scout_results = scan_for_opportunities(supabase_client=supabase)
@@ -388,23 +363,18 @@ async def run_midday_cycle(supabase: Client, user_id: str):
         ticker = cand.get("ticker") or cand.get("symbol")
         strategy = cand.get("strategy") or cand.get("type") or "unknown"
 
-        # Compute Symbol Regime
+        # V3: Compute Symbol Snapshot
         sym_snap = regime_engine.compute_symbol_snapshot(ticker, global_snap)
-        effective_regime_state = regime_engine.get_effective_regime(sym_snap, global_snap)
-        scoring_regime = regime_engine.map_to_scoring_regime(effective_regime_state)
+        effective_regime = regime_engine.get_effective_regime(sym_snap, global_snap)
+        effective_regime_str = effective_regime.value
+        scoring_regime = regime_engine.map_to_scoring_regime(effective_regime)
 
         # Extract pricing info. structure of candidate varies, assuming basic keys
-        # The scanner returns dicts with 'suggested_entry', 'ev', etc.
         price = float(cand.get("suggested_entry", 0))
         ev = float(cand.get("ev", 0))
 
         if price <= 0:
             continue
-
-        # V3: Compute Symbol Snapshot
-        sym_snap = regime_engine.compute_symbol_snapshot(ticker, datetime.now(), global_snap)
-        effective_regime = regime_engine.get_effective_regime(sym_snap, global_snap)
-        effective_regime_str = effective_regime.value
 
         sizing = calculate_sizing(
             account_buying_power=deployable_capital,
@@ -431,19 +401,18 @@ async def run_midday_cycle(supabase: Client, user_id: str):
             if "context" not in sizing:
                 sizing["context"] = {
                     "iv_rank": cand.get("iv_rank"),
-                    "iv_regime": effective_regime_str,
-                    "global_state": global_snap.state.value
                     "iv_regime": scoring_regime,
-                    "regime_v3_global": global_snap.state,
-                    "regime_v3_symbol": sym_snap.state,
-                    "regime_v3_effective": effective_regime_state
+                    "global_state": global_snap.state.value,
+                    "regime_v3_global": global_snap.state.value,
+                    "regime_v3_symbol": sym_snap.state.value,
+                    "regime_v3_effective": effective_regime_str
                 }
             else:
                 # Update existing context
                 sizing["context"].update({
-                    "regime_v3_global": global_snap.state,
-                    "regime_v3_symbol": sym_snap.state,
-                    "regime_v3_effective": effective_regime_state,
+                    "regime_v3_global": global_snap.state.value,
+                    "regime_v3_symbol": sym_snap.state.value,
+                    "regime_v3_effective": effective_regime_str,
                     "iv_regime": scoring_regime # ensure consistency
                 })
 

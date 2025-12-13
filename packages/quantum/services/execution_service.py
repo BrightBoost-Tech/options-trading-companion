@@ -13,6 +13,7 @@ class ExecutionDragStats(TypedDict):
     avg_slip_bps: float            # basis points vs target_price
     avg_fees: float                # dollars
     avg_drag: float                # dollars = avg_abs_slip + avg_fees
+    source: str                    # "history"
 
 class ExecutionService:
     def __init__(self, supabase: Client):
@@ -104,6 +105,7 @@ class ExecutionService:
         try:
             # Step 1: Pull executions in ONE query
             # Using 'timestamp' as it is explicitly populated by register_execution.
+            # Removed .limit() to avoid cross-symbol starvation.
             query = self.supabase.table(self.executions_table)\
                 .select("symbol, fill_price, fees, suggestion_id")\
                 .eq("user_id", user_id)\
@@ -112,7 +114,7 @@ class ExecutionService:
                 .neq("fill_price", None)\
                 .gte("timestamp", cutoff_date)
 
-            ex_res = query.order("timestamp", desc=True).limit(1000).execute()
+            ex_res = query.order("timestamp", desc=True).execute()
             executions = ex_res.data or []
 
             if not executions:
@@ -182,7 +184,8 @@ class ExecutionService:
                     "avg_abs_slip": agg["sum_abs_slip"] / n,
                     "avg_slip_bps": agg["sum_slip_bps"] / n,
                     "avg_fees": agg["sum_fees"] / n,
-                    "avg_drag": agg["sum_drag"] / n
+                    "avg_drag": agg["sum_drag"] / n,
+                    "source": "history"
                 }
 
         except Exception as e:
@@ -232,23 +235,7 @@ class ExecutionService:
             spread_pct = 0.005 # 0.5% default assumption
 
         # Assumption: Drag is roughly half the spread + some fees
-        # Price is unknown here so we assume a nominal price or just return a fixed proxy?
-        # The previous implementation called `get_execution_drag_stats(symbol)` which returned 0.05 default.
-        # But now `get_execution_drag_stats` requires user_id.
-
-        # If we don't have price, we can't do spread_pct * price.
-        # But usually spread_pct is not enough, we need the spread amount.
-        # Previous implementation:
-        # base_cost = self.get_execution_drag_stats(symbol) -> returns float (0.05 default)
-
-        # We'll use a constant heuristic + spread scaling if possible, or just a flat value.
-        # Let's stick to the previous default 0.05 if spread_pct is missing or low.
-
-        # But wait, the scanner passes spread_pct.
-        # Scanner logic: estimated_cost_raw = (trade_dict['bid_ask_spread'] * 0.5) + (len(legs)*0.0065)
-
-        # Here we are returning a per-share cost estimate.
-        # Let's return a safe default.
+        # Return a safe default.
         return 0.05
 
     def simulate_fill(self,

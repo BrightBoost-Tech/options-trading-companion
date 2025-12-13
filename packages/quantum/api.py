@@ -61,8 +61,6 @@ from packages.quantum.services.risk_engine import RiskEngine
 from packages.quantum.services.iv_repository import IVRepository
 from packages.quantum.services.iv_point_service import IVPointService
 from packages.quantum.analytics.regime_engine_v3 import RegimeEngineV3, GlobalRegimeSnapshot, RegimeState
-# IVRegimeService removed: RegimeEngineV3 is the authority now.
-# from packages.quantum.analytics.iv_regime_service import IVRegimeService
 
 # v3 Observability
 from packages.quantum.observability.telemetry import TradeContext, compute_features_hash, emit_trade_event
@@ -250,13 +248,6 @@ async def execute_rebalance(
     except Exception as e:
         print(f"Failed to persist global regime snapshot: {e}")
 
-    # Step D2: Replace with RegimeEngineV3 snapshot-derived decisions only
-    # No more IVRegimeService usage.
-
-    # We still need iv_rank for conviction service, let's get it via RegimeEngine logic if possible
-    # or just use what we have in symbol snapshots.
-    # But for positions_for_conviction, we need to iterate positions.
-
     positions_for_conviction: List[PositionDescriptor] = []
 
     # Pre-fetch regime snapshots for portfolio symbols if needed, or compute on fly.
@@ -314,98 +305,6 @@ async def execute_rebalance(
     if not tickers:
         return {"status": "ok", "message": "No assets to rebalance", "count": 0}
 
-    # Helper function for heavy compute
-    def run_optimizer_logic():
-        from packages.quantum.market_data import calculate_portfolio_inputs
-        import numpy as np
-
-        unique_underlyings = list(set([s.underlying for s in current_spreads]))
-
-        try:
-             inputs = calculate_portfolio_inputs(unique_underlyings)
-             base_mu = inputs['expected_returns']
-             base_sigma = inputs['covariance_matrix']
-             base_idx_map = {u: i for i, u in enumerate(unique_underlyings)}
-
-             n = len(tickers)
-             mu = np.zeros(n)
-             sigma = np.zeros((n, n))
-
-             # Apply Risk Scaler from Regime Engine to Sigma
-             scaler = global_snap.risk_scaler
-             if scaler < 0.1: scaler = 0.1 # Safety floor
-             sigma_multiplier = 1.0 / scaler
-
-             for i in range(n):
-                 u_i = current_spreads[i].underlying
-                 idx_i = base_idx_map.get(u_i)
-                 mu[i] = base_mu[idx_i] if idx_i is not None else 0.05
-                 for j in range(n):
-                     u_j = current_spreads[j].underlying
-                     idx_j = base_idx_map.get(u_j)
-                     if idx_i is not None and idx_j is not None:
-                         sigma[i, j] = base_sigma[idx_i][idx_j]
-                     else:
-                         if i==j: sigma[i, j] = 0.1
-
-             # Apply Regime Scaling
-             sigma = sigma * (sigma_multiplier ** 2)
-
-             coskew = np.zeros((n, n, n))
-
-             target_weights, _, _, trace_id, _, _, _, _ = _compute_portfolio_weights(
-                 mu, sigma, coskew, tickers, current_spreads, opt_req, user_id, total_val, cash,
-                 external_risk_scaler=global_snap.risk_scaler
-             )
-
-             red_flags = []
-             if not trace_id:
-                 red_flags.append("optimizer_trace_missing")
-
-             spread_map = {s.ticker: s for s in current_spreads}
-
-             targets = []
-             for sym, w in target_weights.items():
-                 spread_obj = spread_map.get(sym)
-                 strat_type = spread_obj.spread_type if spread_obj else "other"
-
-                 regime_key = global_snap.state.value
-
-                 # Step D3: Ensure no remaining references to IVRegimeService context
-                 # Retrieve Regime for conviction call via V3 logic if needed,
-                 # but calculate_dynamic_target uses regime_key which is from global_snap.state.value
-
-                 # Previously: ctx = iv_ctx_map.get(sym, {}) -> regime = ctx.get("iv_regime", current_regime_scoring)
-                 # Now: we trust global regime for the broad constraint logic OR we can use symbol specific regime?
-                 # calculate_dynamic_target generally wants the global regime to set the "tone" or specific symbol regime?
-                 # Looking at logic: regime=regime_key passed to calculate_dynamic_target.
-                 # Global Regime is 'normal', 'suppressed', 'shock'.
-                 # If we want symbol specific, we'd use symbol_snapshot.
-                 # But rebalance usually operates on macro regime.
-                 # The previous code used IVRegimeService which returned "iv_regime" per symbol (based on IV Rank).
-                 # So it WAS symbol-specific.
-                 # To replicate that using RegimeEngineV3:
-
-                 # sym_snap = regime_engine.compute_symbol_snapshot(sym, global_snap)
-                 # effective = regime_engine.get_effective_regime(sym_snap, global_snap)
-                 # regime_key_symbol = effective.value
-
-                 # But since we are inside a loop, we can't easily access regime_engine services (async/thread issues maybe? No, we passed args).
-                 # Wait, we are inside run_optimizer_logic which runs in thread pool.
-                 # regime_engine instance is outside.
-                 # We should probably pre-calculate regimes map before entering thread pool.
-
-                 # However, since the prompt says "Replace with RegimeEngineV3 snapshot-derived decisions only",
-                 # and D2 says "effective_regime = regime_engine.get_effective_regime(...)".
-                 # I will follow that. But I need to pass the map in.
-                 pass # Logic continues below...
-
-             return targets, trace_id, red_flags, regime_key, spread_map
-
-        except Exception as e:
-            print(f"Optimization failed during rebalance: {e}")
-            raise e
-
     # Pre-calculate symbol regimes to pass to thread
     symbol_regime_map = {}
     for t in tickers:
@@ -413,8 +312,8 @@ async def execute_rebalance(
         eff = regime_engine.get_effective_regime(s_snap, global_snap)
         symbol_regime_map[t] = eff.value
 
-    # Update Helper function to use pre-calculated map
-    def run_optimizer_logic_v2():
+    # Helper function for heavy compute
+    def run_optimizer_logic():
         from packages.quantum.market_data import calculate_portfolio_inputs
         import numpy as np
 
@@ -509,7 +408,7 @@ async def execute_rebalance(
     loop = asyncio.get_event_loop()
     with ThreadPoolExecutor() as pool:
         try:
-            targets, trace_id, red_flags, regime_val = await loop.run_in_executor(pool, run_optimizer_logic_v2)
+            targets, trace_id, red_flags, regime_val = await loop.run_in_executor(pool, run_optimizer_logic)
         except Exception as e:
              raise HTTPException(status_code=500, detail=f"Optimization failed: {e}")
 
@@ -641,7 +540,6 @@ async def preview_rebalance(
     global_snap = regime_engine.compute_global_snapshot(now) # Skip symbol snapshot for preview speed
 
     # Build positions for conviction service
-    # Replaced IVRegimeService with V3 logic
 
     positions_for_conviction: List[PositionDescriptor] = []
 

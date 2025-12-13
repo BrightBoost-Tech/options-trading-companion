@@ -72,20 +72,27 @@ def scan_for_opportunities(
         print(f"[Scanner] Regime computation failed: {e}. Using default.")
         global_snapshot = regime_engine._default_global_snapshot(datetime.now())
 
+    # Batch fetch execution drag for efficiency (ONCE)
+    drag_map = {}
+    if execution_service and user_id:
+        try:
+            # Step B2: Build symbol list early, then call batch stats ONCE
+            drag_map = execution_service.get_batch_execution_drag_stats(
+                user_id=user_id,
+                symbols=symbols,
+                lookback_days=45,
+                min_samples=3
+            )
+        except Exception as e:
+            print(f"[Scanner] Failed to fetch execution stats: {e}")
+
 
     # 3. Sequential Processing
+    # No longer batching for Execution Drag here, as it's done above.
     batch_size = 5
 
     for i in range(0, len(symbols), batch_size):
         batch = symbols[i : i + batch_size]
-
-        # Batch fetch execution drag for efficiency
-        batch_drag_stats = {}
-        if execution_service:
-            try:
-                batch_drag_stats = execution_service.get_batch_execution_drag_stats(batch, user_id=user_id)
-            except Exception:
-                pass
 
         for symbol in batch:
             try:
@@ -259,31 +266,43 @@ def scan_for_opportunities(
                     "type": "debit" if total_cost > 0 else "credit"
                 }
 
-                # Fetch Execution Drag History
-                historical_drag = batch_drag_stats.get(symbol, 0.0)
+                # Step B3: Inject expected execution cost
+                stats = drag_map.get(symbol)
+
+                # Default proxy
+                expected_execution_cost = None
+                drag_source = "proxy"
+                drag_samples = 0
+
+                if stats:
+                    expected_execution_cost = stats["avg_drag"]
+                    drag_source = "history"
+                    drag_samples = stats["n"]
+                else:
+                    # Use existing proxy mechanism if stats not available
+                    # We pass None and let unified_score handle it, OR we compute proxy here.
+                    # The prompt says: "if stats: expected = stats... else expected = proxy"
+                    # And then pass it to calculate_unified_score.
+                    if execution_service:
+                        expected_execution_cost = execution_service.estimate_execution_cost(symbol, spread_pct=spread_pct, user_id=None)
+                    else:
+                        expected_execution_cost = 0.05 # safe fallback
 
                 unified_score = calculate_unified_score(
                     trade=trade_dict,
                     regime_snapshot=global_snapshot.to_dict(),
                     market_data={"bid_ask_spread_pct": spread_pct},
-                    execution_drag_estimate=historical_drag
+                    execution_drag_estimate=expected_execution_cost
                 )
 
-                # Requirement: Hard-reject if execution cost > EV
-                # Execution Cost Points in score structure is scaled.
-                # We should check raw values.
-                # Expected Cost = (UnifiedScore calculates it internaly).
-                # We can replicate or check component score?
-                # Easier: if unified_score.score <= 0 due to cost?
-                # Actually, check raw EV vs Estimated Cost.
-                estimated_cost_raw = (trade_dict['bid_ask_spread'] * 0.5) + (len(legs)*0.0065)
-                # Use max of historical too
-                estimated_cost_raw = max(estimated_cost_raw, historical_drag)
-
-                if estimated_cost_raw > total_ev:
-                    # REJECT: Negative Expectancy after Cost
+                # Step B4: Hard rejection: execution drag > EV
+                if expected_execution_cost >= total_ev:
+                    # REJECT: Execution drag exceeds EV
+                    # store reject reason e.g. "execution_drag_exceeds_ev"
+                    # We continue loop, effectively skipping this candidate
                     continue
 
+                # Step B5: Persist in candidate details
                 candidates.append({
                     "symbol": symbol,
                     "ticker": symbol,
@@ -296,7 +315,10 @@ def scan_for_opportunities(
                     "iv_rank": iv_rank,
                     "trend": trend,
                     "legs": legs,
-                    "badges": unified_score.badges
+                    "badges": unified_score.badges,
+                    "execution_drag_estimate": expected_execution_cost,
+                    "execution_drag_samples": drag_samples,
+                    "execution_drag_source": drag_source
                 })
 
             except Exception as e:

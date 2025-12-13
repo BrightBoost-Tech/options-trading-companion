@@ -77,13 +77,64 @@ REGIME_STRATEGY_CAPS = {
         "single": 0.10,
         "other": 0.05,
     },
-    "high_vol": {
+    "suppressed": { # Low Vol: Buy Premium
+        "debit_call": 0.15,
+        "debit_put": 0.15,
+        "credit_call": 0.05,
+        "credit_put": 0.05,
+        "iron_condor": 0.04,
+        "vertical": 0.10,
+    },
+    "normal": {
+        "debit_call": 0.10,
+        "debit_put": 0.10,
+        "credit_call": 0.08,
+        "credit_put": 0.08,
+        "iron_condor": 0.05,
+    },
+    "elevated": { # High Vol: Sell Premium
         "credit_call": 0.12,
         "credit_put": 0.12,
         "debit_call": 0.06,
         "debit_put": 0.06,
-        "iron_condor": 0.03,
+        "iron_condor": 0.08,
     },
+    "high_vol": { # Alias for elevated
+        "credit_call": 0.12,
+        "credit_put": 0.12,
+        "debit_call": 0.06,
+        "debit_put": 0.06,
+        "iron_condor": 0.08,
+    },
+    "shock": { # Extreme Risk: Cut size drastically
+        "credit_call": 0.05,
+        "credit_put": 0.05,
+        "debit_call": 0.03,
+        "debit_put": 0.03,
+        "iron_condor": 0.03,
+        "vertical": 0.03,
+        "other": 0.02
+    },
+    "panic": { # Alias for shock
+        "credit_call": 0.05,
+        "credit_put": 0.05,
+        "debit_call": 0.03,
+        "debit_put": 0.03,
+        "iron_condor": 0.03,
+        "other": 0.02
+    },
+    "rebound": { # Sharp recovery: Favor calls/bull spreads
+        "debit_call": 0.12,
+        "credit_put": 0.12,
+        "debit_put": 0.05,
+        "credit_call": 0.05,
+    },
+    "chop": { # Range bound: Iron Condors / Calendars
+        "iron_condor": 0.10,
+        "calendar": 0.10,
+        "debit_call": 0.05,
+        "credit_call": 0.08,
+    }
 }
 
 def calculate_dynamic_target(
@@ -124,7 +175,7 @@ def _compute_portfolio_weights(
     total_portfolio_value: float,
     liquidity: float,
     force_baseline: bool = False,
-    collateral_list: List[float] = None
+    external_risk_scaler: Optional[float] = None
 ):
     """
     Internal helper to run the optimization logic once.
@@ -159,18 +210,32 @@ def _compute_portfolio_weights(
     # --- LAYER 2: GLOBAL BACKBONE ---
     if use_l2:
         try:
-            macro_service = PolygonService()
-            macro_features = compute_macro_features(macro_service)
-            global_ctx = infer_global_context(macro_features)
-            log_global_context(global_ctx)
-            g_scaler = global_ctx.global_risk_scaler
-            if g_scaler < 0.01: g_scaler = 0.01
-            sigma_multiplier = 1.0 / g_scaler
-            sigma = sigma * (sigma_multiplier ** 2)
-            diagnostics_nested["l2"] = asdict(global_ctx)
-            if global_ctx.global_regime == "shock":
-                local_req.profile = "conservative"
-                diagnostics_nested["crisis_mode_triggered_by"] = "l2_shock"
+            if external_risk_scaler is not None:
+                # Use provided scaler from RegimeEngineV3
+                g_scaler = external_risk_scaler
+                if g_scaler < 0.01: g_scaler = 0.01
+                sigma_multiplier = 1.0 / g_scaler
+                sigma = sigma * (sigma_multiplier ** 2)
+                diagnostics_nested["l2"] = {"source": "RegimeEngineV3", "risk_scaler": g_scaler}
+
+                # If scaler is very low (shock), force conservative
+                if g_scaler <= 0.6:
+                    local_req.profile = "conservative"
+                    diagnostics_nested["crisis_mode_triggered_by"] = "v3_shock"
+            else:
+                # Fallback to legacy backbone
+                macro_service = PolygonService()
+                macro_features = compute_macro_features(macro_service)
+                global_ctx = infer_global_context(macro_features)
+                log_global_context(global_ctx)
+                g_scaler = global_ctx.global_risk_scaler
+                if g_scaler < 0.01: g_scaler = 0.01
+                sigma_multiplier = 1.0 / g_scaler
+                sigma = sigma * (sigma_multiplier ** 2)
+                diagnostics_nested["l2"] = asdict(global_ctx)
+                if global_ctx.global_regime == "shock":
+                    local_req.profile = "conservative"
+                    diagnostics_nested["crisis_mode_triggered_by"] = "l2_shock"
         except Exception as e:
             print(f"Phase 3 L2 Error: {e}")
 
@@ -415,7 +480,7 @@ async def optimize_portfolio(req: OptimizationRequest, request: Request, user_id
         target_weights, diagnostics_nested, solver_type, trace_id, final_profile, weights_array, metrics_mu, metrics_sigma = _compute_portfolio_weights(
             mu, sigma, coskew, tickers, investable_assets, req, user_id,
             total_portfolio_value, liquidity, force_baseline=force_main_baseline,
-            collateral_list=collateral
+            external_risk_scaler=None # Default None for direct optimization calls unless we fetch it here too
         )
 
         if analytics and trace_id:

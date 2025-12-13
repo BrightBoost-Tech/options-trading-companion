@@ -15,6 +15,7 @@ from .analytics_service import AnalyticsService
 
 # Importing existing logic
 from packages.quantum.options_scanner import scan_for_opportunities, classify_iv_regime
+from packages.quantum.analytics.regime_engine_v3 import RegimeEngineV3, RegimeState
 from packages.quantum.models import Holding
 from packages.quantum.market_data import PolygonService
 from packages.quantum.ev_calculator import calculate_exit_metrics
@@ -57,6 +58,10 @@ async def run_morning_cycle(supabase: Client, user_id: str):
     # Initialize Market Data Truth Layer
     truth_layer = MarketDataTruthLayer()
 
+    # Initialize Regime Engine V3
+    regime_engine = RegimeEngineV3(supabase, truth_layer)
+    global_snap = regime_engine.compute_global_snapshot(datetime.utcnow())
+
     suggestions = []
 
     # 3. Generate Exit Suggestions per Spread
@@ -83,13 +88,13 @@ async def run_morning_cycle(supabase: Client, user_id: str):
             # Use snapshot_many for the options
             snapshots = truth_layer.snapshot_many(leg_symbols)
 
-            # Fetch IV Context (Rank/Regime) from Truth Layer using Underlying
-            # This fixes the bug where we were using option IV as rank
-            iv_ctx = truth_layer.iv_context(underlying)
-            iv_rank_score = iv_ctx.get("iv_rank", 50.0) # 0-100
-            if iv_rank_score is None: iv_rank_score = 50.0
+            # Fetch IV Context via Regime Engine (Symbol Snapshot)
+            sym_snap = regime_engine.compute_symbol_snapshot(underlying, global_snap)
+            effective_regime_state = regime_engine.get_effective_regime(sym_snap, global_snap)
 
-            iv_regime = iv_ctx.get("iv_regime") or classify_iv_regime(iv_rank_score)
+            # Map back to legacy string for existing consumers
+            iv_regime = regime_engine.map_to_scoring_regime(effective_regime_state)
+            iv_rank_score = sym_snap.iv_rank if sym_snap.iv_rank is not None else 50.0
 
             # Sum Deltas
             for leg in legs:
@@ -240,8 +245,11 @@ async def run_morning_cycle(supabase: Client, user_id: str):
                 "sizing_metadata": {
                     "reason": metrics.reason,
                     "context": {
-                        "iv_rank": iv_rank_score, # Use the Rank (0-100) here for metadata context!
-                        "iv_regime": iv_regime
+                        "iv_rank": iv_rank_score,
+                        "iv_regime": iv_regime,
+                        "regime_v3_global": global_snap.state,
+                        "regime_v3_symbol": sym_snap.state,
+                        "regime_v3_effective": effective_regime_state
                     },
                     "spread_details": {
                         "underlying": underlying,
@@ -348,6 +356,12 @@ async def run_midday_cycle(supabase: Client, user_id: str):
     # 2. Call Scanner (market-wide)
     candidates = []
     scout_results = []
+
+    # Initialize Regime Engine V3
+    truth_layer = MarketDataTruthLayer()
+    regime_engine = RegimeEngineV3(supabase, truth_layer)
+    global_snap = regime_engine.compute_global_snapshot(datetime.utcnow())
+
     try:
         # Let scan_for_opportunities use its built-in universe and StrategySelector
         # Pass supabase client to enable UniverseService
@@ -395,6 +409,11 @@ async def run_midday_cycle(supabase: Client, user_id: str):
     for cand in candidates:
         ticker = cand.get("ticker") or cand.get("symbol")
         strategy = cand.get("strategy") or cand.get("type") or "unknown"
+
+        # Compute Symbol Regime
+        sym_snap = regime_engine.compute_symbol_snapshot(ticker, global_snap)
+        effective_regime_state = regime_engine.get_effective_regime(sym_snap, global_snap)
+        scoring_regime = regime_engine.map_to_scoring_regime(effective_regime_state)
 
         # Extract pricing info. structure of candidate varies, assuming basic keys
         # The scanner returns dicts with 'suggested_entry', 'ev', etc.
@@ -452,8 +471,19 @@ async def run_midday_cycle(supabase: Client, user_id: str):
             if "context" not in sizing:
                 sizing["context"] = {
                     "iv_rank": cand.get("iv_rank"),
-                    "iv_regime": cand.get("iv_regime") or classify_iv_regime(cand.get("iv_rank"))
+                    "iv_regime": scoring_regime,
+                    "regime_v3_global": global_snap.state,
+                    "regime_v3_symbol": sym_snap.state,
+                    "regime_v3_effective": effective_regime_state
                 }
+            else:
+                # Update existing context
+                sizing["context"].update({
+                    "regime_v3_global": global_snap.state,
+                    "regime_v3_symbol": sym_snap.state,
+                    "regime_v3_effective": effective_regime_state,
+                    "iv_regime": scoring_regime # ensure consistency
+                })
 
             # Observability v3: Create Trade Context
             cand_features = {

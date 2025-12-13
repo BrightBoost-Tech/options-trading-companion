@@ -2,7 +2,7 @@ from datetime import datetime, date, timedelta
 from typing import List, Dict, Optional, Any, Tuple
 import logging
 import numpy as np
-from ..models import OptionContract, OptionType
+# Removed bad import: from ..models import OptionContract, OptionType
 
 logger = logging.getLogger(__name__)
 

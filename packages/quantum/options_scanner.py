@@ -13,23 +13,13 @@ from packages.quantum.ev_calculator import calculate_ev
 from packages.quantum.market_data import PolygonService
 from packages.quantum.analytics.regime_integration import map_market_regime
 from packages.quantum.services.iv_repository import IVRepository
-from packages.quantum.analytics.regime_engine_v3 import RegimeState
+from packages.quantum.analytics.regime_engine_v3 import RegimeEngineV3, GlobalRegimeSnapshot, RegimeState
+from packages.quantum.analytics.scoring import calculate_unified_score
 
 # Configuration
 SCANNER_LIMIT_DEV = int(os.getenv("SCANNER_LIMIT_DEV", "40")) # Limit universe in dev
 
 logger = logging.getLogger(__name__)
-
-def classify_iv_regime(iv_rank: float) -> str:
-    """Classifies IV Rank into Low/Normal/High/Extreme."""
-    if iv_rank < 20:
-        return "suppressed"
-    elif iv_rank < 50:
-        return "normal"
-    elif iv_rank < 80:
-        return "elevated"
-    else:
-        return "high"
 
 def scan_for_opportunities(
     symbols: List[str] = None,
@@ -45,6 +35,13 @@ def scan_for_opportunities(
     market_data = PolygonService()
     strategy_selector = StrategySelector()
     universe_service = UniverseService(supabase_client) if supabase_client else None
+
+    # Unified Regime Engine
+    regime_engine = RegimeEngineV3(
+        supabase_client=supabase_client,
+        market_data=market_data, # Use scanner's market data instance
+        iv_repository=IVRepository(supabase_client) if supabase_client else None,
+    )
 
     # 1. Determine Universe
     if not symbols:
@@ -64,7 +61,17 @@ def scan_for_opportunities(
 
     print(f"[Scanner] Processing {len(symbols)} symbols...")
 
-    # 2. Sequential Processing
+    # 2. Compute Global Regime Snapshot ONCE
+    # This ensures consistency for the entire scan batch
+    try:
+        global_snapshot = regime_engine.compute_global_snapshot(datetime.now())
+        print(f"[Scanner] Global Regime: {global_snapshot.state}")
+    except Exception as e:
+        print(f"[Scanner] Regime computation failed: {e}. Using default.")
+        global_snapshot = regime_engine._default_global_snapshot(datetime.now())
+
+
+    # 3. Sequential Processing
     batch_size = 5
 
     for i in range(0, len(symbols), batch_size):
@@ -79,34 +86,39 @@ def scan_for_opportunities(
                 current_price = quote.get("price")
                 if not current_price: continue
 
-                # Check Liquidity (Bid/Ask spread)
+                # B. Check Liquidity (Hard Rejection)
                 bid = quote.get("bid_price", 0)
                 ask = quote.get("ask_price", 0)
+                spread_pct = 0.0
+
                 if bid > 0 and ask > 0:
                     spread_pct = (ask - bid) / current_price
-                    if spread_pct > 0.10:
+                    # Dynamic Liquidity Threshold based on Regime
+                    threshold = 0.10 # Default
+                    if global_snapshot.state == RegimeState.SUPPRESSED:
+                         threshold = 0.20 # Allow wider spreads in low vol? Or maybe tighter?
+                         # Usually low vol = tighter spreads.
+                         # Actually, suppressed regime implies maybe low liquidity too if interest is low?
+                         # Let's say if regime is SHOCK, spreads blow out, so we must tolerate wider spreads?
+                         pass
+                    elif global_snapshot.state == RegimeState.SHOCK:
+                         threshold = 0.15 # Tolerate slightly wider
+
+                    if spread_pct > threshold:
+                        # REJECT: Liquidity
                         continue
+                else:
+                    # REJECT: No Quote
+                    continue
 
-                # B. Get IV Data
-                iv_rank = 50.0 # Default
-                effective_regime = None
+                # C. Compute Symbol Regime (Authoritative)
+                symbol_snapshot = regime_engine.compute_symbol_snapshot(symbol, global_snapshot)
+                effective_regime_state = regime_engine.get_effective_regime(symbol_snapshot, global_snapshot)
 
-                if supabase_client:
-                    try:
-                        repo = IVRepository(supabase_client)
-                        iv_ctx = repo.get_iv_context(symbol)
-                        iv_rank = iv_ctx.get("iv_rank", 50.0)
-                        if iv_rank is None: iv_rank = 50.0
+                iv_rank = symbol_snapshot.iv_rank or 50.0
 
-                        if iv_rank < 20: effective_regime = RegimeState.SUPPRESSED.value
-                        elif iv_rank > 80: effective_regime = RegimeState.ELEVATED.value
-                        elif iv_rank > 95: effective_regime = RegimeState.SHOCK.value
-                        else: effective_regime = RegimeState.NORMAL.value
-
-                    except Exception:
-                        pass
-
-                # C. Technical Analysis (Trend)
+                # D. Technical Analysis (Trend) - Kept simple for now, but should ideally move to RegimeEngine or FactorService
+                # For now, scanner does a quick check for StrategySelector
                 bars = market_data.get_historical_prices(symbol, days=60)
                 if not bars or len(bars) < 50:
                     continue
@@ -115,32 +127,35 @@ def scan_for_opportunities(
                 sma20 = np.mean(closes[-20:])
                 sma50 = np.mean(closes[-50:])
 
-                # Simple Trend Logic
                 trend = "NEUTRAL"
                 if closes[-1] > sma20 > sma50:
                     trend = "BULLISH"
                 elif closes[-1] < sma20 < sma50:
                     trend = "BEARISH"
 
-                # D. Strategy Selection
+                # E. Strategy Selection
+                # Convert authoritative regime enum to string for selector if needed, or update selector
+                # Assuming StrategySelector expects string "suppressed", "elevated", etc.
                 suggestion = strategy_selector.determine_strategy(
                     ticker=symbol,
                     sentiment=trend,
                     current_price=current_price,
                     iv_rank=iv_rank,
-                    effective_regime=effective_regime
+                    effective_regime=effective_regime_state.value
                 )
 
                 if suggestion["strategy"] == "HOLD":
                     continue
 
-                # E. Construct Contract & Calculate EV
+                # F. Construct Contract & Calculate EV
                 chain = market_data.get_option_chain(symbol, min_dte=25, max_dte=45)
                 if not chain: continue
 
                 legs = []
                 total_cost = 0.0
                 total_ev = 0.0
+
+                # ... (Leg selection logic remains mostly same, just ensuring we capture metrics for scoring)
 
                 for leg_def in suggestion["legs"]:
                      target_delta = leg_def["delta_target"]
@@ -182,7 +197,10 @@ def scan_for_opportunities(
                          "type": op_type,
                          "side": side,
                          "premium": premium,
-                         "delta": best_contract.get('delta') or target_delta
+                         "delta": best_contract.get('delta') or target_delta,
+                         "gamma": best_contract.get('gamma') or 0.0,
+                         "vega": best_contract.get('vega') or 0.0,
+                         "theta": best_contract.get('theta') or 0.0
                      })
 
                      if side == "buy":
@@ -190,9 +208,7 @@ def scan_for_opportunities(
                      else:
                          total_cost -= premium # Credit
 
-                # Compute Net EV and Score
-                trend_score = (sma20 / sma50 - 1.0) * 100 # % diff
-
+                # G. Compute Net EV
                 if len(legs) == 2:
                     long_leg = next((l for l in legs if l['side'] == 'buy'), None)
                     short_leg = next((l for l in legs if l['side'] == 'sell'), None)
@@ -202,7 +218,7 @@ def scan_for_opportunities(
 
                         ev_obj = calculate_ev(
                             premium=abs(total_cost),
-                            strike=long_leg['strike'], # Anchor
+                            strike=long_leg['strike'],
                             current_price=current_price,
                             delta=long_leg['delta'],
                             strategy=st_type,
@@ -223,14 +239,24 @@ def scan_for_opportunities(
                     )
                     total_ev = ev_obj.expected_value
 
-                score = 50.0 + (trend_score * 5.0)
-                if total_cost > 0:
-                    roi_ev = total_ev / total_cost if total_cost > 0 else 0
-                    score += roi_ev * 20.0
+                # H. Unified Scoring
+                trade_dict = {
+                    "ev": total_ev,
+                    "suggested_entry": abs(total_cost),
+                    "bid_ask_spread": abs(total_cost) * spread_pct, # Proxy spread width
+                    "strategy": suggestion["strategy"],
+                    "legs": legs,
+                    "vega": sum(l['vega'] if l['side']=='buy' else -l['vega'] for l in legs),
+                    "gamma": sum(l['gamma'] if l['side']=='buy' else -l['gamma'] for l in legs),
+                    "iv_rank": iv_rank,
+                    "type": "debit" if total_cost > 0 else "credit"
+                }
 
-                is_debit = total_cost > 0
-                if is_debit and iv_rank < 30: score += 10
-                if not is_debit and iv_rank > 50: score += 10
+                unified_score = calculate_unified_score(
+                    trade=trade_dict,
+                    regime_snapshot=global_snapshot.to_dict(), # Passing dict to score
+                    market_data={"bid_ask_spread_pct": spread_pct}
+                )
 
                 candidates.append({
                     "symbol": symbol,
@@ -239,14 +265,19 @@ def scan_for_opportunities(
                     "strategy": suggestion["strategy"],
                     "suggested_entry": abs(total_cost),
                     "ev": total_ev,
-                    "score": round(score, 1),
+                    "score": round(unified_score.score, 1),
+                    "unified_score_details": unified_score.components.dict(),
                     "iv_rank": iv_rank,
                     "trend": trend,
-                    "legs": legs
+                    "legs": legs,
+                    "badges": unified_score.badges
                 })
 
             except Exception as e:
                 print(f"[Scanner] Error processing {symbol}: {e}")
                 continue
+
+    # Sort by Unified Score descending
+    candidates.sort(key=lambda x: x['score'], reverse=True)
 
     return candidates

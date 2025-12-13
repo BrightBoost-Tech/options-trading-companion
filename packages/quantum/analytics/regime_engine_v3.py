@@ -10,16 +10,11 @@ from packages.quantum.services.iv_repository import IVRepository
 from packages.quantum.services.iv_point_service import IVPointService
 from packages.quantum.services.universe_service import UniverseService
 from packages.quantum.analytics.factors import calculate_trend, calculate_iv_rank
+from packages.quantum.common_enums import RegimeState
 
 logger = logging.getLogger(__name__)
 
-class RegimeState(str, Enum):
-    SUPPRESSED = "suppressed"
-    NORMAL = "normal"
-    ELEVATED = "elevated"
-    SHOCK = "shock"
-    REBOUND = "rebound"
-    CHOP = "chop"
+# Removed local RegimeState definition in favor of common_enums.py
 
 @dataclass
 class GlobalRegimeSnapshot:

@@ -308,31 +308,10 @@ def scan_for_opportunities(
     # Final Scoring
     final_candidates = []
     for cand in enriched_opportunities:
-        # Always recompute score to avoid stale or legacy constants
-        metrics = cand.get("metrics") or {}
-        iv_rank = metrics.get("iv_rank")
-        if iv_rank is None:
-            iv_rank = cand.get("iv_rank")
-
-        pop = metrics.get("probability_of_profit")
-        rr = metrics.get("reward_to_risk") or cand.get("reward_risk")
-
-        components = []
-        if iv_rank is not None:
-            components.append(iv_rank / 100.0)
-
-        if pop is not None:
-            components.append(pop)
-
-        if rr is not None:
-            components.append(min(rr, 3.0) / 3.0) # Cap R/R at 3 for scoring normalization
-
-        raw_score = 100 * sum(components) / len(components) if components else None
-
-        cand['score'] = raw_score
+        # V3 Scoring is already applied in enrich_trade_suggestions via OpportunityScorer
+        # We trust the score and metrics populated there.
 
         symbol = cand.get("symbol") or cand.get("ticker")
-
         metrics_debug = cand.get('metrics') or {}
 
         # Ensure suggested_entry is present
@@ -343,7 +322,7 @@ def scan_for_opportunities(
                  width = cand.get("width", 5)
                  cand["suggested_entry"] = width * 0.35
 
-        print(f"{symbol} score={cand.get('score')} ev={metrics_debug.get('expected_value')}")
+        print(f"{symbol} score={cand.get('score')} ev={metrics_debug.get('ev_amount')}")
 
         final_candidates.append(cand)
 

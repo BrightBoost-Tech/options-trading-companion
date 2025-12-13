@@ -1,7 +1,8 @@
 
 from typing import List, Dict, Any, Optional
 from packages.quantum.analytics.guardrails import is_earnings_safe, check_liquidity, sector_penalty, apply_slippage_guardrail
-from packages.quantum.analytics.scoring import calculate_otc_score, generate_badges
+from packages.quantum.analytics.scoring import generate_badges
+from packages.quantum.analytics.opportunity_scorer import OpportunityScorer
 from packages.quantum.analytics.sizing import calculate_contract_size
 from packages.quantum.services.exit_stats_service import ExitStatsService
 from supabase import Client
@@ -39,10 +40,14 @@ def enrich_trade_suggestions(
         trade['is_liquid'] = check_liquidity(symbol, symbol_market_data)
         trade['sector_penalty'] = sector_penalty(symbol, symbol_market_data, positions, portfolio_value)
 
-        # 2. Calculate OTC Score
-        trade['score'] = calculate_otc_score(trade, symbol_market_data)
+        # 2. V3 Scoring (Authoritative)
+        scored_output = OpportunityScorer.score(trade, symbol_market_data)
+        trade['score'] = scored_output['score']
+        trade['metrics'] = scored_output['metrics']
+        trade['penalties'] = scored_output['penalties']
+        trade['features_hash'] = scored_output['features_hash']
 
-        # 2b. Slippage Guardrail
+        # 2b. Slippage Guardrail (Optional: already in V3 scoring as liquidity_penalty, but kept for hard rejection)
         quote = {
             "bid": symbol_market_data.get("bid", 0.0),
             "ask": symbol_market_data.get("ask", 0.0),
@@ -53,7 +58,11 @@ def enrich_trade_suggestions(
             # Hard reject this trade – skip adding
             continue
 
-        trade['score'] *= slippage_mult
+        # Note: V3 Score already accounts for liquidity penalty, but slippage_mult might be a hard guardrail.
+        # If we keep it, it just reinforces the reject. We shouldn't double penalize the score if V3 already did.
+        # But 'apply_slippage_guardrail' returns 0.8 or 1.0.
+        # OpportunityScorer returns 0.9 or similar.
+        # Let's trust V3 scorer for the score value, but use guardrail for HARD rejection (0.0).
 
         # 3. Generate Badges
         trade['badges'] = generate_badges(trade, symbol_market_data)
@@ -63,7 +72,7 @@ def enrich_trade_suggestions(
             target_dollar_exposure=trade.get('value', 0),
             share_price=symbol_market_data.get('price', trade.get('est_price', 100)),
             option_delta=trade.get('delta', 0.5),
-            max_loss_per_contract=trade.get('max_loss', 500),
+            max_loss_per_contract=trade.get('metrics', {}).get('max_loss', 500),
             portfolio_value=portfolio_value
         )
 
@@ -79,7 +88,7 @@ def enrich_trade_suggestions(
 
         # 6. Generate Rationale
         rationale_parts = []
-        iv_rank_val = trade.get('iv_rank')
+        iv_rank_val = trade.get('iv_rank') or symbol_market_data.get('iv_rank')
         if iv_rank_val is not None and iv_rank_val > 50:
             rationale_parts.append(f"High IV Rank ({iv_rank_val:.2f})")
         if trade.get('trend') == "UP":

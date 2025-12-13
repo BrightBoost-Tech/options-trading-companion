@@ -6,6 +6,7 @@ import math
 from packages.quantum.models import SpreadPosition, Holding
 from packages.quantum.services.sizing_engine import calculate_sizing
 from packages.quantum.analytics.iv_regime_service import IVRegimeService
+from packages.quantum.analytics.regime_engine_v3 import RegimeState
 
 class RebalanceEngine:
     """

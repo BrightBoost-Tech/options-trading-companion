@@ -19,6 +19,9 @@ from packages.quantum.analytics.regime_integration import (
 from packages.quantum.analytics.factors import calculate_trend, calculate_volatility, calculate_rsi
 from packages.quantum.nested.backbone import infer_global_context, GlobalContext
 from packages.quantum.execution.transaction_cost_model import TransactionCostModel
+from analytics.factors import calculate_trend, calculate_volatility, calculate_rsi
+from nested.backbone import infer_global_context, GlobalContext
+from packages.quantum.services.transaction_cost_model import TransactionCostModel
 
 class BacktestRunResult(BaseModel):
     backtest_id: str
@@ -53,6 +56,9 @@ class BacktestEngine:
         """
         rng = random.Random(seed)
         backtest_id = str(uuid.uuid4())
+
+        # Initialize TCM
+        tcm = TransactionCostModel(cost_model)
 
         # 1. Fetch Data
         try:
@@ -94,11 +100,10 @@ class BacktestEngine:
                 break
 
         if start_idx == -1 or start_idx < self.lookback_window:
-             # Try to adjust if we have enough data but start_idx is too early
              if len(dates) > self.lookback_window and start_idx != -1:
-                 pass # Use found start_idx
+                 pass
              elif len(dates) > self.lookback_window:
-                 start_idx = self.lookback_window # Default to earliest possible
+                 start_idx = self.lookback_window
              else:
                 return BacktestRunResult(
                     backtest_id=backtest_id,
@@ -110,7 +115,7 @@ class BacktestEngine:
 
         # 2. Simulation State
         cash = initial_equity
-        position = None # { "quantity": float, "entry_price": float, "entry_date": str, "id": str }
+        position = None
         trades = []
         events = []
         equity_curve = []
@@ -121,7 +126,6 @@ class BacktestEngine:
             current_price = prices[i]
 
             # Helper to calculate scoring
-            # Slice strictly up to i inclusive
             price_slice = prices[:i+1]
 
             # --- Scoring Logic (Reused) ---
@@ -201,29 +205,28 @@ class BacktestEngine:
 
                 if should_exit:
                     # Execute Exit
-                    fill_price = self._simulate_fill(current_price, "sell", cost_model, rng)
-                    commission = cost_model.commission_per_contract * position["quantity"] # Simple per share/contract model
+                    fill = tcm.simulate_fill(current_price, position["quantity"], "sell", rng)
 
-                    gross_proceeds = fill_price * position["quantity"]
-                    net_proceeds = gross_proceeds - commission
+                    gross_proceeds = fill.fill_price * fill.filled_quantity
+                    net_proceeds = gross_proceeds - fill.commission_paid
 
                     cash += net_proceeds
 
                     trade_record = {
                         "trade_id": position["trade_id"],
                         "symbol": symbol,
-                        "direction": "long", # Only supporting long for now as per HistoricalCycleService logic
+                        "direction": "long",
                         "entry_date": position["entry_date"],
                         "entry_price": position["entry_price"],
                         "exit_date": current_date,
-                        "exit_price": fill_price,
+                        "exit_price": fill.fill_price,
                         "quantity": position["quantity"],
                         "pnl": net_proceeds - position["cost_basis"],
-                        "pnl_pct": (fill_price - position["entry_price"]) / position["entry_price"],
+                        "pnl_pct": (fill.fill_price - position["entry_price"]) / position["entry_price"],
                         "exit_reason": exit_reason,
                         "status": "closed",
-                        "commission_paid": position["commission"] + commission,
-                        "slippage_paid": (position["ideal_entry"] - position["entry_price"]) * position["quantity"] + (fill_price - current_price) * position["quantity"] # Approx
+                        "commission_paid": position["commission"] + fill.commission_paid,
+                        "slippage_paid": position["slippage"] + fill.slippage_paid
                     }
                     trades.append(trade_record)
 
@@ -231,9 +234,9 @@ class BacktestEngine:
                         "trade_id": position["trade_id"],
                         "event_type": "EXIT_FILLED",
                         "date": current_date,
-                        "price": fill_price,
+                        "price": fill.fill_price,
                         "quantity": position["quantity"],
-                        "details": {"reason": exit_reason, "commission": commission}
+                        "details": {"reason": exit_reason, "commission": fill.commission_paid}
                     })
 
                     position = None
@@ -249,40 +252,35 @@ class BacktestEngine:
                     trade_id = str(uuid.uuid4())
 
                     # Sizing
-                    risk_amt = cash * config.max_risk_pct_portfolio
-                    # Simplified: buying power = cash. Use max_risk_pct_portfolio as position size for now
-                    # Or adhere strictly:
-                    # If max_risk_pct_per_trade is risk (stop loss dist), calculate qty.
-                    # Here assuming simplified position sizing:
                     position_value = cash * config.max_risk_pct_portfolio
                     quantity = position_value / current_price
-                    if quantity < 1: quantity = 0 # Can't buy partial
+                    if quantity < 1: quantity = 0
 
                     if quantity > 0:
                         ideal_price = current_price
-                        fill_price = self._simulate_fill(current_price, "buy", cost_model, rng)
-                        commission = cost_model.commission_per_contract * quantity
-                        cost_basis = (fill_price * quantity) + commission
+                        fill = tcm.simulate_fill(current_price, quantity, "buy", rng)
+                        cost_basis = (fill.fill_price * fill.filled_quantity) + fill.commission_paid
 
                         if cash >= cost_basis:
                             cash -= cost_basis
                             position = {
                                 "trade_id": trade_id,
                                 "entry_date": current_date,
-                                "entry_price": fill_price,
+                                "entry_price": fill.fill_price,
                                 "ideal_entry": ideal_price,
-                                "quantity": quantity,
+                                "quantity": fill.filled_quantity,
                                 "cost_basis": cost_basis,
-                                "commission": commission
+                                "commission": fill.commission_paid,
+                                "slippage": fill.slippage_paid
                             }
 
                             events.append({
                                 "trade_id": trade_id,
                                 "event_type": "ENTRY_FILLED",
                                 "date": current_date,
-                                "price": fill_price,
-                                "quantity": quantity,
-                                "details": {"conviction": conviction, "regime": regime_mapped, "commission": commission}
+                                "price": fill.fill_price,
+                                "quantity": fill.filled_quantity,
+                                "details": {"conviction": conviction, "regime": regime_mapped, "commission": fill.commission_paid}
                             })
 
             # Track Equity
@@ -344,7 +342,7 @@ class BacktestEngine:
                 "total_pnl": 0.0,
                 "turnover": 0.0,
                 "slippage_paid": 0.0,
-                "fill_rate": 1.0, # Mock
+                "fill_rate": 1.0,
                 "trades_count": 0
             }
 

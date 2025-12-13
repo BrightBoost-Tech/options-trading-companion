@@ -15,6 +15,7 @@ from packages.quantum.strategy_profiles import CostModelConfig
 # Execution V3
 from packages.quantum.execution.transaction_cost_model import TransactionCostModel
 from packages.quantum.execution.pnl_attribution import PnlAttribution
+from packages.quantum.services.paper_execution_service import PaperExecutionService
 
 # v3 Observability
 from packages.quantum.observability.telemetry import TradeContext, emit_trade_event, TradeEventName

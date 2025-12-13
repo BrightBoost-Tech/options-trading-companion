@@ -267,7 +267,7 @@ export default function PaperTradingPage() {
                                {meta?.display_name || stratPart}
                            </span>
                            {meta && (
-                             <Badge variant="secondary" className="w-fit text-[10px] px-1.5 py-0 h-5">
+                              <Badge variant="default" className="w-fit text-[10px] px-1.5 py-0 h-5">
                                {meta.risk_profile}
                              </Badge>
                            )}

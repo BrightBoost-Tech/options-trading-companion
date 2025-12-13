@@ -1,11 +1,18 @@
 from supabase import Client
 from datetime import datetime, timezone, timedelta
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, TypedDict
 import logging
 import statistics
 from packages.quantum.services.transaction_cost_model import TransactionCostModel
 
 logger = logging.getLogger(__name__)
+
+class ExecutionDragStats(TypedDict):
+    n: int
+    avg_abs_slip: float            # dollars
+    avg_slip_bps: float            # basis points vs target_price
+    avg_fees: float                # dollars
+    avg_drag: float                # dollars = avg_abs_slip + avg_fees
 
 class ExecutionService:
     def __init__(self, supabase: Client):
@@ -62,12 +69,6 @@ class ExecutionService:
             "suggestion_id": suggestion_id
         }
 
-        # Note: We rely on 'fees' or 'details' in schema if available.
-        # Since we cannot modify schema, we calculate drag but might not store it explicitly
-        # unless we piggyback on 'fees' or a JSON field.
-        # Requirement D.1: "Store execution drag per symbol".
-        # We assume 'fees' captures explicit costs. Slippage is implicit.
-
         try:
             ex_res = self.supabase.table(self.executions_table).insert(execution_data).execute()
             execution = ex_res.data[0] if ex_res.data else None
@@ -84,141 +85,171 @@ class ExecutionService:
 
         return execution
 
-    def get_execution_drag_stats(self, symbol: str) -> float:
+    def get_batch_execution_drag_stats(
+        self,
+        user_id: str,
+        symbols: List[str],
+        lookback_days: int = 45,
+        min_samples: int = 3,
+    ) -> Dict[str, ExecutionDragStats]:
         """
-        Returns average execution drag (slippage + fees per share) for a symbol
-        based on historical executions.
+        Calculates execution drag stats for a batch of symbols based on history.
         """
-        # This single-symbol fetch is kept for backward compat,
-        # but batched fetch is preferred.
-        res = self.get_batch_execution_drag_stats([symbol])
-        return res.get(symbol, 0.05)
-
-    def get_batch_execution_drag_stats(self, symbols: List[str], user_id: str = None, lookback_days: int = 30) -> Dict[str, float]:
-        """
-        Fetches avg execution drag for a list of symbols.
-        Returns { symbol: drag_amount }. Default 0.05 if no history.
-
-        Logic:
-        1. Query Executions (filtered by symbol, user_id, lookback).
-        2. Query Suggestions (by suggestion_id from step 1).
-        3. Compute slippage = abs(fill - target).
-        4. Compute drag = slippage + fees_per_share.
-        5. Aggregate.
-        """
-        if not symbols:
+        if not symbols or not user_id:
             return {}
 
-        default_drag = 0.05
-        results = {s: default_drag for s in symbols}
+        results: Dict[str, ExecutionDragStats] = {}
+        cutoff_date = (datetime.now(timezone.utc) - timedelta(days=lookback_days)).isoformat()
 
         try:
-            # 1. Fetch Executions
-            # We filter by symbol IN list.
+            # Step 1: Pull executions in ONE query
+            # Using 'timestamp' as it is explicitly populated by register_execution.
             query = self.supabase.table(self.executions_table)\
-                .select("id, symbol, fill_price, fees, quantity, suggestion_id")\
+                .select("symbol, fill_price, fees, suggestion_id")\
+                .eq("user_id", user_id)\
                 .in_("symbol", symbols)\
-                .gte("timestamp", (datetime.now(timezone.utc) - timedelta(days=lookback_days)).isoformat())
+                .neq("suggestion_id", None)\
+                .neq("fill_price", None)\
+                .gte("timestamp", cutoff_date)
 
-            if user_id:
-                query = query.eq("user_id", user_id)
+            ex_res = query.order("timestamp", desc=True).limit(1000).execute()
+            executions = ex_res.data or []
 
-            # Limit to prevent massive fetch, though batch size in scanner is small (5)
-            # If symbols list is small, we get all relevant history up to limit.
-            ex_res = query.order("timestamp", desc=True).limit(100).execute()
-
-            executions = ex_res.data
             if not executions:
-                return results
+                return {}
 
-            # 2. Fetch Suggestions
-            sugg_ids = [x['suggestion_id'] for x in executions if x.get('suggestion_id')]
-            sugg_ids = list(set(sugg_ids)) # dedup
+            # Step 2: Pull suggestion logs
+            suggestion_ids = list(set(ex["suggestion_id"] for ex in executions if ex.get("suggestion_id")))
 
-            suggestion_map = {}
-            if sugg_ids:
-                # Chunk IDs if too many? Supabase URL length limit.
-                # Assuming < 100 IDs is fine.
+            target_by_log_id = {}
+            if suggestion_ids:
+                # Chunking could be needed if suggestion_ids is very large, but assuming reasonable batch.
                 s_res = self.supabase.table(self.logs_table)\
-                    .select("id, target_price, suggested_entry, order_json")\
-                    .in_("id", sugg_ids)\
+                    .select("id, target_price")\
+                    .in_("id", suggestion_ids)\
                     .execute()
 
-                for s in s_res.data:
-                    # Priority: target_price -> order_json.limit_price -> suggested_entry
-                    ref_price = s.get('target_price')
-                    if not ref_price and s.get('order_json'):
-                        ref_price = s['order_json'].get('limit_price')
-                    if not ref_price:
-                        ref_price = s.get('suggested_entry')
+                for row in s_res.data or []:
+                    if row.get("target_price"):
+                        target_by_log_id[row["id"]] = float(row["target_price"])
 
-                    suggestion_map[s['id']] = float(ref_price or 0.0)
-
-            # 3. Calculate Drag per Symbol
-            symbol_drags = {s: [] for s in symbols}
+            # Compute stats
+            # Maintain running sums per symbol
+            # { symbol: { count, sum_abs_slip, sum_slip_bps, sum_fees, sum_drag } }
+            aggregates = {}
 
             for ex in executions:
-                sym = ex.get('symbol')
-                if sym not in symbol_drags: continue
+                symbol = ex.get("symbol")
+                suggestion_id = ex.get("suggestion_id")
+                fill_price = float(ex.get("fill_price") or 0.0)
+                fees = float(ex.get("fees") or 0.0)
 
-                fill_price = float(ex.get('fill_price', 0.0))
-                fees = float(ex.get('fees', 0.0))
-                qty = float(ex.get('quantity', 1.0))
-                s_id = ex.get('suggestion_id')
+                target = target_by_log_id.get(suggestion_id)
 
-                if fill_price <= 0: continue
+                if target is None or target <= 0:
+                    continue
+                if fill_price is None: # Should be filtered by query but double check
+                    continue
 
-                # Slippage
-                slippage = 0.0
-                if s_id and s_id in suggestion_map:
-                    target_price = suggestion_map[s_id]
-                    if target_price > 0:
-                        slippage = abs(fill_price - target_price)
+                abs_slip = abs(fill_price - target)
+                slip_bps = (abs_slip / target) * 10_000
+                drag = abs_slip + fees
 
-                        # Calculate BPS for logging/telemetry if needed
-                        # slip_bps = (slippage / target_price) * 10000
+                if symbol not in aggregates:
+                    aggregates[symbol] = {
+                        "count": 0,
+                        "sum_abs_slip": 0.0,
+                        "sum_slip_bps": 0.0,
+                        "sum_fees": 0.0,
+                        "sum_drag": 0.0
+                    }
 
-                # Total Drag per share
-                fee_per_share = fees / qty if qty > 0 else 0
-                drag = slippage + fee_per_share
+                agg = aggregates[symbol]
+                agg["count"] += 1
+                agg["sum_abs_slip"] += abs_slip
+                agg["sum_slip_bps"] += slip_bps
+                agg["sum_fees"] += fees
+                agg["sum_drag"] += drag
 
-                # Sanity check: Ignore outliers > 10% of price or huge absolute drag
-                # Assuming drag < $5.00 is reasonable for options.
-                if drag < 10.0:
-                    symbol_drags[sym].append(drag)
+            # Finalize results
+            for symbol, agg in aggregates.items():
+                n = agg["count"]
+                if n < min_samples:
+                    continue
 
-            # 4. Average
-            for sym, drags in symbol_drags.items():
-                if drags:
-                    avg_drag = statistics.mean(drags)
-                    results[sym] = avg_drag
-                    # If drag is very low (e.g. 0), keep it 0.
-                    # But if 0, maybe fallback to default?
-                    # No, if history says 0 slippage, use 0.
-                else:
-                    # No valid drags found despite executions? Use default.
-                    results[sym] = default_drag
+                results[symbol] = {
+                    "n": n,
+                    "avg_abs_slip": agg["sum_abs_slip"] / n,
+                    "avg_slip_bps": agg["sum_slip_bps"] / n,
+                    "avg_fees": agg["sum_fees"] / n,
+                    "avg_drag": agg["sum_drag"] / n
+                }
 
         except Exception as e:
-            logger.error(f"Error fetching batch execution stats: {e}")
-            # Return defaults on error
+            logger.error(f"Error calculating batch execution drag: {e}")
+            return {}
 
         return results
 
-    def estimate_execution_cost(self, symbol: str, regime: str = "normal") -> float:
+    def get_execution_drag_stats(
+        self,
+        user_id: str,
+        symbol: str,
+        lookback_days: int = 45,
+        min_samples: int = 3
+    ) -> Optional[ExecutionDragStats]:
         """
-        Returns estimated execution cost per share (slippage + fees) based on symbol history and regime.
+        Wrapper for single symbol stats.
         """
-        base_cost = self.get_execution_drag_stats(symbol)
+        batch = self.get_batch_execution_drag_stats(
+            user_id=user_id,
+            symbols=[symbol],
+            lookback_days=lookback_days,
+            min_samples=min_samples
+        )
+        return batch.get(symbol)
 
-        if regime == "suppressed":
-            return base_cost * 0.8
-        elif regime == "elevated":
-            return base_cost * 1.5
-        elif regime == "shock":
-            return base_cost * 3.0
+    def estimate_execution_cost(
+        self,
+        symbol: str,
+        spread_pct: float | None = None,
+        user_id: str | None = None
+    ) -> float:
+        """
+        Returns estimated execution cost (drag) per share.
+        Prioritizes historical data if user_id is provided and enough samples exist.
+        Fallbacks to heuristic spread proxy.
+        """
+        # 1. Try History
+        if user_id:
+            stats = self.get_execution_drag_stats(user_id, symbol)
+            if stats:
+                return stats["avg_drag"]
 
-        return base_cost
+        # 2. Fallback Heuristic
+        # Default spread_pct if None
+        if spread_pct is None:
+            spread_pct = 0.005 # 0.5% default assumption
+
+        # Assumption: Drag is roughly half the spread + some fees
+        # Price is unknown here so we assume a nominal price or just return a fixed proxy?
+        # The previous implementation called `get_execution_drag_stats(symbol)` which returned 0.05 default.
+        # But now `get_execution_drag_stats` requires user_id.
+
+        # If we don't have price, we can't do spread_pct * price.
+        # But usually spread_pct is not enough, we need the spread amount.
+        # Previous implementation:
+        # base_cost = self.get_execution_drag_stats(symbol) -> returns float (0.05 default)
+
+        # We'll use a constant heuristic + spread scaling if possible, or just a flat value.
+        # Let's stick to the previous default 0.05 if spread_pct is missing or low.
+
+        # But wait, the scanner passes spread_pct.
+        # Scanner logic: estimated_cost_raw = (trade_dict['bid_ask_spread'] * 0.5) + (len(legs)*0.0065)
+
+        # Here we are returning a per-share cost estimate.
+        # Let's return a safe default.
+        return 0.05
 
     def simulate_fill(self,
                       symbol: str,

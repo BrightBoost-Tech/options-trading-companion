@@ -1,5 +1,5 @@
 # packages/quantum/analytics/strategy_selector.py
-from typing import Optional
+from typing import Optional, List, Dict, Any
 from .regime_engine_v3 import RegimeState
 
 class StrategySelector:
@@ -10,9 +10,8 @@ class StrategySelector:
         current_price: float,
         iv_rank: float,
         days_to_expiry: int = 45,
-        effective_regime: Optional[RegimeState] = None
-        effective_regime: str = "normal" # New argument
-    ) -> dict:
+        effective_regime: str = "normal"
+    ) -> Dict[str, Any]:
         """
         Translates a directional sentiment into a specific option structure
         based on Volatility Regimes and Regime Engine V3 state.
@@ -24,24 +23,8 @@ class StrategySelector:
             "rationale": "",
         }
 
-        # Use effective_regime if provided to guide selection
-        # If not, fallback to simple IV Rank logic (backward compatibility)
-
-        # Regime A: Low IV (IV Rank < 30) or SUPPRESSED → Buy debit structures
-        is_low_vol = (iv_rank < 30) or (effective_regime == RegimeState.SUPPRESSED)
-
-        # Regime B: High IV (IV Rank > 50) or ELEVATED/SHOCK/REBOUND → Sell credit structures
-        is_high_vol = (iv_rank > 50) or (effective_regime in [RegimeState.ELEVATED, RegimeState.SHOCK, RegimeState.REBOUND])
-
-        # CHOP handling: Favor Iron Condors or wide spreads? Or skip?
-        is_chop = (effective_regime == RegimeState.CHOP)
-
-        if sentiment == "BULLISH":
-            if is_low_vol:
-                suggestion["strategy"] = "LONG_CALL_DEBIT_SPREAD"
-                suggestion["rationale"] = "Bullish outlook + Suppressed/Low Vol. Buying leverage."
         # Normalize regime
-        regime = effective_regime.lower()
+        regime = effective_regime.lower() if effective_regime else "normal"
 
         # Logic Matrix
         if regime == "suppressed":
@@ -53,9 +36,6 @@ class StrategySelector:
                     {"side": "buy", "type": "call", "delta_target": 0.65},
                     {"side": "sell", "type": "call", "delta_target": 0.30},
                 ]
-            elif is_high_vol:
-                suggestion["strategy"] = "SHORT_PUT_CREDIT_SPREAD"
-                suggestion["rationale"] = "Bullish outlook + Elevated Vol. Selling premium."
             elif sentiment == "BEARISH":
                 suggestion["strategy"] = "LONG_PUT_DEBIT_SPREAD"
                 suggestion["rationale"] = "Bearish + Suppressed IV. Buying cheap protection."
@@ -64,7 +44,7 @@ class StrategySelector:
                     {"side": "sell", "type": "put", "delta_target": -0.30},
                 ]
 
-        elif regime in ["elevated", "high_vol"]:
+        elif regime in ["elevated", "high_vol", "elevated_vol"]:
             # High Vol -> Sell Vol (Credit Spreads)
             if sentiment == "BULLISH":
                 suggestion["strategy"] = "SHORT_PUT_CREDIT_SPREAD"
@@ -90,22 +70,13 @@ class StrategySelector:
                     {"side": "buy", "type": "call", "delta_target": 0.60},
                     {"side": "sell", "type": "call", "delta_target": 0.20}, # Wider spread
                 ]
-            elif is_chop:
-                 # In chop, maybe wider credit spreads or less directionality?
-                 # Sticking to credit spreads for now but noting chop
-                 suggestion["strategy"] = "SHORT_PUT_CREDIT_SPREAD"
-                 suggestion["rationale"] = "Bullish lean in Choppy market. Selling premium with caution."
+            elif sentiment == "BEARISH":
+                 # Betting against rebound?
+                 suggestion["strategy"] = "LONG_PUT_DEBIT_SPREAD"
+                 suggestion["rationale"] = "Fading Rebound."
                  suggestion["legs"] = [
-                    {"side": "sell", "type": "put", "delta_target": 0.25}, # More conservative delta
-                    {"side": "buy", "type": "put", "delta_target": 0.10},
-                 ]
-            else:
-                 # Default Normal
-                 suggestion["strategy"] = "LONG_CALL_DEBIT_SPREAD"
-                 suggestion["rationale"] = "Bullish outlook in Normal conditions."
-                 suggestion["legs"] = [
-                    {"side": "buy", "type": "call", "delta_target": 0.55},
-                    {"side": "sell", "type": "call", "delta_target": 0.25},
+                    {"side": "buy", "type": "put", "delta_target": -0.50},
+                    {"side": "sell", "type": "put", "delta_target": -0.20},
                  ]
 
         elif regime == "chop":
@@ -134,7 +105,7 @@ class StrategySelector:
                  suggestion["rationale"] = "Panic Regime. Cash is king."
 
         else: # Normal or Fallback
-            # Use IV Rank logic
+            # Use IV Rank logic if regime is ambiguous or "normal"
             if sentiment == "BULLISH":
                 if iv_rank < 35:
                     suggestion["strategy"] = "LONG_CALL_DEBIT_SPREAD"
@@ -143,7 +114,7 @@ class StrategySelector:
                         {"side": "buy", "type": "call", "delta_target": 0.60},
                         {"side": "sell", "type": "call", "delta_target": 0.30},
                     ]
-                elif iv_rank > 45:
+                else:
                     suggestion["strategy"] = "SHORT_PUT_CREDIT_SPREAD"
                     suggestion["rationale"] = "Bullish + Normal/High IV."
                     suggestion["legs"] = [
@@ -153,12 +124,14 @@ class StrategySelector:
             elif sentiment == "BEARISH":
                  if iv_rank < 35:
                     suggestion["strategy"] = "LONG_PUT_DEBIT_SPREAD"
+                    suggestion["rationale"] = "Bearish + Low IV."
                     suggestion["legs"] = [
                         {"side": "buy", "type": "put", "delta_target": -0.60},
                         {"side": "sell", "type": "put", "delta_target": -0.30},
                     ]
                  else:
                     suggestion["strategy"] = "SHORT_CALL_CREDIT_SPREAD"
+                    suggestion["rationale"] = "Bearish + High IV."
                     suggestion["legs"] = [
                         {"side": "sell", "type": "call", "delta_target": 0.30},
                         {"side": "buy", "type": "call", "delta_target": 0.15},

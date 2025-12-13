@@ -1,7 +1,7 @@
 """
 Plaid API Endpoints
 """
-from fastapi import HTTPException, Header, Depends, Body
+from fastapi import HTTPException, Header, Depends, Body, Request
 from typing import Dict, Optional
 import json
 import plaid
@@ -9,6 +9,7 @@ from plaid.exceptions import ApiException
 from datetime import datetime
 from packages.quantum.security import encrypt_token, decrypt_token, redact_sensitive_fields, get_current_user
 from supabase import Client
+from slowapi import Limiter
 
 def parse_plaid_error(e: ApiException) -> str:
     """Helper to extract readable error message from Plaid ApiException"""
@@ -25,7 +26,8 @@ def register_plaid_endpoints(
     supabase_admin: Client,
     analytics_service,
     # dependency injection
-    get_supabase_client_dependency
+    get_supabase_client_dependency,
+    limiter: Limiter
 ):
     """Register Plaid endpoints with the FastAPI app"""
     
@@ -59,11 +61,12 @@ def register_plaid_endpoints(
             return {"connected": False, "institution": None}
 
     @app.post("/plaid/create_link_token")
+    @limiter.limit("10/minute")
     async def create_plaid_link_token(
+        request: Request,
         user_id: str = Depends(get_current_user)
     ):
         """Create Plaid Link token for connecting brokerage account"""
-        # Removed user_id from body, using auth token
         if analytics_service:
             analytics_service.log_event(user_id, "plaid_link_started", "ux", {})
 
@@ -85,10 +88,13 @@ def register_plaid_endpoints(
             print(f"❌ Unexpected Error in create_link_token: {e}")
             if analytics_service:
                 analytics_service.log_event(user_id, "plaid_link_error", "system", {"error": str(e)})
-            raise HTTPException(status_code=500, detail=f"Internal Server Error: {str(e)}")
+            # SECURITY: Do not leak exception details in 500 responses
+            raise HTTPException(status_code=500, detail="Internal Server Error: Failed to create link token.")
 
     @app.post("/plaid/exchange_token")
+    @limiter.limit("5/minute")
     async def exchange_plaid_token(
+        request: Request,
         public_token: str = Body(..., embed=True),
         metadata: Dict = Body({}, embed=True),
         user_id: str = Depends(get_current_user),
@@ -126,10 +132,13 @@ def register_plaid_endpoints(
             raise HTTPException(status_code=400, detail=error_msg)
         except Exception as e:
             print(f"❌ Unexpected Error in exchange_token: {e}")
-            raise HTTPException(status_code=500, detail=f"Internal Server Error: {str(e)}")
+            # SECURITY: Do not leak exception details
+            raise HTTPException(status_code=500, detail="Internal Server Error: Token exchange failed.")
 
     @app.post("/plaid/get_holdings")
+    @limiter.limit("5/minute")
     async def get_plaid_holdings(
+        request: Request,
         user_id: str = Depends(get_current_user),
         supabase: Client = Depends(get_supabase_client_dependency)
     ):
@@ -176,7 +185,7 @@ def register_plaid_endpoints(
                     print("✅ Positions updated in DB")
                 except Exception as e:
                     print(f"❌ Failed to update positions in DB: {e}")
-                    raise HTTPException(status_code=500, detail=f"Database update failed: {e}")
+                    raise HTTPException(status_code=500, detail="Database update failed.")
 
             return {
                 "synced": True,
@@ -193,6 +202,7 @@ def register_plaid_endpoints(
             raise HTTPException(status_code=400, detail=error_msg)
         except Exception as e:
             print(f"❌ Unexpected Error in get_holdings: {e}")
-            raise HTTPException(status_code=500, detail=f"Internal Server Error: {str(e)}")
+            # SECURITY: Do not leak exception details
+            raise HTTPException(status_code=500, detail="Internal Server Error: Failed to retrieve holdings.")
     
     print("✅ Plaid endpoints registered (v3 Hardened)")

@@ -4,6 +4,7 @@ import { useState } from 'react';
 import { supabase } from '@/lib/supabase';
 import { API_URL } from '@/lib/constants';
 import { cn } from '@/lib/utils';
+import { RefreshCw } from 'lucide-react';
 
 interface SyncHoldingsButtonProps {
   onSyncComplete?: () => void;
@@ -56,7 +57,7 @@ export default function SyncHoldingsButton({ onSyncComplete, className }: SyncHo
          throw new Error(errorData.detail || 'Sync failed');
       }
 
-      const data = await response.json();
+      await response.json();
       setStatusMsg(`Synced ${new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`);
       if (onSyncComplete) onSyncComplete();
 
@@ -70,29 +71,29 @@ export default function SyncHoldingsButton({ onSyncComplete, className }: SyncHo
 
   return (
     <div className="flex items-center gap-2">
-       {statusMsg && (
-        <span className="text-xs text-gray-500 hidden sm:inline">
-          {statusMsg}
-        </span>
-      )}
-      {error && (
-         <span className="text-xs text-red-500 hidden sm:inline" title={error}>
-           {error}
-         </span>
-      )}
-      <button
+       {/* Status Messages - improved visibility and a11y */}
+       <div role="status" aria-live="polite" className="text-xs flex items-center">
+          {statusMsg && <span className="text-gray-500 mr-2">{statusMsg}</span>}
+          {error && <span className="text-red-500 mr-2" title={error}>{error}</span>}
+       </div>
+
+       {/* Button - using native element with existing styles but improved a11y */}
+       <button
         onClick={handleSync}
         disabled={loading}
-        className={cn("flex items-center gap-1 px-3 py-1.5 bg-white border border-gray-300 rounded-md text-sm text-gray-700 hover:bg-gray-50 disabled:opacity-50 shadow-sm", className)}
+        aria-busy={loading}
+        className={cn(
+            "flex items-center gap-1.5 px-3 py-1.5 bg-white border border-gray-300 rounded-md text-sm text-gray-700 hover:bg-gray-50 disabled:opacity-50 shadow-sm transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-gray-400",
+            className
+        )}
       >
-        <svg
-          className={`w-4 h-4 ${loading ? 'animate-spin text-blue-600' : 'text-gray-500'}`}
-          fill="none"
-          stroke="currentColor"
-          viewBox="0 0 24 24"
-        >
-          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
-        </svg>
+        <RefreshCw
+            className={cn(
+                "w-3.5 h-3.5",
+                loading ? "animate-spin text-blue-600" : "text-gray-500"
+            )}
+            aria-hidden="true"
+        />
         <span>{loading ? 'Syncing...' : 'Sync'}</span>
       </button>
     </div>

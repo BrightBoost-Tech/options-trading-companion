@@ -89,7 +89,7 @@ export default function PaperPortfolioWidget() {
         </CardHeader>
         <CardContent>
           <p className="text-xs text-neutral-500">
-            No paper trades yet. Use the "Paper Trade" button on suggestions to start practicing.
+            No paper trades yet. Use the &quot;Paper Trade&quot; button on suggestions to start practicing.
           </p>
         </CardContent>
       </Card>

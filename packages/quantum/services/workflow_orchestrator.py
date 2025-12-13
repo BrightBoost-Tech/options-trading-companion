@@ -15,6 +15,7 @@ from .analytics_service import AnalyticsService
 
 # Importing existing logic
 from packages.quantum.options_scanner import scan_for_opportunities, classify_iv_regime
+from packages.quantum.analytics.regime_engine_v3 import RegimeEngineV3, RegimeState
 from packages.quantum.models import Holding
 from packages.quantum.market_data import PolygonService
 from packages.quantum.ev_calculator import calculate_exit_metrics
@@ -72,6 +73,9 @@ async def run_morning_cycle(supabase: Client, user_id: str):
         supabase.table("regime_snapshots").insert(global_snap.to_dict()).execute()
     except Exception:
         pass # Non-blocking
+    # Initialize Regime Engine V3
+    regime_engine = RegimeEngineV3(supabase, truth_layer)
+    global_snap = regime_engine.compute_global_snapshot(datetime.utcnow())
 
     suggestions = []
 
@@ -110,6 +114,13 @@ async def run_morning_cycle(supabase: Client, user_id: str):
             iv_regime = effective_regime.value # e.g. "shock", "suppressed"
 
             iv_rank_score = sym_snap.features.get("iv_rank", 50.0)
+            # Fetch IV Context via Regime Engine (Symbol Snapshot)
+            sym_snap = regime_engine.compute_symbol_snapshot(underlying, global_snap)
+            effective_regime_state = regime_engine.get_effective_regime(sym_snap, global_snap)
+
+            # Map back to legacy string for existing consumers
+            iv_regime = regime_engine.map_to_scoring_regime(effective_regime_state)
+            iv_rank_score = sym_snap.iv_rank if sym_snap.iv_rank is not None else 50.0
 
             # Sum Deltas
             for leg in legs:
@@ -240,6 +251,9 @@ async def run_morning_cycle(supabase: Client, user_id: str):
                         "iv_rank": iv_rank_score,
                         "iv_regime": iv_regime,
                         "global_state": global_snap.state.value
+                        "regime_v3_global": global_snap.state,
+                        "regime_v3_symbol": sym_snap.state,
+                        "regime_v3_effective": effective_regime_state
                     },
                     "spread_details": {
                         "underlying": underlying,
@@ -335,6 +349,12 @@ async def run_midday_cycle(supabase: Client, user_id: str):
     # 2. Call Scanner (market-wide)
     candidates = []
     scout_results = []
+
+    # Initialize Regime Engine V3
+    truth_layer = MarketDataTruthLayer()
+    regime_engine = RegimeEngineV3(supabase, truth_layer)
+    global_snap = regime_engine.compute_global_snapshot(datetime.utcnow())
+
     try:
         scout_results = scan_for_opportunities(supabase_client=supabase)
 
@@ -367,6 +387,14 @@ async def run_midday_cycle(supabase: Client, user_id: str):
     for cand in candidates:
         ticker = cand.get("ticker") or cand.get("symbol")
         strategy = cand.get("strategy") or cand.get("type") or "unknown"
+
+        # Compute Symbol Regime
+        sym_snap = regime_engine.compute_symbol_snapshot(ticker, global_snap)
+        effective_regime_state = regime_engine.get_effective_regime(sym_snap, global_snap)
+        scoring_regime = regime_engine.map_to_scoring_regime(effective_regime_state)
+
+        # Extract pricing info. structure of candidate varies, assuming basic keys
+        # The scanner returns dicts with 'suggested_entry', 'ev', etc.
         price = float(cand.get("suggested_entry", 0))
         ev = float(cand.get("ev", 0))
 
@@ -405,7 +433,19 @@ async def run_midday_cycle(supabase: Client, user_id: str):
                     "iv_rank": cand.get("iv_rank"),
                     "iv_regime": effective_regime_str,
                     "global_state": global_snap.state.value
+                    "iv_regime": scoring_regime,
+                    "regime_v3_global": global_snap.state,
+                    "regime_v3_symbol": sym_snap.state,
+                    "regime_v3_effective": effective_regime_state
                 }
+            else:
+                # Update existing context
+                sizing["context"].update({
+                    "regime_v3_global": global_snap.state,
+                    "regime_v3_symbol": sym_snap.state,
+                    "regime_v3_effective": effective_regime_state,
+                    "iv_regime": scoring_regime # ensure consistency
+                })
 
             cand_features = {
                 "ticker": ticker,

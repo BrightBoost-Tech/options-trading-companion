@@ -358,6 +358,118 @@ def scan_for_opportunities(
                     "trend": trend,
                     "legs": legs
                 })
+                # Use pre-fetched data for trend (needs ~100 days)
+                # Ensure we pass the list, calculate_trend handles length checks
+                prices = hist_data['prices']
+                # Pass recent slice or full history (calculate_trend looks at last 50)
+                opp['trend'] = calculate_trend(prices)
+
+                # Use pre-fetched data for IV Rank (needs 365 days)
+                opp['iv_rank'] = calculate_iv_rank(hist_data['returns'])
+
+                opp['iv_regime'] = classify_iv_regime(opp['iv_rank'])
+
+                if opp['trend'] == "DOWN":
+                    opp['type'] = 'Debit Put Spread'
+                    target_long = current_price * 0.95
+                    target_short = current_price * 0.90
+                else:
+                    opp['type'] = 'Debit Call Spread'
+                    target_long = current_price * 1.02
+                    target_short = current_price * 1.07
+
+                step = 1 if current_price < 200 else 5
+                long_strike = round(target_long / step) * step
+                short_strike = round(target_short / step) * step
+                if abs(short_strike - long_strike) < step:
+                     short_strike = long_strike + (step if opp['trend']!="DOWN" else -step)
+
+                opp['long_strike'] = long_strike
+                opp['short_strike'] = short_strike
+                opp['width'] = abs(short_strike - long_strike)
+
+                estimated_price = opp['width'] * 0.35
+                opp['suggested_entry'] = estimated_price
+                opp['last_price'] = estimated_price
+
+            except:
+                pass
+
+        # Ensure fallback
+        if opp.get('suggested_entry') is None:
+             opp['suggested_entry'] = opp['width'] * 0.35
+             opp['last_price'] = opp['width'] * 0.35
+
+        processed_opportunities.append(opp)
+
+    # --- Enrich & Filter ---
+    market_data_enrich = {}
+
+    # We already have snapshots from the batch call above
+    for opp in processed_opportunities:
+        symbol = opp['symbol']
+
+        # Use existing snapshot data
+        norm_sym = truth_layer.normalize_symbol(symbol)
+        snapshot = snapshots.get(norm_sym) or {}
+        quote = snapshot.get("quote", {})
+
+        bid = quote.get("bid") or 0.0
+        ask = quote.get("ask") or 0.0
+
+        if bid > 0:
+             spread_pct = (ask - bid) / bid
+             if spread_pct > 0.10: continue
+
+        market_data_enrich[symbol] = {
+            "price": opp['underlying_price'],
+            "iv_rank": opp.get("iv_rank"),
+            "iv_regime": opp.get("iv_regime"),
+            "trend": opp.get("trend"),
+            "sector": "Unknown",
+            "bid": bid,
+            "ask": ask
+        }
+
+    filtered_opportunities = [
+        opp for opp in processed_opportunities
+        if opp['symbol'] in market_data_enrich
+    ]
+
+    enriched_opportunities = enrich_trade_suggestions(
+        filtered_opportunities,
+        100000,
+        market_data_enrich,
+        [],
+        supabase_client=supabase_client
+    )
+
+    print(
+        f"[Scanner] filtered_opportunities={len(filtered_opportunities)}, "
+        f"enriched={len(enriched_opportunities)}, "
+        f"market_data={len(market_data_enrich)}"
+    )
+
+    # Final Scoring
+    final_candidates = []
+    for cand in enriched_opportunities:
+        # V3 Scoring is already applied in enrich_trade_suggestions via OpportunityScorer
+        # We trust the score and metrics populated there.
+
+        symbol = cand.get("symbol") or cand.get("ticker")
+        metrics_debug = cand.get('metrics') or {}
+
+        # Ensure suggested_entry is present
+        current_entry = cand.get("suggested_entry")
+        if current_entry is None or (isinstance(current_entry, (int, float)) and current_entry <= 0):
+             cand["suggested_entry"] = cand.get("last_price", 0.0)
+             if cand["suggested_entry"] <= 0:
+                 width = cand.get("width", 5)
+                 cand["suggested_entry"] = width * 0.35
+
+        print(f"{symbol} score={cand.get('score')} ev={metrics_debug.get('ev_amount')}")
+
+        final_candidates.append(cand)
 
             except Exception as e:
                 print(f"[Scanner] Error processing {symbol}: {e}")

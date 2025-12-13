@@ -301,6 +301,41 @@ async def execute_rebalance(
         "global_score": global_snap.risk_score,
         "risk_scaler": global_snap.risk_scaler,
         "universe_median": universe_median,
+    # Determine regime context via RegimeEngineV3
+    from packages.quantum.analytics.regime_engine_v3 import RegimeEngineV3
+
+    def fetch_regime_v3():
+        eng = RegimeEngineV3(supabase)
+        snap = eng.compute_global_snapshot(datetime.utcnow())
+
+        # Compute universe median from current holdings IV context
+        ranks = [d.get('iv_rank') for d in iv_ctx_map.values() if d.get('iv_rank') is not None]
+        median = 50.0
+        if ranks:
+            import numpy as np
+            median = float(np.median(ranks))
+
+        return snap, median
+
+    loop = asyncio.get_event_loop()
+    with ThreadPoolExecutor() as pool:
+         global_snap, universe_median = await loop.run_in_executor(pool, fetch_regime_v3)
+
+    # Map to legacy scoring regime
+    # We need an instance to call map methods, or static?
+    # RegimeEngineV3 is stateful (deps), but map_to_scoring_regime is pure.
+    # Let's instantiate locally or move map method to static/module level.
+    # It's an instance method in my implementation.
+    regime_engine_inst = RegimeEngineV3(supabase)
+    scoring_regime = regime_engine_inst.map_to_scoring_regime(global_snap.state)
+    global_regime = scoring_regime # For backward compat variable name
+
+    regime_context = {
+        "current_regime_scoring": scoring_regime,
+        "universe_median": universe_median,
+        "global_state": global_snap.state,
+        "global_score": global_snap.risk_score,
+        "risk_scaler": global_snap.risk_scaler
     }
 
     conviction_service = ConvictionService(supabase=supabase)
@@ -365,7 +400,8 @@ async def execute_rebalance(
              coskew = np.zeros((n, n, n))
 
              target_weights, _, _, trace_id, _, _, _, _ = _compute_portfolio_weights(
-                 mu, sigma, coskew, tickers, current_spreads, opt_req, user_id, total_val, cash
+                 mu, sigma, coskew, tickers, current_spreads, opt_req, user_id, total_val, cash,
+                 external_risk_scaler=global_snap.risk_scaler
              )
 
              red_flags = []
@@ -383,6 +419,13 @@ async def execute_rebalance(
                  # Retrieve Regime (Local or Global?)
                  # Pass the V3 Regime State string (e.g. "shock", "rebound") to dynamic target
                  regime_key = global_snap.state.value
+                 # Retrieve Regime
+                 ctx = iv_ctx_map.get(sym, {})
+                 # Use global regime if symbol context missing, but prefer symbol specific?
+                 # Actually for dynamic target we usually use "current market regime" or specific?
+                 # Existing code used symbol's IV regime if available.
+                 # Let's keep that but fall back to global scoring regime.
+                 regime = ctx.get("iv_regime", global_regime)
 
                  # Default neutral conviction
                  base_conviction = 1.0
@@ -449,6 +492,16 @@ async def execute_rebalance(
 
             # V3 Context in Suggestion
             # We use global state primarily here
+            # Create Trace Context
+            features_dict = {
+                "symbol": sym,
+                "target_allocation": t.get("target_weight", 0),
+                "strategy": strategy,
+                "regime": regime,
+                "regime_v3": global_snap.state,
+                "risk_score": global_snap.risk_score,
+                "conviction_used": "implicit_1.0" # For now unless we thread it through
+            }
 
             ctx = TradeContext.create_new(
                 model_version=APP_VERSION,

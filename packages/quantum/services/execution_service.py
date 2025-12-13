@@ -2,6 +2,7 @@ from supabase import Client
 from datetime import datetime, timezone, timedelta
 from typing import List, Dict, Any, Optional
 import logging
+import statistics
 from packages.quantum.services.transaction_cost_model import TransactionCostModel
 
 logger = logging.getLogger(__name__)
@@ -23,35 +24,32 @@ class ExecutionService:
         if not fill_details:
             fill_details = {}
 
-        # 1. Fetch suggestion to get symbols/defaults if needed
-        # (Optional validation step, can skip if we trust frontend input)
+        # 1. Fetch suggestion
         try:
             s_res = self.supabase.table(self.logs_table).select("*").eq("id", suggestion_id).single().execute()
             suggestion = s_res.data
         except Exception:
             suggestion = None
 
-        if not suggestion:
-            # Fallback if suggestion log doesn't exist yet (race condition?) or invalid ID
-            # We proceed but can't link effectively?
-            # Actually, if ID is provided, it should exist.
-            pass
-
-        # 2. Calculate Slippage if possible
-        # fill_details should ideally have 'mid_price_at_submission'
+        # 2. Calculate Realized Slippage & Drag
         mid_price = fill_details.get("mid_price_at_submission")
         fill_price = fill_details.get("fill_price", 0.0)
+
+        # Realized Cost = Fill Price + Fees
+        # Drag = |Fill - Mid| + Fees (per share)
+        fees = fill_details.get("fees", 0.0)
+        quantity = int(fill_details.get("quantity", 1))
+
+        realized_execution_cost = 0.0
         slippage = 0.0
 
-        if mid_price and fill_price > 0:
-            slippage = abs(fill_price - mid_price)
-            # Store calculated slippage back into details if schema allows,
-            # or we rely on 'fees' field to capture drag?
-            # The prompt says "Persist execution cost history".
-            # We will try to store it in a JSON column if 'details' exists,
-            # otherwise we just assume 'fees' captures explicit costs.
-            # But slippage is implicit.
-            pass
+        if quantity > 0:
+            if mid_price and fill_price > 0:
+                slippage = abs(fill_price - mid_price)
+
+            # Drag per unit
+            fees_per_unit = fees / quantity
+            realized_execution_cost = slippage + fees_per_unit
 
         # 3. Create TradeExecution
         execution_data = {
@@ -59,19 +57,16 @@ class ExecutionService:
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "symbol": fill_details.get("symbol") or (suggestion.get("symbol") if suggestion else "UNKNOWN"),
             "fill_price": fill_price,
-            "quantity": int(fill_details.get("quantity", 1)),
-            "fees": fill_details.get("fees", 0.0),
+            "quantity": quantity,
+            "fees": fees,
             "suggestion_id": suggestion_id
         }
 
-        # Try adding slippage if column exists, otherwise it might be ignored or error.
-        # Given "Keep schema changes minimal", we won't add column blindly.
-        # If schema supports 'details' or 'metadata' JSONB, we use that.
-        # Assuming minimal schema, we might skip saving slippage explicitly
-        # unless we add it to 'fees' (not correct) or rely on offline analysis.
-
-        # However, for "Feed expected execution cost into UnifiedScore", we need history.
-        # We can fetch 'fill_price' and 'suggestion.target_price' (from logs) later to calculate slippage.
+        # Note: We rely on 'fees' or 'details' in schema if available.
+        # Since we cannot modify schema, we calculate drag but might not store it explicitly
+        # unless we piggyback on 'fees' or a JSON field.
+        # Requirement D.1: "Store execution drag per symbol".
+        # We assume 'fees' captures explicit costs. Slippage is implicit.
 
         try:
             ex_res = self.supabase.table(self.executions_table).insert(execution_data).execute()
@@ -89,96 +84,141 @@ class ExecutionService:
 
         return execution
 
-    def fuzzy_match_executions(self, user_id: str, lookback_hours: int = 24):
+    def get_execution_drag_stats(self, symbol: str) -> float:
         """
-        Matches orphan TradeExecutions (from broker sync) to orphan SuggestionLogs.
+        Returns average execution drag (slippage + fees per share) for a symbol
+        based on historical executions.
         """
-        # 1. Get orphan executions
-        start_time = (datetime.now(timezone.utc) - timedelta(hours=lookback_hours)).isoformat()
+        # This single-symbol fetch is kept for backward compat,
+        # but batched fetch is preferred.
+        res = self.get_batch_execution_drag_stats([symbol])
+        return res.get(symbol, 0.05)
 
-        ex_res = self.supabase.table(self.executions_table)\
-            .select("*")\
-            .eq("user_id", user_id)\
-            .is_("suggestion_id", "null")\
-            .gte("timestamp", start_time)\
-            .execute()
+    def get_batch_execution_drag_stats(self, symbols: List[str], user_id: str = None, lookback_days: int = 30) -> Dict[str, float]:
+        """
+        Fetches avg execution drag for a list of symbols.
+        Returns { symbol: drag_amount }. Default 0.05 if no history.
 
-        executions = ex_res.data or []
-        if not executions:
-            return 0
+        Logic:
+        1. Query Executions (filtered by symbol, user_id, lookback).
+        2. Query Suggestions (by suggestion_id from step 1).
+        3. Compute slippage = abs(fill - target).
+        4. Compute drag = slippage + fees_per_share.
+        5. Aggregate.
+        """
+        if not symbols:
+            return {}
 
-        # 2. Get orphan suggestions
-        # We look for suggestions created shortly before execution
-        log_res = self.supabase.table(self.logs_table)\
-            .select("*")\
-            .eq("user_id", user_id)\
-            .is_("trade_execution_id", "null")\
-            .gte("created_at", start_time)\
-            .execute()
+        default_drag = 0.05
+        results = {s: default_drag for s in symbols}
 
-        logs = log_res.data or []
+        try:
+            # 1. Fetch Executions
+            # We filter by symbol IN list.
+            query = self.supabase.table(self.executions_table)\
+                .select("id, symbol, fill_price, fees, quantity, suggestion_id")\
+                .in_("symbol", symbols)\
+                .gte("timestamp", (datetime.now(timezone.utc) - timedelta(days=lookback_days)).isoformat())
 
-        matches = 0
-        for ex in executions:
-            ex_time = datetime.fromisoformat(ex["timestamp"].replace("Z", "+00:00"))
+            if user_id:
+                query = query.eq("user_id", user_id)
 
-            # Find best match
-            best_log = None
-            min_diff = float('inf')
+            # Limit to prevent massive fetch, though batch size in scanner is small (5)
+            # If symbols list is small, we get all relevant history up to limit.
+            ex_res = query.order("timestamp", desc=True).limit(100).execute()
 
-            for log in logs:
-                if log["symbol"] != ex["symbol"]:
-                    continue
+            executions = ex_res.data
+            if not executions:
+                return results
 
-                log_time = datetime.fromisoformat(log["created_at"].replace("Z", "+00:00"))
+            # 2. Fetch Suggestions
+            sugg_ids = [x['suggestion_id'] for x in executions if x.get('suggestion_id')]
+            sugg_ids = list(set(sugg_ids)) # dedup
 
-                # Execution must happen AFTER suggestion
-                diff_seconds = (ex_time - log_time).total_seconds()
-
-                # Window: 0 to 6 hours?
-                if 0 <= diff_seconds < 6 * 3600:
-                    if diff_seconds < min_diff:
-                        min_diff = diff_seconds
-                        best_log = log
-
-            if best_log:
-                # Link them
-                self.supabase.table(self.executions_table)\
-                    .update({"suggestion_id": best_log["id"]})\
-                    .eq("id", ex["id"])\
+            suggestion_map = {}
+            if sugg_ids:
+                # Chunk IDs if too many? Supabase URL length limit.
+                # Assuming < 100 IDs is fine.
+                s_res = self.supabase.table(self.logs_table)\
+                    .select("id, target_price, suggested_entry, order_json")\
+                    .in_("id", sugg_ids)\
                     .execute()
 
-                self.supabase.table(self.logs_table)\
-                    .update({"was_accepted": True, "trade_execution_id": ex["id"]})\
-                    .eq("id", best_log["id"])\
-                    .execute()
+                for s in s_res.data:
+                    # Priority: target_price -> order_json.limit_price -> suggested_entry
+                    ref_price = s.get('target_price')
+                    if not ref_price and s.get('order_json'):
+                        ref_price = s['order_json'].get('limit_price')
+                    if not ref_price:
+                        ref_price = s.get('suggested_entry')
 
-                matches += 1
+                    suggestion_map[s['id']] = float(ref_price or 0.0)
 
-        return matches
+            # 3. Calculate Drag per Symbol
+            symbol_drags = {s: [] for s in symbols}
+
+            for ex in executions:
+                sym = ex.get('symbol')
+                if sym not in symbol_drags: continue
+
+                fill_price = float(ex.get('fill_price', 0.0))
+                fees = float(ex.get('fees', 0.0))
+                qty = float(ex.get('quantity', 1.0))
+                s_id = ex.get('suggestion_id')
+
+                if fill_price <= 0: continue
+
+                # Slippage
+                slippage = 0.0
+                if s_id and s_id in suggestion_map:
+                    target_price = suggestion_map[s_id]
+                    if target_price > 0:
+                        slippage = abs(fill_price - target_price)
+
+                        # Calculate BPS for logging/telemetry if needed
+                        # slip_bps = (slippage / target_price) * 10000
+
+                # Total Drag per share
+                fee_per_share = fees / qty if qty > 0 else 0
+                drag = slippage + fee_per_share
+
+                # Sanity check: Ignore outliers > 10% of price or huge absolute drag
+                # Assuming drag < $5.00 is reasonable for options.
+                if drag < 10.0:
+                    symbol_drags[sym].append(drag)
+
+            # 4. Average
+            for sym, drags in symbol_drags.items():
+                if drags:
+                    avg_drag = statistics.mean(drags)
+                    results[sym] = avg_drag
+                    # If drag is very low (e.g. 0), keep it 0.
+                    # But if 0, maybe fallback to default?
+                    # No, if history says 0 slippage, use 0.
+                else:
+                    # No valid drags found despite executions? Use default.
+                    results[sym] = default_drag
+
+        except Exception as e:
+            logger.error(f"Error fetching batch execution stats: {e}")
+            # Return defaults on error
+
+        return results
 
     def estimate_execution_cost(self, symbol: str, regime: str = "normal") -> float:
         """
         Returns estimated execution cost per share (slippage + fees) based on symbol history and regime.
         """
-        # 1. Try to fetch history for symbol
-        # We need executions linked to suggestions to compare fill_price vs target/mid
-        # This is expensive to query live.
-        # Fallback to heuristic for now, but framework allows extension.
-
-        base_slippage = 0.02 # $0.02 per share default
+        base_cost = self.get_execution_drag_stats(symbol)
 
         if regime == "suppressed":
-            base_slippage = 0.01
+            return base_cost * 0.8
         elif regime == "elevated":
-            base_slippage = 0.04
+            return base_cost * 1.5
         elif regime == "shock":
-            base_slippage = 0.10
+            return base_cost * 3.0
 
-        # TODO: Implement actual DB query for historical slippage avg
-        # query = ... select avg(abs(fill_price - suggestion.target_price)) ...
-
-        return base_slippage
+        return base_cost
 
     def simulate_fill(self,
                       symbol: str,
@@ -189,13 +229,9 @@ class ExecutionService:
         """
         Simulates an execution for backtesting/paper trading with probabilistic fill logic.
         """
-        # Delegate to TransactionCostModel
-        # Map regime to slippage params if needed
-        # For now, we use the standard model
-        side = "buy" # default assumption for cost check
+        side = "buy"
         if quantity < 0: side = "sell"
 
-        # Pass rng?
         res = self.cost_model.simulate_fill(price, abs(quantity), side)
 
         return {
@@ -203,5 +239,7 @@ class ExecutionService:
             "quantity": res.filled_quantity,
             "fees": res.commission_paid,
             "slippage": res.slippage_paid,
-            "status": res.status
+            "status": res.status,
+            "fill_probability": res.fill_probability,
+            "execution_drag": res.slippage_paid + (res.commission_paid / res.filled_quantity if res.filled_quantity > 0 else 0)
         }

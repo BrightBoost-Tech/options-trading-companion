@@ -331,7 +331,7 @@ async def run_midday_cycle(supabase: Client, user_id: str):
     scout_results = []
 
     try:
-        scout_results = scan_for_opportunities(supabase_client=supabase)
+        scout_results = scan_for_opportunities(supabase_client=supabase, user_id=user_id)
 
         print(f"Scanner returned {len(scout_results)} raw opportunities.")
 

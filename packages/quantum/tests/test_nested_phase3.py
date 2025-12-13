@@ -3,8 +3,8 @@ from unittest.mock import MagicMock, patch
 import os
 import numpy as np
 from datetime import datetime
-from nested.backbone import infer_global_context, compute_macro_features
-from nested.session import update_session_state, get_session_sigma_scale, load_session_state, refresh_session_from_db, _SESSION_STORE
+from packages.quantum.nested.backbone import infer_global_context, compute_macro_features
+from packages.quantum.nested.session import update_session_state, get_session_sigma_scale, load_session_state, refresh_session_from_db, _SESSION_STORE
 
 class TestNestedPhase3(unittest.TestCase):
 

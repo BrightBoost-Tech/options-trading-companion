@@ -6,7 +6,6 @@ import sys
 import os
 
 # Ensure package root is in path
-sys.path.append(os.path.join(os.path.dirname(__file__), '../../'))
 
 from packages.quantum.scripts.train_symbol_adapters import train_adapters, SymbolAdapterState
 

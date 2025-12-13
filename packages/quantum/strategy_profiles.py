@@ -1,5 +1,5 @@
 from pydantic import BaseModel, Field
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, Literal
 
 class StrategyConfig(BaseModel):
     name: str
@@ -27,3 +27,49 @@ class BacktestRequest(BaseModel):
     end_date: str
     ticker: str
     param_grid: Optional[Dict[str, List[Any]]] = None
+
+class CostModelConfig(BaseModel):
+    commission_per_contract: float = 0.65
+    min_fee: float = 0.0
+    spread_slippage_bps: int = 5
+    fill_probability_model: Literal["conservative", "optimistic", "neutral"] = "neutral"
+
+class WalkForwardConfig(BaseModel):
+    train_days: int
+    test_days: int
+    step_days: int
+    warmup_days: int = 0
+    embargo_days: int = 0
+    min_trades_per_fold: int = 5
+
+class ParamSearchConfig(BaseModel):
+    method: Literal["grid", "random"]
+    n_samples: Optional[int] = None
+    seed: Optional[int] = None
+    space: Optional[Dict[str, Any]] = None
+
+class BacktestRequestV3(BacktestRequest):
+    """
+    V3 backtest request supporting walk-forward validation,
+    parameter sweeps, and realistic execution assumptions.
+    """
+    engine_version: Literal["v3"] = "v3"
+    run_mode: Literal["single", "walk_forward"] = "single"
+
+    # Existing nested configs (Required by Engine)
+    walk_forward: Optional[WalkForwardConfig] = None
+    param_search: Optional[ParamSearchConfig] = None
+    cost_model: CostModelConfig = Field(default_factory=CostModelConfig)
+
+    # User-requested flattened fields (Optional/Compat)
+    train_window_days: Optional[int] = None
+    test_window_days: Optional[int] = None
+    step_days: Optional[int] = None
+    max_trials: Optional[int] = None
+    slippage_bps: float = 0.0
+    commission_per_contract: float = 0.0
+    allow_early_close: bool = True
+    persist_results: bool = True
+
+    seed: int = 42
+    initial_equity: float = 100000.0

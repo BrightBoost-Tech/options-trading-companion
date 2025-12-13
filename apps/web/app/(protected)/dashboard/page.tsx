@@ -18,6 +18,7 @@ import { supabase } from '@/lib/supabase';
 import { API_URL, TEST_USER_ID } from '@/lib/constants';
 import { groupOptionSpreads, formatOptionDisplay } from '@/lib/formatters';
 import { QuantumTooltip } from "@/components/ui/QuantumTooltip";
+import { ThemeToggle } from '@/components/ThemeToggle';
 import { AlertTriangle, AlertCircle, Activity, Wallet } from 'lucide-react';
 
 const mockAlerts = [
@@ -68,6 +69,7 @@ export default function DashboardPage() {
   const [simCursor, setSimCursor] = useState<string>('2023-01-01');
   const [simResult, setSimResult] = useState<any>(null);
   const [simLoading, setSimLoading] = useState(false);
+  const [simMode, setSimMode] = useState<'deterministic' | 'random'>('deterministic');
 
   // Load data on mount
   useEffect(() => {
@@ -90,7 +92,10 @@ export default function DashboardPage() {
       if (session) {
           headers['Authorization'] = `Bearer ${session.access_token}`;
       } else {
-          headers['X-Test-Mode-User'] = TEST_USER_ID;
+          // Gate dev auth bypass for security
+          if (process.env.NEXT_PUBLIC_ENABLE_DEV_AUTH_BYPASS === '1') {
+              headers['X-Test-Mode-User'] = TEST_USER_ID;
+          }
       }
       return headers;
   };
@@ -277,10 +282,23 @@ export default function DashboardPage() {
     setSimLoading(true);
     try {
       const headers = await getAuthHeaders();
+      const payload: any = { mode: simMode };
+      if (simMode === 'deterministic') {
+          payload.cursor = simCursor;
+          payload.symbol = 'SPY';
+      } else {
+          // In random mode, cursor and symbol are optional (server chooses)
+          // But API schema requires cursor. We can send a dummy or the current one.
+          // run_historical_cycle body: cursor=..., symbol=..., mode=...
+          // If random, the server overrides date. But we should send something valid.
+          payload.cursor = simCursor;
+          // symbol omitted -> server chooses random if configured
+      }
+
       const res = await fetch(`${API_URL}/historical/run-cycle`, {
         method: 'POST',
         headers,
-        body: JSON.stringify({ cursor: simCursor, symbol: 'SPY' }),
+        body: JSON.stringify(payload),
       });
 
       if (res.ok) {
@@ -288,6 +306,11 @@ export default function DashboardPage() {
         setSimResult(data);
         if (data.nextCursor) {
             setSimCursor(data.nextCursor);
+        }
+        // If random mode, we might want to update the displayed cursor/symbol to what was actually used
+        if (data.entryTime) {
+            // Optional: update simCursor to match what was chosen?
+            // setSimCursor(data.entryTime);
         }
       } else {
         console.error('Simulation failed', await res.text());
@@ -315,11 +338,14 @@ export default function DashboardPage() {
       <div className="max-w-7xl mx-auto p-8 space-y-6">
 
         {/* DASHBOARD TITLE */}
-        <div className="flex items-center gap-2">
-          <h1 className="text-3xl font-bold text-gray-900">Dashboard</h1>
-          <QuantumTooltip
-            content="Your command center for portfolio insights, AI-driven suggestions, and risk tracking."
-          />
+        <div className="flex items-center justify-between">
+          <div className="flex items-center gap-2">
+            <h1 className="text-3xl font-bold text-gray-900 dark:text-gray-100">Dashboard</h1>
+            <QuantumTooltip
+              content="Your command center for portfolio insights, AI-driven suggestions, and risk tracking."
+            />
+          </div>
+          <ThemeToggle />
         </div>
 
         <DashboardOnboarding
@@ -342,17 +368,17 @@ export default function DashboardPage() {
         {/* SECTION 1: POSITIONS & OPTIMIZER */}
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
           <div className="lg:col-span-2">
-            <div className="bg-white rounded-lg shadow overflow-hidden">
-              <div className="px-6 py-4 border-b flex justify-between items-center">
-                <h2 className="text-xl font-semibold">Positions</h2>
+            <div className="bg-white dark:bg-zinc-900 rounded-lg shadow overflow-hidden">
+              <div className="px-6 py-4 border-b dark:border-zinc-800 flex justify-between items-center">
+                <h2 className="text-xl font-semibold dark:text-gray-100">Positions</h2>
                 <div className="flex gap-2">
                   <SyncHoldingsButton onSyncComplete={loadSnapshot} />
-                  <a href="/paper" className="text-xs px-3 py-1 flex items-center rounded bg-blue-50 text-blue-700 hover:bg-blue-100 border border-blue-200">
+                  <a href="/paper" className="text-xs px-3 py-1 flex items-center rounded bg-blue-50 text-blue-700 hover:bg-blue-100 border border-blue-200 dark:bg-blue-900 dark:text-blue-100 dark:border-blue-800">
                      <Wallet className="w-3 h-3 mr-1" /> Paper Portfolio
                   </a>
                   <button
                     onClick={runAllWorkflows}
-                    className="text-xs px-3 py-1 rounded border border-purple-200 text-purple-700 hover:bg-purple-50"
+                    className="text-xs px-3 py-1 rounded border border-purple-200 text-purple-700 hover:bg-purple-50 dark:border-purple-800 dark:text-purple-300 dark:hover:bg-purple-900"
                   >
                     Generate Suggestions (Dev)
                   </button>
@@ -408,71 +434,89 @@ export default function DashboardPage() {
         <StrategyProfilesPanel />
 
         {/* SECTION 1.5: HISTORICAL SIMULATION (Polished) */}
-        <div className="bg-white rounded-lg shadow p-6 border-l-4 border-indigo-500">
+        <div className="bg-white dark:bg-zinc-900 rounded-lg shadow p-6 border-l-4 border-indigo-500">
             <div className="flex justify-between items-center mb-4">
                 <div>
-                    <h2 className="text-lg font-bold text-gray-900">Historical Regime Cycle</h2>
-                    <p className="text-sm text-gray-500">Manual verification of regime transitions & strategy logic.</p>
+                    <h2 className="text-lg font-bold text-gray-900 dark:text-gray-100">Historical Regime Cycle</h2>
+                    <p className="text-sm text-gray-500 dark:text-gray-400">Manual verification of regime transitions & strategy logic.</p>
                 </div>
                 <div className="flex items-center gap-4">
-                    <div className="text-sm text-gray-600 bg-gray-100 px-3 py-1 rounded">
-                        Date: <span className="font-mono font-bold">{simCursor}</span>
+                    <div className="flex items-center gap-2 bg-gray-50 dark:bg-zinc-800 p-1 rounded-lg border border-gray-200 dark:border-zinc-700">
+                         <button
+                            onClick={() => setSimMode('deterministic')}
+                            className={`px-3 py-1 text-xs font-medium rounded transition-colors ${simMode === 'deterministic' ? 'bg-white dark:bg-zinc-700 text-indigo-700 dark:text-indigo-300 shadow-sm border border-gray-200 dark:border-zinc-600' : 'text-gray-500 hover:text-gray-300'}`}
+                         >
+                            Deterministic
+                         </button>
+                         <button
+                            onClick={() => setSimMode('random')}
+                            className={`px-3 py-1 text-xs font-medium rounded transition-colors ${simMode === 'random' ? 'bg-white dark:bg-zinc-700 text-indigo-700 dark:text-indigo-300 shadow-sm border border-gray-200 dark:border-zinc-600' : 'text-gray-500 hover:text-gray-300'}`}
+                         >
+                            Random
+                         </button>
                     </div>
+
+                    {simMode === 'deterministic' && (
+                        <div className="text-sm text-gray-600 dark:text-gray-300 bg-gray-100 dark:bg-zinc-800 px-3 py-1 rounded">
+                            Date: <span className="font-mono font-bold">{simCursor}</span>
+                        </div>
+                    )}
+
                     <button
                         onClick={runHistoricalCycle}
-                        disabled={simLoading || simResult?.done}
+                        disabled={simLoading || (simMode === 'deterministic' && simResult?.done)}
                         className={`px-4 py-2 rounded text-white font-medium shadow-sm transition-colors ${
-                            simLoading ? 'bg-gray-400 cursor-not-allowed' : 'bg-indigo-600 hover:bg-indigo-700'
+                            simLoading ? 'bg-gray-400 dark:bg-zinc-600 cursor-not-allowed' : 'bg-indigo-600 hover:bg-indigo-700 dark:bg-indigo-700 dark:hover:bg-indigo-800'
                         }`}
                     >
-                        {simLoading ? 'Processing...' : simResult?.done ? 'End of Data' : 'Step Forward 1 Cycle'}
+                        {simLoading ? 'Processing...' : (simMode === 'deterministic' && simResult?.done) ? 'End of Data' : simMode === 'random' ? 'Run Random Cycle' : 'Step Forward 1 Cycle'}
                     </button>
                 </div>
             </div>
 
             {/* Simulation Results Display */}
             {simResult && !simResult.error && (
-                <div className="bg-gray-50 rounded-lg p-5 border border-gray-200">
+                <div className="bg-gray-50 dark:bg-zinc-800 rounded-lg p-5 border border-gray-200 dark:border-zinc-700">
                     {simResult.done && !simResult.entryTime ? (
-                         <p className="text-gray-500 italic flex items-center gap-2">
+                         <p className="text-gray-500 dark:text-gray-400 italic flex items-center gap-2">
                              <AlertTriangle className="w-4 h-4" />
                              {simResult.message || "No trades triggered in remaining data."}
                          </p>
                     ) : (
                         <div className="grid grid-cols-2 md:grid-cols-5 gap-6">
                             <div>
-                                <p className="text-xs text-gray-500 uppercase tracking-wide">Strategy / Regime</p>
-                                <p className="font-semibold text-gray-900 mt-1">{simResult.strategy || 'Standard'}</p>
-                                <div className="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-purple-100 text-purple-800 mt-1">
+                                <p className="text-xs text-gray-500 dark:text-gray-400 uppercase tracking-wide">Strategy / Regime</p>
+                                <p className="font-semibold text-gray-900 dark:text-gray-100 mt-1">{simResult.strategy || 'Standard'}</p>
+                                <div className="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-purple-100 text-purple-800 dark:bg-purple-900 dark:text-purple-200 mt-1">
                                     {simResult.regime || 'Neutral'}
                                 </div>
                             </div>
 
                             <div>
-                                <p className="text-xs text-gray-500 uppercase tracking-wide">Entry</p>
-                                <p className="font-semibold text-gray-900 mt-1">{simResult.entryTime}</p>
-                                <p className="text-sm text-gray-600">@ ${simResult.entryPrice?.toFixed(2)}</p>
-                                <span className={`text-[10px] px-1.5 py-0.5 rounded uppercase mt-1 inline-block ${simResult.direction === 'long' ? 'bg-green-100 text-green-800' : 'bg-red-100 text-red-800'}`}>
+                                <p className="text-xs text-gray-500 dark:text-gray-400 uppercase tracking-wide">Entry</p>
+                                <p className="font-semibold text-gray-900 dark:text-gray-100 mt-1">{simResult.entryTime}</p>
+                                <p className="text-sm text-gray-600 dark:text-gray-400">@ ${simResult.entryPrice?.toFixed(2)}</p>
+                                <span className={`text-[10px] px-1.5 py-0.5 rounded uppercase mt-1 inline-block ${simResult.direction === 'long' ? 'bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-200' : 'bg-red-100 text-red-800 dark:bg-red-900 dark:text-red-200'}`}>
                                     {simResult.direction}
                                 </span>
                             </div>
 
                             <div>
-                                <p className="text-xs text-gray-500 uppercase tracking-wide">Exit</p>
+                                <p className="text-xs text-gray-500 dark:text-gray-400 uppercase tracking-wide">Exit</p>
                                 {simResult.exitTime ? (
                                     <>
-                                        <p className="font-semibold text-gray-900 mt-1">{simResult.exitTime}</p>
-                                        <p className="text-sm text-gray-600">@ ${simResult.exitPrice?.toFixed(2)}</p>
+                                        <p className="font-semibold text-gray-900 dark:text-gray-100 mt-1">{simResult.exitTime}</p>
+                                        <p className="text-sm text-gray-600 dark:text-gray-400">@ ${simResult.exitPrice?.toFixed(2)}</p>
                                     </>
                                 ) : (
-                                    <p className="text-sm text-gray-400 italic mt-1">Position Open</p>
+                                    <p className="text-sm text-gray-400 dark:text-gray-500 italic mt-1">Position Open</p>
                                 )}
                             </div>
 
                             <div>
-                                <p className="text-xs text-gray-500 uppercase tracking-wide">P&L</p>
+                                <p className="text-xs text-gray-500 dark:text-gray-400 uppercase tracking-wide">P&L</p>
                                 {simResult.pnl !== undefined ? (
-                                    <p className={`font-bold text-2xl mt-1 ${simResult.pnl >= 0 ? 'text-green-600' : 'text-red-600'}`}>
+                                    <p className={`font-bold text-2xl mt-1 ${simResult.pnl >= 0 ? 'text-green-600 dark:text-green-400' : 'text-red-600 dark:text-red-400'}`}>
                                         {simResult.pnl >= 0 ? '+' : ''}{simResult.pnl.toFixed(2)}
                                     </p>
                                 ) : (
@@ -480,15 +524,15 @@ export default function DashboardPage() {
                                 )}
                             </div>
 
-                            <div className="bg-white p-2 rounded border border-gray-100">
-                                <p className="text-xs text-gray-500 uppercase tracking-wide mb-1">Conviction</p>
+                            <div className="bg-white dark:bg-zinc-700 p-2 rounded border border-gray-100 dark:border-zinc-600">
+                                <p className="text-xs text-gray-500 dark:text-gray-300 uppercase tracking-wide mb-1">Conviction</p>
                                 <div className="flex items-center justify-between text-sm">
-                                    <span className="text-gray-500">Entry:</span>
-                                    <span className="font-mono font-bold">{simResult.entryConviction?.toFixed(2) || '--'}</span>
+                                    <span className="text-gray-500 dark:text-gray-400">Entry:</span>
+                                    <span className="font-mono font-bold dark:text-gray-200">{simResult.entryConviction?.toFixed(2) || '--'}</span>
                                 </div>
                                 <div className="flex items-center justify-between text-sm mt-1">
-                                    <span className="text-gray-500">Exit:</span>
-                                    <span className="font-mono font-bold">{simResult.exitConviction?.toFixed(2) || '--'}</span>
+                                    <span className="text-gray-500 dark:text-gray-400">Exit:</span>
+                                    <span className="font-mono font-bold dark:text-gray-200">{simResult.exitConviction?.toFixed(2) || '--'}</span>
                                 </div>
                             </div>
                         </div>
@@ -496,7 +540,7 @@ export default function DashboardPage() {
                 </div>
             )}
             {simResult?.error && (
-                <div className="bg-red-50 text-red-700 p-3 rounded text-sm mt-2 flex items-center gap-2">
+                <div className="bg-red-50 dark:bg-red-900/20 text-red-700 dark:text-red-300 p-3 rounded text-sm mt-2 flex items-center gap-2">
                     <AlertTriangle className="w-4 h-4" />
                     Error: {simResult.error}
                 </div>
@@ -521,28 +565,28 @@ export default function DashboardPage() {
 
             {/* Trade Journal Stats (Side Panel) */}
             <div className="space-y-6">
-                <div className="bg-gradient-to-r from-purple-50 to-pink-50 rounded-lg shadow p-6 border-l-4 border-purple-500 h-fit">
+                <div className="bg-gradient-to-r from-purple-50 to-pink-50 dark:from-purple-950/40 dark:to-pink-950/40 rounded-lg shadow p-6 border-l-4 border-purple-500 h-fit">
                     <div className="flex justify-between items-start mb-4">
-                        <h3 className="text-lg font-semibold text-purple-900 flex items-center gap-2">📊 Trade Journal</h3>
-                        <button onClick={loadJournalStats} className="text-sm text-purple-700 underline">Refresh</button>
+                        <h3 className="text-lg font-semibold text-purple-900 dark:text-purple-200 flex items-center gap-2">📊 Trade Journal</h3>
+                        <button onClick={loadJournalStats} className="text-sm text-purple-700 dark:text-purple-300 underline">Refresh</button>
                     </div>
                     {journalStats ? (
                         <div className="space-y-4">
                              <div className="grid grid-cols-2 gap-4">
-                                <div className="bg-white p-3 rounded border border-purple-200">
-                                    <p className="text-xs text-gray-600">Win Rate</p>
-                                    <p className="text-xl font-bold text-purple-900">{journalStats.stats.win_rate?.toFixed(1) || 0}%</p>
+                                <div className="bg-white dark:bg-zinc-800 p-3 rounded border border-purple-200 dark:border-purple-800">
+                                    <p className="text-xs text-gray-600 dark:text-gray-400">Win Rate</p>
+                                    <p className="text-xl font-bold text-purple-900 dark:text-purple-200">{journalStats.stats.win_rate?.toFixed(1) || 0}%</p>
                                 </div>
-                                <div className="bg-white p-3 rounded border border-purple-200">
-                                    <p className="text-xs text-gray-600">Total P&L</p>
-                                    <p className={`text-xl font-bold ${(journalStats.stats.total_pnl || 0) >= 0 ? 'text-green-600' : 'text-red-600'}`}>
+                                <div className="bg-white dark:bg-zinc-800 p-3 rounded border border-purple-200 dark:border-purple-800">
+                                    <p className="text-xs text-gray-600 dark:text-gray-400">Total P&L</p>
+                                    <p className={`text-xl font-bold ${(journalStats.stats.total_pnl || 0) >= 0 ? 'text-green-600 dark:text-green-400' : 'text-red-600 dark:text-red-400'}`}>
                                         ${(journalStats.stats.total_pnl || 0).toFixed(0)}
                                     </p>
                                 </div>
                             </div>
                         </div>
                     ) : (
-                        <div className="text-center py-8 text-purple-700 text-sm">No trades logged yet.</div>
+                        <div className="text-center py-8 text-purple-700 dark:text-purple-300 text-sm">No trades logged yet.</div>
                     )}
                 </div>
             </div>

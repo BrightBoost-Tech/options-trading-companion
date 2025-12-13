@@ -1,7 +1,7 @@
 import re
 import uuid
 from typing import List, Dict, Any, Optional
-from models import SpreadPosition
+from packages.quantum.models import SpreadPosition
 
 def parse_option_symbol(symbol: str) -> Dict[str, Any]:
     """

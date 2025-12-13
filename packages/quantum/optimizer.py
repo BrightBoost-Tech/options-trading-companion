@@ -8,30 +8,33 @@ import uuid
 from dataclasses import asdict
 
 # Core Imports
-from core.math_engine import PortfolioMath
-from core.surrogate import SurrogateOptimizer, optimize_for_compounding
+from packages.quantum.core.math_engine import PortfolioMath
+from packages.quantum.core.surrogate import SurrogateOptimizer, optimize_for_compounding
 try:
-    from core.qci_adapter import QciDiracAdapter
+    from packages.quantum.core.qci_adapter import QciDiracAdapter
 except ImportError:
     QciDiracAdapter = None
 
 # Analytics Imports
-from analytics.strategy_selector import StrategySelector
-from analytics.guardrails import apply_guardrails, compute_conviction_score, SmallAccountCompounder
-from analytics.analytics import OptionsAnalytics
-from services.trade_builder import enrich_trade_suggestions
-from market_data import PolygonService, calculate_portfolio_inputs
-from ev_calculator import calculate_ev, calculate_kelly_sizing
-from nested_logging import log_inference
-from nested.adapters import load_symbol_adapters, apply_biases
-from nested.backbone import compute_macro_features, infer_global_context, log_global_context
-from nested.session import load_session_state, refresh_session_from_db, get_session_sigma_scale
-from security import get_current_user_id
+from packages.quantum.analytics.strategy_selector import StrategySelector
+from packages.quantum.analytics.guardrails import apply_guardrails, compute_conviction_score, SmallAccountCompounder
+from packages.quantum.analytics.analytics import OptionsAnalytics
+from packages.quantum.services.trade_builder import enrich_trade_suggestions
+from packages.quantum.market_data import PolygonService, calculate_portfolio_inputs
+from packages.quantum.ev_calculator import calculate_ev, calculate_kelly_sizing
+from packages.quantum.nested_logging import log_inference
+from packages.quantum.nested.adapters import load_symbol_adapters, apply_biases
+from packages.quantum.nested.backbone import compute_macro_features, infer_global_context, log_global_context
+from packages.quantum.nested.session import load_session_state, refresh_session_from_db, get_session_sigma_scale
+from packages.quantum.security import get_current_user_id
 from fastapi import Request
 
-from models import Spread, SpreadLeg, SpreadPosition
-from services.options_utils import group_spread_positions
-from services.analytics_service import AnalyticsService
+from packages.quantum.models import Spread, SpreadLeg, SpreadPosition
+from packages.quantum.services.options_utils import group_spread_positions
+from packages.quantum.services.analytics_service import AnalyticsService
+
+# V3 Imports
+from packages.quantum.analytics.risk_model import SpreadRiskModel
 
 router = APIRouter()
 
@@ -62,7 +65,7 @@ MIN_QTY_BALANCED = 0.05
 MIN_DOLLAR_DIFF_AGGRESSIVE = 10.0
 MIN_QTY_AGGRESSIVE = 0.02
 
-# --- REGIME ELASTIC CONFIG ---
+# --- REGIME ELASTIC CONFIG (V3) ---
 REGIME_STRATEGY_CAPS = {
     "default": {
         "debit_call": 0.10,
@@ -74,14 +77,102 @@ REGIME_STRATEGY_CAPS = {
         "single": 0.10,
         "other": 0.05,
     },
-    "high_vol": {
+    "suppressed": { # Low Vol: Buy Premium
+        "debit_call": 0.12,
+        "debit_put": 0.12,
+        "credit_call": 0.06,
+        "credit_put": 0.06,
+        "iron_condor": 0.04,
+        "single": 0.15, # Aggressive long delta
+    },
+    "normal": { # Balanced
+        "debit_call": 0.15,
+        "debit_put": 0.15,
+        "credit_call": 0.05,
+        "credit_put": 0.05,
+        "iron_condor": 0.04,
+        "vertical": 0.10,
+    },
+    "normal": {
+        "debit_call": 0.10,
+        "debit_put": 0.10,
+        "credit_call": 0.08,
+        "credit_put": 0.08,
+        "iron_condor": 0.06,
+        "single": 0.10,
+    },
+    "elevated": { # High Vol: Sell Premium
+        "iron_condor": 0.05,
+    },
+    "elevated": { # High Vol: Sell Premium
         "credit_call": 0.12,
         "credit_put": 0.12,
         "debit_call": 0.06,
         "debit_put": 0.06,
-        "iron_condor": 0.03,
+        "iron_condor": 0.08,
     },
+    "high_vol": { # Alias for elevated
+        "credit_call": 0.12,
+        "credit_put": 0.12,
+        "debit_call": 0.06,
+        "debit_put": 0.06,
+        "iron_condor": 0.08,
+        "single": 0.05,
+    },
+    "shock": { # Crash: Defensive
+        "credit_call": 0.15, # Sell calls aggressively? Or just cash.
+        "debit_put": 0.10, # Hedges
+        "credit_put": 0.02, # Dangerous
+        "iron_condor": 0.00,
+        "single": 0.02,
+    },
+    "rebound": { # Post-Shock rally
+        "debit_call": 0.10,
+        "credit_put": 0.10,
+        "debit_put": 0.04,
+        "single": 0.08,
+    },
+    "chop": { # Range bound
+        "iron_condor": 0.10,
+        "credit_call": 0.08,
+        "credit_put": 0.08,
+        "debit_call": 0.04,
+        "debit_put": 0.04,
+    },
+    "shock": { # Extreme Risk: Cut size drastically
+        "credit_call": 0.05,
+        "credit_put": 0.05,
+        "debit_call": 0.03,
+        "debit_put": 0.03,
+        "iron_condor": 0.03,
+        "vertical": 0.03,
+        "other": 0.02
+    },
+    "panic": { # Alias for shock
+        "credit_call": 0.05,
+        "credit_put": 0.05,
+        "debit_call": 0.03,
+        "debit_put": 0.03,
+        "iron_condor": 0.03,
+        "other": 0.02
+    },
+    "rebound": { # Sharp recovery: Favor calls/bull spreads
+        "debit_call": 0.12,
+        "credit_put": 0.12,
+        "debit_put": 0.05,
+        "credit_call": 0.05,
+    },
+    "chop": { # Range bound: Iron Condors / Calendars
+        "iron_condor": 0.10,
+        "calendar": 0.10,
+        "debit_call": 0.05,
+        "credit_call": 0.08,
+    }
 }
+
+# Mapping for backwards compatibility with V2 "high_vol" etc. if passed as keys
+REGIME_STRATEGY_CAPS["high_vol"] = REGIME_STRATEGY_CAPS["elevated"]
+REGIME_STRATEGY_CAPS["panic"] = REGIME_STRATEGY_CAPS["shock"]
 
 def calculate_dynamic_target(
     base_weight: float,
@@ -95,15 +186,24 @@ def calculate_dynamic_target(
       - Conviction scaling factor: 0.5 + 0.5 * conviction.
     """
 
+    # Check for exact match, else default
+    # If regime is passed as V3 string (e.g. 'rebound'), it works.
+    # If passed as 'high_vol' (V2), it works.
     caps = REGIME_STRATEGY_CAPS.get(regime, REGIME_STRATEGY_CAPS["default"])
+
     # Fallback keys logic
     cap = caps.get(strategy_type, caps.get("other", base_weight))
 
     # Conviction scaling: low conviction => ~0.5x, high => ~1.0x
     scale = 0.5 + 0.5 * max(0.0, min(1.0, conviction))
 
-    target = base_weight * scale
-    return min(target, cap)
+    # target = base_weight * scale # REMOVED in V3: base_weight is optimizer output.
+    # This function is now used to calculate BOUNDS (Caps).
+    # So we return the CAP scaled by conviction?
+    # Actually, the logic was post-hoc. Now we want pre-hoc bounds.
+
+    # New V3 Usage: Return the dynamic CAP.
+    return cap * scale
 
 def _compute_portfolio_weights(
     mu: np.ndarray,
@@ -115,7 +215,8 @@ def _compute_portfolio_weights(
     user_id: str,
     total_portfolio_value: float,
     liquidity: float,
-    force_baseline: bool = False
+    force_baseline: bool = False,
+    external_risk_scaler: Optional[float] = None
 ):
     """
     Internal helper to run the optimization logic once.
@@ -150,18 +251,32 @@ def _compute_portfolio_weights(
     # --- LAYER 2: GLOBAL BACKBONE ---
     if use_l2:
         try:
-            macro_service = PolygonService()
-            macro_features = compute_macro_features(macro_service)
-            global_ctx = infer_global_context(macro_features)
-            log_global_context(global_ctx)
-            g_scaler = global_ctx.global_risk_scaler
-            if g_scaler < 0.01: g_scaler = 0.01
-            sigma_multiplier = 1.0 / g_scaler
-            sigma = sigma * (sigma_multiplier ** 2)
-            diagnostics_nested["l2"] = asdict(global_ctx)
-            if global_ctx.global_regime == "shock":
-                local_req.profile = "conservative"
-                diagnostics_nested["crisis_mode_triggered_by"] = "l2_shock"
+            if external_risk_scaler is not None:
+                # Use provided scaler from RegimeEngineV3
+                g_scaler = external_risk_scaler
+                if g_scaler < 0.01: g_scaler = 0.01
+                sigma_multiplier = 1.0 / g_scaler
+                sigma = sigma * (sigma_multiplier ** 2)
+                diagnostics_nested["l2"] = {"source": "RegimeEngineV3", "risk_scaler": g_scaler}
+
+                # If scaler is very low (shock), force conservative
+                if g_scaler <= 0.6:
+                    local_req.profile = "conservative"
+                    diagnostics_nested["crisis_mode_triggered_by"] = "v3_shock"
+            else:
+                # Fallback to legacy backbone
+                macro_service = PolygonService()
+                macro_features = compute_macro_features(macro_service)
+                global_ctx = infer_global_context(macro_features)
+                log_global_context(global_ctx)
+                g_scaler = global_ctx.global_risk_scaler
+                if g_scaler < 0.01: g_scaler = 0.01
+                sigma_multiplier = 1.0 / g_scaler
+                sigma = sigma * (sigma_multiplier ** 2)
+                diagnostics_nested["l2"] = asdict(global_ctx)
+                if global_ctx.global_regime == "shock":
+                    local_req.profile = "conservative"
+                    diagnostics_nested["crisis_mode_triggered_by"] = "l2_shock"
         except Exception as e:
             print(f"Phase 3 L2 Error: {e}")
 
@@ -170,12 +285,7 @@ def _compute_portfolio_weights(
         try:
             # Load adapters for UNDERLYING symbols
             adapters = load_symbol_adapters(underlying_list)
-            # Apply biases map. But wait, apply_biases expects 'tickers' match 'mu'/'sigma' indices.
-            # Here 'tickers' are Spread Tickers, but adapters are for Underlyings.
-            # We need to map adapter effects to spread assets.
-            # Approximation: Apply underlying bias to the spread asset.
 
-            # Create a mapped adapter dict where keys are Spread Tickers, but values come from Underlying
             spread_adapters = {}
             for i, t in enumerate(tickers):
                 und = underlying_list[i]
@@ -214,7 +324,7 @@ def _compute_portfolio_weights(
         except ValueError:
             pass
 
-    # --- DYNAMIC CONSTRAINT LOGIC ---
+    # --- DYNAMIC CONSTRAINT LOGIC (V3: Bounds per asset) ---
     default_max_pct = 0.40
     num_assets = len(tickers)
     if num_assets * default_max_pct < 1.0:
@@ -222,11 +332,52 @@ def _compute_portfolio_weights(
     else:
         effective_max_pct = default_max_pct
 
+    # Calculate per-asset bounds based on strategy and regime
+    bounds = []
+    regime_name = "default" # TODO: get from global context if available
+
+    for asset in investable_assets:
+        # Determine cap
+        # Default cap logic
+        cap = calculate_dynamic_target(1.0, str(asset.spread_type).lower(), regime_name, conviction=1.0)
+        # Combine with global max
+        final_cap = min(cap, effective_max_pct)
+        bounds.append((0.0, final_cap))
+
     constraints = {
         "risk_aversion": local_req.risk_aversion,
         "skew_preference": local_req.skew_preference,
-        "max_position_pct": effective_max_pct,
+        "max_position_pct": effective_max_pct, # Fallback
+        "bounds": bounds,
+        "turnover_penalty": 0.01 # Add V3 turnover penalty default
     }
+
+    # Greek sensitivities for constraints (V3)
+    greek_sensitivities = {
+        'delta': np.array([a.delta for a in investable_assets]),
+        'vega': np.array([a.vega for a in investable_assets])
+    }
+
+    # Shock losses (V3: simplified 20% crash proxy)
+    # Estimate loss if underlying drops 20% and Vol up 50%
+    # loss_i = delta_i * S * (-0.20) + vega_i * (0.50)
+    # Normalized to return space: loss_i / Collateral
+    shock_losses = []
+    for i, a in enumerate(investable_assets):
+        S = 100.0 # Placeholder or fetch real
+        if a.legs:
+            l = a.legs[0]
+            if isinstance(l, dict): S = l.get('current_price', 100.0)
+            else: S = getattr(l, 'current_price', 100.0)
+
+        loss_val = (a.delta * S * -0.20) + (a.vega * 0.50)
+        c = collateral_list[i] if collateral_list else 1000.0
+        shock_losses.append(loss_val / c)
+
+    shock_losses_arr = np.array(shock_losses)
+
+    # Add drawdown constraint
+    constraints['max_drawdown'] = 0.25 # Max 25% portfolio loss in shock
 
     # 4. SOLVER SELECTION
     has_qci_token = (os.getenv("QCI_API_TOKEN") is not None)
@@ -234,24 +385,28 @@ def _compute_portfolio_weights(
     solver_type = "Classical"
     weights_array = []
 
+    # Current weights for turnover (Mock: 1/N for now, ideally passed in)
+    current_w = np.array([1.0/num_assets] * num_assets)
+
     if (local_req.skew_preference > 0) and has_qci_token and (QciDiracAdapter is not None):
         try:
             if len(tickers) > TRIAL_ASSET_LIMIT:
                 s_solver = SurrogateOptimizer()
-                weights_array = s_solver.solve(mu, sigma, coskew, constraints)
+                weights_array = s_solver.solve(mu, sigma, coskew, constraints, current_weights=current_w, greek_sensitivities=greek_sensitivities, shock_losses=shock_losses_arr)
                 solver_type = "Surrogate (Trial Limit)"
             else:
                 q_solver = QciDiracAdapter()
+                # Assuming Dirac Adapter updated to support new constraints or ignore them safely
                 weights_array = q_solver.solve_portfolio(mu, sigma, coskew, constraints)
                 solver_type = "QCI Dirac-3"
         except Exception as e:
             print(f"⚠️ Quantum Uplink Failed: {e}. Reverting.")
             s_solver = SurrogateOptimizer()
-            weights_array = s_solver.solve(mu, sigma, coskew, constraints)
+            weights_array = s_solver.solve(mu, sigma, coskew, constraints, current_weights=current_w, greek_sensitivities=greek_sensitivities, shock_losses=shock_losses_arr)
             solver_type = "Surrogate (Fallback)"
     else:
         s_solver = SurrogateOptimizer()
-        weights_array = s_solver.solve(mu, sigma, coskew, constraints)
+        weights_array = s_solver.solve(mu, sigma, coskew, constraints, current_weights=current_w, greek_sensitivities=greek_sensitivities, shock_losses=shock_losses_arr)
         solver_type = "Surrogate (Simulated)"
 
     target_weights = {tickers[i]: float(weights_array[i]) for i in range(len(tickers))}
@@ -269,7 +424,7 @@ def _compute_portfolio_weights(
             "cash": liquidity,
             "risk_aversion": local_req.risk_aversion,
             "skew_preference": local_req.skew_preference,
-            "constraints": constraints,
+            "constraints": str(constraints),
             "solver_type": solver_type,
             "force_baseline": force_baseline,
             "shadow_mode": req.nested_shadow
@@ -315,18 +470,12 @@ async def optimize_portfolio(req: OptimizationRequest, request: Request, user_id
         for p in raw_positions:
             sym = p.get("symbol", "").upper()
             if sym in ["CUR:USD", "USD", "CASH", "MM", "USDOLLAR"]:
-                # Check if it's already accounted for?
-                # The request assumes cash_balance is passed explicitly usually,
-                # but if we are calculating from snapshot, we might have cash positions.
-                # Use current_value
                 val = p.get("current_value", 0)
                 if val == 0 and "quantity" in p:
-                    # heuristic
                     val = float(p.get("quantity", 0)) * float(p.get("current_price", 1.0))
                 liquidity += val
 
         if not investable_assets:
-             # Just return empty plan if no assets
              return {
                 "status": "success",
                 "target_weights": {},
@@ -338,28 +487,11 @@ async def optimize_portfolio(req: OptimizationRequest, request: Request, user_id
         assets_equity = sum(s.current_value for s in investable_assets)
         total_portfolio_value = assets_equity + liquidity
 
-        # 2. GET DATA (Real Market Data)
-        # We need historical data for the SPREADS.
-        # Since Polygon doesn't give historical data for composite spreads easily,
-        # we will fetch data for the UNDERLYING and approximate.
-        # Approximation: Spread returns ~ Underlying returns * Delta?
-        # Or better: construct history from legs.
-        # For this version: Use Underlying History as proxy for volatility/correlation structure,
-        # but maybe scale it?
-        # Actually, standard approach: Optimization runs on Underlying exposure.
-        # BUT the spec says: "It optimizes spreads, not individual legs... targets: Spread A..."
+        # 2. V3 RISK MODEL INPUTS
+        underlying_tickers = list(set([s.underlying for s in investable_assets
+                                     if s.underlying and "USD" not in s.underlying]))
 
-        # We will use Underlying Data for correlation/mean estimation.
-        # This is a simplification. A Spread behaves differently than stock.
-        # But for 'target weights', relating them via underlying correlation is 'okay' for v2.
-
-        underlying_tickers = [s.underlying for s in investable_assets]
-
-        portfolio_inputs = {}
-        mu = np.array([])
-        sigma = np.array([])
-        coskew = None
-
+        # 2.1 Fetch Underlying Covariance
         try:
             # Fetch for unique underlyings
             # 3.1 Exclude Cash/Bad Tickers from Inputs
@@ -375,7 +507,7 @@ async def optimize_portfolio(req: OptimizationRequest, request: Request, user_id
 
             # Map back to spreads
             # mu vector size = len(tickers)
-            # sigma matrix size = len(tickers) x len(tickers)
+            # sigma matrix size = len(tickers)
 
             # Create mapping: underlying -> index in base_inputs
             base_idx_map = {u: i for i, u in enumerate(unique_underlyings)}
@@ -420,13 +552,26 @@ async def optimize_portfolio(req: OptimizationRequest, request: Request, user_id
 
             coskew = np.zeros((n, n, n)) # Mock coskew
 
+            market_inputs = calculate_portfolio_inputs(
+                underlying_tickers,
+                method="ewma", # V3 uses EWMA
+                shrinkage_tau_days=30 # Bayesian shrinkage for mu
+            )
+            underlying_cov = np.array(market_inputs['covariance_matrix'])
+            underlying_syms_aligned = market_inputs['symbols']
         except Exception as e:
-             # Fallback: Mock data if market data fails or partial failure
-            print(f"Market data mapping failed ({e}), using fallback.")
-            n = len(tickers)
-            mu = np.full(n, 0.05)
-            sigma = np.identity(n) * 0.02
-            coskew = np.zeros((n, n, n))
+            print(f"Market Data Error: {e}. Using identity fallback.")
+            n_u = len(underlying_tickers)
+            underlying_cov = np.eye(n_u) * 0.04
+            underlying_syms_aligned = underlying_tickers
+
+        # 2.2 Spread Risk Model
+        risk_model = SpreadRiskModel(investable_assets)
+        mu, sigma, coskew, collateral = risk_model.build_mu_sigma(
+            underlying_cov,
+            underlying_syms_aligned,
+            horizon_days=5
+        )
 
         # 3. COMPUTE WEIGHTS
         deployable_capital = liquidity
@@ -434,7 +579,8 @@ async def optimize_portfolio(req: OptimizationRequest, request: Request, user_id
 
         target_weights, diagnostics_nested, solver_type, trace_id, final_profile, weights_array, metrics_mu, metrics_sigma = _compute_portfolio_weights(
             mu, sigma, coskew, tickers, investable_assets, req, user_id,
-            total_portfolio_value, liquidity, force_baseline=force_main_baseline
+            total_portfolio_value, liquidity, force_baseline=force_main_baseline,
+            external_risk_scaler=None # Default None for direct optimization calls unless we fetch it here too
         )
 
         if analytics and trace_id:
@@ -459,31 +605,40 @@ async def optimize_portfolio(req: OptimizationRequest, request: Request, user_id
                 "target_allocation": round(weight, 4)
             })
 
-        # 4. TRADES are generated by RebalanceEngine now (external call),
-        # OR we keep generating simple trades here for the immediate response?
-        # The spec says: "Output final rebalance suggestions to Supabase table trade_suggestions" via RebalanceEngine.
-        # But this endpoint /optimize/portfolio usually returns a plan.
-        # We should probably return the plan here too.
-        # But we won't implement the full logic here to duplicate RebalanceEngine.
-        # We will just return the targets. The client can call /rebalance/execute to get trades.
-        # OR we can generate simple diffs here for display.
+        # Calculate Real V3 Metrics
+        # Expected Return = sum(w * mu) * PortfolioValue ??
+        # mu is return over 5 days? Or annualized?
+        # RiskModel mu is Return / Collateral.
+        # Wait, build_mu_sigma normalizes to Return ROI.
+        # Is it annualized?
+        # In RiskModel: E_PnL = ...; mu[i] = E_PnL / c_i
+        # E_PnL was based on horizon_days. So mu is horizon return.
+        # We should annualize for display.
 
-        # Let's return simple trades for display consistency with legacy frontend,
-        # but mostly reliance is on "target_weights".
+        annual_factor = 365.0 / 5.0 # assuming 5 day horizon
 
-        # Legacy trade generator (adapted for Spreads)
-        trades = []
-        # ... (Legacy logic omitted for brevity, focusing on targets)
+        expected_ret_horizon = np.dot(weights_array, metrics_mu)
+        expected_ret_annual = expected_ret_horizon * annual_factor
+
+        # Volatility
+        var_horizon = np.dot(weights_array.T, np.dot(metrics_sigma, weights_array))
+        vol_horizon = np.sqrt(var_horizon)
+        vol_annual = vol_horizon * np.sqrt(annual_factor) # approx
+
+        rf = 0.04
+        sharpe = (expected_ret_annual - rf) / vol_annual if vol_annual > 0 else 0.0
 
         return {
             "status": "success",
             "targets": formatted_targets,
-            "target_weights": target_weights, # Legacy format support
+            "target_weights": target_weights,
             "mode": solver_type,
             "profile": final_profile,
             "metrics": {
-                 "expected_return": float(np.dot(weights_array, metrics_mu)),
-                 "sharpe_ratio": 0.0 # simplified
+                 "expected_return": float(expected_ret_annual),
+                 "volatility": float(vol_annual),
+                 "sharpe_ratio": float(sharpe),
+                 "horizon_days": 5
             },
             "diagnostics": {
                 "nested": diagnostics_nested,
@@ -493,6 +648,8 @@ async def optimize_portfolio(req: OptimizationRequest, request: Request, user_id
 
     except Exception as e:
         print(f"Optimizer Error: {e}")
+        import traceback
+        traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
 
 @router.get("/diagnostics/phase1")

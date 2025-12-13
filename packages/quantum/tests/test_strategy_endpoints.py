@@ -9,7 +9,7 @@ sys.modules["security.get_current_user_id"] = MagicMock(return_value="test_user"
 sys.modules["security.secrets_provider"] = MagicMock()
 
 # Now import the router and app logic
-from strategy_endpoints import router, _run_simulation_job, StrategyConfig, BacktestRequest
+from packages.quantum.strategy_endpoints import router, _run_simulation_job, StrategyConfig, BacktestRequest
 
 def test_strategy_config_model():
     """Verify StrategyConfig model validation."""
@@ -55,7 +55,7 @@ def test_list_strategy_backtests(mock_get_supabase):
         .range.return_value \
         .execute.return_value = mock_execute
 
-    from strategy_endpoints import list_strategy_backtests
+    from packages.quantum.strategy_endpoints import list_strategy_backtests
 
     result = list_strategy_backtests(
         name="TestStrat",
@@ -83,7 +83,7 @@ def test_list_recent_backtests(mock_get_supabase):
         .limit.return_value \
         .execute.return_value = mock_execute
 
-    from strategy_endpoints import list_recent_backtests
+    from packages.quantum.strategy_endpoints import list_recent_backtests
 
     result = list_recent_backtests(limit=5, user_id="test_user")
 

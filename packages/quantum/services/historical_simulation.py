@@ -1,18 +1,20 @@
 import os
 import sys
+import random
+import uuid
 import numpy as np
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import List, Dict, Any, Optional
 
 # Add parent directory to path to allow importing strategy_profiles
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 try:
-    from strategy_profiles import StrategyConfig
+    from packages.quantum.strategy_profiles import StrategyConfig
 except ImportError:
     StrategyConfig = None # Fallback or type alias
 
-from analytics.regime_scoring import ScoringEngine, ConvictionTransform
-from analytics.regime_integration import (
+from packages.quantum.analytics.regime_scoring import ScoringEngine, ConvictionTransform
+from packages.quantum.analytics.regime_integration import (
     DEFAULT_WEIGHT_MATRIX,
     DEFAULT_CATALYST_PROFILES,
     DEFAULT_LIQUIDITY_SCALAR,
@@ -20,9 +22,17 @@ from analytics.regime_integration import (
     map_market_regime,
     run_historical_scoring
 )
-from market_data import PolygonService
-from analytics.factors import calculate_trend, calculate_volatility, calculate_rsi
-from nested.backbone import infer_global_context, GlobalContext
+from packages.quantum.market_data import PolygonService
+from packages.quantum.analytics.factors import calculate_trend, calculate_volatility, calculate_rsi
+from packages.quantum.nested.backbone import infer_global_context, GlobalContext
+
+# --- Configuration ---
+HISTORICAL_SIM_UNIVERSE = os.getenv("HISTORICAL_SIM_UNIVERSE", "SPY,QQQ,IWM,DIA").split(",")
+HISTORICAL_RANDOM_LOOKBACK_YEARS = int(os.getenv("HISTORICAL_RANDOM_LOOKBACK_YEARS", "5"))
+HISTORICAL_RANDOM_MIN_AGE_DAYS = int(os.getenv("HISTORICAL_RANDOM_MIN_AGE_DAYS", "365"))
+HISTORICAL_RANDOM_PARAMS = os.getenv("HISTORICAL_RANDOM_PARAMS", "false").lower() == "true"
+HISTORICAL_SIM_USER_ID = os.getenv("HISTORICAL_SIM_USER_ID")
+
 
 # --- Learning Hook ---
 
@@ -37,6 +47,7 @@ def learn_from_cycle(
     """
     Hook for nested learning.
     Feeds (state, action, reward) into learning_feedback_loops for offline analysis.
+    Uses aggregation pattern to support ConvictionService feedback loop.
     """
     try:
         # Check if enabled globally (redundant check if caller checked, but safe)
@@ -46,22 +57,23 @@ def learn_from_cycle(
 
         # Lazy import to avoid circular dep at top level if it becomes an issue,
         # though usually okay.
-        from nested_logging import _get_supabase_client
-        from services.journal_service import JournalService
+        from packages.quantum.nested_logging import _get_supabase_client
+        from packages.quantum.services.journal_service import JournalService
 
         supabase = _get_supabase_client()
         if not supabase:
             return
 
-        # 1. Create Synthetic Journal Entry
+        # 1. Determine Target User
+        # Use configured historical user, passed user, or fallback
+        target_user = HISTORICAL_SIM_USER_ID or user_id
+        if not target_user:
+            # Fallback only for dev convenience
+            target_user = "75ee12ad-b119-4f32-aeea-19b4ef55d587"
+
+        # 2. Create Synthetic Journal Entry
         try:
             journal_service = JournalService(supabase)
-
-            # Use passed user_id or fallback to test user (with warning) if none provided
-            target_user = user_id
-            if not target_user:
-                # Fallback only for dev convenience, but ideally caller provides it
-                target_user = "75ee12ad-b119-4f32-aeea-19b4ef55d587"
 
             journal_service.add_trade(
                 user_id=target_user,
@@ -81,33 +93,67 @@ def learn_from_cycle(
         except Exception as j_err:
             print(f"[NestedLearning] Journal entry failed: {j_err}")
 
-        # Prepare details
-        details = {
-            "entry_regime": entry.get("regimeAtEntry"),
-            "exit_regime": exit.get("regimeAtExit"),
-            "entry_conviction": entry.get("convictionAtEntry"),
-            "exit_conviction": exit.get("convictionAtExit"),
-            "days_in_trade": exit.get("daysInTrade"),
-            "mode": mode,
-            "trajectory_length": len(trajectory)
-        }
+        # 3. Update Aggregate Learning Stats
+        # Key: (user_id, strategy="historical_cycle", window="historical_sim")
+        strategy_key = "historical_cycle"
+        window_key = "historical_sim"
 
-        # Create a synthetic trace_id for this historical episode
-        import uuid
-        trace_id = str(uuid.uuid4())
+        # Safe probe to silence errors if migration not applied
+        supports_aggregate = True
+        try:
+            # Check if columns exist by trying to select one
+            supabase.table("learning_feedback_loops").select("strategy").limit(1).execute()
+        except Exception as e:
+            if "42703" in str(e): # Undefined column
+                supports_aggregate = False
+            else:
+                pass # Other error, proceed carefully
 
-        data = {
-            "trace_id": trace_id,
-            "user_id": None, # Historical simulation is usually system-wide or anonymous
-            "outcome_type": "historical_win" if reward > 0 else "historical_loss",
-            "pnl_realized": reward,
-            "pnl_predicted": None, # Could use entry expected return if available
-            "drift_tags": [],
-            "details_json": details,
-            "created_at": datetime.now().isoformat()
-        }
+        if supports_aggregate:
+            try:
+                existing_feedback = supabase.table("learning_feedback_loops") \
+                    .select("*") \
+                    .eq("user_id", target_user) \
+                    .eq("strategy", strategy_key) \
+                    .eq("window", window_key) \
+                    .eq("outcome_type", "aggregate") \
+                    .execute()
 
-        supabase.table("learning_feedback_loops").insert(data).execute()
+                if existing_feedback.data:
+                    rec = existing_feedback.data[0]
+                    new_total = (rec.get("total_trades") or 0) + 1
+                    new_wins = (rec.get("wins") or 0) + (1 if reward > 0 else 0)
+                    new_losses = (rec.get("losses") or 0) + (1 if reward < 0 else 0)
+                    # Update average return (simple moving average approximation)
+                    current_avg = float(rec.get("avg_return", 0) or 0)
+                    old_total = rec.get("total_trades") or 0
+                    new_avg = ((current_avg * old_total) + reward) / new_total
+
+                    supabase.table("learning_feedback_loops").update({
+                        "total_trades": new_total,
+                        "wins": new_wins,
+                        "losses": new_losses,
+                        "avg_return": new_avg,
+                        "updated_at": datetime.now(timezone.utc).isoformat(),
+                        "outcome_type": "aggregate"
+                    }).eq("id", rec["id"]).execute()
+                else:
+                    feedback_payload = {
+                        "user_id": target_user,
+                        "strategy": strategy_key,
+                        "window": window_key,
+                        "total_trades": 1,
+                        "wins": 1 if reward > 0 else 0,
+                        "losses": 1 if reward < 0 else 0,
+                        "avg_return": reward,
+                        "updated_at": datetime.now(timezone.utc).isoformat(),
+                        "outcome_type": "aggregate"
+                    }
+                    supabase.table("learning_feedback_loops").insert(feedback_payload).execute()
+            except Exception as fb_err:
+                # Still catch unexpected errors but silence the known 42703 if probe failed to catch it
+                if "42703" not in str(fb_err):
+                    print(f"[NestedLearning] Failed to update feedback loop stats: {fb_err}")
 
     except Exception as e:
         print(f"[NestedLearning] Failed to log cycle: {e}")
@@ -133,13 +179,58 @@ class HistoricalCycleService:
         cursor_date_str: str,
         symbol: str = "SPY",
         user_id: Optional[str] = None,
-        config: Optional[Any] = None # Using Any to avoid runtime issues if import fails, but verified via logic
+        config: Optional[Any] = None, # Using Any to avoid runtime issues if import fails, but verified via logic
+        mode: str = "deterministic",
+        seed: Optional[int] = None # Added seed param
     ) -> Dict[str, Any]:
         """
-        Runs exactly one historical trade cycle (Entry -> Exit) starting from cursor_date.
-        Accepts optional StrategyConfig to parameterize rules.
+        Runs exactly one historical trade cycle (Entry -> Exit).
+        mode: "deterministic" (default) or "random".
+        seed: Optional seed for reproducibility in random mode.
         """
-        # 0. Setup Parameters
+        run_id = str(uuid.uuid4())
+
+        # 0. Setup Parameters & Randomness
+        chosen_symbol = symbol
+
+        # Use local RNG instance for thread safety
+        # If seed is provided, use it. Else use random source (system time/entropy).
+        rng = random.Random(seed)
+
+        if mode == "random":
+            # Randomize Symbol
+            if not symbol or symbol == "SPY":
+                chosen_symbol = rng.choice(HISTORICAL_SIM_UNIVERSE)
+
+            # Randomize Date
+            # Configurable lookback
+            now = datetime.now()
+            min_age_days = HISTORICAL_RANDOM_MIN_AGE_DAYS
+            lookback_years = HISTORICAL_RANDOM_LOOKBACK_YEARS
+
+            end_window = now - timedelta(days=min_age_days)
+            start_window = end_window - timedelta(days=365 * lookback_years)
+
+            if start_window < datetime(2000, 1, 1): # Hard floor
+                start_window = datetime(2000, 1, 1)
+
+            time_delta = end_window - start_window
+            if time_delta.days > 0:
+                random_days = rng.randrange(time_delta.days)
+                start_date = start_window + timedelta(days=random_days)
+                cursor_date_str = start_date.strftime("%Y-%m-%d")
+            else:
+                # Fallback if window is too small
+                start_date = start_window
+                cursor_date_str = start_date.strftime("%Y-%m-%d")
+
+        # 1. Parse Cursor (Deterministic / Finalized Random)
+        try:
+            start_date = datetime.strptime(cursor_date_str, "%Y-%m-%d")
+        except (ValueError, TypeError):
+            # If invalid or empty, default to 2 years ago
+            start_date = datetime.now() - timedelta(days=365*2)
+
         entry_threshold = 0.70
         tp_pct = 0.08
         sl_pct = 0.05
@@ -153,12 +244,19 @@ class HistoricalCycleService:
             max_days = config.max_holding_days
             regime_whitelist = config.regime_whitelist
 
-        # 1. Parse Cursor
-        try:
-            start_date = datetime.strptime(cursor_date_str, "%Y-%m-%d")
-        except (ValueError, TypeError):
-            # If invalid or empty, default to 2 years ago
-            start_date = datetime.now() - timedelta(days=365*2)
+        # Apply Jitter if enabled
+        if mode == "random" and HISTORICAL_RANDOM_PARAMS:
+            # entry_threshold ± 0.05, clamped [0.4, 0.95]
+            jitter_entry = rng.uniform(-0.05, 0.05)
+            entry_threshold = max(0.4, min(0.95, entry_threshold + jitter_entry))
+
+            # tp_pct ± 0.02, clamped [0.01, 0.5]
+            jitter_tp = rng.uniform(-0.02, 0.02)
+            tp_pct = max(0.01, min(0.5, tp_pct + jitter_tp))
+
+            # sl_pct ± 0.01, clamped [0.01, 0.3]
+            jitter_sl = rng.uniform(-0.01, 0.01)
+            sl_pct = max(0.01, min(0.3, sl_pct + jitter_sl))
 
         # 2. Fetch Data Chunk (Start Date -> 1 Year Forward + Lookback)
         simulation_end_date = start_date + timedelta(days=365) # Fetch ample data
@@ -166,12 +264,18 @@ class HistoricalCycleService:
 
         try:
             hist_data = self.polygon.get_historical_prices(
-                symbol,
+                chosen_symbol,
                 days=days_needed,
                 to_date=simulation_end_date
             )
         except Exception as e:
-            return {"error": f"Data fetch failed: {str(e)}", "done": True, "status": "no_data"}
+            return {
+                "error": f"Data fetch failed for {chosen_symbol}: {str(e)}",
+                "done": True,
+                "status": "no_data",
+                "run_id": run_id,
+                "chosen_symbol": chosen_symbol
+            }
 
         dates = hist_data.get('dates', [])
         prices = hist_data.get('prices', [])
@@ -189,7 +293,9 @@ class HistoricalCycleService:
             return {
                 "done": True,
                 "status": "no_data",
-                "message": "No more historical data starting from cursor"
+                "message": "No more historical data starting from cursor",
+                "run_id": run_id,
+                "chosen_symbol": chosen_symbol
             }
 
         if start_idx < self.lookback_window:
@@ -253,7 +359,7 @@ class HistoricalCycleService:
 
             scoring_result = run_historical_scoring(
                 symbol_data={
-                    "symbol": symbol,
+                    "symbol": chosen_symbol,
                     "factors": factors_input,
                     "liquidity_tier": "top"
                 },
@@ -292,7 +398,7 @@ class HistoricalCycleService:
                         "direction": "long",
                         "regimeAtEntry": regime_mapped,
                         "convictionAtEntry": c_i,
-                        "symbol": symbol
+                        "symbol": chosen_symbol
                     }
                     trajectory = [step_snapshot] # Start trajectory
                     days_in_trade = 0
@@ -346,7 +452,9 @@ class HistoricalCycleService:
                         "pnl_pct": pnl_pct,
                         "done": False,
                         "status": "normal_exit",
-                        "nextCursor": dates[current_idx + 1] if current_idx + 1 < len(dates) else dates[-1]
+                        "nextCursor": dates[current_idx + 1] if current_idx + 1 < len(dates) else dates[-1],
+                        "run_id": run_id,
+                        "chosen_symbol": chosen_symbol
                     }
 
             current_idx += 1
@@ -383,12 +491,16 @@ class HistoricalCycleService:
                 "done": True,
                 "status": "forced_exit",
                 "message": "Data ended during trade",
-                "nextCursor": None
+                "nextCursor": None,
+                "run_id": run_id,
+                "chosen_symbol": chosen_symbol
             }
 
         return {
             "done": True,
             "status": "no_entry",
             "message": "End of data reached without finding another trade.",
-            "nextCursor": None
+            "nextCursor": None,
+            "run_id": run_id,
+            "chosen_symbol": chosen_symbol
         }

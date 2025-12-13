@@ -7,6 +7,32 @@ class JournalService:
     def __init__(self, supabase_client: Client):
         self.supabase = supabase_client
 
+    def _sanitize_for_json(self, data: Any) -> Any:
+        """
+        Recursively converts objects to JSON-serializable types.
+        Handles Pydantic models, classes, Enums, and common types.
+        """
+        if isinstance(data, dict):
+            return {k: self._sanitize_for_json(v) for k, v in data.items()}
+        elif isinstance(data, list):
+            return [self._sanitize_for_json(item) for item in data]
+        elif hasattr(data, "model_dump"):  # Pydantic v2
+            return self._sanitize_for_json(data.model_dump())
+        elif hasattr(data, "dict"):  # Pydantic v1
+            return self._sanitize_for_json(data.dict())
+        elif hasattr(data, "__dict__"):
+            return self._sanitize_for_json(vars(data))
+        elif hasattr(data, "isoformat"):  # datetime, date
+            return data.isoformat()
+
+        # Handle simple types and fallback
+        try:
+            if isinstance(data, (str, int, float, bool, type(None))):
+                return data
+            return str(data)
+        except Exception:
+            return str(data)
+
     def get_journal_entries(self, user_id: str) -> List[Dict[str, Any]]:
         """Retrieves all journal entries for a given user."""
         try:
@@ -69,9 +95,19 @@ class JournalService:
         """Adds a new trade to the journal."""
         trade_data['user_id'] = user_id
 
+        # Sanitize entire payload to prevent "not JSON serializable" errors
+        # This handles Pydantic models (e.g. StrategyConfig) or other objects passed by mistake
+        trade_data = self._sanitize_for_json(trade_data)
+
         # Ensure dates are in the correct format
         if 'entry_date' in trade_data:
-            trade_data['entry_date'] = datetime.fromisoformat(trade_data['entry_date']).isoformat()
+            # If it's already a string, validate/reformat it
+            if isinstance(trade_data['entry_date'], str):
+                try:
+                    trade_data['entry_date'] = datetime.fromisoformat(trade_data['entry_date']).isoformat()
+                except ValueError:
+                    pass # Keep as is if parsing fails, let DB decide or fail
+
         try:
             response = self.supabase.table("trade_journal_entries").insert(trade_data).execute()
             return response.data[0] if response.data else None

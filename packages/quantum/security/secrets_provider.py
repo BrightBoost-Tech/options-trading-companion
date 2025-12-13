@@ -10,6 +10,8 @@ class PlaidSecrets(BaseModel):
 class SupabaseSecrets(BaseModel):
     url: Optional[str]
     service_role_key: Optional[str]
+    anon_key: Optional[str]
+    jwt_secret: Optional[str]
 
 class PolygonSecrets(BaseModel):
     api_key: Optional[str]
@@ -20,8 +22,6 @@ class QciSecrets(BaseModel):
 class SecretsProvider:
     """
     Central access point for backend-wide secrets.
-    Initially reads from environment variables, but can later be extended
-    to pull from Supabase or a cloud secret manager.
     """
     def __init__(self):
         self._plaid: Optional[PlaidSecrets] = None
@@ -43,6 +43,8 @@ class SecretsProvider:
             self._supabase = SupabaseSecrets(
                 url=os.getenv("NEXT_PUBLIC_SUPABASE_URL"),
                 service_role_key=os.getenv("SUPABASE_SERVICE_ROLE_KEY"),
+                anon_key=os.getenv("SUPABASE_ANON_KEY"),
+                jwt_secret=os.getenv("SUPABASE_JWT_SECRET"),
             )
         return self._supabase
 

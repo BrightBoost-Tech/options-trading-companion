@@ -14,7 +14,7 @@ sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 # Explicitly load .env for standalone script usage
 load_dotenv()
 
-from security.secrets_provider import SecretsProvider
+from packages.quantum.security.secrets_provider import SecretsProvider
 
 secrets_provider = SecretsProvider()
 plaid_secrets = secrets_provider.get_plaid_secrets()

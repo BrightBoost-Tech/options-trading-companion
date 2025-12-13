@@ -1,6 +1,6 @@
 import pytest
-from analytics.greeks_aggregator import aggregate_portfolio_greeks, build_greek_alerts
-from models import SpreadPosition, SpreadLeg
+from packages.quantum.analytics.greeks_aggregator import aggregate_portfolio_greeks, build_greek_alerts
+from packages.quantum.models import SpreadPosition, SpreadLeg
 
 # Assuming Leg is not exported or needed if we pass legs as dicts to SpreadPosition (per model definition)
 

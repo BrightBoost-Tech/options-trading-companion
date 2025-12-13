@@ -112,8 +112,7 @@ export default function PortfolioOptimizer({ positions, onOptimizationComplete }
           cash_balance: cashBalance,
           profile: profile,
           nested_enabled: false,   // baseline only
-          nested_shadow: false     // no shadow in UI yet
-          // TODO: when ready, allow nested_shadow=true for QA runs.
+          nested_shadow: true      // enabled for QA
           // TODO: nested_enabled should remain false until nested has been validated in replay.
         })
       })

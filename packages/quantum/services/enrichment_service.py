@@ -1,7 +1,7 @@
 # packages/quantum/services/enrichment_service.py
-from market_data import PolygonService
+from packages.quantum.market_data import PolygonService
 import numpy as np
-from analytics.sector_mapper import SectorMapper
+from packages.quantum.analytics.sector_mapper import SectorMapper
 
 def enrich_holdings_with_analytics(holdings: list) -> list:
     """

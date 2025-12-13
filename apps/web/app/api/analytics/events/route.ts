@@ -24,8 +24,9 @@ export async function POST(request: NextRequest) {
     }
 
     // Forward "X-Test-Mode-User" header if present (for dev/test modes)
+    // Only if enabled in env (though checking NEXT_PUBLIC on server side is redundant, we use process.env)
     const testUserHeader = request.headers.get("x-test-mode-user");
-    if (testUserHeader) {
+    if (testUserHeader && process.env.NEXT_PUBLIC_ENABLE_DEV_AUTH_BYPASS === '1') {
       headers["X-Test-Mode-User"] = testUserHeader;
     }
 

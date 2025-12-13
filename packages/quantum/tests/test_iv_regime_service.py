@@ -1,6 +1,6 @@
 import pytest
 from unittest.mock import MagicMock
-from analytics.iv_regime_service import IVRegimeService
+from packages.quantum.analytics.iv_regime_service import IVRegimeService
 
 def test_iv_regime_classification():
     # Helper to access the static/class method logic if available,

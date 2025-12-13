@@ -22,6 +22,7 @@ class AnalyticsService:
     ) -> None:
         """
         Logs a generic event to the analytics_events table.
+        Extracts typed columns from properties if present for v3 observability.
         """
         if not self.supabase:
             return
@@ -34,6 +35,29 @@ class AnalyticsService:
                 except ValueError:
                     trace_id = None
 
+            # Extract v3 typed columns from properties
+            suggestion_id = properties.get("suggestion_id")
+            execution_id = properties.get("execution_id")
+            model_version = properties.get("model_version")
+            window = properties.get("window")
+            strategy = properties.get("strategy")
+            regime = properties.get("regime")
+            features_hash = properties.get("features_hash")
+            is_paper = properties.get("is_paper", False)
+
+            # Validate UUIDs for typed columns
+            if suggestion_id:
+                try:
+                    uuid.UUID(str(suggestion_id))
+                except ValueError:
+                    suggestion_id = None
+
+            if execution_id:
+                try:
+                    uuid.UUID(str(execution_id))
+                except ValueError:
+                    execution_id = None
+
             data = {
                 "user_id": user_id,
                 "event_name": event_name,
@@ -41,7 +65,16 @@ class AnalyticsService:
                 "properties": properties,
                 "trace_id": str(trace_id) if trace_id else None,
                 "session_id": session_id,
-                "timestamp": datetime.now().isoformat()
+                "timestamp": datetime.now().isoformat(),
+                # v3 Typed Columns
+                "suggestion_id": str(suggestion_id) if suggestion_id else None,
+                "execution_id": str(execution_id) if execution_id else None,
+                "model_version": model_version,
+                "window": window,
+                "strategy": strategy,
+                "regime": regime,
+                "features_hash": features_hash,
+                "is_paper": is_paper
             }
 
             # Fire and forget (async ideally, but simple synchronous insert here is fine for low volume)
@@ -66,14 +99,25 @@ class AnalyticsService:
             return
 
         try:
+            # Use v3 fields from suggestion if available
+            s_trace_id = suggestion.get("trace_id")
+            s_id = suggestion.get("id")
+            s_model = suggestion.get("model_version")
+            s_features_hash = suggestion.get("features_hash")
+            s_regime = suggestion.get("regime")
+
             props = {
-                "suggestion_id": suggestion.get("id"),
+                "suggestion_id": s_id,
                 "symbol": suggestion.get("symbol") or suggestion.get("ticker"),
                 "strategy": suggestion.get("strategy"),
                 "window": suggestion.get("window"),
                 "score": suggestion.get("score") or suggestion.get("confidence_score"),
-                "iv_regime": suggestion.get("iv_regime"),
+                "iv_regime": suggestion.get("iv_regime"), # local iv regime (legacy)
                 "ev": suggestion.get("metrics", {}).get("ev") or suggestion.get("ev"),
+                # v3 fields
+                "model_version": s_model,
+                "features_hash": s_features_hash,
+                "regime": s_regime, # global regime
             }
 
             if extra_props:
@@ -81,9 +125,12 @@ class AnalyticsService:
 
             # Try to find trace_id in suggestion if not provided
             if not trace_id:
-                # Some suggestions might store trace_id in context or metadata
-                context = suggestion.get("order_json", {}).get("context", {})
-                trace_id = context.get("trace_id")
+                if s_trace_id:
+                    trace_id = s_trace_id
+                else:
+                    # Legacy fallback
+                    context = suggestion.get("order_json", {}).get("context", {})
+                    trace_id = context.get("trace_id")
 
             self.log_event(
                 user_id=user_id,

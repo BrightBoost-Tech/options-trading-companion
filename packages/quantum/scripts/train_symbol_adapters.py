@@ -15,7 +15,7 @@ from supabase import create_client
 # We need to add 'packages/quantum' to path so 'nested.adapters' resolves
 sys.path.append(os.path.join(os.path.dirname(__file__), '../'))
 
-from nested.adapters import load_symbol_adapters, save_symbol_adapters, SymbolAdapterState
+from packages.quantum.nested.adapters import load_symbol_adapters, save_symbol_adapters, SymbolAdapterState
 
 def get_supabase():
     url = os.getenv("NEXT_PUBLIC_SUPABASE_URL")

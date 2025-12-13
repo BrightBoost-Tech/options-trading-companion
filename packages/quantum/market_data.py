@@ -2,11 +2,11 @@
 import os
 import requests
 from datetime import datetime, timedelta
-from typing import List, Dict
+from typing import List, Dict, Optional, Any
 import numpy as np
 import re
-from cache import get_cached_data, save_to_cache
-from analytics.factors import calculate_trend, calculate_iv_rank
+from packages.quantum.cache import get_cached_data, save_to_cache
+from packages.quantum.analytics.factors import calculate_trend, calculate_iv_rank
 
 def normalize_option_symbol(symbol: str) -> str:
     """Ensures option symbols have the 'O:' prefix required by Polygon."""
@@ -217,6 +217,94 @@ class PolygonService:
 
         return {}
 
+    def get_option_chain_snapshot(self, underlying: str, strike_range: float = 0.20) -> List[Dict]:
+        """
+        Fetches option chain snapshot for the underlying.
+        Endpoint: /v3/snapshot/options/{underlyingAsset}
+        Filters:
+        - 20-45 DTE initially to optimize for 30d interpolation (can widen if needed)
+        - Strike range ±20% around spot (requires spot price first)
+
+        If strike_range is None, fetches full chain (careful with pagination).
+        """
+        # 1. Get spot price first to filter strikes
+        try:
+            quote = self.get_recent_quote(underlying)
+            spot = (quote['bid'] + quote['ask']) / 2.0
+        except:
+            spot = 0
+
+        if spot <= 0:
+            # Try getting price from get_historical_prices (previous close)
+            try:
+                hist = self.get_historical_prices(underlying, days=2)
+                if hist and hist.get('prices'):
+                    spot = hist['prices'][-1]
+            except:
+                pass
+
+        # If still no spot, we can't filter by strike effectively. Use wider net or fail?
+        # Let's proceed with no strike filter if spot is missing, but strict limit.
+
+        url = f"{self.base_url}/v3/snapshot/options/{underlying}"
+
+        params = {
+            'apiKey': self.api_key,
+            'limit': 250
+        }
+
+        # Add filters for efficiency
+        # Expiry: >= 15 days, <= 60 days (to bracket 30 days)
+        # Polygon filtering syntax: expiration_date.gte, etc.
+
+        today = datetime.now().date()
+        date_min = (today + timedelta(days=15)).strftime('%Y-%m-%d')
+        date_max = (today + timedelta(days=60)).strftime('%Y-%m-%d')
+
+        params['expiration_date.gte'] = date_min
+        params['expiration_date.lte'] = date_max
+
+        if spot > 0:
+            strike_min = spot * (1 - strike_range)
+            strike_max = spot * (1 + strike_range)
+            params['strike_price.gte'] = strike_min
+            params['strike_price.lte'] = strike_max
+
+        results = []
+
+        try:
+            while url:
+                response = requests.get(url, params=params, timeout=10)
+                if response.status_code != 200:
+                    print(f"Chain snapshot fetch failed for {underlying}: {response.status_code}")
+                    break
+
+                data = response.json()
+                batch = data.get('results', [])
+                results.extend(batch)
+
+                # Check for pagination
+                # Polygon uses 'next_url' in response, which includes params (but not apiKey usually?)
+                # Actually v3 snapshot often includes cursor in next_url
+                next_url = data.get('next_url')
+                if next_url:
+                    url = next_url
+                    # next_url usually has params embedded. reset params to avoid duplication/conflict
+                    # but we MUST ensure apiKey is attached if it's not in next_url
+                    params = {'apiKey': self.api_key}
+                else:
+                    break
+
+                # Safety break for massive chains
+                if len(results) > 1000:
+                    break
+
+            return results
+
+        except Exception as e:
+            print(f"Error fetching chain snapshot for {underlying}: {e}")
+            return []
+
 def get_polygon_price(symbol: str) -> float:
     # FIX 1: Handle Cash Manually
     if symbol == 'CUR:USD':
@@ -252,16 +340,63 @@ def get_polygon_price(symbol: str) -> float:
         print(f"⚠️ Error fetching {search_symbol}: {e}")
         return 0.0 # Fallback
 
-def calculate_portfolio_inputs(symbols: List[str], api_key: str = None) -> Dict:
-    """Calculate with caching to avoid rate limits"""
+def _nearest_psd(A):
+    """Find the nearest positive-semi-definite matrix to input A."""
+    B = (A + A.T) / 2
+    _, s, V = np.linalg.svd(B)
+    H = np.dot(V.T, np.dot(np.diag(s), V))
+    A2 = (B + H) / 2
+    A3 = (A2 + A2.T) / 2
+    if _is_psd(A3):
+        return A3
+    spacing = np.spacing(np.linalg.norm(A))
+    I = np.eye(A.shape[0])
+    k = 1
+    while not _is_psd(A3):
+        mineig = np.min(np.real(np.linalg.eigvals(A3)))
+        A3 += I * (-mineig * k**2 + spacing)
+        k += 1
+    return A3
+
+def _is_psd(A):
+    """Check if matrix is positive semi-definite."""
+    try:
+        # Check eigenvalues
+        return np.all(np.linalg.eigvals(A) >= -1e-8)
+    except np.linalg.LinAlgError:
+        return False
+
+def calculate_portfolio_inputs(
+    symbols: List[str],
+    api_key: str = None,
+    method: str = "sample", # "sample", "ewma", "ledoit_wolf"
+    shrinkage_tau_days: int = 0
+) -> Dict:
+    """
+    Calculate portfolio inputs (mu, sigma) with robust estimation methods.
+
+    Args:
+        symbols: List of ticker symbols.
+        api_key: Polygon API key.
+        method: Estimation method for covariance ("sample", "ewma", "ledoit_wolf").
+        shrinkage_tau_days: If > 0, use Bayesian shrinkage for mu to 0 with this tau strength (days of evidence).
+
+    Returns:
+        Dict with 'expected_returns', 'covariance_matrix', etc.
+    """
     
     if not symbols:
         raise ValueError("No symbols provided")
 
-    # Check cache first
+    # Check cache first (incorporate method into cache key if needed, or clear cache on method change)
+    # Simple cache key: symbols + method
     symbols_tuple = tuple(sorted(symbols))
-    cached = get_cached_data(symbols_tuple)
+    cache_key = (symbols_tuple, method)
     
+    # We use a custom cache mechanism here or reuse get_cached_data
+    # get_cached_data uses filename based on hash of arg.
+    # Let's assume get_cached_data works on arbitrary pickleable objects.
+    cached = get_cached_data(cache_key)
     if cached:
         return cached
 
@@ -285,17 +420,74 @@ def calculate_portfolio_inputs(symbols: List[str], api_key: str = None) -> Dict:
                 print(f"  ✗ {symbol}: {str(e)}")
                 raise
 
-        expected_returns = []
-        for data in all_data:
-            mean_daily_return = np.mean(data['returns'])
-            annualized_return = mean_daily_return * 252
-            expected_returns.append(float(annualized_return))
-
+        # Align Data
         min_length = min(len(data['returns']) for data in all_data)
         aligned_returns = [data['returns'][-min_length:] for data in all_data]
+        returns_matrix = np.array(aligned_returns) # Shape (n_assets, n_days)
 
-        returns_matrix = np.array(aligned_returns)
-        cov_matrix = np.cov(returns_matrix) * 252
+        # 1. Expected Returns (mu)
+        # Default: Sample Mean * 252
+        means = np.mean(returns_matrix, axis=1) * 252
+
+        # Bayesian Shrinkage (James-Stein style)
+        if shrinkage_tau_days > 0:
+            # Shrink towards 0.0 (or market mean, here 0.0 for risk-adjusted view)
+            # Alpha = T / (T + tau)
+            # Est = Alpha * SampleMean + (1 - Alpha) * Prior
+            T = min_length
+            alpha = T / (T + shrinkage_tau_days)
+            means = alpha * means + (1 - alpha) * 0.0
+
+        expected_returns = means.tolist()
+
+        # 2. Covariance (Sigma)
+        cov_matrix = None
+
+        if method == "ewma":
+            # Exponentially Weighted Moving Average
+            # Decay factor lambda usually 0.94 or 0.97 for daily
+            decay = 0.94
+            # Implement EWMA covariance
+            T_days = returns_matrix.shape[1]
+            n_assets = returns_matrix.shape[0]
+
+            # Remove mean? Usually EWMA assumes mean 0 or uses trailing mean.
+            # Assuming mean 0 is standard for daily vol.
+            centered = returns_matrix # or returns_matrix - np.mean(returns_matrix, axis=1, keepdims=True)
+
+            weights = np.power(decay, np.arange(T_days)[::-1])
+            weights /= np.sum(weights)
+
+            # Weighted Covariance
+            # cov_ij = sum(w_t * r_it * r_jt)
+            # Efficient: (R * sqrt(W)) @ (R * sqrt(W)).T
+
+            w_matrix = np.sqrt(weights)
+            weighted_R = centered * w_matrix
+            cov_matrix = (weighted_R @ weighted_R.T) * 252 # Annualize
+
+        elif method == "ledoit_wolf":
+             # Use sklearn if available, else simple shrinkage to diagonal
+            try:
+                from sklearn.covariance import LedoitWolf
+                lw = LedoitWolf()
+                # sklearn expects (n_samples, n_features) -> (n_days, n_assets)
+                lw.fit(returns_matrix.T)
+                cov_matrix = lw.covariance_ * 252
+            except ImportError:
+                print("sklearn not found, falling back to simple shrinkage")
+                # Simple linear shrinkage: 0.5 * Sample + 0.5 * Diag
+                sample_cov = np.cov(returns_matrix) * 252
+                prior = np.diag(np.diag(sample_cov))
+                cov_matrix = 0.5 * sample_cov + 0.5 * prior
+
+        else: # "sample"
+            cov_matrix = np.cov(returns_matrix) * 252
+
+        # Ensure PSD
+        if not _is_psd(cov_matrix):
+            print("Warning: Covariance matrix not PSD, repairing...")
+            cov_matrix = _nearest_psd(cov_matrix)
 
         result = {
             'expected_returns': expected_returns,
@@ -306,7 +498,7 @@ def calculate_portfolio_inputs(symbols: List[str], api_key: str = None) -> Dict:
         }
 
         # Cache for next time
-        save_to_cache(symbols_tuple, result)
+        save_to_cache(cache_key, result)
 
         return result
 
@@ -319,7 +511,7 @@ if __name__ == '__main__':
     symbols = ['SPY', 'QQQ', 'IWM', 'DIA']
     
     try:
-        inputs = calculate_portfolio_inputs(symbols)
+        inputs = calculate_portfolio_inputs(symbols, method="ewma", shrinkage_tau_days=30)
         
         print("\nPortfolio Inputs:")
         print("="*50)

@@ -65,7 +65,7 @@ MIN_QTY_BALANCED = 0.05
 MIN_DOLLAR_DIFF_AGGRESSIVE = 10.0
 MIN_QTY_AGGRESSIVE = 0.02
 
-# --- REGIME ELASTIC CONFIG ---
+# --- REGIME ELASTIC CONFIG (V3) ---
 REGIME_STRATEGY_CAPS = {
     "default": {
         "debit_call": 0.10,
@@ -78,6 +78,14 @@ REGIME_STRATEGY_CAPS = {
         "other": 0.05,
     },
     "suppressed": { # Low Vol: Buy Premium
+        "debit_call": 0.12,
+        "debit_put": 0.12,
+        "credit_call": 0.06,
+        "credit_put": 0.06,
+        "iron_condor": 0.04,
+        "single": 0.15, # Aggressive long delta
+    },
+    "normal": { # Balanced
         "debit_call": 0.15,
         "debit_put": 0.15,
         "credit_call": 0.05,
@@ -90,6 +98,10 @@ REGIME_STRATEGY_CAPS = {
         "debit_put": 0.10,
         "credit_call": 0.08,
         "credit_put": 0.08,
+        "iron_condor": 0.06,
+        "single": 0.10,
+    },
+    "elevated": { # High Vol: Sell Premium
         "iron_condor": 0.05,
     },
     "elevated": { # High Vol: Sell Premium
@@ -105,6 +117,27 @@ REGIME_STRATEGY_CAPS = {
         "debit_call": 0.06,
         "debit_put": 0.06,
         "iron_condor": 0.08,
+        "single": 0.05,
+    },
+    "shock": { # Crash: Defensive
+        "credit_call": 0.15, # Sell calls aggressively? Or just cash.
+        "debit_put": 0.10, # Hedges
+        "credit_put": 0.02, # Dangerous
+        "iron_condor": 0.00,
+        "single": 0.02,
+    },
+    "rebound": { # Post-Shock rally
+        "debit_call": 0.10,
+        "credit_put": 0.10,
+        "debit_put": 0.04,
+        "single": 0.08,
+    },
+    "chop": { # Range bound
+        "iron_condor": 0.10,
+        "credit_call": 0.08,
+        "credit_put": 0.08,
+        "debit_call": 0.04,
+        "debit_put": 0.04,
     },
     "shock": { # Extreme Risk: Cut size drastically
         "credit_call": 0.05,
@@ -137,6 +170,10 @@ REGIME_STRATEGY_CAPS = {
     }
 }
 
+# Mapping for backwards compatibility with V2 "high_vol" etc. if passed as keys
+REGIME_STRATEGY_CAPS["high_vol"] = REGIME_STRATEGY_CAPS["elevated"]
+REGIME_STRATEGY_CAPS["panic"] = REGIME_STRATEGY_CAPS["shock"]
+
 def calculate_dynamic_target(
     base_weight: float,
     strategy_type: str,
@@ -149,7 +186,11 @@ def calculate_dynamic_target(
       - Conviction scaling factor: 0.5 + 0.5 * conviction.
     """
 
+    # Check for exact match, else default
+    # If regime is passed as V3 string (e.g. 'rebound'), it works.
+    # If passed as 'high_vol' (V2), it works.
     caps = REGIME_STRATEGY_CAPS.get(regime, REGIME_STRATEGY_CAPS["default"])
+
     # Fallback keys logic
     cap = caps.get(strategy_type, caps.get("other", base_weight))
 
@@ -452,6 +493,65 @@ async def optimize_portfolio(req: OptimizationRequest, request: Request, user_id
 
         # 2.1 Fetch Underlying Covariance
         try:
+            # Fetch for unique underlyings
+            # 3.1 Exclude Cash/Bad Tickers from Inputs
+            unique_underlyings = list(set([
+                u for u in underlying_tickers
+                if u and "USD" not in u and "CASH" not in u and not u.startswith("CUR:")
+            ]))
+
+            if not unique_underlyings:
+                 raise ValueError("No valid investable underlyings found after filtering.")
+
+            base_inputs = calculate_portfolio_inputs(unique_underlyings)
+
+            # Map back to spreads
+            # mu vector size = len(tickers)
+            # sigma matrix size = len(tickers)
+
+            # Create mapping: underlying -> index in base_inputs
+            base_idx_map = {u: i for i, u in enumerate(unique_underlyings)}
+
+            n = len(tickers)
+            mu = np.zeros(n)
+            sigma = np.zeros((n, n))
+
+            base_mu = base_inputs['expected_returns']
+            base_sigma = base_inputs['covariance_matrix']
+
+            for i in range(n):
+                u_i = investable_assets[i].underlying
+                idx_i = base_idx_map.get(u_i)
+                mu[i] = base_mu[idx_i] if idx_i is not None else 0.05 # default
+
+                for j in range(n):
+                    u_j = investable_assets[j].underlying
+                    idx_j = base_idx_map.get(u_j)
+                    if idx_i is not None and idx_j is not None:
+                        sigma[i, j] = base_sigma[idx_i][idx_j]
+                    else:
+                        sigma[i, j] = 0.0
+                        if i == j: sigma[i, j] = 0.1 # default var
+
+            # 3.2 Sanitize Sigma (Core System Hardening)
+            # Check for NaNs or Infs
+            if np.isnan(sigma).any() or np.isinf(sigma).any():
+                print("Warning: Sigma contains NaNs or Infs. Falling back to identity.")
+                sigma = np.identity(n) * 0.05
+            else:
+                 # Check PSD (Positive Semi-Definite)
+                 try:
+                     eigvals = np.linalg.eigvals(sigma)
+                     if np.any(eigvals < 0):
+                          print("Warning: Sigma not PSD. Falling back to diagonal.")
+                          sigma = np.diag(np.diag(sigma))
+                 except Exception:
+                     # e.g. convergence error
+                     print("Warning: Sigma check failed. Falling back to identity.")
+                     sigma = np.identity(n) * 0.05
+
+            coskew = np.zeros((n, n, n)) # Mock coskew
+
             market_inputs = calculate_portfolio_inputs(
                 underlying_tickers,
                 method="ewma", # V3 uses EWMA

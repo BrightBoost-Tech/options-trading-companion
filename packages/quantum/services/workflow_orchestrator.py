@@ -21,6 +21,9 @@ from packages.quantum.market_data import PolygonService
 from packages.quantum.ev_calculator import calculate_exit_metrics
 from packages.quantum.analytics.loss_minimizer import LossMinimizer
 from packages.quantum.analytics.conviction_service import ConvictionService
+from packages.quantum.services.iv_repository import IVRepository
+from packages.quantum.services.iv_point_service import IVPointService
+from packages.quantum.analytics.regime_engine_v3 import RegimeEngineV3, GlobalRegimeSnapshot, RegimeState
 
 # v3 Observability
 from packages.quantum.observability.telemetry import TradeContext, compute_features_hash, emit_trade_event
@@ -58,6 +61,18 @@ async def run_morning_cycle(supabase: Client, user_id: str):
     # Initialize Market Data Truth Layer
     truth_layer = MarketDataTruthLayer()
 
+    # V3: Compute Global Regime Snapshot ONCE
+    market_data = PolygonService()
+    iv_repo = IVRepository(supabase)
+    iv_point_service = IVPointService(supabase)
+    regime_engine = RegimeEngineV3(market_data, iv_repo, iv_point_service)
+
+    global_snap = regime_engine.compute_global_snapshot(datetime.now())
+    # Try to persist global snapshot
+    try:
+        supabase.table("regime_snapshots").insert(global_snap.to_dict()).execute()
+    except Exception:
+        pass # Non-blocking
     # Initialize Regime Engine V3
     regime_engine = RegimeEngineV3(supabase, truth_layer)
     global_snap = regime_engine.compute_global_snapshot(datetime.utcnow())
@@ -83,11 +98,22 @@ async def run_morning_cycle(supabase: Client, user_id: str):
 
         try:
             # 3a. Use Truth Layer for Options Data
-            # We can fetch snapshot for legs to get greeks
             leg_symbols = [l["symbol"] for l in legs]
-            # Use snapshot_many for the options
             snapshots = truth_layer.snapshot_many(leg_symbols)
 
+            # V3: Use Regime Engine for Symbol Snapshot
+            # We can use Truth Layer for IV context still, or switch to V3 Symbol Snapshot if efficient.
+            # V3 Symbol Snapshot requires IV Repository.
+            # Let's keep using truth layer for basic data but enrich with V3 state if possible.
+
+            # Calculate symbol snapshot
+            sym_snap = regime_engine.compute_symbol_snapshot(underlying, datetime.now(), global_snap)
+            # Persist symbol snapshot? Maybe too heavy for loop. Skipping persistence for now.
+
+            effective_regime = regime_engine.get_effective_regime(sym_snap, global_snap)
+            iv_regime = effective_regime.value # e.g. "shock", "suppressed"
+
+            iv_rank_score = sym_snap.features.get("iv_rank", 50.0)
             # Fetch IV Context via Regime Engine (Symbol Snapshot)
             sym_snap = regime_engine.compute_symbol_snapshot(underlying, global_snap)
             effective_regime_state = regime_engine.get_effective_regime(sym_snap, global_snap)
@@ -101,7 +127,6 @@ async def run_morning_cycle(supabase: Client, user_id: str):
                 sym = leg["symbol"]
                 qty = float(leg.get("quantity", 0))
 
-                # Normalize symbol for lookup because Truth Layer keys by normalized ticker
                 norm_sym = truth_layer.normalize_symbol(sym)
                 snap = snapshots.get(norm_sym, {})
 
@@ -111,9 +136,6 @@ async def run_morning_cycle(supabase: Client, user_id: str):
                 net_delta += delta * qty
 
             # Use IV from context as reference? Or stick to IV from options?
-            # EV calculator might need IV level (decimal) not rank.
-            # So we should get implied volatility from one of the legs.
-            # Assuming first leg is representative.
             norm_ref = truth_layer.normalize_symbol(ref_symbol)
             first_snap = snapshots.get(norm_ref, {})
             iv_decimal = first_snap.get("iv")
@@ -134,22 +156,9 @@ async def run_morning_cycle(supabase: Client, user_id: str):
 
             total_cost += cost * qty * 100
             total_value += curr * qty * 100
-            total_quantity += qty # This is sum of legs, not spread count.
+            total_quantity += qty
 
-        # Assume spread count is min(qty of legs) roughly?
-        # For simplicity, treat the suggestion as "Close this entire spread group".
-
-        # Avoid div by zero
         if total_cost == 0: total_cost = 0.01
-
-        spread_price = total_value / 100.0 # Aggregate price per unit (if quantity normalized)
-        # Actually, let's work with Totals for metrics, then divide by "unit" count?
-        # Or just use the total value.
-
-        # We need a "Current Price" per spread unit to suggest a "Limit Price".
-        # Let's assume quantity is homogeneous (e.g. 1 spread = 1 of each leg).
-        # If not, it's messy. We will assume 1:1 ratio for morning suggestions.
-        # So "Current Price" = Net Value / Quantity of first leg.
 
         qty_unit = float(legs[0].get("quantity", 1))
         if qty_unit == 0: qty_unit = 1
@@ -158,54 +167,48 @@ async def run_morning_cycle(supabase: Client, user_id: str):
         unit_cost = (total_cost / 100.0) / qty_unit
 
         # Calculate EV-based Target
-        # Use our new helper
         metrics = calculate_exit_metrics(
             current_price=unit_price,
             cost_basis=unit_cost,
-            delta=net_delta / qty_unit, # Average delta per unit
-            iv=iv_decimal, # Use decimal IV for BS model
-            days_to_expiry=30 # Placeholder, could parse from expiry
+            delta=net_delta / qty_unit,
+            iv=iv_decimal,
+            days_to_expiry=30
         )
 
-        # Check for deep loss salvage (LossMinimizer Hook)
-        # If position is losing badly (e.g. current_price < 0.5 * cost_basis), consider salvage
         if unit_price < unit_cost * 0.5:
-             # Placeholder Hook: Future integration will call LossMinimizer here
-             # salvage_res = LossMinimizer.analyze_position({...}, user_threshold=...)
-             # log_salvage_opportunity(salvage_res)
              pass
 
-        # Only suggest if profitable and positive expectation
         if metrics.expected_value > 0 and metrics.limit_price > unit_price:
 
-            # Fetch historical stats for rationale
+            # Map V3 regime to legacy string for stats lookup if needed
+            legacy_regime = regime_engine.map_to_scoring_regime(effective_regime)
+
             hist_stats = ExitStatsService.get_stats(
                 underlying=underlying,
-                regime=iv_regime or "normal",
+                regime=legacy_regime,
                 strategy="take_profit_limit",
                 supabase_client=supabase
             )
 
-            # Build rationale safely
             if hist_stats.get("insufficient_history") or hist_stats.get("win_rate") is None:
                 rationale_text = (
                     f"Take profit at ${metrics.limit_price:.2f} based on EV model. "
-                    f"(Insufficient history for win-rate stats in {iv_regime or 'normal'} regime.)"
+                    f"(Insufficient history for win-rate stats in {iv_regime} regime.)"
                 )
             else:
                 win_rate_pct = hist_stats['win_rate'] * 100
                 rationale_text = (
                     f"Take profit at ${metrics.limit_price:.2f} based on {win_rate_pct:.0f}% "
-                    f"historical win rate for similar exits in {iv_regime or 'normal'} regime."
+                    f"historical win rate for similar exits in {iv_regime} regime."
                 )
 
-            # Observability v3: Create Trade Context
             features_dict = {
                 "unit_price": unit_price,
                 "unit_cost": unit_cost,
                 "delta": net_delta / qty_unit,
                 "iv_rank": iv_rank_score,
                 "regime": iv_regime,
+                "global_regime": global_snap.state.value,
                 "strategy": "take_profit_limit",
                 "underlying": underlying
             }
@@ -223,7 +226,7 @@ async def run_morning_cycle(supabase: Client, user_id: str):
                     "created_at": datetime.now(timezone.utc).isoformat(),
                     "valid_until": (datetime.now(timezone.utc) + timedelta(hours=12)).isoformat(),
                     "window": "morning_limit",
-                    "ticker": spread.ticker, # e.g. "KURA 04/17/26 Call Spread"
+                    "ticker": spread.ticker,
                     "display_symbol": spread.ticker,
                     "strategy": "take_profit_limit",
                     "direction": "close",
@@ -247,18 +250,18 @@ async def run_morning_cycle(supabase: Client, user_id: str):
                     "context": {
                         "iv_rank": iv_rank_score,
                         "iv_regime": iv_regime,
+                        "global_state": global_snap.state.value
                         "regime_v3_global": global_snap.state,
                         "regime_v3_symbol": sym_snap.state,
                         "regime_v3_effective": effective_regime_state
                     },
                     "spread_details": {
                         "underlying": underlying,
-                        "expiry": legs[0]["expiry"], # Extract from leg
+                        "expiry": legs[0]["expiry"],
                         "type": spread.spread_type
                     }
                 },
                 "status": "pending",
-                # v3 Fields
                 "trace_id": ctx.trace_id,
                 "model_version": ctx.model_version,
                 "features_hash": ctx.features_hash,
@@ -266,13 +269,6 @@ async def run_morning_cycle(supabase: Client, user_id: str):
             }
             suggestions.append(suggestion)
 
-            # Emit telemetry
-            # We assume suggestion ID will be generated by DB, so we can't emit suggestion_id yet here.
-            # But we can update suggestion_id after insert if we want exact linking,
-            # or rely on trace_id for linking in analytics.
-            # Ideally we'd insert first then emit.
-            # But we are batch inserting.
-            # We will emit 'suggestion_generated' event for each suggestion using trace_id as key.
             emit_trade_event(
                 analytics_service,
                 user_id,
@@ -284,7 +280,6 @@ async def run_morning_cycle(supabase: Client, user_id: str):
     # 4. Insert suggestions
     if suggestions:
         try:
-            # Clear old morning suggestions for this user
             supabase.table(TRADE_SUGGESTIONS_TABLE) \
                 .delete() \
                 .eq("user_id", user_id) \
@@ -296,31 +291,20 @@ async def run_morning_cycle(supabase: Client, user_id: str):
         except Exception as e:
             print(f"Error inserting morning suggestions: {e}")
 
-        # 5. Log suggestions (write-only side effect)
+        # 5. Log suggestions
         try:
             logs = []
             for s in suggestions:
-                # Reconstruct needed metrics from suggestion or scope
-                # Morning cycle doesn't compute global regime, so we log local iv_rank
-                # derived from spread analysis loop earlier?
-                # Actually we only have it per spread loop. We need to attach it to suggestion.
-                # For simplicity, we use a placeholder regime or the one from the last loop iteration
-                # (which is incorrect).
-                # But suggestion is for a specific spread. We should probably carry the context in the loop.
-                # For now, we will just use minimal context.
-
-                # Extract target price from order_json
                 target = s.get("order_json", {}).get("limit_price", 0.0)
-
                 logs.append({
                     "user_id": user_id,
                     "created_at": s["created_at"],
-                    "regime_context": {"cycle": "morning_limit"}, # Minimal context as we lack global scan here
+                    "regime_context": {"cycle": "morning_limit", "global": global_snap.state.value},
                     "symbol": s["ticker"],
                     "strategy_type": s["strategy"],
                     "direction": s["direction"],
                     "target_price": target,
-                    "confidence_score": s.get("probability_of_profit", 0) * 100, # Convert 0-1 to 0-100
+                    "confidence_score": s.get("probability_of_profit", 0) * 100,
                 })
 
             if logs:
@@ -339,19 +323,28 @@ async def run_midday_cycle(supabase: Client, user_id: str):
     """
     print(f"Running midday cycle for user {user_id}")
     analytics_service = AnalyticsService(supabase)
-
-    # 3. Add full debug logging to midday cycle
     print("\n=== MIDDAY DEBUG ===")
 
     cash_service = CashService(supabase)
-
-    # 1. Get deployable capital
     deployable_capital = await cash_service.get_deployable_capital(user_id)
     print(f"Deployable capital: {deployable_capital}")
 
-    if deployable_capital < 100: # Min threshold to bother scanning
+    if deployable_capital < 100:
         print("Insufficient capital to scan.")
         return
+
+    # V3: Compute Global Regime Snapshot ONCE
+    market_data = PolygonService()
+    iv_repo = IVRepository(supabase)
+    iv_point_service = IVPointService(supabase)
+    regime_engine = RegimeEngineV3(market_data, iv_repo, iv_point_service)
+
+    global_snap = regime_engine.compute_global_snapshot(datetime.now())
+    # Try to persist global snapshot
+    try:
+        supabase.table("regime_snapshots").insert(global_snap.to_dict()).execute()
+    except Exception:
+        pass
 
     # 2. Call Scanner (market-wide)
     candidates = []
@@ -363,32 +356,17 @@ async def run_midday_cycle(supabase: Client, user_id: str):
     global_snap = regime_engine.compute_global_snapshot(datetime.utcnow())
 
     try:
-        # Let scan_for_opportunities use its built-in universe and StrategySelector
-        # Pass supabase client to enable UniverseService
-        scout_results = scan_for_opportunities(supabase_client=supabase)  # no symbols arg
+        scout_results = scan_for_opportunities(supabase_client=supabase)
 
         print(f"Scanner returned {len(scout_results)} raw opportunities.")
 
-        # Phase 3: Apply Learning Weights BEFORE selection
-        # We need to temporarily inject 'window'='midday_entry' into candidates so scoring matches
         for c in scout_results:
             c["window"] = "midday_entry"
 
         conviction_service = ConvictionService(supabase=supabase)
         scout_results = conviction_service.adjust_suggestion_scores(scout_results, user_id)
 
-        print("Top 10 scanner results (after learning adjustment):")
-        for c in scout_results[:10]:
-            name = c.get("ticker") or c.get("symbol")
-            print(f"- {name} score={c.get('score')} ev={c.get('ev')}")
-
-        # Sort by score (highest first)
         scout_results.sort(key=lambda x: x.get("score", 0), reverse=True)
-
-        # For now, do NOT filter out low scores; just take the top 5 for visibility.
-        # This makes the pipeline tolerant of low/empty scores in short term.
-        # User requested 2 candidates override in logic below? The code had `candidates = scout_results[:5]` then `[:2]`.
-        # I will keep the final logic which seemed to be `[:2]`.
         candidates = scout_results[:2]
 
         print(f"Top {len(candidates)} scanner results for midday (top 2 by score):")
@@ -423,9 +401,11 @@ async def run_midday_cycle(supabase: Client, user_id: str):
         if price <= 0:
             continue
 
-        # 4. Sizing
-        # Use existing sizing logic with upgraded max risk parameter
-        # User requested 40% max risk per trade for midday entries (AGGRESSIVE)
+        # V3: Compute Symbol Snapshot
+        sym_snap = regime_engine.compute_symbol_snapshot(ticker, datetime.now(), global_snap)
+        effective_regime = regime_engine.get_effective_regime(sym_snap, global_snap)
+        effective_regime_str = effective_regime.value
+
         sizing = calculate_sizing(
             account_buying_power=deployable_capital,
             ev_per_contract=ev,
@@ -434,32 +414,13 @@ async def run_midday_cycle(supabase: Client, user_id: str):
             profile="AGGRESSIVE",
         )
 
-        # DEBUG SIZING LOGS
         print(
             f"[Midday] {ticker} sizing: contracts={sizing.get('contracts')}, "
-            f"max_risk_exceeded={sizing.get('max_risk_exceeded', False)}, " # sizing engine might not return this yet, but prompts says it does
+            f"max_risk_exceeded={sizing.get('max_risk_exceeded', False)}, "
             f"risk_pct={0.40}, "
             f"ev_per_contract={ev}, "
             f"reason={sizing.get('reason')}"
         )
-
-        # B. After sizing:
-        # Check dev mode override
-        # Requirements: "if test_mode and sizing.contracts <= 0 and not sizing.max_risk_exceeded"
-        # We need to ensure we don't override if max_risk_exceeded is true.
-        # Currently sizing engine does not return 'max_risk_exceeded' explicitly in the dict.
-        # We assume if the sizing function capped it due to risk, it might return contracts > 0 or 0.
-        # If it returns 0, it might be due to account size (safe to override in dev) or risk.
-        # We will add a check for 'max_risk_exceeded' key assuming the sizing engine MIGHT be updated or we inject it.
-        # BUT since we didn't update sizing engine to return that key, we'll check the 'reason' string for risk keywords
-        # OR simply skip the check if the key is missing but default to False to allow override,
-        # UNLESS we are strict about "existing max-risk guardrails".
-        # Re-reading prompt: "Keep existing max-risk guardrails: if max_risk_exceeded is True, still skip the trade."
-        # This implies `sizing` object HAS `max_risk_exceeded`.
-        # I should probably add that to `sizing_engine.py` too to be safe, but for now I will assume it might be there or default False.
-        # But to be safe and strictly follow "Keep existing max-risk guardrails", I should probably implement the flag in sizing engine if I can.
-        # The reviewer says "Midday Override Safety Violation... logic `if test_mode and sizing.contracts <= 0 and not sizing.max_risk_exceeded`".
-        # I will implement exactly that logic.
 
         is_max_risk = sizing.get("max_risk_exceeded", False)
         if MIDDAY_TEST_MODE and sizing["contracts"] <= 0 and not is_max_risk:
@@ -467,10 +428,11 @@ async def run_midday_cycle(supabase: Client, user_id: str):
              sizing["reason"] = (sizing.get("reason", "") or "") + " | dev_override=1_contract"
 
         if sizing["contracts"] > 0:
-            # Inject IV context into sizing_metadata if not present
             if "context" not in sizing:
                 sizing["context"] = {
                     "iv_rank": cand.get("iv_rank"),
+                    "iv_regime": effective_regime_str,
+                    "global_state": global_snap.state.value
                     "iv_regime": scoring_regime,
                     "regime_v3_global": global_snap.state,
                     "regime_v3_symbol": sym_snap.state,
@@ -485,7 +447,6 @@ async def run_midday_cycle(supabase: Client, user_id: str):
                     "iv_regime": scoring_regime # ensure consistency
                 })
 
-            # Observability v3: Create Trade Context
             cand_features = {
                 "ticker": ticker,
                 "strategy": strategy,
@@ -493,26 +454,26 @@ async def run_midday_cycle(supabase: Client, user_id: str):
                 "price": price,
                 "score": cand.get("score"),
                 "iv_rank": cand.get("iv_rank"),
-                "sizing": sizing
+                "sizing": sizing,
+                "regime": effective_regime_str
             }
-            regime = cand.get("iv_regime") or "unknown"
 
             ctx = TradeContext.create_new(
                 model_version=APP_VERSION,
                 window="midday_entry",
                 strategy=strategy,
-                regime=regime
+                regime=effective_regime_str
             )
             ctx.features_hash = compute_features_hash(cand_features)
 
             suggestion = {
                 "user_id": user_id,
                 "created_at": datetime.now(timezone.utc).isoformat(),
-                "valid_until": (datetime.now(timezone.utc) + timedelta(hours=6)).isoformat(), # Close of day roughly
+                "valid_until": (datetime.now(timezone.utc) + timedelta(hours=6)).isoformat(),
                 "window": "midday_entry",
                 "ticker": ticker,
                 "strategy": strategy,
-                "direction": "long", # simplified assumption
+                "direction": "long",
                 "order_json": {
                     "side": "buy",
                     "limit_price": price,
@@ -522,8 +483,7 @@ async def run_midday_cycle(supabase: Client, user_id: str):
                 "status": "pending",
                 "source": "scanner",
                 "ev": ev,
-                "internal_cand": cand, # Temporary store for logging context
-                # v3 Fields
+                "internal_cand": cand,
                 "trace_id": ctx.trace_id,
                 "model_version": ctx.model_version,
                 "features_hash": ctx.features_hash,
@@ -531,7 +491,6 @@ async def run_midday_cycle(supabase: Client, user_id: str):
             }
             suggestions.append(suggestion)
 
-            # Emit telemetry
             emit_trade_event(
                 analytics_service,
                 user_id,
@@ -540,22 +499,16 @@ async def run_midday_cycle(supabase: Client, user_id: str):
                 properties={"ev": ev, "score": cand.get("score")}
             )
 
-    # C. If candidates still empty:
-    # (Removed the old fallback logic as the new override above handles it per candidate)
-
     print(f"FINAL MIDDAY SUGGESTION COUNT: {len(suggestions)}")
 
-    # Insert suggestions
     if suggestions:
         try:
-            # Clear old midday suggestions for this user
             supabase.table(TRADE_SUGGESTIONS_TABLE) \
                 .delete() \
                 .eq("user_id", user_id) \
                 .eq("window", "midday_entry") \
                 .execute()
 
-            # Clean internal_cand before insert
             suggestions_to_insert = [{k: v for k, v in s.items() if k != 'internal_cand'} for s in suggestions]
 
             supabase.table(TRADE_SUGGESTIONS_TABLE).insert(suggestions_to_insert).execute()
@@ -563,16 +516,16 @@ async def run_midday_cycle(supabase: Client, user_id: str):
         except Exception as e:
             print(f"Error inserting midday suggestions: {e}")
 
-        # 5. Log suggestions (write-only side effect)
         try:
             logs = []
             for s in suggestions:
                 cand = s.get("internal_cand", {})
-                # Capture regime from candidate enrichment
                 regime_ctx = {
                     "iv_rank": cand.get("iv_rank"),
                     "trend": cand.get("trend"),
-                    "score": cand.get("score")
+                    "score": cand.get("score"),
+                    "global_state": global_snap.state.value,
+                    "effective_regime": s.get("regime")
                 }
 
                 logs.append({
@@ -602,19 +555,15 @@ async def run_weekly_report(supabase: Client, user_id: str):
 
     journal_service = JournalService(supabase)
 
-    # Get stats
     try:
         stats = journal_service.get_journal_stats(user_id)
-        # Expected stats structure: {"stats": {...}, "recent_trades": [...]}
         metrics = stats.get("stats", {})
     except Exception as e:
         print(f"Error fetching journal stats: {e}")
         metrics = {}
 
-    # Basic content generation
     win_rate = metrics.get("win_rate", 0)
     total_pnl = metrics.get("total_pnl", 0)
-    # Fix: JournalService returns 'trade_count', not 'total_trades'
     trade_count = metrics.get("trade_count", 0)
 
     report_md = f"""
@@ -638,7 +587,7 @@ async def run_weekly_report(supabase: Client, user_id: str):
         "total_pnl": total_pnl,
         "win_rate": win_rate,
         "trade_count": trade_count,
-        "missed_opportunities": [], # Placeholder
+        "missed_opportunities": [],
         "report_markdown": report_md.strip()
     }
 

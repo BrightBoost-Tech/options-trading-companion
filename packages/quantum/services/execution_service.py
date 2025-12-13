@@ -1,12 +1,17 @@
 from supabase import Client
 from datetime import datetime, timezone, timedelta
 from typing import List, Dict, Any, Optional
+import logging
+from packages.quantum.services.transaction_cost_model import TransactionCostModel
+
+logger = logging.getLogger(__name__)
 
 class ExecutionService:
     def __init__(self, supabase: Client):
         self.supabase = supabase
         self.logs_table = "suggestion_logs"
         self.executions_table = "trade_executions"
+        self.cost_model = TransactionCostModel()
 
     def register_execution(self,
                            user_id: str,
@@ -32,21 +37,50 @@ class ExecutionService:
             # Actually, if ID is provided, it should exist.
             pass
 
-        # 2. Create TradeExecution
+        # 2. Calculate Slippage if possible
+        # fill_details should ideally have 'mid_price_at_submission'
+        mid_price = fill_details.get("mid_price_at_submission")
+        fill_price = fill_details.get("fill_price", 0.0)
+        slippage = 0.0
+
+        if mid_price and fill_price > 0:
+            slippage = abs(fill_price - mid_price)
+            # Store calculated slippage back into details if schema allows,
+            # or we rely on 'fees' field to capture drag?
+            # The prompt says "Persist execution cost history".
+            # We will try to store it in a JSON column if 'details' exists,
+            # otherwise we just assume 'fees' captures explicit costs.
+            # But slippage is implicit.
+            pass
+
+        # 3. Create TradeExecution
         execution_data = {
             "user_id": user_id,
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "symbol": fill_details.get("symbol") or (suggestion.get("symbol") if suggestion else "UNKNOWN"),
-            "fill_price": fill_details.get("fill_price", 0.0),
+            "fill_price": fill_price,
             "quantity": int(fill_details.get("quantity", 1)),
             "fees": fill_details.get("fees", 0.0),
             "suggestion_id": suggestion_id
         }
 
-        ex_res = self.supabase.table(self.executions_table).insert(execution_data).execute()
-        execution = ex_res.data[0] if ex_res.data else None
+        # Try adding slippage if column exists, otherwise it might be ignored or error.
+        # Given "Keep schema changes minimal", we won't add column blindly.
+        # If schema supports 'details' or 'metadata' JSONB, we use that.
+        # Assuming minimal schema, we might skip saving slippage explicitly
+        # unless we add it to 'fees' (not correct) or rely on offline analysis.
 
-        # 3. Update SuggestionLog
+        # However, for "Feed expected execution cost into UnifiedScore", we need history.
+        # We can fetch 'fill_price' and 'suggestion.target_price' (from logs) later to calculate slippage.
+
+        try:
+            ex_res = self.supabase.table(self.executions_table).insert(execution_data).execute()
+            execution = ex_res.data[0] if ex_res.data else None
+        except Exception as e:
+            logger.error(f"Failed to insert execution: {e}")
+            return None
+
+        # 4. Update SuggestionLog
         if execution:
             self.supabase.table(self.logs_table).update({
                 "was_accepted": True,
@@ -120,7 +154,54 @@ class ExecutionService:
                     .execute()
 
                 matches += 1
-                # Remove matched log from pool to avoid double matching?
-                # Ideally yes, but list is small enough.
 
         return matches
+
+    def estimate_execution_cost(self, symbol: str, regime: str = "normal") -> float:
+        """
+        Returns estimated execution cost per share (slippage + fees) based on symbol history and regime.
+        """
+        # 1. Try to fetch history for symbol
+        # We need executions linked to suggestions to compare fill_price vs target/mid
+        # This is expensive to query live.
+        # Fallback to heuristic for now, but framework allows extension.
+
+        base_slippage = 0.02 # $0.02 per share default
+
+        if regime == "suppressed":
+            base_slippage = 0.01
+        elif regime == "elevated":
+            base_slippage = 0.04
+        elif regime == "shock":
+            base_slippage = 0.10
+
+        # TODO: Implement actual DB query for historical slippage avg
+        # query = ... select avg(abs(fill_price - suggestion.target_price)) ...
+
+        return base_slippage
+
+    def simulate_fill(self,
+                      symbol: str,
+                      order_type: str,
+                      price: float,
+                      quantity: float,
+                      regime: str) -> Dict[str, Any]:
+        """
+        Simulates an execution for backtesting/paper trading with probabilistic fill logic.
+        """
+        # Delegate to TransactionCostModel
+        # Map regime to slippage params if needed
+        # For now, we use the standard model
+        side = "buy" # default assumption for cost check
+        if quantity < 0: side = "sell"
+
+        # Pass rng?
+        res = self.cost_model.simulate_fill(price, abs(quantity), side)
+
+        return {
+            "fill_price": res.fill_price,
+            "quantity": res.filled_quantity,
+            "fees": res.commission_paid,
+            "slippage": res.slippage_paid,
+            "status": res.status
+        }

@@ -25,6 +25,8 @@ from packages.quantum.analytics.regime_integration import (
 from packages.quantum.market_data import PolygonService
 from packages.quantum.analytics.factors import calculate_trend, calculate_volatility, calculate_rsi
 from packages.quantum.nested.backbone import infer_global_context, GlobalContext
+from packages.quantum.services.transaction_cost_model import TransactionCostModel
+from packages.quantum.common_enums import UnifiedScore
 
 # --- Configuration ---
 HISTORICAL_SIM_UNIVERSE = os.getenv("HISTORICAL_SIM_UNIVERSE", "SPY,QQQ,IWM,DIA").split(",")
@@ -43,6 +45,7 @@ def learn_from_cycle(
     reward: float,
     user_id: Optional[str] = None,
     mode: str = "historical",
+    attribution: Dict[str, float] = None
 ) -> None:
     """
     Hook for nested learning.
@@ -71,6 +74,11 @@ def learn_from_cycle(
             # Fallback only for dev convenience
             target_user = "75ee12ad-b119-4f32-aeea-19b4ef55d587"
 
+        # Breakdown attribution in notes
+        attr_str = ""
+        if attribution:
+            attr_str = f" | Attribution: Alpha={attribution.get('alpha',0):.2f}, Drag={attribution.get('execution_drag',0):.2f}, Regime={attribution.get('regime_shift',0):.2f}"
+
         # 2. Create Synthetic Journal Entry
         try:
             journal_service = JournalService(supabase)
@@ -87,7 +95,7 @@ def learn_from_cycle(
                     "exit_price": exit["exitPrice"],
                     "direction": "Long",
                     "status": "closed",
-                    "notes": f"Historical regime cycle {mode}: PnL={reward:.2f} | Entry: {entry.get('regimeAtEntry')} -> Exit: {exit.get('regimeAtExit')}",
+                    "notes": f"Historical regime cycle {mode}: PnL={reward:.2f} | Entry: {entry.get('regimeAtEntry')} -> Exit: {exit.get('regimeAtExit')}{attr_str}",
                 }
             )
         except Exception as j_err:
@@ -173,6 +181,7 @@ class HistoricalCycleService:
         self.conviction_transform = ConvictionTransform(DEFAULT_REGIME_PROFILES)
         self.lookback_window = 60 # Days needed for indicators
         self.enable_learning = os.getenv("ENABLE_HISTORICAL_NESTED_LEARNING", "true").lower() == "true"
+        self.cost_model = TransactionCostModel() # New V3
 
     def run_cycle(
         self,
@@ -308,6 +317,9 @@ class HistoricalCycleService:
         current_idx = start_idx
         days_in_trade = 0
 
+        # Attribution vars
+        execution_drag_total = 0.0
+
         while current_idx < len(dates):
             # GUARD: Future Leakage Check
             # We strictly slice up to current_idx (inclusive)
@@ -391,10 +403,22 @@ class HistoricalCycleService:
 
                 if regime_ok and c_i >= entry_threshold:
                     in_trade = True
+
+                    # Execution Sim (Entry)
+                    sim_res = self.cost_model.simulate_fill(
+                        price=current_price,
+                        quantity=100, # Mock qty
+                        side="buy",
+                        rng=rng
+                    )
+                    entry_fill_price = sim_res.fill_price
+                    execution_drag_total += sim_res.slippage_paid # In dollars
+
                     entry_details = {
                         "entryIndex": current_idx,
                         "entryTime": current_date_str,
-                        "entryPrice": current_price,
+                        "entryPrice": entry_fill_price,
+                        "rawEntryPrice": current_price,
                         "direction": "long",
                         "regimeAtEntry": regime_mapped,
                         "convictionAtEntry": c_i,
@@ -423,12 +447,36 @@ class HistoricalCycleService:
                 if days_in_trade > max_days: should_exit = True
 
                 if should_exit:
-                    pnl_amount = (current_price - entry_details['entryPrice'])
+                    # Execution Sim (Exit)
+                    sim_res = self.cost_model.simulate_fill(
+                        price=current_price,
+                        quantity=100,
+                        side="sell",
+                        rng=rng
+                    )
+                    exit_fill_price = sim_res.fill_price
+                    execution_drag_total += sim_res.slippage_paid
+
+                    pnl_amount = (exit_fill_price - entry_details['entryPrice'])
+
+                    # PnL Attribution
+                    # Alpha = Raw Market Move
+                    # Drag = Execution Cost
+                    # Regime Shift = If regime changed against us
+                    raw_pnl = current_price - entry_details['rawEntryPrice']
+                    execution_drag = (entry_details['entryPrice'] - entry_details['rawEntryPrice']) + (current_price - exit_fill_price)
+                    # Note: above calc is simplified, drag is basically slippage
+
+                    attribution = {
+                        "alpha": raw_pnl,
+                        "execution_drag": -abs(execution_drag),
+                        "regime_shift": 0.0 # TODO: Calculate if regime change hurt/helped
+                    }
 
                     exit_details = {
                         "exitIndex": current_idx,
                         "exitTime": current_date_str,
-                        "exitPrice": current_price,
+                        "exitPrice": exit_fill_price,
                         "regimeAtExit": regime_mapped,
                         "convictionAtExit": c_i,
                         "daysInTrade": days_in_trade
@@ -442,19 +490,21 @@ class HistoricalCycleService:
                             exit_details,
                             pnl_amount,
                             user_id=user_id,
-                            mode="historical"
+                            mode="historical",
+                            attribution=attribution
                         )
 
                     return {
                         **entry_details,
                         **exit_details,
                         "pnl": pnl_amount,
-                        "pnl_pct": pnl_pct,
+                        "pnl_pct": pnl_amount / entry_details['entryPrice'],
                         "done": False,
                         "status": "normal_exit",
                         "nextCursor": dates[current_idx + 1] if current_idx + 1 < len(dates) else dates[-1],
                         "run_id": run_id,
-                        "chosen_symbol": chosen_symbol
+                        "chosen_symbol": chosen_symbol,
+                        "attribution": attribution
                     }
 
             current_idx += 1
@@ -462,12 +512,20 @@ class HistoricalCycleService:
         # End of Data Loop
         if in_trade:
             # Forced Exit
-            pnl_amount = (prices[-1] - entry_details['entryPrice'])
+            sim_res = self.cost_model.simulate_fill(
+                price=prices[-1],
+                quantity=100,
+                side="sell",
+                rng=rng
+            )
+            exit_fill_price = sim_res.fill_price
+
+            pnl_amount = (exit_fill_price - entry_details['entryPrice'])
             pnl_pct = pnl_amount / entry_details['entryPrice']
             exit_details = {
                 "exitIndex": len(dates)-1,
                 "exitTime": dates[-1],
-                "exitPrice": prices[-1],
+                "exitPrice": exit_fill_price,
                 "regimeAtExit": "unknown", # Data ended
                 "convictionAtExit": 0.5,
                 "daysInTrade": days_in_trade

@@ -145,7 +145,8 @@ plaid_endpoints.register_plaid_endpoints(
     plaid_service,
     supabase_admin,
     analytics_service,
-    get_supabase_user_client
+    get_supabase_user_client,
+    limiter
 )
 
 # --- Register Optimizer Endpoints ---

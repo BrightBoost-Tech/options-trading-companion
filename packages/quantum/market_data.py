@@ -36,6 +36,7 @@ class PolygonService:
         if not self.api_key:
             print("Warning: POLYGON_API_KEY not found. Service will use mock data.")
         self.base_url = "https://api.polygon.io"
+        self.session = requests.Session()
     
     def get_historical_prices(self, symbol: str, days: int = 252, to_date: datetime = None) -> Dict:
         to_date = to_date or datetime.now()
@@ -55,7 +56,7 @@ class PolygonService:
         }
         
         # Reduced timeout to 5s to prevent hanging
-        response = requests.get(url, params=params, timeout=5)
+        response = self.session.get(url, params=params, timeout=5)
         response.raise_for_status()
         
         data = response.json()
@@ -94,7 +95,7 @@ class PolygonService:
             url = f"{self.base_url}/v3/reference/tickers/{symbol}"
 
         params = {'apiKey': self.api_key}
-        response = requests.get(url, params=params, timeout=5)
+        response = self.session.get(url, params=params, timeout=5)
         response.raise_for_status()
         data = response.json()
         return data.get('results', {})
@@ -143,7 +144,7 @@ class PolygonService:
                     'sort': 'timestamp',
                     'apiKey': self.api_key
                 }
-                response = requests.get(url, params=params, timeout=5)
+                response = self.session.get(url, params=params, timeout=5)
                 # Use raise_for_status to catch 4xx/5xx errors
                 if response.status_code != 200:
                      return {"bid": 0.0, "ask": 0.0}
@@ -160,7 +161,7 @@ class PolygonService:
                 # Stocks: Use v2 NBBO (Last Quote)
                 url = f"{self.base_url}/v2/last/nbbo/{search_symbol}"
                 params = {'apiKey': self.api_key}
-                response = requests.get(url, params=params, timeout=5)
+                response = self.session.get(url, params=params, timeout=5)
 
                 # NBBO endpoint might return 404 if no data, or 200 with empty results
                 if response.status_code != 200:
@@ -197,7 +198,7 @@ class PolygonService:
         params = {'apiKey': self.api_key}
 
         try:
-            response = requests.get(url, params=params, timeout=5)
+            response = self.session.get(url, params=params, timeout=5)
             if response.status_code != 200:
                 print(f"Snapshot fetch failed: {response.status_code} {response.text}")
                 return {}
@@ -274,7 +275,7 @@ class PolygonService:
 
         try:
             while url:
-                response = requests.get(url, params=params, timeout=10)
+                response = self.session.get(url, params=params, timeout=10)
                 if response.status_code != 200:
                     print(f"Chain snapshot fetch failed for {underlying}: {response.status_code}")
                     break
@@ -328,7 +329,7 @@ def get_polygon_price(symbol: str) -> float:
             'apiKey': service.api_key
         }
 
-        response = requests.get(url, params=params, timeout=5)
+        response = service.session.get(url, params=params, timeout=5)
 
         if response.status_code == 200:
              data = response.json()

@@ -47,19 +47,6 @@ class UniverseService:
         except Exception as e:
             print(f"Error syncing universe: {e}")
 
-    @staticmethod
-    def classify_iv_regime(iv_rank: float | None) -> str | None:
-        # Thresholds defined locally or could be top-level constants.
-        # Repeating for clarity if not top-level.
-        IV_RANK_SUPPRESSED_THRESHOLD = 20
-        IV_RANK_ELEVATED_THRESHOLD = 60
-
-        if iv_rank is None:
-            return None
-        if iv_rank < IV_RANK_SUPPRESSED_THRESHOLD: return "suppressed"
-        if iv_rank < IV_RANK_ELEVATED_THRESHOLD: return "normal"
-        return "elevated"
-
     def update_metrics(self):
         """
         Iterates over active symbols and updates metrics using Polygon.
@@ -95,7 +82,9 @@ class UniverseService:
                     pass
 
                 iv_rank = self.polygon.get_iv_rank(sym)
-                iv_regime = self.classify_iv_regime(iv_rank)
+
+                # Removed local classify_iv_regime logic.
+                # RegimeEngineV3 is the source of truth.
 
                 # 3. Liquidity Score (0-100)
                 # Heuristic:
@@ -126,7 +115,7 @@ class UniverseService:
                     "market_cap": market_cap,
                     "avg_volume_30d": avg_vol,
                     "iv_rank": iv_rank,
-                    "iv_regime": iv_regime,
+                    "iv_regime": None, # Deprecated source of truth
                     "liquidity_score": min(100, l_score),
                     "last_updated": datetime.now().isoformat()
                 })

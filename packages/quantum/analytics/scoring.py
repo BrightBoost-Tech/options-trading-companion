@@ -5,11 +5,15 @@ from packages.quantum.common_enums import UnifiedScore, UnifiedScoreComponent, R
 def calculate_unified_score(
     trade: Dict[str, Any],
     regime_snapshot: Dict[str, Any], # GlobalRegimeSnapshot or dict
-    market_data: Optional[Dict[str, Any]] = None
+    market_data: Optional[Dict[str, Any]] = None,
+    execution_drag_estimate: float = 0.0
 ) -> UnifiedScore:
     """
     Calculates the Unified Score (0-100) based on:
     UnifiedScore = EV - ExecutionCostExpected - RegimePenalty - GreekRiskPenalty
+
+    All components are normalized to 'points' where 1 Point approx 0.02% ROI impact,
+    scaled to a 0-100 score.
     """
     if market_data is None:
         market_data = {}
@@ -21,84 +25,73 @@ def calculate_unified_score(
     # Avoid division by zero
     cost_basis = suggested_entry if suggested_entry > 0.01 else 1.0
 
-    # 2. Estimate Execution Cost (Drag)
-    # Baseline: 1% of premium + fixed fee per leg
-    # Real logic: use bid/ask spread if available
+    # EV ROI
+    ev_roi = ev / cost_basis
+
+    # 2. Expected Execution Cost (Drag)
+    # Use provided estimate (from history) or calculate from current spread
     bid_ask_spread_width = trade.get('bid_ask_spread', 0.0)
-    if bid_ask_spread_width <= 0:
-        # Fallback estimation
-        bid_ask_spread_width = suggested_entry * 0.02 # 2% spread assumption
 
-    num_legs = len(trade.get('legs', [])) or 1
-    commission = num_legs * 0.65 # $0.65 per contract
+    # Cost per share
+    estimated_cost_per_share = execution_drag_estimate
 
-    # Execution Cost = (Spread / 2) + Commission
-    # Spread/2 is the "fair value" loss vs mid price
-    exec_cost = (bid_ask_spread_width * 0.5) * 100 # x100 multiplier for contract size?
-    # Usually suggested_entry is total premium per share ($1.50).
-    # Spread is width per share ($0.10).
-    # So exec cost per share is $0.05 + comms/100.
+    if bid_ask_spread_width > 0:
+        # If live spread is known, use it: (Spread/2) + Comms
+        live_cost = (bid_ask_spread_width * 0.5) + 0.0065 # $0.65 contract / 100
+        # Use the worse of historical or live
+        estimated_cost_per_share = max(estimated_cost_per_share, live_cost)
+    elif estimated_cost_per_share == 0:
+         # Fallback
+         estimated_cost_per_share = cost_basis * 0.01 # 1% slippage assumption
 
-    exec_drag_per_share = (bid_ask_spread_width * 0.5) + (commission / 100.0)
+    # Cost ROI Impact
+    cost_roi = estimated_cost_per_share / cost_basis
 
-    # Normalize EV to ROI % for scoring to keep it scale-invariant
-    # EV is typically total expected profit per share ($0.20)
-
-    # 3. Regime Penalty
+    # 3. Regime Penalty (ROI Impact)
     regime_state = RegimeState(regime_snapshot.get('state', 'normal'))
-    regime_penalty = 0.0
+    regime_penalty_roi = 0.0
 
     strategy_type = trade.get('strategy', 'unknown')
 
     # Example Penalties
     if regime_state == RegimeState.SHOCK:
         if 'credit_put' in strategy_type:
-            regime_penalty += 0.50 # 50% penalty on ROI
+            regime_penalty_roi += 0.10 # 10% ROI penalty
         if 'debit_call' in strategy_type:
-             regime_penalty += 0.20
+             regime_penalty_roi += 0.05
 
     elif regime_state == RegimeState.ELEVATED:
-        # Penalize buying premium (Vega Long)
         if 'debit' in strategy_type:
-            regime_penalty += 0.15
+            regime_penalty_roi += 0.03
 
     elif regime_state == RegimeState.SUPPRESSED:
-        # Penalize selling premium (Vega Short)
         if 'credit' in strategy_type:
-            regime_penalty += 0.15
+            regime_penalty_roi += 0.03
 
-    # 4. Greek Risk Penalty
-    greek_penalty = 0.0
+    # 4. Greek Risk Penalty (ROI Impact)
+    greek_penalty_roi = 0.0
     gamma = abs(trade.get('gamma', 0.0))
     vega = trade.get('vega', 0.0)
 
-    # Penalize high gamma (explosive risk)
+    # Penalize high gamma
     if gamma > 0.1:
-        greek_penalty += gamma * 1.0
+        greek_penalty_roi += gamma * 0.1
 
     # Penalize wrong-way Vega
     if regime_state == RegimeState.ELEVATED and vega > 0:
-        greek_penalty += 0.10
+        greek_penalty_roi += 0.02
     if regime_state == RegimeState.SUPPRESSED and vega < 0:
-        greek_penalty += 0.10
+        greek_penalty_roi += 0.02
 
-    # 5. Synthesis
-    # Convert everything to "Points"
-    # Base Score = EV ROI * Scaling Factor
+    # 5. Synthesis: Unified Score = EV - Cost - Regime - Risk
+    # We scale ROI to Score (0-100).
+    # Let's say ROI 20% (0.20) = 100 Score.
+    SCALING_FACTOR = 500.0
 
-    ev_roi = ev / cost_basis if cost_basis else 0.0
-
-    # Point Basis: 1% ROI = 1 Point? No, 1% ROI is small.
-    # Let's say 10% ROI = 50 Points (Target).
-    # ROI of 0.20 (20%) = 100 points.
-
-    base_points = ev_roi * 500.0
-
-    cost_points = (exec_drag_per_share / cost_basis) * 500.0
-
-    regime_points = regime_penalty * 100.0 # 0.15 penalty = 15 points lost
-
-    greek_points = greek_penalty * 100.0
+    base_points = ev_roi * SCALING_FACTOR
+    cost_points = cost_roi * SCALING_FACTOR
+    regime_points = regime_penalty_roi * SCALING_FACTOR
+    greek_points = greek_penalty_roi * SCALING_FACTOR
 
     final_score = base_points - cost_points - regime_points - greek_points
 

@@ -15,6 +15,7 @@ from packages.quantum.analytics.regime_integration import map_market_regime
 from packages.quantum.services.iv_repository import IVRepository
 from packages.quantum.analytics.regime_engine_v3 import RegimeEngineV3, GlobalRegimeSnapshot, RegimeState
 from packages.quantum.analytics.scoring import calculate_unified_score
+from packages.quantum.services.execution_service import ExecutionService
 
 # Configuration
 SCANNER_LIMIT_DEV = int(os.getenv("SCANNER_LIMIT_DEV", "40")) # Limit universe in dev
@@ -23,7 +24,8 @@ logger = logging.getLogger(__name__)
 
 def scan_for_opportunities(
     symbols: List[str] = None,
-    supabase_client: Client = None
+    supabase_client: Client = None,
+    user_id: str = None
 ) -> List[Dict[str, Any]]:
     """
     Scans the provided symbols (or universe) for option trade opportunities.
@@ -35,11 +37,12 @@ def scan_for_opportunities(
     market_data = PolygonService()
     strategy_selector = StrategySelector()
     universe_service = UniverseService(supabase_client) if supabase_client else None
+    execution_service = ExecutionService(supabase_client) if supabase_client else None
 
     # Unified Regime Engine
     regime_engine = RegimeEngineV3(
         supabase_client=supabase_client,
-        market_data=market_data, # Use scanner's market data instance
+        market_data=market_data,
         iv_repository=IVRepository(supabase_client) if supabase_client else None,
     )
 
@@ -47,7 +50,7 @@ def scan_for_opportunities(
     if not symbols:
         if universe_service:
             try:
-                universe = universe_service.get_universe() # returns list of dicts
+                universe = universe_service.get_universe()
                 symbols = [u['symbol'] for u in universe]
             except Exception as e:
                 print(f"[Scanner] UniverseService failed: {e}. Using fallback.")
@@ -62,7 +65,6 @@ def scan_for_opportunities(
     print(f"[Scanner] Processing {len(symbols)} symbols...")
 
     # 2. Compute Global Regime Snapshot ONCE
-    # This ensures consistency for the entire scan batch
     try:
         global_snapshot = regime_engine.compute_global_snapshot(datetime.now())
         print(f"[Scanner] Global Regime: {global_snapshot.state}")
@@ -77,9 +79,17 @@ def scan_for_opportunities(
     for i in range(0, len(symbols), batch_size):
         batch = symbols[i : i + batch_size]
 
+        # Batch fetch execution drag for efficiency
+        batch_drag_stats = {}
+        if execution_service:
+            try:
+                batch_drag_stats = execution_service.get_batch_execution_drag_stats(batch, user_id=user_id)
+            except Exception:
+                pass
+
         for symbol in batch:
             try:
-                # A. Enrich Data (Price, IV, Earnings, etc.)
+                # A. Enrich Data
                 quote = market_data.get_recent_quote(symbol)
                 if not quote: continue
 
@@ -96,13 +106,9 @@ def scan_for_opportunities(
                     # Dynamic Liquidity Threshold based on Regime
                     threshold = 0.10 # Default
                     if global_snapshot.state == RegimeState.SUPPRESSED:
-                         threshold = 0.20 # Allow wider spreads in low vol? Or maybe tighter?
-                         # Usually low vol = tighter spreads.
-                         # Actually, suppressed regime implies maybe low liquidity too if interest is low?
-                         # Let's say if regime is SHOCK, spreads blow out, so we must tolerate wider spreads?
-                         pass
+                         threshold = 0.20
                     elif global_snapshot.state == RegimeState.SHOCK:
-                         threshold = 0.15 # Tolerate slightly wider
+                         threshold = 0.15
 
                     if spread_pct > threshold:
                         # REJECT: Liquidity
@@ -117,8 +123,13 @@ def scan_for_opportunities(
 
                 iv_rank = symbol_snapshot.iv_rank or 50.0
 
-                # D. Technical Analysis (Trend) - Kept simple for now, but should ideally move to RegimeEngine or FactorService
-                # For now, scanner does a quick check for StrategySelector
+                # Check for Regime Suppression (Hard Rejection)
+                # If regime explicitly bans structures or symbols, we skip here.
+                # E.g., if Symbol is in 'Crisis' state (IV Rank > 95) but market is Normal?
+                # The strategy selector should handle this, or we do it here.
+                # For now, relying on Strategy Selector returning HOLD/NONE.
+
+                # D. Technical Analysis (Trend)
                 bars = market_data.get_historical_prices(symbol, days=60)
                 if not bars or len(bars) < 50:
                     continue
@@ -134,8 +145,6 @@ def scan_for_opportunities(
                     trend = "BEARISH"
 
                 # E. Strategy Selection
-                # Convert authoritative regime enum to string for selector if needed, or update selector
-                # Assuming StrategySelector expects string "suppressed", "elevated", etc.
                 suggestion = strategy_selector.determine_strategy(
                     ticker=symbol,
                     sentiment=trend,
@@ -155,12 +164,11 @@ def scan_for_opportunities(
                 total_cost = 0.0
                 total_ev = 0.0
 
-                # ... (Leg selection logic remains mostly same, just ensuring we capture metrics for scoring)
-
+                # ... (Leg selection logic)
                 for leg_def in suggestion["legs"]:
                      target_delta = leg_def["delta_target"]
-                     side = leg_def["side"] # buy/sell
-                     op_type = leg_def["type"] # call/put
+                     side = leg_def["side"]
+                     op_type = leg_def["type"]
 
                      if op_type == "call":
                          filtered = [c for c in chain if c['type'] == 'call']
@@ -176,14 +184,13 @@ def scan_for_opportunities(
                          target_d = abs(target_delta)
                          best_contract = min(filtered, key=lambda x: abs(abs(x.get('delta',0) or 0) - target_d))
                      else:
-                         # Fallback: Moneyness
                          moneyness = 1.0
                          if op_type == 'call':
-                             if target_delta > 0.5: moneyness = 0.95 # ITM
-                             elif target_delta < 0.5: moneyness = 1.05 # OTM
-                         else: # put
-                             if target_delta > 0.5: moneyness = 1.05 # ITM
-                             elif target_delta < 0.5: moneyness = 0.95 # OTM
+                             if target_delta > 0.5: moneyness = 0.95
+                             elif target_delta < 0.5: moneyness = 1.05
+                         else:
+                             if target_delta > 0.5: moneyness = 1.05
+                             elif target_delta < 0.5: moneyness = 0.95
 
                          target_k = current_price * moneyness
                          best_contract = min(filtered, key=lambda x: abs(x['strike'] - target_k))
@@ -206,7 +213,7 @@ def scan_for_opportunities(
                      if side == "buy":
                          total_cost += premium
                      else:
-                         total_cost -= premium # Credit
+                         total_cost -= premium
 
                 # G. Compute Net EV
                 if len(legs) == 2:
@@ -243,7 +250,7 @@ def scan_for_opportunities(
                 trade_dict = {
                     "ev": total_ev,
                     "suggested_entry": abs(total_cost),
-                    "bid_ask_spread": abs(total_cost) * spread_pct, # Proxy spread width
+                    "bid_ask_spread": abs(total_cost) * spread_pct,
                     "strategy": suggestion["strategy"],
                     "legs": legs,
                     "vega": sum(l['vega'] if l['side']=='buy' else -l['vega'] for l in legs),
@@ -252,11 +259,30 @@ def scan_for_opportunities(
                     "type": "debit" if total_cost > 0 else "credit"
                 }
 
+                # Fetch Execution Drag History
+                historical_drag = batch_drag_stats.get(symbol, 0.0)
+
                 unified_score = calculate_unified_score(
                     trade=trade_dict,
-                    regime_snapshot=global_snapshot.to_dict(), # Passing dict to score
-                    market_data={"bid_ask_spread_pct": spread_pct}
+                    regime_snapshot=global_snapshot.to_dict(),
+                    market_data={"bid_ask_spread_pct": spread_pct},
+                    execution_drag_estimate=historical_drag
                 )
+
+                # Requirement: Hard-reject if execution cost > EV
+                # Execution Cost Points in score structure is scaled.
+                # We should check raw values.
+                # Expected Cost = (UnifiedScore calculates it internaly).
+                # We can replicate or check component score?
+                # Easier: if unified_score.score <= 0 due to cost?
+                # Actually, check raw EV vs Estimated Cost.
+                estimated_cost_raw = (trade_dict['bid_ask_spread'] * 0.5) + (len(legs)*0.0065)
+                # Use max of historical too
+                estimated_cost_raw = max(estimated_cost_raw, historical_drag)
+
+                if estimated_cost_raw > total_ev:
+                    # REJECT: Negative Expectancy after Cost
+                    continue
 
                 candidates.append({
                     "symbol": symbol,

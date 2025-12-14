@@ -1,4 +1,4 @@
-## 2024-05-23 - Inconsistent Authentication Patterns
-**Vulnerability:** The `/holdings/export` endpoint was manually parsing the Authorization header and calling `supabase.auth.get_user(token)` directly, instead of using the standardized `Depends(get_current_user)` dependency used elsewhere.
-**Learning:** "Roll-your-own" auth checks in individual endpoints create inconsistent security postures and maintenance burdens. They often lack the full suite of checks (like environment-specific fallbacks or unified error handling) present in the centralized auth logic.
-**Prevention:** Always use the centralized `get_current_user` dependency for any endpoint requiring authentication. Use linters or grep searches for `Header("Authorization")` or `supabase.auth.get_user` in API routes to catch deviations.
+## 2024-05-23 - [Critical Privilege Escalation in API Dependency]
+**Vulnerability:** The `get_supabase_user_client` dependency in `packages/quantum/api.py` defaulted to returning the `supabase_admin` (service role) client if authentication checks failed or fell through due to misconfiguration (e.g., missing `SUPABASE_ANON_KEY`).
+**Learning:** Default fallbacks in security-sensitive dependency injection functions can silently upgrade privileges. Never use an administrative client as a "default" return value.
+**Prevention:** Always follow the "Fail Securely" principle. Explicitly raise an exception (e.g., 401 or 500) at the end of authentication functions if no valid credentials or safe state can be established.

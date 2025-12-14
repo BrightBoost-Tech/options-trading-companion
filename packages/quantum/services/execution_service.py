@@ -216,12 +216,14 @@ class ExecutionService:
         self,
         symbol: str,
         spread_pct: float | None = None,
-        user_id: str | None = None
+        user_id: str | None = None,
+        entry_cost: float | None = None,
+        num_legs: int | None = None
     ) -> float:
         """
-        Returns estimated execution cost (drag) per share.
+        Returns estimated execution cost (drag) per share/contract.
         Prioritizes historical data if user_id is provided and enough samples exist.
-        Fallbacks to heuristic spread proxy.
+        Fallbacks to heuristic spread proxy: (Spread * 0.5) + (Legs * Fees).
         """
         # 1. Try History
         if user_id:
@@ -234,8 +236,14 @@ class ExecutionService:
         if spread_pct is None:
             spread_pct = 0.005 # 0.5% default assumption
 
-        # Assumption: Drag is roughly half the spread + some fees
-        # Return a safe default.
+        # Precise formula match for scanner equivalence:
+        # Cost = (Entry * Spread% * 0.5) + (Legs * 0.0065)
+        if entry_cost is not None and num_legs is not None:
+             spread_value = abs(entry_cost) * spread_pct
+             return (spread_value * 0.5) + (num_legs * 0.0065)
+
+        # Legacy Assumption: Drag is roughly half the spread + some fees
+        # Return a safe default if specific trade structure is unknown.
         return 0.05
 
     def simulate_fill(self,

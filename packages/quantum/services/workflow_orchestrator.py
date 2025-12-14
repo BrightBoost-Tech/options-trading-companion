@@ -61,10 +61,16 @@ async def run_morning_cycle(supabase: Client, user_id: str):
     truth_layer = MarketDataTruthLayer()
 
     # V3: Compute Global Regime Snapshot ONCE
-    market_data = PolygonService()
+    # market_data = PolygonService() # REMOVED: Not used in morning cycle, and not for RegimeEngine
     iv_repo = IVRepository(supabase)
     iv_point_service = IVPointService(supabase)
-    regime_engine = RegimeEngineV3(supabase, market_data, iv_repo, iv_point_service)
+
+    regime_engine = RegimeEngineV3(
+        supabase_client=supabase,
+        market_data=truth_layer,
+        iv_repository=iv_repo,
+        iv_point_service=iv_point_service,
+    )
 
     global_snap = regime_engine.compute_global_snapshot(datetime.now())
     # Try to persist global snapshot
@@ -315,10 +321,16 @@ async def run_midday_cycle(supabase: Client, user_id: str):
         return
 
     # V3: Compute Global Regime Snapshot ONCE
-    market_data = PolygonService()
+    truth_layer = MarketDataTruthLayer()
     iv_repo = IVRepository(supabase)
     iv_point_service = IVPointService(supabase)
-    regime_engine = RegimeEngineV3(supabase, market_data, iv_repo, iv_point_service)
+
+    regime_engine = RegimeEngineV3(
+        supabase_client=supabase,
+        market_data=truth_layer,
+        iv_repository=iv_repo,
+        iv_point_service=iv_point_service,
+    )
 
     global_snap = regime_engine.compute_global_snapshot(datetime.now())
     # Try to persist global snapshot
@@ -563,8 +575,16 @@ async def run_weekly_report(supabase: Client, user_id: str):
         # Ideally, LossMinimizer would query the DB itself or we'd pass a list of recent executions.
 
         # Determine global regime for context
-        market_data = PolygonService()
-        regime_engine = RegimeEngineV3(supabase, market_data) # Lightweight init
+        truth_layer = MarketDataTruthLayer()
+        iv_repo = IVRepository(supabase)
+        iv_point_service = IVPointService(supabase)
+
+        regime_engine = RegimeEngineV3(
+            supabase_client=supabase,
+            market_data=truth_layer,
+            iv_repository=iv_repo,
+            iv_point_service=iv_point_service,
+        )
         global_snap = regime_engine.compute_global_snapshot(datetime.now())
         current_regime_str = global_snap.state.value
 
@@ -580,22 +600,27 @@ async def run_weekly_report(supabase: Client, user_id: str):
 
         # Persist Policy to Learning Loop
         if policy:
-            loop_entry = {
-                "user_id": user_id,
-                "created_at": datetime.now(timezone.utc).isoformat(),
-                "feedback_type": "guardrail_policy",
-                "payload": policy, # Storing policy in JSON payload
-                "metadata": {"source": "weekly_loss_minimizer"}
+            policy_details = {
+                "policy_version": "v1",
+                "regime_state": str(current_regime_str),
+                "generated_at": datetime.now(timezone.utc).isoformat(),
+                "source": "loss_minimizer",
+                "policy": policy,
+                "inputs": {
+                    "lookback_days": 7,
+                    "loss_summary": recent_losses_summary,
+                },
             }
-            # Assuming 'learning_feedback_loops' has 'payload' or 'metadata' column.
-            # If not, we might need to use 'rationale' or similar if schema restricted.
-            # Standard Supabase tables usually have JSONB.
-            # Based on memory, 'learning_feedback_loops' exists.
+
             try:
-                supabase.table("learning_feedback_loops").insert(loop_entry).execute()
+                supabase.table("learning_feedback_loops").insert({
+                    "user_id": user_id,
+                    "outcome_type": "guardrail_policy",
+                    "details_json": policy_details,
+                }).execute()
                 print("Persisted adaptive guardrail policy.")
             except Exception as ex:
-                print(f"Failed to persist guardrail policy (schema might mismatch): {ex}")
+                print(f"Failed to persist guardrail policy: {ex}")
 
     except Exception as e:
         print(f"Adaptive Caps Error: {e}")

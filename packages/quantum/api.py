@@ -46,6 +46,7 @@ from packages.quantum.optimizer import router as optimizer_router
 from packages.quantum.market_data import calculate_portfolio_inputs, PolygonService
 # New Services for Cash-Aware Workflow
 from packages.quantum.services.workflow_orchestrator import run_morning_cycle, run_midday_cycle, run_weekly_report
+from packages.quantum.services.market_data_truth_layer import MarketDataTruthLayer
 from packages.quantum.services.plaid_history_service import PlaidHistoryService
 from packages.quantum.services.rebalance_engine import RebalanceEngine
 from packages.quantum.services.execution_service import ExecutionService
@@ -228,10 +229,17 @@ async def execute_rebalance(
 
     # --- V3: Regime Engine Integration ---
     # Instantiate services
-    market_data = PolygonService()
+    market_data = PolygonService() # Keep for safety if used elsewhere
+    truth_layer = MarketDataTruthLayer()
     iv_repo = IVRepository(supabase)
     iv_point_service = IVPointService(supabase)
-    regime_engine = RegimeEngineV3(market_data, iv_repo, iv_point_service)
+
+    regime_engine = RegimeEngineV3(
+        supabase_client=supabase,
+        market_data=truth_layer,
+        iv_repository=iv_repo,
+        iv_point_service=iv_point_service,
+    )
 
     # Compute Global Snapshot
     now = datetime.now()
@@ -536,10 +544,17 @@ async def preview_rebalance(
     from packages.quantum.optimizer import _compute_portfolio_weights, OptimizationRequest, calculate_dynamic_target
 
     # --- V3: Regime Engine Integration (Preview Mode: Global Only for Speed) ---
-    market_data = PolygonService()
+    market_data = PolygonService() # Keep for safety if used elsewhere
+    truth_layer = MarketDataTruthLayer()
     iv_repo = IVRepository(supabase)
     iv_point_service = IVPointService(supabase)
-    regime_engine = RegimeEngineV3(market_data, iv_repo, iv_point_service)
+
+    regime_engine = RegimeEngineV3(
+        supabase_client=supabase,
+        market_data=truth_layer,
+        iv_repository=iv_repo,
+        iv_point_service=iv_point_service,
+    )
 
     now = datetime.now()
     global_snap = regime_engine.compute_global_snapshot(now) # Skip symbol snapshot for preview speed

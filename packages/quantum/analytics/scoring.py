@@ -6,7 +6,9 @@ def calculate_unified_score(
     trade: Dict[str, Any],
     regime_snapshot: Dict[str, Any], # GlobalRegimeSnapshot or dict
     market_data: Optional[Dict[str, Any]] = None,
-    execution_drag_estimate: float = 0.0
+    execution_drag_estimate: float = 0.0,
+    num_legs: Optional[int] = None,
+    entry_cost: Optional[float] = None
 ) -> UnifiedScore:
     """
     Calculates the Unified Score (0-100) based on:
@@ -30,19 +32,47 @@ def calculate_unified_score(
 
     # 2. Expected Execution Cost (Drag)
     # Use provided estimate (from history) or calculate from current spread
+
+    # Infer defaults
+    if num_legs is None:
+        legs = trade.get('legs', [])
+        num_legs = len(legs) if legs else 1
+
+    if entry_cost is None:
+        entry_cost = trade.get('suggested_entry', 0.0)
+
     bid_ask_spread_width = trade.get('bid_ask_spread', 0.0)
+
+    # Calculate Proxy Cost
+    # Formula: (Entry * Spread% * 0.5) + (Legs * 0.0065)
+    proxy_cost = 0.0
+
+    # Try to use bid_ask_spread_pct from market_data first
+    spread_pct = market_data.get('bid_ask_spread_pct')
+    if spread_pct is not None and entry_cost > 0:
+        width = entry_cost * spread_pct
+        proxy_cost = (width * 0.5) + (num_legs * 0.0065)
+    elif bid_ask_spread_width > 0:
+         # Fallback to pre-calculated width
+         # Note: bid_ask_spread in trade is usually width
+         proxy_cost = (bid_ask_spread_width * 0.5) + (num_legs * 0.0065)
+    else:
+         # Fallback if no spread info
+         proxy_cost = (cost_basis * 0.01 * 0.5) + (num_legs * 0.0065)
 
     # Cost per share
     estimated_cost_per_share = execution_drag_estimate
 
-    if bid_ask_spread_width > 0:
-        # If live spread is known, use it: (Spread/2) + Comms
-        live_cost = (bid_ask_spread_width * 0.5) + 0.0065 # $0.65 contract / 100
-        # Use the worse of historical or live
-        estimated_cost_per_share = max(estimated_cost_per_share, live_cost)
-    elif estimated_cost_per_share == 0:
-         # Fallback
-         estimated_cost_per_share = cost_basis * 0.01 # 1% slippage assumption
+    if estimated_cost_per_share > 0:
+        # Use the worse of historical or live proxy
+        estimated_cost_per_share = max(estimated_cost_per_share, proxy_cost)
+    else:
+        # If no history, use proxy
+        estimated_cost_per_share = proxy_cost
+
+    # Safety floor
+    if estimated_cost_per_share <= 0:
+         estimated_cost_per_share = cost_basis * 0.01
 
     # Cost ROI Impact
     cost_roi = estimated_cost_per_share / cost_basis

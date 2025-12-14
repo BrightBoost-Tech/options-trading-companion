@@ -291,18 +291,21 @@ def scan_for_opportunities(
                   entry_cost=abs(total_cost),
                   num_legs=len(legs),
                 )
-                else:
+            else:
                   expected_execution_cost = 0.05  # safe fallback
 
             unified_score = calculate_unified_score(
                 trade=trade_dict,
                 regime_snapshot=global_snapshot.to_dict(),
                 market_data={"bid_ask_spread_pct": spread_pct},
-                execution_drag_estimate=expected_execution_cost
+                execution_drag_estimate=expected_execution_cost,
+                num_legs=len(legs),
+                entry_cost=abs(total_cost)
             )
 
            # Requirement: Hard-reject if execution cost > EV
-            proxy_cost = (trade_dict["bid_ask_spread"] * 0.5) + (len(legs) * 0.0065)
+           # Use consistent value: max of history or proxy
+            proxy_cost = (abs(total_cost) * spread_pct * 0.5) + (len(legs) * 0.0065)
             exec_cost = max(proxy_cost, float(expected_execution_cost or 0.0))
 
             if exec_cost > total_ev:
@@ -337,14 +340,6 @@ def scan_for_opportunities(
             future_to_symbol = {
                 executor.submit(process_symbol, sym, drag_map): sym
                 for sym in symbols
-            }
-
-            for future in concurrent.futures.as_completed(future_to_symbol):
-                res = future.result()
-                if res:
-                    candidates.append(res)
-
-                for sym in batch
             }
 
             for future in concurrent.futures.as_completed(future_to_symbol):

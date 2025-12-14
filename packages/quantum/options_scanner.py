@@ -274,6 +274,26 @@ def scan_for_opportunities(
                  else:
                      expected_execution_cost = 0.05
 
+            # Default proxy values
+            expected_execution_cost = None
+            drag_source = "proxy"
+            drag_samples = 0
+
+            if stats and isinstance(stats, dict):
+                expected_execution_cost = float(stats.get("avg_drag", 0.0))
+                drag_source = "history"
+                drag_samples = int(stats.get("n", stats.get("N", 0)) or 0)
+            elif execution_service:
+                expected_execution_cost = execution_service.estimate_execution_cost(
+                  symbol,
+                  spread_pct=spread_pct,
+                  user_id=user_id,              # use real user if available
+                  entry_cost=abs(total_cost),
+                  num_legs=len(legs),
+                )
+                else:
+                  expected_execution_cost = 0.05  # safe fallback
+
             unified_score = calculate_unified_score(
                 trade=trade_dict,
                 regime_snapshot=global_snapshot.to_dict(),
@@ -281,14 +301,13 @@ def scan_for_opportunities(
                 execution_drag_estimate=expected_execution_cost
             )
 
-            # Requirement: Hard-reject if execution cost > EV
-            estimated_cost_raw = (trade_dict['bid_ask_spread'] * 0.5) + (len(legs)*0.0065)
-            # Use max of historical too
-            estimated_cost_raw = max(estimated_cost_raw, expected_execution_cost)
+           # Requirement: Hard-reject if execution cost > EV
+            proxy_cost = (trade_dict["bid_ask_spread"] * 0.5) + (len(legs) * 0.0065)
+            exec_cost = max(proxy_cost, float(expected_execution_cost or 0.0))
 
-            if estimated_cost_raw > total_ev:
-                # REJECT: Negative Expectancy after Cost
+            if exec_cost > total_ev:
                 return None
+  
 
             return {
                 "symbol": symbol,
@@ -312,18 +331,19 @@ def scan_for_opportunities(
             print(f"[Scanner] Error processing {symbol}: {e}")
             return None
 
+        batch_size = 5  # controls max_workers
 
-    # Process in batches to balance parallelism with resource usage
-    # We iterate over batches to submit to executor, but executor manages concurrency
-    # Actually, submitting all at once is fine if we limit max_workers
-    # But to respect the original batch loop structure (maybe for memory?), we can keep it.
-
-    with concurrent.futures.ThreadPoolExecutor(max_workers=batch_size) as executor:
-        for i in range(0, len(symbols), batch_size):
-            batch = symbols[i : i + batch_size]
-
+        with concurrent.futures.ThreadPoolExecutor(max_workers=batch_size) as executor:
             future_to_symbol = {
                 executor.submit(process_symbol, sym, drag_map): sym
+                for sym in symbols
+            }
+
+            for future in concurrent.futures.as_completed(future_to_symbol):
+                res = future.result()
+                if res:
+                    candidates.append(res)
+
                 for sym in batch
             }
 

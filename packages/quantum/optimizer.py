@@ -32,12 +32,14 @@ from fastapi import Request
 from packages.quantum.models import Spread, SpreadLeg, SpreadPosition
 from packages.quantum.services.options_utils import group_spread_positions
 from packages.quantum.services.analytics_service import AnalyticsService
+from packages.quantum.services.execution_service import ExecutionService
+from packages.quantum.services.risk_engine import RiskEngine
 
 # V3 Imports
 from packages.quantum.analytics.risk_model import SpreadRiskModel
 from packages.quantum.analytics.regime_engine_v3 import RegimeEngineV3, GlobalRegimeSnapshot, RegimeState
 from packages.quantum.common_enums import UnifiedScore
-from packages.quantum.analytics.scoring import calculate_unified_score
+# from packages.quantum.analytics.scoring import calculate_unified_score # Deprecated in favor of ExecutionService parity
 
 router = APIRouter()
 
@@ -149,7 +151,8 @@ def _compute_portfolio_weights(
     total_portfolio_value: float,
     liquidity: float,
     force_baseline: bool = False,
-    external_regime_snapshot: Optional[GlobalRegimeSnapshot] = None
+    external_regime_snapshot: Optional[GlobalRegimeSnapshot] = None,
+    guardrail_policy: Optional[Dict[str, Any]] = None
 ):
     """
     Internal helper to run the optimization logic once.
@@ -258,6 +261,13 @@ def _compute_portfolio_weights(
         "bounds": bounds,
         "turnover_penalty": 0.01
     }
+
+    # Apply Adaptive Caps if Policy Exists
+    if guardrail_policy:
+        from packages.quantum.services.risk_engine import RiskEngine
+        constraints = RiskEngine.apply_adaptive_caps(guardrail_policy, constraints)
+        diagnostics_nested["adaptive_caps_applied"] = True
+        diagnostics_nested["policy_source"] = guardrail_policy.get("source", "unknown")
 
     # Greek sensitivities
     greek_sensitivities = {
@@ -446,43 +456,85 @@ async def optimize_portfolio(req: OptimizationRequest, request: Request, user_id
             horizon_days=5
         )
 
-        # 3.4 Apply Unified Score Penalties to Mu
-        # "Optimizer must rank by UnifiedScore... Regime act as penalties"
-        # We adjust 'mu' by calculating UnifiedScore components
+        # 3.4 Apply Execution Cost Penalties to Mu (Optimizer Parity)
+        # Use ExecutionService to estimate transaction costs and spread impact, aligning with Scanner logic.
+
+        # Instantiate ExecutionService
+        # If analytics_service is available, reuse its client; otherwise create/get one.
+        exec_service_client = analytics.supabase if analytics else None
+        # If no client (rare), we can still instantiate ExecutionService but it might lack history.
+        # We can pass None and ExecutionService should handle it or we assume it works for heuristic.
+        # However, ExecutionService expects a client.
+        if exec_service_client is None:
+             # Try to get from request if possible, or skip history.
+             # Ideally we have a client. For now, assume heuristic fallback if client fails.
+             pass
+
+        # To be safe, we wrap in try/except or conditional
+        try:
+             execution_service = ExecutionService(exec_service_client)
+        except Exception:
+             execution_service = None
+
         for i, asset in enumerate(investable_assets):
-            # Construct dummy trade dict for scoring penalties
-            trade_dict = {
-                "strategy": str(asset.spread_type),
-                "vega": asset.vega,
-                "gamma": asset.gamma,
-                "bid_ask_spread": 0.02 * asset.current_value, # Estimate
-                "suggested_entry": asset.current_value # Cost basis proxy
-            }
-            # Score
-            score_obj = calculate_unified_score(trade_dict, global_snapshot.to_dict())
+            cost_drag_dollars = 0.0
 
-            # Penalties in score are positive values subtracted from total.
-            # UnifiedScore = ... - RegimePenalty - GreekPenalty
-            # We want to reduce Mu by these penalties (normalized)
+            if execution_service:
+                # Estimate Cost
+                # entry_cost = asset.current_value (approx for existing or new?)
+                # For optimization (rebalance/sizing), we care about the cost to ENTER or EXIT?
+                # Usually we model the "friction" of holding/trading this asset.
+                # If we assume we hold it, the cost is already paid?
+                # But 'mu' is future return. If we buy more, we pay cost.
+                # So we penalize 'mu' by the cost of trading it (spread).
 
-            penalty_points = score_obj.components.regime_penalty + score_obj.components.greek_penalty
-            # Convert points to return drag?
-            # 100 points ~= 20% ROI (from scoring.py assumption: ev_roi * 500 = points)
-            # So 1 point = 0.04% ROI (0.0004)
+                # Infer legs
+                num_legs = 1
+                if asset.legs: num_legs = len(asset.legs)
+                elif asset.spread_type in ["vertical", "spread", "straddle"]: num_legs = 2
+                elif asset.spread_type in ["condor", "butterfly"]: num_legs = 4
 
-            roi_drag = penalty_points * 0.0004
+                # Heuristic spread if unknown
+                spread_pct = 0.01 # Default 1% if not passed? ExecutionService defaults to 0.5%
+
+                cost_drag_dollars = execution_service.estimate_execution_cost(
+                    symbol=asset.ticker,
+                    spread_pct=None, # let service decide or use default
+                    user_id=user_id,
+                    entry_cost=asset.current_value,
+                    num_legs=num_legs
+                )
+            else:
+                 # Fallback if service init failed
+                 cost_drag_dollars = asset.current_value * 0.01
+
+            # Convert dollar drag to return drag (percentage)
+            # mu is expected return (e.g., 0.05 for 5%).
+            # drag_pct = cost / value
+            asset_val = asset.current_value
+            if asset_val <= 0: asset_val = 1.0 # Protect div zero
+
+            drag_pct = cost_drag_dollars / asset_val
 
             # Apply drag
-            mu[i] -= roi_drag
+            mu[i] -= drag_pct
 
         # 4. COMPUTE WEIGHTS
         deployable_capital = liquidity
         force_main_baseline = req.nested_shadow
 
+        # --- ADAPTIVE CAPS: Fetch Policy ---
+        # Fetch latest guardrail policy for user to potentially tighten constraints
+        # We need the client. `analytics` has it?
+        active_policy = None
+        if analytics and analytics.supabase:
+            active_policy = RiskEngine.get_active_policy(user_id, analytics.supabase)
+
         target_weights, diagnostics_nested, solver_type, trace_id, final_profile, weights_array, metrics_mu, metrics_sigma = _compute_portfolio_weights(
             mu, sigma, coskew, tickers, investable_assets, req, user_id,
             total_portfolio_value, liquidity, force_baseline=force_main_baseline,
-            external_regime_snapshot=global_snapshot
+            external_regime_snapshot=global_snapshot,
+            guardrail_policy=active_policy
         )
 
         # Formatting Targets

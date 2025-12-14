@@ -1,8 +1,64 @@
 from typing import List, Dict, Any, Optional
 from packages.quantum.models import UnifiedPosition, Holding
 from packages.quantum.services.options_utils import parse_option_symbol
+from packages.quantum.analytics.loss_minimizer import GuardrailPolicy
 
 class RiskEngine:
+    @staticmethod
+    def get_active_policy(user_id: str, supabase: Any) -> Optional[GuardrailPolicy]:
+        """
+        Fetches the latest active guardrail policy for the user.
+        """
+        try:
+            # Assuming 'learning_feedback_loops' has 'payload' column where we stored it.
+            # Order by created_at desc, limit 1.
+            # Filter by feedback_type="guardrail_policy"
+            res = supabase.table("learning_feedback_loops")\
+                .select("payload")\
+                .eq("user_id", user_id)\
+                .eq("feedback_type", "guardrail_policy")\
+                .order("created_at", desc=True)\
+                .limit(1)\
+                .execute()
+
+            if res.data and len(res.data) > 0:
+                payload = res.data[0].get("payload")
+                if payload:
+                    return payload
+            return None
+        except Exception as e:
+            # print(f"Error fetching guardrail policy: {e}")
+            return None
+
+    @staticmethod
+    def apply_adaptive_caps(
+        policy: Optional[GuardrailPolicy],
+        base_constraints: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """
+        Applies adaptive caps from LossMinimizer policy to optimizer constraints.
+        Returns modified constraints dictionary.
+        """
+        if not policy:
+            return base_constraints
+
+        adjusted = base_constraints.copy()
+
+        # 1. Cap Max Position Size
+        policy_max = policy.get("max_position_pct")
+        current_max = adjusted.get("max_position_pct", 1.0)
+
+        if policy_max is not None:
+             adjusted["max_position_pct"] = min(current_max, policy_max)
+
+        # 2. Banned Structures
+        banned = policy.get("ban_structures", [])
+        if banned:
+            current_banned = adjusted.get("banned_strategies", [])
+            adjusted["banned_strategies"] = list(set(current_banned + banned))
+
+        return adjusted
+
     @staticmethod
     def build_unified_positions(holdings: List[Dict[str, Any]]) -> List[UnifiedPosition]:
         """

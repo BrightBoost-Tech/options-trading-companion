@@ -135,7 +135,9 @@ def get_supabase_user_client(
                  client.postgrest.auth(fake_token)
                  return client
 
-    return supabase_admin
+    # 🛡️ Sentinel: Safe default failure
+    # Never fall back to admin client if user context was expected but not established.
+    raise HTTPException(status_code=500, detail="Secure Database Context Unavailable")
 
 # --- Register Plaid Endpoints ---
 plaid_endpoints.register_plaid_endpoints(

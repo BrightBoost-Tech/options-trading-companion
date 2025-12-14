@@ -260,20 +260,6 @@ def scan_for_opportunities(
 
             # Fetch Execution Drag History
             stats = drag_map.get(symbol)
-            expected_execution_cost = 0.0
-            drag_source = "proxy"
-            drag_samples = 0
-
-            if stats and isinstance(stats, dict):
-                expected_execution_cost = stats.get("avg_drag", 0.0)
-                drag_source = "history"
-                drag_samples = stats.get("n", 0)
-            else:
-                 if execution_service:
-                     expected_execution_cost = execution_service.estimate_execution_cost(symbol, spread_pct=spread_pct, user_id=None)
-                 else:
-                     expected_execution_cost = 0.05
-
             # Default proxy values
             expected_execution_cost = None
             drag_source = "proxy"
@@ -304,11 +290,7 @@ def scan_for_opportunities(
             )
 
            # Requirement: Hard-reject if execution cost > EV
-           # Use consistent value: max of history or proxy
-            proxy_cost = (abs(total_cost) * spread_pct * 0.5) + (len(legs) * 0.0065)
-            exec_cost = max(proxy_cost, float(expected_execution_cost or 0.0))
-
-            if exec_cost > total_ev:
+            if (expected_execution_cost or 0.0) >= total_ev:
                 return None
   
 

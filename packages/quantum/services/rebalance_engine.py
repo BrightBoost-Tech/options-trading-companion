@@ -7,6 +7,7 @@ from packages.quantum.models import SpreadPosition, Holding
 from packages.quantum.services.sizing_engine import calculate_sizing
 from packages.quantum.analytics.regime_engine_v3 import RegimeEngineV3, RegimeState
 from packages.quantum.analytics.scoring import calculate_unified_score
+from packages.quantum.services.execution_service import ExecutionService
 
 class RebalanceEngine:
     """
@@ -17,6 +18,7 @@ class RebalanceEngine:
     def __init__(self, supabase: Client = None):
         self.supabase = supabase
         self.regime_engine = RegimeEngineV3(supabase) if supabase else None
+        self.execution_service = ExecutionService(supabase) if supabase else None
 
     def generate_trades(
         self,
@@ -24,12 +26,17 @@ class RebalanceEngine:
         raw_positions: List[Dict], # including stocks
         cash_balance: float,
         target_weights: List[Dict], # [{type: spread|stock, symbol: str, target_weight: float}, ...]
-        profile: str = "balanced"
+        profile: str = "balanced",
+        conviction_map: Dict[str, float] = None,
+        regime_context: Dict[str, Any] = None,
+        user_id: str = None
     ) -> List[Dict]:
         """
         Core logic: compare current vs target and emit trades.
         """
         trades = []
+        if conviction_map is None:
+            conviction_map = {}
 
         # 1. Map Targets
         # Targets structure: {"type": "spread", "symbol": "...", "target_allocation": 0.15}
@@ -52,6 +59,10 @@ class RebalanceEngine:
                  regime_snap = gs.to_dict()
              except:
                  pass
+
+        # Use passed regime_context if available (it might be fresher or from V3 logic in API)
+        # But 'regime_snap' is used for `calculate_unified_score`.
+        # For RebalanceScore, we might use regime_context['current_regime'] (e.g. "normal", "shock").
 
         # 2. Process Spreads (Existing vs Target)
         for target in target_weights:
@@ -121,51 +132,80 @@ class RebalanceEngine:
 
                 if qty_delta == 0: continue
 
-            # --- Unified Score Calculation ---
-            # Construct a minimal trade dict for scoring
-            # We treat 'increase' as a 'buy'
-            trade_type = "debit" if side == "buy" else "credit" # simplified assumption
-            if item_type == "stock":
-                 trade_type = "stock" # Scoring might not handle stock perfectly but EV logic applies
+            # --- Rebalance Score Calculation ---
+            # Inputs:
+            # 1. Conviction (0-1)
+            # 2. Execution Cost Penalty
+            # 3. Risk/Regime Penalty
 
-            trade_dict = {
-                "ev": 0.0, # Will be filled if we had metrics
-                "suggested_entry": price_unit * qty_delta,
-                "strategy": "rebalance",
-                "type": trade_type,
-                "legs": []
+            # 1. Conviction
+            # Use underlying for lookup if possible, else symbol
+            lookup_key = existing_spread.underlying if existing_spread else symbol
+            conviction = conviction_map.get(lookup_key, conviction_map.get(symbol, 0.5))
+
+            # Base Score: Conviction * 100 (0-100 scale)
+            base_score = conviction * 100.0
+
+            # 2. Execution Cost Penalty
+            # Use ExecutionService logic
+            exec_cost_per_unit = 0.05 # default fallback
+            if self.execution_service:
+                # We try to use historical data if user_id is provided
+                exec_cost_per_unit = self.execution_service.estimate_execution_cost(
+                    symbol=symbol,
+                    user_id=user_id,
+                    entry_cost=price_unit,
+                    num_legs=1 # Simplified, exact legs might be hard here
+                )
+
+            # ROI impact of execution cost: Cost / Price
+            cost_roi = 0.0
+            if price_unit > 0:
+                cost_roi = exec_cost_per_unit / price_unit
+
+            # Scaling: 1% cost = 5 points penalty (Factor 500, similar to scoring.py)
+            exec_penalty_points = cost_roi * 500.0
+
+            # 3. Regime Penalty
+            # Use simplified logic based on scoring.py patterns
+            regime_penalty_points = 0.0
+            if regime_context:
+                current_regime = regime_context.get("current_regime", "normal")
+                # regime_context uses "normal", "high_vol", "panic" (mapped from RegimeState)
+
+                # Simple penalties
+                if current_regime == "panic": # Shock
+                    regime_penalty_points = 15.0 # High penalty in panic
+                elif current_regime == "high_vol": # Elevated
+                    # If we are buying (adding risk) in high vol, maybe small penalty unless conviction is high
+                    if side == "buy":
+                        regime_penalty_points = 5.0
+
+            # 4. Risk Penalty
+            # Use diff_w as a proxy for 'urgency' but maybe not 'risk'.
+            # If we are shorting (selling), risk is actually reducing.
+            # Let's keep it simple: RebalanceScore is about quality of holding + regime.
+            # User said: "risk_penalty (portfolio greek deltas / concentration / regime penalty)"
+            risk_penalty_points = 0.0
+            # Concentration check: if target > 20%, maybe add penalty?
+            if target_w > 0.20:
+                risk_penalty_points += 5.0
+
+            # Final Score Calculation
+            # RebalanceScore = Conviction - Cost - Regime - Risk
+            rebalance_score = base_score - exec_penalty_points - regime_penalty_points - risk_penalty_points
+
+            # Clamp 0-100
+            rebalance_score = max(0.0, min(100.0, rebalance_score))
+
+            # Components for API
+            score_components = {
+                "conviction_score": base_score,
+                "execution_cost_penalty": exec_penalty_points,
+                "regime_penalty": regime_penalty_points,
+                "risk_penalty": risk_penalty_points,
+                "raw_cost_roi": cost_roi
             }
-
-            # Since we don't have fresh EV for existing holdings easily,
-            # we rely on the target weight as a proxy for 'Score'.
-            # A high target weight implies the optimizer liked it.
-            # But the requirement says "Rebalance must rank targets using UnifiedScore".
-            # "Eliminate placeholder EV=0.0 logic".
-
-            # If we truly can't compute EV (no live option chain here),
-            # we must be honest or fetch it.
-            # Since fetching chains for all holdings is expensive here,
-            # and optimizer ALREADY scored them to generate weights,
-            # we can assume the target weight reflects the score.
-
-            # However, to satisfy the requirement "UnifiedScore = EV...",
-            # we can set a dummy EV that results in a high score if target_weight is high.
-            # Or better: Just use 0.0 but explicitly note it.
-            # But "Eliminate placeholder EV=0.0 logic".
-
-            # Implementation decision: The rebalance engine is executing the optimizer's will.
-            # The optimizer *has* calculated scores.
-            # Ideally we pass scores from optimizer.
-            # Without them, we can't recalculate UnifiedScore faithfully without fresh data.
-            # I will set EV based on a generic assumption of Alpha if available,
-            # or just calculate the score structure with 0 EV but high 'Regime alignment'.
-
-            # Let's assume EV is proportional to target allocation * portfolio_value * 0.05 (expected return).
-            estimated_ev = (target_w * total_portfolio_value) * 0.05
-            trade_dict['ev'] = estimated_ev
-
-            score_obj = calculate_unified_score(trade_dict, regime_snap)
-            final_score = score_obj.score
 
             # Construct Trade
             trade = {
@@ -180,8 +220,10 @@ class RebalanceEngine:
                 "risk_metadata": {
                     "diff_value": desired_val_change
                 },
-                "score": final_score, # Unified Score
-                "ev": estimated_ev
+                "score": rebalance_score, # Use RebalanceScore for sorting
+                "rebalance_score": rebalance_score,
+                "score_components": score_components,
+                "ev": None # Explicitly None to avoid fake EV
             }
             trades.append(trade)
 

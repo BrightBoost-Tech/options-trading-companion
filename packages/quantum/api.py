@@ -415,13 +415,16 @@ async def execute_rebalance(
              raise HTTPException(status_code=500, detail=f"Optimization failed: {e}")
 
     # 4. Generate Trades
-    engine = RebalanceEngine()
+    engine = RebalanceEngine(supabase)
     trades = engine.generate_trades(
         current_spreads,
         raw_positions,
         cash,
         targets,
-        profile="balanced"
+        profile="balanced",
+        conviction_map=real_conviction_map,
+        regime_context=regime_context,
+        user_id=user_id
     )
 
     # 5. Save to DB with v3 Traceability
@@ -692,13 +695,16 @@ async def preview_rebalance(
              return {"status": "error", "message": str(e), "trades": []}
 
     # 4. Generate Trades
-    engine = RebalanceEngine()
+    engine = RebalanceEngine(supabase)
     trades = engine.generate_trades(
         current_spreads,
         raw_positions,
         cash,
         targets,
-        profile="balanced"
+        profile="balanced",
+        conviction_map=real_conviction_map,
+        regime_context=regime_context,
+        user_id=user_id
     )
 
     # 5. Save to DB

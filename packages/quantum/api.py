@@ -48,7 +48,7 @@ from packages.quantum.market_data import calculate_portfolio_inputs, PolygonServ
 from packages.quantum.services.workflow_orchestrator import run_morning_cycle, run_midday_cycle, run_weekly_report
 from packages.quantum.services.market_data_truth_layer import MarketDataTruthLayer
 from packages.quantum.services.plaid_history_service import PlaidHistoryService
-from packages.quantum.services.rebalance_engine import RebalanceEngine
+from packages.quantum.services.rebalance_engine import RebalanceEngine, RiskBudgetEngine
 from packages.quantum.services.execution_service import ExecutionService
 from packages.quantum.analytics.progress_engine import ProgressEngine, get_week_id_for_last_full_week
 from packages.quantum.services.options_utils import group_spread_positions, format_occ_symbol_readable
@@ -214,6 +214,28 @@ async def execute_rebalance(
     spreads_dicts = group_spread_positions(raw_positions)
     current_spreads = [Spread(**s) for s in spreads_dicts]
 
+    # Convert to SpreadPosition for engine compatibility
+    # Assuming Spread and SpreadPosition are similar enough or we adapt
+    spread_positions = []
+    for s in current_spreads:
+        # map fields
+        sp = SpreadPosition(
+            id=s.id,
+            user_id=user_id,
+            spread_type=s.spread_type,
+            underlying=s.underlying,
+            ticker=s.ticker,
+            legs=[l.dict() for l in s.legs],
+            net_cost=s.net_cost,
+            current_value=s.current_value,
+            delta=s.delta or 0.0,
+            gamma=s.gamma or 0.0,
+            vega=s.vega or 0.0,
+            theta=s.theta or 0.0,
+            quantity=s.quantity
+        )
+        spread_positions.append(sp)
+
     # Calculate Cash
     cash = 0.0
     for p in raw_positions:
@@ -223,6 +245,11 @@ async def execute_rebalance(
              if val == 0:
                  val = float(p.get("quantity", 0)) * float(p.get("current_price", 1.0))
              cash += val
+
+    # Instantiate RiskBudgetEngine
+    risk_budget_engine = RiskBudgetEngine()
+    total_equity = sum(s.current_value for s in spread_positions) + cash
+    risk_summary = risk_budget_engine.compute(spread_positions, total_equity)
 
     # 3. Run Optimizer directly to get targets
     from packages.quantum.optimizer import _compute_portfolio_weights, OptimizationRequest, calculate_dynamic_target
@@ -291,6 +318,7 @@ async def execute_rebalance(
         "global_score": global_snap.risk_score,
         "risk_scaler": global_snap.risk_scaler,
         "universe_median": universe_median,
+        "trace_id": None # Will be filled by optimizer
     }
 
     conviction_service = ConvictionService(supabase=supabase)
@@ -321,6 +349,21 @@ async def execute_rebalance(
         s_snap = regime_engine.compute_symbol_snapshot(t, global_snap)
         eff = regime_engine.get_effective_regime(s_snap, global_snap)
         symbol_regime_map[t] = eff.value
+
+    # Get Prices for engine
+    # In real app, optimizer uses prices from market_data.
+    # We can fetch or mock.
+    # For now, simplistic:
+    pricing_data = {t: 100.0 for t in tickers} # Placeholder if not in market_data
+    # Or rely on what optimizer used if we can extract it.
+    # Actually, current_spreads have values, but we need per-unit price for sizing.
+    for s in current_spreads:
+        # Approximate price per unit
+        if s.quantity and s.current_value:
+             pricing_data[s.ticker] = s.current_value / s.quantity
+        else:
+             pricing_data[s.ticker] = 100.0
+
 
     # Helper function for heavy compute
     def run_optimizer_logic():
@@ -372,7 +415,8 @@ async def execute_rebalance(
 
              spread_map = {s.ticker: s for s in current_spreads}
 
-             targets = []
+             targets = {}
+             target_list = []
              for sym, w in target_weights.items():
                  spread_obj = spread_map.get(sym)
                  strat_type = spread_obj.spread_type if spread_obj else "other"
@@ -401,7 +445,9 @@ async def execute_rebalance(
                      conviction=conviction_used
                  )
 
-                 targets.append({
+                 targets[sym] = adjusted_w
+
+                 target_list.append({
                      "type": "spread",
                      "symbol": sym,
                      "target_allocation": adjusted_w
@@ -418,21 +464,27 @@ async def execute_rebalance(
     loop = asyncio.get_event_loop()
     with ThreadPoolExecutor() as pool:
         try:
-            targets, trace_id, red_flags, regime_val = await loop.run_in_executor(pool, run_optimizer_logic)
+            targets_dict, trace_id, red_flags, regime_val = await loop.run_in_executor(pool, run_optimizer_logic)
         except Exception as e:
              raise HTTPException(status_code=500, detail=f"Optimization failed: {e}")
 
     # 4. Generate Trades
-    engine = RebalanceEngine(supabase)
+    engine = RebalanceEngine(
+        conviction_service=conviction_service,
+        iv_regime_service=iv_point_service
+    )
+
+    # Enrich market context with trace ID
+    regime_context["trace_id"] = trace_id
+
     trades = engine.generate_trades(
-        current_spreads,
-        raw_positions,
+        spread_positions,
+        targets_dict,
+        total_equity,
         cash,
-        targets,
-        profile="balanced",
-        conviction_map=real_conviction_map,
-        regime_context=regime_context,
-        user_id=user_id
+        pricing_data,
+        market_context=regime_context,
+        risk_summary=risk_summary
     )
 
     # 5. Save to DB with v3 Traceability
@@ -442,13 +494,13 @@ async def execute_rebalance(
 
         db_rows = []
         for t in trades:
-            sym = t["symbol"]
-            strategy = t.get("spread_type", "custom")
+            sym = t["ticker"] # Use ticker from trade dict
+            strategy = t.get("type", "custom") # rebalance_buy etc
 
             # Create Trace Context
             features_dict = {
                 "symbol": sym,
-                "target_allocation": t.get("target_weight", 0),
+                "target_allocation": 0, # Could pass actual target weight
                 "strategy": strategy,
                 "global_regime": global_snap.state.value,
                 "risk_score": global_snap.risk_score
@@ -462,6 +514,7 @@ async def execute_rebalance(
             )
             ctx.features_hash = compute_features_hash(features_dict)
 
+            # context field might not exist in t, but we can add
             if "context" not in t:
                 t["context"] = {}
             t["context"]["trace_id"] = ctx.trace_id
@@ -476,7 +529,7 @@ async def execute_rebalance(
                 "user_id": user_id,
                 "symbol": sym,
                 "strategy": strategy,
-                "direction": t["side"].title(),
+                "direction": t["action"].title(),
                 "confidence_score": 0,
                 "ev": 0,
                 "order_json": t,
@@ -496,7 +549,7 @@ async def execute_rebalance(
                 ctx,
                 "suggestion_generated",
                 properties={
-                    "target_allocation": t.get("target_weight", 0),
+                    "target_allocation": 0,
                     **emit_props
                 }
             )
@@ -527,8 +580,30 @@ async def preview_rebalance(
     raw_positions = pos_res.data or []
 
     # 2. Group into Spreads
-    # group_spread_positions now returns SpreadPosition objects directly
-    current_spreads = group_spread_positions(raw_positions)
+    # group_spread_positions now returns SpreadPosition objects directly (No, it returns dicts, need convert)
+    spreads_dicts = group_spread_positions(raw_positions)
+    current_spreads = [Spread(**s) for s in spreads_dicts]
+
+    # Convert to SpreadPosition for engine compatibility
+    spread_positions = []
+    for s in current_spreads:
+        # map fields
+        sp = SpreadPosition(
+            id=s.id,
+            user_id=user_id,
+            spread_type=s.spread_type,
+            underlying=s.underlying,
+            ticker=s.ticker,
+            legs=[l.dict() for l in s.legs],
+            net_cost=s.net_cost,
+            current_value=s.current_value,
+            delta=s.delta or 0.0,
+            gamma=s.gamma or 0.0,
+            vega=s.vega or 0.0,
+            theta=s.theta or 0.0,
+            quantity=s.quantity
+        )
+        spread_positions.append(sp)
 
     # Calculate Cash
     cash = 0.0
@@ -539,6 +614,11 @@ async def preview_rebalance(
              if val == 0:
                  val = float(p.get("quantity", 0)) * float(p.get("current_price", 1.0))
              cash += val
+
+    # Instantiate RiskBudgetEngine
+    risk_budget_engine = RiskBudgetEngine()
+    total_equity = sum(s.current_value for s in spread_positions) + cash
+    risk_summary = risk_budget_engine.compute(spread_positions, total_equity)
 
     # 3. Run Optimizer directly to get targets
     from packages.quantum.optimizer import _compute_portfolio_weights, OptimizationRequest, calculate_dynamic_target
@@ -593,6 +673,7 @@ async def preview_rebalance(
         "global_score": global_snap.risk_score,
         "risk_scaler": global_snap.risk_scaler,
         "universe_median": universe_median,
+        "trace_id": None
     }
 
     conviction_service = ConvictionService(supabase=supabase)
@@ -622,6 +703,14 @@ async def preview_rebalance(
         s_snap = regime_engine.compute_symbol_snapshot(t, global_snap)
         eff = regime_engine.get_effective_regime(s_snap, global_snap)
         symbol_regime_map[t] = eff.value
+
+    # Pricing data
+    pricing_data = {t: 100.0 for t in tickers}
+    for s in current_spreads:
+        if s.quantity and s.current_value:
+             pricing_data[s.ticker] = s.current_value / s.quantity
+        else:
+             pricing_data[s.ticker] = 100.0
 
     # Helper function for heavy compute
     def run_optimizer_logic_preview():
@@ -664,7 +753,7 @@ async def preview_rebalance(
              )
 
              spread_map = {s.ticker: s for s in current_spreads}
-             targets = []
+             targets = {}
              for sym, w in target_weights.items():
                  spread_obj = spread_map.get(sym)
                  strat_type = spread_obj.spread_type if spread_obj else "other"
@@ -689,12 +778,8 @@ async def preview_rebalance(
                      conviction=conviction_used
                  )
 
-                 targets.append({
-                     "type": "spread",
-                     "symbol": sym,
-                     "target_allocation": adjusted_w
-                 })
-             return targets
+                 targets[sym] = adjusted_w
+             return targets, trace_id
 
         except Exception as e:
             print(f"Optimization failed during rebalance: {e}")
@@ -704,50 +789,43 @@ async def preview_rebalance(
     loop = asyncio.get_event_loop()
     with ThreadPoolExecutor() as pool:
         try:
-            targets = await loop.run_in_executor(pool, run_optimizer_logic_preview)
+            targets_dict, trace_id = await loop.run_in_executor(pool, run_optimizer_logic_preview)
         except Exception as e:
              print(f"Rebalance optimization error: {e}")
              return {"status": "error", "message": str(e), "trades": []}
 
+    regime_context["trace_id"] = trace_id
+
     # 4. Generate Trades
-    engine = RebalanceEngine(supabase)
+    engine = RebalanceEngine(
+        conviction_service=conviction_service,
+        iv_regime_service=iv_point_service
+    )
     trades = engine.generate_trades(
-        current_spreads,
-        raw_positions,
+        spread_positions,
+        targets_dict,
+        total_equity,
         cash,
-        targets,
-        profile="balanced",
-        conviction_map=real_conviction_map,
-        regime_context=regime_context,
-        user_id=user_id
+        pricing_data,
+        market_context=regime_context,
+        risk_summary=risk_summary
     )
 
-    # 5. Save to DB
-    saved_count = 0
-    if trades:
-        # Clear old rebalance suggestions
-        supabase.table(TRADE_SUGGESTIONS_TABLE).delete().eq("user_id", user_id).eq("window", "rebalance").execute()
-
-        db_rows = []
-        for t in trades:
-            db_rows.append({
-                "user_id": user_id,
-                "symbol": t["symbol"],
-                "ticker": t["symbol"], # Populate ticker for UI
-                "strategy": t.get("spread_type", "custom"),
-                "direction": t.get("side", "hold").title(), # Buy/Sell/Increase
-                "order_json": t, # Store full details
-                "status": "pending",
-                "window": "rebalance",
-                "created_at": datetime.now().isoformat(),
-                "sizing_metadata": {"reason": t.get("reason", "")}
-            })
-
-        res = supabase.table(TRADE_SUGGESTIONS_TABLE).insert(db_rows).execute()
-        saved_count = len(res.data) if res.data else 0
+    # 5. Return trades directly (Preview)
+    # Map to UI friendly format same as stored ones
+    ui_trades = []
+    for t in trades:
+        ui_trades.append({
+            "ticker": t["ticker"],
+            "strategy": t.get("type", "custom"),
+            "direction": t.get("action", "Hold").title(),
+            "order_json": t,
+            "notes": t.get("reason", "")
+        })
 
     return {
         "status": "ok",
-        "count": saved_count,
-        "trades": trades
+        "count": len(ui_trades),
+        "trades": ui_trades,
+        "risk_summary": risk_summary # Optional debug info
     }

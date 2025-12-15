@@ -25,6 +25,64 @@ SCANNER_LIMIT_DEV = int(os.getenv("SCANNER_LIMIT_DEV", "40")) # Limit universe i
 
 logger = logging.getLogger(__name__)
 
+def _compute_risk_primitives_usd(legs: List[Dict[str, Any]], total_cost: float, current_price: float) -> Dict[str, float]:
+    """
+    Computes max loss, max profit, and collateral required in contract USD terms.
+    Always returns valid float values for 1-leg and 2-leg strategies.
+    """
+    max_loss = 0.0
+    max_profit = 0.0
+    collateral_required = 0.0
+
+    if len(legs) == 1:
+        leg = legs[0]
+        premium = float(leg.get("premium") or 0.0)
+        strike = float(leg.get("strike") or 0.0)
+        side = leg["side"]
+        opt_type = leg["type"]
+
+        if side == "buy":
+            max_loss = premium * 100.0
+            collateral_required = max_loss # Debit paid
+            if opt_type == "call":
+                max_profit = float("inf")
+            else: # put
+                max_profit = max(0.0, (strike - premium)) * 100.0
+        else: # side == "sell"
+            max_profit = premium * 100.0
+            if opt_type == "call":
+                max_loss = float("inf")
+                # Crude placeholder for naked call capital
+                collateral_required = current_price * 100.0
+            else: # put
+                max_loss = max(0.0, (strike - premium)) * 100.0
+                # Cash-secured put approximation
+                collateral_required = strike * 100.0
+
+    elif len(legs) == 2:
+        long_leg = next((l for l in legs if l["side"] == "buy"), None)
+        short_leg = next((l for l in legs if l["side"] == "sell"), None)
+
+        if long_leg and short_leg:
+            width = abs(long_leg["strike"] - short_leg["strike"])
+            # total_cost > 0 is DEBIT, < 0 is CREDIT
+
+            if total_cost > 0: # DEBIT SPREAD
+                debit = abs(total_cost)
+                max_loss = debit * 100.0
+                max_profit = max(0.0, (width - debit)) * 100.0
+                collateral_required = max_loss # Capital is the debit paid
+            else: # CREDIT SPREAD
+                credit = abs(total_cost)
+                max_loss = max(0.0, (width - credit)) * 100.0
+                max_profit = credit * 100.0
+                collateral_required = width * 100.0 # Margin is usually the width
+
+    return {
+        "max_loss_per_contract": max_loss,
+        "max_profit_per_contract": max_profit,
+        "collateral_required_per_contract": collateral_required,
+    }
 def _estimate_probability_of_profit(candidate: Dict[str, Any], global_snapshot: Optional[Dict[str, Any]] = None) -> float:
     """
     Estimates the Probability of Profit (PoP) for a trade candidate.
@@ -302,6 +360,7 @@ def scan_for_opportunities(
                  data_quality = "degraded"
                  pricing_mode = "approximate"
 
+            # EV Calculation
             if len(legs) == 2:
                 long_leg = next((l for l in legs if l['side'] == 'buy'), None)
                 short_leg = next((l for l in legs if l['side'] == 'sell'), None)
@@ -318,16 +377,6 @@ def scan_for_opportunities(
                         width=width
                     )
                     total_ev = ev_obj.expected_value
-
-                    # Risk Primitives for Spread
-                    if total_cost > 0: # Debit Spread
-                        max_loss_contract = abs(total_cost) * 100
-                        max_profit_contract = (width - abs(total_cost)) * 100
-                        collateral_contract = 0.0 # Paid upfront, usually no margin req beyond cost
-                    else: # Credit Spread
-                        max_loss_contract = (width - abs(total_cost)) * 100
-                        max_profit_contract = abs(total_cost) * 100
-                        collateral_contract = width * 100
                 else:
                     total_ev = 0
             elif len(legs) == 1:
@@ -341,38 +390,12 @@ def scan_for_opportunities(
                     strategy=st_type
                 )
                 total_ev = ev_obj.expected_value
-                max_loss_per_contract = ev_obj.max_loss
 
-                # Long Option: Collateral is cost (max loss)
-                # Short Option (not handled here usually, but if so): undefined or margin
-                # Scanner usually returns long or spread.
-                if leg['side'] == 'buy':
-                    collateral_per_contract = max_loss_per_contract
-                else:
-                    # Short naked? Not typical for this scanner yet.
-                    # Assume Cash Secured Put logic: Strike * 100
-                    if leg['type'] == 'put':
-                         collateral_per_contract = leg['strike'] * 100.0
-                    else:
-                         # Short Call naked: infinite/margin. Use stock price.
-                         collateral_per_contract = current_price * 100.0
-
-                # Risk Primitives for Single Leg
-                if leg['side'] == 'buy': # Long
-                    max_loss_contract = leg['premium'] * 100
-                    collateral_contract = 0.0
-                    if leg['type'] == 'call':
-                        max_profit_contract = float('inf')
-                    else:
-                        max_profit_contract = (leg['strike'] - leg['premium']) * 100
-                else: # Short
-                    max_profit_contract = leg['premium'] * 100
-                    if leg['type'] == 'call':
-                        max_loss_contract = float('inf')
-                        collateral_contract = current_price * 0.20 * 100 # Rough naked call approximation
-                    else:
-                        max_loss_contract = (leg['strike'] - leg['premium']) * 100
-                        collateral_contract = leg['strike'] * 0.10 * 100 # Rough naked put approximation
+            # Risk Primitives (New Helper)
+            primitives = _compute_risk_primitives_usd(legs, total_cost, current_price)
+            max_loss_contract = primitives["max_loss_per_contract"]
+            max_profit_contract = primitives["max_profit_per_contract"]
+            collateral_contract = primitives["collateral_required_per_contract"]
 
             # H. Unified Scoring
             trade_dict = {
@@ -438,8 +461,6 @@ def scan_for_opportunities(
                 "strategy_key": strategy_key,
                 "suggested_entry": abs(total_cost),
                 "ev": total_ev,
-                "max_loss_per_contract": max_loss_per_contract,
-                "collateral_per_contract": collateral_per_contract,
                 "score": round(unified_score.score, 1),
                 "unified_score_details": unified_score.components.dict(),
                 "iv_rank": iv_rank,
@@ -453,6 +474,7 @@ def scan_for_opportunities(
                 "max_loss_per_contract": max_loss_contract,
                 "max_profit_per_contract": max_profit_contract,
                 "collateral_required_per_contract": collateral_contract,
+                "collateral_per_contract": collateral_contract,
                 "net_delta_per_contract": net_delta_contract,
                 "net_vega_per_contract": net_vega_contract,
                 "data_quality": data_quality,

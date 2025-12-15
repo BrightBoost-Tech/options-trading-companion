@@ -518,6 +518,22 @@ async def run_midday_cycle(supabase: Client, user_id: str):
         if price <= 0:
             continue
 
+        max_loss = float(cand.get("max_loss_per_contract", price * 100))
+        collateral = float(cand.get("collateral_per_contract", price * 100))
+
+        # Use canonical sizing (no hardcoded aggressive 0.40)
+        # Assuming balanced or deriving from user prefs (passed as config or defaulting).
+        # For now, we use defaults or conservative caps as per instruction:
+        # "Remove hardcoded profile->risk_pct mapping that uses 0.40"
+        sizing = calculate_sizing(
+            account_buying_power=deployable_capital,
+            max_loss_per_contract=max_loss,
+            collateral_required_per_contract=collateral,
+            max_risk_pct=0.05, # Conservative default cap
+            profile="AGGRESSIVE", # Sizing engine will clamp this to <= 0.05
+            # Deprecated args
+            ev_per_contract=ev,
+            contract_ask=price,
         # --- RISK AWARE SIZING ---
         # 1. Calculate Risk Multiplier (Conviction)
         score = float(cand.get("score", 50))

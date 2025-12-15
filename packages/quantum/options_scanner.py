@@ -300,6 +300,21 @@ def scan_for_opportunities(
                     strategy=st_type
                 )
                 total_ev = ev_obj.expected_value
+                max_loss_per_contract = ev_obj.max_loss
+
+                # Long Option: Collateral is cost (max loss)
+                # Short Option (not handled here usually, but if so): undefined or margin
+                # Scanner usually returns long or spread.
+                if leg['side'] == 'buy':
+                    collateral_per_contract = max_loss_per_contract
+                else:
+                    # Short naked? Not typical for this scanner yet.
+                    # Assume Cash Secured Put logic: Strike * 100
+                    if leg['type'] == 'put':
+                         collateral_per_contract = leg['strike'] * 100.0
+                    else:
+                         # Short Call naked: infinite/margin. Use stock price.
+                         collateral_per_contract = current_price * 100.0
 
                 # Risk Primitives for Single Leg
                 if leg['side'] == 'buy': # Long
@@ -370,10 +385,9 @@ def scan_for_opportunities(
             # Retrieve final execution cost (contract dollars) from UnifiedScore
             final_execution_cost = unified_score.execution_cost_dollars
 
-           # Requirement: Hard-reject if execution cost > EV
+            # Requirement: Hard-reject if execution cost > EV
             if final_execution_cost >= total_ev:
                 return None
-  
 
             return {
                 "symbol": symbol,
@@ -383,6 +397,8 @@ def scan_for_opportunities(
                 "strategy_key": strategy_key,
                 "suggested_entry": abs(total_cost),
                 "ev": total_ev,
+                "max_loss_per_contract": max_loss_per_contract,
+                "collateral_per_contract": collateral_per_contract,
                 "score": round(unified_score.score, 1),
                 "unified_score_details": unified_score.components.dict(),
                 "iv_rank": iv_rank,

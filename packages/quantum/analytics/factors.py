@@ -1,4 +1,5 @@
 import numpy as np
+from numpy.lib.stride_tricks import sliding_window_view
 from typing import List, Union
 
 def calculate_trend(prices: List[float]) -> str:
@@ -26,38 +27,35 @@ def calculate_iv_rank(returns: List[float], days: int = 365) -> float:
     if not returns or len(returns) < 30:
         return None
 
+    # Use NumPy sliding window view for vectorized performance (O(N))
+    # Avoids Python loops and overhead of pandas Series creation
     returns_arr = np.array(returns)
 
-    # Calculate 30-day rolling volatility
-    # We need at least 30 days of data
+    # Check sufficient data again after conversion
     if len(returns_arr) < 30:
         return None
 
-    # Vectorized rolling std dev
-    # Create a view of rolling windows
-    # Note: simple loop is often safer/clearer for small arrays than complex stride tricks
-    rolling_vol = []
-    # We start from index 30 to get the first window [0:30]
-    for i in range(30, len(returns_arr) + 1):
-        window = returns_arr[i-30:i]
-        vol = np.std(window) * np.sqrt(252)
-        rolling_vol.append(vol)
+    # Create rolling windows of size 30
+    # shape will be (N - 29, 30)
+    windows = sliding_window_view(returns_arr, window_shape=30)
 
-    if not rolling_vol:
+    # Calculate std dev for each window along axis 1
+    # ddof=0 matches original implementation (population std)
+    rolling_vol = np.std(windows, axis=1, ddof=0) * np.sqrt(252)
+
+    if rolling_vol.size == 0:
         return None
 
-    rolling_vol_arr = np.array(rolling_vol)
-
-    # Get 52-week high and low of volatility (or as much history as provided)
-    high_52_week = np.max(rolling_vol_arr)
-    low_52_week = np.min(rolling_vol_arr)
+    # Get 52-week high and low
+    high_52_week = np.max(rolling_vol)
+    low_52_week = np.min(rolling_vol)
 
     # Avoid division by zero
     if high_52_week == low_52_week:
         return None
 
     # Current volatility (last window)
-    current_vol = rolling_vol_arr[-1]
+    current_vol = rolling_vol[-1]
 
     # IV Rank formula
     iv_rank = ((current_vol - low_52_week) / (high_52_week - low_52_week)) * 100

@@ -1,6 +1,7 @@
 from typing import Dict, Any, Optional
 from datetime import datetime, timedelta, timezone, date
 from supabase import Client
+from collections import Counter
 import json
 
 # --- Config / Defaults ---
@@ -90,6 +91,9 @@ class ProgressEngine:
         has_data = bool(logs or executions or snapshots)
 
         # 3. Compute Metrics
+        dominant_regime = DEFAULT_WEEKLY_METRICS["dominant_regime"]
+        avg_ivr = DEFAULT_WEEKLY_METRICS["avg_ivr"]
+
         if has_data:
             user_metrics = self._compute_user_metrics(logs, executions, snapshots)
             system_metrics = self._compute_system_metrics(logs, executions)
@@ -97,6 +101,9 @@ class ProgressEngine:
                 "headline": f"Progress Report for {week_id}",
                 "action_items": ["Review missed suggestions" if user_metrics['components']['adherence_ratio']['value'] < 0.8 else "Maintain discipline"]
             }
+            # Derive aggregates from logs if available
+            dominant_regime = self._derive_dominant_regime(logs)
+            avg_ivr = self._derive_avg_ivr(logs)
         else:
             # Graceful No-Data State
             user_metrics = {
@@ -129,8 +136,8 @@ class ProgressEngine:
             "week_id": week_id,
             "date_start": start_date.isoformat(),
             "date_end": end_date.isoformat(),
-            "dominant_regime": DEFAULT_WEEKLY_METRICS["dominant_regime"], # TODO: Derive from logs
-            "avg_ivr": DEFAULT_WEEKLY_METRICS["avg_ivr"], # TODO: Derive
+            "dominant_regime": dominant_regime,
+            "avg_ivr": avg_ivr,
             "user_metrics": user_metrics,
             "system_metrics": system_metrics,
             "synthesis": synthesis,
@@ -146,6 +153,42 @@ class ProgressEngine:
             print(f"Error upserting weekly snapshot: {e}")
 
         return snapshot_data
+
+    def _derive_dominant_regime(self, logs: list) -> str:
+        """Derives the most frequent regime from log context."""
+        regimes = []
+        for log in logs:
+            ctx = log.get("regime_context") or {}
+            # Prioritize specific to general
+            r = ctx.get("effective_regime") or \
+                ctx.get("global_state") or \
+                ctx.get("global") or \
+                ctx.get("current_regime")
+            if r:
+                regimes.append(str(r))
+
+        if not regimes:
+            return DEFAULT_WEEKLY_METRICS["dominant_regime"]
+
+        return Counter(regimes).most_common(1)[0][0]
+
+    def _derive_avg_ivr(self, logs: list) -> float:
+        """Calculates average IV Rank from logs where available."""
+        iv_ranks = []
+        for log in logs:
+            ctx = log.get("regime_context") or {}
+            # Check for iv_rank
+            val = ctx.get("iv_rank")
+            if val is not None:
+                try:
+                    iv_ranks.append(float(val))
+                except (ValueError, TypeError):
+                    pass
+
+        if not iv_ranks:
+            return DEFAULT_WEEKLY_METRICS["avg_ivr"]
+
+        return sum(iv_ranks) / len(iv_ranks)
 
     def _fetch_logs(self, user_id, start, end):
         try:

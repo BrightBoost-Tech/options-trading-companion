@@ -2,10 +2,33 @@
 import os
 from datetime import date, timedelta, datetime
 from typing import Dict, Any, List
+from packages.quantum.market_data import PolygonService
 
 def get_next_earnings_date(symbol: str):
-    # TODO: Implement this with a real data source
-    return None
+    """
+    Estimates the next earnings date using a real data source (Polygon).
+    Strategy: Get last financial filing date and project +90-91 days.
+    """
+    try:
+        service = PolygonService()
+        last_date_dt = service.get_last_financials_date(symbol)
+
+        if last_date_dt:
+            last_date = last_date_dt.date()
+            # Standard quarter is ~91 days
+            next_date = last_date + timedelta(days=91)
+
+            # If the projected date is in the past, keep adding quarters until it's in the future.
+            # This robustly handles data that might be 6+ months stale (e.g. smaller caps).
+            while next_date < date.today():
+                next_date += timedelta(days=91)
+
+            return next_date
+
+        return None
+    except Exception:
+        # Fail gracefully to None
+        return None
 
 def get_sector_weight(existing_portfolio, sector):
     # TODO: Implement this with a real data source

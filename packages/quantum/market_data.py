@@ -100,6 +100,41 @@ class PolygonService:
         data = response.json()
         return data.get('results', {})
 
+    def get_last_financials_date(self, symbol: str) -> Optional[datetime]:
+        """
+        Fetches the date of the most recent financial filing (usually earnings).
+        Uses Polygon /vX/reference/financials.
+        """
+        try:
+            url = f"{self.base_url}/vX/reference/financials"
+            params = {
+                'ticker': symbol,
+                'limit': 1,
+                'sort': 'filing_date',
+                'order': 'desc',
+                'apiKey': self.api_key
+            }
+            # Short timeout to avoid blocking
+            response = self.session.get(url, params=params, timeout=3)
+            if response.status_code != 200:
+                return None
+
+            data = response.json()
+            results = data.get('results', [])
+            if not results:
+                return None
+
+            # Use filing_date or period_of_report_date
+            filing_date_str = results[0].get('filing_date')
+            if filing_date_str:
+                return datetime.fromisoformat(filing_date_str)
+
+            return None
+
+        except Exception as e:
+            # print(f"Error fetching financials for {symbol}: {e}")
+            return None
+
     def get_iv_rank(self, symbol: str) -> float:
         """Calculates IV Rank from historical data."""
         try:

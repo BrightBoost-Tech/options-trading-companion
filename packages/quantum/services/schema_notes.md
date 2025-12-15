@@ -22,6 +22,9 @@ Stores generated trade ideas and their lifecycle status.
 | `sizing_metadata` | jsonb | Details: { "capital_required": 500.0, "reason": "Risk capped" } |
 | `status` | text | 'pending', 'dismissed', 'executed', 'expired' |
 | `ev` | numeric | Scalar Expected Value ($) |
+| `trace_id` | uuid | Link to inference log |
+| `model_version` | text | Version of the model used |
+| `features_hash` | text | Hash of input features for reproducibility |
 
 ### `weekly_trade_reports`
 
@@ -94,6 +97,32 @@ Existing table `portfolio_snapshots` should expect these additional fields in th
 | Column | Type | Notes |
 |---|---|---|
 | `cash_buffer` | numeric | Amount of cash to keep reserved (default 0) |
+
+### `model_governance_states` (New - Learned Nesting v3)
+
+Stores per-user model governance states (calibration + conviction multipliers).
+
+| Column | Type | Notes |
+|---|---|---|
+| `id` | uuid | Primary Key |
+| `user_id` | uuid | Foreign Key |
+| `model_name` | text | e.g. 'calibration_v3', 'conviction_v3' |
+| `strategy` | text | Optional filter |
+| `window` | text | Optional filter |
+| `regime` | text | Optional filter |
+| `state_json` | jsonb | Calibration/conviction parameters |
+| `sample_size` | integer | Number of samples used |
+| `trained_at` | timestamptz | When it was last trained |
+| `created_at` | timestamptz | Creation time |
+| `updated_at` | timestamptz | Auto-updated |
+
+### Learned Nesting v3 Views
+
+The following views are created for v3 learning surfaces:
+
+- **`learning_trade_outcomes_v3`**: Joins `trade_suggestions` and `learning_feedback_loops` to provide a flattened view of trade outcomes with traceability.
+- **`learning_performance_summary_v3`**: Aggregates trade outcomes by user, strategy, window, and regime. **This is the preferred source for conviction multipliers going forward.**
+- **`learning_contract_violations_v3`**: Identifies data integrity issues in the learning pipeline (missing traces, IDs, etc.).
 
 ## Migration Status
 

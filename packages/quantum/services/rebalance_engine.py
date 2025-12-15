@@ -149,13 +149,33 @@ class RebalanceEngine:
             # 2. Execution Cost Penalty
             # Use ExecutionService logic
             exec_cost_per_unit = 0.05 # default fallback
-            if self.execution_service:
+
+            if item_type == "stock":
+                # STOCK FIX: Use simple spread model, do NOT use options calculator
+                # 5 bps spread (0.05%) -> cost is half spread
+                STOCK_SPREAD_BPS = 5.0
+                stock_spread_pct = STOCK_SPREAD_BPS / 10000.0
+                exec_cost_per_unit = price_unit * stock_spread_pct * 0.5
+            elif self.execution_service:
+                # OPTION FIX: Convert contract-dollar price_unit to per-share premium
+                entry_cost_per_share = price_unit / 100.0
+
+                # Determine legs
+                num_legs = 1
+                if existing_spread and existing_spread.legs:
+                    num_legs = len(existing_spread.legs)
+
+                # Use underlying for history
+                symbol_for_history = symbol
+                if existing_spread and existing_spread.underlying:
+                    symbol_for_history = existing_spread.underlying
+
                 # We try to use historical data if user_id is provided
                 exec_cost_per_unit = self.execution_service.estimate_execution_cost(
-                    symbol=symbol,
+                    symbol=symbol_for_history,
                     user_id=user_id,
-                    entry_cost=price_unit,
-                    num_legs=1 # Simplified, exact legs might be hard here
+                    entry_cost=entry_cost_per_share,
+                    num_legs=num_legs
                 )
 
             # ROI impact of execution cost: Cost / Price

@@ -536,15 +536,25 @@ async def run_midday_cycle(supabase: Client, user_id: str):
         if price <= 0:
             continue
 
-        max_loss = float(cand.get("max_loss_per_contract", price * 100))
-        collateral = float(cand.get("collateral_per_contract", price * 100))
+        price = float(cand.get("suggested_entry", 0.0) or 0.0)
+        max_loss = float(cand.get("max_loss_per_contract") or (price * 100.0))
+        collateral = float(cand.get("collateral_required_per_contract") or cand.get("collateral_per_contract") or max_loss)
 
-        # Use canonical sizing (no hardcoded aggressive 0.40)
-        # Assuming balanced or deriving from user prefs (passed as config or defaulting).
-        # For now, we use defaults or conservative caps as per instruction:
-        # "Remove hardcoded profile->risk_pct mapping that uses 0.40"
+        score = float(cand.get("unified_score", cand.get("score", 50.0)) or 50.0)
+        base_per_trade_pct = 0.02 if score >= 70 else 0.01
+
+        # Risk multiplier from conviction (clamp 0.5..1.5)
+        conviction = float(cand.get("conviction_score", cand.get("confidence_score", 0.5)) or 0.5)
+        risk_multiplier = 0.5 + conviction
+        risk_multiplier = min(1.5, max(0.5, risk_multiplier))
+
+        # Absolute risk budget dollars
+        risk_budget = deployable_capital * base_per_trade_pct * risk_multiplier
+
         sizing = calculate_sizing(
             account_buying_power=deployable_capital,
+            ev_per_contract=float(cand.get("ev", 0.0) or 0.0),
+            contract_ask=price,  # keep for backward compat logging
             max_loss_per_contract=max_loss,
             collateral_required_per_contract=collateral,
             max_risk_pct=0.05, # Conservative default cap
@@ -588,6 +598,8 @@ async def run_midday_cycle(supabase: Client, user_id: str):
             max_risk_pct=1.0, # Full utilization of the calculated allowed risk
             profile="AGGRESSIVE"
         )
+
+        allowed_risk_dollars = sizing.get("max_dollar_risk", 0.0)
 
         # If contracts == 0, check reasons.
         if sizing["contracts"] == 0:

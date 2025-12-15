@@ -2,6 +2,7 @@ from typing import Dict, Any, Optional
 from datetime import datetime, timedelta, timezone, date
 from supabase import Client
 import json
+from collections import Counter
 
 # --- Config / Defaults ---
 DEFAULT_WEEKLY_METRICS = {
@@ -89,10 +90,18 @@ class ProgressEngine:
 
         has_data = bool(logs or executions or snapshots)
 
+        # Defaults
+        avg_ivr = DEFAULT_WEEKLY_METRICS["avg_ivr"]
+        dominant_regime = DEFAULT_WEEKLY_METRICS["dominant_regime"]
+
         # 3. Compute Metrics
         if has_data:
             user_metrics = self._compute_user_metrics(logs, executions, snapshots)
             system_metrics = self._compute_system_metrics(logs, executions)
+
+            # Derive specific log metrics
+            avg_ivr, dominant_regime = self._derive_log_metrics(logs)
+
             synthesis = {
                 "headline": f"Progress Report for {week_id}",
                 "action_items": ["Review missed suggestions" if user_metrics['components']['adherence_ratio']['value'] < 0.8 else "Maintain discipline"]
@@ -129,8 +138,8 @@ class ProgressEngine:
             "week_id": week_id,
             "date_start": start_date.isoformat(),
             "date_end": end_date.isoformat(),
-            "dominant_regime": DEFAULT_WEEKLY_METRICS["dominant_regime"], # TODO: Derive from logs
-            "avg_ivr": DEFAULT_WEEKLY_METRICS["avg_ivr"], # TODO: Derive
+            "dominant_regime": dominant_regime,
+            "avg_ivr": avg_ivr,
             "user_metrics": user_metrics,
             "system_metrics": system_metrics,
             "synthesis": synthesis,
@@ -146,6 +155,32 @@ class ProgressEngine:
             print(f"Error upserting weekly snapshot: {e}")
 
         return snapshot_data
+
+    def _derive_log_metrics(self, logs):
+        iv_ranks = []
+        regimes = []
+
+        for log in logs:
+            ctx = log.get("regime_context", {}) or {}
+
+            # IV Rank (Midday: ctx.get("iv_rank"))
+            ivr = ctx.get("iv_rank")
+            if ivr is not None and isinstance(ivr, (int, float)):
+                iv_ranks.append(ivr)
+
+            # Regime (Midday: effective_regime or global_state; Morning: global)
+            regime = ctx.get("effective_regime") or ctx.get("global_state") or ctx.get("global")
+            if regime:
+                regimes.append(regime)
+
+        avg_ivr = sum(iv_ranks) / len(iv_ranks) if iv_ranks else DEFAULT_WEEKLY_METRICS["avg_ivr"]
+
+        dominant_regime = DEFAULT_WEEKLY_METRICS["dominant_regime"]
+        if regimes:
+            c = Counter(regimes)
+            dominant_regime = c.most_common(1)[0][0]
+
+        return avg_ivr, dominant_regime
 
     def _fetch_logs(self, user_id, start, end):
         try:

@@ -269,6 +269,22 @@ def _compute_portfolio_weights(
         diagnostics_nested["adaptive_caps_applied"] = True
         diagnostics_nested["policy_source"] = guardrail_policy.get("source", "unknown")
 
+        # B2: Enforce banned_strategies by zeroing bounds in optimizer after policy is applied.
+        banned = [str(x).lower() for x in constraints.get("banned_strategies", [])]
+        if banned and "bounds" in constraints:
+            new_bounds = []
+            banned_assets = []
+            for i, asset in enumerate(investable_assets):
+                st = str(asset.spread_type).lower()
+                (lo, hi) = constraints["bounds"][i]
+                if any((b in st) or (st in b) for b in banned):
+                    new_bounds.append((0.0, 0.0))
+                    banned_assets.append(tickers[i])
+                else:
+                    new_bounds.append((float(lo), float(hi)))
+            constraints["bounds"] = new_bounds
+            diagnostics_nested["banned_assets"] = banned_assets
+
     # Greek sensitivities
     greek_sensitivities = {
         'delta': np.array([a.delta for a in investable_assets]),

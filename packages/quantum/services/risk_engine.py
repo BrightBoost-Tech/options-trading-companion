@@ -58,7 +58,14 @@ class RiskEngine:
         current_max = adjusted.get("max_position_pct", 1.0)
 
         if policy_max is not None:
-             adjusted["max_position_pct"] = min(current_max, policy_max)
+             new_max = min(current_max, policy_max)
+             adjusted["max_position_pct"] = new_max
+
+             # B1) Clamp per-asset bounds when apply_adaptive_caps() tightens max_position_pct.
+             if "bounds" in adjusted and adjusted.get("max_position_pct") is not None:
+                 max_w = float(new_max)
+                 # Reconstruct bounds list clamping hi to max_w
+                 adjusted["bounds"] = [(lo, min(float(hi), max_w)) for (lo, hi) in adjusted["bounds"]]
 
         # 2. Banned Structures
         banned = policy.get("ban_structures", [])

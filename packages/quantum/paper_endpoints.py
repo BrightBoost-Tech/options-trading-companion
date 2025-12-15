@@ -280,8 +280,8 @@ def _stage_order_internal(supabase, analytics, user_id, ticket: TradeTicket, por
     return order_id
 
 def _process_orders_for_user(supabase, analytics, user_id, target_order_id=None):
-    # Fetch working orders
-    query = supabase.table("paper_orders").select("*").eq("status", "staged") # Add 'working' later
+    # Fetch working orders: staged, working, or partial
+    # A1) Replace exact "staged" check with list of in-flight states
     # We need to filter by portfolio owned by user, or join.
     # Simplest is to get user portfolios then filter orders.
     # Or rely on RLS if enabled. Assuming we trust backend:
@@ -293,6 +293,8 @@ def _process_orders_for_user(supabase, analytics, user_id, target_order_id=None)
     p_map = {p["id"]: p for p in p_res.data}
     p_ids = list(p_map.keys())
 
+    # A1 Implementation
+    query = supabase.table("paper_orders").select("*").in_("status", ["staged", "working", "partial"])
     orders_res = query.in_("portfolio_id", p_ids).execute()
     orders = orders_res.data
 
@@ -318,49 +320,112 @@ def _process_orders_for_user(supabase, analytics, user_id, target_order_id=None)
         # Simulate Fill
         fill_res = TransactionCostModel.simulate_fill(order, quote)
 
+        # A2: Only commit when a NEW fill occurred on this tick.
+        should_commit = False
+
+        # Must be in a valid fill state
         if fill_res["status"] in ["filled", "partial"]:
+            # And must have incremental fill quantity
+            last_fill_qty = float(fill_res.get("last_fill_qty") or 0)
+            if last_fill_qty > 0:
+                should_commit = True
+
+        if should_commit:
             # Commit Fill
             _commit_fill(supabase, analytics, user_id, order, fill_res, quote, p_map[order["portfolio_id"]])
             processed_count += 1
 
+            # Note: _commit_fill updates DB, but we should also update local 'order'
+            # or refetch if we needed it again, but we just continue here.
+
+            # Important: Update local portfolio cash in case next order uses same portfolio
+            # This is handled by _commit_fill re-fetching or we pass p_map by ref?
+            # Actually _commit_fill updates DB. We should update p_map here to be safe.
+            # But _commit_fill does the math.
+            pass
+
         elif fill_res["status"] == "working":
             # Update last checked?
-            pass
+            # Optionally update status to 'working' if it was 'staged'
+            if order["status"] == "staged":
+                supabase.table("paper_orders").update({"status": "working"}).eq("id", order["id"]).execute()
 
     return processed_count
 
+def _compute_fill_deltas(order: dict, fill_res: dict) -> dict:
+    """
+    Computes incremental deltas for this tick's fill.
+    Returns:
+        this_fill_qty: float (incremental qty filled this tick)
+        this_fill_price: float (price for this incremental fill)
+        new_total_filled_qty: float (cumulative)
+        new_avg_fill_price: float (cumulative avg)
+        fees_total: float (cumulative fees)
+        fees_delta: float (incremental fees this tick)
+    """
+    this_fill_qty = float(fill_res.get("last_fill_qty") or 0)
+
+    # Use last_fill_price if available, else fallback to avg (unlikely if last_fill_qty > 0)
+    this_fill_price = float(fill_res.get("last_fill_price") or fill_res.get("avg_fill_price") or 0)
+
+    new_total_filled_qty = float(fill_res.get("filled_qty") or 0)
+    new_avg_fill_price = float(fill_res.get("avg_fill_price") or 0)
+
+    # Fee Math
+    req_qty = float(order.get("requested_qty") or order.get("quantity") or 0)
+    # Avoid div zero
+    if req_qty == 0 and new_total_filled_qty > 0:
+        req_qty = new_total_filled_qty # Should not happen unless bad data
+
+    tcm_est = order.get("tcm") or {}
+    est_fees = float(tcm_est.get("fees_usd") or 0)
+
+    prev_fees_total = float(order.get("fees_usd") or 0)
+
+    if req_qty > 0:
+        fees_total = (new_total_filled_qty / req_qty) * est_fees
+    else:
+        fees_total = 0.0
+
+    fees_delta = max(0.0, fees_total - prev_fees_total)
+
+    return {
+        "this_fill_qty": this_fill_qty,
+        "this_fill_price": this_fill_price,
+        "new_total_filled_qty": new_total_filled_qty,
+        "new_avg_fill_price": new_avg_fill_price,
+        "fees_total": fees_total,
+        "fees_delta": fees_delta
+    }
+
 def _commit_fill(supabase, analytics, user_id, order, fill_res, quote, portfolio):
-    # 1. Update Order
+    # A3) Use helper to compute deltas
+    deltas = _compute_fill_deltas(order, fill_res)
+
+    this_fill_qty = deltas["this_fill_qty"]
+    this_fill_price = deltas["this_fill_price"]
+    fees_delta = deltas["fees_delta"]
+
     now = datetime.now(timezone.utc).isoformat()
 
-    fees = 0.0 # TCM might return fees in simulate_fill if we updated it, but estimate has it.
-    # Re-calc fees based on actual fill qty
-    # Simple logic:
-    filled_qty = fill_res["filled_qty"]
-    fill_price = fill_res["avg_fill_price"]
-
-    # Get fees from TCM estimate in order if available, pro-rated
-    tcm_est = order.get("tcm") or {}
-    est_fees = tcm_est.get("fees_usd", 0.0)
-    req_qty = float(order.get("requested_qty") or 1)
-    fees = (filled_qty / req_qty) * est_fees if req_qty > 0 else 0
-
+    # 1. Update Order with CUMULATIVE totals
     update_payload = {
         "status": fill_res["status"],
-        "filled_qty": filled_qty,
-        "avg_fill_price": fill_price,
-        "fees_usd": fees,
+        "filled_qty": deltas["new_total_filled_qty"],
+        "avg_fill_price": deltas["new_avg_fill_price"],
+        "fees_usd": deltas["fees_total"],
         "filled_at": now,
         "quote_at_fill": quote
     }
 
     supabase.table("paper_orders").update(update_payload).eq("id", order["id"]).execute()
 
-    # 2. Update Portfolio & Position
+    # 2. Update Portfolio & Position with INCREMENTAL deltas
     side = order.get("side", "buy")
     multiplier = 100.0
 
-    txn_value = filled_qty * fill_price * multiplier
+    # Cash Delta uses incremental qty and price + incremental fees
+    txn_value = this_fill_qty * this_fill_price * multiplier
 
     # Cash Impact:
     # Buy: - (Price * Qty) - Fees
@@ -368,19 +433,26 @@ def _commit_fill(supabase, analytics, user_id, order, fill_res, quote, portfolio
 
     cash_delta = 0.0
     if side == "buy":
-        cash_delta = -(txn_value + fees)
+        cash_delta = -(txn_value + fees_delta)
     else:
-        cash_delta = (txn_value - fees)
+        cash_delta = (txn_value - fees_delta)
 
-    new_cash = float(portfolio["cash_balance"]) + cash_delta
+    # Use fresh cash from portfolio object (which we assume is up to date or we fetch)
+    # In _process loop we pass p_map[id], let's trust it but verify
+    current_cash = float(portfolio["cash_balance"])
+    new_cash = current_cash + cash_delta
 
+    # Update DB
     supabase.table("paper_portfolios").update({"cash_balance": new_cash}).eq("id", portfolio["id"]).execute()
 
-    # Ledger
+    # Update in-memory portfolio object for subsequent fills in same loop
+    portfolio["cash_balance"] = new_cash
+
+    # Ledger uses incremental
     supabase.table("paper_ledger").insert({
         "portfolio_id": portfolio["id"],
         "amount": cash_delta,
-        "description": f"Fill {side} {filled_qty} {order.get('order_json', {}).get('symbol')} @ {fill_price}",
+        "description": f"Fill {side} {this_fill_qty} {order.get('order_json', {}).get('symbol')} @ {this_fill_price}",
         "balance_after": new_cash
     }).execute()
 
@@ -393,7 +465,7 @@ def _commit_fill(supabase, analytics, user_id, order, fill_res, quote, portfolio
     # Signed Quantity logic
     # Buy adds (+), Sell subtracts (-)
     fill_sign = 1.0 if side == "buy" else -1.0
-    signed_filled_qty = filled_qty * fill_sign
+    signed_incremental_qty = this_fill_qty * fill_sign
 
     # Locate or create position
     if pos_id:
@@ -409,7 +481,7 @@ def _commit_fill(supabase, analytics, user_id, order, fill_res, quote, portfolio
         current_qty = float(pos["quantity"]) # Signed
         current_avg = float(pos["avg_entry_price"])
 
-        new_qty = current_qty + signed_filled_qty
+        new_qty = current_qty + signed_incremental_qty
 
         # Average Price Logic
         # Only update avg price if we are increasing exposure in the same direction
@@ -418,8 +490,9 @@ def _commit_fill(supabase, analytics, user_id, order, fill_res, quote, portfolio
         new_avg = current_avg
 
         # Case 1: Increasing exposure (Same sign)
-        if (current_qty >= 0 and signed_filled_qty > 0) or (current_qty <= 0 and signed_filled_qty < 0):
-            total_cost = (abs(current_qty) * current_avg) + (abs(signed_filled_qty) * fill_price)
+        if (current_qty >= 0 and signed_incremental_qty > 0) or (current_qty <= 0 and signed_incremental_qty < 0):
+            # Weighted average of OLD total vs NEW incremental
+            total_cost = (abs(current_qty) * current_avg) + (abs(signed_incremental_qty) * this_fill_price)
             if abs(new_qty) > 0:
                 new_avg = total_cost / abs(new_qty)
 
@@ -430,13 +503,18 @@ def _commit_fill(supabase, analytics, user_id, order, fill_res, quote, portfolio
         # e.g. +5 to -5.
         if (current_qty > 0 and new_qty < 0) or (current_qty < 0 and new_qty > 0):
             # The portion that flipped is new_qty.
-            # The cost basis for that portion is fill_price.
-            new_avg = fill_price
+            # The cost basis for that portion is this_fill_price.
+            # Simplified: if we flip, new avg is the fill price of the flip.
+            new_avg = this_fill_price
 
         if new_qty == 0:
             # Closed completely
             if pos_id: # Was explicit close
-                 _run_attribution(supabase, user_id, order, pos, fill_price, fees, side)
+                 # A4) Fix attribution callsite to use UPDATED order totals.
+                 # Merge update_payload into order to get cumulative values
+                 order_updated = {**order, **update_payload}
+                 # Pass fees_total (cumulative), not delta
+                 _run_attribution(supabase, user_id, order_updated, pos, deltas["new_avg_fill_price"], deltas["fees_total"], side)
 
             # We delete the position if 0
             supabase.table("paper_positions").delete().eq("id", pos["id"]).execute()
@@ -450,14 +528,14 @@ def _commit_fill(supabase, analytics, user_id, order, fill_res, quote, portfolio
 
     else:
         # Create new
-        # signed_filled_qty is the quantity
+        # signed_incremental_qty is the quantity
         pos_payload = {
             "portfolio_id": portfolio["id"],
             "strategy_key": strategy_key,
             "symbol": symbol,
-            "quantity": signed_filled_qty,
-            "avg_entry_price": fill_price,
-            "current_mark": fill_price,
+            "quantity": signed_incremental_qty,
+            "avg_entry_price": this_fill_price,
+            "current_mark": this_fill_price,
             "unrealized_pl": 0.0
         }
         supabase.table("paper_positions").insert(pos_payload).execute()

@@ -48,9 +48,11 @@ class TestExecutionDrag(unittest.TestCase):
         def table_side_effect(name):
             mock_builder = MagicMock()
             if name == "trade_executions":
+                # Matches the service call: select -> eq -> in_ -> neq -> neq -> gte -> order -> execute
+                # Removed .limit call from chain to match service update
                 mock_builder.select.return_value.eq.return_value.in_.return_value \
                     .neq.return_value.neq.return_value.gte.return_value \
-                    .order.return_value.limit.return_value.execute.return_value.data = executions
+                    .order.return_value.execute.return_value.data = executions
             elif name == "suggestion_logs":
                 mock_builder.select.return_value.in_.return_value.execute.return_value.data = suggestions
             return mock_builder

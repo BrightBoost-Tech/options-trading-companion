@@ -545,7 +545,10 @@ async def run_weekly_report(supabase: Client, user_id: str):
         print(f"Error fetching journal stats: {e}")
         metrics = {}
 
-    win_rate = metrics.get("win_rate", 0)
+    win_rate_pct = metrics.get("win_rate", 0)
+    # Normalize to ratio (0.0 - 1.0) if it looks like a percent (>1.0)
+    win_rate_ratio = (win_rate_pct / 100.0) if win_rate_pct > 1.0 else win_rate_pct
+
     total_pnl = metrics.get("total_pnl", 0)
     trade_count = metrics.get("trade_count", 0)
 
@@ -556,7 +559,7 @@ async def run_weekly_report(supabase: Client, user_id: str):
 
 ## Performance Summary
 - **P&L:** ${total_pnl:.2f}
-- **Win Rate:** {win_rate * 100:.1f}%
+- **Win Rate:** {win_rate_pct:.1f}%
 - **Trades:** {trade_count}
 
 ## AI Insights
@@ -592,7 +595,8 @@ async def run_weekly_report(supabase: Client, user_id: str):
         # Here we pass minimal info to satisfy the contract.
         recent_losses_summary = {
             "regime": current_regime_str,
-            "win_rate": win_rate,
+            "win_rate": win_rate_ratio,
+            "win_rate_pct": win_rate_pct,
             "total_pnl": total_pnl
         }
 
@@ -629,7 +633,7 @@ async def run_weekly_report(supabase: Client, user_id: str):
         "user_id": user_id,
         "week_ending": datetime.now().strftime('%Y-%m-%d'),
         "total_pnl": total_pnl,
-        "win_rate": win_rate,
+        "win_rate": win_rate_pct,
         "trade_count": trade_count,
         "missed_opportunities": [],
         "report_markdown": report_md.strip()

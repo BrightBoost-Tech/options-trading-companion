@@ -8,8 +8,44 @@ def get_next_earnings_date(symbol: str):
     return None
 
 def get_sector_weight(existing_portfolio, sector):
-    # TODO: Implement this with a real data source
-    return 0.0
+    """
+    Calculates the weight of a specific sector in the existing portfolio.
+
+    Args:
+        existing_portfolio: List of positions (dicts or objects).
+        sector: The sector string to check against.
+
+    Returns:
+        float: The proportion of portfolio value in that sector (0.0 to 1.0).
+    """
+    total_portfolio_value = 0.0
+    sector_value = 0.0
+
+    for pos in existing_portfolio:
+        # Determine value and sector safely whether pos is dict or object
+        val = 0.0
+        p_sector = None
+
+        if isinstance(pos, dict):
+            val = float(pos.get("current_value", 0.0))
+            if val == 0.0 and "quantity" in pos and "current_price" in pos:
+                val = float(pos["quantity"]) * float(pos["current_price"])
+            p_sector = pos.get("sector")
+        else:
+            val = getattr(pos, "current_value", 0.0)
+            if val == 0.0 and hasattr(pos, "quantity") and hasattr(pos, "current_price"):
+                val = float(pos.quantity) * float(pos.current_price)
+            p_sector = getattr(pos, "sector", None)
+
+        total_portfolio_value += val
+
+        if p_sector == sector:
+            sector_value += val
+
+    if total_portfolio_value <= 0:
+        return 0.0
+
+    return sector_value / total_portfolio_value
 
 def apply_guardrails(candidates, existing_portfolio):
     """

@@ -184,8 +184,153 @@ class RebalanceEngine:
             diff_val = diff_w * total_equity
             price = pricing_data.get(ticker)
 
-            if not price or price <= 0:
-                continue
+            if desired_val_change > 0:
+                side = "buy" # or "increase"
+                action = "increase"
+            else:
+                side = "sell" # or "decrease"
+                action = "decrease"
+
+            # Sizing
+            if price_unit <= 0: continue
+
+            qty_delta = abs(desired_val_change) / price_unit
+            qty_delta = math.floor(qty_delta)
+
+            if qty_delta == 0: continue
+
+            # Risk Check (for buys)
+            reason = "Rebalance to target"
+            if side == "buy":
+                cost = qty_delta * price_unit
+
+                # Max 25% deployable capital per NEW spread (or addition)
+                max_allocation = deployable_capital * 0.25
+                if cost > max_allocation:
+                     qty_delta = math.floor(max_allocation / price_unit)
+                     reason = "Rebalance (capped by 25% rule)"
+                     cost = qty_delta * price_unit
+
+                if cost > deployable_capital:
+                    qty_delta = math.floor(deployable_capital / price_unit)
+                    reason = "Rebalance (capped by cash)"
+
+                if qty_delta == 0: continue
+
+            # --- Rebalance Score Calculation ---
+            # Inputs:
+            # 1. Conviction (0-1)
+            # 2. Execution Cost Penalty
+            # 3. Risk/Regime Penalty
+
+            # 1. Conviction
+            # Use underlying for lookup if possible, else symbol
+            lookup_key = existing_spread.underlying if existing_spread else symbol
+            conviction = conviction_map.get(lookup_key, conviction_map.get(symbol, 0.5))
+
+            # Base Score: Conviction * 100 (0-100 scale)
+            base_score = conviction * 100.0
+
+            # 2. Execution Cost Penalty
+            # Use ExecutionService logic
+            exec_cost_per_unit = 0.05 # default fallback
+
+            if item_type == "stock":
+                # STOCK FIX: Use simple spread model, do NOT use options calculator
+                # 5 bps spread (0.05%) -> cost is half spread
+                STOCK_SPREAD_BPS = 5.0
+                stock_spread_pct = STOCK_SPREAD_BPS / 10000.0
+                exec_cost_per_unit = price_unit * stock_spread_pct * 0.5
+            elif self.execution_service:
+                # OPTION FIX: Convert contract-dollar price_unit to per-share premium
+                entry_cost_per_share = price_unit / 100.0
+
+                # Determine legs
+                num_legs = 1
+                if existing_spread and existing_spread.legs:
+                    num_legs = len(existing_spread.legs)
+
+                # Use underlying for history
+                symbol_for_history = symbol
+                if existing_spread and existing_spread.underlying:
+                    symbol_for_history = existing_spread.underlying
+
+                # We try to use historical data if user_id is provided
+                exec_cost_per_unit = self.execution_service.estimate_execution_cost(
+                    symbol=symbol_for_history,
+                    user_id=user_id,
+                    entry_cost=entry_cost_per_share,
+                    num_legs=num_legs
+                )
+
+            # ROI impact of execution cost: Cost / Price
+            cost_roi = 0.0
+            if price_unit > 0:
+                cost_roi = exec_cost_per_unit / price_unit
+
+            # Scaling: 1% cost = 5 points penalty (Factor 500, similar to scoring.py)
+            exec_penalty_points = cost_roi * 500.0
+
+            # 3. Regime Penalty
+            # Use simplified logic based on scoring.py patterns
+            regime_penalty_points = 0.0
+            if regime_context:
+                current_regime = regime_context.get("current_regime", "normal")
+                # regime_context uses "normal", "high_vol", "panic" (mapped from RegimeState)
+
+                # Simple penalties
+                if current_regime == "panic": # Shock
+                    regime_penalty_points = 15.0 # High penalty in panic
+                elif current_regime == "high_vol": # Elevated
+                    # If we are buying (adding risk) in high vol, maybe small penalty unless conviction is high
+                    if side == "buy":
+                        regime_penalty_points = 5.0
+
+            # 4. Risk Penalty
+            # Use diff_w as a proxy for 'urgency' but maybe not 'risk'.
+            # If we are shorting (selling), risk is actually reducing.
+            # Let's keep it simple: RebalanceScore is about quality of holding + regime.
+            # User said: "risk_penalty (portfolio greek deltas / concentration / regime penalty)"
+            risk_penalty_points = 0.0
+            # Concentration check: if target > 20%, maybe add penalty?
+            if target_w > 0.20:
+                risk_penalty_points += 5.0
+
+            # Final Score Calculation
+            # RebalanceScore = Conviction - Cost - Regime - Risk
+            rebalance_score = base_score - exec_penalty_points - regime_penalty_points - risk_penalty_points
+
+            # Clamp 0-100
+            rebalance_score = max(0.0, min(100.0, rebalance_score))
+
+            # Components for API
+            score_components = {
+                "conviction_score": base_score,
+                "execution_cost_penalty": exec_penalty_points,
+                "regime_penalty": regime_penalty_points,
+                "risk_penalty": risk_penalty_points,
+                "raw_cost_roi": cost_roi
+            }
+
+            # Construct Trade
+            trade = {
+                "side": action,
+                "kind": item_type,
+                "symbol": symbol,
+                "quantity": qty_delta,
+                "limit_price": price_unit,
+                "reason": f"Target: {target_w:.1%}, Current: {current_w:.1%}. {reason}",
+                "target_weight": target_w,
+                "current_weight": current_w,
+                "risk_metadata": {
+                    "diff_value": desired_val_change
+                },
+                "score": rebalance_score, # Use RebalanceScore for sorting
+                "rebalance_score": rebalance_score,
+                "score_components": score_components,
+                "ev": None # Explicitly None to avoid fake EV
+            }
+            trades.append(trade)
 
             # SELL Logic
             if diff_val < 0:

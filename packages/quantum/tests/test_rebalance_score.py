@@ -207,3 +207,46 @@ def test_rebalance_score_regime_penalty():
     assert trades_norm[0]["rebalance_score"] > trades_panic[0]["rebalance_score"]
     # Panic penalty is 15.0
     assert abs((trades_norm[0]["rebalance_score"] - trades_panic[0]["rebalance_score"]) - 15.0) < 1.0
+
+
+def test_rebalance_engine_stock_no_exec_call():
+    """
+    Verifies that RebalanceEngine uses STOCK_SPREAD_BPS for stocks
+    and does NOT call estimate_execution_cost.
+    """
+    engine = RebalanceEngine(supabase=None)
+    engine.execution_service = MagicMock()
+
+    # Mock Stock Position
+    raw_positions = [{
+        "symbol": "AAPL",
+        "current_value": 1500.0,
+        "current_price": 150.0,
+        "quantity": 10
+    }]
+    current_spreads = [] # No spreads
+    cash = 10000.0
+    targets = [{"symbol": "AAPL", "target_allocation": 0.20}]
+
+    # Execute
+    trades = engine.generate_trades(
+        current_spreads=current_spreads,
+        raw_positions=raw_positions,
+        cash_balance=cash,
+        target_weights=targets,
+        user_id="test_user"
+    )
+
+    # Assert estimate_execution_cost was NOT called for AAPL
+    engine.execution_service.estimate_execution_cost.assert_not_called()
+
+    # Verify score calculation used the stock logic
+    # Stock Logic:
+    # stock_spread_pct = 5 / 10000 = 0.0005
+    # exec_cost_per_unit = 150.0 * 0.0005 * 0.5 = 0.0375
+    # cost_roi = 0.0375 / 150.0 = 0.00025
+    # penalty = 0.00025 * 500 = 0.125
+
+    trade = trades[0]
+    components = trade["score_components"]
+    assert abs(components["execution_cost_penalty"] - 0.125) < 0.0001

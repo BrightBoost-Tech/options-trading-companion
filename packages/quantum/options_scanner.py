@@ -101,15 +101,21 @@ def scan_for_opportunities(
             quote = market_data.get_recent_quote(symbol)
             if not quote: return None
 
+            # Quote handling: tolerate both real Polygon (bid/ask) and mock (bid_price/ask_price)
+            bid = quote.get("bid_price") if "bid_price" in quote else quote.get("bid")
+            ask = quote.get("ask_price") if "ask_price" in quote else quote.get("ask")
             current_price = quote.get("price")
+
+            # Fallback for current_price
+            if current_price is None and bid is not None and ask is not None and bid > 0 and ask > 0:
+                current_price = (bid + ask) / 2.0
+
             if not current_price: return None
 
             # B. Check Liquidity (Hard Rejection)
-            bid = quote.get("bid_price", 0)
-            ask = quote.get("ask_price", 0)
             spread_pct = 0.0
 
-            if bid > 0 and ask > 0:
+            if bid is not None and ask is not None and bid > 0 and ask > 0:
                 spread_pct = (ask - bid) / current_price
                 # Dynamic Liquidity Threshold based on Regime
                 threshold = 0.10 # Default
@@ -133,10 +139,17 @@ def scan_for_opportunities(
 
             # D. Technical Analysis (Trend)
             bars = market_data.get_historical_prices(symbol, days=60)
-            if not bars or len(bars) < 50:
+
+            # History handling: tolerate list of objects or dict with 'prices'
+            closes = []
+            if isinstance(bars, dict):
+                closes = bars.get("prices") or []
+            elif isinstance(bars, list):
+                closes = [b.get("close") for b in bars if b.get("close") is not None]
+
+            if not closes or len(closes) < 50:
                 return None
 
-            closes = [b['close'] for b in bars]
             sma20 = np.mean(closes[-20:])
             sma50 = np.mean(closes[-50:])
 
@@ -319,22 +332,21 @@ def scan_for_opportunities(
             print(f"[Scanner] Error processing {symbol}: {e}")
             return None
 
-        batch_size = 5  # controls max_workers
+    # Corrected Indentation: ThreadPoolExecutor is now OUTSIDE process_symbol
+    with concurrent.futures.ThreadPoolExecutor(max_workers=batch_size) as executor:
+        future_to_symbol = {
+            executor.submit(process_symbol, sym, drag_map): sym
+            for sym in symbols
+        }
 
-        with concurrent.futures.ThreadPoolExecutor(max_workers=batch_size) as executor:
-            future_to_symbol = {
-                executor.submit(process_symbol, sym, drag_map): sym
-                for sym in symbols
-            }
-
-            for future in concurrent.futures.as_completed(future_to_symbol):
-                sym = future_to_symbol[future]
-                try:
-                    result = future.result()
-                    if result:
-                        candidates.append(result)
-                except Exception as exc:
-                    print(f"[Scanner] Exception in thread for {sym}: {exc}")
+        for future in concurrent.futures.as_completed(future_to_symbol):
+            sym = future_to_symbol[future]
+            try:
+                result = future.result()
+                if result:
+                    candidates.append(result)
+            except Exception as exc:
+                print(f"[Scanner] Exception in thread for {sym}: {exc}")
 
     # Sort by Unified Score descending
     candidates.sort(key=lambda x: x['score'], reverse=True)

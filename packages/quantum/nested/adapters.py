@@ -2,6 +2,7 @@ from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple, Any
 import os
 import json
+from datetime import datetime
 import numpy as np
 from supabase import create_client, Client
 
@@ -54,22 +55,25 @@ def load_symbol_adapters(symbols: List[str]) -> Dict[str, SymbolAdapterState]:
         return adapters
 
     try:
-        # Assuming table model_states structure:
-        # id, scope_id (symbol), scope_type ('ticker'), state_data (jsonb)
+        # New Schema: scope, model_version, weights, cumulative_error
         response = supabase.table("model_states")\
-            .select("scope_id, state_data")\
-            .in_("scope_id", symbols)\
-            .eq("scope_type", "ticker")\
+            .select("scope, model_version, weights, cumulative_error")\
+            .in_("scope", symbols)\
             .execute()
 
         for record in response.data:
-            sym = record.get("scope_id")
-            data = record.get("state_data", {})
+            sym = record.get("scope")
+            weights = record.get("weights") or {}
+
+            # Ensure weights is a dict
+            if not isinstance(weights, dict):
+                weights = {}
+
             if sym in adapters:
-                adapters[sym].alpha_adjustment = float(data.get("alpha_adjustment", 0.0))
-                adapters[sym].sigma_scaler = float(data.get("sigma_scaler", 1.0))
-                adapters[sym].model_version = data.get("model_version")
-                adapters[sym].cumulative_error = data.get("cumulative_error")
+                adapters[sym].alpha_adjustment = float(weights.get("alpha_adjustment", 0.0))
+                adapters[sym].sigma_scaler = float(weights.get("sigma_scaler", 1.0))
+                adapters[sym].model_version = record.get("model_version")
+                adapters[sym].cumulative_error = record.get("cumulative_error")
 
     except Exception as e:
         print(f"Nested L1: Error loading adapters: {e}")
@@ -79,32 +83,59 @@ def load_symbol_adapters(symbols: List[str]) -> Dict[str, SymbolAdapterState]:
 def save_symbol_adapters(states: Dict[str, SymbolAdapterState]) -> None:
     """
     Persist updated adapter states back into model_states.
+    Uses 'scope' (symbol) as the key.
     """
     supabase = _get_supabase_client()
     if not supabase:
         print("Nested L1: Supabase not connected. Cannot save adapters.")
         return
 
-    upsert_data = []
+    # 1. Get existing IDs for these symbols to ensure safe updates
+    # (Since 'scope' might not be unique-constrained in DB migration yet)
+    existing_map = {}  # symbol -> id
+    try:
+        res = supabase.table("model_states")\
+            .select("id, scope")\
+            .in_("scope", list(states.keys()))\
+            .execute()
+        for r in res.data:
+            existing_map[r["scope"]] = r["id"]
+    except Exception as e:
+        print(f"Nested L1: Error fetching existing IDs: {e}")
+        return
+
+    updates = []
+    inserts = []
+    now_str = datetime.utcnow().isoformat()
+
     for sym, state in states.items():
-        upsert_data.append({
-            "scope_id": sym,
-            "scope_type": "ticker",
-            "model_name": "l1_adapter",
-            "state_data": state.to_dict(),
-            # "updated_at": "now()" # Let DB handle if column exists/defaults
-        })
+        payload = {
+            "scope": sym,
+            "model_version": state.model_version or "v3-l1",
+            "weights": {
+                "alpha_adjustment": state.alpha_adjustment,
+                "sigma_scaler": state.sigma_scaler
+            },
+            "cumulative_error": state.cumulative_error,
+            "last_updated": now_str
+        }
+
+        if sym in existing_map:
+            # Update existing row by ID
+            payload["id"] = existing_map[sym]
+            updates.append(payload)
+        else:
+            # Insert new row
+            inserts.append(payload)
 
     try:
-        # Using upsert requires a unique constraint on (scope_id, scope_type, model_name)
-        # Assuming such constraint exists or we rely on ID.
-        # Actually, simpler to assume (scope_id, scope_type) is unique for this usage or handle conflict.
-        # Let's assume standard upsert behavior.
-        supabase.table("model_states").upsert(
-            upsert_data,
-            on_conflict="scope_id,scope_type,model_name"
-        ).execute()
-        print(f"Nested L1: Saved {len(upsert_data)} adapters.")
+        if inserts:
+            supabase.table("model_states").insert(inserts).execute()
+
+        if updates:
+            supabase.table("model_states").upsert(updates).execute()
+
+        print(f"Nested L1: Saved {len(inserts)} new, {len(updates)} updated adapters.")
     except Exception as e:
         print(f"Nested L1: Error saving adapters: {e}")
 

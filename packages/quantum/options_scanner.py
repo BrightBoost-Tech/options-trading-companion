@@ -25,40 +25,102 @@ SCANNER_LIMIT_DEV = int(os.getenv("SCANNER_LIMIT_DEV", "40")) # Limit universe i
 
 logger = logging.getLogger(__name__)
 
-def _compute_combo_spread_width_share(truth_layer: MarketDataTruthLayer, legs: List[Dict[str, Any]], fallback_width_share: float) -> float:
-    """Computes the combined bid/ask spread width (per share) for a multi-leg trade."""
-    leg_symbols = [l["symbol"] for l in legs if l.get("symbol")]
-    # normalize symbols implicitly handled by truth_layer inside snapshot_many?
-    # Actually snapshot_many takes raw tickers and normalizes them internally to keys.
-    # But we need to lookup using normalized keys.
+def _compute_risk_primitives_usd(legs: List[Dict[str, Any]], total_cost: float, current_price: float) -> Dict[str, float]:
+    """
+    Computes max loss, max profit, and collateral required in contract USD terms.
+    Always returns valid float values for 1-leg and 2-leg strategies.
+    """
+    max_loss = 0.0
+    max_profit = 0.0
+    collateral_required = 0.0
 
-    snapshots = truth_layer.snapshot_many(leg_symbols)
+    if len(legs) == 1:
+        leg = legs[0]
+        premium = float(leg.get("premium") or 0.0)
+        strike = float(leg.get("strike") or 0.0)
+        side = leg["side"]
+        opt_type = leg["type"]
 
-    widths = []
-    for leg in legs:
-        sym = leg.get("symbol")
-        if not sym:
-            continue
+        if side == "buy":
+            max_loss = premium * 100.0
+            collateral_required = max_loss # Debit paid
+            if opt_type == "call":
+                max_profit = float("inf")
+            else: # put
+                max_profit = max(0.0, (strike - premium)) * 100.0
+        else: # side == "sell"
+            max_profit = premium * 100.0
+            if opt_type == "call":
+                max_loss = float("inf")
+                # Crude placeholder for naked call capital
+                collateral_required = current_price * 100.0
+            else: # put
+                max_loss = max(0.0, (strike - premium)) * 100.0
+                # Cash-secured put approximation
+                collateral_required = strike * 100.0
 
-        normalized_sym = truth_layer.normalize_symbol(sym)
-        snap = snapshots.get(normalized_sym)
+    elif len(legs) == 2:
+        long_leg = next((l for l in legs if l["side"] == "buy"), None)
+        short_leg = next((l for l in legs if l["side"] == "sell"), None)
 
-        # If snapshot missing or no quote
-        if not snap:
-            continue
+        if long_leg and short_leg:
+            width = abs(long_leg["strike"] - short_leg["strike"])
+            # total_cost > 0 is DEBIT, < 0 is CREDIT
 
-        quote = snap.get("quote", {})
-        bid = quote.get("bid")
-        ask = quote.get("ask")
+            if total_cost > 0: # DEBIT SPREAD
+                debit = abs(total_cost)
+                max_loss = debit * 100.0
+                max_profit = max(0.0, (width - debit)) * 100.0
+                collateral_required = max_loss # Capital is the debit paid
+            else: # CREDIT SPREAD
+                credit = abs(total_cost)
+                max_loss = max(0.0, (width - credit)) * 100.0
+                max_profit = credit * 100.0
+                collateral_required = width * 100.0 # Margin is usually the width
 
-        # Validate quotes (must be non-zero and not crossed)
-        if bid is not None and ask is not None and bid > 0 and ask > 0 and ask >= bid:
-            widths.append(ask - bid)
+    return {
+        "max_loss_per_contract": max_loss,
+        "max_profit_per_contract": max_profit,
+        "collateral_required_per_contract": collateral_required,
+    }
+def _estimate_probability_of_profit(candidate: Dict[str, Any], global_snapshot: Optional[Dict[str, Any]] = None) -> float:
+    """
+    Estimates the Probability of Profit (PoP) for a trade candidate.
+    Returns a float in [0.01, 0.99].
+    """
+    score = candidate.get("score", 50.0)
 
-    if widths and len(widths) > 0:
-        return sum(widths)
+    # 1. Base from score: sigmoid centered at 50
+    # p = 1 / (1 + exp(-(score - 50) / 12))
+    p = 1.0 / (1.0 + np.exp(-(score - 50.0) / 12.0))
 
-    return fallback_width_share
+    # 2. Strategy adjustments
+    strategy = str(candidate.get("strategy", "")).lower()
+    c_type = str(candidate.get("type", "")).lower()
+
+    # Concatenate fields to ensure we catch the strategy name even if 'strategy' key is missing/empty
+    # In scan_for_opportunities, 'strategy' key is populated, but we check both for safety.
+    combined = f"{strategy} {c_type}"
+
+    # Credit spreads / Iron Condors: +0.08
+    if "credit" in combined or "condor" in combined:
+        p += 0.08
+    # Debit spreads / Calls / Puts: -0.05
+    elif "debit" in combined or "call" in combined or "put" in combined:
+        p -= 0.05
+
+    # 3. Regime adjustment
+    if global_snapshot:
+        state = global_snapshot.get("state")
+        # state can be an Enum or string. Convert to string safely.
+        state_str = str(state).upper()
+
+        # Check for SHOCK or HIGH_VOL
+        if "SHOCK" in state_str or "HIGH_VOL" in state_str or "EXTREME" in state_str:
+            p -= 0.07
+
+    # 4. Clamp
+    return float(np.clip(p, 0.01, 0.99))
 
 def scan_for_opportunities(
     symbols: List[str] = None,
@@ -280,6 +342,8 @@ def scan_for_opportunities(
             max_loss_contract = 0.0
             max_profit_contract = 0.0
             collateral_contract = 0.0
+            max_loss_per_contract = 0.0
+            collateral_per_contract = 0.0
 
             # Net Delta (shares equiv) and Vega (contract total)
             # Vega in legs is usually per share. Multiplying by 100 gives contract exposure.
@@ -297,6 +361,7 @@ def scan_for_opportunities(
                  data_quality = "degraded"
                  pricing_mode = "approximate"
 
+            # EV Calculation
             if len(legs) == 2:
                 long_leg = next((l for l in legs if l['side'] == 'buy'), None)
                 short_leg = next((l for l in legs if l['side'] == 'sell'), None)
@@ -313,16 +378,6 @@ def scan_for_opportunities(
                         width=width
                     )
                     total_ev = ev_obj.expected_value
-
-                    # Risk Primitives for Spread
-                    if total_cost > 0: # Debit Spread
-                        max_loss_contract = abs(total_cost) * 100
-                        max_profit_contract = (width - abs(total_cost)) * 100
-                        collateral_contract = 0.0 # Paid upfront, usually no margin req beyond cost
-                    else: # Credit Spread
-                        max_loss_contract = (width - abs(total_cost)) * 100
-                        max_profit_contract = abs(total_cost) * 100
-                        collateral_contract = width * 100
                 else:
                     total_ev = 0
             elif len(legs) == 1:
@@ -336,38 +391,12 @@ def scan_for_opportunities(
                     strategy=st_type
                 )
                 total_ev = ev_obj.expected_value
-                max_loss_per_contract = ev_obj.max_loss
 
-                # Long Option: Collateral is cost (max loss)
-                # Short Option (not handled here usually, but if so): undefined or margin
-                # Scanner usually returns long or spread.
-                if leg['side'] == 'buy':
-                    collateral_per_contract = max_loss_per_contract
-                else:
-                    # Short naked? Not typical for this scanner yet.
-                    # Assume Cash Secured Put logic: Strike * 100
-                    if leg['type'] == 'put':
-                         collateral_per_contract = leg['strike'] * 100.0
-                    else:
-                         # Short Call naked: infinite/margin. Use stock price.
-                         collateral_per_contract = current_price * 100.0
-
-                # Risk Primitives for Single Leg
-                if leg['side'] == 'buy': # Long
-                    max_loss_contract = leg['premium'] * 100
-                    collateral_contract = 0.0
-                    if leg['type'] == 'call':
-                        max_profit_contract = float('inf')
-                    else:
-                        max_profit_contract = (leg['strike'] - leg['premium']) * 100
-                else: # Short
-                    max_profit_contract = leg['premium'] * 100
-                    if leg['type'] == 'call':
-                        max_loss_contract = float('inf')
-                        collateral_contract = current_price * 0.20 * 100 # Rough naked call approximation
-                    else:
-                        max_loss_contract = (leg['strike'] - leg['premium']) * 100
-                        collateral_contract = leg['strike'] * 0.10 * 100 # Rough naked put approximation
+            # Risk Primitives (New Helper)
+            primitives = _compute_risk_primitives_usd(legs, total_cost, current_price)
+            max_loss_contract = primitives["max_loss_per_contract"]
+            max_profit_contract = primitives["max_profit_per_contract"]
+            collateral_contract = primitives["collateral_required_per_contract"]
 
             # NEW: Compute explicit combo width via Truth Layer
             fallback_width_share = abs(total_cost) * spread_pct
@@ -424,7 +453,7 @@ def scan_for_opportunities(
             if final_execution_cost >= total_ev:
                 return None
 
-            return {
+            candidate_dict = {
                 "symbol": symbol,
                 "ticker": symbol,
                 "type": suggestion["strategy"],
@@ -432,8 +461,6 @@ def scan_for_opportunities(
                 "strategy_key": strategy_key,
                 "suggested_entry": abs(total_cost),
                 "ev": total_ev,
-                "max_loss_per_contract": max_loss_per_contract,
-                "collateral_per_contract": collateral_per_contract,
                 "score": round(unified_score.score, 1),
                 "unified_score_details": unified_score.components.dict(),
                 "iv_rank": iv_rank,
@@ -447,11 +474,19 @@ def scan_for_opportunities(
                 "max_loss_per_contract": max_loss_contract,
                 "max_profit_per_contract": max_profit_contract,
                 "collateral_required_per_contract": collateral_contract,
+                "collateral_per_contract": collateral_contract,
                 "net_delta_per_contract": net_delta_contract,
                 "net_vega_per_contract": net_vega_contract,
                 "data_quality": data_quality,
                 "pricing_mode": pricing_mode
             }
+
+            # Calculate Probability of Profit
+            # Pass dictionary representation of global snapshot for compatibility
+            gs_dict = global_snapshot.to_dict() if global_snapshot else None
+            candidate_dict["probability_of_profit"] = _estimate_probability_of_profit(candidate_dict, gs_dict)
+
+            return candidate_dict
 
         except Exception as e:
             print(f"[Scanner] Error processing {symbol}: {e}")

@@ -13,6 +13,11 @@ from .regime_integration import (
     DEFAULT_LIQUIDITY_SCALAR
 )
 
+MIN_TRADES = 20
+LEAKAGE_FLOOR = 1.0
+SHRINKAGE_CONST = 30.0
+Z_SCORE_THRESHOLD = 1.0
+
 
 @dataclass
 class PositionDescriptor:
@@ -61,10 +66,9 @@ class ConvictionService:
         # 1. Batch-level multipliers
         m_disc = self._get_discipline_multiplier(user_id) if user_id else 1.0
 
-        # NOTE: _get_performance_multipliers now uses user_id and returns (strategy, window) keys.
-        # The existing portfolio logic used (regime, strategy).
-        # We will attempt to use the "paper_trading" window as a proxy for general performance if user_id is present,
-        # otherwise we default to 1.0.
+        # NOTE: _get_performance_multipliers now returns a mix of keys:
+        # - (strategy, window) for legacy compatibility
+        # - "strategy:window:regime" for V3 specificity
         perf_mult_map = {}
         if user_id:
              perf_mult_map = self._get_performance_multipliers(user_id)
@@ -97,10 +101,20 @@ class ConvictionService:
 
             # 3. Performance multiplier
             # We try to look up performance for this strategy in 'paper_trading' window as a baseline
-            key = (strategy, "paper_trading")
-            m_perf = perf_mult_map.get(key, 1.0)
+            # Priority: Specific Regime > Unknown Regime > Generic Tuple
 
-            # If not found, maybe try "all" or generic if we had it. For now default to 1.0.
+            # Using 'paper_trading' as the window for portfolio positions
+            window = "paper_trading"
+
+            regime_key = f"{strategy}:{window}:{current_regime}"
+            unknown_regime_key = f"{strategy}:{window}:unknown"
+            generic_key = (strategy, window)
+
+            m_perf = perf_mult_map.get(regime_key)
+            if m_perf is None:
+                m_perf = perf_mult_map.get(unknown_regime_key)
+            if m_perf is None:
+                m_perf = perf_mult_map.get(generic_key, 1.0)
 
             c_final = base_conviction * m_perf * m_disc
             # Clamp
@@ -115,7 +129,7 @@ class ConvictionService:
 
         Logic:
           - Fetch multipliers for user.
-          - For each suggestion, find (strategy, window) key.
+          - For each suggestion, find best matching key.
           - Apply multiplier to 'score' and/or 'otc_score'.
           - Clamp result [0.5 * base, 1.5 * base].
         """
@@ -125,43 +139,24 @@ class ConvictionService:
 
         for s in suggestions:
             # Determine keys
-            # Candidates from scanner use 'type', suggestions use 'strategy'.
             strategy = s.get("strategy") or s.get("type") or "unknown"
-            # Normalize strategy key if needed? We assume DB has same keys.
-            # Usually scanner produces human readable types "Debit Call Spread".
-            # While DB might store "debit_call_spread" or similar if normalized.
-            # But paper_endpoints uses `infer_strategy_key_from_suggestion` which normalizes.
-            # Here we might have raw strings.
-            # Ideally we'd normalize, but for now we try raw match.
-            # NOTE: Phase 1 migration implies paper_endpoints stores keys.
-
-            # Window
             window = s.get("window") or "unknown"
-            # Midday scanner candidates don't have 'window' set yet in some flows,
-            # but run_midday_cycle sets it later.
-            # If we call this on candidates inside run_midday_cycle, we might need to pass window or inject it.
-            # Actually run_midday_cycle doesn't set window on candidates, only on final suggestions.
-            # So if we adjust candidates, window is "unknown".
-            # We should probably pass a default window if missing?
-            # Or rely on caller to set it.
+            regime = s.get("regime") or "unknown"
 
-            # If s is a suggestion dict, it has window.
-            # If s is a candidate, we might need to infer.
-            # Let's try "midday_entry" if missing and we are in that context?
-            # But here we don't know context.
-            # We'll use "unknown" or s.get("window").
-            # If caller didn't set window, we can't map.
+            regime_key = f"{strategy}:{window}:{regime}"
+            unknown_regime_key = f"{strategy}:{window}:unknown"
+            generic_key = (strategy, window)
 
-            key = (strategy, window)
-            w = multipliers.get(key, 1.0)
+            w = multipliers.get(regime_key)
+            if w is None:
+                w = multipliers.get(unknown_regime_key)
+            if w is None:
+                w = multipliers.get(generic_key, 1.0)
 
             if w == 1.0:
                 continue
 
             # Apply to score
-            # Score keys: 'score', 'otc_score', 'probability_of_profit' (0-1, distinct from score)
-            # We focus on 'score' (0-100) and 'otc_score'.
-
             for score_key in ["score", "otc_score"]:
                 if score_key in s and s[score_key] is not None:
                     base = float(s[score_key])
@@ -177,7 +172,6 @@ class ConvictionService:
                     s[score_key] = final
 
             # Special case: Morning suggestions use probability_of_profit (0-1)
-            # If we want to bias that:
             if "probability_of_profit" in s and s["probability_of_profit"] is not None:
                 p = float(s["probability_of_profit"])
                 p_adj = p * w
@@ -217,7 +211,112 @@ class ConvictionService:
             return 30.0 < raw_score < 70.0
         return True
 
-    def _get_performance_multipliers(self, user_id: str) -> Dict[tuple, float]:
+    def _get_performance_multipliers(self, user_id: str) -> Dict[Any, float]:
+        """
+        Returns a dict mapping keys -> weight multiplier (float).
+        Keys can be:
+          - (strategy, window)  (Legacy/Fallback)
+          - f"{strategy}:{window}:{regime}" (V3 Specific)
+        """
+        if not self.supabase or not user_id:
+            return {}
+
+        multipliers = {}
+        v3_success = False
+
+        # Attempt V3 Logic: Query learning_performance_summary_v3
+        try:
+            response = self.supabase.table("learning_performance_summary_v3")\
+                .select("*")\
+                .eq("user_id", user_id)\
+                .execute()
+
+            rows = response.data or []
+            if rows:
+                v3_success = True
+                multipliers = self._compute_v3_multipliers(rows)
+        except Exception as e:
+            # If query fails (e.g. view missing), swallow error and fallback
+            # print(f"[ConvictionService] V3 View Query Failed: {e}")
+            pass
+
+        if not v3_success:
+             # Fallback to legacy logic
+             multipliers = self._get_legacy_multipliers(user_id)
+
+        return multipliers
+
+    def _compute_v3_multipliers(self, rows: List[Dict]) -> Dict[Any, float]:
+        multipliers = {}
+
+        for row in rows:
+            strategy = row.get("strategy") or "unknown"
+            window = row.get("window") or "unknown"
+            regime = row.get("regime") or "unknown"
+
+            total_trades = row.get("total_trades") or 0
+            if total_trades < MIN_TRADES:
+                # Explicitly set to 1.0 to prevent inheritance from generic fallbacks
+                self._store_v3_multiplier(multipliers, strategy, window, regime, 1.0)
+                continue
+
+            # Check confidence interval if data available
+            avg_pnl = row.get("avg_realized_pnl")
+            std_pnl = row.get("std_realized_pnl")
+
+            if avg_pnl is not None and std_pnl is not None:
+                avg_pnl = float(avg_pnl)
+                std_pnl = float(std_pnl)
+                se = std_pnl / math.sqrt(total_trades)
+                # If signal is weak (within Z*SE of zero), treat as noise -> 1.0
+                if abs(avg_pnl) < Z_SCORE_THRESHOLD * se:
+                    # We store 1.0 explicitly so it overrides defaults
+                    m = 1.0
+                    self._store_v3_multiplier(multipliers, strategy, window, regime, m)
+                    continue
+
+            # Calculate EV-based multiplier
+            avg_leakage = float(row.get("avg_ev_leakage") or 0.0)
+            avg_predicted = float(row.get("avg_predicted_ev") or 0.0)
+
+            # leakage = realized - predicted
+            # raw = 1 + (leakage / basis)
+            # basis = max(abs(predicted), LEAKAGE_FLOOR)
+            basis = max(abs(avg_predicted), LEAKAGE_FLOOR)
+            raw_adjustment = avg_leakage / basis
+            raw_multiplier = 1.0 + raw_adjustment
+
+            # Shrinkage: n / (n + 30)
+            shrink_factor = total_trades / (total_trades + SHRINKAGE_CONST)
+
+            # Multiplier = 1 + shrink * (raw - 1)
+            final_multiplier = 1.0 + shrink_factor * (raw_multiplier - 1.0)
+
+            # Clamp [0.7, 1.3]
+            final_multiplier = max(0.7, min(1.3, final_multiplier))
+
+            self._store_v3_multiplier(multipliers, strategy, window, regime, final_multiplier)
+
+        return multipliers
+
+    def _store_v3_multiplier(self, multipliers: Dict[Any, float], strategy: str, window: str, regime: str, val: float):
+        # Store regime-specific key
+        regime_key = f"{strategy}:{window}:{regime}"
+        multipliers[regime_key] = val
+
+        # Store legacy tuple key if regime is 'normal' (as a representative proxy)
+        # OR if we don't have one yet.
+        # But 'normal' is preferred for compatibility.
+        legacy_key = (strategy, window)
+
+        if regime == "normal":
+            multipliers[legacy_key] = val
+        elif legacy_key not in multipliers:
+            # If we haven't seen 'normal' yet, store this as placeholder.
+            # 'normal' will overwrite later if encountered.
+            multipliers[legacy_key] = val
+
+    def _get_legacy_multipliers(self, user_id: str) -> Dict[tuple, float]:
         """
         Returns a dict mapping (strategy, window) -> weight multiplier (float)
         based on learning_feedback_loops rows for the user.
@@ -252,8 +351,6 @@ class ConvictionService:
                 pnl_edge = avg_pnl_val
 
                 # Clamp edge: max(-0.3, min(0.5, pnl_edge))
-                # Note: pnl_edge is dollar-based (usually).
-                # This clamping logic effectively limits the impact of large PnL swings.
                 pnl_clamped = max(-0.3, min(0.5, pnl_edge))
 
                 final_weight = base_val + pnl_clamped
@@ -266,7 +363,7 @@ class ConvictionService:
             return multiplier_map
 
         except Exception as err:
-            print(f"[ConvictionService] Error calculating multipliers: {err}")
+            print(f"[ConvictionService] Error calculating legacy multipliers: {err}")
             return {}
 
     def _get_discipline_multiplier(self, user_id: str) -> float:

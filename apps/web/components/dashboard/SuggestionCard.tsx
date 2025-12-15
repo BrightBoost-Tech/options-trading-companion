@@ -215,6 +215,31 @@ const SuggestionCard = ({ suggestion, onStage, onModify, onDismiss }: Suggestion
                     </div>
                 </div>
 
+                {/* Risk Metadata Row */}
+                {suggestion.sizing_metadata && (
+                    <div className="mb-3 p-2 bg-slate-50 border border-slate-100 rounded text-xs text-slate-700 flex flex-wrap items-center gap-2">
+                        {/* Compact metrics */}
+                        <span>
+                            Max loss: ${suggestion.sizing_metadata.max_loss_total?.toFixed(2) ?? '--'}
+                        </span>
+                        <span className="text-slate-300">•</span>
+                        <span>
+                            Collateral: ${suggestion.sizing_metadata.capital_required?.toFixed(2) ?? '--'}
+                        </span>
+                        <span className="text-slate-300">•</span>
+                        <span>
+                            Risk mult: {suggestion.sizing_metadata.risk_multiplier?.toFixed(2) ?? '--'}
+                        </span>
+
+                        {/* Clamp Reason Badge */}
+                        {(suggestion.sizing_metadata.clamped_by || suggestion.sizing_metadata.clamp_reason) && (
+                            <Badge variant="outline" className="ml-auto text-[10px] bg-red-50 text-red-700 border-red-200">
+                                {suggestion.sizing_metadata.clamp_reason ?? suggestion.sizing_metadata.clamped_by}
+                            </Badge>
+                        )}
+                    </div>
+                )}
+
                 {/* Footer Actions */}
                 <div className="flex justify-end gap-2 mt-3 pt-2 border-t border-gray-100">
                     <button

@@ -226,47 +226,47 @@ class ConvictionService:
             return {}
 
         try:
-            # Query learning_feedback_loops
-            # We optionally filter by updated_at > 90 days ago?
-            # For now, get all.
-            res = self.supabase.table("learning_feedback_loops")\
+            # Query learning_feedback_loops for realized PnL analysis
+            # We retrieve all records for the user
+            response = self.supabase.table("learning_feedback_loops")\
                 .select("*")\
                 .eq("user_id", user_id)\
                 .execute()
 
-            rows = res.data or []
-            multipliers = {}
+            rows = response.data or []
+            multiplier_map = {}
 
             for row in rows:
-                strategy = row.get("strategy") or "unknown"
-                window = row.get("window") or "unknown"
-                key = (strategy, window)
+                strat = row.get("strategy") or "unknown"
+                win_key = row.get("window") or "unknown"
+                lookup_key = (strat, win_key)
 
-                total_trades = row.get("total_trades") or 0
-                avg_return = float(row.get("avg_return") or 0.0)
+                trade_count = row.get("total_trades") or 0
+                avg_pnl_val = float(row.get("avg_return") or 0.0)
 
-                # Apply weights only when total_trades >= 5
-                if total_trades < 5:
+                # Skip if insufficient sample size
+                if trade_count < 5:
                     continue
 
-                base = 1.0
-                edge = avg_return
-                # Clamp edge: max(-0.3, min(0.5, edge))
-                # Note: edge is in dollars. This clamping logic treats $0.50 as max positive boost
-                # and $-0.30 as max penalty. It acts as a binary/momentum flag.
-                edge_clamped = max(-0.3, min(0.5, edge))
+                base_val = 1.0
+                pnl_edge = avg_pnl_val
 
-                weight = base + edge_clamped
-                # Final clamp: keep between 0.7x and 1.5x
-                weight = max(0.7, min(1.5, weight))
+                # Clamp edge: max(-0.3, min(0.5, pnl_edge))
+                # Note: pnl_edge is dollar-based (usually).
+                # This clamping logic effectively limits the impact of large PnL swings.
+                pnl_clamped = max(-0.3, min(0.5, pnl_edge))
 
-                multipliers[key] = weight
+                final_weight = base_val + pnl_clamped
 
-            return multipliers
+                # Global safety clamp: keep multiplier between 0.7x and 1.5x
+                final_weight = max(0.7, min(1.5, final_weight))
 
-        except Exception as e:
-            # Log debug message (print for now as we don't have logger here)
-            print(f"[ConvictionService] Failed to fetch multipliers: {e}")
+                multiplier_map[lookup_key] = final_weight
+
+            return multiplier_map
+
+        except Exception as err:
+            print(f"[ConvictionService] Error calculating multipliers: {err}")
             return {}
 
     def _get_discipline_multiplier(self, user_id: str) -> float:

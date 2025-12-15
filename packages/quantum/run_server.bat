@@ -1,43 +1,25 @@
 @echo off
-SETLOCAL
+setlocal
 
-REM Navigate to the directory of the script
-CD /D "%~dp0"
+REM %~dp0 = directory of this script (packages\quantum)
+set "SCRIPT_DIR=%~dp0"
+if "%SCRIPT_DIR:~-1%"=="\" set "SCRIPT_DIR=%SCRIPT_DIR:~0,-1%"
 
-REM Check if venv/Scripts/python.exe exists.
-IF NOT EXIST "venv\Scripts\python.exe" (
-    echo Virtual environment not found. Creating virtual environment...
-    python -m venv venv
-    IF %ERRORLEVEL% NEQ 0 (
-        echo Error: Failed to create virtual environment. Please ensure python is installed and in your PATH.
-        PAUSE
-        EXIT /B 1
-    )
+REM Repo root is two levels up from packages\quantum
+cd /d "%SCRIPT_DIR%\..\.."
+set "REPO_ROOT=%cd%"
+
+set "BACKEND_VENV_PY=%REPO_ROOT%\packages\quantum\venv\Scripts\python.exe"
+
+if not exist "%BACKEND_VENV_PY%" (
+  echo [ERROR] Backend venv python not found: "%BACKEND_VENV_PY%"
+  exit /b 1
 )
 
-REM Define the Python executable path within the virtual environment
-SET PYTHON_EXEC=venv\Scripts\python.exe
+set PYTHONPATH=%REPO_ROOT%
+echo [INFO] Repo root: %REPO_ROOT%
+echo [INFO] PYTHONPATH: %PYTHONPATH%
 
-REM Verify that the python executable exists now
-IF NOT EXIST "%PYTHON_EXEC%" (
-    echo Error: Python executable not found at %PYTHON_EXEC%
-    PAUSE
-    EXIT /B 1
-)
+"%BACKEND_VENV_PY%" -m uvicorn packages.quantum.api:app --reload --host 127.0.0.1 --port 8000
 
-REM Install/Upgrade dependencies
-echo Installing dependencies...
-"%PYTHON_EXEC%" -m pip install --upgrade pip
-"%PYTHON_EXEC%" -m pip install -r requirements.txt
-
-IF %ERRORLEVEL% NEQ 0 (
-    echo Error: Failed to install dependencies.
-    PAUSE
-    EXIT /B 1
-)
-
-REM Run server
-echo Starting server...
-"%PYTHON_EXEC%" -m uvicorn api:app --reload --host 127.0.0.1 --port 8000
-
-ENDLOCAL
+endlocal

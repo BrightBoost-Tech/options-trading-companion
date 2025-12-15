@@ -1,7 +1,7 @@
 from fastapi import APIRouter, HTTPException, Depends, BackgroundTasks
 from pydantic import BaseModel
 from typing import Optional, Dict, Any, List
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 import logging
 import uuid
 import os
@@ -600,17 +600,43 @@ def get_paper_portfolio(
             # 2. SPY Benchmark
             try:
                 poly = PolygonService()
-                current_spy = poly.get_recent_quote("SPY")
-                current_price = (current_spy.get("bid_price", 0) + current_spy.get("ask_price", 0)) / 2 if current_spy else 0
+                current_spy = poly.get_recent_quote("SPY") or {}
+
+                bid = float(current_spy.get("bid_price") or current_spy.get("bid") or 0.0)
+                ask = float(current_spy.get("ask_price") or current_spy.get("ask") or 0.0)
+
+                # Prefer explicit midpoint if provided by the service; otherwise compute from bid/ask.
+                current_price = float(
+                    current_spy.get("price")
+                    or ((bid + ask) / 2.0 if bid > 0 and ask > 0 else 0.0)
+                )
 
                 if current_price > 0:
                     start_date_str = start_dt.strftime("%Y-%m-%d")
-                    # Fetch 1 day of data
-                    hist = poly.get_historical_prices("SPY", from_date=start_date_str, to_date=start_date_str)
-                    if hist and len(hist) > 0:
-                        start_price = hist[0].get("close", 0) # or open
-                        if start_price > 0:
-                            spy_return_pct = ((current_price - start_price) / start_price) * 100
+
+                    # Pull a small window ending shortly AFTER the portfolio start date so we can
+                    # pick the first trading day on/after start_date_str (handles weekends/holidays).
+                    hist = poly.get_historical_prices(
+                        "SPY",
+                        days=10,
+                        to_date=start_dt + timedelta(days=7),
+                    )
+
+                    dates = (hist or {}).get("dates") or []
+                    prices = (hist or {}).get("prices") or []
+
+                    start_price = 0.0
+                    for d, p in zip(dates, prices):
+                        if d >= start_date_str:
+                            try:
+                                start_price = float(p or 0.0)
+                            except Exception:
+                                start_price = 0.0
+                            break
+
+                    if start_price > 0:
+                        spy_return_pct = ((current_price - start_price) / start_price) * 100.0
+
             except Exception as e:
                 logging.warning(f"Failed to calc SPY benchmark: {e}")
 

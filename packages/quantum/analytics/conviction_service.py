@@ -59,7 +59,7 @@ class ConvictionService:
         conviction_map: Dict[str, float] = {}
 
         # 1. Batch-level multipliers
-        m_disc = self._get_discipline_multiplier()
+        m_disc = self._get_discipline_multiplier(user_id) if user_id else 1.0
 
         # NOTE: _get_performance_multipliers now uses user_id and returns (strategy, window) keys.
         # The existing portfolio logic used (regime, strategy).
@@ -269,7 +269,36 @@ class ConvictionService:
             print(f"[ConvictionService] Failed to fetch multipliers: {e}")
             return {}
 
-    def _get_discipline_multiplier(self) -> float:
-        if not self.supabase:
+    def _get_discipline_multiplier(self, user_id: str) -> float:
+        if not self.supabase or not user_id:
             return 1.0
-        return 1.0
+
+        try:
+            # Query discipline_score_per_user for the current user
+            res = self.supabase.table("discipline_score_per_user")\
+                .select("discipline_score")\
+                .eq("user_id", user_id)\
+                .execute()
+
+            rows = res.data or []
+            if not rows:
+                return 1.0
+
+            score = rows[0].get("discipline_score")
+            if score is None:
+                return 1.0
+
+            score = float(score)
+
+            # Map to multiplier
+            if score >= 0.8:
+                return 1.0
+            elif score >= 0.5:
+                return 0.5
+            else:
+                return 0.0
+
+        except Exception as e:
+            # Log debug message (print for now as we don't have logger here)
+            print(f"[ConvictionService] Failed to fetch discipline score: {e}")
+            return 1.0

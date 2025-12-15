@@ -24,11 +24,13 @@ from packages.quantum.services.analytics_service import AnalyticsService
 router = APIRouter()
 
 def get_supabase():
-    from api import supabase  # reuse global supabase client
-    return supabase
+    # Lazy import to avoid circular imports; use the canonical backend module path.
+    from packages.quantum.api import supabase_admin
+    return supabase_admin
 
 def get_analytics_service():
-    from api import analytics_service
+    # Lazy import to avoid circular imports; use the canonical backend module path.
+    from packages.quantum.api import analytics_service
     return analytics_service
 
 class StageOrderRequest(BaseModel):

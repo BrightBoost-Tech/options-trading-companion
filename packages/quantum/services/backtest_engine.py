@@ -18,10 +18,10 @@ from packages.quantum.analytics.regime_integration import (
 )
 from packages.quantum.analytics.factors import calculate_trend, calculate_volatility, calculate_rsi
 from packages.quantum.nested.backbone import infer_global_context, GlobalContext
-from packages.quantum.execution.transaction_cost_model import TransactionCostModel
+from packages.quantum.execution.transaction_cost_model import TransactionCostModel as V3TCM
 from analytics.factors import calculate_trend, calculate_volatility, calculate_rsi
 from nested.backbone import infer_global_context, GlobalContext
-from packages.quantum.services.transaction_cost_model import TransactionCostModel
+from packages.quantum.services.transaction_cost_model import TransactionCostModel as LegacyTCM
 
 class BacktestRunResult(BaseModel):
     backtest_id: str
@@ -58,7 +58,7 @@ class BacktestEngine:
         backtest_id = str(uuid.uuid4())
 
         # Initialize TCM
-        tcm = TransactionCostModel(cost_model)
+        tcm = LegacyTCM(cost_model)
 
         # 1. Fetch Data
         try:
@@ -329,7 +329,7 @@ class BacktestEngine:
         # Generate int seed from rng
         seed_val = rng.randint(0, 1000000)
 
-        res = TransactionCostModel.simulate_fill(order, quote, cost_model, seed=seed_val)
+        res = V3TCM.simulate_fill(order, quote, cost_model, seed=seed_val)
         return res["avg_fill_price"]
 
     def _calculate_metrics(self, trades: List[Dict], equity_curve: List[Dict], initial_equity: float) -> Dict[str, Any]:

@@ -513,13 +513,30 @@ async def optimize_portfolio(req: OptimizationRequest, request: Request, user_id
                 # Heuristic spread if unknown
                 spread_pct = 0.01 # Default 1% if not passed? ExecutionService defaults to 0.5%
 
-                cost_drag_dollars = execution_service.estimate_execution_cost(
-                    symbol=asset.ticker,
+                # FIX: Convert total contract value to per-share premium for the estimator
+                asset_val = abs(asset.current_value)
+                qty = abs(asset.quantity or 1.0)
+                price_per_contract_dollars = asset_val / max(qty, 0.0001)
+                entry_cost_per_share = price_per_contract_dollars / 100.0
+
+                # Use underlying symbol for history lookup (better match)
+                symbol_for_history = asset.underlying
+                if not symbol_for_history:
+                    # Fallback extract from ticker if needed, though usually populated
+                    parts = asset.ticker.split("_")
+                    symbol_for_history = parts[0] if len(parts) > 1 else asset.ticker
+
+                cost_per_contract = execution_service.estimate_execution_cost(
+                    symbol=symbol_for_history,
                     spread_pct=None, # let service decide or use default
                     user_id=user_id,
-                    entry_cost=asset.current_value,
+                    entry_cost=entry_cost_per_share,
                     num_legs=num_legs
                 )
+
+                # Total cost for the position
+                cost_drag_dollars = cost_per_contract * qty
+
             else:
                  # Fallback if service init failed
                  cost_drag_dollars = asset.current_value * 0.01

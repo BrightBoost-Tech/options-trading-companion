@@ -294,7 +294,9 @@ def scan_for_opportunities(
                   num_legs=len(legs),
                 )
             else:
-                  expected_execution_cost = 0.05  # safe fallback
+                  # This fallback is only used if no execution service and no history map.
+                  # It is passed to calculate_unified_score, which handles null/0 better.
+                  expected_execution_cost = 0.0
 
             unified_score = calculate_unified_score(
                 trade=trade_dict,
@@ -305,8 +307,11 @@ def scan_for_opportunities(
                 entry_cost=abs(total_cost)
             )
 
+            # Retrieve final execution cost (contract dollars) from UnifiedScore
+            final_execution_cost = unified_score.execution_cost_dollars
+
            # Requirement: Hard-reject if execution cost > EV
-            if (expected_execution_cost or 0.0) >= total_ev:
+            if final_execution_cost >= total_ev:
                 return None
   
 
@@ -323,7 +328,7 @@ def scan_for_opportunities(
                 "trend": trend,
                 "legs": legs,
                 "badges": unified_score.badges,
-                "execution_drag_estimate": expected_execution_cost,
+                "execution_drag_estimate": final_execution_cost,
                 "execution_drag_samples": drag_samples,
                 "execution_drag_source": drag_source
             }

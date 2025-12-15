@@ -17,10 +17,21 @@ from packages.quantum.plaid_service import client as plaid_api_client # importin
 from packages.quantum import plaid_service
 
 from datetime import datetime
+import os
 
 # Import shared dependencies from main API or re-instantiate securely
 from packages.quantum.security.secrets_provider import SecretsProvider
 from supabase import create_client, Client
+
+# Analytics & Learning Dependencies
+from packages.quantum.analytics.conviction_service import ConvictionService
+from packages.quantum.services.analytics_service import AnalyticsService
+
+# Attempt to import CalibrationService (provided by prompt 6)
+try:
+    from packages.quantum.analytics.calibration_service import CalibrationService
+except ImportError:
+    CalibrationService = None
 
 router = APIRouter(
     prefix="/internal/tasks",
@@ -35,6 +46,8 @@ supa_secrets = secrets_provider.get_supabase_secrets()
 url = supa_secrets.url
 key = supa_secrets.service_role_key
 supabase_admin: Client = create_client(url, key) if url and key else None
+
+APP_VERSION = os.getenv("APP_VERSION", "v2-dev")
 
 def get_admin_client():
     if not supabase_admin:
@@ -155,3 +168,97 @@ async def iv_daily_refresh_task(
              stats["errors"].append(f"{sym}: {e}")
 
     return {"status": "ok", "stats": stats}
+
+@router.post("/train-learning-v3")
+async def train_learning_v3(
+    lookback_days: int = Body(90, embed=True),
+    min_samples: int = Body(40, embed=True),
+    client: Client = Depends(get_admin_client)
+):
+    """
+    Triggers Learned Nesting v3 training cycle:
+    1. Calibrates probability models based on historical outcomes.
+    2. Refreshes conviction multipliers.
+    3. Emits audit events.
+    """
+    if not CalibrationService:
+         raise HTTPException(status_code=500, detail="CalibrationService dependency missing (Prompt 6)")
+
+    analytics = AnalyticsService(client)
+    active_users = get_active_user_ids(client)
+
+    total_buckets = 0
+    total_conviction_rows = 0
+
+    for uid in active_users:
+        try:
+            # Step 1: Start Event
+            analytics.log_event(
+                user_id=uid,
+                event_name="learning_train_started",
+                category="system",
+                properties={
+                    "model_version": APP_VERSION,
+                    "lookback_days": lookback_days
+                }
+            )
+
+            # Step 2: Calibration Training
+            # Call CalibrationService.train_and_persist(user_id, lookback_days, min_samples)
+            # Returns dict with stats (e.g., {'buckets_count': 12, 'error': 0.05})
+            cal_stats = CalibrationService.train_and_persist(uid, lookback_days, min_samples)
+
+            buckets = 0
+            if isinstance(cal_stats, dict):
+                buckets = cal_stats.get("buckets_count", 0)
+            total_buckets += buckets
+
+            # Step 3: Conviction Warmup
+            conviction_svc = ConvictionService(supabase=client)
+            multipliers = conviction_svc._get_performance_multipliers(uid)
+            rows = len(multipliers)
+            total_conviction_rows += rows
+
+            # Step 4: Completion Event
+            analytics.log_event(
+                user_id=uid,
+                event_name="learning_train_completed",
+                category="system",
+                properties={
+                    "model_version": APP_VERSION,
+                    "calibration_buckets": buckets,
+                    "conviction_rows": rows,
+                    "calibration_stats": cal_stats
+                }
+            )
+
+        except Exception as e:
+            error_msg = str(e)
+            print(f"Training failed for user {uid}: {error_msg}")
+
+            analytics.log_event(
+                user_id=uid,
+                event_name="learning_train_failed",
+                category="system",
+                properties={
+                     "model_version": APP_VERSION,
+                     "error": error_msg
+                }
+            )
+
+            # Fail hard as per requirements: "If any step fails... return HTTP 500"
+            raise HTTPException(
+                status_code=500,
+                detail={
+                    "status": "error",
+                    "message": "Training cycle failed",
+                    "user_id": uid,
+                    "error": error_msg
+                }
+            )
+
+    return {
+        "status": "ok",
+        "calibration_buckets": total_buckets,
+        "conviction_rows": total_conviction_rows
+    }

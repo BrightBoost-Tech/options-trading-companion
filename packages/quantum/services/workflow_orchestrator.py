@@ -295,15 +295,29 @@ async def run_morning_cycle(supabase: Client, user_id: str):
                     f"historical win rate for similar exits in {iv_regime} regime.{budget_note}"
                 )
 
-            features_dict = {
-                "unit_price": unit_price,
-                "unit_cost": unit_cost,
-                "delta": net_delta / qty_unit,
-                "iv_rank": iv_rank_score,
-                "regime": iv_regime,
+            # Compute input-only features for hash (stable across price/EV changes)
+            # features_for_hash: inputs only (ticker, spread_type, DTE, width, iv_regime, global_regime, symbol_regime, effective_regime)
+
+            # Helper to compute width/DTE
+            strikes = [float(l.get("strike", 0)) for l in legs]
+            width = max(strikes) - min(strikes) if len(strikes) > 1 else 0.0
+
+            try:
+                # legs[0]["expiry"] is YYYY-MM-DD
+                expiry_dt = datetime.strptime(legs[0]["expiry"], "%Y-%m-%d")
+                dte = (expiry_dt - datetime.now()).days
+            except Exception:
+                dte = 30 # fallback
+
+            features_for_hash = {
+                "ticker": spread.ticker,
+                "spread_type": spread.spread_type,
+                "dte": dte,
+                "width": width,
+                "iv_regime": iv_regime,
                 "global_regime": global_snap.state.value,
-                "strategy": "take_profit_limit",
-                "underlying": underlying
+                "symbol_regime": sym_snap.state.value,
+                "effective_regime": effective_regime_state.value
             }
 
             ctx = TradeContext.create_new(
@@ -312,7 +326,7 @@ async def run_morning_cycle(supabase: Client, user_id: str):
                 strategy="take_profit_limit",
                 regime=iv_regime
             )
-            ctx.features_hash = compute_features_hash(features_dict)
+            ctx.features_hash = compute_features_hash(features_for_hash)
 
             suggestion = {
                     "user_id": user_id,
@@ -372,7 +386,11 @@ async def run_morning_cycle(supabase: Client, user_id: str):
                 user_id,
                 ctx,
                 "suggestion_generated",
-                properties={"ev": metrics.expected_value, "ticker": spread.ticker}
+                properties={
+                    "ev": metrics.expected_value,
+                    "ticker": spread.ticker,
+                    "probability_of_profit": metrics.prob_of_profit
+                }
             )
 
     # 4. Insert suggestions
@@ -518,15 +536,25 @@ async def run_midday_cycle(supabase: Client, user_id: str):
         if price <= 0:
             continue
 
-        max_loss = float(cand.get("max_loss_per_contract", price * 100))
-        collateral = float(cand.get("collateral_per_contract", price * 100))
+        price = float(cand.get("suggested_entry", 0.0) or 0.0)
+        max_loss = float(cand.get("max_loss_per_contract") or (price * 100.0))
+        collateral = float(cand.get("collateral_required_per_contract") or cand.get("collateral_per_contract") or max_loss)
 
-        # Use canonical sizing (no hardcoded aggressive 0.40)
-        # Assuming balanced or deriving from user prefs (passed as config or defaulting).
-        # For now, we use defaults or conservative caps as per instruction:
-        # "Remove hardcoded profile->risk_pct mapping that uses 0.40"
+        score = float(cand.get("unified_score", cand.get("score", 50.0)) or 50.0)
+        base_per_trade_pct = 0.02 if score >= 70 else 0.01
+
+        # Risk multiplier from conviction (clamp 0.5..1.5)
+        conviction = float(cand.get("conviction_score", cand.get("confidence_score", 0.5)) or 0.5)
+        risk_multiplier = 0.5 + conviction
+        risk_multiplier = min(1.5, max(0.5, risk_multiplier))
+
+        # Absolute risk budget dollars
+        risk_budget = deployable_capital * base_per_trade_pct * risk_multiplier
+
         sizing = calculate_sizing(
             account_buying_power=deployable_capital,
+            ev_per_contract=float(cand.get("ev", 0.0) or 0.0),
+            contract_ask=price,  # keep for backward compat logging
             max_loss_per_contract=max_loss,
             collateral_required_per_contract=collateral,
             max_risk_pct=0.05, # Conservative default cap
@@ -568,8 +596,10 @@ async def run_midday_cycle(supabase: Client, user_id: str):
             ev_per_contract=ev,
             contract_ask=price,
             max_risk_pct=1.0, # Full utilization of the calculated allowed risk
-            profile="AGGRESSIVE",
+            profile="AGGRESSIVE"
         )
+
+        allowed_risk_dollars = sizing.get("max_dollar_risk", 0.0)
 
         # If contracts == 0, check reasons.
         if sizing["contracts"] == 0:
@@ -634,6 +664,7 @@ async def run_midday_cycle(supabase: Client, user_id: str):
             )
             ctx.features_hash = compute_features_hash(cand_features)
 
+            pop = cand.get("probability_of_profit")
             suggestion = {
                 "user_id": user_id,
                 "created_at": datetime.now(timezone.utc).isoformat(),
@@ -651,6 +682,7 @@ async def run_midday_cycle(supabase: Client, user_id: str):
                 "status": "pending",
                 "source": "scanner",
                 "ev": ev,
+                "probability_of_profit": pop,
                 "internal_cand": cand,
                 "trace_id": ctx.trace_id,
                 "model_version": ctx.model_version,
@@ -659,12 +691,16 @@ async def run_midday_cycle(supabase: Client, user_id: str):
             }
             suggestions.append(suggestion)
 
+            props = {"ev": ev, "score": cand.get("score")}
+            if pop is not None:
+                props["probability_of_profit"] = pop
+
             emit_trade_event(
                 analytics_service,
                 user_id,
                 ctx,
                 "suggestion_generated",
-                properties={"ev": ev, "score": cand.get("score")}
+                properties=props
             )
 
     print(f"FINAL MIDDAY SUGGESTION COUNT: {len(suggestions)}")

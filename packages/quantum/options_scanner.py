@@ -83,6 +83,44 @@ def _compute_risk_primitives_usd(legs: List[Dict[str, Any]], total_cost: float, 
         "max_profit_per_contract": max_profit,
         "collateral_required_per_contract": collateral_required,
     }
+def _estimate_probability_of_profit(candidate: Dict[str, Any], global_snapshot: Optional[Dict[str, Any]] = None) -> float:
+    """
+    Estimates the Probability of Profit (PoP) for a trade candidate.
+    Returns a float in [0.01, 0.99].
+    """
+    score = candidate.get("score", 50.0)
+
+    # 1. Base from score: sigmoid centered at 50
+    # p = 1 / (1 + exp(-(score - 50) / 12))
+    p = 1.0 / (1.0 + np.exp(-(score - 50.0) / 12.0))
+
+    # 2. Strategy adjustments
+    strategy = str(candidate.get("strategy", "")).lower()
+    c_type = str(candidate.get("type", "")).lower()
+
+    # Concatenate fields to ensure we catch the strategy name even if 'strategy' key is missing/empty
+    # In scan_for_opportunities, 'strategy' key is populated, but we check both for safety.
+    combined = f"{strategy} {c_type}"
+
+    # Credit spreads / Iron Condors: +0.08
+    if "credit" in combined or "condor" in combined:
+        p += 0.08
+    # Debit spreads / Calls / Puts: -0.05
+    elif "debit" in combined or "call" in combined or "put" in combined:
+        p -= 0.05
+
+    # 3. Regime adjustment
+    if global_snapshot:
+        state = global_snapshot.get("state")
+        # state can be an Enum or string. Convert to string safely.
+        state_str = str(state).upper()
+
+        # Check for SHOCK or HIGH_VOL
+        if "SHOCK" in state_str or "HIGH_VOL" in state_str or "EXTREME" in state_str:
+            p -= 0.07
+
+    # 4. Clamp
+    return float(np.clip(p, 0.01, 0.99))
 
 def scan_for_opportunities(
     symbols: List[str] = None,
@@ -300,6 +338,12 @@ def scan_for_opportunities(
                         total_cost -= premium
 
             # G. Compute Net EV & Risk Primitives
+            max_loss_contract = 0.0
+            max_profit_contract = 0.0
+            collateral_contract = 0.0
+            max_loss_per_contract = 0.0
+            collateral_per_contract = 0.0
+
             # Net Delta (shares equiv) and Vega (contract total)
             # Vega in legs is usually per share. Multiplying by 100 gives contract exposure.
             net_delta_contract = sum((l['delta'] if l['side']=='buy' else -l['delta']) for l in legs) * 100
@@ -409,7 +453,7 @@ def scan_for_opportunities(
             if final_execution_cost >= total_ev:
                 return None
 
-            return {
+            candidate_dict = {
                 "symbol": symbol,
                 "ticker": symbol,
                 "type": suggestion["strategy"],
@@ -436,6 +480,13 @@ def scan_for_opportunities(
                 "data_quality": data_quality,
                 "pricing_mode": pricing_mode
             }
+
+            # Calculate Probability of Profit
+            # Pass dictionary representation of global snapshot for compatibility
+            gs_dict = global_snapshot.to_dict() if global_snapshot else None
+            candidate_dict["probability_of_profit"] = _estimate_probability_of_profit(candidate_dict, gs_dict)
+
+            return candidate_dict
 
         except Exception as e:
             print(f"[Scanner] Error processing {symbol}: {e}")

@@ -163,7 +163,21 @@ def close_paper_position(
     )
 
     # 3. Stage Closing Order
-    order_id = _stage_order_internal(supabase, analytics, user_id, ticket, position["portfolio_id"], position_id=req.position_id)
+    # Reuse trace_id from position
+    trace_id_override = position.get("trace_id")
+    # Also pass suggestion_id as source_ref for full context lookup
+    if position.get("suggestion_id"):
+        ticket.source_ref_id = position.get("suggestion_id")
+
+    order_id = _stage_order_internal(
+        supabase,
+        analytics,
+        user_id,
+        ticket,
+        position["portfolio_id"],
+        position_id=req.position_id,
+        trace_id_override=trace_id_override
+    )
 
     # 4. Process
     _process_orders_for_user(supabase, analytics, user_id, target_order_id=order_id)
@@ -216,20 +230,37 @@ def _get_or_create_portfolio(supabase, user_id, portfolio_id=None):
         raise HTTPException(status_code=500, detail="Failed to create portfolio")
     return new_port.data[0]
 
-def _stage_order_internal(supabase, analytics, user_id, ticket: TradeTicket, portfolio_id_arg=None, position_id=None):
+def _stage_order_internal(supabase, analytics, user_id, ticket: TradeTicket, portfolio_id_arg=None, position_id=None, trace_id_override=None):
     portfolio = _get_or_create_portfolio(supabase, user_id, portfolio_id_arg)
     portfolio_id = portfolio["id"]
 
     # Resolve Context
     suggestion_id = None
-    trace_id = None
+    trace_id = trace_id_override
+
+    # Metadata for telemetry
+    model_version = None
+    features_hash = None
+    strategy = None
+    window = None
+    regime = None
+
     if ticket.source_ref_id:
         suggestion_id = str(ticket.source_ref_id)
         # Fetch suggestion context
         try:
-             s_res = supabase.table("trade_suggestions").select("trace_id").eq("id", suggestion_id).single().execute()
+             s_res = supabase.table("trade_suggestions").select("*").eq("id", suggestion_id).single().execute()
              if s_res.data:
-                 trace_id = s_res.data.get("trace_id")
+                 s_data = s_res.data
+                 # Prefer suggestion's trace_id unless overridden (which shouldn't happen usually if linked)
+                 if not trace_id:
+                     trace_id = s_data.get("trace_id")
+
+                 model_version = s_data.get("model_version")
+                 features_hash = s_data.get("features_hash")
+                 strategy = s_data.get("strategy")
+                 window = s_data.get("window")
+                 regime = s_data.get("regime")
         except:
             pass
 
@@ -274,7 +305,15 @@ def _stage_order_internal(supabase, analytics, user_id, ticket: TradeTicket, por
     order_id = res.data[0]["id"]
 
     # Telemetry
-    ctx = TradeContext(trace_id=trace_id, suggestion_id=suggestion_id)
+    ctx = TradeContext(
+        trace_id=trace_id,
+        suggestion_id=suggestion_id,
+        model_version=model_version,
+        features_hash=features_hash,
+        strategy=strategy,
+        window=window,
+        regime=regime
+    )
     emit_trade_event(analytics, user_id, ctx, "order_staged", is_paper=True, properties={"order_id": order_id})
 
     return order_id
@@ -535,9 +574,27 @@ def _commit_fill(supabase, analytics, user_id, order, fill_res, quote, portfolio
             "quantity": signed_incremental_qty,
             "avg_entry_price": this_fill_price,
             "current_mark": this_fill_price,
-            "unrealized_pl": 0.0
+            "unrealized_pl": 0.0,
+            # Linkage
+            "trace_id": order.get("trace_id"),
+            "suggestion_id": order.get("suggestion_id")
         }
-        supabase.table("paper_positions").insert(pos_payload).execute()
+
+        # Enrich with model metadata from suggestion if available
+        if order.get("suggestion_id"):
+            try:
+                s_res = supabase.table("trade_suggestions").select("model_version, features_hash, strategy, window, regime").eq("id", order.get("suggestion_id")).single().execute()
+                if s_res.data:
+                    pos_payload.update(s_res.data)
+            except Exception as e:
+                logging.warning(f"Failed to fetch suggestion metadata for position: {e}")
+
+        new_pos = supabase.table("paper_positions").insert(pos_payload).execute()
+
+        # Update order with the new position_id
+        if new_pos.data:
+            new_pos_id = new_pos.data[0]["id"]
+            supabase.table("paper_orders").update({"position_id": new_pos_id}).eq("id", order["id"]).execute()
 
     # Telemetry
     emit_trade_event(analytics, user_id, TradeContext(trace_id=order.get("trace_id")), "order_filled", is_paper=True, properties={"order_id": order["id"]})
@@ -579,10 +636,19 @@ def _run_attribution(supabase, user_id, order, position, exit_fill, fees, side):
         trace_id = order.get("trace_id")
         suggestion_id = order.get("suggestion_id")
 
+        reason_codes = []
+        if not suggestion_id:
+            reason_codes.append("missing_suggestion_link")
+        if entry_price == entry_mid:
+            reason_codes.append("fallback_entry_mid_used")
+        if not quote_at_exit:
+            reason_codes.append("missing_quote_at_exit")
+
         payload = {
             "user_id": user_id,
             "trace_id": trace_id,
             "suggestion_id": suggestion_id,
+            "execution_id": order.get("id"),
             "is_paper": True,
             "pnl_realized": attr["pnl_total"],
             "pnl_alpha": attr["pnl_alpha"],
@@ -593,13 +659,30 @@ def _run_attribution(supabase, user_id, order, position, exit_fill, fees, side):
             "exit_mid": exit_mid,
             "exit_fill": exit_fill,
             "updated_at": datetime.now(timezone.utc).isoformat(),
-            "outcome_type": "individual_trade"
+            "outcome_type": "trade_closed",
+            "details_json": {"reason_codes": reason_codes}
         }
 
-        # Strategy context
-        strat_key = position.get("strategy_key","")
-        if "_" in strat_key:
-            payload["strategy"] = strat_key.split("_")[-1]
+        # Enrich from suggestion
+        if suggestion_id:
+            try:
+                s_res = supabase.table("trade_suggestions").select("ev, model_version, features_hash, strategy, window, regime").eq("id", suggestion_id).single().execute()
+                if s_res.data:
+                    data = s_res.data
+                    payload["pnl_predicted"] = data.get("ev")
+                    payload["model_version"] = data.get("model_version")
+                    payload["features_hash"] = data.get("features_hash")
+                    payload["strategy"] = data.get("strategy")
+                    payload["window"] = data.get("window")
+                    payload["regime"] = data.get("regime")
+            except Exception as e:
+                logging.warning(f"Failed to fetch suggestion data for LFL: {e}")
+
+        # Fallback strategy key if not in suggestion
+        if "strategy" not in payload:
+            strat_key = position.get("strategy_key","")
+            if "_" in strat_key:
+                payload["strategy"] = strat_key.split("_")[-1]
 
         supabase.table("learning_feedback_loops").insert(payload).execute()
 

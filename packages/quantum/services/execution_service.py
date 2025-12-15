@@ -3,7 +3,10 @@ from datetime import datetime, timezone, timedelta
 from typing import List, Dict, Any, Optional, TypedDict
 import logging
 import statistics
-from packages.quantum.services.transaction_cost_model import TransactionCostModel
+
+from packages.quantum.execution.transaction_cost_model import TransactionCostModel as V3TCM
+from packages.quantum.models import TradeTicket, OptionLeg
+from packages.quantum.strategy_profiles import CostModelConfig
 
 logger = logging.getLogger(__name__)
 
@@ -20,7 +23,6 @@ class ExecutionService:
         self.supabase = supabase
         self.logs_table = "suggestion_logs"
         self.executions_table = "trade_executions"
-        self.cost_model = TransactionCostModel()
 
     def register_execution(self,
                            user_id: str,
@@ -265,21 +267,55 @@ class ExecutionService:
                       order_type: str,
                       price: float,
                       quantity: float,
+                      side: str,
                       regime: str) -> Dict[str, Any]:
         """
-        Simulates an execution for backtesting/paper trading with probabilistic fill logic.
+        Simulates an execution for backtesting/paper trading using V3 TransactionCostModel.
         """
-        side = "buy"
-        if quantity < 0: side = "sell"
+        # 1. Build TradeTicket
+        ticket = TradeTicket(
+            symbol=symbol,
+            order_type="market" if order_type == "market" else "limit",
+            limit_price=None if order_type == "market" else float(price),
+            quantity=int(quantity),
+            legs=[OptionLeg(symbol=symbol, action=side, type="other", quantity=1)]
+        )
 
-        res = self.cost_model.simulate_fill(price, abs(quantity), side)
+        # 2. Build synthetic quote
+        mid = float(price)
+        regime_upper = str(regime).upper()
+        spread_map = {
+            "SUPPRESSED": 0.005,
+            "NORMAL": 0.01,
+            "ELEVATED": 0.015,
+            "SHOCK": 0.02
+        }
+        spread_pct = spread_map.get(regime_upper, 0.01)
 
+        bid = mid * (1.0 - spread_pct/2.0)
+        ask = mid * (1.0 + spread_pct/2.0)
+
+        quote = {"bid_price": bid, "ask_price": ask}
+
+        # 3. Choose CostModelConfig
+        fill_model = "conservative" if regime_upper == "SHOCK" else "neutral"
+        config = CostModelConfig(fill_probability_model=fill_model)
+
+        # 4. Call V3TCM.estimate
+        result = V3TCM.estimate(ticket, quote, config)
+
+        # 5. Compute execution drag (in USD)
+        execution_drag_usd = result["expected_spread_cost_usd"] + result["expected_slippage_usd"] + result["fees_usd"]
+
+        # 6. Return exact keys
         return {
-            "fill_price": res.fill_price,
-            "quantity": res.filled_quantity,
-            "fees": res.commission_paid,
-            "slippage": res.slippage_paid,
-            "status": res.status,
-            "fill_probability": res.fill_probability,
-            "execution_drag": res.slippage_paid + (res.commission_paid / res.filled_quantity if res.filled_quantity > 0 else 0)
+            "status": "simulated",
+            "filled_quantity": int(quantity),
+            "fill_price": float(result["expected_fill_price"]),
+            "slippage_paid": float(result["expected_slippage_usd"]),
+            "commission_paid": float(result["fees_usd"]),
+            "fill_probability": float(result["fill_probability"]),
+            "execution_drag": float(execution_drag_usd),
+            "tcm_version": result.get("tcm_version"),
+            "quote_used_fallback": True
         }

@@ -52,6 +52,8 @@ python3 packages/quantum/scripts/train_symbol_adapters.py --dry-run
 
 ## Database Schema
 Expects `model_states` table with:
-- `scope_id` (ticker)
-- `scope_type` ('ticker')
-- `state_data` (JSONB containing `alpha_adjustment`, `sigma_scaler`)
+- `scope` (ticker)
+- `weights` (JSONB containing `alpha_adjustment`, `sigma_scaler`)
+- `model_version`
+- `last_updated`
+- `cumulative_error`

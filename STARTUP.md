@@ -10,16 +10,18 @@ This will:
 
 Both services will stay running. You can close them by closing their respective terminal windows.
 
-## Backend Only
+## Individual Launchers
 
-If you only need to run the backend:
-1. Go to `packages\quantum`.
-2. Double-click **`run_server.bat`**.
+If you need to launch services individually, you can use the scripts in `scripts\win\`:
 
-## Configuration
+*   **Backend:** `scripts\win\start_backend.cmd`
+*   **Frontend:** `scripts\win\start_frontend.cmd`
 
-If the frontend directory changes, open `start.bat` in a text editor and update the `FRONTEND_DIR` variable.
+## Prerequisites
 
-```bat
-set "FRONTEND_DIR=%REPO_ROOT%\apps\web"
-```
+*   **pnpm**: This repository uses `pnpm` workspaces. Ensure `pnpm` is installed or enabled via corepack:
+    ```bash
+    corepack enable
+    corepack prepare pnpm@latest --activate
+    ```
+*   **Python venv**: Ensure the backend virtual environment exists at `packages\quantum\venv`.

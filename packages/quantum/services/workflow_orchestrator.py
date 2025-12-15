@@ -518,58 +518,34 @@ async def run_midday_cycle(supabase: Client, user_id: str):
         if price <= 0:
             continue
 
-        max_loss = float(cand.get("max_loss_per_contract", price * 100))
-        collateral = float(cand.get("collateral_per_contract", price * 100))
+        price = float(cand.get("suggested_entry", 0.0) or 0.0)
+        max_loss = float(cand.get("max_loss_per_contract") or (price * 100.0))
+        collateral = float(cand.get("collateral_required_per_contract") or cand.get("collateral_per_contract") or max_loss)
 
-        # Use canonical sizing (no hardcoded aggressive 0.40)
-        # Assuming balanced or deriving from user prefs (passed as config or defaulting).
-        # For now, we use defaults or conservative caps as per instruction:
-        # "Remove hardcoded profile->risk_pct mapping that uses 0.40"
+        score = float(cand.get("unified_score", cand.get("score", 50.0)) or 50.0)
+        base_per_trade_pct = 0.02 if score >= 70 else 0.01
+
+        # Risk multiplier from conviction (clamp 0.5..1.5)
+        conviction = float(cand.get("conviction_score", cand.get("confidence_score", 0.5)) or 0.5)
+        risk_multiplier = 0.5 + conviction
+        risk_multiplier = min(1.5, max(0.5, risk_multiplier))
+
+        # Absolute risk budget dollars
+        risk_budget = deployable_capital * base_per_trade_pct * risk_multiplier
+
         sizing = calculate_sizing(
             account_buying_power=deployable_capital,
+            ev_per_contract=float(cand.get("ev", 0.0) or 0.0),
+            contract_ask=price,  # keep for backward compat logging
             max_loss_per_contract=max_loss,
             collateral_required_per_contract=collateral,
-            max_risk_pct=0.05, # Conservative default cap
-            profile="AGGRESSIVE", # Sizing engine will clamp this to <= 0.05
-            # Deprecated args
-            ev_per_contract=ev,
-            contract_ask=price,
-        # --- RISK AWARE SIZING ---
-        # 1. Calculate Risk Multiplier (Conviction)
-        score = float(cand.get("score", 50))
-        # 50 = 1.0x, 100 = 2.0x
-        risk_multiplier = score / 50.0
-        if risk_multiplier < 0.5: risk_multiplier = 0.5
-
-        # 2. Determine Per-Trade Dollar Cap
-        # Base: 5% of Total Equity? Or 2%?
-        # Standard conservative: 2%.
-        base_per_trade_pct = 0.02
-        # Max per trade $
-        per_trade_cap = budgets["total_equity"] * base_per_trade_pct * risk_multiplier
-
-        # 3. Apply Global Budget Remaining
-        allowed_risk_dollars = min(budgets["remaining"], per_trade_cap)
-        if allowed_risk_dollars < 0: allowed_risk_dollars = 0.0
-
-        # 4. Sizing
-        # We pass allowed_risk_dollars as account_buying_power, and max_risk_pct=1.0,
-        # so logic becomes: max_dollar_risk = allowed_risk_dollars * 1.0 = allowed_risk_dollars
-        # And we use "AGGRESSIVE" profile to override potential default clamps if logic changes,
-        # but here we control the dollar input directly.
-
-        # But wait, calculate_sizing also checks account_buying_power.
-        # If we pass allowed_risk_dollars, and it's less than real buying power, it works.
-        # But we must ensure allowed_risk_dollars <= deployable_capital (actual cash).
-        allowed_risk_dollars = min(allowed_risk_dollars, deployable_capital)
-
-        sizing = calculate_sizing(
-            account_buying_power=allowed_risk_dollars,
-            ev_per_contract=ev,
-            contract_ask=price,
-            max_risk_pct=1.0, # Full utilization of the calculated allowed risk
-            profile="AGGRESSIVE",
+            risk_budget_dollars=risk_budget,
+            risk_multiplier=1.0,     # multiplier already baked into risk_budget
+            max_contracts=25,
+            profile="aggressive",
         )
+
+        allowed_risk_dollars = sizing.get("max_dollar_risk", 0.0)
 
         # If contracts == 0, check reasons.
         if sizing["contracts"] == 0:

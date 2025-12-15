@@ -3,6 +3,7 @@ from datetime import datetime, timedelta, timezone, date
 from supabase import Client
 from collections import Counter
 import json
+from collections import Counter
 
 # --- Config / Defaults ---
 DEFAULT_WEEKLY_METRICS = {
@@ -90,6 +91,10 @@ class ProgressEngine:
 
         has_data = bool(logs or executions or snapshots)
 
+        # Defaults
+        avg_ivr = DEFAULT_WEEKLY_METRICS["avg_ivr"]
+        dominant_regime = DEFAULT_WEEKLY_METRICS["dominant_regime"]
+
         # 3. Compute Metrics
         dominant_regime = DEFAULT_WEEKLY_METRICS["dominant_regime"]
         avg_ivr = DEFAULT_WEEKLY_METRICS["avg_ivr"]
@@ -97,6 +102,10 @@ class ProgressEngine:
         if has_data:
             user_metrics = self._compute_user_metrics(logs, executions, snapshots)
             system_metrics = self._compute_system_metrics(logs, executions)
+
+            # Derive specific log metrics
+            avg_ivr, dominant_regime = self._derive_log_metrics(logs)
+
             synthesis = {
                 "headline": f"Progress Report for {week_id}",
                 "action_items": ["Review missed suggestions" if user_metrics['components']['adherence_ratio']['value'] < 0.8 else "Maintain discipline"]

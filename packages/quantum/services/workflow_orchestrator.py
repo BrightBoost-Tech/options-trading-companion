@@ -57,6 +57,68 @@ def normalize_win_rate(value) -> tuple[float, float]:
         ratio = 1.0
     return ratio, ratio * 100.0
 
+class RiskBudgetEngine:
+    """
+    Computes available risk budget based on market regime and portfolio state.
+    """
+    def __init__(self, supabase: Client):
+        self.supabase = supabase
+
+    def compute(self, user_id: str, deployable_capital: float, regime: str, positions: list) -> dict:
+        # Estimate Total Equity
+        positions_value = 0.0
+        current_risk_usage = 0.0
+
+        for p in positions:
+            qty = float(p.get("quantity", 0) or 0)
+            curr = float(p.get("current_price", 0) or 0)
+            cost = float(p.get("cost_basis", 0) or 0)
+
+            # Value
+            val = curr * qty
+            if p.get("asset_type") == "OPTION" or str(p.get("symbol", "")).startswith("O:") or len(p.get("symbol", "")) > 6:
+                val *= 100.0
+                # Risk Usage: Cost Basis for Long Options
+                current_risk_usage += abs(cost * qty * 100.0)
+            else:
+                # Stocks
+                val *= 1.0
+
+            positions_value += val
+
+        total_equity = deployable_capital + positions_value
+        if total_equity <= 0: total_equity = 1.0 # Safety
+
+        # Define Caps (Allocated % of Equity to Options)
+        caps = {
+            "suppressed": 0.50,
+            "normal": 0.40,
+            "elevated": 0.25,
+            "high_vol": 0.15,
+            "shock": 0.05
+        }
+
+        # Map regime
+        r_key = "normal"
+        regime_lower = str(regime).lower()
+        if "shock" in regime_lower or "panic" in regime_lower: r_key = "shock"
+        elif "elevated" in regime_lower or "high_vol" in regime_lower: r_key = "elevated"
+        elif "suppressed" in regime_lower: r_key = "suppressed"
+
+        allocation_cap_pct = caps.get(r_key, 0.40)
+        max_risk_allocation = total_equity * allocation_cap_pct
+
+        remaining = max_risk_allocation - current_risk_usage
+
+        return {
+            "remaining": max(0.0, remaining),
+            "current_usage": current_risk_usage,
+            "max_allocation": max_risk_allocation,
+            "regime": r_key,
+            "cap_pct": allocation_cap_pct,
+            "total_equity": total_equity
+        }
+
 async def run_morning_cycle(supabase: Client, user_id: str):
     """
     1. Read latest portfolio snapshot + positions.
@@ -99,6 +161,23 @@ async def run_morning_cycle(supabase: Client, user_id: str):
         supabase.table("regime_snapshots").insert(global_snap.to_dict()).execute()
     except Exception:
         pass
+
+    # === RISK BUDGET CHECK ===
+    risk_engine = RiskBudgetEngine(supabase)
+    # Get deployable capital approx for equity calc inside engine
+    # We can fetch real cash or assume 0 if morning cycle doesn't fetch it,
+    # but accurate equity is needed. Let's fetch cash quickly.
+    try:
+        cash_service = CashService(supabase)
+        deployable_capital = await cash_service.get_deployable_capital(user_id)
+    except:
+        deployable_capital = 0.0
+
+    budgets = risk_engine.compute(user_id, deployable_capital, global_snap.state.value, positions)
+    is_over_budget = budgets["remaining"] <= 0
+    budget_usage_pct = 0.0
+    if budgets["max_allocation"] > 0:
+        budget_usage_pct = (budgets["current_usage"] / budgets["max_allocation"]) * 100
 
     suggestions = []
 
@@ -186,6 +265,12 @@ async def run_morning_cycle(supabase: Client, user_id: str):
             days_to_expiry=30
         )
 
+        # Risk Budget Check Annotation
+        # If over budget, we might want to flag this trade for closer if it helps reduce risk
+        budget_note = ""
+        if is_over_budget:
+            budget_note = f" [Risk Budget Exceeded: {budget_usage_pct:.0f}% used]"
+
         if unit_price < unit_cost * 0.5:
              pass
 
@@ -201,13 +286,13 @@ async def run_morning_cycle(supabase: Client, user_id: str):
             if hist_stats.get("insufficient_history") or hist_stats.get("win_rate") is None:
                 rationale_text = (
                     f"Take profit at ${metrics.limit_price:.2f} based on EV model. "
-                    f"(Insufficient history for win-rate stats in {iv_regime} regime.)"
+                    f"(Insufficient history for win-rate stats in {iv_regime} regime.){budget_note}"
                 )
             else:
                 win_rate_pct = hist_stats['win_rate'] * 100
                 rationale_text = (
                     f"Take profit at ${metrics.limit_price:.2f} based on {win_rate_pct:.0f}% "
-                    f"historical win rate for similar exits in {iv_regime} regime."
+                    f"historical win rate for similar exits in {iv_regime} regime.{budget_note}"
                 )
 
             features_dict = {
@@ -262,6 +347,11 @@ async def run_morning_cycle(supabase: Client, user_id: str):
                         "regime_v3_global": global_snap.state.value,
                         "regime_v3_symbol": sym_snap.state.value,
                         "regime_v3_effective": effective_regime_state.value
+                    },
+                    "risk_budget": {
+                         "remaining": budgets["remaining"],
+                         "usage_pct": budget_usage_pct,
+                         "status": "violated" if is_over_budget else "ok"
                     },
                     "spread_details": {
                         "underlying": underlying,
@@ -337,6 +427,14 @@ async def run_midday_cycle(supabase: Client, user_id: str):
     deployable_capital = await cash_service.get_deployable_capital(user_id)
     print(f"Deployable capital: {deployable_capital}")
 
+    # Fetch positions for RiskBudgetEngine
+    try:
+        res = supabase.table("positions").select("*").eq("user_id", user_id).execute()
+        positions = res.data or []
+    except Exception as e:
+        print(f"Error fetching positions for midday risk check: {e}")
+        positions = []
+
     if deployable_capital < 100:
         print("Insufficient capital to scan.")
         return
@@ -359,6 +457,15 @@ async def run_midday_cycle(supabase: Client, user_id: str):
         supabase.table("regime_snapshots").insert(global_snap.to_dict()).execute()
     except Exception:
         pass
+
+    # === RISK BUDGET ENGINE ===
+    risk_engine = RiskBudgetEngine(supabase)
+    budgets = risk_engine.compute(user_id, deployable_capital, global_snap.state.value, positions)
+    print(f"Risk Budget: Remaining=${budgets['remaining']:.2f}, Usage=${budgets['current_usage']:.2f}, Cap=${budgets['max_allocation']:.2f} ({budgets['regime']})")
+
+    if budgets["remaining"] <= 0 and not MIDDAY_TEST_MODE:
+         print("Risk budget exhausted. Skipping midday cycle.")
+         return
 
     # 2. Call Scanner (market-wide)
     candidates = []
@@ -411,18 +518,52 @@ async def run_midday_cycle(supabase: Client, user_id: str):
         if price <= 0:
             continue
 
+        # --- RISK AWARE SIZING ---
+        # 1. Calculate Risk Multiplier (Conviction)
+        score = float(cand.get("score", 50))
+        # 50 = 1.0x, 100 = 2.0x
+        risk_multiplier = score / 50.0
+        if risk_multiplier < 0.5: risk_multiplier = 0.5
+
+        # 2. Determine Per-Trade Dollar Cap
+        # Base: 5% of Total Equity? Or 2%?
+        # Standard conservative: 2%.
+        base_per_trade_pct = 0.02
+        # Max per trade $
+        per_trade_cap = budgets["total_equity"] * base_per_trade_pct * risk_multiplier
+
+        # 3. Apply Global Budget Remaining
+        allowed_risk_dollars = min(budgets["remaining"], per_trade_cap)
+        if allowed_risk_dollars < 0: allowed_risk_dollars = 0.0
+
+        # 4. Sizing
+        # We pass allowed_risk_dollars as account_buying_power, and max_risk_pct=1.0,
+        # so logic becomes: max_dollar_risk = allowed_risk_dollars * 1.0 = allowed_risk_dollars
+        # And we use "AGGRESSIVE" profile to override potential default clamps if logic changes,
+        # but here we control the dollar input directly.
+
+        # But wait, calculate_sizing also checks account_buying_power.
+        # If we pass allowed_risk_dollars, and it's less than real buying power, it works.
+        # But we must ensure allowed_risk_dollars <= deployable_capital (actual cash).
+        allowed_risk_dollars = min(allowed_risk_dollars, deployable_capital)
+
         sizing = calculate_sizing(
-            account_buying_power=deployable_capital,
+            account_buying_power=allowed_risk_dollars,
             ev_per_contract=ev,
             contract_ask=price,
-            max_risk_pct=0.40,
+            max_risk_pct=1.0, # Full utilization of the calculated allowed risk
             profile="AGGRESSIVE",
         )
+
+        # If contracts == 0, check reasons.
+        if sizing["contracts"] == 0:
+            print(f"[Midday] Skipped {ticker}: {sizing['reason']} (Allowed Risk: ${allowed_risk_dollars:.2f})")
 
         print(
             f"[Midday] {ticker} sizing: contracts={sizing.get('contracts')}, "
             f"max_risk_exceeded={sizing.get('max_risk_exceeded', False)}, "
-            f"risk_pct={0.40}, "
+            f"risk_mult={risk_multiplier:.2f}, "
+            f"allowed=${allowed_risk_dollars:.2f}, "
             f"ev_per_contract={ev}, "
             f"reason={sizing.get('reason')}"
         )
@@ -450,6 +591,13 @@ async def run_midday_cycle(supabase: Client, user_id: str):
                     "regime_v3_effective": effective_regime_str,
                     "iv_regime": scoring_regime # ensure consistency
                 })
+
+            # Persist sizing metadata as requested
+            sizing["capital_required"] = sizing.get("capital_required", 0)
+            sizing["max_loss_total"] = sizing.get("capital_required", 0) # For debit spread/long option, max loss is capital
+            sizing["risk_multiplier"] = risk_multiplier
+            sizing["budget_snapshot"] = budgets
+            sizing["allowed_risk_dollars"] = allowed_risk_dollars
 
             cand_features = {
                 "ticker": ticker,

@@ -295,15 +295,29 @@ async def run_morning_cycle(supabase: Client, user_id: str):
                     f"historical win rate for similar exits in {iv_regime} regime.{budget_note}"
                 )
 
-            features_dict = {
-                "unit_price": unit_price,
-                "unit_cost": unit_cost,
-                "delta": net_delta / qty_unit,
-                "iv_rank": iv_rank_score,
-                "regime": iv_regime,
+            # Compute input-only features for hash (stable across price/EV changes)
+            # features_for_hash: inputs only (ticker, spread_type, DTE, width, iv_regime, global_regime, symbol_regime, effective_regime)
+
+            # Helper to compute width/DTE
+            strikes = [float(l.get("strike", 0)) for l in legs]
+            width = max(strikes) - min(strikes) if len(strikes) > 1 else 0.0
+
+            try:
+                # legs[0]["expiry"] is YYYY-MM-DD
+                expiry_dt = datetime.strptime(legs[0]["expiry"], "%Y-%m-%d")
+                dte = (expiry_dt - datetime.now()).days
+            except Exception:
+                dte = 30 # fallback
+
+            features_for_hash = {
+                "ticker": spread.ticker,
+                "spread_type": spread.spread_type,
+                "dte": dte,
+                "width": width,
+                "iv_regime": iv_regime,
                 "global_regime": global_snap.state.value,
-                "strategy": "take_profit_limit",
-                "underlying": underlying
+                "symbol_regime": sym_snap.state.value,
+                "effective_regime": effective_regime_state.value
             }
 
             ctx = TradeContext.create_new(
@@ -312,7 +326,7 @@ async def run_morning_cycle(supabase: Client, user_id: str):
                 strategy="take_profit_limit",
                 regime=iv_regime
             )
-            ctx.features_hash = compute_features_hash(features_dict)
+            ctx.features_hash = compute_features_hash(features_for_hash)
 
             suggestion = {
                     "user_id": user_id,
@@ -372,7 +386,11 @@ async def run_morning_cycle(supabase: Client, user_id: str):
                 user_id,
                 ctx,
                 "suggestion_generated",
-                properties={"ev": metrics.expected_value, "ticker": spread.ticker}
+                properties={
+                    "ev": metrics.expected_value,
+                    "ticker": spread.ticker,
+                    "probability_of_profit": metrics.prob_of_profit
+                }
             )
 
     # 4. Insert suggestions
@@ -539,10 +557,46 @@ async def run_midday_cycle(supabase: Client, user_id: str):
             contract_ask=price,  # keep for backward compat logging
             max_loss_per_contract=max_loss,
             collateral_required_per_contract=collateral,
-            risk_budget_dollars=risk_budget,
-            risk_multiplier=1.0,     # multiplier already baked into risk_budget
-            max_contracts=25,
-            profile="aggressive",
+            max_risk_pct=0.05, # Conservative default cap
+            profile="AGGRESSIVE", # Sizing engine will clamp this to <= 0.05
+            # Deprecated args
+            ev_per_contract=ev,
+            contract_ask=price,
+        # --- RISK AWARE SIZING ---
+        # 1. Calculate Risk Multiplier (Conviction)
+        score = float(cand.get("score", 50))
+        # 50 = 1.0x, 100 = 2.0x
+        risk_multiplier = score / 50.0
+        if risk_multiplier < 0.5: risk_multiplier = 0.5
+
+        # 2. Determine Per-Trade Dollar Cap
+        # Base: 5% of Total Equity? Or 2%?
+        # Standard conservative: 2%.
+        base_per_trade_pct = 0.02
+        # Max per trade $
+        per_trade_cap = budgets["total_equity"] * base_per_trade_pct * risk_multiplier
+
+        # 3. Apply Global Budget Remaining
+        allowed_risk_dollars = min(budgets["remaining"], per_trade_cap)
+        if allowed_risk_dollars < 0: allowed_risk_dollars = 0.0
+
+        # 4. Sizing
+        # We pass allowed_risk_dollars as account_buying_power, and max_risk_pct=1.0,
+        # so logic becomes: max_dollar_risk = allowed_risk_dollars * 1.0 = allowed_risk_dollars
+        # And we use "AGGRESSIVE" profile to override potential default clamps if logic changes,
+        # but here we control the dollar input directly.
+
+        # But wait, calculate_sizing also checks account_buying_power.
+        # If we pass allowed_risk_dollars, and it's less than real buying power, it works.
+        # But we must ensure allowed_risk_dollars <= deployable_capital (actual cash).
+        allowed_risk_dollars = min(allowed_risk_dollars, deployable_capital)
+
+        sizing = calculate_sizing(
+            account_buying_power=allowed_risk_dollars,
+            ev_per_contract=ev,
+            contract_ask=price,
+            max_risk_pct=1.0, # Full utilization of the calculated allowed risk
+            profile="AGGRESSIVE"
         )
 
         allowed_risk_dollars = sizing.get("max_dollar_risk", 0.0)
@@ -610,6 +664,7 @@ async def run_midday_cycle(supabase: Client, user_id: str):
             )
             ctx.features_hash = compute_features_hash(cand_features)
 
+            pop = cand.get("probability_of_profit")
             suggestion = {
                 "user_id": user_id,
                 "created_at": datetime.now(timezone.utc).isoformat(),
@@ -627,6 +682,7 @@ async def run_midday_cycle(supabase: Client, user_id: str):
                 "status": "pending",
                 "source": "scanner",
                 "ev": ev,
+                "probability_of_profit": pop,
                 "internal_cand": cand,
                 "trace_id": ctx.trace_id,
                 "model_version": ctx.model_version,
@@ -635,12 +691,16 @@ async def run_midday_cycle(supabase: Client, user_id: str):
             }
             suggestions.append(suggestion)
 
+            props = {"ev": ev, "score": cand.get("score")}
+            if pop is not None:
+                props["probability_of_profit"] = pop
+
             emit_trade_event(
                 analytics_service,
                 user_id,
                 ctx,
                 "suggestion_generated",
-                properties={"ev": ev, "score": cand.get("score")}
+                properties=props
             )
 
     print(f"FINAL MIDDAY SUGGESTION COUNT: {len(suggestions)}")

@@ -289,7 +289,7 @@ def scan_for_opportunities(
                 expected_execution_cost = execution_service.estimate_execution_cost(
                   symbol,
                   spread_pct=spread_pct,
-                  user_id=user_id,              # use real user if available
+                  user_id=None,                 # Force proxy (do not re-query history per symbol)
                   entry_cost=abs(total_cost),
                   num_legs=len(legs),
                 )

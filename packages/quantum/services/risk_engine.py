@@ -65,7 +65,17 @@ class RiskEngine:
              if "bounds" in adjusted and adjusted.get("max_position_pct") is not None:
                  max_w = float(new_max)
                  # Reconstruct bounds list clamping hi to max_w
-                 adjusted["bounds"] = [(lo, min(float(hi), max_w)) for (lo, hi) in adjusted["bounds"]]
+                 new_bounds = []
+                 for (lo, hi) in adjusted["bounds"]:
+                     lo_f = float(lo)
+                     hi_f = float(hi)
+                     hi2 = min(hi_f, max_w)
+                     if hi2 < lo_f:
+                         # If policy max makes bound invalid, force zero allocation
+                         new_bounds.append((0.0, 0.0))
+                     else:
+                         new_bounds.append((lo_f, hi2))
+                 adjusted["bounds"] = new_bounds
 
         # 2. Banned Structures
         banned = policy.get("ban_structures", [])

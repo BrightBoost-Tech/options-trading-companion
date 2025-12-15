@@ -150,9 +150,10 @@ def scan_for_opportunities(
     execution_service = ExecutionService(supabase_client) if supabase_client else None
 
     # Unified Regime Engine
+    truth_layer = MarketDataTruthLayer()
     regime_engine = RegimeEngineV3(
         supabase_client=supabase_client,
-        market_data=MarketDataTruthLayer(),
+        market_data=truth_layer,
         iv_repository=IVRepository(supabase_client) if supabase_client else None,
         iv_point_service=IVPointService(supabase_client) if supabase_client else None,
     )
@@ -397,11 +398,15 @@ def scan_for_opportunities(
             max_profit_contract = primitives["max_profit_per_contract"]
             collateral_contract = primitives["collateral_required_per_contract"]
 
+            # NEW: Compute explicit combo width via Truth Layer
+            fallback_width_share = abs(total_cost) * spread_pct
+            combo_width_share = _compute_combo_spread_width_share(truth_layer, legs, fallback_width_share)
+
             # H. Unified Scoring
             trade_dict = {
                 "ev": total_ev,
                 "suggested_entry": abs(total_cost),
-                "bid_ask_spread": abs(total_cost) * spread_pct,
+                "bid_ask_spread": combo_width_share,  # Uses explicit width
                 "strategy": raw_strategy,
                 "strategy_key": strategy_key,
                 "legs": legs,
@@ -424,23 +429,18 @@ def scan_for_opportunities(
                 expected_execution_cost = float(stats.get("avg_drag", 0.0))
                 drag_source = "history"
                 drag_samples = int(stats.get("n", stats.get("N", 0)) or 0)
-            elif execution_service:
-                expected_execution_cost = execution_service.estimate_execution_cost(
-                  symbol,
-                  spread_pct=spread_pct,
-                  user_id=None,                 # Force proxy (do not re-query history per symbol)
-                  entry_cost=abs(total_cost),
-                  num_legs=len(legs),
-                )
             else:
-                  # This fallback is only used if no execution service and no history map.
-                  # It is passed to calculate_unified_score, which handles null/0 better.
-                  expected_execution_cost = 0.0
+                # PROXY CALCULATION: (combo_width_share * 0.5) + (num_legs * 0.0065)
+                # This replaces execution_service.estimate_execution_cost
+                proxy_cost_share = (combo_width_share * 0.5) + (len(legs) * 0.0065)
+                expected_execution_cost = proxy_cost_share * 100.0   # Convert to contract dollars
+                drag_source = "proxy"
+                drag_samples = 0
 
             unified_score = calculate_unified_score(
                 trade=trade_dict,
                 regime_snapshot=global_snapshot.to_dict(),
-                market_data={"bid_ask_spread_pct": spread_pct},
+                market_data={"bid_ask_spread_pct": 0.0}, # Force use of trade["bid_ask_spread"]
                 execution_drag_estimate=expected_execution_cost,
                 num_legs=len(legs),
                 entry_cost=abs(total_cost)

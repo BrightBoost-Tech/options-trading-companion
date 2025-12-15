@@ -32,7 +32,17 @@ def scan_for_opportunities(
 ) -> List[Dict[str, Any]]:
     """
     Scans the provided symbols (or universe) for option trade opportunities.
-    Returns a list of trade candidates (dictionaries).
+    Returns a list of trade candidates (dictionaries) with risk primitives.
+
+    Output Schema:
+    - symbol, ticker, strategy, ev, score
+    - max_loss_per_contract (USD)
+    - max_profit_per_contract (USD)
+    - collateral_required_per_contract (USD)
+    - net_delta_per_contract (shares-equivalent)
+    - net_vega_per_contract (USD per 1% vol change per contract)
+    - data_quality: "realtime" | "degraded"
+    - pricing_mode: "exact" | "approximate"
     """
     candidates = []
 
@@ -230,7 +240,27 @@ def scan_for_opportunities(
                     else:
                         total_cost -= premium
 
-            # G. Compute Net EV
+            # G. Compute Net EV & Risk Primitives
+            max_loss_contract = 0.0
+            max_profit_contract = 0.0
+            collateral_contract = 0.0
+
+            # Net Delta (shares equiv) and Vega (contract total)
+            # Vega in legs is usually per share. Multiplying by 100 gives contract exposure.
+            net_delta_contract = sum((l['delta'] if l['side']=='buy' else -l['delta']) for l in legs) * 100
+            net_vega_contract = sum((l['vega'] if l['side']=='buy' else -l['vega']) for l in legs) * 100
+
+            # Normalize Strategy Key
+            raw_strategy = suggestion["strategy"]
+            strategy_key = raw_strategy.lower().replace(" ", "_")
+            pricing_mode = "exact"
+            data_quality = "realtime"
+
+            # Check for degraded data (missing premiums)
+            if any((l.get('premium') or 0) <= 0 for l in legs):
+                 data_quality = "degraded"
+                 pricing_mode = "approximate"
+
             if len(legs) == 2:
                 long_leg = next((l for l in legs if l['side'] == 'buy'), None)
                 short_leg = next((l for l in legs if l['side'] == 'sell'), None)
@@ -247,6 +277,16 @@ def scan_for_opportunities(
                         width=width
                     )
                     total_ev = ev_obj.expected_value
+
+                    # Risk Primitives for Spread
+                    if total_cost > 0: # Debit Spread
+                        max_loss_contract = abs(total_cost) * 100
+                        max_profit_contract = (width - abs(total_cost)) * 100
+                        collateral_contract = 0.0 # Paid upfront, usually no margin req beyond cost
+                    else: # Credit Spread
+                        max_loss_contract = (width - abs(total_cost)) * 100
+                        max_profit_contract = abs(total_cost) * 100
+                        collateral_contract = width * 100
                 else:
                     total_ev = 0
             elif len(legs) == 1:
@@ -261,17 +301,37 @@ def scan_for_opportunities(
                 )
                 total_ev = ev_obj.expected_value
 
+                # Risk Primitives for Single Leg
+                if leg['side'] == 'buy': # Long
+                    max_loss_contract = leg['premium'] * 100
+                    collateral_contract = 0.0
+                    if leg['type'] == 'call':
+                        max_profit_contract = float('inf')
+                    else:
+                        max_profit_contract = (leg['strike'] - leg['premium']) * 100
+                else: # Short
+                    max_profit_contract = leg['premium'] * 100
+                    if leg['type'] == 'call':
+                        max_loss_contract = float('inf')
+                        collateral_contract = current_price * 0.20 * 100 # Rough naked call approximation
+                    else:
+                        max_loss_contract = (leg['strike'] - leg['premium']) * 100
+                        collateral_contract = leg['strike'] * 0.10 * 100 # Rough naked put approximation
+
             # H. Unified Scoring
             trade_dict = {
                 "ev": total_ev,
                 "suggested_entry": abs(total_cost),
                 "bid_ask_spread": abs(total_cost) * spread_pct,
-                "strategy": suggestion["strategy"],
+                "strategy": raw_strategy,
+                "strategy_key": strategy_key,
                 "legs": legs,
                 "vega": sum(l['vega'] if l['side']=='buy' else -l['vega'] for l in legs),
                 "gamma": sum(l['gamma'] if l['side']=='buy' else -l['gamma'] for l in legs),
                 "iv_rank": iv_rank,
-                "type": "debit" if total_cost > 0 else "credit"
+                "type": "debit" if total_cost > 0 else "credit",
+                # Pass primitives for scoring if needed
+                "max_loss": max_loss_contract
             }
 
             # Fetch Execution Drag History
@@ -320,6 +380,7 @@ def scan_for_opportunities(
                 "ticker": symbol,
                 "type": suggestion["strategy"],
                 "strategy": suggestion["strategy"],
+                "strategy_key": strategy_key,
                 "suggested_entry": abs(total_cost),
                 "ev": total_ev,
                 "score": round(unified_score.score, 1),
@@ -330,7 +391,15 @@ def scan_for_opportunities(
                 "badges": unified_score.badges,
                 "execution_drag_estimate": final_execution_cost,
                 "execution_drag_samples": drag_samples,
-                "execution_drag_source": drag_source
+                "execution_drag_source": drag_source,
+                # Risk Primitives
+                "max_loss_per_contract": max_loss_contract,
+                "max_profit_per_contract": max_profit_contract,
+                "collateral_required_per_contract": collateral_contract,
+                "net_delta_per_contract": net_delta_contract,
+                "net_vega_per_contract": net_vega_contract,
+                "data_quality": data_quality,
+                "pricing_mode": pricing_mode
             }
 
         except Exception as e:

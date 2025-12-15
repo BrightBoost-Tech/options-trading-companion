@@ -279,6 +279,53 @@ def _stage_order_internal(supabase, analytics, user_id, ticket: TradeTicket, por
 
     return order_id
 
+def _compute_fill_deltas(order: dict, fill_res: dict) -> dict:
+    """
+    Computes incremental deltas for this tick's fill.
+    Returns:
+        this_fill_qty: float (incremental qty filled this tick)
+        this_fill_price: float (price for this incremental fill)
+        new_total_filled_qty: float (cumulative)
+        new_avg_fill_price: float (cumulative avg)
+        fees_total: float (cumulative fees)
+        fees_delta: float (incremental fees this tick)
+    """
+
+    req_qty = float(order.get("requested_qty") or order.get("quantity") or 0.0)
+    prev_total_filled = float(order.get("filled_qty") or 0.0)
+    prev_fees_total = float(order.get("fees_usd") or 0.0)
+
+    new_total_filled_qty = float(fill_res.get("filled_qty") or 0.0)
+    new_avg_fill_price = float(fill_res.get("avg_fill_price") or 0.0)
+
+    this_fill_qty = float(fill_res.get("last_fill_qty") or 0.0)
+    if this_fill_qty <= 0:
+        this_fill_qty = max(0.0, new_total_filled_qty - prev_total_filled)
+
+    this_fill_price = float(fill_res.get("last_fill_price") or 0.0)
+    if this_fill_price <= 0:
+        this_fill_price = float(fill_res.get("avg_fill_price") or 0.0)
+
+    # Fees math
+    tcm_est = order.get("tcm") or {}
+    est_fees = float(tcm_est.get("fees_usd") or 0.0)
+
+    if req_qty > 0:
+        fees_total = (new_total_filled_qty / req_qty) * est_fees
+    else:
+        fees_total = 0.0
+
+    fees_delta = max(0.0, fees_total - prev_fees_total)
+
+    return {
+        "this_fill_qty": this_fill_qty,
+        "this_fill_price": this_fill_price,
+        "new_total_filled_qty": new_total_filled_qty,
+        "new_avg_fill_price": new_avg_fill_price,
+        "fees_total": fees_total,
+        "fees_delta": fees_delta
+    }
+
 def _process_orders_for_user(supabase, analytics, user_id, target_order_id=None):
     # Fetch working orders: staged, working, or partial
     # A1) Replace exact "staged" check with list of in-flight states
@@ -320,28 +367,19 @@ def _process_orders_for_user(supabase, analytics, user_id, target_order_id=None)
         # Simulate Fill
         fill_res = TransactionCostModel.simulate_fill(order, quote)
 
-        # A2: Only commit when a NEW fill occurred on this tick.
+        # B) Commit only when a NEW fill happened this tick
         should_commit = False
 
-        # Must be in a valid fill state
-        if fill_res["status"] in ["filled", "partial"]:
-            # And must have incremental fill quantity
-            last_fill_qty = float(fill_res.get("last_fill_qty") or 0)
-            if last_fill_qty > 0:
-                should_commit = True
+        last_qty = float(fill_res.get("last_fill_qty") or 0.0)
+
+        # Must be in a valid fill state AND have new quantity
+        if fill_res.get("status") in ("partial", "filled") and last_qty > 0:
+            should_commit = True
 
         if should_commit:
             # Commit Fill
             _commit_fill(supabase, analytics, user_id, order, fill_res, quote, p_map[order["portfolio_id"]])
             processed_count += 1
-
-            # Note: _commit_fill updates DB, but we should also update local 'order'
-            # or refetch if we needed it again, but we just continue here.
-
-            # Important: Update local portfolio cash in case next order uses same portfolio
-            # This is handled by _commit_fill re-fetching or we pass p_map by ref?
-            # Actually _commit_fill updates DB. We should update p_map here to be safe.
-            # But _commit_fill does the math.
             pass
 
         elif fill_res["status"] == "working":
@@ -352,68 +390,29 @@ def _process_orders_for_user(supabase, analytics, user_id, target_order_id=None)
 
     return processed_count
 
-def _compute_fill_deltas(order: dict, fill_res: dict) -> dict:
-    """
-    Computes incremental deltas for this tick's fill.
-    Returns:
-        this_fill_qty: float (incremental qty filled this tick)
-        this_fill_price: float (price for this incremental fill)
-        new_total_filled_qty: float (cumulative)
-        new_avg_fill_price: float (cumulative avg)
-        fees_total: float (cumulative fees)
-        fees_delta: float (incremental fees this tick)
-    """
-    this_fill_qty = float(fill_res.get("last_fill_qty") or 0)
-
-    # Use last_fill_price if available, else fallback to avg (unlikely if last_fill_qty > 0)
-    this_fill_price = float(fill_res.get("last_fill_price") or fill_res.get("avg_fill_price") or 0)
-
-    new_total_filled_qty = float(fill_res.get("filled_qty") or 0)
-    new_avg_fill_price = float(fill_res.get("avg_fill_price") or 0)
-
-    # Fee Math
-    req_qty = float(order.get("requested_qty") or order.get("quantity") or 0)
-    # Avoid div zero
-    if req_qty == 0 and new_total_filled_qty > 0:
-        req_qty = new_total_filled_qty # Should not happen unless bad data
-
-    tcm_est = order.get("tcm") or {}
-    est_fees = float(tcm_est.get("fees_usd") or 0)
-
-    prev_fees_total = float(order.get("fees_usd") or 0)
-
-    if req_qty > 0:
-        fees_total = (new_total_filled_qty / req_qty) * est_fees
-    else:
-        fees_total = 0.0
-
-    fees_delta = max(0.0, fees_total - prev_fees_total)
-
-    return {
-        "this_fill_qty": this_fill_qty,
-        "this_fill_price": this_fill_price,
-        "new_total_filled_qty": new_total_filled_qty,
-        "new_avg_fill_price": new_avg_fill_price,
-        "fees_total": fees_total,
-        "fees_delta": fees_delta
-    }
 
 def _commit_fill(supabase, analytics, user_id, order, fill_res, quote, portfolio):
-    # A3) Use helper to compute deltas
+    # D) Use helper to compute deltas
     deltas = _compute_fill_deltas(order, fill_res)
 
     this_fill_qty = deltas["this_fill_qty"]
     this_fill_price = deltas["this_fill_price"]
+
+    new_total_filled_qty = deltas["new_total_filled_qty"]
+    new_avg_fill_price = deltas["new_avg_fill_price"]
+
+    fees_total = deltas["fees_total"]
     fees_delta = deltas["fees_delta"]
 
     now = datetime.now(timezone.utc).isoformat()
 
     # 1. Update Order with CUMULATIVE totals
+    # BUT write the order row using cumulative totals
     update_payload = {
         "status": fill_res["status"],
-        "filled_qty": deltas["new_total_filled_qty"],
-        "avg_fill_price": deltas["new_avg_fill_price"],
-        "fees_usd": deltas["fees_total"],
+        "filled_qty": new_total_filled_qty,
+        "avg_fill_price": new_avg_fill_price,
+        "fees_usd": fees_total,
         "filled_at": now,
         "quote_at_fill": quote
     }
@@ -452,7 +451,7 @@ def _commit_fill(supabase, analytics, user_id, order, fill_res, quote, portfolio
     supabase.table("paper_ledger").insert({
         "portfolio_id": portfolio["id"],
         "amount": cash_delta,
-        "description": f"Fill {side} {this_fill_qty} {order.get('order_json', {}).get('symbol')} @ {this_fill_price}",
+        "description": f"Paper fill {side} {this_fill_qty} @ {this_fill_price:.4f} (fees {fees_delta:.2f})",
         "balance_after": new_cash
     }).execute()
 
@@ -510,11 +509,11 @@ def _commit_fill(supabase, analytics, user_id, order, fill_res, quote, portfolio
         if new_qty == 0:
             # Closed completely
             if pos_id: # Was explicit close
-                 # A4) Fix attribution callsite to use UPDATED order totals.
+                 # E) Attribution invocation should use UPDATED cumulative order values
                  # Merge update_payload into order to get cumulative values
                  order_updated = {**order, **update_payload}
                  # Pass fees_total (cumulative), not delta
-                 _run_attribution(supabase, user_id, order_updated, pos, deltas["new_avg_fill_price"], deltas["fees_total"], side)
+                 _run_attribution(supabase, user_id, order_updated, pos, new_avg_fill_price, fees_total, side)
 
             # We delete the position if 0
             supabase.table("paper_positions").delete().eq("id", pos["id"]).execute()

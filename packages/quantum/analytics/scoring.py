@@ -2,6 +2,15 @@ from typing import List, Dict, Any, Optional
 import math
 from packages.quantum.common_enums import UnifiedScore, UnifiedScoreComponent, RegimeState
 
+CONTRACT_MULTIPLIER = 100.0
+
+def to_contract_dollars(per_share: float | None) -> float:
+    try:
+        v = float(per_share or 0.0)
+    except Exception:
+        return 0.0
+    return v * CONTRACT_MULTIPLIER
+
 def calculate_unified_score(
     trade: Dict[str, Any],
     regime_snapshot: Dict[str, Any], # GlobalRegimeSnapshot or dict
@@ -21,13 +30,20 @@ def calculate_unified_score(
         market_data = {}
 
     # 1. Extract Core Metrics
-    ev = trade.get('ev', 0.0)
-    suggested_entry = trade.get('suggested_entry', 0.0)
+    ev = trade.get('ev', 0.0) # Contract dollars
+    suggested_entry = trade.get('suggested_entry', 0.0) # Per-share dollars
+
+    # Normalize entry cost to Contract Dollars for ROI calculation
+    if entry_cost is None:
+        entry_cost = suggested_entry
+
+    cost_basis = to_contract_dollars(entry_cost)
 
     # Avoid division by zero
-    cost_basis = suggested_entry if suggested_entry > 0.01 else 1.0
+    if cost_basis <= 0:
+        cost_basis = 1.0  # Safe guard, do NOT divide by zero
 
-    # EV ROI
+    # EV ROI (Contract $ / Contract $)
     ev_roi = ev / cost_basis
 
     # 2. Expected Execution Cost (Drag)
@@ -38,44 +54,34 @@ def calculate_unified_score(
         legs = trade.get('legs', [])
         num_legs = len(legs) if legs else 1
 
-    if entry_cost is None:
-        entry_cost = trade.get('suggested_entry', 0.0)
-
     bid_ask_spread_width = trade.get('bid_ask_spread', 0.0)
 
-    # Calculate Proxy Cost
+    # Calculate Proxy Cost (PER SHARE first)
     # Formula: (Entry * Spread% * 0.5) + (Legs * 0.0065)
-    proxy_cost = 0.0
+    proxy_cost_share = 0.0
 
     # Try to use bid_ask_spread_pct from market_data first
     spread_pct = market_data.get('bid_ask_spread_pct')
     if spread_pct is not None and entry_cost > 0:
         width = entry_cost * spread_pct
-        proxy_cost = (width * 0.5) + (num_legs * 0.0065)
+        proxy_cost_share = (width * 0.5) + (num_legs * 0.0065)
     elif bid_ask_spread_width > 0:
          # Fallback to pre-calculated width
          # Note: bid_ask_spread in trade is usually width
-         proxy_cost = (bid_ask_spread_width * 0.5) + (num_legs * 0.0065)
+         proxy_cost_share = (bid_ask_spread_width * 0.5) + (num_legs * 0.0065)
     else:
          # Fallback if no spread info
-         proxy_cost = (cost_basis * 0.01 * 0.5) + (num_legs * 0.0065)
+         proxy_cost_share = (entry_cost * 0.01 * 0.5) + (num_legs * 0.0065)
 
-    # Cost per share
-    estimated_cost_per_share = execution_drag_estimate
+    # Convert Proxy Cost to Contract Dollars
+    proxy_cost_contract = to_contract_dollars(proxy_cost_share)
 
-    if estimated_cost_per_share > 0:
-        # Use the worse of historical or live proxy
-        estimated_cost_per_share = max(estimated_cost_per_share, proxy_cost)
-    else:
-        # If no history, use proxy
-        estimated_cost_per_share = proxy_cost
+    # Determine Final Execution Cost (Contract Dollars)
+    # execution_drag_estimate must be in contract dollars
+    final_execution_cost = max(proxy_cost_contract, execution_drag_estimate or 0.0)
 
-    # Safety floor
-    if estimated_cost_per_share <= 0:
-         estimated_cost_per_share = cost_basis * 0.01
-
-    # Cost ROI Impact
-    cost_roi = estimated_cost_per_share / cost_basis
+    # Cost ROI Impact (Contract $ / Contract $)
+    cost_roi = final_execution_cost / cost_basis
 
     # 3. Regime Penalty (ROI Impact)
     regime_state = RegimeState(regime_snapshot.get('state', 'normal'))
@@ -141,7 +147,8 @@ def calculate_unified_score(
             total_score=final_score
         ),
         badges=badges,
-        regime=regime_state
+        regime=regime_state,
+        execution_cost_dollars=final_execution_cost
     )
 
 def generate_badges(trade: Dict[str, Any], regime: RegimeState, roi: float) -> List[str]:

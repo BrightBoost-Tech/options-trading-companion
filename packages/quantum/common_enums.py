@@ -22,3 +22,4 @@ class UnifiedScore(BaseModel):
     components: UnifiedScoreComponent
     badges: list[str] = []
     regime: RegimeState
+    execution_cost_dollars: float = 0.0

@@ -14,6 +14,8 @@ from packages.quantum.ev_calculator import calculate_ev
 from packages.quantum.market_data import PolygonService
 from packages.quantum.analytics.regime_integration import map_market_regime
 from packages.quantum.services.iv_repository import IVRepository
+from packages.quantum.services.iv_point_service import IVPointService
+from packages.quantum.services.market_data_truth_layer import MarketDataTruthLayer
 from packages.quantum.analytics.regime_engine_v3 import RegimeEngineV3, GlobalRegimeSnapshot, RegimeState
 from packages.quantum.analytics.scoring import calculate_unified_score
 from packages.quantum.services.execution_service import ExecutionService
@@ -43,8 +45,9 @@ def scan_for_opportunities(
     # Unified Regime Engine
     regime_engine = RegimeEngineV3(
         supabase_client=supabase_client,
-        market_data=market_data,
+        market_data=MarketDataTruthLayer(),
         iv_repository=IVRepository(supabase_client) if supabase_client else None,
+        iv_point_service=IVPointService(supabase_client) if supabase_client else None,
     )
 
     # 1. Determine Universe

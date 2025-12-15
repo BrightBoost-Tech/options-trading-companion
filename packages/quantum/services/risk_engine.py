@@ -5,26 +5,35 @@ from packages.quantum.analytics.loss_minimizer import GuardrailPolicy
 
 class RiskEngine:
     @staticmethod
-    def get_active_policy(user_id: str, supabase: Any) -> Optional[GuardrailPolicy]:
+    def get_active_policy(user_id: str, supabase: Any, regime_state: Any = None) -> Optional[GuardrailPolicy]:
         """
         Fetches the latest active guardrail policy for the user.
         """
         try:
-            # Assuming 'learning_feedback_loops' has 'payload' column where we stored it.
-            # Order by created_at desc, limit 1.
-            # Filter by feedback_type="guardrail_policy"
+            # V3 Correction: Read from details_json using outcome_type
             res = supabase.table("learning_feedback_loops")\
-                .select("payload")\
+                .select("details_json, created_at")\
                 .eq("user_id", user_id)\
-                .eq("feedback_type", "guardrail_policy")\
+                .eq("outcome_type", "guardrail_policy")\
                 .order("created_at", desc=True)\
-                .limit(1)\
+                .limit(50)\
                 .execute()
 
-            if res.data and len(res.data) > 0:
-                payload = res.data[0].get("payload")
-                if payload:
-                    return payload
+            rows = res.data or []
+
+            # Pick the most recent matching regime_state (if requested)
+            if regime_state is not None:
+                target_regime = str(regime_state) if isinstance(regime_state, str) else getattr(regime_state, "value", str(regime_state))
+                for r in rows:
+                    dj = r.get("details_json") or {}
+                    stored_regime = dj.get("regime_state")
+                    if stored_regime == target_regime:
+                        return dj.get("policy")
+
+            # Fallback: Newest policy overall
+            if rows:
+                return (rows[0].get("details_json") or {}).get("policy")
+
             return None
         except Exception as e:
             # print(f"Error fetching guardrail policy: {e}")

@@ -2,14 +2,73 @@
 import os
 from datetime import date, timedelta, datetime
 from typing import Dict, Any, List
+from packages.quantum.market_data import PolygonService
 
 def get_next_earnings_date(symbol: str):
-    # TODO: Implement this with a real data source
-    return None
+    """
+    Estimates the next earnings date using a real data source (Polygon).
+    Strategy: Get last financial filing date and project +90-91 days.
+    """
+    try:
+        service = PolygonService()
+        last_date_dt = service.get_last_financials_date(symbol)
+
+        if last_date_dt:
+            last_date = last_date_dt.date()
+            # Standard quarter is ~91 days
+            next_date = last_date + timedelta(days=91)
+
+            # If the projected date is in the past, keep adding quarters until it's in the future.
+            # This robustly handles data that might be 6+ months stale (e.g. smaller caps).
+            while next_date < date.today():
+                next_date += timedelta(days=91)
+
+            return next_date
+
+        return None
+    except Exception:
+        # Fail gracefully to None
+        return None
 
 def get_sector_weight(existing_portfolio, sector):
-    # TODO: Implement this with a real data source
-    return 0.0
+    """
+    Calculates the weight of a specific sector in the existing portfolio.
+
+    Args:
+        existing_portfolio: List of positions (dicts or objects).
+        sector: The sector string to check against.
+
+    Returns:
+        float: The proportion of portfolio value in that sector (0.0 to 1.0).
+    """
+    total_portfolio_value = 0.0
+    sector_value = 0.0
+
+    for pos in existing_portfolio:
+        # Determine value and sector safely whether pos is dict or object
+        val = 0.0
+        p_sector = None
+
+        if isinstance(pos, dict):
+            val = float(pos.get("current_value", 0.0))
+            if val == 0.0 and "quantity" in pos and "current_price" in pos:
+                val = float(pos["quantity"]) * float(pos["current_price"])
+            p_sector = pos.get("sector")
+        else:
+            val = getattr(pos, "current_value", 0.0)
+            if val == 0.0 and hasattr(pos, "quantity") and hasattr(pos, "current_price"):
+                val = float(pos.quantity) * float(pos.current_price)
+            p_sector = getattr(pos, "sector", None)
+
+        total_portfolio_value += val
+
+        if p_sector == sector:
+            sector_value += val
+
+    if total_portfolio_value <= 0:
+        return 0.0
+
+    return sector_value / total_portfolio_value
 
 def apply_guardrails(candidates, existing_portfolio):
     """

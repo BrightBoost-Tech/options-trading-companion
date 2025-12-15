@@ -1,7 +1,7 @@
 """Market data integration with caching"""
 import os
 import requests
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import List, Dict, Optional, Any
 import numpy as np
 import re
@@ -100,6 +100,41 @@ class PolygonService:
         data = response.json()
         return data.get('results', {})
 
+    def get_last_financials_date(self, symbol: str) -> Optional[datetime]:
+        """
+        Fetches the date of the most recent financial filing (usually earnings).
+        Uses Polygon /vX/reference/financials.
+        """
+        try:
+            url = f"{self.base_url}/vX/reference/financials"
+            params = {
+                'ticker': symbol,
+                'limit': 1,
+                'sort': 'filing_date',
+                'order': 'desc',
+                'apiKey': self.api_key
+            }
+            # Short timeout to avoid blocking
+            response = self.session.get(url, params=params, timeout=3)
+            if response.status_code != 200:
+                return None
+
+            data = response.json()
+            results = data.get('results', [])
+            if not results:
+                return None
+
+            # Use filing_date or period_of_report_date
+            filing_date_str = results[0].get('filing_date')
+            if filing_date_str:
+                return datetime.fromisoformat(filing_date_str)
+
+            return None
+
+        except Exception as e:
+            # print(f"Error fetching financials for {symbol}: {e}")
+            return None
+
     def get_iv_rank(self, symbol: str) -> float:
         """Calculates IV Rank from historical data."""
         try:
@@ -125,9 +160,9 @@ class PolygonService:
 
     def get_recent_quote(self, symbol: str) -> Dict[str, float]:
         """
-        Returns a dict with 'bid' and 'ask' for the given symbol.
+        Returns a dict with quotes for the given symbol.
+        Keys: 'bid', 'ask', 'bid_price', 'ask_price', 'price'
         Uses Polygon's quotes endpoint.
-        Returns {'bid': 0.0, 'ask': 0.0} on failure.
         """
         # 1. Normalize Symbol
         search_symbol = normalize_option_symbol(symbol)
@@ -136,7 +171,6 @@ class PolygonService:
         try:
             if is_option:
                 # Options: Use v3 Quotes (latest)
-                # We fetch the most recent quote
                 url = f"{self.base_url}/v3/quotes/{search_symbol}"
                 params = {
                     'limit': 1,
@@ -147,15 +181,21 @@ class PolygonService:
                 response = self.session.get(url, params=params, timeout=5)
                 # Use raise_for_status to catch 4xx/5xx errors
                 if response.status_code != 200:
-                     return {"bid": 0.0, "ask": 0.0}
+                     return {"bid": 0.0, "ask": 0.0, "bid_price": 0.0, "ask_price": 0.0, "price": None}
 
                 data = response.json()
 
                 if 'results' in data and len(data['results']) > 0:
                     quote = data['results'][0]
+                    bid = float(quote.get('bid_price', 0.0))
+                    ask = float(quote.get('ask_price', 0.0))
+                    mid = (bid + ask) / 2.0 if (bid > 0 and ask > 0) else None
                     return {
-                        "bid": float(quote.get('bid_price', 0.0)),
-                        "ask": float(quote.get('ask_price', 0.0))
+                        "bid": bid,
+                        "ask": ask,
+                        "bid_price": bid,
+                        "ask_price": ask,
+                        "price": mid
                     }
             else:
                 # Stocks: Use v2 NBBO (Last Quote)
@@ -165,23 +205,29 @@ class PolygonService:
 
                 # NBBO endpoint might return 404 if no data, or 200 with empty results
                 if response.status_code != 200:
-                    return {"bid": 0.0, "ask": 0.0}
+                    return {"bid": 0.0, "ask": 0.0, "bid_price": 0.0, "ask_price": 0.0, "price": None}
 
                 data = response.json()
 
                 if 'results' in data:
                     res = data['results']
                     # Polygon v2/last/nbbo: p = bid price, P = ask price
+                    bid = float(res.get('p', 0.0))
+                    ask = float(res.get('P', 0.0))
+                    mid = (bid + ask) / 2.0 if (bid > 0 and ask > 0) else None
                     return {
-                        "bid": float(res.get('p', 0.0)),
-                        "ask": float(res.get('P', 0.0))
+                        "bid": bid,
+                        "ask": ask,
+                        "bid_price": bid,
+                        "ask_price": ask,
+                        "price": mid
                     }
 
         except Exception as e:
             # Fallback for any network/parsing errors
             print(f"Quote fetch failed for {search_symbol}: {e}")
 
-        return {"bid": 0.0, "ask": 0.0}
+        return {"bid": 0.0, "ask": 0.0, "bid_price": 0.0, "ask_price": 0.0, "price": None}
 
     def get_option_snapshot(self, symbol: str) -> Dict:
         """
@@ -218,7 +264,7 @@ class PolygonService:
 
         return {}
 
-    def get_option_chain_snapshot(self, underlying: str, strike_range: float = 0.20) -> List[Dict]:
+    def get_option_chain_snapshot(self, underlying: str, strike_range: float = 0.20, limit: int = 1000) -> List[Dict]:
         """
         Fetches option chain snapshot for the underlying.
         Endpoint: /v3/snapshot/options/{underlyingAsset}
@@ -231,7 +277,7 @@ class PolygonService:
         # 1. Get spot price first to filter strikes
         try:
             quote = self.get_recent_quote(underlying)
-            spot = (quote['bid'] + quote['ask']) / 2.0
+            spot = quote.get("price") or (quote['bid'] + quote['ask']) / 2.0
         except:
             spot = 0
 
@@ -244,9 +290,6 @@ class PolygonService:
             except:
                 pass
 
-        # If still no spot, we can't filter by strike effectively. Use wider net or fail?
-        # Let's proceed with no strike filter if spot is missing, but strict limit.
-
         url = f"{self.base_url}/v3/snapshot/options/{underlying}"
 
         params = {
@@ -258,7 +301,9 @@ class PolygonService:
         # Expiry: >= 15 days, <= 60 days (to bracket 30 days)
         # Polygon filtering syntax: expiration_date.gte, etc.
 
-        today = datetime.now().date()
+        today = datetime.now(timezone.utc).date()
+        # Default scan window if no args passed to helper, but caller can filter.
+        # This raw method fetches a wide net.
         date_min = (today + timedelta(days=15)).strftime('%Y-%m-%d')
         date_max = (today + timedelta(days=60)).strftime('%Y-%m-%d')
 
@@ -285,8 +330,6 @@ class PolygonService:
                 results.extend(batch)
 
                 # Check for pagination
-                # Polygon uses 'next_url' in response, which includes params (but not apiKey usually?)
-                # Actually v3 snapshot often includes cursor in next_url
                 next_url = data.get('next_url')
                 if next_url:
                     url = next_url
@@ -297,7 +340,7 @@ class PolygonService:
                     break
 
                 # Safety break for massive chains
-                if len(results) > 1000:
+                if len(results) > limit:
                     break
 
             return results
@@ -305,6 +348,66 @@ class PolygonService:
         except Exception as e:
             print(f"Error fetching chain snapshot for {underlying}: {e}")
             return []
+
+    def get_option_chain(self, symbol: str, min_dte: int = 25, max_dte: int = 45, limit: int = 1000) -> List[Dict[str, Any]]:
+        """
+        High-level wrapper to fetch and normalize option chain for scanner.
+        """
+        raw_chain = self.get_option_chain_snapshot(symbol, limit=limit)
+        normalized = []
+        today = datetime.now(timezone.utc).date()
+
+        for item in raw_chain:
+            details = item.get("details") or {}
+            exp_str = details.get("expiration_date")
+            strike = details.get("strike_price")
+            right = (details.get("contract_type") or "").lower() # "call"/"put"
+            ticker = details.get("ticker") or item.get("ticker")
+
+            if not (ticker and exp_str and strike and right):
+                continue
+
+            try:
+                exp_date = datetime.strptime(exp_str, "%Y-%m-%d").date()
+                dte = (exp_date - today).days
+                if not (min_dte <= dte <= max_dte):
+                    continue
+            except ValueError:
+                continue
+
+            greeks = item.get("greeks") or {}
+            last_quote = item.get("last_quote") or {}
+
+            # Extract prices
+            bid = float(last_quote.get("b") or 0.0)
+            ask = float(last_quote.get("a") or 0.0)
+
+            mid = None
+            if bid > 0 and ask > 0:
+                mid = (bid + ask) / 2.0
+
+            day = item.get("day") or {}
+            close = float(day.get("close") or 0.0)
+
+            # Best effort price
+            price = mid if mid else (float(item.get("last_trade", {}).get("p") or 0.0) or close)
+
+            normalized.append({
+                "ticker": ticker,
+                "strike": strike,
+                "expiration": exp_str,
+                "type": right,
+                "delta": float(greeks.get("delta") or 0.0),
+                "gamma": float(greeks.get("gamma") or 0.0),
+                "vega": float(greeks.get("vega") or 0.0),
+                "theta": float(greeks.get("theta") or 0.0),
+                "bid": bid,
+                "ask": ask,
+                "price": price,
+                "close": close
+            })
+
+        return normalized
 
 def get_polygon_price(symbol: str) -> float:
     # FIX 1: Handle Cash Manually

@@ -36,6 +36,27 @@ SUGGESTION_LOGS_TABLE = "suggestion_logs"
 MIDDAY_TEST_MODE = os.getenv("MIDDAY_TEST_MODE", "false").lower() == "true"
 APP_VERSION = os.getenv("APP_VERSION", "v2-dev")
 
+def normalize_win_rate(value) -> tuple[float, float]:
+    """
+    Returns (ratio_0_to_1, pct_0_to_100).
+    Accepts either:
+      - ratio in [0,1]  (ex: 0.73)
+      - percent in [0,100] (ex: 73.0)
+    Clamps ratio to [0,1] defensively.
+    """
+    if value is None:
+        return 0.0, 0.0
+    try:
+        v = float(value)
+    except Exception:
+        return 0.0, 0.0
+    ratio = (v / 100.0) if v > 1.0 else v
+    if ratio < 0.0:
+        ratio = 0.0
+    if ratio > 1.0:
+        ratio = 1.0
+    return ratio, ratio * 100.0
+
 async def run_morning_cycle(supabase: Client, user_id: str):
     """
     1. Read latest portfolio snapshot + positions.
@@ -545,9 +566,8 @@ async def run_weekly_report(supabase: Client, user_id: str):
         print(f"Error fetching journal stats: {e}")
         metrics = {}
 
-    win_rate_pct = metrics.get("win_rate", 0)
-    # Normalize to ratio (0.0 - 1.0) if it looks like a percent (>1.0)
-    win_rate_ratio = (win_rate_pct / 100.0) if win_rate_pct > 1.0 else win_rate_pct
+    win_rate_raw = metrics.get("win_rate", 0)
+    win_rate_ratio, win_rate_pct = normalize_win_rate(win_rate_raw)
 
     total_pnl = metrics.get("total_pnl", 0)
     trade_count = metrics.get("trade_count", 0)
@@ -633,7 +653,7 @@ async def run_weekly_report(supabase: Client, user_id: str):
         "user_id": user_id,
         "week_ending": datetime.now().strftime('%Y-%m-%d'),
         "total_pnl": total_pnl,
-        "win_rate": win_rate_pct,
+        "win_rate": win_rate_ratio,
         "trade_count": trade_count,
         "missed_opportunities": [],
         "report_markdown": report_md.strip()

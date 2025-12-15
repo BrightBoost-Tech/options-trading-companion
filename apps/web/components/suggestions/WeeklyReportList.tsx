@@ -18,6 +18,12 @@ interface WeeklyReportListProps {
   reports: WeeklyReport[];
 }
 
+function normalizeWinRateRatio(value: number): number {
+  if (value == null) return 0;
+  // If value looks like a percent (ex: 73), convert to ratio.
+  return value > 1 ? value / 100 : value;
+}
+
 export default function WeeklyReportList({ reports }: WeeklyReportListProps) {
   const [selectedReportId, setSelectedReportId] = React.useState<string | null>(
     reports && reports.length > 0 ? reports[0].id : null
@@ -83,7 +89,7 @@ export default function WeeklyReportList({ reports }: WeeklyReportListProps) {
               <div className="flex gap-2 text-xs text-gray-500">
                 <span>{report.trade_count} Trades</span>
                 <span>•</span>
-                <span>{Math.round(report.win_rate * 100)}% WR</span>
+                <span>{Math.round(normalizeWinRateRatio(report.win_rate) * 100)}% WR</span>
                 <span>•</span>
                 <span className={report.total_pnl >= 0 ? 'text-green-600' : 'text-red-600'}>
                   ${report.total_pnl.toFixed(0)}
@@ -123,7 +129,7 @@ export default function WeeklyReportList({ reports }: WeeklyReportListProps) {
           </div>
           <div className="bg-gray-50 p-3 rounded border border-gray-100 text-center">
             <div className="text-xs text-gray-500 uppercase">Win Rate</div>
-            <div className="text-xl font-bold text-gray-800">{Math.round(selectedReport.win_rate * 100)}%</div>
+            <div className="text-xl font-bold text-gray-800">{Math.round(normalizeWinRateRatio(selectedReport.win_rate) * 100)}%</div>
           </div>
           <div className="bg-gray-50 p-3 rounded border border-gray-100 text-center">
             <div className="text-xs text-gray-500 uppercase">Trades</div>

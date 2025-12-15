@@ -127,25 +127,36 @@ def calculate_ev(
 
 def calculate_position_size(
     account_value: float,
-    max_risk_percent: float,
+    max_risk_pct: float,
     max_loss_per_contract: float,
 ) -> PositionSizeResult:
     """
     Calculates the optimal number of contracts based on risk tolerance.
+    Standardized to use 0-1 float for risk percentage.
     """
     if max_loss_per_contract <= 0:
         return PositionSizeResult(
-            contracts_to_trade=1, # Default for no-risk/undefined-risk trades
-            risk_per_trade_usd=0,
+            contracts_to_trade=0,  # 0 contracts for undefined/invalid risk
+            risk_per_trade_usd=0.0,
             max_loss_per_contract=max_loss_per_contract
         )
 
-    risk_per_trade_usd = account_value * (max_risk_percent / 100)
+    # Standardize input: if > 1.0, assume it's a percentage (e.g. 5.0) and convert,
+    # but strictly we expect 0.05. We'll be safe.
+    effective_risk_pct = max_risk_pct
+    if effective_risk_pct > 1.0:
+        effective_risk_pct = effective_risk_pct / 100.0
+
+    risk_per_trade_usd = account_value * effective_risk_pct
 
     num_contracts = risk_per_trade_usd / max_loss_per_contract
 
+    # Contracts = floor(risk_dollars / max_loss_per_contract)
+    contracts = math.floor(num_contracts)
+    contracts = int(max(0, contracts))
+
     return PositionSizeResult(
-        contracts_to_trade=int(max(1, num_contracts)), # Trade at least 1 contract
+        contracts_to_trade=contracts,
         risk_per_trade_usd=risk_per_trade_usd,
         max_loss_per_contract=max_loss_per_contract
     )

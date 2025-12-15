@@ -231,6 +231,9 @@ def scan_for_opportunities(
                         total_cost -= premium
 
             # G. Compute Net EV
+            max_loss_per_contract = 0.0
+            collateral_per_contract = 0.0
+
             if len(legs) == 2:
                 long_leg = next((l for l in legs if l['side'] == 'buy'), None)
                 short_leg = next((l for l in legs if l['side'] == 'sell'), None)
@@ -247,6 +250,16 @@ def scan_for_opportunities(
                         width=width
                     )
                     total_ev = ev_obj.expected_value
+                    max_loss_per_contract = ev_obj.max_loss
+
+                    # Calculate Collateral
+                    # Credit Spread: Width * 100
+                    # Debit Spread: Cost (Max Loss)
+                    if st_type == "credit_spread":
+                        collateral_per_contract = width * 100.0
+                    else:
+                        collateral_per_contract = max_loss_per_contract
+
                 else:
                     total_ev = 0
             elif len(legs) == 1:
@@ -260,6 +273,21 @@ def scan_for_opportunities(
                     strategy=st_type
                 )
                 total_ev = ev_obj.expected_value
+                max_loss_per_contract = ev_obj.max_loss
+
+                # Long Option: Collateral is cost (max loss)
+                # Short Option (not handled here usually, but if so): undefined or margin
+                # Scanner usually returns long or spread.
+                if leg['side'] == 'buy':
+                    collateral_per_contract = max_loss_per_contract
+                else:
+                    # Short naked? Not typical for this scanner yet.
+                    # Assume Cash Secured Put logic: Strike * 100
+                    if leg['type'] == 'put':
+                         collateral_per_contract = leg['strike'] * 100.0
+                    else:
+                         # Short Call naked: infinite/margin. Use stock price.
+                         collateral_per_contract = current_price * 100.0
 
             # H. Unified Scoring
             trade_dict = {
@@ -310,10 +338,9 @@ def scan_for_opportunities(
             # Retrieve final execution cost (contract dollars) from UnifiedScore
             final_execution_cost = unified_score.execution_cost_dollars
 
-           # Requirement: Hard-reject if execution cost > EV
+            # Requirement: Hard-reject if execution cost > EV
             if final_execution_cost >= total_ev:
                 return None
-  
 
             return {
                 "symbol": symbol,
@@ -322,6 +349,8 @@ def scan_for_opportunities(
                 "strategy": suggestion["strategy"],
                 "suggested_entry": abs(total_cost),
                 "ev": total_ev,
+                "max_loss_per_contract": max_loss_per_contract,
+                "collateral_per_contract": collateral_per_contract,
                 "score": round(unified_score.score, 1),
                 "unified_score_details": unified_score.components.dict(),
                 "iv_rank": iv_rank,

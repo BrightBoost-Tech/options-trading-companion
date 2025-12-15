@@ -121,6 +121,14 @@ export interface Suggestion {
   score?: number;
   risk_score?: number;
 
+  sizing_metadata?: {
+    capital_required?: number;
+    max_loss_total?: number;
+    risk_multiplier?: number;
+    clamped_by?: string;
+    clamp_reason?: string;
+  };
+
   // Flattened Context Helpers
   iv_rank?: number;
   iv_regime?: string;

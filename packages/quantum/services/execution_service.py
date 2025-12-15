@@ -107,7 +107,7 @@ class ExecutionService:
             # Using 'timestamp' as it is explicitly populated by register_execution.
             # Removed .limit() to avoid cross-symbol starvation.
             query = self.supabase.table(self.executions_table)\
-                .select("symbol, fill_price, fees, suggestion_id")\
+                .select("symbol, fill_price, fees, suggestion_id, quantity")\
                 .eq("user_id", user_id)\
                 .in_("symbol", symbols)\
                 .neq("suggestion_id", None)\
@@ -145,6 +145,11 @@ class ExecutionService:
                 suggestion_id = ex.get("suggestion_id")
                 fill_price = float(ex.get("fill_price") or 0.0)
                 fees = float(ex.get("fees") or 0.0)
+                qty = float(ex.get("quantity") or 0.0)
+
+                # Fees per contract dollars
+                # If quantity is missing or zero, fallback to total fees (safest assumption)
+                fees_per_contract = (fees / qty) if qty > 0 else fees
 
                 target = target_by_log_id.get(suggestion_id)
 
@@ -153,9 +158,12 @@ class ExecutionService:
                 if fill_price is None: # Should be filtered by query but double check
                     continue
 
-                abs_slip = abs(fill_price - target)
-                slip_bps = (abs_slip / target) * 10_000
-                drag = abs_slip + fees
+                # Slippage in contract dollars (x100 for options)
+                abs_slip_share = abs(fill_price - target)
+                abs_slip_contract = abs_slip_share * 100.0
+
+                slip_bps = (abs_slip_share / target) * 10_000
+                drag_contract = abs_slip_contract + fees_per_contract
 
                 if symbol not in aggregates:
                     aggregates[symbol] = {
@@ -168,10 +176,10 @@ class ExecutionService:
 
                 agg = aggregates[symbol]
                 agg["count"] += 1
-                agg["sum_abs_slip"] += abs_slip
+                agg["sum_abs_slip"] += abs_slip_contract
                 agg["sum_slip_bps"] += slip_bps
-                agg["sum_fees"] += fees
-                agg["sum_drag"] += drag
+                agg["sum_fees"] += fees_per_contract
+                agg["sum_drag"] += drag_contract
 
             # Finalize results
             for symbol, agg in aggregates.items():
@@ -181,10 +189,10 @@ class ExecutionService:
 
                 results[symbol] = {
                     "n": n,
-                    "avg_abs_slip": agg["sum_abs_slip"] / n,
+                    "avg_abs_slip": agg["sum_abs_slip"] / n,  # CONTRACT dollars
                     "avg_slip_bps": agg["sum_slip_bps"] / n,
-                    "avg_fees": agg["sum_fees"] / n,
-                    "avg_drag": agg["sum_drag"] / n,
+                    "avg_fees": agg["sum_fees"] / n,          # Fees per contract
+                    "avg_drag": agg["sum_drag"] / n,          # CONTRACT dollars
                     "source": "history"
                 }
 
@@ -238,13 +246,19 @@ class ExecutionService:
 
         # Precise formula match for scanner equivalence:
         # Cost = (Entry * Spread% * 0.5) + (Legs * 0.0065)
+        # Note: Return value must be in CONTRACT dollars (x100 for options spread component).
+        # entry_cost is per-share total premium (e.g. 1.50).
+        # num_legs * 0.0065 is per share fees (assuming 0.65/contract).
+        # So we multiply the entire share-based cost by 100.
         if entry_cost is not None and num_legs is not None:
              spread_value = abs(entry_cost) * spread_pct
-             return (spread_value * 0.5) + (num_legs * 0.0065)
+             share_cost = (spread_value * 0.5) + (num_legs * 0.0065)
+             return share_cost * 100.0
 
         # Legacy Assumption: Drag is roughly half the spread + some fees
         # Return a safe default if specific trade structure is unknown.
-        return 0.05
+        # 5 cents/share = $5.00/contract
+        return 5.0
 
     def simulate_fill(self,
                       symbol: str,

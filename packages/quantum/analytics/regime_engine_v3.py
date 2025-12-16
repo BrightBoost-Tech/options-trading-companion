@@ -244,9 +244,10 @@ class RegimeEngineV3:
             }
         )
 
-    def compute_symbol_snapshot(self, symbol: str, global_snapshot: GlobalRegimeSnapshot) -> SymbolRegimeSnapshot:
+    def compute_symbol_snapshot(self, symbol: str, global_snapshot: GlobalRegimeSnapshot, existing_bars: List[Dict] = None) -> SymbolRegimeSnapshot:
         """
         Computes regime state for a single symbol.
+        Accepts optional `existing_bars` to avoid redundant API calls.
         """
         as_of = datetime.fromisoformat(global_snapshot.as_of_ts)
 
@@ -262,9 +263,11 @@ class RegimeEngineV3:
         }
 
         # 2. Fetch Realized Vol
-        end_date = as_of
-        start_date = end_date - timedelta(days=40)
-        bars = self.market_data.daily_bars(symbol, start_date, end_date)
+        bars = existing_bars
+        if not bars:
+            end_date = as_of
+            start_date = end_date - timedelta(days=40)
+            bars = self.market_data.daily_bars(symbol, start_date, end_date)
 
         rv_20d = None
         if bars and len(bars) >= 20:

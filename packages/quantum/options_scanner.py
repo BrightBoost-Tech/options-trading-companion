@@ -231,11 +231,35 @@ def scan_for_opportunities(
     # 3. Parallel Processing
     batch_size = 5 # Used for thread pool size
 
-    def process_symbol(symbol: str, drag_map: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    # 3a. Batch Fetch Quotes (Optimization)
+    # Fetch all quotes in one go to avoid N requests inside the loop
+    # truth_layer.snapshot_many handles batching automatically
+    logger.info(f"[Scanner] Batch fetching quotes for {len(symbols)} symbols...")
+    quotes_map = truth_layer.snapshot_many(symbols)
+
+    def process_symbol(symbol: str, drag_map: Dict[str, Any], quotes_map: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         """Process a single symbol and return a candidate dict or None."""
         try:
             # A. Enrich Data
-            quote = market_data.get_recent_quote(symbol)
+            # Use batched quote from map
+            # Normalize symbol key for lookup
+            key = truth_layer.normalize_symbol(symbol)
+            snapshot_item = quotes_map.get(key)
+
+            if not snapshot_item:
+                # Fallback to direct fetch if missing in batch (rare)
+                quote = market_data.get_recent_quote(symbol)
+            else:
+                # Convert MDTL snapshot format to scanner quote format
+                q = snapshot_item.get("quote", {})
+                quote = {
+                    "bid": q.get("bid"),
+                    "ask": q.get("ask"),
+                    "bid_price": q.get("bid"),
+                    "ask_price": q.get("ask"),
+                    "price": q.get("last") or q.get("mid")
+                }
+
             if not quote: return None
 
             # Quote handling: tolerate both real Polygon (bid/ask) and mock (bid_price/ask_price)
@@ -263,14 +287,13 @@ def scan_for_opportunities(
                 # We can reject if NO quote at all, but let's be lenient if we have current_price
                 pass
 
-            # C. Compute Symbol Regime (Authoritative)
-            symbol_snapshot = regime_engine.compute_symbol_snapshot(symbol, global_snapshot)
-            effective_regime_state = regime_engine.get_effective_regime(symbol_snapshot, global_snapshot)
+            # D. Technical Analysis (Trend) - MOVED UP to reuse for Regime
+            # Optimization: Use truth_layer which caches, and reuse bars for regime engine
+            end_date = datetime.now()
+            start_date = end_date - timedelta(days=90) # Enough buffer for 60 trading days
 
-            iv_rank = symbol_snapshot.iv_rank or 50.0
-
-            # D. Technical Analysis (Trend)
-            bars = market_data.get_historical_prices(symbol, days=60)
+            # Fetch using Truth Layer (caches!)
+            bars = truth_layer.daily_bars(symbol, start_date, end_date)
 
             # History handling: tolerate list of objects or dict with 'prices'
             closes = []
@@ -279,8 +302,16 @@ def scan_for_opportunities(
             elif isinstance(bars, list):
                 closes = [b.get("close") for b in bars if b.get("close") is not None]
 
+            # Ensure we have enough data (need at least 50 for SMA50)
             if not closes or len(closes) < 50:
                 return None
+
+            # C. Compute Symbol Regime (Authoritative)
+            # Pass existing bars to avoid redundant network call
+            symbol_snapshot = regime_engine.compute_symbol_snapshot(symbol, global_snapshot, existing_bars=bars)
+            effective_regime_state = regime_engine.get_effective_regime(symbol_snapshot, global_snapshot)
+
+            iv_rank = symbol_snapshot.iv_rank or 50.0
 
             sma20 = np.mean(closes[-20:])
             sma50 = np.mean(closes[-50:])
@@ -532,7 +563,7 @@ def scan_for_opportunities(
     # Corrected Indentation: ThreadPoolExecutor is now OUTSIDE process_symbol
     with concurrent.futures.ThreadPoolExecutor(max_workers=batch_size) as executor:
         future_to_symbol = {
-            executor.submit(process_symbol, sym, drag_map): sym
+            executor.submit(process_symbol, sym, drag_map, quotes_map): sym
             for sym in symbols
         }
 

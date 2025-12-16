@@ -160,3 +160,7 @@ class UniverseService:
         # Fallback to a slice of BASE_UNIVERSE if DB fails or is empty
         print("Falling back to BASE_UNIVERSE")
         return [{"symbol": s, "earnings_date": None} for s in self.BASE_UNIVERSE[:limit]]
+
+    def get_universe(self, limit: int = 30):
+        # Backwards-compatible alias
+        return self.get_scan_candidates(limit=limit)

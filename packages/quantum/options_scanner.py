@@ -254,7 +254,7 @@ def scan_for_opportunities(
     if not symbols:
         if universe_service:
             try:
-                universe = universe_service.get_universe()
+                universe = universe_service.get_scan_candidates(limit=30)
                 symbols = [u['symbol'] for u in universe]
             except Exception as e:
                 print(f"[Scanner] UniverseService failed: {e}. Using fallback.")

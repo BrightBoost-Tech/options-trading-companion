@@ -37,14 +37,47 @@ def calculate_unified_score(
     if entry_cost is None:
         entry_cost = suggested_entry
 
-    cost_basis = to_contract_dollars(entry_cost)
+    # -----------------------------------------------------
+    # ROI Denominator Logic (Risk Basis vs Premium Basis)
+    # -----------------------------------------------------
+    roi_mode = "premium_basis"
+    denom = 100.0
 
-    # Avoid division by zero
-    if cost_basis <= 0:
-        cost_basis = 1.0  # Safe guard, do NOT divide by zero
+    # Prefer risk basis if available
+    max_loss = trade.get("max_loss") or trade.get("max_loss_per_contract")
+    collateral = trade.get("collateral_required_per_contract") or trade.get("collateral_per_contract")
 
-    # EV ROI (Contract $ / Contract $)
-    ev_roi = ev / cost_basis
+    # Check for risk basis (max_loss or collateral)
+    # Use the first positive value found
+    risk_basis = None
+    if max_loss is not None:
+        try:
+            if float(max_loss) > 0:
+                risk_basis = float(max_loss)
+        except (ValueError, TypeError):
+            pass
+
+    if risk_basis is None and collateral is not None:
+        try:
+            if float(collateral) > 0:
+                risk_basis = float(collateral)
+        except (ValueError, TypeError):
+            pass
+
+    if risk_basis is not None:
+        denom = float(risk_basis)
+        roi_mode = "risk_basis"
+    else:
+        # Fallback to premium/contract basis
+        entry_share = abs(float(entry_cost or 0.0))
+        denom = max(1e-6, entry_share * 100.0) # Contract dollars
+        roi_mode = "premium_basis"
+
+    # Use 'denom' as the cost basis for ROI calculation
+    cost_basis = denom
+
+    # EV ROI (Contract $ / Risk Basis $)
+    ev_roi = float(ev) / cost_basis
 
     # 2. Expected Execution Cost (Drag)
     # Use provided estimate (from history) or calculate from current spread
@@ -62,8 +95,8 @@ def calculate_unified_score(
 
     # Try to use bid_ask_spread_pct from market_data first
     spread_pct = market_data.get('bid_ask_spread_pct')
-    if spread_pct is not None and entry_cost > 0:
-        width = entry_cost * spread_pct
+    if spread_pct is not None and (entry_cost or 0) > 0:
+        width = (entry_cost or 0) * spread_pct
         proxy_cost_share = (width * 0.5) + (num_legs * 0.0065)
     elif bid_ask_spread_width > 0:
          # Fallback to pre-calculated width
@@ -71,7 +104,7 @@ def calculate_unified_score(
          proxy_cost_share = (bid_ask_spread_width * 0.5) + (num_legs * 0.0065)
     else:
          # Fallback if no spread info
-         proxy_cost_share = (entry_cost * 0.01 * 0.5) + (num_legs * 0.0065)
+         proxy_cost_share = ((entry_cost or 0) * 0.01 * 0.5) + (num_legs * 0.0065)
 
     # Convert Proxy Cost to Contract Dollars
     proxy_cost_contract = to_contract_dollars(proxy_cost_share)
@@ -87,7 +120,8 @@ def calculate_unified_score(
     regime_state = RegimeState(regime_snapshot.get('state', 'normal'))
     regime_penalty_roi = 0.0
 
-    strategy_type = trade.get('strategy', 'unknown')
+    raw_strategy = trade.get("strategy_key") or trade.get("strategy") or ""
+    strategy_type = str(raw_strategy).lower()
 
     # Example Penalties
     if regime_state == RegimeState.SHOCK:
@@ -144,7 +178,9 @@ def calculate_unified_score(
             execution_cost=cost_points,
             regime_penalty=regime_points,
             greek_penalty=greek_points,
-            total_score=final_score
+            total_score=final_score,
+            roi_mode=roi_mode,
+            roi_denom=denom
         ),
         badges=badges,
         regime=regime_state,

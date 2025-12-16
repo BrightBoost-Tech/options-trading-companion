@@ -1,9 +1,10 @@
 import React, { useState } from 'react';
 import { Card, CardContent } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
+import { Button } from '@/components/ui/button';
 import { QuantumTooltip } from '@/components/ui/QuantumTooltip';
 import { API_URL, TEST_USER_ID } from '@/lib/constants';
-import { Copy, CheckCircle2 } from 'lucide-react';
+import { Copy, CheckCircle2, Loader2 } from 'lucide-react';
 import { formatOptionDisplay } from '@/lib/formatters';
 import { supabase } from '@/lib/supabase';
 
@@ -215,13 +216,15 @@ export default function TradeSuggestionCard({ suggestion, onLogged }: TradeSugge
         <div className="text-gray-600 mt-1 italic">
           {suggestion.rationale || "Morning limit order opportunity."}
         </div>
-        <button
+        <Button
+            variant="outline"
+            size="sm"
             onClick={copyOrderJson}
-            className="mt-2 w-full flex items-center justify-center gap-2 bg-white border border-orange-200 text-orange-700 py-1 rounded hover:bg-orange-100 transition-colors"
+            className="mt-2 w-full h-auto py-1 text-xs flex items-center justify-center gap-2 border-orange-200 text-orange-700 bg-white hover:bg-orange-100 hover:text-orange-800 transition-colors"
         >
           {copied ? <CheckCircle2 className="w-3 h-3" /> : <Copy className="w-3 h-3" />}
           {copied ? 'Copied' : 'Copy Limit Order'}
-        </button>
+        </Button>
       </div>
     );
   };
@@ -246,20 +249,29 @@ export default function TradeSuggestionCard({ suggestion, onLogged }: TradeSugge
         )}
 
         <div className="flex gap-2 mt-2">
-            <button
+            <Button
+                variant="outline"
+                size="sm"
                 onClick={copyOrderJson}
-                className="flex-1 flex items-center justify-center gap-2 bg-white border border-blue-200 text-blue-700 py-1 rounded hover:bg-blue-100 transition-colors"
+                className="flex-1 h-auto py-1 text-xs flex items-center justify-center gap-2 border-blue-200 text-blue-700 bg-white hover:bg-blue-100 hover:text-blue-800 transition-colors"
             >
               {copied ? <CheckCircle2 className="w-3 h-3" /> : <Copy className="w-3 h-3" />}
               {copied ? 'Copied' : 'Copy JSON'}
-            </button>
-            <button
+            </Button>
+            <Button
+                variant="ghost"
+                size="sm"
                 onClick={handleEvPreview}
                 disabled={evLoading}
-                className="flex-1 bg-blue-100 text-blue-700 py-1 rounded hover:bg-blue-200 transition-colors disabled:opacity-50"
+                className="flex-1 h-auto py-1 text-xs bg-blue-100 text-blue-700 hover:bg-blue-200 hover:text-blue-800 transition-colors"
             >
-                {evLoading ? 'Loading...' : 'EV Preview'}
-            </button>
+                {evLoading ? (
+                  <>
+                    <Loader2 className="mr-2 h-3 w-3 animate-spin" />
+                    Loading...
+                  </>
+                ) : 'EV Preview'}
+            </Button>
         </div>
       </div>
     );
@@ -335,13 +347,16 @@ export default function TradeSuggestionCard({ suggestion, onLogged }: TradeSugge
                {suggestion.rationale}
              </p>
 
-             <button
+             <Button
+               variant="link"
+               size="sm"
                onClick={handleEvPreview}
                disabled={evLoading}
-               className="mt-3 text-xs text-blue-600 hover:underline disabled:opacity-50"
+               className="mt-3 h-auto p-0 text-xs text-blue-600 hover:no-underline hover:text-blue-700 disabled:opacity-50"
              >
+               {evLoading ? <Loader2 className="mr-1 h-3 w-3 animate-spin" /> : null}
                {evLoading ? 'Calculating EV…' : 'EV preview'}
-             </button>
+             </Button>
            </>
          )}
 
@@ -357,20 +372,26 @@ export default function TradeSuggestionCard({ suggestion, onLogged }: TradeSugge
 
         {(suggestion.window === 'morning_limit' || suggestion.window === 'midday_entry') && (
             <div className="mt-3 flex justify-end gap-2">
-                <button
+                <Button
+                    variant="outline"
+                    size="sm"
                     onClick={handlePaperTrade}
                     disabled={paperTrading}
-                    className="text-xs px-3 py-1 rounded border border-blue-200 text-blue-700 hover:bg-blue-50 disabled:opacity-50"
+                    className="h-auto py-1 text-xs border-blue-200 text-blue-700 hover:bg-blue-50 hover:text-blue-800"
                 >
+                    {paperTrading ? <Loader2 className="mr-2 h-3 w-3 animate-spin" /> : null}
                     {paperTrading ? "Simulating…" : "Paper Trade"}
-                </button>
-                <button
+                </Button>
+                <Button
+                    variant="outline"
+                    size="sm"
                     onClick={handleLogTrade}
                     disabled={logging}
-                    className="text-xs px-3 py-1 rounded border border-emerald-200 text-emerald-700 hover:bg-emerald-50 disabled:opacity-50"
+                    className="h-auto py-1 text-xs border-emerald-200 text-emerald-700 hover:bg-emerald-50 hover:text-emerald-800"
                 >
+                    {logging ? <Loader2 className="mr-2 h-3 w-3 animate-spin" /> : null}
                     {logging ? 'Logging…' : 'Mark Executed (Log Trade)'}
-                </button>
+                </Button>
             </div>
         )}
       </CardContent>

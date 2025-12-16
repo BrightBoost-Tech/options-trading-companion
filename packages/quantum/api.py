@@ -12,12 +12,14 @@ import requests
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Header, UploadFile, File, Request, Depends, Body
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
+from fastapi.responses import StreamingResponse, JSONResponse
 from pydantic import BaseModel, Field
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from slowapi.util import get_remote_address
 from supabase import create_client, Client
+import uuid
+import traceback
 
 # 1. Load environment variables BEFORE importing other things
 env_path = Path(__file__).resolve().parent / ".env"
@@ -78,6 +80,7 @@ app = FastAPI(
     version="2.0.0",
 )
 
+# Diagnostic endpoint to confirm backend is running correctly
 @app.get("/__whoami")
 def __whoami():
     return {"server": "packages.quantum.api", "version": APP_VERSION}
@@ -87,15 +90,45 @@ limiter = Limiter(key_func=get_remote_address)
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
+ALLOWED_ORIGINS = [
+    "http://localhost:3000",
+    "http://127.0.0.1:3000",
+    "http://localhost:3001",
+    "http://127.0.0.1:3001",
+]
+
+# Global Exception Handler for CORS on 500s
+@app.exception_handler(Exception)
+async def global_exception_handler(request: Request, exc: Exception):
+    trace_id = str(uuid.uuid4())[:8]
+    print(f"Global Exception Handler [Trace: {trace_id}]: {exc}")
+    traceback.print_exc()
+
+    origin = request.headers.get("origin")
+    headers = {
+        "Access-Control-Allow-Credentials": "true",
+        "Access-Control-Allow-Methods": "*",
+        "Access-Control-Allow-Headers": "*",
+    }
+
+    # Mirror allowed origins logic
+    if origin in ALLOWED_ORIGINS:
+        headers["Access-Control-Allow-Origin"] = origin
+
+    return JSONResponse(
+        status_code=500,
+        content={
+            "detail": "Internal Server Error",
+            "trace_id": trace_id,
+            "note": "Check server logs for full stack trace."
+        },
+        headers=headers
+    )
+
 # CORS Setup
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:3000",
-        "http://127.0.0.1:3000",
-        "http://localhost:3001",
-        "http://127.0.0.1:3001",
-    ],
+    allow_origins=ALLOWED_ORIGINS,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

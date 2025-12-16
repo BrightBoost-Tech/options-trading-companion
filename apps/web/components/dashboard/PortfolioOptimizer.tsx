@@ -155,10 +155,10 @@ export default function PortfolioOptimizer({ positions, onOptimizationComplete }
   }
 
   return (
-    <div className="bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden h-full flex flex-col relative">
+    <div className="bg-card rounded-xl shadow-sm border border-border overflow-hidden h-full flex flex-col relative">
 
       {/* --- Header --- */}
-      <div className="p-4 border-b border-slate-100 flex justify-between items-center bg-slate-50/50">
+      <div className="p-4 border-b border-border flex justify-between items-center bg-muted/30">
         <div className="flex items-center gap-2">
           {isQuantum ? (
             <div className="flex items-center gap-2">
@@ -166,27 +166,27 @@ export default function PortfolioOptimizer({ positions, onOptimizationComplete }
                  <Sparkles className="w-5 h-5 text-purple-600 animate-pulse" />
                  <div className="absolute inset-0 bg-purple-400 blur-sm opacity-30 animate-pulse"></div>
                </div>
-               <span className="font-bold text-slate-800 bg-clip-text text-transparent bg-gradient-to-r from-purple-600 to-indigo-600">
+               <span className="font-bold text-foreground bg-clip-text text-transparent bg-gradient-to-r from-purple-600 to-indigo-600">
                  Dirac-3 Optimizer
                </span>
             </div>
           ) : (
             <div className="flex items-center gap-2">
                <Activity className="w-5 h-5 text-emerald-600" />
-               <span className="font-semibold text-slate-700">Classical MVO</span>
+               <span className="font-semibold text-foreground">Classical MVO</span>
             </div>
           )}
         </div>
 
         <div className="flex items-center gap-4 flex-wrap justify-end">
-             <button onClick={runDiagnostics} className="text-[10px] font-mono text-slate-400 hover:text-indigo-600 transition-colors">
+             <button onClick={runDiagnostics} className="text-[10px] font-mono text-muted-foreground hover:text-indigo-600 dark:hover:text-indigo-400 transition-colors">
                 TEST_CORE_SYSTEM
              </button>
 
              {/* Profile Badge (User Request) */}
              <div className={clsx(
                 "px-2 py-0.5 rounded text-[10px] font-bold uppercase tracking-wide cursor-pointer",
-                profile === 'aggressive' ? "bg-rose-100 text-rose-700" : "bg-blue-100 text-blue-700"
+                profile === 'aggressive' ? "bg-rose-100 text-rose-700 dark:bg-rose-900/30 dark:text-rose-400" : "bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-400"
              )}
              onClick={() => setProfile(prev => prev === 'aggressive' ? 'balanced' : 'aggressive')}
              title="Click to toggle profile"
@@ -196,7 +196,7 @@ export default function PortfolioOptimizer({ positions, onOptimizationComplete }
 
              {/* The requested Toggle */}
              <div className="flex items-center gap-2">
-                <span className={`text-xs font-medium transition-colors ${isQuantum ? 'text-purple-700' : 'text-slate-500'}`}>
+                <span className={`text-xs font-medium transition-colors ${isQuantum ? 'text-purple-700 dark:text-purple-400' : 'text-muted-foreground'}`}>
                   <span className="hidden sm:inline">Optimize Tail Risk</span>
                   <span className="sm:hidden">Tail Risk</span>
                 </span>
@@ -204,11 +204,11 @@ export default function PortfolioOptimizer({ positions, onOptimizationComplete }
                   onClick={() => setIsQuantum(!isQuantum)}
                   className={clsx(
                     "relative w-10 h-5 rounded-full transition-colors duration-300 focus:outline-none",
-                    isQuantum ? "bg-purple-600" : "bg-slate-300"
+                    isQuantum ? "bg-purple-600" : "bg-muted-foreground/30"
                   )}
                 >
                   <div className={clsx(
-                    "absolute top-0.5 left-0.5 w-4 h-4 bg-white rounded-full shadow-md transform transition-transform duration-300",
+                    "absolute top-0.5 left-0.5 w-4 h-4 bg-background rounded-full shadow-md transform transition-transform duration-300",
                     isQuantum ? "translate-x-5" : "translate-x-0"
                   )} />
                 </button>
@@ -222,13 +222,13 @@ export default function PortfolioOptimizer({ positions, onOptimizationComplete }
         {/* Empty State */}
         {!results && !isOptimizing && (
           <div className="flex flex-col items-center justify-center h-full py-8 text-center">
-            <div className={clsx("p-4 rounded-full mb-4 bg-opacity-10", isQuantum ? "bg-purple-100" : "bg-emerald-100")}>
-                {isQuantum ? <Cpu className="w-8 h-8 text-purple-600" /> : <ShieldCheck className="w-8 h-8 text-emerald-600" />}
+            <div className={clsx("p-4 rounded-full mb-4 bg-opacity-10", isQuantum ? "bg-purple-100 dark:bg-purple-900/30" : "bg-emerald-100 dark:bg-emerald-900/30")}>
+                {isQuantum ? <Cpu className="w-8 h-8 text-purple-600 dark:text-purple-400" /> : <ShieldCheck className="w-8 h-8 text-emerald-600 dark:text-emerald-400" />}
             </div>
-            <h3 className="text-slate-800 font-medium mb-2">
+            <h3 className="text-foreground font-medium mb-2">
               {isQuantum ? "Quantum Skew Optimization" : "Mean-Variance Optimization"}
             </h3>
-            <p className="text-sm text-slate-500 max-w-xs mx-auto mb-6">
+            <p className="text-sm text-muted-foreground max-w-xs mx-auto mb-6">
               {isQuantum
                 ? "Utilizes QCI Dirac-3 hardware to minimize tail risk (skewness) and maximize momentum."
                 : "Standard Markowitz model. Balances expected return against volatility."}

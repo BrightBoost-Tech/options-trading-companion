@@ -421,8 +421,13 @@ def scan_for_opportunities(
 
             # F. Construct Contract & Calculate EV
             # Prefer TruthLayer (cached)
-            chain_objects = truth_layer.option_chain(symbol)
             chain = []
+            chain_objects = None
+
+            try:
+                chain_objects = truth_layer.option_chain(symbol)
+            except Exception:
+                chain_objects = None
 
             if chain_objects:
                 now_date = datetime.now().date()

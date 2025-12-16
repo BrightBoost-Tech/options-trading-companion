@@ -16,6 +16,8 @@ class UnifiedScoreComponent(BaseModel):
     regime_penalty: float
     greek_penalty: float
     total_score: float
+    roi_mode: Optional[str] = None
+    roi_denom: Optional[float] = None
 
 class UnifiedScore(BaseModel):
     score: float

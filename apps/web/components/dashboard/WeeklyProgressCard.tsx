@@ -39,7 +39,7 @@ export function WeeklyProgressCard() {
             try {
                 // fetchWithAuth now returns parsed JSON and throws on error
                 // It automatically prepends API_URL if path starts with '/'
-                const json = await fetchWithAuth<WeeklySnapshot>('/api/progress/weekly');
+                const json = await fetchWithAuth<WeeklySnapshot>('/progress/weekly');
                 setData(json);
             } catch (e: any) {
                 // Check for 404 by message if possible, or just treat as error/empty

@@ -15,7 +15,7 @@ The backend implements strict security controls for authentication, task executi
     1. `APP_ENV` is NOT `production`.
     2. `ENABLE_DEV_AUTH_BYPASS` is set to `1`.
     3. The request originates from `localhost`.
-- Ensure `NEXT_PUBLIC_ENABLE_DEV_AUTH_BYPASS` matches the backend setting to enable UI controls.
+- Ensure `NEXT_PUBLIC_ENABLE_DEV_AUTH_BYPASS=1` is set in the frontend `.env.local` to allow the UI to send the required `X-Test-Mode-User` header.
 
 ### 3. Internal Tasks
 - Scheduled tasks (Morning Brief, Midday Scan) are hosted on `/internal/tasks/...`.

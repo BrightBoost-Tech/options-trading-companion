@@ -7,19 +7,26 @@ import os
 
 
 from packages.quantum.api import app
-from packages.quantum.security import get_current_user
+from packages.quantum.security import get_current_user, get_supabase_user_client
 
 client = TestClient(app)
 
 def mock_get_current_user():
     return "test-user-id"
 
+# Global mock for the client
+mock_supabase_client = MagicMock()
+
+def mock_get_supabase_client_dep():
+    return mock_supabase_client
+
 app.dependency_overrides[get_current_user] = mock_get_current_user
+app.dependency_overrides[get_supabase_user_client] = mock_get_supabase_client_dep
 
 @pytest.fixture
 def mock_supabase():
-    with patch("packages.quantum.api.supabase") as mock:
-        yield mock
+    mock_supabase_client.reset_mock()
+    return mock_supabase_client
 
 def test_drift_summary_view_success(mock_supabase):
     mock_response = MagicMock()
@@ -56,9 +63,9 @@ def test_drift_summary_fallback_success(mock_supabase):
 
     mock_logs_response = MagicMock()
     mock_logs_response.data = [
-        {"tag": "disciplined_execution"},
-        {"tag": "disciplined_execution"},
-        {"tag": "impulse_trade"}
+        {"discipline_tag": "disciplined_execution"},
+        {"discipline_tag": "disciplined_execution"},
+        {"discipline_tag": "impulse_trade"}
     ]
     mock_logs_query = MagicMock()
     mock_logs_query.execute.return_value = mock_logs_response

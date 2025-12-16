@@ -2,6 +2,8 @@ from typing import Optional, Literal, Dict, Any, List
 from pydantic import BaseModel, Field
 import math
 
+UNBOUNDED_GAIN_CAP_MULT = 10.0
+
 class EVResult(BaseModel):
     expected_value: float
     win_probability: float
@@ -11,6 +13,8 @@ class EVResult(BaseModel):
     risk_reward_ratio: Optional[float] = None
     trade_cost: float
     breakeven_price: Optional[float] = None
+    capped: bool = False
+    cap_mult: Optional[float] = None
 
     def to_dict(self) -> Dict[str, Any]:
         data = self.model_dump()
@@ -51,9 +55,13 @@ def calculate_ev(
     trade_cost = 0
     breakeven = None
 
+    capped_trade = False
+
     if strategy == "long_call":
-        max_gain = float('inf')
         max_loss = premium * 100
+        # Cap max_gain to avoid infinite EV
+        max_gain = max_loss * UNBOUNDED_GAIN_CAP_MULT
+        capped_trade = True
         trade_cost = premium * 100
         breakeven = strike + premium
 
@@ -65,7 +73,9 @@ def calculate_ev(
 
     elif strategy == "short_call":
         max_gain = premium * 100
-        max_loss = float('inf')
+        # Cap max_loss for short calls too
+        max_loss = max_gain * UNBOUNDED_GAIN_CAP_MULT
+        capped_trade = True
         trade_cost = -premium * 100 # Negative cost = credit
         win_prob, loss_prob = loss_prob, win_prob # Invert for short positions
         breakeven = strike + premium
@@ -109,6 +119,19 @@ def calculate_ev(
     # Calculate EV
     expected_value = (win_prob * max_gain) - (loss_prob * max_loss)
 
+    # Final safety check for finiteness
+    if not math.isfinite(expected_value):
+        expected_value = 0.0
+        capped_trade = True
+
+    if not math.isfinite(max_gain):
+        max_gain = max_loss * UNBOUNDED_GAIN_CAP_MULT if max_loss > 0 else 10000.0
+        capped_trade = True
+
+    if not math.isfinite(max_loss):
+        max_loss = max_gain * UNBOUNDED_GAIN_CAP_MULT if max_gain > 0 else 10000.0
+        capped_trade = True
+
     risk_reward = None
     if max_loss > 0 and max_gain > 0:
         risk_reward = max_loss / max_gain
@@ -121,7 +144,9 @@ def calculate_ev(
         max_loss=max_loss,
         risk_reward_ratio=risk_reward,
         trade_cost=trade_cost,
-        breakeven_price=breakeven
+        breakeven_price=breakeven,
+        capped=capped_trade,
+        cap_mult=UNBOUNDED_GAIN_CAP_MULT if capped_trade else None
     )
 
 

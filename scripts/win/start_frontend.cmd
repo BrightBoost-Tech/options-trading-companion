@@ -1,33 +1,54 @@
 @echo off
 setlocal
 
-REM Resolve repo root: two levels up from scripts\win
+:: Resolve repo root
 cd /d "%~dp0\..\.."
-set "REPO_ROOT=%cd%"
+set "REPO_ROOT=%CD%"
 
-if not exist "%REPO_ROOT%\apps\web\package.json" (
-  echo [ERROR] Frontend app not found at:
-  echo         "%REPO_ROOT%\apps\web\package.json"
-  pause
-  exit /b 1
-)
+echo [Frontend] Starting Web Client...
+echo [Frontend] Repo Root: %REPO_ROOT%
 
-REM This repo is a pnpm workspace. Root dev uses pnpm filters.
-REM Prefer invoking pnpm from repo root.
+:: Check if pnpm is installed
 where pnpm >nul 2>nul
-if errorlevel 1 (
-  echo [ERROR] pnpm not found on PATH.
-  echo         Install pnpm or enable via corepack:
-  echo           corepack enable
-  echo           corepack prepare pnpm@latest --activate
-  pause
-  exit /b 1
+if %errorlevel% neq 0 (
+    echo [ERROR] pnpm is not installed or not in PATH.
+    echo Please enable pnpm via corepack:
+    echo   corepack enable
+    echo   corepack prepare pnpm@latest --activate
+    pause
+    exit /b 1
 )
 
-echo [INFO] Repo root: %REPO_ROOT%
-echo [INFO] Starting frontend for apps/web (pnpm filter)...
+:: Preflight: Verify workspace package.json exists
+if not exist "%REPO_ROOT%\apps\web\package.json" (
+    echo [ERROR] apps/web/package.json not found.
+    echo Ensure the repository is cloned correctly.
+    pause
+    exit /b 1
+)
 
+:: Preflight: Verify critical dependencies exist
+set "REQ_PKG_DIR1=%REPO_ROOT%\apps\web\node_modules\@radix-ui\react-tooltip"
+set "REQ_PKG_DIR2=%REPO_ROOT%\node_modules\@radix-ui\react-tooltip"
+
+if not exist "%REQ_PKG_DIR1%" if not exist "%REQ_PKG_DIR2%" (
+  echo [WARN] Required dependency @radix-ui/react-tooltip not found in node_modules.
+  echo [INFO] Running pnpm install at repo root...
+  cd /d "%REPO_ROOT%"
+  call pnpm install
+  if errorlevel 1 (
+    echo [ERROR] pnpm install failed. See logs above.
+    pause
+    exit /b 1
+  )
+)
+
+:: Run the dev server
 cd /d "%REPO_ROOT%"
-pnpm --filter "@app/web" dev
+echo [Frontend] Running: pnpm --filter @app/web dev
+call pnpm --filter @app/web dev
 
-endlocal
+if %errorlevel% neq 0 (
+    echo [Frontend] Process exited with error code %errorlevel%.
+    pause
+)

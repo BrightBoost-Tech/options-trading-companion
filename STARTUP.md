@@ -19,15 +19,17 @@ If you need to launch services individually, you can use the scripts in `scripts
 
 ## Dependency Verification
 
-If you encounter module resolution errors (e.g., `Module not found: Can't resolve ...`), verify that dependencies are correctly installed using pnpm:
+If you encounter module resolution errors (e.g., `Module not found: Can't resolve ...`), verify that dependencies are correctly installed using pnpm.
+
+**Note:** The frontend launcher (`start_frontend.cmd`) now automatically detects missing dependencies and runs `pnpm install` if needed.
+
+If you still see "Module not found", run:
 
 ```bash
-# Verify a specific package exists in the frontend workspace
-pnpm --filter @app/web list @radix-ui/react-tooltip
-
-# If missing or broken, run:
 pnpm install
 ```
+
+from the repository root.
 
 ## Prerequisites
 

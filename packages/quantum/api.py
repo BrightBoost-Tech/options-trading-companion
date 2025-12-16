@@ -66,7 +66,6 @@ from packages.quantum.analytics.regime_engine_v3 import RegimeEngineV3, GlobalRe
 # v3 Observability
 from packages.quantum.observability.telemetry import TradeContext, compute_features_hash, emit_trade_event
 
-TEST_USER_UUID = "75ee12ad-b119-4f32-aeea-19b4ef55d587"
 APP_VERSION = os.getenv("APP_VERSION", "v2-dev")
 
 # New Table Constants
@@ -154,7 +153,8 @@ async def get_iv_context(
         return context
     except Exception as e:
         print(f"Error getting IV context for {symbol}: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        # SECURITY: Do not leak exception details
+        raise HTTPException(status_code=500, detail="Internal Server Error")
 
 @app.post("/tasks/iv/daily-refresh", deprecated=True)
 def iv_daily_refresh_task_deprecated(
@@ -439,7 +439,9 @@ async def execute_rebalance(
         try:
             targets_dict, trace_id, red_flags, regime_val = await loop.run_in_executor(pool, run_optimizer_logic)
         except Exception as e:
-             raise HTTPException(status_code=500, detail=f"Optimization failed: {e}")
+             print(f"Rebalance optimization error: {e}")
+             # SECURITY: Do not leak exception details
+             raise HTTPException(status_code=500, detail="Optimization failed")
 
     # 4. Generate Trades
     engine = RebalanceEngine(

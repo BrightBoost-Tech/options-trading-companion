@@ -165,6 +165,10 @@ app.include_router(paper_router)
 from packages.quantum.internal_tasks import router as internal_tasks_router
 app.include_router(internal_tasks_router)
 
+# --- Register Job Monitoring Endpoints ---
+from packages.quantum.jobs.endpoints import router as jobs_router
+app.include_router(jobs_router)
+
 # --- IV & Market Context Endpoints ---
 
 @app.get("/market/iv-context")

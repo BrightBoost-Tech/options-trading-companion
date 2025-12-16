@@ -83,6 +83,7 @@ def _compute_risk_primitives_usd(legs: List[Dict[str, Any]], total_cost: float, 
         "max_profit_per_contract": max_profit,
         "collateral_required_per_contract": collateral_required,
     }
+
 def _estimate_probability_of_profit(candidate: Dict[str, Any], global_snapshot: Optional[Dict[str, Any]] = None) -> float:
     """
     Estimates the Probability of Profit (PoP) for a trade candidate.
@@ -121,6 +122,34 @@ def _estimate_probability_of_profit(candidate: Dict[str, Any], global_snapshot: 
 
     # 4. Clamp
     return float(np.clip(p, 0.01, 0.99))
+
+def _combo_width_share_from_legs(truth_layer, legs, fallback_width_share):
+    leg_syms = [l.get("symbol") for l in legs if l.get("symbol")]
+    if not leg_syms:
+        return float(fallback_width_share or 0.0)
+
+    # Batch fetch snapshots for efficiency
+    snaps = truth_layer.snapshot_many(leg_syms) or {}
+
+    total = 0.0
+    found = 0
+    for l in legs:
+        sym = l.get("symbol")
+        key = truth_layer.normalize_symbol(sym) if hasattr(truth_layer, "normalize_symbol") else sym
+        s = snaps.get(key) or snaps.get(sym) or {}
+
+        q = (s.get("quote") or {}) if isinstance(s, dict) else {}
+        bid = q.get("bid")
+        ask = q.get("ask")
+
+        if bid is not None and ask is not None:
+            bid = float(bid)
+            ask = float(ask)
+            if bid > 0 and ask > 0 and ask >= bid:
+                total += (ask - bid)
+                found += 1
+
+    return total if found > 0 else float(fallback_width_share or 0.0)
 
 def scan_for_opportunities(
     symbols: List[str] = None,
@@ -220,24 +249,19 @@ def scan_for_opportunities(
 
             if not current_price: return None
 
-            # B. Check Liquidity (Hard Rejection)
-            spread_pct = 0.0
+            # B. Check Liquidity (Deferred)
+            # We calculate threshold here but apply it later using Option Spread Pct
+            threshold = 0.10 # Default
+            if global_snapshot.state == RegimeState.SUPPRESSED:
+                    threshold = 0.20
+            elif global_snapshot.state == RegimeState.SHOCK:
+                    threshold = 0.15
 
-            if bid is not None and ask is not None and bid > 0 and ask > 0:
-                spread_pct = (ask - bid) / current_price
-                # Dynamic Liquidity Threshold based on Regime
-                threshold = 0.10 # Default
-                if global_snapshot.state == RegimeState.SUPPRESSED:
-                        threshold = 0.20
-                elif global_snapshot.state == RegimeState.SHOCK:
-                        threshold = 0.15
+            # Note: We NO LONGER reject here based on underlying spread.
 
-                if spread_pct > threshold:
-                    # REJECT: Liquidity
-                    return None
-            else:
-                # REJECT: No Quote
-                return None
+            if not (bid is not None and ask is not None and bid > 0 and ask > 0):
+                # We can reject if NO quote at all, but let's be lenient if we have current_price
+                pass
 
             # C. Compute Symbol Regime (Authoritative)
             symbol_snapshot = regime_engine.compute_symbol_snapshot(symbol, global_snapshot)
@@ -399,8 +423,21 @@ def scan_for_opportunities(
             collateral_contract = primitives["collateral_required_per_contract"]
 
             # NEW: Compute explicit combo width via Truth Layer
-            fallback_width_share = abs(total_cost) * spread_pct
-            combo_width_share = _compute_combo_spread_width_share(truth_layer, legs, fallback_width_share)
+            # Fallback based on underlying spread or default
+            fallback_width_share = abs(total_cost) * 0.05 # Default 5%
+            if bid is not None and ask is not None and current_price and current_price > 0:
+                 fallback_width_share = abs(total_cost) * ((ask - bid) / current_price)
+
+            combo_width_share = _combo_width_share_from_legs(truth_layer, legs, fallback_width_share)
+
+            # Compute option-spread-based pct (relative to entry)
+            entry_cost_share = abs(float(total_cost or 0.0))
+            option_spread_pct = (combo_width_share / entry_cost_share) if entry_cost_share > 1e-9 else 0.0
+
+            # NEW: Liquidity Gating (Option Spread Based)
+            if option_spread_pct > threshold:
+                 # REJECT: Illiquid Options
+                 return None
 
             # H. Unified Scoring
             trade_dict = {
@@ -440,7 +477,7 @@ def scan_for_opportunities(
             unified_score = calculate_unified_score(
                 trade=trade_dict,
                 regime_snapshot=global_snapshot.to_dict(),
-                market_data={"bid_ask_spread_pct": 0.0}, # Force use of trade["bid_ask_spread"]
+                market_data={"bid_ask_spread_pct": option_spread_pct}, # Uses option_spread_pct
                 execution_drag_estimate=expected_execution_cost,
                 num_legs=len(legs),
                 entry_cost=abs(total_cost)

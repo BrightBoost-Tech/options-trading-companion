@@ -167,6 +167,7 @@ def calculate_unified_score(
     # We scale ROI to Score (0-100).
     # Let's say ROI 20% (0.20) = 100 Score.
     SCALING_FACTOR = 500.0
+    SCALING = SCALING_FACTOR
 
     base_points = ev_roi * SCALING_FACTOR
     cost_points = cost_roi * SCALING_FACTOR

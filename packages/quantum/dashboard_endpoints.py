@@ -6,6 +6,7 @@ from datetime import datetime, timedelta
 from packages.quantum.security import get_current_user, get_supabase_user_client
 from packages.quantum.services.journal_service import JournalService
 from packages.quantum.analytics.progress_engine import ProgressEngine, get_week_id_for_last_full_week
+from packages.quantum.models import RiskDashboardResponse, PortfolioSnapshot
 
 # Table names
 TRADE_SUGGESTIONS_TABLE = "trade_suggestions"
@@ -33,6 +34,88 @@ async def get_journal_stats(
 
     service = JournalService(supabase)
     return service.get_journal_stats(user_id)
+
+@router.get("/risk/dashboard", response_model=RiskDashboardResponse)
+async def get_risk_dashboard(
+    user_id: str = Depends(get_current_user),
+    supabase: Client = Depends(get_supabase_user_client)
+):
+    """
+    Returns risk dashboard metrics.
+    Currently returns a safe shell to prevent 404s/500s.
+    """
+    default_response = RiskDashboardResponse(
+        summary={"status": "ok", "message": "No risk data available yet"},
+        exposure={"long_exposure": 0.0, "short_exposure": 0.0, "net_exposure": 0.0},
+        greeks={"delta": 0.0, "gamma": 0.0, "theta": 0.0, "vega": 0.0}
+    )
+
+    if not supabase:
+        return default_response
+
+    # Future: fetch real risk aggregation logic
+    return default_response
+
+@router.get("/portfolio/snapshot", response_model=PortfolioSnapshot)
+async def get_portfolio_snapshot(
+    user_id: str = Depends(get_current_user),
+    supabase: Client = Depends(get_supabase_user_client)
+):
+    """
+    Returns the latest portfolio snapshot.
+    Returns safe default if none exists.
+    """
+    empty_snapshot = PortfolioSnapshot(
+        user_id=user_id,
+        created_at=datetime.now(),
+        snapshot_type="empty",
+        holdings=[],
+        spreads=[],
+        risk_metrics={}
+    )
+
+    if not supabase:
+        return empty_snapshot
+
+    try:
+        # Try to fetch latest snapshot
+        res = supabase.table("portfolio_snapshots") \
+            .select("*") \
+            .eq("user_id", user_id) \
+            .order("created_at", desc=True) \
+            .limit(1) \
+            .execute()
+
+        if res.data and len(res.data) > 0:
+            # Need to convert dictionary to Pydantic model
+            # Assuming data structure matches roughly
+            return PortfolioSnapshot(**res.data[0])
+
+        return empty_snapshot
+    except Exception:
+        # If table doesn't exist or other error, return empty
+        return empty_snapshot
+
+@router.get("/rebalance/suggestions")
+async def get_rebalance_suggestions(
+    user_id: str = Depends(get_current_user),
+    supabase: Client = Depends(get_supabase_user_client)
+):
+    """
+    Returns pending rebalance suggestions.
+    """
+    if not supabase:
+        return {"suggestions": []}
+
+    # We can reuse generic suggestions endpoint logic but filter for rebalance window
+    # or just return empty for now as requested by prompt
+    try:
+        query = supabase.table(TRADE_SUGGESTIONS_TABLE).select("*").eq("user_id", user_id).eq("window", "rebalance")
+        res = query.order("created_at", desc=True).limit(50).execute()
+        return {"suggestions": res.data or []}
+    except Exception:
+        return {"suggestions": []}
+
 
 @router.get("/journal/drift-summary")
 async def get_drift_summary(

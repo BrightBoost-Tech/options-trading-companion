@@ -243,13 +243,11 @@ def scan_for_opportunities(
             # A. Enrich Data
             # Use batched quote from map
             # Normalize symbol key for lookup
-            key = truth_layer.normalize_symbol(symbol)
-            snapshot_item = quotes_map.get(key)
+            key = truth_layer.normalize_symbol(symbol) if hasattr(truth_layer, "normalize_symbol") else symbol
+            snapshot_item = quotes_map.get(key) or quotes_map.get(symbol)
 
-            if not snapshot_item:
-                # Fallback to direct fetch if missing in batch (rare)
-                quote = market_data.get_recent_quote(symbol)
-            else:
+            quote = {}
+            if snapshot_item:
                 # Convert MDTL snapshot format to scanner quote format
                 q = snapshot_item.get("quote", {})
                 quote = {
@@ -260,16 +258,24 @@ def scan_for_opportunities(
                     "price": q.get("last") or q.get("mid")
                 }
 
-            if not quote: return None
-
-            # Quote handling: tolerate both real Polygon (bid/ask) and mock (bid_price/ask_price)
-            bid = quote.get("bid_price") if "bid_price" in quote else quote.get("bid")
-            ask = quote.get("ask_price") if "ask_price" in quote else quote.get("ask")
+            # Extract primitives from truth layer attempt
+            bid = quote.get("bid")
+            ask = quote.get("ask")
             current_price = quote.get("price")
 
-            # Fallback for current_price
+            # Calculate mid if needed
             if current_price is None and bid is not None and ask is not None and bid > 0 and ask > 0:
-                current_price = (bid + ask) / 2.0
+                current_price = (float(bid) + float(ask)) / 2.0
+
+            # Fallback to PolygonService if TruthLayer failed to provide a valid price
+            if current_price is None:
+                quote = market_data.get_recent_quote(symbol)
+                bid = quote.get("bid_price") if "bid_price" in quote else quote.get("bid")
+                ask = quote.get("ask_price") if "ask_price" in quote else quote.get("ask")
+                current_price = quote.get("price")
+
+                if current_price is None and bid is not None and ask is not None and bid > 0 and ask > 0:
+                    current_price = (float(bid) + float(ask)) / 2.0
 
             if not current_price: return None
 
@@ -301,6 +307,22 @@ def scan_for_opportunities(
                 closes = bars.get("prices") or []
             elif isinstance(bars, list):
                 closes = [b.get("close") for b in bars if b.get("close") is not None]
+
+            # Fallback to PolygonService if TruthLayer failed or returned insufficient data
+            if not closes or len(closes) < 50:
+                try:
+                    hist_data = market_data.get_historical_prices(symbol, days=90)
+                    if hist_data and "prices" in hist_data:
+                        closes = hist_data["prices"]
+                        # Convert to list of dicts for RegimeEngine compatibility if needed
+                        # bars = [{"close": p} for p in closes]
+                        # Note: We rely on 'closes' list for SMA calc below.
+                        # RegimeEngine below uses 'existing_bars=bars'. If 'bars' is from TruthLayer (empty),
+                        # RegimeEngine might re-fetch or fail.
+                        # Ideally we update 'bars' to match TruthLayer format for RegimeEngine reuse.
+                        bars = [{"close": p} for p in closes]
+                except Exception:
+                    pass
 
             # Ensure we have enough data (need at least 50 for SMA50)
             if not closes or len(closes) < 50:
@@ -335,7 +357,59 @@ def scan_for_opportunities(
                 return None
 
             # F. Construct Contract & Calculate EV
-            chain = market_data.get_option_chain(symbol, min_dte=25, max_dte=45)
+            # Prefer TruthLayer (cached)
+            chain_objects = truth_layer.option_chain(symbol)
+            chain = []
+
+            if chain_objects:
+                now_date = datetime.now().date()
+                for c in chain_objects:
+                    # Adapt to scanner format
+                    try:
+                        exp_str = c.get("expiry")
+                        if not exp_str: continue
+
+                        # Handle date parsing safely
+                        try:
+                            exp_dt = datetime.strptime(exp_str, "%Y-%m-%d").date()
+                        except ValueError:
+                            continue
+
+                        days_to_expiry = (exp_dt - now_date).days
+
+                        if not (25 <= days_to_expiry <= 45):
+                            continue
+
+                        # Flatten structure
+                        greeks = c.get("greeks") or {}
+                        quote = c.get("quote") or {}
+
+                        # Price logic: Mid -> Last -> 0
+                        price = quote.get("mid")
+                        if price is None:
+                            price = quote.get("last")
+
+                        chain.append({
+                            "ticker": c.get("contract"),
+                            "strike": c.get("strike"),
+                            "expiration": exp_str,
+                            "type": c.get("right"), # 'call'/'put'
+                            "delta": greeks.get("delta"),
+                            "gamma": greeks.get("gamma"),
+                            "vega": greeks.get("vega"),
+                            "theta": greeks.get("theta"),
+                            "price": price,
+                            "close": quote.get("last"), # fallback
+                            "bid": quote.get("bid"),
+                            "ask": quote.get("ask")
+                        })
+                    except Exception as e:
+                        continue
+
+            # Fallback if empty
+            if not chain:
+                chain = market_data.get_option_chain(symbol, min_dte=25, max_dte=45)
+
             if not chain: return None
 
             legs = []

@@ -566,11 +566,16 @@ def scan_for_opportunities(
                     width = abs(long_leg['strike'] - short_leg['strike'])
                     st_type = "debit_spread" if total_cost > 0 else "credit_spread"
 
+                    if st_type == "credit_spread":
+                        delta_for_ev = abs(float(short_leg.get("delta") or 0.0))
+                    else:
+                        delta_for_ev = abs(float(long_leg.get("delta") or 0.0))
+
                     ev_obj = calculate_ev(
                         premium=abs(total_cost),
                         strike=long_leg['strike'],
                         current_price=current_price,
-                        delta=long_leg['delta'],
+                        delta=delta_for_ev,
                         strategy=st_type,
                         width=width
                     )

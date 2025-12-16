@@ -151,6 +151,53 @@ def _combo_width_share_from_legs(truth_layer, legs, fallback_width_share):
 
     return total if found > 0 else float(fallback_width_share or 0.0)
 
+def _determine_execution_cost(
+    drag_map: Dict[str, Any],
+    symbol: str,
+    combo_width_share: float,
+    num_legs: int
+) -> Dict[str, Any]:
+    """
+    Determines the execution cost to use for scoring and rejection.
+    Logic: max(history_cost, proxy_cost).
+    """
+    # 1. Compute Proxy Cost ALWAYS
+    # Formula: (combo_width_share * 0.5) + (num_legs * 0.0065) -> per share
+    # Multiplied by 100 for contract dollars
+    proxy_cost_share = (combo_width_share * 0.5) + (num_legs * 0.0065)
+    proxy_cost_contract = proxy_cost_share * 100.0
+
+    # 2. Fetch History Cost
+    stats = drag_map.get(symbol)
+    history_cost_contract = 0.0
+    history_samples = 0
+    has_history = False
+
+    if stats and isinstance(stats, dict):
+        history_cost_contract = float(stats.get("avg_drag") or 0.0)
+        history_samples = int(stats.get("n", stats.get("N", 0)) or 0)
+        has_history = True
+
+    # execution_drag_source: "where history came from"
+    execution_drag_source = "history" if has_history else "proxy"
+
+    # 3. Choose Cost Used
+    if history_cost_contract >= proxy_cost_contract and history_samples > 0:
+        expected_execution_cost = history_cost_contract
+        execution_cost_source_used = "history"
+        execution_cost_samples_used = history_samples
+    else:
+        expected_execution_cost = proxy_cost_contract
+        execution_cost_source_used = "proxy"
+        execution_cost_samples_used = 0
+
+    return {
+        "expected_execution_cost": expected_execution_cost,
+        "execution_cost_source_used": execution_cost_source_used,
+        "execution_cost_samples_used": execution_cost_samples_used,
+        "execution_drag_source": execution_drag_source
+    }
+
 def scan_for_opportunities(
     symbols: List[str] = None,
     supabase_client: Client = None,
@@ -486,24 +533,14 @@ def scan_for_opportunities(
                 "max_loss": max_loss_contract
             }
 
-            # Fetch Execution Drag History
-            stats = drag_map.get(symbol)
-            # Default proxy values
-            expected_execution_cost = None
-            drag_source = "proxy"
-            drag_samples = 0
-
-            if stats and isinstance(stats, dict):
-                expected_execution_cost = float(stats.get("avg_drag", 0.0))
-                drag_source = "history"
-                drag_samples = int(stats.get("n", stats.get("N", 0)) or 0)
-            else:
-                # PROXY CALCULATION: (combo_width_share * 0.5) + (num_legs * 0.0065)
-                # This replaces execution_service.estimate_execution_cost
-                proxy_cost_share = (combo_width_share * 0.5) + (len(legs) * 0.0065)
-                expected_execution_cost = proxy_cost_share * 100.0   # Convert to contract dollars
-                drag_source = "proxy"
-                drag_samples = 0
+            # Determine Execution Cost
+            cost_details = _determine_execution_cost(
+                drag_map=drag_map,
+                symbol=symbol,
+                combo_width_share=combo_width_share,
+                num_legs=len(legs)
+            )
+            expected_execution_cost = cost_details["expected_execution_cost"]
 
             unified_score = calculate_unified_score(
                 trade=trade_dict,
@@ -518,7 +555,8 @@ def scan_for_opportunities(
             final_execution_cost = unified_score.execution_cost_dollars
 
             # Requirement: Hard-reject if execution cost > EV
-            if final_execution_cost >= total_ev:
+            # Use expected_execution_cost as per instruction
+            if expected_execution_cost >= total_ev:
                 return None
 
             candidate_dict = {
@@ -535,9 +573,11 @@ def scan_for_opportunities(
                 "trend": trend,
                 "legs": legs,
                 "badges": unified_score.badges,
-                "execution_drag_estimate": final_execution_cost,
-                "execution_drag_samples": drag_samples,
-                "execution_drag_source": drag_source,
+                "execution_drag_estimate": expected_execution_cost,
+                "execution_drag_samples": cost_details["execution_cost_samples_used"],
+                "execution_drag_source": cost_details["execution_drag_source"],
+                "execution_cost_source_used": cost_details["execution_cost_source_used"],
+                "execution_cost_samples_used": cost_details["execution_cost_samples_used"],
                 # Risk Primitives
                 "max_loss_per_contract": max_loss_contract,
                 "max_profit_per_contract": max_profit_contract,

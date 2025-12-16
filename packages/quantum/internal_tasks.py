@@ -1,29 +1,21 @@
 from fastapi import APIRouter, Depends, Header, HTTPException, Body
 from typing import Optional, Dict
 from packages.quantum.security.task_auth import verify_internal_task_request
-from packages.quantum.services.workflow_orchestrator import run_morning_cycle, run_midday_cycle, run_weekly_report
-from packages.quantum.services.universe_service import UniverseService
-from packages.quantum.services.plaid_history_service import PlaidHistoryService
-from packages.quantum.market_data import PolygonService
-from packages.quantum.services.iv_repository import IVRepository
-from packages.quantum.services.iv_point_service import IVPointService
-# Explicit import of PlaidService class to instantiate locally
-from packages.quantum.plaid_service import client as plaid_api_client # importing the raw client object already init in plaid_service?
-# The api.py imports `plaid_service` module. Let's see how api.py uses it.
-# `from packages.quantum import plaid_service`
-# `plaid_endpoints.register_plaid_endpoints(app, plaid_service, ...)`
-# `plaid_service` module has module-level functions `create_link_token`, etc.
-# So we can just import the module.
-from packages.quantum import plaid_service
-
+from packages.quantum.security.secrets_provider import SecretsProvider
+from supabase import create_client, Client
 from datetime import datetime
 import os
 
-# Import shared dependencies from main API or re-instantiate securely
-from packages.quantum.security.secrets_provider import SecretsProvider
-from supabase import create_client, Client
+# Job Enqueue Dependencies
+from packages.quantum.jobs.enqueue import enqueue_idempotent
+from packages.quantum.jobs.http_models import EnqueueResponse
 
-# Analytics & Learning Dependencies
+# Keep imports that might be needed for other endpoints not being converted
+# (e.g. IV daily refresh which was NOT in the target list, and train-learning-v3)
+from packages.quantum.services.universe_service import UniverseService
+from packages.quantum.market_data import PolygonService
+from packages.quantum.services.iv_repository import IVRepository
+from packages.quantum.services.iv_point_service import IVPointService
 from packages.quantum.analytics.conviction_service import ConvictionService
 from packages.quantum.services.analytics_service import AnalyticsService
 
@@ -63,62 +55,123 @@ def get_active_user_ids(client: Client) -> list[str]:
         print(f"Error fetching active users: {e}")
         return []
 
-@router.post("/morning-brief")
+@router.post("/morning-brief", status_code=202)
 async def morning_brief(
     client: Client = Depends(get_admin_client)
 ):
-    active_users = get_active_user_ids(client)
-    for uid in active_users:
-        await run_morning_cycle(client, uid)
-    return {"status": "ok", "processed": len(active_users)}
+    today = datetime.now().strftime("%Y-%m-%d")
+    job_name = "morning-brief"
+    key = f"{job_name}-{today}"
 
-@router.post("/midday-scan")
+    job_id = enqueue_idempotent(
+        client=client,
+        job_name=job_name,
+        idempotency_key=key,
+        payload={}
+    )
+
+    return {
+        "job_run_id": str(job_id),
+        "job_name": job_name,
+        "idempotency_key": key,
+        "status": "queued"
+    }
+
+@router.post("/midday-scan", status_code=202)
 async def midday_scan(
     client: Client = Depends(get_admin_client)
 ):
-    active_users = get_active_user_ids(client)
-    for uid in active_users:
-        await run_midday_cycle(client, uid)
-    return {"status": "ok", "processed": len(active_users)}
+    today = datetime.now().strftime("%Y-%m-%d")
+    job_name = "midday-scan"
+    key = f"{job_name}-{today}"
 
-@router.post("/weekly-report")
+    job_id = enqueue_idempotent(
+        client=client,
+        job_name=job_name,
+        idempotency_key=key,
+        payload={}
+    )
+
+    return {
+        "job_run_id": str(job_id),
+        "job_name": job_name,
+        "idempotency_key": key,
+        "status": "queued"
+    }
+
+@router.post("/weekly-report", status_code=202)
 async def weekly_report_task(
     client: Client = Depends(get_admin_client)
 ):
-    active_users = get_active_user_ids(client)
-    for uid in active_users:
-        await run_weekly_report(client, uid)
-    return {"status": "ok", "processed": len(active_users)}
+    # Weekly bucket
+    week = datetime.now().strftime("%Y-W%V")
+    job_name = "weekly-report"
+    key = f"{job_name}-{week}"
 
-@router.post("/universe/sync")
+    job_id = enqueue_idempotent(
+        client=client,
+        job_name=job_name,
+        idempotency_key=key,
+        payload={}
+    )
+
+    return {
+        "job_run_id": str(job_id),
+        "job_name": job_name,
+        "idempotency_key": key,
+        "status": "queued"
+    }
+
+@router.post("/universe/sync", status_code=202)
 async def universe_sync_task(
     client: Client = Depends(get_admin_client)
 ):
-    print("Universe sync task: starting")
-    try:
-        service = UniverseService(client)
-        service.sync_universe()
-        service.update_metrics()
-        print("Universe sync task: complete")
-        return {"status": "ok", "message": "Universe synced and metrics updated"}
-    except Exception as e:
-        print(f"Universe sync task failed: {e}")
-        raise HTTPException(status_code=500, detail=f"Sync failed: {e}")
+    today = datetime.now().strftime("%Y-%m-%d")
+    job_name = "universe-sync"
+    key = f"{job_name}-{today}"
 
-@router.post("/plaid/backfill-history")
+    job_id = enqueue_idempotent(
+        client=client,
+        job_name=job_name,
+        idempotency_key=key,
+        payload={}
+    )
+
+    return {
+        "job_run_id": str(job_id),
+        "job_name": job_name,
+        "idempotency_key": key,
+        "status": "queued"
+    }
+
+@router.post("/plaid/backfill-history", status_code=202)
 async def backfill_history(
     start_date: str = Body(..., embed=True),
     end_date: str = Body(..., embed=True),
     client: Client = Depends(get_admin_client)
 ):
-    user_ids = get_active_user_ids(client)
-    # The plaid_service module exposes `client` which is the `plaid_api.PlaidApi` instance.
-    service = PlaidHistoryService(plaid_service.client, client)
-    counts = {}
-    for uid in user_ids:
-        counts[uid] = await service.backfill_snapshots(uid, start_date, end_date)
-    return {"status": "ok", "counts": counts}
+    today = datetime.now().strftime("%Y-%m-%d")
+    job_name = "plaid-backfill-history"
+    key = f"{job_name}-{start_date}-{end_date}-{today}"
 
+    job_id = enqueue_idempotent(
+        client=client,
+        job_name=job_name,
+        idempotency_key=key,
+        payload={
+            "start_date": start_date,
+            "end_date": end_date
+        }
+    )
+
+    return {
+        "job_run_id": str(job_id),
+        "job_name": job_name,
+        "idempotency_key": key,
+        "status": "queued"
+    }
+
+# Keep remaining endpoints unchanged as they were not in the target list
 @router.post("/iv/daily-refresh")
 async def iv_daily_refresh_task(
     client: Client = Depends(get_admin_client)
@@ -176,10 +229,7 @@ async def train_learning_v3(
     client: Client = Depends(get_admin_client)
 ):
     """
-    Triggers Learned Nesting v3 training cycle:
-    1. Calibrates probability models based on historical outcomes.
-    2. Refreshes conviction multipliers.
-    3. Emits audit events.
+    Triggers Learned Nesting v3 training cycle.
     """
     if not CalibrationService:
          raise HTTPException(status_code=500, detail="CalibrationService dependency missing (Prompt 6)")
@@ -204,8 +254,6 @@ async def train_learning_v3(
             )
 
             # Step 2: Calibration Training
-            # Call CalibrationService.train_and_persist(user_id, lookback_days, min_samples)
-            # Returns dict with stats (e.g., {'buckets_count': 12, 'error': 0.05})
             cal_stats = CalibrationService.train_and_persist(uid, lookback_days, min_samples)
 
             buckets = 0
@@ -246,7 +294,6 @@ async def train_learning_v3(
                 }
             )
 
-            # Fail hard as per requirements: "If any step fails... return HTTP 500"
             raise HTTPException(
                 status_code=500,
                 detail={

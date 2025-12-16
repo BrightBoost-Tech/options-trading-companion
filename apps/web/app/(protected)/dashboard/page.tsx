@@ -11,33 +11,17 @@ import StrategyProfilesPanel from '@/components/dashboard/StrategyProfilesPanel'
 import DisciplineSummary from '@/components/dashboard/DisciplineSummary';
 import RiskSummaryCard from '@/components/dashboard/RiskSummaryCard';
 import HoldingsTreemap from '@/components/dashboard/HoldingsTreemap';
-import OptimizerInsightCard from '@/components/dashboard/OptimizerInsightCard';
-import PortfolioHoldingsTable from '@/components/dashboard/PortfolioHoldingsTable'; // Phase 8.4
+import PortfolioHoldingsTable from '@/components/dashboard/PortfolioHoldingsTable';
 import PaperPortfolioWidget from '@/components/dashboard/PaperPortfolioWidget';
-import { supabase } from '@/lib/supabase';
-import { API_URL, TEST_USER_ID } from '@/lib/constants';
-import { groupOptionSpreads, formatOptionDisplay } from '@/lib/formatters';
+import { fetchWithAuth, fetchWithAuthTimeout } from '@/lib/api';
 import { QuantumTooltip } from "@/components/ui/QuantumTooltip";
 import { ThemeToggle } from '@/components/ThemeToggle';
-import { AlertTriangle, AlertCircle, Activity, Wallet } from 'lucide-react';
+import { AlertTriangle, Wallet } from 'lucide-react';
 
 const mockAlerts = [
   { id: '1', message: 'SPY credit put spread scout: 475/470 for $1.50 credit', time: '2 min ago' },
   { id: '2', message: 'QQQ IV rank above 50% - consider premium selling', time: '15 min ago' },
 ];
-
-interface FetchOptions extends RequestInit {
-  timeout?: number;
-}
-
-const fetchWithTimeout = async (resource: RequestInfo, options: FetchOptions = {}) => {
-  const { timeout = 15000, ...rest } = options;
-  const controller = new AbortController();
-  const id = setTimeout(() => controller.abort(), timeout);
-  const response = await fetch(resource, { ...rest, signal: controller.signal });
-  clearTimeout(id);
-  return response;
-};
 
 const isAbortError = (err: any) =>
   err?.name === 'AbortError' || err?.message?.toLowerCase()?.includes('aborted');
@@ -71,47 +55,40 @@ export default function DashboardPage() {
   const [simLoading, setSimLoading] = useState(false);
   const [simMode, setSimMode] = useState<'deterministic' | 'random'>('deterministic');
 
-  // Load data on mount
+  // Load data with staged execution
   useEffect(() => {
-    loadSnapshot();
-    loadRiskDashboard(); // Phase 8.2
-    loadWeeklyScout();
-    loadJournalStats();
-    loadMorningSuggestions();
-    loadMiddaySuggestions();
-    loadWeeklyReports();
-    loadRebalanceSuggestions();
+    let mounted = true;
+
+    const loadStaged = async () => {
+      // Phase 1: Critical Data (Snapshot) - Blocking for initial meaningful paint
+      await loadSnapshot();
+      if (!mounted) return;
+
+      // Phase 2: Risk & Journal - Fire and forget
+      Promise.all([loadRiskDashboard(), loadJournalStats()]);
+
+      // Phase 3: Secondary Data (Scout, Suggestions, Reports)
+      // Small delay to prioritize rendering of Phase 1 & 2
+      await new Promise(r => setTimeout(r, 100));
+      if (!mounted) return;
+
+      loadWeeklyScout();
+      loadMorningSuggestions();
+      loadMiddaySuggestions();
+      loadWeeklyReports();
+      loadRebalanceSuggestions();
+    };
+
+    loadStaged();
+
+    return () => { mounted = false; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  const getAuthHeaders = async () => {
-      const { data: { session } } = await supabase.auth.getSession();
-      const headers: Record<string, string> = {
-          'Content-Type': 'application/json'
-      };
-      if (session) {
-          headers['Authorization'] = `Bearer ${session.access_token}`;
-      } else {
-          // Gate dev auth bypass for security
-          if (process.env.NEXT_PUBLIC_ENABLE_DEV_AUTH_BYPASS === '1') {
-              headers['X-Test-Mode-User'] = TEST_USER_ID;
-          }
-      }
-      return headers;
-  };
-
   const loadSnapshot = async () => {
     try {
-      const headers = await getAuthHeaders();
-      const response = await fetchWithTimeout(`${API_URL}/portfolio/snapshot`, {
-         headers,
-         timeout: 15000
-      });
-
-      if (response.ok) {
-        const data = await response.json();
-        setSnapshot(data);
-      }
+      const data = await fetchWithAuthTimeout('/portfolio/snapshot', 15000);
+      setSnapshot(data);
     } catch (err: any) {
       if (isAbortError(err)) return;
       console.error('Failed to load snapshot:', err);
@@ -120,14 +97,8 @@ export default function DashboardPage() {
 
   const loadRiskDashboard = async () => {
     try {
-      const headers = await getAuthHeaders();
-      const response = await fetchWithTimeout(`${API_URL}/risk/dashboard`, {
-         headers,
-         timeout: 10000
-      });
-      if (response.ok) {
-         setRiskData(await response.json());
-      }
+      const data = await fetchWithAuthTimeout('/risk/dashboard', 10000);
+      setRiskData(data);
     } catch (err: any) {
       if (isAbortError(err)) return;
       console.error('Failed to load risk dashboard:', err);
@@ -137,16 +108,8 @@ export default function DashboardPage() {
   const loadWeeklyScout = async () => {
     setScoutLoading(true);
     try {
-      const headers = await getAuthHeaders();
-      const response = await fetchWithTimeout(`${API_URL}/scout/weekly`, {
-        headers,
-        timeout: 20000
-      });
-
-      if (response.ok) {
-        const data = await response.json();
-        setWeeklyScout(data);
-      }
+      const data = await fetchWithAuthTimeout('/scout/weekly', 20000);
+      setWeeklyScout(data);
     } catch (err: any) {
       if (isAbortError(err)) return;
       console.error('Failed to load scout:', err);
@@ -157,16 +120,8 @@ export default function DashboardPage() {
 
   const loadJournalStats = async () => {
     try {
-      const headers = await getAuthHeaders();
-      const response = await fetchWithTimeout(`${API_URL}/journal/stats`, { 
-          headers,
-          timeout: 10000 
-      });
-      
-      if (response.ok) {
-        const data = await response.json();
-        setJournalStats(data);
-      }
+      const data = await fetchWithAuthTimeout('/journal/stats', 10000);
+      setJournalStats(data);
     } catch (err: any) {
       if (isAbortError(err)) return;
       console.error('Failed to load journal stats:', err);
@@ -175,17 +130,8 @@ export default function DashboardPage() {
 
   const loadMorningSuggestions = async () => {
     try {
-      const headers = await getAuthHeaders();
-      const response = await fetchWithTimeout(`${API_URL}/suggestions?window=morning_limit`, {
-        headers,
-        timeout: 15000
-      });
-      if (response.ok) {
-        const data = await response.json();
-        setMorningSuggestions(Array.isArray(data.suggestions) ? data.suggestions : []);
-      } else {
-        setMorningSuggestions([]);
-      }
+      const data = await fetchWithAuthTimeout('/suggestions?window=morning_limit', 15000);
+      setMorningSuggestions(Array.isArray(data.suggestions) ? data.suggestions : []);
     } catch (err: any) {
       if (isAbortError(err)) return;
       console.error('Failed to load morning suggestions', err);
@@ -195,17 +141,8 @@ export default function DashboardPage() {
 
   const loadMiddaySuggestions = async () => {
     try {
-      const headers = await getAuthHeaders();
-      const response = await fetchWithTimeout(`${API_URL}/suggestions?window=midday_entry`, {
-        headers,
-        timeout: 15000
-      });
-      if (response.ok) {
-        const data = await response.json();
-        setMiddaySuggestions(Array.isArray(data.suggestions) ? data.suggestions : []);
-      } else {
-        setMiddaySuggestions([]);
-      }
+      const data = await fetchWithAuthTimeout('/suggestions?window=midday_entry', 15000);
+      setMiddaySuggestions(Array.isArray(data.suggestions) ? data.suggestions : []);
     } catch (err: any) {
       if (isAbortError(err)) return;
       console.error('Failed to load midday suggestions', err);
@@ -215,17 +152,8 @@ export default function DashboardPage() {
 
   const loadRebalanceSuggestions = async () => {
     try {
-      const headers = await getAuthHeaders();
-      const response = await fetchWithTimeout(`${API_URL}/rebalance/suggestions`, {
-        headers,
-        timeout: 15000
-      });
-      if (response.ok) {
-        const data = await response.json();
-        setRebalanceSuggestions(Array.isArray(data.suggestions) ? data.suggestions : []);
-      } else {
-        setRebalanceSuggestions([]);
-      }
+      const data = await fetchWithAuthTimeout('/rebalance/suggestions', 15000);
+      setRebalanceSuggestions(Array.isArray(data.suggestions) ? data.suggestions : []);
     } catch (err: any) {
       if (isAbortError(err)) return;
       console.error('Failed to load rebalance suggestions', err);
@@ -235,17 +163,8 @@ export default function DashboardPage() {
 
   const loadWeeklyReports = async () => {
     try {
-      const headers = await getAuthHeaders();
-      const response = await fetchWithTimeout(`${API_URL}/weekly-reports`, {
-        headers,
-        timeout: 15000
-      });
-      if (response.ok) {
-        const data = await response.json();
-        setWeeklyReports(Array.isArray(data.reports) ? data.reports : []);
-      } else {
-        setWeeklyReports([]);
-      }
+      const data = await fetchWithAuthTimeout('/weekly-reports', 15000);
+      setWeeklyReports(Array.isArray(data.reports) ? data.reports : []);
     } catch (err: any) {
       if (isAbortError(err)) return;
       console.error('Failed to load weekly reports', err);
@@ -255,16 +174,9 @@ export default function DashboardPage() {
 
   const runAllWorkflows = async () => {
     try {
-      const headers = await getAuthHeaders();
-      const res = await fetchWithTimeout(`${API_URL}/tasks/run-all`, {
+      await fetchWithAuthTimeout('/tasks/run-all', 30000, {
         method: 'POST',
-        headers,
-        timeout: 30000,
       });
-      if (!res.ok) {
-        console.error('Failed to run workflows', await res.text());
-        return;
-      }
       // After triggering, reload suggestions and weekly reports
       await Promise.all([
         loadMorningSuggestions(),
@@ -281,39 +193,22 @@ export default function DashboardPage() {
   const runHistoricalCycle = async () => {
     setSimLoading(true);
     try {
-      const headers = await getAuthHeaders();
       const payload: any = { mode: simMode };
       if (simMode === 'deterministic') {
           payload.cursor = simCursor;
           payload.symbol = 'SPY';
       } else {
-          // In random mode, cursor and symbol are optional (server chooses)
-          // But API schema requires cursor. We can send a dummy or the current one.
-          // run_historical_cycle body: cursor=..., symbol=..., mode=...
-          // If random, the server overrides date. But we should send something valid.
           payload.cursor = simCursor;
-          // symbol omitted -> server chooses random if configured
       }
 
-      const res = await fetch(`${API_URL}/historical/run-cycle`, {
+      const data = await fetchWithAuth('/historical/run-cycle', {
         method: 'POST',
-        headers,
         body: JSON.stringify(payload),
       });
 
-      if (res.ok) {
-        const data = await res.json();
-        setSimResult(data);
-        if (data.nextCursor) {
-            setSimCursor(data.nextCursor);
-        }
-        // If random mode, we might want to update the displayed cursor/symbol to what was actually used
-        if (data.entryTime) {
-            // Optional: update simCursor to match what was chosen?
-            // setSimCursor(data.entryTime);
-        }
-      } else {
-        console.error('Simulation failed', await res.text());
+      setSimResult(data);
+      if (data.nextCursor) {
+          setSimCursor(data.nextCursor);
       }
     } catch (err) {
       console.error('Simulation error', err);
@@ -323,11 +218,6 @@ export default function DashboardPage() {
   };
 
   // --- DERIVED STATE ---
-
-  // Use snapshot risk metrics if available
-  const riskMetrics = snapshot?.risk_metrics || {};
-  const greeks = riskMetrics.greeks || {};
-  const greekAlerts = riskMetrics.greek_alerts || {};
 
   const hasPositions =
     Array.isArray(snapshot?.positions ?? snapshot?.holdings) &&

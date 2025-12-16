@@ -117,7 +117,17 @@ def calculate_unified_score(
     cost_roi = final_execution_cost / cost_basis
 
     # 3. Regime Penalty (ROI Impact)
-    regime_state = RegimeState(regime_snapshot.get('state', 'normal'))
+    # FIX: Ensure regime_state is an Enum member, handling string inputs
+    regime_val = regime_snapshot.get('state', 'normal')
+    try:
+        regime_state = RegimeState(regime_val)
+    except ValueError:
+        # If value is invalid (e.g. 'NORMAL'), try lowercase or fallback
+        try:
+            regime_state = RegimeState(str(regime_val).lower())
+        except ValueError:
+            regime_state = RegimeState.NORMAL
+
     regime_penalty_roi = 0.0
 
     raw_strategy = trade.get("strategy_key") or trade.get("strategy") or ""

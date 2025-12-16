@@ -103,9 +103,6 @@ class ProgressEngine:
             user_metrics = self._compute_user_metrics(logs, executions, snapshots)
             system_metrics = self._compute_system_metrics(logs, executions)
 
-            # Derive specific log metrics
-            avg_ivr, dominant_regime = self._derive_log_metrics(logs)
-
             synthesis = {
                 "headline": f"Progress Report for {week_id}",
                 "action_items": ["Review missed suggestions" if user_metrics['components']['adherence_ratio']['value'] < 0.8 else "Maintain discipline"]

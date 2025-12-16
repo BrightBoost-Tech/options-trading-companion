@@ -559,9 +559,8 @@ async def run_midday_cycle(supabase: Client, user_id: str):
             collateral_required_per_contract=collateral,
             max_risk_pct=0.05, # Conservative default cap
             profile="AGGRESSIVE", # Sizing engine will clamp this to <= 0.05
-            # Deprecated args
-            ev_per_contract=ev,
-            contract_ask=price,
+        )
+
         # --- RISK AWARE SIZING ---
         # 1. Calculate Risk Multiplier (Conviction)
         score = float(cand.get("score", 50))

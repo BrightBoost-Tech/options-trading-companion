@@ -57,6 +57,30 @@ def normalize_win_rate(value) -> tuple[float, float]:
         ratio = 1.0
     return ratio, ratio * 100.0
 
+def build_midday_order_json(cand: dict, contracts: int) -> dict:
+    legs = cand.get("legs") or []
+    leg_orders = []
+
+    for leg in legs:
+        sym = leg.get("symbol")
+        side = leg.get("side")  # "buy"/"sell"
+        if sym and side and contracts > 0:
+            leg_orders.append({
+                "symbol": sym,
+                "side": side,
+                "quantity": contracts,
+            })
+
+    order_json = {
+        "order_type": "multi_leg" if len(leg_orders) > 1 else "single_leg",
+        "contracts": contracts,
+        "limit_price": float(cand.get("suggested_entry") or 0.0),
+        "legs": leg_orders,
+        "underlying": cand.get("symbol"),
+        "strategy": cand.get("strategy") or cand.get("strategy_key"),
+    }
+    return order_json
+
 class RiskBudgetEngine:
     """
     Computes available risk budget based on market regime and portfolio state.
@@ -666,11 +690,7 @@ async def run_midday_cycle(supabase: Client, user_id: str):
                 "ticker": ticker,
                 "strategy": strategy,
                 "direction": "long",
-                "order_json": {
-                    "side": "buy",
-                    "limit_price": price,
-                    "contracts": sizing["contracts"]
-                },
+                "order_json": build_midday_order_json(cand, sizing["contracts"]),
                 "sizing_metadata": sizing,
                 "status": "pending",
                 "source": "scanner",

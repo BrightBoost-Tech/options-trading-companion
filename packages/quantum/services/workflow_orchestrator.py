@@ -37,6 +37,11 @@ SUGGESTION_LOGS_TABLE = "suggestion_logs"
 MIDDAY_TEST_MODE = os.getenv("MIDDAY_TEST_MODE", "false").lower() == "true"
 APP_VERSION = os.getenv("APP_VERSION", "v2-dev")
 
+
+def clamp_risk_budget(per_trade_budget: float, remaining: float) -> float:
+    return max(0.0, min(float(per_trade_budget or 0.0), float(remaining or 0.0)))
+
+
 def normalize_win_rate(value) -> tuple[float, float]:
     """
     Returns (ratio_0_to_1, pct_0_to_100).
@@ -542,6 +547,19 @@ async def run_midday_cycle(supabase: Client, user_id: str):
         risk_multiplier = min(1.5, max(0.5, risk_multiplier))
 
         risk_budget_dollars = deployable_capital * base_per_trade_pct * risk_multiplier
+
+        # CLAMPING LOGIC
+        remaining = float(
+            budgets.get("remaining")
+            or budgets.get("remaining_budget")
+            or budgets.get("remaining_dollars")
+            or 0.0
+        )
+        risk_budget_dollars = clamp_risk_budget(risk_budget_dollars, remaining)
+
+        if risk_budget_dollars <= 0:
+            print(f"[Midday] Skipped {ticker}: Risk budget exhausted for trade (Remaining: ${remaining:.2f})")
+            continue
 
         # --- SIZING (single call) ---
         sizing = calculate_sizing(

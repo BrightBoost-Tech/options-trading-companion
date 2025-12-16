@@ -462,15 +462,31 @@ class HistoricalCycleService:
                     # PnL Attribution
                     # Alpha = Raw Market Move
                     # Drag = Execution Cost
-                    # Regime Shift = If regime changed against us
+                    # Regime Shift = PnL accrued while in a regime different from entry
                     raw_pnl = current_price - entry_details['rawEntryPrice']
                     execution_drag = (entry_details['entryPrice'] - entry_details['rawEntryPrice']) + (current_price - exit_fill_price)
-                    # Note: above calc is simplified, drag is basically slippage
+
+                    regime_shift_pnl = 0.0
+                    entry_regime = entry_details.get('regimeAtEntry')
+
+                    # Trajectory contains snapshots [Entry, Day1, Day2, ... Exit]
+                    # We iterate from index 1 (Day 1) to calculate daily PnL and attribute based on that day's regime
+                    if len(trajectory) > 1:
+                        for i in range(1, len(trajectory)):
+                            step_curr = trajectory[i]
+                            step_prev = trajectory[i-1]
+
+                            step_price_delta = step_curr['price'] - step_prev['price']
+
+                            # If the regime on this day (step_curr['regime']) differs from entry regime,
+                            # attribute the price move to regime shift.
+                            if step_curr.get('regime') != entry_regime:
+                                regime_shift_pnl += step_price_delta
 
                     attribution = {
                         "alpha": raw_pnl,
                         "execution_drag": -abs(execution_drag),
-                        "regime_shift": 0.0 # TODO: Calculate if regime change hurt/helped
+                        "regime_shift": regime_shift_pnl
                     }
 
                     exit_details = {

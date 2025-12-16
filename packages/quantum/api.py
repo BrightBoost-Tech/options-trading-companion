@@ -23,7 +23,7 @@ from supabase import create_client, Client
 env_path = Path(__file__).resolve().parent / ".env"
 load_dotenv(dotenv_path=env_path)
 
-from packages.quantum.security import encrypt_token, decrypt_token, get_current_user
+from packages.quantum.security import encrypt_token, decrypt_token, get_current_user, get_supabase_user_client
 from packages.quantum.security.config import validate_security_config
 from packages.quantum.security.secrets_provider import SecretsProvider
 
@@ -105,41 +105,6 @@ supabase_admin: Client = create_client(url, key) if url and key else None
 analytics_service = AnalyticsService(supabase_admin)
 app.state.analytics_service = analytics_service
 
-# RLS-Aware Client Dependency
-def get_supabase_user_client(
-    user_id: str = Depends(get_current_user),
-    request: Request = None
-) -> Client:
-    # Check if we have a real Bearer token
-    auth_header = request.headers.get("Authorization")
-    is_bearer = auth_header and auth_header.startswith("Bearer ")
-
-    if is_bearer:
-        token = auth_header.split(" ")[1]
-        if supa_secrets.url and supa_secrets.anon_key:
-            client = create_client(supa_secrets.url, supa_secrets.anon_key)
-            client.postgrest.auth(token)
-            return client
-
-    if os.getenv("APP_ENV") != "production" and os.getenv("ENABLE_DEV_AUTH_BYPASS") == "1":
-        if request.headers.get("X-Test-Mode-User") == user_id:
-             import jwt
-             if supa_secrets.jwt_secret:
-                 payload = {
-                     "sub": user_id,
-                     "aud": "authenticated",
-                     "role": "authenticated",
-                     "exp": 9999999999
-                 }
-                 fake_token = jwt.encode(payload, supa_secrets.jwt_secret, algorithm="HS256")
-                 client = create_client(supa_secrets.url, supa_secrets.anon_key)
-                 client.postgrest.auth(fake_token)
-                 return client
-
-    # 🛡️ Sentinel: Safe default failure
-    # Never fall back to admin client if user context was expected but not established.
-    raise HTTPException(status_code=500, detail="Secure Database Context Unavailable")
-
 # --- Register Plaid Endpoints ---
 plaid_endpoints.register_plaid_endpoints(
     app,
@@ -156,6 +121,10 @@ app.include_router(optimizer_router)
 # --- Register Strategy Endpoints ---
 from packages.quantum.strategy_endpoints import router as strategy_router
 app.include_router(strategy_router)
+
+# --- Register Dashboard Endpoints ---
+from packages.quantum.dashboard_endpoints import router as dashboard_router
+app.include_router(dashboard_router)
 
 # --- Register Paper Trading Endpoints ---
 from packages.quantum.paper_endpoints import router as paper_router

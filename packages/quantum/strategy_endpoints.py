@@ -7,8 +7,9 @@ import uuid
 from typing import List, Dict, Any, Optional
 from fastapi import APIRouter, HTTPException, Depends, BackgroundTasks
 from pydantic import BaseModel
+from supabase import Client
 
-from packages.quantum.security import get_current_user_id
+from packages.quantum.security import get_current_user_id, get_supabase_user_client
 from packages.quantum.strategy_profiles import StrategyConfig, BacktestRequest, BacktestRequestV3
 from packages.quantum.strategy_requests import BatchSimulationRequest, ResearchCompareRequest
 from packages.quantum.services.historical_simulation import HistoricalCycleService
@@ -203,11 +204,9 @@ def get_strategy_metadata(user_id: str = Depends(get_current_user_id)):
 @router.post("/strategies")
 def create_strategy_config(
     config: StrategyConfig,
-    user_id: str = Depends(get_current_user_id)
+    user_id: str = Depends(get_current_user_id),
+    supabase: Client = Depends(get_supabase_user_client)
 ):
-    supabase = get_supabase()
-    if not supabase:
-        raise HTTPException(status_code=503, detail="Database not available")
     row = {
         "user_id": user_id,
         "name": config.name,
@@ -220,10 +219,10 @@ def create_strategy_config(
     return {"status": "ok", "data": res.data}
 
 @router.get("/strategies")
-def list_strategies(user_id: str = Depends(get_current_user_id)):
-    supabase = get_supabase()
-    if not supabase:
-        raise HTTPException(status_code=503, detail="Database not available")
+def list_strategies(
+    user_id: str = Depends(get_current_user_id),
+    supabase: Client = Depends(get_supabase_user_client)
+):
     res = supabase.table("strategy_configs").select("*").eq("user_id", user_id).execute()
     return {"strategies": res.data}
 
@@ -231,11 +230,9 @@ def list_strategies(user_id: str = Depends(get_current_user_id)):
 def run_backtest(
     name: str,
     request: BacktestRequest,
-    user_id: str = Depends(get_current_user_id)
+    user_id: str = Depends(get_current_user_id),
+    supabase: Client = Depends(get_supabase_user_client)
 ):
-    supabase = get_supabase()
-    if not supabase:
-        raise HTTPException(status_code=503, detail="Database not available")
     res = supabase.table("strategy_configs").select("*").eq("user_id", user_id).eq("name", name).order("version", desc=True).limit(1).execute()
     if not res.data:
          raise HTTPException(status_code=404, detail="Strategy config not found")
@@ -248,15 +245,12 @@ def run_backtest(
 def run_backtest_v3(
     name: str,
     request: BacktestRequestV3,
-    user_id: str = Depends(get_current_user_id)
+    user_id: str = Depends(get_current_user_id),
+    supabase: Client = Depends(get_supabase_user_client)
 ):
     """
     Executes V3 backtest (Single or Walk-Forward) with optional param sweep.
     """
-    supabase = get_supabase()
-    if not supabase:
-        raise HTTPException(status_code=503, detail="Database not available")
-
     # 1. Fetch Config
     res = supabase.table("strategy_configs").select("*").eq("user_id", user_id).eq("name", name).order("version", desc=True).limit(1).execute()
     if not res.data:
@@ -300,15 +294,12 @@ def run_backtest_v3(
 @router.post("/research/compare")
 def compare_backtests(
     req: ResearchCompareRequest,
-    user_id: str = Depends(get_current_user_id)
+    user_id: str = Depends(get_current_user_id),
+    supabase: Client = Depends(get_supabase_user_client)
 ):
     """
     Compares two Walk-Forward backtests using paired fold deltas and bootstrapping.
     """
-    supabase = get_supabase()
-    if not supabase:
-        raise HTTPException(status_code=503, detail="Database not available")
-
     # Fetch folds
     folds_base = supabase.table("strategy_backtest_folds").select("*").eq("backtest_id", req.baseline_backtest_id).order("fold_index").execute()
     folds_cand = supabase.table("strategy_backtest_folds").select("*").eq("backtest_id", req.candidate_backtest_id).order("fold_index").execute()
@@ -372,12 +363,9 @@ def compare_backtests(
 async def run_batch_simulation_endpoint(
     req: BatchSimulationRequest,
     background_tasks: BackgroundTasks,
-    user_id: str = Depends(get_current_user_id)
+    user_id: str = Depends(get_current_user_id),
+    supabase: Client = Depends(get_supabase_user_client)
 ):
-    supabase = get_supabase()
-    if not supabase:
-        raise HTTPException(status_code=503, detail="Database not available")
-
     batch_id = str(uuid.uuid4())
 
     res = supabase.table("strategy_configs").select("*").eq("user_id", user_id).eq("name", req.strategy_name).order("version", desc=True).limit(1).execute()
@@ -405,12 +393,9 @@ async def run_batch_simulation_endpoint(
 @router.get("/simulation/batch/{batch_id}")
 def get_batch_status(
     batch_id: str,
-    user_id: str = Depends(get_current_user_id)
+    user_id: str = Depends(get_current_user_id),
+    supabase: Client = Depends(get_supabase_user_client)
 ):
-    supabase = get_supabase()
-    if not supabase:
-        raise HTTPException(status_code=503, detail="Database not available")
-
     res = supabase.table("strategy_backtests").select("*").eq("batch_id", batch_id).execute()
     return {"results": res.data}
 
@@ -419,12 +404,9 @@ def list_strategy_backtests(
     name: str,
     limit: int = 20,
     offset: int = 0,
-    user_id: str = Depends(get_current_user_id)
+    user_id: str = Depends(get_current_user_id),
+    supabase: Client = Depends(get_supabase_user_client)
 ):
-    supabase = get_supabase()
-    if not supabase:
-        raise HTTPException(status_code=503, detail="Database not available")
-
     res = (
         supabase.table("strategy_backtests")
         .select("id, strategy_name, version, param_hash, start_date, end_date, ticker, trades_count, win_rate, max_drawdown, total_pnl, metrics, status, created_at")
@@ -440,12 +422,9 @@ def list_strategy_backtests(
 @router.get("/strategy_backtests/recent")
 def list_recent_backtests(
     limit: int = 10,
-    user_id: str = Depends(get_current_user_id)
+    user_id: str = Depends(get_current_user_id),
+    supabase: Client = Depends(get_supabase_user_client)
 ):
-    supabase = get_supabase()
-    if not supabase:
-        raise HTTPException(status_code=503, detail="Database not available")
-
     res = (
         supabase.table("strategy_backtests")
         .select("id, strategy_name, version, param_hash, start_date, end_date, ticker, trades_count, win_rate, total_pnl, status, created_at")

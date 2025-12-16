@@ -215,7 +215,8 @@ async def get_weekly_progress(
     week_id = get_week_id_for_last_full_week()
 
     if not supabase:
-         raise HTTPException(status_code=404, detail="No database connection")
+         # Propagate the 500 from dependency or if just missing
+         raise HTTPException(status_code=500, detail="Database Context Unavailable")
 
     try:
         res = supabase.table("weekly_snapshots") \
@@ -228,13 +229,16 @@ async def get_weekly_progress(
         if res.data:
             return res.data
         else:
-             # UI expects 404 behavior for "no data yet" based on catch block analysis
-             # or simply empty. The UI component throws 404 in fetchWithAuth usually.
-             raise HTTPException(status_code=404, detail=f"No snapshot found for week {week_id}")
+            raise HTTPException(status_code=404, detail=f"No snapshot found for week {week_id}")
 
     except Exception as e:
-        # If .single() fails (e.g. returns nothing), or table missing
-        raise HTTPException(status_code=404, detail=f"No snapshot found for week {week_id}")
+        # Only catch "No rows found" error from PostgREST/Supabase
+        if "JSON object requested, multiple (or no) rows returned" in str(e) or "The result contains 0 rows" in str(e):
+             raise HTTPException(status_code=404, detail=f"No snapshot found for week {week_id}")
+
+        # Re-raise other errors (Auth, DB Connection, etc)
+        print(f"Error fetching weekly progress: {e}")
+        raise e
 
 @router.get("/suggestions")
 async def get_suggestions(

@@ -396,14 +396,39 @@ async def run_morning_cycle(supabase: Client, user_id: str):
     # 4. Insert suggestions
     if suggestions:
         try:
-            supabase.table(TRADE_SUGGESTIONS_TABLE) \
-                .delete() \
-                .eq("user_id", user_id) \
-                .eq("window", "morning_limit") \
-                .execute()
+            cycle_date = datetime.now(timezone.utc).date().isoformat()
 
-            supabase.table(TRADE_SUGGESTIONS_TABLE).insert(suggestions).execute()
-            print(f"Inserted {len(suggestions)} morning suggestions.")
+            # Fetch existing to preserve status
+            existing_map = {}
+            try:
+                ex = supabase.table(TRADE_SUGGESTIONS_TABLE).select("ticker,strategy,status") \
+                    .eq("user_id", user_id) \
+                    .eq("window", "morning_limit") \
+                    .eq("cycle_date", cycle_date).execute()
+                existing_map = {(r["ticker"], r["strategy"]): r["status"] for r in (ex.data or [])}
+            except Exception:
+                pass
+
+            upserts = []
+            inserts = 0
+            updates = 0
+
+            for s in suggestions:
+                s["cycle_date"] = cycle_date
+                key = (s["ticker"], s["strategy"])
+                if key in existing_map:
+                    s["status"] = existing_map[key]
+                    updates += 1
+                else:
+                    s["status"] = "pending"
+                    inserts += 1
+                upserts.append(s)
+
+            supabase.table(TRADE_SUGGESTIONS_TABLE).upsert(
+                upserts,
+                on_conflict="user_id,window,cycle_date,ticker,strategy"
+            ).execute()
+            print(f"Upserted morning suggestions: {inserts} inserted, {updates} updated.")
         except Exception as e:
             print(f"Error inserting morning suggestions: {e}")
 
@@ -706,16 +731,42 @@ async def run_midday_cycle(supabase: Client, user_id: str):
 
     if suggestions:
         try:
-            supabase.table(TRADE_SUGGESTIONS_TABLE) \
-                .delete() \
-                .eq("user_id", user_id) \
-                .eq("window", "midday_entry") \
-                .execute()
+            cycle_date = datetime.now(timezone.utc).date().isoformat()
 
-            suggestions_to_insert = [{k: v for k, v in s.items() if k != 'internal_cand'} for s in suggestions]
+            # Fetch existing to preserve status
+            existing_map = {}
+            try:
+                ex = supabase.table(TRADE_SUGGESTIONS_TABLE).select("ticker,strategy,status") \
+                    .eq("user_id", user_id) \
+                    .eq("window", "midday_entry") \
+                    .eq("cycle_date", cycle_date).execute()
+                existing_map = {(r["ticker"], r["strategy"]): r["status"] for r in (ex.data or [])}
+            except Exception:
+                pass
 
-            supabase.table(TRADE_SUGGESTIONS_TABLE).insert(suggestions_to_insert).execute()
-            print(f"Inserted {len(suggestions)} midday suggestions.")
+            upserts = []
+            inserts = 0
+            updates = 0
+
+            for s in suggestions:
+                s["cycle_date"] = cycle_date
+                key = (s["ticker"], s["strategy"])
+                if key in existing_map:
+                    s["status"] = existing_map[key]
+                    updates += 1
+                else:
+                    s["status"] = "pending"
+                    inserts += 1
+
+                # Clean internal fields
+                clean_s = {k: v for k, v in s.items() if k != 'internal_cand'}
+                upserts.append(clean_s)
+
+            supabase.table(TRADE_SUGGESTIONS_TABLE).upsert(
+                upserts,
+                on_conflict="user_id,window,cycle_date,ticker,strategy"
+            ).execute()
+            print(f"Upserted midday suggestions: {inserts} inserted, {updates} updated.")
         except Exception as e:
             print(f"Error inserting midday suggestions: {e}")
 

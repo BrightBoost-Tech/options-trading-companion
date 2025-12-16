@@ -25,6 +25,22 @@ SCANNER_LIMIT_DEV = int(os.getenv("SCANNER_LIMIT_DEV", "40")) # Limit universe i
 
 logger = logging.getLogger(__name__)
 
+def _map_single_leg_strategy(leg: Dict[str, Any]) -> Optional[str]:
+    """Maps scanner leg attributes to calculate_ev strategy types."""
+    side = str(leg.get("side") or "").lower()
+    opt_type = str(leg.get("type") or "").lower()
+
+    if side == "buy" and opt_type == "call":
+        return "long_call"
+    elif side == "buy" and opt_type == "put":
+        return "long_put"
+    elif side == "sell" and opt_type == "call":
+        return "short_call"
+    elif side == "sell" and opt_type == "put":
+        return "short_put"
+    else:
+        return None
+
 def _compute_risk_primitives_usd(legs: List[Dict[str, Any]], total_cost: float, current_price: float) -> Dict[str, float]:
     """
     Computes max loss, max profit, and collateral required in contract USD terms.
@@ -558,7 +574,10 @@ def scan_for_opportunities(
                     total_ev = 0
             elif len(legs) == 1:
                 leg = legs[0]
-                st_type = f"{leg['side']}_{leg['type']}"
+                st_type = _map_single_leg_strategy(leg)
+                if not st_type:
+                    return None
+
                 ev_obj = calculate_ev(
                     premium=leg['premium'],
                     strike=leg['strike'],

@@ -1,5 +1,6 @@
 from typing import List, Dict, Any, Optional
 import datetime
+import math
 # from .trade_builder import SafetySelectionLayer # Removed because it does not exist in trade_builder.py
 from ..models import SpreadPosition
 # Removed WorkflowOrchestrator import to avoid circular dependency
@@ -136,7 +137,7 @@ class RebalanceEngine:
 
     def generate_trades(
         self,
-        current_holdings: List[SpreadPosition],
+        current_holdings: List[Any], # Changed from List[SpreadPosition] to Any to support dicts as well
         target_weights: Dict[str, float],
         total_equity: float,
         deployable_capital: float,
@@ -148,7 +149,7 @@ class RebalanceEngine:
         Generates buy/sell suggestions based on weight differences, enforcing risk budgets.
 
         Args:
-            current_holdings: List of current SpreadPositions.
+            current_holdings: List of current SpreadPositions (objects or dicts).
             target_weights: {ticker: target_pct} from optimizer.
             total_equity: Current Net Liquidity.
             deployable_capital: Cash available for new trades.
@@ -161,283 +162,92 @@ class RebalanceEngine:
         """
         trades = []
 
-        # 1. Map current holdings to weights
-        current_weights = {}
-        holding_map = {} # ticker -> SpreadPosition
-
+        # 1. Normalize current holdings to dicts for easier processing
+        normalized_holdings = []
         for pos in current_holdings:
-            ticker = pos.ticker_key if hasattr(pos, 'ticker_key') else pos.ticker or pos.underlying
-            val = pos.current_value
-            weight = val / total_equity if total_equity > 0 else 0
-
-            if ticker in current_weights:
-                current_weights[ticker] += weight
+            if isinstance(pos, dict):
+                normalized_holdings.append(pos)
+            elif hasattr(pos, 'model_dump'):
+                normalized_holdings.append(pos.model_dump())
+            elif hasattr(pos, 'dict'):
+                normalized_holdings.append(pos.dict())
             else:
-                current_weights[ticker] = weight
+                 # Fallback for generic object
+                 try:
+                     normalized_holdings.append(vars(pos))
+                 except:
+                     pass
 
-            holding_map[ticker] = pos
+        # 2. Map normalized holdings by symbol/ticker
+        holding_map = {} # symbol -> dict
 
-        # 2. Identify all relevant tickers (current + target)
-        all_tickers = set(current_weights.keys()).union(target_weights.keys())
+        for pos in normalized_holdings:
+            # Try to find symbol in various fields (robustness)
+            symbol = pos.get('symbol') or pos.get('ticker') or pos.get('underlying')
+            if symbol:
+                holding_map[symbol] = pos
 
-        # Helper: Trace ID for lineage
-        trace_id = market_context.get('trace_id') if market_context else None
+        # 3. Identify all relevant symbols (targets + holdings)
+        # Using sorted list to ensure deterministic order during processing
+        all_symbols = sorted(list(set(target_weights.keys()).union(holding_map.keys())))
 
-        # Sort tickers to process sells first?
-        # Actually, we should collect all potential trades then process.
-        # But for now, let's just loop.
+        # 4. Canonical Trade Loop
+        for symbol in all_symbols:
+            # Determine current value
+            pos = holding_map.get(symbol)
+            if pos:
+                current_val = float(pos.get("current_value") or 0.0)
+            else:
+                current_val = 0.0
 
-        sell_trades = []
-        buy_trades = []
+            # Determine target value
+            target_w = float(target_weights.get(symbol, 0.0) or 0.0)
+            target_val = target_w * float(total_equity or 0.0)
 
-        for ticker in all_tickers:
-            current_w = current_weights.get(ticker, 0.0)
-            target_w = target_weights.get(ticker, 0.0)
+            diff_val = target_val - current_val
 
-            diff_w = target_w - current_w
+            # Determine price_unit (MUST be > 0)
+            price_unit = 0.0
+            if pricing_data and symbol in pricing_data:
+                price_data = pricing_data[symbol]
+                if isinstance(price_data, dict):
+                    price_unit = float(price_data.get("price") or 0.0)
+                else:
+                    # Handle case where pricing_data values might be floats directly (unlikely but safe)
+                    try:
+                        price_unit = float(price_data)
+                    except:
+                        price_unit = 0.0
 
-            # Threshold for action (e.g. 1% drift)
-            if abs(diff_w) < 0.01:
+            # Fallback: estimate from position if price not found in pricing_data
+            if price_unit <= 0.0 and pos:
+                qty = abs(float(pos.get("quantity") or 0.0))
+                if qty > 0:
+                    price_unit = abs(current_val) / qty
+
+            if price_unit <= 0.0:
                 continue
 
-            diff_val = diff_w * total_equity
-            price = pricing_data.get(ticker)
+            # Calculate quantity delta
+            qty_delta = int(math.floor(abs(diff_val) / price_unit))
 
-            if desired_val_change > 0:
-                side = "buy" # or "increase"
-                action = "increase"
-            else:
-                side = "sell" # or "decrease"
-                action = "decrease"
+            if qty_delta == 0:
+                continue
 
-            # Sizing
-            if price_unit <= 0: continue
+            side = "buy" if diff_val > 0 else "sell"
 
-            qty_delta = abs(desired_val_change) / price_unit
-            qty_delta = math.floor(qty_delta)
-
-            if qty_delta == 0: continue
-
-            # Risk Check (for buys)
-            reason = "Rebalance to target"
-            if side == "buy":
-                cost = qty_delta * price_unit
-
-                # Max 25% deployable capital per NEW spread (or addition)
-                max_allocation = deployable_capital * 0.25
-                if cost > max_allocation:
-                     qty_delta = math.floor(max_allocation / price_unit)
-                     reason = "Rebalance (capped by 25% rule)"
-                     cost = qty_delta * price_unit
-
-                if cost > deployable_capital:
-                    qty_delta = math.floor(deployable_capital / price_unit)
-                    reason = "Rebalance (capped by cash)"
-
-                if qty_delta == 0: continue
-
-            # --- Rebalance Score Calculation ---
-            # Inputs:
-            # 1. Conviction (0-1)
-            # 2. Execution Cost Penalty
-            # 3. Risk/Regime Penalty
-
-            # 1. Conviction
-            # Use underlying for lookup if possible, else symbol
-            lookup_key = existing_spread.underlying if existing_spread else symbol
-            conviction = conviction_map.get(lookup_key, conviction_map.get(symbol, 0.5))
-
-            # Base Score: Conviction * 100 (0-100 scale)
-            base_score = conviction * 100.0
-
-            # 2. Execution Cost Penalty
-            # Use ExecutionService logic
-            exec_cost_per_unit = 0.05 # default fallback
-
-            if item_type == "stock":
-                # STOCK FIX: Use simple spread model, do NOT use options calculator
-                # 5 bps spread (0.05%) -> cost is half spread
-                STOCK_SPREAD_BPS = 5.0
-                stock_spread_pct = STOCK_SPREAD_BPS / 10000.0
-                exec_cost_per_unit = price_unit * stock_spread_pct * 0.5
-            elif self.execution_service:
-                # OPTION FIX: Convert contract-dollar price_unit to per-share premium
-                entry_cost_per_share = price_unit / 100.0
-
-                # Determine legs
-                num_legs = 1
-                if existing_spread and existing_spread.legs:
-                    num_legs = len(existing_spread.legs)
-
-                # Use underlying for history
-                symbol_for_history = symbol
-                if existing_spread and existing_spread.underlying:
-                    symbol_for_history = existing_spread.underlying
-
-                # We try to use historical data if user_id is provided
-                exec_cost_per_unit = self.execution_service.estimate_execution_cost(
-                    symbol=symbol_for_history,
-                    user_id=user_id,
-                    entry_cost=entry_cost_per_share,
-                    num_legs=num_legs
-                )
-
-            # ROI impact of execution cost: Cost / Price
-            cost_roi = 0.0
-            if price_unit > 0:
-                cost_roi = exec_cost_per_unit / price_unit
-
-            # Scaling: 1% cost = 5 points penalty (Factor 500, similar to scoring.py)
-            exec_penalty_points = cost_roi * 500.0
-
-            # 3. Regime Penalty
-            # Use simplified logic based on scoring.py patterns
-            regime_penalty_points = 0.0
-            if regime_context:
-                current_regime = regime_context.get("current_regime", "normal")
-                # regime_context uses "normal", "high_vol", "panic" (mapped from RegimeState)
-
-                # Simple penalties
-                if current_regime == "panic": # Shock
-                    regime_penalty_points = 15.0 # High penalty in panic
-                elif current_regime == "high_vol": # Elevated
-                    # If we are buying (adding risk) in high vol, maybe small penalty unless conviction is high
-                    if side == "buy":
-                        regime_penalty_points = 5.0
-
-            # 4. Risk Penalty
-            # Use diff_w as a proxy for 'urgency' but maybe not 'risk'.
-            # If we are shorting (selling), risk is actually reducing.
-            # Let's keep it simple: RebalanceScore is about quality of holding + regime.
-            # User said: "risk_penalty (portfolio greek deltas / concentration / regime penalty)"
-            risk_penalty_points = 0.0
-            # Concentration check: if target > 20%, maybe add penalty?
-            if target_w > 0.20:
-                risk_penalty_points += 5.0
-
-            # Final Score Calculation
-            # RebalanceScore = Conviction - Cost - Regime - Risk
-            rebalance_score = base_score - exec_penalty_points - regime_penalty_points - risk_penalty_points
-
-            # Clamp 0-100
-            rebalance_score = max(0.0, min(100.0, rebalance_score))
-
-            # Components for API
-            score_components = {
-                "conviction_score": base_score,
-                "execution_cost_penalty": exec_penalty_points,
-                "regime_penalty": regime_penalty_points,
-                "risk_penalty": risk_penalty_points,
-                "raw_cost_roi": cost_roi
-            }
-
-            # Construct Trade
             trade = {
-                "side": action,
-                "kind": item_type,
                 "symbol": symbol,
+                "action": side,
                 "quantity": qty_delta,
-                "limit_price": price_unit,
-                "reason": f"Target: {target_w:.1%}, Current: {current_w:.1%}. {reason}",
-                "target_weight": target_w,
-                "current_weight": current_w,
-                "risk_metadata": {
-                    "diff_value": desired_val_change
-                },
-                "score": rebalance_score, # Use RebalanceScore for sorting
-                "rebalance_score": rebalance_score,
-                "score_components": score_components,
-                "ev": None # Explicitly None to avoid fake EV
+                "price_unit": price_unit,
+                "value_delta": (qty_delta * price_unit) * (1 if side == "buy" else -1),
+                "reason": "rebalance_target",
             }
+
             trades.append(trade)
 
-            # SELL Logic
-            if diff_val < 0:
-                if ticker not in holding_map:
-                    continue
-
-                sell_val = abs(diff_val)
-                qty_to_sell = sell_val / price
-                qty = int(round(qty_to_sell))
-                if qty < 1:
-                    continue
-
-                sell_trades.append({
-                    "ticker": ticker,
-                    "action": "SELL",
-                    "quantity": qty,
-                    "reason": f"Overweight by {abs(diff_w)*100:.1f}%",
-                    "price": price,
-                    "est_value": qty * price,
-                    "type": "rebalance_sell",
-                    "trace_id": trace_id
-                })
-
-            # BUY Logic
-            elif diff_val > 0:
-                buy_val = diff_val
-
-                # Check Risk Budgets
-                clamp_reason = []
-
-                # 1. Global Capital / VaR
-                if risk_summary:
-                    remaining_var = risk_summary["remaining"]["var"]
-                    if buy_val > remaining_var:
-                        buy_val = max(0, remaining_var)
-                        clamp_reason.append(f"Clamped by Global VaR Budget")
-
-                # 2. Underlying Budget
-                if risk_summary:
-                    # Parse underlying from ticker (e.g. "AAPL")
-                    # If ticker is option "AAPL 100C", underlying is "AAPL"
-                    # Simple assumption: ticker is underlying for weight purposes
-                    und = ticker
-                    rem_und = risk_summary["remaining"]["underlying"].get(und, risk_summary["limits"]["defaults"]["underlying"])
-
-                    if buy_val > rem_und:
-                        buy_val = max(0, rem_und)
-                        clamp_reason.append(f"Clamped by Underlying Limit")
-
-                # 3. Strategy Budget (Harder if we don't know strategy of new buy)
-                # If we assume we are adding to existing position, we know type.
-                # If new, we might assume 'vertical' or similar.
-                # Skip for now if unknown.
-
-                # 4. Deployable Capital (Cash)
-                # Max 25% of deployable per trade
-                safe_cap = deployable_capital * 0.25
-                if buy_val > safe_cap:
-                    buy_val = safe_cap
-                    clamp_reason.append("Clamped by 25% Cash Rule")
-
-                # Final check
-                if buy_val <= 0:
-                    continue
-
-                qty_to_buy = buy_val / price
-                qty = int(round(qty_to_buy))
-
-                if qty < 1:
-                    continue
-
-                trade = {
-                    "ticker": ticker,
-                    "action": "BUY",
-                    "quantity": qty,
-                    "reason": f"Underweight by {diff_w*100:.1f}%",
-                    "price": price,
-                    "est_value": qty * price,
-                    "type": "rebalance_buy",
-                    "trace_id": trace_id
-                }
-                if clamp_reason:
-                    trade["clamp_info"] = "; ".join(clamp_reason)
-                    trade["reason"] += " (Clamped)"
-
-                buy_trades.append(trade)
-
-        # Prioritize SELLs (liquidity generation) before BUYs
-        trades = sell_trades + buy_trades
+        # 5. Sort by abs(value_delta) descending
+        trades.sort(key=lambda t: abs(float(t.get("value_delta") or 0.0)), reverse=True)
 
         return trades

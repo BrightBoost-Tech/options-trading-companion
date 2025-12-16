@@ -12,6 +12,7 @@ from .options_utils import group_spread_positions, format_occ_symbol_readable
 from .exit_stats_service import ExitStatsService
 from .market_data_truth_layer import MarketDataTruthLayer
 from .analytics_service import AnalyticsService
+from packages.quantum.services.risk_budget_engine import RiskBudgetEngine
 
 # Importing existing logic
 from packages.quantum.options_scanner import scan_for_opportunities
@@ -81,67 +82,6 @@ def build_midday_order_json(cand: dict, contracts: int) -> dict:
     }
     return order_json
 
-class RiskBudgetEngine:
-    """
-    Computes available risk budget based on market regime and portfolio state.
-    """
-    def __init__(self, supabase: Client):
-        self.supabase = supabase
-
-    def compute(self, user_id: str, deployable_capital: float, regime: str, positions: list) -> dict:
-        # Estimate Total Equity
-        positions_value = 0.0
-        current_risk_usage = 0.0
-
-        for p in positions:
-            qty = float(p.get("quantity", 0) or 0)
-            curr = float(p.get("current_price", 0) or 0)
-            cost = float(p.get("cost_basis", 0) or 0)
-
-            # Value
-            val = curr * qty
-            if p.get("asset_type") == "OPTION" or str(p.get("symbol", "")).startswith("O:") or len(p.get("symbol", "")) > 6:
-                val *= 100.0
-                # Risk Usage: Cost Basis for Long Options
-                current_risk_usage += abs(cost * qty * 100.0)
-            else:
-                # Stocks
-                val *= 1.0
-
-            positions_value += val
-
-        total_equity = deployable_capital + positions_value
-        if total_equity <= 0: total_equity = 1.0 # Safety
-
-        # Define Caps (Allocated % of Equity to Options)
-        caps = {
-            "suppressed": 0.50,
-            "normal": 0.40,
-            "elevated": 0.25,
-            "high_vol": 0.15,
-            "shock": 0.05
-        }
-
-        # Map regime
-        r_key = "normal"
-        regime_lower = str(regime).lower()
-        if "shock" in regime_lower or "panic" in regime_lower: r_key = "shock"
-        elif "elevated" in regime_lower or "high_vol" in regime_lower: r_key = "elevated"
-        elif "suppressed" in regime_lower: r_key = "suppressed"
-
-        allocation_cap_pct = caps.get(r_key, 0.40)
-        max_risk_allocation = total_equity * allocation_cap_pct
-
-        remaining = max_risk_allocation - current_risk_usage
-
-        return {
-            "remaining": max(0.0, remaining),
-            "current_usage": current_risk_usage,
-            "max_allocation": max_risk_allocation,
-            "regime": r_key,
-            "cap_pct": allocation_cap_pct,
-            "total_equity": total_equity
-        }
 
 async def run_morning_cycle(supabase: Client, user_id: str):
     """

@@ -609,7 +609,8 @@ async def optimize_portfolio(req: OptimizationRequest, request: Request, user_id
         print(f"Optimizer Error: {e}")
         import traceback
         traceback.print_exc()
-        raise HTTPException(status_code=500, detail=str(e))
+        # SECURITY: Do not leak exception details
+        raise HTTPException(status_code=500, detail="Optimization failed")
 
 @router.get("/diagnostics/phase1")
 async def run_phase1_test():

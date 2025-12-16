@@ -175,3 +175,26 @@ export interface PortfolioSnapshot {
     holdings?: any[];
     spreads?: any[];
 }
+
+export interface JobRun {
+  id: string;
+  job_name: string;
+  idempotency_key?: string;
+  status: 'pending' | 'processing' | 'completed' | 'failed' | 'dead_lettered' | 'failed_retryable';
+  attempt_count: number;
+  max_attempts: number;
+  scheduled_for: string;
+  run_after: string;
+  started_at?: string;
+  finished_at?: string;
+  duration_ms?: number;
+  payload?: any;
+  result?: any;
+  error?: any;
+  created_at: string;
+}
+
+export interface JobFilters {
+    status?: string;
+    job_name?: string;
+}

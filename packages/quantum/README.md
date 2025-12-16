@@ -47,6 +47,15 @@ Run the shell script:
 ./run_server.sh
 ```
 
+### Verification
+To verify you are running the correct backend server (packages/quantum/api.py) and not a rogue instance, run:
+
+```bash
+curl http://127.0.0.1:8000/__whoami
+```
+
+It should return: `{"server": "packages.quantum.api", "version": "..."}`.
+
 ## Manual Setup
 
 If you prefer to run it manually, ensure you are using a virtual environment:

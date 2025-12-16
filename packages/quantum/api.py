@@ -146,6 +146,21 @@ app.include_router(internal_tasks_router)
 from packages.quantum.jobs.endpoints import router as jobs_router
 app.include_router(jobs_router)
 
+# --- Scout Endpoints (New) ---
+
+@app.get("/scout/weekly")
+def scout_weekly():
+    try:
+        results = scan_for_opportunities()
+        return {
+            "count": len(results),
+            "top_picks": results,
+            "generated_at": datetime.now().isoformat()
+        }
+    except Exception as e:
+        print(f"Scout weekly error: {e}")
+        raise HTTPException(status_code=500, detail="Failed to generate scout picks")
+
 # --- IV & Market Context Endpoints ---
 
 @app.get("/market/iv-context")

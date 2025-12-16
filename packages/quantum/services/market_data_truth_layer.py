@@ -207,8 +207,39 @@ class MarketDataTruthLayer:
             "source": "polygon",
             "retrieved_ts": datetime.utcnow().isoformat(),
             "provider_ts": item.get("updated"), # Polygon timestamp in nanos usually? or millis?
-            "staleness_ms": None # TODO: compute if provider_ts is usable
+            "staleness_ms": self._compute_staleness(item.get("updated"))
         }
+
+    def _compute_staleness(self, provider_ts: Optional[Union[int, float]]) -> Optional[float]:
+        """
+        Computes staleness in milliseconds.
+        Handles provider_ts in milliseconds, microseconds, or nanoseconds automatically.
+        """
+        if not provider_ts:
+            return None
+
+        try:
+            # Current time in milliseconds
+            now_ms = time.time() * 1000.0
+            ts_val = float(provider_ts)
+
+            # Determine unit based on magnitude
+            # Unix 2025: ~1.7e9 (sec), ~1.7e12 (ms), ~1.7e15 (us), ~1.7e18 (ns)
+
+            if ts_val > 1e16: # Nanoseconds (> 10^16)
+                ts_ms = ts_val / 1e6
+            elif ts_val > 1e14: # Microseconds (> 10^14)
+                ts_ms = ts_val / 1e3
+            elif ts_val > 1e11: # Milliseconds (> 10^11)
+                ts_ms = ts_val
+            else: # Seconds or invalid
+                ts_ms = ts_val * 1000.0
+
+            staleness = max(0.0, now_ms - ts_ms)
+            return staleness
+
+        except (ValueError, TypeError):
+            return None
 
     def option_chain(self, underlying: str, *,
                      expiration_date: Optional[str] = None,

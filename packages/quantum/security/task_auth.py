@@ -2,6 +2,7 @@ import hmac
 import hashlib
 import os
 import time
+import ipaddress
 from fastapi import Request, HTTPException, Header
 from typing import Optional
 
@@ -9,6 +10,16 @@ from typing import Optional
 TASK_SIGNING_SECRET = os.getenv("TASK_SIGNING_SECRET")
 TASK_TTL_SECONDS = int(os.getenv("TASK_TTL_SECONDS", "300"))
 TASK_ALLOWLIST_CIDRS = os.getenv("TASK_ALLOWLIST_CIDRS", "") # Comma separated
+
+# Pre-parse allowlist to avoid overhead per request
+ALLOWED_NETWORKS = []
+if TASK_ALLOWLIST_CIDRS:
+    try:
+        # Use strict=False to allow host bits in CIDR (e.g. 192.168.1.10/24 -> 192.168.1.0/24)
+        ALLOWED_NETWORKS = [ipaddress.ip_network(c.strip(), strict=False) for c in TASK_ALLOWLIST_CIDRS.split(",") if c.strip()]
+    except ValueError as e:
+        # CRITICAL: Do not fail open. If config is invalid, we must prevent startup.
+        raise ValueError(f"CRITICAL: Invalid TASK_ALLOWLIST_CIDRS configuration: {e}")
 
 async def verify_internal_task_request(
     request: Request,
@@ -57,9 +68,21 @@ async def verify_internal_task_request(
         raise HTTPException(status_code=401, detail="Invalid signature")
 
     # 3. IP Allowlist (Optional)
+    # Check if configured (even if empty list was result of empty string logic above, though empty string skips block)
     if TASK_ALLOWLIST_CIDRS:
-        # TODO: Implement CIDR check if needed.
-        # For now, simplistic check or trust the load balancer / firewall.
-        pass
+        if not ALLOWED_NETWORKS:
+             # Should be caught by startup check, but double safety
+             print("🚨 Allowlist configured but empty/invalid runtime state. Denying access.")
+             raise HTTPException(status_code=503, detail="Security Configuration Error")
+
+        client_ip = request.client.host
+        try:
+            ip = ipaddress.ip_address(client_ip)
+            if not any(ip in net for net in ALLOWED_NETWORKS):
+                print(f"🚨 IP {client_ip} blocked by Allowlist.")
+                raise HTTPException(status_code=403, detail="IP not allowed")
+        except ValueError:
+            print(f"🚨 Invalid Client IP: {client_ip}")
+            raise HTTPException(status_code=400, detail="Invalid IP format")
 
     return True

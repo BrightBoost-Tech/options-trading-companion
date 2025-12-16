@@ -1,398 +1,276 @@
 'use client';
 
-import React, { useState, useEffect } from 'react';
-import { Card, CardHeader, CardTitle, CardContent, CardDescription } from '@/components/ui/card';
-import { API_URL, TEST_USER_ID } from '@/lib/constants';
-import { supabase } from '@/lib/supabase';
-import { StrategyConfig, BacktestRequest, StrategyBacktest } from '@/lib/types';
+import { useState, useEffect } from 'react';
+import { Card, CardHeader, CardTitle, CardContent } from '@/components/ui/card';
+import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
-import { useStrategyRegistry } from '@/hooks/useStrategyRegistry';
+import { getAuthHeadersCached, fetchWithAuth } from '@/lib/api';
+import { QuantumTooltip } from "@/components/ui/QuantumTooltip";
+import { ChevronDown, ChevronRight, Play, Clock, Settings, Save, RefreshCw } from 'lucide-react';
+import { StrategyConfig } from '@/lib/types';
+import { API_URL } from '@/lib/constants';
 
-interface StrategyProfilesPanelProps {
-    className?: string;
+interface StrategyBacktest {
+  id: string;
+  strategy_name: string;
+  start_date: string;
+  end_date: string;
+  total_return: number;
+  sharpe_ratio: number;
+  max_drawdown: number;
+  win_rate: number;
+  trade_count: number;
+  created_at: string;
 }
 
-export default function StrategyProfilesPanel({ className }: StrategyProfilesPanelProps) {
-    const [strategies, setStrategies] = useState<StrategyConfig[]>([]);
-    const [loading, setLoading] = useState(false);
-    const [selectedStrategy, setSelectedStrategy] = useState<StrategyConfig | null>(null);
-    const [isEditing, setIsEditing] = useState(false);
+export default function StrategyProfilesPanel() {
+  const [strategies, setStrategies] = useState<StrategyConfig[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [selectedStrategy, setSelectedStrategy] = useState<StrategyConfig | null>(null);
+  const [editingConfig, setEditingConfig] = useState<string>('');
+  const [backtests, setBacktests] = useState<StrategyBacktest[]>([]);
+  const [btLoading, setBtLoading] = useState(false);
+  const [expandedRow, setExpandedRow] = useState<string | null>(null);
 
-    const { getMetadata } = useStrategyRegistry();
+  // New simulation state
+  const [simRunning, setSimRunning] = useState(false);
+  const [simResult, setSimResult] = useState<any>(null);
 
-    // Backtest Modal State
-    const [showBacktestModal, setShowBacktestModal] = useState(false);
-    const [backtestParams, setBacktestParams] = useState<BacktestRequest>({
-        start_date: '2023-01-01',
-        end_date: '2023-12-31',
-        ticker: 'SPY',
-        strategy_name: ''
-    });
-    const [backtestResults, setBacktestResults] = useState<StrategyBacktest[]>([]);
+  useEffect(() => {
+    fetchStrategies();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
-    useEffect(() => {
-        loadStrategies();
-    }, []);
+  useEffect(() => {
+    if (selectedStrategy) {
+      setEditingConfig(JSON.stringify(selectedStrategy.parameters || {}, null, 2));
+      fetchBacktests(selectedStrategy.name);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedStrategy]);
 
-    // Load backtests when a strategy is selected
-    useEffect(() => {
-        if (selectedStrategy && selectedStrategy.name) {
-            loadStrategyBacktests(selectedStrategy.name);
-        }
-    }, [selectedStrategy]);
+  const fetchStrategies = async () => {
+    try {
+      setLoading(true);
+      const data = await fetchWithAuth('/strategies');
+      setStrategies(data);
+      if (data.length > 0 && !selectedStrategy) {
+        setSelectedStrategy(data[0]);
+      }
+    } catch (err) {
+      console.error('Failed to fetch strategies', err);
+    } finally {
+      setLoading(false);
+    }
+  };
 
-    const getAuthHeaders = async () => {
-        const { data: { session } } = await supabase.auth.getSession();
-        const headers: Record<string, string> = {
-            'Content-Type': 'application/json'
-        };
-        if (session) {
-            headers['Authorization'] = `Bearer ${session.access_token}`;
-        } else {
-            headers['X-Test-Mode-User'] = TEST_USER_ID;
-        }
-        return headers;
-    };
+  const fetchBacktests = async (strategyName: string) => {
+    try {
+      setBtLoading(true);
+      const data = await fetchWithAuth(`/strategies/${strategyName}/backtests`);
+      setBacktests(data);
+    } catch (err) {
+      console.error('Failed to fetch backtests', err);
+    } finally {
+      setBtLoading(false);
+    }
+  };
 
-    const loadStrategies = async () => {
-        setLoading(true);
-        try {
-            const headers = await getAuthHeaders();
-            const res = await fetch(`${API_URL}/strategies`, { headers });
-            if (res.ok) {
-                const data = await res.json();
-                const configs = data.strategies.map((row: any) => ({
-                    ...row.params,
-                    name: row.name,
-                    version: row.version,
-                    description: row.description
-                }));
-                setStrategies(configs);
-            }
-        } catch (err) {
-            console.error('Failed to load strategies', err);
-        } finally {
-            setLoading(false);
-        }
-    };
+  const handleSaveConfig = async () => {
+    if (!selectedStrategy) return;
+    try {
+      const params = JSON.parse(editingConfig);
+      const headers = await getAuthHeadersCached();
+      const res = await fetch(`${API_URL}/strategies`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          name: selectedStrategy.name,
+          description: selectedStrategy.description,
+          parameters: params
+        })
+      });
 
-    const loadStrategyBacktests = async (strategyName: string) => {
-        try {
-            const headers = await getAuthHeaders();
-            const res = await fetch(`${API_URL}/strategies/${strategyName}/backtests?limit=20`, { headers });
-            if (res.ok) {
-                const data = await res.json();
-                setBacktestResults(data.backtests || []);
-            }
-        } catch (err) {
-            console.error('Failed to load backtests', err);
-        }
-    };
+      if (res.ok) {
+        const updated = await res.json();
+        // Update local list
+        setStrategies(prev => prev.map(s => s.name === updated.name ? updated : s));
+        setSelectedStrategy(updated);
+        alert('Configuration saved!');
+      } else {
+        alert('Failed to save configuration');
+      }
+    } catch (err) {
+      console.error(err);
+      alert('Invalid JSON');
+    }
+  };
 
-    const handleSaveStrategy = async (config: StrategyConfig) => {
-        try {
-            const headers = await getAuthHeaders();
-            const res = await fetch(`${API_URL}/strategies`, {
-                method: 'POST',
-                headers,
-                body: JSON.stringify(config)
-            });
-            if (res.ok) {
-                await loadStrategies();
-                setIsEditing(false);
-                setSelectedStrategy(null);
-            } else {
-                console.error("Failed to save strategy");
-            }
-        } catch (err) {
-             console.error("Error saving strategy", err);
-        }
-    };
+  const runBacktest = async () => {
+    if (!selectedStrategy) return;
+    try {
+      setSimRunning(true);
+      setSimResult(null);
+      // Run quick simulation for immediate feedback
+      const headers = await getAuthHeadersCached();
+      const res = await fetch(`${API_URL}/strategies/${selectedStrategy.name}/backtest`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+            // Default quick params
+            start_date: "2023-01-01",
+            end_date: "2023-12-31",
+            initial_capital: 100000
+        })
+      });
 
-    const handleRunBacktest = async () => {
-        if (!selectedStrategy) return;
-        try {
-            const headers = await getAuthHeaders();
-            const payload = {
-                ...backtestParams,
-                strategy_name: selectedStrategy.name
-            };
+      if (res.ok) {
+        const result = await res.json();
+        setSimResult(result);
+        // Refresh history
+        fetchBacktests(selectedStrategy.name);
+      }
+    } catch (err) {
+      console.error('Simulation failed', err);
+    } finally {
+      setSimRunning(false);
+    }
+  };
 
-            const res = await fetch(`${API_URL}/simulation/batch`, {
-                method: 'POST',
-                headers,
-                body: JSON.stringify(payload)
-            });
+  const triggerBatchSim = async () => {
+    if (!selectedStrategy) return;
+    try {
+      const headers = await getAuthHeadersCached();
+      const res = await fetch(`${API_URL}/simulation/batch`, {
+         method: 'POST',
+         headers,
+         body: JSON.stringify({
+             strategy_name: selectedStrategy.name,
+             // Param grid logic would go here
+             param_grid: {
+                 "conviction_floor": [0.6, 0.7, 0.8]
+             }
+         })
+      });
+      if (res.ok) {
+          alert("Batch simulation queued!");
+      }
+    } catch (err) {
+        console.error("Batch sim failed", err);
+    }
+  };
 
-            if (res.ok) {
-                const data = await res.json();
-                alert(`Backtest queued! Batch ID: ${data.batch_id}`);
-                setShowBacktestModal(false);
-                // Optionally poll for results
-                pollBacktestResults(selectedStrategy.name);
-            } else {
-                console.error("Failed to queue backtest");
-            }
-        } catch (err) {
-            console.error("Error running backtest", err);
-        }
-    };
+  if (loading) return <div className="p-4 text-center">Loading strategies...</div>;
 
-    const pollBacktestResults = (strategyName: string) => {
-        // Simple polling: refresh every 2s for 10s
-        let attempts = 0;
-        const interval = setInterval(async () => {
-            attempts++;
-            await loadStrategyBacktests(strategyName);
-            if (attempts >= 5) clearInterval(interval);
-        }, 2000);
-    };
+  return (
+    <div className="space-y-6">
+      <div className="flex flex-col md:flex-row gap-6">
+        {/* Sidebar List */}
+        <div className="w-full md:w-1/4 space-y-2">
+           <h3 className="font-semibold text-gray-500 uppercase text-xs mb-2">Available Profiles</h3>
+           {strategies.map(s => (
+             <button
+               key={s.name}
+               onClick={() => setSelectedStrategy(s)}
+               className={`w-full text-left px-4 py-3 rounded-lg border transition-colors ${
+                 selectedStrategy?.name === s.name
+                 ? 'bg-indigo-50 border-indigo-200 text-indigo-900 dark:bg-indigo-900/20 dark:border-indigo-800 dark:text-indigo-100'
+                 : 'bg-white border-gray-100 hover:bg-gray-50 dark:bg-zinc-800 dark:border-zinc-700 dark:hover:bg-zinc-700'
+               }`}
+             >
+               <div className="font-medium">{s.name}</div>
+               <div className="text-xs text-gray-500 mt-1 truncate">{s.description}</div>
+             </button>
+           ))}
+           <Button variant="outline" className="w-full mt-4 text-xs">
+             + Create New Profile
+           </Button>
+        </div>
 
-    return (
-        <Card className={className}>
-            <CardHeader>
-                <div className="flex justify-between items-center">
-                    <CardTitle>Strategy Profiles</CardTitle>
-                    <button
-                        onClick={() => {
-                            setSelectedStrategy({
-                                name: 'New Strategy',
-                                version: 1,
-                                conviction_floor: 0.5,
-                                conviction_slope: 1.0,
-                                max_risk_pct_per_trade: 0.02,
-                                max_risk_pct_portfolio: 0.25,
-                                max_concurrent_positions: 5,
-                                max_spread_bps: 20,
-                                max_days_to_expiry: 45,
-                                min_underlying_liquidity: 1000000,
-                                take_profit_pct: 0.5,
-                                stop_loss_pct: 0.5,
-                                max_holding_days: 10
-                            });
-                            setIsEditing(true);
-                        }}
-                        className="text-sm bg-indigo-600 text-white px-3 py-1 rounded hover:bg-indigo-700"
-                    >
-                        + Create
-                    </button>
-                </div>
-                <CardDescription>Manage trading strategies and run simulations.</CardDescription>
-            </CardHeader>
-            <CardContent>
-                {/* Strategy List */}
-                <div className="space-y-4">
-                    {loading ? <p>Loading...</p> : strategies.map((s, i) => {
-                        const meta = getMetadata(s.name);
-                        return (
-                        <div key={`${s.name}-${s.version}`} className={`border p-4 rounded flex justify-between items-center ${selectedStrategy?.name === s.name ? 'border-indigo-500 bg-indigo-50' : ''}`}>
-                            <div onClick={() => setSelectedStrategy(s)} className="cursor-pointer flex-1">
-                                <div className="flex items-center gap-2">
-                                    <h4 className="font-bold">{s.name} <span className="text-xs text-gray-500">v{s.version}</span></h4>
-                                    {meta && (
-                                        <Badge variant="outline" className="text-[10px] h-5">
-                                            {meta.risk_profile} risk
-                                        </Badge>
-                                    )}
-                                </div>
-                                <p className="text-sm text-gray-600">{meta?.description || s.description || 'No description'}</p>
+        {/* Main Editor Area */}
+        <div className="flex-1 bg-white dark:bg-zinc-900 rounded-lg shadow border dark:border-zinc-800 p-6">
+          {selectedStrategy ? (
+            <div className="space-y-6">
+               <div className="flex justify-between items-start">
+                 <div>
+                    <h2 className="text-2xl font-bold text-gray-900 dark:text-gray-100">{selectedStrategy.name}</h2>
+                    <p className="text-gray-500">{selectedStrategy.description}</p>
+                 </div>
+                 <div className="flex gap-2">
+                    <Button variant="outline" size="sm" onClick={triggerBatchSim}>
+                        <RefreshCw className="w-4 h-4 mr-2" />
+                        Batch Sim
+                    </Button>
+                    <Button onClick={runBacktest} disabled={simRunning}>
+                       {simRunning ? <RefreshCw className="w-4 h-4 animate-spin mr-2" /> : <Play className="w-4 h-4 mr-2" />}
+                       Run Test
+                    </Button>
+                 </div>
+               </div>
 
-                                <div className="text-xs text-gray-500 mt-1 space-x-2">
-                                    <span>Floor: {s.conviction_floor}</span>
-                                    <span>Slope: {s.conviction_slope}</span>
-                                    <span>Risk: {s.max_risk_pct_per_trade * 100}%</span>
-                                    {meta && (
-                                        <span className="text-indigo-600">Period: {meta.typical_holding_period}</span>
-                                    )}
-                                </div>
-                            </div>
-                            <div className="flex gap-2">
-                                <button
-                                    onClick={() => {
-                                        setSelectedStrategy(s);
-                                        setIsEditing(true);
-                                    }}
-                                    className="text-xs border border-gray-300 px-2 py-1 rounded hover:bg-gray-50"
-                                >
-                                    Edit
-                                </button>
-                                <button
-                                    onClick={() => {
-                                        setSelectedStrategy(s);
-                                        setShowBacktestModal(true);
-                                    }}
-                                    className="text-xs bg-purple-50 text-purple-700 border border-purple-200 px-2 py-1 rounded hover:bg-purple-100"
-                                >
-                                    Run Backtest
-                                </button>
-                            </div>
-                        </div>
-                    )})}
-                </div>
+               <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
+                  {/* JSON Editor */}
+                  <div>
+                     <div className="flex items-center justify-between mb-2">
+                        <label className="text-sm font-medium flex items-center gap-2">
+                           <Settings className="w-4 h-4" /> Parameters
+                        </label>
+                        <Button variant="ghost" size="sm" onClick={handleSaveConfig} className="h-8 text-xs">
+                           <Save className="w-3 h-3 mr-1" /> Save
+                        </Button>
+                     </div>
+                     <textarea
+                        className="w-full h-[300px] font-mono text-sm p-4 bg-gray-50 dark:bg-zinc-950 border rounded-lg focus:ring-2 focus:ring-indigo-500 outline-none"
+                        value={editingConfig}
+                        onChange={(e) => setEditingConfig(e.target.value)}
+                     />
+                  </div>
 
-                {/* Backtest Results Table */}
-                {selectedStrategy && (
-                    <div className="mt-8 border-t pt-4">
-                        <h3 className="font-semibold mb-2">Backtest Results: {selectedStrategy.name}</h3>
-                        {backtestResults.length === 0 ? (
-                            <p className="text-sm text-gray-500">No backtests found.</p>
+                  {/* Results Panel */}
+                  <div className="space-y-4">
+                     <h3 className="text-sm font-medium flex items-center gap-2">
+                        <Clock className="w-4 h-4" /> Recent Backtests
+                     </h3>
+                     <div className="bg-gray-50 dark:bg-zinc-950 rounded-lg border h-[300px] overflow-y-auto">
+                        {btLoading ? (
+                            <div className="p-8 text-center text-sm text-gray-500">Loading history...</div>
+                        ) : backtests.length === 0 ? (
+                            <div className="p-8 text-center text-sm text-gray-500">No backtests run yet.</div>
                         ) : (
-                            <div className="overflow-x-auto">
-                                <table className="w-full text-sm">
-                                    <thead className="bg-gray-50">
-                                        <tr>
-                                            <th scope="col" className="p-2 text-left">Date</th>
-                                            <th scope="col" className="p-2 text-left">Ticker</th>
-                                            <th scope="col" className="p-2 text-left">Period</th>
-                                            <th scope="col" className="p-2 text-right">Trades</th>
-                                            <th scope="col" className="p-2 text-right">Win Rate</th>
-                                            <th scope="col" className="p-2 text-right">Max DD</th>
-                                            <th scope="col" className="p-2 text-right">P&L</th>
-                                            <th scope="col" className="p-2 text-center">Status</th>
+                            <table className="w-full text-sm text-left">
+                                <thead className="bg-gray-100 dark:bg-zinc-900 text-xs uppercase text-gray-500 sticky top-0">
+                                    <tr>
+                                        <th className="px-4 py-2">Date</th>
+                                        <th className="px-4 py-2">Return</th>
+                                        <th className="px-4 py-2">Sharpe</th>
+                                        <th className="px-4 py-2">Win Rate</th>
+                                    </tr>
+                                </thead>
+                                <tbody className="divide-y divide-gray-100 dark:divide-zinc-800">
+                                    {backtests.map(bt => (
+                                        <tr key={bt.id} className="hover:bg-gray-100 dark:hover:bg-zinc-800 cursor-pointer" onClick={() => setExpandedRow(expandedRow === bt.id ? null : bt.id)}>
+                                            <td className="px-4 py-2">{new Date(bt.created_at).toLocaleDateString()}</td>
+                                            <td className={`px-4 py-2 font-medium ${bt.total_return >= 0 ? 'text-green-600' : 'text-red-600'}`}>
+                                                {(bt.total_return * 100).toFixed(1)}%
+                                            </td>
+                                            <td className="px-4 py-2">{bt.sharpe_ratio.toFixed(2)}</td>
+                                            <td className="px-4 py-2">{(bt.win_rate * 100).toFixed(0)}%</td>
                                         </tr>
-                                    </thead>
-                                    <tbody>
-                                        {backtestResults.map((res, idx) => (
-                                            <tr key={idx} className="border-t hover:bg-gray-50">
-                                                <td className="p-2 text-xs text-gray-500">
-                                                    {new Date(res.created_at).toLocaleDateString()}
-                                                </td>
-                                                <td className="p-2">{res.ticker}</td>
-                                                <td className="p-2 text-xs text-gray-500">{res.start_date} to {res.end_date}</td>
-                                                <td className="p-2 text-right">{res.trades_count}</td>
-                                                <td className="p-2 text-right">{res.win_rate != null ? (res.win_rate * 100).toFixed(1) + '%' : '-'}</td>
-                                                <td className="p-2 text-right">{res.max_drawdown != null ? (res.max_drawdown * 100).toFixed(1) + '%' : '-'}</td>
-                                                <td className={`p-2 text-right font-medium ${res.total_pnl >= 0 ? 'text-green-600' : 'text-red-600'}`}>
-                                                    {res.total_pnl != null ? `$${res.total_pnl.toFixed(2)}` : '-'}
-                                                </td>
-                                                <td className="p-2 text-center">
-                                                    <Badge variant="outline" className={
-                                                        res.status === 'completed' ? 'text-green-600 border-green-200 bg-green-50' :
-                                                        res.status === 'error' ? 'text-red-600 border-red-200 bg-red-50' :
-                                                        'text-yellow-600 border-yellow-200 bg-yellow-50'
-                                                    }>
-                                                        {res.status}
-                                                    </Badge>
-                                                </td>
-                                            </tr>
-                                        ))}
-                                    </tbody>
-                                </table>
-                            </div>
+                                    ))}
+                                </tbody>
+                            </table>
                         )}
-                    </div>
-                )}
-            </CardContent>
-
-            {/* Edit Modal (Overlay) */}
-            {isEditing && selectedStrategy && (
-                <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
-                    <div className="bg-white p-6 rounded-lg w-full max-w-lg max-h-[90vh] overflow-y-auto">
-                        <h3 className="text-lg font-bold mb-4">{selectedStrategy.version > 1 ? 'Edit Strategy' : 'Create Strategy'}</h3>
-                        <form onSubmit={(e) => { e.preventDefault(); handleSaveStrategy(selectedStrategy); }}>
-                            <div className="grid grid-cols-2 gap-4">
-                                <div className="col-span-2">
-                                    <label className="block text-xs font-medium">Name</label>
-                                    <input
-                                        className="w-full border rounded p-1"
-                                        value={selectedStrategy.name}
-                                        onChange={e => setSelectedStrategy({...selectedStrategy, name: e.target.value})}
-                                    />
-                                </div>
-                                <div className="col-span-2">
-                                    <label className="block text-xs font-medium">Description</label>
-                                    <textarea
-                                        className="w-full border rounded p-1"
-                                        value={selectedStrategy.description || ''}
-                                        onChange={e => setSelectedStrategy({...selectedStrategy, description: e.target.value})}
-                                    />
-                                </div>
-                                <div>
-                                    <label className="block text-xs font-medium">Conviction Floor</label>
-                                    <input
-                                        type="number" step="0.05"
-                                        className="w-full border rounded p-1"
-                                        value={selectedStrategy.conviction_floor}
-                                        onChange={e => setSelectedStrategy({...selectedStrategy, conviction_floor: parseFloat(e.target.value)})}
-                                    />
-                                </div>
-                                <div>
-                                    <label className="block text-xs font-medium">Max Risk %</label>
-                                    <input
-                                        type="number" step="0.01"
-                                        className="w-full border rounded p-1"
-                                        value={selectedStrategy.max_risk_pct_per_trade}
-                                        onChange={e => setSelectedStrategy({...selectedStrategy, max_risk_pct_per_trade: parseFloat(e.target.value)})}
-                                    />
-                                </div>
-                                {/* Add more fields as needed for the demo */}
-                            </div>
-                            <div className="flex justify-end gap-2 mt-6">
-                                <button type="button" onClick={() => setIsEditing(false)} className="px-3 py-1 border rounded">Cancel</button>
-                                <button type="submit" className="px-3 py-1 bg-indigo-600 text-white rounded">Save</button>
-                            </div>
-                        </form>
-                    </div>
-                </div>
-            )}
-
-            {/* Backtest Modal */}
-            {showBacktestModal && selectedStrategy && (
-                <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
-                    <div className="bg-white p-6 rounded-lg w-full max-w-md">
-                        <h3 className="text-lg font-bold mb-4">Run Backtest: {selectedStrategy.name}</h3>
-                        <div className="space-y-4">
-                            <div>
-                                <label className="block text-xs font-medium">Ticker</label>
-                                <input
-                                    className="w-full border rounded p-1"
-                                    value={backtestParams.ticker}
-                                    onChange={e => setBacktestParams({...backtestParams, ticker: e.target.value})}
-                                />
-                            </div>
-                            <div className="grid grid-cols-2 gap-4">
-                                <div>
-                                    <label className="block text-xs font-medium">Start Date</label>
-                                    <input
-                                        type="date"
-                                        className="w-full border rounded p-1"
-                                        value={backtestParams.start_date}
-                                        onChange={e => setBacktestParams({...backtestParams, start_date: e.target.value})}
-                                    />
-                                </div>
-                                <div>
-                                    <label className="block text-xs font-medium">End Date</label>
-                                    <input
-                                        type="date"
-                                        className="w-full border rounded p-1"
-                                        value={backtestParams.end_date}
-                                        onChange={e => setBacktestParams({...backtestParams, end_date: e.target.value})}
-                                    />
-                                </div>
-                            </div>
-                            <div>
-                                <label className="block text-xs font-medium">Param Grid (JSON, Optional)</label>
-                                <textarea
-                                    className="w-full border rounded p-1 h-20 text-xs font-mono"
-                                    placeholder='{"conviction_floor": [0.4, 0.6]}'
-                                    onChange={e => {
-                                        try {
-                                            const val = e.target.value ? JSON.parse(e.target.value) : undefined;
-                                            setBacktestParams({...backtestParams, param_grid: val});
-                                        } catch {
-                                            // Ignore invalid JSON while typing
-                                        }
-                                    }}
-                                />
-                            </div>
-                        </div>
-                        <div className="flex justify-end gap-2 mt-6">
-                            <button onClick={() => setShowBacktestModal(false)} className="px-3 py-1 border rounded">Cancel</button>
-                            <button onClick={handleRunBacktest} className="px-3 py-1 bg-purple-600 text-white rounded">Queue Simulation</button>
-                        </div>
-                    </div>
-                </div>
-            )}
-        </Card>
-    );
+                     </div>
+                  </div>
+               </div>
+            </div>
+          ) : (
+            <div className="h-full flex items-center justify-center text-gray-400">
+               Select a profile to edit
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
 }

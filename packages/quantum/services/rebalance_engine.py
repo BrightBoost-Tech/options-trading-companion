@@ -13,10 +13,12 @@ class RiskBudgetEngine:
     """
     Computes risk utilization against defined budgets for strategies, underlyings, and global risk (VaR).
     """
-    def __init__(self, default_strategy_cap=0.30, default_underlying_cap=0.20, max_var_pct=0.25):
+    def __init__(self, default_strategy_cap=0.30, default_underlying_cap=0.20, max_var_pct=0.25, default_vega_cap_pct=0.01, default_delta_cap=2000.0):
         self.default_strategy_cap = default_strategy_cap
         self.default_underlying_cap = default_underlying_cap
         self.max_var_pct = max_var_pct
+        self.default_vega_cap_pct = default_vega_cap_pct
+        self.default_delta_cap = default_delta_cap
 
     def compute(self, current_positions: List[SpreadPosition], total_equity: float, risk_profile: str = "balanced") -> Dict[str, Any]:
         """
@@ -63,33 +65,50 @@ class RiskBudgetEngine:
         strat_cap_pct = self.default_strategy_cap
         und_cap_pct = self.default_underlying_cap
         var_cap_pct = self.max_var_pct
+        vega_cap_pct = self.default_vega_cap_pct
+        delta_cap = self.default_delta_cap
 
         if risk_profile == "aggressive":
             strat_cap_pct *= 1.5
             und_cap_pct *= 1.5
             var_cap_pct = 0.35 # Higher max risk
+            vega_cap_pct *= 1.5
+            delta_cap *= 1.5
         elif risk_profile == "conservative":
             strat_cap_pct *= 0.7
             und_cap_pct *= 0.7
             var_cap_pct = 0.15
+            vega_cap_pct *= 0.7
+            delta_cap *= 0.7
 
         limits = {
             "strategy": {k: total_equity * strat_cap_pct for k in usage["strategy"].keys()}, # limits for existing keys
             "underlying": {k: total_equity * und_cap_pct for k in usage["underlying"].keys()},
             "var": total_equity * var_cap_pct,
+            "greeks": {
+                "delta": delta_cap,
+                "vega": total_equity * vega_cap_pct
+            },
             "defaults": {
                 "strategy": total_equity * strat_cap_pct,
                 "underlying": total_equity * und_cap_pct
             }
         }
+        # Include greeks defaults for consistency
+        limits["defaults"]["greeks"] = limits["greeks"]
 
         # Calculate Remaining
         remaining = {
             "strategy": {},
             "underlying": {},
             "var": limits["var"] - usage["var"],
-            "greeks": {} # TODO: Implement greek limits if needed
+            "greeks": {}
         }
+
+        for und, g_usage in usage["greeks"].items():
+            rem_delta = limits["greeks"]["delta"] - g_usage["delta"]
+            rem_vega = limits["greeks"]["vega"] - g_usage["vega"]
+            remaining["greeks"][und] = {"delta": rem_delta, "vega": rem_vega}
 
         for k, v in usage["strategy"].items():
             limit = limits["strategy"].get(k, limits["defaults"]["strategy"])

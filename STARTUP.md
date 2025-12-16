@@ -2,7 +2,7 @@
 
 ## One-Click Start (Recommended)
 
-Double-click **`start.bat`** in the repository root.
+Double-click **`start.bat`** (or `start_app.bat`) in the repository root.
 
 This will:
 1. Launch the **Backend** (Uvicorn) in a new terminal window.
@@ -16,6 +16,18 @@ If you need to launch services individually, you can use the scripts in `scripts
 
 *   **Backend:** `scripts\win\start_backend.cmd`
 *   **Frontend:** `scripts\win\start_frontend.cmd`
+
+## Dependency Verification
+
+If you encounter module resolution errors (e.g., `Module not found: Can't resolve ...`), verify that dependencies are correctly installed using pnpm:
+
+```bash
+# Verify a specific package exists in the frontend workspace
+pnpm --filter @app/web list @radix-ui/react-tooltip
+
+# If missing or broken, run:
+pnpm install
+```
 
 ## Prerequisites
 

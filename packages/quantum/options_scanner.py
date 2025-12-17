@@ -121,6 +121,67 @@ def _select_legs_from_chain(chain: List[Dict[str, Any]], leg_defs: List[Dict[str
 
     return legs, total_cost
 
+def _validate_spread_economics(legs: List[Dict[str, Any]], total_cost: float) -> tuple[bool, str]:
+    if not legs:
+        return False, "no_legs"
+
+    # Common validation: Expiry
+    expiries = {l.get("expiry") for l in legs if l.get("expiry")}
+    if len(expiries) > 1:
+        return False, "expiry_mismatch"
+
+    if len(legs) == 2:
+        long_leg = next((l for l in legs if l["side"] == "buy"), None)
+        short_leg = next((l for l in legs if l["side"] == "sell"), None)
+
+        if not long_leg or not short_leg:
+            return False, "missing_long_or_short"
+
+        width = abs(long_leg["strike"] - short_leg["strike"])
+        premium_share = abs(float(total_cost))
+
+        if width <= 1e-9:
+            return False, "zero_width"
+        if premium_share <= 1e-9:
+            return False, "zero_premium"
+        if premium_share >= width:
+            return False, "premium_ge_width"
+
+        return True, ""
+
+    elif len(legs) == 4:
+        # Condor validation: Ensure strikes are ordered and credit < max width
+        sorted_legs = sorted(legs, key=lambda l: l["strike"])
+
+        # Check structure for Iron Condor (Buy Put, Sell Put, Sell Call, Buy Call)
+        l0, l1, l2, l3 = sorted_legs[0], sorted_legs[1], sorted_legs[2], sorted_legs[3]
+
+        is_condor_structure = (
+            l0['side'] == 'buy' and l0['type'] == 'put' and
+            l1['side'] == 'sell' and l1['type'] == 'put' and
+            l2['side'] == 'sell' and l2['type'] == 'call' and
+            l3['side'] == 'buy' and l3['type'] == 'call'
+        )
+
+        if is_condor_structure:
+             # Ensure strict ordering (strikes)
+             if not (l0['strike'] < l1['strike'] <= l2['strike'] < l3['strike']):
+                  return False, "condor_strike_ordering"
+
+             width_put = l1['strike'] - l0['strike']
+             width_call = l3['strike'] - l2['strike']
+             max_width = max(width_put, width_call)
+
+             # Credit Condor implies total_cost < 0
+             if total_cost < 0:
+                 credit_share = abs(total_cost)
+                 if credit_share <= 1e-9:
+                     return False, "zero_credit"
+                 if credit_share >= max_width:
+                     return False, "credit_ge_width"
+
+    return True, ""
+
 def _map_single_leg_strategy(leg: Dict[str, Any]) -> Optional[str]:
     """Maps scanner leg attributes to calculate_ev strategy types."""
     side = str(leg.get("side") or "").lower()
@@ -589,11 +650,9 @@ def scan_for_opportunities(
             total_ev = 0.0
             ev_obj = None
 
-            # Validation: All legs must share the same expiry
-            expiries = {l.get("expiry") for l in legs if l.get("expiry")}
-            if len(expiries) > 1:
-                return None
-            if not legs:
+            # Validation: Spread Economics (Sanity Check)
+            is_valid_structure, _ = _validate_spread_economics(legs, total_cost)
+            if not is_valid_structure:
                 return None
 
             # G. Compute Net EV & Risk Primitives

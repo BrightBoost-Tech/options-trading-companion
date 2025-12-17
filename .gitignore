@@ -12,6 +12,10 @@ pnpm-debug.log*
 .env
 .env.*
 !.env.example
+env.txt
+
+# Keys
+.key
 
 # IDEs and editors
 .vscode/

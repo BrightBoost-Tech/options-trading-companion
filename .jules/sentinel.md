@@ -1,4 +1,7 @@
-## 2024-05-23 - [Critical Privilege Escalation in API Dependency]
-**Vulnerability:** The `get_supabase_user_client` dependency in `packages/quantum/api.py` defaulted to returning the `supabase_admin` (service role) client if authentication checks failed or fell through due to misconfiguration (e.g., missing `SUPABASE_ANON_KEY`).
-**Learning:** Default fallbacks in security-sensitive dependency injection functions can silently upgrade privileges. Never use an administrative client as a "default" return value.
-**Prevention:** Always follow the "Fail Securely" principle. Explicitly raise an exception (e.g., 401 or 500) at the end of authentication functions if no valid credentials or safe state can be established.
+## 2025-05-23 - [Exposed Secrets in Root Directory]
+**Vulnerability:** Found `.key` (encryption key) and `env.txt` (environment variables including API keys) committed to the repository root.
+**Learning:** These files were likely created during local development or startup scripts and accidentally added to git because they were not in `.gitignore`. The `env.txt` file is not a standard pattern, suggesting it was a manual dump or output of a script.
+**Prevention:**
+1. Added `.key` and `env.txt` to `.gitignore`.
+2. Removed them from git tracking.
+3. Future: Ensure all setup scripts do not create files in the root that are not gitignored. Use standard `.env` patterns.

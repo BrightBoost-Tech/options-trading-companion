@@ -19,11 +19,179 @@ from packages.quantum.services.market_data_truth_layer import MarketDataTruthLay
 from packages.quantum.analytics.regime_engine_v3 import RegimeEngineV3, GlobalRegimeSnapshot, RegimeState
 from packages.quantum.analytics.scoring import calculate_unified_score
 from packages.quantum.services.execution_service import ExecutionService
+from packages.quantum.analytics.guardrails import earnings_week_penalty
 
 # Configuration
 SCANNER_LIMIT_DEV = int(os.getenv("SCANNER_LIMIT_DEV", "40")) # Limit universe in dev
+SCANNER_MIN_DTE = 25
+SCANNER_MAX_DTE = 45
 
 logger = logging.getLogger(__name__)
+
+def _select_expiry_bucket(chain: List[Dict[str, Any]], target_dte: int = 35) -> Optional[str]:
+    if not chain:
+        return None
+
+    # Group by expiry
+    buckets = {}
+    for c in chain:
+        exp = c.get("expiration")
+        if not exp: continue
+        if exp not in buckets:
+            buckets[exp] = []
+        buckets[exp].append(c)
+
+    if not buckets:
+        return None
+
+    # Helper to get DTE diff
+    def get_dte_diff(exp_str):
+        try:
+            exp_dt = datetime.strptime(exp_str, "%Y-%m-%d").date()
+            return abs((exp_dt - datetime.now().date()).days - target_dte)
+        except ValueError:
+            return 9999
+
+    # Sort keys:
+    # 1. Count (descending) -> -len
+    # 2. DTE diff (ascending)
+    # 3. Expiry string (ascending)
+    sorted_expiries = sorted(
+        buckets.keys(),
+        key=lambda e: (-len(buckets[e]), get_dte_diff(e), e)
+    )
+
+    return sorted_expiries[0]
+
+def _filter_chain_by_expiry(chain: List[Dict[str, Any]], expiry: str) -> List[Dict[str, Any]]:
+    return [c for c in chain if c.get("expiration") == expiry]
+
+def _select_legs_from_chain(chain: List[Dict[str, Any]], leg_defs: List[Dict[str, Any]], current_price: float) -> tuple[List[Dict[str, Any]], float]:
+    legs = []
+    total_cost = 0.0
+
+    for leg_def in leg_defs:
+        target_delta = leg_def["delta_target"]
+        side = leg_def["side"]
+        op_type = leg_def["type"]
+
+        if op_type == "call":
+            filtered = [c for c in chain if c.get('type') == 'call']
+        else:
+            filtered = [c for c in chain if c.get('type') == 'put']
+
+        if not filtered: continue
+
+        # Find closest delta
+        has_delta = any('delta' in c and c['delta'] is not None for c in filtered)
+
+        if has_delta:
+            target_d = abs(target_delta)
+            # Safe access to delta, assuming it might be None
+            best_contract = min(filtered, key=lambda x: abs(abs(x.get('delta') or 0) - target_d))
+        else:
+            moneyness = 1.0
+            if op_type == 'call':
+                if target_delta > 0.5: moneyness = 0.95
+                elif target_delta < 0.5: moneyness = 1.05
+            else:
+                if target_delta > 0.5: moneyness = 1.05
+                elif target_delta < 0.5: moneyness = 0.95
+
+            target_k = current_price * moneyness
+            best_contract = min(filtered, key=lambda x: abs(x['strike'] - target_k))
+
+        premium = best_contract.get('price') or best_contract.get('close') or 0.0
+
+        bid = best_contract.get('bid')
+        ask = best_contract.get('ask')
+        mid = None
+        if bid is not None and ask is not None:
+             mid = (float(bid) + float(ask)) / 2.0
+
+        legs.append({
+            "symbol": best_contract['ticker'],
+            "strike": best_contract['strike'],
+            "expiry": best_contract['expiration'],
+            "type": op_type,
+            "side": side,
+            "premium": premium,
+            "delta": best_contract.get('delta') or target_delta,
+            "gamma": best_contract.get('gamma') or 0.0,
+            "vega": best_contract.get('vega') or 0.0,
+            "theta": best_contract.get('theta') or 0.0,
+            "bid": bid,
+            "ask": ask,
+            "mid": mid
+        })
+
+        if side == "buy":
+            total_cost += premium
+        else:
+            total_cost -= premium
+
+    return legs, total_cost
+
+def _validate_spread_economics(legs: List[Dict[str, Any]], total_cost: float) -> tuple[bool, str]:
+    if not legs:
+        return False, "no_legs"
+
+    # Common validation: Expiry
+    expiries = {l.get("expiry") for l in legs if l.get("expiry")}
+    if len(expiries) > 1:
+        return False, "expiry_mismatch"
+
+    if len(legs) == 2:
+        long_leg = next((l for l in legs if l["side"] == "buy"), None)
+        short_leg = next((l for l in legs if l["side"] == "sell"), None)
+
+        if not long_leg or not short_leg:
+            return False, "missing_long_or_short"
+
+        width = abs(long_leg["strike"] - short_leg["strike"])
+        premium_share = abs(float(total_cost))
+
+        if width <= 1e-9:
+            return False, "zero_width"
+        if premium_share <= 1e-9:
+            return False, "zero_premium"
+        if premium_share >= width:
+            return False, "premium_ge_width"
+
+        return True, ""
+
+    elif len(legs) == 4:
+        # Condor validation: Ensure strikes are ordered and credit < max width
+        sorted_legs = sorted(legs, key=lambda l: l["strike"])
+
+        # Check structure for Iron Condor (Buy Put, Sell Put, Sell Call, Buy Call)
+        l0, l1, l2, l3 = sorted_legs[0], sorted_legs[1], sorted_legs[2], sorted_legs[3]
+
+        is_condor_structure = (
+            l0['side'] == 'buy' and l0['type'] == 'put' and
+            l1['side'] == 'sell' and l1['type'] == 'put' and
+            l2['side'] == 'sell' and l2['type'] == 'call' and
+            l3['side'] == 'buy' and l3['type'] == 'call'
+        )
+
+        if is_condor_structure:
+             # Ensure strict ordering (strikes)
+             if not (l0['strike'] < l1['strike'] <= l2['strike'] < l3['strike']):
+                  return False, "condor_strike_ordering"
+
+             width_put = l1['strike'] - l0['strike']
+             width_call = l3['strike'] - l2['strike']
+             max_width = max(width_put, width_call)
+
+             # Credit Condor implies total_cost < 0
+             if total_cost < 0:
+                 credit_share = abs(total_cost)
+                 if credit_share <= 1e-9:
+                     return False, "zero_credit"
+                 if credit_share >= max_width:
+                     return False, "credit_ge_width"
+
+    return True, ""
 
 def _map_single_leg_strategy(leg: Dict[str, Any]) -> Optional[str]:
     """Maps scanner leg attributes to calculate_ev strategy types."""
@@ -167,6 +335,31 @@ def _combo_width_share_from_legs(truth_layer, legs, fallback_width_share):
     if not leg_syms:
         return float(fallback_width_share or 0.0)
 
+    # First attempt: use leg quotes if available
+    widths = []
+    all_legs_ok = True
+    for l in legs:
+        bid = l.get("bid")
+        ask = l.get("ask")
+        if bid is not None and ask is not None:
+            try:
+                bid = float(bid)
+                ask = float(ask)
+                if bid > 0 and ask >= bid:
+                    widths.append(ask - bid)
+                else:
+                    all_legs_ok = False
+                    break
+            except (ValueError, TypeError):
+                all_legs_ok = False
+                break
+        else:
+            all_legs_ok = False
+            break
+
+    if all_legs_ok and len(widths) == len(legs):
+        return sum(widths)
+
     # Batch fetch snapshots for efficiency
     snaps = truth_layer.snapshot_many(leg_syms) or {}
 
@@ -240,7 +433,8 @@ def _determine_execution_cost(
 def scan_for_opportunities(
     symbols: List[str] = None,
     supabase_client: Client = None,
-    user_id: str = None
+    user_id: str = None,
+    global_snapshot: GlobalRegimeSnapshot = None
 ) -> List[Dict[str, Any]]:
     """
     Scans the provided symbols (or universe) for option trade opportunities.
@@ -273,12 +467,15 @@ def scan_for_opportunities(
         iv_point_service=IVPointService(supabase_client) if supabase_client else None,
     )
 
-    # 1. Determine Universe
+    # 1. Determine Universe & Earnings Map
+    earnings_map = {}
+
     if not symbols:
         if universe_service:
             try:
                 universe = universe_service.get_scan_candidates(limit=30)
                 symbols = [u['symbol'] for u in universe]
+                earnings_map = {u["symbol"]: u.get("earnings_date") for u in universe}
             except Exception as e:
                 print(f"[Scanner] UniverseService failed: {e}. Using fallback.")
                 symbols = ["SPY", "QQQ", "IWM", "AAPL", "MSFT", "TSLA", "NVDA", "AMD"]
@@ -292,12 +489,15 @@ def scan_for_opportunities(
     print(f"[Scanner] Processing {len(symbols)} symbols...")
 
     # 2. Compute Global Regime Snapshot ONCE
-    try:
-        global_snapshot = regime_engine.compute_global_snapshot(datetime.now())
-        print(f"[Scanner] Global Regime: {global_snapshot.state}")
-    except Exception as e:
-        print(f"[Scanner] Regime computation failed: {e}. Using default.")
-        global_snapshot = regime_engine._default_global_snapshot(datetime.now())
+    if global_snapshot is None:
+        try:
+            global_snapshot = regime_engine.compute_global_snapshot(datetime.now())
+            print(f"[Scanner] Global Regime: {global_snapshot.state}")
+        except Exception as e:
+            print(f"[Scanner] Regime computation failed: {e}. Using default.")
+            global_snapshot = regime_engine._default_global_snapshot(datetime.now())
+    else:
+        print(f"[Scanner] Using provided Global Regime: {global_snapshot.state}")
 
     # Batch fetch execution drag for efficiency (ONCE)
     drag_map = {}
@@ -323,7 +523,7 @@ def scan_for_opportunities(
     logger.info(f"[Scanner] Batch fetching quotes for {len(symbols)} symbols...")
     quotes_map = truth_layer.snapshot_many(symbols)
 
-    def process_symbol(symbol: str, drag_map: Dict[str, Any], quotes_map: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    def process_symbol(symbol: str, drag_map: Dict[str, Any], quotes_map: Dict[str, Any], earnings_map: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         """Process a single symbol and return a candidate dict or None."""
         try:
             # A. Enrich Data
@@ -448,7 +648,14 @@ def scan_for_opportunities(
             chain_objects = None
 
             try:
-                chain_objects = truth_layer.option_chain(symbol)
+                # OPTIMIZATION: Use min/max expiry to reduce data fetch size
+                now_date = datetime.now().date()
+                min_dte = SCANNER_MIN_DTE
+                max_dte = SCANNER_MAX_DTE
+                min_expiry = (now_date + timedelta(days=min_dte)).isoformat()
+                max_expiry = (now_date + timedelta(days=max_dte)).isoformat()
+
+                chain_objects = truth_layer.option_chain(symbol, min_expiry=min_expiry, max_expiry=max_expiry)
             except Exception:
                 chain_objects = None
 
@@ -468,7 +675,7 @@ def scan_for_opportunities(
 
                         days_to_expiry = (exp_dt - now_date).days
 
-                        if not (25 <= days_to_expiry <= 45):
+                        if not (SCANNER_MIN_DTE <= days_to_expiry <= SCANNER_MAX_DTE):
                             continue
 
                         # Flatten structure
@@ -499,7 +706,7 @@ def scan_for_opportunities(
 
             # Fallback if empty
             if not chain:
-                chain = market_data.get_option_chain(symbol, min_dte=25, max_dte=45)
+                chain = market_data.get_option_chain(symbol, min_dte=SCANNER_MIN_DTE, max_dte=SCANNER_MAX_DTE)
 
             if not chain: return None
 
@@ -782,6 +989,46 @@ def scan_for_opportunities(
                  pricing_mode = "approximate"
 
             # Risk Primitives (New Helper handles 4 legs now)
+            # EV Calculation
+            if len(legs) == 2:
+                long_leg = next((l for l in legs if l['side'] == 'buy'), None)
+                short_leg = next((l for l in legs if l['side'] == 'sell'), None)
+                if long_leg and short_leg:
+                    width = abs(long_leg['strike'] - short_leg['strike'])
+                    st_type = "debit_spread" if total_cost > 0 else "credit_spread"
+
+                    if st_type == "credit_spread":
+                        delta_for_ev = abs(float(short_leg.get("delta") or 0.0))
+                    else:
+                        delta_for_ev = abs(float(long_leg.get("delta") or 0.0))
+
+                    ev_obj = calculate_ev(
+                        premium=abs(total_cost),
+                        strike=long_leg['strike'],
+                        current_price=current_price,
+                        delta=delta_for_ev,
+                        strategy=st_type,
+                        width=width
+                    )
+                    total_ev = ev_obj.expected_value
+                else:
+                    total_ev = 0
+            elif len(legs) == 1:
+                leg = legs[0]
+                st_type = _map_single_leg_strategy(leg)
+                if not st_type:
+                    return None
+
+                ev_obj = calculate_ev(
+                    premium=leg['premium'],
+                    strike=leg['strike'],
+                    current_price=current_price,
+                    delta=leg['delta'],
+                    strategy=st_type
+                )
+                total_ev = ev_obj.expected_value
+
+            # Risk Primitives (New Helper)
             primitives = _compute_risk_primitives_usd(legs, total_cost, current_price)
             max_loss_contract = primitives["max_loss_per_contract"]
             max_profit_contract = primitives["max_profit_per_contract"]
@@ -846,6 +1093,48 @@ def scan_for_opportunities(
             if expected_execution_cost >= total_ev:
                 return None
 
+            # --- Earnings Awareness Logic ---
+            earnings_val = earnings_map.get(symbol)
+            days_to_earnings = None
+            earnings_risk = False
+            earnings_penalty_val = 0.0
+
+            if earnings_val:
+                try:
+                    # Support datetime object or YYYY-MM-DD string
+                    earnings_dt = None
+                    if isinstance(earnings_val, datetime):
+                        earnings_dt = earnings_val
+                    elif isinstance(earnings_val, str):
+                        earnings_dt = datetime.fromisoformat(earnings_val)
+
+                    if earnings_dt:
+                        # Use now() as scanner is live.
+                        now_dt = datetime.now()
+                        days_to_earnings = (earnings_dt.date() - now_dt.date()).days
+
+                        # Normalize strategy key for safety checks (already lowercased above but ensuring consistency)
+                        safe_strategy_key = strategy_key.lower()
+
+                        # 1. Hard Reject: Short Premium within 2 days
+                        if days_to_earnings <= 2:
+                            is_short_premium = ("credit" in safe_strategy_key) or ("condor" in safe_strategy_key) or ("short" in safe_strategy_key)
+                            if is_short_premium:
+                                return None
+
+                        # 2. Score Penalty: Within 7 days
+                        if days_to_earnings <= 7:
+                            earnings_risk = True
+                            earnings_penalty_val = earnings_week_penalty(safe_strategy_key)
+
+                            # Apply penalty
+                            unified_score.score = max(0.0, unified_score.score - earnings_penalty_val)
+                            # Add badge/warning to unified score object if possible, or handle locally
+                            unified_score.badges.append("EARNINGS_RISK")
+
+                except Exception as e:
+                    print(f"[Scanner] Earnings date parse error for {symbol}: {e}")
+
             candidate_dict = {
                 "symbol": symbol,
                 "ticker": symbol,
@@ -873,13 +1162,31 @@ def scan_for_opportunities(
                 "net_delta_per_contract": net_delta_contract,
                 "net_vega_per_contract": net_vega_contract,
                 "data_quality": data_quality,
-                "pricing_mode": pricing_mode
+                "pricing_mode": pricing_mode,
+                # Earnings Metadata
+                "earnings_date": str(earnings_val) if earnings_val else None,
+                "days_to_earnings": days_to_earnings,
+                "earnings_risk": earnings_risk,
+                "earnings_penalty": earnings_penalty_val
             }
 
             # Calculate Probability of Profit
             # Pass dictionary representation of global snapshot for compatibility
             gs_dict = global_snapshot.to_dict() if global_snapshot else None
-            candidate_dict["probability_of_profit"] = _estimate_probability_of_profit(candidate_dict, gs_dict)
+
+            pop = None
+            if ev_obj is not None and hasattr(ev_obj, "win_probability"):
+                pop = float(ev_obj.win_probability)
+            elif ev_obj is not None and isinstance(ev_obj, dict) and "win_probability" in ev_obj:
+                pop = float(ev_obj["win_probability"])
+
+            if pop is not None:
+                pop = max(0.0, min(1.0, pop))
+                candidate_dict["probability_of_profit"] = pop
+                candidate_dict["probability_of_profit_source"] = "ev"
+            else:
+                candidate_dict["probability_of_profit"] = _estimate_probability_of_profit(candidate_dict, gs_dict)
+                candidate_dict["probability_of_profit_source"] = "score_fallback"
 
             return candidate_dict
 
@@ -890,7 +1197,7 @@ def scan_for_opportunities(
     # Corrected Indentation: ThreadPoolExecutor is now OUTSIDE process_symbol
     with concurrent.futures.ThreadPoolExecutor(max_workers=batch_size) as executor:
         future_to_symbol = {
-            executor.submit(process_symbol, sym, drag_map, quotes_map): sym
+            executor.submit(process_symbol, sym, drag_map, quotes_map, earnings_map): sym
             for sym in symbols
         }
 

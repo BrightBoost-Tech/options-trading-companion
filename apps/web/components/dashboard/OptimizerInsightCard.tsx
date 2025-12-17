@@ -32,7 +32,7 @@ export default function OptimizerInsightCard({ traceId }: OptimizerInsightCardPr
     }
   };
 
-  if (loading && !insight) return <div className="h-48 bg-gray-100 animate-pulse rounded"></div>;
+  if (loading && !insight) return <div className="h-48 bg-muted animate-pulse rounded"></div>;
   if (!insight) return null;
 
   // Derive status color
@@ -42,9 +42,9 @@ export default function OptimizerInsightCard({ traceId }: OptimizerInsightCardPr
   const StatusIcon = insight.status === 'OPTIMAL' ? ShieldCheck : AlertTriangle;
 
   return (
-    <Card className="shadow-sm border-gray-200">
+    <Card className="shadow-sm border-border">
         <CardHeader className="pb-2">
-            <CardTitle className="text-sm font-medium text-gray-500 uppercase tracking-wide flex items-center justify-between">
+            <CardTitle className="text-sm font-medium text-muted-foreground uppercase tracking-wide flex items-center justify-between">
                 <span className="flex items-center gap-2"><Brain className="w-4 h-4" /> Optimizer AI</span>
                 <span className={`text-xs font-bold flex items-center gap-1 ${statusColor}`}>
                     <StatusIcon className="w-3 h-3" /> {insight.status}
@@ -55,13 +55,13 @@ export default function OptimizerInsightCard({ traceId }: OptimizerInsightCardPr
             <div className="space-y-3">
                 {/* Metrics Grid */}
                 <div className="grid grid-cols-2 gap-2 text-xs">
-                    <div className="bg-gray-50 p-2 rounded">
-                        <p className="text-gray-400">Regime</p>
-                        <p className="font-semibold text-gray-800 capitalize">{insight.regime_detected || 'Unknown'}</p>
+                    <div className="bg-muted p-2 rounded">
+                        <p className="text-muted-foreground">Regime</p>
+                        <p className="font-semibold text-foreground capitalize">{insight.regime_detected || 'Unknown'}</p>
                     </div>
-                    <div className="bg-gray-50 p-2 rounded">
-                        <p className="text-gray-400">Conviction Used</p>
-                        <p className="font-semibold text-gray-800 flex items-center gap-1">
+                    <div className="bg-muted p-2 rounded">
+                        <p className="text-muted-foreground">Conviction Used</p>
+                        <p className="font-semibold text-foreground flex items-center gap-1">
                              <Zap className="w-3 h-3 text-yellow-500" fill="currentColor" />
                              {(insight.conviction_used * 100).toFixed(0)}%
                         </p>
@@ -70,23 +70,23 @@ export default function OptimizerInsightCard({ traceId }: OptimizerInsightCardPr
 
                 {/* Narrative / Constraints */}
                 <div>
-                    <p className="text-[10px] text-gray-400 uppercase tracking-wide mb-1">Active Constraints</p>
+                    <p className="text-[10px] text-muted-foreground uppercase tracking-wide mb-1">Active Constraints</p>
                     {insight.active_constraints && insight.active_constraints.length > 0 ? (
                         <div className="flex flex-wrap gap-1">
                             {insight.active_constraints.map((c: string, idx: number) => (
-                                <span key={idx} className="text-[10px] bg-yellow-50 text-yellow-800 border border-yellow-100 px-2 py-1 rounded">
+                                <span key={idx} className="text-[10px] bg-yellow-50 text-yellow-800 border border-yellow-100 dark:bg-yellow-900/30 dark:text-yellow-300 dark:border-yellow-900/50 px-2 py-1 rounded">
                                     {c}
                                 </span>
                             ))}
                         </div>
                     ) : (
-                        <p className="text-xs text-gray-500 italic">No active constraints limiting the solution.</p>
+                        <p className="text-xs text-muted-foreground italic">No active constraints limiting the solution.</p>
                     )}
                 </div>
 
                 {insight.trace_id && (
-                    <div className="pt-2 border-t border-gray-50">
-                        <p className="text-[10px] text-gray-300 font-mono truncate">ID: {insight.trace_id}</p>
+                    <div className="pt-2 border-t border-border">
+                        <p className="text-[10px] text-muted-foreground font-mono truncate">ID: {insight.trace_id}</p>
                     </div>
                 )}
             </div>

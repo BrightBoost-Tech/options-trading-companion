@@ -38,10 +38,10 @@ export default function DisciplineSummary({ className }: { className?: string })
     if (loading) return (
         <Card className={className}>
             <CardHeader className="pb-2">
-                <CardTitle className="text-sm font-medium text-gray-500">Execution Discipline</CardTitle>
+                <CardTitle className="text-sm font-medium text-muted-foreground">Execution Discipline</CardTitle>
             </CardHeader>
             <CardContent>
-                <div className="animate-pulse h-12 bg-gray-100 rounded"></div>
+                <div className="animate-pulse h-12 bg-muted rounded"></div>
             </CardContent>
         </Card>
     );
@@ -50,10 +50,10 @@ export default function DisciplineSummary({ className }: { className?: string })
          return (
             <Card className={className}>
                 <CardHeader className="pb-2">
-                    <CardTitle className="text-sm font-medium text-gray-500">Execution Discipline</CardTitle>
+                    <CardTitle className="text-sm font-medium text-muted-foreground">Execution Discipline</CardTitle>
                 </CardHeader>
                 <CardContent>
-                    <p className="text-sm text-gray-400">No recent activity</p>
+                    <p className="text-sm text-muted-foreground">No recent activity</p>
                 </CardContent>
             </Card>
          );
@@ -69,8 +69,8 @@ export default function DisciplineSummary({ className }: { className?: string })
     return (
         <Card className={className}>
             <CardHeader className="pb-2">
-                <CardTitle className="text-sm font-medium text-gray-500">
-                    Execution Discipline <span className="text-xs font-normal text-gray-400">(Last {summary.window_days} Days)</span>
+                <CardTitle className="text-sm font-medium text-muted-foreground">
+                    Execution Discipline <span className="text-xs font-normal text-muted-foreground">(Last {summary.window_days} Days)</span>
                 </CardTitle>
             </CardHeader>
             <CardContent>
@@ -78,12 +78,12 @@ export default function DisciplineSummary({ className }: { className?: string })
                     <div className={`text-2xl font-bold ${color}`}>
                         {disciplinePct}%
                     </div>
-                    <div className="text-xs text-gray-500">
+                    <div className="text-xs text-muted-foreground">
                         {summary.disciplined_execution} / {summary.total_suggestions} trades
                     </div>
                 </div>
 
-                <div className="space-y-1 text-xs text-gray-600">
+                <div className="space-y-1 text-xs text-muted-foreground">
                     {summary.impulse_trades > 0 && (
                         <div className="flex justify-between">
                             <span>Impulse Trades:</span>

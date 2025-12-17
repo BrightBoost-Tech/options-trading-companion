@@ -65,13 +65,13 @@ export default function PaperPortfolioWidget() {
 
   if (loading) {
     return (
-      <Card className="h-full bg-neutral-900 border-neutral-800 text-neutral-100 animate-pulse">
+      <Card className="h-full bg-card border-border text-foreground animate-pulse">
         <CardHeader>
-          <CardTitle className="text-neutral-400">Paper Portfolio</CardTitle>
+          <CardTitle className="text-muted-foreground">Paper Portfolio</CardTitle>
         </CardHeader>
         <CardContent>
-          <div className="h-4 w-24 bg-neutral-800 rounded mb-4" />
-          <div className="h-4 w-32 bg-neutral-800 rounded" />
+          <div className="h-4 w-24 bg-muted rounded mb-4" />
+          <div className="h-4 w-32 bg-muted rounded" />
         </CardContent>
       </Card>
     );
@@ -80,15 +80,15 @@ export default function PaperPortfolioWidget() {
   // "No portfolio yet" state
   if (!data?.portfolio) {
     return (
-      <Card className="h-full bg-neutral-50/50 border-neutral-200">
+      <Card className="h-full bg-muted/20 border-border">
         <CardHeader className="pb-2">
-          <CardTitle className="text-sm font-semibold text-neutral-700 flex items-center gap-2">
+          <CardTitle className="text-sm font-semibold text-foreground flex items-center gap-2">
             <Layers className="w-4 h-4 text-purple-600" />
             Paper Portfolio
           </CardTitle>
         </CardHeader>
         <CardContent>
-          <p className="text-xs text-neutral-500">
+          <p className="text-xs text-muted-foreground">
             No paper trades yet. Use the &quot;Paper Trade&quot; button on suggestions to start practicing.
           </p>
         </CardContent>
@@ -102,8 +102,8 @@ export default function PaperPortfolioWidget() {
     .slice(0, 3);
 
   return (
-    <Card className="h-full bg-gradient-to-br from-neutral-900 to-neutral-800 border-neutral-700 text-white shadow-md">
-      <CardHeader className="pb-3 border-b border-neutral-700/50">
+    <Card className="h-full bg-gradient-to-br from-card to-background border-border text-foreground shadow-md">
+      <CardHeader className="pb-3 border-b border-border">
         <CardTitle className="text-sm font-semibold flex items-center gap-2">
           <Layers className="w-4 h-4 text-purple-400" />
           Paper Portfolio
@@ -113,14 +113,14 @@ export default function PaperPortfolioWidget() {
         {/* Top Stats Row */}
         <div className="flex justify-between items-end">
           <div>
-            <p className="text-[10px] text-neutral-400 uppercase tracking-wide">Net Liq</p>
+            <p className="text-[10px] text-muted-foreground uppercase tracking-wide">Net Liq</p>
             <p className="text-xl font-bold font-mono text-emerald-400">
               ${portfolio.net_liq.toLocaleString(undefined, { minimumFractionDigits: 0, maximumFractionDigits: 0 })}
             </p>
           </div>
           <div className="text-right">
-             <p className="text-[10px] text-neutral-400 uppercase tracking-wide">Cash</p>
-             <p className="text-sm font-medium text-neutral-200">
+             <p className="text-[10px] text-muted-foreground uppercase tracking-wide">Cash</p>
+             <p className="text-sm font-medium text-foreground">
                ${portfolio.cash_balance.toLocaleString(undefined, { minimumFractionDigits: 0, maximumFractionDigits: 0 })}
              </p>
           </div>
@@ -129,20 +129,20 @@ export default function PaperPortfolioWidget() {
         {/* Positions Summary */}
         <div>
           <div className="flex justify-between items-center mb-2">
-             <span className="text-xs text-neutral-400">Open Positions ({stats.open_positions_count})</span>
+             <span className="text-xs text-muted-foreground">Open Positions ({stats.open_positions_count})</span>
              <Badge variant="outline" className={`text-xs border-0 ${stats.total_unrealized_pl >= 0 ? 'bg-green-900/30 text-green-400' : 'bg-red-900/30 text-red-400'}`}>
                 {stats.total_unrealized_pl >= 0 ? '+' : ''}${stats.total_unrealized_pl.toFixed(2)}
              </Badge>
           </div>
           <div className="space-y-2">
             {topPositions.length === 0 && (
-                <p className="text-xs text-neutral-500 italic">No open positions.</p>
+                <p className="text-xs text-muted-foreground italic">No open positions.</p>
             )}
             {topPositions.map((p, idx) => (
-              <div key={idx} className="flex justify-between items-center text-xs p-1.5 rounded bg-white/5 border border-white/5">
+              <div key={idx} className="flex justify-between items-center text-xs p-1.5 rounded bg-muted/30 border border-border">
                  <div className="flex flex-col">
-                    <span className="font-semibold text-neutral-200">{p.symbol}</span>
-                    <span className="text-[10px] text-neutral-500">{p.quantity} contracts</span>
+                    <span className="font-semibold text-foreground">{p.symbol}</span>
+                    <span className="text-[10px] text-muted-foreground">{p.quantity} contracts</span>
                  </div>
                  <span className={`font-mono ${p.unrealized_pl >= 0 ? 'text-green-400' : 'text-red-400'}`}>
                     {p.unrealized_pl >= 0 ? '+' : ''}{p.unrealized_pl.toFixed(2)}

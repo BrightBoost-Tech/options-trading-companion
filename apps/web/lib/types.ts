@@ -2,6 +2,8 @@ export interface StrategyConfig {
   name: string;
   version: number;
   description?: string;
+  // Parameters object to hold loose key-values for the editor
+  parameters?: Record<string, any>;
   regime_whitelist?: string[];
   conviction_floor: number;
   conviction_slope: number;

@@ -101,6 +101,12 @@ def _select_legs_from_chain(chain: List[Dict[str, Any]], leg_defs: List[Dict[str
 
         premium = best_contract.get('price') or best_contract.get('close') or 0.0
 
+        bid = best_contract.get('bid')
+        ask = best_contract.get('ask')
+        mid = None
+        if bid is not None and ask is not None:
+             mid = (float(bid) + float(ask)) / 2.0
+
         legs.append({
             "symbol": best_contract['ticker'],
             "strike": best_contract['strike'],
@@ -111,7 +117,10 @@ def _select_legs_from_chain(chain: List[Dict[str, Any]], leg_defs: List[Dict[str
             "delta": best_contract.get('delta') or target_delta,
             "gamma": best_contract.get('gamma') or 0.0,
             "vega": best_contract.get('vega') or 0.0,
-            "theta": best_contract.get('theta') or 0.0
+            "theta": best_contract.get('theta') or 0.0,
+            "bid": bid,
+            "ask": ask,
+            "mid": mid
         })
 
         if side == "buy":
@@ -239,6 +248,31 @@ def _combo_width_share_from_legs(truth_layer, legs, fallback_width_share):
     leg_syms = [l.get("symbol") for l in legs if l.get("symbol")]
     if not leg_syms:
         return float(fallback_width_share or 0.0)
+
+    # First attempt: use leg quotes if available
+    widths = []
+    all_legs_ok = True
+    for l in legs:
+        bid = l.get("bid")
+        ask = l.get("ask")
+        if bid is not None and ask is not None:
+            try:
+                bid = float(bid)
+                ask = float(ask)
+                if bid > 0 and ask >= bid:
+                    widths.append(ask - bid)
+                else:
+                    all_legs_ok = False
+                    break
+            except (ValueError, TypeError):
+                all_legs_ok = False
+                break
+        else:
+            all_legs_ok = False
+            break
+
+    if all_legs_ok and len(widths) == len(legs):
+        return sum(widths)
 
     # Batch fetch snapshots for efficiency
     snaps = truth_layer.snapshot_many(leg_syms) or {}

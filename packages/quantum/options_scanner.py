@@ -11,6 +11,7 @@ import concurrent.futures
 from packages.quantum.services.universe_service import UniverseService
 from packages.quantum.analytics.strategy_selector import StrategySelector
 from packages.quantum.ev_calculator import calculate_ev, calculate_iron_condor_ev
+from packages.quantum.ev_calculator import calculate_ev, calculate_condor_ev
 from packages.quantum.market_data import PolygonService
 from packages.quantum.analytics.regime_integration import map_market_regime
 from packages.quantum.services.iv_repository import IVRepository
@@ -23,6 +24,8 @@ from packages.quantum.analytics.guardrails import earnings_week_penalty
 
 # Configuration
 SCANNER_LIMIT_DEV = int(os.getenv("SCANNER_LIMIT_DEV", "40")) # Limit universe in dev
+SCANNER_MIN_DTE = 25
+SCANNER_MAX_DTE = 45
 
 logger = logging.getLogger(__name__)
 
@@ -101,6 +104,12 @@ def _select_legs_from_chain(chain: List[Dict[str, Any]], leg_defs: List[Dict[str
 
         premium = best_contract.get('price') or best_contract.get('close') or 0.0
 
+        bid = best_contract.get('bid')
+        ask = best_contract.get('ask')
+        mid = None
+        if bid is not None and ask is not None:
+             mid = (float(bid) + float(ask)) / 2.0
+
         legs.append({
             "symbol": best_contract['ticker'],
             "strike": best_contract['strike'],
@@ -111,7 +120,10 @@ def _select_legs_from_chain(chain: List[Dict[str, Any]], leg_defs: List[Dict[str
             "delta": best_contract.get('delta') or target_delta,
             "gamma": best_contract.get('gamma') or 0.0,
             "vega": best_contract.get('vega') or 0.0,
-            "theta": best_contract.get('theta') or 0.0
+            "theta": best_contract.get('theta') or 0.0,
+            "bid": bid,
+            "ask": ask,
+            "mid": mid
         })
 
         if side == "buy":
@@ -279,6 +291,66 @@ def _validate_iron_condor_invariants(legs: List[Dict[str, Any]]) -> bool:
         return False
 
     return True
+def _validate_spread_economics(legs: List[Dict[str, Any]], total_cost: float) -> tuple[bool, str]:
+    if not legs:
+        return False, "no_legs"
+
+    # Common validation: Expiry
+    expiries = {l.get("expiry") for l in legs if l.get("expiry")}
+    if len(expiries) > 1:
+        return False, "expiry_mismatch"
+
+    if len(legs) == 2:
+        long_leg = next((l for l in legs if l["side"] == "buy"), None)
+        short_leg = next((l for l in legs if l["side"] == "sell"), None)
+
+        if not long_leg or not short_leg:
+            return False, "missing_long_or_short"
+
+        width = abs(long_leg["strike"] - short_leg["strike"])
+        premium_share = abs(float(total_cost))
+
+        if width <= 1e-9:
+            return False, "zero_width"
+        if premium_share <= 1e-9:
+            return False, "zero_premium"
+        if premium_share >= width:
+            return False, "premium_ge_width"
+
+        return True, ""
+
+    elif len(legs) == 4:
+        # Condor validation: Ensure strikes are ordered and credit < max width
+        sorted_legs = sorted(legs, key=lambda l: l["strike"])
+
+        # Check structure for Iron Condor (Buy Put, Sell Put, Sell Call, Buy Call)
+        l0, l1, l2, l3 = sorted_legs[0], sorted_legs[1], sorted_legs[2], sorted_legs[3]
+
+        is_condor_structure = (
+            l0['side'] == 'buy' and l0['type'] == 'put' and
+            l1['side'] == 'sell' and l1['type'] == 'put' and
+            l2['side'] == 'sell' and l2['type'] == 'call' and
+            l3['side'] == 'buy' and l3['type'] == 'call'
+        )
+
+        if is_condor_structure:
+             # Ensure strict ordering (strikes)
+             if not (l0['strike'] < l1['strike'] <= l2['strike'] < l3['strike']):
+                  return False, "condor_strike_ordering"
+
+             width_put = l1['strike'] - l0['strike']
+             width_call = l3['strike'] - l2['strike']
+             max_width = max(width_put, width_call)
+
+             # Credit Condor implies total_cost < 0
+             if total_cost < 0:
+                 credit_share = abs(total_cost)
+                 if credit_share <= 1e-9:
+                     return False, "zero_credit"
+                 if credit_share >= max_width:
+                     return False, "credit_ge_width"
+
+    return True, ""
 
 def _map_single_leg_strategy(leg: Dict[str, Any]) -> Optional[str]:
     """Maps scanner leg attributes to calculate_ev strategy types."""
@@ -381,6 +453,27 @@ def _compute_risk_primitives_usd(legs: List[Dict[str, Any]], total_cost: float, 
             max_profit = credit_share * 100.0
             max_loss = max(0.0, (width_max - credit_share)) * 100.0
             collateral_required = width_max * 100.0
+        # Condor logic usually handled in main loop, but here for completeness if called
+        # Check if condor structure
+        calls = [l for l in legs if l['type']=='call']
+        puts = [l for l in legs if l['type']=='put']
+
+        if len(calls) == 2 and len(puts) == 2:
+            short_call = next((l for l in calls if l['side']=='sell'), None)
+            long_call = next((l for l in calls if l['side']=='buy'), None)
+            short_put = next((l for l in puts if l['side']=='sell'), None)
+            long_put = next((l for l in puts if l['side']=='buy'), None)
+
+            if short_call and long_call and short_put and long_put:
+                width_call = abs(long_call['strike'] - short_call['strike'])
+                width_put = abs(long_put['strike'] - short_put['strike'])
+                width_max = max(width_call, width_put)
+
+                credit = abs(total_cost) if total_cost < 0 else 0.0
+
+                max_profit = credit * 100.0
+                max_loss = max(0.0, width_max - credit) * 100.0
+                collateral_required = width_max * 100.0
 
     return {
         "max_loss_per_contract": max_loss,
@@ -431,6 +524,31 @@ def _combo_width_share_from_legs(truth_layer, legs, fallback_width_share):
     leg_syms = [l.get("symbol") for l in legs if l.get("symbol")]
     if not leg_syms:
         return float(fallback_width_share or 0.0)
+
+    # First attempt: use leg quotes if available
+    widths = []
+    all_legs_ok = True
+    for l in legs:
+        bid = l.get("bid")
+        ask = l.get("ask")
+        if bid is not None and ask is not None:
+            try:
+                bid = float(bid)
+                ask = float(ask)
+                if bid > 0 and ask >= bid:
+                    widths.append(ask - bid)
+                else:
+                    all_legs_ok = False
+                    break
+            except (ValueError, TypeError):
+                all_legs_ok = False
+                break
+        else:
+            all_legs_ok = False
+            break
+
+    if all_legs_ok and len(widths) == len(legs):
+        return sum(widths)
 
     # Batch fetch snapshots for efficiency
     snaps = truth_layer.snapshot_many(leg_syms) or {}
@@ -505,7 +623,8 @@ def _determine_execution_cost(
 def scan_for_opportunities(
     symbols: List[str] = None,
     supabase_client: Client = None,
-    user_id: str = None
+    user_id: str = None,
+    global_snapshot: GlobalRegimeSnapshot = None
 ) -> List[Dict[str, Any]]:
     """
     Scans the provided symbols (or universe) for option trade opportunities.
@@ -560,12 +679,15 @@ def scan_for_opportunities(
     print(f"[Scanner] Processing {len(symbols)} symbols...")
 
     # 2. Compute Global Regime Snapshot ONCE
-    try:
-        global_snapshot = regime_engine.compute_global_snapshot(datetime.now())
-        print(f"[Scanner] Global Regime: {global_snapshot.state}")
-    except Exception as e:
-        print(f"[Scanner] Regime computation failed: {e}. Using default.")
-        global_snapshot = regime_engine._default_global_snapshot(datetime.now())
+    if global_snapshot is None:
+        try:
+            global_snapshot = regime_engine.compute_global_snapshot(datetime.now())
+            print(f"[Scanner] Global Regime: {global_snapshot.state}")
+        except Exception as e:
+            print(f"[Scanner] Regime computation failed: {e}. Using default.")
+            global_snapshot = regime_engine._default_global_snapshot(datetime.now())
+    else:
+        print(f"[Scanner] Using provided Global Regime: {global_snapshot.state}")
 
     # Batch fetch execution drag for efficiency (ONCE)
     drag_map = {}
@@ -716,7 +838,14 @@ def scan_for_opportunities(
             chain_objects = None
 
             try:
-                chain_objects = truth_layer.option_chain(symbol)
+                # OPTIMIZATION: Use min/max expiry to reduce data fetch size
+                now_date = datetime.now().date()
+                min_dte = SCANNER_MIN_DTE
+                max_dte = SCANNER_MAX_DTE
+                min_expiry = (now_date + timedelta(days=min_dte)).isoformat()
+                max_expiry = (now_date + timedelta(days=max_dte)).isoformat()
+
+                chain_objects = truth_layer.option_chain(symbol, min_expiry=min_expiry, max_expiry=max_expiry)
             except Exception:
                 chain_objects = None
 
@@ -736,7 +865,7 @@ def scan_for_opportunities(
 
                         days_to_expiry = (exp_dt - now_date).days
 
-                        if not (25 <= days_to_expiry <= 45):
+                        if not (SCANNER_MIN_DTE <= days_to_expiry <= SCANNER_MAX_DTE):
                             continue
 
                         # Flatten structure
@@ -767,7 +896,7 @@ def scan_for_opportunities(
 
             # Fallback if empty
             if not chain:
-                chain = market_data.get_option_chain(symbol, min_dte=25, max_dte=45)
+                chain = market_data.get_option_chain(symbol, min_dte=SCANNER_MIN_DTE, max_dte=SCANNER_MAX_DTE)
 
             if not chain:
                 return None
@@ -814,15 +943,266 @@ def scan_for_opportunities(
             else:
                 legs, total_cost = _select_legs_from_chain(chain, suggestion["legs"], current_price)
 
+            legs = []
+            total_cost = 0.0
             total_ev = 0.0
-            ev_obj = None
 
-            # Validation: All legs must share the same expiry
-            expiries = {l.get("expiry") for l in legs if l.get("expiry")}
-            if len(expiries) > 1:
-                return None
-            if not legs:
-                return None
+            # Normalize Strategy Key
+            raw_strategy = suggestion["strategy"]
+            strategy_key = raw_strategy.lower().replace(" ", "_")
+            pricing_mode = "exact"
+            data_quality = "realtime"
+
+            # IRON CONDOR Logic
+            if strategy_key in ("iron_condor", "ironcondor") or "iron_condor" in raw_strategy.lower():
+                # 1. Select Expiry (Shared)
+                # Group by expiry
+                expiries = {}
+                for c in chain:
+                    e = c['expiration']
+                    if e not in expiries: expiries[e] = []
+                    expiries[e].append(c)
+
+                # Pick best expiry: nearest to 35 DTE
+                target_dte = 35
+                now_date = datetime.now().date()
+
+                best_expiry = None
+                best_diff = 999
+
+                for e_str, c_list in expiries.items():
+                    try:
+                         e_dt = datetime.strptime(e_str, "%Y-%m-%d").date()
+                         dte = (e_dt - now_date).days
+                         diff = abs(dte - target_dte)
+                         if diff < best_diff:
+                             best_diff = diff
+                             best_expiry = e_str
+                         elif diff == best_diff:
+                             # Tie breaker: most liquid (count of contracts)
+                             if len(c_list) > len(expiries.get(best_expiry, [])):
+                                 best_expiry = e_str
+                    except: continue
+
+                if not best_expiry: return None
+
+                # Filter chain for this expiry
+                expiry_chain = expiries[best_expiry]
+                calls = [c for c in expiry_chain if c['type'] == 'call']
+                puts = [c for c in expiry_chain if c['type'] == 'put']
+
+                if not calls or not puts: return None
+
+                # 2. Select Short Strikes (Delta +/- 0.15)
+                # Short Call
+                short_call = min(calls, key=lambda x: abs(abs(x.get('delta', 0) or 0) - 0.15))
+                # Short Put
+                short_put = min(puts, key=lambda x: abs(abs(x.get('delta', 0) or 0) - 0.15))
+
+                # 3. Select Wings (Fixed Width)
+                width = 5.0 if current_price >= 50 else 2.5
+
+                # Long Call: Closest strike >= short_call.strike + width
+                target_long_call_strike = short_call['strike'] + width
+                # Find contract with strike closest to target but >= target
+                # Wait, closest strike above is safer
+                candidates_long_call = [c for c in calls if c['strike'] >= target_long_call_strike - 0.01]
+                if not candidates_long_call:
+                     candidates_long_call = [c for c in calls if c['strike'] > short_call['strike']]
+
+                if not candidates_long_call: return None
+                long_call = min(candidates_long_call, key=lambda x: x['strike'])
+
+                # Long Put: Closest strike <= short_put.strike - width
+                target_long_put_strike = short_put['strike'] - width
+                candidates_long_put = [c for c in puts if c['strike'] <= target_long_put_strike + 0.01]
+                if not candidates_long_put:
+                    candidates_long_put = [c for c in puts if c['strike'] < short_put['strike']]
+
+                if not candidates_long_put: return None
+                # Want closest to target (which is below short put)
+                # Actually we want the highest strike that is <= target
+                # Sort by strike descending
+                candidates_long_put.sort(key=lambda x: x['strike'], reverse=True)
+                long_put = candidates_long_put[0]
+
+                # 4. Build Legs
+                # Canonical Order: Short Put, Long Put, Short Call, Long Call
+                # (Arbitrary, but consistent with prompt request)
+                # Prompt: short put, long put, short call, long call
+
+                # Helper to build leg dict
+                def make_leg(contract, side):
+                    # Priority: mid -> calculated mid -> SKIP
+                    # "IMPORTANT: Use `mid=(bid+ask)/2` if chain doesn’t provide `mid`. If no bid/ask, skip candidate."
+
+                    p = contract.get('price') # In adapter, this is mid -> last -> 0
+
+                    # Strictly check if we have a valid mid or bid/ask
+                    # Adapter: price = quote.get("mid"); if None: price = quote.get("last")
+                    # So 'price' might be 'last'. We need to be careful.
+
+                    # Let's check bid/ask explicitly from the contract dict which has them
+                    b = contract.get('bid')
+                    a = contract.get('ask')
+
+                    valid_quote = False
+                    mid_price = 0.0
+
+                    # Case A: Explicit Mid available (and positive)
+                    # Note: Scanner adapter populated 'price' with mid if available.
+                    # But we can't distinguish if 'price' came from 'mid' or 'last' easily here unless we check keys again.
+                    # The adapter set 'price' = mid or last.
+
+                    if b is not None and a is not None and a > 0:
+                        mid_price = (float(b) + float(a)) / 2.0
+                        valid_quote = True
+                    elif p is not None and p > 0:
+                        # Fallback to whatever 'price' is (could be last), but user said "If no bid/ask, skip".
+                        # However, we must allow price if it is available.
+                        # This covers the case where the chain provides a mid directly.
+                        mid_price = float(p)
+                        valid_quote = True
+
+                    # If we don't have valid bid/ask to form a mid, we should likely fail this leg.
+                    if not valid_quote:
+                        # One last chance: if 'price' is set and we trust it is a mid (e.g. from TruthLayer), use it?
+                        # But strictly: "If no bid/ask, skip candidate."
+                        # We'll return None to signal failure.
+                        return None
+
+                    return {
+                        "symbol": contract['ticker'],
+                        "strike": contract['strike'],
+                        "expiry": contract['expiration'],
+                        "type": contract['type'],
+                        "side": side,
+                        "premium": mid_price,
+                        "delta": contract.get('delta') or 0.0,
+                        "gamma": contract.get('gamma') or 0.0,
+                        "vega": contract.get('vega') or 0.0,
+                        "theta": contract.get('theta') or 0.0
+                    }
+
+                legs = []
+                for contract, side in [
+                    (short_put, "sell"),
+                    (long_put, "buy"),
+                    (short_call, "sell"),
+                    (long_call, "buy")
+                ]:
+                    l = make_leg(contract, side)
+                    if l is None:
+                        legs = []
+                        break
+                    legs.append(l)
+
+                if not legs: return None
+
+                # 5. Compute Cost
+                total_cost = sum((l['premium'] if l['side'] == "buy" else -l['premium']) for l in legs)
+
+                # 6. Calculate EV using new condor function
+                width_call_actual = abs(long_call['strike'] - short_call['strike'])
+                width_put_actual = abs(long_put['strike'] - short_put['strike'])
+
+                credit = abs(total_cost) if total_cost < 0 else 0.0
+
+                ev_result = calculate_condor_ev(
+                    credit=credit,
+                    width_put=width_put_actual,
+                    width_call=width_call_actual,
+                    delta_short_put=short_put.get('delta', 0),
+                    delta_short_call=short_call.get('delta', 0)
+                )
+
+                total_ev = ev_result.expected_value
+
+            else:
+                # Default Logic (Original loop)
+                for leg_def in suggestion["legs"]:
+                        target_delta = leg_def["delta_target"]
+                        side = leg_def["side"]
+                        op_type = leg_def["type"]
+
+                        if op_type == "call":
+                            filtered = [c for c in chain if c['type'] == 'call']
+                        else:
+                            filtered = [c for c in chain if c['type'] == 'put']
+
+                        if not filtered: continue
+
+                        # Find closest delta
+                        has_delta = any('delta' in c and c['delta'] is not None for c in filtered)
+
+                        if has_delta:
+                            target_d = abs(target_delta)
+                            best_contract = min(filtered, key=lambda x: abs(abs(x.get('delta',0) or 0) - target_d))
+                        else:
+                            moneyness = 1.0
+                            if op_type == 'call':
+                                if target_delta > 0.5: moneyness = 0.95
+                                elif target_delta < 0.5: moneyness = 1.05
+                            else:
+                                if target_delta > 0.5: moneyness = 1.05
+                                elif target_delta < 0.5: moneyness = 0.95
+
+                            target_k = current_price * moneyness
+                            best_contract = min(filtered, key=lambda x: abs(x['strike'] - target_k))
+
+                        premium = best_contract.get('price') or best_contract.get('close') or 0.0
+
+                        legs.append({
+                            "symbol": best_contract['ticker'],
+                            "strike": best_contract['strike'],
+                            "expiry": best_contract['expiration'],
+                            "type": op_type,
+                            "side": side,
+                            "premium": premium,
+                            "delta": best_contract.get('delta') or target_delta,
+                            "gamma": best_contract.get('gamma') or 0.0,
+                            "vega": best_contract.get('vega') or 0.0,
+                            "theta": best_contract.get('theta') or 0.0
+                        })
+
+                        if side == "buy":
+                            total_cost += premium
+                        else:
+                            total_cost -= premium
+
+                # EV Calculation for standard strategies (1-2 legs)
+                if len(legs) == 2:
+                    long_leg = next((l for l in legs if l['side'] == 'buy'), None)
+                    short_leg = next((l for l in legs if l['side'] == 'sell'), None)
+                    if long_leg and short_leg:
+                        width = abs(long_leg['strike'] - short_leg['strike'])
+                        st_type = "debit_spread" if total_cost > 0 else "credit_spread"
+
+                        ev_obj = calculate_ev(
+                            premium=abs(total_cost),
+                            strike=long_leg['strike'],
+                            current_price=current_price,
+                            delta=long_leg['delta'],
+                            strategy=st_type,
+                            width=width
+                        )
+                        total_ev = ev_obj.expected_value
+                    else:
+                        total_ev = 0
+                elif len(legs) == 1:
+                    leg = legs[0]
+                    st_type = _map_single_leg_strategy(leg)
+                    if not st_type:
+                        return None
+
+                    ev_obj = calculate_ev(
+                        premium=leg['premium'],
+                        strike=leg['strike'],
+                        current_price=current_price,
+                        delta=leg['delta'],
+                        strategy=st_type
+                    )
+                    total_ev = ev_obj.expected_value
 
             # G. Compute Net EV & Risk Primitives
             max_loss_contract = 0.0
@@ -844,6 +1224,7 @@ def scan_for_opportunities(
                  data_quality = "degraded"
                  pricing_mode = "approximate"
 
+            # Risk Primitives (New Helper handles 4 legs now)
             # EV Calculation
             if len(legs) == 4 and ("condor" in strategy_key or "iron_condor" in strategy_key):
                  # Iron Condor EV

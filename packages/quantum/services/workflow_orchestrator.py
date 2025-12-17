@@ -88,6 +88,20 @@ def build_midday_order_json(cand: dict, contracts: int) -> dict:
     return order_json
 
 
+def postprocess_midday_sizing(sizing: dict, max_loss_per_contract: float) -> dict:
+    """
+    Ensures sizing metadata fields are correctly populated and distinct.
+    Specifically prevents max_loss_total from being overwritten by capital_required.
+    """
+    # Fix: Do NOT overwrite max_loss_total with capital_required.
+    # Especially important for credit spreads where max_loss > capital/margin.
+    if "max_loss_total" not in sizing:
+        sizing["max_loss_total"] = sizing.get("contracts", 0) * max_loss_per_contract
+
+    sizing["capital_required_total"] = sizing.get("capital_required", 0.0)
+    return sizing
+
+
 async def run_morning_cycle(supabase: Client, user_id: str):
     """
     1. Read latest portfolio snapshot + positions.
@@ -485,7 +499,11 @@ async def run_midday_cycle(supabase: Client, user_id: str):
 
     try:
         # Step C: Wire user_id from cycle orchestration into scanner
-        scout_results = scan_for_opportunities(supabase_client=supabase, user_id=user_id)
+        scout_results = scan_for_opportunities(
+            supabase_client=supabase,
+            user_id=user_id,
+            global_snapshot=global_snap
+        )
 
         print(f"Scanner returned {len(scout_results)} raw opportunities.")
 
@@ -615,7 +633,9 @@ async def run_midday_cycle(supabase: Client, user_id: str):
 
             # Persist sizing metadata as requested
             sizing["capital_required"] = sizing.get("capital_required", 0)
-            sizing["max_loss_total"] = sizing.get("capital_required", 0) # For debit spread/long option, max loss is capital
+
+            postprocess_midday_sizing(sizing, max_loss)
+
             sizing["risk_multiplier"] = risk_multiplier
             sizing["budget_snapshot"] = budgets
             sizing["allowed_risk_dollars"] = allowed_risk_dollars

@@ -17,6 +17,31 @@ If you need to launch services individually, you can use the scripts in `scripts
 *   **Backend:** `scripts\win\start_backend.cmd`
 *   **Frontend:** `scripts\win\start_frontend.cmd`
 
+## Dark Mode Verification
+
+To verify the Dashboard dark mode:
+
+1.  Open the application (e.g., http://localhost:3000).
+2.  Navigate to the **Dashboard**.
+3.  Toggle the theme to **Dark Mode** using the sun/moon icon in the top right.
+4.  **Checklist:**
+    *   [ ] **Dashboard Title**: Text should be readable (white/light gray) against the background.
+    *   [ ] **Cards**: Cards should have a dark background (`bg-card`) with subtle borders.
+    *   [ ] **Positions Table**:
+        *   Headers should be readable.
+        *   Row backgrounds should be dark (e.g., `bg-card` or transparent).
+        *   Section headers (Option Plays, Long Term Holds) should have appropriate dark backgrounds (e.g., `dark:bg-purple-900/20`).
+    *   [ ] **Optimizer Panel**:
+        *   Backgrounds should be dark.
+        *   Text should be `text-foreground` or `text-muted-foreground`.
+        *   Icons should have appropriate contrast.
+    *   [ ] **Trade Suggestions**:
+        *   Suggestion cards should not be white.
+        *   Badges (IV, Score) should use dark-mode compatible colors (e.g., `dark:bg-purple-900/30`).
+    *   [ ] **Historical Simulation**:
+        *   The panel should integrate seamlessly with the dark theme.
+        *   Results text should be readable.
+
 ## Dependency Verification
 
 If you encounter module resolution errors (e.g., `Module not found: Can't resolve ...`), verify that dependencies are correctly installed using pnpm.

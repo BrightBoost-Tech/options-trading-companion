@@ -22,9 +22,16 @@ export async function getAuthHeadersCached(ttlMs = 5000): Promise<Record<string,
     'Content-Type': 'application/json',
   };
 
-  if (session?.access_token) {
+  // Dev Auth Bypass
+  const devBypass = process.env.NEXT_PUBLIC_ENABLE_DEV_AUTH_BYPASS === '1';
+  const devUser = process.env.NEXT_PUBLIC_DEV_USER_ID || 'dev-user';
+
+  if (devBypass) {
+    headers['X-Test-Mode-User'] = devUser;
+  } else if (session?.access_token) {
     headers['Authorization'] = `Bearer ${session.access_token}`;
   } else {
+    // Fallback for tests/local (deprecated behavior, but kept for compatibility)
     headers['X-Test-Mode-User'] = TEST_USER_ID;
   }
 

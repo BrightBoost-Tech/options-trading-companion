@@ -452,3 +452,66 @@ def calculate_exit_metrics(
         limit_price=limit_price,
         reason=f"Targeting {k}σ move over {horizon_days}d"
     )
+
+def calculate_condor_ev(
+    credit: float,
+    width_put: float,
+    width_call: float,
+    delta_short_put: float,
+    delta_short_call: float
+) -> EVResult:
+    """
+    Calculates EV for an Iron Condor using disjoint tail probabilities.
+
+    Logic:
+    - p_loss_put = |delta_short_put|
+    - p_loss_call = |delta_short_call|
+    - p_loss = p_loss_put + p_loss_call (approx disjoint)
+    - p_win = 1.0 - p_loss
+
+    - max_loss_put = width_put - credit
+    - max_loss_call = width_call - credit
+    - max_profit = credit
+
+    EV = (p_win * max_profit) - (p_loss_put * max_loss_put) - (p_loss_call * max_loss_call)
+    """
+
+    # 1. Probabilities
+    p_loss_put = min(1.0, max(0.0, abs(delta_short_put)))
+    p_loss_call = min(1.0, max(0.0, abs(delta_short_call)))
+    p_loss = min(1.0, p_loss_put + p_loss_call)
+    p_win = 1.0 - p_loss
+
+    # 2. Financials (per share)
+    # credit is passed as a positive value representing net credit received
+    profit = credit * 100.0
+
+    # Loss is width - credit, clamped at 0
+    loss_put = max(0.0, (width_put - credit)) * 100.0
+    loss_call = max(0.0, (width_call - credit)) * 100.0
+
+    # Max loss of the structure is the max of either side
+    structure_max_loss = max(loss_put, loss_call)
+
+    # 3. EV Calculation
+    # We weight the losses by their respective probabilities
+    ev = (p_win * profit) - (p_loss_put * loss_put) - (p_loss_call * loss_call)
+
+    if not math.isfinite(ev):
+        ev = 0.0
+
+    risk_reward = None
+    if structure_max_loss > 0 and profit > 0:
+        risk_reward = structure_max_loss / profit
+
+    return EVResult(
+        expected_value=ev,
+        win_probability=p_win,
+        loss_probability=p_loss,
+        max_gain=profit,
+        max_loss=structure_max_loss,
+        risk_reward_ratio=risk_reward,
+        trade_cost=-profit, # Negative cost for credit strategies
+        breakeven_price=None, # Multiple B/E points, skipping for simple model
+        capped=False
+    )

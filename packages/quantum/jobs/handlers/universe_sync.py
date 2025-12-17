@@ -1,39 +1,49 @@
-import time
-from typing import Any, Dict
+from typing import Dict, Any
 from packages.quantum.services.universe_service import UniverseService
-from packages.quantum.jobs.handlers.utils import get_admin_client
-from packages.quantum.jobs.handlers.exceptions import RetryableJobError, PermanentJobError
+from packages.quantum.security.secrets_provider import SecretsProvider
+from supabase import create_client, Client
+from datetime import datetime
+import traceback
 
 JOB_NAME = "universe_sync"
 
-def run(payload: Dict[str, Any], ctx: Any) -> Dict[str, Any]:
+def run(payload: Dict[str, Any]) -> Dict[str, Any]:
     """
-    Executes the universe sync job.
+    Handler for universe_sync job.
     """
-    start_time = time.time()
-    notes = []
+    print(f"[{JOB_NAME}] Starting job with payload: {payload}")
 
     try:
-        client = get_admin_client()
-        service = UniverseService(client)
+        # 1. Initialize Supabase Client
+        secrets_provider = SecretsProvider()
+        supa_secrets = secrets_provider.get_supabase_secrets()
+        url = supa_secrets.url
+        key = supa_secrets.service_role_key
 
+        if not url or not key:
+            raise ValueError("Supabase credentials missing")
+
+        supabase: Client = create_client(url, key)
+
+        # 2. Initialize UniverseService
+        service = UniverseService(supabase)
+
+        # 3. Execute Logic
+        # Sync Base Universe (Seeds the table)
         service.sync_universe()
-        notes.append("Universe synced")
 
+        # Update Metrics (Fetches from Polygon)
         service.update_metrics()
-        notes.append("Metrics updated")
 
-        timing_ms = (time.time() - start_time) * 1000
         return {
             "ok": True,
-            "counts": {"synced": 1}, # Exact count difficult without service return val
-            "timing_ms": timing_ms,
-            "notes": notes
+            "synced_count": len(UniverseService.BASE_UNIVERSE), # Approximation, since service prints it
+            "ts": datetime.now().isoformat()
         }
 
-    except ValueError as e:
-        # Config errors
-        raise PermanentJobError(f"Configuration error: {e}")
     except Exception as e:
-        # Network or other transient errors
-        raise RetryableJobError(f"Universe sync failed: {e}")
+        print(f"[{JOB_NAME}] Failed: {e}")
+        traceback.print_exc()
+        # Return error dict for RQ to capture (or raise to mark as failed)
+        # RQ jobs failing raises an exception usually.
+        raise e

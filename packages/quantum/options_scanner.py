@@ -10,7 +10,6 @@ import concurrent.futures
 
 from packages.quantum.services.universe_service import UniverseService
 from packages.quantum.analytics.strategy_selector import StrategySelector
-from packages.quantum.ev_calculator import calculate_ev, calculate_iron_condor_ev
 from packages.quantum.ev_calculator import calculate_ev, calculate_condor_ev
 from packages.quantum.market_data import PolygonService
 from packages.quantum.analytics.regime_integration import map_market_regime
@@ -320,35 +319,38 @@ def _validate_spread_economics(legs: List[Dict[str, Any]], total_cost: float) ->
         return True, ""
 
     elif len(legs) == 4:
-        # Condor validation: Ensure strikes are ordered and credit < max width
-        sorted_legs = sorted(legs, key=lambda l: l["strike"])
+        # Condor validation
+        if not _validate_iron_condor_invariants(legs):
+            return False, "iron_condor_invariants"
 
-        # Check structure for Iron Condor (Buy Put, Sell Put, Sell Call, Buy Call)
-        l0, l1, l2, l3 = sorted_legs[0], sorted_legs[1], sorted_legs[2], sorted_legs[3]
+        if total_cost is None or total_cost >= 0:
+            return False, "iron_condor_not_credit"
 
-        is_condor_structure = (
-            l0['side'] == 'buy' and l0['type'] == 'put' and
-            l1['side'] == 'sell' and l1['type'] == 'put' and
-            l2['side'] == 'sell' and l2['type'] == 'call' and
-            l3['side'] == 'buy' and l3['type'] == 'call'
-        )
+        # Identify legs
+        calls = sorted([l for l in legs if l["type"] == "call"], key=lambda x: x["strike"])
+        puts = sorted([l for l in legs if l["type"] == "put"], key=lambda x: x["strike"])
 
-        if is_condor_structure:
-             # Ensure strict ordering (strikes)
-             if not (l0['strike'] < l1['strike'] <= l2['strike'] < l3['strike']):
-                  return False, "condor_strike_ordering"
+        # Already validated 2 calls 2 puts in invariants
+        # Short Call (lower k), Long Call (higher k)
+        short_call = calls[0]
+        long_call = calls[1]
 
-             width_put = l1['strike'] - l0['strike']
-             width_call = l3['strike'] - l2['strike']
-             max_width = max(width_put, width_call)
+        # Long Put (lower k), Short Put (higher k)
+        long_put = puts[0]
+        short_put = puts[1]
 
-             # Credit Condor implies total_cost < 0
-             if total_cost < 0:
-                 credit_share = abs(total_cost)
-                 if credit_share <= 1e-9:
-                     return False, "zero_credit"
-                 if credit_share >= max_width:
-                     return False, "credit_ge_width"
+        width_put = short_put["strike"] - long_put["strike"]
+        width_call = long_call["strike"] - short_call["strike"]
+        max_width = max(width_put, width_call)
+
+        if max_width <= 0:
+            return False, "iron_condor_invalid_width"
+
+        credit = abs(total_cost)
+        if credit >= max_width:
+            return False, "iron_condor_credit_ge_width"
+
+        return True, ""
 
     return True, ""
 
@@ -453,27 +455,6 @@ def _compute_risk_primitives_usd(legs: List[Dict[str, Any]], total_cost: float, 
             max_profit = credit_share * 100.0
             max_loss = max(0.0, (width_max - credit_share)) * 100.0
             collateral_required = width_max * 100.0
-        # Condor logic usually handled in main loop, but here for completeness if called
-        # Check if condor structure
-        calls = [l for l in legs if l['type']=='call']
-        puts = [l for l in legs if l['type']=='put']
-
-        if len(calls) == 2 and len(puts) == 2:
-            short_call = next((l for l in calls if l['side']=='sell'), None)
-            long_call = next((l for l in calls if l['side']=='buy'), None)
-            short_put = next((l for l in puts if l['side']=='sell'), None)
-            long_put = next((l for l in puts if l['side']=='buy'), None)
-
-            if short_call and long_call and short_put and long_put:
-                width_call = abs(long_call['strike'] - short_call['strike'])
-                width_put = abs(long_put['strike'] - short_put['strike'])
-                width_max = max(width_call, width_put)
-
-                credit = abs(total_cost) if total_cost < 0 else 0.0
-
-                max_profit = credit * 100.0
-                max_loss = max(0.0, width_max - credit) * 100.0
-                collateral_required = width_max * 100.0
 
     return {
         "max_loss_per_contract": max_loss,
@@ -1253,10 +1234,10 @@ def scan_for_opportunities(
                      width_put = abs(short_put["strike"] - long_put["strike"])
                      width_call = abs(long_call["strike"] - short_call["strike"])
 
-                     ev_obj = calculate_iron_condor_ev(
-                        credit_share=credit_share,
-                        width_put_share=width_put,
-                        width_call_share=width_call,
+                     ev_obj = calculate_condor_ev(
+                        credit=credit_share,
+                        width_put=width_put,
+                        width_call=width_call,
                         delta_short_put=short_put["delta"], # Should be neg
                         delta_short_call=short_call["delta"] # Should be pos
                      )

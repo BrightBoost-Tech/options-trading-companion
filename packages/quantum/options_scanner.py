@@ -25,6 +25,101 @@ SCANNER_LIMIT_DEV = int(os.getenv("SCANNER_LIMIT_DEV", "40")) # Limit universe i
 
 logger = logging.getLogger(__name__)
 
+def _select_expiry_bucket(chain: List[Dict[str, Any]], target_dte: int = 35) -> Optional[str]:
+    if not chain:
+        return None
+
+    # Group by expiry
+    buckets = {}
+    for c in chain:
+        exp = c.get("expiration")
+        if not exp: continue
+        if exp not in buckets:
+            buckets[exp] = []
+        buckets[exp].append(c)
+
+    if not buckets:
+        return None
+
+    # Helper to get DTE diff
+    def get_dte_diff(exp_str):
+        try:
+            exp_dt = datetime.strptime(exp_str, "%Y-%m-%d").date()
+            return abs((exp_dt - datetime.now().date()).days - target_dte)
+        except ValueError:
+            return 9999
+
+    # Sort keys:
+    # 1. Count (descending) -> -len
+    # 2. DTE diff (ascending)
+    # 3. Expiry string (ascending)
+    sorted_expiries = sorted(
+        buckets.keys(),
+        key=lambda e: (-len(buckets[e]), get_dte_diff(e), e)
+    )
+
+    return sorted_expiries[0]
+
+def _filter_chain_by_expiry(chain: List[Dict[str, Any]], expiry: str) -> List[Dict[str, Any]]:
+    return [c for c in chain if c.get("expiration") == expiry]
+
+def _select_legs_from_chain(chain: List[Dict[str, Any]], leg_defs: List[Dict[str, Any]], current_price: float) -> tuple[List[Dict[str, Any]], float]:
+    legs = []
+    total_cost = 0.0
+
+    for leg_def in leg_defs:
+        target_delta = leg_def["delta_target"]
+        side = leg_def["side"]
+        op_type = leg_def["type"]
+
+        if op_type == "call":
+            filtered = [c for c in chain if c.get('type') == 'call']
+        else:
+            filtered = [c for c in chain if c.get('type') == 'put']
+
+        if not filtered: continue
+
+        # Find closest delta
+        has_delta = any('delta' in c and c['delta'] is not None for c in filtered)
+
+        if has_delta:
+            target_d = abs(target_delta)
+            # Safe access to delta, assuming it might be None
+            best_contract = min(filtered, key=lambda x: abs(abs(x.get('delta') or 0) - target_d))
+        else:
+            moneyness = 1.0
+            if op_type == 'call':
+                if target_delta > 0.5: moneyness = 0.95
+                elif target_delta < 0.5: moneyness = 1.05
+            else:
+                if target_delta > 0.5: moneyness = 1.05
+                elif target_delta < 0.5: moneyness = 0.95
+
+            target_k = current_price * moneyness
+            best_contract = min(filtered, key=lambda x: abs(x['strike'] - target_k))
+
+        premium = best_contract.get('price') or best_contract.get('close') or 0.0
+
+        legs.append({
+            "symbol": best_contract['ticker'],
+            "strike": best_contract['strike'],
+            "expiry": best_contract['expiration'],
+            "type": op_type,
+            "side": side,
+            "premium": premium,
+            "delta": best_contract.get('delta') or target_delta,
+            "gamma": best_contract.get('gamma') or 0.0,
+            "vega": best_contract.get('vega') or 0.0,
+            "theta": best_contract.get('theta') or 0.0
+        })
+
+        if side == "buy":
+            total_cost += premium
+        else:
+            total_cost -= premium
+
+    return legs, total_cost
+
 def _map_single_leg_strategy(leg: Dict[str, Any]) -> Optional[str]:
     """Maps scanner leg attributes to calculate_ev strategy types."""
     side = str(leg.get("side") or "").lower()
@@ -480,60 +575,21 @@ def scan_for_opportunities(
 
             if not chain: return None
 
-            legs = []
-            total_cost = 0.0
+            # Enforce shared expiry
+            expiry_selected = _select_expiry_bucket(chain, target_dte=35)
+            if not expiry_selected:
+                return None
+            chain = _filter_chain_by_expiry(chain, expiry_selected)
+
+            legs, total_cost = _select_legs_from_chain(chain, suggestion["legs"], current_price)
             total_ev = 0.0
 
-            # ... (Leg selection logic)
-            for leg_def in suggestion["legs"]:
-                    target_delta = leg_def["delta_target"]
-                    side = leg_def["side"]
-                    op_type = leg_def["type"]
-
-                    if op_type == "call":
-                        filtered = [c for c in chain if c['type'] == 'call']
-                    else:
-                        filtered = [c for c in chain if c['type'] == 'put']
-
-                    if not filtered: continue
-
-                    # Find closest delta
-                    has_delta = any('delta' in c and c['delta'] is not None for c in filtered)
-
-                    if has_delta:
-                        target_d = abs(target_delta)
-                        best_contract = min(filtered, key=lambda x: abs(abs(x.get('delta',0) or 0) - target_d))
-                    else:
-                        moneyness = 1.0
-                        if op_type == 'call':
-                            if target_delta > 0.5: moneyness = 0.95
-                            elif target_delta < 0.5: moneyness = 1.05
-                        else:
-                            if target_delta > 0.5: moneyness = 1.05
-                            elif target_delta < 0.5: moneyness = 0.95
-
-                        target_k = current_price * moneyness
-                        best_contract = min(filtered, key=lambda x: abs(x['strike'] - target_k))
-
-                    premium = best_contract.get('price') or best_contract.get('close') or 0.0
-
-                    legs.append({
-                        "symbol": best_contract['ticker'],
-                        "strike": best_contract['strike'],
-                        "expiry": best_contract['expiration'],
-                        "type": op_type,
-                        "side": side,
-                        "premium": premium,
-                        "delta": best_contract.get('delta') or target_delta,
-                        "gamma": best_contract.get('gamma') or 0.0,
-                        "vega": best_contract.get('vega') or 0.0,
-                        "theta": best_contract.get('theta') or 0.0
-                    })
-
-                    if side == "buy":
-                        total_cost += premium
-                    else:
-                        total_cost -= premium
+            # Validation: All legs must share the same expiry
+            expiries = {l.get("expiry") for l in legs if l.get("expiry")}
+            if len(expiries) > 1:
+                return None
+            if not legs:
+                return None
 
             # G. Compute Net EV & Risk Primitives
             max_loss_contract = 0.0

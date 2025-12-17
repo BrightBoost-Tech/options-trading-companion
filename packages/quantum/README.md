@@ -13,9 +13,15 @@ The backend implements strict security controls for authentication, task executi
 ### 2. Dev Auth Bypass
 - A "Test Mode" user (`X-Test-Mode-User`) is available **only** if:
     1. `APP_ENV` is NOT `production`.
-    2. `ENABLE_DEV_AUTH_BYPASS` is set to `1`.
+    2. `ENABLE_DEV_AUTH_BYPASS` is set to `1` in `packages/quantum/.env`.
     3. The request originates from `localhost`.
 - Ensure `NEXT_PUBLIC_ENABLE_DEV_AUTH_BYPASS=1` is set in the frontend `.env.local` to allow the UI to send the required `X-Test-Mode-User` header.
+
+**Verification:**
+Use the debug endpoint to check authentication status:
+```bash
+curl http://127.0.0.1:8000/__auth_debug
+```
 
 ### 3. Internal Tasks
 - Scheduled tasks (Morning Brief, Midday Scan) are hosted on `/internal/tasks/...`.

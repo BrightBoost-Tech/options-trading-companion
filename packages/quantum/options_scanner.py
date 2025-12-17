@@ -10,7 +10,7 @@ import concurrent.futures
 
 from packages.quantum.services.universe_service import UniverseService
 from packages.quantum.analytics.strategy_selector import StrategySelector
-from packages.quantum.ev_calculator import calculate_ev
+from packages.quantum.ev_calculator import calculate_ev, calculate_iron_condor_ev
 from packages.quantum.market_data import PolygonService
 from packages.quantum.analytics.regime_integration import map_market_regime
 from packages.quantum.services.iv_repository import IVRepository
@@ -121,6 +121,165 @@ def _select_legs_from_chain(chain: List[Dict[str, Any]], leg_defs: List[Dict[str
 
     return legs, total_cost
 
+def _select_iron_condor_legs(
+    chain: List[Dict[str, Any]],
+    current_price: float,
+    target_delta: float = 0.15
+) -> tuple[List[Dict[str, Any]], float]:
+    """
+    Selects 4 legs for an Iron Condor:
+    - Short Put (delta ~ -0.15)
+    - Long Put (Short Put Strike - width)
+    - Short Call (delta ~ 0.15)
+    - Long Call (Short Call Strike + width)
+
+    Width logic: 5.0 if price >= 50 else 2.5
+    Total Cost should be negative (Credit).
+    """
+    legs = []
+    total_cost = 0.0
+
+    # 1. Split chain
+    calls = [c for c in chain if c.get("type") == "call"]
+    puts = [c for c in chain if c.get("type") == "put"]
+
+    if not calls or not puts:
+        return [], 0.0
+
+    # 2. Select Shorts by Delta
+    # Target delta is usually ~0.15 (abs)
+    # Short Call: delta ~ 0.15
+    short_call = min(calls, key=lambda x: abs(abs(x.get("delta") or 0) - target_delta))
+    # Short Put: delta ~ -0.15
+    short_put = min(puts, key=lambda x: abs(abs(x.get("delta") or 0) - target_delta))
+
+    # 3. Determine Width
+    width = 5.0 if current_price >= 50.0 else 2.5
+
+    # 4. Select Longs by Strike
+    # Long Call: Strike > Short Call Strike
+    target_long_call_strike = short_call["strike"] + width
+    # Filter for strikes >= target (or just closest)
+    # Ideally strictly > short strike
+    valid_long_calls = [c for c in calls if c["strike"] > short_call["strike"]]
+    if not valid_long_calls:
+        # Fallback to just closest if no strictly greater exists (unlikely if chain is deep)
+        long_call = min(calls, key=lambda x: abs(x["strike"] - target_long_call_strike))
+    else:
+        long_call = min(valid_long_calls, key=lambda x: abs(x["strike"] - target_long_call_strike))
+
+    # Long Put: Strike < Short Put Strike
+    target_long_put_strike = short_put["strike"] - width
+    valid_long_puts = [c for c in puts if c["strike"] < short_put["strike"]]
+    if not valid_long_puts:
+        long_put = min(puts, key=lambda x: abs(x["strike"] - target_long_put_strike))
+    else:
+        long_put = min(valid_long_puts, key=lambda x: abs(x["strike"] - target_long_put_strike))
+
+    # Check that we didn't pick the same strike (should be handled by valid_ filters but verify)
+    if long_call["strike"] <= short_call["strike"] or long_put["strike"] >= short_put["strike"]:
+        # Failed to find appropriate wings
+        return [], 0.0
+
+    # 5. Build Legs List (Sell Shorts, Buy Longs)
+    # Order: Short Put, Long Put, Short Call, Long Call (or any consistent order)
+    # Let's do: Sell Put, Buy Put, Sell Call, Buy Call
+
+    selected_contracts = [
+        (short_put, "sell"),
+        (long_put, "buy"),
+        (short_call, "sell"),
+        (long_call, "buy")
+    ]
+
+    for contract, side in selected_contracts:
+        # Use mid from bid/ask if available, otherwise 'price'/'close'
+        bid = contract.get("bid")
+        ask = contract.get("ask")
+        mid_calc = None
+        if bid is not None and ask is not None and ask >= bid:
+            mid_calc = (float(bid) + float(ask)) / 2.0
+
+        premium = mid_calc if mid_calc is not None else (contract.get("price") or contract.get("close") or 0.0)
+
+        leg = {
+            "symbol": contract['ticker'],
+            "strike": contract['strike'],
+            "expiry": contract['expiration'],
+            "type": contract['type'],
+            "side": side,
+            "premium": premium,
+            "delta": contract.get('delta') or 0.0,
+            "gamma": contract.get('gamma') or 0.0,
+            "vega": contract.get('vega') or 0.0,
+            "theta": contract.get('theta') or 0.0,
+            # Pass through bid/ask for width calculation later
+            "bid": contract.get("bid"),
+            "ask": contract.get("ask"),
+            "mid": premium
+        }
+        legs.append(leg)
+
+        if side == "buy":
+            total_cost += premium
+        else:
+            total_cost -= premium
+
+    return legs, total_cost
+
+def _validate_iron_condor_invariants(legs: List[Dict[str, Any]]) -> bool:
+    """
+    Validates Iron Condor invariants:
+    1. 4 unique legs
+    2. Shared expiry
+    3. Correct types and sides
+    4. Strict strike ordering: Long Put < Short Put < Short Call < Long Call
+    """
+    if len(legs) != 4:
+        return False
+
+    symbols = {l["symbol"] for l in legs}
+    if len(symbols) != 4:
+        return False
+
+    expiries = {l["expiry"] for l in legs}
+    if len(expiries) != 1:
+        return False
+
+    # Categorize
+    calls = sorted([l for l in legs if l["type"] == "call"], key=lambda x: x["strike"])
+    puts = sorted([l for l in legs if l["type"] == "put"], key=lambda x: x["strike"])
+
+    if len(calls) != 2 or len(puts) != 2:
+        return False
+
+    # Check Calls: Short (lower k) < Long (higher k)
+    # Short Call should be SELL, Long Call should be BUY
+    short_call = calls[0]
+    long_call = calls[1]
+
+    if short_call["side"] != "sell" or long_call["side"] != "buy":
+        return False
+    if not (short_call["strike"] < long_call["strike"]): # Strict inequality already from sort if unique, but check
+        return False
+
+    # Check Puts: Long (lower k) < Short (higher k)
+    # Long Put should be BUY, Short Put should be SELL
+    long_put = puts[0]
+    short_put = puts[1]
+
+    if long_put["side"] != "buy" or short_put["side"] != "sell":
+        return False
+    if not (long_put["strike"] < short_put["strike"]):
+        return False
+
+    # Check Put Wing < Call Wing (Strict ordering of wings)
+    # Short Put < Short Call
+    if not (short_put["strike"] < short_call["strike"]):
+        return False
+
+    return True
+
 def _map_single_leg_strategy(leg: Dict[str, Any]) -> Optional[str]:
     """Maps scanner leg attributes to calculate_ev strategy types."""
     side = str(leg.get("side") or "").lower()
@@ -189,6 +348,39 @@ def _compute_risk_primitives_usd(legs: List[Dict[str, Any]], total_cost: float, 
                 max_loss = max(0.0, (width - credit)) * 100.0
                 max_profit = credit * 100.0
                 collateral_required = width * 100.0 # Margin is usually the width
+
+    elif len(legs) == 4:
+        # Iron Condor Risk Primitives
+        # Expecting negative total_cost (Credit)
+        credit_share = abs(total_cost) if total_cost < 0 else 0.0
+
+        # Identify legs
+        calls = [l for l in legs if l["type"] == "call"]
+        puts = [l for l in legs if l["type"] == "put"]
+
+        if len(calls) == 2 and len(puts) == 2:
+            # Sort by strike
+            calls.sort(key=lambda x: x["strike"]) # Short Call is lower strike, Long Call is higher
+            puts.sort(key=lambda x: x["strike"])  # Long Put is lower strike, Short Put is higher
+
+            # Call Spread: Short (lower k) - Long (higher k)
+            short_call = calls[0] # Should be the short one
+            long_call = calls[1]
+
+            # Put Spread: Short (higher k) - Long (lower k)
+            long_put = puts[0]
+            short_put = puts[1] # Should be the short one
+
+            # Verify sides if possible, but strike logic is robust for standard condors
+
+            width_call = abs(long_call["strike"] - short_call["strike"])
+            width_put = abs(short_put["strike"] - long_put["strike"])
+
+            width_max = max(width_call, width_put)
+
+            max_profit = credit_share * 100.0
+            max_loss = max(0.0, (width_max - credit_share)) * 100.0
+            collateral_required = width_max * 100.0
 
     return {
         "max_loss_per_contract": max_loss,
@@ -577,7 +769,8 @@ def scan_for_opportunities(
             if not chain:
                 chain = market_data.get_option_chain(symbol, min_dte=25, max_dte=45)
 
-            if not chain: return None
+            if not chain:
+                return None
 
             # Enforce shared expiry
             expiry_selected = _select_expiry_bucket(chain, target_dte=35)
@@ -585,7 +778,42 @@ def scan_for_opportunities(
                 return None
             chain = _filter_chain_by_expiry(chain, expiry_selected)
 
-            legs, total_cost = _select_legs_from_chain(chain, suggestion["legs"], current_price)
+            # Normalize Strategy Key early
+            raw_strategy = suggestion["strategy"]
+            strategy_key = raw_strategy.lower().replace(" ", "_")
+
+            if "iron_condor" in strategy_key or "condor" in strategy_key:
+                # Specialized logic for Iron Condor
+                legs, total_cost = _select_iron_condor_legs(chain, current_price)
+                if not legs:
+                     return None
+
+                # Invariant Validation
+                if not _validate_iron_condor_invariants(legs):
+                    return None
+
+                # Sanity Checks
+                credit_share = abs(total_cost) if total_cost < 0 else 0.0
+                if credit_share <= 0:
+                    return None
+
+                # Width Check
+                calls = sorted([l for l in legs if l["type"] == "call"], key=lambda x: x["strike"])
+                puts = sorted([l for l in legs if l["type"] == "put"], key=lambda x: x["strike"])
+
+                width_call = abs(calls[1]["strike"] - calls[0]["strike"])
+                width_put = abs(puts[1]["strike"] - puts[0]["strike"])
+                width_max = max(width_call, width_put)
+
+                if credit_share >= width_max:
+                    # Credit cannot exceed width (no risk? impossible/arb)
+                    return None
+
+                if width_call <= 0 or width_put <= 0:
+                    return None
+            else:
+                legs, total_cost = _select_legs_from_chain(chain, suggestion["legs"], current_price)
+
             total_ev = 0.0
             ev_obj = None
 
@@ -608,9 +836,6 @@ def scan_for_opportunities(
             net_delta_contract = sum((l['delta'] if l['side']=='buy' else -l['delta']) for l in legs) * 100
             net_vega_contract = sum((l['vega'] if l['side']=='buy' else -l['vega']) for l in legs) * 100
 
-            # Normalize Strategy Key
-            raw_strategy = suggestion["strategy"]
-            strategy_key = raw_strategy.lower().replace(" ", "_")
             pricing_mode = "exact"
             data_quality = "realtime"
 
@@ -620,7 +845,45 @@ def scan_for_opportunities(
                  pricing_mode = "approximate"
 
             # EV Calculation
-            if len(legs) == 2:
+            if len(legs) == 4 and ("condor" in strategy_key or "iron_condor" in strategy_key):
+                 # Iron Condor EV
+                 credit_share = abs(total_cost)
+
+                 # Identify legs for EV params
+                 calls = sorted([l for l in legs if l["type"] == "call"], key=lambda x: x["strike"])
+                 puts = sorted([l for l in legs if l["type"] == "put"], key=lambda x: x["strike"])
+
+                 if len(calls) == 2 and len(puts) == 2:
+                     # Short Call is lower strike (for call spread side logic in Condor? No wait.)
+                     # Iron Condor:
+                     # Sell Put (Higher K), Buy Put (Lower K)
+                     # Sell Call (Lower K), Buy Call (Higher K)
+                     # Wait, standard Iron Condor:
+                     # Strikes: Long Put < Short Put < Short Call < Long Call
+
+                     # calls[0] is Short Call (Lower K), calls[1] is Long Call (Higher K)
+                     short_call = calls[0]
+                     long_call = calls[1]
+
+                     # puts[0] is Long Put (Lower K), puts[1] is Short Put (Higher K)
+                     long_put = puts[0]
+                     short_put = puts[1]
+
+                     width_put = abs(short_put["strike"] - long_put["strike"])
+                     width_call = abs(long_call["strike"] - short_call["strike"])
+
+                     ev_obj = calculate_iron_condor_ev(
+                        credit_share=credit_share,
+                        width_put_share=width_put,
+                        width_call_share=width_call,
+                        delta_short_put=short_put["delta"], # Should be neg
+                        delta_short_call=short_call["delta"] # Should be pos
+                     )
+                     total_ev = ev_obj.expected_value
+                 else:
+                     total_ev = 0.0
+
+            elif len(legs) == 2:
                 long_leg = next((l for l in legs if l['side'] == 'buy'), None)
                 short_leg = next((l for l in legs if l['side'] == 'sell'), None)
                 if long_leg and short_leg:
@@ -774,7 +1037,7 @@ def scan_for_opportunities(
                 "suggested_entry": abs(total_cost),
                 "ev": total_ev,
                 "score": round(unified_score.score, 1),
-                "unified_score_details": unified_score.components.dict(),
+                "unified_score_details": unified_score.components.model_dump(),
                 "iv_rank": iv_rank,
                 "trend": trend,
                 "legs": legs,
@@ -782,7 +1045,7 @@ def scan_for_opportunities(
                 "execution_drag_estimate": expected_execution_cost,
                 "execution_drag_samples": cost_details["execution_cost_samples_used"],
                 "execution_drag_source": cost_details["execution_drag_source"],
-                "execution_cost_source_used": cost_details["execution_cost_source_used"],
+                "execution_cost_source_used": cost_details["execution_cost_samples_used"],
                 "execution_cost_samples_used": cost_details["execution_cost_samples_used"],
                 # Risk Primitives
                 "max_loss_per_contract": max_loss_contract,

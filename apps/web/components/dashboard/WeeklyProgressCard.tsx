@@ -57,7 +57,7 @@ export function WeeklyProgressCard() {
         load();
     }, []);
 
-    if (loading) return <div className="animate-pulse h-48 bg-gray-100 rounded-lg"></div>;
+    if (loading) return <div className="animate-pulse h-48 bg-muted rounded-lg"></div>;
 
     if (error) return null; // Hide on error for minimal intrusion
 
@@ -76,7 +76,7 @@ export function WeeklyProgressCard() {
     const headline = synthesis?.headline || "No data available";
 
     return (
-        <Card className="bg-gradient-to-br from-white to-gray-50 border-l-4 border-l-blue-500">
+        <Card className="bg-gradient-to-br from-card to-background border-l-4 border-l-blue-500">
             <CardHeader className="pb-2">
                 <div className="flex justify-between items-start">
                     <div>
@@ -85,7 +85,7 @@ export function WeeklyProgressCard() {
                         </CardTitle>
                         <CardDescription>{headline}</CardDescription>
                     </div>
-                    <Badge className={dominant_regime === 'Neutral' ? 'bg-gray-500' : 'bg-purple-600'}>
+                    <Badge className={dominant_regime === 'Neutral' ? 'bg-muted-foreground' : 'bg-purple-600'}>
                         {dominant_regime} Regime
                     </Badge>
                 </div>
@@ -94,15 +94,15 @@ export function WeeklyProgressCard() {
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-6 mt-4">
                     {/* User Metrics */}
                     <div className="space-y-3">
-                        <h4 className="text-sm font-semibold text-gray-500 uppercase tracking-wider">Pilot Performance</h4>
+                        <h4 className="text-sm font-semibold text-muted-foreground uppercase tracking-wider">Pilot Performance</h4>
                         <div className="flex justify-between items-center">
-                            <span className="text-2xl font-bold text-gray-900">{user_metrics.overall_score.toFixed(0)}</span>
-                            <span className="text-xs text-gray-500">Overall Score</span>
+                            <span className="text-2xl font-bold text-foreground">{user_metrics.overall_score.toFixed(0)}</span>
+                            <span className="text-xs text-muted-foreground">Overall Score</span>
                         </div>
                         <div className="space-y-2">
                             {Object.entries(user_metrics.components).map(([key, metric]: [string, any]) => (
                                 <div key={key} className="flex justify-between text-sm">
-                                    <span className="text-gray-600">{metric.label}</span>
+                                    <span className="text-muted-foreground">{metric.label}</span>
                                     <span className="font-medium">{(metric.value * 100).toFixed(0)}%</span>
                                 </div>
                             ))}
@@ -111,15 +111,15 @@ export function WeeklyProgressCard() {
 
                     {/* System Metrics */}
                     <div className="space-y-3 md:border-l md:pl-6">
-                        <h4 className="text-sm font-semibold text-gray-500 uppercase tracking-wider">Engine Accuracy</h4>
+                        <h4 className="text-sm font-semibold text-muted-foreground uppercase tracking-wider">Engine Accuracy</h4>
                         <div className="flex justify-between items-center">
                             <span className="text-2xl font-bold text-purple-900">{system_metrics.overall_quality.toFixed(0)}</span>
-                            <span className="text-xs text-gray-500">Quality Score</span>
+                            <span className="text-xs text-muted-foreground">Quality Score</span>
                         </div>
                          <div className="space-y-2">
                             {Object.entries(system_metrics.components).map(([key, metric]: [string, any]) => (
                                 <div key={key} className="flex justify-between text-sm">
-                                    <span className="text-gray-600">{metric.label}</span>
+                                    <span className="text-muted-foreground">{metric.label}</span>
                                     <span className="font-medium">{(metric.value * 100).toFixed(0)}%</span>
                                 </div>
                             ))}

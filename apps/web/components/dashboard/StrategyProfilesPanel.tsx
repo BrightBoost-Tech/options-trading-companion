@@ -167,7 +167,7 @@ export default function StrategyProfilesPanel() {
       <div className="flex flex-col md:flex-row gap-6">
         {/* Sidebar List */}
         <div className="w-full md:w-1/4 space-y-2">
-           <h3 className="font-semibold text-gray-500 uppercase text-xs mb-2">Available Profiles</h3>
+           <h3 className="font-semibold text-muted-foreground uppercase text-xs mb-2">Available Profiles</h3>
            {strategies.map(s => (
              <button
                key={s.name}
@@ -175,11 +175,11 @@ export default function StrategyProfilesPanel() {
                className={`w-full text-left px-4 py-3 rounded-lg border transition-colors ${
                  selectedStrategy?.name === s.name
                  ? 'bg-indigo-50 border-indigo-200 text-indigo-900 dark:bg-indigo-900/20 dark:border-indigo-800 dark:text-indigo-100'
-                 : 'bg-white border-gray-100 hover:bg-gray-50 dark:bg-zinc-800 dark:border-zinc-700 dark:hover:bg-zinc-700'
+                 : 'bg-card border-border hover:bg-muted/50'
                }`}
              >
                <div className="font-medium">{s.name}</div>
-               <div className="text-xs text-gray-500 mt-1 truncate">{s.description}</div>
+               <div className="text-xs text-muted-foreground mt-1 truncate">{s.description}</div>
              </button>
            ))}
            <Button variant="outline" className="w-full mt-4 text-xs">
@@ -188,13 +188,13 @@ export default function StrategyProfilesPanel() {
         </div>
 
         {/* Main Editor Area */}
-        <div className="flex-1 bg-white dark:bg-zinc-900 rounded-lg shadow border dark:border-zinc-800 p-6">
+        <div className="flex-1 bg-card dark:bg-card rounded-lg shadow border border-border p-6">
           {selectedStrategy ? (
             <div className="space-y-6">
                <div className="flex justify-between items-start">
                  <div>
-                    <h2 className="text-2xl font-bold text-gray-900 dark:text-gray-100">{selectedStrategy.name}</h2>
-                    <p className="text-gray-500">{selectedStrategy.description}</p>
+                    <h2 className="text-2xl font-bold text-foreground">{selectedStrategy.name}</h2>
+                    <p className="text-muted-foreground">{selectedStrategy.description}</p>
                  </div>
                  <div className="flex gap-2">
                     <Button variant="outline" size="sm" onClick={triggerBatchSim}>
@@ -220,7 +220,7 @@ export default function StrategyProfilesPanel() {
                         </Button>
                      </div>
                      <textarea
-                        className="w-full h-[300px] font-mono text-sm p-4 bg-gray-50 dark:bg-zinc-950 border rounded-lg focus:ring-2 focus:ring-indigo-500 outline-none"
+                        className="w-full h-[300px] font-mono text-sm p-4 bg-muted/30 border border-border rounded-lg focus:ring-2 focus:ring-indigo-500 outline-none text-foreground"
                         value={editingConfig}
                         onChange={(e) => setEditingConfig(e.target.value)}
                      />
@@ -231,14 +231,14 @@ export default function StrategyProfilesPanel() {
                      <h3 className="text-sm font-medium flex items-center gap-2">
                         <Clock className="w-4 h-4" /> Recent Backtests
                      </h3>
-                     <div className="bg-gray-50 dark:bg-zinc-950 rounded-lg border h-[300px] overflow-y-auto">
+                     <div className="bg-muted/30 rounded-lg border border-border h-[300px] overflow-y-auto">
                         {btLoading ? (
-                            <div className="p-8 text-center text-sm text-gray-500">Loading history...</div>
+                            <div className="p-8 text-center text-sm text-muted-foreground">Loading history...</div>
                         ) : backtests.length === 0 ? (
-                            <div className="p-8 text-center text-sm text-gray-500">No backtests run yet.</div>
+                            <div className="p-8 text-center text-sm text-muted-foreground">No backtests run yet.</div>
                         ) : (
                             <table className="w-full text-sm text-left">
-                                <thead className="bg-gray-100 dark:bg-zinc-900 text-xs uppercase text-gray-500 sticky top-0">
+                                <thead className="bg-muted text-xs uppercase text-muted-foreground sticky top-0">
                                     <tr>
                                         <th className="px-4 py-2">Date</th>
                                         <th className="px-4 py-2">Return</th>
@@ -246,9 +246,9 @@ export default function StrategyProfilesPanel() {
                                         <th className="px-4 py-2">Win Rate</th>
                                     </tr>
                                 </thead>
-                                <tbody className="divide-y divide-gray-100 dark:divide-zinc-800">
+                                <tbody className="divide-y divide-border">
                                     {backtests.map(bt => (
-                                        <tr key={bt.id} className="hover:bg-gray-100 dark:hover:bg-zinc-800 cursor-pointer" onClick={() => setExpandedRow(expandedRow === bt.id ? null : bt.id)}>
+                                        <tr key={bt.id} className="hover:bg-muted/50 cursor-pointer" onClick={() => setExpandedRow(expandedRow === bt.id ? null : bt.id)}>
                                             <td className="px-4 py-2">{new Date(bt.created_at).toLocaleDateString()}</td>
                                             <td className={`px-4 py-2 font-medium ${bt.total_return >= 0 ? 'text-green-600' : 'text-red-600'}`}>
                                                 {(bt.total_return * 100).toFixed(1)}%
@@ -265,7 +265,7 @@ export default function StrategyProfilesPanel() {
                </div>
             </div>
           ) : (
-            <div className="h-full flex items-center justify-center text-gray-400">
+            <div className="h-full flex items-center justify-center text-muted-foreground">
                Select a profile to edit
             </div>
           )}

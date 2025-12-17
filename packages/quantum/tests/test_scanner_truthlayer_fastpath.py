@@ -33,6 +33,7 @@ def test_scanner_uses_truthlayer_fastpath():
 
     mock_bars = [{"date": "2024-01-01", "close": 100.0 + i} for i in range(60)] # Rising trend
 
+    # Use tight spreads to pass liquidity guardrail (spread/cost < 10%)
     mock_chain_item = {
         "contract": "O:AAPL240621C00150000",
         "ticker": "O:AAPL240621C00150000",
@@ -43,7 +44,7 @@ def test_scanner_uses_truthlayer_fastpath():
         "right": "call",
         "contract_type": "call",
         "type": "call",
-        "quote": {"bid": 4.9, "ask": 5.1, "mid": 5.0, "last": 5.0},
+        "quote": {"bid": 4.95, "ask": 5.05, "mid": 5.0, "last": 5.0},
         "greeks": {
             "delta": 0.5,
             "gamma": 0.05,
@@ -54,7 +55,13 @@ def test_scanner_uses_truthlayer_fastpath():
 
     mock_chain = [
         mock_chain_item,
-        {**mock_chain_item, "strike": 155.0, "greeks": {"delta": 0.3, "gamma": 0.04, "vega": 0.1, "theta": -0.05}, "quote": {"bid": 1.9, "ask": 2.1, "mid": 2.0, "last": 2.0}, "contract": "O:AAPL240621C00155000"}
+        {
+            **mock_chain_item,
+            "strike": 155.0,
+            "greeks": {"delta": 0.3, "gamma": 0.04, "vega": 0.1, "theta": -0.05},
+            "quote": {"bid": 1.95, "ask": 2.05, "mid": 2.0, "last": 2.0},
+            "contract": "O:AAPL240621C00155000"
+        }
     ]
 
     # 2. Patch dependencies
@@ -110,16 +117,7 @@ def test_scanner_uses_truthlayer_fastpath():
         with patch("packages.quantum.options_scanner.datetime") as mock_datetime:
             mock_datetime.now.return_value = datetime(2024, 5, 15)
             mock_datetime.strptime = datetime.strptime
-            # Avoid overwriting timedelta if it's imported
-            # mock_datetime is the Mock object replacing 'packages.quantum.options_scanner.datetime'
-            # We must ensure 'timedelta' is available if options_scanner uses it via 'datetime.timedelta'
-            # OR 'from datetime import timedelta'.
-            # The file does: 'from datetime import datetime, timedelta, timezone'
-            # So patching 'packages.quantum.options_scanner.datetime' ONLY patches the 'datetime' class/module reference?
-            # Actually, the file imports 'datetime' class from 'datetime' module.
-            # So patching 'packages.quantum.options_scanner.datetime' patches the class.
-            # 'timedelta' is imported separately, so it remains unaffected.
-            # But the 'datetime' class is used.
+            # Ensure timedelta is available
 
             candidates = scan_for_opportunities(symbols=mock_symbols)
 
@@ -133,7 +131,13 @@ def test_scanner_uses_truthlayer_fastpath():
         # Verify TruthLayer usage
         truth_instance.snapshot_many.assert_any_call(mock_symbols)
         truth_instance.daily_bars.assert_called()
+
+        # Verify option_chain was called with some args (we added args, so assert_called is safe)
         truth_instance.option_chain.assert_called()
+
+        # Optional: Verify new args are passed
+        # call_args = truth_instance.option_chain.call_args
+        # assert "min_expiry" in call_args[1]
 
         # Verify PolygonService avoidance
         poly_instance.get_recent_quote.assert_not_called()

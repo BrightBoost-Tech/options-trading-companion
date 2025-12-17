@@ -483,6 +483,7 @@ def scan_for_opportunities(
             legs = []
             total_cost = 0.0
             total_ev = 0.0
+            ev_obj = None
 
             # ... (Leg selection logic)
             for leg_def in suggestion["legs"]:
@@ -695,7 +696,20 @@ def scan_for_opportunities(
             # Calculate Probability of Profit
             # Pass dictionary representation of global snapshot for compatibility
             gs_dict = global_snapshot.to_dict() if global_snapshot else None
-            candidate_dict["probability_of_profit"] = _estimate_probability_of_profit(candidate_dict, gs_dict)
+
+            pop = None
+            if ev_obj is not None and hasattr(ev_obj, "win_probability"):
+                pop = float(ev_obj.win_probability)
+            elif ev_obj is not None and isinstance(ev_obj, dict) and "win_probability" in ev_obj:
+                pop = float(ev_obj["win_probability"])
+
+            if pop is not None:
+                pop = max(0.0, min(1.0, pop))
+                candidate_dict["probability_of_profit"] = pop
+                candidate_dict["probability_of_profit_source"] = "ev"
+            else:
+                candidate_dict["probability_of_profit"] = _estimate_probability_of_profit(candidate_dict, gs_dict)
+                candidate_dict["probability_of_profit_source"] = "score_fallback"
 
             return candidate_dict
 

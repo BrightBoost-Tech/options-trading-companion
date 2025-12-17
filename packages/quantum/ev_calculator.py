@@ -42,44 +42,16 @@ def calculate_iron_condor_ev(
 ) -> EVResult:
     """
     Calculates EV for an Iron Condor using a delta-tail approximation.
+    Wraps canonical calculate_condor_ev.
     """
-    # Clamp deltas to [0, 1] just in case
-    p_loss_put = max(0.0, min(1.0, abs(delta_short_put)))
-    p_loss_call = max(0.0, min(1.0, abs(delta_short_call)))
-
-    # Disjoint approximation for total probability of loss
-    p_loss = max(0.0, min(1.0, p_loss_put + p_loss_call))
-    p_win = 1.0 - p_loss
-
-    profit = credit_share * 100.0
-    loss_put = max(0.0, (width_put_share - credit_share)) * 100.0
-    loss_call = max(0.0, (width_call_share - credit_share)) * 100.0
-
-    max_loss_val = max(loss_put, loss_call)
-    ev = (p_win * profit) - (p_loss_put * loss_put) - (p_loss_call * loss_call)
-
-    # Ensure finiteness
-    if not math.isfinite(ev):
-        ev = 0.0
-    if not math.isfinite(profit):
-        profit = 0.0
-    if not math.isfinite(max_loss_val):
-        max_loss_val = 0.0
-
-    risk_reward = None
-    if max_loss_val > 0 and profit > 0:
-        risk_reward = max_loss_val / profit
-
-    return EVResult(
-        expected_value=ev,
-        max_gain=profit,
-        max_loss=max_loss_val,
-        win_probability=p_win,
-        loss_probability=p_loss,
-        trade_cost=-profit,  # Credit trade, cost is negative
-        risk_reward_ratio=risk_reward,
-        breakeven_price=0.0 # Not used/simple for condor
+    return calculate_condor_ev(
+        credit=credit_share,
+        width_put=width_put_share,
+        width_call=width_call_share,
+        delta_short_put=delta_short_put,
+        delta_short_call=delta_short_call
     )
+
 
 def calculate_ev(
     premium: float,
@@ -104,6 +76,9 @@ def calculate_ev(
     breakeven = None
 
     capped_trade = False
+
+    if strategy == "iron_condor":
+        raise ValueError("iron_condor is not supported by calculate_ev(); use calculate_condor_ev/calculate_iron_condor_ev instead")
 
     if strategy == "long_call":
         max_loss = premium * 100
@@ -135,9 +110,9 @@ def calculate_ev(
         win_prob, loss_prob = loss_prob, win_prob
         breakeven = strike - premium
 
-    elif strategy in ["credit_spread", "debit_spread", "iron_condor"]:
+    elif strategy in ["credit_spread", "debit_spread"]:
         if width is None:
-            raise ValueError("`width` is required for spread and condor strategies.")
+            raise ValueError("`width` is required for spread strategies.")
 
         if strategy == "credit_spread":
             max_gain = premium * 100
@@ -149,14 +124,6 @@ def calculate_ev(
             max_gain = (width - premium) * 100
             max_loss = premium * 100
             trade_cost = premium * 100
-
-        elif strategy == "iron_condor":
-            # NOTE: For advanced Iron Condor EV, use calculate_iron_condor_ev directly.
-            # This block is a fallback for simplified calls.
-            max_gain = premium * 100
-            max_loss = (width - premium) * 100
-            trade_cost = -premium * 100
-            win_prob = delta * 2 # Simplified approximation for condors
 
     else:
          raise NotImplementedError(f"Strategy '{strategy}' not yet implemented.")

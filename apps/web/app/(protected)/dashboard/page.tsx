@@ -16,7 +16,7 @@ import PaperPortfolioWidget from '@/components/dashboard/PaperPortfolioWidget';
 import { fetchWithAuth, fetchWithAuthTimeout } from '@/lib/api';
 import { QuantumTooltip } from "@/components/ui/QuantumTooltip";
 import { ThemeToggle } from '@/components/ThemeToggle';
-import { AlertTriangle, Wallet } from 'lucide-react';
+import { AlertTriangle, Wallet, Loader2 } from 'lucide-react';
 
 const mockAlerts = [
   { id: '1', message: 'SPY credit put spread scout: 475/470 for $1.50 credit', time: '2 min ago' },
@@ -54,6 +54,7 @@ export default function DashboardPage() {
   const [simResult, setSimResult] = useState<any>(null);
   const [simLoading, setSimLoading] = useState(false);
   const [simMode, setSimMode] = useState<'deterministic' | 'random'>('deterministic');
+  const [workflowsRunning, setWorkflowsRunning] = useState(false);
 
   // Load data with staged execution
   useEffect(() => {
@@ -173,6 +174,7 @@ export default function DashboardPage() {
   };
 
   const runAllWorkflows = async () => {
+    setWorkflowsRunning(true);
     try {
       await fetchWithAuthTimeout('/tasks/run-all', 30000, {
         method: 'POST',
@@ -187,6 +189,8 @@ export default function DashboardPage() {
     } catch (err: any) {
       if (isAbortError(err)) return;
       console.error('Failed to run workflows', err);
+    } finally {
+      setWorkflowsRunning(false);
     }
   };
 
@@ -268,9 +272,11 @@ export default function DashboardPage() {
                   </a>
                   <button
                     onClick={runAllWorkflows}
-                    className="text-xs px-3 py-1 rounded border border-purple-200 text-purple-700 hover:bg-purple-50 dark:border-purple-800 dark:text-purple-300 dark:hover:bg-purple-900"
+                    disabled={workflowsRunning}
+                    className="text-xs px-3 py-1 rounded border border-purple-200 text-purple-700 hover:bg-purple-50 dark:border-purple-800 dark:text-purple-300 dark:hover:bg-purple-900 disabled:opacity-50 disabled:cursor-wait inline-flex items-center gap-1.5"
                   >
-                    Generate Suggestions (Dev)
+                    {workflowsRunning && <Loader2 className="w-3 h-3 animate-spin" />}
+                    {workflowsRunning ? 'Generating...' : 'Generate Suggestions (Dev)'}
                   </button>
                 </div>
               </div>
@@ -334,12 +340,14 @@ export default function DashboardPage() {
                     <div className="flex items-center gap-2 bg-gray-50 dark:bg-zinc-800 p-1 rounded-lg border border-gray-200 dark:border-zinc-700">
                          <button
                             onClick={() => setSimMode('deterministic')}
+                            aria-pressed={simMode === 'deterministic'}
                             className={`px-3 py-1 text-xs font-medium rounded transition-colors ${simMode === 'deterministic' ? 'bg-white dark:bg-zinc-700 text-indigo-700 dark:text-indigo-300 shadow-sm border border-gray-200 dark:border-zinc-600' : 'text-gray-500 hover:text-gray-300'}`}
                          >
                             Deterministic
                          </button>
                          <button
                             onClick={() => setSimMode('random')}
+                            aria-pressed={simMode === 'random'}
                             className={`px-3 py-1 text-xs font-medium rounded transition-colors ${simMode === 'random' ? 'bg-white dark:bg-zinc-700 text-indigo-700 dark:text-indigo-300 shadow-sm border border-gray-200 dark:border-zinc-600' : 'text-gray-500 hover:text-gray-300'}`}
                          >
                             Random

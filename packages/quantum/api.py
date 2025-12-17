@@ -30,6 +30,10 @@ from packages.quantum.security.config import validate_security_config
 from packages.quantum.security.secrets_provider import SecretsProvider
 
 # Validate Security Config on Startup
+if os.getenv("ENABLE_DEV_AUTH_BYPASS") == "1":
+    print("🔓 DEV AUTH BYPASS ENABLED (expected for local dev only)")
+else:
+    print("🔒 DEV AUTH BYPASS DISABLED (expected for prod)")
 validate_security_config()
 
 # Import models and services
@@ -84,6 +88,31 @@ app = FastAPI(
 @app.get("/__whoami")
 def __whoami():
     return {"server": "packages.quantum.api", "version": APP_VERSION}
+
+
+@app.get("/health")
+def health_check():
+    return {"status": "ok", "app_env": os.getenv("APP_ENV")}
+
+
+@app.get("/__auth_debug")
+def auth_debug(request: Request, user_id: str = Depends(get_current_user)):
+    """
+    Dev-only endpoint to debug authentication resolution.
+    Rejects in production.
+    """
+    app_env = os.getenv("APP_ENV", "development")
+    if app_env == "production":
+        raise HTTPException(status_code=403, detail="Forbidden in production")
+
+    return {
+        "app_env": app_env,
+        "enable_dev_auth_bypass": os.getenv("ENABLE_DEV_AUTH_BYPASS"),
+        "has_authorization_header": "Authorization" in request.headers,
+        "has_x_test_mode_user": "X-Test-Mode-User" in request.headers,
+        "resolved_user_id": user_id,
+        "is_localhost": request.client.host in ("127.0.0.1", "::1", "localhost") if request.client else False
+    }
 
 # Initialize Limiter
 limiter = Limiter(key_func=get_remote_address)

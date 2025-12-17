@@ -243,6 +243,8 @@ class MarketDataTruthLayer:
 
     def option_chain(self, underlying: str, *,
                      expiration_date: Optional[str] = None,
+                     min_expiry: Optional[str] = None,
+                     max_expiry: Optional[str] = None,
                      strike_range: Optional[float] = None,
                      right: Optional[str] = None) -> List[Dict]:
         """
@@ -250,7 +252,7 @@ class MarketDataTruthLayer:
         Returns a list of canonical option objects.
         """
         # 1. Check Cache
-        cache_key = f"{underlying}_{expiration_date}_{right}"
+        cache_key = f"{underlying}_{expiration_date}_{min_expiry}_{max_expiry}_{right}"
         cached = self.cache.get("option_chain", cache_key)
         if cached:
             return cached
@@ -262,6 +264,12 @@ class MarketDataTruthLayer:
 
         if expiration_date:
             params["expiration_date"] = expiration_date
+        elif min_expiry or max_expiry:
+             if min_expiry:
+                 params["expiration_date.gte"] = min_expiry
+             if max_expiry:
+                 params["expiration_date.lte"] = max_expiry
+
         if right:
             # right should be 'call' or 'put'
             params["contract_type"] = right.lower()

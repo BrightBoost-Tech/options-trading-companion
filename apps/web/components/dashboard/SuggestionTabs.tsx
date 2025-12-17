@@ -71,7 +71,7 @@ export default function SuggestionTabs({
           className={`flex-1 py-4 px-2 min-w-[120px] text-sm font-medium text-center border-b-2 transition-colors whitespace-nowrap ${
             activeTab === 'morning'
               ? 'border-orange-500 text-orange-600 dark:text-orange-400 bg-orange-50/50 dark:bg-orange-900/10'
-              : 'border-transparent text-muted-foreground hover:text-foreground'
+              : 'border-transparent text-muted-foreground hover:text-foreground hover:bg-muted/50'
           }`}
         >
           <div className="flex items-center justify-center gap-2">
@@ -90,7 +90,7 @@ export default function SuggestionTabs({
           className={`flex-1 py-4 px-2 min-w-[120px] text-sm font-medium text-center border-b-2 transition-colors whitespace-nowrap ${
             activeTab === 'midday'
               ? 'border-blue-500 text-blue-600 dark:text-blue-400 bg-blue-50/50 dark:bg-blue-900/10'
-              : 'border-transparent text-muted-foreground hover:text-foreground'
+              : 'border-transparent text-muted-foreground hover:text-foreground hover:bg-muted/50'
           }`}
         >
           <div className="flex items-center justify-center gap-2">
@@ -109,7 +109,7 @@ export default function SuggestionTabs({
           className={`flex-1 py-4 px-2 min-w-[120px] text-sm font-medium text-center border-b-2 transition-colors whitespace-nowrap ${
             activeTab === 'rebalance'
               ? 'border-indigo-500 text-indigo-600 dark:text-indigo-400 bg-indigo-50/50 dark:bg-indigo-900/10'
-              : 'border-transparent text-muted-foreground hover:text-foreground'
+              : 'border-transparent text-muted-foreground hover:text-foreground hover:bg-muted/50'
           }`}
         >
           <div className="flex items-center justify-center gap-2">
@@ -128,7 +128,7 @@ export default function SuggestionTabs({
           className={`flex-1 py-4 px-2 min-w-[120px] text-sm font-medium text-center border-b-2 transition-colors whitespace-nowrap ${
             activeTab === 'scout'
               ? 'border-green-500 text-green-600 dark:text-green-400 bg-green-50/50 dark:bg-green-900/10'
-              : 'border-transparent text-muted-foreground hover:text-foreground'
+              : 'border-transparent text-muted-foreground hover:text-foreground hover:bg-muted/50'
           }`}
         >
           <div className="flex items-center justify-center gap-2">
@@ -147,7 +147,7 @@ export default function SuggestionTabs({
           className={`flex-1 py-4 px-2 min-w-[120px] text-sm font-medium text-center border-b-2 transition-colors whitespace-nowrap ${
             activeTab === 'journal'
               ? 'border-purple-500 text-purple-600 dark:text-purple-400 bg-purple-50/50 dark:bg-purple-900/10'
-              : 'border-transparent text-muted-foreground hover:text-foreground'
+              : 'border-transparent text-muted-foreground hover:text-foreground hover:bg-muted/50'
           }`}
         >
           <div className="flex items-center justify-center gap-2">
@@ -166,7 +166,7 @@ export default function SuggestionTabs({
           className={`flex-1 py-4 px-2 min-w-[120px] text-sm font-medium text-center border-b-2 transition-colors whitespace-nowrap ${
             activeTab === 'weekly'
               ? 'border-slate-500 text-slate-600 dark:text-slate-400 bg-slate-50/50 dark:bg-slate-900/10'
-              : 'border-transparent text-muted-foreground hover:text-foreground'
+              : 'border-transparent text-muted-foreground hover:text-foreground hover:bg-muted/50'
           }`}
         >
           <div className="flex items-center justify-center gap-2">

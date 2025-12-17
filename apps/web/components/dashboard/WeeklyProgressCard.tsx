@@ -75,6 +75,17 @@ export function WeeklyProgressCard() {
     const { user_metrics, system_metrics, synthesis, dominant_regime } = data;
     const headline = synthesis?.headline || "No data available";
 
+    if (!user_metrics || !system_metrics) {
+        return (
+             <Card>
+                <CardHeader>
+                    <CardTitle>Weekly Progress</CardTitle>
+                    <CardDescription>Data is incomplete.</CardDescription>
+                </CardHeader>
+            </Card>
+        );
+    }
+
     return (
         <Card className="bg-gradient-to-br from-card to-background border-l-4 border-l-blue-500">
             <CardHeader className="pb-2">
@@ -113,7 +124,7 @@ export function WeeklyProgressCard() {
                     <div className="space-y-3 md:border-l md:pl-6">
                         <h4 className="text-sm font-semibold text-muted-foreground uppercase tracking-wider">Engine Accuracy</h4>
                         <div className="flex justify-between items-center">
-                            <span className="text-2xl font-bold text-purple-900">{system_metrics.overall_quality.toFixed(0)}</span>
+                            <span className="text-2xl font-bold text-purple-900 dark:text-purple-300">{system_metrics.overall_quality.toFixed(0)}</span>
                             <span className="text-xs text-muted-foreground">Quality Score</span>
                         </div>
                          <div className="space-y-2">

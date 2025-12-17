@@ -234,7 +234,7 @@ export default function DashboardPage() {
         {/* DASHBOARD TITLE */}
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-2">
-            <h1 className="text-3xl font-bold text-gray-900 dark:text-gray-100">Dashboard</h1>
+            <h1 className="text-3xl font-bold text-foreground">Dashboard</h1>
             <QuantumTooltip
               content="Your command center for portfolio insights, AI-driven suggestions, and risk tracking."
             />
@@ -262,12 +262,12 @@ export default function DashboardPage() {
         {/* SECTION 1: POSITIONS & OPTIMIZER */}
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
           <div className="lg:col-span-2">
-            <div className="bg-white dark:bg-zinc-900 rounded-lg shadow overflow-hidden">
-              <div className="px-6 py-4 border-b dark:border-zinc-800 flex justify-between items-center">
-                <h2 className="text-xl font-semibold dark:text-gray-100">Positions</h2>
+            <div className="bg-card rounded-lg shadow overflow-hidden border border-border">
+              <div className="px-6 py-4 border-b border-border flex justify-between items-center">
+                <h2 className="text-xl font-semibold text-foreground">Positions</h2>
                 <div className="flex gap-2">
                   <SyncHoldingsButton onSyncComplete={loadSnapshot} />
-                  <a href="/paper" className="text-xs px-3 py-1 flex items-center rounded bg-blue-50 text-blue-700 hover:bg-blue-100 border border-blue-200 dark:bg-blue-900 dark:text-blue-100 dark:border-blue-800">
+                  <a href="/paper" className="text-xs px-3 py-1 flex items-center rounded bg-blue-50 text-blue-700 hover:bg-blue-100 border border-blue-200 dark:bg-blue-900/30 dark:text-blue-400 dark:border-blue-800">
                      <Wallet className="w-3 h-3 mr-1" /> Paper Portfolio
                   </a>
                   <button
@@ -330,14 +330,14 @@ export default function DashboardPage() {
         <StrategyProfilesPanel />
 
         {/* SECTION 1.5: HISTORICAL SIMULATION (Polished) */}
-        <div className="bg-white dark:bg-zinc-900 rounded-lg shadow p-6 border-l-4 border-indigo-500">
+        <div className="bg-card rounded-lg shadow p-6 border-l-4 border-indigo-500 border border-border border-l-0">
             <div className="flex justify-between items-center mb-4">
                 <div>
-                    <h2 className="text-lg font-bold text-gray-900 dark:text-gray-100">Historical Regime Cycle</h2>
-                    <p className="text-sm text-gray-500 dark:text-gray-400">Manual verification of regime transitions & strategy logic.</p>
+                    <h2 className="text-lg font-bold text-foreground">Historical Regime Cycle</h2>
+                    <p className="text-sm text-muted-foreground">Manual verification of regime transitions & strategy logic.</p>
                 </div>
                 <div className="flex items-center gap-4">
-                    <div className="flex items-center gap-2 bg-gray-50 dark:bg-zinc-800 p-1 rounded-lg border border-gray-200 dark:border-zinc-700">
+                    <div className="flex items-center gap-2 bg-muted p-1 rounded-lg border border-border">
                          <button
                             onClick={() => setSimMode('deterministic')}
                             aria-pressed={simMode === 'deterministic'}
@@ -355,7 +355,7 @@ export default function DashboardPage() {
                     </div>
 
                     {simMode === 'deterministic' && (
-                        <div className="text-sm text-gray-600 dark:text-gray-300 bg-gray-100 dark:bg-zinc-800 px-3 py-1 rounded">
+                        <div className="text-sm text-muted-foreground bg-muted/50 px-3 py-1 rounded">
                             Date: <span className="font-mono font-bold">{simCursor}</span>
                         </div>
                     )}
@@ -374,63 +374,63 @@ export default function DashboardPage() {
 
             {/* Simulation Results Display */}
             {simResult && !simResult.error && (
-                <div className="bg-gray-50 dark:bg-zinc-800 rounded-lg p-5 border border-gray-200 dark:border-zinc-700">
+                <div className="bg-muted/50 rounded-lg p-5 border border-border">
                     {simResult.done && !simResult.entryTime ? (
-                         <p className="text-gray-500 dark:text-gray-400 italic flex items-center gap-2">
+                         <p className="text-muted-foreground italic flex items-center gap-2">
                              <AlertTriangle className="w-4 h-4" />
                              {simResult.message || "No trades triggered in remaining data."}
                          </p>
                     ) : (
                         <div className="grid grid-cols-2 md:grid-cols-5 gap-6">
                             <div>
-                                <p className="text-xs text-gray-500 dark:text-gray-400 uppercase tracking-wide">Strategy / Regime</p>
-                                <p className="font-semibold text-gray-900 dark:text-gray-100 mt-1">{simResult.strategy || 'Standard'}</p>
-                                <div className="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-purple-100 text-purple-800 dark:bg-purple-900 dark:text-purple-200 mt-1">
+                                <p className="text-xs text-muted-foreground uppercase tracking-wide">Strategy / Regime</p>
+                                <p className="font-semibold text-foreground mt-1">{simResult.strategy || 'Standard'}</p>
+                                <div className="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-purple-100 text-purple-800 dark:bg-purple-900/30 dark:text-purple-200 mt-1">
                                     {simResult.regime || 'Neutral'}
                                 </div>
                             </div>
 
                             <div>
-                                <p className="text-xs text-gray-500 dark:text-gray-400 uppercase tracking-wide">Entry</p>
-                                <p className="font-semibold text-gray-900 dark:text-gray-100 mt-1">{simResult.entryTime}</p>
-                                <p className="text-sm text-gray-600 dark:text-gray-400">@ ${simResult.entryPrice?.toFixed(2)}</p>
-                                <span className={`text-[10px] px-1.5 py-0.5 rounded uppercase mt-1 inline-block ${simResult.direction === 'long' ? 'bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-200' : 'bg-red-100 text-red-800 dark:bg-red-900 dark:text-red-200'}`}>
+                                <p className="text-xs text-muted-foreground uppercase tracking-wide">Entry</p>
+                                <p className="font-semibold text-foreground mt-1">{simResult.entryTime}</p>
+                                <p className="text-sm text-muted-foreground">@ ${simResult.entryPrice?.toFixed(2)}</p>
+                                <span className={`text-[10px] px-1.5 py-0.5 rounded uppercase mt-1 inline-block ${simResult.direction === 'long' ? 'bg-green-100 text-green-800 dark:bg-green-900/30 dark:text-green-200' : 'bg-red-100 text-red-800 dark:bg-red-900/30 dark:text-red-200'}`}>
                                     {simResult.direction}
                                 </span>
                             </div>
 
                             <div>
-                                <p className="text-xs text-gray-500 dark:text-gray-400 uppercase tracking-wide">Exit</p>
+                                <p className="text-xs text-muted-foreground uppercase tracking-wide">Exit</p>
                                 {simResult.exitTime ? (
                                     <>
-                                        <p className="font-semibold text-gray-900 dark:text-gray-100 mt-1">{simResult.exitTime}</p>
-                                        <p className="text-sm text-gray-600 dark:text-gray-400">@ ${simResult.exitPrice?.toFixed(2)}</p>
+                                        <p className="font-semibold text-foreground mt-1">{simResult.exitTime}</p>
+                                        <p className="text-sm text-muted-foreground">@ ${simResult.exitPrice?.toFixed(2)}</p>
                                     </>
                                 ) : (
-                                    <p className="text-sm text-gray-400 dark:text-gray-500 italic mt-1">Position Open</p>
+                                    <p className="text-sm text-muted-foreground italic mt-1">Position Open</p>
                                 )}
                             </div>
 
                             <div>
-                                <p className="text-xs text-gray-500 dark:text-gray-400 uppercase tracking-wide">P&L</p>
+                                <p className="text-xs text-muted-foreground uppercase tracking-wide">P&L</p>
                                 {simResult.pnl !== undefined ? (
                                     <p className={`font-bold text-2xl mt-1 ${simResult.pnl >= 0 ? 'text-green-600 dark:text-green-400' : 'text-red-600 dark:text-red-400'}`}>
                                         {simResult.pnl >= 0 ? '+' : ''}{simResult.pnl.toFixed(2)}
                                     </p>
                                 ) : (
-                                    <p className="text-gray-400 text-xl mt-1">---</p>
+                                    <p className="text-muted-foreground text-xl mt-1">---</p>
                                 )}
                             </div>
 
-                            <div className="bg-white dark:bg-zinc-700 p-2 rounded border border-gray-100 dark:border-zinc-600">
-                                <p className="text-xs text-gray-500 dark:text-gray-300 uppercase tracking-wide mb-1">Conviction</p>
+                            <div className="bg-card p-2 rounded border border-border">
+                                <p className="text-xs text-muted-foreground uppercase tracking-wide mb-1">Conviction</p>
                                 <div className="flex items-center justify-between text-sm">
-                                    <span className="text-gray-500 dark:text-gray-400">Entry:</span>
-                                    <span className="font-mono font-bold dark:text-gray-200">{simResult.entryConviction?.toFixed(2) || '--'}</span>
+                                    <span className="text-muted-foreground">Entry:</span>
+                                    <span className="font-mono font-bold text-foreground">{simResult.entryConviction?.toFixed(2) || '--'}</span>
                                 </div>
                                 <div className="flex items-center justify-between text-sm mt-1">
-                                    <span className="text-gray-500 dark:text-gray-400">Exit:</span>
-                                    <span className="font-mono font-bold dark:text-gray-200">{simResult.exitConviction?.toFixed(2) || '--'}</span>
+                                    <span className="text-muted-foreground">Exit:</span>
+                                    <span className="font-mono font-bold text-foreground">{simResult.exitConviction?.toFixed(2) || '--'}</span>
                                 </div>
                             </div>
                         </div>
@@ -463,7 +463,7 @@ export default function DashboardPage() {
 
             {/* Trade Journal Stats (Side Panel) */}
             <div className="space-y-6">
-                <div className="bg-gradient-to-r from-purple-50 to-pink-50 dark:from-purple-950/40 dark:to-pink-950/40 rounded-lg shadow p-6 border-l-4 border-purple-500 h-fit">
+                <div className="bg-gradient-to-r from-purple-50 to-pink-50 dark:from-purple-950/40 dark:to-pink-950/40 rounded-lg shadow p-6 border-l-4 border-purple-500 h-fit border border-border border-l-0">
                     <div className="flex justify-between items-start mb-4">
                         <h3 className="text-lg font-semibold text-purple-900 dark:text-purple-200 flex items-center gap-2">📊 Trade Journal</h3>
                         <button onClick={loadJournalStats} className="text-sm text-purple-700 dark:text-purple-300 underline">Refresh</button>
@@ -471,12 +471,12 @@ export default function DashboardPage() {
                     {journalStats ? (
                         <div className="space-y-4">
                              <div className="grid grid-cols-2 gap-4">
-                                <div className="bg-white dark:bg-zinc-800 p-3 rounded border border-purple-200 dark:border-purple-800">
-                                    <p className="text-xs text-gray-600 dark:text-gray-400">Win Rate</p>
+                                <div className="bg-card p-3 rounded border border-purple-200 dark:border-purple-800">
+                                    <p className="text-xs text-muted-foreground">Win Rate</p>
                                     <p className="text-xl font-bold text-purple-900 dark:text-purple-200">{journalStats.stats.win_rate?.toFixed(1) || 0}%</p>
                                 </div>
-                                <div className="bg-white dark:bg-zinc-800 p-3 rounded border border-purple-200 dark:border-purple-800">
-                                    <p className="text-xs text-gray-600 dark:text-gray-400">Total P&L</p>
+                                <div className="bg-card p-3 rounded border border-purple-200 dark:border-purple-800">
+                                    <p className="text-xs text-muted-foreground">Total P&L</p>
                                     <p className={`text-xl font-bold ${(journalStats.stats.total_pnl || 0) >= 0 ? 'text-green-600 dark:text-green-400' : 'text-red-600 dark:text-red-400'}`}>
                                         ${(journalStats.stats.total_pnl || 0).toFixed(0)}
                                     </p>

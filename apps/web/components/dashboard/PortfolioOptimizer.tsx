@@ -158,7 +158,7 @@ export default function PortfolioOptimizer({ positions, onOptimizationComplete }
     <div className="bg-card rounded-xl shadow-sm border border-border overflow-hidden h-full flex flex-col relative">
 
       {/* --- Header --- */}
-      <div className="p-4 border-b border-border flex justify-between items-center bg-muted/30">
+      <div className="p-4 border-b border-border flex justify-between items-center bg-muted/50">
         <div className="flex items-center gap-2">
           {isQuantum ? (
             <div className="flex items-center gap-2">

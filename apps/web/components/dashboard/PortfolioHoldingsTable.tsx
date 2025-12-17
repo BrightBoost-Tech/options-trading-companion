@@ -38,8 +38,8 @@ export default function PortfolioHoldingsTable({ holdings, onSync, onGenerateSug
       const displaySymbol = position.display_symbol ?? (type === 'option' ? formatOptionDisplay(position.symbol) : position.symbol);
 
       return (
-        <tr key={`${position.symbol}-${idx}`} className="hover:bg-muted/50">
-            <td className={`px-6 py-4 font-medium ${type === 'option' ? 'text-purple-600 dark:text-purple-400' : 'text-gray-900 dark:text-foreground'}`}>
+        <tr key={`${position.symbol}-${idx}`} className="hover:bg-muted/50 transition-colors">
+            <td className={`px-6 py-4 font-medium ${type === 'option' ? 'text-purple-600 dark:text-purple-400' : 'text-foreground'}`}>
                 <div className="flex flex-col">
                     <span>{displaySymbol}</span>
                     {position.sector && (
@@ -100,7 +100,7 @@ export default function PortfolioHoldingsTable({ holdings, onSync, onGenerateSug
         <tbody className="divide-y divide-border">
             {optionHoldings.length > 0 && (
                  <>
-                    <tr className="bg-purple-50 dark:bg-purple-900/20">
+                    <tr className="bg-purple-50 dark:bg-purple-900/20 border-b border-purple-100 dark:border-purple-900/30">
                         <td colSpan={5} className="px-6 py-2 text-xs font-bold text-purple-800 dark:text-purple-300 uppercase">🎯 Option Plays</td>
                     </tr>
                     {optionHoldings.map((h, i) => renderPositionRow(h, i))}
@@ -109,7 +109,7 @@ export default function PortfolioHoldingsTable({ holdings, onSync, onGenerateSug
 
             {equityHoldings.length > 0 && (
                  <>
-                    <tr className="bg-blue-50 dark:bg-blue-900/20">
+                    <tr className="bg-blue-50 dark:bg-blue-900/20 border-b border-blue-100 dark:border-blue-900/30">
                         <td colSpan={5} className="px-6 py-2 text-xs font-bold text-blue-800 dark:text-blue-300 uppercase">📈 Long Term Holds</td>
                     </tr>
                     {equityHoldings.map((h, i) => renderPositionRow(h, i))}
@@ -118,11 +118,11 @@ export default function PortfolioHoldingsTable({ holdings, onSync, onGenerateSug
 
             {cashHoldings.length > 0 && (
                 <>
-                     <tr className="bg-green-50 dark:bg-green-900/20">
+                     <tr className="bg-green-50 dark:bg-green-900/20 border-b border-green-100 dark:border-green-900/30">
                         <td colSpan={5} className="px-6 py-2 text-xs font-bold text-green-800 dark:text-green-300 uppercase">💵 Cash & Equiv</td>
                     </tr>
                     {cashHoldings.map((position, idx) => (
-                        <tr key={`cash-${idx}`} className="bg-green-50 dark:bg-green-900/20 border-t-2 border-green-100 dark:border-green-900/30">
+                        <tr key={`cash-${idx}`} className="bg-green-50/50 dark:bg-green-900/10 border-t border-green-100 dark:border-green-900/30">
                             <td className="px-6 py-4 font-bold text-green-800 dark:text-green-300">
                                 {position.symbol === 'CUR:USD' ? 'USD CASH' : position.symbol}
                             </td>

@@ -23,6 +23,8 @@ from packages.quantum.analytics.guardrails import earnings_week_penalty
 
 # Configuration
 SCANNER_LIMIT_DEV = int(os.getenv("SCANNER_LIMIT_DEV", "40")) # Limit universe in dev
+SCANNER_MIN_DTE = 25
+SCANNER_MAX_DTE = 45
 
 logger = logging.getLogger(__name__)
 
@@ -623,7 +625,14 @@ def scan_for_opportunities(
             chain_objects = None
 
             try:
-                chain_objects = truth_layer.option_chain(symbol)
+                # OPTIMIZATION: Use min/max expiry to reduce data fetch size
+                now_date = datetime.now().date()
+                min_dte = SCANNER_MIN_DTE
+                max_dte = SCANNER_MAX_DTE
+                min_expiry = (now_date + timedelta(days=min_dte)).isoformat()
+                max_expiry = (now_date + timedelta(days=max_dte)).isoformat()
+
+                chain_objects = truth_layer.option_chain(symbol, min_expiry=min_expiry, max_expiry=max_expiry)
             except Exception:
                 chain_objects = None
 
@@ -643,7 +652,7 @@ def scan_for_opportunities(
 
                         days_to_expiry = (exp_dt - now_date).days
 
-                        if not (25 <= days_to_expiry <= 45):
+                        if not (SCANNER_MIN_DTE <= days_to_expiry <= SCANNER_MAX_DTE):
                             continue
 
                         # Flatten structure
@@ -674,7 +683,7 @@ def scan_for_opportunities(
 
             # Fallback if empty
             if not chain:
-                chain = market_data.get_option_chain(symbol, min_dte=25, max_dte=45)
+                chain = market_data.get_option_chain(symbol, min_dte=SCANNER_MIN_DTE, max_dte=SCANNER_MAX_DTE)
 
             if not chain: return None
 

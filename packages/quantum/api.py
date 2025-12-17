@@ -204,6 +204,10 @@ app.include_router(paper_router)
 from packages.quantum.internal_tasks import router as internal_tasks_router
 app.include_router(internal_tasks_router)
 
+# --- Register Public Task Endpoints (Permanent Option A) ---
+from packages.quantum.public_tasks import router as public_tasks_router
+app.include_router(public_tasks_router)
+
 # --- Register Job Monitoring Endpoints ---
 from packages.quantum.jobs.endpoints import router as jobs_router
 app.include_router(jobs_router)

@@ -124,19 +124,22 @@ def get_supabase_user_client(
             client.postgrest.auth(token)
             return client
 
+    # Bypass Check: Must check bypass explicitly and verify localhost again for safety
     if os.getenv("APP_ENV") != "production" and os.getenv("ENABLE_DEV_AUTH_BYPASS") == "1":
+        # If user_id matches header AND we are on localhost
         if request.headers.get("X-Test-Mode-User") == user_id:
-             if supa_secrets.jwt_secret:
-                 payload = {
-                     "sub": user_id,
-                     "aud": "authenticated",
-                     "role": "authenticated",
-                     "exp": 9999999999
-                 }
-                 fake_token = jwt.encode(payload, supa_secrets.jwt_secret, algorithm="HS256")
-                 client = create_client(supa_secrets.url, supa_secrets.anon_key)
-                 client.postgrest.auth(fake_token)
-                 return client
+             if is_localhost(request):
+                 if supa_secrets.jwt_secret:
+                     payload = {
+                         "sub": user_id,
+                         "aud": "authenticated",
+                         "role": "authenticated",
+                         "exp": 9999999999
+                     }
+                     fake_token = jwt.encode(payload, supa_secrets.jwt_secret, algorithm="HS256")
+                     client = create_client(supa_secrets.url, supa_secrets.anon_key)
+                     client.postgrest.auth(fake_token)
+                     return client
 
     # 🛡️ Sentinel: Safe default failure
     # Never fall back to admin client if user context was expected but not established.

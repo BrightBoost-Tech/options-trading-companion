@@ -499,7 +499,11 @@ async def run_midday_cycle(supabase: Client, user_id: str):
 
     try:
         # Step C: Wire user_id from cycle orchestration into scanner
-        scout_results = scan_for_opportunities(supabase_client=supabase, user_id=user_id)
+        scout_results = scan_for_opportunities(
+            supabase_client=supabase,
+            user_id=user_id,
+            global_snapshot=global_snap
+        )
 
         print(f"Scanner returned {len(scout_results)} raw opportunities.")
 

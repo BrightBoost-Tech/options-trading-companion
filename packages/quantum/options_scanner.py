@@ -313,7 +313,8 @@ def _determine_execution_cost(
 def scan_for_opportunities(
     symbols: List[str] = None,
     supabase_client: Client = None,
-    user_id: str = None
+    user_id: str = None,
+    global_snapshot: GlobalRegimeSnapshot = None
 ) -> List[Dict[str, Any]]:
     """
     Scans the provided symbols (or universe) for option trade opportunities.
@@ -368,12 +369,15 @@ def scan_for_opportunities(
     print(f"[Scanner] Processing {len(symbols)} symbols...")
 
     # 2. Compute Global Regime Snapshot ONCE
-    try:
-        global_snapshot = regime_engine.compute_global_snapshot(datetime.now())
-        print(f"[Scanner] Global Regime: {global_snapshot.state}")
-    except Exception as e:
-        print(f"[Scanner] Regime computation failed: {e}. Using default.")
-        global_snapshot = regime_engine._default_global_snapshot(datetime.now())
+    if global_snapshot is None:
+        try:
+            global_snapshot = regime_engine.compute_global_snapshot(datetime.now())
+            print(f"[Scanner] Global Regime: {global_snapshot.state}")
+        except Exception as e:
+            print(f"[Scanner] Regime computation failed: {e}. Using default.")
+            global_snapshot = regime_engine._default_global_snapshot(datetime.now())
+    else:
+        print(f"[Scanner] Using provided Global Regime: {global_snapshot.state}")
 
     # Batch fetch execution drag for efficiency (ONCE)
     drag_map = {}

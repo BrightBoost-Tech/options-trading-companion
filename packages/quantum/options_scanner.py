@@ -19,6 +19,7 @@ from packages.quantum.services.market_data_truth_layer import MarketDataTruthLay
 from packages.quantum.analytics.regime_engine_v3 import RegimeEngineV3, GlobalRegimeSnapshot, RegimeState
 from packages.quantum.analytics.scoring import calculate_unified_score
 from packages.quantum.services.execution_service import ExecutionService
+from packages.quantum.analytics.guardrails import earnings_week_penalty
 
 # Configuration
 SCANNER_LIMIT_DEV = int(os.getenv("SCANNER_LIMIT_DEV", "40")) # Limit universe in dev
@@ -345,12 +346,15 @@ def scan_for_opportunities(
         iv_point_service=IVPointService(supabase_client) if supabase_client else None,
     )
 
-    # 1. Determine Universe
+    # 1. Determine Universe & Earnings Map
+    earnings_map = {}
+
     if not symbols:
         if universe_service:
             try:
                 universe = universe_service.get_scan_candidates(limit=30)
                 symbols = [u['symbol'] for u in universe]
+                earnings_map = {u["symbol"]: u.get("earnings_date") for u in universe}
             except Exception as e:
                 print(f"[Scanner] UniverseService failed: {e}. Using fallback.")
                 symbols = ["SPY", "QQQ", "IWM", "AAPL", "MSFT", "TSLA", "NVDA", "AMD"]
@@ -395,7 +399,7 @@ def scan_for_opportunities(
     logger.info(f"[Scanner] Batch fetching quotes for {len(symbols)} symbols...")
     quotes_map = truth_layer.snapshot_many(symbols)
 
-    def process_symbol(symbol: str, drag_map: Dict[str, Any], quotes_map: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    def process_symbol(symbol: str, drag_map: Dict[str, Any], quotes_map: Dict[str, Any], earnings_map: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         """Process a single symbol and return a candidate dict or None."""
         try:
             # A. Enrich Data
@@ -719,6 +723,48 @@ def scan_for_opportunities(
             if expected_execution_cost >= total_ev:
                 return None
 
+            # --- Earnings Awareness Logic ---
+            earnings_val = earnings_map.get(symbol)
+            days_to_earnings = None
+            earnings_risk = False
+            earnings_penalty_val = 0.0
+
+            if earnings_val:
+                try:
+                    # Support datetime object or YYYY-MM-DD string
+                    earnings_dt = None
+                    if isinstance(earnings_val, datetime):
+                        earnings_dt = earnings_val
+                    elif isinstance(earnings_val, str):
+                        earnings_dt = datetime.fromisoformat(earnings_val)
+
+                    if earnings_dt:
+                        # Use now() as scanner is live.
+                        now_dt = datetime.now()
+                        days_to_earnings = (earnings_dt.date() - now_dt.date()).days
+
+                        # Normalize strategy key for safety checks (already lowercased above but ensuring consistency)
+                        safe_strategy_key = strategy_key.lower()
+
+                        # 1. Hard Reject: Short Premium within 2 days
+                        if days_to_earnings <= 2:
+                            is_short_premium = ("credit" in safe_strategy_key) or ("condor" in safe_strategy_key) or ("short" in safe_strategy_key)
+                            if is_short_premium:
+                                return None
+
+                        # 2. Score Penalty: Within 7 days
+                        if days_to_earnings <= 7:
+                            earnings_risk = True
+                            earnings_penalty_val = earnings_week_penalty(safe_strategy_key)
+
+                            # Apply penalty
+                            unified_score.score = max(0.0, unified_score.score - earnings_penalty_val)
+                            # Add badge/warning to unified score object if possible, or handle locally
+                            unified_score.badges.append("EARNINGS_RISK")
+
+                except Exception as e:
+                    print(f"[Scanner] Earnings date parse error for {symbol}: {e}")
+
             candidate_dict = {
                 "symbol": symbol,
                 "ticker": symbol,
@@ -746,7 +792,12 @@ def scan_for_opportunities(
                 "net_delta_per_contract": net_delta_contract,
                 "net_vega_per_contract": net_vega_contract,
                 "data_quality": data_quality,
-                "pricing_mode": pricing_mode
+                "pricing_mode": pricing_mode,
+                # Earnings Metadata
+                "earnings_date": str(earnings_val) if earnings_val else None,
+                "days_to_earnings": days_to_earnings,
+                "earnings_risk": earnings_risk,
+                "earnings_penalty": earnings_penalty_val
             }
 
             # Calculate Probability of Profit
@@ -776,7 +827,7 @@ def scan_for_opportunities(
     # Corrected Indentation: ThreadPoolExecutor is now OUTSIDE process_symbol
     with concurrent.futures.ThreadPoolExecutor(max_workers=batch_size) as executor:
         future_to_symbol = {
-            executor.submit(process_symbol, sym, drag_map, quotes_map): sym
+            executor.submit(process_symbol, sym, drag_map, quotes_map, earnings_map): sym
             for sym in symbols
         }
 

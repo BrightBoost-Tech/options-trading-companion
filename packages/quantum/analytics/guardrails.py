@@ -136,6 +136,13 @@ def compute_conviction_score(trade):
     # Clamp 0–100
     return max(0, min(100, int(score)))
 
+def earnings_week_penalty(strategy: str) -> float:
+    """
+    Returns the score penalty to apply if earnings are within 7 days.
+    """
+    # Simple constant penalty, matching the implicit -15 logic in compute_conviction_score
+    return 15.0
+
 def apply_slippage_guardrail(trade: Dict[str, Any], quote: Dict[str, float]) -> float:
     """
     Returns a slippage penalty multiplier in [0,1] based on bid/ask spread.

@@ -23,6 +23,7 @@ from packages.quantum.jobs.db import (
     dead_letter_job_run
 )
 from packages.quantum.jobs.backoff import backoff_seconds
+from packages.quantum.jobs.registry import discover_handlers
 
 class RetryableJobError(Exception):
     """Exception raised when a job fails but should be retried."""
@@ -36,17 +37,6 @@ def test_job_handler(payload: Dict[str, Any], context: Dict[str, Any]) -> Dict[s
     """A simple test handler."""
     print(f"Executing test_job with payload: {payload}")
     return {"status": "success", "processed_payload": payload}
-
-def discover_handlers() -> Dict[str, Callable]:
-    """
-    Discovers available job handlers.
-    In the future, this could scan modules or use a registry.
-    For now, it returns a simple map including a test job.
-    """
-    handlers = {
-        "test_job": test_job_handler
-    }
-    return handlers
 
 def format_error_payload(exception: Exception, job_name: str, attempt: int) -> Dict[str, Any]:
     """Formats an exception into the required error payload structure."""
@@ -73,7 +63,9 @@ def main():
     worker_id = f"{socket.gethostname()}-{os.getpid()}"
     print(f"Worker ID: {worker_id}")
 
+    # Load handlers from registry and add local test handler
     handlers = discover_handlers()
+    handlers["test_job"] = test_job_handler
     print(f"Registered handlers: {list(handlers.keys())}")
 
     print("Worker loop started. Polling for jobs...")

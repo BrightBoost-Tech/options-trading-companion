@@ -4,7 +4,7 @@ from packages.quantum.services.workflow_orchestrator import run_morning_cycle
 from packages.quantum.jobs.handlers.utils import get_admin_client, get_active_user_ids, run_async
 from packages.quantum.jobs.handlers.exceptions import RetryableJobError, PermanentJobError
 
-JOB_NAME = "morning_brief"
+JOB_NAME = "morning-brief"
 
 def run(payload: Dict[str, Any], ctx: Any) -> Dict[str, Any]:
     start_time = time.time()
@@ -13,7 +13,13 @@ def run(payload: Dict[str, Any], ctx: Any) -> Dict[str, Any]:
 
     try:
         client = get_admin_client()
-        active_users = get_active_user_ids(client)
+
+        # Check if a specific user_id is provided in the payload
+        target_user_id = payload.get("user_id")
+        if target_user_id:
+            active_users = [target_user_id]
+        else:
+            active_users = get_active_user_ids(client)
 
         async def process_users():
             processed = 0

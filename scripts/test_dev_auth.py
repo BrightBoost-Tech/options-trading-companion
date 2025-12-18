@@ -11,7 +11,9 @@ def test_endpoints():
     base_url = "http://127.0.0.1:8000"
 
     print("\n--- Testing Auth Debug ---")
-    headers = {"X-Test-Mode-User": "test-user-123"}
+    # Use a valid UUID format for PostgreSQL compatibility
+    test_uuid = "75ee12ad-b119-4f32-aeea-19b4ef55d587"
+    headers = {"X-Test-Mode-User": test_uuid}
     try:
         resp = requests.get(f"{base_url}/__auth_debug", headers=headers)
         print(f"Status: {resp.status_code}")
@@ -19,7 +21,7 @@ def test_endpoints():
 
         if resp.status_code == 200:
              data = resp.json()
-             if data.get("resolved_user_id") == "test-user-123":
+             if data.get("resolved_user_id") == test_uuid:
                  print("✅ User ID resolved correctly via Bypass")
              else:
                  print("❌ User ID mismatch")

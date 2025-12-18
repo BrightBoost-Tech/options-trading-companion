@@ -179,31 +179,42 @@ export default function PortfolioOptimizer({ positions, onOptimizationComplete }
         </div>
 
         <div className="flex items-center gap-4 flex-wrap justify-end">
-             <button onClick={runDiagnostics} className="text-[10px] font-mono text-muted-foreground hover:text-indigo-600 dark:hover:text-indigo-400 transition-colors">
+             <button onClick={runDiagnostics} className="text-[10px] font-mono text-muted-foreground hover:text-indigo-600 dark:hover:text-indigo-400 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500 rounded">
                 TEST_CORE_SYSTEM
              </button>
 
              {/* Profile Badge (User Request) */}
-             <div className={clsx(
-                "px-2 py-0.5 rounded text-[10px] font-bold uppercase tracking-wide cursor-pointer",
-                profile === 'aggressive' ? "bg-rose-100 text-rose-700 dark:bg-rose-900/30 dark:text-rose-400" : "bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-400"
-             )}
-             onClick={() => setProfile(prev => prev === 'aggressive' ? 'balanced' : 'aggressive')}
-             title="Click to toggle profile"
+             <button
+               type="button"
+               className={clsx(
+                  "px-2 py-0.5 rounded text-[10px] font-bold uppercase tracking-wide transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500",
+                  profile === 'aggressive' ? "bg-rose-100 text-rose-700 dark:bg-rose-900/30 dark:text-rose-400" : "bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-400"
+               )}
+               onClick={() => setProfile(prev => prev === 'aggressive' ? 'balanced' : 'aggressive')}
+               title="Click to toggle profile"
+               aria-label={`Toggle risk profile. Current: ${profile}`}
              >
                 Profile: {profile}
-             </div>
+             </button>
 
              {/* The requested Toggle */}
              <div className="flex items-center gap-2">
-                <span className={`text-xs font-medium transition-colors ${isQuantum ? 'text-purple-700 dark:text-purple-400' : 'text-muted-foreground'}`}>
+                <span
+                  className={`text-xs font-medium transition-colors cursor-pointer select-none ${isQuantum ? 'text-purple-700 dark:text-purple-400' : 'text-muted-foreground'}`}
+                  onClick={() => setIsQuantum(!isQuantum)}
+                  aria-hidden="true"
+                >
                   <span className="hidden sm:inline">Optimize Tail Risk</span>
                   <span className="sm:hidden">Tail Risk</span>
                 </span>
                 <button
+                  type="button"
+                  role="switch"
+                  aria-checked={isQuantum}
+                  aria-label="Optimize Tail Risk"
                   onClick={() => setIsQuantum(!isQuantum)}
                   className={clsx(
-                    "relative w-10 h-5 rounded-full transition-colors duration-300 focus:outline-none",
+                    "relative w-10 h-5 rounded-full transition-colors duration-300 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-purple-500 focus-visible:ring-offset-2",
                     isQuantum ? "bg-purple-600" : "bg-muted-foreground/30"
                   )}
                 >

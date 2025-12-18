@@ -1,4 +1,5 @@
 import os
+import hashlib
 from redis import Redis
 from rq import Queue
 from fastapi import HTTPException
@@ -34,6 +35,15 @@ def get_queue(name: str = "otc") -> Queue:
         print(f"Error getting RQ queue: {e}")
         raise HTTPException(status_code=503, detail="Redis/RQ unavailable")
 
+def make_job_id(job_name: str, idempotency_key: str) -> str:
+    """
+    Creates a deterministic, safe job ID for RQ (no colons).
+    Format: {job_name}__{hash}
+    """
+    raw = f"{job_name}|{idempotency_key}"
+    job_hash = hashlib.sha256(raw.encode("utf-8")).hexdigest()[:32]
+    return f"{job_name}__{job_hash}"
+
 def enqueue_idempotent(
     job_name: str,
     idempotency_key: str,
@@ -54,7 +64,7 @@ def enqueue_idempotent(
     Returns:
         Dict with job_id and status
     """
-    job_id = f"{job_name}:{idempotency_key}"
+    job_id = make_job_id(job_name, idempotency_key)
 
     try:
         q = get_queue(queue_name)

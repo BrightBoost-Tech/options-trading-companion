@@ -6,9 +6,8 @@ from packages.quantum.jobs.handlers.exceptions import RetryableJobError, Permane
 
 JOB_NAME = "morning-brief"
 
+# RQ calls run(payload); ctx must be optional.
 def run(payload: Dict[str, Any], ctx: Any = None) -> Dict[str, Any]:
-    print("[morning_brief] ctx provided:", bool(ctx))
-    ctx = ctx or {}
     start_time = time.time()
     notes = []
     counts = {"processed": 0, "failed": 0}

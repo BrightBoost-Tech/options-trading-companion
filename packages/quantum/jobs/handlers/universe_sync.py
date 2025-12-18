@@ -7,7 +7,8 @@ import traceback
 
 JOB_NAME = "universe_sync"
 
-def run(payload: Dict[str, Any]) -> Dict[str, Any]:
+# RQ calls run(payload); ctx must be optional.
+def run(payload: Dict[str, Any], ctx: Any = None) -> Dict[str, Any]:
     """
     Handler for universe_sync job.
     """

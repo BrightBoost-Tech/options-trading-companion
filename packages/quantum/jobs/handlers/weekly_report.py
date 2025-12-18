@@ -6,6 +6,7 @@ from packages.quantum.jobs.handlers.exceptions import RetryableJobError, Permane
 
 JOB_NAME = "weekly_report"
 
+# RQ calls run(payload); ctx must be optional.
 def run(payload: Dict[str, Any], ctx: Any = None) -> Dict[str, Any]:
     start_time = time.time()
     notes = []

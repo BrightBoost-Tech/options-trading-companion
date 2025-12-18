@@ -7,7 +7,8 @@ from packages.quantum.jobs.handlers.exceptions import RetryableJobError, Permane
 
 JOB_NAME = "plaid_backfill_history"
 
-def run(payload: Dict[str, Any], ctx: Any) -> Dict[str, Any]:
+# RQ calls run(payload); ctx must be optional.
+def run(payload: Dict[str, Any], ctx: Any = None) -> Dict[str, Any]:
     start_time = time.time()
     notes = []
     counts = {}

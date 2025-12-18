@@ -1,6 +1,7 @@
 from fastapi import APIRouter, Header, HTTPException, Request, Depends
 from typing import Optional
 import os
+import secrets
 from datetime import datetime
 
 from packages.quantum.jobs.rq_enqueue import enqueue_idempotent
@@ -14,6 +15,7 @@ router = APIRouter(
 async def verify_cron_secret(x_cron_secret: Optional[str] = Header(None)):
     """
     Verifies that the X-Cron-Secret header matches the CRON_SECRET env var.
+    Uses constant-time comparison to prevent timing attacks.
     """
     expected_secret = os.getenv("CRON_SECRET")
 
@@ -22,7 +24,7 @@ async def verify_cron_secret(x_cron_secret: Optional[str] = Header(None)):
         print("Error: CRON_SECRET environment variable not set.")
         raise HTTPException(status_code=500, detail="Server misconfiguration: CRON_SECRET missing")
 
-    if x_cron_secret != expected_secret:
+    if x_cron_secret is None or not secrets.compare_digest(x_cron_secret, expected_secret):
         # Auth failure
         raise HTTPException(status_code=401, detail="Invalid Cron Secret")
 

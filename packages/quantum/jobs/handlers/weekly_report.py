@@ -6,7 +6,7 @@ from packages.quantum.jobs.handlers.exceptions import RetryableJobError, Permane
 
 JOB_NAME = "weekly_report"
 
-def run(payload: Dict[str, Any], ctx: Any) -> Dict[str, Any]:
+def run(payload: Dict[str, Any], ctx: Any = None) -> Dict[str, Any]:
     start_time = time.time()
     notes = []
     counts = {"processed": 0, "failed": 0}

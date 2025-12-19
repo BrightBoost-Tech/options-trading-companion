@@ -48,6 +48,8 @@ If you encounter module resolution errors (e.g., `Module not found: Can't resolv
 
 **Note:** The frontend launcher (`start_frontend.cmd`) now automatically detects missing dependencies and runs `pnpm install` if needed.
 
+If you pull changes that update Tailwind config, run pnpm install.
+
 If you still see "Module not found", run:
 
 ```bash

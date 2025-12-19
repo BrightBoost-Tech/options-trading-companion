@@ -24,6 +24,18 @@ class UniverseService:
         self.supabase = supabase
         self.polygon = polygon_service or PolygonService()
 
+    def _sanitize_bigint(self, value):
+        """
+        Casts value to int to satisfy Postgres bigint requirements.
+        Handles None, float, and numeric strings.
+        """
+        if value is None:
+            return None
+        try:
+            return int(float(value))
+        except (ValueError, TypeError):
+            return 0
+
     def sync_universe(self):
         """
         Upserts the base universe into scanner_universe table.
@@ -64,7 +76,8 @@ class UniverseService:
             try:
                 # 1. Basic Details (Sector, Market Cap)
                 details = self.polygon.get_ticker_details(sym)
-                market_cap = details.get("market_cap", 0)
+                # Sanitize market_cap to int for Postgres bigint column
+                market_cap = self._sanitize_bigint(details.get("market_cap", 0))
                 sector = details.get("sic_description", "Unknown")
 
                 # 2. Volume (Avg 30d) & IV Rank

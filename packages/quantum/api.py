@@ -219,9 +219,10 @@ app.include_router(observability_router)
 # --- Scout Endpoints (New) ---
 
 @app.get("/scout/weekly")
-def scout_weekly():
+@limiter.limit("5/minute")
+def scout_weekly(request: Request, user_id: str = Depends(get_current_user)):
     try:
-        results = scan_for_opportunities()
+        results = scan_for_opportunities(user_id=user_id)
         return {
             "count": len(results),
             "top_picks": results,
@@ -259,7 +260,9 @@ def iv_daily_refresh_task_deprecated(
 # --- Rebalance Engine Endpoints (Step 3) ---
 
 @app.post("/rebalance/execute")
+@limiter.limit("5/minute")
 async def execute_rebalance(
+    request: Request,
     user_id: str = Depends(get_current_user),
     supabase: Client = Depends(get_supabase_user_client)
 ):
@@ -633,7 +636,9 @@ async def execute_rebalance(
     }
 
 @app.post("/rebalance/preview")
+@limiter.limit("5/minute")
 async def preview_rebalance(
+    request: Request,
     user_id: str = Depends(get_current_user),
     supabase: Client = Depends(get_supabase_user_client)
 ):

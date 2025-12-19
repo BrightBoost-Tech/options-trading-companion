@@ -23,13 +23,27 @@ Use the debug endpoint to check authentication status:
 curl http://127.0.0.1:8000/__auth_debug
 ```
 
-### 3. Internal Tasks
+### 3. Job Runs API: /jobs/*
+
+The canonical surface for job visibility is `/jobs/runs`.
+
+- **Endpoints**:
+  - `GET /jobs/runs`: List recent job runs.
+  - `GET /jobs/runs/{id}`: Get details of a specific job run.
+  - `POST /jobs/runs/{id}/retry`: Manually retry a failed job.
+
+- **Authentication**:
+  These endpoints support two authentication methods:
+  1. **User Auth**: Standard Supabase JWT (for Frontend Dashboard).
+  2. **Cron Auth**: `X-Cron-Secret` header (for System/Cron tasks).
+
+### 4. Internal Tasks
 - Scheduled tasks (Morning Brief, Midday Scan) are hosted on `/internal/tasks/...`.
 - These endpoints are protected by HMAC-SHA256 signature verification.
 - Requests must include `X-Task-Signature` and `X-Task-Timestamp`.
 - Use `TASK_SIGNING_SECRET` to sign payloads.
 
-### 4. Row Level Security (RLS)
+### 5. Row Level Security (RLS)
 - The API uses a user-scoped Supabase client for all user-initiated operations.
 - RLS policies enforce that users can only access their own data.
 - The Service Role Key is used strictly for internal system tasks.

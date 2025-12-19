@@ -30,9 +30,15 @@ if not exist "%REPO_ROOT%\apps\web\package.json" (
 :: Preflight: Verify critical dependencies exist
 set "REQ_PKG_DIR1=%REPO_ROOT%\apps\web\node_modules\@radix-ui\react-tooltip"
 set "REQ_PKG_DIR2=%REPO_ROOT%\node_modules\@radix-ui\react-tooltip"
+set "REQ_PKG_DIR3=%REPO_ROOT%\apps\web\node_modules\tailwindcss-animate"
+set "REQ_PKG_DIR4=%REPO_ROOT%\node_modules\tailwindcss-animate"
 
-if not exist "%REQ_PKG_DIR1%" if not exist "%REQ_PKG_DIR2%" (
-  echo [WARN] Required dependency @radix-ui/react-tooltip not found in node_modules.
+set "MISSING_DEPS="
+if not exist "%REQ_PKG_DIR1%" if not exist "%REQ_PKG_DIR2%" set "MISSING_DEPS=1"
+if not exist "%REQ_PKG_DIR3%" if not exist "%REQ_PKG_DIR4%" set "MISSING_DEPS=1"
+
+if defined MISSING_DEPS (
+  echo [WARN] Required dependencies not found in node_modules.
   echo [INFO] Running pnpm install at repo root...
   cd /d "%REPO_ROOT%"
   call pnpm install

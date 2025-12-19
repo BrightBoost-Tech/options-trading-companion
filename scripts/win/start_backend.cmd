@@ -1,39 +1,36 @@
 @echo off
 setlocal
 
-REM Resolve repo root: two levels up from scripts\win
+REM Resolve REPO_ROOT from this script location:
+REM If script is scripts\win\start_backend.cmd => repo root is two levels up.
 cd /d "%~dp0\..\.."
 set "REPO_ROOT=%cd%"
 
-set "PYTHONPATH=%REPO_ROOT%"
+REM Prefer .venv then venv
+set "PY_EXE=%REPO_ROOT%\packages\quantum\.venv\Scripts\python.exe"
+if not exist "%PY_EXE%" set "PY_EXE=%REPO_ROOT%\packages\quantum\venv\Scripts\python.exe"
 
-REM Check for .venv first (preferred), then fallback to venv
-set "VENV_DOT=%REPO_ROOT%\packages\quantum\.venv\Scripts\python.exe"
-set "VENV_STD=%REPO_ROOT%\packages\quantum\venv\Scripts\python.exe"
-
-if exist "%VENV_DOT%" (
-    set "BACKEND_VENV=%VENV_DOT%"
-) else if exist "%VENV_STD%" (
-    set "BACKEND_VENV=%VENV_STD%"
-) else (
-    echo [ERROR] Backend venv python not found.
-    echo         Checked paths:
-    echo         1) "%VENV_DOT%"
-    echo         2) "%VENV_STD%"
-    echo.
-    echo         Please ensure you have created a virtual environment in packages\quantum.
-    pause
-    exit /b 1
+if not exist "%PY_EXE%" (
+  echo [ERROR] Could not find backend python executable.
+  echo         Checked:
+  echo           %REPO_ROOT%\packages\quantum\.venv\Scripts\python.exe
+  echo           %REPO_ROOT%\packages\quantum\venv\Scripts\python.exe
+  pause
+  exit /b 1
 )
 
+set "PYTHONPATH=%REPO_ROOT%"
 echo [INFO] Repo root: %REPO_ROOT%
+echo [INFO] Python: %PY_EXE%
 echo [INFO] PYTHONPATH: %PYTHONPATH%
-echo [INFO] Python used: "%BACKEND_VENV%"
+echo [INFO] Starting Uvicorn...
 
-REM Verify python executable path for debugging
-"%BACKEND_VENV%" -c "import sys; print(f'[DEBUG] sys.executable: {sys.executable}')"
+pushd "%REPO_ROOT%"
+"%PY_EXE%" -m uvicorn packages.quantum.api:app --reload --host 127.0.0.1 --port 8000
+set "EXIT_CODE=%ERRORLEVEL%"
+popd
 
-echo [INFO] Starting backend (uvicorn packages.quantum.api:app)...
-"%BACKEND_VENV%" -m uvicorn packages.quantum.api:app --reload --host 127.0.0.1 --port 8000
-
-endlocal
+echo.
+echo [INFO] Backend exited with code %EXIT_CODE%
+pause
+exit /b %EXIT_CODE%

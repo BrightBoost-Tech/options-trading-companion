@@ -27,7 +27,7 @@ echo Repo root: %REPO_ROOT%
 echo ============================================
 
 REM Use start "" /D to avoid fragile quoting and Windows title parsing.
-start "OTC Backend" /D "%REPO_ROOT%" cmd /k "%BACKEND_LAUNCHER%"
+start "OTC Backend" /D "%REPO_ROOT%" cmd /k "call \"%BACKEND_LAUNCHER%\""
 start "OTC Frontend" /D "%REPO_ROOT%" cmd /k "%FRONTEND_LAUNCHER%"
 
 echo [OK] Spawned backend + frontend terminals.

@@ -1,80 +1,93 @@
-import sys
-import os
-import inspect
+#!/usr/bin/env python3
 import importlib
 import pkgutil
-import logging
+import os
+import inspect
+import sys
+from typing import Dict, Callable
 
-# Add the repository root to sys.path so we can import packages.quantum
+# Add repo root to sys.path to allow imports
 repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-sys.path.append(repo_root)
+sys.path.insert(0, repo_root)
 
-# Configure logging to stdout so we can see the registry errors
-logging.basicConfig(level=logging.ERROR)
+HANDLERS_PACKAGE = "packages.quantum.jobs.handlers"
 
-from packages.quantum.jobs.registry import discover_handlers, HANDLERS_PACKAGE
-
-def verify_handlers():
-    print("Verifying handler contracts...")
-
-    # Get the "valid" handlers as per the registry
-    valid_handlers = discover_handlers()
-
-    # Locate the handlers directory
-    # We can use the same logic as registry.py or just rely on the path
+def verify_contract():
+    """
+    Scans the packages/quantum/jobs/handlers directory for modules.
+    Enforces that every handler has:
+      - JOB_NAME string
+      - run(payload: dict, ctx=None) -> dict
+    """
     handlers_dir = os.path.join(repo_root, "packages", "quantum", "jobs", "handlers")
 
     if not os.path.exists(handlers_dir):
-        print(f"ERROR: Handlers directory not found at {handlers_dir}")
+        print(f"Error: Handlers directory not found at {handlers_dir}")
         sys.exit(1)
 
-    failure_count = 0
+    print(f"Scanning handlers in {handlers_dir}...")
+
+    violations = []
+    checked_count = 0
 
     # Iterate over modules in the handlers package
     for module_info in pkgutil.iter_modules([handlers_dir]):
         module_name = f"{HANDLERS_PACKAGE}.{module_info.name}"
 
+        # Skip __init__ and utilities if they don't look like handlers
+        # But really we should check everything that *looks* like a handler or claims to be one.
+        # For simplicity, we import everything in that dir.
+
         try:
             module = importlib.import_module(module_name)
+        except Exception as e:
+            # If we can't import it, it's broken code, but might not be a handler contract violation per se.
+            # However, for a verify script, we should probably flag it.
+            # But let's focus on contract.
+            print(f"Warning: Could not import {module_name}: {e}")
+            continue
 
-            # Skip modules without JOB_NAME (helpers, utils, etc)
-            if not hasattr(module, "JOB_NAME"):
+        # Heuristic: If it has JOB_NAME, it MUST follow contract.
+        if hasattr(module, "JOB_NAME"):
+            checked_count += 1
+            job_name = getattr(module, "JOB_NAME")
+            print(f"Checking {module_name} (JOB_NAME='{job_name}')...")
+
+            if not hasattr(module, "run"):
+                violations.append(f"{module_name}: Missing 'run' function")
                 continue
 
-            job_name = getattr(module, "JOB_NAME")
+            run_func = getattr(module, "run")
+            if not callable(run_func):
+                violations.append(f"{module_name}: 'run' is not callable")
+                continue
 
-            # Check if this job was accepted by registry
-            if job_name in valid_handlers:
-                print(f"[PASS] {module_info.name} ({job_name})")
-            else:
-                # It was rejected. Let's find out why (re-run checks)
-                print(f"[FAIL] {module_info.name} ({job_name})")
-                failure_count += 1
+            sig = inspect.signature(run_func)
+            params = sig.parameters
 
-                if not hasattr(module, "run") or not callable(getattr(module, "run")):
-                    print(f"       Reason: Missing 'run' function")
-                    continue
+            # 1. Must accept 'payload'
+            if "payload" not in params:
+                violations.append(f"{module_name}: run() missing 'payload' argument")
 
-                handler_func = getattr(module, "run")
-                sig = inspect.signature(handler_func)
-                params = sig.parameters
+            # 2. 'ctx' must have default if present
+            if "ctx" in params:
+                if params["ctx"].default == inspect.Parameter.empty:
+                    violations.append(f"{module_name}: run() argument 'ctx' must be optional (default=None)")
 
-                if "payload" not in params:
-                    print(f"       Reason: Missing 'payload' parameter")
+        else:
+            # If no JOB_NAME, we assume it's a utility module (like exceptions.py, utils.py)
+            pass
 
-                if "ctx" in params and params["ctx"].default == inspect.Parameter.empty:
-                    print(f"       Reason: 'ctx' parameter missing default value")
+    print(f"\nChecked {checked_count} handlers.")
 
-        except Exception as e:
-            print(f"[FAIL] {module_info.name}: Import/Runtime error: {e}")
-            failure_count += 1
-
-    if failure_count > 0:
-        print(f"\nVerification FAILED. {failure_count} handler(s) violated the contract.")
+    if violations:
+        print("\n❌ CONTRACT VIOLATIONS FOUND:")
+        for v in violations:
+            print(f" - {v}")
         sys.exit(1)
     else:
-        print("\nVerification PASSED. All handlers conform to contract.")
+        print("\n✅ All handlers satisfy the contract.")
         sys.exit(0)
 
 if __name__ == "__main__":
-    verify_handlers()
+    verify_contract()

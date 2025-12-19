@@ -1,0 +1,54 @@
+name: Schedule Tasks
+
+on:
+  schedule:
+    # 8:00 AM local time (Assuming UTC or adjust accordingly)
+    # If local is EST (UTC-5), 8:00 AM is 13:00 UTC.
+    # The prompt says "pick a consistent timezone; document it".
+    # I will assume UTC for simplicity and consistency in cloud runners.
+    # So 8:00 AM UTC.
+    - cron: '0 8 * * *'
+
+    # 8:05 AM UTC - Morning Brief
+    - cron: '5 8 * * *'
+
+    # 12:00 PM UTC - Midday Scan
+    - cron: '0 12 * * *'
+
+  workflow_dispatch:
+    inputs:
+      task:
+        description: 'Task to run'
+        required: true
+        default: 'all'
+        type: choice
+        options:
+        - all
+        - universe_sync
+        - morning_brief
+        - midday_scan
+
+jobs:
+  run-task:
+    runs-on: ubuntu-latest
+    steps:
+    - name: Run Universe Sync
+      if: github.event.schedule == '0 8 * * *' || (github.event_name == 'workflow_dispatch' && (github.event.inputs.task == 'all' || github.event.inputs.task == 'universe_sync'))
+      run: |
+        curl -X POST "${{ secrets.API_URL }}/tasks/universe/sync" \
+        -H "X-Cron-Secret: ${{ secrets.CRON_SECRET }}" \
+        -H "Content-Type: application/json"
+
+    - name: Run Morning Brief
+      if: github.event.schedule == '5 8 * * *' || (github.event_name == 'workflow_dispatch' && (github.event.inputs.task == 'all' || github.event.inputs.task == 'morning_brief'))
+      run: |
+        curl -X POST "${{ secrets.API_URL }}/tasks/morning-brief" \
+        -H "X-Cron-Secret: ${{ secrets.CRON_SECRET }}" \
+        -H "Content-Type: application/json"
+
+    - name: Run Midday Scan
+      if: github.event.schedule == '0 12 * * *' || (github.event_name == 'workflow_dispatch' && (github.event.inputs.task == 'all' || github.event.inputs.task == 'midday_scan'))
+      run: |
+        curl -X POST "${{ secrets.API_URL }}/tasks/midday-scan" \
+        -H "X-Cron-Secret: ${{ secrets.CRON_SECRET }}" \
+        -H "Content-Type: application/json"

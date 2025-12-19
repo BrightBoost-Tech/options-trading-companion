@@ -212,6 +212,10 @@ app.include_router(public_tasks_router)
 from packages.quantum.jobs.endpoints import router as jobs_router
 app.include_router(jobs_router)
 
+# --- Register Observability Endpoints (Internal Dashboard) ---
+from packages.quantum.observability.endpoints import router as observability_router
+app.include_router(observability_router)
+
 # --- Scout Endpoints (New) ---
 
 @app.get("/scout/weekly")

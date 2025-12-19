@@ -14,7 +14,7 @@ def discover_handlers() -> Dict[str, Callable]:
     """
     Scans the packages/quantum/jobs/handlers directory for modules defining:
       JOB_NAME = "..."
-      def run(payload: dict, ctx: JobContext) -> dict
+      def run(payload: dict, ctx=None) -> dict
 
     Returns:
         dict[job_name, callable]
@@ -49,7 +49,20 @@ def discover_handlers() -> Dict[str, Callable]:
 
             handler_func = getattr(module, "run")
 
-            # (Optional) We could inspect signature here, but strictly not required by instructions
+            # Enforce Contract: def run(payload: dict, ctx=None)
+            sig = inspect.signature(handler_func)
+            params = sig.parameters
+
+            # 1. Must accept 'payload'
+            if "payload" not in params:
+                logger.error(f"Handler {module_name} violates contract: missing 'payload' parameter. Skipping.")
+                continue
+
+            # 2. 'ctx' is optional but if present must have default
+            if "ctx" in params:
+                if params["ctx"].default == inspect.Parameter.empty:
+                    logger.error(f"Handler {module_name} violates contract: 'ctx' parameter must have a default value (e.g. None). Skipping.")
+                    continue
 
             if job_name in handlers:
                 logger.warning(f"Duplicate job name detected: {job_name}. Overwriting previous handler.")

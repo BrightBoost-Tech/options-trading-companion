@@ -16,7 +16,7 @@ import PaperPortfolioWidget from '@/components/dashboard/PaperPortfolioWidget';
 import { fetchWithAuth, fetchWithAuthTimeout } from '@/lib/api';
 import { QuantumTooltip } from "@/components/ui/QuantumTooltip";
 import { ThemeToggle } from '@/components/ThemeToggle';
-import { AlertTriangle, Wallet, Loader2 } from 'lucide-react';
+import { AlertTriangle, Wallet, Loader2, RefreshCw } from 'lucide-react';
 
 const mockAlerts = [
   { id: '1', message: 'SPY credit put spread scout: 475/470 for $1.50 credit', time: '2 min ago' },
@@ -48,6 +48,7 @@ export default function DashboardPage() {
   
   // Journal state
   const [journalStats, setJournalStats] = useState<any>(null);
+  const [journalLoading, setJournalLoading] = useState(false);
 
   // Historical Simulation State
   const [simCursor, setSimCursor] = useState<string>('2023-01-01');
@@ -120,12 +121,15 @@ export default function DashboardPage() {
   };
 
   const loadJournalStats = async () => {
+    setJournalLoading(true);
     try {
       const data = await fetchWithAuthTimeout('/journal/stats', 10000);
       setJournalStats(data);
     } catch (err: any) {
       if (isAbortError(err)) return;
       console.error('Failed to load journal stats:', err);
+    } finally {
+      setJournalLoading(false);
     }
   };
 
@@ -466,7 +470,14 @@ export default function DashboardPage() {
                 <div className="bg-gradient-to-r from-purple-50 to-pink-50 dark:from-purple-950/40 dark:to-pink-950/40 rounded-lg shadow p-6 border-l-4 border-purple-500 h-fit border border-border border-l-0">
                     <div className="flex justify-between items-start mb-4">
                         <h3 className="text-lg font-semibold text-purple-900 dark:text-purple-200 flex items-center gap-2">📊 Trade Journal</h3>
-                        <button onClick={loadJournalStats} className="text-sm text-purple-700 dark:text-purple-300 underline">Refresh</button>
+                        <button
+                          onClick={loadJournalStats}
+                          disabled={journalLoading}
+                          className="text-sm text-purple-700 dark:text-purple-300 flex items-center gap-1 hover:underline disabled:opacity-50"
+                        >
+                          <RefreshCw className={`w-3 h-3 ${journalLoading ? 'animate-spin' : ''}`} />
+                          Refresh
+                        </button>
                     </div>
                     {journalStats ? (
                         <div className="space-y-4">

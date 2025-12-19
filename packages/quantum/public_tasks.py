@@ -1,10 +1,11 @@
-from fastapi import APIRouter, Header, HTTPException, Request, Depends
-from typing import Optional
+from fastapi import APIRouter, Header, HTTPException, Request, Depends, Body
+from typing import Optional, Dict, Any
 import os
 import secrets
 from datetime import datetime
 
 from packages.quantum.jobs.rq_enqueue import enqueue_idempotent
+from packages.quantum.jobs.job_runs import JobRunStore
 
 router = APIRouter(
     prefix="/tasks",
@@ -30,90 +31,202 @@ async def verify_cron_secret(x_cron_secret: Optional[str] = Header(None)):
 
     return True
 
+def enqueue_job_run(job_name: str, idempotency_key: str, payload: Dict[str, Any], queue_name: str = "otc") -> Dict[str, Any]:
+    """
+    Helper to create a JobRun and enqueue the runner.
+    """
+    store = JobRunStore()
+
+    # 1. Create or Get DB record
+    job_run = store.create_or_get(job_name, idempotency_key, payload)
+
+    # 2. Enqueue the runner via RQ
+    # We use the same idempotency key for RQ to prevent double enqueueing in Redis if possible,
+    # or just rely on DB state.
+    # But `enqueue_idempotent` uses job_name + idempotency_key to generate RQ job_id.
+    # We should stick to that.
+
+    result = enqueue_idempotent(
+        job_name=job_name,
+        idempotency_key=idempotency_key,
+        payload={"job_run_id": job_run["id"]}, # Pass ID to runner
+        handler_path="packages.quantum.jobs.runner.run_job_run", # New runner path
+        queue_name=queue_name
+    )
+
+    return {
+        "job_run_id": job_run["id"],
+        "job_name": job_name,
+        "idempotency_key": idempotency_key,
+        "rq_job_id": result.get("job_id"),
+        "status": job_run["status"]
+    }
+
+
 @router.post("/universe/sync", status_code=202)
 async def task_universe_sync(
     authorized: bool = Depends(verify_cron_secret)
 ):
     """
-    Triggers the universe sync job via Redis/RQ.
+    Triggers the universe sync job via JobRun system.
     """
     today = datetime.now().strftime("%Y-%m-%d")
     job_name = "universe_sync"
 
-    # Enqueue to 'otc' queue
-    # Handler: packages.quantum.jobs.handlers.universe_sync.run
-    result = enqueue_idempotent(
+    return enqueue_job_run(
         job_name=job_name,
         idempotency_key=today,
-        payload={"date": today},
-        handler_path="packages.quantum.jobs.handlers.universe_sync.run",
-        queue_name="otc"
+        payload={"date": today}
     )
-
-    return result
 
 @router.post("/morning-brief", status_code=202)
 async def task_morning_brief(
     authorized: bool = Depends(verify_cron_secret)
 ):
     """
-    Stub for morning brief task. Enqueues job only.
+    Triggers morning brief job.
     """
     today = datetime.now().strftime("%Y-%m-%d")
     job_name = "morning_brief"
 
-    # Using a placeholder handler or the sync one for now since logic isn't ported
-    # But prompt says "Stub endpoints (enqueue only, no handler yet)"
-    # We'll use a dummy path or just enqueue it. RQ will fail if handler missing on worker side,
-    # but the API response will be 202.
-
-    result = enqueue_idempotent(
+    return enqueue_job_run(
         job_name=job_name,
         idempotency_key=today,
-        payload={"date": today},
-        handler_path="packages.quantum.jobs.handlers.morning_brief.run", # Does not exist yet
-        queue_name="otc"
+        payload={"date": today}
     )
-
-    return result
 
 @router.post("/midday-scan", status_code=202)
 async def task_midday_scan(
     authorized: bool = Depends(verify_cron_secret)
 ):
     """
-    Stub for midday scan task.
+    Triggers midday scan job.
     """
     today = datetime.now().strftime("%Y-%m-%d")
     job_name = "midday_scan"
 
-    result = enqueue_idempotent(
+    return enqueue_job_run(
         job_name=job_name,
         idempotency_key=today,
-        payload={"date": today},
-        handler_path="packages.quantum.jobs.handlers.midday_scan.run",
-        queue_name="otc"
+        payload={"date": today}
     )
-
-    return result
 
 @router.post("/weekly-report", status_code=202)
 async def task_weekly_report(
     authorized: bool = Depends(verify_cron_secret)
 ):
     """
-    Stub for weekly report task.
+    Triggers weekly report job.
     """
     # Weekly bucket
     week = datetime.now().strftime("%Y-W%V")
     job_name = "weekly_report"
 
-    result = enqueue_idempotent(
+    return enqueue_job_run(
         job_name=job_name,
         idempotency_key=week,
-        payload={"week": week},
-        handler_path="packages.quantum.jobs.handlers.weekly_report.run",
-        queue_name="otc"
+        payload={"week": week}
     )
 
-    return result
+# --- Visibility Endpoints ---
+
+@router.get("/runs", tags=["jobs"])
+async def list_job_runs(
+    status: Optional[str] = None,
+    job_name: Optional[str] = None,
+    limit: int = 50,
+    authorized: bool = Depends(verify_cron_secret)
+):
+    """
+    List job runs with optional filtering.
+    """
+    store = JobRunStore()
+    query = store.client.table("job_runs").select("*").order("created_at", desc=True).limit(limit)
+
+    if status:
+        query = query.eq("status", status)
+    if job_name:
+        query = query.eq("job_name", job_name)
+
+    res = query.execute()
+    return res.data
+
+@router.get("/runs/{job_run_id}", tags=["jobs"])
+async def get_job_run(
+    job_run_id: str,
+    authorized: bool = Depends(verify_cron_secret)
+):
+    """
+    Get details of a specific job run.
+    """
+    store = JobRunStore()
+    job = store.get_job(job_run_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job run not found")
+    return job
+
+@router.post("/runs/{job_run_id}/retry", tags=["jobs"])
+async def retry_job_run(
+    job_run_id: str,
+    authorized: bool = Depends(verify_cron_secret)
+):
+    """
+    Manually retry a failed or dead-lettered job.
+    """
+    store = JobRunStore()
+    job = store.get_job(job_run_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job run not found")
+
+    # Only allow retry if terminal state? Or anytime?
+    # Ideally from failed/dead_lettered.
+    if job["status"] not in ("failed_retryable", "dead_lettered", "cancelled", "succeeded"):
+        # If it's queued or running, we shouldn't intervene?
+        # Maybe force retry if stuck?
+        # Let's allow it but warn or reset.
+        pass
+
+    # Reset state to queued?
+    # Or use requeue RPC?
+    # RPC `requeue_job_run` sets it to `failed_retryable` with a run_after.
+    # We want to run it NOW.
+    # So we can update status to 'queued' and run_after to now, and attempt to 0 (or keep incrementing?).
+    # If we reset attempt, we risk infinite loops if it keeps failing.
+    # But manual retry implies user intervention.
+    # Let's just update to 'queued' and clear error.
+
+    store.client.table("job_runs").update({
+        "status": "queued",
+        "run_after": datetime.now().isoformat(),
+        "error": None,
+        "result": None,
+        "locked_by": None,
+        "locked_at": None,
+        # Reset attempts? Or keep history?
+        # If we keep attempts, it might hit max_attempts again immediately.
+        # Manual retry usually resets the counter or ignores it.
+        # But our runner checks attempt < max_attempts.
+        # So we must increase max_attempts or reset attempt count.
+        # Let's reset attempt to 0 to give it a fresh start.
+        "attempt": 0
+    }).eq("id", job_run_id).execute()
+
+    # Also need to kick the runner via RQ again!
+    # Because `claim_job_run` is poll based, but we rely on RQ pushing.
+    # So we must enqueue the runner again.
+
+    payload = {"job_run_id": job_run_id}
+
+    # We need a new RQ ID? Or reuse?
+    # `enqueue_idempotent` uses job_name+key.
+    # If we use same key, RQ might dedupe if still in queue?
+    # If it's finished in RQ, we can re-enqueue.
+
+    result = enqueue_idempotent(
+        job_name=job["job_name"],
+        idempotency_key=job["idempotency_key"], # Reuse same key
+        payload=payload,
+        handler_path="packages.quantum.jobs.runner.run_job_run"
+    )
+
+    return {"status": "retried", "rq_job_id": result.get("job_id")}

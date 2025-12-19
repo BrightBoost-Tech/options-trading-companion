@@ -24,17 +24,35 @@ class UniverseService:
         self.supabase = supabase
         self.polygon = polygon_service or PolygonService()
 
-    def _sanitize_bigint(self, value):
+    # Int-like keys that must be sanitized for Postgres BigInt
+    INT_LIKE_KEYS = {
+        "market_cap", "volume", "avg_volume", "avg_volume_30d",
+        "shares_outstanding", "open_interest", "timestamp_ms",
+        "liquidity_score"
+    }
+
+    @staticmethod
+    def sanitize_metrics(payload: Dict) -> Dict:
         """
-        Casts value to int to satisfy Postgres bigint requirements.
-        Handles None, float, and numeric strings.
+        Sanitizes dictionary values to ensure int-like fields are actual integers.
+        Useful for Postgres bigint columns which reject floats or decimal strings.
         """
-        if value is None:
-            return None
-        try:
-            return int(float(value))
-        except (ValueError, TypeError):
-            return 0
+        sanitized = payload.copy()
+        for key, value in payload.items():
+            if key in UniverseService.INT_LIKE_KEYS:
+                if value is None:
+                    # Omit key if None to avoid overwriting with NULL or errors
+                    sanitized.pop(key, None)
+                    continue
+
+                try:
+                    # Coerce: float -> int, "123.45" -> 123
+                    sanitized[key] = int(float(value))
+                except (ValueError, TypeError):
+                    # Omit key if coercion fails
+                    sanitized.pop(key, None)
+
+        return sanitized
 
     def sync_universe(self):
         """
@@ -76,8 +94,7 @@ class UniverseService:
             try:
                 # 1. Basic Details (Sector, Market Cap)
                 details = self.polygon.get_ticker_details(sym)
-                # Sanitize market_cap to int for Postgres bigint column
-                market_cap = self._sanitize_bigint(details.get("market_cap", 0))
+                market_cap = details.get("market_cap")  # Raw value (float/None)
                 sector = details.get("sic_description", "Unknown")
 
                 # 2. Volume (Avg 30d) & IV Rank
@@ -138,8 +155,10 @@ class UniverseService:
 
         if updates:
             try:
-                self.supabase.table("scanner_universe").upsert(updates).execute()
-                print(f"[UniverseService] Updated metrics for {len(updates)} symbols.")
+                # Sanitize all updates before sending to DB
+                sanitized_updates = [self.sanitize_metrics(u) for u in updates]
+                self.supabase.table("scanner_universe").upsert(sanitized_updates).execute()
+                print(f"[UniverseService] Updated metrics for {len(sanitized_updates)} symbols.")
             except Exception as e:
                 print(f"[UniverseService] Error saving metrics: {e}")
 

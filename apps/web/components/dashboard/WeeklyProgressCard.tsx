@@ -3,7 +3,7 @@
 import { useState, useEffect } from 'react';
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
-import { fetchWithAuth } from "@/lib/api";
+import { fetchWithAuth, ApiError } from "@/lib/api";
 
 interface WeeklySnapshot {
     week_id: string;
@@ -41,13 +41,14 @@ export function WeeklyProgressCard() {
                 // It automatically prepends API_URL if path starts with '/'
                 const json = await fetchWithAuth<WeeklySnapshot>('/progress/weekly');
                 setData(json);
+                setError(false);
             } catch (e: any) {
-                // Check for 404 by message if possible, or just treat as error/empty
-                // Current fetchWithAuth throws generic error with status code in message
-                if (e.message && e.message.includes('404')) {
+                // Check for 404 by status if it is an ApiError
+                if (e instanceof ApiError && e.status === 404) {
                      // No data yet, handled by null state
+                     setData(null);
                 } else {
-                     console.error(e);
+                     console.error('Failed to load weekly progress:', e);
                      setError(true);
                 }
             } finally {
@@ -59,7 +60,16 @@ export function WeeklyProgressCard() {
 
     if (loading) return <div className="animate-pulse h-48 bg-muted rounded-lg"></div>;
 
-    if (error) return null; // Hide on error for minimal intrusion
+    if (error) {
+         return (
+             <Card className="opacity-75">
+                <CardHeader>
+                    <CardTitle>Weekly Progress</CardTitle>
+                    <CardDescription>Unavailable at the moment.</CardDescription>
+                </CardHeader>
+            </Card>
+        );
+    }
 
     if (!data) {
         return (
@@ -111,10 +121,10 @@ export function WeeklyProgressCard() {
                             <span className="text-xs text-muted-foreground">Overall Score</span>
                         </div>
                         <div className="space-y-2">
-                            {Object.entries(user_metrics.components).map(([key, metric]: [string, any]) => (
+                            {user_metrics.components && Object.entries(user_metrics.components).map(([key, metric]: [string, any]) => (
                                 <div key={key} className="flex justify-between text-sm">
-                                    <span className="text-muted-foreground">{metric.label}</span>
-                                    <span className="font-medium">{(metric.value * 100).toFixed(0)}%</span>
+                                    <span className="text-muted-foreground">{metric?.label || key}</span>
+                                    <span className="font-medium">{metric?.value != null ? (metric.value * 100).toFixed(0) : '--'}%</span>
                                 </div>
                             ))}
                         </div>
@@ -128,10 +138,10 @@ export function WeeklyProgressCard() {
                             <span className="text-xs text-muted-foreground">Quality Score</span>
                         </div>
                          <div className="space-y-2">
-                            {Object.entries(system_metrics.components).map(([key, metric]: [string, any]) => (
+                            {system_metrics.components && Object.entries(system_metrics.components).map(([key, metric]: [string, any]) => (
                                 <div key={key} className="flex justify-between text-sm">
-                                    <span className="text-muted-foreground">{metric.label}</span>
-                                    <span className="font-medium">{(metric.value * 100).toFixed(0)}%</span>
+                                    <span className="text-muted-foreground">{metric?.label || key}</span>
+                                    <span className="font-medium">{metric?.value != null ? (metric.value * 100).toFixed(0) : '--'}%</span>
                                 </div>
                             ))}
                         </div>

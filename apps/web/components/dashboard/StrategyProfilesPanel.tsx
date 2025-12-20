@@ -1,12 +1,9 @@
 'use client';
 
 import { useState, useEffect } from 'react';
-import { Card, CardHeader, CardTitle, CardContent } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
-import { Badge } from '@/components/ui/badge';
-import { getAuthHeadersCached, fetchWithAuth } from '@/lib/api';
-import { QuantumTooltip } from "@/components/ui/QuantumTooltip";
-import { ChevronDown, ChevronRight, Play, Clock, Settings, Save, RefreshCw } from 'lucide-react';
+import { getAuthHeadersCached, fetchWithAuth, ApiError } from '@/lib/api';
+import { Play, Clock, Settings, Save, RefreshCw, AlertTriangle } from 'lucide-react';
 import { StrategyConfig } from '@/lib/types';
 import { API_URL } from '@/lib/constants';
 
@@ -26,6 +23,7 @@ interface StrategyBacktest {
 export default function StrategyProfilesPanel() {
   const [strategies, setStrategies] = useState<StrategyConfig[]>([]);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
   const [selectedStrategy, setSelectedStrategy] = useState<StrategyConfig | null>(null);
   const [editingConfig, setEditingConfig] = useState<string>('');
   const [backtests, setBacktests] = useState<StrategyBacktest[]>([]);
@@ -52,13 +50,40 @@ export default function StrategyProfilesPanel() {
   const fetchStrategies = async () => {
     try {
       setLoading(true);
-      const data = await fetchWithAuth('/strategies');
-      setStrategies(data);
-      if (data.length > 0 && !selectedStrategy) {
-        setSelectedStrategy(data[0]);
+      setError(null);
+      // Explicitly type as any first to check shape safely
+      const data = await fetchWithAuth<any>('/strategies');
+
+      let safeStrategies: StrategyConfig[] = [];
+
+      if (Array.isArray(data)) {
+        safeStrategies = data;
+      } else if (data && typeof data === 'object' && Array.isArray(data.strategies)) {
+        safeStrategies = data.strategies;
+      } else {
+        // Fallback for unexpected response structure
+        console.warn('Unexpected strategy response shape:', data);
+        safeStrategies = [];
       }
-    } catch (err) {
+
+      setStrategies(safeStrategies);
+
+      if (safeStrategies.length > 0 && !selectedStrategy) {
+        setSelectedStrategy(safeStrategies[0]);
+      }
+    } catch (err: any) {
       console.error('Failed to fetch strategies', err);
+      // Extract trace_id or status if available
+      let errorMsg = 'Failed to load strategies.';
+      if (err instanceof ApiError) {
+         errorMsg += ` (Status: ${err.status}`;
+         if (err.trace_id) errorMsg += `, Trace: ${err.trace_id}`;
+         errorMsg += ')';
+      } else if (err.message) {
+         errorMsg += ` ${err.message}`;
+      }
+      setError(errorMsg);
+      setStrategies([]); // Ensure it's empty array
     } finally {
       setLoading(false);
     }
@@ -68,9 +93,14 @@ export default function StrategyProfilesPanel() {
     try {
       setBtLoading(true);
       const data = await fetchWithAuth(`/strategies/${strategyName}/backtests`);
-      setBacktests(data);
+      if (Array.isArray(data)) {
+        setBacktests(data);
+      } else {
+        setBacktests([]);
+      }
     } catch (err) {
       console.error('Failed to fetch backtests', err);
+      setBacktests([]);
     } finally {
       setBtLoading(false);
     }
@@ -98,7 +128,8 @@ export default function StrategyProfilesPanel() {
         setSelectedStrategy(updated);
         alert('Configuration saved!');
       } else {
-        alert('Failed to save configuration');
+        const errBody = await res.json().catch(() => ({}));
+        alert(`Failed to save: ${errBody.detail || res.statusText}`);
       }
     } catch (err) {
       console.error(err);
@@ -129,6 +160,10 @@ export default function StrategyProfilesPanel() {
         setSimResult(result);
         // Refresh history
         fetchBacktests(selectedStrategy.name);
+      } else {
+          const err = await res.json().catch(() => ({}));
+          console.error("Backtest failed", err);
+          alert(`Backtest failed: ${err.detail || 'Unknown error'}`);
       }
     } catch (err) {
       console.error('Simulation failed', err);
@@ -154,6 +189,8 @@ export default function StrategyProfilesPanel() {
       });
       if (res.ok) {
           alert("Batch simulation queued!");
+      } else {
+          alert("Failed to queue batch sim");
       }
     } catch (err) {
         console.error("Batch sim failed", err);
@@ -168,6 +205,15 @@ export default function StrategyProfilesPanel() {
         {/* Sidebar List */}
         <div className="w-full md:w-1/4 space-y-2">
            <h3 className="font-semibold text-muted-foreground uppercase text-xs mb-2">Available Profiles</h3>
+           {error && (
+             <div className="p-3 mb-2 text-xs bg-red-50 text-red-600 border border-red-200 rounded flex items-start gap-2">
+               <AlertTriangle className="w-4 h-4 shrink-0" />
+               <span className="break-words">{error}</span>
+             </div>
+           )}
+           {strategies.length === 0 && !error && (
+               <div className="text-sm text-muted-foreground italic p-2">No strategies found.</div>
+           )}
            {strategies.map(s => (
              <button
                key={s.name}
@@ -265,8 +311,8 @@ export default function StrategyProfilesPanel() {
                </div>
             </div>
           ) : (
-            <div className="h-full flex items-center justify-center text-muted-foreground">
-               Select a profile to edit
+             <div className="h-full flex items-center justify-center text-muted-foreground p-8">
+               {error ? 'Unable to load strategies. Please try again later.' : 'Select a profile to edit'}
             </div>
           )}
         </div>

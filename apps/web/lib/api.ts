@@ -3,6 +3,24 @@ import { API_URL, TEST_USER_ID } from '@/lib/constants';
 
 type FetchInput = RequestInfo | URL;
 
+export class ApiError extends Error {
+  status: number;
+  detail?: string;
+  trace_id?: string;
+  note?: string;
+
+  constructor(message: string, status: number, body?: any) {
+    super(message);
+    this.name = 'ApiError';
+    this.status = status;
+    if (body && typeof body === 'object') {
+      this.detail = body.detail;
+      this.trace_id = body.trace_id;
+      this.note = body.note;
+    }
+  }
+}
+
 // --- Auth Header Caching ---
 let cachedHeaders: Record<string, string> | null = null;
 let cachedHeadersTimestamp = 0;
@@ -46,7 +64,7 @@ export async function getAuthHeadersCached(ttlMs = 5000): Promise<Record<string,
  * Prepends API_URL if the input is a relative path starting with '/'.
  *
  * Returns the parsed JSON response by default.
- * Throws an error if the response is not ok.
+ * Throws a typed ApiError if the response is not ok.
  */
 export async function fetchWithAuth<T = any>(
   input: FetchInput,
@@ -85,12 +103,33 @@ export async function fetchWithAuth<T = any>(
     headers,
   });
 
-  if (!response.ok) {
-    throw new Error(`Request failed with status ${response.status}`);
+  // 6. Handle Response
+  let data: any;
+  const contentType = response.headers.get('content-type');
+  if (contentType && contentType.includes('application/json')) {
+    try {
+      data = await response.json();
+    } catch (e) {
+      // Failed to parse JSON, data remains undefined
+    }
+  } else {
+    // If text/plain or other, try to read text
+    try {
+        data = await response.text();
+    } catch (e) {
+        // failed to read text
+    }
   }
 
-  // 6. Return parsed JSON
-  return response.json();
+  if (!response.ok) {
+    const message = (data && typeof data === 'object' && data.detail)
+      ? data.detail
+      : `Request failed with status ${response.status}`;
+
+    throw new ApiError(message, response.status, data);
+  }
+
+  return data as T;
 }
 
 /**

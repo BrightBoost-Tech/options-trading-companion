@@ -92,7 +92,12 @@ def __whoami():
 
 @app.get("/health")
 def health_check():
-    return {"status": "ok", "app_env": os.getenv("APP_ENV")}
+    return {
+        "status": "ok",
+        "app_env": os.getenv("APP_ENV"),
+        "supabase": SUPABASE_STATUS,
+        "env_loaded_from": str(env_path)
+    }
 
 
 @app.get("/__auth_debug")
@@ -167,9 +172,48 @@ app.add_middleware(
 secrets_provider = SecretsProvider()
 supa_secrets = secrets_provider.get_supabase_secrets()
 url = supa_secrets.url
-key = supa_secrets.service_role_key
+
+# Deterministic Key Selection
+key = None
+key_type = "none"
+
+if supa_secrets.service_role_key:
+    key = supa_secrets.service_role_key
+    key_type = "service_role"
+elif supa_secrets.anon_key:
+    key = supa_secrets.anon_key
+    key_type = "anon (degraded)"
+    print("⚠️ WARNING: Using Anon Key for Admin Client. Some operations may fail.")
 
 supabase_admin: Client = create_client(url, key) if url and key else None
+
+# Supabase Startup Validation
+SUPABASE_STATUS = {
+    "ok": False,
+    "url": url,
+    "key_type": key_type,
+    "error": None
+}
+
+if supabase_admin:
+    try:
+        # Real network request to validate credentials
+        # We try to fetch 1 row from scanner_universe which should exist.
+        # If this fails with APIError (401), we know keys are bad.
+        supabase_admin.table("scanner_universe").select("ticker").limit(1).execute()
+
+        # Redact key for logging
+        redacted_key = f"{key[:6]}...{key[-4:]}" if key and len(key) > 10 else "N/A"
+        print(f"✅ Supabase Validated: URL={url}, KeyType={key_type}, Key={redacted_key}")
+        SUPABASE_STATUS["ok"] = True
+    except Exception as e:
+        print(f"❌ Supabase Startup Validation Failed: {e}")
+        SUPABASE_STATUS["error"] = str(e)
+        # We do NOT kill the app, but health check will report failure.
+else:
+    msg = "Supabase URL or Key missing in environment."
+    print(f"❌ {msg}")
+    SUPABASE_STATUS["error"] = msg
 
 # Initialize Analytics Service (Use Admin Client for system logging)
 analytics_service = AnalyticsService(supabase_admin)

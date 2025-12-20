@@ -41,9 +41,9 @@ class SecretsProvider:
     def get_supabase_secrets(self) -> SupabaseSecrets:
         if self._supabase is None:
             self._supabase = SupabaseSecrets(
-                url=os.getenv("NEXT_PUBLIC_SUPABASE_URL"),
-                service_role_key=os.getenv("SUPABASE_SERVICE_ROLE_KEY"),
-                anon_key=os.getenv("SUPABASE_ANON_KEY"),
+                url=os.getenv("SUPABASE_URL") or os.getenv("NEXT_PUBLIC_SUPABASE_URL"),
+                service_role_key=os.getenv("SUPABASE_SERVICE_ROLE_KEY") or os.getenv("SUPABASE_SERVICE_KEY"),
+                anon_key=os.getenv("SUPABASE_ANON_KEY") or os.getenv("NEXT_PUBLIC_SUPABASE_ANON_KEY"),
                 jwt_secret=os.getenv("SUPABASE_JWT_SECRET"),
             )
         return self._supabase

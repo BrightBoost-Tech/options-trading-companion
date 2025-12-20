@@ -6,8 +6,10 @@ from datetime import datetime
 import uuid
 from typing import List, Dict, Any, Optional
 from fastapi import APIRouter, HTTPException, Depends, BackgroundTasks
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 from supabase import Client
+from postgrest.exceptions import APIError
+import traceback
 
 from packages.quantum.security import get_current_user_id, get_supabase_user_client
 from packages.quantum.strategy_profiles import StrategyConfig, BacktestRequest, BacktestRequestV3
@@ -223,8 +225,17 @@ def list_strategies(
     user_id: str = Depends(get_current_user_id),
     supabase: Client = Depends(get_supabase_user_client)
 ):
-    res = supabase.table("strategy_configs").select("*").eq("user_id", user_id).execute()
-    return {"strategies": res.data}
+    try:
+        res = supabase.table("strategy_configs").select("*").eq("user_id", user_id).execute()
+        return {"strategies": res.data}
+    except APIError as e:
+        print(f"Supabase API Error in list_strategies: {e}")
+        # Return empty list on failure to keep UI stable
+        return {"strategies": []}
+    except Exception as e:
+        print(f"Error listing strategies: {e}")
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail="Internal Server Error")
 
 @router.post("/strategies/{name}/backtest")
 def run_backtest(
@@ -407,17 +418,23 @@ def list_strategy_backtests(
     user_id: str = Depends(get_current_user_id),
     supabase: Client = Depends(get_supabase_user_client)
 ):
-    res = (
-        supabase.table("strategy_backtests")
-        .select("id, strategy_name, version, param_hash, start_date, end_date, ticker, trades_count, win_rate, max_drawdown, total_pnl, metrics, status, created_at")
-        .eq("user_id", user_id)
-        .eq("strategy_name", name)
-        .order("created_at", desc=True)
-        .range(offset, offset + limit - 1)
-        .execute()
-    )
-
-    return {"backtests": res.data}
+    try:
+        res = (
+            supabase.table("strategy_backtests")
+            .select("id, strategy_name, version, param_hash, start_date, end_date, ticker, trades_count, win_rate, max_drawdown, total_pnl, metrics, status, created_at")
+            .eq("user_id", user_id)
+            .eq("strategy_name", name)
+            .order("created_at", desc=True)
+            .range(offset, offset + limit - 1)
+            .execute()
+        )
+        return {"backtests": res.data}
+    except APIError as e:
+        print(f"Supabase API Error in list_strategy_backtests: {e}")
+        return {"backtests": []}
+    except Exception as e:
+        print(f"Error listing backtests: {e}")
+        return {"backtests": []}
 
 @router.get("/strategy_backtests/recent")
 def list_recent_backtests(
@@ -425,13 +442,16 @@ def list_recent_backtests(
     user_id: str = Depends(get_current_user_id),
     supabase: Client = Depends(get_supabase_user_client)
 ):
-    res = (
-        supabase.table("strategy_backtests")
-        .select("id, strategy_name, version, param_hash, start_date, end_date, ticker, trades_count, win_rate, total_pnl, status, created_at")
-        .eq("user_id", user_id)
-        .order("created_at", desc=True)
-        .limit(limit)
-        .execute()
-    )
-
-    return {"recent_backtests": res.data}
+    try:
+        res = (
+            supabase.table("strategy_backtests")
+            .select("id, strategy_name, version, param_hash, start_date, end_date, ticker, trades_count, win_rate, total_pnl, status, created_at")
+            .eq("user_id", user_id)
+            .order("created_at", desc=True)
+            .limit(limit)
+            .execute()
+        )
+        return {"recent_backtests": res.data}
+    except Exception as e:
+        print(f"Error listing recent backtests: {e}")
+        return {"recent_backtests": []}

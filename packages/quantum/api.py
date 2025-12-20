@@ -104,11 +104,18 @@ def health_check():
 def auth_debug(request: Request, user_id: str = Depends(get_current_user)):
     """
     Dev-only endpoint to debug authentication resolution.
-    Rejects in production.
+    Strictly limited to localhost AND development/test environments.
     """
     app_env = os.getenv("APP_ENV", "development")
-    if app_env == "production":
-        raise HTTPException(status_code=403, detail="Forbidden in production")
+
+    # 🛡️ Sentinel: Whitelist safe environments only
+    if app_env not in ["development", "test"]:
+        raise HTTPException(status_code=403, detail="Forbidden")
+
+    # 🛡️ Sentinel: Enforce localhost check regardless of environment setting
+    is_local = request.client.host in ("127.0.0.1", "::1", "localhost") if request.client else False
+    if not is_local:
+        raise HTTPException(status_code=403, detail="Forbidden: Localhost only")
 
     return {
         "app_env": app_env,
@@ -116,7 +123,7 @@ def auth_debug(request: Request, user_id: str = Depends(get_current_user)):
         "has_authorization_header": "Authorization" in request.headers,
         "has_x_test_mode_user": "X-Test-Mode-User" in request.headers,
         "resolved_user_id": user_id,
-        "is_localhost": request.client.host in ("127.0.0.1", "::1", "localhost") if request.client else False
+        "is_localhost": is_local
     }
 
 # Initialize Limiter

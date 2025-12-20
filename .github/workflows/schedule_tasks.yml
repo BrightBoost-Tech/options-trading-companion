@@ -1,19 +1,22 @@
+# Scheduling is disabled until API_URL is deployed and added as a secret
+# Run manually via Actions tab -> workflow_dispatch
+
 name: Schedule Tasks
 
 on:
-  schedule:
-    # 8:00 AM local time (Assuming UTC or adjust accordingly)
-    # If local is EST (UTC-5), 8:00 AM is 13:00 UTC.
-    # The prompt says "pick a consistent timezone; document it".
-    # I will assume UTC for simplicity and consistency in cloud runners.
-    # So 8:00 AM UTC.
-    - cron: '0 8 * * *'
-
-    # 8:05 AM UTC - Morning Brief
-    - cron: '5 8 * * *'
-
-    # 12:00 PM UTC - Midday Scan
-    - cron: '0 12 * * *'
+  # schedule:
+  #   # 8:00 AM local time (Assuming UTC or adjust accordingly)
+  #   # If local is EST (UTC-5), 8:00 AM is 13:00 UTC.
+  #   # The prompt says "pick a consistent timezone; document it".
+  #   # I will assume UTC for simplicity and consistency in cloud runners.
+  #   # So 8:00 AM UTC.
+  #   - cron: '0 8 * * *'
+  #
+  #   # 8:05 AM UTC - Morning Brief
+  #   - cron: '5 8 * * *'
+  #
+  #   # 12:00 PM UTC - Midday Scan
+  #   - cron: '0 12 * * *'
 
   workflow_dispatch:
     inputs:

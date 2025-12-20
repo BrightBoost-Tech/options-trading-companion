@@ -10,7 +10,20 @@ type DialogProps = {
   children: React.ReactNode
 }
 
-export function Dialog({ open, children }: DialogProps) {
+export function Dialog({ open, onOpenChange, children }: DialogProps) {
+  React.useEffect(() => {
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (open && event.key === 'Escape') {
+        onOpenChange?.(false)
+      }
+    }
+
+    if (open) {
+      document.addEventListener('keydown', handleKeyDown)
+    }
+    return () => document.removeEventListener('keydown', handleKeyDown)
+  }, [open, onOpenChange])
+
   if (!open) return null
   // we just render children; parent controls open state
   return <>{children}</>
@@ -24,6 +37,8 @@ export function DialogContent({ className, children, ...props }: DialogContentPr
   return (
     <div
       className="fixed inset-0 z-50 flex items-center justify-center bg-black/40"
+      aria-modal="true"
+      role="dialog"
       {...props}
     >
       <div
@@ -31,6 +46,7 @@ export function DialogContent({ className, children, ...props }: DialogContentPr
           "w-full max-w-md rounded-lg bg-white p-6 shadow-xl",
           className
         )}
+        onClick={(e) => e.stopPropagation()} // Prevent closing when clicking content (if we had backdrop click)
       >
         {children}
       </div>

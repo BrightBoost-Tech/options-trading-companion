@@ -14,6 +14,12 @@ export default function DashboardLayout({ children, mockAlerts = [] }: Dashboard
 
   return (
     <div className="min-h-screen bg-gray-50">
+      <a
+        href="#main-content"
+        className="sr-only focus:not-sr-only focus:absolute focus:top-4 focus:left-4 focus:z-[100] focus:px-4 focus:py-2 focus:bg-white focus:text-blue-600 focus:shadow-lg focus:rounded-md focus:border focus:border-blue-200 focus:outline-none focus:ring-2 focus:ring-blue-500"
+      >
+        Skip to main content
+      </a>
       <div className="bg-white border-b">
         <div className="max-w-7xl mx-auto px-8 py-4 flex justify-between items-center">
           <div className="flex items-center gap-4">
@@ -32,7 +38,7 @@ export default function DashboardLayout({ children, mockAlerts = [] }: Dashboard
           <div className="flex items-center gap-4">
             {isDashboard && (
               <div className="relative">
-                <button className="p-2 rounded-full hover:bg-gray-100">
+                <button aria-label="Notifications" className="p-2 rounded-full hover:bg-gray-100">
                   <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 17h5l-1.405-1.405A2.032 2.032 0 0118 14.158V11a6.002 6.002 0 00-4-5.659V5a2 2 0 10-4 0v.341C7.67 6.165 6 8.388 6 11v3.159c0 .538-.214 1.055-.595 1.436L4 17h5m6 0v1a3 3 0 11-6 0v-1m6 0H9" />
                   </svg>
@@ -57,7 +63,9 @@ export default function DashboardLayout({ children, mockAlerts = [] }: Dashboard
           </div>
         </div>
       </div>
-      {children}
+      <main id="main-content">
+        {children}
+      </main>
     </div>
   );
 }

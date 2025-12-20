@@ -1,6 +1,5 @@
 import os
 import requests
-import pandas as pd
 import numpy as np
 from datetime import datetime, timedelta, timezone
 from typing import List, Dict, Any, Optional
@@ -28,9 +27,9 @@ SCANNER_MAX_DTE = 45
 
 logger = logging.getLogger(__name__)
 
-def _select_expiry_bucket(chain: List[Dict[str, Any]], target_dte: int = 35) -> Optional[str]:
+def _select_best_expiry_chain(chain: List[Dict[str, Any]], target_dte: int = 35) -> tuple[Optional[str], List[Dict[str, Any]]]:
     if not chain:
-        return None
+        return None, []
 
     # Group by expiry
     buckets = {}
@@ -42,7 +41,7 @@ def _select_expiry_bucket(chain: List[Dict[str, Any]], target_dte: int = 35) -> 
         buckets[exp].append(c)
 
     if not buckets:
-        return None
+        return None, []
 
     # Helper to get DTE diff
     def get_dte_diff(exp_str):
@@ -61,10 +60,8 @@ def _select_expiry_bucket(chain: List[Dict[str, Any]], target_dte: int = 35) -> 
         key=lambda e: (-len(buckets[e]), get_dte_diff(e), e)
     )
 
-    return sorted_expiries[0]
-
-def _filter_chain_by_expiry(chain: List[Dict[str, Any]], expiry: str) -> List[Dict[str, Any]]:
-    return [c for c in chain if c.get("expiration") == expiry]
+    best_expiry = sorted_expiries[0]
+    return best_expiry, buckets[best_expiry]
 
 def _select_legs_from_chain(
     calls: List[Dict[str, Any]],
@@ -890,16 +887,24 @@ def scan_for_opportunities(
                 return None
 
             # Enforce shared expiry
-            expiry_selected = _select_expiry_bucket(chain, target_dte=35)
-            if not expiry_selected:
+            # Optimization: Select bucket and return contracts directly to avoid re-filtering
+            expiry_selected, chain_subset = _select_best_expiry_chain(chain, target_dte=35)
+            if not expiry_selected or not chain_subset:
                 return None
-            chain = _filter_chain_by_expiry(chain, expiry_selected)
 
             # Optimization: Sort and index chain ONCE per symbol
-            # This avoids repeated filtering and sorting in leg selection functions
-            # Bolt Optimization: 2025-02-23
-            calls_sorted = sorted([c for c in chain if c.get('type') == 'call'], key=lambda x: x['strike'])
-            puts_sorted = sorted([c for c in chain if c.get('type') == 'put'], key=lambda x: x['strike'])
+            # Single-pass split into calls and puts
+            calls_list = []
+            puts_list = []
+            for c in chain_subset:
+                t = c.get('type')
+                if t == 'call':
+                    calls_list.append(c)
+                elif t == 'put':
+                    puts_list.append(c)
+
+            calls_sorted = sorted(calls_list, key=lambda x: x['strike'])
+            puts_sorted = sorted(puts_list, key=lambda x: x['strike'])
 
             # Normalize Strategy Key early
             raw_strategy = suggestion["strategy"]

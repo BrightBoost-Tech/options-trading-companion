@@ -1,7 +1,10 @@
 from typing import Dict, List, Optional, Any
 from fastapi import APIRouter, Depends, HTTPException, Query
 from supabase import Client
+from postgrest.exceptions import APIError
+from pydantic import ValidationError
 from datetime import datetime, timedelta
+import traceback
 
 from packages.quantum.security import get_current_user, get_supabase_user_client
 from packages.quantum.services.journal_service import JournalService
@@ -215,8 +218,7 @@ async def get_weekly_progress(
     week_id = get_week_id_for_last_full_week()
 
     if not supabase:
-         # Propagate the 500 from dependency or if just missing
-         raise HTTPException(status_code=500, detail="Database Context Unavailable")
+         raise HTTPException(status_code=503, detail="Database Context Unavailable")
 
     try:
         res = supabase.table("weekly_snapshots") \
@@ -231,14 +233,27 @@ async def get_weekly_progress(
         else:
             raise HTTPException(status_code=404, detail=f"No snapshot found for week {week_id}")
 
+    except APIError as e:
+        # Handle Supabase API Errors (e.g. Invalid API Key, RLS policy)
+        print(f"Supabase API Error in weekly progress: {e}")
+        raise HTTPException(status_code=502, detail={
+            "error": "Upstream API Error",
+            "message": str(e),
+            "hint": "Check SUPABASE_URL and Keys"
+        })
+    except ValidationError as e:
+        # Handle Pydantic Validation Errors (often from malformed Supabase responses)
+        print(f"Validation Error in weekly progress: {e}")
+        raise HTTPException(status_code=502, detail="Invalid Data from Upstream")
     except Exception as e:
-        # Only catch "No rows found" error from PostgREST/Supabase
-        if "JSON object requested, multiple (or no) rows returned" in str(e) or "The result contains 0 rows" in str(e):
+        # Check for specific "No rows found" messages which come as generic exceptions sometimes
+        msg = str(e)
+        if "JSON object requested, multiple (or no) rows returned" in msg or "The result contains 0 rows" in msg:
              raise HTTPException(status_code=404, detail=f"No snapshot found for week {week_id}")
 
-        # Re-raise other errors (Auth, DB Connection, etc)
         print(f"Error fetching weekly progress: {e}")
-        raise e
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail="Internal Server Error")
 
 @router.get("/suggestions")
 async def get_suggestions(

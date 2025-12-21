@@ -152,3 +152,18 @@ export async function fetchWithAuthTimeout<T = any>(
     clearTimeout(id);
   }
 }
+
+/**
+ * Helper to normalize list responses that might be wrapped in an object or null.
+ * e.g. { strategies: [...] } vs [...]
+ *
+ * @param data The raw response data
+ * @param listKey The key to look for if the data is an object wrapper (default: 'items')
+ * @returns A guaranteed array
+ */
+export function normalizeList<T>(data: any, listKey: string = 'items'): T[] {
+  if (!data) return [];
+  if (Array.isArray(data)) return data;
+  if (typeof data === 'object' && Array.isArray(data[listKey])) return data[listKey];
+  return [];
+}

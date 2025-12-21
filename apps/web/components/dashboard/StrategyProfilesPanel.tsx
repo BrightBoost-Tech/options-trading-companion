@@ -2,7 +2,7 @@
 
 import { useState, useEffect } from 'react';
 import { Button } from '@/components/ui/button';
-import { getAuthHeadersCached, fetchWithAuth, ApiError } from '@/lib/api';
+import { getAuthHeadersCached, fetchWithAuth, ApiError, normalizeList } from '@/lib/api';
 import { Play, Clock, Settings, Save, RefreshCw, AlertTriangle } from 'lucide-react';
 import { StrategyConfig } from '@/lib/types';
 import { API_URL } from '@/lib/constants';
@@ -54,17 +54,8 @@ export default function StrategyProfilesPanel() {
       // Explicitly type as any first to check shape safely
       const data = await fetchWithAuth<any>('/strategies');
 
-      let safeStrategies: StrategyConfig[] = [];
-
-      if (Array.isArray(data)) {
-        safeStrategies = data;
-      } else if (data && typeof data === 'object' && Array.isArray(data.strategies)) {
-        safeStrategies = data.strategies;
-      } else {
-        // Fallback for unexpected response structure
-        console.warn('Unexpected strategy response shape:', data);
-        safeStrategies = [];
-      }
+      // Use helper to normalize { strategies: [...] } vs [...]
+      const safeStrategies = normalizeList<StrategyConfig>(data, 'strategies');
 
       setStrategies(safeStrategies);
 

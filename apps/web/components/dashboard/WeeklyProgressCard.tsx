@@ -43,10 +43,13 @@ export function WeeklyProgressCard() {
                 setData(json);
                 setError(false);
             } catch (e: any) {
-                // Check for 404 by status if it is an ApiError
-                if (e instanceof ApiError && e.status === 404) {
-                     // No data yet, handled by null state
+                // Check for 404 or 4xx by status if it is an ApiError
+                // Only treat >=500 as "system errors" that show the red card.
+                // 404 means "no data yet".
+                if (e instanceof ApiError && e.status < 500) {
+                     // No data available (or bad request), treat as empty state
                      setData(null);
+                     setError(false);
                 } else {
                      console.error('Failed to load weekly progress:', e);
                      setError(true);

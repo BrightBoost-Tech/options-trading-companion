@@ -1,59 +1,42 @@
-import { NextRequest, NextResponse } from "next/server";
+import { NextRequest, NextResponse } from 'next/server';
+import { API_URL } from '@/lib/constants';
 
-const API_BASE_URL = process.env.API_URL || "http://127.0.0.1:8000";
-
-export async function POST(request: NextRequest) {
+export async function POST(req: NextRequest) {
   try {
-    const body = await request.json();
+    const body = await req.json();
 
-    // Prepare headers for the backend request
+    // Propagate headers for auth/dev bypass
     const headers: Record<string, string> = {
-      "Content-Type": "application/json",
+      'Content-Type': 'application/json',
     };
-
-    // Forward Authorization header if present
-    const authHeader = request.headers.get("authorization");
-    if (authHeader) {
-      headers["Authorization"] = authHeader;
+    if (req.headers.has('authorization')) {
+      headers['authorization'] = req.headers.get('authorization')!;
+    }
+    if (req.headers.has('x-test-mode-user')) {
+      headers['x-test-mode-user'] = req.headers.get('x-test-mode-user')!;
+    }
+    if (req.headers.has('cookie')) {
+      headers['cookie'] = req.headers.get('cookie')!;
     }
 
-    // Forward cookies if present
-    const cookieHeader = request.headers.get("cookie");
-    if (cookieHeader) {
-      headers["Cookie"] = cookieHeader;
-    }
-
-    // Forward "X-Test-Mode-User" header if present (for dev/test modes)
-    // Only if enabled in env (though checking NEXT_PUBLIC on server side is redundant, we use process.env)
-    const testUserHeader = request.headers.get("x-test-mode-user");
-    if (testUserHeader && process.env.NEXT_PUBLIC_ENABLE_DEV_AUTH_BYPASS === '1') {
-      headers["X-Test-Mode-User"] = testUserHeader;
-    }
-
-    const response = await fetch(`${API_BASE_URL}/analytics/events`, {
-      method: "POST",
+    const res = await fetch(`${API_URL}/analytics/events`, {
+      method: 'POST',
       headers,
       body: JSON.stringify(body),
     });
 
-    if (response.status === 401) {
-      // Log unauthorized access server-side but don't break the client UI
-      console.error("Analytics backend unauthorized:", await response.text());
-      return new NextResponse(null, { status: 200 });
+    if (!res.ok) {
+      // Even if backend fails, return 200 to client to avoid noise
+      // but log it on server console
+      console.warn(`[Analytics Proxy] Backend failed: ${res.status}`);
+      return NextResponse.json({ status: 'ok', warning: 'backend_failed' }, { status: 200 });
     }
 
-    if (!response.ok) {
-        // Just log server side, don't fail the request to the client
-        console.error(`Analytics backend failed: ${response.status} ${await response.text()}`);
-        return NextResponse.json({ status: "logged_with_error" });
-    }
-
-    const data = await response.json();
+    const data = await res.json();
     return NextResponse.json(data);
-
-  } catch (error) {
-    console.error("Error in analytics proxy:", error);
-    // Return success to client so we don't break their flow
-    return NextResponse.json({ status: "error_swallowed" });
+  } catch (e) {
+    console.error('[Analytics Proxy] Error:', e);
+    // Always return 200 OK for analytics to prevent client-side spam
+    return NextResponse.json({ status: 'ok', warning: 'proxy_failed' }, { status: 200 });
   }
 }

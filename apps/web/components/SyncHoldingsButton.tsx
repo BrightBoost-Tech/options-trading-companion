@@ -1,7 +1,7 @@
 'use client';
 
 import { useState } from 'react';
-import { supabase } from '@/lib/supabase';
+import { fetchWithAuth, ApiError } from '@/lib/api';
 import { API_URL } from '@/lib/constants';
 import { cn } from '@/lib/utils';
 import { RefreshCw } from 'lucide-react';
@@ -22,46 +22,22 @@ export default function SyncHoldingsButton({ onSyncComplete, className }: SyncHo
     setStatusMsg(null);
 
     try {
-      const { data: { session } } = await supabase.auth.getSession();
-
-      // Define Headers
-      const headers: Record<string, string> = {
-          'Content-Type': 'application/json'
-      };
-
-      if (session) {
-          headers['Authorization'] = `Bearer ${session.access_token}`;
-      } else {
-          // 🛠️ FIX: If no session, send the Test User ID header
-          headers['X-Test-Mode-User'] = '75ee12ad-b119-4f32-aeea-19b4ef55d587';
-      }
-
-      const response = await fetch(`${API_URL}/plaid/sync_holdings`, {
-        method: 'POST',
-        headers: headers
+      await fetchWithAuth(`${API_URL}/plaid/sync_holdings`, {
+        method: 'POST'
       });
 
-      if (!response.ok) {
-         const errorData = await response.json().catch(() => ({}));
-
-         // Specific handling for "No Plaid account" (404)
-         if (response.status === 404) {
-            console.warn("Plaid sync skipped: No linked account.");
-            setStatusMsg("No Plaid linked");
-            // Even if Plaid is missing, we treat this as "done" so the table can refresh
-            // (e.g. if CSV was uploaded but table is stale)
-            if (onSyncComplete) onSyncComplete();
-            return;
-         }
-
-         throw new Error(errorData.detail || 'Sync failed');
-      }
-
-      await response.json();
       setStatusMsg(`Synced ${new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`);
       if (onSyncComplete) onSyncComplete();
 
     } catch (err: any) {
+      // Specific handling for "No Plaid account" (404) from ApiError
+      if (err instanceof ApiError && err.status === 404) {
+        console.warn("Plaid sync skipped: No linked account.");
+        setStatusMsg("No Plaid linked");
+        if (onSyncComplete) onSyncComplete();
+        return;
+      }
+
       console.error('Sync error:', err);
       setError(err.message || 'Failed to sync');
     } finally {

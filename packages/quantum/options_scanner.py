@@ -690,7 +690,7 @@ def scan_for_opportunities(
 
 
     # 3. Parallel Processing
-    batch_size = 5 # Used for thread pool size
+    batch_size = 20 # Increased from 5 to 20 to improve I/O throughput (Bolt Optimization)
 
     # 3a. Batch Fetch Quotes (Optimization)
     # Fetch all quotes in one go to avoid N requests inside the loop

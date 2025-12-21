@@ -225,13 +225,25 @@ async def get_weekly_progress(
             .select("*") \
             .eq("user_id", user_id) \
             .eq("week_id", week_id) \
-            .single() \
+            .limit(1) \
             .execute()
 
-        if res.data:
-            return res.data
+        if res.data and len(res.data) > 0:
+            return res.data[0]
         else:
-            raise HTTPException(status_code=404, detail=f"No snapshot found for week {week_id}")
+            # Return stable "empty" response instead of 404/500
+            return {
+                "id": None,
+                "user_id": user_id,
+                "week_id": week_id,
+                "date_start": None,
+                "date_end": None,
+                "status": "empty",
+                "message": f"No snapshot yet for week {week_id}",
+                "user_metrics": {},
+                "system_metrics": {},
+                "synthesis": None
+            }
 
     except APIError as e:
         # Handle Supabase API Errors (e.g. Invalid API Key, RLS policy)
@@ -246,11 +258,6 @@ async def get_weekly_progress(
         print(f"Validation Error in weekly progress: {e}")
         raise HTTPException(status_code=502, detail="Invalid Data from Upstream")
     except Exception as e:
-        # Check for specific "No rows found" messages which come as generic exceptions sometimes
-        msg = str(e)
-        if "JSON object requested, multiple (or no) rows returned" in msg or "The result contains 0 rows" in msg:
-             raise HTTPException(status_code=404, detail=f"No snapshot found for week {week_id}")
-
         print(f"Error fetching weekly progress: {e}")
         traceback.print_exc()
         raise HTTPException(status_code=500, detail="Internal Server Error")

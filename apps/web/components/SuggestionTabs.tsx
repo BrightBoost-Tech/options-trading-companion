@@ -8,6 +8,12 @@ import WeeklyReportList from './suggestions/WeeklyReportList';
 import { Sparkles, RefreshCw, Activity, Sun, Clock, FileText } from 'lucide-react';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipProvider,
+  TooltipTrigger,
+} from '@/components/ui/tooltip';
 
 interface SuggestionTabsProps {
   optimizerSuggestions: any[];
@@ -41,8 +47,13 @@ export default function SuggestionTabs({
   return (
     <div className="bg-white rounded-lg shadow overflow-hidden h-full flex flex-col">
       {/* Tabs Header */}
-      <div className="flex border-b border-gray-100 overflow-x-auto no-scrollbar">
+      <div className="flex border-b border-gray-100 overflow-x-auto no-scrollbar" role="tablist">
         <button
+          id="tab-morning"
+          role="tab"
+          aria-selected={activeTab === 'morning'}
+          aria-controls="panel-morning"
+          type="button"
           onClick={() => setActiveTab('morning')}
           className={`flex-1 py-4 px-2 min-w-[120px] text-sm font-medium text-center border-b-2 transition-colors whitespace-nowrap ${
             activeTab === 'morning'
@@ -62,6 +73,11 @@ export default function SuggestionTabs({
         </button>
 
         <button
+          id="tab-midday"
+          role="tab"
+          aria-selected={activeTab === 'midday'}
+          aria-controls="panel-midday"
+          type="button"
           onClick={() => setActiveTab('midday')}
           className={`flex-1 py-4 px-2 min-w-[120px] text-sm font-medium text-center border-b-2 transition-colors whitespace-nowrap ${
             activeTab === 'midday'
@@ -81,6 +97,11 @@ export default function SuggestionTabs({
         </button>
 
         <button
+          id="tab-rebalance"
+          role="tab"
+          aria-selected={activeTab === 'rebalance'}
+          aria-controls="panel-rebalance"
+          type="button"
           onClick={() => setActiveTab('rebalance')}
           className={`flex-1 py-4 px-2 min-w-[120px] text-sm font-medium text-center border-b-2 transition-colors whitespace-nowrap ${
             activeTab === 'rebalance'
@@ -100,6 +121,11 @@ export default function SuggestionTabs({
         </button>
 
         <button
+          id="tab-scout"
+          role="tab"
+          aria-selected={activeTab === 'scout'}
+          aria-controls="panel-scout"
+          type="button"
           onClick={() => setActiveTab('scout')}
           className={`flex-1 py-4 px-2 min-w-[120px] text-sm font-medium text-center border-b-2 transition-colors whitespace-nowrap ${
             activeTab === 'scout'
@@ -119,6 +145,11 @@ export default function SuggestionTabs({
         </button>
 
         <button
+          id="tab-journal"
+          role="tab"
+          aria-selected={activeTab === 'journal'}
+          aria-controls="panel-journal"
+          type="button"
           onClick={() => setActiveTab('journal')}
           className={`flex-1 py-4 px-2 min-w-[120px] text-sm font-medium text-center border-b-2 transition-colors whitespace-nowrap ${
             activeTab === 'journal'
@@ -138,6 +169,11 @@ export default function SuggestionTabs({
         </button>
 
         <button
+          id="tab-weekly"
+          role="tab"
+          aria-selected={activeTab === 'weekly'}
+          aria-controls="panel-weekly"
+          type="button"
           onClick={() => setActiveTab('weekly')}
           className={`flex-1 py-4 px-2 min-w-[120px] text-sm font-medium text-center border-b-2 transition-colors whitespace-nowrap ${
             activeTab === 'weekly'
@@ -156,19 +192,25 @@ export default function SuggestionTabs({
       <div className="p-4 flex-1 overflow-y-auto bg-gray-50/50 min-h-[400px]">
 
         {activeTab === 'morning' && (
-          <MorningOrdersList suggestions={morningSuggestions} />
+          <div role="tabpanel" id="panel-morning" aria-labelledby="tab-morning">
+            <MorningOrdersList suggestions={morningSuggestions} />
+          </div>
         )}
 
         {activeTab === 'midday' && (
-          <MiddayEntriesList suggestions={middaySuggestions} />
+          <div role="tabpanel" id="panel-midday" aria-labelledby="tab-midday">
+            <MiddayEntriesList suggestions={middaySuggestions} />
+          </div>
         )}
 
         {activeTab === 'weekly' && (
-          <WeeklyReportList reports={weeklyReports} />
+          <div role="tabpanel" id="panel-weekly" aria-labelledby="tab-weekly">
+            <WeeklyReportList reports={weeklyReports} />
+          </div>
         )}
 
         {activeTab === 'rebalance' && (
-          <div className="space-y-4">
+          <div role="tabpanel" id="panel-rebalance" aria-labelledby="tab-rebalance" className="space-y-4">
              {optimizerSuggestions.length === 0 ? (
                <div className="text-center py-10 text-gray-400">
                  <Activity className="w-10 h-10 mx-auto mb-3 opacity-20" />
@@ -228,16 +270,27 @@ export default function SuggestionTabs({
         )}
 
         {activeTab === 'scout' && (
-          <div className="space-y-4">
+          <div role="tabpanel" id="panel-scout" aria-labelledby="tab-scout" className="space-y-4">
             <div className="flex justify-end mb-2">
-                <button
-                  onClick={onRefreshScout}
-                  disabled={scoutLoading}
-                  className="text-xs text-green-600 flex items-center gap-1 hover:underline disabled:opacity-50"
-                >
-                  <RefreshCw className={`w-3 h-3 ${scoutLoading ? 'animate-spin' : ''}`} />
-                  Refresh
-                </button>
+                <TooltipProvider>
+                  <Tooltip>
+                    <TooltipTrigger asChild>
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        onClick={onRefreshScout}
+                        disabled={scoutLoading}
+                        className="h-6 text-xs text-green-600 gap-1 hover:text-green-700 hover:bg-green-50"
+                      >
+                        <RefreshCw className={`w-3 h-3 ${scoutLoading ? 'animate-spin' : ''}`} />
+                        Refresh
+                      </Button>
+                    </TooltipTrigger>
+                    <TooltipContent>
+                      <p>Refresh market scan for new opportunities</p>
+                    </TooltipContent>
+                  </Tooltip>
+                </TooltipProvider>
             </div>
 
             {scoutSuggestions.length === 0 ? (
@@ -254,7 +307,7 @@ export default function SuggestionTabs({
         )}
 
         {activeTab === 'journal' && (
-          <div className="space-y-4">
+          <div role="tabpanel" id="panel-journal" aria-labelledby="tab-journal" className="space-y-4">
             {journalQueue.length === 0 ? (
                <div className="text-center py-10 text-gray-400">
                  <p>Journal queue is empty.</p>

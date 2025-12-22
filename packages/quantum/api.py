@@ -28,6 +28,7 @@ load_dotenv(dotenv_path=env_path)
 from packages.quantum.security import encrypt_token, decrypt_token, get_current_user, get_supabase_user_client
 from packages.quantum.security.config import validate_security_config
 from packages.quantum.security.secrets_provider import SecretsProvider
+from packages.quantum.security.headers_middleware import SecurityHeadersMiddleware
 
 # Validate Security Config on Startup
 if os.getenv("ENABLE_DEV_AUTH_BYPASS") == "1":
@@ -137,6 +138,9 @@ ALLOWED_ORIGINS = [
     "http://localhost:3001",
     "http://127.0.0.1:3001",
 ]
+
+# Add Security Headers Middleware
+app.add_middleware(SecurityHeadersMiddleware)
 
 # Global Exception Handler for CORS on 500s
 @app.exception_handler(Exception)

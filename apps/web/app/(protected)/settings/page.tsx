@@ -35,13 +35,10 @@ export default function SettingsPage() {
           const { data: { session } } = await supabase.auth.getSession();
           if (!session) return;
 
-          const res = await fetch(`${API_URL}/plaid/status`, {
-              headers: {
-                  'Authorization': `Bearer ${session.access_token}`
-              }
-          });
-          const data = await res.json();
-          if (data.connected) {
+          // fetchWithAuth automatically handles Authorization header and URL prefixing
+          const data = await fetchWithAuth<any>('/plaid/status');
+
+          if (data && data.connected) {
               setConnectedInstitution(data.institution || 'Connected Broker');
           }
       } catch (e) {
@@ -65,7 +62,8 @@ export default function SettingsPage() {
 
       try {
           // Exchange token
-          const data = await fetchWithAuth(`${API_URL}/plaid/exchange_token`, {
+          // Using shared fetchWithAuth helper which handles prefixing
+          const data = await fetchWithAuth('/plaid/exchange_token', {
               method: 'POST',
               headers: {
                   'Content-Type': 'application/json',
@@ -82,7 +80,7 @@ export default function SettingsPage() {
 
           // ✅ FIX: Trigger sync with correct headers for Dev Mode
           try {
-              await fetchWithAuth(`${API_URL}/plaid/sync_holdings`, {
+              await fetchWithAuth('/plaid/sync_holdings', {
                   method: 'POST'
               });
               console.log("✅ Initial sync successful");

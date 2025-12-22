@@ -115,7 +115,7 @@ export default function PlaidLink({ userId, onSuccess, onExit }: PlaidLinkProps)
       
       const scriptPromise = loadPlaidScript();
       
-      const tokenPromise = fetchWithAuth(`${API_URL}/plaid/create_link_token`, {
+      const tokenPromise = fetchWithAuth(`/plaid/create_link_token`, {
         method: 'POST'
       });
 

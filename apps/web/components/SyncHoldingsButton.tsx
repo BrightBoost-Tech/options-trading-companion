@@ -22,7 +22,7 @@ export default function SyncHoldingsButton({ onSyncComplete, className }: SyncHo
     setStatusMsg(null);
 
     try {
-      await fetchWithAuth(`${API_URL}/plaid/sync_holdings`, {
+      await fetchWithAuth(`/plaid/sync_holdings`, {
         method: 'POST'
       });
 

@@ -688,6 +688,14 @@ def scan_for_opportunities(
         except Exception as e:
             print(f"[Scanner] Failed to fetch execution stats: {e}")
 
+    # Batch Fetch IV Context (Bolt Optimization)
+    iv_context_map = {}
+    if regime_engine.iv_repo:
+        try:
+            logger.info(f"[Scanner] Batch fetching IV context for {len(symbols)} symbols...")
+            iv_context_map = regime_engine.iv_repo.get_iv_context_batch(symbols)
+        except Exception as e:
+            print(f"[Scanner] Failed to batch fetch IV context: {e}")
 
     # 3. Parallel Processing
     batch_size = 20 # Increased from 5 to 20 to improve I/O throughput (Bolt Optimization)
@@ -698,7 +706,7 @@ def scan_for_opportunities(
     logger.info(f"[Scanner] Batch fetching quotes for {len(symbols)} symbols...")
     quotes_map = truth_layer.snapshot_many(symbols)
 
-    def process_symbol(symbol: str, drag_map: Dict[str, Any], quotes_map: Dict[str, Any], earnings_map: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    def process_symbol(symbol: str, drag_map: Dict[str, Any], quotes_map: Dict[str, Any], earnings_map: Dict[str, Any], iv_context_map: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         """Process a single symbol and return a candidate dict or None."""
         try:
             # A. Enrich Data
@@ -791,7 +799,9 @@ def scan_for_opportunities(
 
             # C. Compute Symbol Regime (Authoritative)
             # Pass existing bars to avoid redundant network call
-            symbol_snapshot = regime_engine.compute_symbol_snapshot(symbol, global_snapshot, existing_bars=bars)
+            # Use pre-fetched IV context (Bolt Optimization)
+            iv_context = iv_context_map.get(symbol) if iv_context_map else None
+            symbol_snapshot = regime_engine.compute_symbol_snapshot(symbol, global_snapshot, existing_bars=bars, iv_context=iv_context)
             effective_regime_state = regime_engine.get_effective_regime(symbol_snapshot, global_snapshot)
 
             iv_rank = symbol_snapshot.iv_rank or 50.0
@@ -1080,13 +1090,6 @@ def scan_for_opportunities(
                  puts = sorted([l for l in legs if l["type"] == "put"], key=lambda x: x["strike"])
 
                  if len(calls) == 2 and len(puts) == 2:
-                     # Short Call is lower strike (for call spread side logic in Condor? No wait.)
-                     # Iron Condor:
-                     # Sell Put (Higher K), Buy Put (Lower K)
-                     # Sell Call (Lower K), Buy Call (Higher K)
-                     # Wait, standard Iron Condor:
-                     # Strikes: Long Put < Short Put < Short Call < Long Call
-
                      # calls[0] is Short Call (Lower K), calls[1] is Long Call (Higher K)
                      short_call = calls[0]
                      long_call = calls[1]
@@ -1102,8 +1105,8 @@ def scan_for_opportunities(
                         credit=credit_share,
                         width_put=width_put,
                         width_call=width_call,
-                        delta_short_put=short_put["delta"], # Should be neg
-                        delta_short_call=short_call["delta"] # Should be pos
+                        delta_short_put=short_put.get("delta", 0),
+                        delta_short_call=short_call.get("delta", 0)
                      )
                      total_ev = ev_obj.expected_value
                  else:
@@ -1316,7 +1319,7 @@ def scan_for_opportunities(
     # Corrected Indentation: ThreadPoolExecutor is now OUTSIDE process_symbol
     with concurrent.futures.ThreadPoolExecutor(max_workers=batch_size) as executor:
         future_to_symbol = {
-            executor.submit(process_symbol, sym, drag_map, quotes_map, earnings_map): sym
+            executor.submit(process_symbol, sym, drag_map, quotes_map, earnings_map, iv_context_map): sym
             for sym in symbols
         }
 

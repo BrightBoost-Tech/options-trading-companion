@@ -1,6 +1,8 @@
 from typing import Dict, Optional, Any, List
-from datetime import datetime
+from datetime import datetime, timedelta
 from supabase import Client
+import pandas as pd
+import numpy as np
 
 class IVRepository:
     """
@@ -118,3 +120,93 @@ class IVRepository:
                 "iv_regime": None,
                 "error": str(e)
             }
+
+    def get_iv_context_batch(self, symbols: List[str]) -> Dict[str, Any]:
+        """
+        Retrieves IV context for multiple symbols in batches to respect DB row limits.
+        Replaces N synchronous queries with ~N/2 batch queries.
+        """
+        if not symbols:
+            return {}
+
+        results = {}
+        # Chunk size 2 to keep rows ~730 (2 * 365) < 1000 limit
+        chunk_size = 2
+
+        # Calculate cutoff date once
+        cutoff = (datetime.now() - timedelta(days=400)).strftime('%Y-%m-%d')
+
+        for i in range(0, len(symbols), chunk_size):
+            batch_symbols = symbols[i : i + chunk_size]
+
+            try:
+                # Fetch history for this chunk
+                res = self.supabase.table(self.table)\
+                    .select("underlying, iv_30d, as_of_date")\
+                    .in_("underlying", batch_symbols)\
+                    .gte("as_of_date", cutoff)\
+                    .neq("iv_30d", "null")\
+                    .execute()
+
+                data = res.data
+                if not data:
+                    continue
+
+                df = pd.DataFrame(data)
+                df['iv_30d'] = pd.to_numeric(df['iv_30d'], errors='coerce')
+                df.dropna(subset=['iv_30d'], inplace=True)
+
+                if df.empty:
+                    continue
+
+                # Vectorized Grouping for this batch
+                grouped = df.groupby('underlying')
+
+                for sym, group in grouped:
+                    # Sort by date desc to get latest
+                    group = group.sort_values('as_of_date', ascending=False)
+
+                    if group.empty:
+                        continue
+
+                    latest_row = group.iloc[0]
+                    iv_30d_current = float(latest_row['iv_30d'])
+                    as_of = latest_row['as_of_date']
+
+                    # Use numpy for fast stat calculation
+                    history = group['iv_30d'].values
+                    # Limit to 365 samples if more returned
+                    if len(history) > 365:
+                        history = history[:365]
+
+                    sample_size = len(history)
+
+                    iv_rank = None
+                    iv_regime = None
+
+                    if sample_size >= 60:
+                        min_iv = np.min(history)
+                        max_iv = np.max(history)
+
+                        if max_iv > min_iv:
+                            iv_rank = (iv_30d_current - min_iv) / (max_iv - min_iv) * 100.0
+                            iv_rank = max(0.0, min(100.0, iv_rank))
+
+                            if iv_rank < 20: iv_regime = "suppressed"
+                            elif iv_rank < 60: iv_regime = "normal"
+                            else: iv_regime = "elevated"
+
+                    results[sym] = {
+                        "iv_30d": iv_30d_current,
+                        "iv_rank": round(iv_rank, 1) if iv_rank is not None else None,
+                        "iv_regime": iv_regime,
+                        "sample_size": sample_size,
+                        "as_of_date": as_of
+                    }
+
+            except Exception as e:
+                # Log but continue to next batch
+                print(f"[IVRepo] Batch fetch error for {batch_symbols}: {e}")
+                continue
+
+        return results

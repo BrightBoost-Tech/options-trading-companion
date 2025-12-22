@@ -4,7 +4,7 @@ import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { QuantumTooltip } from '@/components/ui/QuantumTooltip';
 import { API_URL, TEST_USER_ID } from '@/lib/constants';
-import { Copy, CheckCircle2, Loader2 } from 'lucide-react';
+import { Copy, CheckCircle2, Loader2, Check } from 'lucide-react';
 import { formatOptionDisplay } from '@/lib/formatters';
 import { supabase } from '@/lib/supabase';
 
@@ -61,7 +61,9 @@ export default function TradeSuggestionCard({ suggestion, onLogged }: TradeSugge
   const [evError, setEvError] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
   const [logging, setLogging] = useState(false);
+  const [logSuccess, setLogSuccess] = useState(false);
   const [paperTrading, setPaperTrading] = useState(false);
+  const [paperSuccess, setPaperSuccess] = useState(false);
 
   // Normalize symbol/ticker
   const rawSymbol = suggestion.display_symbol || suggestion.symbol || suggestion.ticker || 'UNKNOWN';
@@ -144,6 +146,7 @@ export default function TradeSuggestionCard({ suggestion, onLogged }: TradeSugge
   const handlePaperTrade = async () => {
     try {
       setPaperTrading(true);
+      setPaperSuccess(false);
       const { data: { session } } = await supabase.auth.getSession();
       const headers: Record<string, string> = { "Content-Type": "application/json" };
       if (session) {
@@ -164,8 +167,9 @@ export default function TradeSuggestionCard({ suggestion, onLogged }: TradeSugge
         return;
       }
 
-      // Optional: we could surface a toast/snackbar later; for v1 just log.
       console.log("Paper trade executed", await res.json());
+      setPaperSuccess(true);
+      setTimeout(() => setPaperSuccess(false), 3000);
     } catch (err) {
       console.error("Error executing paper trade", err);
     } finally {
@@ -177,6 +181,7 @@ export default function TradeSuggestionCard({ suggestion, onLogged }: TradeSugge
     if (!suggestion.id) return;
     try {
       setLogging(true);
+      setLogSuccess(false);
       const { data: { session } } = await supabase.auth.getSession();
       const headers: Record<string, string> = { 'Content-Type': 'application/json' };
       if (session) {
@@ -195,7 +200,13 @@ export default function TradeSuggestionCard({ suggestion, onLogged }: TradeSugge
         return;
       }
 
-      if (onLogged) onLogged(suggestion.id);
+      setLogSuccess(true);
+      // If parent provided callback, wait a moment so user sees success state
+      if (onLogged) {
+        setTimeout(() => onLogged(suggestion.id!), 1000);
+      } else {
+        setTimeout(() => setLogSuccess(false), 3000);
+      }
     } catch (err) {
       console.error('Error logging trade', err);
     } finally {
@@ -376,21 +387,37 @@ export default function TradeSuggestionCard({ suggestion, onLogged }: TradeSugge
                     variant="outline"
                     size="sm"
                     onClick={handlePaperTrade}
-                    disabled={paperTrading}
-                    className="h-auto py-1 text-xs border-blue-200 text-blue-700 hover:bg-blue-50 hover:text-blue-800"
+                    disabled={paperTrading || paperSuccess}
+                    className={`h-auto py-1 text-xs border-blue-200 transition-colors ${
+                      paperSuccess
+                        ? 'bg-blue-100 text-blue-800'
+                        : 'text-blue-700 hover:bg-blue-50 hover:text-blue-800'
+                    }`}
                 >
-                    {paperTrading ? <Loader2 className="mr-2 h-3 w-3 animate-spin" /> : null}
-                    {paperTrading ? "Simulating…" : "Paper Trade"}
+                    {paperTrading ? (
+                      <Loader2 className="mr-2 h-3 w-3 animate-spin" />
+                    ) : paperSuccess ? (
+                      <Check className="mr-2 h-3 w-3" />
+                    ) : null}
+                    {paperTrading ? "Simulating…" : paperSuccess ? "Executed!" : "Paper Trade"}
                 </Button>
                 <Button
                     variant="outline"
                     size="sm"
                     onClick={handleLogTrade}
-                    disabled={logging}
-                    className="h-auto py-1 text-xs border-emerald-200 text-emerald-700 hover:bg-emerald-50 hover:text-emerald-800"
+                    disabled={logging || logSuccess}
+                    className={`h-auto py-1 text-xs border-emerald-200 transition-colors ${
+                      logSuccess
+                        ? 'bg-emerald-100 text-emerald-800'
+                        : 'text-emerald-700 hover:bg-emerald-50 hover:text-emerald-800'
+                    }`}
                 >
-                    {logging ? <Loader2 className="mr-2 h-3 w-3 animate-spin" /> : null}
-                    {logging ? 'Logging…' : 'Mark Executed (Log Trade)'}
+                    {logging ? (
+                      <Loader2 className="mr-2 h-3 w-3 animate-spin" />
+                    ) : logSuccess ? (
+                      <Check className="mr-2 h-3 w-3" />
+                    ) : null}
+                    {logging ? 'Logging…' : logSuccess ? 'Logged!' : 'Mark Executed (Log Trade)'}
                 </Button>
             </div>
         )}

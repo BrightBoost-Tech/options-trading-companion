@@ -207,7 +207,7 @@ if supabase_admin:
         # Real network request to validate credentials
         # We try to fetch 1 row from scanner_universe which should exist.
         # If this fails with APIError (401), we know keys are bad.
-        supabase_admin.table("scanner_universe").select("ticker").limit(1).execute()
+        supabase_admin.table("scanner_universe").select("symbol").limit(1).execute()
 
         # Redact key for logging
         redacted_key = f"{key[:6]}...{key[-4:]}" if key and len(key) > 10 else "N/A"

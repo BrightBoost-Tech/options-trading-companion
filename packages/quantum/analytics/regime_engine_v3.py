@@ -244,15 +244,16 @@ class RegimeEngineV3:
             }
         )
 
-    def compute_symbol_snapshot(self, symbol: str, global_snapshot: GlobalRegimeSnapshot, existing_bars: List[Dict] = None) -> SymbolRegimeSnapshot:
+    def compute_symbol_snapshot(self, symbol: str, global_snapshot: GlobalRegimeSnapshot, existing_bars: List[Dict] = None, iv_context: Dict[str, Any] = None) -> SymbolRegimeSnapshot:
         """
         Computes regime state for a single symbol.
-        Accepts optional `existing_bars` to avoid redundant API calls.
+        Accepts optional `existing_bars` and `iv_context` to avoid redundant API calls.
         """
         as_of = datetime.fromisoformat(global_snapshot.as_of_ts)
 
-        # 1. Fetch IV Context
-        iv_context = self.iv_repo.get_iv_context(symbol) if self.iv_repo else {}
+        # 1. Fetch IV Context (Use prefetched or fetch now)
+        if not iv_context:
+             iv_context = self.iv_repo.get_iv_context(symbol) if self.iv_repo else {}
 
         iv_rank = iv_context.get('iv_rank')
         atm_iv = iv_context.get('iv_30d')

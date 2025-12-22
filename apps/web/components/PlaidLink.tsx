@@ -2,6 +2,7 @@
 
 import { useEffect, useState, useCallback, useRef } from 'react';
 import { usePlaidLink, PlaidLinkOptions } from 'react-plaid-link';
+import { fetchWithAuth } from '@/lib/api';
 import { API_URL } from '@/lib/constants';
 import { logEvent } from '@/lib/analytics';
 
@@ -114,21 +115,13 @@ export default function PlaidLink({ userId, onSuccess, onExit }: PlaidLinkProps)
       
       const scriptPromise = loadPlaidScript();
       
-      const tokenPromise = fetch(`${API_URL}/plaid/create_link_token`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ user_id: userId })
+      const tokenPromise = fetchWithAuth(`${API_URL}/plaid/create_link_token`, {
+        method: 'POST'
       });
 
       // Wait for both
-      const [_, response] = await Promise.all([scriptPromise, tokenPromise]);
+      const [_, data] = await Promise.all([scriptPromise, tokenPromise]);
 
-      if (!response.ok) {
-        const errData = await response.json().catch(() => ({}));
-        throw new Error(errData.detail || `API Error ${response.status}`);
-      }
-
-      const data = await response.json();
       if (!data.link_token) throw new Error('No link_token in response');
 
       console.log('🟢 TOKEN VALUE:', data.link_token);

@@ -4,6 +4,7 @@ import { useState, useRef, useCallback, useEffect } from 'react';
 import PlaidLink from '@/components/PlaidLink';
 import DashboardLayout from '@/components/DashboardLayout';
 import { supabase } from '@/lib/supabase';
+import { fetchWithAuth } from '@/lib/api';
 import { API_URL } from '@/lib/constants';
 import { logEvent } from '@/lib/analytics';
 
@@ -64,55 +65,27 @@ export default function SettingsPage() {
 
       try {
           // Exchange token
-          const response = await fetch(`${API_URL}/plaid/exchange_token`, {
+          const data = await fetchWithAuth(`${API_URL}/plaid/exchange_token`, {
               method: 'POST',
               headers: {
                   'Content-Type': 'application/json',
               },
-              // We must pass user_id so the backend can save the item to the right user
               body: JSON.stringify({
                   public_token: publicToken,
-                  user_id: userId
+                  metadata: metadata
               })
           });
 
-          if (!response.ok) {
-              const errorData = await response.json();
-              throw new Error(errorData.detail || 'Failed to exchange token');
-          }
-
-          const data = await response.json();
           console.log('Exchange success:', data);
 
           setConnectedInstitution(metadata.institution?.name || 'Connected Broker');
 
           // ✅ FIX: Trigger sync with correct headers for Dev Mode
           try {
-              const { data: { session } } = await supabase.auth.getSession();
-
-              const headers: Record<string, string> = {
-                  'Content-Type': 'application/json'
-              };
-
-              if (session) {
-                  // Real User Login
-                  headers['Authorization'] = `Bearer ${session.access_token}`;
-              } else if (userId && process.env.NEXT_PUBLIC_ENABLE_DEV_AUTH_BYPASS === '1') {
-                  // 🛠️ DEV MODE BYPASS: Pass the user ID explicitly
-                  headers['X-Test-Mode-User'] = userId;
-              }
-
-              const syncRes = await fetch(`${API_URL}/plaid/sync_holdings`, {
-                  method: 'POST',
-                  headers: headers
+              await fetchWithAuth(`${API_URL}/plaid/sync_holdings`, {
+                  method: 'POST'
               });
-
-              if (syncRes.ok) {
-                  console.log("✅ Initial sync successful");
-              } else {
-                  console.warn("⚠️ Initial sync failed", await syncRes.text());
-              }
-
+              console.log("✅ Initial sync successful");
           } catch (e) {
               console.warn("Initial sync failed:", e);
           }

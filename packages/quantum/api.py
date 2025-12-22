@@ -267,6 +267,10 @@ app.include_router(jobs_router)
 from packages.quantum.observability.endpoints import router as observability_router
 app.include_router(observability_router)
 
+# --- Register Analytics Endpoints ---
+from packages.quantum.analytics_endpoints import router as analytics_router
+app.include_router(analytics_router)
+
 # --- Scout Endpoints (New) ---
 
 @app.get("/scout/weekly")

@@ -42,7 +42,9 @@ export async function getAuthHeadersCached(ttlMs = 5000): Promise<Record<string,
 
   // Dev Auth Bypass
   const devBypass = process.env.NEXT_PUBLIC_ENABLE_DEV_AUTH_BYPASS === '1';
-  const devUser = process.env.NEXT_PUBLIC_DEV_USER_ID || 'dev-user';
+  // Use the global TEST_USER_ID constant if explicit dev user is not set,
+  // ensuring alignment with backend test user ID.
+  const devUser = process.env.NEXT_PUBLIC_DEV_USER_ID || TEST_USER_ID;
 
   if (devBypass) {
     headers['X-Test-Mode-User'] = devUser;

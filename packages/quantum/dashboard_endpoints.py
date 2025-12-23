@@ -240,8 +240,8 @@ async def get_weekly_progress(
                 "date_end": None,
                 "status": "empty",
                 "message": f"No snapshot yet for week {week_id}",
-                "user_metrics": {},
-                "system_metrics": {},
+                "user_metrics": {"overall_score": 0, "components": {}},
+                "system_metrics": {"overall_quality": 0, "components": {}},
                 "synthesis": None
             }
 

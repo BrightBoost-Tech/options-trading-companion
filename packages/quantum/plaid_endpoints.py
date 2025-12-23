@@ -135,14 +135,14 @@ def register_plaid_endpoints(
             # SECURITY: Do not leak exception details
             raise HTTPException(status_code=500, detail="Internal Server Error: Token exchange failed.")
 
-    @app.post("/plaid/get_holdings")
+    @app.post("/plaid/sync_holdings")
     @limiter.limit("5/minute")
-    async def get_plaid_holdings(
+    async def sync_plaid_holdings(
         request: Request,
         user_id: str = Depends(get_current_user),
         supabase: Client = Depends(get_supabase_client_dependency)
     ):
-        """Get holdings from connected brokerage account and store them"""
+        """Sync holdings from connected brokerage account and store them"""
         try:
             if not supabase:
                  raise HTTPException(status_code=503, detail="Database not available")
@@ -154,7 +154,7 @@ def register_plaid_endpoints(
             access_token = token_store.get_access_token(user_id)
 
             if not access_token:
-                 raise HTTPException(status_code=400, detail="access_token not found for user")
+                 raise HTTPException(status_code=404, detail="No linked Plaid account")
             
             # Fetch from Plaid
             print("Fetching holdings from Plaid Service...")
@@ -188,9 +188,9 @@ def register_plaid_endpoints(
                     raise HTTPException(status_code=500, detail="Database update failed.")
 
             return {
-                "synced": True,
-                "positions_count": len(holdings_list),
-                "holdings": holdings_list
+                "status": "ok",
+                "holdings_count": len(holdings_list),
+                "source": "plaid"
             }
 
         except ValueError as e:

@@ -6,6 +6,8 @@ Implements the "Truth Layer" pattern to ensure consistency across the applicatio
 import os
 import time
 import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 import logging
 import re
 from typing import List, Dict, Optional, Any, Union
@@ -36,6 +38,27 @@ class MarketDataTruthLayer:
         self.base_url = "https://api.polygon.io"
         self.cache = get_market_data_cache()
 
+        # Initialize Session with Connection Pooling
+        self.session = requests.Session()
+
+        # Configure retry strategy
+        retry_strategy = Retry(
+            total=3,
+            backoff_factor=0.5,
+            status_forcelist=[429, 500, 502, 503, 504],
+            allowed_methods=["HEAD", "GET", "OPTIONS"]
+        )
+
+        # Mount adapter with increased pool size for parallel execution
+        # pool_maxsize=50 supports up to 50 concurrent threads without blocking on connection pool
+        adapter = HTTPAdapter(
+            pool_connections=10,
+            pool_maxsize=50,
+            max_retries=retry_strategy
+        )
+        self.session.mount("https://", adapter)
+        self.session.mount("http://", adapter)
+
         # Caching TTLs (in seconds)
         self.ttl_snapshot = 10
         self.ttl_option_chain = 60
@@ -51,35 +74,29 @@ class MarketDataTruthLayer:
         if self.api_key and "apiKey" not in params:
              params["apiKey"] = self.api_key
 
-        attempt = 0
-        while attempt <= retries:
-            try:
-                start_ts = time.time()
-                response = requests.get(url, params=params, timeout=5)
-                elapsed_ms = (time.time() - start_ts) * 1000
+        # Use session for connection pooling
+        try:
+            start_ts = time.time()
+            response = self.session.get(url, params=params, timeout=5)
+            elapsed_ms = (time.time() - start_ts) * 1000
 
-                if response.status_code == 200:
-                    logger.info(f"OK {endpoint} {response.status_code} {elapsed_ms:.1f}ms")
-                    return response.json()
-                elif response.status_code == 429:
-                    logger.warning(f"Rate limited on {endpoint}. Retrying...")
-                    time.sleep(1 * (attempt + 1)) # Backoff
-                else:
-                    logger.error(f"Error {endpoint}: {response.status_code} {response.text}")
-                    # Don't retry 4xx errors generally, except maybe 429 which we handled
-                    if 400 <= response.status_code < 500:
-                         return None
+            if response.status_code == 200:
+                logger.info(f"OK {endpoint} {response.status_code} {elapsed_ms:.1f}ms")
+                return response.json()
+            elif response.status_code == 429:
+                # Retry logic handled by adapter, but if we are here it failed retries or manual handling needed?
+                # Actually Adapter handles retries on status codes. If we get 429 here, it means retries exhausted.
+                logger.warning(f"Rate limited on {endpoint} (Retries exhausted).")
+                return None
+            else:
+                logger.error(f"Error {endpoint}: {response.status_code} {response.text}")
+                return None
 
-            except requests.exceptions.Timeout:
-                logger.warning(f"Timeout on {endpoint}. Retrying...")
-            except requests.exceptions.RequestException as e:
-                logger.error(f"Request failed {endpoint}: {e}")
+        except requests.exceptions.RequestException as e:
+            logger.error(f"Request failed {endpoint}: {e}")
+            return None
 
-            attempt += 1
-            time.sleep(0.5 * attempt)
-
-        return None
-
+    # ... rest of the class methods ...
     def snapshot_many(self, tickers: List[str]) -> Dict[str, Dict]:
         """
         Fetches snapshots for multiple tickers (up to 250).

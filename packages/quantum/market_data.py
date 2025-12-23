@@ -1,6 +1,8 @@
 """Market data integration with caching"""
 import os
 import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 from datetime import datetime, timedelta, timezone
 from typing import List, Dict, Optional, Any
 import numpy as np
@@ -36,7 +38,27 @@ class PolygonService:
         if not self.api_key:
             print("Warning: POLYGON_API_KEY not found. Service will use mock data.")
         self.base_url = "https://api.polygon.io"
+
+        # Initialize Session with Connection Pooling
         self.session = requests.Session()
+
+        # Configure retry strategy
+        retry_strategy = Retry(
+            total=3,
+            backoff_factor=0.5,
+            status_forcelist=[429, 500, 502, 503, 504],
+            allowed_methods=["HEAD", "GET", "OPTIONS"]
+        )
+
+        # Mount adapter with increased pool size for parallel execution
+        # pool_maxsize=50 supports up to 50 concurrent threads without blocking on connection pool
+        adapter = HTTPAdapter(
+            pool_connections=10,
+            pool_maxsize=50,
+            max_retries=retry_strategy
+        )
+        self.session.mount("https://", adapter)
+        self.session.mount("http://", adapter)
     
     def get_historical_prices(self, symbol: str, days: int = 252, to_date: datetime = None) -> Dict:
         to_date = to_date or datetime.now()

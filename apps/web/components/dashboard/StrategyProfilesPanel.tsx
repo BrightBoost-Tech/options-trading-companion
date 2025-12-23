@@ -5,7 +5,7 @@ import { Button } from '@/components/ui/button';
 import { getAuthHeadersCached, fetchWithAuth, ApiError, normalizeList } from '@/lib/api';
 import { Play, Clock, Settings, Save, RefreshCw, AlertTriangle } from 'lucide-react';
 import { StrategyConfig } from '@/lib/types';
-import { API_URL } from '@/lib/constants';
+// API_URL is handled by fetchWithAuth
 
 interface StrategyBacktest {
   id: string;
@@ -87,7 +87,7 @@ export default function StrategyProfilesPanel() {
       if (Array.isArray(data)) {
         setBacktests(data);
       } else {
-        setBacktests([]);
+        setBacktests(normalizeList(data, 'backtests'));
       }
     } catch (err) {
       console.error('Failed to fetch backtests', err);
@@ -101,10 +101,9 @@ export default function StrategyProfilesPanel() {
     if (!selectedStrategy) return;
     try {
       const params = JSON.parse(editingConfig);
-      const headers = await getAuthHeadersCached();
-      const res = await fetch(`${API_URL}/strategies`, {
+
+      const updated = await fetchWithAuth('/strategies', {
         method: 'POST',
-        headers,
         body: JSON.stringify({
           name: selectedStrategy.name,
           description: selectedStrategy.description,
@@ -112,19 +111,24 @@ export default function StrategyProfilesPanel() {
         })
       });
 
-      if (res.ok) {
-        const updated = await res.json();
-        // Update local list
-        setStrategies(prev => prev.map(s => s.name === updated.name ? updated : s));
-        setSelectedStrategy(updated);
-        alert('Configuration saved!');
+      // Update local list
+      // Note: Endpoint usually returns { status: "ok", data: [...] }
+      const newConfig = updated.data ? updated.data[0] : updated; // Fallback
+      if (newConfig && newConfig.name) {
+          setStrategies(prev => prev.map(s => s.name === newConfig.name ? newConfig : s));
+          setSelectedStrategy(newConfig);
+          alert('Configuration saved!');
       } else {
-        const errBody = await res.json().catch(() => ({}));
-        alert(`Failed to save: ${errBody.detail || res.statusText}`);
+          // If response structure is unexpected but no error thrown
+          alert('Configuration saved (refresh to see changes).');
       }
-    } catch (err) {
+    } catch (err: any) {
       console.error(err);
-      alert('Invalid JSON');
+      if (err instanceof SyntaxError) {
+          alert('Invalid JSON');
+      } else {
+          alert(`Failed to save: ${err.detail || err.message}`);
+      }
     }
   };
 
@@ -134,30 +138,25 @@ export default function StrategyProfilesPanel() {
       setSimRunning(true);
       setSimResult(null);
       // Run quick simulation for immediate feedback
-      const headers = await getAuthHeadersCached();
-      const res = await fetch(`${API_URL}/strategies/${selectedStrategy.name}/backtest`, {
+      // Must include ticker as per backend schema
+      // V1 endpoint does not support initial_capital, so removed.
+
+      const result = await fetchWithAuth(`/strategies/${selectedStrategy.name}/backtest`, {
         method: 'POST',
-        headers,
         body: JSON.stringify({
-            // Default quick params
             start_date: "2023-01-01",
             end_date: "2023-12-31",
-            initial_capital: 100000
+            ticker: "SPY" // Required by backend
         })
       });
 
-      if (res.ok) {
-        const result = await res.json();
-        setSimResult(result);
-        // Refresh history
-        fetchBacktests(selectedStrategy.name);
-      } else {
-          const err = await res.json().catch(() => ({}));
-          console.error("Backtest failed", err);
-          alert(`Backtest failed: ${err.detail || 'Unknown error'}`);
-      }
-    } catch (err) {
+      setSimResult(result);
+      // Refresh history
+      fetchBacktests(selectedStrategy.name);
+
+    } catch (err: any) {
       console.error('Simulation failed', err);
+      alert(`Backtest failed: ${JSON.stringify(err.detail || err.message || err)}`);
     } finally {
       setSimRunning(false);
     }
@@ -166,25 +165,23 @@ export default function StrategyProfilesPanel() {
   const triggerBatchSim = async () => {
     if (!selectedStrategy) return;
     try {
-      const headers = await getAuthHeadersCached();
-      const res = await fetch(`${API_URL}/simulation/batch`, {
+      await fetchWithAuth(`/simulation/batch`, {
          method: 'POST',
-         headers,
          body: JSON.stringify({
              strategy_name: selectedStrategy.name,
+             ticker: "SPY", // Required by backend
+             start_date: "2023-01-01", // Required by backend
+             end_date: "2023-12-31", // Required by backend
              // Param grid logic would go here
              param_grid: {
                  "conviction_floor": [0.6, 0.7, 0.8]
              }
          })
       });
-      if (res.ok) {
-          alert("Batch simulation queued!");
-      } else {
-          alert("Failed to queue batch sim");
-      }
-    } catch (err) {
+      alert("Batch simulation queued!");
+    } catch (err: any) {
         console.error("Batch sim failed", err);
+        alert(`Failed to queue batch sim: ${JSON.stringify(err.detail || err.message)}`);
     }
   };
 

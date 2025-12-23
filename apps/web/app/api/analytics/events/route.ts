@@ -1,5 +1,4 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { API_URL } from '@/lib/constants';
 
 export async function POST(req: NextRequest) {
   try {
@@ -19,7 +18,16 @@ export async function POST(req: NextRequest) {
       headers['cookie'] = req.headers.get('cookie')!;
     }
 
-    const res = await fetch(`${API_URL}/analytics/events`, {
+    // Determine the upstream base URL
+    // Use NEXT_PUBLIC_API_URL but ensure it is absolute for server-side fetch.
+    // If it starts with '/', it is relative, which node-fetch/undici cannot handle without base.
+    // Fallback to localhost:8000 (backend default) if not absolute.
+    let apiUrl = process.env.NEXT_PUBLIC_API_URL || 'http://127.0.0.1:8000';
+    if (apiUrl.startsWith('/')) {
+        apiUrl = 'http://127.0.0.1:8000';
+    }
+
+    const res = await fetch(`${apiUrl}/analytics/events`, {
       method: 'POST',
       headers,
       body: JSON.stringify(body),

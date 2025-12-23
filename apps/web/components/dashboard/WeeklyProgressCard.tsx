@@ -99,6 +99,24 @@ export function WeeklyProgressCard() {
         );
     }
 
+    const overallScore = typeof user_metrics.overall_score === 'number' ? user_metrics.overall_score : null;
+    const qualityScore = typeof system_metrics.overall_quality === 'number' ? system_metrics.overall_quality : null;
+
+    // If both scores are null/missing and components are empty, show empty state
+    const hasUserComponents = user_metrics.components && Object.keys(user_metrics.components).length > 0;
+    const hasSystemComponents = system_metrics.components && Object.keys(system_metrics.components).length > 0;
+
+    if (overallScore === null && qualityScore === null && !hasUserComponents && !hasSystemComponents) {
+         return (
+            <Card>
+                <CardHeader>
+                    <CardTitle>Weekly Progress</CardTitle>
+                    <CardDescription>Metrics will appear after one week of activity.</CardDescription>
+                </CardHeader>
+            </Card>
+        );
+    }
+
     return (
         <Card className="bg-gradient-to-br from-card to-background border-l-4 border-l-blue-500">
             <CardHeader className="pb-2">
@@ -120,7 +138,9 @@ export function WeeklyProgressCard() {
                     <div className="space-y-3">
                         <h4 className="text-sm font-semibold text-muted-foreground uppercase tracking-wider">Pilot Performance</h4>
                         <div className="flex justify-between items-center">
-                            <span className="text-2xl font-bold text-foreground">{user_metrics.overall_score.toFixed(0)}</span>
+                            <span className="text-2xl font-bold text-foreground">
+                                {overallScore !== null ? overallScore.toFixed(0) : '--'}
+                            </span>
                             <span className="text-xs text-muted-foreground">Overall Score</span>
                         </div>
                         <div className="space-y-2">
@@ -137,7 +157,9 @@ export function WeeklyProgressCard() {
                     <div className="space-y-3 md:border-l md:pl-6">
                         <h4 className="text-sm font-semibold text-muted-foreground uppercase tracking-wider">Engine Accuracy</h4>
                         <div className="flex justify-between items-center">
-                            <span className="text-2xl font-bold text-purple-900 dark:text-purple-300">{system_metrics.overall_quality.toFixed(0)}</span>
+                            <span className="text-2xl font-bold text-purple-900 dark:text-purple-300">
+                                {qualityScore !== null ? qualityScore.toFixed(0) : '--'}
+                            </span>
                             <span className="text-xs text-muted-foreground">Quality Score</span>
                         </div>
                          <div className="space-y-2">

@@ -20,6 +20,16 @@ interface StrategyBacktest {
   created_at: string;
 }
 
+const fmt = (val: number | null | undefined, digits: number = 2) => {
+  if (val === null || val === undefined) return "--";
+  return val.toFixed(digits);
+};
+
+const pct = (val: number | null | undefined, digits: number = 1) => {
+  if (val === null || val === undefined) return "--";
+  return (val * 100).toFixed(digits) + "%";
+};
+
 export default function StrategyProfilesPanel() {
   const [strategies, setStrategies] = useState<StrategyConfig[]>([]);
   const [loading, setLoading] = useState(true);
@@ -284,11 +294,15 @@ export default function StrategyProfilesPanel() {
                                     {backtests.map(bt => (
                                         <tr key={bt.id} className="hover:bg-muted/50 cursor-pointer" onClick={() => setExpandedRow(expandedRow === bt.id ? null : bt.id)}>
                                             <td className="px-4 py-2">{new Date(bt.created_at).toLocaleDateString()}</td>
-                                            <td className={`px-4 py-2 font-medium ${bt.total_return >= 0 ? 'text-green-600' : 'text-red-600'}`}>
-                                                {(bt.total_return * 100).toFixed(1)}%
+                                            <td className={`px-4 py-2 font-medium ${
+                                                bt.total_return != null
+                                                  ? (bt.total_return >= 0 ? 'text-green-600' : 'text-red-600')
+                                                  : ''
+                                            }`}>
+                                                {pct(bt.total_return, 1)}
                                             </td>
-                                            <td className="px-4 py-2">{bt.sharpe_ratio.toFixed(2)}</td>
-                                            <td className="px-4 py-2">{(bt.win_rate * 100).toFixed(0)}%</td>
+                                            <td className="px-4 py-2">{fmt(bt.sharpe_ratio, 2)}</td>
+                                            <td className="px-4 py-2">{pct(bt.win_rate, 0)}</td>
                                         </tr>
                                     ))}
                                 </tbody>

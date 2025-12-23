@@ -1,6 +1,6 @@
 'use client';
 
-import { useState } from 'react';
+import { useState, useRef } from 'react';
 import SuggestionCard from './SuggestionCard';
 import { Suggestion } from '@/lib/types';
 import { Sparkles, Activity, Sun, Clock, FileText } from 'lucide-react';
@@ -33,151 +33,129 @@ export default function SuggestionTabs({
 }: SuggestionTabsProps) {
   const [activeTab, setActiveTab] = useState<'morning' | 'midday' | 'rebalance' | 'scout' | 'journal' | 'weekly'>('morning');
   const [stagedIds, setStagedIds] = useState<string[]>([]);
+  const tabListRef = useRef<HTMLDivElement>(null);
 
-  // Placeholder handlers
+  // Tabs configuration for cleaner rendering and accessibility
+  const tabs = [
+    { id: 'morning', label: 'Morning', icon: Sun, count: morningSuggestions.length, color: 'orange' },
+    { id: 'midday', label: 'Midday', icon: Clock, count: middaySuggestions.length, color: 'blue' },
+    { id: 'rebalance', label: 'Rebalance', icon: Activity, count: optimizerSuggestions.length, color: 'indigo' },
+    { id: 'scout', label: 'Scout', icon: Sparkles, count: scoutSuggestions.length, color: 'green' },
+    { id: 'journal', label: 'Journal', icon: null, textIcon: '📖', count: journalQueue.length, color: 'purple' },
+    { id: 'weekly', label: 'Reports', icon: FileText, count: 0, color: 'slate' },
+  ] as const;
+
   const handleStage = (s: Suggestion) => {
-      // Logic to toggle staged state or add to a staging queue
       setStagedIds(prev =>
-        prev.includes(s.id)
-          ? prev.filter(id => id !== s.id)
-          : [...prev, s.id]
+        prev.includes(s.id) ? prev.filter(id => id !== s.id) : [...prev, s.id]
       );
-      // Analytics for staging is handled inside SuggestionCard
   };
 
-  const handleModify = (s: Suggestion) => {
-    // Analytics handled in SuggestionCard
-  };
+  const handleModify = (s: Suggestion) => {};
+  const handleDismiss = (s: Suggestion, tag: string) => {};
 
-  const handleDismiss = (s: Suggestion, tag: string) => {
-    // Analytics handled in SuggestionCard
-  };
-
-  const handleTabChange = (tab: 'morning' | 'midday' | 'rebalance' | 'scout' | 'journal' | 'weekly') => {
-      setActiveTab(tab);
+  const handleTabChange = (tabId: typeof activeTab) => {
+      setActiveTab(tabId);
       logEvent({
           eventName: 'suggestion_tab_changed',
           category: 'ux',
-          properties: { tab }
+          properties: { tab: tabId }
       });
+  };
+
+  const handleKeyDown = (e: React.KeyboardEvent) => {
+    if (e.key === 'ArrowRight' || e.key === 'ArrowLeft') {
+      e.preventDefault();
+      const currentIndex = tabs.findIndex(t => t.id === activeTab);
+      let nextIndex;
+      if (e.key === 'ArrowRight') {
+        nextIndex = (currentIndex + 1) % tabs.length;
+      } else {
+        nextIndex = (currentIndex - 1 + tabs.length) % tabs.length;
+      }
+      const nextTab = tabs[nextIndex];
+      handleTabChange(nextTab.id);
+      // Focus will be handled by the button's auto-focus if we programmed it,
+      // but simpler is to rely on aria-activedescendant or manual focus.
+      // For tabs, moving focus immediately is standard.
+      const buttons = tabListRef.current?.querySelectorAll<HTMLButtonElement>('[role="tab"]');
+      buttons?.[nextIndex]?.focus();
+    }
   };
 
   return (
     <div className="bg-card rounded-lg shadow overflow-hidden h-full flex flex-col border border-border">
       {/* Tabs Header */}
-      <div className="flex border-b border-border overflow-x-auto no-scrollbar bg-muted/20">
-        <button
-          onClick={() => handleTabChange('morning')}
-          className={`flex-1 py-4 px-2 min-w-[120px] text-sm font-medium text-center border-b-2 transition-colors whitespace-nowrap ${
-            activeTab === 'morning'
-              ? 'border-orange-500 text-orange-600 dark:text-orange-400 bg-orange-50/50 dark:bg-orange-900/10'
-              : 'border-transparent text-muted-foreground hover:text-foreground hover:bg-muted/50'
-          }`}
-        >
-          <div className="flex items-center justify-center gap-2">
-            <Sun className="w-4 h-4" />
-            Morning
-            {morningSuggestions.length > 0 && (
-              <span className="bg-orange-100 text-orange-600 dark:bg-orange-900/30 dark:text-orange-400 py-0.5 px-2 rounded-full text-xs">
-                {morningSuggestions.length}
-              </span>
-            )}
-          </div>
-        </button>
+      <div
+        ref={tabListRef}
+        role="tablist"
+        aria-label="Trading Opportunities"
+        className="flex border-b border-border overflow-x-auto no-scrollbar bg-muted/20"
+        onKeyDown={handleKeyDown}
+      >
+        {tabs.map((tab) => {
+          const isActive = activeTab === tab.id;
+          const Icon = tab.icon;
+          // Colors map: orange, blue, indigo, green, purple, slate
+          // We construct classes dynamically but safely since the map is small
+          let activeClass = '';
+          let badgeClass = '';
 
-        <button
-          onClick={() => handleTabChange('midday')}
-          className={`flex-1 py-4 px-2 min-w-[120px] text-sm font-medium text-center border-b-2 transition-colors whitespace-nowrap ${
-            activeTab === 'midday'
-              ? 'border-blue-500 text-blue-600 dark:text-blue-400 bg-blue-50/50 dark:bg-blue-900/10'
-              : 'border-transparent text-muted-foreground hover:text-foreground hover:bg-muted/50'
-          }`}
-        >
-          <div className="flex items-center justify-center gap-2">
-            <Clock className="w-4 h-4" />
-            Midday
-            {middaySuggestions.length > 0 && (
-              <span className="bg-blue-100 text-blue-600 dark:bg-blue-900/30 dark:text-blue-400 py-0.5 px-2 rounded-full text-xs">
-                {middaySuggestions.length}
-              </span>
-            )}
-          </div>
-        </button>
+          if (tab.color === 'orange') {
+             activeClass = 'border-orange-500 text-orange-600 dark:text-orange-400 bg-orange-50/50 dark:bg-orange-900/10';
+             badgeClass = 'bg-orange-100 text-orange-600 dark:bg-orange-900/30 dark:text-orange-400';
+          } else if (tab.color === 'blue') {
+             activeClass = 'border-blue-500 text-blue-600 dark:text-blue-400 bg-blue-50/50 dark:bg-blue-900/10';
+             badgeClass = 'bg-blue-100 text-blue-600 dark:bg-blue-900/30 dark:text-blue-400';
+          } else if (tab.color === 'indigo') {
+             activeClass = 'border-indigo-500 text-indigo-600 dark:text-indigo-400 bg-indigo-50/50 dark:bg-indigo-900/10';
+             badgeClass = 'bg-indigo-100 text-indigo-600 dark:bg-indigo-900/30 dark:text-indigo-400';
+          } else if (tab.color === 'green') {
+             activeClass = 'border-green-500 text-green-600 dark:text-green-400 bg-green-50/50 dark:bg-green-900/10';
+             badgeClass = 'bg-green-100 text-green-600 dark:bg-green-900/30 dark:text-green-400';
+          } else if (tab.color === 'purple') {
+             activeClass = 'border-purple-500 text-purple-600 dark:text-purple-400 bg-purple-50/50 dark:bg-purple-900/10';
+             badgeClass = 'bg-purple-100 text-purple-600 dark:bg-purple-900/30 dark:text-purple-400';
+          } else { // slate
+             activeClass = 'border-slate-500 text-slate-600 dark:text-slate-400 bg-slate-50/50 dark:bg-slate-900/10';
+          }
 
-        <button
-          onClick={() => handleTabChange('rebalance')}
-          className={`flex-1 py-4 px-2 min-w-[120px] text-sm font-medium text-center border-b-2 transition-colors whitespace-nowrap ${
-            activeTab === 'rebalance'
-              ? 'border-indigo-500 text-indigo-600 dark:text-indigo-400 bg-indigo-50/50 dark:bg-indigo-900/10'
-              : 'border-transparent text-muted-foreground hover:text-foreground hover:bg-muted/50'
-          }`}
-        >
-          <div className="flex items-center justify-center gap-2">
-            <Activity className="w-4 h-4" />
-            Rebalance
-            {optimizerSuggestions.length > 0 && (
-              <span className="bg-indigo-100 text-indigo-600 dark:bg-indigo-900/30 dark:text-indigo-400 py-0.5 px-2 rounded-full text-xs">
-                {optimizerSuggestions.length}
-              </span>
-            )}
-          </div>
-        </button>
-
-        <button
-          onClick={() => handleTabChange('scout')}
-          className={`flex-1 py-4 px-2 min-w-[120px] text-sm font-medium text-center border-b-2 transition-colors whitespace-nowrap ${
-            activeTab === 'scout'
-              ? 'border-green-500 text-green-600 dark:text-green-400 bg-green-50/50 dark:bg-green-900/10'
-              : 'border-transparent text-muted-foreground hover:text-foreground hover:bg-muted/50'
-          }`}
-        >
-          <div className="flex items-center justify-center gap-2">
-            <Sparkles className="w-4 h-4" />
-            Scout
-            {scoutSuggestions.length > 0 && (
-              <span className="bg-green-100 text-green-600 dark:bg-green-900/30 dark:text-green-400 py-0.5 px-2 rounded-full text-xs">
-                {scoutSuggestions.length}
-              </span>
-            )}
-          </div>
-        </button>
-
-        <button
-          onClick={() => handleTabChange('journal')}
-          className={`flex-1 py-4 px-2 min-w-[120px] text-sm font-medium text-center border-b-2 transition-colors whitespace-nowrap ${
-            activeTab === 'journal'
-              ? 'border-purple-500 text-purple-600 dark:text-purple-400 bg-purple-50/50 dark:bg-purple-900/10'
-              : 'border-transparent text-muted-foreground hover:text-foreground hover:bg-muted/50'
-          }`}
-        >
-          <div className="flex items-center justify-center gap-2">
-            <span>📖</span>
-            Journal
-            {journalQueue.length > 0 && (
-              <span className="bg-purple-100 text-purple-600 dark:bg-purple-900/30 dark:text-purple-400 py-0.5 px-2 rounded-full text-xs">
-                {journalQueue.length}
-              </span>
-            )}
-          </div>
-        </button>
-
-        <button
-          onClick={() => handleTabChange('weekly')}
-          className={`flex-1 py-4 px-2 min-w-[120px] text-sm font-medium text-center border-b-2 transition-colors whitespace-nowrap ${
-            activeTab === 'weekly'
-              ? 'border-slate-500 text-slate-600 dark:text-slate-400 bg-slate-50/50 dark:bg-slate-900/10'
-              : 'border-transparent text-muted-foreground hover:text-foreground hover:bg-muted/50'
-          }`}
-        >
-          <div className="flex items-center justify-center gap-2">
-            <FileText className="w-4 h-4" />
-            Reports
-          </div>
-        </button>
+          return (
+            <button
+              key={tab.id}
+              role="tab"
+              aria-selected={isActive}
+              aria-controls={`panel-${tab.id}`}
+              id={`tab-${tab.id}`}
+              tabIndex={isActive ? 0 : -1}
+              onClick={() => handleTabChange(tab.id)}
+              className={`flex-1 py-4 px-2 min-w-[120px] text-sm font-medium text-center border-b-2 transition-colors whitespace-nowrap focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring ${
+                isActive
+                  ? activeClass
+                  : 'border-transparent text-muted-foreground hover:text-foreground hover:bg-muted/50'
+              }`}
+            >
+              <div className="flex items-center justify-center gap-2">
+                {Icon ? <Icon className="w-4 h-4" /> : <span>{tab.textIcon}</span>}
+                {tab.label}
+                {tab.count > 0 && (
+                  <span className={`${badgeClass} py-0.5 px-2 rounded-full text-xs`}>
+                    {tab.count}
+                  </span>
+                )}
+              </div>
+            </button>
+          );
+        })}
       </div>
 
       {/* Tab Content */}
-      <div className="p-4 flex-1 overflow-y-auto bg-muted/20 min-h-[400px]">
+      <div
+        role="tabpanel"
+        id={`panel-${activeTab}`}
+        aria-labelledby={`tab-${activeTab}`}
+        className="p-4 flex-1 overflow-y-auto bg-muted/20 min-h-[400px]"
+      >
 
         {activeTab === 'morning' && (
              morningSuggestions.length === 0 ? (

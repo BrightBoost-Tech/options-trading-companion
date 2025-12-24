@@ -3,6 +3,7 @@ from datetime import datetime, timedelta
 from supabase import Client
 import pandas as pd
 import numpy as np
+import concurrent.futures
 
 class IVRepository:
     """
@@ -124,7 +125,8 @@ class IVRepository:
     def get_iv_context_batch(self, symbols: List[str]) -> Dict[str, Any]:
         """
         Retrieves IV context for multiple symbols in batches to respect DB row limits.
-        Replaces N synchronous queries with ~N/2 batch queries.
+        Replaces N synchronous queries with ~N/2 parallel batch queries.
+        Optimization: Uses ThreadPoolExecutor to run DB batches in parallel.
         """
         if not symbols:
             return {}
@@ -136,9 +138,8 @@ class IVRepository:
         # Calculate cutoff date once
         cutoff = (datetime.now() - timedelta(days=400)).strftime('%Y-%m-%d')
 
-        for i in range(0, len(symbols), chunk_size):
-            batch_symbols = symbols[i : i + chunk_size]
-
+        def fetch_batch(batch_symbols):
+            batch_results = {}
             try:
                 # Fetch history for this chunk
                 res = self.supabase.table(self.table)\
@@ -150,14 +151,14 @@ class IVRepository:
 
                 data = res.data
                 if not data:
-                    continue
+                    return {}
 
                 df = pd.DataFrame(data)
                 df['iv_30d'] = pd.to_numeric(df['iv_30d'], errors='coerce')
                 df.dropna(subset=['iv_30d'], inplace=True)
 
                 if df.empty:
-                    continue
+                    return {}
 
                 # Vectorized Grouping for this batch
                 grouped = df.groupby('underlying')
@@ -196,17 +197,32 @@ class IVRepository:
                             elif iv_rank < 60: iv_regime = "normal"
                             else: iv_regime = "elevated"
 
-                    results[sym] = {
+                    batch_results[sym] = {
                         "iv_30d": iv_30d_current,
                         "iv_rank": round(iv_rank, 1) if iv_rank is not None else None,
                         "iv_regime": iv_regime,
                         "sample_size": sample_size,
                         "as_of_date": as_of
                     }
-
             except Exception as e:
                 # Log but continue to next batch
                 print(f"[IVRepo] Batch fetch error for {batch_symbols}: {e}")
-                continue
+
+            return batch_results
+
+        # 1. Prepare batches
+        batches = [symbols[i : i + chunk_size] for i in range(0, len(symbols), chunk_size)]
+
+        # 2. Execute in parallel
+        # Use max_workers=10 to keep concurrent DB connections reasonable
+        with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
+            future_to_batch = {executor.submit(fetch_batch, batch): batch for batch in batches}
+
+            for future in concurrent.futures.as_completed(future_to_batch):
+                try:
+                    batch_res = future.result()
+                    results.update(batch_res)
+                except Exception as exc:
+                    print(f"[IVRepo] Thread exception: {exc}")
 
         return results

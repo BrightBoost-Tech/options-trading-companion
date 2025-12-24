@@ -168,45 +168,70 @@ def fetch_and_normalize_holdings(access_token: str) -> list[Holding]:
         request = InvestmentsHoldingsGetRequest(access_token=access_token)
         response = client.investments_holdings_get(request)
 
-        holdings_data = response.get('holdings', [])
-        securities_data = {s['security_id']: s for s in response.get('securities', [])}
+        # Explicitly convert to dict to avoid model proxy issues and ensure robust access
+        data = response.to_dict()
+
+        holdings_data = data.get('holdings', [])
+        securities_list = data.get('securities', [])
+
+        # Build lookup map: security_id -> security dict
+        securities_map = {s.get('security_id'): s for s in securities_list}
 
         normalized_holdings = []
+        print(f"Processing {len(holdings_data)} holdings from Plaid...")
 
         for item in holdings_data:
             security_id = item.get('security_id')
-            security = securities_data.get(security_id, {})
+            security = securities_map.get(security_id, {})
 
+            # --- Symbol Resolution Logic ---
+            # 1. Prefer 'ticker_symbol' (usually populated for stocks/ETFs, sometimes options)
             ticker = security.get('ticker_symbol')
-            # Fallback to name if ticker is missing, or skip? Prompt implies we match security.
-            # "For each holding in holdings, find the corresponding security to get its ticker_symbol"
-            # "symbol – use the security’s ticker if available (or a composite name if no ticker...)"
-            if not ticker:
-                ticker = security.get('name', 'Unknown')
 
+            # 2. If missing, check 'name'
+            if not ticker:
+                ticker = security.get('name')
+
+            # 3. Last resort
+            if not ticker:
+                ticker = "UNKNOWN"
+
+            # --- Quantity & Cost Logic ---
             qty = float(item.get('quantity', 0) or 0)
             total_cost = float(item.get('cost_basis', 0) or 0)
 
             # Normalize Plaid cost_basis (total cost) to per-share to match frontend expectations
             if qty > 0 and total_cost > 0:
                 cost_basis = total_cost / qty
+            elif qty != 0:
+                 # If qty is negative (short), total_cost might be negative too?
+                 # Usually cost_basis is positive, but let's be safe.
+                 cost_basis = abs(total_cost / qty)
             else:
                 cost_basis = 0.0
             
-            # Fetch real price from Polygon if available
-            price = get_polygon_price(ticker)
+            # --- Price Logic ---
+            # Priority: Polygon Real-time > Institution Price > Close Price
+            price = 0.0
+
+            # Only fetch real price if we have a valid ticker
+            if ticker and ticker != "UNKNOWN":
+                price = get_polygon_price(ticker)
 
             if price == 0.0:
-                if security.get('close_price'):
-                    price = float(security.get('close_price'))
-                elif item.get('institution_price'):
+                # Fallback to data from Plaid
+                if item.get('institution_price'):
                     price = float(item.get('institution_price'))
+                elif security.get('close_price'):
+                    price = float(security.get('close_price'))
+                elif item.get('institution_value') and qty != 0:
+                     price = float(item.get('institution_value')) / qty
 
-            # Fallback to institution value / quantity if price missing?
-            # Plaid usually provides institution_price.
-
-            # Classify Asset Type (Phase 8.1)
+            # --- Asset Type Classification ---
             asset_type = AssetClassifier.classify_plaid_security(security, item)
+
+            # If asset is option but ticker looks like "Call Option", we might need better naming?
+            # But we stick to strict requirements: ticker -> name -> Unknown.
 
             holding = Holding(
                 symbol=ticker,

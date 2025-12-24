@@ -48,7 +48,7 @@ class TestIVPointService(unittest.TestCase):
             {'details': {'strike_price': 100.0, 'contract_type': 'put', 'expiration_date': d2}, 'implied_volatility': 0.30},
         ]
 
-        res = IVPointService.compute_atm_iv_30d_from_chain(contracts, 100.0, as_of)
+        res = IVPointService.compute_atm_iv_target_from_chain(contracts, 100.0, as_of)
 
         # Logic check:
         # T1 = 25/365, T2 = 35/365, T_target = 30/365
@@ -64,7 +64,7 @@ class TestIVPointService(unittest.TestCase):
         # Approximate check
         self.assertTrue(0.20 < iv_30d < 0.30)
         self.assertAlmostEqual(iv_30d, 0.26299, places=3)
-        self.assertEqual(res['iv_30d_method'], 'var_interp_spot_atm')
+        self.assertEqual(res['iv_method'], 'var_interp_spot_atm')
 
     def test_compute_iv_fallback_single_expiry(self):
         # Only 25 days available
@@ -77,10 +77,10 @@ class TestIVPointService(unittest.TestCase):
             {'details': {'strike_price': 100.0, 'contract_type': 'put', 'expiration_date': d1}, 'implied_volatility': 0.20},
         ]
 
-        res = IVPointService.compute_atm_iv_30d_from_chain(contracts, 100.0, as_of)
+        res = IVPointService.compute_atm_iv_target_from_chain(contracts, 100.0, as_of)
 
         self.assertEqual(res['iv_30d'], 0.20)
-        self.assertEqual(res['iv_30d_method'], 'nearest_expiry')
+        self.assertEqual(res['iv_method'], 'nearest_expiry')
         self.assertTrue(res['quality_score'] < 100)
 
     def test_percentile_iv_rank(self):

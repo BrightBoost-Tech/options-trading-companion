@@ -15,7 +15,7 @@ from packages.quantum.security import get_current_user_id, get_supabase_user_cli
 from packages.quantum.strategy_profiles import StrategyConfig, BacktestRequest, BacktestRequestV3
 from packages.quantum.strategy_requests import BatchSimulationRequest, ResearchCompareRequest
 from packages.quantum.services.historical_simulation import HistoricalCycleService
-from packages.quantum.services.backtest_workflow import _run_backtest_workflow
+from .services.backtest_workflow import _run_backtest_workflow
 from packages.quantum.services.backtest_engine import BacktestEngine, BacktestRunResult
 from packages.quantum.services.param_search_runner import ParamSearchRunner
 from packages.quantum.services.walkforward_runner import WalkForwardResult

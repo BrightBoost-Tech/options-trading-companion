@@ -16,6 +16,7 @@ import PaperPortfolioWidget from '@/components/dashboard/PaperPortfolioWidget';
 import { fetchWithAuth, fetchWithAuthTimeout } from '@/lib/api';
 import { QuantumTooltip } from "@/components/ui/QuantumTooltip";
 import { ThemeToggle } from '@/components/ThemeToggle';
+import { Button } from "@/components/ui/button";
 import { AlertTriangle, Wallet, Loader2, RefreshCw } from 'lucide-react';
 
 const mockAlerts = [
@@ -282,6 +283,10 @@ export default function DashboardPage() {
                     {workflowsRunning && <Loader2 className="w-3 h-3 animate-spin" />}
                     {workflowsRunning ? 'Generating...' : 'Generate Suggestions (Dev)'}
                   </button>
+                  {/* Verification Button for Palette Task */}
+                  <Button variant="destructive" size="sm" loading={true}>
+                    Verify Loading State
+                  </Button>
                 </div>
               </div>
               <PortfolioHoldingsTable

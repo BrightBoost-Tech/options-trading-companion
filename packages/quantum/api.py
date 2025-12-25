@@ -275,6 +275,10 @@ app.include_router(observability_router)
 from packages.quantum.analytics_endpoints import router as analytics_router
 app.include_router(analytics_router)
 
+# --- Register Historical Simulation Endpoints ---
+from packages.quantum.historical_endpoints import router as historical_router
+app.include_router(historical_router)
+
 # --- Scout Endpoints (New) ---
 
 @app.get("/scout/weekly")

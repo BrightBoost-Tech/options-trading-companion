@@ -150,10 +150,22 @@ export const TradeScoreCard = ({
 
       {/* Score Meter */}
       <div className="mb-4">
-          <div className="w-full bg-gray-200 rounded-full h-2.5">
-            <div className={`${color} h-2.5 rounded-full`} style={{ width: `${score}%` }}></div>
+          <div
+            className="w-full bg-gray-200 rounded-full h-2.5"
+            role="progressbar"
+            aria-valuenow={score}
+            aria-valuemin={0}
+            aria-valuemax={100}
+            aria-label="Trade Score Confidence"
+          >
+            <div
+              className={`${color} h-2.5 rounded-full`}
+              style={{ width: `${score}%` }}
+            />
           </div>
-          <p className="text-xs text-center mt-1 text-gray-600">Trade Score: {score}/100</p>
+          <p className="text-xs text-center mt-1 text-gray-600" aria-hidden="true">
+            Trade Score: {score}/100
+          </p>
       </div>
 
       {/* Key Metrics */}
@@ -172,13 +184,15 @@ export const TradeScoreCard = ({
       <div className="flex gap-3">
         <button
           onClick={onExecute}
-          className="flex-1 bg-blue-600 text-white font-semibold py-2 px-4 rounded-lg hover:bg-blue-700 transition"
+          aria-label={`Execute trade for ${symbol}`}
+          className="flex-1 bg-blue-600 text-white font-semibold py-2 px-4 rounded-lg hover:bg-blue-700 transition focus-visible:ring-2 focus-visible:ring-offset-2 focus-visible:ring-blue-600 outline-none"
         >
           Execute
         </button>
         <button
           onClick={onAddToWatchlist}
-          className="flex-1 bg-gray-200 text-gray-800 font-semibold py-2 px-4 rounded-lg hover:bg-gray-300 transition"
+          aria-label={`Add ${symbol} to watchlist`}
+          className="flex-1 bg-gray-200 text-gray-800 font-semibold py-2 px-4 rounded-lg hover:bg-gray-300 transition focus-visible:ring-2 focus-visible:ring-offset-2 focus-visible:ring-gray-400 outline-none"
         >
           Watchlist
         </button>

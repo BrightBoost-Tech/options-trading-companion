@@ -7,6 +7,7 @@ from datetime import datetime, timedelta, timezone
 from typing import List, Dict, Optional, Any
 import numpy as np
 import re
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from packages.quantum.cache import get_cached_data, save_to_cache
 from packages.quantum.analytics.factors import calculate_trend, calculate_iv_rank
 
@@ -517,7 +518,11 @@ def calculate_portfolio_inputs(
     # Check cache first (incorporate method into cache key if needed, or clear cache on method change)
     # Simple cache key: symbols + method
     symbols_tuple = tuple(sorted(symbols))
-    cache_key = (symbols_tuple, method)
+    # cache_key must be compatible with get_cached_data expectation.
+    # The error was '<' not supported between instances of 'str' and 'tuple' inside cache.py's sorted(symbols)
+    # cache.py expects an iterable of strings.
+    # So we flatten cache_key into a tuple of strings.
+    cache_key = symbols_tuple + (str(method), str(shrinkage_tau_days))
     
     # We use a custom cache mechanism here or reuse get_cached_data
     # get_cached_data uses filename based on hash of arg.
@@ -536,15 +541,25 @@ def calculate_portfolio_inputs(
         service = PolygonService(real_api_key)
         print(f"Fetching historical data for: {', '.join(symbols)}")
 
-        all_data = []
-        for symbol in symbols:
-            try:
-                data = service.get_historical_prices(symbol)
-                all_data.append(data)
-                print(f"  ✓ {symbol}: {len(data['prices'])} days")
-            except Exception as e:
-                print(f"  ✗ {symbol}: {str(e)}")
-                raise
+        all_data_map = {}
+        # Use ThreadPoolExecutor for parallel I/O (network requests)
+        # Max workers 20 covers most portfolio sizes without overwhelming the pool (max 50)
+        with ThreadPoolExecutor(max_workers=20) as executor:
+            future_to_symbol = {executor.submit(service.get_historical_prices, sym): sym for sym in symbols}
+
+            for future in as_completed(future_to_symbol):
+                sym = future_to_symbol[future]
+                try:
+                    data = future.result()
+                    all_data_map[sym] = data
+                    print(f"  ✓ {sym}: {len(data['prices'])} days")
+                except Exception as e:
+                    print(f"  ✗ {sym}: {str(e)}")
+                    # We raise immediately to fail fast, or could collect errors
+                    raise e
+
+        # Reconstruct list in alignment with input 'symbols' order
+        all_data = [all_data_map[s] for s in symbols]
 
         # Align Data
         min_length = min(len(data['returns']) for data in all_data)

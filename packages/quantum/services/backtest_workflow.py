@@ -1,8 +1,22 @@
 from typing import List, Dict, Any, Optional
+import json
+import numpy as np
 from datetime import datetime
 from .historical_simulation import HistoricalCycleService
+from packages.quantum.nested_logging import _get_supabase_client
 
-def _run_backtest_workflow(user_id: str, request, name: str, config) -> List[Dict[str, Any]]:
+def _serialize(obj):
+    if isinstance(obj, np.integer):
+        return int(obj)
+    if isinstance(obj, np.floating):
+        return float(obj)
+    if isinstance(obj, np.ndarray):
+        return obj.tolist()
+    if isinstance(obj, datetime):
+        return obj.isoformat()
+    return obj
+
+def _run_backtest_workflow(user_id: str, request, name: str, config, batch_id: Optional[str] = None) -> List[Dict[str, Any]]:
     """
     Restored backtest workflow that iterates through historical cycles.
     Intended for V2/Legacy backtest requests.
@@ -56,5 +70,32 @@ def _run_backtest_workflow(user_id: str, request, name: str, config) -> List[Dic
 
         cursor = next_cursor
         cycles += 1
+
+    # Handle Batch Persistence if needed
+    if batch_id:
+        try:
+            supabase = _get_supabase_client()
+            if supabase:
+                # Calculate metrics
+                trades_count = len(results)
+
+                wins = [r for r in results if r.get("pnl", 0) > 0]
+                total_pnl = sum([r.get("pnl", 0) for r in results])
+                win_rate = len(wins) / trades_count if trades_count > 0 else 0.0
+
+                # Serialize results for JSONB storage
+                # Use json.dumps with default=_serialize to handle numpy types, then json.loads back to dict/list
+                serialized_results = json.loads(json.dumps(results, default=_serialize))
+
+                supabase.table("strategy_backtests").update({
+                    "status": "completed",
+                    "trades_count": trades_count,
+                    "win_rate": win_rate,
+                    "total_pnl": total_pnl,
+                    "metrics": {"results": serialized_results}
+                }).eq("batch_id", batch_id).execute()
+        except Exception as e:
+            print(f"Error persisting batch results for {batch_id}: {e}")
+            # We don't want to crash the return value, just log the error
 
     return results

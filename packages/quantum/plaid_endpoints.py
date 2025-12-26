@@ -158,8 +158,10 @@ def register_plaid_endpoints(
             
             # Fetch from Plaid
             print("Fetching holdings from Plaid Service...")
-            result = plaid_service.get_holdings(access_token)
+            # --- MODIFIED: Use get_holdings_with_accounts to get balances too ---
+            result = plaid_service.get_holdings_with_accounts(access_token)
             holdings_list = result.get('holdings', [])
+            accounts_list = result.get('accounts', [])
 
             # Upsert to positions table
             if holdings_list:
@@ -187,9 +189,55 @@ def register_plaid_endpoints(
                     print(f"❌ Failed to update positions in DB: {e}")
                     raise HTTPException(status_code=500, detail="Database update failed.")
 
+            # --- NEW: Compute Buying Power and Update Portfolio Snapshots ---
+            buying_power = 0.0
+
+            if accounts_list:
+                print(f"Processing {len(accounts_list)} accounts for buying power...")
+                for acc in accounts_list:
+                    # Plaid balances structure: { "available": float, "current": float, "limit": float, ... }
+                    balances = acc.get('balances', {})
+                    # Prefer available, fallback to current
+                    val = balances.get('available')
+                    if val is None:
+                        val = balances.get('current')
+
+                    if val is not None:
+                         try:
+                             buying_power += float(val)
+                         except (ValueError, TypeError):
+                             pass
+
+                print(f"💰 Computed Buying Power: {buying_power}")
+
+                try:
+                    # Upsert to portfolio_snapshots
+                    snapshot_data = {
+                        "user_id": user_id,
+                        "created_at": datetime.now().isoformat(),
+                        "data_source": "plaid",
+                        "buying_power": buying_power,
+                        "risk_metrics": {"accounts_synced": len(accounts_list)}
+                    }
+
+                    # Assuming portfolio_snapshots has an ID or we rely on insert.
+                    # If we want to replace the latest, we just insert a new one as it's a snapshot log.
+                    # The prompt said "Upsert into portfolio_snapshots".
+                    # Since it's a log, "insert" is usually fine, but if there's a constraint, we handle it.
+                    # Looking at CashService, it orders by created_at desc limit 1. So insert is fine.
+
+                    supabase.table("portfolio_snapshots").insert(snapshot_data).execute()
+                    print("✅ Portfolio Snapshot updated with buying_power")
+
+                except Exception as e:
+                     print(f"⚠️ Failed to update portfolio_snapshots (non-critical): {e}")
+                     # Non-blocking error, as positions are already synced
+
             return {
                 "status": "ok",
                 "holdings_count": len(holdings_list),
+                "accounts_count": len(accounts_list),
+                "buying_power": buying_power,
                 "source": "plaid"
             }
 
@@ -201,7 +249,7 @@ def register_plaid_endpoints(
             print(f"❌ Plaid Holdings Error: {error_msg}")
             raise HTTPException(status_code=400, detail=error_msg)
         except Exception as e:
-            print(f"❌ Unexpected Error in get_holdings: {e}")
+            print(f"❌ Unexpected Error in sync_plaid_holdings: {e}")
             # SECURITY: Do not leak exception details
             raise HTTPException(status_code=500, detail="Internal Server Error: Failed to retrieve holdings.")
     

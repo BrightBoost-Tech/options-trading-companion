@@ -155,6 +155,35 @@ def get_holdings(access_token: str):
 
     return {"holdings": serialized}
 
+def get_holdings_with_accounts(access_token: str) -> dict:
+    """
+    Get holdings and account balances wrapper.
+    """
+    if not PLAID_SECRET or not PLAID_CLIENT_ID:
+        raise ValueError("Plaid credentials are not configured.")
+
+    try:
+        request = InvestmentsHoldingsGetRequest(access_token=access_token)
+        response = client.investments_holdings_get(request)
+        data = response.to_dict()
+
+        holdings = _normalize_response_data(data)
+        serialized_holdings = []
+        for h in holdings:
+            row = h.dict()
+            sym = row.get("symbol", "")
+            if sym and ("O:" in sym or h.asset_type == "OPTION" or len(sym) > 15):
+                row["display_symbol"] = format_occ_symbol_readable(sym)
+            serialized_holdings.append(row)
+
+        return {
+            "holdings": serialized_holdings,
+            "accounts": data.get("accounts", [])
+        }
+
+    except plaid.ApiException as e:
+        print(f"Plaid API Error (Get Holdings with Accounts): {e}")
+        raise e
 
 def fetch_and_normalize_holdings(access_token: str) -> list[Holding]:
     """
@@ -170,86 +199,91 @@ def fetch_and_normalize_holdings(access_token: str) -> list[Holding]:
 
         # Explicitly convert to dict to avoid model proxy issues and ensure robust access
         data = response.to_dict()
-
-        holdings_data = data.get('holdings', [])
-        securities_list = data.get('securities', [])
-
-        # Build lookup map: security_id -> security dict
-        securities_map = {s.get('security_id'): s for s in securities_list}
-
-        normalized_holdings = []
-        print(f"Processing {len(holdings_data)} holdings from Plaid...")
-
-        for item in holdings_data:
-            security_id = item.get('security_id')
-            security = securities_map.get(security_id, {})
-
-            # --- Symbol Resolution Logic ---
-            # 1. Prefer 'ticker_symbol' (usually populated for stocks/ETFs, sometimes options)
-            ticker = security.get('ticker_symbol')
-
-            # 2. If missing, check 'name'
-            if not ticker:
-                ticker = security.get('name')
-
-            # 3. Last resort
-            if not ticker:
-                ticker = "UNKNOWN"
-
-            # --- Quantity & Cost Logic ---
-            qty = float(item.get('quantity', 0) or 0)
-            total_cost = float(item.get('cost_basis', 0) or 0)
-
-            # Normalize Plaid cost_basis (total cost) to per-share to match frontend expectations
-            if qty > 0 and total_cost > 0:
-                cost_basis = total_cost / qty
-            elif qty != 0:
-                 # If qty is negative (short), total_cost might be negative too?
-                 # Usually cost_basis is positive, but let's be safe.
-                 cost_basis = abs(total_cost / qty)
-            else:
-                cost_basis = 0.0
-            
-            # --- Price Logic ---
-            # Priority: Polygon Real-time > Institution Price > Close Price
-            price = 0.0
-
-            # Only fetch real price if we have a valid ticker
-            if ticker and ticker != "UNKNOWN":
-                price = get_polygon_price(ticker)
-
-            if price == 0.0:
-                # Fallback to data from Plaid
-                if item.get('institution_price'):
-                    price = float(item.get('institution_price'))
-                elif security.get('close_price'):
-                    price = float(security.get('close_price'))
-                elif item.get('institution_value') and qty != 0:
-                     price = float(item.get('institution_value')) / qty
-
-            # --- Asset Type Classification ---
-            asset_type = AssetClassifier.classify_plaid_security(security, item)
-
-            # If asset is option but ticker looks like "Call Option", we might need better naming?
-            # But we stick to strict requirements: ticker -> name -> Unknown.
-
-            holding = Holding(
-                symbol=ticker,
-                name=security.get('name'),
-                quantity=qty,
-                cost_basis=cost_basis,
-                current_price=price,
-                currency=item.get('iso_currency_code', 'USD'),
-                institution_name="Plaid",
-                source="plaid",
-                account_id=item.get('account_id'),
-                last_updated=datetime.now(),
-                asset_type=asset_type
-            )
-            normalized_holdings.append(holding)
-
-        return normalized_holdings
+        return _normalize_response_data(data)
 
     except plaid.ApiException as e:
         print(f"Plaid API Error (Fetch Holdings): {e}")
         raise e
+
+def _normalize_response_data(data: dict) -> list[Holding]:
+    """
+    Internal helper to normalize raw Plaid response data into Holding objects.
+    """
+    holdings_data = data.get('holdings', [])
+    securities_list = data.get('securities', [])
+
+    # Build lookup map: security_id -> security dict
+    securities_map = {s.get('security_id'): s for s in securities_list}
+
+    normalized_holdings = []
+    print(f"Processing {len(holdings_data)} holdings from Plaid...")
+
+    for item in holdings_data:
+        security_id = item.get('security_id')
+        security = securities_map.get(security_id, {})
+
+        # --- Symbol Resolution Logic ---
+        # 1. Prefer 'ticker_symbol' (usually populated for stocks/ETFs, sometimes options)
+        ticker = security.get('ticker_symbol')
+
+        # 2. If missing, check 'name'
+        if not ticker:
+            ticker = security.get('name')
+
+        # 3. Last resort
+        if not ticker:
+            ticker = "UNKNOWN"
+
+        # --- Quantity & Cost Logic ---
+        qty = float(item.get('quantity', 0) or 0)
+        total_cost = float(item.get('cost_basis', 0) or 0)
+
+        # Normalize Plaid cost_basis (total cost) to per-share to match frontend expectations
+        if qty > 0 and total_cost > 0:
+            cost_basis = total_cost / qty
+        elif qty != 0:
+             # If qty is negative (short), total_cost might be negative too?
+             # Usually cost_basis is positive, but let's be safe.
+             cost_basis = abs(total_cost / qty)
+        else:
+            cost_basis = 0.0
+
+        # --- Price Logic ---
+        # Priority: Polygon Real-time > Institution Price > Close Price
+        price = 0.0
+
+        # Only fetch real price if we have a valid ticker
+        if ticker and ticker != "UNKNOWN":
+            price = get_polygon_price(ticker)
+
+        if price == 0.0:
+            # Fallback to data from Plaid
+            if item.get('institution_price'):
+                price = float(item.get('institution_price'))
+            elif security.get('close_price'):
+                price = float(security.get('close_price'))
+            elif item.get('institution_value') and qty != 0:
+                 price = float(item.get('institution_value')) / qty
+
+        # --- Asset Type Classification ---
+        asset_type = AssetClassifier.classify_plaid_security(security, item)
+
+        # If asset is option but ticker looks like "Call Option", we might need better naming?
+        # But we stick to strict requirements: ticker -> name -> Unknown.
+
+        holding = Holding(
+            symbol=ticker,
+            name=security.get('name'),
+            quantity=qty,
+            cost_basis=cost_basis,
+            current_price=price,
+            currency=item.get('iso_currency_code', 'USD'),
+            institution_name="Plaid",
+            source="plaid",
+            account_id=item.get('account_id'),
+            last_updated=datetime.now(),
+            asset_type=asset_type
+        )
+        normalized_holdings.append(holding)
+
+    return normalized_holdings

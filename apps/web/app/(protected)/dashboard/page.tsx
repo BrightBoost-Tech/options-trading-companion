@@ -180,7 +180,7 @@ export default function DashboardPage() {
   const runAllWorkflows = async () => {
     setWorkflowsRunning(true);
     try {
-      await fetchWithAuthTimeout('/tasks/run-all', 30000, {
+      await fetchWithAuthTimeout('/dev/run-all', 30000, {
         method: 'POST',
       });
       // After triggering, reload suggestions and weekly reports

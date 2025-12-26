@@ -130,27 +130,40 @@ def auth_debug(request: Request, user_id: str = Depends(get_current_user)):
 
 @app.post("/dev/run-midday")
 async def dev_run_midday(
-    x_test_mode_user: str = Header(..., alias="X-Test-Mode-User")
+    request: Request,
+    body: Optional[Dict[str, bool]] = Body(None),
+    user_id: str = Depends(get_current_user),
+    supabase: Client = Depends(get_supabase_user_client)
 ):
     """
     Dev-only endpoint to force run the midday cycle inline.
-    Bypasses Redis/RQ. Requires ENABLE_DEV_AUTH_BYPASS=1.
+    Bypasses Redis/RQ.
     """
-    # 1. Enforce Dev Mode
-    if os.getenv("ENABLE_DEV_AUTH_BYPASS") != "1":
+    # 1. Guardrails
+    app_env = os.getenv("APP_ENV", "production")
+    dev_bypass = os.getenv("ENABLE_DEV_AUTH_BYPASS") == "1"
+
+    if app_env not in ["development", "test"] and not dev_bypass:
         raise HTTPException(status_code=403, detail="Dev mode only")
 
-    print(f"🔧 DEV: Manually triggering midday cycle for {x_test_mode_user}")
+    is_local = request.client.host in ("127.0.0.1", "::1", "localhost") if request.client else False
+    if not is_local:
+        raise HTTPException(status_code=403, detail="Localhost only")
 
-    # 3. Run Cycle Inline
+    print(f"🔧 DEV run_midday_cycle invoked for user {user_id}")
+
+    # 2. Run Cycle Inline
     try:
-        await run_midday_cycle(supabase_admin, x_test_mode_user)
+        if not supabase:
+            raise HTTPException(status_code=503, detail="Database not available")
+
+        await run_midday_cycle(supabase, user_id)
     except Exception as e:
         print(f"❌ DEV Midday Cycle Failed: {e}")
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"Cycle failed: {str(e)}")
 
-    return {"status": "ok", "message": "Midday cycle executed inline"}
+    return {"status": "ok", "note": "midday cycle executed inline"}
 
 
 # Initialize Limiter

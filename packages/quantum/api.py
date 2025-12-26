@@ -127,6 +127,32 @@ def auth_debug(request: Request, user_id: str = Depends(get_current_user)):
         "is_localhost": is_local
     }
 
+
+@app.post("/dev/run-midday")
+async def dev_run_midday(
+    x_test_mode_user: str = Header(..., alias="X-Test-Mode-User")
+):
+    """
+    Dev-only endpoint to force run the midday cycle inline.
+    Bypasses Redis/RQ. Requires ENABLE_DEV_AUTH_BYPASS=1.
+    """
+    # 1. Enforce Dev Mode
+    if os.getenv("ENABLE_DEV_AUTH_BYPASS") != "1":
+        raise HTTPException(status_code=403, detail="Dev mode only")
+
+    print(f"🔧 DEV: Manually triggering midday cycle for {x_test_mode_user}")
+
+    # 3. Run Cycle Inline
+    try:
+        await run_midday_cycle(supabase_admin, x_test_mode_user)
+    except Exception as e:
+        print(f"❌ DEV Midday Cycle Failed: {e}")
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Cycle failed: {str(e)}")
+
+    return {"status": "ok", "message": "Midday cycle executed inline"}
+
+
 # Initialize Limiter
 limiter = Limiter(key_func=get_remote_address)
 app.state.limiter = limiter

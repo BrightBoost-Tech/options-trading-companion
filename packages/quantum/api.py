@@ -166,6 +166,53 @@ async def dev_run_midday(
     return {"status": "ok", "note": "midday cycle executed inline"}
 
 
+@app.post("/dev/run-all")
+async def dev_run_all(
+    request: Request,
+    user_id: str = Depends(get_current_user),
+    x_test_mode_user: Optional[str] = Header(None, alias="X-Test-Mode-User")
+):
+    """
+    Dev-only endpoint to force run morning, midday, and weekly cycles inline.
+    Bypasses Redis/RQ. Requires ENABLE_DEV_AUTH_BYPASS=1.
+    Strictly restricted to localhost.
+    Accepts valid auth token OR X-Test-Mode-User header.
+    """
+    # 1. Enforce Dev Mode
+    if os.getenv("ENABLE_DEV_AUTH_BYPASS") != "1":
+        raise HTTPException(status_code=403, detail="Dev mode only")
+
+    # 2. Enforce Localhost
+    is_local = request.client.host in ("127.0.0.1", "::1", "localhost") if request.client else False
+    if not is_local:
+        raise HTTPException(status_code=403, detail="Forbidden: Localhost only")
+
+    # Resolve effective user_id
+    effective_user_id = user_id or x_test_mode_user
+    if not effective_user_id:
+        raise HTTPException(status_code=401, detail="Authentication required (Token or X-Test-Mode-User)")
+
+    print(f"🔧 DEV: Manually triggering ALL workflows for {effective_user_id}")
+
+    try:
+        # Run sequentially
+        print(">>> Starting Morning Cycle...")
+        await run_morning_cycle(supabase_admin, effective_user_id)
+
+        print(">>> Starting Midday Cycle...")
+        await run_midday_cycle(supabase_admin, effective_user_id)
+
+        print(">>> Starting Weekly Report...")
+        await run_weekly_report(supabase_admin, effective_user_id)
+
+    except Exception as e:
+        print(f"❌ DEV Run-All Failed: {e}")
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Cycle failed: {str(e)}")
+
+    return {"status": "ok", "message": "All workflows executed inline"}
+
+
 # Initialize Limiter
 limiter = Limiter(key_func=get_remote_address)
 app.state.limiter = limiter

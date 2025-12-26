@@ -33,7 +33,10 @@ def get_queue(name: str = "otc") -> Queue:
         return Queue(name, connection=redis_conn)
     except Exception as e:
         print(f"Error getting RQ queue: {e}")
-        raise HTTPException(status_code=503, detail="Redis/RQ unavailable")
+        raise HTTPException(
+            status_code=503,
+            detail="Task queue unavailable (Redis). Run /dev/run-midday for local debugging or start Redis/worker."
+        )
 
 def make_job_id(job_name: str, idempotency_key: str) -> str:
     """
@@ -93,10 +96,12 @@ def enqueue_idempotent(
             "enqueued_at": job.enqueued_at.isoformat() if job.enqueued_at else None
         }
 
+    except HTTPException as e:
+        # Pass through specific HTTP exceptions (like 503 from get_queue)
+        raise e
     except Exception as e:
         # If it's a "job_id already exists" error or similar, we might want to handle it.
         # But RQ usually allows re-enqueueing or we can catch it.
         print(f"Error enqueueing job {job_id}: {e}")
-        # If Redis is down, get_queue raised 503.
         # If something else failed (e.g. serialization), we raise 500.
         raise HTTPException(status_code=500, detail=f"Failed to enqueue job: {str(e)}")

@@ -13,6 +13,7 @@ from .exit_stats_service import ExitStatsService
 from .market_data_truth_layer import MarketDataTruthLayer
 from .analytics_service import AnalyticsService
 from packages.quantum.services.risk_budget_engine import RiskBudgetEngine
+from packages.quantum.services.analytics.small_account_compounder import SmallAccountCompounder, CapitalTier, SizingConfig
 
 # Importing existing logic
 from packages.quantum.options_scanner import scan_for_opportunities
@@ -35,6 +36,7 @@ SUGGESTION_LOGS_TABLE = "suggestion_logs"
 
 # 1. Add MIDDAY_TEST_MODE flag
 MIDDAY_TEST_MODE = os.getenv("MIDDAY_TEST_MODE", "false").lower() == "true"
+COMPOUNDING_MODE = os.getenv("COMPOUNDING_MODE", "false").lower() == "true"
 APP_VERSION = os.getenv("APP_VERSION", "v2-dev")
 
 
@@ -513,10 +515,34 @@ async def run_midday_cycle(supabase: Client, user_id: str):
         conviction_service = ConvictionService(supabase=supabase)
         scout_results = conviction_service.adjust_suggestion_scores(scout_results, user_id)
 
-        scout_results.sort(key=lambda x: x.get("score", 0), reverse=True)
-        candidates = scout_results[:2]
+        # NEW: Rank and Select Pipeline using SmallAccountCompounder
+        # Detect capital tier
+        tier = SmallAccountCompounder.get_tier(deployable_capital)
+        print(f"[Midday] Account Tier: {tier.name} (Compounding: {COMPOUNDING_MODE})")
 
-        print(f"Top {len(candidates)} scanner results for midday (top 2 by score):")
+        # Select candidates
+        remaining_global_budget = float(
+            budgets.get("remaining")
+            or budgets.get("remaining_budget")
+            or budgets.get("remaining_dollars")
+            or 0.0
+        )
+
+        # Config
+        midday_config = SizingConfig(compounding_enabled=COMPOUNDING_MODE)
+
+        # Use Global regime state for selection estimation
+        current_regime = global_snap.state.value
+
+        candidates = SmallAccountCompounder.rank_and_select(
+            candidates=scout_results,
+            capital=deployable_capital,
+            risk_budget=remaining_global_budget,
+            config=midday_config,
+            regime=current_regime
+        )
+
+        print(f"Top {len(candidates)} candidates selected for midday:")
         for c in candidates:
             print(f"  {c.get('ticker', c.get('symbol'))} score={c.get('score')} type={c.get('type')}")
 
@@ -557,14 +583,18 @@ async def run_midday_cycle(supabase: Client, user_id: str):
             or max_loss
         )
 
-        score = float(cand.get("unified_score", cand.get("score", 50.0)) or 50.0)
-        base_per_trade_pct = 0.02 if score >= 70 else 0.01
+        # Use SmallAccountCompounder for variable sizing
+        tier = SmallAccountCompounder.get_tier(deployable_capital)
+        sizing_vars = SmallAccountCompounder.calculate_variable_sizing(
+            candidate=cand,
+            capital=deployable_capital,
+            tier=tier,
+            regime=scoring_regime,
+            compounding=COMPOUNDING_MODE
+        )
 
-        conviction = float(cand.get("conviction_score", cand.get("confidence_score", 0.5)) or 0.5)
-        risk_multiplier = 0.5 + conviction
-        risk_multiplier = min(1.5, max(0.5, risk_multiplier))
-
-        risk_budget_dollars = deployable_capital * base_per_trade_pct * risk_multiplier
+        risk_budget_dollars = sizing_vars["risk_budget"]
+        risk_multiplier = sizing_vars["multipliers"]["score"] # Approximate for logging
 
         # CLAMPING LOGIC
         remaining = float(

@@ -952,38 +952,8 @@ def scan_for_opportunities(
             else:
                 legs, total_cost = _select_legs_from_chain(calls_sorted, puts_sorted, suggestion["legs"], current_price)
 
-            # NOTE: We recalculate legs below for risk primitives or just reuse?
-            # The original code reset `legs = []` here which discards the work above!
-            # Wait, looking at original code:
-            # legs, total_cost = ...
-            # legs = []
-            # ...
-            # strategy_key in ("iron_condor" ...): ... logic ...
-            # else: default loop
-            #
-            # The original code seems to double-calculate or discard?
-            # Let's check lines 400-600.
-            # It seems `legs, total_cost = ...` is done, THEN `legs = []`, THEN a large block repeats logic?
-            # Ah, the original code had a large block `if strategy_key ... else ...` that RE-DID selection?
-            # NO, the original code I read shows:
-            #   legs, total_cost = _select_legs_from_chain(...)
-            #   legs = []
-            #   ...
-            # This looks like dead code or a mistake in the file I read.
-            # Actually, looking at the file read output:
-            # Line 345: if "iron_condor"...
-            # Line 375: else: legs, total_cost = _select_legs_from_chain...
-            # Line 377: legs = []
-            # Line 378: total_cost = 0.0
-            # Line 386: if strategy_key in ("iron_condor"...):
-            # Line 493: else: # Default Logic (Original loop) ... iterates chain again!
-            #
-            # WOW. The original code computes legs, throws them away, and computes them again inline!
-            # This is a HUGE performance bug.
-            # I will fix this by removing the redundant re-calculation.
-
-            # I will USE the legs computed above and REMOVE the redundant blocks below.
-            # Removed redundant re-calculation block. We now use 'legs' and 'total_cost' from above.
+            if not legs:
+                return None
 
             pricing_mode = "exact"
             data_quality = "realtime"

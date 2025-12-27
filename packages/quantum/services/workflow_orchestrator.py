@@ -157,10 +157,16 @@ async def run_morning_cycle(supabase: Client, user_id: str):
         deployable_capital = 0.0
 
     budgets = risk_engine.compute(user_id, deployable_capital, global_snap.state.value, positions)
-    is_over_budget = budgets["remaining"] <= 0
+
+    # Updated to access keys from Pydantic model
+    remaining_global = budgets.global_allocation.remaining
+    max_alloc_global = budgets.global_allocation.max_limit
+    usage_global = budgets.global_allocation.used
+
+    is_over_budget = remaining_global <= 0
     budget_usage_pct = 0.0
-    if budgets["max_allocation"] > 0:
-        budget_usage_pct = (budgets["current_usage"] / budgets["max_allocation"]) * 100
+    if max_alloc_global > 0:
+        budget_usage_pct = (usage_global / max_alloc_global) * 100
 
     suggestions = []
 
@@ -346,7 +352,7 @@ async def run_morning_cycle(supabase: Client, user_id: str):
                         "regime_v3_effective": effective_regime_state.value
                     },
                     "risk_budget": {
-                         "remaining": budgets["remaining"],
+                         "remaining": remaining_global,
                          "usage_pct": budget_usage_pct,
                          "status": "violated" if is_over_budget else "ok"
                     },
@@ -487,9 +493,14 @@ async def run_midday_cycle(supabase: Client, user_id: str):
     # === RISK BUDGET ENGINE ===
     risk_engine = RiskBudgetEngine(supabase)
     budgets = risk_engine.compute(user_id, deployable_capital, global_snap.state.value, positions)
-    print(f"Risk Budget: Remaining=${budgets['remaining']:.2f}, Usage=${budgets['current_usage']:.2f}, Cap=${budgets['max_allocation']:.2f} ({budgets['regime']})")
 
-    if budgets["remaining"] <= 0 and not MIDDAY_TEST_MODE:
+    remaining_global = budgets.global_allocation.remaining
+    usage_global = budgets.global_allocation.used
+    max_global = budgets.global_allocation.max_limit
+
+    print(f"Risk Budget: Remaining=${remaining_global:.2f}, Usage=${usage_global:.2f}, Cap=${max_global:.2f} ({budgets.regime})")
+
+    if remaining_global <= 0 and not MIDDAY_TEST_MODE:
          print("Risk budget exhausted. Skipping midday cycle.")
          return
 
@@ -567,17 +578,25 @@ async def run_midday_cycle(supabase: Client, user_id: str):
         risk_budget_dollars = deployable_capital * base_per_trade_pct * risk_multiplier
 
         # CLAMPING LOGIC
-        remaining = float(
-            budgets.get("remaining")
-            or budgets.get("remaining_budget")
-            or budgets.get("remaining_dollars")
-            or 0.0
-        )
-        risk_budget_dollars = clamp_risk_budget(risk_budget_dollars, remaining)
+        # Use max_risk_per_trade from engine which accounts for remaining global + granular profile sizing
+        recommended_risk = budgets.max_risk_per_trade
 
-        if risk_budget_dollars <= 0:
-            print(f"[Midday] Skipped {ticker}: Risk budget exhausted for trade (Remaining: ${remaining:.2f})")
+        # We can still apply the scanner-based score multiplier, but should clamp to recommended_risk
+        # Re-calc base based on scanner conviction?
+        # The engine provided a "max safe trade size".
+        # We also have "remaining" global budget.
+
+        final_risk_dollars = min(risk_budget_dollars, recommended_risk)
+
+        # Also clamp to remaining global (redundant if engine did it, but safe)
+        final_risk_dollars = clamp_risk_budget(final_risk_dollars, remaining_global)
+
+        if final_risk_dollars <= 0:
+            print(f"[Midday] Skipped {ticker}: Risk budget exhausted for trade (Remaining: ${remaining_global:.2f})")
             continue
+
+        # Update variable for sizing engine
+        risk_budget_dollars = final_risk_dollars
 
         # --- SIZING (single call) ---
         sizing = calculate_sizing(
@@ -637,7 +656,7 @@ async def run_midday_cycle(supabase: Client, user_id: str):
             postprocess_midday_sizing(sizing, max_loss)
 
             sizing["risk_multiplier"] = risk_multiplier
-            sizing["budget_snapshot"] = budgets
+            sizing["budget_snapshot"] = budgets.model_dump()
             sizing["allowed_risk_dollars"] = allowed_risk_dollars
 
             cand_features = {

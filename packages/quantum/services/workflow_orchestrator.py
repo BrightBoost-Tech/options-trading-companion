@@ -12,6 +12,7 @@ from .options_utils import group_spread_positions, format_occ_symbol_readable
 from .exit_stats_service import ExitStatsService
 from .market_data_truth_layer import MarketDataTruthLayer
 from .analytics_service import AnalyticsService
+from packages.quantum.analytics.strategy_policy import StrategyPolicy
 from packages.quantum.services.risk_budget_engine import RiskBudgetEngine
 from packages.quantum.services.analytics.small_account_compounder import SmallAccountCompounder, CapitalTier, SizingConfig
 
@@ -526,12 +527,28 @@ async def run_midday_cycle(supabase: Client, user_id: str):
     candidates = []
     scout_results = []
 
+    # Fetch user policy settings
+    banned_strategies = []
+    try:
+        # Try to fetch from settings table if it exists and has the column
+        # Fallback to empty if not found
+        settings_res = supabase.table("settings").select("banned_strategies").eq("user_id", user_id).single().execute()
+        if settings_res.data:
+            banned_strategies = settings_res.data.get("banned_strategies") or []
+    except Exception as e:
+        # settings table might not exist or column missing, non-critical
+        print(f"Note: Could not fetch banned_strategies for user {user_id}: {e}")
+
+    # Initialize Policy for Final Gate
+    policy = StrategyPolicy(banned_strategies)
+
     try:
         # Step C: Wire user_id from cycle orchestration into scanner
         scout_results = scan_for_opportunities(
             supabase_client=supabase,
             user_id=user_id,
-            global_snapshot=global_snap
+            global_snapshot=global_snap,
+            banned_strategies=banned_strategies
         )
 
         print(f"Scanner returned {len(scout_results)} raw opportunities.")
@@ -725,6 +742,12 @@ async def run_midday_cycle(supabase: Client, user_id: str):
             ctx.features_hash = compute_features_hash(cand_features)
 
             pop = cand.get("probability_of_profit")
+
+            # Final Policy Gate (should have been filtered upstream, but redundant check)
+            if not policy.is_allowed(strategy):
+                print(f"[Midday] Final Gate: Rejecting {ticker} {strategy} due to policy.")
+                continue
+
             suggestion = {
                 "user_id": user_id,
                 "created_at": datetime.now(timezone.utc).isoformat(),

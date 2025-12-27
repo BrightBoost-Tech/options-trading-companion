@@ -8,6 +8,7 @@ import os
 
 # Fix import for when running from different contexts
 from packages.quantum.market_data import PolygonService
+from packages.quantum.services.earnings_calendar_service import EarningsCalendarService
 
 class UniverseService:
     # Top 50 liquid tickers + broad market ETFs
@@ -23,6 +24,7 @@ class UniverseService:
     def __init__(self, supabase: Client, polygon_service: PolygonService = None):
         self.supabase = supabase
         self.polygon = polygon_service or PolygonService()
+        self.earnings_service = EarningsCalendarService(self.polygon)
 
     # Int-like keys that must be sanitized for Postgres BigInt
     INT_LIKE_KEYS = {
@@ -139,6 +141,10 @@ class UniverseService:
                 if iv_rank is not None:
                     l_score += 20
 
+                # 4. Earnings Date
+                earnings_date = self.earnings_service.get_earnings_date(sym)
+                earnings_str = earnings_date.isoformat() if earnings_date else None
+
                 updates.append({
                     "symbol": sym,
                     "sector": sector,
@@ -147,6 +153,7 @@ class UniverseService:
                     "iv_rank": iv_rank,
                     "iv_regime": None, # Deprecated source of truth
                     "liquidity_score": min(100, l_score),
+                    "earnings_date": earnings_str,
                     "last_updated": datetime.now().isoformat()
                 })
 

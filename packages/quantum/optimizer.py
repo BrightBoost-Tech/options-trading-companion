@@ -23,7 +23,7 @@ from packages.quantum.analytics.analytics import OptionsAnalytics
 from packages.quantum.services.trade_builder import enrich_trade_suggestions
 from packages.quantum.market_data import PolygonService, calculate_portfolio_inputs
 from packages.quantum.ev_calculator import calculate_ev, calculate_kelly_sizing
-from packages.quantum.nested_logging import log_inference
+from packages.quantum.nested_logging import log_inference, log_decision
 from packages.quantum.nested.adapters import load_symbol_adapters, apply_biases
 from packages.quantum.nested.backbone import compute_macro_features, infer_global_context, log_global_context
 from packages.quantum.nested.session import load_session_state, refresh_session_from_db, get_session_sigma_scale
@@ -362,6 +362,22 @@ def _compute_portfolio_weights(
             predicted_sigma={"sigma_matrix": sigma_list},
             optimizer_profile=local_req.profile
         )
+
+        # New: Log the optimization decision (target weights)
+        if trace_id:
+            log_decision(
+                trace_id=trace_id,
+                user_id=user_id,
+                decision_type="optimizer_weights",
+                content={
+                    "target_weights": target_weights,
+                    "metrics": {
+                        "expected_return": float(np.dot(weights_array, mu)), # approximate for log
+                        "solver": solver_type
+                    }
+                }
+            )
+
     except Exception as e:
         print(f"Logging Integration Error: {e}")
 

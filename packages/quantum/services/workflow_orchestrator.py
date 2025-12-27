@@ -24,6 +24,7 @@ from packages.quantum.analytics.loss_minimizer import LossMinimizer
 from packages.quantum.analytics.conviction_service import ConvictionService
 from packages.quantum.services.iv_repository import IVRepository
 from packages.quantum.services.iv_point_service import IVPointService
+from packages.quantum.nested_logging import log_decision
 
 # v3 Observability
 from packages.quantum.observability.telemetry import TradeContext, compute_features_hash, emit_trade_event
@@ -376,6 +377,21 @@ async def run_morning_cycle(supabase: Client, user_id: str):
                 }
             )
 
+            # Log Decision
+            if ctx.trace_id:
+                log_decision(
+                    trace_id=ctx.trace_id,
+                    user_id=user_id,
+                    decision_type="morning_suggestion",
+                    content={
+                        "action": "close",
+                        "strategy": "take_profit_limit",
+                        "target_price": metrics.limit_price,
+                        "ev": metrics.expected_value,
+                        "rationale": rationale_text
+                    }
+                )
+
     # 4. Insert suggestions
     if suggestions:
         try:
@@ -693,6 +709,21 @@ async def run_midday_cycle(supabase: Client, user_id: str):
                 "suggestion_generated",
                 properties=props
             )
+
+            # Log Decision
+            if ctx.trace_id:
+                log_decision(
+                    trace_id=ctx.trace_id,
+                    user_id=user_id,
+                    decision_type="midday_suggestion",
+                    content={
+                        "action": "open",
+                        "strategy": strategy,
+                        "sizing": sizing, # Full sizing details
+                        "ev": ev,
+                        "score": cand.get("score")
+                    }
+                )
 
     print(f"FINAL MIDDAY SUGGESTION COUNT: {len(suggestions)}")
 

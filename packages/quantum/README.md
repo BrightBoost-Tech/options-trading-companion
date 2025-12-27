@@ -48,6 +48,21 @@ The canonical surface for job visibility is `/jobs/runs`.
 - RLS policies enforce that users can only access their own data.
 - The Service Role Key is used strictly for internal system tasks.
 
+## Learning & Attribution Model (Phase 2 Update)
+
+The outcome attribution model has been updated to tie learning signals directly to the *decisions* made by the system, rather than just the input portfolio state.
+
+### Attribution Logic
+When computing the "Surprise" score and realized PnL for a trace (an inference/decision event), the system prioritizes sources in the following order:
+
+1.  **Execution (`trade_executions`)**: If the system's suggestion resulted in a trade, the actual realized PnL of that trade is used. This provides the strongest learning signal.
+2.  **Suggestion (`trade_suggestions`)**: If a suggestion was generated but not executed (e.g., limit price not hit, or ignored by user), the outcome is marked as `no_action`.
+3.  **Optimizer Decision (`decision_logs`)**: If the optimizer generated target weights (e.g., for rebalancing) but no specific trade suggestion was created, the theoretical performance of the target portfolio is simulated.
+4.  **Portfolio Snapshot (`inputs_snapshot`)**: Fallback to the legacy method of measuring the performance of the input portfolio (passive hold) if no active decision was recorded.
+
+### Decision Logging
+A new table `decision_logs` captures the granular output of the optimizer (target weights) and sizing engines. This ensures that even if a trade is not executed, the *intent* of the system is preserved for "counterfactual" learning (what would have happened if we traded).
+
 ## Running Locally
 
 To ensure a consistent environment and automated setup, please use the provided helper scripts. These scripts will:

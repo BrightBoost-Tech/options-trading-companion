@@ -3,11 +3,14 @@
 import { useState } from 'react';
 import { createBrowserClient } from '@supabase/ssr';
 import { useRouter } from 'next/navigation';
+import { Button } from '@/components/ui/button';
+import { Input } from '@/components/ui/input';
 
 export default function SignupPage() {
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [error, setError] = useState('');
+  const [loading, setLoading] = useState(false);
   const router = useRouter();
 
   const supabase = createBrowserClient(
@@ -18,69 +21,81 @@ export default function SignupPage() {
   const handleSignup = async (e: React.FormEvent) => {
     e.preventDefault();
     setError('');
+    setLoading(true);
 
-    const { error } = await supabase.auth.signUp({
-      email,
-      password,
-      options: {
-        emailRedirectTo: `${window.location.origin}/dashboard`,
-      },
-    });
+    try {
+      const { error } = await supabase.auth.signUp({
+        email,
+        password,
+        options: {
+          emailRedirectTo: `${window.location.origin}/dashboard`,
+        },
+      });
 
-    if (error) {
-      setError(error.message);
-    } else {
-      alert('Check your email to confirm your account!');
-      router.push('/login');
+      if (error) {
+        setError(error.message);
+      } else {
+        alert('Check your email to confirm your account!');
+        router.push('/login');
+      }
+    } catch (err) {
+      setError('An unexpected error occurred');
+    } finally {
+      setLoading(false);
     }
   };
 
   return (
-    <div className="flex min-h-screen items-center justify-center px-4 bg-gray-50">
+    <div className="flex min-h-screen items-center justify-center px-4 bg-background">
       <div className="w-full max-w-md space-y-8">
         <div>
-          <h2 className="text-3xl font-bold text-center">Create account</h2>
-          <p className="mt-2 text-center text-gray-600">
+          <h2 className="text-3xl font-bold text-center text-foreground">Create account</h2>
+          <p className="mt-2 text-center text-muted-foreground">
             Start trading smarter with AI
           </p>
         </div>
-        <form onSubmit={handleSignup} className="space-y-6 bg-white p-8 rounded-lg shadow">
+        <form onSubmit={handleSignup} className="space-y-6 bg-card p-8 rounded-lg shadow border border-border">
           {error && (
-            <div className="p-3 text-sm text-red-600 bg-red-50 rounded">
+            <div role="alert" className="p-3 text-sm text-red-600 bg-red-50 dark:bg-red-900/30 dark:text-red-400 rounded">
               {error}
             </div>
           )}
           <div>
-            <label className="block text-sm font-medium mb-2">Email</label>
-            <input
+            <label htmlFor="email" className="block text-sm font-medium mb-2 text-foreground">Email</label>
+            <Input
+              id="email"
               type="email"
               value={email}
               onChange={(e) => setEmail(e.target.value)}
-              className="w-full px-3 py-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
               required
+              disabled={loading}
+              placeholder="name@example.com"
             />
           </div>
           <div>
-            <label className="block text-sm font-medium mb-2">Password</label>
-            <input
+            <label htmlFor="password" className="block text-sm font-medium mb-2 text-foreground">Password</label>
+            <Input
+              id="password"
               type="password"
               value={password}
               onChange={(e) => setPassword(e.target.value)}
-              className="w-full px-3 py-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
               required
               minLength={6}
+              disabled={loading}
+              placeholder="••••••••"
             />
-            <p className="mt-1 text-xs text-gray-500">At least 6 characters</p>
+            <p className="mt-1 text-xs text-muted-foreground">At least 6 characters</p>
           </div>
-          <button
+          <Button
             type="submit"
-            className="w-full py-2 px-4 bg-blue-600 text-white rounded-lg hover:bg-blue-700 font-medium"
+            className="w-full"
+            loading={loading}
           >
             Sign up
-          </button>
-          <p className="text-center text-sm text-gray-600">
+          </Button>
+          <p className="text-center text-sm text-muted-foreground">
             Already have an account?{' '}
-            <a href="/login" className="text-blue-600 hover:underline">
+            <a href="/login" className="text-primary hover:underline">
               Sign in
             </a>
           </p>

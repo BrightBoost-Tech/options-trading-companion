@@ -8,7 +8,7 @@ import sys
 from .cash_service import CashService
 from .sizing_engine import calculate_sizing
 from .journal_service import JournalService
-from .options_utils import group_spread_positions, format_occ_symbol_readable
+from .options_utils import group_spread_positions, format_occ_symbol_readable, compute_legs_fingerprint
 from .exit_stats_service import ExitStatsService
 from .market_data_truth_layer import MarketDataTruthLayer
 from .analytics_service import AnalyticsService
@@ -320,6 +320,22 @@ async def run_morning_cycle(supabase: Client, user_id: str):
             )
             ctx.features_hash = compute_features_hash(features_for_hash)
 
+            order_json = {
+                "side": "close_spread",
+                "limit_price": round(metrics.limit_price, 2),
+                "legs": [
+                    {
+                        "symbol": l["symbol"],
+                        "display_symbol": format_occ_symbol_readable(l["symbol"]),
+                        "quantity": l["quantity"],
+                        "side": l.get("side", "") # Added side from leg for fingerprinting
+                    } for l in legs
+                ]
+            }
+
+            # Calculate fingerprint
+            fingerprint = compute_legs_fingerprint(order_json)
+
             suggestion = {
                     "user_id": user_id,
                     "created_at": datetime.now(timezone.utc).isoformat(),
@@ -333,17 +349,7 @@ async def run_morning_cycle(supabase: Client, user_id: str):
                     "probability_of_profit": metrics.prob_of_profit,
                     "rationale": rationale_text,
                     "historical_stats": hist_stats,
-                    "order_json": {
-                        "side": "close_spread",
-                        "limit_price": round(metrics.limit_price, 2),
-                        "legs": [
-                            {
-                                "symbol": l["symbol"],
-                                "display_symbol": format_occ_symbol_readable(l["symbol"]),
-                                "quantity": l["quantity"]
-                            } for l in legs
-                        ]
-                    },
+                    "order_json": order_json,
                 "sizing_metadata": {
                     "reason": metrics.reason,
                     "context": {
@@ -369,7 +375,8 @@ async def run_morning_cycle(supabase: Client, user_id: str):
                 "trace_id": ctx.trace_id,
                 "model_version": ctx.model_version,
                 "features_hash": ctx.features_hash,
-                "regime": ctx.regime
+                "regime": ctx.regime,
+                "legs_fingerprint": fingerprint
             }
             suggestions.append(suggestion)
 
@@ -405,14 +412,27 @@ async def run_morning_cycle(supabase: Client, user_id: str):
         try:
             cycle_date = datetime.now(timezone.utc).date().isoformat()
 
-            # Fetch existing to preserve status
+            # Fetch existing to preserve status (using new key if possible, but map still relies on ticker/strategy)
+            # With fingerprinting, ticker+strategy is no longer unique.
+            # We need to map by fingerprint if available, or ticker+strategy as fallback?
+            # Or just blindly insert new ones?
+            # Ideally we want to update status if re-suggested.
+            # We can use fingerprint for key now.
+
             existing_map = {}
             try:
-                ex = supabase.table(TRADE_SUGGESTIONS_TABLE).select("ticker,strategy,status") \
+                # We select legs_fingerprint as well
+                ex = supabase.table(TRADE_SUGGESTIONS_TABLE).select("ticker,strategy,legs_fingerprint,status") \
                     .eq("user_id", user_id) \
                     .eq("window", "morning_limit") \
                     .eq("cycle_date", cycle_date).execute()
-                existing_map = {(r["ticker"], r["strategy"]): r["status"] for r in (ex.data or [])}
+                for r in (ex.data or []):
+                    # Key is fingerprint if available, else (ticker, strategy)
+                    fp = r.get("legs_fingerprint")
+                    if fp and fp != 'legacy':
+                        existing_map[fp] = r["status"]
+                    else:
+                        existing_map[(r["ticker"], r["strategy"])] = r["status"]
             except Exception:
                 pass
 
@@ -422,9 +442,18 @@ async def run_morning_cycle(supabase: Client, user_id: str):
 
             for s in suggestions:
                 s["cycle_date"] = cycle_date
-                key = (s["ticker"], s["strategy"])
-                if key in existing_map:
-                    s["status"] = existing_map[key]
+                fp = s.get("legs_fingerprint")
+
+                # Check by fingerprint first
+                status = None
+                if fp and fp in existing_map:
+                    status = existing_map[fp]
+                elif (s["ticker"], s["strategy"]) in existing_map:
+                    # Fallback for transition
+                    status = existing_map[(s["ticker"], s["strategy"])]
+
+                if status:
+                    s["status"] = status
                     updates += 1
                 else:
                     s["status"] = "pending"
@@ -433,7 +462,7 @@ async def run_morning_cycle(supabase: Client, user_id: str):
 
             supabase.table(TRADE_SUGGESTIONS_TABLE).upsert(
                 upserts,
-                on_conflict="user_id,window,cycle_date,ticker,strategy"
+                on_conflict="user_id,window,cycle_date,ticker,strategy,legs_fingerprint"
             ).execute()
             print(f"Upserted morning suggestions: {inserts} inserted, {updates} updated.")
         except Exception as e:
@@ -725,6 +754,11 @@ async def run_midday_cycle(supabase: Client, user_id: str):
             ctx.features_hash = compute_features_hash(cand_features)
 
             pop = cand.get("probability_of_profit")
+            order_json = build_midday_order_json(cand, sizing["contracts"])
+
+            # Calculate fingerprint
+            fingerprint = compute_legs_fingerprint(order_json)
+
             suggestion = {
                 "user_id": user_id,
                 "created_at": datetime.now(timezone.utc).isoformat(),
@@ -733,7 +767,7 @@ async def run_midday_cycle(supabase: Client, user_id: str):
                 "ticker": ticker,
                 "strategy": strategy,
                 "direction": "long",
-                "order_json": build_midday_order_json(cand, sizing["contracts"]),
+                "order_json": order_json,
                 "sizing_metadata": sizing,
                 "status": "pending",
                 "source": "scanner",
@@ -743,7 +777,8 @@ async def run_midday_cycle(supabase: Client, user_id: str):
                 "trace_id": ctx.trace_id,
                 "model_version": ctx.model_version,
                 "features_hash": ctx.features_hash,
-                "regime": ctx.regime
+                "regime": ctx.regime,
+                "legs_fingerprint": fingerprint
             }
             suggestions.append(suggestion)
 
@@ -780,14 +815,19 @@ async def run_midday_cycle(supabase: Client, user_id: str):
         try:
             cycle_date = datetime.now(timezone.utc).date().isoformat()
 
-            # Fetch existing to preserve status
+            # Fetch existing to preserve status using fingerprint or fallback
             existing_map = {}
             try:
-                ex = supabase.table(TRADE_SUGGESTIONS_TABLE).select("ticker,strategy,status") \
+                ex = supabase.table(TRADE_SUGGESTIONS_TABLE).select("ticker,strategy,legs_fingerprint,status") \
                     .eq("user_id", user_id) \
                     .eq("window", "midday_entry") \
                     .eq("cycle_date", cycle_date).execute()
-                existing_map = {(r["ticker"], r["strategy"]): r["status"] for r in (ex.data or [])}
+                for r in (ex.data or []):
+                    fp = r.get("legs_fingerprint")
+                    if fp and fp != 'legacy':
+                        existing_map[fp] = r["status"]
+                    else:
+                        existing_map[(r["ticker"], r["strategy"])] = r["status"]
             except Exception:
                 pass
 
@@ -797,9 +837,16 @@ async def run_midday_cycle(supabase: Client, user_id: str):
 
             for s in suggestions:
                 s["cycle_date"] = cycle_date
-                key = (s["ticker"], s["strategy"])
-                if key in existing_map:
-                    s["status"] = existing_map[key]
+                fp = s.get("legs_fingerprint")
+
+                status = None
+                if fp and fp in existing_map:
+                    status = existing_map[fp]
+                elif (s["ticker"], s["strategy"]) in existing_map:
+                    status = existing_map[(s["ticker"], s["strategy"])]
+
+                if status:
+                    s["status"] = status
                     updates += 1
                 else:
                     s["status"] = "pending"
@@ -811,7 +858,7 @@ async def run_midday_cycle(supabase: Client, user_id: str):
 
             supabase.table(TRADE_SUGGESTIONS_TABLE).upsert(
                 upserts,
-                on_conflict="user_id,window,cycle_date,ticker,strategy"
+                on_conflict="user_id,window,cycle_date,ticker,strategy,legs_fingerprint"
             ).execute()
             print(f"Upserted midday suggestions: {inserts} inserted, {updates} updated.")
         except Exception as e:

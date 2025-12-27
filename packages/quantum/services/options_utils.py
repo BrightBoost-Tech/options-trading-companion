@@ -1,5 +1,7 @@
 import re
 import uuid
+import hashlib
+import json
 from typing import List, Dict, Any, Optional
 from packages.quantum.models import SpreadPosition
 
@@ -57,6 +59,43 @@ def format_occ_symbol_readable(symbol: str) -> str:
         return f"{parsed['underlying']} {formatted_date} {parsed['type']} {strike_str}"
     except Exception:
         return symbol
+
+def compute_legs_fingerprint(order_json: dict) -> str:
+    """
+    Generates a deterministic hash for the trade structure based on its legs.
+    Normalizes leg order and formatting.
+    Hash covers: side, underlying, expiry, type, strike.
+    """
+    legs = order_json.get("legs", [])
+    if not legs:
+        # Fallback for empty legs (e.g. stock trade?)
+        return "no_legs"
+
+    normalized_legs = []
+    for leg in legs:
+        symbol = leg.get("symbol", "")
+        side = leg.get("side", "").lower()
+
+        # Parse symbol to get canonical parts
+        parsed = parse_option_symbol(symbol)
+        if not parsed:
+            # Maybe it's a stock symbol?
+            # Use raw symbol
+            key = f"STOCK:{symbol}"
+        else:
+            # {underlying}:{expiry}:{type}:{strike}
+            # formatting: strike is float, expiry YYYY-MM-DD
+            key = f"{parsed['underlying']}:{parsed['expiry']}:{parsed['type']}:{parsed['strike']}"
+
+        # Include side in the hash
+        normalized_legs.append(f"{side}:{key}")
+
+    # Sort to ensure A+B == B+A (order independence)
+    normalized_legs.sort()
+
+    # Hash
+    raw_str = "|".join(normalized_legs)
+    return hashlib.sha256(raw_str.encode("utf-8")).hexdigest()
 
 def group_spread_positions(positions: List[Dict]) -> List[SpreadPosition]:
     """

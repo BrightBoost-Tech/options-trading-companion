@@ -79,13 +79,14 @@ def log_decision(
     user_id: str,
     decision_type: str,
     content: Dict[str, Any]
-):
+) -> uuid.UUID:
     """
     Log the actual decision taken (optimizer weights, sizing, etc.) to decision_logs.
+    Returns the trace_id (decision_id) to verify stability.
     """
     supabase = _get_supabase_client()
     if not supabase:
-        return
+        return trace_id
 
     try:
         data = {
@@ -98,6 +99,8 @@ def log_decision(
         supabase.table("decision_logs").insert(data).execute()
     except Exception as e:
         print(f"Logging Error: Failed to write to decision_logs: {e}")
+
+    return trace_id
 
 def log_outcome(
     trace_id: uuid.UUID,

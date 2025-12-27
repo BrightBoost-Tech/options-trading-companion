@@ -1,129 +1,12 @@
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Union
 import datetime
 import math
-# from .trade_builder import SafetySelectionLayer # Removed because it does not exist in trade_builder.py
 from ..models import SpreadPosition
-# Removed WorkflowOrchestrator import to avoid circular dependency
-# from .workflow_orchestrator import WorkflowOrchestrator
 
 # Using services to fetch context is safer than direct imports
 from ..analytics.conviction_service import ConvictionService
 from ..analytics.iv_regime_service import IVRegimeService
-
-class RiskBudgetEngine:
-    """
-    Computes risk utilization against defined budgets for strategies, underlyings, and global risk (VaR).
-    """
-    def __init__(self, default_strategy_cap=0.30, default_underlying_cap=0.20, max_var_pct=0.25, default_vega_cap_pct=0.01, default_delta_cap=2000.0):
-        self.default_strategy_cap = default_strategy_cap
-        self.default_underlying_cap = default_underlying_cap
-        self.max_var_pct = max_var_pct
-        self.default_vega_cap_pct = default_vega_cap_pct
-        self.default_delta_cap = default_delta_cap
-
-    def compute(self, current_positions: List[SpreadPosition], total_equity: float, risk_profile: str = "balanced") -> Dict[str, Any]:
-        """
-        Calculates current usage and remaining budgets.
-
-        Returns:
-            Dict containing:
-            - usage: {strategy: val, underlying: val, var: val, greeks: {underlying: {delta: val, vega: val}}}
-            - remaining: {strategy: val, underlying: val, var: val}
-            - limits: {strategy: val, underlying: val, var: val}
-        """
-        usage = {
-            "strategy": {},
-            "underlying": {},
-            "var": 0.0,
-            "greeks": {} # underlying -> {delta: x, vega: y}
-        }
-
-        # Calculate usage
-        for pos in current_positions:
-            val = pos.current_value
-            # Strategy Usage
-            stype = pos.spread_type or "unknown"
-            usage["strategy"][stype] = usage["strategy"].get(stype, 0.0) + val
-
-            # Underlying Usage
-            und = pos.underlying or "unknown"
-            usage["underlying"][und] = usage["underlying"].get(und, 0.0) + val
-
-            # VaR Usage (Approximated by net_cost/max loss for debit, or margin for credit)
-            # Using net_cost if positive (debit), else approx margin.
-            # Simplified: Use current_value as a proxy for exposure if net_cost not reliable
-            risk_amt = max(pos.net_cost, pos.current_value) if pos.net_cost > 0 else (pos.current_value * 1.5) # Rough heuristic
-            usage["var"] += risk_amt
-
-            # Greeks Usage
-            if und not in usage["greeks"]:
-                usage["greeks"][und] = {"delta": 0.0, "vega": 0.0}
-            usage["greeks"][und]["delta"] += abs(pos.delta)
-            usage["greeks"][und]["vega"] += abs(pos.vega)
-
-        # Calculate Limits
-        # Adjust caps based on risk_profile if needed
-        strat_cap_pct = self.default_strategy_cap
-        und_cap_pct = self.default_underlying_cap
-        var_cap_pct = self.max_var_pct
-        vega_cap_pct = self.default_vega_cap_pct
-        delta_cap = self.default_delta_cap
-
-        if risk_profile == "aggressive":
-            strat_cap_pct *= 1.5
-            und_cap_pct *= 1.5
-            var_cap_pct = 0.35 # Higher max risk
-            vega_cap_pct *= 1.5
-            delta_cap *= 1.5
-        elif risk_profile == "conservative":
-            strat_cap_pct *= 0.7
-            und_cap_pct *= 0.7
-            var_cap_pct = 0.15
-            vega_cap_pct *= 0.7
-            delta_cap *= 0.7
-
-        limits = {
-            "strategy": {k: total_equity * strat_cap_pct for k in usage["strategy"].keys()}, # limits for existing keys
-            "underlying": {k: total_equity * und_cap_pct for k in usage["underlying"].keys()},
-            "var": total_equity * var_cap_pct,
-            "greeks": {
-                "delta": delta_cap,
-                "vega": total_equity * vega_cap_pct
-            },
-            "defaults": {
-                "strategy": total_equity * strat_cap_pct,
-                "underlying": total_equity * und_cap_pct
-            }
-        }
-        # Include greeks defaults for consistency
-        limits["defaults"]["greeks"] = limits["greeks"]
-
-        # Calculate Remaining
-        remaining = {
-            "strategy": {},
-            "underlying": {},
-            "var": limits["var"] - usage["var"],
-            "greeks": {}
-        }
-
-        for und, g_usage in usage["greeks"].items():
-            rem_delta = limits["greeks"]["delta"] - g_usage["delta"]
-            rem_vega = limits["greeks"]["vega"] - g_usage["vega"]
-            remaining["greeks"][und] = {"delta": rem_delta, "vega": rem_vega}
-
-        for k, v in usage["strategy"].items():
-            limit = limits["strategy"].get(k, limits["defaults"]["strategy"])
-            remaining["strategy"][k] = limit - v
-
-        for k, v in usage["underlying"].items():
-            limit = limits["underlying"].get(k, limits["defaults"]["underlying"])
-            remaining["underlying"][k] = limit - v
-
-        return {
-            "usage": usage,
-            "limits": limits,
-            "remaining": remaining
-        }
+from .risk_budget_engine import RiskBudgetReport
 
 class RebalanceEngine:
     """
@@ -143,7 +26,7 @@ class RebalanceEngine:
         deployable_capital: float,
         pricing_data: Dict[str, float],
         market_context: Dict[str, Any] = None,  # Contains 'regime', 'vix', etc.
-        risk_summary: Dict[str, Any] = None     # Contains budget info
+        risk_summary: Union[Dict[str, Any], RiskBudgetReport] = None     # Contains budget info
     ) -> List[Dict[str, Any]]:
         """
         Generates buy/sell suggestions based on weight differences, enforcing risk budgets.
@@ -244,6 +127,33 @@ class RebalanceEngine:
                 "value_delta": (qty_delta * price_unit) * (1 if side == "buy" else -1),
                 "reason": "rebalance_target",
             }
+
+            # 4b. Enforce Risk Budgets (Unification)
+            # If buying, verify we have budget
+            if side == "buy" and risk_summary:
+                cost_est = trade["value_delta"]
+
+                # Check Global Allocation
+                if hasattr(risk_summary, 'global_allocation'):
+                    # Pydantic Report
+                    remaining = risk_summary.global_allocation.remaining
+                else:
+                    # Legacy or dict
+                    remaining = risk_summary.get('global_allocation', {}).get('remaining', 999999.0)
+
+                if cost_est > remaining:
+                    # Reduce quantity to fit budget
+                    can_afford = max(0.0, remaining)
+                    new_qty = int(math.floor(can_afford / price_unit))
+                    if new_qty < qty_delta:
+                        if new_qty == 0:
+                            continue # Skip trade entirely
+
+                        # Adjust trade
+                        qty_delta = new_qty
+                        trade["quantity"] = qty_delta
+                        trade["value_delta"] = qty_delta * price_unit
+                        trade["reason"] += " (budget_clamped)"
 
             trades.append(trade)
 

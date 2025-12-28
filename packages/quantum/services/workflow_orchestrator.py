@@ -16,6 +16,7 @@ from packages.quantum.analytics.strategy_policy import StrategyPolicy
 from packages.quantum.services.risk_budget_engine import RiskBudgetEngine
 from packages.quantum.services.analytics.small_account_compounder import SmallAccountCompounder, CapitalTier, SizingConfig
 from packages.quantum.analytics.capital_scan_policy import CapitalScanPolicy
+from packages.quantum.agents.agents.sizing_agent import SizingAgent
 
 # Importing existing logic
 from packages.quantum.options_scanner import scan_for_opportunities
@@ -658,7 +659,11 @@ async def run_midday_cycle(supabase: Client, user_id: str):
             or max_loss
         )
 
-        # Use SmallAccountCompounder for variable sizing
+        # --- AGENT-BASED SIZING ---
+        # Defaults to classic logic, overridden if agent is enabled
+        QUANT_AGENTS_ENABLED = os.getenv("QUANT_AGENTS_ENABLED", "false").lower() == "true"
+
+        # Use SmallAccountCompounder for variable sizing (classic path)
         tier = SmallAccountCompounder.get_tier(deployable_capital)
         sizing_vars = SmallAccountCompounder.calculate_variable_sizing(
             candidate=cand,
@@ -668,22 +673,89 @@ async def run_midday_cycle(supabase: Client, user_id: str):
             compounding=COMPOUNDING_MODE
         )
 
+        # Classic Risk Calculations
         risk_budget_dollars = sizing_vars["risk_budget"]
-        risk_multiplier = sizing_vars["multipliers"]["score"] # Approximate for logging
-
-        # CLAMPING LOGIC
-        # Use max_risk_per_trade from engine which accounts for remaining global + granular profile sizing
+        risk_multiplier = sizing_vars["multipliers"]["score"]
         recommended_risk = budgets.max_risk_per_trade
-
-        # We can still apply the scanner-based score multiplier, but should clamp to recommended_risk
-        # Re-calc base based on scanner conviction?
-        # The engine provided a "max safe trade size".
-        # We also have "remaining" global budget.
-
         final_risk_dollars = min(risk_budget_dollars, recommended_risk)
-
-        # Also clamp to remaining global (redundant if engine did it, but safe)
         final_risk_dollars = clamp_risk_budget(final_risk_dollars, remaining_global)
+
+        max_contracts_limit = 25
+        sizing_agent_signal = None
+
+        if QUANT_AGENTS_ENABLED:
+            try:
+                sizing_agent = SizingAgent()
+
+                # V3: Prepare Agent Signals
+                # Inject regime and volatility signals if missing, for confluence logic
+                current_agent_signals = cand.get("agent_signals", {}).copy()
+
+                # Mock regime signal from global snapshot if not provided by an agent
+                if "regime" not in current_agent_signals:
+                    # Map regime enum to a score (hypothetical mapping for confluence)
+                    # Bull/Normal -> High score (Safe), Bear/Volatile -> Low score (Risky)?
+                    # Actually, requirements say "scale risk UP when regime+vol align"
+                    # Usually means Strong Trend + Low Volatility? Or High Vol + High Conviction?
+                    # Let's map global regime score:
+                    # - Bull: 90, Normal: 75, Bear: 40, Crisis: 10
+                    regime_score_map = {
+                        "bull_trend": 90, "normal": 75, "sideways": 60, "bear_trend": 40, "crisis": 10
+                    }
+                    r_score = regime_score_map.get(global_snap.state.value, 50)
+                    current_agent_signals["regime"] = {"score": r_score, "source": "global_snapshot"}
+
+                # Mock volatility signal
+                if "vol" not in current_agent_signals and "volatility" not in current_agent_signals:
+                    # High IV Rank -> Low Score (Risk)? Or High Score (Opportunity)?
+                    # Usually SizingAgent logic: "scale UP when regime+vol align"
+                    # If "align" means "safe", then Low Vol -> High Score.
+                    # IV Rank 20 -> Score 80. IV Rank 80 -> Score 20.
+                    iv_r = cand.get("iv_rank", 50.0) or 50.0
+                    vol_score = max(0, 100 - iv_r)
+                    current_agent_signals["vol"] = {"score": vol_score, "source": "iv_rank"}
+
+                sizing_ctx = {
+                    "deployable_capital": deployable_capital,
+                    "max_loss_per_contract": max_loss,
+                    "collateral_required_per_contract": collateral,
+                    "base_score": cand.get("score", 50.0),
+                    "agent_signals": current_agent_signals
+                }
+                sizing_agent_signal = sizing_agent.evaluate(sizing_ctx)
+
+                # Apply Agent Constraints
+                constraints = sizing_agent_signal.metadata.get("constraints", {})
+                agent_target_risk = constraints.get("sizing.target_risk_usd", 0.0)
+
+                # Use the tighter of (Agent Target, Global Budget Remaining)
+                # But allow Agent to be the primary sizer
+                final_risk_dollars = min(agent_target_risk, remaining_global)
+
+                # Agent also dictates max contracts
+                max_contracts_limit = constraints.get("sizing.recommended_contracts", 25)
+
+                # Update candidate signals
+                if "agent_signals" not in cand:
+                    cand["agent_signals"] = {}
+
+                # Store signal
+                cand["agent_signals"]["sizing"] = sizing_agent_signal.model_dump()
+
+                # Update Summary Score
+                if "agent_summary" not in cand:
+                    cand["agent_summary"] = {"overall_score": sizing_agent_signal.score}
+                else:
+                    # Simple re-average
+                    current_overall = cand["agent_summary"].get("overall_score", 50.0)
+                    new_overall = (current_overall + sizing_agent_signal.score) / 2
+                    cand["agent_summary"]["overall_score"] = new_overall
+
+                print(f"[Midday] SizingAgent applied: Risk=${final_risk_dollars:.2f}, Contracts={max_contracts_limit}")
+
+            except Exception as e:
+                print(f"[Midday] SizingAgent failed: {e}. Falling back to classic sizing.")
+                # Fallback to calculated above
 
         if final_risk_dollars <= 0:
             print(f"[Midday] Skipped {ticker}: Risk budget exhausted for trade (Remaining: ${remaining_global:.2f})")
@@ -701,7 +773,7 @@ async def run_midday_cycle(supabase: Client, user_id: str):
             collateral_required_per_contract=collateral,
             risk_budget_dollars=risk_budget_dollars,
             risk_multiplier=1.0,   # multiplier already baked into risk_budget_dollars
-            max_contracts=25,
+            max_contracts=max_contracts_limit,
             profile="aggressive",
         )
 

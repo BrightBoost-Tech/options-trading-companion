@@ -64,6 +64,7 @@ class OptimizationRequest(BaseModel):
     profile: str = "balanced"  # "aggressive" | "balanced" | "conservative"
     nested_enabled: bool = False # if False -> pure baseline
     nested_shadow: bool = False  # if True, compute nested path but DO NOT change trades
+    agent_constraints: Optional[Dict[str, Any]] = None
 
 # Constants
 MIN_DOLLAR_DIFF_BALANCED = 50.0
@@ -71,6 +72,26 @@ MIN_QTY_BALANCED = 0.05
 
 MIN_DOLLAR_DIFF_AGGRESSIVE = 10.0
 MIN_QTY_AGGRESSIVE = 0.02
+
+UNDEFINED_RISK_STRATEGIES = [
+    "short_put", "short_call", "short_straddle", "short_strangle",
+    "naked_put", "naked_call", "short_combination"
+]
+
+def normalize_agent_constraints(agent_constraints: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    defaults = {
+        "banned_strategies": [],
+        "max_position_pct": None,
+        "require_defined_risk": False
+    }
+    if not agent_constraints:
+        return defaults
+
+    return {
+        "banned_strategies": list(set(agent_constraints.get("banned_strategies", []))),
+        "max_position_pct": agent_constraints.get("max_position_pct"),
+        "require_defined_risk": bool(agent_constraints.get("require_defined_risk", False))
+    }
 
 
 def _compute_portfolio_weights(
@@ -170,11 +191,19 @@ def _compute_portfolio_weights(
 
     # --- DYNAMIC CONSTRAINT LOGIC (V3) ---
     default_max_pct = 0.40
+
+    # Apply Agent Constraint for Max Position Pct
+    agent_con = normalize_agent_constraints(req.agent_constraints)
+    if agent_con["max_position_pct"] is not None:
+        default_max_pct = min(default_max_pct, float(agent_con["max_position_pct"]))
+
     num_assets = len(tickers)
     if num_assets * default_max_pct < 1.0:
         effective_max_pct = 1.0
     else:
         effective_max_pct = default_max_pct
+
+    diagnostics_nested["effective_max_position_pct"] = effective_max_pct
 
     # Calculate per-asset bounds based on strategy and regime
     bounds = []
@@ -221,6 +250,35 @@ def _compute_portfolio_weights(
             constraints["bounds"] = new_bounds
             diagnostics_nested["banned_assets"] = banned_assets
 
+    # B3: Apply Agent Banned Strategies & Defined Risk
+    agent_banned = set(agent_con["banned_strategies"])
+    if agent_con["require_defined_risk"]:
+        agent_banned.update(UNDEFINED_RISK_STRATEGIES)
+
+    if agent_banned and "bounds" in constraints:
+        diagnostics_nested["agent_constraints_applied"] = True
+        diagnostics_nested["banned_assets_agent"] = []
+        new_bounds = []
+        current_bounds = constraints["bounds"]
+
+        for i, asset in enumerate(investable_assets):
+            st = str(getattr(asset, "spread_type", "") or getattr(asset, "strategy", "") or "").lower()
+            lo, hi = current_bounds[i]
+
+            # Check if banned (loose matching)
+            is_banned = False
+            for b in agent_banned:
+                if b.lower() in st:
+                    is_banned = True
+                    break
+
+            if is_banned:
+                new_bounds.append((0.0, 0.0))
+                diagnostics_nested["banned_assets_agent"].append(tickers[i])
+            else:
+                new_bounds.append((float(lo), float(hi)))
+        constraints["bounds"] = new_bounds
+
     # Greek sensitivities
     greek_sensitivities = {
         'delta': np.array([a.delta for a in investable_assets]),
@@ -254,6 +312,20 @@ def _compute_portfolio_weights(
     solver_type = "Classical"
     weights_array = []
     current_w = np.array([1.0/num_assets] * num_assets)
+
+    # ADJUST INITIAL GUESS TO RESPECT BOUNDS
+    if "bounds" in constraints:
+        new_w = current_w.copy()
+        for i, (lo, hi) in enumerate(constraints["bounds"]):
+            if new_w[i] < lo: new_w[i] = lo
+            if new_w[i] > hi: new_w[i] = hi
+
+        # Re-normalize if possible
+        total = np.sum(new_w)
+        if total > 0:
+            new_w = new_w / total
+
+        current_w = new_w
 
     if (local_req.skew_preference > 0) and has_qci_token and (QciDiracAdapter is not None):
         try:

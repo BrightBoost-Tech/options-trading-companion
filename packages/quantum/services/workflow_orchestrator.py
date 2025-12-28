@@ -15,6 +15,7 @@ from .analytics_service import AnalyticsService
 from packages.quantum.analytics.strategy_policy import StrategyPolicy
 from packages.quantum.services.risk_budget_engine import RiskBudgetEngine
 from packages.quantum.services.analytics.small_account_compounder import SmallAccountCompounder, CapitalTier, SizingConfig
+from packages.quantum.analytics.capital_scan_policy import CapitalScanPolicy
 
 # Importing existing logic
 from packages.quantum.options_scanner import scan_for_opportunities
@@ -515,8 +516,9 @@ async def run_midday_cycle(supabase: Client, user_id: str):
         print(f"Error fetching positions for midday risk check: {e}")
         positions = []
 
-    if deployable_capital < 100:
-        print("Insufficient capital to scan.")
+    can_scan, scan_reason = CapitalScanPolicy.can_scan(deployable_capital)
+    if not can_scan:
+        print(f"Skipping scan: {scan_reason}")
         return
 
     # V3: Compute Global Regime Snapshot ONCE

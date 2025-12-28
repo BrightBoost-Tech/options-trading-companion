@@ -1,7 +1,12 @@
 import os
+import logging
 from typing import Dict, Any, List, Optional, TypedDict
 from pydantic import BaseModel
 from datetime import datetime
+from packages.quantum.common_enums import StrategyType
+
+# Setup logger
+logger = logging.getLogger(__name__)
 
 class GuardrailPolicy(TypedDict):
     max_position_pct: float
@@ -19,6 +24,46 @@ class LossAnalysisResult(BaseModel):
 class LossMinimizer:
     # Allow override via env, default to 100
     DEFAULT_THRESHOLD = float(os.getenv("LOSS_SALVAGE_THRESHOLD_USD", "100.0"))
+
+    @staticmethod
+    def get_strategy_type(raw_strategy: str) -> StrategyType:
+        """
+        Normalizes a raw strategy string into a canonical StrategyType.
+        Uses heuristics for loose matching.
+        """
+        if not raw_strategy:
+            return StrategyType.UNKNOWN
+
+        # 1. Normalize
+        normalized = raw_strategy.lower().strip().replace(" ", "_").replace("-", "_")
+
+        # 2. Direct Enum Match
+        try:
+            return StrategyType(normalized)
+        except ValueError:
+            pass
+
+        # 3. Heuristics
+        # "credit_put_spread", "credit_put" -> SHORT_PUT_CREDIT_SPREAD
+        if "credit" in normalized and "put" in normalized:
+            logger.info(f"Heuristic mapping: {raw_strategy} -> SHORT_PUT_CREDIT_SPREAD")
+            return StrategyType.SHORT_PUT_CREDIT_SPREAD
+
+        if "credit" in normalized and "call" in normalized:
+            logger.info(f"Heuristic mapping: {raw_strategy} -> SHORT_CALL_CREDIT_SPREAD")
+            return StrategyType.SHORT_CALL_CREDIT_SPREAD
+
+        if "iron" in normalized and "condor" in normalized:
+            logger.info(f"Heuristic mapping: {raw_strategy} -> IRON_CONDOR")
+            return StrategyType.IRON_CONDOR
+
+        if "long" in normalized and "call" in normalized:
+            return StrategyType.LONG_CALL
+
+        if "long" in normalized and "put" in normalized:
+            return StrategyType.LONG_PUT
+
+        return StrategyType.UNKNOWN
 
     @staticmethod
     def analyze_position(

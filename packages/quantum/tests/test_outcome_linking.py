@@ -9,7 +9,7 @@ import os
 # Add package root to path
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '../..')))
 
-from packages.quantum.analytics.outcome_aggregator import OutcomeAggregator
+from packages.quantum.services.outcome_aggregator import OutcomeAggregator
 from packages.quantum.nested_logging import log_decision, log_outcome
 
 class TestOutcomeLinking(unittest.TestCase):
@@ -21,7 +21,7 @@ class TestOutcomeLinking(unittest.TestCase):
             returned_id = log_decision(trace_id, "user1", "test_type", {})
             self.assertEqual(returned_id, trace_id)
 
-    @patch('packages.quantum.analytics.outcome_aggregator.log_outcome')
+    @patch('packages.quantum.services.outcome_aggregator.log_outcome')
     def test_morning_suggestion_linking(self, mock_log_outcome):
         """
         Verify that OutcomeAggregator picks up a 'morning_suggestion'

@@ -59,6 +59,12 @@ class TestWorkflowOrchestratorAgentPersistence(unittest.IsolatedAsyncioTestCase)
         self.mock_agent = self.mock_agent_cls.return_value
         self.patchers.append(self.agent_patch)
 
+        # Mock ExitPlanAgent
+        self.exit_agent_patch = patch('packages.quantum.services.workflow_orchestrator.ExitPlanAgent')
+        self.mock_exit_agent_cls = self.exit_agent_patch.start()
+        self.mock_exit_agent = self.mock_exit_agent_cls.return_value
+        self.patchers.append(self.exit_agent_patch)
+
         # Mock SmallAccountCompounder
         self.sac_patch = patch('packages.quantum.services.workflow_orchestrator.SmallAccountCompounder')
         self.mock_sac = self.sac_patch.start()
@@ -126,6 +132,50 @@ class TestWorkflowOrchestratorAgentPersistence(unittest.IsolatedAsyncioTestCase)
 
         self.assertIn("agent_summary", suggestion)
         self.assertEqual(suggestion["agent_summary"]["overall_score"], 75.0)
+
+    async def test_midday_cycle_persists_exit_plan(self):
+        # Setup candidate
+        cand = {
+            "symbol": "TSLA",
+            "ticker": "TSLA",
+            "strategy": "long_call",
+            "score": 85.0,
+            "suggested_entry": 5.0,
+            "max_loss_per_contract": 50.0,
+            "ev": 20.0,
+        }
+        self.mock_scanner.return_value = [cand]
+
+        # Setup ExitPlanAgent response
+        exit_signal = MagicMock()
+        exit_signal.agent_id = "exit_plan"
+        exit_signal.score = 100.0
+        exit_signal.metadata = {
+            "exit.profit_take_pct": 0.50,
+            "exit.stop_loss_pct": 0.50,
+            "exit.time_stop_days": 30
+        }
+        exit_signal.model_dump.return_value = {"score": 100.0, "agent_id": "exit_plan"}
+        self.mock_exit_agent.evaluate.return_value = exit_signal
+
+        # Run cycle with env var enabled
+        with patch.dict(os.environ, {"QUANT_AGENTS_ENABLED": "true"}):
+            await run_midday_cycle(self.supabase, "user_123")
+
+        # Verify upsert call contains agent fields
+        upsert_call = self.supabase.table_mock.upsert.call_args
+        self.assertIsNotNone(upsert_call)
+        upsert_data = upsert_call[0][0]
+        suggestion = upsert_data[0]
+
+        # Verify agent_signals
+        self.assertIn("agent_signals", suggestion)
+        self.assertIn("exit_plan", suggestion["agent_signals"])
+
+        # Verify agent_summary constraints
+        self.assertIn("agent_summary", suggestion)
+        self.assertIn("active_constraints", suggestion["agent_summary"])
+        self.assertEqual(suggestion["agent_summary"]["active_constraints"]["exit.profit_take_pct"], 0.50)
 
     async def test_fallback_retry_logic(self):
         # Simulate db error on first upsert due to missing columns

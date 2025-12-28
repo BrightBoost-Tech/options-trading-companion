@@ -21,6 +21,8 @@ from packages.quantum.analytics.scoring import calculate_unified_score
 from packages.quantum.services.execution_service import ExecutionService
 from packages.quantum.analytics.guardrails import earnings_week_penalty
 from packages.quantum.services.earnings_calendar_service import EarningsCalendarService
+from packages.quantum.agents.runner import AgentRunner
+from packages.quantum.agents.agents.strategy_design_agent import StrategyDesignAgent
 
 # Configuration
 SCANNER_LIMIT_DEV = int(os.getenv("SCANNER_LIMIT_DEV", "40")) # Limit universe in dev
@@ -913,7 +915,36 @@ def scan_for_opportunities(
                 banned_strategies=banned_strategies
             )
 
-            if suggestion["strategy"] == "HOLD":
+            # --- V3 Strategy Design Agent Override ---
+            if QUANT_AGENTS_ENABLED:
+                try:
+                    # Use AgentRunner for consistency
+                    design_agent = StrategyDesignAgent()
+                    agent_context = {
+                        "legacy_strategy": suggestion["strategy"],
+                        "effective_regime": effective_regime_state.value,
+                        "iv_rank": iv_rank,
+                        "banned_strategies": banned_strategies
+                    }
+
+                    # Run via Runner
+                    _, summary = AgentRunner.run_agents(agent_context, [design_agent])
+
+                    # Check for override in active constraints
+                    active_constraints = summary.get("active_constraints", {})
+                    if active_constraints.get("strategy.override_selector"):
+                        rec = active_constraints.get("strategy.recommended")
+                        if rec:
+                            suggestion["strategy"] = rec
+                            # Log override reason
+                            top_reasons = summary.get("top_reasons", [])
+                            if top_reasons:
+                                print(f"[Scanner] Strategy Override for {symbol}: {top_reasons[0]}")
+                except Exception as e:
+                    print(f"[Scanner] StrategyDesignAgent error for {symbol}: {e}")
+            # -----------------------------------------
+
+            if suggestion["strategy"] == "HOLD" or suggestion["strategy"] == "CASH":
                 return None
 
             # Double check policy (redundant but safe)

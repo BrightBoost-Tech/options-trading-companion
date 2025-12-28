@@ -25,6 +25,8 @@ from packages.quantum.agents.runner import AgentRunner
 from packages.quantum.agents.agents.strategy_design_agent import StrategyDesignAgent
 from packages.quantum.agents.agents.liquidity_agent import LiquidityAgent
 from packages.quantum.agents.agents.event_risk_agent import EventRiskAgent
+from packages.quantum.agents.agents.regime_agent import RegimeAgent
+from packages.quantum.agents.agents.vol_surface_agent import VolSurfaceAgent
 
 # Configuration
 SCANNER_LIMIT_DEV = int(os.getenv("SCANNER_LIMIT_DEV", "40")) # Limit universe in dev
@@ -1156,6 +1158,10 @@ def scan_for_opportunities(
             if expected_execution_cost >= total_ev:
                 return None
 
+            # Define Missing Greeks for Candidate Dict
+            net_delta_contract = sum((l.get('delta') or 0.0) * (1 if l['side'] == 'buy' else -1) for l in legs)
+            net_vega_contract = sum((l.get('vega') or 0.0) * (1 if l['side'] == 'buy' else -1) for l in legs)
+
             # --- Earnings Awareness Logic ---
             earnings_val = earnings_map.get(symbol)
 
@@ -1270,7 +1276,12 @@ def scan_for_opportunities(
 
                     # Run Canonical Agents
                     # Note: StrategyDesignAgent runs earlier to guide selection
-                    agents = [LiquidityAgent(), EventRiskAgent()]
+                    agents = [
+                        LiquidityAgent(),
+                        EventRiskAgent(),
+                        RegimeAgent(),
+                        VolSurfaceAgent()
+                    ]
 
                     agent_signals, agent_summary = AgentRunner.run_agents(agent_context, agents)
 

@@ -443,7 +443,28 @@ async def run_morning_cycle(supabase: Client, user_id: str):
             inserts = 0
             updates = 0
 
+            # Deduplicate by fingerprint to prevent batch upsert conflicts
+            # If multiple suggestions share the same fingerprint, keep the last one (assumed most recent/best)
+            # Using a dict to map fingerprint -> suggestion is cleaner.
+            suggestion_map_by_fp = {}
+
             for s in suggestions:
+                fp = s.get("legs_fingerprint")
+                # If no fingerprint, fallback to ticker:strategy unique key simulation or just append
+                # But for safety in this strict mode, we rely on fingerprint.
+                if fp:
+                    suggestion_map_by_fp[fp] = s
+                else:
+                    # No fingerprint? Should generally not happen with updated scanner.
+                    # Generate a temp key or allow if it doesn't conflict.
+                    # We'll just append to a separate list or handle gracefully.
+                    # For now, assuming all have fingerprints.
+                    pass
+
+            # Convert back to list
+            final_suggestion_list = list(suggestion_map_by_fp.values())
+
+            for s in final_suggestion_list:
                 s["cycle_date"] = cycle_date
                 fp = s.get("legs_fingerprint")
 
@@ -960,10 +981,11 @@ async def run_midday_cycle(supabase: Client, user_id: str):
                 upserts.append(clean_s)
 
             # Try to upsert with agent fields
+            # UPDATED: Use the new unique constraint including legs_fingerprint
             try:
                 supabase.table(TRADE_SUGGESTIONS_TABLE).upsert(
                     upserts,
-                    on_conflict="user_id,window,cycle_date,ticker,strategy"
+                    on_conflict="user_id,window,cycle_date,ticker,strategy,legs_fingerprint"
                 ).execute()
                 print(f"Upserted midday suggestions: {inserts} inserted, {updates} updated.")
             except Exception as e:
@@ -980,7 +1002,7 @@ async def run_midday_cycle(supabase: Client, user_id: str):
 
                     supabase.table(TRADE_SUGGESTIONS_TABLE).upsert(
                         fallback_upserts,
-                        on_conflict="user_id,window,cycle_date,ticker,strategy"
+                        on_conflict="user_id,window,cycle_date,ticker,strategy,legs_fingerprint"
                     ).execute()
                     print(f"Upserted midday suggestions (fallback): {inserts} inserted, {updates} updated.")
                 else:

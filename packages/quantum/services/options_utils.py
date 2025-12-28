@@ -63,12 +63,28 @@ def format_occ_symbol_readable(symbol: str) -> str:
 def compute_legs_fingerprint(order_json: dict) -> str:
     """
     Generates a deterministic hash for the trade structure based on its legs.
-    Normalizes leg order and formatting.
-    Hash covers: side, underlying, expiry, type, strike.
+
+    SEMANTICS (Option A): Structure-Only Fingerprinting
+    - Includes: Leg composition (underlying, expiry, type, strike, side).
+    - Excludes: Quantity (size) and Price (limit/market).
+
+    This ensures that two suggestions with the exact same structure (e.g. "Buy 100C Jan 2025")
+    are treated as the SAME suggestion in the database, regardless of whether the system
+    later suggests a different quantity or slightly updated limit price. The database
+    uniqueness constraint ensures only one active suggestion per structure per cycle exists.
+    Updates to size/price for the same structure should overwrite the existing record.
+
+    Normalization:
+    - Leg order is irrelevant (legs are sorted before hashing).
+    - Symbols are parsed to canonical form to handle "O:" prefixes or formatting differences.
     """
     legs = order_json.get("legs", [])
     if not legs:
         # Fallback for empty legs (e.g. stock trade?)
+        # Use underlying + side if available, or just fail safe
+        underlying = order_json.get("underlying", "")
+        if underlying:
+             return hashlib.sha256(f"STOCK:{underlying}".encode("utf-8")).hexdigest()
         return "no_legs"
 
     normalized_legs = []

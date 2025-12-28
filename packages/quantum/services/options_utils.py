@@ -36,6 +36,21 @@ def parse_option_symbol(symbol: str) -> Dict[str, Any]:
         "strike": strike
     }
 
+def get_contract_multiplier(symbol: str) -> float:
+    """
+    Returns the contract multiplier for the given symbol.
+    Options (OCC format) -> 100.0
+    Equities/Other -> 1.0
+
+    Relies on robust OCC parsing, not string length.
+    """
+    # Check if it looks like an option
+    parsed = parse_option_symbol(symbol)
+    if parsed:
+        return 100.0
+
+    return 1.0
+
 def format_occ_symbol_readable(symbol: str) -> str:
     """
     Convert 'AMZN251219C00255000' to 'AMZN 12/19/25 C 255'.

@@ -10,7 +10,7 @@ from supabase import create_client, Client
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '../..')))
 
 from packages.quantum.market_data import PolygonService
-from packages.quantum.analytics.outcome_aggregator import OutcomeAggregator
+from packages.quantum.services.outcome_aggregator import OutcomeAggregator
 
 # Load env vars
 load_dotenv()

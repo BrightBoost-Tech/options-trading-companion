@@ -684,12 +684,41 @@ async def run_midday_cycle(supabase: Client, user_id: str):
         if QUANT_AGENTS_ENABLED:
             try:
                 sizing_agent = SizingAgent()
+
+                # V3: Prepare Agent Signals
+                # Inject regime and volatility signals if missing, for confluence logic
+                current_agent_signals = cand.get("agent_signals", {}).copy()
+
+                # Mock regime signal from global snapshot if not provided by an agent
+                if "regime" not in current_agent_signals:
+                    # Map regime enum to a score (hypothetical mapping for confluence)
+                    # Bull/Normal -> High score (Safe), Bear/Volatile -> Low score (Risky)?
+                    # Actually, requirements say "scale risk UP when regime+vol align"
+                    # Usually means Strong Trend + Low Volatility? Or High Vol + High Conviction?
+                    # Let's map global regime score:
+                    # - Bull: 90, Normal: 75, Bear: 40, Crisis: 10
+                    regime_score_map = {
+                        "bull_trend": 90, "normal": 75, "sideways": 60, "bear_trend": 40, "crisis": 10
+                    }
+                    r_score = regime_score_map.get(global_snap.state.value, 50)
+                    current_agent_signals["regime"] = {"score": r_score, "source": "global_snapshot"}
+
+                # Mock volatility signal
+                if "vol" not in current_agent_signals and "volatility" not in current_agent_signals:
+                    # High IV Rank -> Low Score (Risk)? Or High Score (Opportunity)?
+                    # Usually SizingAgent logic: "scale UP when regime+vol align"
+                    # If "align" means "safe", then Low Vol -> High Score.
+                    # IV Rank 20 -> Score 80. IV Rank 80 -> Score 20.
+                    iv_r = cand.get("iv_rank", 50.0) or 50.0
+                    vol_score = max(0, 100 - iv_r)
+                    current_agent_signals["vol"] = {"score": vol_score, "source": "iv_rank"}
+
                 sizing_ctx = {
                     "deployable_capital": deployable_capital,
                     "max_loss_per_contract": max_loss,
                     "collateral_required_per_contract": collateral,
                     "base_score": cand.get("score", 50.0),
-                    "agent_signals": cand.get("agent_signals", {})
+                    "agent_signals": current_agent_signals
                 }
                 sizing_agent_signal = sizing_agent.evaluate(sizing_ctx)
 

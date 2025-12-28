@@ -19,16 +19,16 @@ class SizingAgent(BaseQuantAgent):
         Configurable via environment variables.
         """
         # Load config or defaults
-        # <1000
+        # <1k: 10–35
         m1_min = float(os.getenv("SIZING_MILESTONE_1000_MIN", "10"))
         m1_max = float(os.getenv("SIZING_MILESTONE_1000_MAX", "35"))
-        # 1000-5000
+        # 1k–5k: 20–75
         m2_min = float(os.getenv("SIZING_MILESTONE_5000_MIN", "20"))
         m2_max = float(os.getenv("SIZING_MILESTONE_5000_MAX", "75"))
-        # 5000-10000
+        # 5k–10k: 35–150
         m3_min = float(os.getenv("SIZING_MILESTONE_10000_MIN", "35"))
         m3_max = float(os.getenv("SIZING_MILESTONE_10000_MAX", "150"))
-        # >10000
+        # >10k: 50–250
         m4_min = float(os.getenv("SIZING_MILESTONE_BIG_MIN", "50"))
         m4_max = float(os.getenv("SIZING_MILESTONE_BIG_MAX", "250"))
 
@@ -40,6 +40,21 @@ class SizingAgent(BaseQuantAgent):
             return m3_min, m3_max
         else:
             return m4_min, m4_max
+
+    def _extract_score(self, signals: Dict[str, Any], keys: list[str]) -> Optional[float]:
+        """Helper to extract score from signal dict or object for first matching key."""
+        for key in keys:
+            signal = signals.get(key)
+            if not signal:
+                continue
+
+            # If it's an AgentSignal object
+            if hasattr(signal, "score"):
+                return float(signal.score)
+            # If it's a dict
+            if isinstance(signal, dict):
+                return float(signal.get("score", 50.0))
+        return None
 
     def evaluate(self, context: Dict[str, Any]) -> AgentSignal:
         """
@@ -62,94 +77,81 @@ class SizingAgent(BaseQuantAgent):
         # 1. Determine Risk Range
         min_risk, max_risk = self._get_milestone_limits(capital)
 
-        # 2. Calculate Confluence Score
+        # 2. Confluence Logic
         agent_signals = context.get("agent_signals", {})
-        scores = [base_score]
 
-        veto_triggered = False
+        # Parse signals
+        # Prioritize keys: 'regime', 'vol', 'liquidity', 'event'/'event_risk'
+        regime_score = self._extract_score(agent_signals, ["regime", "regime_agent"])
+        vol_score = self._extract_score(agent_signals, ["vol", "volatility", "vol_agent"])
+        liquidity_score = self._extract_score(agent_signals, ["liquidity", "liquidity_agent"])
+        event_score = self._extract_score(agent_signals, ["event", "event_risk", "event_agent"])
 
-        if agent_signals:
-            for agent_id, signal in agent_signals.items():
-                # Signal can be dict or AgentSignal object
-                if hasattr(signal, "veto") and signal.veto:
-                    veto_triggered = True
-                elif isinstance(signal, dict) and signal.get("veto"):
-                    veto_triggered = True
+        # Base factor from scanner score
+        base_scale_factor = max(0.0, min(1.0, base_score / 100.0))
 
-                s_val = getattr(signal, "score", None)
-                if s_val is None and isinstance(signal, dict):
-                    s_val = signal.get("score")
+        # Apply Confluence Modifiers
+        confluence_multiplier = 1.0
+        reasons = []
 
-                if s_val is not None:
-                    scores.append(float(s_val))
+        # Scale UP: Regime + Vol alignment
+        # Assuming high score in regime/vol means "favorable/safe" or "strong signal"
+        if regime_score is not None and vol_score is not None:
+            if regime_score > 70 and vol_score > 70:
+                confluence_multiplier *= 1.25
+                reasons.append("Boost: High Regime & Vol alignment")
 
-        if veto_triggered:
-            return AgentSignal(
-                agent_id=self.id,
-                score=0,
-                veto=True,
-                reasons=["Vetoed by another agent"],
-                metadata={
-                    "constraints": {
-                        "sizing.target_risk_usd": 0.0,
-                        "sizing.max_risk_usd": 0.0,
-                        "sizing.recommended_contracts": 0,
-                        "sizing.max_contracts": 0,
-                        "sizing.risk_scale_factor": 0.0
-                    }
-                }
-            )
+        # Scale DOWN: Liquidity risk (low score = bad liquidity)
+        if liquidity_score is not None and liquidity_score < 50:
+            penalty = (liquidity_score / 50.0) # e.g. score 25 -> 0.5x
+            confluence_multiplier *= penalty
+            reasons.append(f"Penalty: Poor Liquidity (Score {liquidity_score:.0f})")
 
-        avg_score = sum(scores) / len(scores) if scores else 50.0
+        # Scale DOWN: Event risk (low score = high risk/earnings soon)
+        if event_score is not None and event_score < 50:
+            penalty = (event_score / 50.0)
+            confluence_multiplier *= penalty
+            reasons.append(f"Penalty: Event Risk (Score {event_score:.0f})")
+
+        # Calculate final scale factor
+        final_scale_factor = base_scale_factor * confluence_multiplier
+        final_scale_factor = max(0.0, min(1.0, final_scale_factor)) # Clamp to 0-1 range within bucket
 
         # 3. Calculate Target Risk
-        # Map avg_score (0-100) to range [min_risk, max_risk]
-        # score 0 -> min_risk
-        # score 100 -> max_risk
-        # Use a simple linear interpolation
-        scale_factor = max(0.0, min(1.0, avg_score / 100.0))
-        target_risk = min_risk + (max_risk - min_risk) * scale_factor
+        # Map factor to range [min_risk, max_risk]
+        target_risk = min_risk + (max_risk - min_risk) * final_scale_factor
 
-        # 4. Convert to Contracts
-        # Safety check: never exceed capital
-        safe_risk_cap = capital * 0.95 # Safety buffer
+        # 4. Safety Checks & Contract Conversion
+        safe_risk_cap = capital * 0.95 # Absolute safety buffer
         target_risk = min(target_risk, safe_risk_cap)
 
         if max_loss <= 0:
-            # Undefined risk per contract? Fallback to 1 if safe, else 0
-            # If price-based max loss is used, this shouldn't happen for long options.
-            # Assuming max_loss is valid. If not, can't size.
-            rec_contracts = 0
-            reason = "Invalid max_loss_per_contract"
-            # Special case: if we want to force at least 1 for tiny accounts/tests?
-            # Prompt: "Missing per-contract risk -> recommended_contracts=1 with a reason"
-            if max_loss <= 0:
-                 rec_contracts = 1
-                 reason = "Missing per-contract risk, default to 1"
+            rec_contracts = 1
+            reasons.append("Missing per-contract risk, default to 1")
         else:
             rec_contracts = math.floor(target_risk / max_loss)
-            reason = f"Sized by risk ${target_risk:.2f} (score {avg_score:.1f})"
+            reasons.append(f"Sized ${target_risk:.2f} (Factor {final_scale_factor:.2f})")
 
         # 5. Check Collateral/Buying Power
         if collateral > 0:
             max_contracts_bp = math.floor(capital / collateral)
             if rec_contracts > max_contracts_bp:
                 rec_contracts = max_contracts_bp
-                reason += " | Capped by Buying Power"
+                reasons.append("Capped by Buying Power")
 
         rec_contracts = int(max(0, rec_contracts))
 
-        # Max contracts constraint (hard cap from env or default)
+        # Hard max cap
         HARD_MAX = 100
         if rec_contracts > HARD_MAX:
             rec_contracts = HARD_MAX
-            reason += " | Capped by global max"
+            reasons.append("Capped by global max")
 
         return AgentSignal(
             agent_id=self.id,
-            score=avg_score, # The score reflects the conviction used for sizing
-            veto=False,
-            reasons=[reason],
+            score=base_score, # We return base score but sizing metadata reflects the logic
+            veto=False, # Sizing agent rarely vetos, just returns 0 contracts if needed
+            reasons=reasons,
             metadata={
                 "constraints": {
                     "sizing.target_risk_usd": round(target_risk, 2),
@@ -157,7 +159,7 @@ class SizingAgent(BaseQuantAgent):
                     "sizing.min_risk_usd": round(min_risk, 2),
                     "sizing.recommended_contracts": rec_contracts,
                     "sizing.max_contracts": HARD_MAX,
-                    "sizing.risk_scale_factor": round(scale_factor, 2)
+                    "sizing.risk_scale_factor": round(final_scale_factor, 2)
                 }
             }
         )

@@ -1,10 +1,6 @@
-from pydantic import BaseModel
-from typing import Dict, Any, Optional
+from packages.quantum.agents.core import AgentSignal, BaseQuantAgent
 
-class AgentSignal(BaseModel):
-    agent_id: str
-    signal: str = "neutral"
-    veto: bool = False
-    score: float = 0.5
-    constraints: Dict[str, Any] = {}
-    reason: str = ""
+# Backward compatibility alias
+# If any code imports AgentSignal from models, it gets the core version.
+# We re-export them here.
+__all__ = ["AgentSignal", "BaseQuantAgent"]

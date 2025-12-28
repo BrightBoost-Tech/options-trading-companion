@@ -12,3 +12,10 @@
 **Prevention:**
 1. Replaced with `secrets.compare_digest` for constant-time comparison.
 2. Added defensive null checks before comparison.
+
+## 2025-05-24 - [Information Leakage via Stack Traces & Rigid CORS]
+**Vulnerability:** The global exception handler was unconditionally printing full stack traces to stdout/stderr via `traceback.print_exc()`, even in production. Additionally, `ALLOWED_ORIGINS` was hardcoded to localhost, preventing secure production deployment without code modification (or insecure `*` wildcarding).
+**Learning:** "Fail Open" logging patterns in development often persist to production if not explicitly gated. Hardcoded configurations creates friction that leads to security compromises (like enabling all origins) in production.
+**Prevention:**
+1. Updated `api.py` to check `APP_ENV` and suppress stack traces in production, logging only the error message and trace ID.
+2. Modified CORS logic to append `CORS_ALLOWED_ORIGINS` from environment variables, enabling flexible and secure production configuration.

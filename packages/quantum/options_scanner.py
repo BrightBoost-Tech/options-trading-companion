@@ -9,6 +9,7 @@ import concurrent.futures
 
 from packages.quantum.services.universe_service import UniverseService
 from packages.quantum.analytics.strategy_selector import StrategySelector
+from packages.quantum.analytics.strategy_policy import StrategyPolicy
 from packages.quantum.ev_calculator import calculate_ev, calculate_condor_ev
 from packages.quantum.market_data import PolygonService
 from packages.quantum.analytics.regime_integration import map_market_regime
@@ -19,6 +20,7 @@ from packages.quantum.analytics.regime_engine_v3 import RegimeEngineV3, GlobalRe
 from packages.quantum.analytics.scoring import calculate_unified_score
 from packages.quantum.services.execution_service import ExecutionService
 from packages.quantum.analytics.guardrails import earnings_week_penalty
+from packages.quantum.services.earnings_calendar_service import EarningsCalendarService
 
 # Configuration
 SCANNER_LIMIT_DEV = int(os.getenv("SCANNER_LIMIT_DEV", "40")) # Limit universe in dev
@@ -692,7 +694,8 @@ def scan_for_opportunities(
     symbols: List[str] = None,
     supabase_client: Client = None,
     user_id: str = None,
-    global_snapshot: GlobalRegimeSnapshot = None
+    global_snapshot: GlobalRegimeSnapshot = None,
+    banned_strategies: List[str] = None
 ) -> List[Dict[str, Any]]:
     """
     Scans the provided symbols (or universe) for option trade opportunities.
@@ -713,8 +716,10 @@ def scan_for_opportunities(
     # Initialize services
     market_data = PolygonService()
     strategy_selector = StrategySelector()
+    policy = StrategyPolicy(banned_strategies)
     universe_service = UniverseService(supabase_client) if supabase_client else None
     execution_service = ExecutionService(supabase_client) if supabase_client else None
+    earnings_service = EarningsCalendarService(market_data)
 
     # Unified Regime Engine
     truth_layer = MarketDataTruthLayer()
@@ -904,10 +909,15 @@ def scan_for_opportunities(
                 sentiment=trend,
                 current_price=current_price,
                 iv_rank=iv_rank,
-                effective_regime=effective_regime_state.value
+                effective_regime=effective_regime_state.value,
+                banned_strategies=banned_strategies
             )
 
             if suggestion["strategy"] == "HOLD":
+                return None
+
+            # Double check policy (redundant but safe)
+            if not policy.is_allowed(suggestion["strategy"]):
                 return None
 
             # F. Construct Contract & Calculate EV
@@ -1179,6 +1189,16 @@ def scan_for_opportunities(
 
             # --- Earnings Awareness Logic ---
             earnings_val = earnings_map.get(symbol)
+
+            # Fallback: If not in map (from Universe), fetch using service
+            if not earnings_val:
+                 # Note: This is an extra call if missed, but cached inside service.
+                 # Optimization: Could preload all missing earnings in a batch if API supported it.
+                 # For now, per-symbol fallback is safe due to caching.
+                 earnings_dt_fetched = earnings_service.get_earnings_date(symbol)
+                 if earnings_dt_fetched:
+                     earnings_val = earnings_dt_fetched.isoformat()
+
             days_to_earnings = None
             earnings_risk = False
             earnings_penalty_val = 0.0

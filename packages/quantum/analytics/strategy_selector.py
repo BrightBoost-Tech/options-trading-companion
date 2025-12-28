@@ -1,9 +1,10 @@
 # packages/quantum/analytics/strategy_selector.py
 from __future__ import annotations
 
-from typing import Optional, Union
+from typing import Optional, Union, List
 
 from .regime_engine_v3 import RegimeState
+from .strategy_policy import StrategyPolicy
 
 
 class StrategySelector:
@@ -15,6 +16,7 @@ class StrategySelector:
         iv_rank: float,
         days_to_expiry: int = 45,
         effective_regime: Optional[Union[RegimeState, str]] = None,
+        banned_strategies: Optional[List[str]] = None,
     ) -> dict:
         """
         Converts sentiment + volatility/regime context into a concrete options structure.
@@ -22,6 +24,7 @@ class StrategySelector:
         Inputs
         - sentiment: BULLISH | BEARISH | NEUTRAL | EARNINGS (case-insensitive)
         - effective_regime: RegimeState (preferred) OR legacy string ("normal"/"elevated"/"shock"/...)
+        - banned_strategies: List of strategy keys or categories to exclude.
 
         Output dict fields:
         - ticker, strategy, legs, rationale
@@ -30,6 +33,9 @@ class StrategySelector:
         s = (sentiment or "NEUTRAL").upper().strip()
         if s not in {"BULLISH", "BEARISH", "NEUTRAL", "EARNINGS"}:
             s = "NEUTRAL"
+
+        # Initialize Policy
+        policy = StrategyPolicy(banned_strategies)
 
         regime_state = self._coerce_regime(effective_regime, iv_rank)
 
@@ -57,127 +63,177 @@ class StrategySelector:
             },
         }
 
+        # Helper to apply suggestion safely with policy check
+        def apply_suggestion(strat: str, rationale: str, legs: list):
+            if policy.is_allowed(strat):
+                suggestion.update(strategy=strat, rationale=rationale, legs=legs)
+            else:
+                # If banned, we might want to fallback or just stay HOLD.
+                # For now, we revert to HOLD if the primary choice is banned.
+                # Ideally, we could try an alternative (e.g. Debit Spread instead of Credit Spread).
+
+                # Simple fallback logic:
+                # If Credit Spread is banned, try Debit Spread if direction matches.
+                # Note: This is a basic heuristic.
+
+                fallback_strat = None
+                fallback_legs = []
+                fallback_rationale = ""
+
+                if "SHORT_PUT_CREDIT_SPREAD" in strat:
+                    # Bullish credit banned -> Bullish debit
+                    fallback_strat = "LONG_CALL_DEBIT_SPREAD"
+                    fallback_rationale = f"{rationale} (Fallback: Credit banned). Using Debit Spread."
+                    fallback_legs = [
+                        {"side": "buy", "type": "call", "delta_target": 0.60},
+                        {"side": "sell", "type": "call", "delta_target": 0.30},
+                    ]
+                elif "SHORT_CALL_CREDIT_SPREAD" in strat:
+                    # Bearish credit banned -> Bearish debit
+                    fallback_strat = "LONG_PUT_DEBIT_SPREAD"
+                    fallback_rationale = f"{rationale} (Fallback: Credit banned). Using Debit Spread."
+                    fallback_legs = [
+                        {"side": "buy", "type": "put", "delta_target": -0.60},
+                        {"side": "sell", "type": "put", "delta_target": -0.30},
+                    ]
+                elif "IRON_CONDOR" in strat:
+                    # Neutral credit banned -> No good debit alternative for pure neutral income without credit
+                    # Could do Long Iron Condor (Debit) but that is a volatility play (Long Vega), not neutral/short-vol.
+                    # So fallback is HOLD.
+                    pass
+
+                if fallback_strat and policy.is_allowed(fallback_strat):
+                    suggestion.update(strategy=fallback_strat, rationale=fallback_rationale, legs=fallback_legs)
+                else:
+                    # Final fallback: HOLD
+                    reason = policy.get_rejection_reason(strat)
+                    suggestion.update(
+                        strategy="HOLD",
+                        rationale=f"Strategy {strat} banned. {reason or ''} No valid fallback."
+                    )
+
+
         # 1) CHOP: range-bound first, regardless of directional lean
         if is_chop and s in {"BULLISH", "BEARISH", "NEUTRAL"}:
-            suggestion.update(
-                strategy="IRON_CONDOR",
-                rationale="Chop regime. Neutral theta harvest with defined risk.",
-                legs=[
+            apply_suggestion(
+                "IRON_CONDOR",
+                "Chop regime. Neutral theta harvest with defined risk.",
+                [
                     {"side": "sell", "type": "put", "delta_target": -0.20},
                     {"side": "buy", "type": "put", "delta_target": -0.10},
                     {"side": "sell", "type": "call", "delta_target": 0.20},
                     {"side": "buy", "type": "call", "delta_target": 0.10},
-                ],
+                ]
             )
             return suggestion
 
         # 2) SHOCK: default to defense unless you explicitly want otherwise
         if regime_state == RegimeState.SHOCK and s != "EARNINGS":
-            suggestion.update(
-                strategy="CASH",
-                rationale="Shock regime. Default to capital preservation; avoid new risk.",
-                legs=[],
+            apply_suggestion(
+                "CASH",
+                "Shock regime. Default to capital preservation; avoid new risk.",
+                []
             )
             return suggestion
 
         # 3) Directional routing
         if s == "BULLISH":
             if is_low_vol:
-                suggestion.update(
-                    strategy="LONG_CALL_DEBIT_SPREAD",
-                    rationale="Bullish + low/suppressed IV. Buy defined-risk upside.",
-                    legs=[
+                apply_suggestion(
+                    "LONG_CALL_DEBIT_SPREAD",
+                    "Bullish + low/suppressed IV. Buy defined-risk upside.",
+                    [
                         {"side": "buy", "type": "call", "delta_target": 0.65},
                         {"side": "sell", "type": "call", "delta_target": 0.30},
-                    ],
+                    ]
                 )
             elif is_high_vol:
-                suggestion.update(
-                    strategy="SHORT_PUT_CREDIT_SPREAD",
-                    rationale="Bullish + elevated IV. Sell defined-risk put premium.",
-                    legs=[
+                apply_suggestion(
+                    "SHORT_PUT_CREDIT_SPREAD",
+                    "Bullish + elevated IV. Sell defined-risk put premium.",
+                    [
                         {"side": "sell", "type": "put", "delta_target": -0.30},
                         {"side": "buy", "type": "put", "delta_target": -0.15},
-                    ],
+                    ]
                 )
             else:
-                suggestion.update(
-                    strategy="LONG_CALL_DEBIT_SPREAD",
-                    rationale="Bullish + normal IV. Defined-risk vertical.",
-                    legs=[
+                apply_suggestion(
+                    "LONG_CALL_DEBIT_SPREAD",
+                    "Bullish + normal IV. Defined-risk vertical.",
+                    [
                         {"side": "buy", "type": "call", "delta_target": 0.60},
                         {"side": "sell", "type": "call", "delta_target": 0.30},
-                    ],
+                    ]
                 )
 
         elif s == "BEARISH":
             if is_low_vol:
-                suggestion.update(
-                    strategy="LONG_PUT_DEBIT_SPREAD",
-                    rationale="Bearish + low/suppressed IV. Buy defined-risk downside.",
-                    legs=[
+                apply_suggestion(
+                    "LONG_PUT_DEBIT_SPREAD",
+                    "Bearish + low/suppressed IV. Buy defined-risk downside.",
+                    [
                         {"side": "buy", "type": "put", "delta_target": -0.65},
                         {"side": "sell", "type": "put", "delta_target": -0.30},
-                    ],
+                    ]
                 )
             elif is_high_vol:
-                suggestion.update(
-                    strategy="SHORT_CALL_CREDIT_SPREAD",
-                    rationale="Bearish + elevated IV. Sell defined-risk call premium.",
-                    legs=[
+                apply_suggestion(
+                    "SHORT_CALL_CREDIT_SPREAD",
+                    "Bearish + elevated IV. Sell defined-risk call premium.",
+                    [
                         {"side": "sell", "type": "call", "delta_target": 0.30},
                         {"side": "buy", "type": "call", "delta_target": 0.15},
-                    ],
+                    ]
                 )
             else:
-                suggestion.update(
-                    strategy="LONG_PUT_DEBIT_SPREAD",
-                    rationale="Bearish + normal IV. Defined-risk vertical.",
-                    legs=[
+                apply_suggestion(
+                    "LONG_PUT_DEBIT_SPREAD",
+                    "Bearish + normal IV. Defined-risk vertical.",
+                    [
                         {"side": "buy", "type": "put", "delta_target": -0.60},
                         {"side": "sell", "type": "put", "delta_target": -0.30},
-                    ],
+                    ]
                 )
 
         # 4) Neutral routing
         elif s == "NEUTRAL":
             # Only sell premium when IV is rich enough; otherwise skip.
             if is_high_vol:
-                suggestion.update(
-                    strategy="IRON_CONDOR",
-                    rationale="Neutral + elevated IV. Sell both sides with defined risk.",
-                    legs=[
+                apply_suggestion(
+                    "IRON_CONDOR",
+                    "Neutral + elevated IV. Sell both sides with defined risk.",
+                    [
                         {"side": "sell", "type": "put", "delta_target": -0.20},
                         {"side": "buy", "type": "put", "delta_target": -0.10},
                         {"side": "sell", "type": "call", "delta_target": 0.20},
                         {"side": "buy", "type": "call", "delta_target": 0.10},
-                    ],
+                    ]
                 )
             else:
-                suggestion.update(
-                    strategy="HOLD",
-                    rationale="Neutral + low/normal IV. Not enough edge to sell premium; skip.",
-                    legs=[],
+                apply_suggestion(
+                    "HOLD",
+                    "Neutral + low/normal IV. Not enough edge to sell premium; skip.",
+                    []
                 )
 
         # 5) Earnings routing (conservative until long-vol builders exist)
         elif s == "EARNINGS":
             if is_high_vol:
-                suggestion.update(
-                    strategy="IRON_CONDOR",
-                    rationale="Earnings + rich IV. Defined-risk premium sale (condor).",
-                    legs=[
+                apply_suggestion(
+                    "IRON_CONDOR",
+                    "Earnings + rich IV. Defined-risk premium sale (condor).",
+                    [
                         {"side": "sell", "type": "put", "delta_target": -0.20},
                         {"side": "buy", "type": "put", "delta_target": -0.10},
                         {"side": "sell", "type": "call", "delta_target": 0.20},
                         {"side": "buy", "type": "call", "delta_target": 0.10},
-                    ],
+                    ]
                 )
             else:
-                suggestion.update(
-                    strategy="HOLD",
-                    rationale="Earnings but IV not rich enough for premium sale; skip.",
-                    legs=[],
+                apply_suggestion(
+                    "HOLD",
+                    "Earnings but IV not rich enough for premium sale; skip.",
+                    []
                 )
 
         return suggestion

@@ -5,6 +5,7 @@ import { Card, CardContent } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { Suggestion } from '@/lib/types';
 import { logEvent } from '@/lib/analytics';
+import { QuantumTooltip } from '@/components/ui/QuantumTooltip';
 
 interface SuggestionCardProps {
     suggestion: Suggestion;
@@ -14,7 +15,7 @@ interface SuggestionCardProps {
 }
 
 const SuggestionCard = ({ suggestion, onStage, onModify, onDismiss }: SuggestionCardProps) => {
-    const { order_json, score, metrics, iv_regime, iv_rank, delta_impact, theta_impact, staged } = suggestion;
+    const { order_json, score, metrics, iv_regime, iv_rank, delta_impact, theta_impact, staged, agent_summary } = suggestion;
     const hasLoggedView = useRef(false);
     const displaySymbol = suggestion.display_symbol ?? suggestion.symbol ?? suggestion.ticker ?? '---';
     const exitPrice = typeof order_json?.limit_price === 'number'
@@ -156,6 +157,30 @@ const SuggestionCard = ({ suggestion, onStage, onModify, onDismiss }: Suggestion
                                 <Badge className="text-[10px] bg-purple-100 text-purple-800 dark:bg-purple-900/30 dark:text-purple-300 px-1 py-0">
                                     Score: {score.toFixed(0)}
                                 </Badge>
+                             )}
+
+                             {/* Agent Summary Chip */}
+                             {agent_summary && (
+                                <>
+                                    {(agent_summary.decision === 'VETOED' || agent_summary.vetoed) ? (
+                                        <Badge variant="destructive" className="text-[10px] h-5 px-1.5 ml-1">
+                                            VETOED
+                                        </Badge>
+                                    ) : (typeof agent_summary.overall_score === 'number') && (
+                                        <Badge variant="secondary" className="text-[10px] h-5 px-1.5 bg-indigo-50 text-indigo-700 border-indigo-100 hover:bg-indigo-100 ml-1">
+                                            Confidence {Math.round(agent_summary.overall_score <= 1.0 ? agent_summary.overall_score * 100 : agent_summary.overall_score)}%
+                                        </Badge>
+                                    )}
+                                    <QuantumTooltip
+                                        label="Why this trade?"
+                                        className="ml-1"
+                                        content={
+                                            (agent_summary.top_reasons?.length)
+                                                ? agent_summary.top_reasons.map(r => `• ${r}`).join(' ')
+                                                : "Suggested based on your positions, volatility regime, and risk model. Always confirm it fits your own plan."
+                                        }
+                                    />
+                                </>
                              )}
                         </div>
                     </div>

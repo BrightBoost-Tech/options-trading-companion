@@ -25,6 +25,8 @@ Stores generated trade ideas and their lifecycle status.
 | `trace_id` | uuid | Link to inference log |
 | `model_version` | text | Version of the model used |
 | `features_hash` | text | Hash of input features for reproducibility |
+| `agent_signals` | jsonb | Quant Agents v3: Raw signals/reasoning |
+| `agent_summary` | jsonb | Quant Agents v3: Human-readable summary |
 
 ### `weekly_trade_reports`
 

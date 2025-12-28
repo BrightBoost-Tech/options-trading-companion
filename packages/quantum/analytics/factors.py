@@ -10,7 +10,10 @@ def calculate_trend(prices: List[float]) -> str:
     if len(prices) < 50:
         return "NEUTRAL"
 
-    prices_arr = np.array(prices)
+    # Optimization: Slice the list before converting to numpy array
+    # We only need the last 50 prices for SMA50 and SMA20
+    prices_arr = np.array(prices[-50:])
+
     sma_20 = np.mean(prices_arr[-20:])
     sma_50 = np.mean(prices_arr[-50:])
 
@@ -29,7 +32,16 @@ def calculate_iv_rank(returns: List[float], days: int = 365) -> float:
 
     # Use NumPy sliding window view for vectorized performance (O(N))
     # Avoids Python loops and overhead of pandas Series creation
-    returns_arr = np.array(returns)
+
+    # Optimization: If returns is very large (e.g. backtesting), limit to relevant window
+    # We need 'days' of history for the rank + window size for the rolling vol
+    window_size = 30
+    required_len = days + window_size
+
+    if len(returns) > required_len:
+        returns_arr = np.array(returns[-required_len:])
+    else:
+        returns_arr = np.array(returns)
 
     # Check sufficient data again after conversion
     if len(returns_arr) < 30:
@@ -69,9 +81,14 @@ def calculate_rsi(prices: List[float], period: int = 14) -> float:
     if len(prices) < period + 1:
         return 50.0
 
-    prices_arr = np.array(prices)
+    # Optimization: Only process relevant data
+    # We only need the last 'period' + 1 prices to calculate the last 'period' deltas
+    prices_arr = np.array(prices[-(period+1):])
+
     deltas = np.diff(prices_arr)
-    seed = deltas[-period:]
+    # deltas will have length 'period'
+    seed = deltas # usage of variable name 'seed' preserved from original logic
+
     up = seed[seed >= 0].sum() / period
     down = -seed[seed < 0].sum() / period
     rs = up / down if down != 0 else 0
@@ -85,16 +102,10 @@ def calculate_volatility(prices: List[float], window: int = 30) -> float:
     if len(prices) < window + 1:
         return 0.0
 
-    prices_arr = np.array(prices)
-    # Returns: (P_t - P_{t-1}) / P_{t-1}
+    # Optimization: Only process relevant data
     # To get `window` returns, we need `window+1` prices.
-    # diff of array of length N is N-1.
+    prices_arr = np.array(prices[-(window+1):])
 
-    # Take window+1 prices from end
-    subset = prices_arr[-(window+1):]
-    if len(subset) < window+1:
-        return 0.0
-
-    returns = np.diff(subset) / subset[:-1]
+    returns = np.diff(prices_arr) / prices_arr[:-1]
     vol = np.std(returns) * np.sqrt(252)
     return float(vol)

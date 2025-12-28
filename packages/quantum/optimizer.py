@@ -23,7 +23,7 @@ from packages.quantum.analytics.analytics import OptionsAnalytics
 from packages.quantum.services.trade_builder import enrich_trade_suggestions
 from packages.quantum.market_data import PolygonService, calculate_portfolio_inputs
 from packages.quantum.ev_calculator import calculate_ev, calculate_kelly_sizing
-from packages.quantum.nested_logging import log_inference
+from packages.quantum.nested_logging import log_inference, log_decision
 from packages.quantum.nested.adapters import load_symbol_adapters, apply_biases
 from packages.quantum.nested.backbone import compute_macro_features, infer_global_context, log_global_context
 from packages.quantum.nested.session import load_session_state, refresh_session_from_db, get_session_sigma_scale
@@ -35,6 +35,7 @@ from packages.quantum.services.options_utils import group_spread_positions
 from packages.quantum.services.analytics_service import AnalyticsService
 from packages.quantum.services.execution_service import ExecutionService
 from packages.quantum.services.risk_engine import RiskEngine
+from packages.quantum.services.risk_budget_engine import RiskBudgetEngine
 
 # V3 Imports
 from packages.quantum.analytics.risk_model import SpreadRiskModel
@@ -70,75 +71,6 @@ MIN_QTY_BALANCED = 0.05
 
 MIN_DOLLAR_DIFF_AGGRESSIVE = 10.0
 MIN_QTY_AGGRESSIVE = 0.02
-
-
-def calculate_dynamic_cap(
-    strategy_type: str,
-    regime_state: RegimeState,
-    conviction: float = 1.0
-) -> float:
-    """
-    Returns adjusted_cap ∈ [0, 1.0] based on regime rules and conviction.
-    Replaces older REGIME_STRATEGY_CAPS constant map.
-    """
-
-    # Base Caps per Regime
-    # These could be moved to a config file or DB eventually
-    caps = {
-        RegimeState.SUPPRESSED: {
-            "debit_call": 0.12, "debit_put": 0.12,
-            "credit_call": 0.06, "credit_put": 0.06,
-            "iron_condor": 0.04, "single": 0.15
-        },
-        RegimeState.NORMAL: {
-            "debit_call": 0.15, "debit_put": 0.15,
-            "credit_call": 0.08, "credit_put": 0.08,
-            "iron_condor": 0.06, "vertical": 0.10
-        },
-        RegimeState.ELEVATED: {
-             "credit_call": 0.12, "credit_put": 0.12,
-             "debit_call": 0.06, "debit_put": 0.06,
-             "iron_condor": 0.08, "single": 0.05
-        },
-        RegimeState.SHOCK: {
-             "credit_call": 0.05, "credit_put": 0.02, # Dangerous
-             "debit_put": 0.10, # Hedge
-             "debit_call": 0.02,
-             "iron_condor": 0.00,
-             "vertical": 0.03
-        },
-        RegimeState.REBOUND: {
-             "debit_call": 0.12, "credit_put": 0.12,
-             "debit_put": 0.04, "credit_call": 0.05,
-             "single": 0.08
-        },
-        RegimeState.CHOP: {
-             "iron_condor": 0.10, "calendar": 0.10,
-             "debit_call": 0.05, "debit_put": 0.05,
-             "credit_call": 0.08, "credit_put": 0.08
-        }
-    }
-
-    regime_caps = caps.get(regime_state, caps[RegimeState.NORMAL])
-
-    # Fuzzy match strategy type
-    st = strategy_type.lower()
-    base_cap = 0.05 # Default low
-
-    # Try exact match first
-    if st in regime_caps:
-        base_cap = regime_caps[st]
-    else:
-        # Try substring match
-        for k, v in regime_caps.items():
-            if k in st:
-                base_cap = v
-                break
-
-    # Conviction Scaling
-    scale = 0.5 + 0.5 * max(0.0, min(1.0, conviction))
-
-    return base_cap * scale
 
 
 def _compute_portfolio_weights(
@@ -247,9 +179,12 @@ def _compute_portfolio_weights(
     # Calculate per-asset bounds based on strategy and regime
     bounds = []
 
+    # Instantiate engine (only for logic, no DB needed for this check as it's pure logic)
+    # RiskBudgetEngine.calculate_strategy_cap is static, so no instantiation needed.
+
     for asset in investable_assets:
-        # Determine cap using V3 Logic
-        cap = calculate_dynamic_cap(str(asset.spread_type), current_regime, conviction=1.0)
+        # Determine cap using V3 Logic (from Canonical Engine)
+        cap = RiskBudgetEngine.calculate_strategy_cap(str(asset.spread_type), current_regime, conviction=1.0)
 
         # Combine with global max
         final_cap = min(cap, effective_max_pct)
@@ -362,6 +297,22 @@ def _compute_portfolio_weights(
             predicted_sigma={"sigma_matrix": sigma_list},
             optimizer_profile=local_req.profile
         )
+
+        # New: Log the optimization decision (target weights)
+        if trace_id:
+            log_decision(
+                trace_id=trace_id,
+                user_id=user_id,
+                decision_type="optimizer_weights",
+                content={
+                    "target_weights": target_weights,
+                    "metrics": {
+                        "expected_return": float(np.dot(weights_array, mu)), # approximate for log
+                        "solver": solver_type
+                    }
+                }
+            )
+
     except Exception as e:
         print(f"Logging Integration Error: {e}")
 

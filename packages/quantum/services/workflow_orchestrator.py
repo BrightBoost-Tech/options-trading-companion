@@ -8,11 +8,13 @@ import sys
 from .cash_service import CashService
 from .sizing_engine import calculate_sizing
 from .journal_service import JournalService
-from .options_utils import group_spread_positions, format_occ_symbol_readable
+from .options_utils import group_spread_positions, format_occ_symbol_readable, compute_legs_fingerprint
 from .exit_stats_service import ExitStatsService
 from .market_data_truth_layer import MarketDataTruthLayer
 from .analytics_service import AnalyticsService
+from packages.quantum.analytics.strategy_policy import StrategyPolicy
 from packages.quantum.services.risk_budget_engine import RiskBudgetEngine
+from packages.quantum.services.analytics.small_account_compounder import SmallAccountCompounder, CapitalTier, SizingConfig
 
 # Importing existing logic
 from packages.quantum.options_scanner import scan_for_opportunities
@@ -24,6 +26,7 @@ from packages.quantum.analytics.loss_minimizer import LossMinimizer
 from packages.quantum.analytics.conviction_service import ConvictionService
 from packages.quantum.services.iv_repository import IVRepository
 from packages.quantum.services.iv_point_service import IVPointService
+from packages.quantum.nested_logging import log_decision
 
 # v3 Observability
 from packages.quantum.observability.telemetry import TradeContext, compute_features_hash, emit_trade_event
@@ -35,6 +38,7 @@ SUGGESTION_LOGS_TABLE = "suggestion_logs"
 
 # 1. Add MIDDAY_TEST_MODE flag
 MIDDAY_TEST_MODE = os.getenv("MIDDAY_TEST_MODE", "false").lower() == "true"
+COMPOUNDING_MODE = os.getenv("COMPOUNDING_MODE", "false").lower() == "true"
 APP_VERSION = os.getenv("APP_VERSION", "v2-dev")
 
 
@@ -157,10 +161,16 @@ async def run_morning_cycle(supabase: Client, user_id: str):
         deployable_capital = 0.0
 
     budgets = risk_engine.compute(user_id, deployable_capital, global_snap.state.value, positions)
-    is_over_budget = budgets["remaining"] <= 0
+
+    # Updated to access keys from Pydantic model
+    remaining_global = budgets.global_allocation.remaining
+    max_alloc_global = budgets.global_allocation.max_limit
+    usage_global = budgets.global_allocation.used
+
+    is_over_budget = remaining_global <= 0
     budget_usage_pct = 0.0
-    if budgets["max_allocation"] > 0:
-        budget_usage_pct = (budgets["current_usage"] / budgets["max_allocation"]) * 100
+    if max_alloc_global > 0:
+        budget_usage_pct = (usage_global / max_alloc_global) * 100
 
     suggestions = []
 
@@ -311,6 +321,22 @@ async def run_morning_cycle(supabase: Client, user_id: str):
             )
             ctx.features_hash = compute_features_hash(features_for_hash)
 
+            order_json = {
+                "side": "close_spread",
+                "limit_price": round(metrics.limit_price, 2),
+                "legs": [
+                    {
+                        "symbol": l["symbol"],
+                        "display_symbol": format_occ_symbol_readable(l["symbol"]),
+                        "quantity": l["quantity"],
+                        "side": l.get("side", "") # Added side from leg for fingerprinting
+                    } for l in legs
+                ]
+            }
+
+            # Calculate fingerprint
+            fingerprint = compute_legs_fingerprint(order_json)
+
             suggestion = {
                     "user_id": user_id,
                     "created_at": datetime.now(timezone.utc).isoformat(),
@@ -324,17 +350,7 @@ async def run_morning_cycle(supabase: Client, user_id: str):
                     "probability_of_profit": metrics.prob_of_profit,
                     "rationale": rationale_text,
                     "historical_stats": hist_stats,
-                    "order_json": {
-                        "side": "close_spread",
-                        "limit_price": round(metrics.limit_price, 2),
-                        "legs": [
-                            {
-                                "symbol": l["symbol"],
-                                "display_symbol": format_occ_symbol_readable(l["symbol"]),
-                                "quantity": l["quantity"]
-                            } for l in legs
-                        ]
-                    },
+                    "order_json": order_json,
                 "sizing_metadata": {
                     "reason": metrics.reason,
                     "context": {
@@ -346,7 +362,7 @@ async def run_morning_cycle(supabase: Client, user_id: str):
                         "regime_v3_effective": effective_regime_state.value
                     },
                     "risk_budget": {
-                         "remaining": budgets["remaining"],
+                         "remaining": remaining_global,
                          "usage_pct": budget_usage_pct,
                          "status": "violated" if is_over_budget else "ok"
                     },
@@ -360,7 +376,8 @@ async def run_morning_cycle(supabase: Client, user_id: str):
                 "trace_id": ctx.trace_id,
                 "model_version": ctx.model_version,
                 "features_hash": ctx.features_hash,
-                "regime": ctx.regime
+                "regime": ctx.regime,
+                "legs_fingerprint": fingerprint
             }
             suggestions.append(suggestion)
 
@@ -376,19 +393,47 @@ async def run_morning_cycle(supabase: Client, user_id: str):
                 }
             )
 
+            # Log Decision
+            if ctx.trace_id:
+                log_decision(
+                    trace_id=ctx.trace_id,
+                    user_id=user_id,
+                    decision_type="morning_suggestion",
+                    content={
+                        "action": "close",
+                        "strategy": "take_profit_limit",
+                        "target_price": metrics.limit_price,
+                        "ev": metrics.expected_value,
+                        "rationale": rationale_text
+                    }
+                )
+
     # 4. Insert suggestions
     if suggestions:
         try:
             cycle_date = datetime.now(timezone.utc).date().isoformat()
 
-            # Fetch existing to preserve status
+            # Fetch existing to preserve status (using new key if possible, but map still relies on ticker/strategy)
+            # With fingerprinting, ticker+strategy is no longer unique.
+            # We need to map by fingerprint if available, or ticker+strategy as fallback?
+            # Or just blindly insert new ones?
+            # Ideally we want to update status if re-suggested.
+            # We can use fingerprint for key now.
+
             existing_map = {}
             try:
-                ex = supabase.table(TRADE_SUGGESTIONS_TABLE).select("ticker,strategy,status") \
+                # We select legs_fingerprint as well
+                ex = supabase.table(TRADE_SUGGESTIONS_TABLE).select("ticker,strategy,legs_fingerprint,status") \
                     .eq("user_id", user_id) \
                     .eq("window", "morning_limit") \
                     .eq("cycle_date", cycle_date).execute()
-                existing_map = {(r["ticker"], r["strategy"]): r["status"] for r in (ex.data or [])}
+                for r in (ex.data or []):
+                    # Key is fingerprint if available, else (ticker, strategy)
+                    fp = r.get("legs_fingerprint")
+                    if fp and fp != 'legacy':
+                        existing_map[fp] = r["status"]
+                    else:
+                        existing_map[(r["ticker"], r["strategy"])] = r["status"]
             except Exception:
                 pass
 
@@ -398,9 +443,18 @@ async def run_morning_cycle(supabase: Client, user_id: str):
 
             for s in suggestions:
                 s["cycle_date"] = cycle_date
-                key = (s["ticker"], s["strategy"])
-                if key in existing_map:
-                    s["status"] = existing_map[key]
+                fp = s.get("legs_fingerprint")
+
+                # Check by fingerprint first
+                status = None
+                if fp and fp in existing_map:
+                    status = existing_map[fp]
+                elif (s["ticker"], s["strategy"]) in existing_map:
+                    # Fallback for transition
+                    status = existing_map[(s["ticker"], s["strategy"])]
+
+                if status:
+                    s["status"] = status
                     updates += 1
                 else:
                     s["status"] = "pending"
@@ -409,7 +463,7 @@ async def run_morning_cycle(supabase: Client, user_id: str):
 
             supabase.table(TRADE_SUGGESTIONS_TABLE).upsert(
                 upserts,
-                on_conflict="user_id,window,cycle_date,ticker,strategy"
+                on_conflict="user_id,window,cycle_date,ticker,strategy,legs_fingerprint"
             ).execute()
             print(f"Upserted morning suggestions: {inserts} inserted, {updates} updated.")
         except Exception as e:
@@ -487,9 +541,14 @@ async def run_midday_cycle(supabase: Client, user_id: str):
     # === RISK BUDGET ENGINE ===
     risk_engine = RiskBudgetEngine(supabase)
     budgets = risk_engine.compute(user_id, deployable_capital, global_snap.state.value, positions)
-    print(f"Risk Budget: Remaining=${budgets['remaining']:.2f}, Usage=${budgets['current_usage']:.2f}, Cap=${budgets['max_allocation']:.2f} ({budgets['regime']})")
 
-    if budgets["remaining"] <= 0 and not MIDDAY_TEST_MODE:
+    remaining_global = budgets.global_allocation.remaining
+    usage_global = budgets.global_allocation.used
+    max_global = budgets.global_allocation.max_limit
+
+    print(f"Risk Budget: Remaining=${remaining_global:.2f}, Usage=${usage_global:.2f}, Cap=${max_global:.2f} ({budgets.regime})")
+
+    if remaining_global <= 0 and not MIDDAY_TEST_MODE:
          print("Risk budget exhausted. Skipping midday cycle.")
          return
 
@@ -497,12 +556,28 @@ async def run_midday_cycle(supabase: Client, user_id: str):
     candidates = []
     scout_results = []
 
+    # Fetch user policy settings
+    banned_strategies = []
+    try:
+        # Try to fetch from settings table if it exists and has the column
+        # Fallback to empty if not found
+        settings_res = supabase.table("settings").select("banned_strategies").eq("user_id", user_id).single().execute()
+        if settings_res.data:
+            banned_strategies = settings_res.data.get("banned_strategies") or []
+    except Exception as e:
+        # settings table might not exist or column missing, non-critical
+        print(f"Note: Could not fetch banned_strategies for user {user_id}: {e}")
+
+    # Initialize Policy for Final Gate
+    policy = StrategyPolicy(banned_strategies)
+
     try:
         # Step C: Wire user_id from cycle orchestration into scanner
         scout_results = scan_for_opportunities(
             supabase_client=supabase,
             user_id=user_id,
-            global_snapshot=global_snap
+            global_snapshot=global_snap,
+            banned_strategies=banned_strategies
         )
 
         print(f"Scanner returned {len(scout_results)} raw opportunities.")
@@ -513,10 +588,34 @@ async def run_midday_cycle(supabase: Client, user_id: str):
         conviction_service = ConvictionService(supabase=supabase)
         scout_results = conviction_service.adjust_suggestion_scores(scout_results, user_id)
 
-        scout_results.sort(key=lambda x: x.get("score", 0), reverse=True)
-        candidates = scout_results[:2]
+        # NEW: Rank and Select Pipeline using SmallAccountCompounder
+        # Detect capital tier
+        tier = SmallAccountCompounder.get_tier(deployable_capital)
+        print(f"[Midday] Account Tier: {tier.name} (Compounding: {COMPOUNDING_MODE})")
 
-        print(f"Top {len(candidates)} scanner results for midday (top 2 by score):")
+        # Select candidates
+        remaining_global_budget = float(
+            budgets.get("remaining")
+            or budgets.get("remaining_budget")
+            or budgets.get("remaining_dollars")
+            or 0.0
+        )
+
+        # Config
+        midday_config = SizingConfig(compounding_enabled=COMPOUNDING_MODE)
+
+        # Use Global regime state for selection estimation
+        current_regime = global_snap.state.value
+
+        candidates = SmallAccountCompounder.rank_and_select(
+            candidates=scout_results,
+            capital=deployable_capital,
+            risk_budget=remaining_global_budget,
+            config=midday_config,
+            regime=current_regime
+        )
+
+        print(f"Top {len(candidates)} candidates selected for midday:")
         for c in candidates:
             print(f"  {c.get('ticker', c.get('symbol'))} score={c.get('score')} type={c.get('type')}")
 
@@ -557,27 +656,39 @@ async def run_midday_cycle(supabase: Client, user_id: str):
             or max_loss
         )
 
-        score = float(cand.get("unified_score", cand.get("score", 50.0)) or 50.0)
-        base_per_trade_pct = 0.02 if score >= 70 else 0.01
+        # Use SmallAccountCompounder for variable sizing
+        tier = SmallAccountCompounder.get_tier(deployable_capital)
+        sizing_vars = SmallAccountCompounder.calculate_variable_sizing(
+            candidate=cand,
+            capital=deployable_capital,
+            tier=tier,
+            regime=scoring_regime,
+            compounding=COMPOUNDING_MODE
+        )
 
-        conviction = float(cand.get("conviction_score", cand.get("confidence_score", 0.5)) or 0.5)
-        risk_multiplier = 0.5 + conviction
-        risk_multiplier = min(1.5, max(0.5, risk_multiplier))
-
-        risk_budget_dollars = deployable_capital * base_per_trade_pct * risk_multiplier
+        risk_budget_dollars = sizing_vars["risk_budget"]
+        risk_multiplier = sizing_vars["multipliers"]["score"] # Approximate for logging
 
         # CLAMPING LOGIC
-        remaining = float(
-            budgets.get("remaining")
-            or budgets.get("remaining_budget")
-            or budgets.get("remaining_dollars")
-            or 0.0
-        )
-        risk_budget_dollars = clamp_risk_budget(risk_budget_dollars, remaining)
+        # Use max_risk_per_trade from engine which accounts for remaining global + granular profile sizing
+        recommended_risk = budgets.max_risk_per_trade
 
-        if risk_budget_dollars <= 0:
-            print(f"[Midday] Skipped {ticker}: Risk budget exhausted for trade (Remaining: ${remaining:.2f})")
+        # We can still apply the scanner-based score multiplier, but should clamp to recommended_risk
+        # Re-calc base based on scanner conviction?
+        # The engine provided a "max safe trade size".
+        # We also have "remaining" global budget.
+
+        final_risk_dollars = min(risk_budget_dollars, recommended_risk)
+
+        # Also clamp to remaining global (redundant if engine did it, but safe)
+        final_risk_dollars = clamp_risk_budget(final_risk_dollars, remaining_global)
+
+        if final_risk_dollars <= 0:
+            print(f"[Midday] Skipped {ticker}: Risk budget exhausted for trade (Remaining: ${remaining_global:.2f})")
             continue
+
+        # Update variable for sizing engine
+        risk_budget_dollars = final_risk_dollars
 
         # --- SIZING (single call) ---
         sizing = calculate_sizing(
@@ -637,7 +748,7 @@ async def run_midday_cycle(supabase: Client, user_id: str):
             postprocess_midday_sizing(sizing, max_loss)
 
             sizing["risk_multiplier"] = risk_multiplier
-            sizing["budget_snapshot"] = budgets
+            sizing["budget_snapshot"] = budgets.model_dump()
             sizing["allowed_risk_dollars"] = allowed_risk_dollars
 
             cand_features = {
@@ -660,6 +771,16 @@ async def run_midday_cycle(supabase: Client, user_id: str):
             ctx.features_hash = compute_features_hash(cand_features)
 
             pop = cand.get("probability_of_profit")
+            order_json = build_midday_order_json(cand, sizing["contracts"])
+
+            # Calculate fingerprint
+            fingerprint = compute_legs_fingerprint(order_json)
+
+            # Final Policy Gate (should have been filtered upstream, but redundant check)
+            if not policy.is_allowed(strategy):
+                print(f"[Midday] Final Gate: Rejecting {ticker} {strategy} due to policy.")
+                continue
+
             suggestion = {
                 "user_id": user_id,
                 "created_at": datetime.now(timezone.utc).isoformat(),
@@ -668,7 +789,7 @@ async def run_midday_cycle(supabase: Client, user_id: str):
                 "ticker": ticker,
                 "strategy": strategy,
                 "direction": "long",
-                "order_json": build_midday_order_json(cand, sizing["contracts"]),
+                "order_json": order_json,
                 "sizing_metadata": sizing,
                 "status": "pending",
                 "source": "scanner",
@@ -678,7 +799,8 @@ async def run_midday_cycle(supabase: Client, user_id: str):
                 "trace_id": ctx.trace_id,
                 "model_version": ctx.model_version,
                 "features_hash": ctx.features_hash,
-                "regime": ctx.regime
+                "regime": ctx.regime,
+                "legs_fingerprint": fingerprint
             }
 
             # --- AGENT FIELDS ---
@@ -701,20 +823,40 @@ async def run_midday_cycle(supabase: Client, user_id: str):
                 properties=props
             )
 
+            # Log Decision
+            if ctx.trace_id:
+                log_decision(
+                    trace_id=ctx.trace_id,
+                    user_id=user_id,
+                    decision_type="midday_suggestion",
+                    content={
+                        "action": "open",
+                        "strategy": strategy,
+                        "sizing": sizing, # Full sizing details
+                        "ev": ev,
+                        "score": cand.get("score")
+                    }
+                )
+
     print(f"FINAL MIDDAY SUGGESTION COUNT: {len(suggestions)}")
 
     if suggestions:
         try:
             cycle_date = datetime.now(timezone.utc).date().isoformat()
 
-            # Fetch existing to preserve status
+            # Fetch existing to preserve status using fingerprint or fallback
             existing_map = {}
             try:
-                ex = supabase.table(TRADE_SUGGESTIONS_TABLE).select("ticker,strategy,status") \
+                ex = supabase.table(TRADE_SUGGESTIONS_TABLE).select("ticker,strategy,legs_fingerprint,status") \
                     .eq("user_id", user_id) \
                     .eq("window", "midday_entry") \
                     .eq("cycle_date", cycle_date).execute()
-                existing_map = {(r["ticker"], r["strategy"]): r["status"] for r in (ex.data or [])}
+                for r in (ex.data or []):
+                    fp = r.get("legs_fingerprint")
+                    if fp and fp != 'legacy':
+                        existing_map[fp] = r["status"]
+                    else:
+                        existing_map[(r["ticker"], r["strategy"])] = r["status"]
             except Exception:
                 pass
 
@@ -724,9 +866,16 @@ async def run_midday_cycle(supabase: Client, user_id: str):
 
             for s in suggestions:
                 s["cycle_date"] = cycle_date
-                key = (s["ticker"], s["strategy"])
-                if key in existing_map:
-                    s["status"] = existing_map[key]
+                fp = s.get("legs_fingerprint")
+
+                status = None
+                if fp and fp in existing_map:
+                    status = existing_map[fp]
+                elif (s["ticker"], s["strategy"]) in existing_map:
+                    status = existing_map[(s["ticker"], s["strategy"])]
+
+                if status:
+                    s["status"] = status
                     updates += 1
                 else:
                     s["status"] = "pending"

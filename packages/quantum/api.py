@@ -218,12 +218,16 @@ limiter = Limiter(key_func=get_remote_address)
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
+# 🛡️ Sentinel: Load allowed origins from env for production flexibility
+env_origins = os.getenv("CORS_ALLOWED_ORIGINS", "")
+parsed_origins = [o.strip() for o in env_origins.split(",") if o.strip()]
+
 ALLOWED_ORIGINS = [
     "http://localhost:3000",
     "http://127.0.0.1:3000",
     "http://localhost:3001",
     "http://127.0.0.1:3001",
-]
+] + parsed_origins
 
 # Add Security Headers Middleware
 app.add_middleware(SecurityHeadersMiddleware)
@@ -232,8 +236,17 @@ app.add_middleware(SecurityHeadersMiddleware)
 @app.exception_handler(Exception)
 async def global_exception_handler(request: Request, exc: Exception):
     trace_id = str(uuid.uuid4())[:8]
-    print(f"Global Exception Handler [Trace: {trace_id}]: {exc}")
-    traceback.print_exc()
+
+    # 🛡️ Sentinel: Safe logging
+    # In production, we log the error but suppress the stack trace to avoid leaking sensitive data.
+    app_env = os.getenv("APP_ENV", "development")
+
+    print(f"Global Exception Handler [Trace: {trace_id}]: {type(exc).__name__}: {exc}")
+
+    if app_env != "production":
+        traceback.print_exc()
+    else:
+        print(f"Stack trace suppressed in production (Trace ID: {trace_id})")
 
     origin = request.headers.get("origin")
     headers = {

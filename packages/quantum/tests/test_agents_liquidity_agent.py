@@ -23,6 +23,10 @@ def test_tight_spreads_pass(agent):
     assert signal.veto is False
     assert signal.score > 80
     assert signal.metadata["liquidity.observed_spread_pct"] == pytest.approx(0.01)
+    # Check constraints wrapper
+    assert "constraints" in signal.metadata
+    assert signal.metadata["constraints"]["liquidity.observed_spread_pct"] == pytest.approx(0.01)
+    assert signal.metadata["constraints"]["liquidity.require_limit_orders"] is True
 
 def test_wide_spread_veto(agent):
     # Bid 8.00, Ask 12.00, Mid 10.00 -> Spread 4.0 / 10.0 = 40%

@@ -113,7 +113,15 @@ class LiquidityAgent(BaseQuantAgent):
                 veto = True
                 reasons.append("Too many missing/invalid quotes (>50%)")
 
+        constraints = {
+            "liquidity.observed_spread_pct": observed_spread if valid_legs > 0 else None,
+            "liquidity.max_spread_pct": self.max_spread_pct,
+            "liquidity.require_limit_orders": True,
+            "liquidity.quote_quality": quote_quality
+        }
+
         metadata = {
+            "constraints": constraints,
             "liquidity.observed_spread_pct": observed_spread if valid_legs > 0 else None,
             "liquidity.max_spread_pct": self.max_spread_pct,
             "liquidity.require_limit_orders": True,

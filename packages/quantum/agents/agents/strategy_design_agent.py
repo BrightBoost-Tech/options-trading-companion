@@ -11,6 +11,31 @@ class StrategyDesignAgent(BaseQuantAgent):
     def id(self) -> str:
         return "strategy_design"
 
+    def _normalize_strategy(self, strategy_name: str) -> str:
+        """
+        Normalizes human-readable strategy names to internal snake_case keys.
+        """
+        s = str(strategy_name).upper().strip()
+
+        # Explicit mappings
+        mapping = {
+            "IRON CONDOR": "iron_condor",
+            "LONG CALL": "long_call",
+            "LONG PUT": "long_put",
+            "CREDIT PUT SPREAD": "credit_put_spread",
+            "CREDIT CALL SPREAD": "credit_call_spread",
+            "DEBIT CALL SPREAD": "debit_call_spread",
+            "DEBIT PUT SPREAD": "debit_put_spread",
+            "CASH": "cash",
+            "HOLD": "cash"
+        }
+
+        if s in mapping:
+            return mapping[s]
+
+        # Fallback normalization
+        return s.lower().replace(" ", "_")
+
     def evaluate(self, context: Dict[str, Any]) -> AgentSignal:
         """
         Context inputs:
@@ -19,10 +44,15 @@ class StrategyDesignAgent(BaseQuantAgent):
         - iv_rank: float (0-100)
         - banned_strategies: List[str] (optional)
         """
-        legacy_strategy = str(context.get("legacy_strategy", "")).upper()
+        raw_legacy = context.get("legacy_strategy", "")
+        legacy_strategy = self._normalize_strategy(raw_legacy)
+
         effective_regime = str(context.get("effective_regime", "NEUTRAL")).upper()
         iv_rank = float(context.get("iv_rank", 50.0))
-        banned_strategies = context.get("banned_strategies", []) or []
+
+        # Normalize banned strategies
+        raw_banned = context.get("banned_strategies", []) or []
+        banned_strategies = [self._normalize_strategy(s) for s in raw_banned]
 
         # Default: stick to legacy
         recommended = legacy_strategy
@@ -34,21 +64,21 @@ class StrategyDesignAgent(BaseQuantAgent):
 
         # 1. SHOCK Regime Check
         if "SHOCK" in effective_regime:
-            if "CONDOR" in legacy_strategy or "CREDIT" in legacy_strategy:
+            if "condor" in legacy_strategy or "credit" in legacy_strategy:
                 # Override to CASH (Safety)
-                recommended = "CASH"
+                recommended = "cash"
                 override = True
-                reasons.append(f"Regime is SHOCK: Overriding {legacy_strategy} to CASH/HOLD")
+                reasons.append(f"Regime is SHOCK: Overriding {legacy_strategy} to cash")
                 score = 100.0 # High confidence in safety override
 
         # 2. CHOP Regime Check
         # "If effective_regime includes 'CHOP' and legacy is long premium -> override to defined-risk credit (or CASH)"
         elif "CHOP" in effective_regime:
-            is_long_premium = "DEBIT" in legacy_strategy or "LONG" in legacy_strategy or "BUY" in legacy_strategy
+            is_long_premium = "debit" in legacy_strategy or "long" in legacy_strategy or "buy" in legacy_strategy
             if is_long_premium:
                 # Override to defined-risk credit or CASH
                 # Let's verify we aren't banning credit spreads
-                if "CREDIT SPREAD" not in banned_strategies:
+                if "credit_spread" not in banned_strategies and "iron_condor" not in banned_strategies:
                      # Attempt to switch to Credit Spread (neutral/sold)
                      # But which direction? CHOP implies mean reversion.
                      # If legacy was Long Call -> Short Put Spread (Bullish)?
@@ -56,37 +86,37 @@ class StrategyDesignAgent(BaseQuantAgent):
                      # Prompt says "defined-risk credit variant".
                      # Actually, if we are chopping, directional bets are risky.
                      # Maybe Iron Condor?
-                     recommended = "IRON CONDOR"
+                     recommended = "iron_condor"
                      override = True
-                     reasons.append(f"Regime is CHOP: Overriding Long Premium to IRON CONDOR")
+                     reasons.append(f"Regime is CHOP: Overriding Long Premium to iron_condor")
                 else:
-                     recommended = "CASH"
+                     recommended = "cash"
                      override = True
-                     reasons.append("Regime is CHOP & Credit Banned: Overriding to CASH")
+                     reasons.append("Regime is CHOP & Credit Banned: Overriding to cash")
 
         # 3. High IV Rank Check
         # "If iv_rank high (>=60) and legacy is long premium -> override to defined-risk credit variant (reduce vega bleed)"
         if iv_rank >= 60.0:
-            is_long_premium = "DEBIT" in legacy_strategy or "LONG" in legacy_strategy or "BUY" in legacy_strategy
+            is_long_premium = "debit" in legacy_strategy or "long" in legacy_strategy or "buy" in legacy_strategy
 
             # Note: If we already overrode to CASH or CONDOR above, we might skip this or refine it.
             # If recommended is already CASH, don't change it back.
-            if recommended != "CASH" and is_long_premium:
+            if recommended != "cash" and is_long_premium:
                  # Override to Credit
                  # Long Call -> Bull Put Spread
                  # Long Put -> Bear Call Spread
 
                  new_strat = None
-                 if "CALL" in legacy_strategy:
-                     new_strat = "CREDIT PUT SPREAD" # Bullish
-                 elif "PUT" in legacy_strategy:
-                     new_strat = "CREDIT CALL SPREAD" # Bearish
+                 if "call" in legacy_strategy:
+                     new_strat = "credit_put_spread" # Bullish
+                 elif "put" in legacy_strategy:
+                     new_strat = "credit_call_spread" # Bearish
 
                  if new_strat and new_strat not in banned_strategies:
                      recommended = new_strat
                      override = True
                      reasons.append(f"High IV ({iv_rank}): Overriding Long Premium to {new_strat}")
-                 elif "IRON CONDOR" not in banned_strategies and "CONDOR" not in legacy_strategy:
+                 elif "iron_condor" not in banned_strategies and "condor" not in legacy_strategy:
                      # Fallback to Condor if directional credit blocked?
                      # Or just CASH
                      pass
@@ -96,10 +126,12 @@ class StrategyDesignAgent(BaseQuantAgent):
         # Note: We check normalized strings.
         # "CREDIT SPREAD" might cover "CREDIT PUT SPREAD" depending on policy implementation.
         # Here we do a simple check.
-        if recommended in banned_strategies:
-             recommended = "CASH"
+
+        # FIX: CASH must never be treated as "banned"
+        if recommended != "cash" and recommended in banned_strategies:
+             recommended = "cash"
              override = True
-             reasons.append(f"Strategy {recommended} is Banned: Defaulting to CASH")
+             reasons.append(f"Strategy {recommended} is Banned: Defaulting to cash")
 
         # Constraints payload
         constraints = {
@@ -109,7 +141,7 @@ class StrategyDesignAgent(BaseQuantAgent):
             "strategy.require_defined_risk": True # Always default to defined risk for agents
         }
 
-        if recommended == "CASH" or recommended == "HOLD":
+        if recommended == "cash" or recommended == "hold":
             # If we recommend CASH, that's effectively a veto on the *legacy* trade,
             # or a successful signal for "Do Nothing".
             # In the scanner context, returning "HOLD" strategy usually results in `None` candidate.

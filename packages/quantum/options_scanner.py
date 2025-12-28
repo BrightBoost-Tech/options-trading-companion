@@ -660,6 +660,7 @@ def scan_for_opportunities(
             try:
                 universe = universe_service.get_scan_candidates(limit=30)
                 symbols = [u['symbol'] for u in universe]
+                # Prefill from Universe if available
                 earnings_map = {u["symbol"]: u.get("earnings_date") for u in universe}
             except Exception as e:
                 print(f"[Scanner] UniverseService failed: {e}. Using fallback.")
@@ -672,6 +673,23 @@ def scan_for_opportunities(
         symbols = symbols[:SCANNER_LIMIT_DEV]
 
     print(f"[Scanner] Processing {len(symbols)} symbols...")
+
+    # Enrich Earnings Map via Service (Batch)
+    try:
+        # Find symbols missing earnings in Universe map
+        missing_earnings = [s for s in symbols if not earnings_map.get(s)]
+        if missing_earnings:
+             logger.info(f"[Scanner] Fetching earnings for {len(missing_earnings)} symbols...")
+             fetched_map = earnings_service.get_earnings_map(missing_earnings)
+
+             # Merge into main map (convert date objects to string if needed, or keep as obj)
+             # Note: Universe map has strings (from DB), Service returns date objects.
+             # We unify to date objects or strings? Scanner logic below handles both.
+             # But let's keep it consistent if possible.
+             for s, d in fetched_map.items():
+                 earnings_map[s] = d # Store date object directly, logic handles it.
+    except Exception as e:
+        logger.warning(f"[Scanner] Earnings batch fetch failed: {e}")
 
     # 2. Compute Global Regime Snapshot ONCE
     if global_snapshot is None:
@@ -1141,14 +1159,8 @@ def scan_for_opportunities(
             # --- Earnings Awareness Logic ---
             earnings_val = earnings_map.get(symbol)
 
-            # Fallback: If not in map (from Universe), fetch using service
-            if not earnings_val:
-                 # Note: This is an extra call if missed, but cached inside service.
-                 # Optimization: Could preload all missing earnings in a batch if API supported it.
-                 # For now, per-symbol fallback is safe due to caching.
-                 earnings_dt_fetched = earnings_service.get_earnings_date(symbol)
-                 if earnings_dt_fetched:
-                     earnings_val = earnings_dt_fetched.isoformat()
+            # Note: No fallback fetch here anymore to avoid N+1.
+            # We rely on the batch fetch done at start.
 
             days_to_earnings = None
             earnings_risk = False

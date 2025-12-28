@@ -10,6 +10,14 @@ class RegimeState(str, Enum):
     REBOUND = "rebound"
     CHOP = "chop"
 
+class StrategyType(str, Enum):
+    SHORT_PUT_CREDIT_SPREAD = "short_put_credit_spread"
+    SHORT_CALL_CREDIT_SPREAD = "short_call_credit_spread"
+    IRON_CONDOR = "iron_condor"
+    LONG_CALL = "long_call"
+    LONG_PUT = "long_put"
+    UNKNOWN = "unknown"
+
 class UnifiedScoreComponent(BaseModel):
     ev: float
     execution_cost: float

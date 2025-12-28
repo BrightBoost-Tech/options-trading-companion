@@ -24,8 +24,91 @@ from packages.quantum.analytics.guardrails import earnings_week_penalty
 SCANNER_LIMIT_DEV = int(os.getenv("SCANNER_LIMIT_DEV", "40")) # Limit universe in dev
 SCANNER_MIN_DTE = 25
 SCANNER_MAX_DTE = 45
+QUANT_AGENTS_ENABLED = os.getenv("QUANT_AGENTS_ENABLED", "false").lower() == "true"
 
 logger = logging.getLogger(__name__)
+
+# --- Quant Agents v3 Local Definitions ---
+
+class LiquidityAgent:
+    """
+    Guardrail agent that inspects bid/ask spreads and volume/OI (if available)
+    to veto trades that are likely to suffer from high slippage or difficult execution.
+    """
+    def evaluate(self, candidate: Dict[str, Any]) -> Dict[str, Any]:
+        signal = {
+            "agent": "LiquidityAgent",
+            "score": 1.0,
+            "status": "pass",
+            "reasons": [],
+            "veto": False
+        }
+
+        legs = candidate.get("legs", [])
+        if not legs:
+            signal["status"] = "neutral"
+            return signal
+
+        max_spread_ratio = 0.0
+
+        for leg in legs:
+            bid = leg.get("bid")
+            ask = leg.get("ask")
+            if bid and ask and float(bid) > 0:
+                width = float(ask) - float(bid)
+                mid = (float(bid) + float(ask)) / 2.0
+                ratio = width / mid if mid > 0 else 1.0
+
+                if ratio > max_spread_ratio:
+                    max_spread_ratio = ratio
+
+                if ratio > 0.20: # 20% spread is very wide
+                    pass # Just logging internally, handled by max ratio check
+
+        # Veto logic
+        if max_spread_ratio > 0.25:
+            signal["veto"] = True
+            signal["score"] = 0.0
+            signal["status"] = "veto"
+            signal["reasons"].append(f"Max leg spread {max_spread_ratio:.1%} exceeds 25%")
+        elif max_spread_ratio > 0.15:
+             signal["score"] = 0.5
+             signal["status"] = "warning"
+             signal["reasons"].append(f"High spread {max_spread_ratio:.1%}")
+
+        return signal
+
+class EventRiskAgent:
+    """
+    Guardrail agent that checks for binary events (Earnings) that could cause
+    outsized moves or volatility crush against the trade hypothesis.
+    """
+    def evaluate(self, candidate: Dict[str, Any]) -> Dict[str, Any]:
+        signal = {
+            "agent": "EventRiskAgent",
+            "score": 1.0,
+            "status": "pass",
+            "reasons": [],
+            "veto": False
+        }
+
+        # Check earnings
+        days = candidate.get("days_to_earnings")
+        if days is not None:
+            # Veto if earnings < 2 days (unless strategy is explicitly designed for it, which scanner isn't typically)
+            if days <= 2:
+                signal["veto"] = True
+                signal["score"] = 0.0
+                signal["status"] = "veto"
+                signal["reasons"].append(f"Earnings in {days} days (High Risk)")
+            elif days <= 7:
+                signal["score"] = 0.4
+                signal["status"] = "warning"
+                signal["reasons"].append(f"Earnings in {days} days")
+
+        return signal
+
+# ----------------------------------------
 
 def _select_best_expiry_chain(chain: List[Dict[str, Any]], target_dte: int = 35) -> tuple[Optional[str], List[Dict[str, Any]]]:
     if not chain:
@@ -1029,97 +1112,6 @@ def scan_for_opportunities(
                 )
                 total_ev = ev_obj.expected_value
 
-            # G. Compute Net EV & Risk Primitives
-            max_loss_contract = 0.0
-            max_profit_contract = 0.0
-            collateral_contract = 0.0
-            max_loss_per_contract = 0.0
-            collateral_per_contract = 0.0
-
-            # Net Delta (shares equiv) and Vega (contract total)
-            # Vega in legs is usually per share. Multiplying by 100 gives contract exposure.
-            net_delta_contract = sum((l['delta'] if l['side']=='buy' else -l['delta']) for l in legs) * 100
-            net_vega_contract = sum((l['vega'] if l['side']=='buy' else -l['vega']) for l in legs) * 100
-
-            pricing_mode = "exact"
-            data_quality = "realtime"
-
-            # Check for degraded data (missing premiums)
-            if any((l.get('premium') or 0) <= 0 for l in legs):
-                 data_quality = "degraded"
-                 pricing_mode = "approximate"
-
-            # Risk Primitives (New Helper handles 4 legs now)
-            # EV Calculation
-            if len(legs) == 4 and ("condor" in strategy_key or "iron_condor" in strategy_key):
-                 # Iron Condor EV
-                 credit_share = abs(total_cost)
-
-                 # Identify legs for EV params
-                 calls = sorted([l for l in legs if l["type"] == "call"], key=lambda x: x["strike"])
-                 puts = sorted([l for l in legs if l["type"] == "put"], key=lambda x: x["strike"])
-
-                 if len(calls) == 2 and len(puts) == 2:
-                     # calls[0] is Short Call (Lower K), calls[1] is Long Call (Higher K)
-                     short_call = calls[0]
-                     long_call = calls[1]
-
-                     # puts[0] is Long Put (Lower K), puts[1] is Short Put (Higher K)
-                     long_put = puts[0]
-                     short_put = puts[1]
-
-                     width_put = abs(short_put["strike"] - long_put["strike"])
-                     width_call = abs(long_call["strike"] - short_call["strike"])
-
-                     ev_obj = calculate_condor_ev(
-                        credit=credit_share,
-                        width_put=width_put,
-                        width_call=width_call,
-                        delta_short_put=short_put.get("delta", 0),
-                        delta_short_call=short_call.get("delta", 0)
-                     )
-                     total_ev = ev_obj.expected_value
-                 else:
-                     total_ev = 0.0
-
-            elif len(legs) == 2:
-                long_leg = next((l for l in legs if l['side'] == 'buy'), None)
-                short_leg = next((l for l in legs if l['side'] == 'sell'), None)
-                if long_leg and short_leg:
-                    width = abs(long_leg['strike'] - short_leg['strike'])
-                    st_type = "debit_spread" if total_cost > 0 else "credit_spread"
-
-                    if st_type == "credit_spread":
-                        delta_for_ev = abs(float(short_leg.get("delta") or 0.0))
-                    else:
-                        delta_for_ev = abs(float(long_leg.get("delta") or 0.0))
-
-                    ev_obj = calculate_ev(
-                        premium=abs(total_cost),
-                        strike=long_leg['strike'],
-                        current_price=current_price,
-                        delta=delta_for_ev,
-                        strategy=st_type,
-                        width=width
-                    )
-                    total_ev = ev_obj.expected_value
-                else:
-                    total_ev = 0
-            elif len(legs) == 1:
-                leg = legs[0]
-                st_type = _map_single_leg_strategy(leg)
-                if not st_type:
-                    return None
-
-                ev_obj = calculate_ev(
-                    premium=leg['premium'],
-                    strike=leg['strike'],
-                    current_price=current_price,
-                    delta=leg['delta'],
-                    strategy=st_type
-                )
-                total_ev = ev_obj.expected_value
-
             # Risk Primitives (New Helper)
             primitives = _compute_risk_primitives_usd(legs, total_cost, current_price)
             max_loss_contract = primitives["max_loss_per_contract"]
@@ -1279,6 +1271,35 @@ def scan_for_opportunities(
             else:
                 candidate_dict["probability_of_profit"] = _estimate_probability_of_profit(candidate_dict, gs_dict)
                 candidate_dict["probability_of_profit_source"] = "score_fallback"
+
+            # --- QUANT AGENTS V3 INTEGRATION ---
+            if QUANT_AGENTS_ENABLED:
+                agents = [LiquidityAgent(), EventRiskAgent()]
+                agent_signals = {}
+                agent_summary = {
+                    "overall_score": 1.0,
+                    "decision": "pass",
+                    "top_reasons": [],
+                    "active_constraints": [],
+                    "vetoed": False
+                }
+
+                for agent in agents:
+                    res = agent.evaluate(candidate_dict)
+                    agent_signals[res["agent"]] = res
+
+                    if res.get("veto"):
+                        agent_summary["vetoed"] = True
+                        agent_summary["decision"] = "reject"
+
+                    if res["reasons"]:
+                        agent_summary["top_reasons"].extend(res["reasons"])
+
+                if agent_summary["vetoed"]:
+                    return None
+
+                candidate_dict["agent_signals"] = agent_signals
+                candidate_dict["agent_summary"] = agent_summary
 
             return candidate_dict
 

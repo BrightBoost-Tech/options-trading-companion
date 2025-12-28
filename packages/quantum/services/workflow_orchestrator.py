@@ -680,6 +680,13 @@ async def run_midday_cycle(supabase: Client, user_id: str):
                 "features_hash": ctx.features_hash,
                 "regime": ctx.regime
             }
+
+            # --- AGENT FIELDS ---
+            if "agent_signals" in cand:
+                suggestion["agent_signals"] = cand["agent_signals"]
+            if "agent_summary" in cand:
+                suggestion["agent_summary"] = cand["agent_summary"]
+
             suggestions.append(suggestion)
 
             props = {"ev": ev, "score": cand.get("score")}
@@ -729,11 +736,33 @@ async def run_midday_cycle(supabase: Client, user_id: str):
                 clean_s = {k: v for k, v in s.items() if k != 'internal_cand'}
                 upserts.append(clean_s)
 
-            supabase.table(TRADE_SUGGESTIONS_TABLE).upsert(
-                upserts,
-                on_conflict="user_id,window,cycle_date,ticker,strategy"
-            ).execute()
-            print(f"Upserted midday suggestions: {inserts} inserted, {updates} updated.")
+            # Try to upsert with agent fields
+            try:
+                supabase.table(TRADE_SUGGESTIONS_TABLE).upsert(
+                    upserts,
+                    on_conflict="user_id,window,cycle_date,ticker,strategy"
+                ).execute()
+                print(f"Upserted midday suggestions: {inserts} inserted, {updates} updated.")
+            except Exception as e:
+                # Fallback: remove agent fields if upsert failed (likely missing columns)
+                if "agent_signals" in str(e) or "agent_summary" in str(e) or "column" in str(e).lower():
+                    print(f"Upsert failed, likely due to missing agent columns. Retrying without them. Error: {e}")
+                    fallback_upserts = []
+                    for u in upserts:
+                        # Create a copy to avoid modifying original
+                        u_clean = u.copy()
+                        u_clean.pop("agent_signals", None)
+                        u_clean.pop("agent_summary", None)
+                        fallback_upserts.append(u_clean)
+
+                    supabase.table(TRADE_SUGGESTIONS_TABLE).upsert(
+                        fallback_upserts,
+                        on_conflict="user_id,window,cycle_date,ticker,strategy"
+                    ).execute()
+                    print(f"Upserted midday suggestions (fallback): {inserts} inserted, {updates} updated.")
+                else:
+                    raise e
+
         except Exception as e:
             print(f"Error inserting midday suggestions: {e}")
 

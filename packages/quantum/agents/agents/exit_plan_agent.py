@@ -54,7 +54,17 @@ class ExitPlanAgent(BaseQuantAgent):
         else:
             reasons.append(f"Unknown strategy {strategy_type}, applying default template")
 
+        plan_text = f"Profit Target: {profit_take_pct:.0%}, Stop Loss: {stop_loss_pct:.0%}, Time Stop: {time_stop_days} days."
+
+        constraints = {
+            "exit.profit_take_pct": profit_take_pct,
+            "exit.stop_loss_pct": stop_loss_pct,
+            "exit.time_stop_days": time_stop_days,
+            "exit.plan_text": plan_text
+        }
+
         exit_plan = {
+            "constraints": constraints,
             "exit.profit_take_pct": profit_take_pct,
             "exit.stop_loss_pct": stop_loss_pct,
             "exit.time_stop_days": time_stop_days

@@ -13,6 +13,12 @@ class TestVolSurfaceAgent(unittest.TestCase):
         self.assertEqual(signal.score, 100.0)
         self.assertEqual(signal.metadata["vol.bias"], "sell_premium")
         self.assertTrue(signal.metadata["vol.require_defined_risk"])
+
+        # Check constraints wrapper
+        self.assertIn("constraints", signal.metadata)
+        self.assertEqual(signal.metadata["constraints"]["vol.bias"], "sell_premium")
+        self.assertTrue(signal.metadata["constraints"]["vol.require_defined_risk"])
+
         self.assertIn("High IV Rank (75.0) detected", signal.reasons)
 
     def test_low_iv_rank(self):

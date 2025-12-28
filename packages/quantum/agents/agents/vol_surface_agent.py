@@ -50,6 +50,12 @@ class VolSurfaceAgent(BaseQuantAgent):
                 metadata["vol.bias"] = "neutral"
                 metadata["vol.require_defined_risk"] = False
 
+        # Add constraints wrapper
+        metadata["constraints"] = {
+            "vol.bias": metadata.get("vol.bias", "neutral"),
+            "vol.require_defined_risk": metadata.get("vol.require_defined_risk", False)
+        }
+
         return AgentSignal(
             agent_id=self.id,
             score=score,

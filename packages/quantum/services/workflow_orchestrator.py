@@ -17,6 +17,7 @@ from packages.quantum.services.risk_budget_engine import RiskBudgetEngine
 from packages.quantum.services.analytics.small_account_compounder import SmallAccountCompounder, CapitalTier, SizingConfig
 from packages.quantum.analytics.capital_scan_policy import CapitalScanPolicy
 from packages.quantum.agents.agents.sizing_agent import SizingAgent
+from packages.quantum.agents.agents.exit_plan_agent import ExitPlanAgent
 
 # Importing existing logic
 from packages.quantum.options_scanner import scan_for_opportunities
@@ -756,6 +757,36 @@ async def run_midday_cycle(supabase: Client, user_id: str):
             except Exception as e:
                 print(f"[Midday] SizingAgent failed: {e}. Falling back to classic sizing.")
                 # Fallback to calculated above
+
+            # --- EXIT PLAN AGENT ---
+            try:
+                exit_agent = ExitPlanAgent()
+                exit_ctx = {
+                    "strategy_type": strategy
+                }
+                exit_signal = exit_agent.evaluate(exit_ctx)
+
+                # Store signal
+                if "agent_signals" not in cand:
+                    cand["agent_signals"] = {}
+                cand["agent_signals"]["exit_plan"] = exit_signal.model_dump()
+
+                # Update Summary Constraints
+                if "agent_summary" not in cand:
+                    # If SizingAgent didn't run or failed, init
+                    cand["agent_summary"] = {"overall_score": exit_signal.score, "active_constraints": {}}
+
+                if "active_constraints" not in cand["agent_summary"]:
+                    cand["agent_summary"]["active_constraints"] = {}
+
+                # Merge exit plan metadata into active_constraints (top-level merge as per requirements)
+                # ExitPlanAgent returns metadata={ "exit.profit_take_pct": ... }
+                cand["agent_summary"]["active_constraints"].update(exit_signal.metadata)
+
+                print(f"[Midday] ExitPlanAgent applied: {exit_signal.metadata}")
+
+            except Exception as e:
+                print(f"[Midday] ExitPlanAgent failed: {e}")
 
         if final_risk_dollars <= 0:
             print(f"[Midday] Skipped {ticker}: Risk budget exhausted for trade (Remaining: ${remaining_global:.2f})")

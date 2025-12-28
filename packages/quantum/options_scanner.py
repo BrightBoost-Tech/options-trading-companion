@@ -23,6 +23,8 @@ from packages.quantum.analytics.guardrails import earnings_week_penalty
 from packages.quantum.services.earnings_calendar_service import EarningsCalendarService
 from packages.quantum.agents.runner import AgentRunner
 from packages.quantum.agents.agents.strategy_design_agent import StrategyDesignAgent
+from packages.quantum.agents.agents.liquidity_agent import LiquidityAgent
+from packages.quantum.agents.agents.event_risk_agent import EventRiskAgent
 
 # Configuration
 SCANNER_LIMIT_DEV = int(os.getenv("SCANNER_LIMIT_DEV", "40")) # Limit universe in dev
@@ -31,88 +33,6 @@ SCANNER_MAX_DTE = 45
 QUANT_AGENTS_ENABLED = os.getenv("QUANT_AGENTS_ENABLED", "false").lower() == "true"
 
 logger = logging.getLogger(__name__)
-
-# --- Quant Agents v3 Local Definitions ---
-
-class LiquidityAgent:
-    """
-    Guardrail agent that inspects bid/ask spreads and volume/OI (if available)
-    to veto trades that are likely to suffer from high slippage or difficult execution.
-    """
-    def evaluate(self, candidate: Dict[str, Any]) -> Dict[str, Any]:
-        signal = {
-            "agent": "LiquidityAgent",
-            "score": 1.0,
-            "status": "pass",
-            "reasons": [],
-            "veto": False
-        }
-
-        legs = candidate.get("legs", [])
-        if not legs:
-            signal["status"] = "neutral"
-            return signal
-
-        max_spread_ratio = 0.0
-
-        for leg in legs:
-            bid = leg.get("bid")
-            ask = leg.get("ask")
-            if bid and ask and float(bid) > 0:
-                width = float(ask) - float(bid)
-                mid = (float(bid) + float(ask)) / 2.0
-                ratio = width / mid if mid > 0 else 1.0
-
-                if ratio > max_spread_ratio:
-                    max_spread_ratio = ratio
-
-                if ratio > 0.20: # 20% spread is very wide
-                    pass # Just logging internally, handled by max ratio check
-
-        # Veto logic
-        if max_spread_ratio > 0.25:
-            signal["veto"] = True
-            signal["score"] = 0.0
-            signal["status"] = "veto"
-            signal["reasons"].append(f"Max leg spread {max_spread_ratio:.1%} exceeds 25%")
-        elif max_spread_ratio > 0.15:
-             signal["score"] = 0.5
-             signal["status"] = "warning"
-             signal["reasons"].append(f"High spread {max_spread_ratio:.1%}")
-
-        return signal
-
-class EventRiskAgent:
-    """
-    Guardrail agent that checks for binary events (Earnings) that could cause
-    outsized moves or volatility crush against the trade hypothesis.
-    """
-    def evaluate(self, candidate: Dict[str, Any]) -> Dict[str, Any]:
-        signal = {
-            "agent": "EventRiskAgent",
-            "score": 1.0,
-            "status": "pass",
-            "reasons": [],
-            "veto": False
-        }
-
-        # Check earnings
-        days = candidate.get("days_to_earnings")
-        if days is not None:
-            # Veto if earnings < 2 days (unless strategy is explicitly designed for it, which scanner isn't typically)
-            if days <= 2:
-                signal["veto"] = True
-                signal["score"] = 0.0
-                signal["status"] = "veto"
-                signal["reasons"].append(f"Earnings in {days} days (High Risk)")
-            elif days <= 7:
-                signal["score"] = 0.4
-                signal["status"] = "warning"
-                signal["reasons"].append(f"Earnings in {days} days")
-
-        return signal
-
-# ----------------------------------------
 
 def _select_best_expiry_chain(chain: List[Dict[str, Any]], target_dte: int = 35) -> tuple[Optional[str], List[Dict[str, Any]]]:
     if not chain:
@@ -1325,32 +1245,31 @@ def scan_for_opportunities(
 
             # --- QUANT AGENTS V3 INTEGRATION ---
             if QUANT_AGENTS_ENABLED:
-                agents = [LiquidityAgent(), EventRiskAgent()]
-                agent_signals = {}
-                agent_summary = {
-                    "overall_score": 1.0,
-                    "decision": "pass",
-                    "top_reasons": [],
-                    "active_constraints": [],
-                    "vetoed": False
-                }
+                try:
+                    # Build Agent Context
+                    agent_context = candidate_dict.copy()
+                    agent_context.update({
+                        "quote": quote,
+                        "iv_rank": iv_rank,
+                        "effective_regime": effective_regime_state.value,
+                        "earnings_map": earnings_map,
+                        "timestamp": datetime.now().isoformat()
+                    })
 
-                for agent in agents:
-                    res = agent.evaluate(candidate_dict)
-                    agent_signals[res["agent"]] = res
+                    # Run Canonical Agents
+                    # Note: StrategyDesignAgent runs earlier to guide selection
+                    agents = [LiquidityAgent(), EventRiskAgent()]
 
-                    if res.get("veto"):
-                        agent_summary["vetoed"] = True
-                        agent_summary["decision"] = "reject"
+                    agent_signals, agent_summary = AgentRunner.run_agents(agent_context, agents)
 
-                    if res["reasons"]:
-                        agent_summary["top_reasons"].extend(res["reasons"])
+                    if agent_summary.get("vetoed"):
+                        return None
 
-                if agent_summary["vetoed"]:
-                    return None
+                    candidate_dict["agent_signals"] = agent_signals
+                    candidate_dict["agent_summary"] = agent_summary
 
-                candidate_dict["agent_signals"] = agent_signals
-                candidate_dict["agent_summary"] = agent_summary
+                except Exception as e:
+                    print(f"[Scanner] Agent execution error for {symbol}: {e}")
 
             return candidate_dict
 

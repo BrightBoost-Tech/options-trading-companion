@@ -1,16 +1,7 @@
-# Bolt's Journal ⚡
+## 2025-05-23 - [Scalar vs Array Performance]
+**Learning:** `np.array(list)` creates a full copy of the data, which is O(N). When calculating rolling windows or stats on a subset of data (like SMA20/50 from a list of 1000 items), slicing the list first (`list[-50:]`) is O(K) and significantly faster than converting the entire list to an array first.
+**Action:** Always slice Python lists to the minimum required window *before* passing them to NumPy functions or converting them to arrays.
 
-## 2024-05-22 - [Initial Setup]
-**Learning:** Journal was missing. Created it to track critical performance learnings.
-**Action:** Always check for existence before reading.
-
-## 2025-02-23 - [Parallel I/O Optimization]
-**Learning:** When optimizing synchronous I/O bound tasks in Python (like API scanners), `ThreadPoolExecutor` + `requests.Session` is a powerful combination that avoids the complexity of full `asyncio` rewrites while delivering similar performance gains for network-heavy operations.
-**Action:** Look for other synchronous loops over network calls (e.g., backtesting, data syncing) to apply this pattern.
-
-## 2025-02-23 - [Vectorized Rolling Windows]
-**Learning:** Python loops for rolling window calculations on NumPy arrays are a major bottleneck ($O(N \cdot W)$). `numpy.lib.stride_tricks.sliding_window_view` provides a zero-copy view that allows full vectorization of rolling statistics (like `std`) along an axis, yielding ~96x speedup over loops and ~2x speedup over `pandas.Series.rolling` for simple cases.
-**Action:** Replace manual loop-based sliding windows with `sliding_window_view` wherever possible in analytics code.
-## 2025-05-22 - [Vectorized Sliding Window Optimization]
-**Learning:** When calculating rolling statistics (like SMA, RSI, Volatility) on large datasets in Python/NumPy, converting the entire list to a NumPy array is a major bottleneck (O(N)). Slicing the Python list *before* conversion (O(K), where K is the window size) drastically reduces overhead for sequential calls.
-**Action:** Always slice lists to the required window size before passing them to NumPy for rolling calculations in hot loops.
+## 2025-05-23 - [Scalar Math Optimization]
+**Learning:** For scalar floating-point operations, Python's built-in `math` module (e.g., `math.exp`) and `max/min` are significantly faster (2-10x) than NumPy's counterparts (`np.exp`, `np.clip`) because they avoid the overhead of type checking and array dispatch.
+**Action:** Use `math.*` and Python built-ins for scalar calculations inside hot loops; reserve NumPy for actual vector operations.

@@ -145,6 +145,22 @@ class OutcomeAggregator:
             if inference_log:
                 total_equity = inference_log.get("inputs_snapshot", {}).get("total_equity")
 
+            # Fallback to portfolio_snapshots if inference equity missing
+            if total_equity is None:
+                user_id = decision.get("user_id")
+                if user_id:
+                    try:
+                        res = self.supabase.table("portfolio_snapshots") \
+                            .select("total_equity") \
+                            .eq("user_id", user_id) \
+                            .order("created_at", desc=True) \
+                            .limit(1) \
+                            .execute()
+                        if res.data and res.data[0].get("total_equity") is not None:
+                            total_equity = float(res.data[0]["total_equity"])
+                    except Exception:
+                        pass
+
             # Strict equity check
             if total_equity is None:
                 # Fallback: check db via CashService?

@@ -2,8 +2,9 @@ import uuid
 from datetime import datetime, timedelta
 from typing import List, Dict, Any, Optional, Tuple
 
+import numpy as np
 from supabase import Client
-from packages.quantum.market_data import PolygonService
+from packages.quantum.market_data import PolygonService, extract_underlying_symbol
 from packages.quantum.analytics.surprise import compute_surprise
 from packages.quantum.nested_logging import log_outcome
 from packages.quantum.services.options_utils import get_contract_multiplier
@@ -179,25 +180,28 @@ class OutcomeAggregator:
 
         # --- Surprise Calculation ---
         surprise = 0.0
+
+        # Handle partial data for volatility
+        # If realized_vol_1d is None, we mark as partial and default to 0.0 for logging,
+        # but the attribution type signals the data quality issue.
+        safe_realized_vol = realized_vol_1d if realized_vol_1d is not None else 0.0
+
+        if realized_vol_1d is None and attribution_type == "execution":
+            attribution_type = "partial_execution"
+
         if inference_log:
             sigma_pred_matrix = inference_log.get("predicted_sigma", {}).get("sigma_matrix", [])
             avg_predicted_vol = 0.0
             if sigma_pred_matrix:
-                import numpy as np
                 arr = np.array(sigma_pred_matrix)
                 if arr.shape[0] > 0:
                     avg_predicted_vol = np.mean(np.sqrt(np.diag(arr)))
 
             sigma_pred_1d = avg_predicted_vol / 16.0 # Annualized to daily approx
 
-            # If realized_vol is 0 (e.g. from execution PnL where we don't track vol),
-            # we should be careful.
-            # If execution, we might not have 'realized_vol_1d' easily unless we track underlying.
-            # _calculate_execution_pnl now returns vol too (as 0.0 for now if not implemented)
-
             surprise = compute_surprise(
                 sigma_pred=sigma_pred_1d,
-                sigma_realized=realized_vol_1d,
+                sigma_realized=safe_realized_vol,
                 pnl_realized=realized_pnl_1d
             )
         else:
@@ -207,41 +211,59 @@ class OutcomeAggregator:
         log_outcome(
             trace_id=uuid.UUID(trace_id),
             realized_pl_1d=realized_pnl_1d,
-            realized_vol_1d=realized_vol_1d,
+            realized_vol_1d=safe_realized_vol,
             surprise_score=surprise,
             attribution_type=attribution_type,
             related_id=uuid.UUID(related_id) if related_id else None
         )
 
-    def _calculate_execution_pnl(self, executions: List[Dict]) -> Tuple[float, float]:
+    def _calculate_execution_pnl(self, executions: List[Dict]) -> Tuple[float, Optional[float]]:
         """
         Returns (pnl, vol).
-        Vol is hard to calc from just execution without more data, so returning 0.0 for now unless we look up underlying.
+        Computes PnL from option price marks and Vol from underlying returns.
+        Returns None for vol if underlying data is unavailable.
         """
         total_pnl = 0.0
-
-        # We can try to calc vol if we map execution symbol to underlying
-        # But for now, let's just get PnL right.
+        vols = []
+        processed_underlyings = set()
 
         for exc in executions:
             sym = exc["symbol"]
             qty = exc["quantity"]
             fill_price = exc["fill_price"]
+
+            # 1. PnL Calculation (using option/asset price)
             try:
                 hist = self.polygon_service.get_historical_prices(sym, days=5)
                 prices = hist.get("prices", [])
                 if len(prices) >= 1:
                     curr = prices[-1]
-                    # Robust multiplier check
                     multiplier = get_contract_multiplier(sym)
-
-                    # PnL = (Current - Fill) * Qty * Multiplier
-                    # If Short (qty < 0), logic holds: (Price went down) -> (Current < Fill) -> Negative Diff * Negative Qty -> Positive PnL
                     total_pnl += (curr - fill_price) * qty * multiplier
             except:
                 pass
 
-        return total_pnl, 0.0
+            # 2. Volatility Calculation (using underlying)
+            underlying = extract_underlying_symbol(sym)
+            if underlying not in processed_underlyings:
+                try:
+                    # Fetch slightly more history to ensure we have valid returns
+                    u_hist = self.polygon_service.get_historical_prices(underlying, days=10)
+                    u_returns = u_hist.get("returns", [])
+
+                    # Need at least a few data points for meaningful vol
+                    if len(u_returns) >= 3:
+                        vol_daily = np.std(u_returns)
+                        vols.append(vol_daily)
+                        processed_underlyings.add(underlying)
+                except:
+                    # Failed to get underlying data
+                    pass
+
+        # Aggregate Vol (average if multiple underlyings, usually just one)
+        avg_vol = float(np.mean(vols)) if vols else None
+
+        return total_pnl, avg_vol
 
     def _calculate_sim_pnl(self, weights: Dict[str, float], total_equity: float) -> Tuple[float, float]:
         """

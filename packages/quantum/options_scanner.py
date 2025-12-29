@@ -21,18 +21,12 @@ from packages.quantum.analytics.scoring import calculate_unified_score
 from packages.quantum.services.execution_service import ExecutionService
 from packages.quantum.analytics.guardrails import earnings_week_penalty
 from packages.quantum.services.earnings_calendar_service import EarningsCalendarService
-from packages.quantum.agents.runner import AgentRunner
-from packages.quantum.agents.agents.strategy_design_agent import StrategyDesignAgent
-from packages.quantum.agents.agents.liquidity_agent import LiquidityAgent
-from packages.quantum.agents.agents.event_risk_agent import EventRiskAgent
-from packages.quantum.agents.agents.regime_agent import RegimeAgent
-from packages.quantum.agents.agents.vol_surface_agent import VolSurfaceAgent
+from packages.quantum.agents.runner import AgentRunner, build_agent_pipeline
 
 # Configuration
 SCANNER_LIMIT_DEV = int(os.getenv("SCANNER_LIMIT_DEV", "40")) # Limit universe in dev
 SCANNER_MIN_DTE = 25
 SCANNER_MAX_DTE = 45
-QUANT_AGENTS_ENABLED = os.getenv("QUANT_AGENTS_ENABLED", "false").lower() == "true"
 
 logger = logging.getLogger(__name__)
 
@@ -856,10 +850,10 @@ def scan_for_opportunities(
             )
 
             # --- V3 Strategy Design Agent Override ---
-            if QUANT_AGENTS_ENABLED:
+            design_agents = build_agent_pipeline(phase="strategy_design")
+            if design_agents:
                 try:
                     # Use AgentRunner for consistency
-                    design_agent = StrategyDesignAgent()
                     agent_context = {
                         "legacy_strategy": suggestion["strategy"],
                         "effective_regime": effective_regime_state.value,
@@ -868,7 +862,7 @@ def scan_for_opportunities(
                     }
 
                     # Run via Runner
-                    _, summary = AgentRunner.run_agents(agent_context, [design_agent])
+                    _, summary = AgentRunner.run_agents(agent_context, design_agents)
 
                     # Check for override in active constraints
                     active_constraints = summary.get("active_constraints", {})
@@ -1262,7 +1256,8 @@ def scan_for_opportunities(
                 candidate_dict["probability_of_profit_source"] = "score_fallback"
 
             # --- QUANT AGENTS V3 INTEGRATION ---
-            if QUANT_AGENTS_ENABLED:
+            scanner_agents = build_agent_pipeline(phase="scanner")
+            if scanner_agents:
                 try:
                     # Build Agent Context
                     agent_context = candidate_dict.copy()
@@ -1276,14 +1271,7 @@ def scan_for_opportunities(
 
                     # Run Canonical Agents
                     # Note: StrategyDesignAgent runs earlier to guide selection
-                    agents = [
-                        LiquidityAgent(),
-                        EventRiskAgent(),
-                        RegimeAgent(),
-                        VolSurfaceAgent()
-                    ]
-
-                    agent_signals, agent_summary = AgentRunner.run_agents(agent_context, agents)
+                    agent_signals, agent_summary = AgentRunner.run_agents(agent_context, scanner_agents)
 
                     if agent_summary.get("vetoed"):
                         return None

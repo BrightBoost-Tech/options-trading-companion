@@ -256,12 +256,35 @@ export default function SuggestionTabs({
 
                    {/* Actions */}
                    <div className="flex gap-2 mt-1">
-                      <Button size="sm" className="w-full bg-indigo-600 hover:bg-indigo-700 text-white" disabled>
-                         Apply Rebalance
-                      </Button>
-                      <Button size="sm" variant="outline" className="w-full text-gray-600" disabled>
-                         Execute in Robinhood
-                      </Button>
+                      <TooltipProvider>
+                        <Tooltip>
+                          <TooltipTrigger asChild>
+                            <span className="w-full" tabIndex={0}>
+                              <Button size="sm" className="w-full bg-indigo-600 hover:bg-indigo-700 text-white pointer-events-none" disabled>
+                                 Apply Rebalance
+                              </Button>
+                            </span>
+                          </TooltipTrigger>
+                          <TooltipContent>
+                            <p>Automated execution coming soon</p>
+                          </TooltipContent>
+                        </Tooltip>
+                      </TooltipProvider>
+
+                      <TooltipProvider>
+                        <Tooltip>
+                          <TooltipTrigger asChild>
+                            <span className="w-full" tabIndex={0}>
+                              <Button size="sm" variant="outline" className="w-full text-gray-600 pointer-events-none" disabled>
+                                 Execute in Robinhood
+                              </Button>
+                            </span>
+                          </TooltipTrigger>
+                          <TooltipContent>
+                            <p>Integration pending</p>
+                          </TooltipContent>
+                        </Tooltip>
+                      </TooltipProvider>
                    </div>
                  </div>
                ))

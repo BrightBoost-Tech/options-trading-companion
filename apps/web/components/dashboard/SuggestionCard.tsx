@@ -15,7 +15,9 @@ interface SuggestionCardProps {
 }
 
 const SuggestionCard = ({ suggestion, onStage, onModify, onDismiss }: SuggestionCardProps) => {
-    const { order_json, score, metrics, iv_regime, iv_rank, delta_impact, theta_impact, staged, agent_summary } = suggestion;
+    const { order_json, score, metrics, iv_regime, iv_rank, delta_impact, theta_impact, staged } = suggestion;
+    // Cast to any to access optional agent_summary without changing global type
+    const agent_summary = (suggestion as any).agent_summary;
     const hasLoggedView = useRef(false);
     const displaySymbol = suggestion.display_symbol ?? suggestion.symbol ?? suggestion.ticker ?? '---';
     const exitPrice = typeof order_json?.limit_price === 'number'

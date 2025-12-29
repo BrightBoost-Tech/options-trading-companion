@@ -3,6 +3,8 @@ import re
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
+from packages.quantum.services.options_utils import get_contract_multiplier
+
 # --- Configuration Constants ---
 LOOKBACK_HOURS = 48
 SIZE_VIOLATION_FACTOR = 1.5  # If execution size > 1.5x suggested
@@ -60,8 +62,8 @@ def _calculate_notional_size(item: Dict[str, Any]) -> float:
         # Our `positions` table usually stores q, p.
         # Let's try to infer if it's an option.
         sym = item.get("symbol", "")
-        # Check for numeric option string (len > 6 and digits)
-        multiplier = 100 if len(sym) > 6 and any(c.isdigit() for c in sym) else 1
+        # Use canonical contract multiplier
+        multiplier = get_contract_multiplier(sym)
         return q * p * multiplier
 
     # 2. Suggestion
@@ -73,16 +75,24 @@ def _calculate_notional_size(item: Dict[str, Any]) -> float:
     # Check suggestion for option-ness
     strat = item.get("strategy", "").lower()
     ticker = item.get("ticker", "").lower()
+    sym = item.get("symbol", "")
 
-    is_option = (
-        "spread" in strat or
-        "call" in strat or
-        "put" in strat or
-        "option" in strat or
-        "call" in ticker or
-        "put" in ticker
-    )
-    multiplier = 100 if is_option else 1
+    # Try canonical multiplier first (if specific symbol provided)
+    multiplier = get_contract_multiplier(sym)
+
+    # If canonical returned 1 (equity), but strategy implies option, force 100
+    # (Suggestions often have underlying ticker as symbol but 'strategy' defines the option nature)
+    if multiplier == 1.0:
+        is_option_strategy = (
+            "spread" in strat or
+            "call" in strat or
+            "put" in strat or
+            "option" in strat or
+            "call" in ticker or
+            "put" in ticker
+        )
+        if is_option_strategy:
+            multiplier = 100.0
 
     return qty * price * multiplier
 

@@ -41,20 +41,31 @@ class SizingAgent(BaseQuantAgent):
         else:
             return m4_min, m4_max
 
-    def _extract_score(self, signals: Dict[str, Any], keys: list[str]) -> Optional[float]:
-        """Helper to extract score from signal dict or object for first matching key."""
+    def _extract_signal_data(self, signals: Dict[str, Any], keys: list[str]) -> tuple[Optional[float], bool]:
+        """Helper to extract (score, veto) from signal dict or object for first matching key."""
         for key in keys:
             signal = signals.get(key)
             if not signal:
                 continue
 
+            score = None
+            veto = False
+
             # If it's an AgentSignal object
             if hasattr(signal, "score"):
-                return float(signal.score)
+                score = float(signal.score)
+                veto = getattr(signal, "veto", False)
             # If it's a dict
-            if isinstance(signal, dict):
-                return float(signal.get("score", 50.0))
-        return None
+            elif isinstance(signal, dict):
+                score = float(signal.get("score", 50.0))
+                veto = bool(signal.get("veto", False))
+
+            if score is not None:
+                # Normalize 0-1 to 0-100
+                if -1.0 < score <= 1.0:
+                     score *= 100.0
+                return score, veto
+        return None, False
 
     def evaluate(self, context: Dict[str, Any]) -> AgentSignal:
         """
@@ -81,18 +92,33 @@ class SizingAgent(BaseQuantAgent):
         agent_signals = context.get("agent_signals", {})
 
         # Parse signals
-        # Prioritize keys: 'regime', 'vol', 'liquidity', 'event'/'event_risk'
-        regime_score = self._extract_score(agent_signals, ["regime", "regime_agent"])
-        vol_score = self._extract_score(agent_signals, ["vol", "volatility", "vol_agent"])
-        liquidity_score = self._extract_score(agent_signals, ["liquidity", "liquidity_agent"])
-        event_score = self._extract_score(agent_signals, ["event", "event_risk", "event_agent"])
+        regime_score, regime_veto = self._extract_signal_data(agent_signals, ["regime", "regime_agent", "regime_signal"])
+        vol_score, vol_veto = self._extract_signal_data(agent_signals, ["vol_surface", "vol", "volatility", "vol_agent"])
+        liquidity_score, liquidity_veto = self._extract_signal_data(agent_signals, ["liquidity", "liquidity_agent"])
+        event_score, event_veto = self._extract_signal_data(agent_signals, ["event_risk", "event", "event_risk_agent"])
+
+        reasons = []
+
+        # Check for vetoes
+        if regime_veto or vol_veto or liquidity_veto or event_veto:
+            return AgentSignal(
+                agent_id=self.id,
+                score=0.0,
+                veto=True,
+                reasons=["Vetoed by upstream agent (regime/vol/liquidity/event)"],
+                metadata={
+                    "constraints": {
+                        "sizing.recommended_contracts": 0,
+                        "sizing.target_risk_usd": 0.0
+                    }
+                }
+            )
 
         # Base factor from scanner score
         base_scale_factor = max(0.0, min(1.0, base_score / 100.0))
 
         # Apply Confluence Modifiers
         confluence_multiplier = 1.0
-        reasons = []
 
         # Scale UP: Regime + Vol alignment
         # Assuming high score in regime/vol means "favorable/safe" or "strong signal"

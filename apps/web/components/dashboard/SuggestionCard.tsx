@@ -1,21 +1,42 @@
 'use client';
 
-import React, { useEffect, useRef, memo } from 'react';
+import React, { useEffect, useRef, memo, useState } from 'react';
 import { Card, CardContent } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { Suggestion } from '@/lib/types';
 import { logEvent } from '@/lib/analytics';
 import { QuantumTooltip } from '@/components/ui/QuantumTooltip';
+import { Check, X, RefreshCw, AlertTriangle, Clock } from 'lucide-react';
+import { Button } from '@/components/ui/button';
+import { Dialog, DialogContent, DialogTrigger } from '@/components/ui/dialog';
 
 interface SuggestionCardProps {
     suggestion: Suggestion;
     onStage?: (suggestion: Suggestion) => void;
     onModify?: (suggestion: Suggestion) => void;
     onDismiss?: (suggestion: Suggestion, tag: string) => void;
+    onRefreshQuote?: (suggestion: Suggestion) => void;
+
+    isStale?: boolean;
+    batchModeEnabled?: boolean;
+    isSelected?: boolean;
+    onToggleSelect?: (suggestion: Suggestion) => void;
 }
 
-const SuggestionCard = ({ suggestion, onStage, onModify, onDismiss }: SuggestionCardProps) => {
+const SuggestionCard = ({
+    suggestion,
+    onStage,
+    onModify,
+    onDismiss,
+    onRefreshQuote,
+    isStale = false,
+    batchModeEnabled = false,
+    isSelected = false,
+    onToggleSelect
+}: SuggestionCardProps) => {
     const { order_json, score, metrics, iv_regime, iv_rank, delta_impact, theta_impact, staged } = suggestion;
+    const [dismissOpen, setDismissOpen] = useState(false);
+    const [isRefreshing, setIsRefreshing] = useState(false);
     // Cast to any to access optional agent_summary without changing global type
     const agent_summary = (suggestion as any).agent_summary;
     const hasLoggedView = useRef(false);
@@ -70,6 +91,7 @@ const SuggestionCard = ({ suggestion, onStage, onModify, onDismiss }: Suggestion
 
     // Analytics Wrappers for Actions
     const handleStage = () => {
+        if (isStale) return; // Guard
         logEvent({
             eventName: "suggestion_staged",
             category: "ux",
@@ -94,26 +116,58 @@ const SuggestionCard = ({ suggestion, onStage, onModify, onDismiss }: Suggestion
         onModify && onModify(suggestion);
     };
 
-    const handleDismiss = () => {
+    const handleDismiss = (reason: string) => {
         logEvent({
             eventName: "suggestion_dismissed",
             category: "ux",
             properties: {
                 suggestion_id: suggestion.id,
                 symbol: suggestion.symbol,
-                reason: 'skipped'
+                reason: reason
             }
         });
-        onDismiss && onDismiss(suggestion, 'skipped');
+        onDismiss && onDismiss(suggestion, reason);
+        setDismissOpen(false);
+    };
+
+    const handleRefresh = async (e: React.MouseEvent) => {
+        e.stopPropagation();
+        if (isRefreshing || !onRefreshQuote) return;
+        setIsRefreshing(true);
+        try {
+             await onRefreshQuote(suggestion);
+        } finally {
+             setIsRefreshing(false);
+        }
     };
 
     return (
-        <Card className="mb-3 border-l-4 border-l-purple-500 hover:shadow-md transition-shadow bg-card border-border">
-            <CardContent className="p-4">
+        <Card className={`mb-3 border-l-4 ${staged ? 'border-l-green-500' : 'border-l-purple-500'} hover:shadow-md transition-shadow bg-card border-border`}>
+            <CardContent className="p-4 relative">
+                {/* Batch Selection Checkbox */}
+                {batchModeEnabled && onToggleSelect && (
+                     <div className="absolute top-4 left-[-30px] md:left-[-30px] flex items-center justify-center h-full w-[30px]">
+                        <input
+                            type="checkbox"
+                            checked={isSelected}
+                            onChange={() => onToggleSelect(suggestion)}
+                            className="w-4 h-4 rounded border-gray-300 text-purple-600 focus:ring-purple-500 cursor-pointer"
+                        />
+                     </div>
+                )}
+
                 {/* Header */}
                 <div className="flex justify-between items-start mb-2">
                     <div>
                         <div className="flex items-center gap-2">
+                            {batchModeEnabled && onToggleSelect && (
+                                <input
+                                    type="checkbox"
+                                    checked={isSelected}
+                                    onChange={() => onToggleSelect(suggestion)}
+                                    className="w-4 h-4 rounded border-gray-300 text-purple-600 focus:ring-purple-500 cursor-pointer mr-2 md:hidden"
+                                />
+                            )}
                             <span className="font-bold text-lg text-foreground">{displaySymbol}</span>
                             <span className="text-sm font-medium text-muted-foreground">{suggestion.strategy}</span>
                             {suggestion.expiration && (
@@ -268,22 +322,71 @@ const SuggestionCard = ({ suggestion, onStage, onModify, onDismiss }: Suggestion
                 )}
 
                 {/* Footer Actions */}
-                <div className="flex justify-end gap-2 mt-3 pt-2 border-t border-border">
-                    <button
-                        onClick={handleDismiss}
-                        className="text-xs text-muted-foreground hover:text-foreground px-2 py-1"
-                    >
-                        Dismiss
-                    </button>
+                <div className="flex justify-end gap-2 mt-3 pt-2 border-t border-border items-center">
+                    {/* Stale Warning / Refresh */}
+                    {isStale && !staged && (
+                        <div className="flex items-center gap-2 mr-auto">
+                            <span className="text-xs text-orange-600 dark:text-orange-400 flex items-center gap-1">
+                                <Clock className="w-3 h-3" />
+                                Stale
+                            </span>
+                            <Button
+                                variant="outline"
+                                size="sm"
+                                className="h-6 text-[10px] px-2"
+                                onClick={handleRefresh}
+                                disabled={isRefreshing}
+                            >
+                                <RefreshCw className={`w-3 h-3 mr-1 ${isRefreshing ? 'animate-spin' : ''}`} />
+                                Refresh Quote
+                            </Button>
+                        </div>
+                    )}
+
+                    {/* Dismiss Popover/Buttons */}
+                    <div className="relative group">
+                         {dismissOpen ? (
+                             <div className="flex items-center gap-1 animate-in fade-in zoom-in duration-200">
+                                 <button onClick={() => handleDismiss('Too Risky')} className="text-[10px] bg-red-100 text-red-700 hover:bg-red-200 px-2 py-1 rounded border border-red-200">
+                                     Risky
+                                 </button>
+                                 <button onClick={() => handleDismiss('Bad Price')} className="text-[10px] bg-yellow-100 text-yellow-700 hover:bg-yellow-200 px-2 py-1 rounded border border-yellow-200">
+                                     Price
+                                 </button>
+                                 <button onClick={() => handleDismiss('Wrong Timing')} className="text-[10px] bg-slate-100 text-slate-700 hover:bg-slate-200 px-2 py-1 rounded border border-slate-200">
+                                     Timing
+                                 </button>
+                                 <button onClick={() => setDismissOpen(false)} className="ml-1 p-1 hover:bg-muted rounded text-muted-foreground">
+                                     <X className="w-3 h-3" />
+                                 </button>
+                             </div>
+                         ) : (
+                             <button
+                                 onClick={() => setDismissOpen(true)}
+                                 className="text-xs text-muted-foreground hover:text-foreground px-2 py-1"
+                             >
+                                 Dismiss
+                             </button>
+                         )}
+                    </div>
+
                     <button
                         onClick={handleModify}
                         className="text-xs bg-card border border-border text-foreground px-3 py-1 rounded hover:bg-muted/50"
                     >
                         Modify
                     </button>
+
                     <button
                         onClick={handleStage}
-                        className={`text-xs px-3 py-1 rounded font-medium ${staged ? 'bg-green-100 text-green-800 dark:bg-green-900/30 dark:text-green-400' : 'bg-purple-600 text-white hover:bg-purple-700'}`}
+                        disabled={isStale && !staged}
+                        className={`text-xs px-3 py-1 rounded font-medium transition-colors ${
+                            staged
+                                ? 'bg-green-100 text-green-800 dark:bg-green-900/30 dark:text-green-400'
+                                : isStale
+                                    ? 'bg-muted text-muted-foreground cursor-not-allowed opacity-70'
+                                    : 'bg-purple-600 text-white hover:bg-purple-700'
+                        }`}
                     >
                         {staged ? 'Staged' : 'Stage Trade'}
                     </button>

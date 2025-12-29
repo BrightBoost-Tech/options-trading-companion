@@ -122,6 +122,10 @@ class OutcomeAggregator:
         related_id = None
         is_incomplete = False
 
+        # Initialize counterfactual variables safely
+        cf_pnl = None
+        cf_avail = False
+
         # --- Outcome Logic ---
 
         # Priority 1: Execution
@@ -135,6 +139,9 @@ class OutcomeAggregator:
             attribution_type = "no_action"
             related_id = suggestions[0]["id"]
             realized_pnl_1d = 0.0
+
+            # --- Counterfactual Logic ---
+            cf_pnl, cf_avail = self._calculate_counterfactual_pnl(suggestions)
 
         # Priority 3: Optimizer Decision (Simulation)
         elif decision["decision_type"] == "optimizer_weights":
@@ -208,14 +215,69 @@ class OutcomeAggregator:
             surprise = 0.0
 
         # --- Write Log ---
+        # Prepare counterfactual args if applicable
+        cf_args = {}
+        if attribution_type == "no_action" and cf_avail:
+            cf_args['counterfactual_pl_1d'] = cf_pnl
+            cf_args['counterfactual_available'] = True
+
         log_outcome(
             trace_id=uuid.UUID(trace_id),
             realized_pl_1d=realized_pnl_1d,
             realized_vol_1d=safe_realized_vol,
             surprise_score=surprise,
             attribution_type=attribution_type,
-            related_id=uuid.UUID(related_id) if related_id else None
+            related_id=uuid.UUID(related_id) if related_id else None,
+            **cf_args
         )
+
+    def _calculate_counterfactual_pnl(self, suggestions: List[Dict]) -> Tuple[float, bool]:
+        """
+        Computes what the PnL would have been if the suggestion was taken.
+        Returns (pnl, available).
+        """
+        if not suggestions:
+            return 0.0, False
+
+        suggestion = suggestions[0]
+        ticker = suggestion.get("ticker")
+        if not ticker:
+            return 0.0, False
+
+        # Try to parse order details if available, otherwise heuristic
+        # We assume entry at T (suggestion time) and exit at T+1 (now)
+        # Using PolygonService to get price change over last day
+
+        try:
+            # We fetch 5 days to be safe and take last 2
+            hist = self.polygon_service.get_historical_prices(ticker, days=5)
+            prices = hist.get("prices", [])
+
+            if len(prices) < 2:
+                return 0.0, False
+
+            p_today = prices[-1]
+            p_prev = prices[-2]
+
+            # Check direction
+            direction = suggestion.get("direction", "long").lower()
+            multiplier = get_contract_multiplier(ticker)
+
+            # Heuristic: 1 contract or base quantity
+            qty = 1.0
+
+            raw_diff = p_today - p_prev
+
+            if direction == "short":
+                pnl = -raw_diff * qty * multiplier
+            else:
+                pnl = raw_diff * qty * multiplier
+
+            return float(pnl), True
+
+        except Exception as e:
+            # print(f"Counterfactual calc failed: {e}")
+            return 0.0, False
 
     def _calculate_execution_pnl(self, executions: List[Dict]) -> Tuple[float, Optional[float]]:
         """

@@ -20,6 +20,7 @@ from packages.quantum.services.paper_execution_service import PaperExecutionServ
 # v3 Observability
 from packages.quantum.observability.telemetry import TradeContext, emit_trade_event, TradeEventName
 from packages.quantum.services.analytics_service import AnalyticsService
+from packages.quantum.agents.agents.post_trade_review_agent import PostTradeReviewAgent
 
 router = APIRouter()
 
@@ -664,9 +665,10 @@ def _run_attribution(supabase, user_id, order, position, exit_fill, fees, side):
         }
 
         # Enrich from suggestion
+        agent_signals_snapshot = {}
         if suggestion_id:
             try:
-                s_res = supabase.table("trade_suggestions").select("ev, model_version, features_hash, strategy, window, regime").eq("id", suggestion_id).single().execute()
+                s_res = supabase.table("trade_suggestions").select("ev, model_version, features_hash, strategy, window, regime, agent_signals").eq("id", suggestion_id).single().execute()
                 if s_res.data:
                     data = s_res.data
                     payload["pnl_predicted"] = data.get("ev")
@@ -675,6 +677,7 @@ def _run_attribution(supabase, user_id, order, position, exit_fill, fees, side):
                     payload["strategy"] = data.get("strategy")
                     payload["window"] = data.get("window")
                     payload["regime"] = data.get("regime")
+                    agent_signals_snapshot = data.get("agent_signals") or {}
             except Exception as e:
                 logging.warning(f"Failed to fetch suggestion data for LFL: {e}")
 
@@ -683,6 +686,30 @@ def _run_attribution(supabase, user_id, order, position, exit_fill, fees, side):
             strat_key = position.get("strategy_key","")
             if "_" in strat_key:
                 payload["strategy"] = strat_key.split("_")[-1]
+
+        # Post Trade Review Agent
+        try:
+            review_agent = PostTradeReviewAgent()
+            review_context = {
+                "realized_pnl": attr["pnl_total"],
+                "mfe": 0.0, # Proxy: Not tracked in paper_positions yet
+                "mae": 0.0, # Proxy: Not tracked in paper_positions yet
+                "agent_signals": agent_signals_snapshot,
+                "strategy": payload.get("strategy"),
+                "regime": payload.get("regime"),
+                "window": payload.get("window")
+            }
+            review_signal = review_agent.evaluate(review_context)
+
+            if "details_json" not in payload:
+                payload["details_json"] = {}
+
+            payload["details_json"]["post_trade_review"] = review_signal.model_dump(mode="json")
+        except Exception as e:
+            logging.warning(f"PostTradeReviewAgent failed: {e}")
+            if "details_json" not in payload:
+                payload["details_json"] = {}
+            payload["details_json"]["post_trade_review_error"] = str(e)
 
         supabase.table("learning_feedback_loops").insert(payload).execute()
 

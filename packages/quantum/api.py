@@ -93,11 +93,18 @@ def __whoami():
 
 @app.get("/health")
 def health_check():
+    # Sanitize Supabase Status for public response
+    safe_supabase_status = {
+        "ok": SUPABASE_STATUS.get("ok"),
+        "key_type": SUPABASE_STATUS.get("key_type"),
+        "connected": SUPABASE_STATUS.get("ok")
+    }
+
     return {
         "status": "ok",
         "app_env": os.getenv("APP_ENV"),
-        "supabase": SUPABASE_STATUS,
-        "env_loaded_from": str(env_path)
+        "supabase": safe_supabase_status,
+        "env_loaded": os.path.exists(env_path)
     }
 
 

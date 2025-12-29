@@ -710,32 +710,8 @@ async def run_midday_cycle(supabase: Client, user_id: str):
                 sizing_agent = SizingAgent()
 
                 # V3: Prepare Agent Signals
-                # Inject regime and volatility signals if missing, for confluence logic
+                # Use ONLY real agent signals from the scanner (no mocks)
                 current_agent_signals = cand.get("agent_signals", {}).copy()
-
-                # Mock regime signal from global snapshot if not provided by an agent
-                if "regime" not in current_agent_signals:
-                    # Map regime enum to a score (hypothetical mapping for confluence)
-                    # Bull/Normal -> High score (Safe), Bear/Volatile -> Low score (Risky)?
-                    # Actually, requirements say "scale risk UP when regime+vol align"
-                    # Usually means Strong Trend + Low Volatility? Or High Vol + High Conviction?
-                    # Let's map global regime score:
-                    # - Bull: 90, Normal: 75, Bear: 40, Crisis: 10
-                    regime_score_map = {
-                        "bull_trend": 90, "normal": 75, "sideways": 60, "bear_trend": 40, "crisis": 10
-                    }
-                    r_score = regime_score_map.get(global_snap.state.value, 50)
-                    current_agent_signals["regime"] = {"score": r_score, "source": "global_snapshot"}
-
-                # Mock volatility signal
-                if "vol" not in current_agent_signals and "volatility" not in current_agent_signals:
-                    # High IV Rank -> Low Score (Risk)? Or High Score (Opportunity)?
-                    # Usually SizingAgent logic: "scale UP when regime+vol align"
-                    # If "align" means "safe", then Low Vol -> High Score.
-                    # IV Rank 20 -> Score 80. IV Rank 80 -> Score 20.
-                    iv_r = cand.get("iv_rank", 50.0) or 50.0
-                    vol_score = max(0, 100 - iv_r)
-                    current_agent_signals["vol"] = {"score": vol_score, "source": "iv_rank"}
 
                 sizing_ctx = {
                     "deployable_capital": deployable_capital,
@@ -747,7 +723,10 @@ async def run_midday_cycle(supabase: Client, user_id: str):
                 sizing_agent_signal = sizing_agent.evaluate(sizing_ctx)
 
                 # Apply Agent Constraints
-                constraints = sizing_agent_signal.metadata.get("constraints", {})
+                # Handle both dict and Pydantic model for sizing_agent_signal (evaluate returns model)
+                sizing_meta = sizing_agent_signal.metadata if hasattr(sizing_agent_signal, "metadata") else sizing_agent_signal.get("metadata", {})
+                constraints = sizing_meta.get("constraints", {})
+
                 agent_target_risk = constraints.get("sizing.target_risk_usd", 0.0)
 
                 # Use the tighter of (Agent Target, Global Budget Remaining)
@@ -762,15 +741,21 @@ async def run_midday_cycle(supabase: Client, user_id: str):
                     cand["agent_signals"] = {}
 
                 # Store signal
-                cand["agent_signals"]["sizing"] = sizing_agent_signal.model_dump()
+                if hasattr(sizing_agent_signal, "model_dump"):
+                    cand["agent_signals"]["sizing"] = sizing_agent_signal.model_dump()
+                else:
+                    cand["agent_signals"]["sizing"] = sizing_agent_signal
+
+                # Handle model vs dict for score
+                sizing_score = sizing_agent_signal.score if hasattr(sizing_agent_signal, "score") else sizing_agent_signal.get("score", 50.0)
 
                 # Update Summary Score
                 if "agent_summary" not in cand:
-                    cand["agent_summary"] = {"overall_score": sizing_agent_signal.score}
+                    cand["agent_summary"] = {"overall_score": sizing_score}
                 else:
                     # Simple re-average
                     current_overall = cand["agent_summary"].get("overall_score", 50.0)
-                    new_overall = (current_overall + sizing_agent_signal.score) / 2
+                    new_overall = (current_overall + sizing_score) / 2
                     cand["agent_summary"]["overall_score"] = new_overall
 
                 print(f"[Midday] SizingAgent applied: Risk=${final_risk_dollars:.2f}, Contracts={max_contracts_limit}")
@@ -790,21 +775,29 @@ async def run_midday_cycle(supabase: Client, user_id: str):
                 # Store signal
                 if "agent_signals" not in cand:
                     cand["agent_signals"] = {}
-                cand["agent_signals"]["exit_plan"] = exit_signal.model_dump()
+
+                if hasattr(exit_signal, "model_dump"):
+                    cand["agent_signals"]["exit_plan"] = exit_signal.model_dump()
+                else:
+                    cand["agent_signals"]["exit_plan"] = exit_signal
+
+                # Handle model vs dict for exit_signal
+                exit_score = exit_signal.score if hasattr(exit_signal, "score") else exit_signal.get("score", 50.0)
 
                 # Update Summary Constraints
                 if "agent_summary" not in cand:
                     # If SizingAgent didn't run or failed, init
-                    cand["agent_summary"] = {"overall_score": exit_signal.score, "active_constraints": {}}
+                    cand["agent_summary"] = {"overall_score": exit_score, "active_constraints": {}}
 
                 if "active_constraints" not in cand["agent_summary"]:
                     cand["agent_summary"]["active_constraints"] = {}
 
-                # Merge exit plan metadata into active_constraints (top-level merge as per requirements)
-                # ExitPlanAgent returns metadata={ "exit.profit_take_pct": ... }
-                cand["agent_summary"]["active_constraints"].update(exit_signal.metadata)
+                # Merge ONLY constraints into active_constraints
+                exit_meta = exit_signal.metadata if hasattr(exit_signal, "metadata") else exit_signal.get("metadata", {})
+                exit_constraints = exit_meta.get("constraints", {})
+                cand["agent_summary"]["active_constraints"].update(exit_constraints)
 
-                print(f"[Midday] ExitPlanAgent applied: {exit_signal.metadata}")
+                print(f"[Midday] ExitPlanAgent applied: {exit_constraints}")
 
             except Exception as e:
                 print(f"[Midday] ExitPlanAgent failed: {e}")

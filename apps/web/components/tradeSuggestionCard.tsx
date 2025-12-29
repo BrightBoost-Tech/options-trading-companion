@@ -13,6 +13,12 @@ interface TradeSuggestionMetrics {
   probability_of_profit?: number; // 0–100
 }
 
+interface AgentSummary {
+  vetoed: boolean;
+  top_reasons?: string[];
+  [key: string]: any;
+}
+
 interface TradeSuggestion {
   id?: string;
   symbol?: string;
@@ -34,6 +40,7 @@ interface TradeSuggestion {
   order_json?: Record<string, any>;
   sizing_metadata?: Record<string, any>;
   ev?: number;
+  agent_summary?: AgentSummary;
 
   // Compounding Mode
   sizing?: {
@@ -75,6 +82,14 @@ export default function TradeSuggestionCard({ suggestion, onLogged }: TradeSugge
   const displayStrategy = suggestion.strategy || suggestion.type || 'Trade';
   const displayScore = suggestion.score || 0;
   const badges = suggestion.badges || [];
+
+  // Veto Logic
+  const isVetoed = suggestion.agent_summary?.vetoed === true;
+  const vetoReasons = suggestion.agent_summary?.top_reasons || [];
+  const defaultTooltip = "Suggested based on your positions, volatility regime, and risk model. Always confirm it fits your own plan.";
+  const tooltipContent = isVetoed
+    ? `veto: ${vetoReasons.slice(0, 3).join("; ") || "No specific reason provided."}`
+    : defaultTooltip;
 
   const handleEvPreview = async () => {
     try {
@@ -300,15 +315,23 @@ export default function TradeSuggestionCard({ suggestion, onLogged }: TradeSugge
             <p className="text-sm text-gray-500">{displayStrategy}</p>
           </div>
           <div className="flex flex-col items-end gap-1 text-right">
-            {displayScore > 0 && (
+            {isVetoed ? (
               <>
-                <div className="text-2xl font-bold text-blue-600">{displayScore}</div>
+                <Badge variant="destructive" className="mb-1">VETOED</Badge>
+                <div className="text-2xl font-bold text-gray-400">—</div>
                 <div className="text-xs text-gray-400">OTC Score</div>
               </>
+            ) : (
+                displayScore > 0 && (
+                <>
+                    <div className="text-2xl font-bold text-blue-600">{displayScore}</div>
+                    <div className="text-xs text-gray-400">OTC Score</div>
+                </>
+                )
             )}
             <QuantumTooltip
-              label="Why this trade?"
-              content="Suggested based on your positions, volatility regime, and risk model. Always confirm it fits your own plan."
+              label={isVetoed ? "Veto Reason" : "Why this trade?"}
+              content={tooltipContent}
             />
           </div>
         </div>

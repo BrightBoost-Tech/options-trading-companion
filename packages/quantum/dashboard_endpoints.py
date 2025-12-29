@@ -26,6 +26,43 @@ router = APIRouter()
 class DismissSuggestionRequest(BaseModel):
     reason: str
 
+class BatchStageRequest(BaseModel):
+    suggestion_ids: List[str]
+
+@router.post("/inbox/stage-batch")
+async def stage_batch_suggestions(
+    body: BatchStageRequest,
+    user_id: str = Depends(get_current_user),
+    supabase: Client = Depends(get_supabase_user_client)
+):
+    if not supabase:
+        raise HTTPException(status_code=503, detail="Database Unavailable")
+
+    try:
+        if not body.suggestion_ids:
+             return {"staged_count": 0, "failed_ids": []}
+
+        # Update status to 'staged' for these IDs belonging to user
+        # Note: 'staged' status removes it from 'pending' view in inbox
+        res = supabase.table(TRADE_SUGGESTIONS_TABLE) \
+            .update({"status": "staged"}) \
+            .in_("id", body.suggestion_ids) \
+            .eq("user_id", user_id) \
+            .execute()
+
+        updated = res.data or []
+        updated_ids = {r["id"] for r in updated}
+        failed_ids = [sid for sid in body.suggestion_ids if sid not in updated_ids]
+
+        return {
+            "staged_count": len(updated),
+            "failed_ids": failed_ids
+        }
+    except Exception as e:
+        print(f"Batch Stage Error: {e}")
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail="Batch stage failed")
+
 @router.get("/inbox")
 async def get_inbox(
     user_id: str = Depends(get_current_user),

@@ -146,6 +146,12 @@ export interface Suggestion {
 
   // Frontend state
   staged?: boolean;
+  is_stale?: boolean; // Derived from createdAt vs stale threshold
+  refreshed_at?: string; // Updated locally or from backend
+}
+
+export interface BatchStageRequest {
+    suggestion_ids: string[];
 }
 
 export interface GreekAlerts {

@@ -55,7 +55,8 @@ from packages.quantum.market_data import calculate_portfolio_inputs, PolygonServ
 from packages.quantum.services.workflow_orchestrator import run_morning_cycle, run_midday_cycle, run_weekly_report
 from packages.quantum.services.market_data_truth_layer import MarketDataTruthLayer
 from packages.quantum.services.plaid_history_service import PlaidHistoryService
-from packages.quantum.services.rebalance_engine import RebalanceEngine, RiskBudgetEngine
+from packages.quantum.services.rebalance_engine import RebalanceEngine
+from packages.quantum.services.risk_budget_engine import RiskBudgetEngine
 from packages.quantum.services.execution_service import ExecutionService
 from packages.quantum.analytics.progress_engine import ProgressEngine, get_week_id_for_last_full_week
 from packages.quantum.services.options_utils import group_spread_positions, format_occ_symbol_readable

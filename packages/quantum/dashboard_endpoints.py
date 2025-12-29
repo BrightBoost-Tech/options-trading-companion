@@ -1,21 +1,221 @@
 from typing import Dict, List, Optional, Any
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Body
 from supabase import Client
 from postgrest.exceptions import APIError
-from pydantic import ValidationError
-from datetime import datetime, timedelta
+from pydantic import ValidationError, BaseModel
+from datetime import datetime, timedelta, timezone
 import traceback
+import json
 
 from packages.quantum.security import get_current_user, get_supabase_user_client
 from packages.quantum.services.journal_service import JournalService
 from packages.quantum.analytics.progress_engine import ProgressEngine, get_week_id_for_last_full_week
-from packages.quantum.models import RiskDashboardResponse, PortfolioSnapshot
+from packages.quantum.models import RiskDashboardResponse, PortfolioSnapshot, TradeTicket
+from packages.quantum.inbox.ranker import rank_suggestions
+from packages.quantum.market_data import PolygonService
+from packages.quantum.execution.transaction_cost_model import TransactionCostModel
 
 # Table names
 TRADE_SUGGESTIONS_TABLE = "trade_suggestions"
 WEEKLY_REPORTS_TABLE = "weekly_trade_reports"
 
 router = APIRouter()
+
+# --- Inbox v3.0 Endpoints ---
+
+class DismissSuggestionRequest(BaseModel):
+    reason: str
+
+@router.get("/inbox")
+async def get_inbox(
+    user_id: str = Depends(get_current_user),
+    supabase: Client = Depends(get_supabase_user_client)
+):
+    """
+    Returns the Inbox State:
+    - hero: Top ranked pending suggestion
+    - queue: Remaining pending suggestions
+    - completed: Today's non-pending suggestions (dismissed/staged/executed)
+    - meta: { total_ev_available, deployable_capital, stale_after_seconds }
+    """
+    if not supabase:
+        raise HTTPException(status_code=503, detail="Database Unavailable")
+
+    try:
+        # Fetch Pending
+        pending_res = supabase.table(TRADE_SUGGESTIONS_TABLE) \
+            .select("*") \
+            .eq("user_id", user_id) \
+            .eq("status", "pending") \
+            .execute()
+        pending_list = pending_res.data or []
+
+        # Fetch Completed (Today)
+        # We define "Today" as last 24h or strictly same calendar day UTC?
+        # Typically "Inbox" implies "Active Workflow".
+        # Let's use start of UTC day for "Today".
+        today_start = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
+
+        completed_res = supabase.table(TRADE_SUGGESTIONS_TABLE) \
+            .select("*") \
+            .eq("user_id", user_id) \
+            .neq("status", "pending") \
+            .gte("created_at", today_start) \
+            .execute()
+        completed_list = completed_res.data or []
+
+        # Rank Pending
+        ranked_pending = rank_suggestions(pending_list)
+
+        # Split Hero vs Queue
+        hero = ranked_pending[0] if ranked_pending else None
+        queue = ranked_pending[1:] if len(ranked_pending) > 1 else []
+
+        # Compute Meta
+        total_ev = sum(s.get("ev", 0) for s in ranked_pending if s.get("ev"))
+
+        # Deployable Capital - Ideally fetched from CashService, but simpler proxy here or fetch from snapshot
+        # For now, placeholder or fetch latest snapshot's cash?
+        deployable_capital = 0.0
+        try:
+             snap_res = supabase.table("portfolio_snapshots") \
+                .select("risk_metrics") \
+                .eq("user_id", user_id) \
+                .order("created_at", desc=True) \
+                .limit(1) \
+                .execute()
+             if snap_res.data and snap_res.data[0].get("risk_metrics"):
+                 deployable_capital = float(snap_res.data[0]["risk_metrics"].get("purchasing_power", 0.0))
+        except:
+             pass
+
+        return {
+            "hero": hero,
+            "queue": queue,
+            "completed": completed_list,
+            "meta": {
+                "total_ev_available": total_ev,
+                "deployable_capital": deployable_capital,
+                "stale_after_seconds": 300
+            }
+        }
+    except Exception as e:
+        print(f"Inbox Error: {e}")
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail="Failed to fetch inbox")
+
+@router.post("/suggestions/{suggestion_id}/dismiss")
+async def dismiss_suggestion(
+    suggestion_id: str,
+    body: DismissSuggestionRequest,
+    user_id: str = Depends(get_current_user),
+    supabase: Client = Depends(get_supabase_user_client)
+):
+    if not supabase:
+        raise HTTPException(status_code=503, detail="Database Unavailable")
+
+    try:
+        # Fetch existing to merge sizing_metadata
+        res = supabase.table(TRADE_SUGGESTIONS_TABLE).select("*").eq("id", suggestion_id).single().execute()
+        if not res.data:
+            raise HTTPException(status_code=404, detail="Suggestion not found")
+
+        suggestion = res.data
+        if suggestion["user_id"] != user_id:
+            raise HTTPException(status_code=403, detail="Unauthorized")
+
+        # Update logic
+        sizing_metadata = suggestion.get("sizing_metadata") or {}
+        sizing_metadata["dismiss"] = {
+            "reason": body.reason,
+            "dismissed_at": datetime.now(timezone.utc).isoformat()
+        }
+
+        update_payload = {
+            "status": "dismissed",
+            "sizing_metadata": sizing_metadata
+        }
+
+        upd_res = supabase.table(TRADE_SUGGESTIONS_TABLE).update(update_payload).eq("id", suggestion_id).execute()
+
+        if upd_res.data:
+            return upd_res.data[0]
+        else:
+            raise HTTPException(status_code=500, detail="Failed to update suggestion")
+
+    except APIError as e:
+        raise HTTPException(status_code=500, detail=f"Database Error: {e}")
+    except Exception as e:
+        print(f"Dismiss Error: {e}")
+        raise HTTPException(status_code=500, detail="Internal Server Error")
+
+@router.post("/suggestions/{suggestion_id}/refresh-quote")
+async def refresh_quote(
+    suggestion_id: str,
+    user_id: str = Depends(get_current_user),
+    supabase: Client = Depends(get_supabase_user_client)
+):
+    if not supabase:
+        raise HTTPException(status_code=503, detail="Database Unavailable")
+
+    try:
+        # Fetch suggestion
+        res = supabase.table(TRADE_SUGGESTIONS_TABLE).select("*").eq("id", suggestion_id).single().execute()
+        if not res.data:
+            raise HTTPException(status_code=404, detail="Suggestion not found")
+
+        suggestion = res.data
+        symbol = suggestion.get("symbol")
+
+        # Get fresh quote
+        poly = PolygonService()
+        try:
+            quote = poly.get_recent_quote(symbol)
+        except Exception as e:
+            # Per edge case instructions: 502 with clear message
+            print(f"Quote refresh failed for {symbol}: {e}")
+            raise HTTPException(status_code=502, detail=f"Quote provider error: {str(e)}")
+
+        # Calculate TCM Estimate
+        # Need to construct a temporary Ticket from suggestion to use TCM
+        try:
+            # Best effort ticket reconstruction
+            order_json = suggestion.get("order_json") or {}
+
+            # Helper to map suggestion to ticket
+            # Usually order_json should match Ticket structure, or close enough
+            legs = order_json.get("legs", [])
+            # ensure valid legs structure
+
+            ticket = TradeTicket(
+                symbol=symbol,
+                strategy_type=suggestion.get("strategy"),
+                legs=legs,
+                quantity=order_json.get("quantity", 1),
+                limit_price=order_json.get("limit_price"),
+                order_type=order_json.get("order_type", "limit")
+            )
+
+            tcm_est = TransactionCostModel.estimate(ticket, quote)
+        except Exception as e:
+            print(f"TCM Estimate failed: {e}")
+            tcm_est = None
+
+        return {
+            "suggestion_id": suggestion_id,
+            "refreshed_at": datetime.now(timezone.utc).isoformat(),
+            "quote": quote,
+            "tcm_estimate": tcm_est
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"Refresh Quote Error: {e}")
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail="Internal Server Error")
+
+# --- Existing Endpoints (Preserved) ---
 
 @router.get("/journal/stats")
 async def get_journal_stats(

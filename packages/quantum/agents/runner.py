@@ -18,24 +18,15 @@ def is_agent_enabled(key: str, default: bool = True) -> bool:
     return default
 
 
-def build_agent_pipeline() -> List[BaseQuantAgent]:
+def build_agent_pipeline(phase: str = "all") -> List[BaseQuantAgent]:
     """
     Builds the list of Quant Agents based on environment configuration.
+
+    Args:
+        phase: The execution phase ("all", "scanner", "strategy_design").
     """
     # Master Toggle
-    # Note: If QUANT_AGENTS_ENABLED is not set, we assume True (enabled) unless specified otherwise?
-    # Existing usage in workflow_orchestrator.py defaults to "false".
-    # However, this function is a helper for building the pipeline.
-    # If the caller uses this function, they likely want to obey the env var.
-    # To match existing patterns, we should default to False if not set, OR rely on the caller to not call this if disabled?
-    # The prompt says: "When QUANT_AGENTS_ENABLED=false: runner returns empty signals + neutral summary (baseline)."
-    # So if this function returns [], run_agents([], ...) returns neutral summary.
-    # So we should check it here.
-    # Defaulting to True here for "enabled by default if missing" might be risky if existing code expects "false".
-    # But the prompt says "default true" for SUB toggles.
-    # For master toggle, I will default to True inside this function for robust testing, or follow the pattern.
-    # Given "Currently only QUANT_AGENTS_ENABLED exists", I will assume we use whatever is in env.
-    if not is_agent_enabled("QUANT_AGENTS_ENABLED", default=False): # Defaulting to False to match codebase pattern
+    if not is_agent_enabled("QUANT_AGENTS_ENABLED", default=False):
         logger.info("Quant Agents disabled via QUANT_AGENTS_ENABLED.")
         return []
 
@@ -51,37 +42,50 @@ def build_agent_pipeline() -> List[BaseQuantAgent]:
 
     agents = []
 
+    # Define phases helper
+    # "all" includes everything
+    # "scanner" includes Regime, VolSurface, Liquidity, EventRisk
+    # "strategy_design" includes StrategyDesignAgent
+
     # 1. Regime Agent
     if is_agent_enabled("QUANT_AGENT_REGIME_ENABLED", default=True):
-        agents.append(RegimeAgent())
+        if phase in ("all", "scanner"):
+            agents.append(RegimeAgent())
 
     # 2. Vol Surface Agent
     if is_agent_enabled("QUANT_AGENT_VOL_SURFACE_ENABLED", default=True):
-        agents.append(VolSurfaceAgent())
+        if phase in ("all", "scanner"):
+            agents.append(VolSurfaceAgent())
 
     # 3. Liquidity Agent
     if is_agent_enabled("QUANT_AGENT_LIQUIDITY_ENABLED", default=True):
-        agents.append(LiquidityAgent())
+        if phase in ("all", "scanner"):
+            agents.append(LiquidityAgent())
 
     # 4. Event Risk Agent
     if is_agent_enabled("QUANT_AGENT_EVENT_RISK_ENABLED", default=True):
-        agents.append(EventRiskAgent())
+        if phase in ("all", "scanner"):
+            agents.append(EventRiskAgent())
 
     # 5. Strategy Design Agent
     if is_agent_enabled("QUANT_AGENT_STRATEGY_DESIGN_ENABLED", default=True):
-        agents.append(StrategyDesignAgent())
+        if phase in ("all", "strategy_design"):
+            agents.append(StrategyDesignAgent())
 
     # 6. Sizing Agent
     if is_agent_enabled("QUANT_AGENT_SIZING_ENABLED", default=True):
-        agents.append(SizingAgent())
+        if phase in ("all", "sizing"):
+            agents.append(SizingAgent())
 
     # 7. Exit Plan Agent
     if is_agent_enabled("QUANT_AGENT_EXIT_PLAN_ENABLED", default=True):
-        agents.append(ExitPlanAgent())
+        if phase in ("all", "exit_plan"):
+            agents.append(ExitPlanAgent())
 
     # 8. Post Trade Review Agent
     if is_agent_enabled("QUANT_AGENT_POST_TRADE_REVIEW_ENABLED", default=True):
-        agents.append(PostTradeReviewAgent())
+        if phase in ("all", "post_trade"):
+            agents.append(PostTradeReviewAgent())
 
     return agents
 

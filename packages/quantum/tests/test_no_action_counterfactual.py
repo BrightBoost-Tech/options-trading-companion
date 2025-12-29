@@ -1,121 +1,105 @@
-import unittest
-from unittest.mock import MagicMock, patch
-import uuid
-from datetime import datetime
-import sys
-import os
-
-# Adjust path to include package root
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '../..')))
-
+import pytest
+from unittest.mock import MagicMock, AsyncMock, ANY
+from datetime import datetime, timedelta, timezone
 from packages.quantum.services.outcome_aggregator import OutcomeAggregator
+from packages.quantum.market_data import PolygonService
 
-class TestNoActionCounterfactual(unittest.TestCase):
-    def setUp(self):
-        self.mock_supabase = MagicMock()
-        self.mock_polygon = MagicMock()
-        self.aggregator = OutcomeAggregator(self.mock_supabase, self.mock_polygon)
+# Mock Data
+MOCK_SUGGESTION_SINGLE = {
+    "id": "s1",
+    "ticker": "O:AAPL230616C00150000",
+    "direction": "long",
+    "order_json": {
+        "limit_price": 5.0,
+        "contracts": 1
+    },
+    "created_at": "2023-06-01T14:30:00Z" # Thursday
+}
 
-    @patch("packages.quantum.services.outcome_aggregator.log_outcome")
-    def test_counterfactual_calculated_for_no_action(self, mock_log):
-        # Setup data
-        trace_id = str(uuid.uuid4())
-        suggestion_id = str(uuid.uuid4())
+MOCK_SUGGESTION_SPREAD = {
+    "id": "s2",
+    "ticker": "SPY Vertical",
+    "direction": "long", # Overall spread direction
+    "order_json": {
+        "legs": [
+            {"symbol": "O:SPY230616C00400000", "side": "buy", "quantity": 1},
+            {"symbol": "O:SPY230616C00405000", "side": "sell", "quantity": 1}
+        ]
+    },
+    "created_at": "2023-06-01T14:30:00Z"
+}
 
-        decision = {
-            "trace_id": trace_id,
-            "decision_type": "morning_suggestion",
-            "content": {}
-        }
+MOCK_SUGGESTION_MISSING_TICKER = {
+    "id": "s3",
+    "ticker": None,
+    "created_at": "2023-06-01T14:30:00Z"
+}
 
-        suggestions = [{
-            "id": suggestion_id,
-            "ticker": "AAPL",
-            "direction": "long",
-            "status": "pending"
-        }]
+@pytest.fixture
+def aggregator():
+    supabase = MagicMock()
+    polygon = MagicMock(spec=PolygonService)
+    return OutcomeAggregator(supabase, polygon)
 
-        executions = [] # Empty -> No Action
-        inference_log = None
+def test_single_leg_counterfactual(aggregator):
+    # Setup
+    # Mock behavior: we have data for Thursday (T) and Friday (T+1)
+    aggregator.polygon_service.get_historical_prices.return_value = {
+        "prices": [5.0, 6.0], # T, T+1
+        "dates": ["2023-06-01", "2023-06-02"]
+    }
 
-        # Mock Polygon response: Price went up 150 -> 155
-        self.mock_polygon.get_historical_prices.return_value = {
-            "prices": [150.0, 155.0]
-        }
+    # Act
+    # Note: _calculate_counterfactual_pnl currently takes a list of suggestions
+    pnl, avail = aggregator._calculate_counterfactual_pnl([MOCK_SUGGESTION_SINGLE])
 
-        # Act
-        self.aggregator._process_single_outcome(decision, inference_log, suggestions, executions)
+    # Assert
+    # Long 1 contract: (6.0 - 5.0) * 100 = 100.0
+    assert avail is True
+    assert pnl == 100.0
 
-        # Assert
-        self.mock_polygon.get_historical_prices.assert_called_with("AAPL", days=5)
+    # Check if to_date was passed correctly (created_at + 5 days)
+    # 2023-06-01 + 5 days = 2023-06-06
+    expected_to_date = datetime(2023, 6, 6, 14, 30, 0, tzinfo=timezone.utc)
+    aggregator.polygon_service.get_historical_prices.assert_called_with("O:AAPL230616C00150000", days=10, to_date=expected_to_date)
 
-        # Expected PnL: (155 - 150) * 1 * 100 (default equity multiplier?)
-        # Wait, get_contract_multiplier defaults to 100 for equity options, but 1 for stocks?
-        # Let's check get_contract_multiplier implementation or assume default.
-        # If ticker is "AAPL", it's likely equity, multiplier 1 usually?
-        # But get_contract_multiplier logic usually checks if it is option.
-        # "AAPL" -> likely stock -> multiplier 1.
-        # "O:AAPL..." -> option -> 100.
-        # In test I used "AAPL". Let's assume multiplier is 1 for stock.
-        # If get_contract_multiplier is imported from options_utils, likely it handles this.
-        # I'll update the test to be robust or mock get_contract_multiplier.
+def test_spread_counterfactual(aggregator):
+    # Setup
+    # Mock return values for different calls
+    def get_prices(symbol, days=10, to_date=None):
+        if symbol == "O:SPY230616C00400000": # Long Leg
+            return {"prices": [10.0, 12.0], "dates": ["2023-06-01", "2023-06-02"]} # +2.0 gain
+        elif symbol == "O:SPY230616C00405000": # Short Leg
+            return {"prices": [8.0, 9.0], "dates": ["2023-06-01", "2023-06-02"]} # +1.0 loss (since short)
+        return {}
 
-        # Let's see what args were passed to log_outcome
-        args, kwargs = mock_log.call_args
-        self.assertEqual(kwargs['attribution_type'], "no_action")
-        self.assertEqual(kwargs['counterfactual_available'], True)
-        # 5.0 * 1 = 5.0 if multiplier is 1. If 100, then 500.
-        # I will check valid range or mock multiplier.
+    aggregator.polygon_service.get_historical_prices.side_effect = get_prices
 
-    @patch("packages.quantum.services.outcome_aggregator.log_outcome")
-    @patch("packages.quantum.services.outcome_aggregator.get_contract_multiplier")
-    def test_counterfactual_value_logic(self, mock_multiplier, mock_log):
-        mock_multiplier.return_value = 100.0
+    # Act
+    pnl, avail = aggregator._calculate_counterfactual_pnl([MOCK_SUGGESTION_SPREAD])
 
-        trace_id = str(uuid.uuid4())
-        decision = {"trace_id": trace_id, "decision_type": "morning_suggestion"}
-        suggestions = [{"id": str(uuid.uuid4()), "ticker": "O:SPY250101C500", "direction": "long"}]
+    # Assert
+    # Long Leg: (12 - 10) * 1 * 100 = +200
+    # Short Leg: (9 - 8) * -1 * 100 = -100
+    # Net: +100
+    assert avail is True
+    assert pnl == 100.0
 
-        self.mock_polygon.get_historical_prices.return_value = {
-            "prices": [10.0, 12.0] # +2.0
-        }
+    # Verify calls happened
+    aggregator.polygon_service.get_historical_prices.assert_any_call("O:SPY230616C00400000", days=10, to_date=ANY)
 
-        self.aggregator._process_single_outcome(decision, None, suggestions, [])
+def test_missing_data_returns_unavailable(aggregator):
+    # Setup
+    aggregator.polygon_service.get_historical_prices.return_value = {"prices": [], "dates": []}
 
-        mock_log.assert_called_once()
-        call_kwargs = mock_log.call_args[1]
-        self.assertEqual(call_kwargs['counterfactual_available'], True)
-        self.assertAlmostEqual(call_kwargs['counterfactual_pl_1d'], 200.0) # 2.0 * 100
+    # Act
+    pnl, avail = aggregator._calculate_counterfactual_pnl([MOCK_SUGGESTION_SINGLE])
 
-    @patch("packages.quantum.services.outcome_aggregator.log_outcome")
-    def test_counterfactual_unavailable_on_error(self, mock_log):
-        trace_id = str(uuid.uuid4())
-        decision = {"trace_id": trace_id, "decision_type": "morning_suggestion"}
-        suggestions = [{"id": str(uuid.uuid4()), "ticker": "BADTICKER"}]
+    # Assert
+    assert avail is False
+    assert pnl == 0.0
 
-        # Mock Polygon error or empty
-        self.mock_polygon.get_historical_prices.side_effect = Exception("API Error")
-
-        self.aggregator._process_single_outcome(decision, None, suggestions, [])
-
-        mock_log.assert_called_once()
-        call_kwargs = mock_log.call_args[1]
-        # Should not have counterfactual args or they should be None/False
-        self.assertNotIn('counterfactual_pl_1d', call_kwargs)
-        self.assertNotIn('counterfactual_available', call_kwargs)
-
-    @patch("packages.quantum.services.outcome_aggregator.log_outcome")
-    def test_skips_if_no_suggestion(self, mock_log):
-        trace_id = str(uuid.uuid4())
-        decision = {"trace_id": trace_id, "decision_type": "morning_suggestion"}
-
-        self.aggregator._process_single_outcome(decision, None, [], [])
-
-        # If no suggestion/execution/inference, it goes to "incomplete_data"
-        mock_log.assert_called_once()
-        call_kwargs = mock_log.call_args[1]
-        self.assertEqual(call_kwargs['attribution_type'], "incomplete_data")
-        self.assertNotIn('counterfactual_available', call_kwargs)
-
-if __name__ == '__main__':
-    unittest.main()
+def test_malformed_suggestion_handles_gracefully(aggregator):
+    pnl, avail = aggregator._calculate_counterfactual_pnl([MOCK_SUGGESTION_MISSING_TICKER])
+    assert avail is False
+    assert pnl == 0.0

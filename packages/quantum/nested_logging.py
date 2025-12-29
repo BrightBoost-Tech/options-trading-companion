@@ -108,7 +108,9 @@ def log_outcome(
     realized_vol_1d: float,
     surprise_score: float,
     attribution_type: str = 'portfolio_snapshot',
-    related_id: Optional[uuid.UUID] = None
+    related_id: Optional[uuid.UUID] = None,
+    counterfactual_pl_1d: Optional[float] = None,
+    counterfactual_available: bool = False
 ):
     """
     Insert into outcomes_log.
@@ -129,6 +131,11 @@ def log_outcome(
 
         if related_id:
             data["related_id"] = str(related_id)
+
+        if counterfactual_available:
+            data["counterfactual_available"] = True
+            if counterfactual_pl_1d is not None:
+                data["counterfactual_pl_1d"] = float(counterfactual_pl_1d)
 
         supabase.table("outcomes_log").insert(data).execute()
 

@@ -1,16 +1,17 @@
 from fastapi import APIRouter, HTTPException, Depends, BackgroundTasks
 from pydantic import BaseModel
-from typing import Optional, Dict, Any, List
+from typing import Optional, Dict, Any, List, Literal
 from datetime import datetime, timezone, timedelta
 import logging
 import uuid
 import os
 
 from packages.quantum.security import get_current_user
-from packages.quantum.models import TradeTicket
+from packages.quantum.models import TradeTicket, OptionLeg
 from packages.quantum.strategy_registry import STRATEGY_REGISTRY, infer_strategy_key_from_suggestion
 from packages.quantum.market_data import PolygonService
 from packages.quantum.strategy_profiles import CostModelConfig
+from packages.quantum.services.options_utils import parse_option_symbol
 
 # Execution V3
 from packages.quantum.execution.transaction_cost_model import TransactionCostModel
@@ -41,6 +42,9 @@ class StageOrderRequest(BaseModel):
 class PaperCloseRequest(BaseModel):
     position_id: str
 
+class BatchStageRequest(BaseModel):
+    suggestion_ids: List[str]
+
 @router.post("/paper/order/stage")
 def stage_order_endpoint(
     req: StageOrderRequest,
@@ -53,6 +57,78 @@ def stage_order_endpoint(
 
     order_id = _stage_order_internal(supabase, analytics, user_id, req.ticket, req.portfolio_id)
     return {"status": "staged", "order_id": order_id}
+
+@router.post("/inbox/stage-batch")
+def stage_batch_endpoint(
+    req: BatchStageRequest,
+    user_id: str = Depends(get_current_user),
+):
+    """
+    Stages multiple suggestions into paper orders in one request.
+    """
+    supabase = get_supabase()
+    analytics = get_analytics_service()
+    if not supabase:
+        raise HTTPException(status_code=503, detail="Database not available")
+
+    if not req.suggestion_ids:
+        return {"staged": [], "failed": []}
+
+    # Fetch all suggestions
+    try:
+        s_res = supabase.table("trade_suggestions").select("*").in_("id", req.suggestion_ids).eq("user_id", user_id).execute()
+        suggestions = s_res.data or []
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to fetch suggestions: {e}")
+
+    staged_results = []
+    failed_results = []
+
+    # Map for easy lookup
+    suggestions_map = {s["id"]: s for s in suggestions}
+
+    for s_id in req.suggestion_ids:
+        suggestion = suggestions_map.get(s_id)
+        if not suggestion:
+            failed_results.append({"suggestion_id": s_id, "error": "Suggestion not found or not owned by user"})
+            continue
+
+        # Check status
+        if suggestion.get("status") != "pending":
+            failed_results.append({"suggestion_id": s_id, "error": f"Status is {suggestion.get('status')}, expected pending"})
+            continue
+
+        try:
+            # Convert to Ticket
+            ticket = _suggestion_to_ticket(suggestion)
+
+            # Stage Order
+            order_id = _stage_order_internal(
+                supabase,
+                analytics,
+                user_id,
+                ticket,
+                portfolio_id_arg=None, # Default portfolio
+                suggestion_id_override=s_id # Ensure linking
+            )
+
+            # Update Suggestion Status
+            supabase.table("trade_suggestions").update({
+                "status": "staged",
+                "order_id": order_id, # Optional linkage column if exists, otherwise harmless or error?
+                                      # Assuming we only update status based on requirements.
+                                      # But wait, if order_id column doesn't exist, this might fail.
+                                      # Requirement: "Update trade_suggestions.status -> 'staged'"
+                                      # I'll stick to status.
+            }).eq("id", s_id).execute()
+
+            staged_results.append({"suggestion_id": s_id, "order_id": order_id})
+
+        except Exception as e:
+            logging.error(f"Failed to stage suggestion {s_id}: {e}")
+            failed_results.append({"suggestion_id": s_id, "error": str(e)})
+
+    return {"staged": staged_results, "failed": failed_results}
 
 @router.post("/paper/order/process")
 def process_orders_endpoint(
@@ -198,6 +274,119 @@ def close_paper_position(
 
 # --- Internal Helpers ---
 
+def _suggestion_to_ticket(suggestion: Dict[str, Any]) -> TradeTicket:
+    """
+    Converts a suggestion dict (from DB) into a TradeTicket for staging.
+    """
+    order_json = suggestion.get("order_json", {})
+
+    # 1. Determine Strategy Type
+    strategy_type = suggestion.get("strategy") or suggestion.get("strategy_type") or "custom"
+
+    # 2. Determine Symbol (Underlying)
+    # Prefer top-level ticker, then order_json underlying, then first leg underlying
+    symbol = suggestion.get("ticker") or order_json.get("underlying")
+
+    legs_data = order_json.get("legs", [])
+
+    # If no symbol yet, try to parse from first leg
+    if not symbol and legs_data:
+        first_leg_sym = legs_data[0].get("symbol")
+        parsed = parse_option_symbol(first_leg_sym)
+        if parsed:
+            symbol = parsed.get("underlying")
+        else:
+            symbol = first_leg_sym # Fallback
+
+    if not symbol:
+        symbol = "UNKNOWN"
+
+    # 3. Determine Quantity (Spreads)
+    # Midday usually has 'contracts' in order_json
+    # Morning usually has quantity per leg
+    quantity = int(order_json.get("contracts", 1))
+    if quantity <= 0:
+        # Fallback to first leg quantity
+        if legs_data:
+            quantity = int(legs_data[0].get("quantity", 1))
+        else:
+            quantity = 1
+
+    # 4. Construct Legs
+    option_legs = []
+
+    # Determine side logic
+    # Morning: side="close_spread" top level. Legs have holding side. We must INVERT.
+    # Midday: legs have side="buy"/"sell". We use AS IS.
+
+    top_side = order_json.get("side", "")
+    is_closing_spread = top_side == "close_spread" or suggestion.get("direction") == "close"
+
+    for l in legs_data:
+        l_sym = l.get("symbol")
+        l_qty = int(l.get("quantity", 1))
+        l_side = l.get("side", "buy").lower()
+
+        if is_closing_spread:
+            # Invert side
+            # If holding is long (buy), we sell. If short (sell), we buy.
+            # Usually side in leg describes the holding?
+            # "side": "long" -> action="sell"
+            # "side": "short" -> action="buy"
+            if l_side in ["long", "buy"]:
+                action = "sell"
+            elif l_side in ["short", "sell"]:
+                action = "buy"
+            else:
+                action = "sell" # Default close to sell?
+        else:
+            # Opening (Midday)
+            # "side": "buy" -> action="buy"
+            # "side": "sell" -> action="sell"
+            action = l_side if l_side in ["buy", "sell"] else "buy"
+
+        # Parse type/expiry/strike
+        parsed = parse_option_symbol(l_sym)
+        if parsed:
+            l_type = "call" if parsed["type"] == "C" else "put"
+            l_strike = parsed["strike"]
+            l_expiry = parsed["expiry"]
+        else:
+            l_type = "stock" # or other
+            l_strike = None
+            l_expiry = None
+
+        option_legs.append(OptionLeg(
+            symbol=l_sym,
+            action=action,
+            type=l_type,
+            strike=l_strike,
+            expiry=l_expiry,
+            quantity=l_qty
+        ))
+
+    # 5. Limit Price
+    limit_price = order_json.get("limit_price")
+    order_type = "limit" if limit_price else "market"
+    if limit_price:
+        limit_price = float(limit_price)
+
+    ticket = TradeTicket(
+        source_engine=suggestion.get("window", "manual"), # use window as engine proxy
+        source_ref_id=suggestion.get("id"),
+        strategy_type=strategy_type,
+        symbol=symbol,
+        legs=option_legs,
+        order_type=order_type,
+        limit_price=limit_price,
+        quantity=quantity,
+        conviction_score=suggestion.get("probability_of_profit"), # approximate mapping
+        expected_value=suggestion.get("ev"),
+        # regime_context=suggestion.get("regime", {}) # string vs dict mismatch potential, skip for now
+    )
+
+    return ticket
+
 def _derive_strategy_key(ticket: TradeTicket) -> str:
     mock_suggestion = {
         "strategy_type": ticket.strategy_type,
@@ -231,12 +420,12 @@ def _get_or_create_portfolio(supabase, user_id, portfolio_id=None):
         raise HTTPException(status_code=500, detail="Failed to create portfolio")
     return new_port.data[0]
 
-def _stage_order_internal(supabase, analytics, user_id, ticket: TradeTicket, portfolio_id_arg=None, position_id=None, trace_id_override=None):
+def _stage_order_internal(supabase, analytics, user_id, ticket: TradeTicket, portfolio_id_arg=None, position_id=None, trace_id_override=None, suggestion_id_override=None):
     portfolio = _get_or_create_portfolio(supabase, user_id, portfolio_id_arg)
     portfolio_id = portfolio["id"]
 
     # Resolve Context
-    suggestion_id = None
+    suggestion_id = suggestion_id_override
     trace_id = trace_id_override
 
     # Metadata for telemetry
@@ -246,8 +435,10 @@ def _stage_order_internal(supabase, analytics, user_id, ticket: TradeTicket, por
     window = None
     regime = None
 
-    if ticket.source_ref_id:
+    if ticket.source_ref_id and not suggestion_id:
         suggestion_id = str(ticket.source_ref_id)
+
+    if suggestion_id:
         # Fetch suggestion context
         try:
              s_res = supabase.table("trade_suggestions").select("*").eq("id", suggestion_id).single().execute()

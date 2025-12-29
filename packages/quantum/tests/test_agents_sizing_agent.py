@@ -37,47 +37,120 @@ class TestSizingAgent(unittest.TestCase):
         self.assertEqual(constraints["sizing.recommended_contracts"], 7) # floor(7.5) = 7
 
     def test_confluence_increases_risk(self):
-        # Base 50, Agent 90 => Avg 70
+        # Base 50.
+        # Need Regime > 70 AND Vol > 70 to get 1.25x boost.
         context = {
             "deployable_capital": 2000.0,
             "max_loss_per_contract": 10.0,
             "base_score": 50.0,
             "agent_signals": {
-                "alpha": {"score": 90.0}
+                "regime": {"score": 90.0},
+                "vol": {"score": 90.0}
             }
         }
         # Range 20-75.
-        # Score 70. Factor 0.7.
-        # Target = 20 + (55 * 0.7) = 20 + 38.5 = 58.5
+        # Score 50 -> Factor 0.5.
+        # Boost: 0.5 * 1.25 = 0.625.
+        # Target = 20 + (55 * 0.625) = 20 + 34.375 = 54.375
         signal = self.agent.evaluate(context)
         target = signal.metadata["constraints"]["sizing.target_risk_usd"]
-        self.assertAlmostEqual(target, 58.5, places=1)
-        self.assertTrue(signal.score == 70.0)
+        self.assertAlmostEqual(target, 54.375, places=1)
+        self.assertTrue(signal.score == 50.0)
 
     def test_confluence_conflict_decreases_risk(self):
-        # Base 90, Agent 10 => Avg 50
+        # NOT used in current implementation logic explicitly as "conflict" -> just lack of boost OR penalty.
+        # BUT if we have liquidity penalty.
+        # Base 90 -> Factor 0.9.
+        # Liquidity 25 -> Penalty (25/50) = 0.5x.
+        # Factor 0.9 * 0.5 = 0.45.
         context = {
             "deployable_capital": 2000.0,
             "max_loss_per_contract": 10.0,
             "base_score": 90.0,
             "agent_signals": {
-                "alpha": {"score": 10.0}
+                "liquidity": {"score": 25.0}
             }
         }
         # Range 20-75.
-        # Score 50. Factor 0.5.
-        # Target = 20 + (55 * 0.5) = 20 + 27.5 = 47.5
+        # Target = 20 + (55 * 0.45) = 20 + 24.75 = 44.75
         signal = self.agent.evaluate(context)
         target = signal.metadata["constraints"]["sizing.target_risk_usd"]
-        self.assertAlmostEqual(target, 47.5, places=1)
-        self.assertTrue(signal.score == 50.0)
+        self.assertAlmostEqual(target, 44.75, places=1)
+
+    def test_vol_surface_confluence(self):
+        # Verify vol_surface key works.
+        context = {
+            "deployable_capital": 2000.0,
+            "max_loss_per_contract": 10.0,
+            "base_score": 50.0,
+            "agent_signals": {
+                "regime": {"score": 80.0},
+                "vol_surface": {"score": 80.0} # Should trigger boost
+            }
+        }
+        # Factor 0.5 * 1.25 = 0.625
+        # Target = 20 + (55 * 0.625) = 54.375
+        signal = self.agent.evaluate(context)
+        target = signal.metadata["constraints"]["sizing.target_risk_usd"]
+        self.assertAlmostEqual(target, 54.375, places=1)
+
+    def test_event_risk_reduction(self):
+        # Event score < 50 reduces sizing.
+        context = {
+            "deployable_capital": 2000.0,
+            "max_loss_per_contract": 10.0,
+            "base_score": 80.0,
+            "agent_signals": {
+                "event_risk": {"score": 25.0} # 0.5x penalty
+            }
+        }
+        # Factor 0.8 * 0.5 = 0.4
+        # Target = 20 + (55 * 0.4) = 20 + 22 = 42.0
+        signal = self.agent.evaluate(context)
+        target = signal.metadata["constraints"]["sizing.target_risk_usd"]
+        self.assertAlmostEqual(target, 42.0, places=1)
+
+    def test_liquidity_reduction(self):
+        # Liquidity score < 50 reduces sizing.
+        context = {
+            "deployable_capital": 2000.0,
+            "max_loss_per_contract": 10.0,
+            "base_score": 80.0,
+            "agent_signals": {
+                "liquidity_agent": {"score": 0.4} # Normalized to 40. 40/50 = 0.8x penalty.
+            }
+        }
+        # Factor 0.8 * 0.8 = 0.64
+        # Target = 20 + (55 * 0.64) = 20 + 35.2 = 55.2
+        signal = self.agent.evaluate(context)
+        target = signal.metadata["constraints"]["sizing.target_risk_usd"]
+        self.assertAlmostEqual(target, 55.2, places=1)
+
+    def test_normalization(self):
+        # Verify 0.8 -> 80
+        context = {
+            "deployable_capital": 2000.0,
+            "max_loss_per_contract": 10.0,
+            "base_score": 50.0,
+            "agent_signals": {
+                "regime": {"score": 0.8}, # 80
+                "vol": {"score": 0.9} # 90
+            }
+        }
+        # Both > 70 => Boost 1.25x
+        # Factor 0.5 * 1.25 = 0.625
+        # Target 54.375
+        signal = self.agent.evaluate(context)
+        target = signal.metadata["constraints"]["sizing.target_risk_usd"]
+        self.assertAlmostEqual(target, 54.375, places=1)
 
     def test_veto_handling(self):
+        # Test generic veto from a watched agent
         context = {
             "deployable_capital": 2000.0,
             "max_loss_per_contract": 10.0,
             "agent_signals": {
-                "risk_manager": {"score": 0, "veto": True}
+                "liquidity": {"score": 20, "veto": True}
             }
         }
         signal = self.agent.evaluate(context)
@@ -93,18 +166,6 @@ class TestSizingAgent(unittest.TestCase):
         self.assertEqual(signal.metadata["constraints"]["sizing.recommended_contracts"], 1)
 
     def test_capital_safety_cap(self):
-        # Target risk > capital
-        # Say capital 100, min risk 50, max 250.
-        # Score 100 -> target 250.
-        # Should be capped at capital * 0.95 = 95.
-
-        # Actually milestones for <1000 are 10-35.
-        # Let's force a scenario or assume very small capital but high min/max config?
-        # Or just use logic check.
-
-        # If I have $20 capital. Min/Max 10-35.
-        # Score 100 -> Target 35.
-        # Cap should be 20 * 0.95 = 19.
         context = {
             "deployable_capital": 20.0,
             "max_loss_per_contract": 5.0,

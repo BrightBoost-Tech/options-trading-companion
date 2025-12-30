@@ -1,5 +1,6 @@
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Optional
 from packages.quantum.agents.core import BaseQuantAgent, AgentSignal
+from packages.quantum.analytics.strategy_policy import StrategyPolicy
 
 class StrategyDesignAgent(BaseQuantAgent):
     """
@@ -36,6 +37,27 @@ class StrategyDesignAgent(BaseQuantAgent):
         # Fallback normalization
         return s.lower().replace(" ", "_")
 
+    def _get_fallback_strategy(self, strategy: str, policy: StrategyPolicy) -> Optional[str]:
+        """
+        Returns a valid fallback strategy if the primary one is banned.
+        """
+        # Bullish: Credit Put Spread <-> Debit Call Spread
+        if strategy == "credit_put_spread":
+            return "debit_call_spread" if policy.is_allowed("debit_call_spread") else None
+        if strategy == "debit_call_spread":
+            return "credit_put_spread" if policy.is_allowed("credit_put_spread") else None
+
+        # Bearish: Credit Call Spread <-> Debit Put Spread
+        if strategy == "credit_call_spread":
+            return "debit_put_spread" if policy.is_allowed("debit_put_spread") else None
+        if strategy == "debit_put_spread":
+            return "credit_call_spread" if policy.is_allowed("credit_call_spread") else None
+
+        # Neutral: Iron Condor -> No direct equivalent that is usually safer/different enough?
+        # If Iron Condor is banned, we probably just want CASH or HOLD unless we are okay with Butterflies (not impl).
+
+        return None
+
     def evaluate(self, context: Dict[str, Any]) -> AgentSignal:
         """
         Context inputs:
@@ -50,9 +72,9 @@ class StrategyDesignAgent(BaseQuantAgent):
         effective_regime = str(context.get("effective_regime", "NEUTRAL")).upper()
         iv_rank = float(context.get("iv_rank", 50.0))
 
-        # Normalize banned strategies
-        raw_banned = context.get("banned_strategies", []) or []
-        banned_strategies = [self._normalize_strategy(s) for s in raw_banned]
+        # Initialize Policy
+        # raw_banned can be None, StrategyPolicy handles None
+        policy = StrategyPolicy(context.get("banned_strategies"))
 
         # Default: stick to legacy
         recommended = legacy_strategy
@@ -64,94 +86,90 @@ class StrategyDesignAgent(BaseQuantAgent):
 
         # 1. SHOCK Regime Check
         if "SHOCK" in effective_regime:
-            if "condor" in legacy_strategy or "credit" in legacy_strategy:
-                # Override to CASH (Safety)
-                recommended = "cash"
-                override = True
-                reasons.append(f"Regime is SHOCK: Overriding {legacy_strategy} to cash")
-                score = 100.0 # High confidence in safety override
+            # Override to CASH (Safety)
+            # CASH is always allowed (not checkable by policy generally, but safe)
+            recommended = "cash"
+            override = True
+            reasons.append(f"Regime is SHOCK: Overriding {legacy_strategy} to cash")
+            score = 100.0 # High confidence in safety override
 
         # 2. CHOP Regime Check
-        # "If effective_regime includes 'CHOP' and legacy is long premium -> override to defined-risk credit (or CASH)"
-        elif "CHOP" in effective_regime:
+        elif "CHOP" in effective_regime and recommended != "cash":
             is_long_premium = "debit" in legacy_strategy or "long" in legacy_strategy or "buy" in legacy_strategy
             if is_long_premium:
-                # Override to defined-risk credit or CASH
-                # Let's verify we aren't banning credit spreads
-                if "credit_spread" not in banned_strategies and "iron_condor" not in banned_strategies:
-                     # Attempt to switch to Credit Spread (neutral/sold)
-                     # But which direction? CHOP implies mean reversion.
-                     # If legacy was Long Call -> Short Put Spread (Bullish)?
-                     # If legacy was Long Put -> Short Call Spread (Bearish)?
-                     # Prompt says "defined-risk credit variant".
-                     # Actually, if we are chopping, directional bets are risky.
-                     # Maybe Iron Condor?
-                     recommended = "iron_condor"
+                # Attempt to switch to Credit Spread/Condor (neutral/sold)
+                # Prefer Iron Condor for Chop
+                candidate = "iron_condor"
+
+                if policy.is_allowed(candidate):
+                     recommended = candidate
                      override = True
-                     reasons.append(f"Regime is CHOP: Overriding Long Premium to iron_condor")
+                     reasons.append(f"Regime is CHOP: Overriding Long Premium to {candidate}")
                 else:
+                     # If Iron Condor banned, maybe Cash?
                      recommended = "cash"
                      override = True
-                     reasons.append("Regime is CHOP & Credit Banned: Overriding to cash")
+                     reasons.append(f"Regime is CHOP & {candidate} Banned: Overriding to cash")
 
         # 3. High IV Rank Check
         # "If iv_rank high (>=60) and legacy is long premium -> override to defined-risk credit variant (reduce vega bleed)"
-        if iv_rank >= 60.0:
-            is_long_premium = "debit" in legacy_strategy or "long" in legacy_strategy or "buy" in legacy_strategy
+        if iv_rank >= 60.0 and recommended != "cash":
+            # Only override if we haven't already settled on something safe
+            # And if current rec is long premium
+            is_long_premium = "debit" in recommended or "long" in recommended or "buy" in recommended
 
-            # Note: If we already overrode to CASH or CONDOR above, we might skip this or refine it.
-            # If recommended is already CASH, don't change it back.
-            if recommended != "cash" and is_long_premium:
-                 # Override to Credit
-                 # Long Call -> Bull Put Spread
-                 # Long Put -> Bear Call Spread
-
+            if is_long_premium:
                  new_strat = None
-                 if "call" in legacy_strategy:
+                 if "call" in recommended:
                      new_strat = "credit_put_spread" # Bullish
-                 elif "put" in legacy_strategy:
+                 elif "put" in recommended:
                      new_strat = "credit_call_spread" # Bearish
 
-                 if new_strat and new_strat not in banned_strategies:
-                     recommended = new_strat
-                     override = True
-                     reasons.append(f"High IV ({iv_rank}): Overriding Long Premium to {new_strat}")
-                 elif "iron_condor" not in banned_strategies and "condor" not in legacy_strategy:
-                     # Fallback to Condor if directional credit blocked?
-                     # Or just CASH
-                     pass
+                 if new_strat:
+                     if policy.is_allowed(new_strat):
+                         recommended = new_strat
+                         override = True
+                         reasons.append(f"High IV ({iv_rank}): Overriding Long Premium to {new_strat}")
+                     else:
+                         # Credit banned? Maybe stay with debit or go to cash?
+                         # If we are High IV, Long Premium is bad.
+                         # If Credit is banned, we can't sell premium.
+                         # Maybe fallback to CASH is safer than bleeding theta/vega?
+                         # Or just stick to original if user really wants it (but user banned credit).
+                         # Let's try to stick to original unless it's strictly banned or really bad.
+                         # If the user strictly banned credit, we can't do it.
+                         # We'll check the validity of the current 'recommended' at the end.
+                         pass
 
-        # 4. Respect Banned Strategies
-        # If the *recommended* strategy is banned, force CASH/HOLD
-        # Note: We check normalized strings.
-        # "CREDIT SPREAD" might cover "CREDIT PUT SPREAD" depending on policy implementation.
-        # Here we do a simple check.
-
-        # FIX: CASH must never be treated as "banned"
-        if recommended != "cash" and recommended in banned_strategies:
-             recommended = "cash"
-             override = True
-             reasons.append(f"Strategy {recommended} is Banned: Defaulting to cash")
+        # 4. Final Policy Enforcement
+        # Ensure the final recommendation is allowed.
+        # If 'cash' or 'hold', we assume it's always allowed (safe fallback).
+        if recommended not in ("cash", "hold") and not policy.is_allowed(recommended):
+            # Try to find a fallback
+            fallback = self._get_fallback_strategy(recommended, policy)
+            if fallback:
+                original_rec = recommended
+                recommended = fallback
+                override = True
+                reasons.append(f"Strategy {original_rec} is Banned. Fallback to {fallback}.")
+            else:
+                original_rec = recommended
+                recommended = "cash"
+                override = True
+                reasons.append(f"Strategy {original_rec} is Banned & No Fallback. Defaulting to cash.")
 
         # Constraints payload
         constraints = {
             "strategy.recommended": recommended,
             "strategy.override_selector": override,
-            "strategy.banned": banned_strategies,
+            "strategy.banned": list(policy.banned_strategies), # Serialize set to list
             "strategy.require_defined_risk": True # Always default to defined risk for agents
         }
-
-        if recommended == "cash" or recommended == "hold":
-            # If we recommend CASH, that's effectively a veto on the *legacy* trade,
-            # or a successful signal for "Do Nothing".
-            # In the scanner context, returning "HOLD" strategy usually results in `None` candidate.
-            pass
 
         return AgentSignal(
             agent_id=self.id,
             score=score,
-            veto=False, # We don't veto the *process*, we just change the strategy.
-                        # Unless recommended is CASH, which scanner might interpret as "no trade".
+            veto=False,
             reasons=reasons,
             metadata={"constraints": constraints}
         )

@@ -17,7 +17,7 @@ import PaperPortfolioWidget from '@/components/dashboard/PaperPortfolioWidget';
 import { fetchWithAuth, fetchWithAuthTimeout } from '@/lib/api';
 import { QuantumTooltip } from "@/components/ui/QuantumTooltip";
 import { ThemeToggle } from '@/components/ThemeToggle';
-import { AlertTriangle, Wallet, Loader2, RefreshCw } from 'lucide-react';
+import { AlertTriangle, Wallet, Loader2, RefreshCw, ChevronDown, ChevronRight } from 'lucide-react';
 
 const mockAlerts = [
   { id: '1', message: 'SPY credit put spread scout: 475/470 for $1.50 credit', time: '2 min ago' },
@@ -47,6 +47,10 @@ export default function DashboardPage() {
   // Weekly Reports
   const [weeklyReports, setWeeklyReports] = useState<any[]>([]);
   
+  // Legacy View State
+  const [showLegacy, setShowLegacy] = useState(false);
+  const [legacyDataLoaded, setLegacyDataLoaded] = useState(false);
+
   // Journal state
   const [journalStats, setJournalStats] = useState<any>(null);
   const [journalLoading, setJournalLoading] = useState(false);
@@ -75,11 +79,9 @@ export default function DashboardPage() {
       await new Promise(r => setTimeout(r, 100));
       if (!mounted) return;
 
-      loadWeeklyScout();
-      loadMorningSuggestions();
-      loadMiddaySuggestions();
-      loadWeeklyReports();
-      loadRebalanceSuggestions();
+      // Legacy data is now loaded on-demand via loadLegacyData
+      // We can pre-load rebalance suggestions if needed by optimizer,
+      // but let's stick to lazy loading to keep initial load light.
     };
 
     loadStaged();
@@ -87,6 +89,24 @@ export default function DashboardPage() {
     return () => { mounted = false; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // Load legacy data only when requested
+  useEffect(() => {
+    if (showLegacy && !legacyDataLoaded) {
+      loadLegacyData();
+    }
+  }, [showLegacy, legacyDataLoaded]);
+
+  const loadLegacyData = async () => {
+    setLegacyDataLoaded(true);
+    await Promise.all([
+      loadWeeklyScout(),
+      loadMorningSuggestions(),
+      loadMiddaySuggestions(),
+      loadWeeklyReports(),
+      loadRebalanceSuggestions()
+    ]);
+  };
 
   const loadSnapshot = async () => {
     try {
@@ -184,13 +204,15 @@ export default function DashboardPage() {
       await fetchWithAuthTimeout('/dev/run-all', 30000, {
         method: 'POST',
       });
-      // After triggering, reload suggestions and weekly reports
-      await Promise.all([
-        loadMorningSuggestions(),
-        loadMiddaySuggestions(),
-        loadWeeklyReports(),
-        loadRebalanceSuggestions()
-      ]);
+      // After triggering, reload suggestions and weekly reports if legacy data is active
+      if (legacyDataLoaded) {
+        await Promise.all([
+          loadMorningSuggestions(),
+          loadMiddaySuggestions(),
+          loadWeeklyReports(),
+          loadRebalanceSuggestions()
+        ]);
+      }
     } catch (err: any) {
       if (isAbortError(err)) return;
       console.error('Failed to run workflows', err);
@@ -454,19 +476,31 @@ export default function DashboardPage() {
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
             <div className="lg:col-span-2">
                 <TradeInbox />
+
                 <div className="mt-8 border-t pt-8">
-                  <h3 className="text-sm font-semibold text-muted-foreground mb-4 uppercase tracking-wider">Legacy View</h3>
-                  <SuggestionTabs
-                    optimizerSuggestions={rebalanceSuggestions}
-                    scoutSuggestions={weeklyScout?.top_picks || []}
-                    journalQueue={[]}
-                    morningSuggestions={morningSuggestions}
-                    middaySuggestions={middaySuggestions}
-                    weeklyReports={weeklyReports}
-                    onRefreshScout={loadWeeklyScout}
-                    scoutLoading={scoutLoading}
-                    onRefreshJournal={() => {}}
-                  />
+                  <button
+                    onClick={() => setShowLegacy(!showLegacy)}
+                    className="flex items-center gap-2 text-sm font-semibold text-muted-foreground hover:text-foreground uppercase tracking-wider transition-colors mb-4"
+                  >
+                    {showLegacy ? <ChevronDown className="w-4 h-4" /> : <ChevronRight className="w-4 h-4" />}
+                    Legacy View
+                  </button>
+
+                  {showLegacy && (
+                    <div className="animate-in slide-in-from-top-4 fade-in duration-300">
+                      <SuggestionTabs
+                        optimizerSuggestions={rebalanceSuggestions}
+                        scoutSuggestions={weeklyScout?.top_picks || []}
+                        journalQueue={[]}
+                        morningSuggestions={morningSuggestions}
+                        middaySuggestions={middaySuggestions}
+                        weeklyReports={weeklyReports}
+                        onRefreshScout={loadWeeklyScout}
+                        scoutLoading={scoutLoading}
+                        onRefreshJournal={() => {}}
+                      />
+                    </div>
+                  )}
                 </div>
             </div>
 

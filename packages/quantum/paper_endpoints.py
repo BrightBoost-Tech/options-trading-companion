@@ -93,9 +93,23 @@ def stage_batch_endpoint(
             failed_results.append({"suggestion_id": s_id, "error": "Suggestion not found or not owned by user"})
             continue
 
-        # Check status
-        if suggestion.get("status") != "pending":
-            failed_results.append({"suggestion_id": s_id, "error": f"Status is {suggestion.get('status')}, expected pending"})
+        # Idempotency Check
+        current_status = suggestion.get("status")
+        if current_status == "staged":
+            # Check if order actually exists
+            existing_order = supabase.table("paper_orders").select("id").eq("suggestion_id", s_id).execute()
+            if existing_order.data:
+                # Already successfully staged
+                staged_results.append({"suggestion_id": s_id, "order_id": existing_order.data[0]["id"]})
+                continue
+            else:
+                # Inconsistent state: marked staged but no order. treat as failure to be safe, or allow re-stage?
+                # Prompt says: fail with specific error
+                failed_results.append({"suggestion_id": s_id, "error": "already staged but no paper order found"})
+                continue
+
+        if current_status != "pending":
+            failed_results.append({"suggestion_id": s_id, "error": f"Status is {current_status}, expected pending"})
             continue
 
         try:
@@ -112,14 +126,9 @@ def stage_batch_endpoint(
                 suggestion_id_override=s_id # Ensure linking
             )
 
-            # Update Suggestion Status
+            # Update Suggestion Status - STRICTLY status only
             supabase.table("trade_suggestions").update({
-                "status": "staged",
-                "order_id": order_id, # Optional linkage column if exists, otherwise harmless or error?
-                                      # Assuming we only update status based on requirements.
-                                      # But wait, if order_id column doesn't exist, this might fail.
-                                      # Requirement: "Update trade_suggestions.status -> 'staged'"
-                                      # I'll stick to status.
+                "status": "staged"
             }).eq("id", s_id).execute()
 
             staged_results.append({"suggestion_id": s_id, "order_id": order_id})
@@ -128,7 +137,12 @@ def stage_batch_endpoint(
             logging.error(f"Failed to stage suggestion {s_id}: {e}")
             failed_results.append({"suggestion_id": s_id, "error": str(e)})
 
-    return {"staged": staged_results, "failed": failed_results}
+    return {
+        "staged": staged_results,
+        "failed": failed_results,
+        "staged_count": len(staged_results),
+        "failed_ids": [f["suggestion_id"] for f in failed_results]
+    }
 
 @router.post("/paper/order/process")
 def process_orders_endpoint(

@@ -151,11 +151,10 @@ class OutcomeAggregator:
             cf_pnl, cf_avail = self._calculate_counterfactual_pnl(suggestions)
             if not cf_avail:
                 cf_reason = "Missing market data for one or more legs"
-                reason_codes.append("counterfactual_missing")
-                # If no action, and counterfactual is missing, is it incomplete?
-                # User said: "missing equity -> INCOMPLETE". Here equity is counterfactual PnL.
-                status = OutcomeStatus.INCOMPLETE
-                reason_codes.append("missing_equity")
+                reason_codes.append("missing_counterfactual")
+                # If no action, and counterfactual is missing, it is PARTIAL not INCOMPLETE
+                # as core metrics (realized_pnl_1d=0) are present.
+                status = OutcomeStatus.PARTIAL
 
         # Priority 3: Optimizer Decision (Simulation)
         elif decision["decision_type"] == "optimizer_weights":

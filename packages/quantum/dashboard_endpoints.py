@@ -26,43 +26,6 @@ router = APIRouter()
 class DismissSuggestionRequest(BaseModel):
     reason: str
 
-class BatchStageRequest(BaseModel):
-    suggestion_ids: List[str]
-
-@router.post("/inbox/stage-batch")
-async def stage_batch_suggestions(
-    body: BatchStageRequest,
-    user_id: str = Depends(get_current_user),
-    supabase: Client = Depends(get_supabase_user_client)
-):
-    if not supabase:
-        raise HTTPException(status_code=503, detail="Database Unavailable")
-
-    try:
-        if not body.suggestion_ids:
-             return {"staged_count": 0, "failed_ids": []}
-
-        # Update status to 'staged' for these IDs belonging to user
-        # Note: 'staged' status removes it from 'pending' view in inbox
-        res = supabase.table(TRADE_SUGGESTIONS_TABLE) \
-            .update({"status": "staged"}) \
-            .in_("id", body.suggestion_ids) \
-            .eq("user_id", user_id) \
-            .execute()
-
-        updated = res.data or []
-        updated_ids = {r["id"] for r in updated}
-        failed_ids = [sid for sid in body.suggestion_ids if sid not in updated_ids]
-
-        return {
-            "staged_count": len(updated),
-            "failed_ids": failed_ids
-        }
-    except Exception as e:
-        print(f"Batch Stage Error: {e}")
-        traceback.print_exc()
-        raise HTTPException(status_code=500, detail="Batch stage failed")
-
 @router.get("/inbox")
 async def get_inbox(
     user_id: str = Depends(get_current_user),
@@ -151,6 +114,14 @@ async def dismiss_suggestion(
     if not supabase:
         raise HTTPException(status_code=503, detail="Database Unavailable")
 
+    # VALIDATION: Allowed reasons
+    valid_reasons = {"too_risky", "bad_price", "wrong_timing"}
+    if body.reason not in valid_reasons:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Invalid reason. Must be one of: {', '.join(valid_reasons)}"
+        )
+
     try:
         # Fetch existing to merge sizing_metadata
         res = supabase.table(TRADE_SUGGESTIONS_TABLE).select("*").eq("id", suggestion_id).single().execute()
@@ -160,6 +131,10 @@ async def dismiss_suggestion(
         suggestion = res.data
         if suggestion["user_id"] != user_id:
             raise HTTPException(status_code=403, detail="Unauthorized")
+
+        # If already dismissed, return existing record (Do NOT overwrite)
+        if suggestion.get("status") == "dismissed":
+            return suggestion
 
         # Update logic
         sizing_metadata = suggestion.get("sizing_metadata") or {}
@@ -182,6 +157,8 @@ async def dismiss_suggestion(
 
     except APIError as e:
         raise HTTPException(status_code=500, detail=f"Database Error: {e}")
+    except HTTPException:
+        raise
     except Exception as e:
         print(f"Dismiss Error: {e}")
         raise HTTPException(status_code=500, detail="Internal Server Error")
@@ -202,7 +179,15 @@ async def refresh_quote(
             raise HTTPException(status_code=404, detail="Suggestion not found")
 
         suggestion = res.data
-        symbol = suggestion.get("symbol")
+
+        # Enforce ownership
+        if suggestion["user_id"] != user_id:
+            raise HTTPException(status_code=403, detail="Unauthorized")
+
+        # Symbol resolution (symbol OR ticker)
+        symbol = suggestion.get("symbol") or suggestion.get("ticker")
+        if not symbol:
+            raise HTTPException(status_code=422, detail="Suggestion missing symbol or ticker")
 
         # Get fresh quote
         poly = PolygonService()
@@ -214,13 +199,12 @@ async def refresh_quote(
             raise HTTPException(status_code=502, detail=f"Quote provider error: {str(e)}")
 
         # Calculate TCM Estimate
-        # Need to construct a temporary Ticket from suggestion to use TCM
+        tcm_est = None
         try:
             # Best effort ticket reconstruction
             order_json = suggestion.get("order_json") or {}
 
             # Helper to map suggestion to ticket
-            # Usually order_json should match Ticket structure, or close enough
             legs = order_json.get("legs", [])
             # ensure valid legs structure
 
@@ -236,7 +220,10 @@ async def refresh_quote(
             tcm_est = TransactionCostModel.estimate(ticket, quote)
         except Exception as e:
             print(f"TCM Estimate failed: {e}")
-            tcm_est = None
+            # TCM failure is not critical enough to fail the whole request, but prompt said "Quote/TCM failures: HTTP 502"
+            # However, typically quote failure is critical, TCM is supplementary.
+            # "Quote/TCM failures" implies either. Let's be strict.
+            raise HTTPException(status_code=502, detail=f"TCM calculation error: {str(e)}")
 
         return {
             "suggestion_id": suggestion_id,

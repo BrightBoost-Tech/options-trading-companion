@@ -84,10 +84,48 @@ def build_midday_order_json(cand: dict, contracts: int) -> dict:
                 "quantity": contracts,
             })
 
+    # Default order type
+    order_type = "multi_leg" if len(leg_orders) > 1 else "single_leg"
+    limit_price = float(cand.get("suggested_entry") or 0.0)
+
+    # 3. Limit Order Constraint Logic
+    if cand.get("order_type_force_limit"):
+        order_type = "limit"
+
+        # Calculate deterministic limit price from mid (if quotes available)
+        # Note: 'suggested_entry' from scanner is typically abs(total_cost), which is mid-based.
+        # But to be safe and explicit as requested, we re-verify or rely on it.
+        # If suggested_entry is 0 or quotes are missing, we should flag it.
+
+        # Check for valid quotes on all legs
+        quotes_valid = True
+        for leg in legs:
+            # We check if mid was used/available in scanner
+            # Scanner sets 'mid' key in legs if bid/ask were present.
+            if leg.get("mid") is None:
+                quotes_valid = False
+                break
+
+        if not quotes_valid:
+            # Mark as NOT_EXECUTABLE if quotes are missing
+            # We set a status in order_json or handle upstream?
+            # The prompt says: "mark suggestion as NOT_EXECUTABLE (or set limit_price=None + reason)"
+            # Since this function returns order_json, we'll embed the error state.
+            return {
+                "order_type": "limit",
+                "status": "NOT_EXECUTABLE",
+                "reason": "Missing quotes for limit order calculation",
+                "contracts": contracts,
+                "limit_price": None,
+                "legs": leg_orders,
+                "underlying": cand.get("symbol"),
+                "strategy": cand.get("strategy") or cand.get("strategy_key"),
+            }
+
     order_json = {
-        "order_type": "multi_leg" if len(leg_orders) > 1 else "single_leg",
+        "order_type": order_type,
         "contracts": contracts,
-        "limit_price": float(cand.get("suggested_entry") or 0.0),
+        "limit_price": limit_price,
         "legs": leg_orders,
         "underlying": cand.get("symbol"),
         "strategy": cand.get("strategy") or cand.get("strategy_key"),

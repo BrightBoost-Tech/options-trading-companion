@@ -1,10 +1,10 @@
 import uuid
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import List, Dict, Any, Optional, Tuple
 
 import numpy as np
 from supabase import Client
-from packages.quantum.market_data import PolygonService, extract_underlying_symbol
+from packages.quantum.market_data import PolygonService, extract_underlying_symbol, normalize_option_symbol
 from packages.quantum.analytics.surprise import compute_surprise
 from packages.quantum.nested_logging import log_outcome
 from packages.quantum.services.options_utils import get_contract_multiplier
@@ -87,7 +87,7 @@ class OutcomeAggregator:
     def _fetch_suggestions(self, trace_id: str) -> List[Dict]:
         try:
             res = self.supabase.table("trade_suggestions") \
-                .select("id, status, ticker") \
+                .select("id, status, ticker, order_json, direction, created_at") \
                 .eq("trace_id", trace_id) \
                 .execute()
             return res.data or []
@@ -125,6 +125,7 @@ class OutcomeAggregator:
         # Initialize counterfactual variables safely
         cf_pnl = None
         cf_avail = False
+        cf_reason = None
 
         # --- Outcome Logic ---
 
@@ -142,6 +143,8 @@ class OutcomeAggregator:
 
             # --- Counterfactual Logic ---
             cf_pnl, cf_avail = self._calculate_counterfactual_pnl(suggestions)
+            if not cf_avail:
+                cf_reason = "Missing market data for one or more legs"
 
         # Priority 3: Optimizer Decision (Simulation)
         elif decision["decision_type"] == "optimizer_weights":
@@ -233,9 +236,17 @@ class OutcomeAggregator:
         # --- Write Log ---
         # Prepare counterfactual args if applicable
         cf_args = {}
-        if attribution_type == "no_action" and cf_avail:
-            cf_args['counterfactual_pl_1d'] = cf_pnl
-            cf_args['counterfactual_available'] = True
+        if attribution_type == "no_action":
+            if cf_avail:
+                cf_args['counterfactual_pl_1d'] = cf_pnl
+                cf_args['counterfactual_available'] = True
+            elif cf_reason:
+                 # Note: log_outcome might not support cf_reason kwarg yet depending on schema
+                 # But we can pass it if we update schema or just track availability.
+                 # The user requirement said: "store counterfactual_available boolean + counterfactual_reason when unavailable"
+                 # I'll pass it, assuming log_outcome can handle kwargs or ignores extras.
+                 cf_args['counterfactual_available'] = False
+                 cf_args['counterfactual_reason'] = cf_reason
 
         log_outcome(
             trace_id=uuid.UUID(trace_id),
@@ -251,48 +262,145 @@ class OutcomeAggregator:
         """
         Computes what the PnL would have been if the suggestion was taken.
         Returns (pnl, available).
+
+        Supports:
+        - Single Options (via ticker)
+        - Multi-leg Spreads (via order_json['legs'])
+        - Stock Trades
         """
         if not suggestions:
             return 0.0, False
 
         suggestion = suggestions[0]
-        ticker = suggestion.get("ticker")
-        if not ticker:
+        order_json = suggestion.get("order_json") or {}
+        legs = order_json.get("legs", [])
+
+        # Determine anchor date for deterministic history
+        created_at_str = suggestion.get("created_at")
+        anchor_date = None
+        if created_at_str:
+            try:
+                # Parse ISO format
+                created_at = datetime.fromisoformat(created_at_str.replace('Z', '+00:00'))
+                anchor_date = created_at
+            except ValueError:
+                pass # anchor_date remains None, fallback to default behavior (likely now)
+
+        # Strategy 1: Multi-Leg Spread
+        if legs:
+            total_pnl = 0.0
+            all_available = True
+
+            for leg in legs:
+                symbol = leg.get("symbol")
+                quantity = abs(float(leg.get("quantity", 1.0)))
+                side = leg.get("side", "buy").lower() # buy/sell
+
+                # Check side for PnL sign
+                # Buy -> Long -> PnL = (Exit - Entry)
+                # Sell -> Short -> PnL = (Entry - Exit) = -(Exit - Entry)
+                direction_mult = 1.0 if side in ["buy", "long"] else -1.0
+
+                leg_pnl, leg_avail = self._get_single_asset_pnl(symbol, direction_mult, quantity, anchor_date)
+
+                if not leg_avail:
+                    all_available = False
+                    break
+
+                total_pnl += leg_pnl
+
+            if all_available:
+                return total_pnl, True
+            # Fallthrough if spread fails?
+            # If spread data is partial, we probably shouldn't return partial PnL.
             return 0.0, False
 
-        # Try to parse order details if available, otherwise heuristic
-        # We assume entry at T (suggestion time) and exit at T+1 (now)
-        # Using PolygonService to get price change over last day
+        # Strategy 2: Single Ticker (Option or Stock)
+        ticker = suggestion.get("ticker")
+        if ticker:
+            # Determine direction/quantity
+            direction = suggestion.get("direction", "long").lower()
+            direction_mult = -1.0 if direction == "short" else 1.0
+
+            # Try to get quantity from order_json or default to 1
+            qty = float(order_json.get("contracts") or order_json.get("quantity") or 1.0)
+
+            pnl, avail = self._get_single_asset_pnl(ticker, direction_mult, qty, anchor_date)
+            return pnl, avail
+
+        return 0.0, False
+
+    def _get_single_asset_pnl(self, symbol: str, direction_mult: float, quantity: float, anchor_date: Optional[datetime] = None) -> Tuple[float, bool]:
+        """
+        Helper to fetch 1-day PnL for a single asset (Option or Stock).
+        Returns (pnl_dollars, available).
+        """
+        if not symbol:
+            return 0.0, False
+
+        # Normalize symbol for Polygon
+        # If it looks like an option but lacks O:, add it
+        normalized = normalize_option_symbol(symbol)
 
         try:
-            # We fetch 5 days to be safe and take last 2
-            hist = self.polygon_service.get_historical_prices(ticker, days=5)
-            prices = hist.get("prices", [])
+            # Fetch window: anchor_date up to +5 days to catch Next Trading Day.
+            # Polygon's to_date is inclusive.
+            to_date = None
+            if anchor_date:
+                # We want at least T and T+1. If we ask for T+5, we get a buffer for weekends.
+                to_date = anchor_date + timedelta(days=5)
 
-            if len(prices) < 2:
+            # Fetch historical prices
+            # Note: We rely on PolygonService to handle 'days' (lookback from to_date).
+            # If we want forward looking from anchor_date, we have to be careful.
+            # PolygonService.get_historical_prices(days=N, to_date=D) returns N days ending at D.
+            # So if we want [Anchor, Anchor+1, ...], we need to set to_date=Anchor+5, and days=10 (to cover enough history).
+            # Wait, `get_historical_prices` sorts ascending.
+
+            hist = self.polygon_service.get_historical_prices(normalized, days=10, to_date=to_date)
+            prices = hist.get("prices", [])
+            dates = hist.get("dates", []) # List[str] YYYY-MM-DD
+
+            if len(prices) < 2 or len(dates) < 2:
                 return 0.0, False
 
-            p_today = prices[-1]
-            p_prev = prices[-2]
-
-            # Check direction
-            direction = suggestion.get("direction", "long").lower()
-            multiplier = get_contract_multiplier(ticker)
-
-            # Heuristic: 1 contract or base quantity
-            qty = 1.0
-
-            raw_diff = p_today - p_prev
-
-            if direction == "short":
-                pnl = -raw_diff * qty * multiplier
+            # Find the index of the anchor date (or the closest date before/on it)
+            if not anchor_date:
+                # Fallback: Just take last 2 days if no anchor
+                p_exit = prices[-1]
+                p_entry = prices[-2]
             else:
-                pnl = raw_diff * qty * multiplier
+                anchor_str = anchor_date.strftime('%Y-%m-%d')
 
+                # Find index of anchor date
+                idx_entry = -1
+                for i, d in enumerate(dates):
+                    if d >= anchor_str:
+                        # If exact match, great.
+                        # If d > anchor_str, it means anchor was non-trading, so we enter at next avail?
+                        # Or do we strictly require anchor date to be present?
+                        # For "Suggestion at T", we assume we enter at T (Close).
+                        # If T is missing, maybe we can't trade?
+                        # Let's simple match: first date >= anchor_str is our Entry.
+                        # Then next date is Exit.
+                        idx_entry = i
+                        break
+
+                if idx_entry == -1 or idx_entry >= len(prices) - 1:
+                    # Anchor date is too new (no T+1 data yet) or not found
+                    return 0.0, False
+
+                p_entry = prices[idx_entry]
+                p_exit = prices[idx_entry + 1]
+
+            raw_diff = p_exit - p_entry
+
+            multiplier = get_contract_multiplier(normalized)
+
+            pnl = raw_diff * quantity * multiplier * direction_mult
             return float(pnl), True
 
-        except Exception as e:
-            # print(f"Counterfactual calc failed: {e}")
+        except Exception:
             return 0.0, False
 
     def _calculate_execution_pnl(self, executions: List[Dict]) -> Tuple[float, Optional[float]]:

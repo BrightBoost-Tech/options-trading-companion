@@ -602,7 +602,8 @@ async def run_midday_cycle(supabase: Client, user_id: str):
             supabase_client=supabase,
             user_id=user_id,
             global_snapshot=global_snap,
-            banned_strategies=banned_strategies
+            banned_strategies=banned_strategies,
+            portfolio_cash=deployable_capital
         )
 
         print(f"Scanner returned {len(scout_results)} raw opportunities.")

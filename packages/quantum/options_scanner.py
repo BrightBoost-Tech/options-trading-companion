@@ -31,7 +31,7 @@ SCANNER_MAX_DTE = 45
 
 logger = logging.getLogger(__name__)
 
-def _apply_agent_constraints(candidate: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+def _apply_agent_constraints(candidate: Dict[str, Any], portfolio_cash: Optional[float] = None) -> Optional[Dict[str, Any]]:
     """
     Applies agent veto and constraints to the candidate.
     Resolves conflicting constraints using precedence rules.
@@ -85,37 +85,48 @@ def _apply_agent_constraints(candidate: Dict[str, Any]) -> Optional[Dict[str, An
     # 1. Defined Risk
     if require_defined_risk:
         # Check if strategy is defined risk.
-        # "no naked short" logic.
-        # We use max_loss_per_contract. If it is infinite -> Undefined Risk.
-        # Or check strategy keys for explicit naked calls/puts if max_loss isn't enough.
-        # Note: Short Put has max_loss = (Strike - Prem) * 100 which is FINITE.
-        # However, many define "Defined Risk" as spreads (capped loss < notional).
-        # But technically Short Put is defined.
-        # Naked Call is Infinite.
-        # Let's start with banning Infinite max_loss.
-        # And specifically check for single-leg short options if needed.
-        # The prompt says: "candidate must be defined-risk (no naked short)".
-        # "Naked Short" usually implies undefined or high risk.
-        # If I strictly check `max_loss == inf`, I catch Naked Calls.
-        # Naked Puts pass `max_loss != inf`.
-        # If the user wants to ban Naked Puts too, I should check `strategy_key`.
-        strategy_key = candidate.get("strategy_key", "")
-        is_spread = "spread" in strategy_key or "condor" in strategy_key
-        is_single_short = "short" in strategy_key and not is_spread
-
-        # If explicitly single short, reject?
-        # A short put is a "naked short put".
-        # I will assume "defined risk" implies spreads or long positions.
-        # Or Cash Secured Put? CSP is defined risk.
-        # I'll stick to: Reject if max_loss is infinite OR if it is a single-leg short structure (conservative interpretation of "no naked short").
+        # Criteria:
+        # 1. Reject if max_loss is infinite (e.g., Naked Calls).
+        # 2. If Short Put (single leg), ALLOW ONLY IF Cash Secured (CSP).
+        #    - Must have portfolio_cash available.
+        #    - collateral_required <= portfolio_cash.
+        # 3. Allow Spreads and Long Options.
 
         if candidate.get("max_loss_per_contract") == float("inf"):
+            # Naked Short Call or similar infinite risk
             return None
 
-        # Refined check: reject single-leg short strategies if they are considered "naked"
+        strategy_key = candidate.get("strategy_key", "")
+        is_single_short = "short" in strategy_key and "spread" not in strategy_key and "condor" not in strategy_key
+
         if is_single_short:
-             # This bans Short Put and Short Call
-             return None
+            # Short Put logic (since Short Call is caught by max_loss=inf check above, generally)
+            # Just in case Short Call slipped through max_loss check (unlikely), explicitly check strategy
+            if "call" in strategy_key:
+                return None
+
+            # It is a Short Put. Check for CSP capability.
+            # "allow short puts (single-leg) -> allowed only if collateral_required_per_contract * contracts <= available_cash_cap"
+            # In scanner, we assume contracts=1 for feasibility check.
+
+            collateral = candidate.get("collateral_required_per_contract")
+
+            if collateral is None:
+                # "missing collateral fields -> conservative reject with reason missing_collateral"
+                return None
+
+            if portfolio_cash is None:
+                # "portfolio cash unknown -> conservative reject for CSP path"
+                return None
+
+            # Check if we can afford at least 1 contract
+            # contracts > 1 uses total collateral is handled in sizing,
+            # here we check if the trade is theoretically possible as a CSP.
+            if collateral > portfolio_cash:
+                return None
+
+            # If we passed checks, it is a CSP (Defined Risk via Cash Security). Allowed.
+            pass
 
     # 2. Max Spread
     if effective_max_spread is not None:
@@ -715,7 +726,8 @@ def scan_for_opportunities(
     supabase_client: Client = None,
     user_id: str = None,
     global_snapshot: GlobalRegimeSnapshot = None,
-    banned_strategies: List[str] = None
+    banned_strategies: List[str] = None,
+    portfolio_cash: float = None
 ) -> List[Dict[str, Any]]:
     """
     Scans the provided symbols (or universe) for option trade opportunities.
@@ -1381,7 +1393,7 @@ def scan_for_opportunities(
                     candidate_dict["agent_summary"] = agent_summary
 
                     # Apply Constraints & Veto
-                    candidate_dict = _apply_agent_constraints(candidate_dict)
+                    candidate_dict = _apply_agent_constraints(candidate_dict, portfolio_cash=portfolio_cash)
                     if candidate_dict is None:
                         return None
 

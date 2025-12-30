@@ -1,5 +1,7 @@
 import React from 'react';
 import { formatOptionDisplay } from '@/lib/formatters';
+import { Wallet, RefreshCw } from 'lucide-react';
+import { Button } from '@/components/ui/button';
 
 interface PortfolioHoldingsTableProps {
   holdings: any[];
@@ -137,8 +139,28 @@ export default function PortfolioHoldingsTable({ holdings, onSync, onGenerateSug
 
             {holdings.length === 0 && (
                  <tr>
-                    <td colSpan={5} className="px-6 py-8 text-center text-muted-foreground">
-                      No positions found. Sync via Plaid or Import CSV in Settings.
+                    <td colSpan={5} className="py-12 text-center">
+                        <div className="flex flex-col items-center justify-center space-y-3">
+                            <div className="bg-muted p-4 rounded-full">
+                                <Wallet className="w-8 h-8 text-muted-foreground" aria-hidden="true" />
+                            </div>
+                            <div className="space-y-1">
+                                <h3 className="text-lg font-medium">No Holdings Found</h3>
+                                <p className="text-sm text-muted-foreground max-w-[300px] mx-auto">
+                                    Sync your brokerage account via Plaid or import a CSV to get started.
+                                </p>
+                            </div>
+                            <div className="pt-2">
+                                <Button
+                                    onClick={onSync}
+                                    variant="outline"
+                                    aria-label="Sync holdings now"
+                                >
+                                    <RefreshCw className="mr-2 h-4 w-4" aria-hidden="true" />
+                                    Sync Now
+                                </Button>
+                            </div>
+                        </div>
                     </td>
                   </tr>
             )}

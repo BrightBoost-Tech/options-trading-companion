@@ -16,6 +16,9 @@ export interface StrategyConfig {
   take_profit_pct: number;
   stop_loss_pct: number;
   max_holding_days: number;
+  is_active?: boolean;
+  user_id?: string;
+  updated_at?: string;
 }
 
 export interface BacktestRequest {
@@ -47,6 +50,9 @@ export interface BacktestResult {
   status: string;
   batch_id?: string;
   created_at: string; // Made required as it's used in UI
+  sharpe_ratio?: number; // Added for new TradeInbox compatibility
+  trade_count?: number; // Added for new TradeInbox compatibility
+  config_snapshot?: Record<string, any>; // Added for new TradeInbox compatibility
 }
 
 export interface StrategyBacktest {
@@ -83,10 +89,12 @@ export interface SuggestionMetrics {
   kelly: number;
   max_loss: number;
   max_profit: number;
+  return_on_risk?: number; // Added for Inbox
 }
 
 export interface Suggestion {
   id: string;
+  user_id?: string;
   type?: string;
   kind?: string;
   window?: string;
@@ -94,7 +102,7 @@ export interface Suggestion {
   symbol: string;
   display_symbol?: string;
   ticker?: string;
-  direction: string;
+  direction?: string;
   strategy: string;
   expiration?: string;
   rationale?: string;
@@ -116,6 +124,8 @@ export interface Suggestion {
         iv_regime?: string;
         [key: string]: any;
     };
+    quantity?: number; // Added for Inbox
+    order_type?: string; // Added for Inbox
     [key: string]: any; // Catch-all for other order fields
   };
   metrics?: SuggestionMetrics; // Top level metrics convenience
@@ -129,6 +139,10 @@ export interface Suggestion {
     risk_multiplier?: number;
     clamped_by?: string;
     clamp_reason?: string;
+    dismiss?: {
+        reason: string;
+        dismissed_at: string;
+    };
   };
 
   // Flattened Context Helpers
@@ -136,6 +150,7 @@ export interface Suggestion {
   iv_regime?: string;
   conviction?: number;
   trace_id?: string;
+  confidence?: number; // Added for Inbox
 
   // Greeks Impact (Top Level or Derived)
   delta_impact?: number;
@@ -143,11 +158,20 @@ export interface Suggestion {
 
   timestamp?: string;
   created_at?: string;
+  updated_at?: string; // Added for Inbox
 
   // Frontend state
   staged?: boolean;
   is_stale?: boolean; // Derived from createdAt vs stale threshold
   refreshed_at?: string; // Updated locally or from backend
+
+  // Agent / AI Meta (Inbox v3)
+  agent_summary?: {
+    overall_score: number;
+    decision: string;
+    top_reasons: string[];
+    vetoed?: boolean;
+  };
 }
 
 export interface BatchStageRequest {
@@ -205,4 +229,38 @@ export interface JobRun {
 export interface JobFilters {
     status?: string;
     job_name?: string;
+}
+
+export interface Position {
+  symbol: string;
+  quantity: number;
+  current_price: number;
+  cost_basis: number;
+  market_value: number;
+  unrealized_pnl: number;
+  unrealized_pnl_pct: number;
+  asset_type: string; // "equity", "option", "crypto"
+  updated_at?: string;
+  // Greeks
+  delta?: number;
+  gamma?: number;
+  theta?: number;
+  vega?: number;
+  iv?: number;
+  pnl_severity?: 'critical' | 'warning' | 'success'; // Frontend styling helper
+}
+
+// --- Inbox v3 Types ---
+
+export interface InboxMeta {
+  total_ev_available: number;
+  deployable_capital: number;
+  stale_after_seconds: number;
+}
+
+export interface InboxResponse {
+  hero: Suggestion | null;
+  queue: Suggestion[];
+  completed: Suggestion[];
+  meta: InboxMeta;
 }

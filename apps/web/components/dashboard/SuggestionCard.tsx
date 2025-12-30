@@ -6,7 +6,7 @@ import { Badge } from '@/components/ui/badge';
 import { Suggestion } from '@/lib/types';
 import { logEvent } from '@/lib/analytics';
 import { QuantumTooltip } from '@/components/ui/QuantumTooltip';
-import { Check, X, RefreshCw, AlertTriangle, Clock } from 'lucide-react';
+import { Check, X, RefreshCw, AlertTriangle, Clock, Loader2 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Dialog, DialogContent, DialogTrigger } from '@/components/ui/dialog';
 
@@ -21,6 +21,7 @@ interface SuggestionCardProps {
     batchModeEnabled?: boolean;
     isSelected?: boolean;
     onToggleSelect?: (suggestion: Suggestion) => void;
+    isStaging?: boolean;
 }
 
 const SuggestionCard = ({
@@ -32,7 +33,8 @@ const SuggestionCard = ({
     isStale = false,
     batchModeEnabled = false,
     isSelected = false,
-    onToggleSelect
+    onToggleSelect,
+    isStaging = false
 }: SuggestionCardProps) => {
     const { order_json, score, metrics, iv_regime, iv_rank, delta_impact, theta_impact, staged } = suggestion;
     const [dismissOpen, setDismissOpen] = useState(false);
@@ -91,7 +93,7 @@ const SuggestionCard = ({
 
     // Analytics Wrappers for Actions
     const handleStage = () => {
-        if (isStale) return; // Guard
+        if (isStale || isStaging) return; // Guard
         logEvent({
             eventName: "suggestion_staged",
             category: "ux",
@@ -347,13 +349,13 @@ const SuggestionCard = ({
                     <div className="relative group">
                          {dismissOpen ? (
                              <div className="flex items-center gap-1 animate-in fade-in zoom-in duration-200">
-                                 <button onClick={() => handleDismiss('Too Risky')} className="text-[10px] bg-red-100 text-red-700 hover:bg-red-200 px-2 py-1 rounded border border-red-200">
+                                 <button onClick={() => handleDismiss('too_risky')} className="text-[10px] bg-red-100 text-red-700 hover:bg-red-200 px-2 py-1 rounded border border-red-200">
                                      Risky
                                  </button>
-                                 <button onClick={() => handleDismiss('Bad Price')} className="text-[10px] bg-yellow-100 text-yellow-700 hover:bg-yellow-200 px-2 py-1 rounded border border-yellow-200">
+                                 <button onClick={() => handleDismiss('bad_price')} className="text-[10px] bg-yellow-100 text-yellow-700 hover:bg-yellow-200 px-2 py-1 rounded border border-yellow-200">
                                      Price
                                  </button>
-                                 <button onClick={() => handleDismiss('Wrong Timing')} className="text-[10px] bg-slate-100 text-slate-700 hover:bg-slate-200 px-2 py-1 rounded border border-slate-200">
+                                 <button onClick={() => handleDismiss('wrong_timing')} className="text-[10px] bg-slate-100 text-slate-700 hover:bg-slate-200 px-2 py-1 rounded border border-slate-200">
                                      Timing
                                  </button>
                                  <button onClick={() => setDismissOpen(false)} className="ml-1 p-1 hover:bg-muted rounded text-muted-foreground">
@@ -379,8 +381,8 @@ const SuggestionCard = ({
 
                     <button
                         onClick={handleStage}
-                        disabled={isStale && !staged}
-                        className={`text-xs px-3 py-1 rounded font-medium transition-colors ${
+                        disabled={(isStale && !staged) || isStaging}
+                        className={`text-xs px-3 py-1 rounded font-medium transition-colors flex items-center gap-1 ${
                             staged
                                 ? 'bg-green-100 text-green-800 dark:bg-green-900/30 dark:text-green-400'
                                 : isStale
@@ -388,6 +390,7 @@ const SuggestionCard = ({
                                     : 'bg-purple-600 text-white hover:bg-purple-700'
                         }`}
                     >
+                        {isStaging && <Loader2 className="w-3 h-3 animate-spin" />}
                         {staged ? 'Staged' : 'Stage Trade'}
                     </button>
                 </div>

@@ -7,6 +7,7 @@ import SyncHoldingsButton from '@/components/SyncHoldingsButton';
 import PortfolioOptimizer from '@/components/dashboard/PortfolioOptimizer';
 import { WeeklyProgressCard } from '@/components/dashboard/WeeklyProgressCard';
 import SuggestionTabs from '@/components/dashboard/SuggestionTabs';
+import TradeInbox from '@/components/dashboard/TradeInbox';
 import StrategyProfilesPanel from '@/components/dashboard/StrategyProfilesPanel';
 import DisciplineSummary from '@/components/dashboard/DisciplineSummary';
 import RiskSummaryCard from '@/components/dashboard/RiskSummaryCard';
@@ -452,17 +453,21 @@ export default function DashboardPage() {
         {/* SECTION 2: UNIFIED SUGGESTION HUB */}
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
             <div className="lg:col-span-2">
-                <SuggestionTabs
-                  optimizerSuggestions={rebalanceSuggestions}
-                  scoutSuggestions={weeklyScout?.top_picks || []}
-                  journalQueue={[]}
-                  morningSuggestions={morningSuggestions}
-                  middaySuggestions={middaySuggestions}
-                  weeklyReports={weeklyReports}
-                  onRefreshScout={loadWeeklyScout}
-                  scoutLoading={scoutLoading}
-                  onRefreshJournal={() => {}}
-                />
+                <TradeInbox />
+                <div className="mt-8 border-t pt-8">
+                  <h3 className="text-sm font-semibold text-muted-foreground mb-4 uppercase tracking-wider">Legacy View</h3>
+                  <SuggestionTabs
+                    optimizerSuggestions={rebalanceSuggestions}
+                    scoutSuggestions={weeklyScout?.top_picks || []}
+                    journalQueue={[]}
+                    morningSuggestions={morningSuggestions}
+                    middaySuggestions={middaySuggestions}
+                    weeklyReports={weeklyReports}
+                    onRefreshScout={loadWeeklyScout}
+                    scoutLoading={scoutLoading}
+                    onRefreshJournal={() => {}}
+                  />
+                </div>
             </div>
 
             {/* Trade Journal Stats (Side Panel) */}

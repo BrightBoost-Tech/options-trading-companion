@@ -18,6 +18,11 @@ class StrategyType(str, Enum):
     LONG_PUT = "long_put"
     UNKNOWN = "unknown"
 
+class OutcomeStatus(str, Enum):
+    COMPLETE = "COMPLETE"
+    PARTIAL = "PARTIAL"
+    INCOMPLETE = "INCOMPLETE"
+
 class UnifiedScoreComponent(BaseModel):
     ev: float
     execution_cost: float

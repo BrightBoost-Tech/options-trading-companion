@@ -31,6 +31,105 @@ SCANNER_MAX_DTE = 45
 
 logger = logging.getLogger(__name__)
 
+def _apply_agent_constraints(candidate: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """
+    Applies agent veto and constraints to the candidate.
+    Resolves conflicting constraints using precedence rules.
+    Returns the modified candidate (with active_constraints updated) or None if rejected.
+    """
+    summary = candidate.get("agent_summary")
+    if not summary:
+        return candidate # No agents ran, pass
+
+    if summary.get("vetoed"):
+        return None
+
+    signals = candidate.get("agent_signals", {})
+
+    # Resolve Constraints with Precedence
+    # 1. liquidity.max_spread_pct -> MIN (Strictest)
+    # 2. event.require_defined_risk -> ANY (True if any agent requires it)
+    # 3. liquidity.require_limit_orders -> ANY (True if any agent requires it)
+
+    max_spread_values = []
+    require_defined_risk = False
+    require_limit_orders = False
+
+    for signal in signals.values():
+        meta = signal.get("metadata", {})
+        constraints = meta.get("constraints", {})
+
+        if "liquidity.max_spread_pct" in constraints:
+            max_spread_values.append(constraints["liquidity.max_spread_pct"])
+
+        if constraints.get("event.require_defined_risk"):
+            require_defined_risk = True
+
+        if constraints.get("liquidity.require_limit_orders"):
+            require_limit_orders = True
+
+    # Apply Precedence
+    effective_max_spread = min(max_spread_values) if max_spread_values else None
+
+    # Update summary with EFFECTIVE constraints for transparency
+    # We update the candidate in place
+    candidate["agent_summary"]["active_constraints"] = {
+        "event.require_defined_risk": require_defined_risk,
+        "liquidity.require_limit_orders": require_limit_orders,
+    }
+    if effective_max_spread is not None:
+        candidate["agent_summary"]["active_constraints"]["liquidity.max_spread_pct"] = effective_max_spread
+
+    # --- ENFORCE CONSTRAINTS ---
+
+    # 1. Defined Risk
+    if require_defined_risk:
+        # Check if strategy is defined risk.
+        # "no naked short" logic.
+        # We use max_loss_per_contract. If it is infinite -> Undefined Risk.
+        # Or check strategy keys for explicit naked calls/puts if max_loss isn't enough.
+        # Note: Short Put has max_loss = (Strike - Prem) * 100 which is FINITE.
+        # However, many define "Defined Risk" as spreads (capped loss < notional).
+        # But technically Short Put is defined.
+        # Naked Call is Infinite.
+        # Let's start with banning Infinite max_loss.
+        # And specifically check for single-leg short options if needed.
+        # The prompt says: "candidate must be defined-risk (no naked short)".
+        # "Naked Short" usually implies undefined or high risk.
+        # If I strictly check `max_loss == inf`, I catch Naked Calls.
+        # Naked Puts pass `max_loss != inf`.
+        # If the user wants to ban Naked Puts too, I should check `strategy_key`.
+        strategy_key = candidate.get("strategy_key", "")
+        is_spread = "spread" in strategy_key or "condor" in strategy_key
+        is_single_short = "short" in strategy_key and not is_spread
+
+        # If explicitly single short, reject?
+        # A short put is a "naked short put".
+        # I will assume "defined risk" implies spreads or long positions.
+        # Or Cash Secured Put? CSP is defined risk.
+        # I'll stick to: Reject if max_loss is infinite OR if it is a single-leg short structure (conservative interpretation of "no naked short").
+
+        if candidate.get("max_loss_per_contract") == float("inf"):
+            return None
+
+        # Refined check: reject single-leg short strategies if they are considered "naked"
+        if is_single_short:
+             # This bans Short Put and Short Call
+             return None
+
+    # 2. Max Spread
+    if effective_max_spread is not None:
+        current_spread = candidate.get("option_spread_pct", 0.0)
+        if current_spread > effective_max_spread:
+            return None
+
+    # 3. Limit Orders
+    if require_limit_orders:
+        candidate["order_type_force_limit"] = True
+
+    return candidate
+
+
 def _select_best_expiry_chain(chain: List[Dict[str, Any]], target_dte: int = 35) -> tuple[Optional[str], List[Dict[str, Any]]]:
     if not chain:
         return None, []
@@ -1237,7 +1336,9 @@ def scan_for_opportunities(
                 "earnings_date": str(earnings_val) if earnings_val else None,
                 "days_to_earnings": days_to_earnings,
                 "earnings_risk": earnings_risk,
-                "earnings_penalty": earnings_penalty_val
+                "earnings_penalty": earnings_penalty_val,
+                # Agent Data
+                "option_spread_pct": option_spread_pct
             }
 
             # Calculate Probability of Profit
@@ -1276,11 +1377,13 @@ def scan_for_opportunities(
                     # Note: StrategyDesignAgent runs earlier to guide selection
                     agent_signals, agent_summary = AgentRunner.run_agents(agent_context, scanner_agents)
 
-                    if agent_summary.get("vetoed"):
-                        return None
-
                     candidate_dict["agent_signals"] = agent_signals
                     candidate_dict["agent_summary"] = agent_summary
+
+                    # Apply Constraints & Veto
+                    candidate_dict = _apply_agent_constraints(candidate_dict)
+                    if candidate_dict is None:
+                        return None
 
                 except Exception as e:
                     print(f"[Scanner] Agent execution error for {symbol}: {e}")

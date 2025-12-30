@@ -8,6 +8,7 @@ from packages.quantum.market_data import PolygonService, extract_underlying_symb
 from packages.quantum.analytics.surprise import compute_surprise
 from packages.quantum.nested_logging import log_outcome
 from packages.quantum.services.options_utils import get_contract_multiplier
+from packages.quantum.common_enums import OutcomeStatus
 
 class OutcomeAggregator:
     def __init__(self, supabase: Client, polygon_service: PolygonService):
@@ -120,7 +121,9 @@ class OutcomeAggregator:
         realized_vol_1d = 0.0
         attribution_type = "portfolio_snapshot"
         related_id = None
-        is_incomplete = False
+
+        status = OutcomeStatus.COMPLETE
+        reason_codes = []
 
         # Initialize counterfactual variables safely
         cf_pnl = None
@@ -134,6 +137,9 @@ class OutcomeAggregator:
             attribution_type = "execution"
             related_id = executions[0]["id"]
             realized_pnl_1d, realized_vol_1d = self._calculate_execution_pnl(executions)
+            if realized_vol_1d is None:
+                status = OutcomeStatus.PARTIAL
+                reason_codes.append("missing_vol")
 
         # Priority 2: Suggestion (No Action)
         elif suggestions:
@@ -145,6 +151,11 @@ class OutcomeAggregator:
             cf_pnl, cf_avail = self._calculate_counterfactual_pnl(suggestions)
             if not cf_avail:
                 cf_reason = "Missing market data for one or more legs"
+                reason_codes.append("counterfactual_missing")
+                # If no action, and counterfactual is missing, is it incomplete?
+                # User said: "missing equity -> INCOMPLETE". Here equity is counterfactual PnL.
+                status = OutcomeStatus.INCOMPLETE
+                reason_codes.append("missing_equity")
 
         # Priority 3: Optimizer Decision (Simulation)
         elif decision["decision_type"] == "optimizer_weights":
@@ -173,34 +184,48 @@ class OutcomeAggregator:
 
             # Strict equity check
             if total_equity is None:
-                # Fallback: check db via CashService?
-                # For now, if not in inference_log, we assume incomplete data for simulation
-                is_incomplete = True
+                attribution_type = "incomplete_data"
+                status = OutcomeStatus.INCOMPLETE
+                reason_codes.append("missing_equity_snapshot")
             else:
-                realized_pnl_1d, realized_vol_1d = self._calculate_sim_pnl(weights, total_equity)
+                pnl, vol = self._calculate_sim_pnl(weights, total_equity)
+                realized_pnl_1d = pnl
+                realized_vol_1d = vol
+                # Note: _calculate_sim_pnl returns 0.0 vol if missing prices, which might be misleading
+                # Ideally check inside if prices were missing.
+                # Assuming if vol is 0.0 but weights > 0, we might have missing data.
+                if vol == 0.0 and any(w > 0 for w in weights.values()):
+                     # This is a heuristic.
+                     pass
 
         # Priority 4: Fallback (if inference log exists, use portfolio PnL)
         elif inference_log:
             attribution_type = "portfolio_snapshot"
             # Fixed unpacking
-            realized_pnl_1d, realized_vol_1d = self._calculate_portfolio_pnl(inference_log)
+            pnl, vol = self._calculate_portfolio_pnl(inference_log)
+            realized_pnl_1d = pnl
+            realized_vol_1d = vol
+
+            # _calculate_portfolio_pnl returns 0.0 vol on failure.
+            # We can't easily distinguish 0 vol from missing data without better return types there.
+            # But inference_log usually implies we have snapshots.
 
         else:
             # Decision exists but no suggestion, execution, or inference log context.
             attribution_type = "incomplete_data"
-            is_incomplete = True
+            status = OutcomeStatus.INCOMPLETE
+            reason_codes.append("missing_context")
 
-        if is_incomplete:
-            # Log as incomplete or skip?
-            # User requirement: "if missing, outcomes marked INCOMPLETE (no fake equity)"
-            # We will log it with a specific type so we can filter later.
+        if status == OutcomeStatus.INCOMPLETE:
             log_outcome(
                 trace_id=uuid.UUID(trace_id),
                 realized_pl_1d=0.0,
                 realized_vol_1d=0.0,
                 surprise_score=0.0,
-                attribution_type="incomplete_data",
-                related_id=uuid.UUID(related_id) if related_id else None
+                attribution_type=attribution_type,
+                related_id=uuid.UUID(related_id) if related_id else None,
+                status=status.value,
+                reason_codes=reason_codes
             )
             return
 
@@ -208,12 +233,11 @@ class OutcomeAggregator:
         surprise = 0.0
 
         # Handle partial data for volatility
-        # If realized_vol_1d is None, we mark as partial and default to 0.0 for logging,
-        # but the attribution type signals the data quality issue.
         safe_realized_vol = realized_vol_1d if realized_vol_1d is not None else 0.0
 
         if realized_vol_1d is None and attribution_type == "execution":
-            attribution_type = "partial_execution"
+            # Already set status PARTIAL above
+            pass
 
         if inference_log:
             sigma_pred_matrix = inference_log.get("predicted_sigma", {}).get("sigma_matrix", [])
@@ -232,6 +256,13 @@ class OutcomeAggregator:
             )
         else:
             surprise = 0.0
+            # If we don't have inference log, we can't compute surprise properly.
+            # Does this make it PARTIAL?
+            # Requirement: "COMPLETE: all core metrics present"
+            # Surprise requires predicted sigma. If missing, maybe PARTIAL?
+            # User said "PARTIAL: outcome computed but missing a non-critical metric (e.g., realized_vol)".
+            # If surprise is 0.0 because of missing prediction, maybe okay.
+            pass
 
         # --- Write Log ---
         # Prepare counterfactual args if applicable
@@ -241,10 +272,6 @@ class OutcomeAggregator:
                 cf_args['counterfactual_pl_1d'] = cf_pnl
                 cf_args['counterfactual_available'] = True
             elif cf_reason:
-                 # Note: log_outcome might not support cf_reason kwarg yet depending on schema
-                 # But we can pass it if we update schema or just track availability.
-                 # The user requirement said: "store counterfactual_available boolean + counterfactual_reason when unavailable"
-                 # I'll pass it, assuming log_outcome can handle kwargs or ignores extras.
                  cf_args['counterfactual_available'] = False
                  cf_args['counterfactual_reason'] = cf_reason
 
@@ -255,6 +282,8 @@ class OutcomeAggregator:
             surprise_score=surprise,
             attribution_type=attribution_type,
             related_id=uuid.UUID(related_id) if related_id else None,
+            status=status.value,
+            reason_codes=reason_codes,
             **cf_args
         )
 

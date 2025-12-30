@@ -6,6 +6,7 @@ from typing import Optional, Dict, List, Any
 from supabase import create_client, Client
 from dotenv import load_dotenv
 import numpy as np
+from packages.quantum.common_enums import OutcomeStatus
 
 # Ensure env vars are loaded
 load_dotenv()
@@ -110,7 +111,10 @@ def log_outcome(
     attribution_type: str = 'portfolio_snapshot',
     related_id: Optional[uuid.UUID] = None,
     counterfactual_pl_1d: Optional[float] = None,
-    counterfactual_available: bool = False
+    counterfactual_available: bool = False,
+    status: str = OutcomeStatus.COMPLETE.value,
+    reason_codes: List[str] = None,
+    **kwargs
 ):
     """
     Insert into outcomes_log.
@@ -126,8 +130,14 @@ def log_outcome(
             "realized_vol_1d": float(realized_vol_1d),
             "surprise_score": float(surprise_score),
             "attribution_type": attribution_type,
-            "created_at": datetime.now().isoformat()
+            "created_at": datetime.now().isoformat(),
+            "status": status
         }
+
+        if reason_codes is not None:
+             data["reason_codes"] = reason_codes
+        else:
+             data["reason_codes"] = []
 
         if related_id:
             data["related_id"] = str(related_id)
@@ -136,6 +146,9 @@ def log_outcome(
             data["counterfactual_available"] = True
             if counterfactual_pl_1d is not None:
                 data["counterfactual_pl_1d"] = float(counterfactual_pl_1d)
+
+        # Merge extra kwargs like counterfactual_reason
+        data.update(kwargs)
 
         supabase.table("outcomes_log").insert(data).execute()
 

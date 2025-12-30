@@ -9,6 +9,7 @@ import numpy as np
 import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from packages.quantum.cache import get_cached_data, save_to_cache
+from packages.quantum.market_data_cache import get_cached_market_data, cache_market_data
 from packages.quantum.analytics.factors import calculate_trend, calculate_iv_rank
 
 def normalize_option_symbol(symbol: str) -> str:
@@ -61,12 +62,23 @@ class PolygonService:
         self.session.mount("https://", adapter)
         self.session.mount("http://", adapter)
     
-    def get_historical_prices(self, symbol: str, days: int = 252, to_date: datetime = None) -> Dict:
+    def get_historical_prices(self, symbol: str, days: int = 252, to_date: datetime = None) -> Optional[Dict]:
         to_date = to_date or datetime.now()
-        from_date = to_date - timedelta(days=days + 30)
         
+        # 1. Check Cache
+        to_date_str = to_date.strftime('%Y-%m-%d')
+        cached = get_cached_market_data(symbol, days, to_date_str)
+        if cached:
+            return cached
+
+        # 2. Guardrails: Check API Key
+        if not self.api_key:
+            # print(f"Skipping {symbol}: No Polygon API key")
+            return None
+
+        from_date = to_date - timedelta(days=days + 30)
         from_str = from_date.strftime('%Y-%m-%d')
-        to_str = to_date.strftime('%Y-%m-%d')
+        to_str = to_date_str
         
         # Handle Options formatting
         search_symbol = normalize_option_symbol(symbol)
@@ -78,30 +90,48 @@ class PolygonService:
             'apiKey': self.api_key
         }
         
-        # Reduced timeout to 5s to prevent hanging
-        response = self.session.get(url, params=params, timeout=5)
-        response.raise_for_status()
-        
-        data = response.json()
-        if 'results' not in data or len(data['results']) == 0:
-            raise ValueError(f"No data returned for {symbol}")
-        
-        prices = [bar['c'] for bar in data['results']]
-        volumes = [bar.get('v', 0) for bar in data['results']]
-        dates = [datetime.fromtimestamp(bar['t'] / 1000).strftime('%Y-%m-%d') 
-                for bar in data['results']]
-        
-        returns = []
-        for i in range(1, len(prices)):
-            returns.append((prices[i] - prices[i-1]) / prices[i-1])
-        
-        return {
-            'symbol': symbol,
-            'prices': prices,
-            'volumes': volumes,
-            'returns': returns,
-            'dates': dates
-        }
+        try:
+            # Reduced timeout to 5s to prevent hanging
+            response = self.session.get(url, params=params, timeout=5)
+            response.raise_for_status()
+
+            data = response.json()
+            if 'results' not in data or len(data['results']) == 0:
+                # Cache empty result to avoid hitting API repeatedly for bad tickers?
+                # For now, we raise or return None.
+                # User constraint: "Very new tickers with sparse history" -> handled by empty results
+                # We treat empty as None for "realized vol" purposes.
+                # raise ValueError(f"No data returned for {symbol}")
+                return None
+
+            prices = [bar['c'] for bar in data['results']]
+            volumes = [bar.get('v', 0) for bar in data['results']]
+            dates = [datetime.fromtimestamp(bar['t'] / 1000).strftime('%Y-%m-%d')
+                    for bar in data['results']]
+
+            returns = []
+            for i in range(1, len(prices)):
+                returns.append((prices[i] - prices[i-1]) / prices[i-1])
+
+            result = {
+                'symbol': symbol,
+                'prices': prices,
+                'volumes': volumes,
+                'returns': returns,
+                'dates': dates
+            }
+
+            # 3. Cache Success
+            cache_market_data(symbol, days, to_date_str, result)
+            return result
+
+        except requests.exceptions.RequestException as e:
+            # Handle Rate Limits (429) or Timeouts gracefully
+            # Log but don't crash
+            # print(f"Polygon fetch failed for {symbol}: {e}")
+            return None
+        except ValueError:
+            return None
 
     def get_ticker_details(self, symbol: str) -> Dict:
         """Fetches details for a given ticker, including sector."""

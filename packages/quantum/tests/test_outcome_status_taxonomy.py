@@ -103,7 +103,7 @@ class TestOutcomeStatusTaxonomy(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(kwargs['attribution_type'], "incomplete_data")
         self.assertEqual(kwargs['reason_codes'], ["missing_equity_snapshot"])
 
-    async def test_incomplete_status_no_action_missing_counterfactual(self):
+    async def test_partial_status_no_action_missing_counterfactual(self):
         # Case: No action (suggestion ignored), but market data missing for counterfactual
         self.aggregator._fetch_suggestions = MagicMock(return_value=[{"id": str(uuid.uuid4())}])
         self.aggregator._fetch_executions = MagicMock(return_value=[])
@@ -116,9 +116,9 @@ class TestOutcomeStatusTaxonomy(unittest.IsolatedAsyncioTestCase):
         call_args = self.mock_log.call_args
         kwargs = call_args.kwargs
 
-        self.assertEqual(kwargs['status'], OutcomeStatus.INCOMPLETE.value)
+        self.assertEqual(kwargs['status'], OutcomeStatus.PARTIAL.value)
         self.assertEqual(kwargs['attribution_type'], "no_action")
-        self.assertEqual(kwargs['reason_codes'], ["counterfactual_missing", "missing_equity"])
+        self.assertEqual(kwargs['reason_codes'], ["missing_counterfactual"])
 
 if __name__ == '__main__':
     unittest.main()

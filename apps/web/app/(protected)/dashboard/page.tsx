@@ -4,6 +4,7 @@ import { useState, useEffect } from 'react';
 import DashboardLayout from '@/components/DashboardLayout';
 import DashboardOnboarding from '@/components/dashboard/DashboardOnboarding';
 import { CapabilityPanel } from '@/components/dashboard/CapabilityPanel';
+import { SystemEvolutionPanel } from '@/components/dashboard/SystemEvolutionPanel';
 import SyncHoldingsButton from '@/components/SyncHoldingsButton';
 import PortfolioOptimizer from '@/components/dashboard/PortfolioOptimizer';
 import { WeeklyProgressCard } from '@/components/dashboard/WeeklyProgressCard';
@@ -277,6 +278,7 @@ export default function DashboardPage() {
 
         {/* SECTION -1: SYSTEM UPGRADES */}
         <CapabilityPanel />
+        <SystemEvolutionPanel />
         
         {/* SECTION 0: WEEKLY SCOUT / PROGRESS */}
         <div>

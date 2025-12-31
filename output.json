@@ -1,0 +1,44 @@
+{
+  "mode": "classical",
+  "scenarios": [
+    {
+      "name": "cash_tight_knapsack",
+      "description": "Knapsack: 50 items, Budget 1000.0",
+      "classical": {
+        "solver": "classical_greedy",
+        "selected_count": 17,
+        "total_ev": 1604.7117909992046,
+        "total_premium": 998.7655018157203,
+        "objective_value": -406.34442808413854,
+        "runtime_ms": 0.029802322387695312,
+        "feasible": true
+      }
+    },
+    {
+      "name": "greek_tight",
+      "description": "Greek Tight: 40 items, Risk constraint dominant",
+      "classical": {
+        "solver": "classical_greedy",
+        "selected_count": 40,
+        "total_ev": 1744.2748223747185,
+        "total_premium": 1449.4154549363545,
+        "objective_value": 2540255.4528915635,
+        "runtime_ms": 0.021457672119140625,
+        "feasible": true
+      }
+    },
+    {
+      "name": "tail_coupled",
+      "description": "Tail Coupled: 30 items, Quadratic penalty dominant",
+      "classical": {
+        "solver": "classical_greedy",
+        "selected_count": 30,
+        "total_ev": 1461.4782019899094,
+        "total_premium": 613.3421878537876,
+        "objective_value": 4120153.491094521,
+        "runtime_ms": 0.013113021850585938,
+        "feasible": true
+      }
+    }
+  ]
+}

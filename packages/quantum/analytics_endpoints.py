@@ -1,7 +1,7 @@
 from fastapi import APIRouter, Depends, Body, Request, HTTPException
 from typing import Dict, Any, Optional
 from packages.quantum.security import get_current_user, get_supabase_user_client
-from packages.quantum.services.evolution_service import EvolutionService
+from packages.quantum.analytics.evolution_service import EvolutionService
 from supabase import Client
 
 router = APIRouter()
@@ -18,7 +18,7 @@ async def get_system_evolution(
         raise HTTPException(status_code=503, detail="Database not available")
 
     service = EvolutionService(supabase)
-    return service.get_weekly_evolution(user_id)
+    return service.get_system_evolution(user_id)
 
 @router.post("/analytics/events")
 async def log_analytics_event(

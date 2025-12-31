@@ -2,193 +2,143 @@ import { useEffect, useState } from "react";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { fetchWithAuth } from "@/lib/api";
-import { Loader2, ArrowUp, ArrowDown, Minus, Shield, Brain, TrendingUp } from "lucide-react";
+import { Loader2, ArrowUp, ArrowDown, Shield, Brain, Activity } from "lucide-react";
 
-interface EvolutionData {
-  period_start: string;
-  period_end: string;
-  new_constraints: string[];
-  agent_influence: Array<{
-    name: string;
-    change: number;
-    current: number;
-    previous: number;
-  }>;
-  strategy_shifts: Array<{
-    name: string;
-    change: number;
-    current: number;
-    previous: number;
-  }>;
+interface EvolutionMetrics {
+  constraints_activated: string[];
+  agents_increased_influence: string[];
+  strategies_expanded: string[];
+  strategies_reduced: string[];
 }
 
 export function SystemEvolutionPanel() {
-  const [data, setData] = useState<EvolutionData | null>(null);
+  const [metrics, setMetrics] = useState<EvolutionMetrics | null>(null);
   const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    async function loadData() {
+    async function loadMetrics() {
       try {
-        const result = await fetchWithAuth("/analytics/evolution");
-        if (result) {
-          setData(result);
+        const data = await fetchWithAuth("/analytics/evolution");
+        if (data) {
+          setMetrics(data);
         }
       } catch (err) {
-        console.error("Failed to load evolution data", err);
-        setError("Failed to load system evolution.");
+        console.error("Failed to load evolution metrics", err);
       } finally {
         setLoading(false);
       }
     }
-    loadData();
+
+    loadMetrics();
   }, []);
 
   if (loading) {
     return (
-      <Card className="w-full">
+      <Card>
         <CardHeader>
-          <CardTitle className="text-lg">System Evolution</CardTitle>
+          <CardTitle>System Evolution</CardTitle>
+          <CardDescription>What changed in the last 7 days?</CardDescription>
         </CardHeader>
-        <CardContent className="flex justify-center py-6">
+        <CardContent className="flex justify-center py-8">
           <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
         </CardContent>
       </Card>
     );
   }
 
-  if (error || !data) {
-    return null; // Hide if error or no data
-  }
+  if (!metrics) return null;
 
-  const hasActivity = data.new_constraints.length > 0 || data.agent_influence.length > 0 || data.strategy_shifts.length > 0;
-
-  if (!hasActivity) {
-    return (
-      <Card className="w-full">
-        <CardHeader>
-          <CardTitle className="text-lg">System Evolution (Last 7 Days)</CardTitle>
-          <CardDescription>No significant changes or new activations detected.</CardDescription>
-        </CardHeader>
-      </Card>
-    );
-  }
+  const hasChanges =
+    metrics.constraints_activated.length > 0 ||
+    metrics.agents_increased_influence.length > 0 ||
+    metrics.strategies_expanded.length > 0 ||
+    metrics.strategies_reduced.length > 0;
 
   return (
-    <Card className="w-full">
-      <CardHeader className="pb-3">
-        <CardTitle className="text-lg flex items-center gap-2">
-            <TrendingUp className="h-5 w-5 text-primary" />
-            What changed in the last 7 days?
-        </CardTitle>
-        <CardDescription>
-          Tracking adaptive system behavior and strategy shifts.
-        </CardDescription>
+    <Card>
+      <CardHeader>
+        <div className="flex items-center justify-between">
+            <div>
+                <CardTitle>System Evolution</CardTitle>
+                <CardDescription>What changed in the last 7 days?</CardDescription>
+            </div>
+            {!hasChanges && <Badge variant="outline">Stable</Badge>}
+        </div>
       </CardHeader>
-      <CardContent className="grid gap-6 md:grid-cols-3">
-
-        {/* Section 1: New Constraints */}
-        <div className="space-y-3">
-          <h4 className="text-sm font-medium flex items-center gap-2 text-muted-foreground">
-            <Shield className="h-4 w-4" /> New Constraints
-          </h4>
-          {data.new_constraints.length > 0 ? (
-            <ul className="space-y-2">
-              {data.new_constraints.map((c, i) => (
-                <li key={i} className="text-sm border-l-2 border-primary pl-2 py-0.5">
-                  {c}
-                </li>
-              ))}
-            </ul>
-          ) : (
-            <p className="text-sm text-muted-foreground italic">No new guardrails activated.</p>
-          )}
-        </div>
-
-        {/* Section 2: Agent Influence */}
-        <div className="space-y-3">
-          <h4 className="text-sm font-medium flex items-center gap-2 text-muted-foreground">
-            <Brain className="h-4 w-4" /> Agent Influence
-          </h4>
-          {data.agent_influence.length > 0 ? (
-            <div className="space-y-2">
-              {data.agent_influence.slice(0, 5).map((agent, i) => (
-                <div key={i} className="flex items-center justify-between text-sm">
-                  <span className="truncate max-w-[120px]" title={agent.name}>
-                    {formatAgentName(agent.name)}
-                  </span>
-                  <div className="flex items-center gap-1">
-                    <span className="text-xs text-muted-foreground">
-                        {agent.current} signals
-                    </span>
-                    {agent.change > 0 ? (
-                        <Badge variant="outline" className="text-green-500 border-green-200 bg-green-50/10 px-1 py-0 h-5">
-                            <ArrowUp className="h-3 w-3 mr-0.5" />
-                        </Badge>
-                    ) : agent.change < 0 ? (
-                        <Badge variant="outline" className="text-red-500 border-red-200 bg-red-50/10 px-1 py-0 h-5">
-                            <ArrowDown className="h-3 w-3 mr-0.5" />
-                        </Badge>
-                    ) : (
-                        <Badge variant="outline" className="text-muted-foreground px-1 py-0 h-5">
-                            <Minus className="h-3 w-3" />
-                        </Badge>
-                    )}
-                  </div>
-                </div>
-              ))}
+      <CardContent className="space-y-6">
+        {!hasChanges ? (
+            <div className="text-center py-8 text-muted-foreground">
+                <p>No major system changes detected.</p>
+                <p className="text-xs mt-1">System running in stable configuration.</p>
             </div>
-          ) : (
-            <p className="text-sm text-muted-foreground italic">Stable agent configuration.</p>
-          )}
-        </div>
-
-        {/* Section 3: Strategy Shifts */}
-        <div className="space-y-3">
-          <h4 className="text-sm font-medium flex items-center gap-2 text-muted-foreground">
-            <TrendingUp className="h-4 w-4" /> Strategy Shifts
-          </h4>
-          {data.strategy_shifts.length > 0 ? (
+        ) : (
+            <div className="grid gap-6 md:grid-cols-3">
+            {/* 1. Constraints */}
             <div className="space-y-2">
-              {data.strategy_shifts.slice(0, 5).map((strat, i) => (
-                <div key={i} className="flex items-center justify-between text-sm">
-                  <span className="truncate max-w-[120px]" title={strat.name}>
-                    {formatStrategyName(strat.name)}
-                  </span>
-                   <div className="flex items-center gap-1">
-                     <span className="text-xs text-muted-foreground">
-                        {strat.current} orders
-                    </span>
-                    {strat.change > 0 ? (
-                        <Badge variant="outline" className="text-green-500 border-green-200 bg-green-50/10 px-1 py-0 h-5">
-                            <ArrowUp className="h-3 w-3 mr-0.5" />
-                        </Badge>
-                    ) : strat.change < 0 ? (
-                        <Badge variant="outline" className="text-red-500 border-red-200 bg-red-50/10 px-1 py-0 h-5">
-                            <ArrowDown className="h-3 w-3 mr-0.5" />
-                        </Badge>
-                    ) : (
-                        <Badge variant="outline" className="text-muted-foreground px-1 py-0 h-5">
-                             <Minus className="h-3 w-3" />
-                        </Badge>
-                    )}
-                   </div>
+                <div className="flex items-center gap-2 text-sm font-medium text-amber-500">
+                <Shield className="h-4 w-4" />
+                <span>New Constraints</span>
                 </div>
-              ))}
+                {metrics.constraints_activated.length > 0 ? (
+                <ul className="space-y-1">
+                    {metrics.constraints_activated.map((c, i) => (
+                    <li key={i} className="text-sm bg-amber-500/10 text-amber-600 dark:text-amber-400 px-2 py-1 rounded border border-amber-500/20">
+                        {c}
+                    </li>
+                    ))}
+                </ul>
+                ) : (
+                <p className="text-sm text-muted-foreground italic">No new constraints</p>
+                )}
             </div>
-          ) : (
-            <p className="text-sm text-muted-foreground italic">No significant strategy shifts.</p>
-          )}
-        </div>
+
+            {/* 2. Agents */}
+            <div className="space-y-2">
+                <div className="flex items-center gap-2 text-sm font-medium text-blue-500">
+                <Brain className="h-4 w-4" />
+                <span>Agents Influencing</span>
+                </div>
+                {metrics.agents_increased_influence.length > 0 ? (
+                <ul className="space-y-1">
+                    {metrics.agents_increased_influence.map((a, i) => (
+                    <li key={i} className="text-sm bg-blue-500/10 text-blue-600 dark:text-blue-400 px-2 py-1 rounded border border-blue-500/20">
+                        {a}
+                    </li>
+                    ))}
+                </ul>
+                ) : (
+                <p className="text-sm text-muted-foreground italic">No agent updates</p>
+                )}
+            </div>
+
+            {/* 3. Strategies */}
+            <div className="space-y-2">
+                <div className="flex items-center gap-2 text-sm font-medium text-purple-500">
+                <Activity className="h-4 w-4" />
+                <span>Strategy Shift</span>
+                </div>
+                {(metrics.strategies_expanded.length > 0 || metrics.strategies_reduced.length > 0) ? (
+                <div className="space-y-1">
+                    {metrics.strategies_expanded.map((s, i) => (
+                    <div key={`exp-${i}`} className="flex items-center gap-1 text-sm text-green-600 dark:text-green-400">
+                        <ArrowUp className="h-3 w-3" />
+                        <span>{s}</span>
+                    </div>
+                    ))}
+                    {metrics.strategies_reduced.map((s, i) => (
+                    <div key={`red-${i}`} className="flex items-center gap-1 text-sm text-red-600 dark:text-red-400">
+                        <ArrowDown className="h-3 w-3" />
+                        <span>{s}</span>
+                    </div>
+                    ))}
+                </div>
+                ) : (
+                <p className="text-sm text-muted-foreground italic">Mix unchanged</p>
+                )}
+            </div>
+            </div>
+        )}
       </CardContent>
     </Card>
   );
-}
-
-function formatAgentName(name: string): string {
-  return name.replace(/_/g, " ").replace(/\b\w/g, l => l.toUpperCase());
-}
-
-function formatStrategyName(name: string): string {
-    return name.replace(/_/g, " ").replace(/\b\w/g, l => l.toUpperCase());
 }

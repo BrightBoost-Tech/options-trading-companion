@@ -19,6 +19,8 @@ from packages.quantum.analytics.capital_scan_policy import CapitalScanPolicy
 from packages.quantum.agents.agents.sizing_agent import SizingAgent
 from packages.quantum.agents.agents.exit_plan_agent import ExitPlanAgent
 
+from packages.quantum.services.decision_lineage_builder import DecisionLineageBuilder
+
 # Importing existing logic
 from packages.quantum.options_scanner import scan_for_opportunities
 from packages.quantum.analytics.regime_engine_v3 import RegimeEngineV3, RegimeState, GlobalRegimeSnapshot
@@ -695,8 +697,13 @@ async def run_midday_cycle(supabase: Client, user_id: str):
 
     # 3. Size and Prepare Suggestions
     for cand in candidates:
+        # Initialize Lineage Builder for this candidate
+        lineage = DecisionLineageBuilder()
+        lineage.add_agent("Scanner") # Scanner was used to find this candidate
+
         ticker = cand.get("ticker") or cand.get("symbol")
         strategy = cand.get("strategy") or cand.get("type") or "unknown"
+        lineage.set_strategy(strategy)
 
         # V3: Compute Symbol Snapshot
         sym_snap = regime_engine.compute_symbol_snapshot(ticker, global_snap)
@@ -747,6 +754,7 @@ async def run_midday_cycle(supabase: Client, user_id: str):
         if QUANT_AGENTS_ENABLED:
             try:
                 sizing_agent = SizingAgent()
+                lineage.add_agent("SizingAgent")
 
                 # V3: Prepare Agent Signals
                 # Use ONLY real agent signals from the scanner (no mocks)
@@ -775,6 +783,11 @@ async def run_midday_cycle(supabase: Client, user_id: str):
                 # Agent also dictates max contracts
                 max_contracts_limit = constraints.get("sizing.recommended_contracts", 25)
 
+                # Record in Lineage
+                if constraints:
+                    for k, v in constraints.items():
+                        lineage.add_constraint(k, v)
+
                 # Update candidate signals
                 if "agent_signals" not in cand:
                     cand["agent_signals"] = {}
@@ -801,11 +814,13 @@ async def run_midday_cycle(supabase: Client, user_id: str):
 
             except Exception as e:
                 print(f"[Midday] SizingAgent failed: {e}. Falling back to classic sizing.")
+                lineage.set_fallback(f"SizingAgent failed: {str(e)}")
                 # Fallback to calculated above
 
             # --- EXIT PLAN AGENT ---
             try:
                 exit_agent = ExitPlanAgent()
+                lineage.add_agent("ExitPlanAgent")
                 exit_ctx = {
                     "strategy_type": strategy
                 }
@@ -836,10 +851,17 @@ async def run_midday_cycle(supabase: Client, user_id: str):
                 exit_constraints = exit_meta.get("constraints", {})
                 cand["agent_summary"]["active_constraints"].update(exit_constraints)
 
+                if exit_constraints:
+                    for k, v in exit_constraints.items():
+                        lineage.add_constraint(k, v)
+
                 print(f"[Midday] ExitPlanAgent applied: {exit_constraints}")
 
             except Exception as e:
                 print(f"[Midday] ExitPlanAgent failed: {e}")
+                # We don't necessarily fail everything if exit plan fails, but we can log it
+                # lineage.set_fallback(...) - careful not to overwrite SizingAgent fallback if any
+                pass
 
         if final_risk_dollars <= 0:
             print(f"[Midday] Skipped {ticker}: Risk budget exhausted for trade (Remaining: ${remaining_global:.2f})")
@@ -847,6 +869,12 @@ async def run_midday_cycle(supabase: Client, user_id: str):
 
         # Update variable for sizing engine
         risk_budget_dollars = final_risk_dollars
+
+        # Determine Sizing Source
+        if QUANT_AGENTS_ENABLED and "SizingAgent" in lineage.agents_involved and not lineage.fallback_reason:
+            lineage.set_sizing_source("SizingAgent")
+        else:
+            lineage.set_sizing_source("ClassicSizing")
 
         # --- SIZING (single call) ---
         sizing = calculate_sizing(
@@ -949,6 +977,7 @@ async def run_midday_cycle(supabase: Client, user_id: str):
                 "direction": "long",
                 "order_json": order_json,
                 "sizing_metadata": sizing,
+                "decision_lineage": lineage.build(),
                 "status": "pending",
                 "source": "scanner",
                 "ev": ev,

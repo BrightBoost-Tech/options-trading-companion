@@ -141,6 +141,11 @@ class OutcomeAggregator:
                 status = OutcomeStatus.PARTIAL
                 reason_codes.append("missing_vol")
 
+                if not self.polygon_service.api_key:
+                    reason_codes.append("polygon_unavailable")
+                else:
+                    reason_codes.append("missing_market_data")
+
         # Priority 2: Suggestion (No Action)
         elif suggestions:
             attribution_type = "no_action"
@@ -387,6 +392,9 @@ class OutcomeAggregator:
             # Wait, `get_historical_prices` sorts ascending.
 
             hist = self.polygon_service.get_historical_prices(normalized, days=10, to_date=to_date)
+            if not hist:
+                return 0.0, False
+
             prices = hist.get("prices", [])
             dates = hist.get("dates", []) # List[str] YYYY-MM-DD
 
@@ -450,11 +458,12 @@ class OutcomeAggregator:
             # 1. PnL Calculation (using option/asset price)
             try:
                 hist = self.polygon_service.get_historical_prices(sym, days=5)
-                prices = hist.get("prices", [])
-                if len(prices) >= 1:
-                    curr = prices[-1]
-                    multiplier = get_contract_multiplier(sym)
-                    total_pnl += (curr - fill_price) * qty * multiplier
+                if hist:
+                    prices = hist.get("prices", [])
+                    if len(prices) >= 1:
+                        curr = prices[-1]
+                        multiplier = get_contract_multiplier(sym)
+                        total_pnl += (curr - fill_price) * qty * multiplier
             except:
                 pass
 
@@ -464,13 +473,14 @@ class OutcomeAggregator:
                 try:
                     # Fetch slightly more history to ensure we have valid returns
                     u_hist = self.polygon_service.get_historical_prices(underlying, days=10)
-                    u_returns = u_hist.get("returns", [])
+                    if u_hist:
+                        u_returns = u_hist.get("returns", [])
 
-                    # Need at least a few data points for meaningful vol
-                    if len(u_returns) >= 3:
-                        vol_daily = np.std(u_returns)
-                        vols.append(vol_daily)
-                        processed_underlyings.add(underlying)
+                        # Need at least a few data points for meaningful vol
+                        if len(u_returns) >= 3:
+                            vol_daily = np.std(u_returns)
+                            vols.append(vol_daily)
+                            processed_underlyings.add(underlying)
                 except:
                     # Failed to get underlying data
                     pass
@@ -491,11 +501,12 @@ class OutcomeAggregator:
             if w == 0: continue
             try:
                 hist = self.polygon_service.get_historical_prices(sym, days=5)
-                prices = hist.get("prices", [])
-                if len(prices) >= 2:
-                    ret = (prices[-1] - prices[-2]) / prices[-2]
-                    sim_pnl += w * total_equity * ret
-                    rets.append(abs(ret)) # Approximation of asset vol contribution
+                if hist:
+                    prices = hist.get("prices", [])
+                    if len(prices) >= 2:
+                        ret = (prices[-1] - prices[-2]) / prices[-2]
+                        sim_pnl += w * total_equity * ret
+                        rets.append(abs(ret)) # Approximation of asset vol contribution
             except:
                 pass
 
@@ -517,21 +528,22 @@ class OutcomeAggregator:
         for sym in symbol_universe:
             try:
                 hist = self.polygon_service.get_historical_prices(sym, days=5)
-                prices = hist.get("prices", [])
-                if len(prices) >= 2:
-                    p_today = prices[-1]
-                    p_yesterday = prices[-2]
+                if hist:
+                    prices = hist.get("prices", [])
+                    if len(prices) >= 2:
+                        p_today = prices[-1]
+                        p_yesterday = prices[-2]
 
-                    # Vol calculation
-                    ret = (p_today - p_yesterday) / p_yesterday
-                    realized_vols.append(abs(ret))
+                        # Vol calculation
+                        ret = (p_today - p_yesterday) / p_yesterday
+                        realized_vols.append(abs(ret))
 
-                    if sym in qty_map:
-                        qty = qty_map[sym]
-                        multiplier = get_contract_multiplier(sym)
+                        if sym in qty_map:
+                            qty = qty_map[sym]
+                            multiplier = get_contract_multiplier(sym)
 
-                        # PnL calculation
-                        total_pnl += (p_today - p_yesterday) * qty * multiplier
+                            # PnL calculation
+                            total_pnl += (p_today - p_yesterday) * qty * multiplier
             except:
                 pass
 

@@ -65,6 +65,15 @@ class PolygonService:
     def get_historical_prices(self, symbol: str, days: int = 252, to_date: datetime = None) -> Optional[Dict]:
         to_date = to_date or datetime.now()
         
+        # Handle weekend roll to previous Friday
+        if to_date.weekday() >= 5:  # 5=Saturday, 6=Sunday
+            days_to_subtract = to_date.weekday() - 4  # Sat(5)->1, Sun(6)->2
+            to_date = to_date - timedelta(days=days_to_subtract)
+
+        # Normalize symbol first to ensure cache consistency
+        # e.g. "AMZN23..." -> "O:AMZN23..."
+        symbol = normalize_option_symbol(symbol)
+
         # 1. Check Cache
         to_date_str = to_date.strftime('%Y-%m-%d')
         cached = get_cached_market_data(symbol, days, to_date_str)
@@ -81,7 +90,7 @@ class PolygonService:
         to_str = to_date_str
         
         # Handle Options formatting
-        search_symbol = normalize_option_symbol(symbol)
+        search_symbol = symbol  # Already normalized
 
         url = f"{self.base_url}/v2/aggs/ticker/{search_symbol}/range/1/day/{from_str}/{to_str}"
         params = {

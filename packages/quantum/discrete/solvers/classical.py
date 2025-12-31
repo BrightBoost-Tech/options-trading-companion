@@ -149,7 +149,7 @@ class ClassicalSolver:
         }
 
         return DiscreteSolveResponse(
-            status="success",
+            status="ok",
             strategy_used="classical",
             selected_trades=selected_trades,
             metrics=metrics,

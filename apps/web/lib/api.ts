@@ -1,5 +1,6 @@
 import { supabase } from '@/lib/supabase';
 import { API_URL, TEST_USER_ID } from '@/lib/constants';
+import { DiscreteSolveRequest, DiscreteSolveResponse } from './types';
 
 type FetchInput = RequestInfo | URL;
 
@@ -168,4 +169,18 @@ export function normalizeList<T>(data: any, listKey: string = 'items'): T[] {
   if (Array.isArray(data)) return data;
   if (typeof data === 'object' && Array.isArray(data[listKey])) return data[listKey];
   return [];
+}
+
+/**
+ * Calls the /optimize/discrete endpoint to select optimal trades under constraints.
+ *
+ * @param req - The selection candidates and constraints
+ * @returns The optimized selection result
+ * @throws ApiError if backend returns non-2xx
+ */
+export async function postOptimizeDiscrete(req: DiscreteSolveRequest): Promise<DiscreteSolveResponse> {
+  return fetchWithAuth<DiscreteSolveResponse>('/optimize/discrete', {
+    method: 'POST',
+    body: JSON.stringify(req),
+  });
 }

@@ -138,7 +138,7 @@ export function useInboxActions(onActionComplete?: () => void) {
       }
   }, [toast, onActionComplete]);
 
-  const refreshQuote = useCallback(async (id: string) => {
+  const refreshQuote = useCallback(async (id: string, symbol?: string) => {
       try {
           const res = await fetchWithAuth(`/suggestions/${id}/refresh-quote`, {
               method: 'POST'
@@ -149,7 +149,10 @@ export function useInboxActions(onActionComplete?: () => void) {
                   ...prev,
                   [id]: new Date(res.refreshed_at).getTime()
               }));
-              toast({ title: "Quote Refreshed", description: "Latest market data fetched." });
+              toast({
+                  title: "Quote Refreshed",
+                  description: `Latest market data fetched${symbol ? ` for ${symbol}` : ''}.`
+              });
               onActionComplete?.(); // Optional: trigger reload of inbox to get new ranking/ev
               return true;
           }

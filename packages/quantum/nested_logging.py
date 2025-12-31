@@ -46,12 +46,15 @@ def log_inference(
     inputs_snapshot: Dict[str, Any],
     predicted_mu: Dict[str, float],
     predicted_sigma: Dict[str, Any],
-    optimizer_profile: str
+    optimizer_profile: str,
+    trace_id: Optional[uuid.UUID] = None
 ) -> uuid.UUID:
     """
     Insert into inference_log and return trace_id. Should fail gracefully.
+    If trace_id is provided, it uses it; otherwise generates new one.
     """
-    trace_id = uuid.uuid4()
+    if trace_id is None:
+        trace_id = uuid.uuid4()
 
     supabase = _get_supabase_client()
     if not supabase:

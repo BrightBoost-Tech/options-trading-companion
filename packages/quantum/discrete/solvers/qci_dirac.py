@@ -35,7 +35,7 @@ class QciDiracDiscreteSolver:
             # 1. Filter candidates if too many
             if len(req.candidates) > max_candidates:
                 return DiscreteSolveResponse(
-                    status="skipped",
+                    status="error",
                     strategy_used="dirac3",
                     selected_trades=[],
                     metrics=DiscreteSolveMetrics(

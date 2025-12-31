@@ -6,7 +6,7 @@ import { Suggestion, InboxResponse, InboxMeta } from '@/lib/types';
 import SuggestionCard from './SuggestionCard';
 import { Card, CardContent } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
-import { Loader2, RefreshCw, ChevronDown, ChevronUp, AlertCircle, CheckCircle2 } from 'lucide-react';
+import { Loader2, RefreshCw, ChevronDown, ChevronUp, AlertCircle, CheckCircle2, Wand2 } from 'lucide-react';
 import { useToast } from '@/components/ui/use-toast';
 import { QuantumTooltip } from '@/components/ui/QuantumTooltip';
 import { useInboxActions } from '@/hooks/useInboxActions';
@@ -93,6 +93,11 @@ export default function TradeInbox() {
     const [error, setError] = useState<string | null>(null);
     const [queueExpanded, setQueueExpanded] = useState(false);
 
+    // Selection / Batch Mode State
+    const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+    const [isAutoSelecting, setIsAutoSelecting] = useState(false);
+    const { toast } = useToast();
+
     // -- Actions Hook --
     const fetchInbox = useCallback(async () => {
         // Don't set loading true if we already have data (background refresh)
@@ -120,13 +125,118 @@ export default function TradeInbox() {
         isStale,
         dismissedIds,
         stagedIds,
-        stagingIds
+        stagingIds,
+        isBatchLoading: isStagingBatch
     } = useInboxActions(fetchInbox);
 
     useEffect(() => {
         setLoading(true);
         fetchInbox();
     }, [fetchInbox]);
+
+    // -- Handlers --
+
+    const handleToggleSelect = useCallback((s: Suggestion) => {
+        setSelectedIds(prev => {
+            const next = new Set(prev);
+            if (next.has(s.id)) next.delete(s.id);
+            else next.add(s.id);
+            return next;
+        });
+    }, []);
+
+    const handleAutoSelect = async () => {
+        if (!data) return;
+        setIsAutoSelecting(true);
+
+        const allCandidates = [];
+        if (data.hero && !dismissedIds.has(data.hero.id)) allCandidates.push(data.hero);
+        if (data.queue) allCandidates.push(...data.queue.filter(q => !dismissedIds.has(q.id)));
+
+        if (allCandidates.length === 0) {
+            setIsAutoSelecting(false);
+            return;
+        }
+
+        try {
+            // Map to CandidateTrade schema
+            const candidates = allCandidates.map(s => ({
+                id: s.id,
+                symbol: displaySymbol(s),
+                side: 'buy', // Default to buy for simplicity
+                qty_max: 1, // Default to 1 unit selection
+                ev_per_unit: s.metrics?.ev ?? (s.score ? s.score / 10.0 : 0.0), // Fallback EV proxy
+                premium_per_unit: s.order_json?.price ?? 0.0,
+                delta: s.delta_impact ?? 0.0,
+                gamma: 0.0, // Assuming unavailable if not present
+                vega: s.vega_impact ?? 0.0,
+                tail_risk_contribution: 0.0
+            }));
+
+            const payload = {
+                candidates,
+                constraints: {
+                    max_cash: data.meta.deployable_capital || 5000,
+                    max_vega: 99999,
+                    max_delta_abs: 99999,
+                    max_gamma: 99999
+                },
+                parameters: {
+                    mode: 'hybrid',
+                    trial_mode: process.env.NEXT_PUBLIC_QCI_TRIAL_MODE === "1",
+                    num_samples: 20,
+                    lambda_tail: 1.0,
+                    lambda_cash: 1.0,
+                    lambda_vega: 1.0,
+                    lambda_delta: 1.0,
+                    lambda_gamma: 1.0,
+                    max_candidates_for_dirac: 40,
+                    max_dirac_calls: 2,
+                    dirac_timeout_s: 10
+                }
+            };
+
+            const res = await fetchWithAuth('/optimize/discrete', {
+                method: 'POST',
+                body: JSON.stringify(payload)
+            });
+
+            if (res && res.selected_trades) {
+                const newSelectedIds = new Set<string>();
+                res.selected_trades.forEach((t: any) => newSelectedIds.add(t.id));
+                setSelectedIds(newSelectedIds);
+
+                if (newSelectedIds.size === 0) {
+                     toast({
+                        description: "No batch found under current constraints.",
+                     });
+                } else {
+                     toast({
+                        title: "Auto-Selected Best Batch",
+                        description: `Selected ${newSelectedIds.size} optimal trades.`,
+                     });
+                }
+            }
+        } catch (e) {
+            console.error("Auto-select failed", e);
+            toast({
+                variant: "destructive",
+                title: "Auto-Select Failed",
+                description: "Couldn't auto-select. Try again."
+            });
+        } finally {
+            setIsAutoSelecting(false);
+        }
+    };
+
+    const handleStageSelected = async () => {
+        const ids = Array.from(selectedIds);
+        // stageItems handles batch staging in the hook
+        const success = await stageItems(ids);
+        if (success) {
+            setSelectedIds(new Set()); // Clear selection on success
+        }
+    };
 
 
     // -- Render --
@@ -164,16 +274,43 @@ export default function TradeInbox() {
 
     // Filter out dismissed items optimistically
     const isHeroDismissed = hero && dismissedIds.has(hero.id);
-    // If hero is staged, we still show it but marked as staged, until refresh moves it to completed
     const hasHero = !!hero && !isHeroDismissed;
-
     const visibleQueue = queue.filter(q => !dismissedIds.has(q.id));
     const hasQueue = visibleQueue.length > 0;
+
+    const totalCandidates = (hasHero ? 1 : 0) + visibleQueue.length;
+    const isSelectionEnabled = totalCandidates > 0;
 
     return (
         <div className="max-w-4xl mx-auto pb-10">
             {/* Meta Bar */}
             <InboxMetaBar meta={meta} isLoading={loading} />
+
+            {/* Action Bar */}
+            <div className="flex justify-between items-center mb-6">
+                 <div className="flex gap-2">
+                    <Button
+                        onClick={handleAutoSelect}
+                        disabled={isAutoSelecting || !isSelectionEnabled}
+                        className="gap-2 bg-gradient-to-r from-indigo-500 to-purple-600 hover:from-indigo-600 hover:to-purple-700 text-white shadow-sm transition-all"
+                    >
+                        {isAutoSelecting ? <Loader2 className="w-4 h-4 animate-spin" /> : <Wand2 className="w-4 h-4" />}
+                        {isAutoSelecting ? "Selecting..." : "Auto-Select Best Batch"}
+                    </Button>
+
+                    {selectedIds.size > 0 && (
+                        <Button
+                            onClick={handleStageSelected}
+                            disabled={isStagingBatch}
+                            variant="secondary"
+                            className="gap-2 animate-in fade-in slide-in-from-left-2 duration-200"
+                        >
+                            {isStagingBatch && <Loader2 className="w-4 h-4 animate-spin" />}
+                            Stage Selected ({selectedIds.size})
+                        </Button>
+                    )}
+                 </div>
+            </div>
 
             {/* Hero Section */}
             <div className="mb-6">
@@ -184,14 +321,26 @@ export default function TradeInbox() {
 
                 {hasHero ? (
                     <div className="transform transition-all duration-300 hover:scale-[1.01]">
-                        <SuggestionCard
-                            suggestion={{...hero, staged: hero.staged || stagedIds.has(hero.id)}}
-                            onStage={(s) => stageItems([s.id])}
-                            onDismiss={(s, r) => dismissItem(s.id, r)}
-                            onRefreshQuote={(s) => refreshQuote(s.id, displaySymbol(s))}
-                            isStale={isStale(hero)}
-                            isStaging={stagingIds.has(hero.id)}
-                        />
+                        <div className="flex gap-3">
+                            <div className="pt-8">
+                                <input
+                                    type="checkbox"
+                                    checked={selectedIds.has(hero.id)}
+                                    onChange={() => handleToggleSelect(hero)}
+                                    className="w-4 h-4 rounded border-gray-300 text-purple-600 focus:ring-purple-500 cursor-pointer"
+                                />
+                            </div>
+                            <div className="flex-1">
+                                <SuggestionCard
+                                    suggestion={{...hero, staged: hero.staged || stagedIds.has(hero.id)}}
+                                    onStage={(s) => stageItems([s.id])}
+                                    onDismiss={(s, r) => dismissItem(s.id, r)}
+                                    onRefreshQuote={(s) => refreshQuote(s.id, displaySymbol(s))}
+                                    isStale={isStale(hero)}
+                                    isStaging={stagingIds.has(hero.id)}
+                                />
+                            </div>
+                        </div>
                     </div>
                 ) : (
                     <Card className="border-dashed border-2 bg-muted/10">
@@ -219,15 +368,26 @@ export default function TradeInbox() {
                     {queueExpanded ? (
                         <div className="space-y-3 mt-2 pl-2 border-l-2 border-muted ml-2 animate-in slide-in-from-top-2 fade-in duration-200">
                              {visibleQueue.map(item => (
-                                 <SuggestionCard
-                                     key={item.id}
-                                     suggestion={{...item, staged: item.staged || stagedIds.has(item.id)}}
-                                     onStage={(s) => stageItems([s.id])}
-                                     onDismiss={(s, r) => dismissItem(s.id, r)}
-                                     onRefreshQuote={(s) => refreshQuote(s.id, displaySymbol(s))}
-                                     isStale={isStale(item)}
-                                     isStaging={stagingIds.has(item.id)}
-                                 />
+                                 <div key={item.id} className="flex gap-3">
+                                     <div className="pt-8">
+                                        <input
+                                            type="checkbox"
+                                            checked={selectedIds.has(item.id)}
+                                            onChange={() => handleToggleSelect(item)}
+                                            className="w-4 h-4 rounded border-gray-300 text-purple-600 focus:ring-purple-500 cursor-pointer"
+                                        />
+                                     </div>
+                                     <div className="flex-1">
+                                         <SuggestionCard
+                                             suggestion={{...item, staged: item.staged || stagedIds.has(item.id)}}
+                                             onStage={(s) => stageItems([s.id])}
+                                             onDismiss={(s, r) => dismissItem(s.id, r)}
+                                             onRefreshQuote={(s) => refreshQuote(s.id, displaySymbol(s))}
+                                             isStale={isStale(item)}
+                                             isStaging={stagingIds.has(item.id)}
+                                         />
+                                     </div>
+                                 </div>
                              ))}
                         </div>
                     ) : (

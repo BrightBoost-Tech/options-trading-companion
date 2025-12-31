@@ -1,5 +1,5 @@
 import pytest
-from packages.quantum.discrete.models import DiscreteSolveRequest, CandidateTrade, OptimizationParameters, OptimizationConstraints
+from packages.quantum.discrete.models import DiscreteSolveRequest, CandidateTrade, DiscreteParameters, DiscreteConstraints
 from packages.quantum.discrete.objective import compute_components, check_hard_constraints, objective_value
 
 @pytest.fixture
@@ -7,6 +7,9 @@ def sample_candidates():
     return [
         CandidateTrade(
             id="trade_a",
+            symbol="TEST",
+            side="buy",
+            qty_max=10,
             ev_per_unit=100.0,
             premium_per_unit=50.0,
             tail_risk_contribution=1.0,
@@ -16,6 +19,9 @@ def sample_candidates():
         ),
         CandidateTrade(
             id="trade_b",
+            symbol="TEST",
+            side="buy",
+            qty_max=10,
             ev_per_unit=200.0,
             premium_per_unit=80.0,
             tail_risk_contribution=2.0,
@@ -29,14 +35,19 @@ def sample_candidates():
 def basic_request(sample_candidates):
     return DiscreteSolveRequest(
         candidates=sample_candidates,
-        parameters=OptimizationParameters(
+        parameters=DiscreteParameters(
             lambda_tail=0.1,
             lambda_cash=1.0,
-            lambda_vega=0.5
+            lambda_vega=0.5,
+            lambda_delta=0.0,
+            lambda_gamma=0.0,
+            mode="classical_only"
         ),
-        constraints=OptimizationConstraints(
+        constraints=DiscreteConstraints(
             max_cash=100.0,
-            max_vega=4.0
+            max_vega=4.0,
+            max_delta_abs=100.0,
+            max_gamma=100.0
         )
     )
 
@@ -91,6 +102,8 @@ def test_objective_value(basic_request):
     # Tail Penalty = 0.1 * 9 = 0.9
     # Cash Penalty = 1.0 * (130 - 100)^2 = 900
     # Vega Penalty = 0.5 * (5 - 4)^2 = 0.5
+    # Delta Penalty = 0.0
+    # Gamma Penalty = 0.0
     # Total = -170 + 0.9 + 900 + 0.5 = 731.4
 
     q_by_id = {"trade_a": 1, "trade_b": 1}
@@ -116,6 +129,9 @@ def test_objective_improvement_with_ev(basic_request):
     # Modify request to have higher EV for Trade A
     better_candidate = CandidateTrade(
         id="trade_a",
+        symbol="TEST",
+        side="buy",
+        qty_max=10,
         ev_per_unit=150.0, # Increased by 50
         premium_per_unit=50.0,
         tail_risk_contribution=1.0,
@@ -161,12 +177,42 @@ def test_missing_candidate_ignored(basic_request):
 def test_constraints_skipped_if_none():
     # Setup request with no constraints and no lambdas
     candidates = [
-        CandidateTrade(id="a", ev_per_unit=10, premium_per_unit=5, tail_risk_contribution=1)
+        CandidateTrade(
+            id="a",
+            symbol="TEST",
+            side="buy",
+            qty_max=10,
+            ev_per_unit=10,
+            premium_per_unit=5,
+            tail_risk_contribution=1,
+            delta=0.0,
+            gamma=0.0,
+            vega=0.0
+        )
     ]
+
+    # We use DiscreteParameters with all 0.0 lambdas
+    parameters = DiscreteParameters(
+        lambda_tail=0.0,
+        lambda_cash=0.0,
+        lambda_vega=0.0,
+        lambda_delta=0.0,
+        lambda_gamma=0.0,
+        mode="classical_only"
+    )
+
+    # We use DiscreteConstraints with very loose constraints
+    constraints = DiscreteConstraints(
+        max_cash=1e9,
+        max_vega=1e9,
+        max_delta_abs=1e9,
+        max_gamma=1e9
+    )
+
     req = DiscreteSolveRequest(
         candidates=candidates,
-        parameters=OptimizationParameters(), # all 0
-        constraints=OptimizationConstraints() # all None
+        parameters=parameters,
+        constraints=constraints
     )
 
     q_by_id = {"a": 100} # huge quantity

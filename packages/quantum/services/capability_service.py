@@ -25,14 +25,14 @@ class CapabilityResolver:
         capabilities = []
 
         # 1. Agent Sizing
-        # Rule: Active if we have a portfolio snapshot with value > $2,000 (arbitrary threshold for "serious" sizing)
-        # or just if we have *any* synced positions to size against.
+        # Rule: Active if account > $2,000 OR (Portfolio has holdings and we can assume it's funded)
+        # We check for a recent portfolio snapshot with valid total value.
         agent_sizing = self._check_agent_sizing(user_id)
         capabilities.append(agent_sizing)
 
-        # 2. Counterfactual Feedback
+        # 2. Counterfactual Analysis
         # Rule: Active if user has at least one entry in outcomes_log (meaning they are generating data for feedback)
-        counterfactual = self._check_counterfactual_feedback(user_id)
+        counterfactual = self._check_counterfactual_analysis(user_id)
         capabilities.append(counterfactual)
 
         # 3. Advanced Event Guardrails
@@ -45,11 +45,12 @@ class CapabilityResolver:
     def _check_agent_sizing(self, user_id: str) -> CapabilityState:
         """
         Check if account size / sync status supports agent sizing.
+        Minimum Account Tier logic: > $2,000 for full auto sizing features.
         """
         try:
             # Check most recent snapshot
             res = self.supabase.table("portfolio_snapshots") \
-                .select("holdings, created_at") \
+                .select("holdings, created_at, risk_metrics") \
                 .eq("user_id", user_id) \
                 .order("created_at", desc=True) \
                 .limit(1) \
@@ -58,22 +59,47 @@ class CapabilityResolver:
             data = res.data
             if not data:
                 return CapabilityState(
-                    capability=UpgradeCapability.AGENT_SIZING_ENABLED,
+                    capability=UpgradeCapability.AGENT_SIZING,
                     is_active=False,
                     reason="No portfolio synced. Connect brokerage to unlock."
                 )
 
-            # Simple check: do we have holdings?
-            holdings = data[0].get("holdings", [])
-            if len(holdings) > 0:
+            snapshot = data[0]
+            holdings = snapshot.get("holdings", []) or [] # Ensure list
+            risk_metrics = snapshot.get("risk_metrics", {}) or {}
+
+            # Account Tier check
+            # Handle potential None/Null values safely
+            net_liquidity = risk_metrics.get("net_liquidity")
+            total_equity = float(net_liquidity) if net_liquidity is not None else 0.0
+
+            # If net_liquidity is missing/zero, try summing holdings
+            if total_equity <= 0 and holdings:
+                sum_holdings = 0.0
+                for h in holdings:
+                    qty = h.get("quantity")
+                    price = h.get("current_price")
+                    # Safe float conversion
+                    q_val = float(qty) if qty is not None else 0.0
+                    p_val = float(price) if price is not None else 0.0
+                    sum_holdings += (q_val * p_val)
+                total_equity = sum_holdings
+
+            if total_equity >= 2000.0:
                  return CapabilityState(
-                    capability=UpgradeCapability.AGENT_SIZING_ENABLED,
+                    capability=UpgradeCapability.AGENT_SIZING,
                     is_active=True,
-                    reason="Portfolio synced."
+                    reason="Active (Account > $2,000)"
+                )
+            elif len(holdings) > 0:
+                 return CapabilityState(
+                    capability=UpgradeCapability.AGENT_SIZING,
+                    is_active=False,
+                    reason="Account value too low (< $2,000) for agent sizing."
                 )
             else:
                  return CapabilityState(
-                    capability=UpgradeCapability.AGENT_SIZING_ENABLED,
+                    capability=UpgradeCapability.AGENT_SIZING,
                     is_active=False,
                     reason="Portfolio empty."
                 )
@@ -81,18 +107,17 @@ class CapabilityResolver:
         except Exception as e:
             logger.error(f"Error checking agent sizing capability: {e}")
             return CapabilityState(
-                capability=UpgradeCapability.AGENT_SIZING_ENABLED,
+                capability=UpgradeCapability.AGENT_SIZING,
                 is_active=False,
                 reason="Error verifying account status."
             )
 
-    def _check_counterfactual_feedback(self, user_id: str) -> CapabilityState:
+    def _check_counterfactual_analysis(self, user_id: str) -> CapabilityState:
         """
         Check if user has outcomes to analyze.
         """
         try:
-            # Check outcomes_log or similar
-            # If table doesn't exist yet in all envs, catch error
+            # Check learning_feedback_loops or outcomes_log
             res = self.supabase.table("learning_feedback_loops") \
                 .select("id", count="exact") \
                 .eq("user_id", user_id) \
@@ -100,24 +125,23 @@ class CapabilityResolver:
                 .execute()
 
             count = res.count
-            if count and count > 0:
+            if count is not None and count > 0:
                 return CapabilityState(
-                    capability=UpgradeCapability.COUNTERFACTUAL_FEEDBACK,
+                    capability=UpgradeCapability.COUNTERFACTUAL_ANALYSIS,
                     is_active=True,
                     reason="Feedback loop active."
                 )
             else:
                 return CapabilityState(
-                    capability=UpgradeCapability.COUNTERFACTUAL_FEEDBACK,
+                    capability=UpgradeCapability.COUNTERFACTUAL_ANALYSIS,
                     is_active=False,
                     reason="No completed trade cycles yet."
                 )
 
         except Exception as e:
-            # Fallback if table issues
             logger.warning(f"Could not check learning_feedback_loops: {e}")
             return CapabilityState(
-                capability=UpgradeCapability.COUNTERFACTUAL_FEEDBACK,
+                capability=UpgradeCapability.COUNTERFACTUAL_ANALYSIS,
                 is_active=False,
                 reason="Data unavailable."
             )
@@ -125,10 +149,9 @@ class CapabilityResolver:
     def _check_event_guardrails(self, user_id: str) -> CapabilityState:
         """
         Check if market data availability supports advanced guardrails.
-        This is a system-wide check usually, but let's scope it.
         """
         try:
-            # Check if scanner universe has data
+            # Check if scanner universe has data (System Readiness)
             res = self.supabase.table("scanner_universe") \
                 .select("ticker") \
                 .limit(1) \
@@ -138,7 +161,7 @@ class CapabilityResolver:
                 return CapabilityState(
                     capability=UpgradeCapability.ADVANCED_EVENT_GUARDRAILS,
                     is_active=True,
-                    reason="Market data active."
+                    reason="System ready (Market Data Active)."
                 )
             else:
                 return CapabilityState(

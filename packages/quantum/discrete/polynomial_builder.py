@@ -8,6 +8,9 @@ class DiscreteCandidate(BaseModel):
     ev: float = Field(..., description="Expected Value per unit")
     premium: float = Field(..., description="Cost per unit (premium)")
     tail_risk: float = Field(..., description="Tail risk contribution (T_i)")
+    # For compatibility, allow extra fields
+    class Config:
+        extra = "ignore"
 
 class DiscreteOptimizationRequest(BaseModel):
     candidates: List[DiscreteCandidate]

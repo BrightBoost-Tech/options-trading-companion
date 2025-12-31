@@ -29,10 +29,11 @@ from packages.quantum.analytics.loss_minimizer import LossMinimizer
 from packages.quantum.analytics.conviction_service import ConvictionService
 from packages.quantum.services.iv_repository import IVRepository
 from packages.quantum.services.iv_point_service import IVPointService
-from packages.quantum.nested_logging import log_decision
+from packages.quantum.nested_logging import log_decision, log_inference
 
 # v3 Observability
 from packages.quantum.observability.telemetry import TradeContext, compute_features_hash, emit_trade_event
+import uuid
 
 # Constants for table names
 TRADE_SUGGESTIONS_TABLE = "trade_suggestions"
@@ -613,6 +614,34 @@ async def run_midday_cycle(supabase: Client, user_id: str):
 
     if remaining_global <= 0 and not MIDDAY_TEST_MODE:
          print("Risk budget exhausted. Skipping midday cycle.")
+         # Log Veto
+         try:
+             # Generate a trace_id for this rejection event
+             veto_trace_id = uuid.uuid4()
+             # Log a dummy inference to satisfy FK constraint
+             log_inference(
+                 symbol_universe=[],
+                 inputs_snapshot={},
+                 predicted_mu={},
+                 predicted_sigma={},
+                 optimizer_profile="midday_veto",
+                 trace_id=veto_trace_id
+             )
+             # Attempt to extract strategy from candidate if available
+             strat = None # Global budget check has no candidate yet
+             log_decision(
+                 trace_id=veto_trace_id,
+                 user_id=user_id,
+                 decision_type="trade_veto",
+                 content={
+                     "reason": "global_risk_budget_exhausted",
+                     "agent": "RiskBudgetEngine",
+                     "remaining_global": remaining_global,
+                     "strategy": strat
+                 }
+             )
+         except Exception as e:
+             print(f"Error logging global veto: {e}")
          return
 
     # 2. Call Scanner (market-wide)
@@ -801,6 +830,35 @@ async def run_midday_cycle(supabase: Client, user_id: str):
 
             except Exception as e:
                 print(f"[Midday] SizingAgent failed: {e}. Falling back to classic sizing.")
+                # Log Fallback
+                try:
+                     # We need a trace_id. Using a new one for this event if needed, or context's if available later?
+                     # Context is not created yet. We'll create a temporary trace.
+                     fallback_trace_id = uuid.uuid4()
+                     log_inference(
+                         symbol_universe=[ticker],
+                         inputs_snapshot={},
+                         predicted_mu={},
+                         predicted_sigma={},
+                         optimizer_profile="midday_fallback",
+                         trace_id=fallback_trace_id
+                     )
+                     # Attempt to extract strategy
+                     strat = cand.get("strategy") or cand.get("type")
+                     log_decision(
+                         trace_id=fallback_trace_id,
+                         user_id=user_id,
+                         decision_type="system_fallback",
+                         content={
+                             "component": "SizingAgent",
+                             "error": str(e),
+                             "fallback": "classic_sizing",
+                             "ticker": ticker,
+                             "strategy": strat
+                         }
+                     )
+                except Exception as log_err:
+                     print(f"Error logging fallback: {log_err}")
                 # Fallback to calculated above
 
             # --- EXIT PLAN AGENT ---
@@ -843,6 +901,33 @@ async def run_midday_cycle(supabase: Client, user_id: str):
 
         if final_risk_dollars <= 0:
             print(f"[Midday] Skipped {ticker}: Risk budget exhausted for trade (Remaining: ${remaining_global:.2f})")
+            # Log Veto
+            try:
+                veto_trace_id = uuid.uuid4()
+                log_inference(
+                    symbol_universe=[ticker],
+                    inputs_snapshot={},
+                    predicted_mu={},
+                    predicted_sigma={},
+                    optimizer_profile="midday_veto",
+                    trace_id=veto_trace_id
+                )
+                # Attempt to extract strategy from candidate if available
+                strat = cand.get("strategy") or cand.get("type")
+                log_decision(
+                    trace_id=veto_trace_id,
+                    user_id=user_id,
+                    decision_type="trade_veto",
+                    content={
+                        "reason": "risk_budget_exhausted",
+                        "ticker": ticker,
+                        "strategy": strat,
+                        "agent": "RiskBudgetEngine",
+                        "remaining_global": remaining_global
+                    }
+                )
+            except Exception as e:
+                print(f"Error logging trade veto: {e}")
             continue
 
         # Update variable for sizing engine
@@ -866,6 +951,32 @@ async def run_midday_cycle(supabase: Client, user_id: str):
         # If contracts == 0, check reasons.
         if sizing["contracts"] == 0:
             print(f"[Midday] Skipped {ticker}: {sizing['reason']} (Allowed Risk: ${allowed_risk_dollars:.2f})")
+            # Log Veto
+            try:
+                veto_trace_id = uuid.uuid4()
+                log_inference(
+                    symbol_universe=[ticker],
+                    inputs_snapshot={},
+                    predicted_mu={},
+                    predicted_sigma={},
+                    optimizer_profile="midday_veto",
+                    trace_id=veto_trace_id
+                )
+                # Attempt to extract strategy
+                strat = cand.get("strategy") or cand.get("type")
+                log_decision(
+                    trace_id=veto_trace_id,
+                    user_id=user_id,
+                    decision_type="trade_veto",
+                    content={
+                        "reason": sizing.get('reason'),
+                        "ticker": ticker,
+                        "strategy": strat,
+                        "agent": "SizingAgent"
+                    }
+                )
+            except Exception as e:
+                print(f"Error logging sizing veto: {e}")
 
         print(
             f"[Midday] {ticker} sizing: contracts={sizing.get('contracts')}, "

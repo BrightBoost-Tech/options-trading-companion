@@ -1,8 +1,29 @@
-from fastapi import APIRouter, Depends, Body, Request, HTTPException
+from fastapi import APIRouter, Depends, Body, Request, HTTPException, Query
 from typing import Dict, Any, Optional
 from packages.quantum.security import get_current_user
+from packages.quantum.analytics.behavior_analysis import BehaviorAnalysisService
 
 router = APIRouter()
+
+@router.get("/analytics/behavior")
+def get_behavior_summary(
+    request: Request,
+    window: str = Query("7d", regex="^(7d|30d)$"),
+    strategy: Optional[str] = None,
+    user_id: str = Depends(get_current_user)
+):
+    """
+    Get aggregated behavior summary (veto rates, constraints, fallbacks).
+    """
+    try:
+        supabase = request.app.state.supabase
+        service = BehaviorAnalysisService(supabase)
+
+        days = int(window.replace("d", ""))
+        return service.get_behavior_summary(user_id, window_days=days, strategy_family=strategy)
+    except Exception as e:
+        print(f"Error fetching behavior summary: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 @router.post("/analytics/events")
 async def log_analytics_event(

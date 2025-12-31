@@ -1,0 +1,173 @@
+[
+  {
+    "input": {
+      "agent_signals": {},
+      "base_score": 90.0,
+      "deployable_capital": 500.0,
+      "max_loss_per_contract": 50.0
+    },
+    "name": "small_account_high_score",
+    "output": {
+      "metadata": {
+        "constraints": {
+          "sizing.max_contracts": 100,
+          "sizing.max_risk_usd": 35.0,
+          "sizing.min_risk_usd": 10.0,
+          "sizing.recommended_contracts": 0,
+          "sizing.risk_scale_factor": 0.9,
+          "sizing.target_risk_usd": 32.5
+        }
+      },
+      "reasons": [
+        "Sized $32.50 (Factor 0.90)"
+      ],
+      "score": 90.0,
+      "veto": false
+    }
+  },
+  {
+    "input": {
+      "agent_signals": {},
+      "base_score": 20.0,
+      "deployable_capital": 20000.0,
+      "max_loss_per_contract": 50.0
+    },
+    "name": "large_account_low_score",
+    "output": {
+      "metadata": {
+        "constraints": {
+          "sizing.max_contracts": 100,
+          "sizing.max_risk_usd": 250.0,
+          "sizing.min_risk_usd": 50.0,
+          "sizing.recommended_contracts": 1,
+          "sizing.risk_scale_factor": 0.2,
+          "sizing.target_risk_usd": 90.0
+        }
+      },
+      "reasons": [
+        "Sized $90.00 (Factor 0.20)"
+      ],
+      "score": 20.0,
+      "veto": false
+    }
+  },
+  {
+    "input": {
+      "agent_signals": {
+        "liquidity": {
+          "score": 0.0,
+          "veto": true
+        }
+      },
+      "base_score": 50.0,
+      "deployable_capital": 5000.0,
+      "max_loss_per_contract": 50.0
+    },
+    "name": "veto_upstream",
+    "output": {
+      "metadata": {
+        "constraints": {
+          "sizing.recommended_contracts": 0,
+          "sizing.target_risk_usd": 0.0
+        }
+      },
+      "reasons": [
+        "Vetoed by upstream agent (regime/vol/liquidity/event)"
+      ],
+      "score": 0.0,
+      "veto": true
+    }
+  },
+  {
+    "input": {
+      "agent_signals": {
+        "regime": {
+          "score": 80.0
+        },
+        "vol": {
+          "score": 80.0
+        }
+      },
+      "base_score": 50.0,
+      "deployable_capital": 5000.0,
+      "max_loss_per_contract": 50.0
+    },
+    "name": "confluence_boost",
+    "output": {
+      "metadata": {
+        "constraints": {
+          "sizing.max_contracts": 100,
+          "sizing.max_risk_usd": 150.0,
+          "sizing.min_risk_usd": 35.0,
+          "sizing.recommended_contracts": 2,
+          "sizing.risk_scale_factor": 0.62,
+          "sizing.target_risk_usd": 106.88
+        }
+      },
+      "reasons": [
+        "Boost: High Regime & Vol alignment",
+        "Sized $106.88 (Factor 0.62)"
+      ],
+      "score": 50.0,
+      "veto": false
+    }
+  },
+  {
+    "input": {
+      "agent_signals": {
+        "liquidity": {
+          "score": 30.0
+        }
+      },
+      "base_score": 50.0,
+      "deployable_capital": 5000.0,
+      "max_loss_per_contract": 50.0
+    },
+    "name": "confluence_penalty",
+    "output": {
+      "metadata": {
+        "constraints": {
+          "sizing.max_contracts": 100,
+          "sizing.max_risk_usd": 150.0,
+          "sizing.min_risk_usd": 35.0,
+          "sizing.recommended_contracts": 1,
+          "sizing.risk_scale_factor": 0.3,
+          "sizing.target_risk_usd": 69.5
+        }
+      },
+      "reasons": [
+        "Penalty: Poor Liquidity (Score 30)",
+        "Sized $69.50 (Factor 0.30)"
+      ],
+      "score": 50.0,
+      "veto": false
+    }
+  },
+  {
+    "input": {
+      "agent_signals": {},
+      "base_score": 90.0,
+      "collateral_required_per_contract": 600.0,
+      "deployable_capital": 1000.0,
+      "max_loss_per_contract": 50.0
+    },
+    "name": "buying_power_limit",
+    "output": {
+      "metadata": {
+        "constraints": {
+          "sizing.max_contracts": 100,
+          "sizing.max_risk_usd": 75.0,
+          "sizing.min_risk_usd": 20.0,
+          "sizing.recommended_contracts": 1,
+          "sizing.risk_scale_factor": 0.9,
+          "sizing.target_risk_usd": 69.5
+        }
+      },
+      "reasons": [
+        "Sized $69.50 (Factor 0.90)"
+      ],
+      "score": 90.0,
+      "veto": false
+    }
+  }
+]

@@ -3,6 +3,7 @@
 import { useState, useEffect } from 'react';
 import DashboardLayout from '@/components/DashboardLayout';
 import DashboardOnboarding from '@/components/dashboard/DashboardOnboarding';
+import { CapabilityPanel } from '@/components/dashboard/CapabilityPanel';
 import SyncHoldingsButton from '@/components/SyncHoldingsButton';
 import PortfolioOptimizer from '@/components/dashboard/PortfolioOptimizer';
 import { WeeklyProgressCard } from '@/components/dashboard/WeeklyProgressCard';
@@ -273,6 +274,9 @@ export default function DashboardPage() {
           hasPositions={hasPositions}
           onSyncComplete={loadSnapshot}
         />
+
+        {/* SECTION -1: SYSTEM UPGRADES */}
+        <CapabilityPanel />
         
         {/* SECTION 0: WEEKLY SCOUT / PROGRESS */}
         <div>

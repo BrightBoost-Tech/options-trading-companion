@@ -386,6 +386,22 @@ app.include_router(analytics_router)
 from packages.quantum.historical_endpoints import router as historical_router
 app.include_router(historical_router)
 
+# --- Capabilities Endpoint ---
+from packages.quantum.services.capability_service import CapabilityResolver
+
+@app.get("/capabilities")
+@limiter.limit("20/minute")
+def get_user_capabilities(
+    request: Request,
+    user_id: str = Depends(get_current_user),
+    supabase: Client = Depends(get_supabase_user_client)
+):
+    if not supabase:
+        raise HTTPException(status_code=503, detail="Database not available")
+
+    resolver = CapabilityResolver(supabase)
+    return resolver.resolve_capabilities(user_id)
+
 # --- Scout Endpoints (New) ---
 
 @app.get("/scout/weekly")

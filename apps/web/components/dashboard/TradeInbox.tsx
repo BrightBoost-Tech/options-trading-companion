@@ -5,12 +5,11 @@ import { fetchWithAuth } from '@/lib/api';
 import { Suggestion, InboxResponse, InboxMeta } from '@/lib/types';
 import SuggestionCard from './SuggestionCard';
 import { Card, CardContent } from '@/components/ui/card';
-import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Loader2, RefreshCw, ChevronDown, ChevronUp, AlertCircle, CheckCircle2 } from 'lucide-react';
 import { useToast } from '@/components/ui/use-toast';
-import { cn } from '@/lib/utils';
 import { QuantumTooltip } from '@/components/ui/QuantumTooltip';
+import { useInboxActions } from '@/hooks/useInboxActions';
 
 // --- Sub-components ---
 
@@ -75,11 +74,6 @@ const CompletedList = ({ items }: { items: Suggestion[] }) => {
                     <SuggestionCard
                         key={item.id}
                         suggestion={item}
-                        // Read-only mode implied by lack of handlers,
-                        // but SuggestionCard renders actions if not disabled.
-                        // We can pass empty handlers or rely on status styling.
-                        // Ideally SuggestionCard should have a 'readOnly' prop but it doesn't.
-                        // However, we can just NOT pass handlers.
                         isStale={false}
                     />
                 ))}
@@ -95,13 +89,12 @@ export default function TradeInbox() {
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState<string | null>(null);
     const [queueExpanded, setQueueExpanded] = useState(false);
-    const { toast } = useToast();
 
-    // -- Actions --
-
+    // -- Actions Hook --
     const fetchInbox = useCallback(async () => {
-        setLoading(true);
-        setError(null);
+        // Don't set loading true if we already have data (background refresh)
+        // But here we might want to if it's a full refresh requested by user
+        // For now, let's keep it simple.
         try {
             const res = await fetchWithAuth('/inbox');
             if (res) {
@@ -117,78 +110,21 @@ export default function TradeInbox() {
         }
     }, []);
 
+    const {
+        stageItems,
+        dismissItem,
+        refreshQuote,
+        isStale,
+        dismissedIds,
+        stagedIds,
+        stagingIds
+    } = useInboxActions(fetchInbox);
+
     useEffect(() => {
+        setLoading(true);
         fetchInbox();
     }, [fetchInbox]);
 
-    const handleRefreshQuote = async (s: Suggestion) => {
-        try {
-            const res = await fetchWithAuth(`/suggestions/${s.id}/refresh-quote`, {
-                method: 'POST'
-            });
-            if (res.quote) {
-                 toast({ title: "Quote Refreshed", description: `Latest price for ${s.symbol}` });
-                 // Optimistically update? Or just re-fetch inbox?
-                 // Re-fetching inbox is safer to get re-ranked data.
-                 fetchInbox();
-            }
-        } catch (e) {
-            toast({ title: "Refresh Failed", description: "Could not fetch new quote.", variant: "destructive" });
-        }
-    };
-
-    const handleDismiss = async (s: Suggestion, reason: string) => {
-        try {
-             // Optimistic Update
-             if (data) {
-                 const isHero = data.hero?.id === s.id;
-                 const newQueue = data.queue.filter(i => i.id !== s.id);
-                 let newHero = isHero ? null : data.hero;
-
-                 // If hero dismissed, promote top of queue?
-                 // The backend re-ranks, but for immediate UI feedback we might just remove it.
-                 // Let's just remove it and wait for re-fetch or let user manually refresh if they want new rank.
-                 // Better UX: Remove locally, then background fetch.
-
-                 setData({
-                     ...data,
-                     hero: newHero,
-                     queue: newQueue
-                 });
-             }
-
-             await fetchWithAuth(`/suggestions/${s.id}/dismiss`, {
-                 method: 'POST',
-                 body: JSON.stringify({ reason })
-             });
-
-             toast({ title: "Dismissed", description: "Suggestion removed." });
-             fetchInbox(); // Sync with backend for new hero/ranking
-        } catch (e) {
-             toast({ title: "Error", description: "Failed to dismiss suggestion", variant: "destructive" });
-             fetchInbox(); // Revert on error
-        }
-    };
-
-    const handleStage = async (s: Suggestion) => {
-        try {
-            // Check for batch endpoint usage as singular
-            // Reuse logic from SuggestionTabs: /inbox/stage-batch with list
-            const res = await fetchWithAuth('/inbox/stage-batch', {
-                method: 'POST',
-                body: JSON.stringify({ suggestion_ids: [s.id] })
-            });
-
-            if (res.staged_count > 0 || (res.staged && res.staged.length > 0)) {
-                toast({ title: "Staged", description: "Trade moved to execution queue." });
-                fetchInbox();
-            } else {
-                throw new Error("Stage failed");
-            }
-        } catch (e) {
-             toast({ title: "Error", description: "Failed to stage trade.", variant: "destructive" });
-        }
-    };
 
     // -- Render --
 
@@ -212,7 +148,7 @@ export default function TradeInbox() {
                 <AlertCircle className="w-10 h-10 mx-auto text-destructive mb-3" />
                 <h3 className="font-medium text-lg">Unable to load Inbox</h3>
                 <p className="text-muted-foreground mb-4">{error}</p>
-                <Button onClick={fetchInbox} variant="outline" className="gap-2">
+                <Button onClick={() => { setLoading(true); fetchInbox(); }} variant="outline" className="gap-2">
                     <RefreshCw className="w-4 h-4" /> Try Again
                 </Button>
             </div>
@@ -222,8 +158,14 @@ export default function TradeInbox() {
     if (!data) return null;
 
     const { hero, queue, completed, meta } = data;
-    const hasHero = !!hero;
-    const hasQueue = queue && queue.length > 0;
+
+    // Filter out dismissed items optimistically
+    const isHeroDismissed = hero && dismissedIds.has(hero.id);
+    // If hero is staged, we still show it but marked as staged, until refresh moves it to completed
+    const hasHero = !!hero && !isHeroDismissed;
+
+    const visibleQueue = queue.filter(q => !dismissedIds.has(q.id));
+    const hasQueue = visibleQueue.length > 0;
 
     return (
         <div className="max-w-4xl mx-auto pb-10">
@@ -240,19 +182,19 @@ export default function TradeInbox() {
                 {hasHero ? (
                     <div className="transform transition-all duration-300 hover:scale-[1.01]">
                         <SuggestionCard
-                            suggestion={hero}
-                            onStage={handleStage}
-                            onDismiss={handleDismiss}
-                            onRefreshQuote={handleRefreshQuote}
-                            isStale={hero.is_stale} // Use backend staleness if available
-                            // Hero is expanded/prominent by default structure of SuggestionCard
+                            suggestion={{...hero, staged: hero.staged || stagedIds.has(hero.id)}}
+                            onStage={(s) => stageItems([s.id])}
+                            onDismiss={(s, r) => dismissItem(s.id, r)}
+                            onRefreshQuote={(s) => refreshQuote(s.id)}
+                            isStale={isStale(hero)}
+                            isStaging={stagingIds.has(hero.id)}
                         />
                     </div>
                 ) : (
                     <Card className="border-dashed border-2 bg-muted/10">
                         <CardContent className="py-10 text-center text-muted-foreground">
                             <p>No high-priority suggestions right now.</p>
-                            <Button variant="link" onClick={fetchInbox} className="mt-2">Check Again</Button>
+                            <Button variant="link" onClick={() => { setLoading(true); fetchInbox(); }} className="mt-2">Check Again</Button>
                         </CardContent>
                     </Card>
                 )}
@@ -266,27 +208,28 @@ export default function TradeInbox() {
                         onClick={() => setQueueExpanded(!queueExpanded)}
                     >
                         <h3 className="font-medium text-muted-foreground flex items-center gap-2">
-                             Pending Queue ({queue.length})
+                             Pending Queue ({visibleQueue.length})
                         </h3>
                         {queueExpanded ? <ChevronUp className="w-4 h-4" /> : <ChevronDown className="w-4 h-4" />}
                     </div>
 
                     {queueExpanded ? (
                         <div className="space-y-3 mt-2 pl-2 border-l-2 border-muted ml-2 animate-in slide-in-from-top-2 fade-in duration-200">
-                             {queue.map(item => (
+                             {visibleQueue.map(item => (
                                  <SuggestionCard
                                      key={item.id}
-                                     suggestion={item}
-                                     onStage={handleStage}
-                                     onDismiss={handleDismiss}
-                                     onRefreshQuote={handleRefreshQuote}
-                                     isStale={item.is_stale}
+                                     suggestion={{...item, staged: item.staged || stagedIds.has(item.id)}}
+                                     onStage={(s) => stageItems([s.id])}
+                                     onDismiss={(s, r) => dismissItem(s.id, r)}
+                                     onRefreshQuote={(s) => refreshQuote(s.id)}
+                                     isStale={isStale(item)}
+                                     isStaging={stagingIds.has(item.id)}
                                  />
                              ))}
                         </div>
                     ) : (
                          <div className="text-xs text-muted-foreground pl-4 mt-1">
-                             {queue.map(q => q.symbol).join(', ')}
+                             {visibleQueue.map(q => q.symbol).join(', ')}
                          </div>
                     )}
                 </div>

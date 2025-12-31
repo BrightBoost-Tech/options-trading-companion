@@ -8,7 +8,6 @@ import { logEvent } from '@/lib/analytics';
 import { QuantumTooltip } from '@/components/ui/QuantumTooltip';
 import { Check, X, RefreshCw, AlertTriangle, Clock, Loader2 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
-import { Dialog, DialogContent, DialogTrigger } from '@/components/ui/dialog';
 
 interface SuggestionCardProps {
     suggestion: Suggestion;
@@ -234,7 +233,7 @@ const SuggestionCard = ({
                                         className="ml-1"
                                         content={
                                             (agent_summary.top_reasons?.length)
-                                                ? agent_summary.top_reasons.map(r => `• ${r}`).join(' ')
+                                                ? agent_summary.top_reasons.map((r: string) => `• ${r}`).join(' ')
                                                 : "Suggested based on your positions, volatility regime, and risk model. Always confirm it fits your own plan."
                                         }
                                     />

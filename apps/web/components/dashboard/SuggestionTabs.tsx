@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useRef, useEffect } from 'react';
+import { useState, useRef } from 'react';
 import SuggestionCard from './SuggestionCard';
 import { Suggestion } from '@/lib/types';
 import { Sparkles, Activity, Sun, Clock, FileText, CheckSquare, Loader2 } from 'lucide-react';
@@ -8,8 +8,7 @@ import WeeklyReportList from '../suggestions/WeeklyReportList';
 import { RefreshCw } from 'lucide-react';
 import { logEvent } from '@/lib/analytics';
 import { Button } from '@/components/ui/button';
-import { fetchWithAuth } from '@/lib/api';
-import { useToast } from '@/components/ui/use-toast';
+import { useInboxActions } from '@/hooks/useInboxActions';
 
 interface SuggestionTabsProps {
   optimizerSuggestions: Suggestion[];
@@ -45,124 +44,55 @@ export default function SuggestionTabs({
   onRefreshJournal
 }: SuggestionTabsProps) {
   const [activeTab, setActiveTab] = useState<'morning' | 'midday' | 'rebalance' | 'scout' | 'journal' | 'weekly'>('morning');
-  const [stagedIds, setStagedIds] = useState<string[]>([]); // Locally staged, visually distinct
-  const [dismissedIds, setDismissedIds] = useState<string[]>([]); // Locally dismissed for optimistic UI
   const [selectedIds, setSelectedIds] = useState<string[]>([]); // Batch selection
-  const [isBatchLoading, setIsBatchLoading] = useState(false);
-  const [stagingIds, setStagingIds] = useState<string[]>([]); // Track which specific IDs are currently staging
-  const [refreshedAtMap, setRefreshedAtMap] = useState<Record<string, number>>({}); // id -> timestamp (ms)
   const tabListRef = useRef<HTMLDivElement>(null);
-  const { toast } = useToast();
+
+  // Hook for actions
+  // We pass onRefreshJournal (or generic refresh) to hook if we want auto-refresh of data
+  // Since SuggestionTabs receives data via props, refreshing data means triggering parent refresh?
+  // The props don't include a general "refreshAll" callback, but onRefreshJournal might work for journal tab.
+  // For other tabs, we rely on optimistic updates or user manual refresh.
+  const {
+      stageItems,
+      dismissItem,
+      refreshQuote,
+      isStale,
+      dismissedIds,
+      stagedIds,
+      isBatchLoading,
+      stagingIds
+  } = useInboxActions(); // No global refresh callback passed, relying on optimistic updates + props updates from parent
 
   // Tabs configuration for cleaner rendering and accessibility
   const tabs = [
-    { id: 'morning', label: 'Morning', icon: Sun, count: morningSuggestions.filter(s => !dismissedIds.includes(s.id)).length, color: 'orange' },
-    { id: 'midday', label: 'Midday', icon: Clock, count: middaySuggestions.filter(s => !dismissedIds.includes(s.id)).length, color: 'blue' },
-    { id: 'rebalance', label: 'Rebalance', icon: Activity, count: optimizerSuggestions.filter(s => !dismissedIds.includes(s.id)).length, color: 'indigo' },
-    { id: 'scout', label: 'Scout', icon: Sparkles, count: scoutSuggestions.filter(s => !dismissedIds.includes(s.id)).length, color: 'green' },
-    { id: 'journal', label: 'Journal', icon: null, textIcon: '📖', count: journalQueue.filter(s => !dismissedIds.includes(s.id)).length, color: 'purple' },
+    { id: 'morning', label: 'Morning', icon: Sun, count: morningSuggestions.filter(s => !dismissedIds.has(s.id)).length, color: 'orange' },
+    { id: 'midday', label: 'Midday', icon: Clock, count: middaySuggestions.filter(s => !dismissedIds.has(s.id)).length, color: 'blue' },
+    { id: 'rebalance', label: 'Rebalance', icon: Activity, count: optimizerSuggestions.filter(s => !dismissedIds.has(s.id)).length, color: 'indigo' },
+    { id: 'scout', label: 'Scout', icon: Sparkles, count: scoutSuggestions.filter(s => !dismissedIds.has(s.id)).length, color: 'green' },
+    { id: 'journal', label: 'Journal', icon: null, textIcon: '📖', count: journalQueue.filter(s => !dismissedIds.has(s.id)).length, color: 'purple' },
     { id: 'weekly', label: 'Reports', icon: FileText, count: 0, color: 'slate' },
   ] as const;
 
-  const executeBatchStage = async (idsToStage: string[]) => {
-      if (idsToStage.length === 0) return;
-
-      const isBatchUI = idsToStage.length > 1;
-      if (isBatchUI) setIsBatchLoading(true);
-      else setStagingIds(prev => [...prev, ...idsToStage]);
-
-      try {
-          const res = await fetchWithAuth('/inbox/stage-batch', {
-              method: 'POST',
-              body: JSON.stringify({ suggestion_ids: idsToStage })
-          });
-
-          // Support new staged[] / failed[] and legacy staged_count / failed_ids
-          // staged[] might be strings OR objects { id, order_id }
-          const rawStaged = res.staged || [];
-          const successfulIds: string[] = [];
-
-          rawStaged.forEach((item: any) => {
-              if (typeof item === 'string') {
-                  successfulIds.push(item);
-              } else if (item && typeof item === 'object') {
-                  if (item.id) {
-                      successfulIds.push(item.id);
-                      if (!item.order_id) {
-                          console.warn(`[BatchStage] Staged item ${item.id} missing order_id`);
-                      }
-                  }
-              }
-          });
-
-          const failedItems: any[] = res.failed || [];
-          const failedIds: string[] = res.failed_ids || failedItems.map((f: any) => f.id) || [];
-
-          // Fallback if staged[] is missing but staged_count indicates success
-          if (successfulIds.length === 0 && res.staged_count > 0 && failedIds.length === 0) {
-              // Assume all succeeded if no specific failures returned
-              successfulIds.push(...idsToStage);
-          }
-
-          if (successfulIds.length > 0) {
-               setStagedIds(prev => Array.from(new Set([...prev, ...successfulIds])));
-
-               if (isBatchUI || successfulIds.length > 1) {
-                   toast({
-                       title: "Staged",
-                       description: `Successfully staged ${successfulIds.length} suggestions.`
-                   });
-               } else {
-                   toast({ title: "Staged", description: "Suggestion moved to staged queue." });
-               }
-
-               // Clear selection if it matches the batch
-               if (isBatchUI) setSelectedIds([]);
-          }
-
-          if (failedIds.length > 0) {
-               toast({
-                   title: "Partial Failure",
-                   description: `Failed to stage ${failedIds.length} items.`,
-                   variant: "destructive"
-               });
-          }
-      } catch (e) {
-          toast({ title: "Error", description: "Stage request failed", variant: "destructive" });
-      } finally {
-          if (isBatchUI) setIsBatchLoading(false);
-          else setStagingIds(prev => prev.filter(id => !idsToStage.includes(id)));
-      }
-  };
-
   const handleStage = (s: Suggestion) => {
-      if (stagingIds.includes(s.id)) return; // Prevent double click
-      executeBatchStage([s.id]);
+      stageItems([s.id]);
   };
 
-  const handleBatchStage = () => {
-      executeBatchStage(selectedIds);
+  const handleBatchStage = async () => {
+      const success = await stageItems(selectedIds);
+      if (success) {
+          setSelectedIds([]);
+      }
   };
 
   const handleModify = (s: Suggestion) => {};
 
-  const handleDismiss = async (s: Suggestion, reasonLabel: string) => {
+  const handleDismiss = (s: Suggestion, reasonLabel: string) => {
       const reason = CANONICAL_REASONS[reasonLabel] || reasonLabel;
+      dismissItem(s.id, reason);
+  };
 
-      // Optimistic UI update
-      setDismissedIds(prev => [...prev, s.id]);
-
-      try {
-          await fetchWithAuth(`/suggestions/${s.id}/dismiss`, {
-              method: 'POST',
-              body: JSON.stringify({ reason }),
-          });
-          toast({ title: "Dismissed", description: `Suggestion dismissed.` });
-      } catch (e) {
-          // Rollback on error
-          setDismissedIds(prev => prev.filter(id => id !== s.id));
-          toast({ title: "Error", description: "Failed to dismiss suggestion", variant: "destructive" });
-      }
+  const handleRefreshQuote = (s: Suggestion) => {
+      refreshQuote(s.id);
   };
 
   const handleTabChange = (tabId: typeof activeTab) => {
@@ -181,65 +111,22 @@ export default function SuggestionTabs({
       );
   };
 
-  const handleRefreshQuote = async (s: Suggestion) => {
-      try {
-          const res = await fetchWithAuth(`/suggestions/${s.id}/refresh-quote`, {
-              method: 'POST'
-          });
-          if (res.refreshed_at) {
-               setRefreshedAtMap(prev => ({
-                   ...prev,
-                   [s.id]: new Date(res.refreshed_at).getTime()
-               }));
-               toast({ title: "Quote Refreshed", description: "Latest market data fetched." });
-          }
-      } catch (e) {
-          toast({ title: "Refresh Failed", description: "Could not fetch new quote.", variant: "destructive" });
-      }
-  };
-
-  // Helper to determine if a suggestion is stale
-  const checkIsStale = (s: Suggestion) => {
-      if (s.staged) return false;
-      const refreshedTime = refreshedAtMap[s.id];
-      const now = Date.now();
-
-      // 1. Check local refresh within 5 minutes
-      if (refreshedTime && (now - refreshedTime < 5 * 60 * 1000)) {
-          return false;
-      }
-
-      // 2. Check server-provided flag
-      if (s.is_stale === true) {
-          return true;
-      }
-
-      // 3. Fallback: Creation time > 5 mins (if is_stale is undefined/null)
-      if (s.is_stale === undefined) {
-          const createdTime = s.created_at ? new Date(s.created_at).getTime() : 0;
-          if (now - createdTime > 5 * 60 * 1000) {
-              return true;
-          }
-      }
-      return false;
-  };
-
   const renderCard = (s: Suggestion, idx: number) => {
-      if (dismissedIds.includes(s.id)) return null;
+      if (dismissedIds.has(s.id)) return null;
 
       return (
           <SuggestionCard
             key={s.id || idx}
-            suggestion={{...s, staged: s.staged || stagedIds.includes(s.id)}}
+            suggestion={{...s, staged: s.staged || stagedIds.has(s.id)}}
             onStage={handleStage}
             onModify={handleModify}
             onDismiss={handleDismiss}
             onRefreshQuote={handleRefreshQuote}
-            isStale={checkIsStale(s)}
+            isStale={isStale(s)}
             batchModeEnabled={true}
             isSelected={selectedIds.includes(s.id)}
             onToggleSelect={handleToggleSelect}
-            isStaging={stagingIds.includes(s.id)}
+            isStaging={stagingIds.has(s.id)}
           />
       );
   };
@@ -363,7 +250,7 @@ export default function SuggestionTabs({
       >
 
         {activeTab === 'morning' && (
-             morningSuggestions.filter(s => !dismissedIds.includes(s.id)).length === 0 ? (
+             morningSuggestions.filter(s => !dismissedIds.has(s.id)).length === 0 ? (
                <div className="text-center py-10 text-muted-foreground">
                  <p>No morning suggestions.</p>
                </div>
@@ -373,7 +260,7 @@ export default function SuggestionTabs({
         )}
 
         {activeTab === 'midday' && (
-             middaySuggestions.filter(s => !dismissedIds.includes(s.id)).length === 0 ? (
+             middaySuggestions.filter(s => !dismissedIds.has(s.id)).length === 0 ? (
                 <div className="text-center py-10 text-muted-foreground">
                   <p>No midday suggestions.</p>
                 </div>
@@ -387,7 +274,7 @@ export default function SuggestionTabs({
         )}
 
         {activeTab === 'rebalance' && (
-            optimizerSuggestions.filter(s => !dismissedIds.includes(s.id)).length === 0 ? (
+            optimizerSuggestions.filter(s => !dismissedIds.has(s.id)).length === 0 ? (
                <div className="text-center py-10 text-muted-foreground">
                  <Activity className="w-10 h-10 mx-auto mb-3 opacity-20" />
                  <p>No rebalance suggestions.</p>
@@ -411,7 +298,7 @@ export default function SuggestionTabs({
                 </button>
             </div>
 
-            {scoutSuggestions.filter(s => !dismissedIds.includes(s.id)).length === 0 ? (
+            {scoutSuggestions.filter(s => !dismissedIds.has(s.id)).length === 0 ? (
                <div className="text-center py-10 text-muted-foreground">
                  <Sparkles className="w-10 h-10 mx-auto mb-3 opacity-20" />
                  <p>No scout picks found.</p>
@@ -424,7 +311,7 @@ export default function SuggestionTabs({
 
         {activeTab === 'journal' && (
           <div className="space-y-4">
-            {journalQueue.filter(s => !dismissedIds.includes(s.id)).length === 0 ? (
+            {journalQueue.filter(s => !dismissedIds.has(s.id)).length === 0 ? (
                <div className="text-center py-10 text-muted-foreground">
                  <p>Journal queue is empty.</p>
                  <p className="text-xs mt-1">Add trades from Scout or Rebalance to track them.</p>

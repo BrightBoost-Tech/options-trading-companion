@@ -3,7 +3,7 @@
 import { useState, useRef } from 'react';
 import SuggestionCard from './SuggestionCard';
 import { Suggestion } from '@/lib/types';
-import { Sparkles, Activity, Sun, Clock, FileText, CheckSquare, Loader2 } from 'lucide-react';
+import { Sparkles, Activity, Sun, Clock, FileText, CheckSquare, Loader2, Coffee, BookOpen } from 'lucide-react';
 import WeeklyReportList from '../suggestions/WeeklyReportList';
 import { RefreshCw } from 'lucide-react';
 import { logEvent } from '@/lib/analytics';
@@ -32,6 +32,32 @@ const CANONICAL_REASONS: Record<string, string> = {
   "Wrong Timing": "wrong_timing"
 };
 
+interface TabEmptyStateProps {
+  icon: React.ElementType;
+  title: string;
+  description: string;
+  actionLabel?: string;
+  onAction?: () => void;
+  className?: string;
+}
+
+function TabEmptyState({ icon: Icon, title, description, actionLabel, onAction, className }: TabEmptyStateProps) {
+  return (
+    <div className={`flex flex-col items-center justify-center py-12 text-center animate-in fade-in-50 duration-500 ${className}`}>
+      <div className="bg-muted/50 p-4 rounded-full mb-4 ring-1 ring-border/50">
+        <Icon className="w-8 h-8 text-muted-foreground/50" aria-hidden="true" />
+      </div>
+      <h3 className="text-lg font-medium text-foreground mb-1">{title}</h3>
+      <p className="text-sm text-muted-foreground max-w-xs mb-4">{description}</p>
+      {actionLabel && onAction && (
+        <Button onClick={onAction} variant="outline" size="sm" className="gap-2">
+          {actionLabel}
+        </Button>
+      )}
+    </div>
+  );
+}
+
 export default function SuggestionTabs({
   optimizerSuggestions,
   scoutSuggestions,
@@ -48,10 +74,6 @@ export default function SuggestionTabs({
   const tabListRef = useRef<HTMLDivElement>(null);
 
   // Hook for actions
-  // We pass onRefreshJournal (or generic refresh) to hook if we want auto-refresh of data
-  // Since SuggestionTabs receives data via props, refreshing data means triggering parent refresh?
-  // The props don't include a general "refreshAll" callback, but onRefreshJournal might work for journal tab.
-  // For other tabs, we rely on optimistic updates or user manual refresh.
   const {
       stageItems,
       dismissItem,
@@ -61,7 +83,7 @@ export default function SuggestionTabs({
       stagedIds,
       isBatchLoading,
       stagingIds
-  } = useInboxActions(); // No global refresh callback passed, relying on optimistic updates + props updates from parent
+  } = useInboxActions();
 
   // Tabs configuration for cleaner rendering and accessibility
   const tabs = [
@@ -251,9 +273,11 @@ export default function SuggestionTabs({
 
         {activeTab === 'morning' && (
              morningSuggestions.filter(s => !dismissedIds.has(s.id)).length === 0 ? (
-               <div className="text-center py-10 text-muted-foreground">
-                 <p>No morning suggestions.</p>
-               </div>
+               <TabEmptyState
+                 icon={Coffee}
+                 title="No morning moves"
+                 description="The market is quiet. Check back later for new opening opportunities."
+               />
              ) : (
                 morningSuggestions.map((s, i) => renderCard(s, i))
              )
@@ -261,9 +285,11 @@ export default function SuggestionTabs({
 
         {activeTab === 'midday' && (
              middaySuggestions.filter(s => !dismissedIds.has(s.id)).length === 0 ? (
-                <div className="text-center py-10 text-muted-foreground">
-                  <p>No midday suggestions.</p>
-                </div>
+                <TabEmptyState
+                  icon={Clock}
+                  title="Midday scan clear"
+                  description="No midday setups detected yet. The scanner is watching the market."
+                />
               ) : (
                  middaySuggestions.map((s, i) => renderCard(s, i))
               )
@@ -275,11 +301,11 @@ export default function SuggestionTabs({
 
         {activeTab === 'rebalance' && (
             optimizerSuggestions.filter(s => !dismissedIds.has(s.id)).length === 0 ? (
-               <div className="text-center py-10 text-muted-foreground">
-                 <Activity className="w-10 h-10 mx-auto mb-3 opacity-20" />
-                 <p>No rebalance suggestions.</p>
-                 <p className="text-xs mt-1">Run the optimizer to generate trades.</p>
-               </div>
+               <TabEmptyState
+                 icon={Activity}
+                 title="Portfolio is balanced"
+                 description="No rebalancing actions required at this time."
+               />
             ) : (
                optimizerSuggestions.map((s, idx) => renderCard(s, idx))
             )
@@ -299,10 +325,11 @@ export default function SuggestionTabs({
             </div>
 
             {scoutSuggestions.filter(s => !dismissedIds.has(s.id)).length === 0 ? (
-               <div className="text-center py-10 text-muted-foreground">
-                 <Sparkles className="w-10 h-10 mx-auto mb-3 opacity-20" />
-                 <p>No scout picks found.</p>
-               </div>
+               <TabEmptyState
+                 icon={Sparkles}
+                 title="Scout is searching"
+                 description="No scout picks found matching your criteria right now."
+               />
             ) : (
                scoutSuggestions.map((opp, idx) => renderCard(opp, idx))
             )}
@@ -312,10 +339,13 @@ export default function SuggestionTabs({
         {activeTab === 'journal' && (
           <div className="space-y-4">
             {journalQueue.filter(s => !dismissedIds.has(s.id)).length === 0 ? (
-               <div className="text-center py-10 text-muted-foreground">
-                 <p>Journal queue is empty.</p>
-                 <p className="text-xs mt-1">Add trades from Scout or Rebalance to track them.</p>
-               </div>
+               <TabEmptyState
+                 icon={BookOpen}
+                 title="Journal is empty"
+                 description="Track your trades here. Add suggestions from Scout or Rebalance."
+                 actionLabel="Go to Scout"
+                 onAction={() => handleTabChange('scout')}
+               />
             ) : (
                journalQueue.map((item, idx) => renderCard(item, idx))
             )}

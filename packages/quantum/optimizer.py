@@ -36,6 +36,8 @@ from packages.quantum.services.analytics_service import AnalyticsService
 from packages.quantum.services.execution_service import ExecutionService
 from packages.quantum.services.risk_engine import RiskEngine
 from packages.quantum.services.risk_budget_engine import RiskBudgetEngine
+from packages.quantum.discrete.models import DiscreteSolveRequest, DiscreteSolveResponse
+from packages.quantum.discrete.solvers.hybrid import HybridDiscreteSolver
 
 # V3 Imports
 from packages.quantum.analytics.risk_model import SpreadRiskModel
@@ -643,3 +645,25 @@ async def run_phase1_test():
 @router.post("/diagnostics/phase2/qci_uplink")
 async def verify_qci_uplink():
     return {"status": "ok", "message": "Phase 2 test not modified"}
+
+
+@router.post("/optimize/discrete", response_model=DiscreteSolveResponse)
+async def optimize_discrete(
+    request: DiscreteSolveRequest,
+    user_id: str = Depends(get_current_user_id)
+):
+    """
+    Solves the discrete optimization problem using the Hybrid Discrete Solver.
+    Uses classical fallback or QCI Dirac based on configuration.
+    """
+    try:
+        # Delegate directly to the solver class
+        response = HybridDiscreteSolver.solve(request)
+        return response
+    except Exception as e:
+        print(f"Discrete optimization failed: {e}")
+        # Return a safe error response or raise HTTP exception depending on preference
+        # The requirements say "response.status should be 'ok' even when classical fallback used",
+        # but for an exception we might want to return 500 or 422.
+        # Given "Simplicity", let's raise HTTPException if it crashes.
+        raise HTTPException(status_code=500, detail=f"Discrete optimization failed: {str(e)}")

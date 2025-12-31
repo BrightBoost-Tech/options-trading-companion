@@ -1,0 +1,116 @@
+[
+  {
+    "input": {},
+    "name": "no_earnings",
+    "output": {
+      "metadata": {},
+      "reasons": [
+        "No earnings data found"
+      ],
+      "score": 50.0,
+      "veto": false
+    }
+  },
+  {
+    "input": {
+      "earnings_date": "2025-01-02"
+    },
+    "name": "earnings_tomorrow",
+    "output": {
+      "metadata": {
+        "constraints": {
+          "event.avoid_new_positions": false,
+          "event.days_to_event": 1,
+          "event.is_event_window": true,
+          "event.max_dte": null,
+          "event.require_defined_risk": false
+        }
+      },
+      "reasons": [
+        "Earnings imminent in 1 days"
+      ],
+      "score": 0.0,
+      "veto": true
+    }
+  },
+  {
+    "input": {
+      "earnings_date": "2025-01-06"
+    },
+    "name": "earnings_in_5_days",
+    "output": {
+      "metadata": {
+        "constraints": {
+          "event.avoid_new_positions": false,
+          "event.days_to_event": 5,
+          "event.is_event_window": true,
+          "event.max_dte": null,
+          "event.require_defined_risk": true
+        }
+      },
+      "reasons": [
+        "Earnings approaching in 5 days"
+      ],
+      "score": 40.0,
+      "veto": false
+    }
+  },
+  {
+    "input": {
+      "earnings_date": "2025-01-21"
+    },
+    "name": "earnings_far",
+    "output": {
+      "metadata": {
+        "constraints": {
+          "event.avoid_new_positions": false,
+          "event.days_to_event": 20,
+          "event.is_event_window": false,
+          "event.max_dte": null,
+          "event.require_defined_risk": false
+        }
+      },
+      "reasons": [
+        "Earnings far out"
+      ],
+      "score": 90.0,
+      "veto": false
+    }
+  },
+  {
+    "input": {
+      "earnings_date": "2024-12-31"
+    },
+    "name": "earnings_passed",
+    "output": {
+      "metadata": {
+        "constraints": {
+          "event.avoid_new_positions": false,
+          "event.days_to_event": -1,
+          "event.is_event_window": false,
+          "event.max_dte": null,
+          "event.require_defined_risk": false
+        }
+      },
+      "reasons": [
+        "Event passed"
+      ],
+      "score": 80.0,
+      "veto": false
+    }
+  },
+  {
+    "input": {
+      "earnings_date": "not-a-date"
+    },
+    "name": "invalid_date",
+    "output": {
+      "metadata": {},
+      "reasons": [
+        "Invalid earnings date format"
+      ],
+      "score": 50.0,
+      "veto": false
+    }
+  }
+]

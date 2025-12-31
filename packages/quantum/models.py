@@ -2,6 +2,20 @@ from pydantic import BaseModel, Field
 from typing import Optional, List, Dict, Any, Literal
 from datetime import datetime, timezone
 from uuid import UUID
+from enum import Enum
+
+class UpgradeCapability(str, Enum):
+    AGENT_SIZING = "AGENT_SIZING"
+    COUNTERFACTUAL_ANALYSIS = "COUNTERFACTUAL_ANALYSIS"
+    ADVANCED_EVENT_GUARDRAILS = "ADVANCED_EVENT_GUARDRAILS"
+
+class CapabilityState(BaseModel):
+    capability: UpgradeCapability
+    is_active: bool
+    reason: Optional[str] = None # e.g. "Account > $25k", "Data available"
+
+class UserCapabilitiesResponse(BaseModel):
+    capabilities: List[CapabilityState]
 
 class OptionLeg(BaseModel):
     symbol: str

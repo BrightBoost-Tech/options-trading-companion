@@ -1,106 +1,174 @@
 import pytest
 import os
-from unittest.mock import patch
-from quantum.discrete.solvers.hybrid import HybridDiscreteSolver
-from quantum.discrete.models import (
-    DiscreteSolveRequest,
-    DiscreteConstraints,
-    DiscreteParameters,
-    CandidateTrade
+import sys
+from unittest.mock import patch, MagicMock
+from packages.quantum.discrete.models import (
+    DiscreteSolveRequest, DiscreteSolveResponse, CandidateTrade,
+    DiscreteConstraints, DiscreteParameters, DiscreteSolveMetrics
 )
+from packages.quantum.discrete.solvers import hybrid
 
 @pytest.fixture
-def base_request():
-    candidates = [
-        CandidateTrade(
-            id="t1", symbol="AAPL", side="buy", qty_max=1,
-            ev_per_unit=10, premium_per_unit=5,
-            delta=0.5, gamma=0.01, vega=0.1, tail_risk_contribution=0.2
-        )
-    ]
-    constraints = DiscreteConstraints(
-        max_cash=1000, max_vega=10, max_delta_abs=5, max_gamma=1
+def basic_request():
+    c1 = CandidateTrade(
+        id="c1", symbol="AAPL", side="buy",
+        qty_max=10, premium_per_unit=1.0, ev_per_unit=2.0,
+        delta=0.5, gamma=0.01, vega=0.1,
+        tail_risk_contribution=0.0
     )
-    parameters = DiscreteParameters(
-        lambda_tail=1, lambda_cash=1, lambda_vega=1, lambda_delta=1, lambda_gamma=1,
-        mode="hybrid",
-        max_candidates_for_dirac=10
+    c2 = CandidateTrade(
+        id="c2", symbol="GOOG", side="buy",
+        qty_max=5, premium_per_unit=2.0, ev_per_unit=5.0,
+        delta=0.2, gamma=0.02, vega=0.2,
+        tail_risk_contribution=0.1
     )
     return DiscreteSolveRequest(
-        candidates=candidates,
-        constraints=constraints,
-        parameters=parameters
+        candidates=[c1, c2],
+        constraints=DiscreteConstraints(
+            max_cash=100.0,
+            max_vega=1.0,
+            max_delta_abs=10.0,
+            max_gamma=1.0
+        ),
+        parameters=DiscreteParameters(
+            mode="hybrid",
+            lambda_tail=1.0,
+            lambda_cash=1.0,
+            lambda_vega=1.0,
+            lambda_delta=1.0,
+            lambda_gamma=1.0
+        )
     )
 
-class TestHybridDiscreteSolver:
+@pytest.fixture
+def mock_qci_available():
+    """Forces QCI_AVAILABLE=True and injects a Mock solver class."""
+    original_avail = hybrid.QCI_AVAILABLE
+    original_solver = getattr(hybrid, 'QciDiracDiscreteSolver', None)
 
-    def test_classical_only_returns_classical(self, base_request):
-        solver = HybridDiscreteSolver()
-        base_request.parameters.mode = 'classical_only'
+    hybrid.QCI_AVAILABLE = True
+    mock_solver_cls = MagicMock()
+    hybrid.QciDiracDiscreteSolver = mock_solver_cls
 
-        with patch.dict(os.environ, {"QCI_API_TOKEN": "valid_token"}):
-            resp = solver.solve(base_request)
+    yield mock_solver_cls
 
+    # Restore
+    hybrid.QCI_AVAILABLE = original_avail
+    if original_solver:
+        hybrid.QciDiracDiscreteSolver = original_solver
+    else:
+        # If it wasn't there originally, remove it
+        if hasattr(hybrid, 'QciDiracDiscreteSolver'):
+             del hybrid.QciDiracDiscreteSolver
+
+def test_hybrid_classical_fallback_no_token(basic_request):
+    """Hybrid mode without token should return classical ok response."""
+    with patch.dict(os.environ, {}, clear=True):
+        resp = hybrid.HybridDiscreteSolver.solve(basic_request)
+        assert resp.status == "ok"
         assert resp.strategy_used == "classical"
-        assert resp.status == "success"
+        assert "fallback_reason" in resp.diagnostics
+        assert len(resp.selected_trades) > 0
 
-    def test_hybrid_without_token_falls_back(self, base_request):
-        solver = HybridDiscreteSolver()
-        base_request.parameters.mode = 'hybrid'
+def test_classical_only_always_classical(basic_request, mock_qci_available):
+    """Classical only mode should never try quantum even if token exists."""
+    basic_request.parameters.mode = "classical_only"
 
-        # Ensure token is missing
-        with patch.dict(os.environ, {}, clear=True):
-            resp = solver.solve(base_request)
-
+    with patch.dict(os.environ, {"QCI_API_TOKEN": "fake"}, clear=True):
+        resp = hybrid.HybridDiscreteSolver.solve(basic_request)
+        assert resp.status == "ok"
         assert resp.strategy_used == "classical"
-        assert resp.diagnostics['fallback_reason'] == "missing_qci_token"
+        mock_qci_available.assert_not_called()
 
-    def test_hybrid_too_many_candidates_falls_back(self, base_request):
-        solver = HybridDiscreteSolver()
-        base_request.parameters.mode = 'hybrid'
-        base_request.parameters.max_candidates_for_dirac = 0 # Force limit
+def test_quantum_only_success(basic_request, mock_qci_available):
+    """Quantum only with token and success response."""
+    basic_request.parameters.mode = "quantum_only"
 
-        with patch.dict(os.environ, {"QCI_API_TOKEN": "valid_token"}):
-            resp = solver.solve(base_request)
+    # Setup mock return
+    mock_instance = mock_qci_available.return_value
+    mock_instance.solve.return_value = DiscreteSolveResponse(
+        status="ok",
+        strategy_used="dirac3",
+        selected_trades=[],
+        metrics=DiscreteSolveMetrics(
+            expected_profit=0.0, total_premium=0.0, tail_risk_value=0.0,
+            delta=0.0, gamma=0.0, vega=0.0, objective_value=0.0, runtime_ms=0.0
+        ),
+        diagnostics={}
+    )
 
-        assert resp.strategy_used == "classical"
-        assert "too_many_candidates" in resp.diagnostics['fallback_reason']
+    with patch.dict(os.environ, {"QCI_API_TOKEN": "fake"}, clear=True):
+        resp = hybrid.HybridDiscreteSolver.solve(basic_request)
+        assert resp.status == "ok"
+        assert resp.strategy_used == "dirac3"
 
-    def test_hybrid_trial_mode_falls_back(self, base_request):
-        solver = HybridDiscreteSolver()
-        base_request.parameters.mode = 'hybrid'
-        base_request.parameters.trial_mode = True
+def test_quantum_only_missing_token(basic_request, mock_qci_available):
+    """Quantum only without token should error."""
+    basic_request.parameters.mode = "quantum_only"
 
-        with patch.dict(os.environ, {"QCI_API_TOKEN": "valid_token"}):
-            resp = solver.solve(base_request)
-
-        assert resp.strategy_used == "classical"
-        assert resp.diagnostics['fallback_reason'] == "trial_mode_active"
-
-    def test_quantum_only_without_token_errors(self, base_request):
-        solver = HybridDiscreteSolver()
-        base_request.parameters.mode = 'quantum_only'
-
-        with patch.dict(os.environ, {}, clear=True):
-            resp = solver.solve(base_request)
-
+    # Even if QCI available locally, missing token prevents usage
+    with patch.dict(os.environ, {}, clear=True):
+        resp = hybrid.HybridDiscreteSolver.solve(basic_request)
         assert resp.status == "error"
-        assert "missing QCI_API_TOKEN" in resp.diagnostics.get("error", "")
+        assert "unavailable" in resp.diagnostics.get("reason", "")
 
-    def test_quantum_only_with_token_attempts_dirac(self, base_request):
-        solver = HybridDiscreteSolver()
-        base_request.parameters.mode = 'quantum_only'
+def test_quantum_only_solver_error(basic_request, mock_qci_available):
+    """Quantum only should return error if solver fails/skips."""
+    basic_request.parameters.mode = "quantum_only"
 
-        with patch.dict(os.environ, {"QCI_API_TOKEN": "valid_token"}):
-            # Expect NotImplementedError as stub raises it
-            with pytest.raises(NotImplementedError):
-                solver.solve(base_request)
+    mock_instance = mock_qci_available.return_value
+    mock_instance.solve.return_value = DiscreteSolveResponse(
+        status="error",
+        strategy_used="dirac3",
+        selected_trades=[],
+        metrics=DiscreteSolveMetrics(
+            expected_profit=0.0, total_premium=0.0, tail_risk_value=0.0,
+            delta=0.0, gamma=0.0, vega=0.0, objective_value=0.0, runtime_ms=0.0
+        ),
+        diagnostics={"reason": "Too many candidates"}
+    )
 
-    def test_hybrid_attempts_dirac_if_valid(self, base_request):
-        solver = HybridDiscreteSolver()
-        base_request.parameters.mode = 'hybrid'
-        base_request.parameters.trial_mode = False
+    with patch.dict(os.environ, {"QCI_API_TOKEN": "fake"}, clear=True):
+        resp = hybrid.HybridDiscreteSolver.solve(basic_request)
+        assert resp.status == "error"
+        assert resp.diagnostics["reason"] == "Too many candidates"
 
-        with patch.dict(os.environ, {"QCI_API_TOKEN": "valid_token"}):
-             with pytest.raises(NotImplementedError):
-                solver.solve(base_request)
+def test_hybrid_fallback_on_solver_error(basic_request, mock_qci_available):
+    """Hybrid should fallback if solver returns error."""
+    basic_request.parameters.mode = "hybrid"
+
+    mock_instance = mock_qci_available.return_value
+    mock_instance.solve.return_value = DiscreteSolveResponse(
+        status="error",
+        strategy_used="dirac3",
+        selected_trades=[],
+        metrics=DiscreteSolveMetrics(
+            expected_profit=0.0, total_premium=0.0, tail_risk_value=0.0,
+            delta=0.0, gamma=0.0, vega=0.0, objective_value=0.0, runtime_ms=0.0
+        ),
+        diagnostics={"reason": "Too many candidates"}
+    )
+
+    with patch.dict(os.environ, {"QCI_API_TOKEN": "fake"}, clear=True):
+        resp = hybrid.HybridDiscreteSolver.solve(basic_request)
+        assert resp.status == "ok"
+        assert resp.strategy_used == "classical"
+        assert "fallback_reason" in resp.diagnostics
+
+def test_empty_candidates(basic_request):
+    """Empty candidates should return ok with empty selected_trades."""
+    basic_request.candidates = []
+
+    resp = hybrid.HybridDiscreteSolver.solve(basic_request)
+    assert resp.status == "ok"
+    assert len(resp.selected_trades) == 0
+
+def test_qty_max_zero(basic_request):
+    """Candidates with qty_max=0 should never be selected."""
+    c = basic_request.candidates[0]
+    c.qty_max = 0
+    basic_request.candidates = [c]
+
+    resp = hybrid.HybridDiscreteSolver.solve(basic_request)
+    assert resp.status == "ok"
+    assert len(resp.selected_trades) == 0

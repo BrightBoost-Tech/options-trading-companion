@@ -1,0 +1,177 @@
+[
+  {
+    "input": {
+      "legs": [
+        {
+          "ask": 10.1,
+          "bid": 10.0,
+          "mid": 10.05
+        },
+        {
+          "ask": 5.05,
+          "bid": 5.0,
+          "mid": 5.025
+        }
+      ]
+    },
+    "name": "basic_pass",
+    "output": {
+      "metadata": {
+        "constraints": {
+          "liquidity.max_spread_pct": 0.12,
+          "liquidity.observed_spread_pct": 0.009950248756218869,
+          "liquidity.quote_quality": 1.0,
+          "liquidity.require_limit_orders": true
+        },
+        "liquidity.max_spread_pct": 0.12,
+        "liquidity.mode": "median",
+        "liquidity.observed_spread_pct": 0.009950248756218869,
+        "liquidity.quote_quality": 1.0,
+        "liquidity.require_limit_orders": true
+      },
+      "reasons": [],
+      "score": 95.9,
+      "veto": false
+    }
+  },
+  {
+    "input": {
+      "legs": [
+        {
+          "ask": 12.0,
+          "bid": 10.0,
+          "mid": 11.0
+        }
+      ]
+    },
+    "name": "wide_spread_veto",
+    "output": {
+      "metadata": {
+        "constraints": {
+          "liquidity.max_spread_pct": 0.12,
+          "liquidity.observed_spread_pct": 0.18181818181818182,
+          "liquidity.quote_quality": 1.0,
+          "liquidity.require_limit_orders": true
+        },
+        "liquidity.max_spread_pct": 0.12,
+        "liquidity.mode": "median",
+        "liquidity.observed_spread_pct": 0.18181818181818182,
+        "liquidity.quote_quality": 1.0,
+        "liquidity.require_limit_orders": true
+      },
+      "reasons": [
+        "Spread 18.2% exceeds limit 12.0%"
+      ],
+      "score": 0.0,
+      "veto": true
+    }
+  },
+  {
+    "input": {
+      "legs": [
+        {
+          "ask": 10.1,
+          "bid": 10.0,
+          "mid": 10.05
+        },
+        {
+          "ask": null,
+          "bid": null,
+          "mid": null
+        }
+      ]
+    },
+    "name": "missing_quotes",
+    "output": {
+      "metadata": {
+        "constraints": {
+          "liquidity.max_spread_pct": 0.12,
+          "liquidity.observed_spread_pct": 0.009950248756218869,
+          "liquidity.quote_quality": 0.5,
+          "liquidity.require_limit_orders": true
+        },
+        "liquidity.max_spread_pct": 0.12,
+        "liquidity.mode": "median",
+        "liquidity.observed_spread_pct": 0.009950248756218869,
+        "liquidity.quote_quality": 0.5,
+        "liquidity.require_limit_orders": true
+      },
+      "reasons": [
+        "Missing/Invalid quotes for 1 legs"
+      ],
+      "score": 85.9,
+      "veto": false
+    }
+  },
+  {
+    "input": {
+      "legs": [
+        {
+          "ask": 10.0,
+          "bid": 10.1,
+          "mid": 10.05
+        }
+      ]
+    },
+    "name": "crossed_market",
+    "output": {
+      "metadata": {
+        "constraints": {
+          "liquidity.max_spread_pct": 0.12,
+          "liquidity.observed_spread_pct": null,
+          "liquidity.quote_quality": 0.0,
+          "liquidity.require_limit_orders": true
+        },
+        "liquidity.max_spread_pct": 0.12,
+        "liquidity.mode": "median",
+        "liquidity.observed_spread_pct": null,
+        "liquidity.quote_quality": 0.0,
+        "liquidity.require_limit_orders": true
+      },
+      "reasons": [
+        "No valid quotes available to calculate spread",
+        "Missing/Invalid quotes for 1 legs",
+        "Too many missing/invalid quotes (>50%)"
+      ],
+      "score": 10.0,
+      "veto": true
+    }
+  },
+  {
+    "input": {
+      "legs": [
+        {
+          "ask": 10.01,
+          "bid": 10.0,
+          "mid": 10.005
+        },
+        {
+          "ask": 1.2,
+          "bid": 1.0,
+          "mid": 1.1
+        }
+      ]
+    },
+    "name": "worst_case_mode",
+    "output": {
+      "metadata": {
+        "constraints": {
+          "liquidity.max_spread_pct": 0.12,
+          "liquidity.observed_spread_pct": 0.18181818181818177,
+          "liquidity.quote_quality": 1.0,
+          "liquidity.require_limit_orders": true
+        },
+        "liquidity.max_spread_pct": 0.12,
+        "liquidity.mode": "worst",
+        "liquidity.observed_spread_pct": 0.18181818181818177,
+        "liquidity.quote_quality": 1.0,
+        "liquidity.require_limit_orders": true
+      },
+      "reasons": [
+        "Spread 18.2% exceeds limit 12.0%"
+      ],
+      "score": 0.0,
+      "veto": true
+    }
+  }
+]

@@ -1,0 +1,152 @@
+[
+  {
+    "input": {
+      "banned_strategies": [],
+      "effective_regime": "BULLISH",
+      "iv_rank": 30,
+      "legacy_strategy": "LONG CALL"
+    },
+    "name": "normal_pass",
+    "output": {
+      "metadata": {
+        "constraints": {
+          "strategy.banned": [],
+          "strategy.override_selector": false,
+          "strategy.recommended": "long_call",
+          "strategy.require_defined_risk": true
+        }
+      },
+      "reasons": [],
+      "score": 80.0,
+      "veto": false
+    }
+  },
+  {
+    "input": {
+      "banned_strategies": [],
+      "effective_regime": "SHOCK",
+      "iv_rank": 30,
+      "legacy_strategy": "LONG CALL"
+    },
+    "name": "shock_override",
+    "output": {
+      "metadata": {
+        "constraints": {
+          "strategy.banned": [],
+          "strategy.override_selector": true,
+          "strategy.recommended": "cash",
+          "strategy.require_defined_risk": true
+        }
+      },
+      "reasons": [
+        "Regime is SHOCK: Overriding long_call to cash"
+      ],
+      "score": 100.0,
+      "veto": false
+    }
+  },
+  {
+    "input": {
+      "banned_strategies": [],
+      "effective_regime": "CHOP",
+      "iv_rank": 30,
+      "legacy_strategy": "LONG CALL"
+    },
+    "name": "chop_override_condor",
+    "output": {
+      "metadata": {
+        "constraints": {
+          "strategy.banned": [],
+          "strategy.override_selector": true,
+          "strategy.recommended": "iron_condor",
+          "strategy.require_defined_risk": true
+        }
+      },
+      "reasons": [
+        "Regime is CHOP: Overriding Long Premium to iron_condor"
+      ],
+      "score": 80.0,
+      "veto": false
+    }
+  },
+  {
+    "input": {
+      "banned_strategies": [
+        "iron_condor"
+      ],
+      "effective_regime": "CHOP",
+      "iv_rank": 30,
+      "legacy_strategy": "LONG CALL"
+    },
+    "name": "chop_override_banned_condor",
+    "output": {
+      "metadata": {
+        "constraints": {
+          "strategy.banned": [
+            "iron_condor"
+          ],
+          "strategy.override_selector": true,
+          "strategy.recommended": "cash",
+          "strategy.require_defined_risk": true
+        }
+      },
+      "reasons": [
+        "Regime is CHOP & iron_condor Banned: Overriding to cash"
+      ],
+      "score": 80.0,
+      "veto": false
+    }
+  },
+  {
+    "input": {
+      "banned_strategies": [],
+      "effective_regime": "BULLISH",
+      "iv_rank": 80,
+      "legacy_strategy": "LONG CALL"
+    },
+    "name": "high_iv_override",
+    "output": {
+      "metadata": {
+        "constraints": {
+          "strategy.banned": [],
+          "strategy.override_selector": true,
+          "strategy.recommended": "credit_put_spread",
+          "strategy.require_defined_risk": true
+        }
+      },
+      "reasons": [
+        "High IV (80.0): Overriding Long Premium to credit_put_spread"
+      ],
+      "score": 80.0,
+      "veto": false
+    }
+  },
+  {
+    "input": {
+      "banned_strategies": [
+        "credit_put_spread"
+      ],
+      "effective_regime": "BULLISH",
+      "iv_rank": 30,
+      "legacy_strategy": "CREDIT PUT SPREAD"
+    },
+    "name": "policy_ban_fallback",
+    "output": {
+      "metadata": {
+        "constraints": {
+          "strategy.banned": [
+            "credit_put_spread"
+          ],
+          "strategy.override_selector": true,
+          "strategy.recommended": "debit_call_spread",
+          "strategy.require_defined_risk": true
+        }
+      },
+      "reasons": [
+        "Strategy credit_put_spread is Banned. Fallback to debit_call_spread."
+      ],
+      "score": 80.0,
+      "veto": false
+    }
+  }
+]

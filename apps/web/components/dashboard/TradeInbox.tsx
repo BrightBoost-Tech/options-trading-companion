@@ -11,6 +11,9 @@ import { useToast } from '@/components/ui/use-toast';
 import { QuantumTooltip } from '@/components/ui/QuantumTooltip';
 import { useInboxActions } from '@/hooks/useInboxActions';
 
+// --- Helpers ---
+const displaySymbol = (s: Suggestion | { symbol?: string, ticker?: string }) => s.symbol ?? s.ticker ?? "Symbol";
+
 // --- Sub-components ---
 
 const InboxMetaBar = ({ meta, isLoading }: { meta?: InboxMeta, isLoading: boolean }) => {
@@ -185,7 +188,7 @@ export default function TradeInbox() {
                             suggestion={{...hero, staged: hero.staged || stagedIds.has(hero.id)}}
                             onStage={(s) => stageItems([s.id])}
                             onDismiss={(s, r) => dismissItem(s.id, r)}
-                            onRefreshQuote={(s) => refreshQuote(s.id)}
+                            onRefreshQuote={(s) => refreshQuote(s.id, displaySymbol(s))}
                             isStale={isStale(hero)}
                             isStaging={stagingIds.has(hero.id)}
                         />
@@ -221,7 +224,7 @@ export default function TradeInbox() {
                                      suggestion={{...item, staged: item.staged || stagedIds.has(item.id)}}
                                      onStage={(s) => stageItems([s.id])}
                                      onDismiss={(s, r) => dismissItem(s.id, r)}
-                                     onRefreshQuote={(s) => refreshQuote(s.id)}
+                                     onRefreshQuote={(s) => refreshQuote(s.id, displaySymbol(s))}
                                      isStale={isStale(item)}
                                      isStaging={stagingIds.has(item.id)}
                                  />
@@ -229,7 +232,7 @@ export default function TradeInbox() {
                         </div>
                     ) : (
                          <div className="text-xs text-muted-foreground pl-4 mt-1">
-                             {visibleQueue.map(q => q.symbol).join(', ')}
+                             {visibleQueue.map(q => displaySymbol(q)).join(', ')}
                          </div>
                     )}
                 </div>

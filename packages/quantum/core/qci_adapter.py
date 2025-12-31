@@ -127,3 +127,68 @@ class QciDiracAdapter:
             if e.response.status_code in [402, 403]:
                 raise ConnectionRefusedError("Trial Expired or Payment Required")
             raise e
+
+    def solve_polynomial_custom(self, polynomial: list, job_params: dict, job_tags: list = None):
+        """
+        Generic entry point for discrete solvers.
+        """
+        try:
+            print(f"📡 Uploading {len(polynomial)} terms to QCI (Custom)...")
+            file_resp = self.client.upload_file(
+                file={"polynomial": polynomial},
+                file_type="polynomial_json"
+            )
+
+            job_config = {
+                "device_type": "dirac-3",
+                "num_samples": job_params.get("num_samples", 5),
+                "constraints": {
+                    "var_min": job_params.get("var_min", 0),
+                    "var_max": job_params.get("var_max", 1)
+                }
+            }
+
+            # Add relaxation schedule if provided (generic param passthrough)
+            if "relaxation_schedule" in job_params:
+                job_config["relaxation_schedule"] = job_params["relaxation_schedule"]
+
+            # Add objective_weight if provided
+            if "objective_weight" in job_params:
+                job_config["objective_weight"] = job_params["objective_weight"]
+
+            job_body = self.client.build_job_body(
+                job_type=job_params.get("job_type", "sample-hamiltonian-integer"),
+                job_params=job_config,
+                polynomial_file_id=file_resp["file_id"],
+                job_tags=job_tags or []
+            )
+
+            job_resp = self.client.submit_job(job_body)
+            job_id = job_resp['job_id']
+
+            timeout = job_params.get("timeout", 60)
+
+            # Polling
+            start_time = time.time()
+            while True:
+                if time.time() - start_time > timeout:
+                    raise TimeoutError(f"QCI Job timed out after {timeout}s")
+
+                time.sleep(1) # Faster polling for interactive usage
+                job_info = self.client.get_job_status(job_id)
+                status = job_info['status']
+
+                if status == "COMPLETED":
+                    break
+                if status == "ERROR":
+                    err_msg = job_info.get('error', '')
+                    if "quota" in err_msg.lower() or "limit" in err_msg.lower():
+                        raise ConnectionRefusedError(f"Trial Quota Exceeded: {err_msg}")
+                    raise Exception(f"QCI Job Failed: {err_msg}")
+
+            return self.client.get_job_results(job_id)
+
+        except requests.exceptions.HTTPError as e:
+            if e.response.status_code in [402, 403]:
+                raise ConnectionRefusedError("Trial Expired or Payment Required")
+            raise e

@@ -634,7 +634,9 @@ async def optimize_portfolio(req: OptimizationRequest, request: Request, user_id
     except Exception as e:
         print(f"Optimizer Error: {e}")
         import traceback
-        traceback.print_exc()
+        # 🛡️ Sentinel: Suppress stack trace in production
+        if os.getenv("APP_ENV") != "production":
+            traceback.print_exc()
         # SECURITY: Do not leak exception details
         raise HTTPException(status_code=500, detail="Optimization failed")
 

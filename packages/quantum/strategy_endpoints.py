@@ -235,7 +235,8 @@ def list_strategies(
         return {"strategies": []}
     except Exception as e:
         print(f"Error listing strategies: {e}")
-        traceback.print_exc()
+        if os.getenv("APP_ENV") != "production":
+            traceback.print_exc()
         raise HTTPException(status_code=500, detail="Internal Server Error")
 
 @router.post("/strategies/{name}/backtest")

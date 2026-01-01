@@ -94,17 +94,13 @@ def __whoami():
 
 @app.get("/health")
 def health_check():
-    # Sanitize Supabase Status for public response
-    safe_supabase_status = {
-        "ok": SUPABASE_STATUS.get("ok"),
-        "key_type": SUPABASE_STATUS.get("key_type"),
-        "connected": SUPABASE_STATUS.get("ok")
-    }
+    # 🛡️ Sentinel: Minimal exposure for health check
+    is_connected = SUPABASE_STATUS.get("ok", False)
 
     return {
         "status": "ok",
         "app_env": os.getenv("APP_ENV"),
-        "supabase": safe_supabase_status,
+        "database_connected": is_connected,
         "env_loaded": os.path.exists(env_path)
     }
 
@@ -168,8 +164,11 @@ async def dev_run_midday(
         await run_midday_cycle(supabase, user_id)
     except Exception as e:
         print(f"❌ DEV Midday Cycle Failed: {e}")
-        traceback.print_exc()
-        raise HTTPException(status_code=500, detail=f"Cycle failed: {str(e)}")
+        if app_env != "production":
+            traceback.print_exc()
+        # 🛡️ Sentinel: Mask error details in non-dev environment even if we shouldn't be here
+        detail = f"Cycle failed: {str(e)}" if app_env in ["development", "test"] else "Cycle failed"
+        raise HTTPException(status_code=500, detail=detail)
 
     return {"status": "ok", "note": "midday cycle executed inline"}
 
@@ -215,8 +214,12 @@ async def dev_run_all(
 
     except Exception as e:
         print(f"❌ DEV Run-All Failed: {e}")
-        traceback.print_exc()
-        raise HTTPException(status_code=500, detail=f"Cycle failed: {str(e)}")
+        app_env = os.getenv("APP_ENV", "production")
+        if app_env != "production":
+            traceback.print_exc()
+        # 🛡️ Sentinel: Mask error details in production
+        detail = f"Cycle failed: {str(e)}" if app_env in ["development", "test"] else "Cycle failed"
+        raise HTTPException(status_code=500, detail=detail)
 
     return {"status": "ok", "message": "All workflows executed inline"}
 

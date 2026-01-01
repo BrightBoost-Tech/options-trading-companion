@@ -5,6 +5,7 @@ import DashboardLayout from '@/components/DashboardLayout';
 import DashboardOnboarding from '@/components/dashboard/DashboardOnboarding';
 import { CapabilityPanel } from '@/components/dashboard/CapabilityPanel';
 import { SystemEvolutionPanel } from '@/components/dashboard/SystemEvolutionPanel';
+import { SystemHealthPanel } from '@/components/dashboard/SystemHealthPanel';
 import SyncHoldingsButton from '@/components/SyncHoldingsButton';
 import PortfolioOptimizer from '@/components/dashboard/PortfolioOptimizer';
 import { WeeklyProgressCard } from '@/components/dashboard/WeeklyProgressCard';
@@ -277,8 +278,17 @@ export default function DashboardPage() {
         />
 
         {/* SECTION -1: SYSTEM UPGRADES */}
-        <CapabilityPanel />
-        <SystemEvolutionPanel />
+        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+          <div className="md:col-span-2">
+             <CapabilityPanel />
+             <div className="mt-6">
+                <SystemEvolutionPanel />
+             </div>
+          </div>
+          <div>
+             <SystemHealthPanel />
+          </div>
+        </div>
         
         {/* SECTION 0: WEEKLY SCOUT / PROGRESS */}
         <div>

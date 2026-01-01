@@ -1,13 +1,15 @@
 import os
 import time
 from typing import Optional, Dict, Any, List
-from ..models import (
+from packages.quantum.discrete.models import (
     DiscreteSolveRequest,
     DiscreteSolveResponse,
     DiscreteSolveMetrics,
     SelectedTrade,
     CandidateTrade
 )
+from packages.quantum.discrete.solvers.classical import ClassicalDiscreteSolver
+from packages.quantum.discrete.solvers.qci_dirac import QciDiracDiscreteSolver
 
 class HybridDiscreteSolver:
     """
@@ -15,12 +17,16 @@ class HybridDiscreteSolver:
     based on availability, request parameters, and constraints.
     """
 
+    def __init__(self):
+        self.classical_solver = ClassicalDiscreteSolver()
+        self.dirac_solver = QciDiracDiscreteSolver()
+
     def solve(self, req: DiscreteSolveRequest) -> DiscreteSolveResponse:
         mode = req.parameters.mode
         qci_token = os.environ.get("QCI_API_TOKEN")
         trial_mode = req.parameters.trial_mode
         candidate_count = len(req.candidates)
-        max_candidates = req.parameters.max_candidates_for_dirac
+        max_candidates = req.parameters.max_candidates_for_dirac or 100
 
         # Determine basic availability
         has_token = bool(qci_token)
@@ -34,10 +40,10 @@ class HybridDiscreteSolver:
             error_reason = None
             if not has_token:
                 error_reason = "missing QCI_API_TOKEN"
-            elif trial_mode is True:
-                error_reason = "trial_mode_active"
-            elif candidate_count > max_candidates:
-                error_reason = f"too_many_candidates ({candidate_count} > {max_candidates})"
+            # In new logic, trial_mode doesn't automatically mean fallback,
+            # but if trial_mode is active and we want to enforce skipping Dirac if budget exhausted:
+            # The dirac solver handles budget check and returns empty/skipped.
+            # If we enforce Quantum Only, we accept whatever Dirac gives (including empty due to budget).
 
             if error_reason:
                 return DiscreteSolveResponse(
@@ -47,64 +53,49 @@ class HybridDiscreteSolver:
                     metrics=self._empty_metrics(),
                     diagnostics={"error": f"Quantum solver unavailable ({error_reason})"}
                 )
-            # If available, attempt quantum
-            return self._solve_quantum(req)
+
+            try:
+                return self.dirac_solver.solve(req)
+            except Exception as e:
+                 return DiscreteSolveResponse(
+                    status="error",
+                    strategy_used="dirac3",
+                    selected_trades=[],
+                    metrics=self._empty_metrics(),
+                    diagnostics={"error": str(e)}
+                )
 
         # 3. Hybrid (Default)
-        if mode == 'hybrid':
-            fallback_reason = None
+        # Try Quantum, fallback to Classical if it fails OR if budget exhausted
 
-            if not has_token:
-                fallback_reason = "missing_qci_token"
-            elif trial_mode is True:
-                fallback_reason = "trial_mode_active"
-            elif candidate_count > max_candidates:
-                fallback_reason = f"too_many_candidates ({candidate_count} > {max_candidates})"
+        # Check basic eligibility for Quantum
+        if has_token and (candidate_count <= max_candidates):
+            try:
+                # Attempt Quantum solve
+                response = self.dirac_solver.solve(req)
 
-            if fallback_reason:
-                resp = self._solve_classical(req)
-                resp.diagnostics['fallback_reason'] = fallback_reason
-                return resp
+                # Check if it was skipped due to budget
+                if response.diagnostics.get("reason") == "dirac_trial_budget_exhausted":
+                     # Fallback to classical
+                     classical_resp = self._solve_classical(req)
+                     classical_resp.diagnostics["fallback_reason"] = "dirac_trial_budget_exhausted"
+                     classical_resp.diagnostics["trial_mode"] = True
+                     return classical_resp
 
-            # Attempt quantum if no fallback reason
-            return self._solve_quantum(req)
+                return response
 
-        # Should not reach here due to Pydantic validation of 'mode', but fallback to classical just in case
-        return self._solve_classical(req)
+            except Exception as e:
+                # Log error and fallback
+                # In a real app we'd log this.
+                pass
+
+        # Fallback to classical
+        resp = self._solve_classical(req)
+        resp.diagnostics["fallback_reason"] = "quantum_unavailable_or_failed"
+        return resp
 
     def _solve_classical(self, req: DiscreteSolveRequest) -> DiscreteSolveResponse:
-        """
-        Stub for classical solver. Returns empty selection with valid metrics.
-        """
-        start_time = time.perf_counter()
-
-        # Simulate some processing time
-        # In a real implementation, this would run a greedy or genetic algorithm
-
-        runtime_ms = (time.perf_counter() - start_time) * 1000
-
-        return DiscreteSolveResponse(
-            status="success",
-            strategy_used="classical",
-            selected_trades=[],
-            metrics=DiscreteSolveMetrics(
-                expected_profit=0.0,
-                total_premium=0.0,
-                tail_risk_value=0.0,
-                delta=0.0,
-                gamma=0.0,
-                vega=0.0,
-                objective_value=0.0,
-                runtime_ms=runtime_ms
-            ),
-            diagnostics={}
-        )
-
-    def _solve_quantum(self, req: DiscreteSolveRequest) -> DiscreteSolveResponse:
-        """
-        Stub for quantum solver (Dirac).
-        """
-        raise NotImplementedError("Dirac solver not implemented yet")
+        return self.classical_solver.solve(req)
 
     def _empty_metrics(self) -> DiscreteSolveMetrics:
         return DiscreteSolveMetrics(

@@ -1,0 +1,201 @@
+[
+  {
+    "name": "all_pass_consensus",
+    "signals": {
+      "agent1": {
+        "agent_id": "agent1",
+        "metadata": {
+          "constraints": {}
+        },
+        "reasons": [],
+        "score": 80.0,
+        "veto": false
+      },
+      "agent2": {
+        "agent_id": "agent2",
+        "metadata": {
+          "constraints": {}
+        },
+        "reasons": [],
+        "score": 90.0,
+        "veto": false
+      }
+    },
+    "summary": {
+      "active_constraints": {},
+      "agent_count": 2,
+      "decision": "pass",
+      "overall_score": 85.0,
+      "top_reasons": [],
+      "vetoed": false
+    }
+  },
+  {
+    "name": "single_veto_kills_deal",
+    "signals": {
+      "agent1": {
+        "agent_id": "agent1",
+        "metadata": {
+          "constraints": {}
+        },
+        "reasons": [],
+        "score": 90.0,
+        "veto": false
+      },
+      "agent2": {
+        "agent_id": "agent2",
+        "metadata": {
+          "constraints": {}
+        },
+        "reasons": [],
+        "score": 10.0,
+        "veto": true
+      }
+    },
+    "summary": {
+      "active_constraints": {},
+      "agent_count": 2,
+      "decision": "reject",
+      "overall_score": 90.0,
+      "top_reasons": [],
+      "vetoed": true
+    }
+  },
+  {
+    "name": "multi_veto",
+    "signals": {
+      "agent1": {
+        "agent_id": "agent1",
+        "metadata": {
+          "constraints": {}
+        },
+        "reasons": [],
+        "score": 10.0,
+        "veto": true
+      },
+      "agent2": {
+        "agent_id": "agent2",
+        "metadata": {
+          "constraints": {}
+        },
+        "reasons": [],
+        "score": 10.0,
+        "veto": true
+      }
+    },
+    "summary": {
+      "active_constraints": {},
+      "agent_count": 2,
+      "decision": "reject",
+      "overall_score": 0.0,
+      "top_reasons": [],
+      "vetoed": true
+    }
+  },
+  {
+    "name": "warning_low_score",
+    "signals": {
+      "agent1": {
+        "agent_id": "agent1",
+        "metadata": {
+          "constraints": {}
+        },
+        "reasons": [],
+        "score": 30.0,
+        "veto": false
+      },
+      "agent2": {
+        "agent_id": "agent2",
+        "metadata": {
+          "constraints": {}
+        },
+        "reasons": [],
+        "score": 40.0,
+        "veto": false
+      }
+    },
+    "summary": {
+      "active_constraints": {},
+      "agent_count": 2,
+      "decision": "warning",
+      "overall_score": 35.0,
+      "top_reasons": [],
+      "vetoed": false
+    }
+  },
+  {
+    "name": "constraint_precedence_last_wins",
+    "signals": {
+      "agent_early": {
+        "agent_id": "agent_early",
+        "metadata": {
+          "constraints": {
+            "max_risk": 0.05
+          }
+        },
+        "reasons": [],
+        "score": 50.0,
+        "veto": false
+      },
+      "agent_late": {
+        "agent_id": "agent_late",
+        "metadata": {
+          "constraints": {
+            "max_risk": 0.02
+          }
+        },
+        "reasons": [],
+        "score": 50.0,
+        "veto": false
+      }
+    },
+    "summary": {
+      "active_constraints": {
+        "max_risk": 0.02
+      },
+      "agent_count": 2,
+      "decision": "pass",
+      "overall_score": 50.0,
+      "top_reasons": [],
+      "vetoed": false
+    }
+  },
+  {
+    "name": "constraint_merging_disjoint",
+    "signals": {
+      "agent1": {
+        "agent_id": "agent1",
+        "metadata": {
+          "constraints": {
+            "param_a": 1
+          }
+        },
+        "reasons": [],
+        "score": 50.0,
+        "veto": false
+      },
+      "agent2": {
+        "agent_id": "agent2",
+        "metadata": {
+          "constraints": {
+            "param_b": 2
+          }
+        },
+        "reasons": [],
+        "score": 50.0,
+        "veto": false
+      }
+    },
+    "summary": {
+      "active_constraints": {
+        "param_a": 1,
+        "param_b": 2
+      },
+      "agent_count": 2,
+      "decision": "pass",
+      "overall_score": 50.0,
+      "top_reasons": [],
+      "vetoed": false
+    }
+  }
+]

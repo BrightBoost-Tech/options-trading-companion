@@ -6,23 +6,41 @@ class DecisionLineageBuilder:
     Ensures deterministic output for comparison across time.
     """
     def __init__(self):
-        self.agents_involved: List[str] = []
-        self.vetoed_agents: List[str] = []
+        self.agents_involved: List[Dict[str, Any]] = []
+        self.vetoed_agents: List[Dict[str, Any]] = []
         self.active_constraints: Dict[str, Any] = {}
         self.strategy_chosen: str = "unknown"
         self.sizing_source: str = "unknown"
         self.fallback_reason: Optional[str] = None
 
-    def add_agent(self, agent_name: str):
+    def add_agent(self, agent_name: str, score: Optional[float] = None, metadata: Optional[Dict[str, Any]] = None):
         """Records an agent that participated in the decision."""
-        if agent_name not in self.agents_involved:
-            self.agents_involved.append(agent_name)
+        # Check if already added to avoid duplicates, update if exists
+        existing = next((a for a in self.agents_involved if a["name"] == agent_name), None)
+        if existing:
+            if score is not None:
+                existing["score"] = score
+            if metadata is not None:
+                existing["metadata"] = metadata
+        else:
+            entry = {"name": agent_name}
+            if score is not None:
+                entry["score"] = score
+            if metadata is not None:
+                entry["metadata"] = metadata
+            self.agents_involved.append(entry)
 
-    def mark_veto(self, agent_name: str):
+    def mark_veto(self, agent_name: str, reason: Optional[str] = None):
         """Records an agent that vetoed the trade."""
+        # Ensure it's in involved list
         self.add_agent(agent_name)
-        if agent_name not in self.vetoed_agents:
-            self.vetoed_agents.append(agent_name)
+
+        existing = next((a for a in self.vetoed_agents if a["name"] == agent_name), None)
+        if not existing:
+            entry = {"name": agent_name}
+            if reason:
+                entry["reason"] = reason
+            self.vetoed_agents.append(entry)
 
     def set_strategy(self, strategy: str):
         """Sets the strategy chosen."""
@@ -45,12 +63,16 @@ class DecisionLineageBuilder:
         Builds the compact, deterministic lineage object.
         Returns a dictionary suitable for JSON serialization.
         """
+        # Sort agents by name
+        sorted_agents = sorted(self.agents_involved, key=lambda x: x["name"])
+        sorted_vetoes = sorted(self.vetoed_agents, key=lambda x: x["name"])
+
         # Sort constraints by key to ensure deterministic output
         sorted_constraints = dict(sorted(self.active_constraints.items()))
 
         return {
-            "agents_involved": sorted(self.agents_involved),
-            "vetoed_agents": sorted(self.vetoed_agents),
+            "agents_involved": sorted_agents,
+            "vetoed_agents": sorted_vetoes,
             "active_constraints": sorted_constraints,
             "strategy_chosen": self.strategy_chosen,
             "sizing_source": self.sizing_source,

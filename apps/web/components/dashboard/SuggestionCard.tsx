@@ -75,7 +75,12 @@ const SuggestionCard = ({
     // Payoff Diagram Helper (Simple V-shape or hockey stick)
     const renderPayoffDiagram = () => {
         return (
-            <svg viewBox="0 0 100 40" className="w-full h-full text-green-500 opacity-20">
+            <svg
+                viewBox="0 0 100 40"
+                className="w-full h-full text-green-500 opacity-20"
+                role="img"
+                aria-label="Payoff diagram preview"
+            >
                 <path d="M0,40 L40,40 L60,10 L100,10" fill="none" stroke="currentColor" strokeWidth="2" />
                 <line x1="0" y1="40" x2="100" y2="40" stroke="currentColor" className="text-muted-foreground/50" strokeWidth="1" strokeDasharray="2,2" />
             </svg>
@@ -153,6 +158,8 @@ const SuggestionCard = ({
                             checked={isSelected}
                             onChange={() => onToggleSelect(suggestion)}
                             className="w-4 h-4 rounded border-gray-300 text-purple-600 focus:ring-purple-500 cursor-pointer"
+                            aria-label={`Select ${displaySymbol}`}
+                            title={`Select ${displaySymbol}`}
                         />
                      </div>
                 )}
@@ -167,6 +174,7 @@ const SuggestionCard = ({
                                     checked={isSelected}
                                     onChange={() => onToggleSelect(suggestion)}
                                     className="w-4 h-4 rounded border-gray-300 text-purple-600 focus:ring-purple-500 cursor-pointer mr-2 md:hidden"
+                                    aria-label={`Select ${displaySymbol}`}
                                 />
                             )}
                             <span className="font-bold text-lg text-foreground">{displaySymbol}</span>
@@ -348,16 +356,32 @@ const SuggestionCard = ({
                     <div className="relative group">
                          {dismissOpen ? (
                              <div className="flex items-center gap-1 animate-in fade-in zoom-in duration-200">
-                                 <button onClick={() => handleDismiss('too_risky')} className="text-[10px] bg-red-100 text-red-700 hover:bg-red-200 px-2 py-1 rounded border border-red-200">
+                                 <button
+                                    onClick={() => handleDismiss('too_risky')}
+                                    className="text-[10px] bg-red-100 text-red-700 hover:bg-red-200 px-2 py-1 rounded border border-red-200"
+                                    aria-label="Dismiss as too risky"
+                                 >
                                      Risky
                                  </button>
-                                 <button onClick={() => handleDismiss('bad_price')} className="text-[10px] bg-yellow-100 text-yellow-700 hover:bg-yellow-200 px-2 py-1 rounded border border-yellow-200">
+                                 <button
+                                    onClick={() => handleDismiss('bad_price')}
+                                    className="text-[10px] bg-yellow-100 text-yellow-700 hover:bg-yellow-200 px-2 py-1 rounded border border-yellow-200"
+                                    aria-label="Dismiss due to bad price"
+                                 >
                                      Price
                                  </button>
-                                 <button onClick={() => handleDismiss('wrong_timing')} className="text-[10px] bg-slate-100 text-slate-700 hover:bg-slate-200 px-2 py-1 rounded border border-slate-200">
+                                 <button
+                                    onClick={() => handleDismiss('wrong_timing')}
+                                    className="text-[10px] bg-slate-100 text-slate-700 hover:bg-slate-200 px-2 py-1 rounded border border-slate-200"
+                                    aria-label="Dismiss due to wrong timing"
+                                 >
                                      Timing
                                  </button>
-                                 <button onClick={() => setDismissOpen(false)} className="ml-1 p-1 hover:bg-muted rounded text-muted-foreground">
+                                 <button
+                                    onClick={() => setDismissOpen(false)}
+                                    className="ml-1 p-1 hover:bg-muted rounded text-muted-foreground"
+                                    aria-label="Cancel dismiss"
+                                 >
                                      <X className="w-3 h-3" />
                                  </button>
                              </div>

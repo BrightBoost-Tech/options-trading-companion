@@ -1,3 +1,3 @@
-## 2024-05-23 - Improved Empty States
-**Learning:** Users often get stuck on "blank canvas" screens. Replacing a simple text message with a rich empty state (Icon + Heading + Action) significantly improves perceived quality and guidance.
-**Action:** Use the `Wallet` icon + `Button` pattern for other data tables (e.g., Strategies, Journals) when no data is present. Ensure actions (like Sync) are immediately available.
+## 2024-05-24 - Accessibility for Complex Cards
+**Learning:** Complex cards with multiple interactive elements (selection, dismissal, charts) often have "hidden" accessibility gaps. Icon-only buttons and selection checkboxes within lists are frequent offenders.
+**Action:** Audit all list-based cards for: 1) selection checkboxes (need dynamic labels), 2) icon-only actions (need `aria-label`), and 3) decorative vs. informative SVGs (need `role="img"`).

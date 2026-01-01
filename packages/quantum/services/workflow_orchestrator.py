@@ -728,7 +728,7 @@ async def run_midday_cycle(supabase: Client, user_id: str):
     for cand in candidates:
         # Initialize Lineage Builder for this candidate
         lineage = DecisionLineageBuilder()
-        lineage.add_agent("Scanner") # Scanner was used to find this candidate
+        lineage.add_agent("Scanner", score=cand.get("score")) # Scanner was used to find this candidate
 
         ticker = cand.get("ticker") or cand.get("symbol")
         strategy = cand.get("strategy") or cand.get("type") or "unknown"
@@ -783,7 +783,6 @@ async def run_midday_cycle(supabase: Client, user_id: str):
         if QUANT_AGENTS_ENABLED:
             try:
                 sizing_agent = SizingAgent()
-                lineage.add_agent("SizingAgent")
 
                 # V3: Prepare Agent Signals
                 # Use ONLY real agent signals from the scanner (no mocks)
@@ -816,6 +815,10 @@ async def run_midday_cycle(supabase: Client, user_id: str):
                 if constraints:
                     for k, v in constraints.items():
                         lineage.add_constraint(k, v)
+
+                # Add agent to lineage with score and metadata
+                sizing_score = sizing_agent_signal.score if hasattr(sizing_agent_signal, "score") else sizing_agent_signal.get("score", 50.0)
+                lineage.add_agent("SizingAgent", score=sizing_score, metadata={"constraints": constraints})
 
                 # Update candidate signals
                 if "agent_signals" not in cand:
@@ -877,7 +880,6 @@ async def run_midday_cycle(supabase: Client, user_id: str):
             # --- EXIT PLAN AGENT ---
             try:
                 exit_agent = ExitPlanAgent()
-                lineage.add_agent("ExitPlanAgent")
                 exit_ctx = {
                     "strategy_type": strategy
                 }
@@ -911,6 +913,9 @@ async def run_midday_cycle(supabase: Client, user_id: str):
                 if exit_constraints:
                     for k, v in exit_constraints.items():
                         lineage.add_constraint(k, v)
+
+                exit_score = exit_signal.score if hasattr(exit_signal, "score") else exit_signal.get("score", 50.0)
+                lineage.add_agent("ExitPlanAgent", score=exit_score, metadata={"constraints": exit_constraints})
 
                 print(f"[Midday] ExitPlanAgent applied: {exit_constraints}")
 
@@ -955,7 +960,9 @@ async def run_midday_cycle(supabase: Client, user_id: str):
         risk_budget_dollars = final_risk_dollars
 
         # Determine Sizing Source
-        if QUANT_AGENTS_ENABLED and "SizingAgent" in lineage.agents_involved and not lineage.fallback_reason:
+        # Check if SizingAgent is in agents_involved (list of dicts now)
+        has_sizing_agent = any(a["name"] == "SizingAgent" for a in lineage.agents_involved)
+        if QUANT_AGENTS_ENABLED and has_sizing_agent and not lineage.fallback_reason:
             lineage.set_sizing_source("SizingAgent")
         else:
             lineage.set_sizing_source("ClassicSizing")

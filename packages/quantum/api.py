@@ -358,6 +358,10 @@ app.include_router(strategy_router)
 from packages.quantum.dashboard_endpoints import router as dashboard_router
 app.include_router(dashboard_router)
 
+# --- Register Decision Endpoints ---
+from packages.quantum.decision_endpoints import router as decision_router
+app.include_router(decision_router)
+
 # --- Register Paper Trading Endpoints ---
 from packages.quantum.paper_endpoints import router as paper_router
 app.include_router(paper_router)

@@ -2,6 +2,7 @@ from fastapi import APIRouter, Depends, Body, Request, HTTPException, Query
 from typing import Dict, Any, Optional
 from packages.quantum.security import get_current_user
 from packages.quantum.analytics.behavior_analysis import BehaviorAnalysisService
+from packages.quantum.services.system_health_service import SystemHealthService
 
 router = APIRouter()
 
@@ -24,6 +25,31 @@ def get_behavior_summary(
     except Exception as e:
         print(f"Error fetching behavior summary: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+@router.get("/system/health")
+def get_system_health(
+    request: Request,
+    user_id: str = Depends(get_current_user)
+):
+    """
+    Get high-level system health metrics and status.
+    """
+    try:
+        supabase = request.app.state.supabase
+        service = SystemHealthService(supabase)
+        return service.get_system_health(user_id)
+    except Exception as e:
+        print(f"Error fetching system health: {e}")
+        # Return a safe default instead of crashing the dashboard
+        return {
+            "status": "Normal",
+            "veto_rate_7d": 0.0,
+            "veto_rate_30d": 0.0,
+            "active_constraints": [],
+            "not_executable_pct": 0.0,
+            "partial_outcomes_pct": 0.0,
+            "error": str(e)
+        }
 
 @router.post("/analytics/events")
 async def log_analytics_event(

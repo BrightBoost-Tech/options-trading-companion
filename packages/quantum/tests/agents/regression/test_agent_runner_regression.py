@@ -13,16 +13,19 @@ FIXTURE_DIR = os.path.join(os.path.dirname(__file__), "fixtures")
 
 def load_or_update_fixture(fixture_name: str, results: List[Dict[str, Any]]):
     filepath = os.path.join(FIXTURE_DIR, fixture_name)
+    update_mode = os.environ.get("UPDATE_FIXTURES") == "1"
 
-    if os.environ.get("UPDATE_GOLDEN"):
+    if update_mode:
         with open(filepath, "w") as f:
             json.dump(results, f, indent=2, sort_keys=True)
+        print(f"UPDATED FIXTURE: {filepath}")
         return results
 
     if not os.path.exists(filepath):
-        with open(filepath, "w") as f:
-            json.dump(results, f, indent=2, sort_keys=True)
-        return results
+        raise FileNotFoundError(
+            f"Fixture {fixture_name} not found. "
+            "Run with UPDATE_FIXTURES=1 to generate it."
+        )
 
     with open(filepath, "r") as f:
         return json.load(f)

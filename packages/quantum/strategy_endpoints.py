@@ -21,6 +21,8 @@ from packages.quantum.services.param_search_runner import ParamSearchRunner
 from packages.quantum.services.walkforward_runner import WalkForwardResult
 from packages.quantum.market_data import PolygonService
 from packages.quantum.strategy_registry import STRATEGY_REGISTRY
+from packages.quantum.core.rate_limiter import limiter
+from fastapi import Request
 
 # ... (omitting parts that didn't change for brevity, focusing on _persist_v3_results and imports)
 
@@ -240,7 +242,9 @@ def list_strategies(
         raise HTTPException(status_code=500, detail="Internal Server Error")
 
 @router.post("/strategies/{name}/backtest")
+@limiter.limit("5/minute")
 def run_backtest(
+    req: Request,
     name: str,
     request: BacktestRequest,
     user_id: str = Depends(get_current_user_id),
@@ -255,7 +259,9 @@ def run_backtest(
     return {"status": "completed", "results_count": len(results), "results": results}
 
 @router.post("/strategies/{name}/backtest/v3")
+@limiter.limit("5/minute")
 def run_backtest_v3(
+    req: Request,
     name: str,
     request: BacktestRequestV3,
     user_id: str = Depends(get_current_user_id),
@@ -305,7 +311,9 @@ def run_backtest_v3(
     }
 
 @router.post("/research/compare")
+@limiter.limit("10/minute")
 def compare_backtests(
+    request: Request,
     req: ResearchCompareRequest,
     user_id: str = Depends(get_current_user_id),
     supabase: Client = Depends(get_supabase_user_client)
@@ -373,7 +381,9 @@ def compare_backtests(
     return report
 
 @router.post("/simulation/batch")
+@limiter.limit("5/minute")
 async def run_batch_simulation_endpoint(
+    request: Request,
     req: BatchSimulationRequest,
     background_tasks: BackgroundTasks,
     user_id: str = Depends(get_current_user_id),

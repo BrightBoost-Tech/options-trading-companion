@@ -14,9 +14,8 @@ from fastapi import FastAPI, HTTPException, Header, UploadFile, File, Request, D
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse, JSONResponse
 from pydantic import BaseModel, Field
-from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
-from slowapi.util import get_remote_address
 from supabase import create_client, Client
 import uuid
 import traceback
@@ -29,6 +28,7 @@ from packages.quantum.security import encrypt_token, decrypt_token, get_current_
 from packages.quantum.security.config import validate_security_config
 from packages.quantum.security.secrets_provider import SecretsProvider
 from packages.quantum.security.headers_middleware import SecurityHeadersMiddleware
+from packages.quantum.core.rate_limiter import limiter
 
 # Validate Security Config on Startup
 if os.getenv("ENABLE_DEV_AUTH_BYPASS") == "1":
@@ -225,7 +225,6 @@ async def dev_run_all(
 
 
 # Initialize Limiter
-limiter = Limiter(key_func=get_remote_address)
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 

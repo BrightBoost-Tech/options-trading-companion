@@ -116,6 +116,8 @@ def test_scanner_uses_truthlayer_fastpath():
         # 3. Execute
         with patch("packages.quantum.options_scanner.datetime") as mock_datetime:
             mock_datetime.now.return_value = datetime(2024, 5, 15)
+            # Bolt Fix: Mock fromisoformat too
+            mock_datetime.fromisoformat = datetime.fromisoformat
             mock_datetime.strptime = datetime.strptime
             # Ensure timedelta is available
 

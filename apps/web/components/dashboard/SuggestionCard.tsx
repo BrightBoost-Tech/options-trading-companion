@@ -357,27 +357,31 @@ const SuggestionCard = ({
                          {dismissOpen ? (
                              <div className="flex items-center gap-1 animate-in fade-in zoom-in duration-200">
                                  <button
+                                    type="button"
                                     onClick={() => handleDismiss('too_risky')}
                                     className="text-[10px] bg-red-100 text-red-700 hover:bg-red-200 px-2 py-1 rounded border border-red-200"
-                                    aria-label="Dismiss as too risky"
+                                    aria-label={`Dismiss ${displaySymbol} as too risky`}
                                  >
                                      Risky
                                  </button>
                                  <button
+                                    type="button"
                                     onClick={() => handleDismiss('bad_price')}
                                     className="text-[10px] bg-yellow-100 text-yellow-700 hover:bg-yellow-200 px-2 py-1 rounded border border-yellow-200"
-                                    aria-label="Dismiss due to bad price"
+                                    aria-label={`Dismiss ${displaySymbol} due to bad price`}
                                  >
                                      Price
                                  </button>
                                  <button
+                                    type="button"
                                     onClick={() => handleDismiss('wrong_timing')}
                                     className="text-[10px] bg-slate-100 text-slate-700 hover:bg-slate-200 px-2 py-1 rounded border border-slate-200"
-                                    aria-label="Dismiss due to wrong timing"
+                                    aria-label={`Dismiss ${displaySymbol} due to wrong timing`}
                                  >
                                      Timing
                                  </button>
                                  <button
+                                    type="button"
                                     onClick={() => setDismissOpen(false)}
                                     className="ml-1 p-1 hover:bg-muted rounded text-muted-foreground"
                                     aria-label="Cancel dismiss"
@@ -387,8 +391,10 @@ const SuggestionCard = ({
                              </div>
                          ) : (
                              <button
+                                 type="button"
                                  onClick={() => setDismissOpen(true)}
                                  className="text-xs text-muted-foreground hover:text-foreground px-2 py-1"
+                                 aria-label={`Dismiss suggestion for ${displaySymbol}`}
                              >
                                  Dismiss
                              </button>
@@ -396,13 +402,16 @@ const SuggestionCard = ({
                     </div>
 
                     <button
+                        type="button"
                         onClick={handleModify}
                         className="text-xs bg-card border border-border text-foreground px-3 py-1 rounded hover:bg-muted/50"
+                        aria-label={`Modify trade parameters for ${displaySymbol}`}
                     >
                         Modify
                     </button>
 
                     <button
+                        type="button"
                         onClick={handleStage}
                         disabled={(isStale && !staged) || isStaging}
                         className={`text-xs px-3 py-1 rounded font-medium transition-colors flex items-center gap-1 ${
@@ -412,6 +421,7 @@ const SuggestionCard = ({
                                     ? 'bg-muted text-muted-foreground cursor-not-allowed opacity-70'
                                     : 'bg-purple-600 text-white hover:bg-purple-700'
                         }`}
+                        aria-label={staged ? `Trade for ${displaySymbol} is staged` : `Stage trade for ${displaySymbol}`}
                     >
                         {isStaging && <Loader2 className="w-3 h-3 animate-spin" />}
                         {staged ? 'Staged' : 'Stage Trade'}

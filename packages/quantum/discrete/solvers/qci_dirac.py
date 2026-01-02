@@ -15,7 +15,12 @@ class QciDiracDiscreteSolver:
     _trial_call_count = 0
 
     def __init__(self):
-        self.adapter = QciDiracAdapter()
+        try:
+            self.adapter = QciDiracAdapter()
+            self.adapter_error = None
+        except Exception as e:
+            self.adapter = None
+            self.adapter_error = str(e)
 
     @classmethod
     def _reset_trial_budget_for_tests(cls):
@@ -23,6 +28,22 @@ class QciDiracDiscreteSolver:
 
     def solve(self, req: DiscreteSolveRequest) -> DiscreteSolveResponse:
         start_time = time.time()
+
+        # Check for adapter availability
+        if not self.adapter:
+            return DiscreteSolveResponse(
+                status="skipped",
+                strategy_used="dirac3",
+                selected_trades=[],
+                metrics=DiscreteSolveMetrics(
+                    expected_profit=0, total_premium=0, tail_risk_value=0,
+                    delta=0, gamma=0, vega=0, objective_value=0, runtime_ms=0
+                ),
+                diagnostics={
+                    "reason": "qci_unavailable",
+                    "details": self.adapter_error
+                }
+            )
 
         # --- Preflight Trial Budgeting ---
         is_trial_mode = req.parameters.trial_mode or os.getenv('QCI_TRIAL_MODE') == '1'
@@ -43,7 +64,7 @@ class QciDiracDiscreteSolver:
             # Check budget
             if self._trial_call_count >= max_dirac_calls:
                  return DiscreteSolveResponse(
-                    status="ok",
+                    status="skipped",
                     strategy_used="dirac3",
                     selected_trades=[],
                     metrics=DiscreteSolveMetrics(
@@ -66,14 +87,17 @@ class QciDiracDiscreteSolver:
             # 1. Filter candidates if too many
             if len(candidates_local) > max_candidates:
                 return DiscreteSolveResponse(
-                    status="error",
+                    status="skipped",
                     strategy_used="dirac3",
                     selected_trades=[],
                     metrics=DiscreteSolveMetrics(
                         expected_profit=0, total_premium=0, tail_risk_value=0,
                         delta=0, gamma=0, vega=0, objective_value=0, runtime_ms=0
                     ),
-                    diagnostics={"reason": f"Too many candidates for trial mode ({len(candidates_local)} > {max_candidates})"}
+                    diagnostics={
+                        "reason": "too_many_candidates_trial",
+                        "details": f"{len(candidates_local)} > {max_candidates}"
+                    }
                 )
 
             # If candidates exceed trial cap (25), pick top 25 by EV/Cost
@@ -90,7 +114,7 @@ class QciDiracDiscreteSolver:
                 num_samples = req.parameters.num_samples
 
         if not candidates_local:
-             return self._empty_response(req, "No candidates provided")
+             return self._empty_response(req, "no_candidates")
 
         # --- Build Polynomial ---
         # Map DiscreteSolveRequest candidates to DiscreteOptimizationRequest candidates
@@ -116,7 +140,7 @@ class QciDiracDiscreteSolver:
 
         if not polynomial:
             # Empty polynomial (e.g. no candidates or everything zeroed)
-            return self._empty_response(req, "Empty polynomial generated")
+            return self._empty_response(req, "empty_polynomial")
 
         # --- Call Adapter ---
         # Update call count
@@ -204,9 +228,9 @@ class QciDiracDiscreteSolver:
             }
         )
 
-    def _empty_response(self, req, reason):
+    def _empty_response(self, req, reason, status="skipped"):
         return DiscreteSolveResponse(
-            status="ok",
+            status=status,
             strategy_used="dirac3",
             selected_trades=[],
             metrics=DiscreteSolveMetrics(

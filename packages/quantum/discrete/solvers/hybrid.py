@@ -11,6 +11,9 @@ from packages.quantum.discrete.models import (
 from packages.quantum.discrete.solvers.classical import ClassicalDiscreteSolver
 from packages.quantum.discrete.solvers.qci_dirac import QciDiracDiscreteSolver
 
+# Module-level toggle for testing/availability
+QCI_AVAILABLE = True
+
 class HybridDiscreteSolver:
     """
     Orchestrates the selection between Quantum (Dirac) and Classical solvers
@@ -19,9 +22,24 @@ class HybridDiscreteSolver:
 
     def __init__(self):
         self.classical_solver = ClassicalDiscreteSolver()
-        self.dirac_solver = QciDiracDiscreteSolver()
+        # Lazily instantiated to avoid token errors when not used
+        self.dirac_solver = None
 
-    def solve(self, req: DiscreteSolveRequest) -> DiscreteSolveResponse:
+    @staticmethod
+    def solve(req: DiscreteSolveRequest) -> DiscreteSolveResponse:
+        """
+        Static entry point to match API contract and simpler usage.
+        Instantiates the solver and delegates to the internal instance method.
+        """
+        solver = HybridDiscreteSolver()
+        return solver._solve(req)
+
+    def _get_dirac_solver(self):
+        if self.dirac_solver is None:
+            self.dirac_solver = QciDiracDiscreteSolver()
+        return self.dirac_solver
+
+    def _solve(self, req: DiscreteSolveRequest) -> DiscreteSolveResponse:
         mode = req.parameters.mode
         qci_token = os.environ.get("QCI_API_TOKEN")
         trial_mode = req.parameters.trial_mode
@@ -30,6 +48,7 @@ class HybridDiscreteSolver:
 
         # Determine basic availability
         has_token = bool(qci_token)
+        is_available = has_token and QCI_AVAILABLE
 
         # 1. Classical Only
         if mode == 'classical_only':
@@ -40,10 +59,8 @@ class HybridDiscreteSolver:
             error_reason = None
             if not has_token:
                 error_reason = "missing QCI_API_TOKEN"
-            # In new logic, trial_mode doesn't automatically mean fallback,
-            # but if trial_mode is active and we want to enforce skipping Dirac if budget exhausted:
-            # The dirac solver handles budget check and returns empty/skipped.
-            # If we enforce Quantum Only, we accept whatever Dirac gives (including empty due to budget).
+            elif not QCI_AVAILABLE:
+                error_reason = "QCI_AVAILABLE is False"
 
             if error_reason:
                 return DiscreteSolveResponse(
@@ -51,30 +68,30 @@ class HybridDiscreteSolver:
                     strategy_used="classical",
                     selected_trades=[],
                     metrics=self._empty_metrics(),
-                    diagnostics={"error": f"Quantum solver unavailable ({error_reason})"}
+                    diagnostics={"reason": f"Quantum solver unavailable ({error_reason})"}
                 )
 
             try:
-                return self.dirac_solver.solve(req)
+                return self._get_dirac_solver().solve(req)
             except Exception as e:
                  return DiscreteSolveResponse(
                     status="error",
                     strategy_used="dirac3",
                     selected_trades=[],
                     metrics=self._empty_metrics(),
-                    diagnostics={"error": str(e)}
+                    diagnostics={"reason": str(e)}
                 )
 
         # 3. Hybrid (Default)
         # Try Quantum, fallback to Classical if it fails OR if budget exhausted
 
         # Check basic eligibility for Quantum
-        if has_token and (candidate_count <= max_candidates):
+        if is_available and (candidate_count <= max_candidates):
             try:
                 # Attempt Quantum solve
-                response = self.dirac_solver.solve(req)
+                response = self._get_dirac_solver().solve(req)
 
-                # Check if it was skipped due to budget
+                # Check if it was skipped due to budget (or other specific soft failures)
                 if response.diagnostics.get("reason") == "dirac_trial_budget_exhausted":
                      # Fallback to classical
                      classical_resp = self._solve_classical(req)
@@ -82,7 +99,12 @@ class HybridDiscreteSolver:
                      classical_resp.diagnostics["trial_mode"] = True
                      return classical_resp
 
-                return response
+                # Check for explicit errors returned as responses (if any)
+                if response.status == "error":
+                    # Fallback
+                    pass  # Will fall through to classical fallback
+                else:
+                    return response
 
             except Exception as e:
                 # Log error and fallback
@@ -91,6 +113,9 @@ class HybridDiscreteSolver:
 
         # Fallback to classical
         resp = self._solve_classical(req)
+        # Only add fallback reason if we actually tried or wanted to try quantum?
+        # Tests check for "fallback_reason" in hybrid mode (implied fallback).
+        # Existing logic added it unconditionally at the end of function if reached.
         resp.diagnostics["fallback_reason"] = "quantum_unavailable_or_failed"
         return resp
 

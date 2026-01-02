@@ -73,9 +73,16 @@ class DecisionService:
         strategy_counts = {}
         constraint_counts = {}
         sizing_source_counts = {}
+        unknown_lineage_count = 0
 
         for s in suggestions:
-            lineage = s.get("decision_lineage") or {}
+            lineage = s.get("decision_lineage")
+            if not lineage:
+                unknown_lineage_count += 1
+                # Still count strategy if available at top level
+                strat = s.get("strategy") or "unknown"
+                strategy_counts[strat] = strategy_counts.get(strat, 0) + 1
+                continue
 
             # Agents involved
             agents = lineage.get("agents_involved", [])
@@ -89,24 +96,29 @@ class DecisionService:
 
             # Constraints
             constraints = lineage.get("active_constraints") or {}
-            for k in constraints.keys():
-                constraint_counts[k] = constraint_counts.get(k, 0) + 1
+            for k, v in constraints.items():
+                # Store as "key: value" to track configuration changes
+                identifier = f"{k}: {v}"
+                constraint_counts[identifier] = constraint_counts.get(identifier, 0) + 1
 
             # Sizing Source
             source = lineage.get("sizing_source") or "unknown"
             sizing_source_counts[source] = sizing_source_counts.get(source, 0) + 1
 
-        # Calculate percentages
+        # Calculate percentages based on total_count (including unknown)
         agent_dominance = {k: round(v / total_count * 100, 1) for k, v in agent_counts.items()}
         strategy_freq = {k: round(v / total_count * 100, 1) for k, v in strategy_counts.items()}
         constraint_freq = {k: round(v / total_count * 100, 1) for k, v in constraint_counts.items()}
         sizing_auth = {k: round(v / total_count * 100, 1) for k, v in sizing_source_counts.items()}
 
+        unknown_lineage_pct = round(unknown_lineage_count / total_count * 100, 1)
+
         return {
             "sample_size": total_count,
+            "unknown_lineage_pct": unknown_lineage_pct,
             "agent_dominance": agent_dominance,
             "strategy_frequency": strategy_freq,
-            "active_constraints": constraint_freq, # Frequency of occurrence
+            "active_constraints": constraint_freq, # Frequency of occurrence (keyed by "key: value")
             "unique_constraints": list(constraint_counts.keys()),
             "sizing_authority": sizing_auth
         }
@@ -118,7 +130,9 @@ class DecisionService:
         for agent in all_agents:
             curr_val = current.get("agent_dominance", {}).get(agent, 0.0)
             prev_val = previous.get("agent_dominance", {}).get(agent, 0.0)
-            agent_shifts[agent] = round(curr_val - prev_val, 1)
+            diff = round(curr_val - prev_val, 1)
+            if diff != 0:
+                agent_shifts[agent] = diff
 
         # Strategy Frequency Changes
         strategy_shifts = {}
@@ -126,25 +140,44 @@ class DecisionService:
         for s in all_strats:
             curr_val = current.get("strategy_frequency", {}).get(s, 0.0)
             prev_val = previous.get("strategy_frequency", {}).get(s, 0.0)
-            strategy_shifts[s] = round(curr_val - prev_val, 1)
+            diff = round(curr_val - prev_val, 1)
+            if diff != 0:
+                strategy_shifts[s] = diff
+
+        # Constraint Prevalence Shifts
+        constraint_shifts = {}
+        # DEBUG:
+        # print(f"DEBUG: Current active: {current.get('active_constraints')}")
+        # print(f"DEBUG: Previous active: {previous.get('active_constraints')}")
+
+        all_cons = set(current.get("active_constraints", {}).keys()) | set(previous.get("active_constraints", {}).keys())
+        for c in all_cons:
+            curr_val = current.get("active_constraints", {}).get(c, 0.0)
+            prev_val = previous.get("active_constraints", {}).get(c, 0.0)
+            diff = round(curr_val - prev_val, 1)
+            if diff != 0:
+                constraint_shifts[c] = diff
 
         # Added/Removed Constraints
-        curr_constraints = set(current.get("unique_constraints", []))
-        prev_constraints = set(previous.get("unique_constraints", []))
+        # Added: Present in current (freq > 0), not present in previous (freq == 0)
+        curr_constraints_set = {k for k, v in current.get("active_constraints", {}).items() if v > 0}
+        prev_constraints_set = {k for k, v in previous.get("active_constraints", {}).items() if v > 0}
 
-        added_constraints = list(curr_constraints - prev_constraints)
-        removed_constraints = list(prev_constraints - curr_constraints)
+        added_constraints = list(curr_constraints_set - prev_constraints_set)
+        removed_constraints = list(prev_constraints_set - curr_constraints_set)
 
         return {
             "agent_shifts": agent_shifts,
             "strategy_changes": strategy_shifts,
-            "added_constraints": added_constraints,
-            "removed_constraints": removed_constraints
+            "constraint_prevalence_shifts": constraint_shifts,
+            "added_constraints": sorted(added_constraints),
+            "removed_constraints": sorted(removed_constraints)
         }
 
     def _empty_stats(self) -> Dict[str, Any]:
         return {
             "sample_size": 0,
+            "unknown_lineage_pct": 0.0,
             "agent_dominance": {},
             "strategy_frequency": {},
             "active_constraints": {},

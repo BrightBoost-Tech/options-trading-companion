@@ -44,7 +44,7 @@ def test_trial_budget_enforcement(MockAdapter, mock_req):
 
     # Call 3 (Should skip adapter)
     resp3 = solver.solve(mock_req)
-    assert resp3.status == "ok"
+    assert resp3.status == "skipped"  # Changed from "ok"
     # Call count should still be 2
     assert mock_instance.solve_polynomial_custom.call_count == 2
     assert resp3.diagnostics["reason"] == "dirac_trial_budget_exhausted"

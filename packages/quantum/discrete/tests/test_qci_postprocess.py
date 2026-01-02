@@ -105,7 +105,7 @@ def test_trial_mode_skip_excessive(base_request):
             resp = solver.solve(base_request)
 
             assert resp.status == "skipped"
-    assert "Too many candidates" in resp.diagnostics["reason"]
+            assert resp.diagnostics["reason"] == "too_many_candidates_trial"
 
 def test_greedy_repair_logic(base_request):
     """Verify repair reduces quantities to fit constraints."""
@@ -201,11 +201,20 @@ def test_hybrid_fallback(base_request):
             instance = MockQci.return_value
             instance.solve.side_effect = Exception("Connection Refused")
 
-            resp = HybridDiscreteSolver.solve(base_request)
+            # Setup Hybrid Solver
+            hybrid = HybridDiscreteSolver()
+
+            # Mock the internal solver instance on the hybrid instance
+            # Note: The patch above mocks the CLASS, so when HybridDiscreteSolver instantiates QciDiracDiscreteSolver, it gets the mock.
+            # However, we need to ensure we are setting the side_effect on the instance that Hybrid uses.
+
+            # In test setup above, `instance` IS the return value of the constructor.
+
+            resp = hybrid.solve(base_request)
 
             assert resp.status == "ok"
             assert resp.strategy_used == "classical"
-            assert "Quantum solver exception" in resp.diagnostics["fallback_reason"]
+            assert "quantum_unavailable_or_failed" in resp.diagnostics["fallback_reason"]
 
 def test_hybrid_success(base_request):
     """Verify hybrid solver uses Quantum result if success."""
@@ -227,7 +236,8 @@ def test_hybrid_success(base_request):
                 diagnostics={}
             )
 
-            resp = HybridDiscreteSolver.solve(base_request)
+            hybrid = HybridDiscreteSolver()
+            resp = hybrid.solve(base_request)
 
             assert resp.status == "ok"
             assert resp.strategy_used == "dirac3"

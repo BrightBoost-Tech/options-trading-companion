@@ -45,6 +45,8 @@ from packages.quantum.analytics.regime_engine_v3 import RegimeEngineV3, GlobalRe
 from packages.quantum.common_enums import UnifiedScore
 # from packages.quantum.analytics.scoring import calculate_unified_score # Deprecated in favor of ExecutionService parity
 
+from packages.quantum.core.rate_limiter import limiter
+
 router = APIRouter()
 
 # --- Schemas ---
@@ -394,6 +396,7 @@ def _compute_portfolio_weights(
 
 # --- Endpoint 1: Main Optimization ---
 @router.post("/optimize/portfolio")
+@limiter.limit("5/minute")
 async def optimize_portfolio(req: OptimizationRequest, request: Request, user_id: str = Depends(get_current_user_id)):
     analytics: Optional[AnalyticsService] = getattr(request.app.state, "analytics_service", None)
 
@@ -650,8 +653,10 @@ async def verify_qci_uplink():
 
 
 @router.post("/optimize/discrete", response_model=DiscreteSolveResponse)
+@limiter.limit("5/minute")
 async def optimize_discrete(
-    request: DiscreteSolveRequest,
+    request: Request,
+    body: DiscreteSolveRequest,
     user_id: str = Depends(get_current_user_id)
 ):
     """
@@ -660,7 +665,7 @@ async def optimize_discrete(
     """
     try:
         # Delegate directly to the solver class
-        response = HybridDiscreteSolver.solve(request)
+        response = HybridDiscreteSolver.solve(body)
         return response
     except Exception as e:
         print(f"Discrete optimization failed: {e}")

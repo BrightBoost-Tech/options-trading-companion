@@ -2,10 +2,26 @@ import os
 import time
 import requests
 import numpy as np
-from qci_client import QciClient
+
+try:
+    # pip package: qci-client
+    from qci_client import QciClient
+    _QCI_IMPORT_ERROR = None
+except ImportError as e:
+    QciClient = None
+    _QCI_IMPORT_ERROR = e
+
 
 class QciDiracAdapter:
     def __init__(self):
+        # Important: do NOT crash uvicorn at import time if qci-client isn't installed.
+        # Only fail when QCI is actually requested/instantiated.
+        if QciClient is None:
+            raise ImportError(
+                "qci-client is not installed. Install with: pip install qci-client "
+                "or run without QCI features."
+            ) from _QCI_IMPORT_ERROR
+
         self.token = os.getenv("QCI_API_TOKEN")
         self.api_url = os.getenv("QCI_API_URL", "https://api.qci-prod.com")
 

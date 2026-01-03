@@ -1,0 +1,8 @@
+[tool.pytest.ini_options]
+filterwarnings = [
+    "ignore::pydantic.warnings.PydanticDeprecationWarning:pyiceberg.*",
+    "ignore:.*regex.*deprecated.*:fastapi.exceptions.FastAPIDeprecationWarning",
+    "ignore::DeprecationWarning:pyiceberg.*",
+    "ignore::DeprecationWarning:supabase.*",
+    "ignore::DeprecationWarning:requests.*",
+]

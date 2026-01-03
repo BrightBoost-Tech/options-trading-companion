@@ -2,6 +2,8 @@ from typing import Dict, Any, List, Optional
 from datetime import datetime, timedelta, timezone
 from supabase import Client
 from packages.quantum.analytics.behavior_analysis import BehaviorAnalysisService
+from packages.quantum.services.provider_guardrails import get_circuit_breaker
+from packages.quantum.services.market_data_cache import get_market_data_cache
 
 class SystemHealthService:
     def __init__(self, supabase: Client):
@@ -12,6 +14,8 @@ class SystemHealthService:
         """
         Aggregates system health metrics:
         - System Status (Normal, Conservative, Data-Limited)
+        - Provider Health (Polygon status, failures)
+        - Cache Stats
         - Veto Rate (7d / 30d)
         - Most Active Constraints
         - % NOT_EXECUTABLE suggestions
@@ -37,6 +41,13 @@ class SystemHealthService:
         except Exception:
             # If query fails, assume data issues
             status_label = "Data-Limited"
+
+        # Check Provider Health
+        polygon_breaker = get_circuit_breaker("polygon")
+        provider_metrics = polygon_breaker.get_metrics()
+
+        if provider_metrics["state"] == "OPEN":
+            status_label = "Data-Limited" # Provider down overrides normal
 
         # Check Conservative: Recent Regime from Suggestions
         # If not already Data-Limited, check if we are in a defensive regime
@@ -96,8 +107,15 @@ class SystemHealthService:
         except Exception:
             partial_pct = 0.0
 
+        # 5. Cache Stats
+        cache_stats = get_market_data_cache().get_stats()
+
         return {
             "status": status_label,
+            "provider_health": {
+                "polygon": provider_metrics
+            },
+            "cache_stats": cache_stats,
             "veto_rate_7d": stats_7d["veto_rate_pct"],
             "veto_rate_30d": stats_30d["veto_rate_pct"],
             "active_constraints": stats_30d["top_active_constraints"],

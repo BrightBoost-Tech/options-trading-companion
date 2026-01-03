@@ -9,7 +9,11 @@ import numpy as np
 import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from packages.quantum.cache import get_cached_data, save_to_cache
+# We keep the old import for backward compatibility if any external module uses it,
+# but we are moving to the new service internally.
 from packages.quantum.market_data_cache import get_cached_market_data, cache_market_data
+from packages.quantum.services.market_data_cache import get_market_data_cache, TTL_QUOTES, TTL_SNAPSHOTS, TTL_OHLC
+from packages.quantum.services.provider_guardrails import guardrail
 from packages.quantum.analytics.factors import calculate_trend, calculate_iv_rank
 
 def normalize_option_symbol(symbol: str) -> str:
@@ -40,6 +44,7 @@ class PolygonService:
         if not self.api_key:
             print("Warning: POLYGON_API_KEY not found. Service will use mock data.")
         self.base_url = "https://api.polygon.io"
+        self.cache = get_market_data_cache()
 
         # Initialize Session with Connection Pooling
         self.session = requests.Session()
@@ -74,23 +79,50 @@ class PolygonService:
         # e.g. "AMZN23..." -> "O:AMZN23..."
         symbol = normalize_option_symbol(symbol)
 
-        # 1. Check Cache
+        # 1. Check New Unified Cache
         to_date_str = to_date.strftime('%Y-%m-%d')
-        cached = get_cached_market_data(symbol, days, to_date_str)
+        # Use simple key parts: symbol, days, date
+        cache_key_parts = [symbol, days, to_date_str]
+        cached = self.cache.get("OHLC", cache_key_parts)
         if cached:
             return cached
 
+        # Fallback to old cache (read-only migration path)
+        old_cached = get_cached_market_data(symbol, days, to_date_str)
+        if old_cached:
+            # Migrate to new cache
+            self.cache.set("OHLC", cache_key_parts, old_cached, ttl_seconds=TTL_OHLC)
+            return old_cached
+
+        # In-Flight Lock: Prevent cache stampede if multiple threads request same OHLC
+        # (e.g., during scanner runs)
+        with self.cache.inflight_lock("OHLC", cache_key_parts):
+            # Double-check cache inside lock
+            cached = self.cache.get("OHLC", cache_key_parts)
+            if cached:
+                return cached
+
+            # Call Guarded Private Method
+            result = self._get_historical_prices_api(symbol, days, to_date, to_date_str)
+
+            if result:
+                 # 3. Cache Success
+                self.cache.set("OHLC", cache_key_parts, result, ttl_seconds=TTL_OHLC)
+                return result
+
+            return None
+
+    @guardrail(provider="polygon", fallback=None)
+    def _get_historical_prices_api(self, symbol: str, days: int, to_date: datetime, to_date_str: str) -> Optional[Dict]:
         # 2. Guardrails: Check API Key
         if not self.api_key:
-            # print(f"Skipping {symbol}: No Polygon API key")
             return None
 
         from_date = to_date - timedelta(days=days + 30)
         from_str = from_date.strftime('%Y-%m-%d')
         to_str = to_date_str
         
-        # Handle Options formatting
-        search_symbol = symbol  # Already normalized
+        search_symbol = symbol
 
         url = f"{self.base_url}/v2/aggs/ticker/{search_symbol}/range/1/day/{from_str}/{to_str}"
         params = {
@@ -99,52 +131,53 @@ class PolygonService:
             'apiKey': self.api_key
         }
         
-        try:
-            # Reduced timeout to 5s to prevent hanging
-            response = self.session.get(url, params=params, timeout=5)
-            response.raise_for_status()
+        response = self.session.get(url, params=params, timeout=5)
+        response.raise_for_status()
 
-            data = response.json()
-            if 'results' not in data or len(data['results']) == 0:
-                # Cache empty result to avoid hitting API repeatedly for bad tickers?
-                # For now, we raise or return None.
-                # User constraint: "Very new tickers with sparse history" -> handled by empty results
-                # We treat empty as None for "realized vol" purposes.
-                # raise ValueError(f"No data returned for {symbol}")
-                return None
-
-            prices = [bar['c'] for bar in data['results']]
-            volumes = [bar.get('v', 0) for bar in data['results']]
-            dates = [datetime.fromtimestamp(bar['t'] / 1000).strftime('%Y-%m-%d')
-                    for bar in data['results']]
-
-            returns = []
-            for i in range(1, len(prices)):
-                returns.append((prices[i] - prices[i-1]) / prices[i-1])
-
-            result = {
-                'symbol': symbol,
-                'prices': prices,
-                'volumes': volumes,
-                'returns': returns,
-                'dates': dates
-            }
-
-            # 3. Cache Success
-            cache_market_data(symbol, days, to_date_str, result)
-            return result
-
-        except requests.exceptions.RequestException as e:
-            # Handle Rate Limits (429) or Timeouts gracefully
-            # Log but don't crash
-            # print(f"Polygon fetch failed for {symbol}: {e}")
+        data = response.json()
+        if 'results' not in data or len(data['results']) == 0:
             return None
-        except ValueError:
-            return None
+
+        prices = [bar['c'] for bar in data['results']]
+        volumes = [bar.get('v', 0) for bar in data['results']]
+        dates = [datetime.fromtimestamp(bar['t'] / 1000).strftime('%Y-%m-%d')
+                for bar in data['results']]
+
+        returns = []
+        for i in range(1, len(prices)):
+            returns.append((prices[i] - prices[i-1]) / prices[i-1])
+
+        result = {
+            'symbol': symbol,
+            'prices': prices,
+            'volumes': volumes,
+            'returns': returns,
+            'dates': dates
+        }
+        return result
 
     def get_ticker_details(self, symbol: str) -> Dict:
         """Fetches details for a given ticker, including sector."""
 
+        # Check cache
+        cached = self.cache.get("DETAILS", symbol)
+        if cached:
+            return cached
+
+        with self.cache.inflight_lock("DETAILS", symbol):
+             # Double-check
+            cached = self.cache.get("DETAILS", symbol)
+            if cached: return cached
+
+            result = self._get_ticker_details_api(symbol)
+
+            if result:
+                self.cache.set("DETAILS", symbol, result, ttl_seconds=86400 * 7) # 1 week TTL for static details
+
+            return result
+
+    @guardrail(provider="polygon", fallback={})
+    def _get_ticker_details_api(self, symbol: str) -> Dict:
         # Check if it is an option (heuristic: length > 5 chars or starts with O:)
         is_option = len(symbol) > 5 or symbol.startswith('O:')
 
@@ -167,35 +200,48 @@ class PolygonService:
         Fetches the date of the most recent financial filing (usually earnings).
         Uses Polygon /vX/reference/financials.
         """
-        try:
-            url = f"{self.base_url}/vX/reference/financials"
-            params = {
-                'ticker': symbol,
-                'limit': 1,
-                'sort': 'filing_date',
-                'order': 'desc',
-                'apiKey': self.api_key
-            }
-            # Short timeout to avoid blocking
-            response = self.session.get(url, params=params, timeout=3)
-            if response.status_code != 200:
-                return None
+        # Cache key: EARNINGS:{symbol}:{today_date}
+        today_str = datetime.now().strftime('%Y-%m-%d')
+        key_parts = [symbol, today_str]
 
-            data = response.json()
-            results = data.get('results', [])
-            if not results:
-                return None
+        cached = self.cache.get("EARNINGS", key_parts)
+        if cached:
+            return datetime.fromisoformat(cached)
 
-            # Use filing_date or period_of_report_date
-            filing_date_str = results[0].get('filing_date')
+        with self.cache.inflight_lock("EARNINGS", key_parts):
+            cached = self.cache.get("EARNINGS", key_parts)
+            if cached: return datetime.fromisoformat(cached)
+
+            filing_date_str = self._get_last_financials_date_api(symbol)
+
             if filing_date_str:
+                self.cache.set("EARNINGS", key_parts, filing_date_str, ttl_seconds=86400)
                 return datetime.fromisoformat(filing_date_str)
 
+        return None
+
+    @guardrail(provider="polygon", fallback=None)
+    def _get_last_financials_date_api(self, symbol: str) -> Optional[str]:
+        url = f"{self.base_url}/vX/reference/financials"
+        params = {
+            'ticker': symbol,
+            'limit': 1,
+            'sort': 'filing_date',
+            'order': 'desc',
+            'apiKey': self.api_key
+        }
+        response = self.session.get(url, params=params, timeout=3)
+        if response.status_code != 200:
             return None
 
-        except Exception as e:
-            # print(f"Error fetching financials for {symbol}: {e}")
+        data = response.json()
+        results = data.get('results', [])
+        if not results:
             return None
+
+        # Use filing_date or period_of_report_date
+        filing_date_str = results[0].get('filing_date')
+        return filing_date_str
 
     def get_iv_rank(self, symbol: str) -> float:
         """Calculates IV Rank from historical data."""
@@ -226,68 +272,77 @@ class PolygonService:
         Keys: 'bid', 'ask', 'bid_price', 'ask_price', 'price'
         Uses Polygon's quotes endpoint.
         """
+        # Cache check (short TTL)
+        cached = self.cache.get("QUOTE", symbol)
+        if cached:
+            return cached
+
+        result = self._get_recent_quote_api(symbol)
+
+        if result.get("price") is not None or result.get("bid") > 0:
+             self.cache.set("QUOTE", symbol, result, ttl_seconds=TTL_QUOTES)
+
+        return result
+
+    @guardrail(provider="polygon", fallback={"bid": 0.0, "ask": 0.0, "bid_price": 0.0, "ask_price": 0.0, "price": None})
+    def _get_recent_quote_api(self, symbol: str) -> Dict[str, float]:
         # 1. Normalize Symbol
         search_symbol = normalize_option_symbol(symbol)
         is_option = search_symbol.startswith('O:')
 
-        try:
-            if is_option:
-                # Options: Use v3 Quotes (latest)
-                url = f"{self.base_url}/v3/quotes/{search_symbol}"
-                params = {
-                    'limit': 1,
-                    'order': 'desc',
-                    'sort': 'timestamp',
-                    'apiKey': self.api_key
-                }
-                response = self.session.get(url, params=params, timeout=5)
-                # Use raise_for_status to catch 4xx/5xx errors
-                if response.status_code != 200:
-                     return {"bid": 0.0, "ask": 0.0, "bid_price": 0.0, "ask_price": 0.0, "price": None}
-
-                data = response.json()
-
-                if 'results' in data and len(data['results']) > 0:
-                    quote = data['results'][0]
-                    bid = float(quote.get('bid_price', 0.0))
-                    ask = float(quote.get('ask_price', 0.0))
-                    mid = (bid + ask) / 2.0 if (bid > 0 and ask > 0) else None
-                    return {
-                        "bid": bid,
-                        "ask": ask,
-                        "bid_price": bid,
-                        "ask_price": ask,
-                        "price": mid
-                    }
-            else:
-                # Stocks: Use v2 NBBO (Last Quote)
-                url = f"{self.base_url}/v2/last/nbbo/{search_symbol}"
-                params = {'apiKey': self.api_key}
-                response = self.session.get(url, params=params, timeout=5)
-
-                # NBBO endpoint might return 404 if no data, or 200 with empty results
-                if response.status_code != 200:
+        if is_option:
+            # Options: Use v3 Quotes (latest)
+            url = f"{self.base_url}/v3/quotes/{search_symbol}"
+            params = {
+                'limit': 1,
+                'order': 'desc',
+                'sort': 'timestamp',
+                'apiKey': self.api_key
+            }
+            response = self.session.get(url, params=params, timeout=5)
+            # Use raise_for_status to catch 4xx/5xx errors
+            if response.status_code != 200:
                     return {"bid": 0.0, "ask": 0.0, "bid_price": 0.0, "ask_price": 0.0, "price": None}
 
-                data = response.json()
+            data = response.json()
 
-                if 'results' in data:
-                    res = data['results']
-                    # Polygon v2/last/nbbo: p = bid price, P = ask price
-                    bid = float(res.get('p', 0.0))
-                    ask = float(res.get('P', 0.0))
-                    mid = (bid + ask) / 2.0 if (bid > 0 and ask > 0) else None
-                    return {
-                        "bid": bid,
-                        "ask": ask,
-                        "bid_price": bid,
-                        "ask_price": ask,
-                        "price": mid
-                    }
+            if 'results' in data and len(data['results']) > 0:
+                quote = data['results'][0]
+                bid = float(quote.get('bid_price', 0.0))
+                ask = float(quote.get('ask_price', 0.0))
+                mid = (bid + ask) / 2.0 if (bid > 0 and ask > 0) else None
+                return {
+                    "bid": bid,
+                    "ask": ask,
+                    "bid_price": bid,
+                    "ask_price": ask,
+                    "price": mid
+                }
+        else:
+            # Stocks: Use v2 NBBO (Last Quote)
+            url = f"{self.base_url}/v2/last/nbbo/{search_symbol}"
+            params = {'apiKey': self.api_key}
+            response = self.session.get(url, params=params, timeout=5)
 
-        except Exception as e:
-            # Fallback for any network/parsing errors
-            print(f"Quote fetch failed for {search_symbol}: {e}")
+            # NBBO endpoint might return 404 if no data, or 200 with empty results
+            if response.status_code != 200:
+                return {"bid": 0.0, "ask": 0.0, "bid_price": 0.0, "ask_price": 0.0, "price": None}
+
+            data = response.json()
+
+            if 'results' in data:
+                res = data['results']
+                # Polygon v2/last/nbbo: p = bid price, P = ask price
+                bid = float(res.get('p', 0.0))
+                ask = float(res.get('P', 0.0))
+                mid = (bid + ask) / 2.0 if (bid > 0 and ask > 0) else None
+                return {
+                    "bid": bid,
+                    "ask": ask,
+                    "bid_price": bid,
+                    "ask_price": ask,
+                    "price": mid
+                }
 
         return {"bid": 0.0, "ask": 0.0, "bid_price": 0.0, "ask_price": 0.0, "price": None}
 
@@ -296,6 +351,20 @@ class PolygonService:
         Fetches snapshot data (price, greeks, iv) for a single option contract.
         Endpoint: /v3/snapshot/options/{underlyingAsset}/{optionContract}
         """
+        # Cache check
+        cached = self.cache.get("SNAPSHOT", symbol)
+        if cached:
+            return cached
+
+        result = self._get_option_snapshot_api(symbol)
+
+        if result:
+            self.cache.set("SNAPSHOT", symbol, result, ttl_seconds=TTL_SNAPSHOTS)
+
+        return result
+
+    @guardrail(provider="polygon", fallback={})
+    def _get_option_snapshot_api(self, symbol: str) -> Dict:
         search_symbol = normalize_option_symbol(symbol)
         underlying = extract_underlying_symbol(symbol)
 
@@ -305,25 +374,19 @@ class PolygonService:
 
         params = {'apiKey': self.api_key}
 
-        try:
-            response = self.session.get(url, params=params, timeout=5)
-            if response.status_code != 200:
-                print(f"Snapshot fetch failed: {response.status_code} {response.text}")
-                return {}
+        response = self.session.get(url, params=params, timeout=5)
+        if response.status_code != 200:
+            print(f"Snapshot fetch failed: {response.status_code} {response.text}")
+            return {}
 
-            data = response.json()
-            if 'results' in data:
-                # API returns a single object in 'results' for this endpoint?
-                # Or a list? Usually list if bulk, but specific path might return object.
-                # Let's handle both.
-                res = data['results']
-                if isinstance(res, list):
-                    return res[0] if res else {}
-                return res
-
-        except Exception as e:
-            print(f"Error fetching option snapshot for {symbol}: {e}")
-
+        data = response.json()
+        if 'results' in data:
+            res = data['results']
+            if isinstance(res, list):
+                result = res[0] if res else {}
+            else:
+                result = res
+            return result
         return {}
 
     def get_option_chain_snapshot(self, underlying: str, strike_range: float = 0.20, limit: int = 1000) -> List[Dict]:
@@ -336,6 +399,26 @@ class PolygonService:
 
         If strike_range is None, fetches full chain (careful with pagination).
         """
+        # Cache key needs to include params
+        # Note: we stringify params. Order is preserved in list.
+        cache_key = [underlying, str(strike_range), str(limit), datetime.now().strftime('%Y-%m-%d-%H')]
+        cached = self.cache.get("CHAIN", cache_key)
+        if cached:
+            return cached
+
+        with self.cache.inflight_lock("CHAIN", cache_key):
+            cached = self.cache.get("CHAIN", cache_key)
+            if cached: return cached
+
+            result = self._get_option_chain_snapshot_api(underlying, strike_range, limit)
+
+            if result:
+                self.cache.set("CHAIN", cache_key, result, ttl_seconds=TTL_SNAPSHOTS)
+
+            return result
+
+    @guardrail(provider="polygon", fallback=[])
+    def _get_option_chain_snapshot_api(self, underlying: str, strike_range: float, limit: int) -> List[Dict]:
         # 1. Get spot price first to filter strikes
         try:
             quote = self.get_recent_quote(underlying)
@@ -359,13 +442,7 @@ class PolygonService:
             'limit': 250
         }
 
-        # Add filters for efficiency
-        # Expiry: >= 15 days, <= 60 days (to bracket 30 days)
-        # Polygon filtering syntax: expiration_date.gte, etc.
-
         today = datetime.now(timezone.utc).date()
-        # Default scan window if no args passed to helper, but caller can filter.
-        # This raw method fetches a wide net.
         date_min = (today + timedelta(days=15)).strftime('%Y-%m-%d')
         date_max = (today + timedelta(days=60)).strftime('%Y-%m-%d')
 
@@ -380,36 +457,27 @@ class PolygonService:
 
         results = []
 
-        try:
-            while url:
-                response = self.session.get(url, params=params, timeout=10)
-                if response.status_code != 200:
-                    print(f"Chain snapshot fetch failed for {underlying}: {response.status_code}")
-                    break
+        while url:
+            response = self.session.get(url, params=params, timeout=10)
+            if response.status_code != 200:
+                print(f"Chain snapshot fetch failed for {underlying}: {response.status_code}")
+                break
 
-                data = response.json()
-                batch = data.get('results', [])
-                results.extend(batch)
+            data = response.json()
+            batch = data.get('results', [])
+            results.extend(batch)
 
-                # Check for pagination
-                next_url = data.get('next_url')
-                if next_url:
-                    url = next_url
-                    # next_url usually has params embedded. reset params to avoid duplication/conflict
-                    # but we MUST ensure apiKey is attached if it's not in next_url
-                    params = {'apiKey': self.api_key}
-                else:
-                    break
+            next_url = data.get('next_url')
+            if next_url:
+                url = next_url
+                params = {'apiKey': self.api_key}
+            else:
+                break
 
-                # Safety break for massive chains
-                if len(results) > limit:
-                    break
+            if len(results) > limit:
+                break
 
-            return results
-
-        except Exception as e:
-            print(f"Error fetching chain snapshot for {underlying}: {e}")
-            return []
+        return results
 
     def get_option_chain(self, symbol: str, min_dte: int = 25, max_dte: int = 45, limit: int = 1000) -> List[Dict[str, Any]]:
         """

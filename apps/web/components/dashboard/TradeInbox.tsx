@@ -355,18 +355,24 @@ export default function TradeInbox() {
             {/* Queue Section */}
             {hasQueue && (
                 <div className="mb-6">
-                    <div
-                        className="flex items-center justify-between cursor-pointer py-2 hover:bg-muted/50 rounded px-2 transition-colors select-none"
+                    <button
+                        type="button"
+                        className="w-full flex items-center justify-between py-2 hover:bg-muted/50 rounded px-2 transition-colors select-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
                         onClick={() => setQueueExpanded(!queueExpanded)}
+                        aria-expanded={queueExpanded}
+                        aria-controls="pending-queue-list"
                     >
-                        <h3 className="font-medium text-muted-foreground flex items-center gap-2">
+                        <span className="font-medium text-muted-foreground flex items-center gap-2">
                              Pending Queue ({visibleQueue.length})
-                        </h3>
+                        </span>
                         {queueExpanded ? <ChevronUp className="w-4 h-4" /> : <ChevronDown className="w-4 h-4" />}
-                    </div>
+                    </button>
 
                     {queueExpanded ? (
-                        <div className="space-y-3 mt-2 pl-2 border-l-2 border-muted ml-2 animate-in slide-in-from-top-2 fade-in duration-200">
+                        <div
+                            id="pending-queue-list"
+                            className="space-y-3 mt-2 pl-2 border-l-2 border-muted ml-2 animate-in slide-in-from-top-2 fade-in duration-200"
+                        >
                              {visibleQueue.map(item => (
                                  <div key={item.id} className="flex gap-3">
                                      <div className="pt-8">

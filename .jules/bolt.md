@@ -1,3 +1,3 @@
-## 2025-05-23 - [Date Parsing Performance]
-**Learning:** `datetime.strptime(s, "%Y-%m-%d")` is surprisingly slow (~14µs) compared to `datetime.fromisoformat(s)` (~0.4µs) for ISO-8601 strings. When processing thousands of option contracts in a loop, this difference adds up.
-**Action:** Use `datetime.fromisoformat()` for standard date strings and cache parsed dates when iterating over data with repeated dates (like option chains).
+## 2025-05-23 - [Pandas Overhead on Small Batches]
+**Learning:** Using `pandas` for data manipulation (creation, type conversion, grouping) on small datasets (e.g., batch size of 2) is significantly slower than using native Python dictionaries and lists. The initialization overhead dominates the execution time.
+**Action:** For small-batch data processing, prefer native Python `dict` aggregation and list comprehensions over `pandas`.

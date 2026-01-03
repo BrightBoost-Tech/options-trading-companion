@@ -1,6 +1,7 @@
 # Quantum Backend
 
 This directory contains the Python FastAPI backend for the Quantum application.
+Quantum / Dirac development requires Python 3.11–3.12.
 
 ## Security v3 Hardening
 

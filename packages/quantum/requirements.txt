@@ -25,4 +25,4 @@ pyjwt>=2.8.0
 slowapi>=0.1.9
 redis>=5.0.0
 rq>=1.15.0
-qci-client>=5.0.0
+qci-client>=5.0.0; python_version < "3.14"

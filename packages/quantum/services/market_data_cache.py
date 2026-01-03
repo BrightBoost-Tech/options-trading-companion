@@ -1,53 +1,121 @@
 """
 Market Data Cache Service
-Implements a TTL cache with namespaces and file fallback support.
+Implements a TTL cache with namespaces, file fallback, robust key generation, and in-flight locking.
 """
 import os
 import time
 import json
 import logging
-from typing import Dict, Any, Optional
-from datetime import datetime, timedelta
+import hashlib
+import threading
+from typing import Dict, Any, Optional, Union, List
+from contextlib import contextmanager
 
 logger = logging.getLogger(__name__)
 
+# Default TTLs
+TTL_QUOTES = 60         # 1 minute
+TTL_SNAPSHOTS = 300     # 5 minutes
+TTL_OHLC = 43200        # 12 hours
+TTL_EARNINGS = 86400    # 24 hours
+
 class MarketDataCache:
     """
-    In-memory cache with optional file persistence.
+    Thread-safe in-memory cache with optional file persistence.
     Supports namespaced keys with individual TTLs.
     """
 
-    def __init__(self, file_path: Optional[str] = None):
+    def __init__(self, file_path: Optional[str] = None, persist: bool = False):
         self._memory_cache: Dict[str, Dict[str, Any]] = {}
-        self.file_path = file_path or os.path.join(os.path.dirname(__file__), "market_data_cache.json")
-        self._load_from_file()
+        self._lock = threading.RLock()
+        self._inflight_locks: Dict[str, threading.Lock] = {}
+        self._inflight_counts: Dict[str, int] = {} # Ref counting for cleanup
+        self._inflight_registry_lock = threading.Lock()
 
-    def _get_key(self, namespace: str, key: str) -> str:
-        return f"{namespace}:{key}"
+        self.persist = persist
+        # Default to a file in the same directory if not provided
+        self.file_path = file_path or os.path.join(os.path.dirname(__file__), "market_data_v2.json")
 
-    def get(self, namespace: str, key: str) -> Optional[Any]:
-        full_key = self._get_key(namespace, key)
-        entry = self._memory_cache.get(full_key)
+        if self.persist:
+            self._load_from_file()
 
-        if not entry:
-            return None
+    def _get_namespaced_key(self, namespace: str, key_parts: Union[str, List[Any]]) -> str:
+        """
+        Generates a deterministic key from namespace and parts.
+        key_parts can be a single string or a list of items.
+        """
+        if isinstance(key_parts, str):
+            raw_key = key_parts
+        else:
+            # Join parts with separator
+            raw_key = "_".join(str(p) for p in key_parts)
 
-        if time.time() > entry['expiry']:
-            del self._memory_cache[full_key]
-            return None
+        # Hash for consistent length and safety
+        hashed = hashlib.md5(raw_key.encode()).hexdigest()
+        return f"{namespace}:{hashed}"
 
-        return entry['data']
+    def get(self, namespace: str, key_parts: Union[str, List[Any]]) -> Optional[Any]:
+        full_key = self._get_namespaced_key(namespace, key_parts)
 
-    def set(self, namespace: str, key: str, value: Any, ttl_seconds: int) -> None:
-        full_key = self._get_key(namespace, key)
-        self._memory_cache[full_key] = {
-            'data': value,
-            'expiry': time.time() + ttl_seconds,
-            'set_at': time.time()
-        }
-        # We don't save to file on every set for performance, rely on periodic or shutdown hooks ideally.
-        # But for this simple implementation, we can save if it's a long-lived item?
-        # For now, let's keep it in memory mostly, unless we implement explicit save.
+        with self._lock:
+            entry = self._memory_cache.get(full_key)
+
+            if not entry:
+                return None
+
+            if time.time() > entry['expiry']:
+                del self._memory_cache[full_key]
+                return None
+
+            return entry['data']
+
+    def set(self, namespace: str, key_parts: Union[str, List[Any]], value: Any, ttl_seconds: int = 300) -> None:
+        full_key = self._get_namespaced_key(namespace, key_parts)
+
+        with self._lock:
+            self._memory_cache[full_key] = {
+                'data': value,
+                'expiry': time.time() + ttl_seconds,
+                'set_at': time.time()
+            }
+
+            if self.persist:
+                self._save_to_file_safe()
+
+    @contextmanager
+    def inflight_lock(self, namespace: str, key_parts: Union[str, List[Any]]):
+        """
+        Context manager to acquire a lock for a specific cache key.
+        Prevents cache stampede by ensuring only one thread fetches data for a missing key.
+        Cleans up lock references to avoid memory leaks.
+        """
+        full_key = self._get_namespaced_key(namespace, key_parts)
+
+        # Get or create lock for this specific key
+        with self._inflight_registry_lock:
+            if full_key not in self._inflight_locks:
+                self._inflight_locks[full_key] = threading.Lock()
+                self._inflight_counts[full_key] = 0
+
+            lock = self._inflight_locks[full_key]
+            self._inflight_counts[full_key] += 1
+
+        acquired = lock.acquire(blocking=True)
+        try:
+            yield acquired
+        finally:
+            if acquired:
+                lock.release()
+
+            # Cleanup reference
+            with self._inflight_registry_lock:
+                self._inflight_counts[full_key] -= 1
+                if self._inflight_counts[full_key] <= 0:
+                    # Double check no new waiters came in between release and now
+                    # (Waiters would have incremented count before acquiring)
+                    if full_key in self._inflight_locks:
+                         del self._inflight_locks[full_key]
+                         del self._inflight_counts[full_key]
 
     def _load_from_file(self):
         """Loads cache from file if it exists."""
@@ -55,18 +123,23 @@ class MarketDataCache:
             try:
                 with open(self.file_path, 'r') as f:
                     data = json.load(f)
-                    # Prune expired
+
+                with self._lock:
                     now = time.time()
-                    self._memory_cache = {
-                        k: v for k, v in data.items()
-                        if v['expiry'] > now
-                    }
+                    # Prune expired on load
+                    count = 0
+                    for k, v in data.items():
+                        if v.get('expiry', 0) > now:
+                            self._memory_cache[k] = v
+                            count += 1
+                    logger.info(f"Loaded {count} entries from market data cache.")
             except Exception as e:
                 logger.warning(f"Failed to load cache from file: {e}")
 
-    def save_to_file(self):
-        """Persists current cache to file."""
+    def _save_to_file_safe(self):
+        """Persists current cache to file, swallowing errors."""
         try:
+            # Atomic write pattern could be better, but simple write is okay for now
             with open(self.file_path, 'w') as f:
                 json.dump(self._memory_cache, f)
         except Exception as e:
@@ -74,19 +147,34 @@ class MarketDataCache:
 
     def clear_namespace(self, namespace: str):
         prefix = f"{namespace}:"
-        keys_to_delete = [k for k in self._memory_cache if k.startswith(prefix)]
-        for k in keys_to_delete:
-            del self._memory_cache[k]
+        with self._lock:
+            keys_to_delete = [k for k in self._memory_cache if k.startswith(prefix)]
+            for k in keys_to_delete:
+                del self._memory_cache[k]
+            if self.persist:
+                self._save_to_file_safe()
+
+    def get_stats(self) -> Dict[str, int]:
+        """Returns basic stats about the cache."""
+        with self._lock:
+            total_items = len(self._memory_cache)
+            now = time.time()
+            active_items = sum(1 for v in self._memory_cache.values() if v['expiry'] > now)
+            return {
+                "total_entries": total_items,
+                "active_entries": active_items
+            }
 
 # Global instance
-# We might want to use a different path for the cache file in production
 _CACHE_INSTANCE = None
+_CACHE_LOCK = threading.Lock()
 
-def get_market_data_cache() -> MarketDataCache:
+def get_market_data_cache(persist: bool = False) -> MarketDataCache:
     global _CACHE_INSTANCE
-    if _CACHE_INSTANCE is None:
-        # Save cache in the same directory as this file
-        cache_dir = os.path.dirname(__file__)
-        cache_file = os.path.join(cache_dir, "market_data_v3_cache.json")
-        _CACHE_INSTANCE = MarketDataCache(file_path=cache_file)
+    with _CACHE_LOCK:
+        if _CACHE_INSTANCE is None:
+            # Save cache in the services directory
+            cache_dir = os.path.dirname(__file__)
+            cache_file = os.path.join(cache_dir, "market_data_v2.json")
+            _CACHE_INSTANCE = MarketDataCache(file_path=cache_file, persist=persist)
     return _CACHE_INSTANCE

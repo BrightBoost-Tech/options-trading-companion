@@ -9,6 +9,7 @@ from packages.quantum.analytics.surprise import compute_surprise
 from packages.quantum.nested_logging import log_outcome
 from packages.quantum.services.options_utils import get_contract_multiplier
 from packages.quantum.common_enums import OutcomeStatus
+from packages.quantum.services.provider_guardrails import get_circuit_breaker
 
 class OutcomeAggregator:
     def __init__(self, supabase: Client, polygon_service: PolygonService):
@@ -141,7 +142,11 @@ class OutcomeAggregator:
                 status = OutcomeStatus.PARTIAL
                 reason_codes.append("missing_vol")
 
-                if not self.polygon_service.api_key:
+                # Check Guardrail / Circuit Breaker status
+                cb = get_circuit_breaker("polygon")
+                if cb.state.value == "OPEN":
+                    reason_codes.append("provider_down")
+                elif not self.polygon_service.api_key:
                     reason_codes.append("polygon_unavailable")
                 else:
                     reason_codes.append("missing_market_data")
@@ -160,6 +165,15 @@ class OutcomeAggregator:
                 # If no action, and counterfactual is missing, it is PARTIAL not INCOMPLETE
                 # as core metrics (realized_pnl_1d=0) are present.
                 status = OutcomeStatus.PARTIAL
+
+                # Check circuit breaker context
+                cb = get_circuit_breaker("polygon")
+                if cb.state.value == "OPEN":
+                    # If it's open, it could be due to rate limits or general failures
+                    if cb.total_rate_limits > 0:
+                        reason_codes.append("polygon_rate_limited")
+                    else:
+                         reason_codes.append("polygon_circuit_open")
 
         # Priority 3: Optimizer Decision (Simulation)
         elif decision["decision_type"] == "optimizer_weights":

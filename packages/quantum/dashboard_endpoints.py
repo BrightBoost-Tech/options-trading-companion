@@ -196,7 +196,8 @@ async def refresh_quote(
         except Exception as e:
             # Per edge case instructions: 502 with clear message
             print(f"Quote refresh failed for {symbol}: {e}")
-            raise HTTPException(status_code=502, detail=f"Quote provider error: {str(e)}")
+            # SECURITY: Do not return detailed error message (may contain API key in URL)
+            raise HTTPException(status_code=502, detail="Quote provider error")
 
         # Calculate TCM Estimate
         tcm_est = None
@@ -223,7 +224,7 @@ async def refresh_quote(
             # TCM failure is not critical enough to fail the whole request, but prompt said "Quote/TCM failures: HTTP 502"
             # However, typically quote failure is critical, TCM is supplementary.
             # "Quote/TCM failures" implies either. Let's be strict.
-            raise HTTPException(status_code=502, detail=f"TCM calculation error: {str(e)}")
+            raise HTTPException(status_code=502, detail="TCM calculation error")
 
         return {
             "suggestion_id": suggestion_id,

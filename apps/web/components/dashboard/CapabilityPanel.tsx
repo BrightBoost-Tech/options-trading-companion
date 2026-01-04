@@ -60,9 +60,7 @@ export function CapabilityPanel() {
                                 <span className={`text-sm font-medium ${cap.is_active ? 'text-foreground' : 'text-muted-foreground'}`}>
                                     {CapabilityDisplayNames[cap.capability]}
                                 </span>
-                                <QuantumTooltip content={CapabilityDescriptions[cap.capability]}>
-                                     <Info className="h-3 w-3 text-muted-foreground cursor-help" />
-                                </QuantumTooltip>
+                                <QuantumTooltip content={CapabilityDescriptions[cap.capability]} />
                             </div>
                             {cap.reason && (
                                 <span className="text-xs text-muted-foreground pl-5">

@@ -63,45 +63,58 @@ export default function WeeklyReportList({ reports }: WeeklyReportListProps) {
   return (
     <div className="flex flex-col md:flex-row gap-4 h-[600px]">
       {/* Sidebar List */}
-      <div className="w-full md:w-1/3 border-r border-gray-100 pr-2 overflow-y-auto">
-        <h3 className="text-xs font-semibold text-gray-500 uppercase mb-3">Report History</h3>
-        <div className="space-y-2">
-          {reports.map((report) => (
-            <button
-              key={report.id}
-              onClick={() => setSelectedReportId(report.id)}
-              className={`w-full text-left p-3 rounded-lg border transition-colors ${
-                selectedReportId === report.id
-                  ? 'bg-indigo-50 border-indigo-200 shadow-sm'
-                  : 'bg-white border-gray-100 hover:bg-gray-50'
-              }`}
-            >
-              <div className="flex justify-between items-center mb-1">
-                <span className="font-semibold text-gray-800 text-sm">
-                  Week End {new Date(report.end_date || report.report_date).toLocaleDateString()}
-                </span>
-                {report.total_pnl >= 0 ? (
-                  <TrendingUp className="w-3 h-3 text-green-500" />
-                ) : (
-                  <TrendingDown className="w-3 h-3 text-red-500" />
-                )}
-              </div>
-              <div className="flex gap-2 text-xs text-gray-500">
-                <span>{report.trade_count} Trades</span>
-                <span>•</span>
-                <span>{Math.round(normalizeWinRateRatio(report.win_rate) * 100)}% WR</span>
-                <span>•</span>
-                <span className={report.total_pnl >= 0 ? 'text-green-600' : 'text-red-600'}>
-                  ${report.total_pnl.toFixed(0)}
-                </span>
-              </div>
-            </button>
-          ))}
+      <div
+        className="w-full md:w-1/3 border-r border-gray-100 pr-2 overflow-y-auto"
+        role="navigation"
+        aria-label="Report History"
+      >
+        <h3 className="text-xs font-semibold text-gray-500 uppercase mb-3" id="report-history-label">Report History</h3>
+        <div className="space-y-2" aria-labelledby="report-history-label">
+          {reports.map((report) => {
+            const isSelected = selectedReportId === report.id;
+            return (
+              <button
+                key={report.id}
+                onClick={() => setSelectedReportId(report.id)}
+                aria-current={isSelected ? 'true' : undefined}
+                className={`w-full text-left p-3 rounded-lg border transition-colors ${
+                  isSelected
+                    ? 'bg-indigo-50 border-indigo-200 shadow-sm'
+                    : 'bg-white border-gray-100 hover:bg-gray-50'
+                }`}
+              >
+                <div className="flex justify-between items-center mb-1">
+                  <span className="font-semibold text-gray-800 text-sm">
+                    Week End {new Date(report.end_date || report.report_date).toLocaleDateString()}
+                  </span>
+                  {report.total_pnl >= 0 ? (
+                    <TrendingUp className="w-3 h-3 text-green-500" aria-hidden="true" />
+                  ) : (
+                    <TrendingDown className="w-3 h-3 text-red-500" aria-hidden="true" />
+                  )}
+                </div>
+                <div className="flex gap-2 text-xs text-gray-500">
+                  <span>{report.trade_count} Trades</span>
+                  <span>•</span>
+                  <span>{Math.round(normalizeWinRateRatio(report.win_rate) * 100)}% WR</span>
+                  <span>•</span>
+                  <span className={report.total_pnl >= 0 ? 'text-green-600' : 'text-red-600'}>
+                    ${report.total_pnl.toFixed(0)}
+                  </span>
+                </div>
+              </button>
+            );
+          })}
         </div>
       </div>
 
       {/* Main Content */}
-      <div className="w-full md:w-2/3 pl-2 overflow-y-auto">
+      <div
+        className="w-full md:w-2/3 pl-2 overflow-y-auto animate-in fade-in duration-300"
+        key={selectedReport.id}
+        role="region"
+        aria-label="Report Details"
+      >
         <div className="flex justify-between items-start mb-4 border-b border-gray-100 pb-2">
           <div>
             <h2 className="text-lg font-bold text-gray-900">Weekly Performance Review</h2>
@@ -113,8 +126,9 @@ export default function WeeklyReportList({ reports }: WeeklyReportListProps) {
           <button
             onClick={handleDownload}
             className="text-xs flex items-center gap-1 text-gray-500 hover:text-gray-800"
+            aria-label={`Download report for week ending ${new Date(selectedReport.end_date || selectedReport.report_date).toLocaleDateString()}`}
           >
-            <Download className="w-3 h-3" />
+            <Download className="w-3 h-3" aria-hidden="true" />
             Download
           </button>
         </div>
@@ -141,7 +155,7 @@ export default function WeeklyReportList({ reports }: WeeklyReportListProps) {
         {selectedReport.missed_opportunities && selectedReport.missed_opportunities.length > 0 && (
           <div className="mb-6">
             <h3 className="text-sm font-semibold text-gray-800 mb-2 flex items-center gap-2">
-              <Crosshair className="w-4 h-4 text-orange-500" />
+              <Crosshair className="w-4 h-4 text-orange-500" aria-hidden="true" />
               Missed Opportunities
             </h3>
             <div className="space-y-2">
@@ -161,7 +175,7 @@ export default function WeeklyReportList({ reports }: WeeklyReportListProps) {
         {/* Markdown Content */}
         <div>
           <h3 className="text-sm font-semibold text-gray-800 mb-2 flex items-center gap-2">
-            <FileText className="w-4 h-4 text-indigo-500" />
+            <FileText className="w-4 h-4 text-indigo-500" aria-hidden="true" />
             Detailed Analysis
           </h3>
           <div className="prose prose-sm max-w-none text-gray-600 bg-white p-4 rounded border border-gray-100 whitespace-pre-wrap font-mono text-xs">

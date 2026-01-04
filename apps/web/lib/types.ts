@@ -155,6 +155,7 @@ export interface Suggestion {
   // Greeks Impact (Top Level or Derived)
   delta_impact?: number;
   theta_impact?: number;
+  vega_impact?: number;
 
   timestamp?: string;
   created_at?: string;
@@ -263,4 +264,75 @@ export interface InboxResponse {
   queue: Suggestion[];
   completed: Suggestion[];
   meta: InboxMeta;
+}
+
+// --- Discrete Optimizer Types ---
+
+export interface CandidateTrade {
+  id: string;
+  symbol: string;
+  side: 'buy' | 'sell';
+  qty_max: number;
+  ev_per_unit: number;
+  premium_per_unit: number;
+  delta: number;
+  gamma: number;
+  vega: number;
+  tail_risk_contribution: number;
+  metadata?: Record<string, any>;
+}
+
+export interface DiscreteConstraints {
+  max_cash: number;
+  max_vega: number;
+  max_delta_abs: number;
+  target_delta?: number;
+  max_gamma: number;
+  max_contracts?: number;
+}
+
+export interface DiscreteParameters {
+  lambda_tail: number;
+  lambda_cash: number;
+  lambda_vega: number;
+  lambda_delta: number;
+  lambda_gamma: number;
+  num_samples: number;
+  relaxation_schedule?: number;
+  mode: 'hybrid' | 'classical_only' | 'quantum_only';
+  trial_mode?: boolean;
+  max_candidates_for_dirac: number;
+  max_dirac_calls: number;
+  dirac_timeout_s: number;
+}
+
+export interface DiscreteSolveRequest {
+  candidates: CandidateTrade[];
+  constraints: DiscreteConstraints;
+  parameters: DiscreteParameters;
+}
+
+export interface SelectedTrade {
+  id: string;
+  qty: number;
+  reason: string;
+}
+
+export interface DiscreteSolveMetrics {
+  expected_profit: number;
+  total_premium: number;
+  tail_risk_value: number;
+  delta: number;
+  gamma: number;
+  vega: number;
+  objective_value: number;
+  runtime_ms: number;
+}
+
+export interface DiscreteSolveResponse {
+  status: string;
+  strategy_used: 'dirac3' | 'classical';
+  selected_trades: SelectedTrade[];
+  metrics: DiscreteSolveMetrics;
+  diagnostics: Record<string, any>;
 }

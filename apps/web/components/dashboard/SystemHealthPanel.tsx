@@ -4,12 +4,27 @@ import { useEffect, useState } from "react"
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card"
 import { Badge } from "@/components/ui/badge"
 import { Progress } from "@/components/ui/progress"
-import { AlertCircle, CheckCircle2, ShieldAlert, Activity, Database, Archive } from "lucide-react"
+import { AlertCircle, CheckCircle2, ShieldAlert, Activity, Database, Zap, ServerCrash } from "lucide-react"
 import { fetchWithAuth } from "@/lib/api"
 import { Skeleton } from "@/components/ui/skeleton"
 
+interface ProviderMetrics {
+  state: "CLOSED" | "HALF_OPEN" | "OPEN"
+  failures: number
+  rate_limits: number
+}
+
+interface CacheStats {
+  total_entries: number
+  active_entries: number
+}
+
 interface SystemHealthResponse {
   status: "Normal" | "Conservative" | "Data-Limited"
+  provider_health?: {
+    polygon?: ProviderMetrics
+  }
+  cache_stats?: CacheStats
   veto_rate_7d: number
   veto_rate_30d: number
   active_constraints: Array<{ constraint: string; count: number }>
@@ -102,6 +117,28 @@ export function SystemHealthPanel() {
     }
   }
 
+  const getReasonLine = () => {
+    if (data.status !== "Data-Limited") return null;
+
+    const polygonState = data.provider_health?.polygon?.state;
+    if (polygonState === "OPEN") {
+      return (
+        <div className="mt-1 flex items-center gap-1 text-xs text-red-500 font-medium">
+          <ServerCrash className="h-3 w-3" />
+          Provider Breaker Open
+        </div>
+      );
+    }
+
+    // Fallback reason if provider is fine but we are still data limited
+    return (
+      <div className="mt-1 flex items-center gap-1 text-xs text-yellow-600 font-medium">
+        <Database className="h-3 w-3" />
+        Universe Scarcity
+      </div>
+    );
+  };
+
   return (
     <Card>
       <CardHeader className="pb-3">
@@ -110,16 +147,58 @@ export function SystemHealthPanel() {
             <Activity className="h-5 w-5 text-muted-foreground" />
             System Health
           </CardTitle>
-          <Badge className={getStatusColor(data.status)} variant="outline">
-            {getStatusIcon(data.status)}
-            {data.status}
-          </Badge>
+          <div className="flex flex-col items-end">
+            <Badge className={getStatusColor(data.status)} variant="outline">
+              {getStatusIcon(data.status)}
+              {data.status}
+            </Badge>
+            {getReasonLine()}
+          </div>
         </div>
         <CardDescription>
           Diagnostic metrics for system behavior (30d window)
         </CardDescription>
       </CardHeader>
       <CardContent className="space-y-6">
+
+        {/* Provider & Cache Details - New Section */}
+        {(data.provider_health?.polygon || data.cache_stats) && (
+          <div className="grid grid-cols-2 gap-2 p-2 bg-muted/30 rounded-lg text-xs">
+             {/* Polygon Status */}
+             {data.provider_health?.polygon && (
+               <div className="space-y-1">
+                 <div className="flex items-center gap-1 text-muted-foreground font-medium">
+                   <Zap className="h-3 w-3" /> Polygon
+                 </div>
+                 <div className="flex flex-col gap-0.5 ml-1">
+                   <span className={data.provider_health.polygon.state === 'OPEN' ? "text-red-500 font-bold" : "text-green-600"}>
+                     {data.provider_health.polygon.state}
+                   </span>
+                   <span className="text-muted-foreground opacity-80">
+                      {data.provider_health.polygon.rate_limits} RL / {data.provider_health.polygon.failures} Err
+                   </span>
+                 </div>
+               </div>
+             )}
+
+             {/* Cache Stats */}
+             {data.cache_stats && (
+               <div className="space-y-1">
+                 <div className="flex items-center gap-1 text-muted-foreground font-medium">
+                   <Database className="h-3 w-3" /> Cache
+                 </div>
+                 <div className="flex flex-col gap-0.5 ml-1">
+                   <span>
+                     {data.cache_stats.active_entries} <span className="text-muted-foreground">/ {data.cache_stats.total_entries}</span>
+                   </span>
+                   <span className="text-muted-foreground opacity-80">
+                     Entries Active
+                   </span>
+                 </div>
+               </div>
+             )}
+          </div>
+        )}
 
         {/* Veto Rate Stats */}
         <div className="space-y-2">

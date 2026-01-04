@@ -2,8 +2,9 @@ import { useEffect, useState } from "react";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { fetchWithAuth } from "@/lib/api";
-import { Loader2, ArrowUp, ArrowDown, Shield, Brain, Activity, AlertCircle } from "lucide-react";
+import { Loader2, ArrowUp, ArrowDown, Shield, Brain, Activity, AlertCircle, Zap } from "lucide-react";
 import { QuantumTooltip } from "@/components/ui/QuantumTooltip";
+import { parseCapabilitiesResponse, formatCapabilityName, CapabilityState } from "@/lib/capability-parser";
 
 interface LineageDiff {
   window: string;
@@ -18,15 +19,9 @@ interface LineageDiff {
   };
 }
 
-interface Capability {
-    id: string;
-    name: string;
-    status: string;
-}
-
 export function SystemEvolutionPanel() {
   const [data, setData] = useState<LineageDiff | null>(null);
-  const [capabilities, setCapabilities] = useState<Capability[]>([]);
+  const [capabilities, setCapabilities] = useState<CapabilityState[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
@@ -34,16 +29,24 @@ export function SystemEvolutionPanel() {
     async function loadData() {
       try {
         const [lineageData, capData] = await Promise.all([
-            fetchWithAuth("/decisions/lineage?window=7d"),
-            fetchWithAuth("/capabilities")
+            fetchWithAuth("/decisions/lineage?window=7d").catch(err => {
+                console.warn("Lineage data fetch failed:", err);
+                return null;
+            }),
+            fetchWithAuth("/capabilities").catch(err => {
+                console.warn("Capability fetch failed:", err);
+                return null;
+            })
         ]);
 
         if (lineageData) {
           setData(lineageData);
         }
-        if (Array.isArray(capData)) {
-            setCapabilities(capData);
-        }
+
+        // Parse capabilities using the helper
+        const parsedCapabilities = parseCapabilitiesResponse(capData);
+        setCapabilities(parsedCapabilities);
+
       } catch (err) {
         console.error("Failed to load evolution data", err);
         setError("Failed to load system evolution.");
@@ -69,7 +72,8 @@ export function SystemEvolutionPanel() {
     );
   }
 
-  if (error || !data) {
+  // If we have neither lineage data nor capabilities, show error
+  if (error || (!data && capabilities.length === 0)) {
        return (
         <Card className="h-full border-dashed">
             <CardHeader>
@@ -82,8 +86,15 @@ export function SystemEvolutionPanel() {
        );
   }
 
-  const { diff, previous } = data;
-  const notEnoughHistory = previous.sample_size === 0;
+  // Fallback defaults if lineage data is missing but capabilities loaded
+  const diff = data?.diff || {
+    added_constraints: [],
+    removed_constraints: [],
+    constraint_prevalence_shifts: {},
+    agent_shifts: {}
+  };
+
+  const notEnoughHistory = data?.previous?.sample_size === 0;
 
   const hasChanges =
     diff.added_constraints.length > 0 ||
@@ -97,6 +108,9 @@ export function SystemEvolutionPanel() {
     .sort((a, b) => Math.abs(b[1]) - Math.abs(a[1]))
     .slice(0, 3);
 
+  // Filter active capabilities
+  const activeCapabilities = capabilities.filter(c => c.is_active);
+
   return (
     <Card className="h-full">
       <CardHeader>
@@ -108,18 +122,36 @@ export function SystemEvolutionPanel() {
                 </CardTitle>
                 <CardDescription>7-Day Change Log</CardDescription>
             </div>
-            {!hasChanges && !notEnoughHistory && <Badge variant="outline" className="bg-green-50 text-green-700 dark:bg-green-900/20 dark:text-green-300">Stable</Badge>}
+            {!hasChanges && !notEnoughHistory && activeCapabilities.length === 0 && <Badge variant="outline" className="bg-green-50 text-green-700 dark:bg-green-900/20 dark:text-green-300">Stable</Badge>}
             {notEnoughHistory && <Badge variant="outline" className="bg-yellow-50 text-yellow-700 dark:bg-yellow-900/20 dark:text-yellow-300">Building History</Badge>}
         </div>
       </CardHeader>
       <CardContent className="space-y-6">
-        {notEnoughHistory ? (
+        {/* Active Capabilities Section */}
+        {activeCapabilities.length > 0 && (
+            <div className="space-y-3 pb-4 border-b border-border">
+                <div className="flex items-center gap-2 text-sm font-medium text-purple-600 dark:text-purple-400">
+                    <Zap className="h-4 w-4" />
+                    <span>Unlocked Capabilities</span>
+                </div>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                    {activeCapabilities.map((cap) => (
+                        <div key={cap.capability} className="flex flex-col text-xs bg-purple-50 text-purple-700 dark:bg-purple-900/20 dark:text-purple-300 px-3 py-2 rounded border border-purple-200 dark:border-purple-800">
+                            <span className="font-semibold">{formatCapabilityName(cap.capability)}</span>
+                            {cap.reason && <span className="text-[10px] opacity-80 mt-1">{cap.reason}</span>}
+                        </div>
+                    ))}
+                </div>
+            </div>
+        )}
+
+        {notEnoughHistory && !activeCapabilities.length ? (
             <div className="text-center py-6 text-muted-foreground">
                 <AlertCircle className="h-8 w-8 mx-auto mb-2 opacity-50" />
                 <p>Not enough historical data to compute diffs yet.</p>
                 <p className="text-xs mt-1">Check back next week.</p>
             </div>
-        ) : !hasChanges ? (
+        ) : !hasChanges && !activeCapabilities.length ? (
             <div className="text-center py-8 text-muted-foreground">
                 <p>No active constraint or strategy changes detected.</p>
             </div>

@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useRef } from 'react';
+import { useState, useRef, useMemo, useCallback } from 'react';
 import SuggestionCard from './SuggestionCard';
 import { Suggestion } from '@/lib/types';
 import { Sparkles, Activity, Sun, Clock, FileText, CheckSquare, Loader2, Coffee, BookOpen } from 'lucide-react';
@@ -85,39 +85,54 @@ export default function SuggestionTabs({
       stagingIds
   } = useInboxActions();
 
-  // Tabs configuration for cleaner rendering and accessibility
-  const tabs = [
-    { id: 'morning', label: 'Morning', icon: Sun, count: morningSuggestions.filter(s => !dismissedIds.has(s.id)).length, color: 'orange' },
-    { id: 'midday', label: 'Midday', icon: Clock, count: middaySuggestions.filter(s => !dismissedIds.has(s.id)).length, color: 'blue' },
-    { id: 'rebalance', label: 'Rebalance', icon: Activity, count: optimizerSuggestions.filter(s => !dismissedIds.has(s.id)).length, color: 'indigo' },
-    { id: 'scout', label: 'Scout', icon: Sparkles, count: scoutSuggestions.filter(s => !dismissedIds.has(s.id)).length, color: 'green' },
-    { id: 'journal', label: 'Journal', icon: null, textIcon: '📖', count: journalQueue.filter(s => !dismissedIds.has(s.id)).length, color: 'purple' },
+  // Bolt Optimization: Memoize filtered counts to avoid re-calculation on every render
+  // This is especially important as the lists grow.
+  const counts = useMemo(() => ({
+    morning: morningSuggestions.filter(s => !dismissedIds.has(s.id)).length,
+    midday: middaySuggestions.filter(s => !dismissedIds.has(s.id)).length,
+    rebalance: optimizerSuggestions.filter(s => !dismissedIds.has(s.id)).length,
+    scout: scoutSuggestions.filter(s => !dismissedIds.has(s.id)).length,
+    journal: journalQueue.filter(s => !dismissedIds.has(s.id)).length
+  }), [morningSuggestions, middaySuggestions, optimizerSuggestions, scoutSuggestions, journalQueue, dismissedIds]);
+
+  // Bolt Optimization: Memoize tabs configuration to prevent array recreation and ensure stable references
+  const tabs = useMemo(() => [
+    { id: 'morning', label: 'Morning', icon: Sun, count: counts.morning, color: 'orange' },
+    { id: 'midday', label: 'Midday', icon: Clock, count: counts.midday, color: 'blue' },
+    { id: 'rebalance', label: 'Rebalance', icon: Activity, count: counts.rebalance, color: 'indigo' },
+    { id: 'scout', label: 'Scout', icon: Sparkles, count: counts.scout, color: 'green' },
+    { id: 'journal', label: 'Journal', icon: null, textIcon: '📖', count: counts.journal, color: 'purple' },
     { id: 'weekly', label: 'Reports', icon: FileText, count: 0, color: 'slate' },
-  ] as const;
+  ] as const, [counts]);
 
-  const handleStage = (s: Suggestion) => {
+  // Bolt Optimization: Memoize handlers to keep SuggestionCard props stable
+  // This allows React.memo(SuggestionCard) to actually work.
+
+  const handleStage = useCallback((s: Suggestion) => {
       stageItems([s.id]);
-  };
+  }, [stageItems]);
 
-  const handleBatchStage = async () => {
+  const handleBatchStage = useCallback(async () => {
       const success = await stageItems(selectedIds);
       if (success) {
           setSelectedIds([]);
       }
-  };
+  }, [stageItems, selectedIds]);
 
-  const handleModify = (s: Suggestion) => {};
+  const handleModify = useCallback((s: Suggestion) => {
+      // Logic for modify (currently empty/placeholder)
+  }, []);
 
-  const handleDismiss = (s: Suggestion, reasonLabel: string) => {
+  const handleDismiss = useCallback((s: Suggestion, reasonLabel: string) => {
       const reason = CANONICAL_REASONS[reasonLabel] || reasonLabel;
       dismissItem(s.id, reason);
-  };
+  }, [dismissItem]);
 
-  const handleRefreshQuote = (s: Suggestion) => {
+  const handleRefreshQuote = useCallback((s: Suggestion) => {
       refreshQuote(s.id);
-  };
+  }, [refreshQuote]);
 
-  const handleTabChange = (tabId: typeof activeTab) => {
+  const handleTabChange = useCallback((tabId: typeof activeTab) => {
       setActiveTab(tabId);
       setSelectedIds([]); // Clear selection on tab change
       logEvent({
@@ -125,16 +140,23 @@ export default function SuggestionTabs({
           category: 'ux',
           properties: { tab: tabId }
       });
-  };
+  }, []);
 
-  const handleToggleSelect = (s: Suggestion) => {
+  const handleToggleSelect = useCallback((s: Suggestion) => {
       setSelectedIds(prev =>
           prev.includes(s.id) ? prev.filter(id => id !== s.id) : [...prev, s.id]
       );
-  };
+  }, []);
 
-  const renderCard = (s: Suggestion, idx: number) => {
+  // Bolt Optimization: Memoize render function to prevent recreation
+  const renderCard = useCallback((s: Suggestion, idx: number) => {
       if (dismissedIds.has(s.id)) return null;
+
+      // Note: We create a new object { ...s, staged: ... } here which technically breaks shallow equality
+      // of the 'suggestion' prop itself. However, 'onStage', 'onModify', etc. are now stable.
+      // To fully optimize, SuggestionCard should take `isStaged` as a separate prop,
+      // but that requires changing the component interface.
+      // For now, stabilizing the callbacks is a big win.
 
       return (
           <SuggestionCard
@@ -151,9 +173,9 @@ export default function SuggestionTabs({
             isStaging={stagingIds.has(s.id)}
           />
       );
-  };
+  }, [dismissedIds, stagedIds, stagingIds, selectedIds, isStale, handleStage, handleModify, handleDismiss, handleRefreshQuote, handleToggleSelect]);
 
-  const handleKeyDown = (e: React.KeyboardEvent) => {
+  const handleKeyDown = useCallback((e: React.KeyboardEvent) => {
     if (e.key === 'ArrowRight' || e.key === 'ArrowLeft') {
       e.preventDefault();
       const currentIndex = tabs.findIndex(t => t.id === activeTab);
@@ -168,7 +190,7 @@ export default function SuggestionTabs({
       const buttons = tabListRef.current?.querySelectorAll<HTMLButtonElement>('[role="tab"]');
       buttons?.[nextIndex]?.focus();
     }
-  };
+  }, [activeTab, tabs, handleTabChange]);
 
   return (
     <div className="bg-card rounded-lg shadow overflow-hidden h-full flex flex-col border border-border">

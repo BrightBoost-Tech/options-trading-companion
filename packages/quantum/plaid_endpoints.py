@@ -164,9 +164,9 @@ def register_plaid_endpoints(
             accounts_list = result.get('accounts', [])
 
             # Upsert to positions table
+            positions_to_insert = []
             if holdings_list:
                 print(f"💾 Saving {len(holdings_list)} positions for user {user_id}")
-                positions_to_insert = []
                 for h in holdings_list:
                     positions_to_insert.append({
                         "user_id": user_id,
@@ -217,7 +217,8 @@ def register_plaid_endpoints(
                         "created_at": datetime.now().isoformat(),
                         "data_source": "plaid",
                         "buying_power": buying_power,
-                        "risk_metrics": {"accounts_synced": len(accounts_list)}
+                        "risk_metrics": {"accounts_synced": len(accounts_list)},
+                        "holdings": positions_to_insert
                     }
 
                     # Assuming portfolio_snapshots has an ID or we rely on insert.

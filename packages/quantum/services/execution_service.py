@@ -21,6 +21,7 @@ class ExecutionDragStats(TypedDict):
 class ExecutionService:
     def __init__(self, supabase: Client):
         self.supabase = supabase
+        self.suggestions_table = "trade_suggestions"
         self.logs_table = "suggestion_logs"
         self.executions_table = "trade_executions"
 
@@ -30,18 +31,35 @@ class ExecutionService:
                            fill_details: Dict[str, Any] = None) -> Dict:
         """
         Explicitly links a suggestion to an execution.
+        suggestion_id can be a trade_suggestions.id (primary) or suggestion_logs.id (legacy/fallback).
         """
         if not fill_details:
             fill_details = {}
 
-        # 1. Fetch suggestion
-        try:
-            s_res = self.supabase.table(self.logs_table).select("*").eq("id", suggestion_id).single().execute()
-            suggestion = s_res.data
-        except Exception:
-            suggestion = None
+        # 1. Fetch suggestion from trade_suggestions (Primary)
+        suggestion = None
+        source_table = None
 
-        # 2. Calculate Realized Slippage & Drag
+        try:
+            s_res = self.supabase.table(self.suggestions_table).select("*").eq("id", suggestion_id).single().execute()
+            if s_res.data:
+                suggestion = s_res.data
+                source_table = self.suggestions_table
+        except Exception:
+            # Not found in trade_suggestions or error
+            pass
+
+        # 2. Fallback to suggestion_logs if not found
+        if not suggestion:
+            try:
+                s_res = self.supabase.table(self.logs_table).select("*").eq("id", suggestion_id).single().execute()
+                if s_res.data:
+                    suggestion = s_res.data
+                    source_table = self.logs_table
+            except Exception:
+                pass
+
+        # 3. Calculate Realized Slippage & Drag
         mid_price = fill_details.get("mid_price_at_submission")
         fill_price = fill_details.get("fill_price", 0.0)
 
@@ -61,16 +79,42 @@ class ExecutionService:
             fees_per_unit = fees / quantity
             realized_execution_cost = slippage + fees_per_unit
 
-        # 3. Create TradeExecution
+        # 4. Prepare Context Fields
         execution_data = {
             "user_id": user_id,
             "timestamp": datetime.now(timezone.utc).isoformat(),
-            "symbol": fill_details.get("symbol") or (suggestion.get("symbol") if suggestion else "UNKNOWN"),
+            "symbol": fill_details.get("symbol") or (suggestion.get("symbol") if suggestion and "symbol" in suggestion else suggestion.get("ticker") if suggestion else "UNKNOWN"),
             "fill_price": fill_price,
             "quantity": quantity,
             "fees": fees,
-            "suggestion_id": suggestion_id
+            "mid_price_at_submission": mid_price,
+            # We assume target_price is in suggestion or passed in fill_details
+            "target_price": fill_details.get("target_price") or (suggestion.get("target_price") if suggestion else None),
+            "order_json": fill_details.get("order_json") or (suggestion.get("order_json") if suggestion else None)
         }
+
+        # Link IDs based on source
+        if source_table == self.suggestions_table:
+            execution_data["suggestion_id"] = suggestion_id
+            # Extract additional context from trade_suggestions
+            if suggestion:
+                execution_data["trace_id"] = suggestion.get("trace_id")
+                execution_data["window"] = suggestion.get("window")
+                execution_data["strategy"] = suggestion.get("strategy")
+                execution_data["model_version"] = suggestion.get("model_version")
+                execution_data["features_hash"] = suggestion.get("features_hash")
+                execution_data["regime"] = suggestion.get("regime")
+
+        elif source_table == self.logs_table:
+            execution_data["suggestion_log_id"] = suggestion_id
+            # Try to infer some fields if possible, or leave null
+            if suggestion:
+                execution_data["regime"] = suggestion.get("regime_context") # might need parsing if it's JSON
+                logger.warning(f"Execution linked to legacy suggestion_logs (id={suggestion_id}). Degrading context quality.")
+
+        else:
+             # Orphaned execution
+             logger.error(f"Execution registered without valid suggestion link (id={suggestion_id}). Learning feedback loop broken.")
 
         try:
             ex_res = self.supabase.table(self.executions_table).insert(execution_data).execute()
@@ -79,12 +123,24 @@ class ExecutionService:
             logger.error(f"Failed to insert execution: {e}")
             return None
 
-        # 4. Update SuggestionLog
+        # 5. Update Source Table status
         if execution:
-            self.supabase.table(self.logs_table).update({
-                "was_accepted": True,
-                "trade_execution_id": execution["id"]
-            }).eq("id", suggestion_id).execute()
+            if source_table == self.suggestions_table:
+                # Assuming trade_suggestions has a status field or similar?
+                # The user didn't explicitly ask to update trade_suggestions status,
+                # but historically suggestion_logs were updated.
+                # Checking schema notes: trade_suggestions has 'status'.
+                try:
+                    self.supabase.table(self.suggestions_table).update({
+                        "status": "filled"
+                    }).eq("id", suggestion_id).execute()
+                except Exception:
+                    pass
+            elif source_table == self.logs_table:
+                self.supabase.table(self.logs_table).update({
+                    "was_accepted": True,
+                    "trade_execution_id": execution["id"]
+                }).eq("id", suggestion_id).execute()
 
         return execution
 
@@ -106,13 +162,11 @@ class ExecutionService:
 
         try:
             # Step 1: Pull executions in ONE query
-            # Using 'timestamp' as it is explicitly populated by register_execution.
-            # Removed .limit() to avoid cross-symbol starvation.
+            # We need to check both suggestion_id and suggestion_log_id
             query = self.supabase.table(self.executions_table)\
-                .select("symbol, fill_price, fees, suggestion_id, quantity")\
+                .select("symbol, fill_price, fees, suggestion_id, suggestion_log_id, quantity, target_price")\
                 .eq("user_id", user_id)\
                 .in_("symbol", symbols)\
-                .neq("suggestion_id", "null")\
                 .neq("fill_price", "null")\
                 .gte("timestamp", cutoff_date)
 
@@ -122,42 +176,75 @@ class ExecutionService:
             if not executions:
                 return {}
 
-            # Step 2: Pull suggestion logs
-            suggestion_ids = list(set(ex["suggestion_id"] for ex in executions if ex.get("suggestion_id")))
+            # Step 2: Resolve Targets
+            # Targets might be directly on execution now (new schema) or on linked suggestion
 
-            target_by_log_id = {}
+            # Collect IDs for lookup
+            suggestion_ids = set()
+            log_ids = set()
+
+            for ex in executions:
+                # If target_price is already on execution, we don't need to look it up
+                if ex.get("target_price") is not None:
+                    continue
+
+                if ex.get("suggestion_id"):
+                    suggestion_ids.add(ex["suggestion_id"])
+                elif ex.get("suggestion_log_id"):
+                    log_ids.add(ex["suggestion_log_id"])
+
+            target_map = {} # ID -> Price
+
+            # Lookup trade_suggestions
             if suggestion_ids:
-                # Chunking could be needed if suggestion_ids is very large, but assuming reasonable batch.
-                s_res = self.supabase.table(self.logs_table)\
-                    .select("id, target_price")\
-                    .in_("id", suggestion_ids)\
-                    .execute()
+                try:
+                    res = self.supabase.table(self.suggestions_table)\
+                        .select("id, target_price")\
+                        .in_("id", list(suggestion_ids))\
+                        .execute()
+                    for row in res.data or []:
+                        if row.get("target_price"):
+                            target_map[row["id"]] = float(row["target_price"])
+                except Exception:
+                    pass
 
-                for row in s_res.data or []:
-                    if row.get("target_price"):
-                        target_by_log_id[row["id"]] = float(row["target_price"])
+            # Lookup suggestion_logs
+            if log_ids:
+                try:
+                    res = self.supabase.table(self.logs_table)\
+                        .select("id, target_price")\
+                        .in_("id", list(log_ids))\
+                        .execute()
+                    for row in res.data or []:
+                        if row.get("target_price"):
+                            target_map[row["id"]] = float(row["target_price"])
+                except Exception:
+                    pass
 
             # Compute stats
-            # Maintain running sums per symbol
-            # { symbol: { count, sum_abs_slip, sum_slip_bps, sum_fees, sum_drag } }
             aggregates = {}
 
             for ex in executions:
                 symbol = ex.get("symbol")
-                suggestion_id = ex.get("suggestion_id")
                 fill_price = float(ex.get("fill_price") or 0.0)
                 fees = float(ex.get("fees") or 0.0)
                 qty = float(ex.get("quantity") or 0.0)
 
                 # Fees per contract dollars
-                # If quantity is missing or zero, fallback to total fees (safest assumption)
                 fees_per_contract = (fees / qty) if qty > 0 else fees
 
-                target = target_by_log_id.get(suggestion_id)
+                # Determine target price
+                target = None
+                if ex.get("target_price") is not None:
+                    target = float(ex["target_price"])
+                else:
+                    # Try linking
+                    sid = ex.get("suggestion_id") or ex.get("suggestion_log_id")
+                    target = target_map.get(sid)
 
                 if target is None or target <= 0:
                     continue
-                if fill_price is None: # Should be filtered by query but double check
+                if fill_price is None:
                     continue
 
                 # Slippage in contract dollars (x100 for options)

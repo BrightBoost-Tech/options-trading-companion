@@ -13,14 +13,9 @@ from packages.quantum.cache import get_cached_data, save_to_cache
 # but we are moving to the new service internally.
 from packages.quantum.market_data_cache import get_cached_market_data, cache_market_data
 from packages.quantum.services.market_data_cache import get_market_data_cache, TTL_QUOTES, TTL_SNAPSHOTS, TTL_OHLC
+from packages.quantum.services.cache_key_builder import make_cache_key_parts, normalize_symbol as normalize_option_symbol
 from packages.quantum.services.provider_guardrails import guardrail
 from packages.quantum.analytics.factors import calculate_trend, calculate_iv_rank
-
-def normalize_option_symbol(symbol: str) -> str:
-    """Ensures option symbols have the 'O:' prefix required by Polygon."""
-    if len(symbol) > 5 and not symbol.startswith('O:'):
-        return f"O:{symbol}"
-    return symbol
 
 def extract_underlying_symbol(symbol: str) -> str:
     """
@@ -82,7 +77,7 @@ class PolygonService:
         # 1. Check New Unified Cache
         to_date_str = to_date.strftime('%Y-%m-%d')
         # Use simple key parts: symbol, days, date
-        cache_key_parts = [symbol, days, to_date_str]
+        cache_key_parts = make_cache_key_parts("OHLC", symbol=symbol, days=days, to_date_str=to_date_str)
         cached = self.cache.get("OHLC", cache_key_parts)
         if cached:
             return cached
@@ -160,19 +155,20 @@ class PolygonService:
         """Fetches details for a given ticker, including sector."""
 
         # Check cache
-        cached = self.cache.get("DETAILS", symbol)
+        cache_key_parts = make_cache_key_parts("DETAILS", symbol=symbol)
+        cached = self.cache.get("DETAILS", cache_key_parts)
         if cached:
             return cached
 
-        with self.cache.inflight_lock("DETAILS", symbol):
+        with self.cache.inflight_lock("DETAILS", cache_key_parts):
              # Double-check
-            cached = self.cache.get("DETAILS", symbol)
+            cached = self.cache.get("DETAILS", cache_key_parts)
             if cached: return cached
 
             result = self._get_ticker_details_api(symbol)
 
             if result:
-                self.cache.set("DETAILS", symbol, result, ttl_seconds=86400 * 7) # 1 week TTL for static details
+                self.cache.set("DETAILS", cache_key_parts, result, ttl_seconds=86400 * 7) # 1 week TTL for static details
 
             return result
 
@@ -202,7 +198,7 @@ class PolygonService:
         """
         # Cache key: EARNINGS:{symbol}:{today_date}
         today_str = datetime.now().strftime('%Y-%m-%d')
-        key_parts = [symbol, today_str]
+        key_parts = make_cache_key_parts("EARNINGS", symbol=symbol, today_str=today_str)
 
         cached = self.cache.get("EARNINGS", key_parts)
         if cached:
@@ -273,14 +269,15 @@ class PolygonService:
         Uses Polygon's quotes endpoint.
         """
         # Cache check (short TTL)
-        cached = self.cache.get("QUOTE", symbol)
+        cache_key_parts = make_cache_key_parts("QUOTE", symbol=symbol)
+        cached = self.cache.get("QUOTE", cache_key_parts)
         if cached:
             return cached
 
         result = self._get_recent_quote_api(symbol)
 
         if result.get("price") is not None or result.get("bid") > 0:
-             self.cache.set("QUOTE", symbol, result, ttl_seconds=TTL_QUOTES)
+             self.cache.set("QUOTE", cache_key_parts, result, ttl_seconds=TTL_QUOTES)
 
         return result
 
@@ -352,14 +349,15 @@ class PolygonService:
         Endpoint: /v3/snapshot/options/{underlyingAsset}/{optionContract}
         """
         # Cache check
-        cached = self.cache.get("SNAPSHOT", symbol)
+        cache_key_parts = make_cache_key_parts("SNAPSHOT", symbol=symbol)
+        cached = self.cache.get("SNAPSHOT", cache_key_parts)
         if cached:
             return cached
 
         result = self._get_option_snapshot_api(symbol)
 
         if result:
-            self.cache.set("SNAPSHOT", symbol, result, ttl_seconds=TTL_SNAPSHOTS)
+            self.cache.set("SNAPSHOT", cache_key_parts, result, ttl_seconds=TTL_SNAPSHOTS)
 
         return result
 
@@ -401,7 +399,8 @@ class PolygonService:
         """
         # Cache key needs to include params
         # Note: we stringify params. Order is preserved in list.
-        cache_key = [underlying, str(strike_range), str(limit), datetime.now().strftime('%Y-%m-%d-%H')]
+        now_str = datetime.now().strftime('%Y-%m-%d-%H')
+        cache_key = make_cache_key_parts("CHAIN", underlying=underlying, strike_range=strike_range, limit=limit, date_str=now_str)
         cached = self.cache.get("CHAIN", cache_key)
         if cached:
             return cached

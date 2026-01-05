@@ -3,7 +3,7 @@ from typing import Optional, Dict
 from packages.quantum.security.task_auth import verify_internal_task_request
 from packages.quantum.security.secrets_provider import SecretsProvider
 from supabase import create_client, Client
-from datetime import datetime
+from datetime import datetime, timedelta
 import os
 
 # Job Enqueue Dependencies
@@ -13,7 +13,7 @@ from packages.quantum.jobs.http_models import EnqueueResponse
 # Keep imports that might be needed for other endpoints not being converted
 # (e.g. IV daily refresh which was NOT in the target list, and train-learning-v3)
 from packages.quantum.services.universe_service import UniverseService
-from packages.quantum.market_data import PolygonService
+from packages.quantum.services.market_data_truth_layer import MarketDataTruthLayer
 from packages.quantum.services.iv_repository import IVRepository
 from packages.quantum.services.iv_point_service import IVPointService
 from packages.quantum.analytics.conviction_service import ConvictionService
@@ -189,28 +189,56 @@ async def iv_daily_refresh_task(
         print(f"[IV Task] Error fetching universe: {e}")
         return {"status": "error", "message": "Failed to fetch universe"}
 
-    poly_service = PolygonService()
+    truth_layer = MarketDataTruthLayer()
     iv_repo = IVRepository(client)
     stats = {"ok": 0, "failed": 0, "errors": []}
 
     for sym in symbols:
         try:
-            chain = poly_service.get_option_chain_snapshot(sym, strike_range=0.20)
+            # 1. Normalize symbol
+            norm_sym = truth_layer.normalize_symbol(sym)
+
+            # 2. Get Spot Price via Snapshot (TruthLayer)
+            # Use snapshot_many for consistency (handles single list too)
+            snapshots = truth_layer.snapshot_many([norm_sym])
+            snap = snapshots.get(norm_sym, {})
+            quote = snap.get("quote", {})
+            spot = quote.get("mid") or quote.get("last") or 0.0
+
+            # Fallback to history if spot missing
+            if spot <= 0:
+                end_dt = datetime.now()
+                start_dt = end_dt - timedelta(days=5)
+                bars = truth_layer.daily_bars(norm_sym, start_dt, end_dt)
+                if bars:
+                    spot = bars[-1]["close"]
+
+            if spot <= 0:
+                stats["failed"] += 1
+                continue
+
+            # 3. Get Chain via TruthLayer
+            chain = truth_layer.option_chain(norm_sym, strike_range=0.20)
+
             if not chain:
                 stats["failed"] += 1
                 continue
 
-            quote = poly_service.get_recent_quote(sym)
-            spot = (quote['bid'] + quote['ask']) / 2.0
-            if spot <= 0:
-                 hist = poly_service.get_historical_prices(sym, days=2)
-                 if hist and hist.get('prices'): spot = hist['prices'][-1]
+            # 4. Adapt Chain for IVPointService (Legacy Compatibility)
+            # IVPointService expects: details.expiration_date, details.strike_price, details.contract_type, greeks.iv
+            adapted_chain = []
+            for c in chain:
+                adapted_chain.append({
+                    "details": {
+                        "expiration_date": c.get("expiry"),
+                        "strike_price": c.get("strike"),
+                        "contract_type": c.get("right")
+                    },
+                    "greeks": c.get("greeks") or {},
+                    "implied_volatility": c.get("iv")
+                })
 
-            if spot <= 0:
-                stats["failed"] += 1
-                continue
-
-            result = IVPointService.compute_atm_iv_30d_from_chain(chain, spot, datetime.now())
+            result = IVPointService.compute_atm_iv_target_from_chain(adapted_chain, spot, datetime.now())
             if result.get("iv_30d") is None:
                 stats["failed"] += 1
             else:

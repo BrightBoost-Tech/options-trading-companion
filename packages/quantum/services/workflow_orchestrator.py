@@ -25,7 +25,6 @@ from packages.quantum.services.decision_lineage_builder import DecisionLineageBu
 from packages.quantum.options_scanner import scan_for_opportunities
 from packages.quantum.analytics.regime_engine_v3 import RegimeEngineV3, RegimeState, GlobalRegimeSnapshot
 from packages.quantum.models import Holding
-from packages.quantum.market_data import PolygonService
 from packages.quantum.ev_calculator import calculate_exit_metrics
 from packages.quantum.analytics.loss_minimizer import LossMinimizer
 from packages.quantum.analytics.conviction_service import ConvictionService
@@ -175,7 +174,6 @@ async def run_morning_cycle(supabase: Client, user_id: str):
     truth_layer = MarketDataTruthLayer()
 
     # V3: Compute Global Regime Snapshot ONCE
-    # market_data = PolygonService() # REMOVED: Not used in morning cycle, and not for RegimeEngine
     iv_repo = IVRepository(supabase)
     iv_point_service = IVPointService(supabase)
 

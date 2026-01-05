@@ -343,6 +343,7 @@ else:
 # Initialize Analytics Service (Use Admin Client for system logging)
 analytics_service = AnalyticsService(supabase_admin)
 app.state.analytics_service = analytics_service
+app.state.supabase = supabase_admin
 
 # --- Register Plaid Endpoints ---
 plaid_endpoints.register_plaid_endpoints(

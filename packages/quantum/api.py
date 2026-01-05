@@ -232,12 +232,17 @@ app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 env_origins = os.getenv("CORS_ALLOWED_ORIGINS", "")
 parsed_origins = [o.strip() for o in env_origins.split(",") if o.strip()]
 
-ALLOWED_ORIGINS = [
-    "http://localhost:3000",
-    "http://127.0.0.1:3000",
-    "http://localhost:3001",
-    "http://127.0.0.1:3001",
-] + parsed_origins
+# 🛡️ Sentinel: Only allow localhost in non-production environments
+app_env = os.getenv("APP_ENV", "development")
+if app_env == "production":
+    ALLOWED_ORIGINS = parsed_origins
+else:
+    ALLOWED_ORIGINS = [
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
+        "http://localhost:3001",
+        "http://127.0.0.1:3001",
+    ] + parsed_origins
 
 # Add Security Headers Middleware
 app.add_middleware(SecurityHeadersMiddleware)

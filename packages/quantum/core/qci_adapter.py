@@ -4,7 +4,6 @@ import requests
 import numpy as np
 
 try:
-    # pip package: qci-client
     from qci_client import QciClient
     _QCI_IMPORT_ERROR = None
 except ImportError as e:
@@ -14,8 +13,6 @@ except ImportError as e:
 
 class QciDiracAdapter:
     def __init__(self):
-        # Important: do NOT crash uvicorn at import time if qci-client isn't installed.
-        # Only fail when QCI is actually requested/instantiated.
         if QciClient is None:
             raise ImportError(
                 "qci-client is not installed. Install with: pip install qci-client "

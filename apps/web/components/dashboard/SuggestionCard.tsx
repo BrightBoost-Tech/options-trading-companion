@@ -355,27 +355,27 @@ const SuggestionCard = ({
                     {/* Dismiss Popover/Buttons */}
                     <div className="relative group">
                          {dismissOpen ? (
-                             <div className="flex items-center gap-1 animate-in fade-in zoom-in duration-200">
+                             <div className="flex items-center gap-1.5 animate-in fade-in zoom-in duration-200 origin-right">
                                  <button
                                     type="button"
                                     onClick={() => handleDismiss('too_risky')}
-                                    className="text-[10px] bg-red-100 text-red-700 hover:bg-red-200 px-2 py-1 rounded border border-red-200"
+                                    className="h-7 px-3 text-xs font-medium bg-red-100 text-red-700 hover:bg-red-200 dark:bg-red-900/30 dark:text-red-400 dark:hover:bg-red-900/50 rounded-md border border-red-200 dark:border-red-900 transition-colors"
                                     aria-label={`Dismiss ${displaySymbol} as too risky`}
                                  >
-                                     Risky
+                                     Too Risky
                                  </button>
                                  <button
                                     type="button"
                                     onClick={() => handleDismiss('bad_price')}
-                                    className="text-[10px] bg-yellow-100 text-yellow-700 hover:bg-yellow-200 px-2 py-1 rounded border border-yellow-200"
+                                    className="h-7 px-3 text-xs font-medium bg-yellow-100 text-yellow-700 hover:bg-yellow-200 dark:bg-yellow-900/30 dark:text-yellow-400 dark:hover:bg-yellow-900/50 rounded-md border border-yellow-200 dark:border-yellow-900 transition-colors"
                                     aria-label={`Dismiss ${displaySymbol} due to bad price`}
                                  >
-                                     Price
+                                     Bad Price
                                  </button>
                                  <button
                                     type="button"
                                     onClick={() => handleDismiss('wrong_timing')}
-                                    className="text-[10px] bg-slate-100 text-slate-700 hover:bg-slate-200 px-2 py-1 rounded border border-slate-200"
+                                    className="h-7 px-3 text-xs font-medium bg-slate-100 text-slate-700 hover:bg-slate-200 dark:bg-slate-800 dark:text-slate-400 dark:hover:bg-slate-700 rounded-md border border-slate-200 dark:border-slate-700 transition-colors"
                                     aria-label={`Dismiss ${displaySymbol} due to wrong timing`}
                                  >
                                      Timing
@@ -383,17 +383,17 @@ const SuggestionCard = ({
                                  <button
                                     type="button"
                                     onClick={() => setDismissOpen(false)}
-                                    className="ml-1 p-1 hover:bg-muted rounded text-muted-foreground"
+                                    className="h-7 w-7 flex items-center justify-center hover:bg-muted rounded-md text-muted-foreground hover:text-foreground transition-colors"
                                     aria-label="Cancel dismiss"
                                  >
-                                     <X className="w-3 h-3" />
+                                     <X className="w-4 h-4" />
                                  </button>
                              </div>
                          ) : (
                              <button
                                  type="button"
                                  onClick={() => setDismissOpen(true)}
-                                 className="text-xs text-muted-foreground hover:text-foreground px-2 py-1"
+                                 className="h-7 px-3 text-xs font-medium text-muted-foreground hover:text-foreground hover:bg-muted/50 rounded-md transition-colors"
                                  aria-label={`Dismiss suggestion for ${displaySymbol}`}
                              >
                                  Dismiss

@@ -189,10 +189,27 @@ def run_job_run(job_run_id: str) -> None:
         # I will check `packages/quantum/jobs/handlers/universe_sync.py` if possible.
         # I'll try to read it.
 
-        result = handler(payload=payload)
+        # Safely dispatch to handler, supporting both new (payload-aware) and legacy (no-arg) signatures
+        import inspect
+        sig = inspect.signature(handler)
 
-        # 4. Success
-        store.mark_succeeded(job_run_id, result if isinstance(result, dict) else {"result": str(result)})
+        if "payload" in sig.parameters or any(p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values()):
+            result = handler(payload=payload)
+        else:
+            # Legacy fallback: call without arguments
+            logger.info(f"Handler {job_name} does not accept payload. Calling without arguments.")
+            result = handler()
+
+        # 4. Success or Partial Failure
+        final_result = result if isinstance(result, dict) else {"result": str(result)}
+
+        # Check for partial failures reported by the handler
+        # e.g. {"users_failed": 5, "users_total": 10}
+        if isinstance(final_result, dict) and final_result.get("users_failed", 0) > 0:
+            logger.warning(f"Job {job_run_id} completed with partial failures: {final_result}")
+            store.mark_partial_failure(job_run_id, final_result)
+        else:
+            store.mark_succeeded(job_run_id, final_result)
 
     except RetryableJobError as e:
         # Handle manual retry request

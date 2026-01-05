@@ -67,7 +67,11 @@ async def morning_brief(
         client=client,
         job_name=job_name,
         idempotency_key=key,
-        payload={}
+        payload={
+            "app_version": APP_VERSION,
+            "trigger_ts": datetime.now().isoformat(),
+            "task_name": job_name
+        }
     )
 
     return {
@@ -89,7 +93,11 @@ async def midday_scan(
         client=client,
         job_name=job_name,
         idempotency_key=key,
-        payload={}
+        payload={
+            "app_version": APP_VERSION,
+            "trigger_ts": datetime.now().isoformat(),
+            "task_name": job_name
+        }
     )
 
     return {
@@ -112,7 +120,11 @@ async def weekly_report_task(
         client=client,
         job_name=job_name,
         idempotency_key=key,
-        payload={}
+        payload={
+            "app_version": APP_VERSION,
+            "trigger_ts": datetime.now().isoformat(),
+            "task_name": job_name
+        }
     )
 
     return {
@@ -134,7 +146,11 @@ async def universe_sync_task(
         client=client,
         job_name=job_name,
         idempotency_key=key,
-        payload={}
+        payload={
+            "app_version": APP_VERSION,
+            "trigger_ts": datetime.now().isoformat(),
+            "task_name": job_name
+        }
     )
 
     return {
@@ -159,6 +175,9 @@ async def backfill_history(
         job_name=job_name,
         idempotency_key=key,
         payload={
+            "app_version": APP_VERSION,
+            "trigger_ts": datetime.now().isoformat(),
+            "task_name": job_name,
             "start_date": start_date,
             "end_date": end_date
         }

@@ -78,6 +78,19 @@ class JobRunStore:
     def mark_succeeded(self, job_run_id: str, result: Dict[str, Any]) -> None:
         complete_job_run(self.client, job_run_id, result)
 
+    def mark_partial_failure(self, job_run_id: str, result: Dict[str, Any]) -> None:
+        """
+        Marks the job as failed_retryable, but without scheduling an immediate retry.
+        This state indicates the job completed but some items failed (e.g. some users).
+        """
+        self.client.table("job_runs").update({
+            "status": "failed_retryable",
+            "result": result,
+            "completed_at": datetime.now().isoformat(),
+            "locked_by": None,
+            "locked_at": None
+        }).eq("id", job_run_id).execute()
+
     def mark_retryable(self, job_run_id: str, error: Dict[str, Any], run_after: datetime) -> None:
         requeue_job_run(self.client, job_run_id, run_after.isoformat(), error)
 

@@ -57,7 +57,9 @@ trend = layer.get_trend("SPY") # "UP", "DOWN", or "NEUTRAL"
 ## Migration Status
 
 - **Options Scanner**: Fully migrated to use `snapshot_many`.
-- **Workflow Orchestrator**: Migrated morning cycle to use Truth Layer and fixed IV Rank bug.
+- **Workflow Orchestrator**: Fully migrated. All cycles (morning/midday) use Truth Layer.
+- **Internal Tasks**: `/iv/daily-refresh` uses Truth Layer for chain and spot checks.
+- **Requirement**: TruthLayer is **REQUIRED** for all workflows and internal analytics. `PolygonService` is allowed ONLY for legacy endpoints until deleted.
 - **Legacy**: `PolygonService` in `market_data.py` is kept for backward compatibility but should be deprecated in favor of `MarketDataTruthLayer`.
 
 ## Configuration

@@ -398,6 +398,10 @@ app.include_router(analytics_router)
 from packages.quantum.historical_endpoints import router as historical_router
 app.include_router(historical_router)
 
+# --- Register Validation Endpoints (v3 Go-Live) ---
+from packages.quantum.validation_endpoints import router as validation_router
+app.include_router(validation_router)
+
 # --- Capabilities Endpoint ---
 from packages.quantum.services.capability_service import CapabilityResolver
 

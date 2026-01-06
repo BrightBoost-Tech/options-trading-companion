@@ -6,7 +6,7 @@ import { Badge } from '@/components/ui/badge';
 import { Suggestion } from '@/lib/types';
 import { logEvent } from '@/lib/analytics';
 import { QuantumTooltip } from '@/components/ui/QuantumTooltip';
-import { Check, X, RefreshCw, AlertTriangle, Clock, Loader2 } from 'lucide-react';
+import { X, RefreshCw, Clock, Loader2 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 
 interface SuggestionCardProps {
@@ -356,76 +356,75 @@ const SuggestionCard = ({
                     <div className="relative group">
                          {dismissOpen ? (
                              <div className="flex items-center gap-1.5 animate-in fade-in zoom-in duration-200 origin-right">
-                                 <button
-                                    type="button"
+                                 <Button
+                                    variant="outline"
                                     onClick={() => handleDismiss('too_risky')}
-                                    className="h-7 px-3 text-xs font-medium bg-red-100 text-red-700 hover:bg-red-200 dark:bg-red-900/30 dark:text-red-400 dark:hover:bg-red-900/50 rounded-md border border-red-200 dark:border-red-900 transition-colors"
+                                    className="h-7 px-3 text-xs font-medium bg-red-100 text-red-700 hover:bg-red-200 hover:text-red-800 dark:bg-red-900/30 dark:text-red-400 dark:hover:bg-red-900/50 border-red-200 dark:border-red-900"
                                     aria-label={`Dismiss ${displaySymbol} as too risky`}
                                  >
                                      Too Risky
-                                 </button>
-                                 <button
-                                    type="button"
+                                 </Button>
+                                 <Button
+                                    variant="outline"
                                     onClick={() => handleDismiss('bad_price')}
-                                    className="h-7 px-3 text-xs font-medium bg-yellow-100 text-yellow-700 hover:bg-yellow-200 dark:bg-yellow-900/30 dark:text-yellow-400 dark:hover:bg-yellow-900/50 rounded-md border border-yellow-200 dark:border-yellow-900 transition-colors"
+                                    className="h-7 px-3 text-xs font-medium bg-yellow-100 text-yellow-700 hover:bg-yellow-200 hover:text-yellow-800 dark:bg-yellow-900/30 dark:text-yellow-400 dark:hover:bg-yellow-900/50 border-yellow-200 dark:border-yellow-900"
                                     aria-label={`Dismiss ${displaySymbol} due to bad price`}
                                  >
                                      Bad Price
-                                 </button>
-                                 <button
-                                    type="button"
+                                 </Button>
+                                 <Button
+                                    variant="outline"
                                     onClick={() => handleDismiss('wrong_timing')}
-                                    className="h-7 px-3 text-xs font-medium bg-slate-100 text-slate-700 hover:bg-slate-200 dark:bg-slate-800 dark:text-slate-400 dark:hover:bg-slate-700 rounded-md border border-slate-200 dark:border-slate-700 transition-colors"
+                                    className="h-7 px-3 text-xs font-medium bg-slate-100 text-slate-700 hover:bg-slate-200 hover:text-slate-800 dark:bg-slate-800 dark:text-slate-400 dark:hover:bg-slate-700 border-slate-200 dark:border-slate-700"
                                     aria-label={`Dismiss ${displaySymbol} due to wrong timing`}
                                  >
                                      Timing
-                                 </button>
-                                 <button
-                                    type="button"
+                                 </Button>
+                                 <Button
+                                    variant="ghost"
                                     onClick={() => setDismissOpen(false)}
-                                    className="h-7 w-7 flex items-center justify-center hover:bg-muted rounded-md text-muted-foreground hover:text-foreground transition-colors"
+                                    className="h-7 w-7 p-0 rounded-md text-muted-foreground hover:text-foreground"
                                     aria-label="Cancel dismiss"
                                  >
                                      <X className="w-4 h-4" />
-                                 </button>
+                                 </Button>
                              </div>
                          ) : (
-                             <button
-                                 type="button"
+                             <Button
+                                 variant="ghost"
                                  onClick={() => setDismissOpen(true)}
-                                 className="h-7 px-3 text-xs font-medium text-muted-foreground hover:text-foreground hover:bg-muted/50 rounded-md transition-colors"
+                                 className="h-7 px-3 text-xs font-medium text-muted-foreground hover:text-foreground hover:bg-muted/50"
                                  aria-label={`Dismiss suggestion for ${displaySymbol}`}
                              >
                                  Dismiss
-                             </button>
+                             </Button>
                          )}
                     </div>
 
-                    <button
-                        type="button"
+                    <Button
+                        variant="outline"
                         onClick={handleModify}
-                        className="text-xs bg-card border border-border text-foreground px-3 py-1 rounded hover:bg-muted/50"
+                        className="h-7 px-3 text-xs bg-card border-border hover:bg-muted/50"
                         aria-label={`Modify trade parameters for ${displaySymbol}`}
                     >
                         Modify
-                    </button>
+                    </Button>
 
-                    <button
-                        type="button"
+                    <Button
                         onClick={handleStage}
                         disabled={(isStale && !staged) || isStaging}
-                        className={`text-xs px-3 py-1 rounded font-medium transition-colors flex items-center gap-1 ${
+                        className={`h-7 text-xs px-3 font-medium transition-colors gap-1 ${
                             staged
-                                ? 'bg-green-100 text-green-800 dark:bg-green-900/30 dark:text-green-400'
+                                ? 'bg-green-100 text-green-800 hover:bg-green-200 dark:bg-green-900/30 dark:text-green-400 dark:hover:bg-green-900/50'
                                 : isStale
-                                    ? 'bg-muted text-muted-foreground cursor-not-allowed opacity-70'
+                                    ? 'bg-muted text-muted-foreground hover:bg-muted cursor-not-allowed opacity-70'
                                     : 'bg-purple-600 text-white hover:bg-purple-700'
                         }`}
                         aria-label={staged ? `Trade for ${displaySymbol} is staged` : `Stage trade for ${displaySymbol}`}
                     >
                         {isStaging && <Loader2 className="w-3 h-3 animate-spin" />}
                         {staged ? 'Staged' : 'Stage Trade'}
-                    </button>
+                    </Button>
                 </div>
             </CardContent>
         </Card>

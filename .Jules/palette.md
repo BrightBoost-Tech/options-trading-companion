@@ -5,3 +5,7 @@
 ## 2025-05-27 - Contextual Actions in List Views
 **Learning:** In dashboard grids where the same action (e.g., "Dismiss", "Stage") appears on multiple cards, generic labels like "Dismiss" are insufficient for screen reader users navigating by focus. They need context (e.g., "Dismiss SPY").
 **Action:** Always inject the unique identifier (Ticker/Symbol) into the `aria-label` of repetitive action buttons in list views.
+
+## 2025-05-27 - Standardizing Interactive Elements
+**Learning:** Custom interactive elements (like raw `<button>` tags with Tailwind classes) often miss critical states like `focus-visible`. This creates an inconsistent keyboard navigation experience where some elements have clear focus rings and others don't.
+**Action:** Replace custom buttons with the design system's `Button` component to inherit standard focus states and interactivity patterns automatically.

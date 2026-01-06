@@ -228,7 +228,7 @@ def register_plaid_endpoints(
                     # Looking at CashService, it orders by created_at desc limit 1. So insert is fine.
 
                     supabase.table("portfolio_snapshots").insert(snapshot_data).execute()
-                    print("✅ Portfolio Snapshot updated with buying_power")
+                    print("✅ Portfolio Snapshot updated with buying_power and holdings")
 
                 except Exception as e:
                      print(f"⚠️ Failed to update portfolio_snapshots (non-critical): {e}")

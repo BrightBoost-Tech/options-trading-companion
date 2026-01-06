@@ -11,6 +11,7 @@ import PortfolioOptimizer from '@/components/dashboard/PortfolioOptimizer';
 import { WeeklyProgressCard } from '@/components/dashboard/WeeklyProgressCard';
 import SuggestionTabs from '@/components/dashboard/SuggestionTabs';
 import TradeInbox from '@/components/dashboard/TradeInbox';
+import { GoLiveReadinessCard } from '@/components/dashboard/GoLiveReadinessCard';
 import StrategyProfilesPanel from '@/components/dashboard/StrategyProfilesPanel';
 import DisciplineSummary from '@/components/dashboard/DisciplineSummary';
 import RiskSummaryCard from '@/components/dashboard/RiskSummaryCard';
@@ -371,6 +372,9 @@ export default function DashboardPage() {
         {/* NEW SECTION: STRATEGY PROFILES */}
         <StrategyProfilesPanel />
 
+        {/* GO-LIVE READINESS CARD */}
+        <GoLiveReadinessCard />
+
         {/* SECTION 1.5: HISTORICAL SIMULATION (Polished) */}
         <div className="bg-card rounded-lg shadow p-6 border-l-4 border-indigo-500 border border-border border-l-0">
             <div className="flex justify-between items-center mb-4">
@@ -538,12 +542,12 @@ export default function DashboardPage() {
                              <div className="grid grid-cols-2 gap-4">
                                 <div className="bg-card p-3 rounded border border-purple-200 dark:border-purple-800">
                                     <p className="text-xs text-muted-foreground">Win Rate</p>
-                                    <p className="text-xl font-bold text-purple-900 dark:text-purple-200">{journalStats.stats.win_rate?.toFixed(1) || 0}%</p>
+                                    <p className="text-xl font-bold text-purple-900 dark:text-purple-200">{journalStats.stats?.win_rate?.toFixed(1) || 0}%</p>
                                 </div>
                                 <div className="bg-card p-3 rounded border border-purple-200 dark:border-purple-800">
                                     <p className="text-xs text-muted-foreground">Total P&L</p>
-                                    <p className={`text-xl font-bold ${(journalStats.stats.total_pnl || 0) >= 0 ? 'text-green-600 dark:text-green-400' : 'text-red-600 dark:text-red-400'}`}>
-                                        ${(journalStats.stats.total_pnl || 0).toFixed(0)}
+                                    <p className={`text-xl font-bold ${(journalStats.stats?.total_pnl || 0) >= 0 ? 'text-green-600 dark:text-green-400' : 'text-red-600 dark:text-red-400'}`}>
+                                        ${(journalStats.stats?.total_pnl || 0).toFixed(0)}
                                     </p>
                                 </div>
                             </div>

@@ -315,12 +315,47 @@ async def get_portfolio_snapshot(
             .execute()
 
         if res.data and len(res.data) > 0:
+            raw_data = res.data[0]
             # Need to convert dictionary to Pydantic model
-            # Assuming data structure matches roughly
-            return PortfolioSnapshot(**res.data[0])
+            try:
+                # Ensure holdings is populated if missing but positions exists
+                if "holdings" not in raw_data or not raw_data["holdings"]:
+                    if "positions" in raw_data and raw_data["positions"]:
+                         raw_data["holdings"] = raw_data["positions"]
+                    else:
+                         raw_data["holdings"] = []
+
+                # Ensure risk_metrics is at least an empty dict
+                if "risk_metrics" not in raw_data or raw_data["risk_metrics"] is None:
+                    raw_data["risk_metrics"] = {}
+
+                return PortfolioSnapshot(**raw_data)
+            except ValidationError as e:
+                # Fallback: Construct a minimal valid snapshot from raw data instead of failing silently
+                print(f"⚠️ Snapshot Parse Error (recovering): {e}")
+
+                # Recover holdings
+                holdings = raw_data.get("holdings")
+                if not isinstance(holdings, list):
+                     holdings = raw_data.get("positions")
+
+                if not isinstance(holdings, list):
+                     holdings = []
+
+                return PortfolioSnapshot(
+                    id=raw_data.get("id"),
+                    user_id=user_id,
+                    created_at=raw_data.get("created_at", datetime.now()),
+                    snapshot_type="recovery", # Mark as recovered
+                    holdings=holdings,
+                    spreads=raw_data.get("spreads") or [],
+                    risk_metrics=raw_data.get("risk_metrics") or {},
+                    buying_power=raw_data.get("buying_power")
+                )
 
         return empty_snapshot
-    except Exception:
+    except Exception as e:
+        print(f"❌ Error fetching snapshot: {e}")
         # If table doesn't exist or other error, return empty
         return empty_snapshot
 

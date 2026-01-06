@@ -253,9 +253,8 @@ export default function DashboardPage() {
 
   // --- DERIVED STATE ---
 
-  const hasPositions =
-    Array.isArray(snapshot?.positions ?? snapshot?.holdings) &&
-    (snapshot?.positions ?? snapshot?.holdings)?.length > 0;
+  const effectiveHoldings = snapshot?.positions ?? snapshot?.holdings ?? [];
+  const hasPositions = Array.isArray(effectiveHoldings) && effectiveHoldings.length > 0;
 
   return (
     <DashboardLayout mockAlerts={mockAlerts}>
@@ -324,7 +323,7 @@ export default function DashboardPage() {
                 </div>
               </div>
               <PortfolioHoldingsTable
-                  holdings={snapshot?.holdings || []}
+                  holdings={effectiveHoldings}
                   onSync={loadSnapshot}
                   onGenerateSuggestions={runAllWorkflows}
               />
@@ -342,7 +341,7 @@ export default function DashboardPage() {
                   />
                </div>
               <PortfolioOptimizer
-                positions={snapshot?.holdings}
+                positions={effectiveHoldings}
                 onOptimizationComplete={(m) => {
                   setMetrics(m);
                   // Refresh rebalance suggestions after optimization

@@ -167,7 +167,8 @@ class ExecutionService:
                 .select("symbol, fill_price, fees, suggestion_id, suggestion_log_id, quantity, target_price")\
                 .eq("user_id", user_id)\
                 .in_("symbol", symbols)\
-                .neq("fill_price", "null")\
+                .not_.is_("suggestion_id", "null")\
+                .not_.is_("fill_price", "null")\
                 .gte("timestamp", cutoff_date)
 
             ex_res = query.order("timestamp", desc=True).execute()

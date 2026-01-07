@@ -14,6 +14,7 @@ from typing import List, Dict, Optional, Any, Union
 from datetime import datetime, timedelta
 
 from packages.quantum.services.market_data_cache import get_market_data_cache
+from packages.quantum.services.cache_key_builder import normalize_symbol
 from packages.quantum.analytics.factors import calculate_iv_rank, calculate_trend
 
 # Use a module-level logger
@@ -106,7 +107,7 @@ class MarketDataTruthLayer:
             return {}
 
         # 1. Normalize tickers and filter valid ones
-        # Use existing logic for option symbol normalization
+        # Use centralized normalization (Sentinel: Input Sanitization)
         normalized_tickers = [self.normalize_symbol(t) for t in tickers]
         # Remove duplicates
         unique_tickers = list(set(normalized_tickers))
@@ -461,21 +462,9 @@ class MarketDataTruthLayer:
     def normalize_symbol(self, symbol: str) -> str:
         """
         Ensures proper Polygon format.
-        O: prefix for options (length > 5 heuristic or known format).
+        Delegates to centralized cache_key_builder for consistent sanitization.
         """
-        # Clean inputs
-        s = symbol.strip().upper()
-
-        # Option heuristic: has numbers? length > 6?
-        # Standard format: Ticker + Date + C/P + Price (e.g. AAPL230616C00150000)
-        # Length of date(6) + type(1) + price(8) = 15 chars fixed suffix.
-        # Plus ticker (1-5). So total 16-20 chars.
-        # Simple check: if > 8 chars and contains digits, likely option.
-        if len(s) > 6 and any(c.isdigit() for c in s):
-            if not s.startswith("O:"):
-                return f"O:{s}"
-
-        return s
+        return normalize_symbol(symbol)
 
     # Backward compat
     _normalize_symbol = normalize_symbol

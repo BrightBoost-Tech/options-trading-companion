@@ -7,14 +7,25 @@ def normalize_symbol(symbol: str) -> str:
     Normalizes a symbol:
     - Uppercase and trim
     - Handles 'O:' prefix for options (length > 5 chars)
+    - 🛡️ Sentinel: Sanitizes input to prevent URL injection/traversal
     """
     if not symbol:
         return ""
 
     s = symbol.strip().upper()
 
+    # 🛡️ Sentinel: Sanitize to prevent URL injection/traversal
+    # Allow A-Z, 0-9, ., -, : (for O: prefix or currencies)
+    # This prevents '?', '&', '/', and other special chars from breaking URL structure
+    s = re.sub(r'[^A-Z0-9\.\-\:]', '', s)
+
     # Polygon option symbol logic
-    if len(s) > 5 and not s.startswith('O:'):
+    # - Must be > 5 chars
+    # - Must NOT start with O: (already handled or doesn't need it)
+    # - Must NOT be a crypto pair (usually contains '-')
+    # - Must NOT be a currency pair (usually contains ':')
+    # - Must contain digits (options always have dates/prices)
+    if len(s) > 5 and not s.startswith('O:') and '-' not in s and ':' not in s and any(c.isdigit() for c in s):
         return f"O:{s}"
 
     return s

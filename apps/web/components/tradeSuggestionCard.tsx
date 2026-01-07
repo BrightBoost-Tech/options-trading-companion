@@ -1,3 +1,5 @@
+'use client';
+
 import React, { useState } from 'react';
 import { Card, CardContent } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
@@ -246,6 +248,7 @@ export default function TradeSuggestionCard({ suggestion, onLogged }: TradeSugge
             variant="outline"
             size="sm"
             onClick={copyOrderJson}
+            aria-label={`Copy limit order JSON for ${displaySymbol}`}
             className="mt-2 w-full h-auto py-1 text-xs flex items-center justify-center gap-2 border-orange-200 text-orange-700 bg-white hover:bg-orange-100 hover:text-orange-800 transition-colors"
         >
           {copied ? <CheckCircle2 className="w-3 h-3" /> : <Copy className="w-3 h-3" />}
@@ -279,6 +282,7 @@ export default function TradeSuggestionCard({ suggestion, onLogged }: TradeSugge
                 variant="outline"
                 size="sm"
                 onClick={copyOrderJson}
+                aria-label={`Copy trade JSON for ${displaySymbol}`}
                 className="flex-1 h-auto py-1 text-xs flex items-center justify-center gap-2 border-blue-200 text-blue-700 bg-white hover:bg-blue-100 hover:text-blue-800 transition-colors"
             >
               {copied ? <CheckCircle2 className="w-3 h-3" /> : <Copy className="w-3 h-3" />}
@@ -289,6 +293,7 @@ export default function TradeSuggestionCard({ suggestion, onLogged }: TradeSugge
                 size="sm"
                 onClick={handleEvPreview}
                 disabled={evLoading}
+                aria-label={`Preview expected value for ${displaySymbol}`}
                 className="flex-1 h-auto py-1 text-xs bg-blue-100 text-blue-700 hover:bg-blue-200 hover:text-blue-800 transition-colors"
             >
                 {evLoading ? (
@@ -386,6 +391,7 @@ export default function TradeSuggestionCard({ suggestion, onLogged }: TradeSugge
                size="sm"
                onClick={handleEvPreview}
                disabled={evLoading}
+               aria-label={`Preview expected value for ${displaySymbol}`}
                className="mt-3 h-auto p-0 text-xs text-blue-600 hover:no-underline hover:text-blue-700 disabled:opacity-50"
              >
                {evLoading ? <Loader2 className="mr-1 h-3 w-3 animate-spin" /> : null}
@@ -411,6 +417,7 @@ export default function TradeSuggestionCard({ suggestion, onLogged }: TradeSugge
                     size="sm"
                     onClick={handlePaperTrade}
                     disabled={paperTrading || paperSuccess}
+                    aria-label={`Execute paper trade for ${displaySymbol}`}
                     className={`h-auto py-1 text-xs border-blue-200 transition-colors ${
                       paperSuccess
                         ? 'bg-blue-100 text-blue-800'
@@ -429,6 +436,7 @@ export default function TradeSuggestionCard({ suggestion, onLogged }: TradeSugge
                     size="sm"
                     onClick={handleLogTrade}
                     disabled={logging || logSuccess}
+                    aria-label={`Log executed trade for ${displaySymbol}`}
                     className={`h-auto py-1 text-xs border-emerald-200 transition-colors ${
                       logSuccess
                         ? 'bg-emerald-100 text-emerald-800'

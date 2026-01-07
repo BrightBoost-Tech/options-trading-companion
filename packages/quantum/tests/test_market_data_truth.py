@@ -20,7 +20,7 @@ class TestMarketDataTruthLayer(unittest.TestCase):
         self.assertEqual(layer._normalize_symbol("AAPL230616C00150000"), "O:AAPL230616C00150000")
         self.assertEqual(layer._normalize_symbol("SPY"), "SPY")
 
-    @patch("packages.quantum.services.market_data_truth_layer.requests.get")
+    @patch("packages.quantum.services.market_data_truth_layer.requests.Session.get")
     def test_snapshot_many_parsing(self, mock_get):
         layer = MarketDataTruthLayer(api_key="test")
 

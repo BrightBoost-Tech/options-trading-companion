@@ -104,3 +104,29 @@ async def task_weekly_report(
         idempotency_key=week,
         payload={"week": week}
     )
+
+@router.post("/validation/eval", status_code=202)
+async def task_validation_eval(
+    payload: Optional[Dict[str, Any]] = Body(None),
+    authorized: bool = Depends(verify_cron_secret)
+):
+    """
+    Triggers go-live validation evaluation (Paper/Historical).
+    Payload can specify mode='paper' and optional user_id.
+    """
+    # Generate idempotency key based on date + params
+    today = datetime.now().strftime("%Y-%m-%d")
+    mode = payload.get("mode", "paper") if payload else "paper"
+    user_id = payload.get("user_id", "all") if payload else "all"
+
+    key = f"{today}-{mode}-{user_id}"
+    job_name = "validation_eval"
+
+    # Pass input payload to job
+    job_payload = payload or {"mode": "paper"}
+
+    return enqueue_job_run(
+        job_name=job_name,
+        idempotency_key=key,
+        payload=job_payload
+    )

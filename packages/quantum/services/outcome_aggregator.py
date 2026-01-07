@@ -41,7 +41,7 @@ class OutcomeAggregator:
 
             # 4. Fetch Linked Suggestions & Executions
             suggestions = self._fetch_suggestions(trace_id)
-            executions = self._fetch_executions(suggestions)
+            executions = self._fetch_executions(suggestions, trace_id)
 
             # 5. Compute Outcome
             self._process_single_outcome(decision, inference_log, suggestions, executions)
@@ -96,18 +96,44 @@ class OutcomeAggregator:
         except Exception:
             return []
 
-    def _fetch_executions(self, suggestions: List[Dict]) -> List[Dict]:
-        if not suggestions:
-            return []
-        try:
-            s_ids = [s["id"] for s in suggestions]
-            res = self.supabase.table("trade_executions") \
-                .select("*") \
-                .in_("suggestion_id", s_ids) \
-                .execute()
-            return res.data or []
-        except Exception:
-            return []
+    def _fetch_executions(self, suggestions: List[Dict], trace_id: str) -> List[Dict]:
+        """
+        Fetch executions linked to these suggestions.
+        Priority 1: suggestion_id
+        Priority 2: trace_id
+        """
+        executions = []
+
+        # 1. Try by suggestion_id
+        if suggestions:
+            try:
+                s_ids = [s["id"] for s in suggestions]
+                res = self.supabase.table("trade_executions") \
+                    .select("*") \
+                    .in_("suggestion_id", s_ids) \
+                    .execute()
+                if res.data:
+                    executions.extend(res.data)
+            except Exception:
+                pass
+
+        # If found, return immediately
+        if executions:
+            return executions
+
+        # 2. Try by trace_id (fallback)
+        if trace_id:
+            try:
+                res = self.supabase.table("trade_executions") \
+                    .select("*") \
+                    .eq("trace_id", trace_id) \
+                    .execute()
+                if res.data:
+                    executions.extend(res.data)
+            except Exception:
+                pass
+
+        return executions
 
     def _process_single_outcome(
         self,
@@ -150,6 +176,8 @@ class OutcomeAggregator:
                     reason_codes.append("polygon_unavailable")
                 else:
                     reason_codes.append("missing_market_data")
+                    # Log which execution was missing data
+                    reason_codes.append(f"execution_id:{related_id}")
 
         # Priority 2: Suggestion (No Action)
         elif suggestions:

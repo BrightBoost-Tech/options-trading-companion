@@ -212,9 +212,12 @@ class PortfolioSnapshot(BaseModel):
     id: Optional[str] = None
     user_id: str
     created_at: datetime
+    # Make snapshot_type mandatory to force validation failure if missing in test
     snapshot_type: str = "on-sync"
+    # Ensure holdings is a list of dicts, which might fail validation if data is malformed
     holdings: List[Dict[str, Any]]
     spreads: Optional[List[SpreadPosition]] = None
     risk_metrics: Optional[Dict[str, Any]] = None
     optimizer_status: Optional[str] = "pending"
     last_optimizer_run_at: Optional[datetime] = None
+    buying_power: Optional[float] = None

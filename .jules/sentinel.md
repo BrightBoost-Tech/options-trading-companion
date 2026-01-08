@@ -18,3 +18,10 @@
 **Prevention:**
 1. Never return `str(e)` or `repr(e)` in HTTP 500/502 responses.
 2. Log the full error server-side, but return a static, generic error message (e.g., "Provider Error") to the client.
+## 2025-02-18 - Sensitive Data Leakage in Exception Handling
+**Vulnerability:** Plaid API endpoints were returning raw exception strings (`str(e)`) in HTTP 400/500 responses. This could leak sensitive configuration details or upstream API response bodies containing PII/keys in production environments.
+**Learning:** Framework default behavior (returning exception details) and convenience for developers (seeing errors in frontend) often conflicts with production security requirements.
+**Prevention:**
+1. Implement a dedicated error parsing helper (like `parse_plaid_error`) that sanitizes upstream errors.
+2. Use an environment check (e.g., `APP_ENV != "production"`) to conditionally reveal detailed error messages only in safe environments.
+3. Mask `ValueError` and similar configuration exceptions with generic "Configuration Error" messages in production.

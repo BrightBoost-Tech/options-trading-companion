@@ -5,16 +5,14 @@ from typing import Dict, Any, Optional, List
 from supabase import Client
 import math
 
-from packages.quantum.services.historical_simulation import HistoricalCycleService
-from packages.quantum.strategy_profiles import StrategyConfig
+from packages.quantum.services.backtest_engine import BacktestEngine
+from packages.quantum.strategy_profiles import StrategyConfig, CostModelConfig
 
 logger = logging.getLogger(__name__)
 
 class GoLiveValidationService:
     def __init__(self, supabase: Client):
         self.supabase = supabase
-        # We instantiate HistoricalCycleService on demand or lazily if needed,
-        # but here we can just create it when needed to avoid heavy init if not used.
 
     def get_or_create_state(self, user_id: str) -> Dict[str, Any]:
         """
@@ -65,26 +63,11 @@ class GoLiveValidationService:
         window_end = datetime.fromisoformat(state["paper_window_end"])
 
         # 1. Calculate Metrics
-        # Try to query learning_trade_outcomes_v3
-        # Fallback to outcomes_log or similar if view missing?
-        # For now, we'll try the view, and if it fails, return 0/empty (safe fail).
-
         pnl_total = 0.0
         segment_pnls = {"seg1": 0.0, "seg2": 0.0, "seg3": 0.0}
         trades = []
 
         try:
-            # Attempt to fetch trades
-            # We assume view has: user_id, is_paper, closed_at, pnl_realized
-            # Or we assume outcomes_log has it.
-            # Let's try outcomes_log directly if view is uncertain, but instructions said "Use view ... if present".
-            # We'll probe for view presence or just try.
-            # Actually, `outcomes_log` is the base table. `learning_trade_outcomes_v3` is likely a view on top.
-            # If the migration for the view isn't here, I cannot query it.
-            # I will query `outcomes_log` directly to be safe and robust, filtering by is_paper (or checking if it's paper).
-            # But the prompt specifically said "Use view ... if present".
-            # I will try to select from view.
-
             rows = []
             try:
                 # Timestamps in supabase are ISO strings
@@ -97,11 +80,6 @@ class GoLiveValidationService:
                     .execute()
                 rows = res.data or []
             except Exception:
-                # View likely missing, try outcomes_log
-                # Assuming outcomes_log has `pnl_realized` and some way to distinguish paper.
-                # Usually paper trades might be marked in metadata or separate table.
-                # If we can't reliably find paper trades, we assume 0 for now or rely on specific logic.
-                # Let's assume `outcomes_log` exists.
                 pass
 
             # If rows found, aggregate
@@ -181,7 +159,6 @@ class GoLiveValidationService:
             self.supabase.table("v3_go_live_journal").insert(journal_data).execute()
 
             # Update State & Roll Window
-            # Roll forward: start = old_end, end = old_end + 90d
             next_start = window_end
             next_end = next_start + timedelta(days=90)
 
@@ -193,9 +170,6 @@ class GoLiveValidationService:
                 "updated_at": now.isoformat()
             }
 
-            # Check consolidated
-            # consolidated requires paper_ready AND historical ready (checked elsewhere or here?)
-            # Logic: overall_ready = (paper_ready == true) AND (historical_last_result.passed == true AND historical_last_run_at within 30d)
             hist_res = state.get("historical_last_result") or {}
             hist_passed = hist_res.get("passed", False)
             hist_ts_str = state.get("historical_last_run_at")
@@ -211,7 +185,6 @@ class GoLiveValidationService:
 
             self.supabase.table("v3_go_live_state").update(updates).eq("user_id", user_id).execute()
 
-            # Refresh result for return
             result["status"] = "finalized"
             result["passed"] = passed
             result["new_streak"] = new_streak
@@ -222,168 +195,189 @@ class GoLiveValidationService:
         return result
 
     def eval_historical(self, user_id: str, suite_config: Dict[str, Any]) -> Dict[str, Any]:
-        """
-        Runs a 90-day historical suite.
-        suite_config: { "window_start": "YYYY-MM-DD", "symbol": "SPY", "seed": 123, "max_cycles": 50 }
-        """
-        # Parse Config
-        start_str = suite_config.get("window_start")
-        if not start_str:
-            # Default to 90 days ago if not provided? Or just error.
-            # Let's default to 180 days ago to allow full 90 day run?
-            # Prompt says "run a 90-day historical suite".
-            start_dt = datetime.now() - timedelta(days=100)
-            start_str = start_dt.strftime("%Y-%m-%d")
+        state = self.get_or_create_state(user_id)
+        baseline = float(state.get("paper_baseline_capital", 100000) or 100000)
 
         symbol = suite_config.get("symbol", "SPY")
-        seed = suite_config.get("seed")
-        max_cycles = suite_config.get("max_cycles", 50)
+        window_days = int(suite_config.get("window_days", 90))
+        concurrent_runs = int(suite_config.get("concurrent_runs", 3))
+        stride_days = int(suite_config.get("stride_days", window_days))
+        goal_return_pct = float(suite_config.get("goal_return_pct", 10.0))
 
-        # Setup Service
-        sim_service = HistoricalCycleService() # assumes polygon service init internally or we pass it
+        autotune = bool(suite_config.get("autotune", False))
+        max_trials = int(suite_config.get("max_trials", 12))
+        strategy_name = suite_config.get("strategy_name")
 
-        # Run Loop
-        cursor = start_str
-        start_dt = datetime.strptime(start_str, "%Y-%m-%d")
-        end_dt = start_dt + timedelta(days=90)
+        now = datetime.now(timezone.utc).date() - timedelta(days=1)
+        anchor_start = (
+            datetime.strptime(suite_config["window_start"], "%Y-%m-%d").date()
+            if suite_config.get("window_start")
+            else now - timedelta(days=window_days)
+        )
 
-        total_pnl = 0.0
-        # For return%, we need a conceptual baseline capital.
-        # State has `paper_baseline_capital`, let's use that.
-        state = self.get_or_create_state(user_id)
-        baseline = float(state.get("paper_baseline_capital", 100000))
+        suite_starts = [
+            anchor_start - timedelta(days=i * stride_days)
+            for i in range(concurrent_runs)
+        ]
 
-        segment_pnls = {"seg1": 0.0, "seg2": 0.0, "seg3": 0.0}
+        # Load base StrategyConfig
+        base_cfg = None
+        try:
+            q = self.supabase.table("strategy_configs").select("params").eq("user_id", user_id)
+            if strategy_name:
+                q = q.eq("name", strategy_name)
+            q = q.order("updated_at", desc=True).limit(1)
+            res = q.execute()
+            if res.data:
+                base_cfg = StrategyConfig(**res.data[0]["params"])
+        except Exception:
+            pass
 
-        cycles_run = 0
-        logs = []
-
-        seg_duration_days = 30
-
-        while cycles_run < max_cycles:
-            # Check if cursor passed end
-            try:
-                curr_dt = datetime.strptime(cursor, "%Y-%m-%d")
-            except:
-                break
-
-            if curr_dt >= end_dt:
-                break
-
-            # Run Cycle
-            # We assume allocation per trade. Let's say we put 5% capital per trade?
-            # Or simpler: accumulate raw PnL and assume 100 shares or fixed size.
-            # HistoricalCycleService.run_cycle uses fixed 100 shares in its sim logic (hardcoded in `simulate_fill`).
-            # So `pnl` is raw dollar amount for 100 shares.
-            # If baseline is 100k, and we trade 100 shares of SPY ($400), that's $40k exposure (40%).
-            # That's aggressive.
-            # But let's stick to the raw output of the service.
-
-            res = sim_service.run_cycle(
-                cursor_date_str=cursor,
-                symbol=symbol,
-                user_id=user_id,
-                mode="random" if seed else "deterministic", # Prompt says 'run a 90-day historical suite', usually deterministic unless specified
-                seed=seed
+        if not base_cfg:
+            base_cfg = StrategyConfig(
+                name="default",
+                version=1,
+                conviction_floor=0.55,
+                take_profit_pct=0.05,
+                stop_loss_pct=0.03,
+                max_holding_days=10,
+                max_risk_pct_portfolio=0.10,
+                max_concurrent_positions=1,
+                # Required fields with defaults
+                conviction_slope=0.2,
+                max_risk_pct_per_trade=0.05,
+                max_spread_bps=100,
+                max_days_to_expiry=45,
+                min_underlying_liquidity=1000000.0,
+                regime_whitelist=[]
             )
 
-            if res.get("error"):
-                logger.error(f"Historical run error: {res['error']}")
-                break
+        engine = BacktestEngine()
+        cost_model = CostModelConfig()
 
-            if res.get("status") == "no_data" or res.get("status") == "no_entry":
-                # Advance cursor arbitrarily if no entry found to prevent infinite loop?
-                # Service usually returns nextCursor.
-                # If no entry, we might need to skip forward.
-                # HistoricalCycleService logic: if no entry, returns nextCursor as None?
-                # Let's check the code I read.
-                # It loop through data. If no trade, returns "status": "no_entry", "nextCursor": None.
-                # Wait, if nextCursor is None, we stop.
-                if not res.get("nextCursor"):
-                    break
+        def run_window(start_date, cfg):
+            end_date = start_date + timedelta(days=window_days)
+            bt = engine.run_single(
+                symbol=symbol,
+                start_date=start_date.isoformat(),
+                end_date=end_date.isoformat(),
+                config=cfg,
+                cost_model=cost_model,
+                seed=0,
+                initial_equity=baseline,
+            )
 
-            # Update Metrics
-            pnl = res.get("pnl", 0.0)
-            total_pnl += pnl
+            equity = bt.equity_curve or []
+            trades = bt.trades or []
 
-            exit_time_str = res.get("exitTime")
-            if exit_time_str:
-                exit_dt = datetime.strptime(exit_time_str, "%Y-%m-%d")
-                offset_days = (exit_dt - start_dt).days
+            final_equity = equity[-1]["equity"] if equity else baseline
+            pnl = final_equity - baseline
+            ret = (pnl / baseline) * 100 if baseline else 0.0
 
-                if offset_days < 30:
-                    segment_pnls["seg1"] += pnl
-                elif offset_days < 60:
-                    segment_pnls["seg2"] += pnl
+            seg = {"seg1": 0.0, "seg2": 0.0, "seg3": 0.0}
+            for t in trades:
+                pnl_t = float(t.get("pnl", 0.0))
+                # Handle possible date formats in trades, assuming ISO or YYYY-MM-DD
+                try:
+                    d = datetime.strptime(t["exit_date"], "%Y-%m-%d").date()
+                except ValueError:
+                    d = datetime.fromisoformat(t["exit_date"]).date()
+
+                off = (d - start_date).days
+                if off < 30:
+                    seg["seg1"] += pnl_t
+                elif off < 60:
+                    seg["seg2"] += pnl_t
                 else:
-                    segment_pnls["seg3"] += pnl
+                    seg["seg3"] += pnl_t
 
-            logs.append({
-                "entry": res.get("entryTime"),
-                "exit": res.get("exitTime"),
-                "pnl": pnl,
-                "regime": res.get("regimeAtEntry")
-            })
+            losing_segment = any(v < 0 for v in seg.values())
+            passed = ret >= goal_return_pct and not losing_segment
 
-            # Advance Cursor
-            next_cursor = res.get("nextCursor")
-            if not next_cursor:
+            return {
+                "window_start": start_date.isoformat(),
+                "window_end": end_date.isoformat(),
+                "return_pct": ret,
+                "pnl_total": pnl,
+                "segment_pnls": seg,
+                "trades_count": len(trades),
+                "passed": passed,
+                "fail_reason": (
+                    "no_trades" if not trades else
+                    "return_below_goal" if ret < goal_return_pct else
+                    "losing_segment" if losing_segment else None
+                ),
+            }
+
+        def candidate_configs():
+            yield base_cfg
+            if not autotune:
+                return
+            for m in [1.25, 1.5, 2.0]:
+                yield base_cfg.copy(update={"max_risk_pct_portfolio": base_cfg.max_risk_pct_portfolio * m})
+            for d in [0.05, 0.1]:
+                yield base_cfg.copy(update={"conviction_floor": base_cfg.conviction_floor - d})
+            yield base_cfg.copy(update={"take_profit_pct": base_cfg.take_profit_pct + 0.02})
+
+        best = None
+        trials = 0
+
+        for cfg in candidate_configs():
+            trials += 1
+            suites = [run_window(s, cfg) for s in suite_starts]
+            worst = min(suites, key=lambda x: x["return_pct"])
+            all_passed = all(s["passed"] for s in suites)
+
+            if not best or worst["return_pct"] > best["worst_return"]:
+                best = {
+                    "config": cfg,
+                    "suites": suites,
+                    "worst_return": worst["return_pct"],
+                    "worst_suite": worst,
+                    "all_passed": all_passed,
+                }
+
+            if all_passed or trials >= max_trials:
                 break
-            cursor = next_cursor
-            cycles_run += 1
 
-        # Finalize
-        return_pct = (total_pnl / baseline) * 100 if baseline > 0 else 0.0
-        passed = return_pct >= 10.0 and all(v >= 0 for v in segment_pnls.values())
+        passed = best["all_passed"]
+        worst = best["worst_suite"]
 
-        fail_reason = None
-        if not passed:
-            if return_pct < 10.0:
-                fail_reason = "return_below_10pct"
-            elif any(v < 0 for v in segment_pnls.values()):
-                fail_reason = "losing_segment"
+        # Serialize best result for DB
+        best_json = best.copy()
+        best_json["config"] = best["config"].model_dump()
 
-        # Persist Run
-        run_data = {
+        self.supabase.table("v3_go_live_runs").insert({
             "user_id": user_id,
             "mode": "historical",
-            "window_start": start_dt.isoformat(),
-            "window_end": end_dt.isoformat(),
-            "return_pct": return_pct,
-            "pnl_total": total_pnl,
-            "segment_pnls": segment_pnls,
+            "window_start": anchor_start.isoformat(),
+            "window_end": (anchor_start + timedelta(days=window_days)).isoformat(),
+            "return_pct": best["worst_return"],
+            "pnl_total": worst["pnl_total"],
+            "segment_pnls": worst["segment_pnls"],
             "passed": passed,
-            "fail_reason": fail_reason,
-            "details_json": {"cycles_run": cycles_run, "symbol": symbol, "logs_count": len(logs)}
-        }
-        self.supabase.table("v3_go_live_runs").insert(run_data).execute()
+            "fail_reason": worst["fail_reason"],
+            "details_json": best_json,
+        }).execute()
 
-        # Persist Journal
-        journal_data = {
+        self.supabase.table("v3_go_live_journal").insert({
             "user_id": user_id,
-            "window_start": start_dt.isoformat(),
-            "window_end": end_dt.isoformat(),
-            "title": f"Historical Validation {'Passed' if passed else 'Failed'}",
-            "summary": f"Return: {return_pct:.2f}% | PnL: ${total_pnl:.2f} | Cycles: {cycles_run}",
-            "details_json": run_data
-        }
-        self.supabase.table("v3_go_live_journal").insert(journal_data).execute()
+            "window_start": anchor_start.isoformat(),
+            "window_end": (anchor_start + timedelta(days=window_days)).isoformat(),
+            "title": f"Historical Concurrent Validation {'Passed' if passed else 'Failed'}",
+            "summary": f"Worst-case return {best['worst_return']:.2f}% across {concurrent_runs} windows",
+            "details_json": best_json,
+        }).execute()
 
-        # Update State
-        now_ts = datetime.now(timezone.utc)
-        updates = {
-            "historical_last_run_at": now_ts.isoformat(),
-            "historical_last_result": {"passed": passed, "return_pct": return_pct, "run_id": str(uuid.uuid4())}, # simplified result
-            "updated_at": now_ts.isoformat()
-        }
+        self.supabase.table("v3_go_live_state").update({
+            "historical_last_run_at": datetime.now(timezone.utc).isoformat(),
+            "historical_last_result": {
+                "passed": passed,
+                "return_pct": best["worst_return"],
+                "suites": best["suites"],
+                "config_used": best_json["config"],
+            },
+            "overall_ready": bool(state.get("paper_ready")) and passed,
+        }).eq("user_id", user_id).execute()
 
-        # Check Consolidated
-        paper_ready = state.get("paper_ready", False)
-        # We just ran historical, so it is recent (now)
-        overall_ready = paper_ready and passed # since recent is true
-
-        updates["overall_ready"] = overall_ready
-
-        self.supabase.table("v3_go_live_state").update(updates).eq("user_id", user_id).execute()
-
-        return run_data
+        return best

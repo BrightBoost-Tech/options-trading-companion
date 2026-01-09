@@ -12,9 +12,17 @@ router = APIRouter(prefix="/validation", tags=["Go Live Validation"])
 class HistoricalRunConfig(BaseModel):
     window_start: Optional[str] = None
     window_days: int = 90
-    max_cycles: int = 50
     symbol: str = "SPY"
-    seed: Optional[int] = None
+
+    concurrent_runs: int = 3
+    stride_days: Optional[int] = None
+
+    goal_return_pct: float = 10.0
+    autotune: bool = False
+    max_trials: int = 12
+    strategy_name: Optional[str] = None
+
+    seed: Optional[int] = None  # ignored
 
 class ValidationRunRequest(BaseModel):
     mode: str # 'paper'|'historical'

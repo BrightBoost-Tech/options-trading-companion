@@ -79,7 +79,11 @@ export function GoLiveReadinessCard() {
                     historical: {
                         window_days: 90,
                         symbol: "SPY",
-                        seed: 42
+                        concurrent_runs: 3,
+                        stride_days: 90,
+                        goal_return_pct: 10,
+                        autotune: true,
+                        max_trials: 12,
                     }
                 })
             });

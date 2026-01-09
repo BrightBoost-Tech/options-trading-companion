@@ -56,7 +56,7 @@ We recommend using **pnpm** for package management.
     # Mac/Linux:
     ./run_server.sh
     # Windows:
-    # run_server.bat
+    # .\run_server.bat
     ```
 
 4.  **Start Frontend**

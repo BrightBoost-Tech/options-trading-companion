@@ -14,8 +14,17 @@ Both services will stay running. You can close them by closing their respective 
 
 If you need to launch services individually, you can use the scripts in `scripts\win\`:
 
-*   **Backend:** `scripts\win\start_backend.cmd`
-*   **Frontend:** `scripts\win\start_frontend.cmd`
+*   **Backend:** `.\scripts\win\start_backend.cmd`
+*   **Frontend:** `.\scripts\win\start_frontend.cmd`
+
+### Sanity Checks (Windows)
+
+If you see an error like `is not recognized` or cannot find the path:
+
+1.  **Check your folder:** Open `cmd` and type `dir`. You should see `scripts` and `packages` in the list.
+2.  **Check the script:** Run `dir scripts\win`. You should see `start_backend.cmd`.
+3.  **Run with relative path:** Use `.\scripts\win\start_backend.cmd`.
+4.  **Check if already running:** Run `netstat -ano | findstr :8000`. If you see a result, the port is busy.
 
 ## Dark Mode Verification
 

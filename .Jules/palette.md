@@ -9,3 +9,7 @@
 ## 2025-05-27 - Standardizing Interactive Elements
 **Learning:** Custom interactive elements (like raw `<button>` tags with Tailwind classes) often miss critical states like `focus-visible`. This creates an inconsistent keyboard navigation experience where some elements have clear focus rings and others don't.
 **Action:** Replace custom buttons with the design system's `Button` component to inherit standard focus states and interactivity patterns automatically.
+
+## 2025-05-27 - Semantic Table Structure
+**Learning:** Using `th scope='row'` and `th scope='rowgroup'` adds critical navigation context for screen readers in complex data tables without breaking visual layouts (as long as `text-left` is applied).
+**Action:** Audit all data tables for row headers and grouping headers.

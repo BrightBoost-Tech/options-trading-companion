@@ -41,14 +41,14 @@ export default function PortfolioHoldingsTable({ holdings, onSync, onGenerateSug
 
       return (
         <tr key={`${position.symbol}-${idx}`} className="hover:bg-muted/50 transition-colors">
-            <td className={`px-6 py-4 font-medium ${type === 'option' ? 'text-purple-600 dark:text-purple-400' : 'text-foreground'}`}>
+            <th scope="row" className={`px-6 py-4 font-medium text-left ${type === 'option' ? 'text-purple-600 dark:text-purple-400' : 'text-foreground'}`}>
                 <div className="flex flex-col">
                     <span>{displaySymbol}</span>
                     {position.sector && (
                         <span className="text-[10px] text-muted-foreground uppercase">{position.sector}</span>
                     )}
                 </div>
-            </td>
+            </th>
             <td className="px-6 py-4">{position.quantity}</td>
             <td className="px-6 py-4">${position.cost_basis?.toFixed(2)}</td>
             <td className="px-6 py-4">
@@ -89,7 +89,7 @@ export default function PortfolioHoldingsTable({ holdings, onSync, onGenerateSug
 
   return (
     <div className="overflow-x-auto">
-      <table className="w-full">
+      <table className="w-full" aria-label="Portfolio Holdings">
         <thead className="bg-muted border-b border-border">
           <tr>
             <th scope="col" className="px-6 py-3 text-left text-xs font-medium text-muted-foreground uppercase">Symbol</th>
@@ -103,7 +103,7 @@ export default function PortfolioHoldingsTable({ holdings, onSync, onGenerateSug
             {optionHoldings.length > 0 && (
                  <>
                     <tr className="bg-purple-50 dark:bg-purple-900/20 border-b border-purple-100 dark:border-purple-900/30">
-                        <td colSpan={5} className="px-6 py-2 text-xs font-bold text-purple-800 dark:text-purple-300 uppercase">🎯 Option Plays</td>
+                        <th scope="rowgroup" colSpan={5} className="px-6 py-2 text-left text-xs font-bold text-purple-800 dark:text-purple-300 uppercase">🎯 Option Plays</th>
                     </tr>
                     {optionHoldings.map((h, i) => renderPositionRow(h, i))}
                  </>
@@ -112,7 +112,7 @@ export default function PortfolioHoldingsTable({ holdings, onSync, onGenerateSug
             {equityHoldings.length > 0 && (
                  <>
                     <tr className="bg-blue-50 dark:bg-blue-900/20 border-b border-blue-100 dark:border-blue-900/30">
-                        <td colSpan={5} className="px-6 py-2 text-xs font-bold text-blue-800 dark:text-blue-300 uppercase">📈 Long Term Holds</td>
+                        <th scope="rowgroup" colSpan={5} className="px-6 py-2 text-left text-xs font-bold text-blue-800 dark:text-blue-300 uppercase">📈 Long Term Holds</th>
                     </tr>
                     {equityHoldings.map((h, i) => renderPositionRow(h, i))}
                  </>
@@ -121,13 +121,13 @@ export default function PortfolioHoldingsTable({ holdings, onSync, onGenerateSug
             {cashHoldings.length > 0 && (
                 <>
                      <tr className="bg-green-50 dark:bg-green-900/20 border-b border-green-100 dark:border-green-900/30">
-                        <td colSpan={5} className="px-6 py-2 text-xs font-bold text-green-800 dark:text-green-300 uppercase">💵 Cash & Equiv</td>
+                        <th scope="rowgroup" colSpan={5} className="px-6 py-2 text-left text-xs font-bold text-green-800 dark:text-green-300 uppercase">💵 Cash & Equiv</th>
                     </tr>
                     {cashHoldings.map((position, idx) => (
                         <tr key={`cash-${idx}`} className="bg-green-50/50 dark:bg-green-900/10 border-t border-green-100 dark:border-green-900/30">
-                            <td className="px-6 py-4 font-bold text-green-800 dark:text-green-300">
+                            <th scope="row" className="px-6 py-4 font-bold text-left text-green-800 dark:text-green-300">
                                 {position.symbol === 'CUR:USD' ? 'USD CASH' : position.symbol}
-                            </td>
+                            </th>
                             <td className="px-6 py-4 text-green-800 dark:text-green-300">---</td>
                             <td className="px-6 py-4 text-green-800 dark:text-green-300">---</td>
                             <td className="px-6 py-4 font-bold text-green-800 dark:text-green-300">${position.quantity?.toFixed(2)}</td>

@@ -148,7 +148,8 @@ def _select_best_expiry_chain(chain: List[Dict[str, Any]], target_dte: int = 35)
     # Group by expiry
     buckets = {}
     for c in chain:
-        exp = c.get("expiration")
+        # Bolt Optimization: Support canonical format (expiry) fallback
+        exp = c.get("expiration") or c.get("expiry")
         if not exp: continue
         if exp not in buckets:
             buckets[exp] = []
@@ -1029,40 +1030,9 @@ def scan_for_opportunities(
 
             if chain_objects:
                 # Bolt Optimization:
-                # Removed redundant date parsing and filtering loop.
-                # MarketDataTruthLayer.option_chain already filters by min_expiry/max_expiry (server-side).
-                # Skipping per-contract date parsing saves ~75% CPU time in this loop.
-                for c in chain_objects:
-                    # Adapt to scanner format
-                    try:
-                        exp_str = c.get("expiry")
-                        if not exp_str: continue
-
-                        # Flatten structure
-                        greeks = c.get("greeks") or {}
-                        quote = c.get("quote") or {}
-
-                        # Price logic: Mid -> Last -> 0
-                        price = quote.get("mid")
-                        if price is None:
-                            price = quote.get("last")
-
-                        chain.append({
-                            "ticker": c.get("contract"),
-                            "strike": c.get("strike"),
-                            "expiration": exp_str,
-                            "type": c.get("right"), # 'call'/'put'
-                            "delta": greeks.get("delta"),
-                            "gamma": greeks.get("gamma"),
-                            "vega": greeks.get("vega"),
-                            "theta": greeks.get("theta"),
-                            "price": price,
-                            "close": quote.get("last"), # fallback
-                            "bid": quote.get("bid"),
-                            "ask": quote.get("ask")
-                        })
-                    except Exception as e:
-                        continue
+                # Pass chain_objects directly to selector. We defer flattening until we select the best expiry.
+                # This reduces dictionary creation/copying from ~5000 (all contracts) to ~200 (one expiry).
+                chain = chain_objects
 
             # Fallback if empty
             if not chain:
@@ -1081,7 +1051,38 @@ def scan_for_opportunities(
             # Single-pass split into calls and puts
             calls_list = []
             puts_list = []
-            for c in chain_subset:
+            for item in chain_subset:
+                c = item
+                # Check if this is a canonical object (nested structure) and flatten it
+                # Logic: If it has 'greeks' dict, it's likely canonical. Scanner format is flat.
+                if "greeks" in item and isinstance(item["greeks"], dict):
+                    try:
+                        exp_str = c.get("expiry") or c.get("expiration")
+                        greeks = c.get("greeks") or {}
+                        quote = c.get("quote") or {}
+
+                        price = quote.get("mid")
+                        if price is None:
+                            price = quote.get("last")
+
+                        # Create flat copy
+                        c = {
+                            "ticker": c.get("contract"),
+                            "strike": c.get("strike"),
+                            "expiration": exp_str,
+                            "type": c.get("right"), # 'call'/'put'
+                            "delta": greeks.get("delta"),
+                            "gamma": greeks.get("gamma"),
+                            "vega": greeks.get("vega"),
+                            "theta": greeks.get("theta"),
+                            "price": price,
+                            "close": quote.get("last"),
+                            "bid": quote.get("bid"),
+                            "ask": quote.get("ask")
+                        }
+                    except Exception:
+                        continue
+
                 t = c.get('type')
                 if t == 'call':
                     calls_list.append(c)

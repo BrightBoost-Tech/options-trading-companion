@@ -19,8 +19,6 @@ from packages.quantum.analytics.regime_integration import (
 from packages.quantum.analytics.factors import calculate_trend, calculate_volatility, calculate_rsi
 from packages.quantum.nested.backbone import infer_global_context, GlobalContext
 from packages.quantum.execution.transaction_cost_model import TransactionCostModel as V3TCM
-from analytics.factors import calculate_trend, calculate_volatility, calculate_rsi
-from nested.backbone import infer_global_context, GlobalContext
 from packages.quantum.services.transaction_cost_model import TransactionCostModel as LegacyTCM
 
 class BacktestRunResult(BaseModel):

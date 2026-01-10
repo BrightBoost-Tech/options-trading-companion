@@ -13,3 +13,7 @@
 ## 2025-05-27 - Semantic Table Structure
 **Learning:** Using `th scope='row'` and `th scope='rowgroup'` adds critical navigation context for screen readers in complex data tables without breaking visual layouts (as long as `text-left` is applied).
 **Action:** Audit all data tables for row headers and grouping headers.
+
+## 2025-05-28 - CSS-Only Accessible Custom Inputs
+**Learning:** We can create fully accessible, custom-styled checkboxes without heavy JS libraries by using the `:checked` pseudo-class and sibling selectors (`peer-checked`). This keeps the bundle size small while maintaining native keyboard navigation and form behavior.
+**Action:** Prefer CSS-driven state styling for simple form controls over complex controlled components when possible.

@@ -8,6 +8,7 @@ import { logEvent } from '@/lib/analytics';
 import { QuantumTooltip } from '@/components/ui/QuantumTooltip';
 import { X, RefreshCw, Clock, Loader2 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
+import { Checkbox } from '@/components/ui/checkbox';
 
 interface SuggestionCardProps {
     suggestion: Suggestion;
@@ -153,11 +154,10 @@ const SuggestionCard = ({
                 {/* Batch Selection Checkbox */}
                 {batchModeEnabled && onToggleSelect && (
                      <div className="absolute top-4 left-[-30px] md:left-[-30px] flex items-center justify-center h-full w-[30px]">
-                        <input
-                            type="checkbox"
+                        <Checkbox
                             checked={isSelected}
                             onChange={() => onToggleSelect(suggestion)}
-                            className="w-4 h-4 rounded border-gray-300 text-purple-600 focus:ring-purple-500 cursor-pointer"
+                            className="checked:bg-purple-600 checked:border-purple-600"
                             aria-label={`Select ${displaySymbol}`}
                             title={`Select ${displaySymbol}`}
                         />
@@ -169,11 +169,10 @@ const SuggestionCard = ({
                     <div>
                         <div className="flex items-center gap-2">
                             {batchModeEnabled && onToggleSelect && (
-                                <input
-                                    type="checkbox"
+                                <Checkbox
                                     checked={isSelected}
                                     onChange={() => onToggleSelect(suggestion)}
-                                    className="w-4 h-4 rounded border-gray-300 text-purple-600 focus:ring-purple-500 cursor-pointer mr-2 md:hidden"
+                                    className="mr-2 md:hidden checked:bg-purple-600 checked:border-purple-600"
                                     aria-label={`Select ${displaySymbol}`}
                                 />
                             )}

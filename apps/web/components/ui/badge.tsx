@@ -1,27 +1,36 @@
-// apps/web/components/ui/Badge.tsx
-import React from 'react';
+import * as React from "react"
+import { cva, type VariantProps } from "class-variance-authority"
 
-interface BadgeProps {
-  variant?: 'destructive' | 'outline' | 'default' | 'secondary';
-  className?: string;
-  children: React.ReactNode;
-}
+import { cn } from "@/lib/utils"
 
-export function Badge({ variant = 'default', className = '', children }: BadgeProps) {
-  const baseClasses = "px-2.5 py-0.5 rounded-full text-xs font-semibold inline-flex items-center";
+const badgeVariants = cva(
+  "inline-flex items-center rounded-full border px-2.5 py-0.5 text-xs font-semibold transition-colors focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2",
+  {
+    variants: {
+      variant: {
+        default:
+          "border-transparent bg-gray-100 text-gray-800 hover:bg-gray-200",
+        secondary:
+          "border-transparent bg-gray-200 text-gray-900 hover:bg-gray-300",
+        destructive:
+          "border-transparent bg-red-500 text-white hover:bg-red-600",
+        outline: "text-gray-400 border-gray-500", // bg-transparent is default
+      },
+    },
+    defaultVariants: {
+      variant: "default",
+    },
+  }
+)
 
-  const variants = {
-    default: "bg-gray-100 text-gray-800",
-    destructive: "bg-red-500 text-white",
-    outline: "bg-transparent border border-gray-500 text-gray-400",
-    secondary: "bg-gray-200 text-gray-900",
-  };
+export interface BadgeProps
+  extends React.HTMLAttributes<HTMLSpanElement>,
+    VariantProps<typeof badgeVariants> {}
 
-  const variantClass = variants[variant as keyof typeof variants] || variants.default;
-
+function Badge({ className, variant, ...props }: BadgeProps) {
   return (
-    <span className={`${baseClasses} ${variantClass} ${className}`}>
-      {children}
-    </span>
-  );
+    <span className={cn(badgeVariants({ variant }), className)} {...props} />
+  )
 }
+
+export { Badge, badgeVariants }

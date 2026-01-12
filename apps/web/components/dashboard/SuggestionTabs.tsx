@@ -336,14 +336,17 @@ export default function SuggestionTabs({
         {activeTab === 'scout' && (
           <div className="space-y-4">
             <div className="flex justify-end mb-2">
-                <button
+                <Button
+                  variant="ghost"
+                  size="sm"
                   onClick={onRefreshScout}
                   disabled={scoutLoading}
-                  className="text-xs text-green-600 dark:text-green-400 flex items-center gap-1 hover:underline disabled:opacity-50"
+                  className="h-6 text-xs text-green-600 hover:text-green-700 hover:bg-green-50 dark:text-green-400 dark:hover:text-green-300 dark:hover:bg-green-900/20 px-2"
+                  aria-label="Refresh scout suggestions"
                 >
-                  <RefreshCw className={`w-3 h-3 ${scoutLoading ? 'animate-spin' : ''}`} />
+                  <RefreshCw className={`w-3 h-3 mr-1 ${scoutLoading ? 'animate-spin' : ''}`} />
                   Refresh
-                </button>
+                </Button>
             </div>
 
             {scoutSuggestions.filter(s => !dismissedIds.has(s.id)).length === 0 ? (

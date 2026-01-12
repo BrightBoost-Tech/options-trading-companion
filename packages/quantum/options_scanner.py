@@ -196,9 +196,32 @@ def _select_legs_from_chain(
     Selects legs using pre-sorted call/put lists to avoid repeated filtering/sorting.
     calls: sorted by strike (asc)
     puts: sorted by strike (asc)
+
+    Bolt Optimization: Supports both Flat (PolygonService) and Nested (TruthLayer) schemas
+    to avoid O(N) flattening overhead.
     """
     legs = []
     total_cost = 0.0
+
+    # Schema Detection (Bolt Optimization)
+    sample = calls[0] if calls else (puts[0] if puts else None)
+    is_nested = sample is not None and "greeks" in sample and isinstance(sample.get("greeks"), dict)
+
+    # Accessors
+    def _delta(c): return c.get("greeks", {}).get("delta") if is_nested else c.get("delta")
+    def _gamma(c): return c.get("greeks", {}).get("gamma") if is_nested else c.get("gamma")
+    def _vega(c): return c.get("greeks", {}).get("vega") if is_nested else c.get("vega")
+    def _theta(c): return c.get("greeks", {}).get("theta") if is_nested else c.get("theta")
+    def _ticker(c): return c.get("contract") if is_nested else c.get("ticker")
+    def _expiry(c): return c.get("expiry") if is_nested else c.get("expiration")
+    def _bid(c): return c.get("quote", {}).get("bid") if is_nested else c.get("bid")
+    def _ask(c): return c.get("quote", {}).get("ask") if is_nested else c.get("ask")
+    def _premium(c):
+        if is_nested:
+            q = c.get("quote", {})
+            return q.get("mid") if q.get("mid") is not None else q.get("last")
+        else:
+            return c.get("price") or c.get("close")
 
     for leg_def in leg_defs:
         target_delta = leg_def["delta_target"]
@@ -212,17 +235,13 @@ def _select_legs_from_chain(
 
         # 2. Find best contract (Delta or Moneyness)
         # Note: Optimization - candidates are sorted by strike.
-        # But we search by Delta mostly. Delta is monotonic with strike (mostly).
-        # Calls: Low Strike = High Delta (~1.0) -> High Strike = Low Delta (~0.0)
-        # Puts: Low Strike = Low Delta (~0.0) -> High Strike = High Delta (~1.0, abs)
-        # For now, linear scan for Delta is fine as N is small per expiry (e.g. 50 items).
-        # We save the repeated [c for c in chain if ...] allocation.
 
-        has_delta = any('delta' in c and c['delta'] is not None for c in candidates)
+        has_delta = any(_delta(c) is not None for c in candidates)
 
         if has_delta:
             target_d = abs(target_delta)
-            best_contract = min(candidates, key=lambda x: abs(abs(x.get('delta') or 0) - target_d))
+            # Bolt: Use accessor
+            best_contract = min(candidates, key=lambda x: abs(abs(_delta(x) or 0) - target_d))
         else:
             moneyness = 1.0
             if op_type == 'call':
@@ -234,27 +253,28 @@ def _select_legs_from_chain(
 
             target_k = current_price * moneyness
             # Binary search could be used here since sorted by strike, but min() is robust and fast enough for N=50
+            # Strike is always at top level
             best_contract = min(candidates, key=lambda x: abs(x['strike'] - target_k))
 
-        premium = best_contract.get('price') or best_contract.get('close') or 0.0
+        premium = _premium(best_contract) or 0.0
 
-        bid = best_contract.get('bid')
-        ask = best_contract.get('ask')
+        bid = _bid(best_contract)
+        ask = _ask(best_contract)
         mid = None
         if bid is not None and ask is not None:
              mid = (float(bid) + float(ask)) / 2.0
 
         legs.append({
-            "symbol": best_contract['ticker'],
+            "symbol": _ticker(best_contract),
             "strike": best_contract['strike'],
-            "expiry": best_contract['expiration'],
+            "expiry": _expiry(best_contract),
             "type": op_type,
             "side": side,
             "premium": premium,
-            "delta": best_contract.get('delta') or target_delta,
-            "gamma": best_contract.get('gamma') or 0.0,
-            "vega": best_contract.get('vega') or 0.0,
-            "theta": best_contract.get('theta') or 0.0,
+            "delta": _delta(best_contract) or target_delta,
+            "gamma": _gamma(best_contract) or 0.0,
+            "vega": _vega(best_contract) or 0.0,
+            "theta": _theta(best_contract) or 0.0,
             "bid": bid,
             "ask": ask,
             "mid": mid
@@ -277,6 +297,8 @@ def _select_iron_condor_legs(
     Selects 4 legs for an Iron Condor using pre-sorted lists.
     calls: sorted by strike
     puts: sorted by strike
+
+    Bolt Optimization: Supports both Flat (PolygonService) and Nested (TruthLayer) schemas
     """
     legs = []
     total_cost = 0.0
@@ -284,12 +306,32 @@ def _select_iron_condor_legs(
     if not calls or not puts:
         return [], 0.0
 
+    # Schema Detection (Bolt Optimization)
+    sample = calls[0] if calls else (puts[0] if puts else None)
+    is_nested = sample is not None and "greeks" in sample and isinstance(sample.get("greeks"), dict)
+
+    # Accessors
+    def _delta(c): return c.get("greeks", {}).get("delta") if is_nested else c.get("delta")
+    def _gamma(c): return c.get("greeks", {}).get("gamma") if is_nested else c.get("gamma")
+    def _vega(c): return c.get("greeks", {}).get("vega") if is_nested else c.get("vega")
+    def _theta(c): return c.get("greeks", {}).get("theta") if is_nested else c.get("theta")
+    def _ticker(c): return c.get("contract") if is_nested else c.get("ticker")
+    def _expiry(c): return c.get("expiry") if is_nested else c.get("expiration")
+    def _bid(c): return c.get("quote", {}).get("bid") if is_nested else c.get("bid")
+    def _ask(c): return c.get("quote", {}).get("ask") if is_nested else c.get("ask")
+    def _premium(c):
+        if is_nested:
+            q = c.get("quote", {})
+            return q.get("mid") if q.get("mid") is not None else q.get("last")
+        else:
+            return c.get("price") or c.get("close")
+
     # 2. Select Shorts by Delta
     # Target delta is usually ~0.15 (abs)
     # Short Call: delta ~ 0.15
-    short_call = min(calls, key=lambda x: abs(abs(x.get("delta") or 0) - target_delta))
+    short_call = min(calls, key=lambda x: abs(abs(_delta(x) or 0) - target_delta))
     # Short Put: delta ~ -0.15
-    short_put = min(puts, key=lambda x: abs(abs(x.get("delta") or 0) - target_delta))
+    short_put = min(puts, key=lambda x: abs(abs(_delta(x) or 0) - target_delta))
 
     # 3. Determine Width
     width = 5.0 if current_price >= 50.0 else 2.5
@@ -324,36 +366,36 @@ def _select_iron_condor_legs(
     # Let's do: Sell Put, Buy Put, Sell Call, Buy Call
 
     selected_contracts = [
-        (short_put, "sell"),
-        (long_put, "buy"),
-        (short_call, "sell"),
-        (long_call, "buy")
+        (short_put, "sell", "put"),
+        (long_put, "buy", "put"),
+        (short_call, "sell", "call"),
+        (long_call, "buy", "call")
     ]
 
-    for contract, side in selected_contracts:
+    for contract, side, type_hint in selected_contracts:
         # Use mid from bid/ask if available, otherwise 'price'/'close'
-        bid = contract.get("bid")
-        ask = contract.get("ask")
+        bid = _bid(contract)
+        ask = _ask(contract)
         mid_calc = None
         if bid is not None and ask is not None and ask >= bid:
             mid_calc = (float(bid) + float(ask)) / 2.0
 
-        premium = mid_calc if mid_calc is not None else (contract.get("price") or contract.get("close") or 0.0)
+        premium = mid_calc if mid_calc is not None else (_premium(contract) or 0.0)
 
         leg = {
-            "symbol": contract['ticker'],
+            "symbol": _ticker(contract),
             "strike": contract['strike'],
-            "expiry": contract['expiration'],
-            "type": contract['type'],
+            "expiry": _expiry(contract),
+            "type": contract.get('type') or contract.get('right') or type_hint,
             "side": side,
             "premium": premium,
-            "delta": contract.get('delta') or 0.0,
-            "gamma": contract.get('gamma') or 0.0,
-            "vega": contract.get('vega') or 0.0,
-            "theta": contract.get('theta') or 0.0,
+            "delta": _delta(contract) or 0.0,
+            "gamma": _gamma(contract) or 0.0,
+            "vega": _vega(contract) or 0.0,
+            "theta": _theta(contract) or 0.0,
             # Pass through bid/ask for width calculation later
-            "bid": contract.get("bid"),
-            "ask": contract.get("ask"),
+            "bid": bid,
+            "ask": ask,
             "mid": premium
         }
         legs.append(leg)
@@ -866,7 +908,7 @@ def scan_for_opportunities(
     ta_end_date = now_dt
     ta_start_date = ta_end_date - timedelta(days=90)
 
-    def process_symbol(symbol: str, drag_map: Dict[str, Any], quotes_map: Dict[str, Any], earnings_map: Dict[str, Any], iv_context_map: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    def process_symbol(symbol: str, drag_map: Dict[str, Any], quotes_map: Dict[str, Any], earnings_map: Dict[str, Any], iv_context: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         """Process a single symbol and return a candidate dict or None."""
         try:
             # A. Enrich Data
@@ -1056,44 +1098,18 @@ def scan_for_opportunities(
 
             # Optimization: Sort and index chain ONCE per symbol
             # Single-pass split into calls and puts
+
+            # Bolt Optimization: Removed flattening loop to avoid O(N) dict overhead.
+            # Splitting logic now handles 'type' vs 'right' access natively.
+
             calls_list = []
             puts_list = []
-            for item in chain_subset:
-                c = item
-                # Check if this is a canonical object (nested structure) and flatten it
-                # Logic: If it has 'greeks' dict, it's likely canonical. Scanner format is flat.
-                if "greeks" in item and isinstance(item["greeks"], dict):
-                    try:
-                        exp_str = c.get("expiry") or c.get("expiration")
-                        greeks = c.get("greeks") or {}
-                        quote = c.get("quote") or {}
-
-                        price = quote.get("mid")
-                        if price is None:
-                            price = quote.get("last")
-
-                        # Create flat copy
-                        c = {
-                            "ticker": c.get("contract"),
-                            "strike": c.get("strike"),
-                            "expiration": exp_str,
-                            "type": c.get("right"), # 'call'/'put'
-                            "delta": greeks.get("delta"),
-                            "gamma": greeks.get("gamma"),
-                            "vega": greeks.get("vega"),
-                            "theta": greeks.get("theta"),
-                            "price": price,
-                            "close": quote.get("last"),
-                            "bid": quote.get("bid"),
-                            "ask": quote.get("ask")
-                        }
-                    except Exception:
-                        continue
-
-                t = c.get('type')
-                if t == 'call':
+            for c in chain_subset:
+                # Native handling of 'type' (Polygon/Flat) or 'right' (TruthLayer/Nested)
+                ctype = c.get('type') or c.get('right')
+                if ctype == 'call':
                     calls_list.append(c)
-                elif t == 'put':
+                elif ctype == 'put':
                     puts_list.append(c)
 
             calls_sorted = sorted(calls_list, key=lambda x: x['strike'])

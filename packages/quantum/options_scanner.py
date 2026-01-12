@@ -829,6 +829,11 @@ def scan_for_opportunities(
         else:
              symbols = ["SPY", "QQQ", "IWM", "AAPL", "MSFT", "TSLA", "NVDA", "AMD"]
 
+    # Bolt Optimization: Normalize and deduplicate symbols upfront
+    # This avoids repeated regex calls inside the hot loop and ensures consistency
+    if hasattr(truth_layer, "normalize_symbol"):
+        symbols = sorted(list(set([truth_layer.normalize_symbol(s) for s in symbols])))
+
     # Dev mode limit
     if os.getenv("APP_ENV") != "production":
         symbols = symbols[:SCANNER_LIMIT_DEV]
@@ -913,9 +918,8 @@ def scan_for_opportunities(
         try:
             # A. Enrich Data
             # Use batched quote from map
-            # Normalize symbol key for lookup
-            key = truth_layer.normalize_symbol(symbol) if hasattr(truth_layer, "normalize_symbol") else symbol
-            snapshot_item = quotes_map.get(key) or quotes_map.get(symbol)
+            # Bolt Optimization: Symbol is already normalized upfront, use directly
+            snapshot_item = quotes_map.get(symbol)
 
             quote = {}
             if snapshot_item:
@@ -1030,7 +1034,7 @@ def scan_for_opportunities(
             )
 
             # --- V3 Strategy Design Agent Override ---
-            design_agents = build_agent_pipeline(phase="strategy_design")
+            design_agents = build_agent_pipeline(phase="scanner")
             if design_agents:
                 try:
                     # Use AgentRunner for consistency

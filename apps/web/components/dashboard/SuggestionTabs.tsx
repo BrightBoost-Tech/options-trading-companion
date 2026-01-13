@@ -244,7 +244,7 @@ export default function SuggestionTabs({
               }`}
             >
               <div className="flex items-center justify-center gap-2">
-                {Icon ? <Icon className="w-4 h-4" /> : <span>{tab.textIcon}</span>}
+                {Icon ? <Icon className="w-4 h-4" aria-hidden="true" /> : <span aria-hidden="true">{tab.textIcon}</span>}
                 {tab.label}
                 {tab.count > 0 && (
                   <span className={`${badgeClass} py-0.5 px-2 rounded-full text-xs`}>

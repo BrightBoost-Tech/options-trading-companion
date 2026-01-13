@@ -1,6 +1,45 @@
 from typing import Optional, Dict, Any
 import os
+from datetime import datetime, date
+from decimal import Decimal
+from enum import Enum
+from uuid import UUID
 from supabase import create_client, Client
+
+def _to_jsonable(obj: Any) -> Any:
+    """
+    Recursively converts objects to JSON-serializable types.
+    """
+    if obj is None:
+        return None
+    # exact bool check before int, though both are safe for json.dumps
+    if isinstance(obj, bool):
+        return obj
+    if isinstance(obj, (str, int, float)):
+        return obj
+    if isinstance(obj, (datetime, date)):
+        return obj.isoformat()
+    if isinstance(obj, UUID):
+        return str(obj)
+    if isinstance(obj, Decimal):
+        return float(obj)
+    if isinstance(obj, Enum):
+        return obj.value
+
+    # Pydantic v2
+    if hasattr(obj, 'model_dump'):
+        return _to_jsonable(obj.model_dump())
+    # Pydantic v1
+    if hasattr(obj, 'dict'):
+        return _to_jsonable(obj.dict())
+
+    if isinstance(obj, (list, tuple, set)):
+        return [_to_jsonable(item) for item in obj]
+    if isinstance(obj, dict):
+        return {str(k): _to_jsonable(v) for k, v in obj.items()}
+
+    # Fallback
+    return str(obj)
 
 def create_supabase_admin_client() -> Client:
     """
@@ -38,21 +77,24 @@ def complete_job_run(client: Client, job_id: str, result_json: Dict[str, Any]) -
     """
     Marks a job run as completed with the given result.
     """
-    client.rpc('complete_job_run', {'job_id': job_id, 'result': result_json}).execute()
+    payload = _to_jsonable(result_json)
+    client.rpc('complete_job_run', {'job_id': job_id, 'result': payload}).execute()
 
 def requeue_job_run(client: Client, job_id: str, run_after: str, error_json: Dict[str, Any]) -> None:
     """
     Requeues a job run for a later time due to a retryable error.
     run_after should be an ISO 8601 formatted string.
     """
+    payload = _to_jsonable(error_json)
     client.rpc('requeue_job_run', {
         'job_id': job_id,
         'run_after': run_after,
-        'error': error_json
+        'error': payload
     }).execute()
 
 def dead_letter_job_run(client: Client, job_id: str, error_json: Dict[str, Any]) -> None:
     """
     Marks a job run as failed permanently (dead letter).
     """
-    client.rpc('dead_letter_job_run', {'job_id': job_id, 'error': error_json}).execute()
+    payload = _to_jsonable(error_json)
+    client.rpc('dead_letter_job_run', {'job_id': job_id, 'error': payload}).execute()

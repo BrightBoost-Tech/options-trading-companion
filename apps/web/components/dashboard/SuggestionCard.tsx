@@ -42,6 +42,7 @@ const SuggestionCard = ({
     // Cast to any to access optional agent_summary without changing global type
     const agent_summary = (suggestion as any).agent_summary;
     const hasLoggedView = useRef(false);
+    const firstDismissReasonRef = useRef<HTMLButtonElement>(null);
     const displaySymbol = suggestion.display_symbol ?? suggestion.symbol ?? suggestion.ticker ?? '---';
     const exitPrice = typeof order_json?.limit_price === 'number'
         ? order_json.limit_price
@@ -73,6 +74,17 @@ const SuggestionCard = ({
         }
     }, [suggestion.id, suggestion.symbol, suggestion.strategy, suggestion.window, iv_regime, score]);
 
+    // Focus management for dismiss actions
+    useEffect(() => {
+        if (dismissOpen) {
+            // Small timeout to allow render to complete and element to be mounted
+            const timer = setTimeout(() => {
+                firstDismissReasonRef.current?.focus();
+            }, 0);
+            return () => clearTimeout(timer);
+        }
+    }, [dismissOpen]);
+
     // Payoff Diagram Helper (Simple V-shape or hockey stick)
     const renderPayoffDiagram = () => {
         return (
@@ -81,6 +93,7 @@ const SuggestionCard = ({
                 className="w-full h-full text-green-500 opacity-20"
                 role="img"
                 aria-label="Payoff diagram preview"
+                aria-hidden="true"
             >
                 <path d="M0,40 L40,40 L60,10 L100,10" fill="none" stroke="currentColor" strokeWidth="2" />
                 <line x1="0" y1="40" x2="100" y2="40" stroke="currentColor" className="text-muted-foreground/50" strokeWidth="1" strokeDasharray="2,2" />
@@ -335,7 +348,7 @@ const SuggestionCard = ({
                     {isStale && !staged && (
                         <div className="flex items-center gap-2 mr-auto">
                             <span className="text-xs text-orange-600 dark:text-orange-400 flex items-center gap-1">
-                                <Clock className="w-3 h-3" />
+                                <Clock className="w-3 h-3" aria-hidden="true" />
                                 Stale
                             </span>
                             <Button
@@ -356,6 +369,7 @@ const SuggestionCard = ({
                          {dismissOpen ? (
                              <div className="flex items-center gap-1.5 animate-in fade-in zoom-in duration-200 origin-right">
                                  <Button
+                                    ref={firstDismissReasonRef}
                                     variant="outline"
                                     onClick={() => handleDismiss('too_risky')}
                                     className="h-7 px-3 text-xs font-medium bg-red-100 text-red-700 hover:bg-red-200 hover:text-red-800 dark:bg-red-900/30 dark:text-red-400 dark:hover:bg-red-900/50 border-red-200 dark:border-red-900"

@@ -25,3 +25,10 @@
 1. Implement a dedicated error parsing helper (like `parse_plaid_error`) that sanitizes upstream errors.
 2. Use an environment check (e.g., `APP_ENV != "production"`) to conditionally reveal detailed error messages only in safe environments.
 3. Mask `ValueError` and similar configuration exceptions with generic "Configuration Error" messages in production.
+
+## 2025-02-18 - Signature Leakage in Auth Logs
+**Vulnerability:** The internal task authentication logic (`packages/quantum/security/task_auth.py`) was logging the `expected_signature` when a signature mismatch occurred. This potentially allows an attacker with log access to forge signatures for future requests (within the TTL window) or analyze the HMAC generation for weaknesses.
+**Learning:** Debug logs that print "Expected vs Got" values are dangerous for cryptographic secrets. Logging the "Expected" secret essentially reveals the correct answer to anyone who can read the logs.
+**Prevention:**
+1. Never log the expected value of a cryptographic check (HMAC, hash, token) on failure.
+2. Only log "Signature verification failed" or at most the *provided* (potentially malicious) signature for forensic analysis, but never the *correct* one.

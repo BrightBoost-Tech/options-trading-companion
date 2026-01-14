@@ -64,7 +64,8 @@ async def verify_internal_task_request(
     ).hexdigest()
 
     if not hmac.compare_digest(expected_signature, x_task_signature):
-        print(f"🚨 Invalid Task Signature. Expected: {expected_signature}, Got: {x_task_signature}, Payload: {payload}")
+        # SECURITY: Do not log the expected signature, as it allows signature forgery if logs are compromised.
+        print(f"🚨 Invalid Task Signature. Got: {x_task_signature}, Payload: {payload}")
         raise HTTPException(status_code=401, detail="Invalid signature")
 
     # 3. IP Allowlist (Optional)

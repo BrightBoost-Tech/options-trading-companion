@@ -150,71 +150,47 @@ def apply_biases(
 ) -> Tuple[np.ndarray, np.ndarray]:
     """
     Return (adj_mu, adj_sigma) with:
-      - mu adjusted by alpha_adjustment, clamped to +/- max_mu_deviation relative to raw mu magnitude?
-        Or absolute deviation? The prompt says "Do not push adj_mu more than +/-25% away from raw mu."
-        This likely implies relative percentage if mu is large, or absolute if mu is small.
-        Usually for expected returns (e.g. 0.05), a 25% deviation is 0.0125.
-        Let's interpret as: |adj_mu - mu| <= 0.25 * |mu|
-
+      - mu adjusted by alpha_adjustment, clamped to +/- max_mu_deviation relative to raw mu magnitude.
       - sigma scaled per symbol via sigma_scaler, clamped to [min_sigma_scaler, max_sigma_scaler].
-        Since sigma is a covariance matrix, we scale the diagonal (volatility) and recompute?
-        Or scale the whole row/col?
-        Usually bias is on 'volatility' (std dev).
-        Covariance C_ij = sigma_i * sigma_j * rho_ij.
-        If we scale sigma_i by S_i, then C'_ij = (sigma_i * S_i) * (sigma_j * S_j) * rho_ij = S_i * S_j * C_ij.
+
+    Optimization: Vectorized using NumPy to avoid Python loop overhead.
     """
-
-    adj_mu = mu.copy()
-    adj_sigma = sigma.copy()
-
     n = len(tickers)
-    scalers = np.ones(n)
 
+    # 1. Extract adapter values into aligned arrays
+    # Default values if adapter missing: alpha=0.0, scaler=1.0
+    alpha_adjustments = np.zeros(n)
+    sigma_scalers = np.ones(n)
+
+    # We iterate once to extract from dict (unavoidable O(N) but lightweight)
+    # This is faster than doing math inside the loop
     for i, ticker in enumerate(tickers):
         adapter = adapters.get(ticker)
-        if not adapter:
-            continue
+        if adapter:
+            alpha_adjustments[i] = adapter.alpha_adjustment
+            sigma_scalers[i] = adapter.sigma_scaler
 
-        # 1. Apply Alpha Adjustment (Mu)
-        # Prompt: "Do not push adj_mu more than +/-25% away from raw mu"
-        raw_val = mu[i]
+    # 2. Vectorized Alpha Adjustment (Mu)
+    proposed_mu = mu + alpha_adjustments
 
-        # Calculate raw proposal
-        proposed_val = raw_val + adapter.alpha_adjustment
+    # Calculate absolute deviation allowance
+    abs_mu = np.abs(mu)
+    deviation = abs_mu * max_mu_deviation
 
-        # Calculate bounds
-        # If raw_val is 0, we can't do % bounds. Assume some absolute floor or skip?
-        # Let's assume strict 25% of raw value.
-        # If raw_val is negative, logic holds.
-        upper = raw_val + abs(raw_val) * max_mu_deviation
-        lower = raw_val - abs(raw_val) * max_mu_deviation
+    # Vectorized clamping: clip(value, min, max)
+    # lower = mu - deviation
+    # upper = mu + deviation
+    # But clip needs constant or matching shape. arrays match.
+    adj_mu = np.clip(proposed_mu, mu - deviation, mu + deviation)
 
-        # Clamp
-        if proposed_val > upper:
-            clamped_val = upper
-        elif proposed_val < lower:
-            clamped_val = lower
-        else:
-            clamped_val = proposed_val
+    # 3. Vectorized Sigma Scaler Preparation
+    # Clamp scalers to [min, max]
+    clamped_scalers = np.clip(sigma_scalers, min_sigma_scaler, max_sigma_scaler)
 
-        adj_mu[i] = clamped_val
-
-        # 2. Prepare Sigma Scaler
-        # Clamp scaler itself first
-        s = adapter.sigma_scaler
-        if s < min_sigma_scaler: s = min_sigma_scaler
-        if s > max_sigma_scaler: s = max_sigma_scaler
-
-        scalers[i] = s
-
-    # Apply Sigma Scaling
+    # 4. Apply Sigma Scaling
     # C'_ij = S_i * S_j * C_ij
-    # We can do this efficiently with broadcasting
-    # S is (n,), sigma is (n,n)
     # result = S[:, None] * S[None, :] * sigma
-
-    # Outer product of scalers
-    scaler_matrix = np.outer(scalers, scalers)
+    scaler_matrix = np.outer(clamped_scalers, clamped_scalers)
     adj_sigma = sigma * scaler_matrix
 
     return adj_mu, adj_sigma

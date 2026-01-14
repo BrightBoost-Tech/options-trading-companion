@@ -37,7 +37,7 @@ class JobRunStore:
             # upsert with ignore_duplicates=True will do nothing if conflict
             res = self.client.table("job_runs").upsert(
                 data, on_conflict="job_name,idempotency_key", ignore_duplicates=True
-            ).select().execute()
+            ).execute()
 
             res_data = self._data(res)
             if res_data:

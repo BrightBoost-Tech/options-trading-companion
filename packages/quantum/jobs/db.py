@@ -54,47 +54,37 @@ def create_supabase_admin_client() -> Client:
     return create_client(url, key)
 
 def claim_job_run(client: Client, worker_id: str) -> Optional[Dict[str, Any]]:
-    """
-    Attempts to claim a pending job run for the given worker.
-    """
     try:
-        response = client.rpc('claim_job_run', {'worker_id': worker_id}).execute()
-        # RPC returns a single object or None/null
-        # supabase-py execute() returns a response object with .data
+        # FIX: function signature is claim_job_run(p_worker_id text)
+        response = client.rpc('claim_job_run', {'p_worker_id': worker_id}).execute()
         data = response.data
         if not data:
             return None
-        # If rpc returns a list with one item (common pattern), handle it
         if isinstance(data, list):
             return data[0] if data else None
         return data
     except Exception as e:
-        # In case of connection error or other issues, we return None and let the worker retry/sleep
         print(f"Error claiming job run: {e}")
         return None
 
+
 def complete_job_run(client: Client, job_id: str, result_json: Dict[str, Any]) -> None:
-    """
-    Marks a job run as completed with the given result.
-    """
     payload = _to_jsonable(result_json)
-    client.rpc('complete_job_run', {'job_id': job_id, 'result': payload}).execute()
+    # FIX: function signature is complete_job_run(p_job_id uuid, p_result jsonb)
+    client.rpc('complete_job_run', {'p_job_id': job_id, 'p_result': payload}).execute()
+
 
 def requeue_job_run(client: Client, job_id: str, run_after: str, error_json: Dict[str, Any]) -> None:
-    """
-    Requeues a job run for a later time due to a retryable error.
-    run_after should be an ISO 8601 formatted string.
-    """
     payload = _to_jsonable(error_json)
+    # FIX: function signature is requeue_job_run(p_job_id uuid, p_run_after timestamptz, p_error jsonb)
     client.rpc('requeue_job_run', {
-        'job_id': job_id,
-        'run_after': run_after,
-        'error': payload
+        'p_job_id': job_id,
+        'p_run_after': run_after,
+        'p_error': payload
     }).execute()
 
+
 def dead_letter_job_run(client: Client, job_id: str, error_json: Dict[str, Any]) -> None:
-    """
-    Marks a job run as failed permanently (dead letter).
-    """
     payload = _to_jsonable(error_json)
-    client.rpc('dead_letter_job_run', {'job_id': job_id, 'error': payload}).execute()
+    # FIX: function signature is dead_letter_job_run(p_job_id uuid, p_error jsonb)
+    client.rpc('dead_letter_job_run', {'p_job_id': job_id, 'p_error': payload}).execute()

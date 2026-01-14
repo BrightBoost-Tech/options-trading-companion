@@ -6,6 +6,9 @@ class JobRunStore:
     def __init__(self):
         self.client = create_supabase_admin_client()
 
+    def _data(self, resp):
+        return getattr(resp, "data", None) if resp is not None else None
+
     def create_or_get(self, job_name: str, idempotency_key: str, payload: Dict[str, Any]) -> Dict[str, Any]:
         """
         Creates a new job run if it doesn't exist (based on job_name + idempotency_key).
@@ -19,8 +22,9 @@ class JobRunStore:
             .maybe_single()\
             .execute()
 
-        if existing.data:
-            return existing.data
+        existing_data = self._data(existing)
+        if existing_data:
+            return existing_data
 
         # Attempt to insert
         try:
@@ -35,8 +39,10 @@ class JobRunStore:
                 data, on_conflict="job_name,idempotency_key", ignore_duplicates=True
             ).select().execute()
 
-            if res.data:
-                return res.data[0]
+            res_data = self._data(res)
+            if res_data:
+                # res_data is typically a list from .select()
+                return res_data[0] if isinstance(res_data, list) else res_data
 
             # If we are here, it means duplicate existed and was ignored. Fetch again.
             existing_retry = self.client.table("job_runs")\
@@ -45,7 +51,15 @@ class JobRunStore:
                 .eq("idempotency_key", idempotency_key)\
                 .maybe_single()\
                 .execute()
-            return existing_retry.data
+
+            retry_data = self._data(existing_retry)
+            if retry_data:
+                return retry_data
+
+            raise RuntimeError(
+                "Failed to create_or_get job_run: Supabase returned None/empty response "
+                f"(job_name={job_name}, idempotency_key={idempotency_key})."
+            )
 
         except Exception as e:
             # Fallback for errors
@@ -54,7 +68,7 @@ class JobRunStore:
 
     def get_job(self, job_run_id: str) -> Optional[Dict[str, Any]]:
         res = self.client.table("job_runs").select("*").eq("id", job_run_id).maybe_single().execute()
-        return res.data
+        return self._data(res)
 
     def mark_running(self, job_run_id: str, worker_id: str) -> None:
         """

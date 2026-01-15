@@ -17,3 +17,7 @@
 ## 2025-05-28 - CSS-Only Accessible Custom Inputs
 **Learning:** We can create fully accessible, custom-styled checkboxes without heavy JS libraries by using the `:checked` pseudo-class and sibling selectors (`peer-checked`). This keeps the bundle size small while maintaining native keyboard navigation and form behavior.
 **Action:** Prefer CSS-driven state styling for simple form controls over complex controlled components when possible.
+
+## 2024-05-22 - [Copy Symbol Pattern]
+**Learning:** Users often need to copy symbols to external tools (trading platforms, research sites). A hidden-on-hover copy action reduces noise while keeping the utility accessible.
+**Action:** When displaying financial identifiers (Tickers, ISINs, Contract IDs), wrap them in a group that reveals a copy action on hover, and confirm with a toast.

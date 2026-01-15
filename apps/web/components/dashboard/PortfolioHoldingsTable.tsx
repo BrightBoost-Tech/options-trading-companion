@@ -1,7 +1,8 @@
 import React from 'react';
 import { formatOptionDisplay } from '@/lib/formatters';
-import { Wallet, RefreshCw } from 'lucide-react';
+import { Wallet, RefreshCw, Copy, Check } from 'lucide-react';
 import { Button } from '@/components/ui/button';
+import { useToast } from '@/components/ui/use-toast';
 
 interface PortfolioHoldingsTableProps {
   holdings: any[];
@@ -18,6 +19,18 @@ const isLikelyOptionSymbol = (symbol: string | undefined): boolean => {
 };
 
 export default function PortfolioHoldingsTable({ holdings, onSync, onGenerateSuggestions }: PortfolioHoldingsTableProps) {
+  const { toast } = useToast();
+  const [copiedSymbol, setCopiedSymbol] = React.useState<string | null>(null);
+
+  const handleCopy = (text: string) => {
+    navigator.clipboard.writeText(text);
+    setCopiedSymbol(text);
+    toast({
+      description: "Symbol copied to clipboard",
+    });
+    setTimeout(() => setCopiedSymbol(null), 2000);
+  };
+
   // --- HELPERS ---
   const renderPositionRow = (position: any, idx: number) => {
       const type = position.asset_type === 'OPTION' ? 'option' : 'stock';
@@ -40,10 +53,22 @@ export default function PortfolioHoldingsTable({ holdings, onSync, onGenerateSug
       const displaySymbol = position.display_symbol ?? (type === 'option' ? formatOptionDisplay(position.symbol) : position.symbol);
 
       return (
-        <tr key={`${position.symbol}-${idx}`} className="hover:bg-muted/50 transition-colors">
+        <tr key={`${position.symbol}-${idx}`} className="hover:bg-muted/50 transition-colors group">
             <th scope="row" className={`px-6 py-4 font-medium text-left ${type === 'option' ? 'text-purple-600 dark:text-purple-400' : 'text-foreground'}`}>
-                <div className="flex flex-col">
-                    <span>{displaySymbol}</span>
+                <div className="flex flex-col items-start gap-1">
+                    <button
+                        onClick={() => handleCopy(displaySymbol)}
+                        className="flex items-center gap-2 hover:opacity-80 transition-opacity text-left"
+                        title="Click to copy symbol"
+                        aria-label={`Copy symbol ${displaySymbol}`}
+                    >
+                        <span>{displaySymbol}</span>
+                        {copiedSymbol === displaySymbol ? (
+                            <Check className="w-3 h-3 text-green-500 animate-in fade-in zoom-in" aria-hidden="true" />
+                        ) : (
+                            <Copy className="w-3 h-3 text-muted-foreground opacity-0 group-hover:opacity-100 transition-opacity" aria-hidden="true" />
+                        )}
+                    </button>
                     {position.sector && (
                         <span className="text-[10px] text-muted-foreground uppercase">{position.sector}</span>
                     )}

@@ -23,7 +23,7 @@ from packages.quantum.analytics.regime_integration import (
     run_historical_scoring
 )
 from packages.quantum.market_data import PolygonService
-from packages.quantum.analytics.factors import calculate_trend, calculate_volatility, calculate_rsi
+from packages.quantum.analytics.factors import calculate_indicators_vectorized
 from packages.quantum.nested.backbone import infer_global_context, GlobalContext
 from packages.quantum.services.transaction_cost_model import TransactionCostModel
 from packages.quantum.common_enums import UnifiedScore
@@ -320,18 +320,26 @@ class HistoricalCycleService:
         # Attribution vars
         execution_drag_total = 0.0
 
+        # Pre-calculate indicators vectorized (Optimization)
+        # Instead of calculating factors in the loop (O(N*M)), we compute them once (O(N))
+        indicators = calculate_indicators_vectorized(prices)
+        trend_series = indicators["trend"]
+        vol_series = indicators["volatility"]
+        rsi_series = indicators["rsi"]
+
         while current_idx < len(dates):
             # GUARD: Future Leakage Check
             # We strictly slice up to current_idx (inclusive)
-            price_slice = prices[:current_idx+1]
+            # price_slice = prices[:current_idx+1] # Removed to save memory/cpu
             current_date_str = dates[current_idx]
             current_price = prices[current_idx]
 
             # --- Shared Logic Usage ---
             # 1. Compute Factors
-            trend = calculate_trend(price_slice) # UP/DOWN/NEUTRAL
-            vol_annual = calculate_volatility(price_slice, window=30)
-            rsi_val = calculate_rsi(price_slice, period=14)
+            # usage of pre-calculated series
+            trend = trend_series[current_idx]
+            vol_annual = vol_series[current_idx]
+            rsi_val = rsi_series[current_idx]
 
             # 2. Detect Regime (Global Backbone)
             features = {

@@ -1,7 +1,81 @@
 import numpy as np
+import pandas as pd
 import math
 from numpy.lib.stride_tricks import sliding_window_view
-from typing import List, Union
+from typing import List, Union, Dict
+
+def calculate_indicators_vectorized(prices: List[float]) -> Dict[str, np.ndarray]:
+    """
+    Calculates Trend, Volatility, and RSI for the entire price series using vectorized operations.
+    Returns aligned numpy arrays matching the input length.
+    """
+    if not prices:
+        return {
+            "trend": np.array([]),
+            "volatility": np.array([]),
+            "rsi": np.array([])
+        }
+
+    s = pd.Series(prices)
+    n = len(s)
+
+    # 1. Trend (SMA20 > SMA50)
+    # Existing logic: if len < 50 return "NEUTRAL"
+    sma20 = s.rolling(20).mean()
+    sma50 = s.rolling(50).mean()
+
+    trend = np.full(n, 'NEUTRAL', dtype=object)
+
+    # Only compare where we have data for SMA50 (implied index >= 49)
+    # sma20 will also be valid there
+    valid_mask = sma50.notna()
+
+    if valid_mask.any():
+        up_mask = (sma20 > sma50) & valid_mask
+        down_mask = (sma20 <= sma50) & valid_mask
+
+        trend[up_mask] = 'UP'
+        trend[down_mask] = 'DOWN'
+
+    # 2. Volatility
+    # Annualized vol of 30-day returns.
+    # Existing logic: if len < 31 return 0.0
+    # Rolling window of 30 on returns requires 30 returns, which requires 31 prices.
+    # Pandas: s.pct_change() gives returns. rolling(30) on returns gives result at index 30 (len 31).
+
+    pct_change = s.pct_change()
+    # ddof=0 to match population std dev used in original code
+    vol = pct_change.rolling(30).std(ddof=0) * np.sqrt(252)
+    vol = vol.fillna(0.0).values
+
+    # 3. RSI
+    # Existing logic: Simple average of gains/losses over period 14.
+    # if len < 15 return 50.0
+    period = 14
+    delta = s.diff()
+    up = delta.clip(lower=0)
+    down = -1 * delta.clip(upper=0)
+
+    ma_up = up.rolling(period).mean()
+    ma_down = down.rolling(period).mean()
+
+    # Calculate RS
+    # Existing logic quirk: if down average is 0, rs = 0.
+    with np.errstate(divide='ignore', invalid='ignore'):
+        rs = ma_up / ma_down
+        # Fix division by zero or where ma_down is 0 (pure uptrend -> 0 in existing logic)
+        rs[ma_down == 0] = 0.0
+
+    rsi = 100 - (100 / (1 + rs))
+
+    # Fill NaN (initial period) with 50.0
+    rsi = rsi.fillna(50.0).values
+
+    return {
+        "trend": trend,
+        "volatility": vol,
+        "rsi": rsi
+    }
 
 def calculate_trend(prices: List[float]) -> str:
     """

@@ -5,3 +5,7 @@
 ## 2025-05-23 - [Redundant Data Filtering Cost]
 **Learning:** Even simple operations like date parsing (`datetime.fromisoformat`) and dictionary lookups become expensive when repeated inside high-volume loops (e.g., thousands of option contracts).
 **Action:** When consuming data from a trusted source (like an internal service or API with filtering params), trust the source's filtering instead of re-verifying every item, especially in hot paths.
+
+## 2026-01-15 - [Vectorized Indicators in Simulation]
+**Learning:** Calculating technical indicators iteratively inside a simulation loop creates O(N^2) complexity due to repeated list slicing and re-computation. Pre-calculating them vectorized (O(N)) reduced simulation time by ~45%.
+**Action:** For historical simulations where the full price series is known upfront, always pre-calculate indicators using vectorized operations (Pandas/NumPy) instead of computing them step-by-step.

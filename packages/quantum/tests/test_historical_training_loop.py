@@ -345,7 +345,7 @@ class TestConfigMutation:
         assert mutated.max_risk_pct_portfolio <= 0.25
 
     def test_guardrails_prevent_extreme_conviction(self):
-        """Guardrails prevent conviction from going below 0.35."""
+        """PR5: Guardrails prevent conviction from going below 0.05 (lowered from 0.35)."""
         from packages.quantum.services.go_live_validation_service import GoLiveValidationService
 
         service = GoLiveValidationService(MagicMock())
@@ -353,7 +353,7 @@ class TestConfigMutation:
         config = StrategyConfig(
             name="test",
             version=1,
-            conviction_floor=0.36,  # Near min
+            conviction_floor=0.06,  # Near new min of 0.05
             take_profit_pct=0.05,
             stop_loss_pct=0.03,
             max_holding_days=10,
@@ -369,8 +369,110 @@ class TestConfigMutation:
 
         mutated = service._mutate_config(config, "no_trades", 0.0)
 
-        # Should not go below 0.35 guardrail
-        assert mutated.conviction_floor >= 0.35
+        # PR5: Should not go below 0.05 guardrail (lowered from 0.35)
+        assert mutated.conviction_floor >= 0.05
+
+    def test_no_trades_mutation_escapes_old_deadlock(self):
+        """PR5: no_trades mutation works even when conviction_floor <= 0.35."""
+        from packages.quantum.services.go_live_validation_service import GoLiveValidationService
+
+        service = GoLiveValidationService(MagicMock())
+
+        # Config with conviction_floor at old limit (0.35) - would NOT mutate before PR5
+        config = StrategyConfig(
+            name="test",
+            version=1,
+            conviction_floor=0.25,  # Below old 0.35 limit
+            take_profit_pct=0.05,
+            stop_loss_pct=0.03,
+            max_holding_days=10,
+            max_risk_pct_portfolio=0.10,
+            max_concurrent_positions=1,
+            conviction_slope=0.2,
+            max_risk_pct_per_trade=0.05,
+            max_spread_bps=200,  # At old max limit
+            max_days_to_expiry=45,
+            min_underlying_liquidity=1000000.0,
+            regime_whitelist=[]
+        )
+
+        mutated = service._mutate_config(config, "no_trades", 0.0)
+
+        # PR5: Should still mutate - lower conviction_floor below 0.25
+        assert mutated.conviction_floor < config.conviction_floor, \
+            "no_trades should reduce conviction_floor even when already <= 0.35"
+
+    def test_no_trades_mutation_increases_spread_above_200(self):
+        """PR5: no_trades can increase max_spread_bps above 200 (up to 400)."""
+        from packages.quantum.services.go_live_validation_service import GoLiveValidationService
+
+        service = GoLiveValidationService(MagicMock())
+
+        # Config with conviction_floor at minimum (0.05) - must mutate spread instead
+        config = StrategyConfig(
+            name="test",
+            version=1,
+            conviction_floor=0.05,  # At new minimum
+            take_profit_pct=0.05,
+            stop_loss_pct=0.03,
+            max_holding_days=10,
+            max_risk_pct_portfolio=0.10,
+            max_concurrent_positions=1,
+            conviction_slope=0.2,
+            max_risk_pct_per_trade=0.05,
+            max_spread_bps=200,  # At old limit, below new limit of 400
+            max_days_to_expiry=45,
+            min_underlying_liquidity=1000000.0,
+            regime_whitelist=[]
+        )
+
+        mutated = service._mutate_config(config, "no_trades", 0.0)
+
+        # PR5: Should increase max_spread_bps since conviction_floor is at min
+        assert mutated.max_spread_bps > config.max_spread_bps, \
+            "no_trades should increase max_spread_bps when conviction_floor at min"
+        assert mutated.max_spread_bps <= 400, \
+            "max_spread_bps should not exceed 400 guardrail"
+
+    def test_no_trades_mutation_repeatedly_lowers_conviction(self):
+        """PR5: Repeated no_trades mutations keep lowering conviction_floor."""
+        from packages.quantum.services.go_live_validation_service import GoLiveValidationService
+
+        service = GoLiveValidationService(MagicMock())
+
+        config = StrategyConfig(
+            name="test",
+            version=1,
+            conviction_floor=0.55,
+            take_profit_pct=0.05,
+            stop_loss_pct=0.03,
+            max_holding_days=10,
+            max_risk_pct_portfolio=0.10,
+            max_concurrent_positions=1,
+            conviction_slope=0.2,
+            max_risk_pct_per_trade=0.05,
+            max_spread_bps=100,
+            max_days_to_expiry=45,
+            min_underlying_liquidity=1000000.0,
+            regime_whitelist=[]
+        )
+
+        # Simulate multiple mutation rounds
+        values = [config.conviction_floor]
+        current = config
+        for _ in range(10):
+            current = service._mutate_config(current, "no_trades", 0.0)
+            values.append(current.conviction_floor)
+
+        # Should be strictly decreasing until hitting min
+        for i in range(1, len(values)):
+            if values[i-1] > 0.05:
+                assert values[i] < values[i-1], \
+                    f"conviction_floor should decrease: {values[i-1]} -> {values[i]}"
+
+        # Final value should be at or near minimum
+        assert current.conviction_floor <= 0.10, \
+            "After 10 mutations, conviction_floor should be near minimum"
 
 
 class TestStrategyPersistence:

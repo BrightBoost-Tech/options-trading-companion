@@ -6,7 +6,7 @@ from typing import List, Dict, Any, Optional, Literal
 from pydantic import BaseModel, Field
 
 from packages.quantum.strategy_profiles import StrategyConfig, CostModelConfig, BacktestRequestV3
-from packages.quantum.market_data import PolygonService
+from packages.quantum.market_data import PolygonService, extract_underlying_symbol
 from packages.quantum.analytics.regime_scoring import ScoringEngine, ConvictionTransform
 from packages.quantum.services.options_utils import get_contract_multiplier
 from packages.quantum.analytics.regime_integration import (
@@ -94,6 +94,25 @@ class BacktestEngine:
         # Map dates to indices
         date_map = {d: i for i, d in enumerate(dates)}
 
+        # PR5: For options, fetch underlying prices for scoring
+        # Option prices are dominated by theta decay, so scoring should use underlying trend
+        underlying_symbol = None
+        underlying_dates = []
+        underlying_prices = []
+        underlying_date_map = {}
+
+        if multiplier == 100:  # Option contract
+            underlying_symbol = extract_underlying_symbol(symbol)
+            underlying_hist = self.polygon.get_historical_prices(
+                underlying_symbol,
+                days=days_needed,
+                to_date=end_dt
+            )
+            if underlying_hist:
+                underlying_dates = underlying_hist.get('dates', [])
+                underlying_prices = underlying_hist.get('prices', [])
+                underlying_date_map = {d: i for i, d in enumerate(underlying_dates)}
+
         # Determine start index
         start_idx = -1
         for i, d in enumerate(dates):
@@ -128,12 +147,22 @@ class BacktestEngine:
             current_price = prices[i]
 
             # Helper to calculate scoring
-            price_slice = prices[:i+1]
+            # PR5: For options, use underlying prices for scoring (not option prices)
+            # Option prices are dominated by theta decay and don't reflect underlying trend
+            if underlying_prices and current_date in underlying_date_map:
+                # Use underlying prices for scoring
+                underlying_idx = underlying_date_map[current_date]
+                scoring_slice = underlying_prices[:underlying_idx+1]
+                scoring_symbol = underlying_symbol
+            else:
+                # Fallback to traded symbol prices (stocks, or if underlying data unavailable)
+                scoring_slice = prices[:i+1]
+                scoring_symbol = symbol
 
             # --- Scoring Logic (Reused) ---
-            trend = calculate_trend(price_slice)
-            vol_annual = calculate_volatility(price_slice, window=30)
-            rsi_val = calculate_rsi(price_slice, period=14)
+            trend = calculate_trend(scoring_slice)
+            vol_annual = calculate_volatility(scoring_slice, window=30)
+            rsi_val = calculate_rsi(scoring_slice, period=14)
 
             # Global Context
             features = {
@@ -168,7 +197,7 @@ class BacktestEngine:
 
             scoring_result = run_historical_scoring(
                 symbol_data={
-                    "symbol": symbol,
+                    "symbol": scoring_symbol,  # PR5: Use underlying for regime matching
                     "factors": factors_input,
                     "liquidity_tier": "top"
                 },
@@ -303,6 +332,13 @@ class BacktestEngine:
 
         # Calculate Metrics
         metrics = self._calculate_metrics(trades, equity_curve, initial_equity)
+
+        # PR5: Add debug metrics for options to track scoring vs trading symbols
+        if multiplier == 100 and underlying_symbol:
+            metrics["scoring_symbol"] = underlying_symbol
+            metrics["traded_symbol"] = symbol
+            metrics["underlying_bars"] = len(underlying_prices)
+            metrics["option_bars"] = len(prices)
 
         return BacktestRunResult(
             backtest_id=backtest_id,

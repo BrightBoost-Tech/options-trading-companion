@@ -709,11 +709,12 @@ class GoLiveValidationService:
                 updates["max_holding_days"] = max(3, config.max_holding_days - 2)
 
         elif fail_reason == "no_trades":
-            # Lower barriers to entry
-            if config.conviction_floor > 0.35:
-                updates["conviction_floor"] = max(0.35, config.conviction_floor - 0.05)
-            elif config.max_spread_bps < 200:
-                updates["max_spread_bps"] = min(200, config.max_spread_bps + 25)
+            # PR5: Lower barriers to entry more aggressively to escape no_trades deadlock
+            # Reduced guardrails: conviction_floor down to 0.05, max_spread_bps up to 400
+            if config.conviction_floor > 0.05:
+                updates["conviction_floor"] = max(0.05, config.conviction_floor - 0.05)
+            elif config.max_spread_bps < 400:
+                updates["max_spread_bps"] = min(400, config.max_spread_bps + 25)
 
         else:
             # Generic mutation: try small adjustments

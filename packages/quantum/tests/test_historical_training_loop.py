@@ -598,5 +598,338 @@ class TestJobHandlerIntegration:
         mock_service.train_historical.assert_not_called()
 
 
+class TestPR8SegmentComputation:
+    """PR8: Tests for equity-based segment computation."""
+
+    def test_compute_segment_returns_from_equity_basic(self):
+        """compute_segment_returns_from_equity computes segment returns from equity curve."""
+        from packages.quantum.services.go_live_validation_service import compute_segment_returns_from_equity
+
+        # Create equity curve spanning 90 days
+        equity_curve = []
+        base_date = date(2024, 1, 1)
+        for i in range(91):
+            # Equity grows 10% over each 30-day segment
+            if i < 30:
+                equity = 10000 + (i * 33.33)  # ~10% gain in seg1
+            elif i < 60:
+                equity = 11000 + ((i - 30) * 36.67)  # ~10% gain in seg2
+            else:
+                equity = 12100 + ((i - 60) * 40.33)  # ~10% gain in seg3
+            equity_curve.append({
+                "date": (base_date + timedelta(days=i)).isoformat(),
+                "equity": equity
+            })
+
+        result = compute_segment_returns_from_equity(equity_curve, base_date, 90)
+
+        assert result["valid"] is True
+        assert "segment_returns_pct" in result
+        assert "seg1" in result["segment_returns_pct"]
+        assert "seg2" in result["segment_returns_pct"]
+        assert "seg3" in result["segment_returns_pct"]
+        # Each segment should show positive return
+        for seg, ret in result["segment_returns_pct"].items():
+            assert ret > 0, f"{seg} should have positive return"
+
+    def test_compute_segment_returns_handles_empty_curve(self):
+        """compute_segment_returns_from_equity handles empty equity curve."""
+        from packages.quantum.services.go_live_validation_service import compute_segment_returns_from_equity
+
+        result = compute_segment_returns_from_equity([], date(2024, 1, 1), 90)
+
+        assert result["valid"] is False
+        # Returns zero for all segments when no data
+        assert result["segment_returns_pct"]["seg1"] == 0.0
+        assert result["segment_returns_pct"]["seg2"] == 0.0
+        assert result["segment_returns_pct"]["seg3"] == 0.0
+
+    def test_compute_segment_returns_handles_short_curve(self):
+        """compute_segment_returns_from_equity handles curve shorter than window."""
+        from packages.quantum.services.go_live_validation_service import compute_segment_returns_from_equity
+
+        # Only 20 days of data
+        equity_curve = [
+            {"date": (date(2024, 1, 1) + timedelta(days=i)).isoformat(), "equity": 10000 + i * 10}
+            for i in range(20)
+        ]
+
+        result = compute_segment_returns_from_equity(equity_curve, date(2024, 1, 1), 90)
+
+        # Should still be valid but may have fewer segments
+        assert "segment_returns_pct" in result
+
+
+class TestPR8ScoreTrainingResult:
+    """PR8: Tests for score_training_result function."""
+
+    def test_score_prefers_passed(self):
+        """Passed results score higher than failed."""
+        from packages.quantum.services.go_live_validation_service import score_training_result
+
+        passed = {"all_passed": True, "worst_return": 5.0}
+        failed = {"all_passed": False, "worst_return": 10.0}  # Higher return but failed
+
+        passed_score = score_training_result(passed)
+        failed_score = score_training_result(failed)
+
+        assert passed_score > failed_score, "Passed should score higher than failed"
+
+    def test_score_prefers_higher_return_among_passed(self):
+        """Among passed results, higher return scores better."""
+        from packages.quantum.services.go_live_validation_service import score_training_result
+
+        high_return = {"all_passed": True, "worst_return": 15.0}
+        low_return = {"all_passed": True, "worst_return": 5.0}
+
+        assert score_training_result(high_return) > score_training_result(low_return)
+
+    def test_score_handles_none_result(self):
+        """None result returns lowest possible score."""
+        from packages.quantum.services.go_live_validation_service import score_training_result
+
+        score = score_training_result(None)
+        any_result = {"all_passed": False, "worst_return": -100.0}
+
+        assert score < score_training_result(any_result)
+
+
+class TestPR8SegmentTolerance:
+    """PR8: Tests for segment_tolerance_pct preventing false failures."""
+
+    @patch('packages.quantum.services.go_live_validation_service.BacktestEngine')
+    @patch('packages.quantum.services.go_live_validation_service.OptionContractResolver')
+    def test_tolerance_prevents_false_losing_segment(self, mock_resolver_class, mock_engine_class):
+        """segment_tolerance_pct prevents small negative segments from failing."""
+        from packages.quantum.services.go_live_validation_service import GoLiveValidationService
+
+        mock_supabase = MagicMock()
+        mock_supabase.table.return_value.select.return_value.eq.return_value.single.return_value.execute.return_value.data = {
+            "user_id": "test-user",
+            "paper_baseline_capital": 10000,
+            "paper_ready": False,
+            "historical_last_result": {}
+        }
+        mock_supabase.table.return_value.select.return_value.eq.return_value.order.return_value.limit.return_value.execute.return_value.data = []
+        mock_supabase.table.return_value.insert.return_value.execute.return_value = MagicMock()
+        mock_supabase.table.return_value.update.return_value.eq.return_value.execute.return_value = MagicMock()
+
+        # Setup backtest with small negative segment but overall positive return
+        mock_engine = MagicMock()
+        mock_bt_result = MagicMock()
+        # Equity curve: 10000 -> 9950 (seg1: -0.5%) -> 10500 (seg2: +5.5%) -> 11000 (seg3: +4.8%)
+        mock_bt_result.equity_curve = [
+            {"date": "2024-01-01", "equity": 10000},
+            {"date": "2024-01-15", "equity": 9975},
+            {"date": "2024-01-31", "equity": 9950},  # seg1 end: -0.5%
+            {"date": "2024-02-15", "equity": 10225},
+            {"date": "2024-03-01", "equity": 10500},  # seg2 end: +5.5%
+            {"date": "2024-03-15", "equity": 10750},
+            {"date": "2024-03-31", "equity": 11000},  # seg3 end: +4.8%
+        ]
+        mock_bt_result.trades = [{"exit_date": "2024-02-15", "pnl": 1000}]
+        mock_engine.run_single.return_value = mock_bt_result
+        mock_engine_class.return_value = mock_engine
+
+        service = GoLiveValidationService(mock_supabase)
+
+        # With 1% tolerance, -0.5% segment should NOT fail
+        result = service.eval_historical("test-user", {
+            "symbol": "SPY",
+            "window_days": 90,
+            "concurrent_runs": 1,
+            "goal_return_pct": 5.0,
+            "segment_tolerance_pct": 1.0  # 1% tolerance
+        })
+
+        # Should pass because -0.5% is within 1% tolerance
+        assert result.get("all_passed", False) or result.get("worst_suite", {}).get("fail_reason") != "losing_segment"
+
+
+class TestPR8ExhaustedBestConfig:
+    """PR8: Tests for exhausted persisting best config."""
+
+    @patch('packages.quantum.services.go_live_validation_service.BacktestEngine')
+    @patch('packages.quantum.services.go_live_validation_service.OptionContractResolver')
+    def test_exhausted_persists_best_config_not_last(self, mock_resolver_class, mock_engine_class):
+        """On exhausted, persists best config found, not last mutated config."""
+        from packages.quantum.services.go_live_validation_service import GoLiveValidationService
+
+        mock_supabase = MagicMock()
+        mock_supabase.table.return_value.select.return_value.eq.return_value.single.return_value.execute.return_value.data = {
+            "user_id": "test-user",
+            "paper_baseline_capital": 10000
+        }
+        mock_supabase.table.return_value.select.return_value.eq.return_value.order.return_value.limit.return_value.execute.return_value.data = []
+        mock_supabase.table.return_value.insert.return_value.execute.return_value = MagicMock()
+        mock_supabase.table.return_value.update.return_value.eq.return_value.eq.return_value.execute.return_value = MagicMock()
+
+        # Setup backtest to return declining returns
+        mock_engine = MagicMock()
+        call_count = [0]
+
+        def side_effect(*args, **kwargs):
+            call_count[0] += 1
+            result = MagicMock()
+            # First attempt is best (8% return), then declining
+            if call_count[0] == 1:
+                result.equity_curve = [{"equity": 10800, "date": "2024-03-31"}]
+                result.trades = [{"exit_date": "2024-02-15", "pnl": 800}]
+            elif call_count[0] == 2:
+                result.equity_curve = [{"equity": 10500, "date": "2024-03-31"}]
+                result.trades = [{"exit_date": "2024-02-15", "pnl": 500}]
+            else:
+                result.equity_curve = [{"equity": 10200, "date": "2024-03-31"}]
+                result.trades = [{"exit_date": "2024-02-15", "pnl": 200}]
+            return result
+
+        mock_engine.run_single.side_effect = side_effect
+        mock_engine_class.return_value = mock_engine
+
+        service = GoLiveValidationService(mock_supabase)
+
+        result = service.train_historical("test-user", {
+            "symbol": "SPY",
+            "window_days": 30,
+            "concurrent_runs": 1,
+            "goal_return_pct": 15.0,  # High goal so all fail
+            "train": True,
+            "train_target_streak": 3,
+            "train_max_attempts": 3
+        })
+
+        assert result["status"] == "exhausted"
+        # best_return should be 8% (from first attempt)
+        assert result["best_return"] == 8.0
+        # best_config should be from first attempt, not last
+        assert result["best_result"] is not None
+
+    @patch('packages.quantum.services.go_live_validation_service.BacktestEngine')
+    @patch('packages.quantum.services.go_live_validation_service.OptionContractResolver')
+    def test_exhausted_includes_best_result_for_diagnostics(self, mock_resolver_class, mock_engine_class):
+        """On exhausted, includes best_result for UI/log diagnostics."""
+        from packages.quantum.services.go_live_validation_service import GoLiveValidationService
+
+        mock_supabase = MagicMock()
+        mock_supabase.table.return_value.select.return_value.eq.return_value.single.return_value.execute.return_value.data = {
+            "user_id": "test-user",
+            "paper_baseline_capital": 10000
+        }
+        mock_supabase.table.return_value.select.return_value.eq.return_value.order.return_value.limit.return_value.execute.return_value.data = []
+        mock_supabase.table.return_value.insert.return_value.execute.return_value = MagicMock()
+        mock_supabase.table.return_value.update.return_value.eq.return_value.eq.return_value.execute.return_value = MagicMock()
+
+        mock_engine = MagicMock()
+        mock_bt_result = MagicMock()
+        mock_bt_result.equity_curve = [{"equity": 9500, "date": "2024-03-31"}]
+        mock_bt_result.trades = [{"exit_date": "2024-02-15", "pnl": -500}]
+        mock_engine.run_single.return_value = mock_bt_result
+        mock_engine_class.return_value = mock_engine
+
+        service = GoLiveValidationService(mock_supabase)
+
+        result = service.train_historical("test-user", {
+            "symbol": "SPY",
+            "window_days": 30,
+            "concurrent_runs": 1,
+            "goal_return_pct": 10.0,
+            "train": True,
+            "train_target_streak": 3,
+            "train_max_attempts": 2
+        })
+
+        assert result["status"] == "exhausted"
+        assert "best_result" in result
+        assert "config_snapshot" in result["best_result"]
+
+
+class TestPR8LosingSegmentMutationAtFloor:
+    """PR8: Tests for losing_segment mutation when stop_loss at floor."""
+
+    def test_losing_segment_reduces_holding_when_stop_at_floor(self):
+        """losing_segment reduces max_holding_days when stop_loss at floor."""
+        from packages.quantum.services.go_live_validation_service import GoLiveValidationService
+
+        service = GoLiveValidationService(MagicMock())
+
+        config = StrategyConfig(
+            name="test",
+            version=1,
+            conviction_floor=0.55,
+            take_profit_pct=0.05,
+            stop_loss_pct=0.015,  # At floor (1.5%)
+            max_holding_days=10,
+            max_risk_pct_portfolio=0.10,
+            max_concurrent_positions=1,
+            conviction_slope=0.2,
+            max_risk_pct_per_trade=0.05,
+            max_spread_bps=100,
+            max_days_to_expiry=45,
+            min_underlying_liquidity=1000000.0,
+            regime_whitelist=[]
+        )
+
+        mutated, _ = service._mutate_config(config, "losing_segment", -5.0)
+
+        # Should reduce max_holding_days since stop_loss is at floor
+        assert mutated.max_holding_days < config.max_holding_days
+
+    def test_losing_segment_reduces_take_profit_when_holding_at_floor(self):
+        """losing_segment reduces take_profit_pct when max_holding_days at floor."""
+        from packages.quantum.services.go_live_validation_service import GoLiveValidationService
+
+        service = GoLiveValidationService(MagicMock())
+
+        config = StrategyConfig(
+            name="test",
+            version=1,
+            conviction_floor=0.55,
+            take_profit_pct=0.05,
+            stop_loss_pct=0.015,  # At floor
+            max_holding_days=3,    # At floor
+            max_risk_pct_portfolio=0.10,
+            max_concurrent_positions=1,
+            conviction_slope=0.2,
+            max_risk_pct_per_trade=0.05,
+            max_spread_bps=100,
+            max_days_to_expiry=45,
+            min_underlying_liquidity=1000000.0,
+            regime_whitelist=[]
+        )
+
+        mutated, _ = service._mutate_config(config, "losing_segment", -5.0)
+
+        # Should reduce take_profit_pct since stop_loss and holding are at floor
+        assert mutated.take_profit_pct < config.take_profit_pct
+
+    def test_losing_segment_reduces_risk_as_last_resort(self):
+        """losing_segment reduces risk only when all other options at floor."""
+        from packages.quantum.services.go_live_validation_service import GoLiveValidationService
+
+        service = GoLiveValidationService(MagicMock())
+
+        config = StrategyConfig(
+            name="test",
+            version=1,
+            conviction_floor=0.55,
+            take_profit_pct=0.03,   # At floor
+            stop_loss_pct=0.015,   # At floor
+            max_holding_days=3,    # At floor
+            max_risk_pct_portfolio=0.10,
+            max_concurrent_positions=1,
+            conviction_slope=0.2,
+            max_risk_pct_per_trade=0.05,
+            max_spread_bps=100,
+            max_days_to_expiry=45,
+            min_underlying_liquidity=1000000.0,
+            regime_whitelist=[]
+        )
+
+        mutated, _ = service._mutate_config(config, "losing_segment", -5.0)
+
+        # Should reduce risk as last resort
+        assert mutated.max_risk_pct_portfolio < config.max_risk_pct_portfolio
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

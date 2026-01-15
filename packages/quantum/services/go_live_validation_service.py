@@ -11,6 +11,151 @@ from packages.quantum.services.option_contract_resolver import OptionContractRes
 
 logger = logging.getLogger(__name__)
 
+
+def compute_segment_returns_from_equity(
+    equity_curve: List[Dict],
+    window_start: date,
+    window_days: int = 90
+) -> Dict[str, Any]:
+    """
+    Computes segment returns from equity curve using mark-to-market approach.
+
+    Instead of bucketing realized PnL by trade exit dates, this function:
+    - Divides the window into 3 segments (days 0-30, 30-60, 60-90)
+    - Computes return for each segment based on equity change
+
+    Args:
+        equity_curve: List of {"date": "YYYY-MM-DD", "equity": float} dicts
+        window_start: Start date of the backtest window
+        window_days: Total window duration (default 90)
+
+    Returns:
+        Dict with:
+        - segment_returns_pct: {"seg1": float, "seg2": float, "seg3": float}
+        - segment_equity: {"seg1": (start, end), "seg2": (start, end), "seg3": (start, end)}
+        - valid: bool indicating if computation was successful
+    """
+    if not equity_curve:
+        return {
+            "segment_returns_pct": {"seg1": 0.0, "seg2": 0.0, "seg3": 0.0},
+            "segment_equity": {"seg1": (0, 0), "seg2": (0, 0), "seg3": (0, 0)},
+            "valid": False
+        }
+
+    # Convert equity curve to date-indexed dict
+    equity_by_date = {}
+    for point in equity_curve:
+        date_str = point.get("date", "")
+        if date_str:
+            try:
+                d = datetime.strptime(date_str, "%Y-%m-%d").date()
+            except ValueError:
+                try:
+                    d = datetime.fromisoformat(date_str).date()
+                except ValueError:
+                    continue
+            equity_by_date[d] = point.get("equity", 0)
+
+    if not equity_by_date:
+        return {
+            "segment_returns_pct": {"seg1": 0.0, "seg2": 0.0, "seg3": 0.0},
+            "segment_equity": {"seg1": (0, 0), "seg2": (0, 0), "seg3": (0, 0)},
+            "valid": False
+        }
+
+    # Define segment boundaries
+    seg_duration = window_days // 3  # 30 days per segment for 90-day window
+    boundaries = [
+        window_start,
+        window_start + timedelta(days=seg_duration),
+        window_start + timedelta(days=seg_duration * 2),
+        window_start + timedelta(days=window_days)
+    ]
+
+    def get_equity_at_or_before(target_date: date) -> Optional[float]:
+        """Find equity at target date, or closest earlier date."""
+        if target_date in equity_by_date:
+            return equity_by_date[target_date]
+        # Find closest earlier date
+        earlier_dates = [d for d in equity_by_date.keys() if d <= target_date]
+        if earlier_dates:
+            return equity_by_date[max(earlier_dates)]
+        return None
+
+    def get_equity_at_or_after(target_date: date) -> Optional[float]:
+        """Find equity at target date, or closest later date."""
+        if target_date in equity_by_date:
+            return equity_by_date[target_date]
+        # Find closest later date
+        later_dates = [d for d in equity_by_date.keys() if d >= target_date]
+        if later_dates:
+            return equity_by_date[min(later_dates)]
+        return None
+
+    segment_returns = {}
+    segment_equity = {}
+
+    for i, seg_name in enumerate(["seg1", "seg2", "seg3"]):
+        seg_start = boundaries[i]
+        seg_end = boundaries[i + 1] - timedelta(days=1)  # End of segment (inclusive)
+
+        # Get equity at segment boundaries
+        start_equity = get_equity_at_or_after(seg_start)
+        end_equity = get_equity_at_or_before(seg_end)
+
+        if start_equity is None:
+            start_equity = get_equity_at_or_before(seg_start)
+        if end_equity is None:
+            end_equity = get_equity_at_or_after(seg_end)
+
+        if start_equity and end_equity and start_equity > 0:
+            ret_pct = ((end_equity - start_equity) / start_equity) * 100
+            segment_returns[seg_name] = ret_pct
+            segment_equity[seg_name] = (start_equity, end_equity)
+        else:
+            segment_returns[seg_name] = 0.0
+            segment_equity[seg_name] = (start_equity or 0, end_equity or 0)
+
+    return {
+        "segment_returns_pct": segment_returns,
+        "segment_equity": segment_equity,
+        "valid": True
+    }
+
+
+def score_training_result(result: Dict[str, Any]) -> tuple:
+    """
+    Scores a training result for ranking purposes.
+
+    Scoring rule (deterministic):
+    1. Prefer passed suites first
+    2. Among passed: highest return_pct, tie-breaker: least negative segment
+    3. Among failed: highest return_pct, tie-breaker: least negative worst segment
+
+    Returns:
+        Tuple for comparison: (passed_score, return_pct, segment_penalty)
+        Higher is better.
+    """
+    if not result:
+        return (0, float("-inf"), float("-inf"))
+
+    all_passed = result.get("all_passed", False)
+    worst_return = result.get("worst_return", float("-inf"))
+
+    # Calculate segment penalty (least negative = best)
+    worst_suite = result.get("worst_suite", {})
+    segment_pnls = worst_suite.get("segment_pnls", {})
+    segment_returns = worst_suite.get("segment_returns_pct", segment_pnls)
+
+    if segment_returns:
+        worst_segment = min(segment_returns.values())
+    else:
+        worst_segment = float("-inf")
+
+    # Score: (passed=1/0, return_pct, worst_segment)
+    return (1 if all_passed else 0, worst_return, worst_segment)
+
+
 class GoLiveValidationService:
     def __init__(self, supabase: Client):
         self.supabase = supabase
@@ -217,6 +362,8 @@ class GoLiveValidationService:
         # PR7: Rolling mode and strict mode
         use_rolling = suite_config.get("use_rolling_contracts", True)  # Default to rolling
         strict_option_mode = suite_config.get("strict_option_mode", False)
+        # PR8: Segment tolerance for losing_segment detection
+        segment_tolerance_pct = float(suite_config.get("segment_tolerance_pct", 0.0))
 
         # Initialize option resolver if needed
         option_resolver = OptionContractResolver() if instrument_type == "option" else None
@@ -338,10 +485,15 @@ class GoLiveValidationService:
             pnl = final_equity - baseline
             ret = (pnl / baseline) * 100 if baseline else 0.0
 
-            seg = {"seg1": 0.0, "seg2": 0.0, "seg3": 0.0}
+            # PR8: Use equity-curve based segment returns instead of trade exit-date bucketing
+            segment_result = compute_segment_returns_from_equity(equity, start_date, window_days)
+            segment_returns_pct = segment_result["segment_returns_pct"]
+            segment_equity = segment_result["segment_equity"]
+
+            # Legacy trade-based segmentation as fallback
+            seg_pnl = {"seg1": 0.0, "seg2": 0.0, "seg3": 0.0}
             for t in trades:
                 pnl_t = float(t.get("pnl", 0.0))
-                # Handle possible date formats in trades, assuming ISO or YYYY-MM-DD
                 try:
                     d = datetime.strptime(t["exit_date"], "%Y-%m-%d").date()
                 except ValueError:
@@ -349,22 +501,34 @@ class GoLiveValidationService:
 
                 off = (d - start_date).days
                 if off < 30:
-                    seg["seg1"] += pnl_t
+                    seg_pnl["seg1"] += pnl_t
                 elif off < 60:
-                    seg["seg2"] += pnl_t
+                    seg_pnl["seg2"] += pnl_t
                 else:
-                    seg["seg3"] += pnl_t
+                    seg_pnl["seg3"] += pnl_t
 
-            losing_segment = any(v < 0 for v in seg.values())
+            # PR8: Use equity-based returns for losing_segment check with tolerance
+            if segment_result["valid"]:
+                # Losing segment: any segment return below -tolerance
+                losing_segment = any(
+                    v < -segment_tolerance_pct for v in segment_returns_pct.values()
+                )
+            else:
+                # Fallback to legacy: any segment PnL < 0
+                losing_segment = any(v < 0 for v in seg_pnl.values())
+
             passed = ret >= goal_return_pct and not losing_segment
 
             return {
                 "window_start": start_date.isoformat(),
                 "window_end": end_date.isoformat(),
-                "symbol": backtest_symbol,  # PR3: Include actual symbol used
+                "symbol": backtest_symbol,
                 "return_pct": ret,
                 "pnl_total": pnl,
-                "segment_pnls": seg,
+                "segment_pnls": seg_pnl,  # Legacy format for backward compat
+                "segment_returns_pct": segment_returns_pct,  # PR8: New equity-based returns
+                "segment_equity": segment_equity,  # PR8: Equity at segment boundaries
+                "segment_tolerance_pct": segment_tolerance_pct,  # PR8: Tolerance used
                 "trades_count": len(trades),
                 "passed": passed,
                 "fail_reason": (
@@ -536,10 +700,19 @@ class GoLiveValidationService:
                 "config_snapshot": current_config.model_dump()
             })
 
-            # Update best result
-            if worst_return > best_return:
+            # PR8: Update best result using scoring function
+            # Include config_snapshot so we can persist the best config on exhausted
+            result_with_config = {
+                **result,
+                "config_snapshot": current_config.model_dump(),
+                "config_obj": current_config  # Keep ref for persistence
+            }
+            current_score = score_training_result(result_with_config)
+            best_score = score_training_result(best_result) if best_result else (0, float("-inf"), float("-inf"))
+
+            if current_score > best_score:
                 best_return = worst_return
-                best_result = result
+                best_result = result_with_config
 
             # Update streak
             if passed:
@@ -559,7 +732,8 @@ class GoLiveValidationService:
                         "best_config": current_config.model_dump(),
                         "best_return": best_return,
                         "history": history,
-                        "final_result": result
+                        "final_result": result,
+                        "best_result": best_result  # PR8: Include best_result for diagnostics
                     }
             else:
                 streak = 0
@@ -577,20 +751,27 @@ class GoLiveValidationService:
                 version += 1
 
         # Exhausted attempts
-        # Persist best config found even if didn't reach target streak
+        # PR8: Persist BEST config found (not last mutated config)
+        best_config_to_persist = None
+        best_config_dict = None
         if best_result:
+            best_config_to_persist = best_result.get("config_obj", current_config)
+            best_config_dict = best_result.get("config_snapshot", current_config.model_dump())
             self._persist_strategy_config(
-                user_id, strategy_name, current_config, version, versioning
+                user_id, strategy_name, best_config_to_persist, version, versioning
             )
+        else:
+            best_config_dict = current_config.model_dump() if current_config else None
 
         return {
             "status": "exhausted",
             "streak": streak,
             "attempts": attempts,
-            "best_config": current_config.model_dump() if current_config else None,
+            "best_config": best_config_dict,
             "best_return": best_return,
             "history": history,
-            "final_result": best_result
+            "final_result": best_result,
+            "best_result": best_result  # PR8: Include best_result for diagnostics
         }
 
     def _run_eval_with_config(
@@ -622,6 +803,8 @@ class GoLiveValidationService:
         # PR7: Rolling mode and strict mode
         use_rolling = suite_config.get("use_rolling_contracts", True)
         strict_option_mode = suite_config.get("strict_option_mode", False)
+        # PR8: Segment tolerance for losing_segment detection
+        segment_tolerance_pct = float(suite_config.get("segment_tolerance_pct", 0.0))
 
         option_resolver = OptionContractResolver() if instrument_type == "option" else None
 
@@ -705,7 +888,13 @@ class GoLiveValidationService:
             pnl = final_equity - baseline
             ret = (pnl / baseline) * 100 if baseline else 0.0
 
-            seg = {"seg1": 0.0, "seg2": 0.0, "seg3": 0.0}
+            # PR8: Use equity-curve based segment returns instead of trade exit-date bucketing
+            segment_result = compute_segment_returns_from_equity(equity, start_date, window_days)
+            segment_returns_pct = segment_result["segment_returns_pct"]
+            segment_equity = segment_result["segment_equity"]
+
+            # Legacy trade-based segmentation as fallback
+            seg_pnl = {"seg1": 0.0, "seg2": 0.0, "seg3": 0.0}
             for t in trades:
                 pnl_t = float(t.get("pnl", 0.0))
                 try:
@@ -715,13 +904,20 @@ class GoLiveValidationService:
 
                 off = (d - start_date).days
                 if off < 30:
-                    seg["seg1"] += pnl_t
+                    seg_pnl["seg1"] += pnl_t
                 elif off < 60:
-                    seg["seg2"] += pnl_t
+                    seg_pnl["seg2"] += pnl_t
                 else:
-                    seg["seg3"] += pnl_t
+                    seg_pnl["seg3"] += pnl_t
 
-            losing_segment = any(v < 0 for v in seg.values())
+            # PR8: Use equity-based returns for losing_segment check with tolerance
+            if segment_result["valid"]:
+                losing_segment = any(
+                    v < -segment_tolerance_pct for v in segment_returns_pct.values()
+                )
+            else:
+                losing_segment = any(v < 0 for v in seg_pnl.values())
+
             passed = ret >= goal_return_pct and not losing_segment
 
             return {
@@ -730,7 +926,10 @@ class GoLiveValidationService:
                 "symbol": backtest_symbol,
                 "return_pct": ret,
                 "pnl_total": pnl,
-                "segment_pnls": seg,
+                "segment_pnls": seg_pnl,
+                "segment_returns_pct": segment_returns_pct,
+                "segment_equity": segment_equity,
+                "segment_tolerance_pct": segment_tolerance_pct,
                 "trades_count": len(trades),
                 "passed": passed,
                 "fail_reason": (
@@ -785,13 +984,25 @@ class GoLiveValidationService:
                 updates["take_profit_pct"] = min(0.15, config.take_profit_pct + 0.02)
 
         elif fail_reason == "losing_segment":
-            # Try to reduce losses
-            if config.stop_loss_pct > 0.015:
-                updates["stop_loss_pct"] = max(0.015, config.stop_loss_pct - 0.005)
-            elif config.max_risk_pct_portfolio > 0.05:
-                updates["max_risk_pct_portfolio"] = max(0.05, config.max_risk_pct_portfolio * 0.85)
-            elif config.max_holding_days > 3:
-                updates["max_holding_days"] = max(3, config.max_holding_days - 2)
+            # PR8: Improved mutation path for losing_segment
+            # Priority: tighten stop loss -> reduce holding time -> lower take profit -> reduce risk
+            stop_loss_floor = 0.015
+            max_holding_floor = 3
+            take_profit_floor = 0.03
+            risk_floor = 0.05
+
+            if config.stop_loss_pct > stop_loss_floor:
+                # First: tighten stop loss
+                updates["stop_loss_pct"] = max(stop_loss_floor, config.stop_loss_pct - 0.005)
+            elif config.max_holding_days > max_holding_floor:
+                # Second: reduce holding time to exit earlier
+                updates["max_holding_days"] = max(max_holding_floor, config.max_holding_days - 2)
+            elif config.take_profit_pct > take_profit_floor:
+                # Third: lower take profit to bank gains earlier
+                updates["take_profit_pct"] = max(take_profit_floor, config.take_profit_pct - 0.01)
+            elif config.max_risk_pct_portfolio > risk_floor:
+                # Last resort: reduce position size
+                updates["max_risk_pct_portfolio"] = max(risk_floor, config.max_risk_pct_portfolio * 0.85)
 
         elif fail_reason == "no_trades":
             # PR5: Lower barriers to entry more aggressively to escape no_trades deadlock

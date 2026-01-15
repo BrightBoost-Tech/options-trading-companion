@@ -268,21 +268,25 @@ class GoLiveValidationService:
         def run_window(start_date, cfg):
             end_date = start_date + timedelta(days=window_days)
 
-            # PR3: Resolve option symbol if instrument_type == "option"
+            # PR3/PR6: Resolve option symbol if instrument_type == "option"
+            # PR6: Use window-aware resolution to ensure sufficient historical bars
             backtest_symbol = symbol
             if instrument_type == "option" and option_resolver:
-                resolved = option_resolver.resolve_contract(
+                resolved = option_resolver.resolve_contract_with_coverage(
                     underlying=symbol,
                     right=option_right,
                     target_dte=option_dte,
                     moneyness=option_moneyness,
-                    as_of_date=start_date
+                    as_of_date=start_date,
+                    window_start=start_date,
+                    window_end=end_date,
+                    min_bars=60
                 )
                 if resolved:
                     backtest_symbol = resolved
-                    logger.info(f"Resolved option contract: {resolved} for window starting {start_date}")
+                    logger.info(f"Resolved option contract with coverage: {resolved} for window {start_date} to {end_date}")
                 else:
-                    logger.warning(f"Could not resolve option contract for {symbol} as of {start_date}, using underlying")
+                    logger.warning(f"Could not resolve option contract with sufficient bars for {symbol} as of {start_date}, using underlying")
 
             bt = engine.run_single(
                 symbol=backtest_symbol,
@@ -596,14 +600,18 @@ class GoLiveValidationService:
         def run_window(start_date):
             end_date = start_date + timedelta(days=window_days)
 
+            # PR6: Use window-aware resolution to ensure sufficient historical bars
             backtest_symbol = symbol
             if instrument_type == "option" and option_resolver:
-                resolved = option_resolver.resolve_contract(
+                resolved = option_resolver.resolve_contract_with_coverage(
                     underlying=symbol,
                     right=option_right,
                     target_dte=option_dte,
                     moneyness=option_moneyness,
-                    as_of_date=start_date
+                    as_of_date=start_date,
+                    window_start=start_date,
+                    window_end=end_date,
+                    min_bars=60
                 )
                 if resolved:
                     backtest_symbol = resolved

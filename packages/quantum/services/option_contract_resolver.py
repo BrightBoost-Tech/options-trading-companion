@@ -278,3 +278,147 @@ class OptionContractResolver:
             OCC symbol (e.g., "O:AAPL240119C00150000")
         """
         return build_occ_symbol(underlying, expiry, right, strike)
+
+    def resolve_contract_with_coverage(
+        self,
+        underlying: str,
+        right: Literal["call", "put"],
+        target_dte: int = 30,
+        moneyness: Literal["atm", "otm_5pct", "itm_5pct"] = "atm",
+        as_of_date: date = None,
+        window_start: date = None,
+        window_end: date = None,
+        min_bars: int = 60,
+        max_candidates: int = 30
+    ) -> Optional[str]:
+        """
+        PR6: Resolves to an option symbol that has sufficient historical OHLC coverage.
+
+        Unlike resolve_contract, this method verifies that the chosen contract has
+        enough historical bars within the backtest window. This prevents selecting
+        contracts that barely trade in the evaluation period.
+
+        Args:
+            underlying: Stock ticker (e.g., "SPY", "AAPL")
+            right: Option type - "call" or "put"
+            target_dte: Target days to expiration (default 30)
+            moneyness: Strike selection relative to spot
+            as_of_date: Reference date for DTE calculation
+            window_start: Start of backtest window (required for coverage check)
+            window_end: End of backtest window (required for coverage check)
+            min_bars: Minimum number of OHLC bars required (default 60)
+            max_candidates: Maximum candidates to check for coverage (default 30)
+
+        Returns:
+            OCC option symbol with sufficient coverage, or None if not found.
+
+        Example:
+            >>> resolver = OptionContractResolver()
+            >>> symbol = resolver.resolve_contract_with_coverage(
+            ...     "SPY", "call", target_dte=30, moneyness="atm",
+            ...     as_of_date=date(2024, 1, 1),
+            ...     window_start=date(2024, 1, 1),
+            ...     window_end=date(2024, 3, 31),
+            ...     min_bars=60
+            ... )
+        """
+        as_of_date = as_of_date or date.today()
+
+        # If no window specified, fall back to basic resolution
+        if window_start is None or window_end is None:
+            return self.resolve_contract(
+                underlying, right, target_dte, moneyness, as_of_date
+            )
+
+        # Get current spot price
+        spot = self._get_spot_price(underlying)
+        if spot is None or spot <= 0:
+            return None
+
+        # Calculate target strike based on moneyness
+        target_strike = self._calculate_target_strike(spot, right, moneyness)
+
+        # Get option chain
+        chain = self._get_filtered_chain(underlying, right, target_dte, as_of_date)
+        if not chain:
+            return None
+
+        # Score and rank all candidates
+        scored_candidates = self._score_candidates(chain, target_strike, target_dte, as_of_date)
+        if not scored_candidates:
+            return None
+
+        # Check top N candidates for sufficient historical coverage
+        window_start_dt = datetime.combine(window_start, datetime.min.time())
+        window_end_dt = datetime.combine(window_end, datetime.min.time())
+
+        for score, contract in scored_candidates[:max_candidates]:
+            ticker = contract.get("ticker")
+            if not ticker:
+                continue
+
+            # Fetch historical OHLC for this contract
+            try:
+                hist = self.polygon.get_option_historical_prices(
+                    ticker,
+                    start_date=window_start_dt,
+                    end_date=window_end_dt
+                )
+
+                if hist and hist.get("prices"):
+                    bar_count = len(hist["prices"])
+                    if bar_count >= min_bars:
+                        return ticker
+            except Exception:
+                # Skip this candidate on error
+                continue
+
+        # No candidate met the min_bars requirement
+        return None
+
+    def _score_candidates(
+        self,
+        chain: List[Dict],
+        target_strike: float,
+        target_dte: int,
+        as_of_date: date
+    ) -> List[tuple]:
+        """
+        Scores and ranks all candidates in the chain.
+
+        Returns:
+            List of (score, contract) tuples sorted by score (lowest first).
+        """
+        scored = []
+        for contract in chain:
+            strike = contract.get("strike", 0)
+            exp_str = contract.get("expiration", "")
+
+            if not (strike > 0 and exp_str):
+                continue
+
+            # Calculate DTE
+            try:
+                exp_date = datetime.fromisoformat(exp_str).date()
+            except ValueError:
+                try:
+                    exp_date = datetime.strptime(exp_str, "%Y-%m-%d").date()
+                except ValueError:
+                    continue
+
+            dte = (exp_date - as_of_date).days
+            if dte < 1:
+                continue
+
+            # Score: lower is better
+            dte_diff = abs(dte - target_dte)
+            strike_diff = abs(strike - target_strike) / target_strike  # Normalized
+
+            # Combined score (DTE weighted 2x)
+            score = (dte_diff * 2) + (strike_diff * 100)
+
+            scored.append((score, contract))
+
+        # Sort by score (lowest first)
+        scored.sort(key=lambda x: x[0])
+        return scored

@@ -118,9 +118,9 @@ class TestEvalHistoricalOptionMode:
         mock_supabase.table.return_value.insert.return_value.execute.return_value = MagicMock()
         mock_supabase.table.return_value.update.return_value.eq.return_value.execute.return_value = MagicMock()
 
-        # Setup resolver mock
+        # Setup resolver mock - PR6: Now uses resolve_contract_with_coverage
         mock_resolver = MagicMock()
-        mock_resolver.resolve_contract.return_value = "O:SPY240315C00450000"
+        mock_resolver.resolve_contract_with_coverage.return_value = "O:SPY240315C00450000"
         mock_resolver_class.return_value = mock_resolver
 
         # Setup backtest engine mock
@@ -144,9 +144,9 @@ class TestEvalHistoricalOptionMode:
             "concurrent_runs": 1
         })
 
-        # Verify resolver was instantiated and called
+        # Verify resolver was instantiated and called (PR6: now uses resolve_contract_with_coverage)
         mock_resolver_class.assert_called_once()
-        assert mock_resolver.resolve_contract.called
+        assert mock_resolver.resolve_contract_with_coverage.called
 
         # Verify backtest was called with option symbol
         call_args = mock_engine.run_single.call_args
@@ -218,9 +218,9 @@ class TestEvalHistoricalOptionMode:
         mock_supabase.table.return_value.insert.return_value.execute.return_value = MagicMock()
         mock_supabase.table.return_value.update.return_value.eq.return_value.execute.return_value = MagicMock()
 
-        # Setup resolver mock
+        # Setup resolver mock - PR6: Now uses resolve_contract_with_coverage
         mock_resolver = MagicMock()
-        mock_resolver.resolve_contract.return_value = "O:SPY240315C00450000"
+        mock_resolver.resolve_contract_with_coverage.return_value = "O:SPY240315C00450000"
         mock_resolver_class.return_value = mock_resolver
 
         # Setup backtest engine mock
@@ -273,9 +273,9 @@ class TestEvalHistoricalOptionMode:
         mock_supabase.table.return_value.insert.return_value.execute.return_value = MagicMock()
         mock_supabase.table.return_value.update.return_value.eq.return_value.execute.return_value = MagicMock()
 
-        # Setup resolver mock
+        # Setup resolver mock - PR6: Now uses resolve_contract_with_coverage
         mock_resolver = MagicMock()
-        mock_resolver.resolve_contract.return_value = "O:AAPL240315C00175000"
+        mock_resolver.resolve_contract_with_coverage.return_value = "O:AAPL240315C00175000"
         mock_resolver_class.return_value = mock_resolver
 
         # Setup backtest engine mock
@@ -325,9 +325,10 @@ class TestOptionModeFallback:
         mock_supabase.table.return_value.insert.return_value.execute.return_value = MagicMock()
         mock_supabase.table.return_value.update.return_value.eq.return_value.execute.return_value = MagicMock()
 
-        # Resolver returns None (no option found)
+        # Resolver returns None (no option found with sufficient coverage)
+        # PR6: Now uses resolve_contract_with_coverage
         mock_resolver = MagicMock()
-        mock_resolver.resolve_contract.return_value = None
+        mock_resolver.resolve_contract_with_coverage.return_value = None
         mock_resolver_class.return_value = mock_resolver
 
         # Setup backtest engine mock

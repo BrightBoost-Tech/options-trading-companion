@@ -8,6 +8,7 @@ from pydantic import BaseModel, Field
 from packages.quantum.strategy_profiles import StrategyConfig, CostModelConfig, BacktestRequestV3
 from packages.quantum.market_data import PolygonService
 from packages.quantum.analytics.regime_scoring import ScoringEngine, ConvictionTransform
+from packages.quantum.services.options_utils import get_contract_multiplier
 from packages.quantum.analytics.regime_integration import (
     DEFAULT_WEIGHT_MATRIX,
     DEFAULT_CATALYST_PROFILES,
@@ -57,6 +58,9 @@ class BacktestEngine:
 
         # Initialize TCM
         tcm = LegacyTCM(cost_model)
+
+        # Determine contract multiplier (100 for options, 1 for stocks)
+        multiplier = get_contract_multiplier(symbol)
 
         # 1. Fetch Data
         try:
@@ -203,9 +207,10 @@ class BacktestEngine:
 
                 if should_exit:
                     # Execute Exit
-                    fill = tcm.simulate_fill(current_price, position["quantity"], "sell", rng)
+                    fill = tcm.simulate_fill(current_price, position["quantity"], "sell", rng, multiplier)
 
-                    gross_proceeds = fill.fill_price * fill.filled_quantity
+                    # Proceeds include multiplier (100 shares per option contract)
+                    gross_proceeds = fill.fill_price * fill.filled_quantity * multiplier
                     net_proceeds = gross_proceeds - fill.commission_paid
 
                     cash += net_proceeds
@@ -219,6 +224,7 @@ class BacktestEngine:
                         "exit_date": current_date,
                         "exit_price": fill.fill_price,
                         "quantity": position["quantity"],
+                        "multiplier": multiplier,
                         "pnl": net_proceeds - position["cost_basis"],
                         "pnl_pct": (fill.fill_price - position["entry_price"]) / position["entry_price"],
                         "exit_reason": exit_reason,
@@ -249,15 +255,16 @@ class BacktestEngine:
                     # Execute Entry
                     trade_id = str(uuid.uuid4())
 
-                    # Sizing
+                    # Sizing (contract-aware: options use multiplier=100)
                     position_value = cash * config.max_risk_pct_portfolio
-                    quantity = position_value / current_price
-                    if quantity < 1: quantity = 0
+                    notional_per_unit = current_price * multiplier
+                    quantity = int(position_value / notional_per_unit) if notional_per_unit > 0 else 0
 
                     if quantity > 0:
                         ideal_price = current_price
-                        fill = tcm.simulate_fill(current_price, quantity, "buy", rng)
-                        cost_basis = (fill.fill_price * fill.filled_quantity) + fill.commission_paid
+                        fill = tcm.simulate_fill(current_price, quantity, "buy", rng, multiplier)
+                        # Cost basis includes multiplier (100 shares per option contract)
+                        cost_basis = (fill.fill_price * fill.filled_quantity * multiplier) + fill.commission_paid
 
                         if cash >= cost_basis:
                             cash -= cost_basis
@@ -269,7 +276,8 @@ class BacktestEngine:
                                 "quantity": fill.filled_quantity,
                                 "cost_basis": cost_basis,
                                 "commission": fill.commission_paid,
-                                "slippage": fill.slippage_paid
+                                "slippage": fill.slippage_paid,
+                                "multiplier": multiplier
                             }
 
                             events.append({
@@ -281,10 +289,10 @@ class BacktestEngine:
                                 "details": {"conviction": conviction, "regime": regime_mapped, "commission": fill.commission_paid}
                             })
 
-            # Track Equity
+            # Track Equity (includes multiplier for options)
             current_equity = cash
             if position:
-                current_value = position["quantity"] * current_price
+                current_value = position["quantity"] * current_price * multiplier
                 current_equity += current_value
 
             equity_curve.append({

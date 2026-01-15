@@ -32,10 +32,18 @@ class TransactionCostModel:
                       price: float,
                       quantity: float,
                       side: str,
-                      rng: random.Random = None) -> ExecutionResult:
+                      rng: random.Random = None,
+                      multiplier: float = 1.0) -> ExecutionResult:
         """
         Simulates fill price and quantity based on cost model.
         Returns ExecutionResult with final price and costs.
+
+        Args:
+            price: Per-share/per-contract price
+            quantity: Number of shares (stocks) or contracts (options)
+            side: "buy" or "sell"
+            rng: Random number generator for jitter
+            multiplier: Contract multiplier (1.0 for stocks, 100.0 for options)
         """
         if rng is None:
             rng = random.Random()
@@ -68,7 +76,8 @@ class TransactionCostModel:
             fill_price = price - impact
 
         commission = max(self.config.min_fee, self.config.commission_per_contract * quantity)
-        slippage_paid = abs(fill_price - price) * quantity
+        # Slippage scales by multiplier (100 shares per option contract)
+        slippage_paid = abs(fill_price - price) * quantity * multiplier
 
         return ExecutionResult(
             filled_quantity=quantity,

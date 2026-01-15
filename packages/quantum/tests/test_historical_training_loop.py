@@ -931,5 +931,158 @@ class TestPR8LosingSegmentMutationAtFloor:
         assert mutated.max_risk_pct_portfolio < config.max_risk_pct_portfolio
 
 
+class TestPR9SegmentToleranceMutation:
+    """PR9: Tests for segment_tolerance_pct mutation when losing_segment blocks passing returns."""
+
+    def test_losing_segment_increases_tolerance_when_return_meets_goal(self):
+        """losing_segment increases segment_tolerance_pct when worst_return >= goal."""
+        from packages.quantum.services.go_live_validation_service import GoLiveValidationService
+
+        service = GoLiveValidationService(MagicMock())
+
+        config = StrategyConfig(
+            name="test",
+            version=1,
+            conviction_floor=0.55,
+            take_profit_pct=0.05,
+            stop_loss_pct=0.03,
+            max_holding_days=10,
+            max_risk_pct_portfolio=0.10,
+            max_concurrent_positions=1,
+            conviction_slope=0.2,
+            max_risk_pct_per_trade=0.05,
+            max_spread_bps=100,
+            max_days_to_expiry=45,
+            min_underlying_liquidity=1000000.0,
+            regime_whitelist=[]
+        )
+
+        suite_config = {
+            "segment_tolerance_pct": 0.0,
+            "goal_return_pct": 10.0
+        }
+
+        # worst_return=11.0 >= goal=10.0, so tolerance should increase
+        mutated, suite_updates = service._mutate_config(
+            config, "losing_segment", 11.0, suite_config
+        )
+
+        assert "segment_tolerance_pct" in suite_updates
+        assert suite_updates["segment_tolerance_pct"] == 1.0
+
+    def test_losing_segment_tolerance_capped_at_12(self):
+        """segment_tolerance_pct is capped at 12.0."""
+        from packages.quantum.services.go_live_validation_service import GoLiveValidationService
+
+        service = GoLiveValidationService(MagicMock())
+
+        config = StrategyConfig(
+            name="test",
+            version=1,
+            conviction_floor=0.55,
+            take_profit_pct=0.05,
+            stop_loss_pct=0.03,
+            max_holding_days=10,
+            max_risk_pct_portfolio=0.10,
+            max_concurrent_positions=1,
+            conviction_slope=0.2,
+            max_risk_pct_per_trade=0.05,
+            max_spread_bps=100,
+            max_days_to_expiry=45,
+            min_underlying_liquidity=1000000.0,
+            regime_whitelist=[]
+        )
+
+        suite_config = {
+            "segment_tolerance_pct": 12.0,  # Already at max
+            "goal_return_pct": 10.0
+        }
+
+        # worst_return >= goal, but tolerance already at max
+        mutated, suite_updates = service._mutate_config(
+            config, "losing_segment", 11.0, suite_config
+        )
+
+        # Should not increase tolerance beyond 12, should mutate config instead
+        if "segment_tolerance_pct" in suite_updates:
+            assert suite_updates["segment_tolerance_pct"] <= 12.0
+        else:
+            # Should fall through to config mutation (stop_loss)
+            assert mutated.stop_loss_pct < config.stop_loss_pct
+
+    def test_losing_segment_mutates_config_when_return_below_goal(self):
+        """losing_segment mutates config (not tolerance) when worst_return < goal."""
+        from packages.quantum.services.go_live_validation_service import GoLiveValidationService
+
+        service = GoLiveValidationService(MagicMock())
+
+        config = StrategyConfig(
+            name="test",
+            version=1,
+            conviction_floor=0.55,
+            take_profit_pct=0.05,
+            stop_loss_pct=0.03,
+            max_holding_days=10,
+            max_risk_pct_portfolio=0.10,
+            max_concurrent_positions=1,
+            conviction_slope=0.2,
+            max_risk_pct_per_trade=0.05,
+            max_spread_bps=100,
+            max_days_to_expiry=45,
+            min_underlying_liquidity=1000000.0,
+            regime_whitelist=[]
+        )
+
+        suite_config = {
+            "segment_tolerance_pct": 0.0,
+            "goal_return_pct": 10.0
+        }
+
+        # worst_return=5.0 < goal=10.0, so should mutate config not tolerance
+        mutated, suite_updates = service._mutate_config(
+            config, "losing_segment", 5.0, suite_config
+        )
+
+        # Should not increase tolerance
+        assert "segment_tolerance_pct" not in suite_updates
+        # Should tighten stop loss instead
+        assert mutated.stop_loss_pct < config.stop_loss_pct
+
+    def test_losing_segment_tolerance_increments_by_1(self):
+        """segment_tolerance_pct increments by 1.0 each mutation."""
+        from packages.quantum.services.go_live_validation_service import GoLiveValidationService
+
+        service = GoLiveValidationService(MagicMock())
+
+        config = StrategyConfig(
+            name="test",
+            version=1,
+            conviction_floor=0.55,
+            take_profit_pct=0.05,
+            stop_loss_pct=0.03,
+            max_holding_days=10,
+            max_risk_pct_portfolio=0.10,
+            max_concurrent_positions=1,
+            conviction_slope=0.2,
+            max_risk_pct_per_trade=0.05,
+            max_spread_bps=100,
+            max_days_to_expiry=45,
+            min_underlying_liquidity=1000000.0,
+            regime_whitelist=[]
+        )
+
+        # Test with tolerance at 5.0
+        suite_config = {
+            "segment_tolerance_pct": 5.0,
+            "goal_return_pct": 10.0
+        }
+
+        mutated, suite_updates = service._mutate_config(
+            config, "losing_segment", 11.0, suite_config
+        )
+
+        assert suite_updates["segment_tolerance_pct"] == 6.0
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

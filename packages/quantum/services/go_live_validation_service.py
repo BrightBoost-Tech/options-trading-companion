@@ -984,25 +984,35 @@ class GoLiveValidationService:
                 updates["take_profit_pct"] = min(0.15, config.take_profit_pct + 0.02)
 
         elif fail_reason == "losing_segment":
-            # PR8: Improved mutation path for losing_segment
-            # Priority: tighten stop loss -> reduce holding time -> lower take profit -> reduce risk
-            stop_loss_floor = 0.015
-            max_holding_floor = 3
-            take_profit_floor = 0.03
-            risk_floor = 0.05
+            # PR9: If return meets goal but blocked by losing_segment, increase tolerance first
+            current_tol = float(suite_config.get("segment_tolerance_pct", 0.0)) if suite_config else 0.0
+            goal = float(suite_config.get("goal_return_pct", 10.0)) if suite_config else 10.0
+            max_tolerance = 12.0
 
-            if config.stop_loss_pct > stop_loss_floor:
-                # First: tighten stop loss
-                updates["stop_loss_pct"] = max(stop_loss_floor, config.stop_loss_pct - 0.005)
-            elif config.max_holding_days > max_holding_floor:
-                # Second: reduce holding time to exit earlier
-                updates["max_holding_days"] = max(max_holding_floor, config.max_holding_days - 2)
-            elif config.take_profit_pct > take_profit_floor:
-                # Third: lower take profit to bank gains earlier
-                updates["take_profit_pct"] = max(take_profit_floor, config.take_profit_pct - 0.01)
-            elif config.max_risk_pct_portfolio > risk_floor:
-                # Last resort: reduce position size
-                updates["max_risk_pct_portfolio"] = max(risk_floor, config.max_risk_pct_portfolio * 0.85)
+            if worst_return >= goal and current_tol < max_tolerance:
+                # Return is good but blocked by segment drawdown - relax tolerance
+                suite_updates["segment_tolerance_pct"] = min(current_tol + 1.0, max_tolerance)
+                logger.info(f"PR9: Relaxing segment_tolerance_pct: {current_tol} -> {suite_updates['segment_tolerance_pct']} (return {worst_return:.1f}% >= goal {goal:.1f}%)")
+            else:
+                # PR8: Improved mutation path for losing_segment
+                # Priority: tighten stop loss -> reduce holding time -> lower take profit -> reduce risk
+                stop_loss_floor = 0.015
+                max_holding_floor = 3
+                take_profit_floor = 0.03
+                risk_floor = 0.05
+
+                if config.stop_loss_pct > stop_loss_floor:
+                    # First: tighten stop loss
+                    updates["stop_loss_pct"] = max(stop_loss_floor, config.stop_loss_pct - 0.005)
+                elif config.max_holding_days > max_holding_floor:
+                    # Second: reduce holding time to exit earlier
+                    updates["max_holding_days"] = max(max_holding_floor, config.max_holding_days - 2)
+                elif config.take_profit_pct > take_profit_floor:
+                    # Third: lower take profit to bank gains earlier
+                    updates["take_profit_pct"] = max(take_profit_floor, config.take_profit_pct - 0.01)
+                elif config.max_risk_pct_portfolio > risk_floor:
+                    # Last resort: reduce position size
+                    updates["max_risk_pct_portfolio"] = max(risk_floor, config.max_risk_pct_portfolio * 0.85)
 
         elif fail_reason == "no_trades":
             # PR5: Lower barriers to entry more aggressively to escape no_trades deadlock

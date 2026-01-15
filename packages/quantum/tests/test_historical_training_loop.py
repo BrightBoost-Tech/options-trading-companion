@@ -255,7 +255,7 @@ class TestConfigMutation:
             regime_whitelist=[]
         )
 
-        mutated = service._mutate_config(config, "return_below_goal", 5.0)
+        mutated, suite_updates = service._mutate_config(config, "return_below_goal", 5.0)
 
         # Should increase max_risk_pct_portfolio
         assert mutated.max_risk_pct_portfolio > config.max_risk_pct_portfolio
@@ -283,7 +283,7 @@ class TestConfigMutation:
             regime_whitelist=[]
         )
 
-        mutated = service._mutate_config(config, "losing_segment", -5.0)
+        mutated, suite_updates = service._mutate_config(config, "losing_segment", -5.0)
 
         # Should reduce stop_loss_pct (tighter stop)
         assert mutated.stop_loss_pct < config.stop_loss_pct
@@ -311,7 +311,7 @@ class TestConfigMutation:
             regime_whitelist=[]
         )
 
-        mutated = service._mutate_config(config, "no_trades", 0.0)
+        mutated, suite_updates = service._mutate_config(config, "no_trades", 0.0)
 
         # Should lower conviction_floor
         assert mutated.conviction_floor < config.conviction_floor
@@ -339,7 +339,7 @@ class TestConfigMutation:
             regime_whitelist=[]
         )
 
-        mutated = service._mutate_config(config, "return_below_goal", 5.0)
+        mutated, suite_updates = service._mutate_config(config, "return_below_goal", 5.0)
 
         # Should not exceed 0.25 guardrail
         assert mutated.max_risk_pct_portfolio <= 0.25
@@ -367,7 +367,7 @@ class TestConfigMutation:
             regime_whitelist=[]
         )
 
-        mutated = service._mutate_config(config, "no_trades", 0.0)
+        mutated, suite_updates = service._mutate_config(config, "no_trades", 0.0)
 
         # PR5: Should not go below 0.05 guardrail (lowered from 0.35)
         assert mutated.conviction_floor >= 0.05
@@ -396,7 +396,7 @@ class TestConfigMutation:
             regime_whitelist=[]
         )
 
-        mutated = service._mutate_config(config, "no_trades", 0.0)
+        mutated, suite_updates = service._mutate_config(config, "no_trades", 0.0)
 
         # PR5: Should still mutate - lower conviction_floor below 0.25
         assert mutated.conviction_floor < config.conviction_floor, \
@@ -426,7 +426,7 @@ class TestConfigMutation:
             regime_whitelist=[]
         )
 
-        mutated = service._mutate_config(config, "no_trades", 0.0)
+        mutated, suite_updates = service._mutate_config(config, "no_trades", 0.0)
 
         # PR5: Should increase max_spread_bps since conviction_floor is at min
         assert mutated.max_spread_bps > config.max_spread_bps, \
@@ -461,7 +461,7 @@ class TestConfigMutation:
         values = [config.conviction_floor]
         current = config
         for _ in range(10):
-            current = service._mutate_config(current, "no_trades", 0.0)
+            current, _ = service._mutate_config(current, "no_trades", 0.0)
             values.append(current.conviction_floor)
 
         # Should be strictly decreasing until hitting min

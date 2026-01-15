@@ -48,10 +48,28 @@ class BacktestEngine:
         config: StrategyConfig,
         cost_model: CostModelConfig,
         seed: int,
-        initial_equity: float
+        initial_equity: float,
+        rolling_options: Dict[str, Any] = None,
+        option_resolver=None
     ) -> BacktestRunResult:
         """
         Runs a single backtest pass stepping through daily bars.
+
+        PR7: If rolling_options is provided, uses rolling contract mode where:
+        - Symbol is treated as the underlying
+        - Each trade entry resolves a fresh option contract as-of entry date
+        - Option OHLC is fetched per-contract for trade execution
+
+        Args:
+            symbol: Stock ticker or option symbol
+            start_date: Start date (YYYY-MM-DD)
+            end_date: End date (YYYY-MM-DD)
+            config: Strategy configuration
+            cost_model: Transaction cost configuration
+            seed: Random seed
+            initial_equity: Starting capital
+            rolling_options: Optional dict with {right, target_dte, moneyness} for rolling mode
+            option_resolver: OptionContractResolver instance (required for rolling mode)
         """
         rng = random.Random(seed)
         backtest_id = str(uuid.uuid4())
@@ -59,8 +77,16 @@ class BacktestEngine:
         # Initialize TCM
         tcm = LegacyTCM(cost_model)
 
-        # Determine contract multiplier (100 for options, 1 for stocks)
-        multiplier = get_contract_multiplier(symbol)
+        # PR7: Rolling options mode detection
+        rolling_mode = rolling_options is not None and option_resolver is not None
+        if rolling_mode:
+            # In rolling mode, symbol is the underlying, multiplier is always 100
+            underlying_for_rolling = symbol
+            multiplier = 100.0
+        else:
+            underlying_for_rolling = None
+            # Determine contract multiplier (100 for options, 1 for stocks)
+            multiplier = get_contract_multiplier(symbol)
 
         # 1. Fetch Data
         try:
@@ -215,28 +241,43 @@ class BacktestEngine:
                 should_exit = False
                 exit_reason = ""
 
-                # PnL Check
-                pnl_pct = (current_price - position["entry_price"]) / position["entry_price"]
+                # PR7: In rolling mode, use contract's OHLC for position valuation
+                position_current_price = current_price
+                if rolling_mode and position.get("contract_ohlc") and position.get("contract_date_map"):
+                    if current_date in position["contract_date_map"]:
+                        position_current_price = position["contract_ohlc"][position["contract_date_map"][current_date]]
+                    else:
+                        # Contract has no data for this date (may have expired)
+                        # Force exit if contract data unavailable
+                        should_exit = True
+                        exit_reason = "contract_expired"
+                        # Use last known price
+                        if position["contract_ohlc"]:
+                            position_current_price = position["contract_ohlc"][-1]
 
-                if pnl_pct < -config.stop_loss_pct:
-                    should_exit = True
-                    exit_reason = "stop_loss"
-                elif pnl_pct > config.take_profit_pct:
-                    should_exit = True
-                    exit_reason = "take_profit"
-                elif conviction < 0.5: # Conviction lost
-                    should_exit = True
-                    exit_reason = "conviction_lost"
-                elif (datetime.strptime(current_date, "%Y-%m-%d") - datetime.strptime(position["entry_date"], "%Y-%m-%d")).days > config.max_holding_days:
-                    should_exit = True
-                    exit_reason = "time_exit"
-                elif i == len(dates) - 1: # End of data
-                    should_exit = True
-                    exit_reason = "forced_exit"
+                # PnL Check
+                pnl_pct = (position_current_price - position["entry_price"]) / position["entry_price"]
+
+                if not should_exit:  # Skip if already flagged for exit
+                    if pnl_pct < -config.stop_loss_pct:
+                        should_exit = True
+                        exit_reason = "stop_loss"
+                    elif pnl_pct > config.take_profit_pct:
+                        should_exit = True
+                        exit_reason = "take_profit"
+                    elif conviction < 0.5: # Conviction lost
+                        should_exit = True
+                        exit_reason = "conviction_lost"
+                    elif (datetime.strptime(current_date, "%Y-%m-%d") - datetime.strptime(position["entry_date"], "%Y-%m-%d")).days > config.max_holding_days:
+                        should_exit = True
+                        exit_reason = "time_exit"
+                    elif i == len(dates) - 1: # End of data
+                        should_exit = True
+                        exit_reason = "forced_exit"
 
                 if should_exit:
                     # Execute Exit
-                    fill = tcm.simulate_fill(current_price, position["quantity"], "sell", rng, multiplier)
+                    fill = tcm.simulate_fill(position_current_price, position["quantity"], "sell", rng, multiplier)
 
                     # Proceeds include multiplier (100 shares per option contract)
                     gross_proceeds = fill.fill_price * fill.filled_quantity * multiplier
@@ -244,9 +285,12 @@ class BacktestEngine:
 
                     cash += net_proceeds
 
+                    # PR7: Use contract symbol in trade record for rolling mode
+                    trade_symbol = position.get("contract_symbol") or symbol
+
                     trade_record = {
                         "trade_id": position["trade_id"],
-                        "symbol": symbol,
+                        "symbol": trade_symbol,
                         "direction": "long",
                         "entry_date": position["entry_date"],
                         "entry_price": position["entry_price"],
@@ -269,7 +313,11 @@ class BacktestEngine:
                         "date": current_date,
                         "price": fill.fill_price,
                         "quantity": position["quantity"],
-                        "details": {"reason": exit_reason, "commission": fill.commission_paid}
+                        "details": {
+                            "reason": exit_reason,
+                            "commission": fill.commission_paid,
+                            "contract_symbol": trade_symbol if rolling_mode else None
+                        }
                     })
 
                     position = None
@@ -284,14 +332,53 @@ class BacktestEngine:
                     # Execute Entry
                     trade_id = str(uuid.uuid4())
 
+                    # PR7: Rolling mode - resolve contract as-of entry date
+                    entry_price = current_price
+                    entry_symbol = symbol
+                    contract_ohlc = None
+                    contract_date_map = None
+
+                    if rolling_mode:
+                        # Resolve contract for this entry date
+                        entry_date_obj = datetime.strptime(current_date, "%Y-%m-%d").date()
+                        resolved_contract = option_resolver.resolve_contract_asof(
+                            underlying=underlying_for_rolling,
+                            right=rolling_options.get("right", "call"),
+                            target_dte=rolling_options.get("target_dte", 30),
+                            moneyness=rolling_options.get("moneyness", "atm"),
+                            as_of_date=entry_date_obj
+                        )
+
+                        if resolved_contract:
+                            entry_symbol = resolved_contract
+                            # Fetch contract's OHLC for the trade window
+                            # Use end_dt as max, but contract may expire earlier
+                            contract_hist = self.polygon.get_option_historical_prices(
+                                resolved_contract,
+                                start_date=entry_date_obj,
+                                end_date=end_dt.date() if hasattr(end_dt, 'date') else end_dt
+                            )
+                            if contract_hist and contract_hist.get("prices"):
+                                contract_ohlc = contract_hist["prices"]
+                                contract_dates = contract_hist.get("dates", [])
+                                contract_date_map = {d: idx for idx, d in enumerate(contract_dates)}
+                                # Use contract's entry-date price
+                                if current_date in contract_date_map:
+                                    entry_price = contract_ohlc[contract_date_map[current_date]]
+                                elif contract_ohlc:
+                                    entry_price = contract_ohlc[0]  # Use first available
+                        else:
+                            # No contract found - skip entry in rolling mode
+                            continue
+
                     # Sizing (contract-aware: options use multiplier=100)
                     position_value = cash * config.max_risk_pct_portfolio
-                    notional_per_unit = current_price * multiplier
+                    notional_per_unit = entry_price * multiplier
                     quantity = int(position_value / notional_per_unit) if notional_per_unit > 0 else 0
 
                     if quantity > 0:
-                        ideal_price = current_price
-                        fill = tcm.simulate_fill(current_price, quantity, "buy", rng, multiplier)
+                        ideal_price = entry_price
+                        fill = tcm.simulate_fill(entry_price, quantity, "buy", rng, multiplier)
                         # Cost basis includes multiplier (100 shares per option contract)
                         cost_basis = (fill.fill_price * fill.filled_quantity * multiplier) + fill.commission_paid
 
@@ -306,7 +393,11 @@ class BacktestEngine:
                                 "cost_basis": cost_basis,
                                 "commission": fill.commission_paid,
                                 "slippage": fill.slippage_paid,
-                                "multiplier": multiplier
+                                "multiplier": multiplier,
+                                # PR7: Track contract info for rolling mode
+                                "contract_symbol": entry_symbol if rolling_mode else None,
+                                "contract_ohlc": contract_ohlc,
+                                "contract_date_map": contract_date_map
                             }
 
                             events.append({
@@ -315,13 +406,26 @@ class BacktestEngine:
                                 "date": current_date,
                                 "price": fill.fill_price,
                                 "quantity": fill.filled_quantity,
-                                "details": {"conviction": conviction, "regime": regime_mapped, "commission": fill.commission_paid}
+                                "details": {
+                                    "conviction": conviction,
+                                    "regime": regime_mapped,
+                                    "commission": fill.commission_paid,
+                                    "contract_symbol": entry_symbol if rolling_mode else None
+                                }
                             })
 
             # Track Equity (includes multiplier for options)
             current_equity = cash
             if position:
-                current_value = position["quantity"] * current_price * multiplier
+                # PR7: In rolling mode, use contract price for position valuation
+                valuation_price = current_price
+                if rolling_mode and position.get("contract_ohlc") and position.get("contract_date_map"):
+                    if current_date in position["contract_date_map"]:
+                        valuation_price = position["contract_ohlc"][position["contract_date_map"][current_date]]
+                    elif position["contract_ohlc"]:
+                        valuation_price = position["contract_ohlc"][-1]  # Last known price
+
+                current_value = position["quantity"] * valuation_price * multiplier
                 current_equity += current_value
 
             equity_curve.append({
@@ -339,6 +443,14 @@ class BacktestEngine:
             metrics["traded_symbol"] = symbol
             metrics["underlying_bars"] = len(underlying_prices)
             metrics["option_bars"] = len(prices)
+
+        # PR7: Add rolling mode metrics
+        if rolling_mode:
+            metrics["rolling_mode"] = True
+            metrics["underlying"] = underlying_for_rolling
+            # Count unique contracts traded
+            unique_contracts = set(t.get("symbol") for t in trades if t.get("symbol"))
+            metrics["unique_contracts_traded"] = len(unique_contracts)
 
         return BacktestRunResult(
             backtest_id=backtest_id,

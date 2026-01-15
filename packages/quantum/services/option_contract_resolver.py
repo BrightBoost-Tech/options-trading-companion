@@ -422,3 +422,165 @@ class OptionContractResolver:
         # Sort by score (lowest first)
         scored.sort(key=lambda x: x[0])
         return scored
+
+    def resolve_contract_asof(
+        self,
+        underlying: str,
+        right: Literal["call", "put"],
+        target_dte: int = 30,
+        moneyness: Literal["atm", "otm_5pct", "itm_5pct"] = "atm",
+        as_of_date: date = None
+    ) -> Optional[str]:
+        """
+        PR7: Resolves an option contract using historical data as of a specific date.
+
+        Unlike resolve_contract (which uses current market snapshot), this method:
+        - Uses historical closing price of underlying at as_of_date for strike calc
+        - Uses reference endpoint to list contracts (works for historical dates)
+        - Does NOT require current market data
+
+        Args:
+            underlying: Stock ticker (e.g., "SPY")
+            right: Option type - "call" or "put"
+            target_dte: Target days to expiration (default 30)
+            moneyness: Strike selection relative to spot
+            as_of_date: Historical date to resolve contract as of
+
+        Returns:
+            OCC option symbol or None if not found
+        """
+        as_of_date = as_of_date or date.today()
+
+        # Get historical spot price at as_of_date
+        spot = self.polygon.get_historical_spot_price(underlying, as_of_date)
+        if spot is None or spot <= 0:
+            return None
+
+        # Calculate target strike based on moneyness
+        target_strike = self._calculate_target_strike(spot, right, moneyness)
+
+        # Calculate expiration window around target_dte
+        target_exp = as_of_date + timedelta(days=target_dte)
+        exp_start = target_exp - timedelta(days=10)
+        exp_end = target_exp + timedelta(days=15)
+
+        # Calculate strike range (±15% from target)
+        strike_min = target_strike * 0.85
+        strike_max = target_strike * 1.15
+
+        # Get contract candidates from reference endpoint
+        candidates = self.polygon.get_option_contract_candidates(
+            underlying=underlying,
+            as_of_date=as_of_date,
+            right=right,
+            exp_start=exp_start,
+            exp_end=exp_end,
+            strike_min=strike_min,
+            strike_max=strike_max,
+            limit=100
+        )
+
+        if not candidates:
+            return None
+
+        # Score and find best match
+        scored = self._score_candidates(candidates, target_strike, target_dte, as_of_date)
+        if not scored:
+            return None
+
+        return scored[0][1].get("ticker")
+
+    def resolve_contract_asof_with_coverage(
+        self,
+        underlying: str,
+        right: Literal["call", "put"],
+        target_dte: int = 30,
+        moneyness: Literal["atm", "otm_5pct", "itm_5pct"] = "atm",
+        as_of_date: date = None,
+        window_start: date = None,
+        window_end: date = None,
+        min_bars: int = 20,
+        max_candidates: int = 30
+    ) -> Optional[str]:
+        """
+        PR7: Resolves option contract as-of date with OHLC coverage validation.
+
+        Combines historical contract resolution with bar coverage check.
+        Used for rolling contract selection where each entry needs its own contract.
+
+        Args:
+            underlying: Stock ticker
+            right: "call" or "put"
+            target_dte: Target days to expiration
+            moneyness: Strike selection
+            as_of_date: Date to resolve contract as of (entry date)
+            window_start: Start of coverage window (usually as_of_date)
+            window_end: End of coverage window
+            min_bars: Minimum OHLC bars required
+            max_candidates: Max candidates to check
+
+        Returns:
+            OCC option symbol with sufficient coverage, or None
+        """
+        as_of_date = as_of_date or date.today()
+        window_start = window_start or as_of_date
+        window_end = window_end or (as_of_date + timedelta(days=30))
+
+        # Get historical spot
+        spot = self.polygon.get_historical_spot_price(underlying, as_of_date)
+        if spot is None or spot <= 0:
+            return None
+
+        target_strike = self._calculate_target_strike(spot, right, moneyness)
+
+        # Expiration must be after window_end to avoid expiry during holding
+        target_exp = as_of_date + timedelta(days=target_dte)
+        exp_start = max(window_end, target_exp - timedelta(days=10))
+        exp_end = target_exp + timedelta(days=30)
+
+        strike_min = target_strike * 0.85
+        strike_max = target_strike * 1.15
+
+        candidates = self.polygon.get_option_contract_candidates(
+            underlying=underlying,
+            as_of_date=as_of_date,
+            right=right,
+            exp_start=exp_start,
+            exp_end=exp_end,
+            strike_min=strike_min,
+            strike_max=strike_max,
+            limit=100
+        )
+
+        if not candidates:
+            return None
+
+        # Score candidates
+        scored = self._score_candidates(candidates, target_strike, target_dte, as_of_date)
+        if not scored:
+            return None
+
+        # Check coverage for top candidates
+        window_start_dt = datetime.combine(window_start, datetime.min.time())
+        window_end_dt = datetime.combine(window_end, datetime.min.time())
+
+        for score, contract in scored[:max_candidates]:
+            ticker = contract.get("ticker")
+            if not ticker:
+                continue
+
+            try:
+                hist = self.polygon.get_option_historical_prices(
+                    ticker,
+                    start_date=window_start_dt,
+                    end_date=window_end_dt
+                )
+
+                if hist and hist.get("prices"):
+                    bar_count = len(hist["prices"])
+                    if bar_count >= min_bars:
+                        return ticker
+            except Exception:
+                continue
+
+        return None

@@ -214,6 +214,9 @@ class GoLiveValidationService:
         option_right = suite_config.get("option_right", "call")
         option_dte = int(suite_config.get("option_dte", 30))
         option_moneyness = suite_config.get("option_moneyness", "atm")
+        # PR7: Rolling mode and strict mode
+        use_rolling = suite_config.get("use_rolling_contracts", True)  # Default to rolling
+        strict_option_mode = suite_config.get("strict_option_mode", False)
 
         # Initialize option resolver if needed
         option_resolver = OptionContractResolver() if instrument_type == "option" else None
@@ -268,25 +271,53 @@ class GoLiveValidationService:
         def run_window(start_date, cfg):
             end_date = start_date + timedelta(days=window_days)
 
-            # PR3/PR6: Resolve option symbol if instrument_type == "option"
-            # PR6: Use window-aware resolution to ensure sufficient historical bars
+            # PR7: Rolling mode vs static contract mode
+            rolling_options_param = None
+            resolver_for_backtest = None
             backtest_symbol = symbol
+
             if instrument_type == "option" and option_resolver:
-                resolved = option_resolver.resolve_contract_with_coverage(
-                    underlying=symbol,
-                    right=option_right,
-                    target_dte=option_dte,
-                    moneyness=option_moneyness,
-                    as_of_date=start_date,
-                    window_start=start_date,
-                    window_end=end_date,
-                    min_bars=60
-                )
-                if resolved:
-                    backtest_symbol = resolved
-                    logger.info(f"Resolved option contract with coverage: {resolved} for window {start_date} to {end_date}")
+                if use_rolling:
+                    # PR7: Rolling mode - pass underlying to backtest, let engine resolve per-entry
+                    backtest_symbol = symbol  # Use underlying
+                    rolling_options_param = {
+                        "right": option_right,
+                        "target_dte": option_dte,
+                        "moneyness": option_moneyness
+                    }
+                    resolver_for_backtest = option_resolver
+                    logger.info(f"Using rolling contract mode for {symbol}")
                 else:
-                    logger.warning(f"Could not resolve option contract with sufficient bars for {symbol} as of {start_date}, using underlying")
+                    # Static mode - resolve one contract for entire window
+                    resolved = option_resolver.resolve_contract_with_coverage(
+                        underlying=symbol,
+                        right=option_right,
+                        target_dte=option_dte,
+                        moneyness=option_moneyness,
+                        as_of_date=start_date,
+                        window_start=start_date,
+                        window_end=end_date,
+                        min_bars=60
+                    )
+                    if resolved:
+                        backtest_symbol = resolved
+                        logger.info(f"Resolved option contract with coverage: {resolved} for window {start_date} to {end_date}")
+                    elif strict_option_mode:
+                        # PR7: Strict mode - fail instead of fallback
+                        logger.error(f"strict_option_mode: No option contract found for {symbol} as of {start_date}")
+                        return {
+                            "window_start": start_date.isoformat(),
+                            "window_end": end_date.isoformat(),
+                            "symbol": symbol,
+                            "return_pct": 0.0,
+                            "pnl_total": 0.0,
+                            "segment_pnls": {"seg1": 0.0, "seg2": 0.0, "seg3": 0.0},
+                            "trades_count": 0,
+                            "passed": False,
+                            "fail_reason": "no_option_contract",
+                        }
+                    else:
+                        logger.warning(f"Could not resolve option contract with sufficient bars for {symbol} as of {start_date}, using underlying")
 
             bt = engine.run_single(
                 symbol=backtest_symbol,
@@ -296,6 +327,8 @@ class GoLiveValidationService:
                 cost_model=cost_model,
                 seed=0,
                 initial_equity=baseline,
+                rolling_options=rolling_options_param,
+                option_resolver=resolver_for_backtest,
             )
 
             equity = bt.equity_curve or []
@@ -533,7 +566,14 @@ class GoLiveValidationService:
                 logger.info(f"Training attempt {attempts}: FAILED ({fail_reason})")
 
                 # Mutate config based on fail_reason
-                current_config = self._mutate_config(current_config, fail_reason, worst_return)
+                # PR7: _mutate_config now returns (config, suite_updates) tuple
+                current_config, suite_updates = self._mutate_config(
+                    current_config, fail_reason, worst_return, suite_config
+                )
+                # Apply suite_updates (e.g., option_dte, option_moneyness mutations)
+                if suite_updates:
+                    suite_config = suite_config.copy()
+                    suite_config.update(suite_updates)
                 version += 1
 
         # Exhausted attempts
@@ -579,6 +619,9 @@ class GoLiveValidationService:
         option_right = suite_config.get("option_right", "call")
         option_dte = int(suite_config.get("option_dte", 30))
         option_moneyness = suite_config.get("option_moneyness", "atm")
+        # PR7: Rolling mode and strict mode
+        use_rolling = suite_config.get("use_rolling_contracts", True)
+        strict_option_mode = suite_config.get("strict_option_mode", False)
 
         option_resolver = OptionContractResolver() if instrument_type == "option" else None
 
@@ -600,21 +643,48 @@ class GoLiveValidationService:
         def run_window(start_date):
             end_date = start_date + timedelta(days=window_days)
 
-            # PR6: Use window-aware resolution to ensure sufficient historical bars
+            # PR7: Rolling mode vs static contract mode
+            rolling_options_param = None
+            resolver_for_backtest = None
             backtest_symbol = symbol
+
             if instrument_type == "option" and option_resolver:
-                resolved = option_resolver.resolve_contract_with_coverage(
-                    underlying=symbol,
-                    right=option_right,
-                    target_dte=option_dte,
-                    moneyness=option_moneyness,
-                    as_of_date=start_date,
-                    window_start=start_date,
-                    window_end=end_date,
-                    min_bars=60
-                )
-                if resolved:
-                    backtest_symbol = resolved
+                if use_rolling:
+                    # PR7: Rolling mode - pass underlying to backtest, let engine resolve per-entry
+                    backtest_symbol = symbol
+                    rolling_options_param = {
+                        "right": option_right,
+                        "target_dte": option_dte,
+                        "moneyness": option_moneyness
+                    }
+                    resolver_for_backtest = option_resolver
+                else:
+                    # Static mode - resolve one contract for entire window
+                    resolved = option_resolver.resolve_contract_with_coverage(
+                        underlying=symbol,
+                        right=option_right,
+                        target_dte=option_dte,
+                        moneyness=option_moneyness,
+                        as_of_date=start_date,
+                        window_start=start_date,
+                        window_end=end_date,
+                        min_bars=60
+                    )
+                    if resolved:
+                        backtest_symbol = resolved
+                    elif strict_option_mode:
+                        # PR7: Strict mode - fail instead of fallback
+                        return {
+                            "window_start": start_date.isoformat(),
+                            "window_end": end_date.isoformat(),
+                            "symbol": symbol,
+                            "return_pct": 0.0,
+                            "pnl_total": 0.0,
+                            "segment_pnls": {"seg1": 0.0, "seg2": 0.0, "seg3": 0.0},
+                            "trades_count": 0,
+                            "passed": False,
+                            "fail_reason": "no_option_contract",
+                        }
 
             bt = engine.run_single(
                 symbol=backtest_symbol,
@@ -624,6 +694,8 @@ class GoLiveValidationService:
                 cost_model=cost_model,
                 seed=0,
                 initial_equity=baseline,
+                rolling_options=rolling_options_param,
+                option_resolver=resolver_for_backtest,
             )
 
             equity = bt.equity_curve or []
@@ -684,19 +756,24 @@ class GoLiveValidationService:
         self,
         config: StrategyConfig,
         fail_reason: Optional[str],
-        worst_return: float
-    ) -> StrategyConfig:
+        worst_return: float,
+        suite_config: Optional[Dict[str, Any]] = None
+    ) -> tuple:
         """
         Mutates strategy config based on failure reason.
 
         Mutation rules:
         - return_below_goal: Increase risk tolerance or lower conviction threshold
         - losing_segment: Tighten stop loss or reduce position size
-        - no_trades: Lower conviction floor
+        - no_trades: Lower conviction floor, then mutate option params
 
         Applies guardrails to prevent extreme values.
+
+        Returns:
+            tuple: (mutated_config, mutated_suite_config)
         """
         updates = {}
+        suite_updates = {}
 
         if fail_reason == "return_below_goal":
             # Try to increase returns
@@ -723,6 +800,27 @@ class GoLiveValidationService:
                 updates["conviction_floor"] = max(0.05, config.conviction_floor - 0.05)
             elif config.max_spread_bps < 400:
                 updates["max_spread_bps"] = min(400, config.max_spread_bps + 25)
+            # PR7: For options, mutate option_dte and option_moneyness after exhausting strategy params
+            elif suite_config and suite_config.get("instrument_type") == "option":
+                current_dte = int(suite_config.get("option_dte", 30))
+                current_moneyness = suite_config.get("option_moneyness", "atm")
+
+                # Try longer DTE first (more liquid contracts)
+                if current_dte < 60:
+                    suite_updates["option_dte"] = min(60, current_dte + 15)
+                    logger.info(f"Mutating option_dte: {current_dte} -> {suite_updates['option_dte']}")
+                # Then try different moneyness (cycle: atm -> otm_5pct -> itm_5pct)
+                elif current_moneyness == "atm":
+                    suite_updates["option_moneyness"] = "otm_5pct"
+                    logger.info(f"Mutating option_moneyness: atm -> otm_5pct")
+                elif current_moneyness == "otm_5pct":
+                    suite_updates["option_moneyness"] = "itm_5pct"
+                    logger.info(f"Mutating option_moneyness: otm_5pct -> itm_5pct")
+                # Also try switching call/put
+                elif suite_config.get("option_right") == "call":
+                    suite_updates["option_right"] = "put"
+                    suite_updates["option_moneyness"] = "atm"  # Reset moneyness
+                    logger.info(f"Mutating option_right: call -> put")
 
         else:
             # Generic mutation: try small adjustments
@@ -731,9 +829,8 @@ class GoLiveValidationService:
             else:
                 updates["max_risk_pct_portfolio"] = min(0.25, config.max_risk_pct_portfolio * 1.1)
 
-        if updates:
-            return config.model_copy(update=updates)
-        return config
+        new_config = config.model_copy(update=updates) if updates else config
+        return new_config, suite_updates
 
     def _persist_strategy_config(
         self,

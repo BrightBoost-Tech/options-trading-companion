@@ -133,7 +133,7 @@ class TestEvalHistoricalOptionMode:
 
         service = GoLiveValidationService(mock_supabase)
 
-        # Run with option mode
+        # Run with option mode (PR7: use_rolling_contracts=False to test static mode)
         result = service.eval_historical("test-user", {
             "symbol": "SPY",
             "instrument_type": "option",
@@ -141,7 +141,8 @@ class TestEvalHistoricalOptionMode:
             "option_dte": 30,
             "option_moneyness": "atm",
             "window_days": 30,
-            "concurrent_runs": 1
+            "concurrent_runs": 1,
+            "use_rolling_contracts": False  # PR7: Test static mode
         })
 
         # Verify resolver was instantiated and called (PR6: now uses resolve_contract_with_coverage)
@@ -294,7 +295,8 @@ class TestEvalHistoricalOptionMode:
             "option_right": "call",
             "option_dte": 30,
             "window_days": 30,
-            "concurrent_runs": 1
+            "concurrent_runs": 1,
+            "use_rolling_contracts": False  # PR7: Test static mode
         })
 
         # Verify suite record includes the option symbol

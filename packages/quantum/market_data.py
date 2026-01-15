@@ -3,7 +3,7 @@ import os
 import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta, timezone, date
 from typing import List, Dict, Optional, Any
 import numpy as np
 import re
@@ -632,6 +632,164 @@ class PolygonService:
             })
 
         return normalized
+
+    def get_option_contract_candidates(
+        self,
+        underlying: str,
+        as_of_date: date,
+        right: str,
+        exp_start: date,
+        exp_end: date,
+        strike_min: float,
+        strike_max: float,
+        limit: int = 1000
+    ) -> List[Dict]:
+        """
+        PR7: Fetches option contract candidates from Polygon reference endpoint.
+
+        Unlike get_option_chain_snapshot (which uses current market data), this method
+        uses the reference endpoint to list contracts that existed for historical dates.
+
+        Args:
+            underlying: Stock ticker (e.g., "SPY")
+            as_of_date: Historical date for context (used for caching)
+            right: "call" or "put"
+            exp_start: Minimum expiration date
+            exp_end: Maximum expiration date
+            strike_min: Minimum strike price
+            strike_max: Maximum strike price
+            limit: Max contracts to return
+
+        Returns:
+            List of contract dicts with: ticker, strike, expiration, type
+        """
+        # Cache key
+        cache_key = make_cache_key_parts(
+            "CONTRACTS_REF",
+            underlying=underlying,
+            as_of_date=as_of_date.isoformat(),
+            right=right,
+            exp_start=exp_start.isoformat(),
+            exp_end=exp_end.isoformat(),
+            strike_min=strike_min,
+            strike_max=strike_max
+        )
+        cached = self.cache.get("CONTRACTS_REF", cache_key)
+        if cached:
+            return cached
+
+        with self.cache.inflight_lock("CONTRACTS_REF", cache_key):
+            cached = self.cache.get("CONTRACTS_REF", cache_key)
+            if cached:
+                return cached
+
+            result = self._get_option_contract_candidates_api(
+                underlying, right, exp_start, exp_end, strike_min, strike_max, limit
+            )
+
+            if result:
+                # Cache for 24 hours - contract listings are static
+                self.cache.set("CONTRACTS_REF", cache_key, result, ttl_seconds=86400)
+
+            return result or []
+
+    @guardrail(provider="polygon", fallback=[])
+    def _get_option_contract_candidates_api(
+        self,
+        underlying: str,
+        right: str,
+        exp_start: date,
+        exp_end: date,
+        strike_min: float,
+        strike_max: float,
+        limit: int
+    ) -> List[Dict]:
+        """Internal API call for option contract candidates."""
+        if not self.api_key:
+            return []
+
+        url = f"{self.base_url}/v3/reference/options/contracts"
+
+        params = {
+            'underlying_ticker': underlying,
+            'contract_type': right.lower(),
+            'expiration_date.gte': exp_start.isoformat(),
+            'expiration_date.lte': exp_end.isoformat(),
+            'strike_price.gte': strike_min,
+            'strike_price.lte': strike_max,
+            'limit': min(limit, 1000),
+            'apiKey': self.api_key
+        }
+
+        all_results = []
+        next_url = url
+
+        while next_url and len(all_results) < limit:
+            if next_url == url:
+                response = self.session.get(url, params=params, timeout=10)
+            else:
+                # Pagination - next_url already includes params
+                response = self.session.get(next_url + f"&apiKey={self.api_key}", timeout=10)
+
+            if response.status_code != 200:
+                break
+
+            data = response.json()
+            results = data.get('results', [])
+            if not results:
+                break
+
+            for item in results:
+                all_results.append({
+                    'ticker': item.get('ticker'),
+                    'strike': float(item.get('strike_price', 0)),
+                    'expiration': item.get('expiration_date'),
+                    'type': (item.get('contract_type') or '').lower(),
+                    'underlying': item.get('underlying_ticker')
+                })
+
+            # Check for pagination
+            next_url = data.get('next_url')
+            if not next_url:
+                break
+
+        return all_results[:limit]
+
+    def get_historical_spot_price(self, underlying: str, as_of_date: date) -> Optional[float]:
+        """
+        PR7: Gets the closing price of underlying at a specific historical date.
+
+        Args:
+            underlying: Stock ticker
+            as_of_date: Date to get closing price for
+
+        Returns:
+            Closing price or None if not available
+        """
+        # Fetch a small window around as_of_date
+        end_dt = datetime.combine(as_of_date, datetime.min.time())
+        hist = self.get_historical_prices(underlying, days=5, to_date=end_dt)
+
+        if not hist or not hist.get('dates') or not hist.get('prices'):
+            return None
+
+        # Find the exact date or closest prior date
+        as_of_str = as_of_date.isoformat()
+        dates = hist['dates']
+        prices = hist['prices']
+
+        # Try exact match first
+        if as_of_str in dates:
+            idx = dates.index(as_of_str)
+            return prices[idx]
+
+        # Otherwise return the last available price before as_of_date
+        for i in range(len(dates) - 1, -1, -1):
+            if dates[i] <= as_of_str:
+                return prices[i]
+
+        return prices[-1] if prices else None
+
 
 def get_polygon_price(symbol: str) -> float:
     # FIX 1: Handle Cash Manually

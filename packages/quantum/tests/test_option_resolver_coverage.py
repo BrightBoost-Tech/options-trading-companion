@@ -349,7 +349,8 @@ class TestValidationServiceUsesWindowAwareResolver:
             "option_dte": 30,
             "option_moneyness": "atm",
             "window_days": 90,
-            "concurrent_runs": 1
+            "concurrent_runs": 1,
+            "use_rolling_contracts": False  # PR7: Test static mode
         })
 
         # Verify resolve_contract_with_coverage was called (not resolve_contract)

@@ -66,8 +66,15 @@ def run(payload: Dict[str, Any], ctx=None) -> Dict[str, Any]:
 
         elif mode == "historical":
             config = payload.get("config", {})
-            result = service.eval_historical(user_id, config)
-            return {"status": "completed", "result": result}
+
+            # PR4: Check if training mode is enabled
+            if config.get("train", False):
+                logger.info(f"Running training loop for user {user_id}")
+                result = service.train_historical(user_id, config)
+                return {"status": "completed", "mode": "train", "result": result}
+            else:
+                result = service.eval_historical(user_id, config)
+                return {"status": "completed", "result": result}
 
         else:
             return {"error": f"Unknown mode: {mode}"}

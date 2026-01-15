@@ -2,7 +2,8 @@ import re
 import uuid
 import hashlib
 import json
-from typing import List, Dict, Any, Optional
+from datetime import date, datetime
+from typing import List, Dict, Any, Optional, Union
 from packages.quantum.models import SpreadPosition
 
 def parse_option_symbol(symbol: str) -> Dict[str, Any]:
@@ -35,6 +36,65 @@ def parse_option_symbol(symbol: str) -> Dict[str, Any]:
         "type": opt_type,
         "strike": strike
     }
+
+
+def build_occ_symbol(
+    underlying: str,
+    expiry: Union[date, str],
+    right: str,
+    strike: float,
+    include_prefix: bool = True
+) -> str:
+    """
+    Builds an OCC-format option symbol from components.
+    Inverse of parse_option_symbol().
+
+    Args:
+        underlying: Stock ticker (e.g., "AAPL", "SPY")
+        expiry: Expiration date as date object or "YYYY-MM-DD" string
+        right: Option type - "C", "P", "call", or "put"
+        strike: Strike price (e.g., 150.0, 255.5)
+        include_prefix: If True, prepends "O:" prefix (default True)
+
+    Returns:
+        OCC symbol like "O:AAPL240119C00150000"
+
+    Example:
+        >>> build_occ_symbol("AAPL", "2024-01-19", "call", 150.0)
+        'O:AAPL240119C00150000'
+        >>> build_occ_symbol("SPY", date(2024, 3, 15), "P", 450.0)
+        'O:SPY240315P00450000'
+    """
+    # Normalize underlying to uppercase
+    underlying = underlying.upper().replace(" ", "")
+
+    # Parse expiry to date if string
+    if isinstance(expiry, str):
+        expiry = datetime.strptime(expiry, "%Y-%m-%d").date()
+
+    # Format expiry as YYMMDD
+    expiry_str = expiry.strftime("%y%m%d")
+
+    # Normalize right to single char
+    right = right.upper()
+    if right in ("CALL", "C"):
+        right_char = "C"
+    elif right in ("PUT", "P"):
+        right_char = "P"
+    else:
+        raise ValueError(f"Invalid option right: {right}. Must be 'C', 'P', 'call', or 'put'")
+
+    # Format strike as 8 digits (strike * 1000, zero-padded)
+    strike_int = int(round(strike * 1000))
+    strike_str = f"{strike_int:08d}"
+
+    # Build symbol
+    symbol = f"{underlying}{expiry_str}{right_char}{strike_str}"
+
+    if include_prefix:
+        return f"O:{symbol}"
+    return symbol
+
 
 def get_contract_multiplier(symbol: str) -> float:
     """

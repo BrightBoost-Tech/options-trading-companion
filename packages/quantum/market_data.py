@@ -107,6 +107,96 @@ class PolygonService:
 
             return None
 
+    def get_option_historical_prices(
+        self,
+        option_symbol: str,
+        start_date: datetime,
+        end_date: datetime
+    ) -> Optional[Dict]:
+        """
+        Fetches daily OHLC data for a specific option contract.
+
+        Args:
+            option_symbol: OCC option symbol (e.g., "O:AAPL240119C00150000" or "AAPL240119C00150000")
+            start_date: Start date for historical data
+            end_date: End date for historical data
+
+        Returns:
+            Dict with keys: dates, prices (close), opens, highs, lows, volumes
+            Returns None if no data available (common for options with limited history)
+
+        Note:
+            Options typically have limited trading history compared to stocks.
+            This method returns None gracefully if no data exists.
+        """
+        # Normalize symbol to ensure O: prefix
+        symbol = normalize_option_symbol(option_symbol)
+
+        start_str = start_date.strftime('%Y-%m-%d')
+        end_str = end_date.strftime('%Y-%m-%d')
+
+        # Cache key
+        cache_key_parts = make_cache_key_parts(
+            "OPTION_OHLC",
+            symbol=symbol,
+            start_date=start_str,
+            end_date=end_str
+        )
+        cached = self.cache.get("OPTION_OHLC", cache_key_parts)
+        if cached:
+            return cached
+
+        with self.cache.inflight_lock("OPTION_OHLC", cache_key_parts):
+            cached = self.cache.get("OPTION_OHLC", cache_key_parts)
+            if cached:
+                return cached
+
+            result = self._get_option_historical_prices_api(symbol, start_str, end_str)
+
+            if result:
+                self.cache.set("OPTION_OHLC", cache_key_parts, result, ttl_seconds=TTL_OHLC)
+
+            return result
+
+    @guardrail(provider="polygon", fallback=None)
+    def _get_option_historical_prices_api(
+        self,
+        symbol: str,
+        start_str: str,
+        end_str: str
+    ) -> Optional[Dict]:
+        """Internal API call for option historical prices."""
+        if not self.api_key:
+            return None
+
+        url = f"{self.base_url}/v2/aggs/ticker/{symbol}/range/1/day/{start_str}/{end_str}"
+        params = {
+            'adjusted': 'true',
+            'sort': 'asc',
+            'apiKey': self.api_key
+        }
+
+        response = self.session.get(url, params=params, timeout=5)
+
+        if response.status_code != 200:
+            return None
+
+        data = response.json()
+        if 'results' not in data or len(data['results']) == 0:
+            return None
+
+        bars = data['results']
+        result = {
+            'symbol': symbol,
+            'dates': [datetime.fromtimestamp(bar['t'] / 1000).strftime('%Y-%m-%d') for bar in bars],
+            'opens': [bar.get('o', 0) for bar in bars],
+            'highs': [bar.get('h', 0) for bar in bars],
+            'lows': [bar.get('l', 0) for bar in bars],
+            'prices': [bar['c'] for bar in bars],  # Close prices
+            'volumes': [bar.get('v', 0) for bar in bars]
+        }
+        return result
+
     @guardrail(provider="polygon", fallback=None)
     def _get_historical_prices_api(self, symbol: str, days: int, to_date: datetime, to_date_str: str) -> Optional[Dict]:
         # 2. Guardrails: Check API Key

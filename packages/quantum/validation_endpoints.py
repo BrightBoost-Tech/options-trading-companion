@@ -1,5 +1,5 @@
 from fastapi import APIRouter, Depends, HTTPException, Body
-from typing import Dict, Any, Optional, List
+from typing import Dict, Any, Optional, List, Literal
 from pydantic import BaseModel
 from supabase import Client
 
@@ -23,6 +23,12 @@ class HistoricalRunConfig(BaseModel):
     strategy_name: Optional[str] = None
 
     seed: Optional[int] = None  # ignored
+
+    # PR3: Options-native validation fields
+    instrument_type: Literal["stock", "option"] = "stock"
+    option_right: Optional[Literal["call", "put"]] = None
+    option_dte: Optional[int] = 30
+    option_moneyness: Optional[Literal["atm", "otm_5pct", "itm_5pct"]] = "atm"
 
 class ValidationRunRequest(BaseModel):
     mode: str # 'paper'|'historical'

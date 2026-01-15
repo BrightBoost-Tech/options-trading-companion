@@ -1,12 +1,13 @@
 import uuid
 import logging
-from datetime import datetime, timedelta, timezone
-from typing import Dict, Any, Optional, List
+from datetime import datetime, timedelta, timezone, date
+from typing import Dict, Any, Optional, List, Literal
 from supabase import Client
 import math
 
 from packages.quantum.services.backtest_engine import BacktestEngine
 from packages.quantum.strategy_profiles import StrategyConfig, CostModelConfig
+from packages.quantum.services.option_contract_resolver import OptionContractResolver
 
 logger = logging.getLogger(__name__)
 
@@ -208,6 +209,15 @@ class GoLiveValidationService:
         max_trials = int(suite_config.get("max_trials", 12))
         strategy_name = suite_config.get("strategy_name")
 
+        # PR3: Option-native validation parameters
+        instrument_type = suite_config.get("instrument_type", "stock")
+        option_right = suite_config.get("option_right", "call")
+        option_dte = int(suite_config.get("option_dte", 30))
+        option_moneyness = suite_config.get("option_moneyness", "atm")
+
+        # Initialize option resolver if needed
+        option_resolver = OptionContractResolver() if instrument_type == "option" else None
+
         now = datetime.now(timezone.utc).date() - timedelta(days=1)
         anchor_start = (
             datetime.strptime(suite_config["window_start"], "%Y-%m-%d").date()
@@ -257,8 +267,25 @@ class GoLiveValidationService:
 
         def run_window(start_date, cfg):
             end_date = start_date + timedelta(days=window_days)
+
+            # PR3: Resolve option symbol if instrument_type == "option"
+            backtest_symbol = symbol
+            if instrument_type == "option" and option_resolver:
+                resolved = option_resolver.resolve_contract(
+                    underlying=symbol,
+                    right=option_right,
+                    target_dte=option_dte,
+                    moneyness=option_moneyness,
+                    as_of_date=start_date
+                )
+                if resolved:
+                    backtest_symbol = resolved
+                    logger.info(f"Resolved option contract: {resolved} for window starting {start_date}")
+                else:
+                    logger.warning(f"Could not resolve option contract for {symbol} as of {start_date}, using underlying")
+
             bt = engine.run_single(
-                symbol=symbol,
+                symbol=backtest_symbol,
                 start_date=start_date.isoformat(),
                 end_date=end_date.isoformat(),
                 config=cfg,
@@ -297,6 +324,7 @@ class GoLiveValidationService:
             return {
                 "window_start": start_date.isoformat(),
                 "window_end": end_date.isoformat(),
+                "symbol": backtest_symbol,  # PR3: Include actual symbol used
                 "return_pct": ret,
                 "pnl_total": pnl,
                 "segment_pnls": seg,

@@ -409,3 +409,371 @@ class GoLiveValidationService:
         }).eq("user_id", user_id).execute()
 
         return best
+
+    def train_historical(self, user_id: str, suite_config: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Self-learning training loop for historical validation.
+
+        Runs eval_historical repeatedly until train_target_streak consecutive passes
+        are achieved, or train_max_attempts is exhausted. On failures, mutates the
+        strategy config based on fail_reason.
+
+        Args:
+            user_id: User ID
+            suite_config: Config dict including training parameters:
+                - train_target_streak: Number of consecutive passes needed (default 3)
+                - train_max_attempts: Maximum attempts before giving up (default 20)
+                - train_strategy_name: Name for persisted strategy configs
+                - train_versioning: "increment" or "overwrite"
+
+        Returns:
+            Dict with: status, streak, attempts, best_config, history, final_result
+        """
+        # Extract training parameters
+        target_streak = int(suite_config.get("train_target_streak", 3))
+        max_attempts = int(suite_config.get("train_max_attempts", 20))
+        strategy_name = suite_config.get("train_strategy_name") or f"trained_{user_id[:8]}"
+        versioning = suite_config.get("train_versioning", "increment")
+
+        # Initialize tracking
+        streak = 0
+        attempts = 0
+        history = []
+        best_result = None
+        best_return = float("-inf")
+        current_config = None
+        version = 1
+
+        # Load or create base config
+        try:
+            q = self.supabase.table("strategy_configs").select("params, version").eq("user_id", user_id)
+            if suite_config.get("strategy_name"):
+                q = q.eq("name", suite_config["strategy_name"])
+            q = q.order("updated_at", desc=True).limit(1)
+            res = q.execute()
+            if res.data:
+                current_config = StrategyConfig(**res.data[0]["params"])
+                version = int(res.data[0].get("version", 1)) + 1
+        except Exception:
+            pass
+
+        if not current_config:
+            current_config = StrategyConfig(
+                name=strategy_name,
+                version=1,
+                conviction_floor=0.55,
+                take_profit_pct=0.05,
+                stop_loss_pct=0.03,
+                max_holding_days=10,
+                max_risk_pct_portfolio=0.10,
+                max_concurrent_positions=1,
+                conviction_slope=0.2,
+                max_risk_pct_per_trade=0.05,
+                max_spread_bps=100,
+                max_days_to_expiry=45,
+                min_underlying_liquidity=1000000.0,
+                regime_whitelist=[]
+            )
+
+        while attempts < max_attempts:
+            attempts += 1
+
+            # Run evaluation with current config
+            eval_config = suite_config.copy()
+            eval_config["strategy_name"] = strategy_name
+            eval_config["autotune"] = False  # We handle mutation ourselves
+
+            # Inject current config into the service temporarily
+            result = self._run_eval_with_config(user_id, eval_config, current_config)
+
+            passed = result.get("all_passed", False)
+            worst_return = result.get("worst_return", float("-inf"))
+            fail_reason = result.get("worst_suite", {}).get("fail_reason")
+
+            # Track history
+            history.append({
+                "attempt": attempts,
+                "passed": passed,
+                "worst_return": worst_return,
+                "fail_reason": fail_reason,
+                "config_snapshot": current_config.model_dump()
+            })
+
+            # Update best result
+            if worst_return > best_return:
+                best_return = worst_return
+                best_result = result
+
+            # Update streak
+            if passed:
+                streak += 1
+                logger.info(f"Training attempt {attempts}: PASSED (streak={streak})")
+
+                if streak >= target_streak:
+                    # Success! Persist the winning config
+                    self._persist_strategy_config(
+                        user_id, strategy_name, current_config, version, versioning
+                    )
+
+                    return {
+                        "status": "success",
+                        "streak": streak,
+                        "attempts": attempts,
+                        "best_config": current_config.model_dump(),
+                        "best_return": best_return,
+                        "history": history,
+                        "final_result": result
+                    }
+            else:
+                streak = 0
+                logger.info(f"Training attempt {attempts}: FAILED ({fail_reason})")
+
+                # Mutate config based on fail_reason
+                current_config = self._mutate_config(current_config, fail_reason, worst_return)
+                version += 1
+
+        # Exhausted attempts
+        # Persist best config found even if didn't reach target streak
+        if best_result:
+            self._persist_strategy_config(
+                user_id, strategy_name, current_config, version, versioning
+            )
+
+        return {
+            "status": "exhausted",
+            "streak": streak,
+            "attempts": attempts,
+            "best_config": current_config.model_dump() if current_config else None,
+            "best_return": best_return,
+            "history": history,
+            "final_result": best_result
+        }
+
+    def _run_eval_with_config(
+        self,
+        user_id: str,
+        suite_config: Dict[str, Any],
+        config: StrategyConfig
+    ) -> Dict[str, Any]:
+        """
+        Runs eval_historical with a specific StrategyConfig.
+
+        This is a helper that bypasses the normal config loading to use
+        the provided config directly.
+        """
+        state = self.get_or_create_state(user_id)
+        baseline = float(state.get("paper_baseline_capital", 100000) or 100000)
+
+        symbol = suite_config.get("symbol", "SPY")
+        window_days = int(suite_config.get("window_days", 90))
+        concurrent_runs = int(suite_config.get("concurrent_runs", 3))
+        stride_days = int(suite_config.get("stride_days", window_days))
+        goal_return_pct = float(suite_config.get("goal_return_pct", 10.0))
+
+        # Option parameters
+        instrument_type = suite_config.get("instrument_type", "stock")
+        option_right = suite_config.get("option_right", "call")
+        option_dte = int(suite_config.get("option_dte", 30))
+        option_moneyness = suite_config.get("option_moneyness", "atm")
+
+        option_resolver = OptionContractResolver() if instrument_type == "option" else None
+
+        now = datetime.now(timezone.utc).date() - timedelta(days=1)
+        anchor_start = (
+            datetime.strptime(suite_config["window_start"], "%Y-%m-%d").date()
+            if suite_config.get("window_start")
+            else now - timedelta(days=window_days)
+        )
+
+        suite_starts = [
+            anchor_start - timedelta(days=i * stride_days)
+            for i in range(concurrent_runs)
+        ]
+
+        engine = BacktestEngine()
+        cost_model = CostModelConfig()
+
+        def run_window(start_date):
+            end_date = start_date + timedelta(days=window_days)
+
+            backtest_symbol = symbol
+            if instrument_type == "option" and option_resolver:
+                resolved = option_resolver.resolve_contract(
+                    underlying=symbol,
+                    right=option_right,
+                    target_dte=option_dte,
+                    moneyness=option_moneyness,
+                    as_of_date=start_date
+                )
+                if resolved:
+                    backtest_symbol = resolved
+
+            bt = engine.run_single(
+                symbol=backtest_symbol,
+                start_date=start_date.isoformat(),
+                end_date=end_date.isoformat(),
+                config=config,
+                cost_model=cost_model,
+                seed=0,
+                initial_equity=baseline,
+            )
+
+            equity = bt.equity_curve or []
+            trades = bt.trades or []
+
+            final_equity = equity[-1]["equity"] if equity else baseline
+            pnl = final_equity - baseline
+            ret = (pnl / baseline) * 100 if baseline else 0.0
+
+            seg = {"seg1": 0.0, "seg2": 0.0, "seg3": 0.0}
+            for t in trades:
+                pnl_t = float(t.get("pnl", 0.0))
+                try:
+                    d = datetime.strptime(t["exit_date"], "%Y-%m-%d").date()
+                except ValueError:
+                    d = datetime.fromisoformat(t["exit_date"]).date()
+
+                off = (d - start_date).days
+                if off < 30:
+                    seg["seg1"] += pnl_t
+                elif off < 60:
+                    seg["seg2"] += pnl_t
+                else:
+                    seg["seg3"] += pnl_t
+
+            losing_segment = any(v < 0 for v in seg.values())
+            passed = ret >= goal_return_pct and not losing_segment
+
+            return {
+                "window_start": start_date.isoformat(),
+                "window_end": end_date.isoformat(),
+                "symbol": backtest_symbol,
+                "return_pct": ret,
+                "pnl_total": pnl,
+                "segment_pnls": seg,
+                "trades_count": len(trades),
+                "passed": passed,
+                "fail_reason": (
+                    "no_trades" if not trades else
+                    "return_below_goal" if ret < goal_return_pct else
+                    "losing_segment" if losing_segment else None
+                ),
+            }
+
+        suites = [run_window(s) for s in suite_starts]
+        worst = min(suites, key=lambda x: x["return_pct"])
+        all_passed = all(s["passed"] for s in suites)
+
+        return {
+            "config": config,
+            "suites": suites,
+            "worst_return": worst["return_pct"],
+            "worst_suite": worst,
+            "all_passed": all_passed,
+        }
+
+    def _mutate_config(
+        self,
+        config: StrategyConfig,
+        fail_reason: Optional[str],
+        worst_return: float
+    ) -> StrategyConfig:
+        """
+        Mutates strategy config based on failure reason.
+
+        Mutation rules:
+        - return_below_goal: Increase risk tolerance or lower conviction threshold
+        - losing_segment: Tighten stop loss or reduce position size
+        - no_trades: Lower conviction floor
+
+        Applies guardrails to prevent extreme values.
+        """
+        updates = {}
+
+        if fail_reason == "return_below_goal":
+            # Try to increase returns
+            if config.max_risk_pct_portfolio < 0.25:
+                updates["max_risk_pct_portfolio"] = min(0.25, config.max_risk_pct_portfolio * 1.2)
+            elif config.conviction_floor > 0.40:
+                updates["conviction_floor"] = max(0.40, config.conviction_floor - 0.05)
+            elif config.take_profit_pct < 0.15:
+                updates["take_profit_pct"] = min(0.15, config.take_profit_pct + 0.02)
+
+        elif fail_reason == "losing_segment":
+            # Try to reduce losses
+            if config.stop_loss_pct > 0.015:
+                updates["stop_loss_pct"] = max(0.015, config.stop_loss_pct - 0.005)
+            elif config.max_risk_pct_portfolio > 0.05:
+                updates["max_risk_pct_portfolio"] = max(0.05, config.max_risk_pct_portfolio * 0.85)
+            elif config.max_holding_days > 3:
+                updates["max_holding_days"] = max(3, config.max_holding_days - 2)
+
+        elif fail_reason == "no_trades":
+            # Lower barriers to entry
+            if config.conviction_floor > 0.35:
+                updates["conviction_floor"] = max(0.35, config.conviction_floor - 0.05)
+            elif config.max_spread_bps < 200:
+                updates["max_spread_bps"] = min(200, config.max_spread_bps + 25)
+
+        else:
+            # Generic mutation: try small adjustments
+            if worst_return < 0:
+                updates["stop_loss_pct"] = max(0.015, config.stop_loss_pct - 0.003)
+            else:
+                updates["max_risk_pct_portfolio"] = min(0.25, config.max_risk_pct_portfolio * 1.1)
+
+        if updates:
+            return config.model_copy(update=updates)
+        return config
+
+    def _persist_strategy_config(
+        self,
+        user_id: str,
+        name: str,
+        config: StrategyConfig,
+        version: int,
+        versioning: str
+    ) -> None:
+        """
+        Persists a strategy config to the database.
+
+        Args:
+            user_id: User ID
+            name: Strategy name
+            config: StrategyConfig to persist
+            version: Version number
+            versioning: "increment" (new row) or "overwrite" (update existing)
+        """
+        try:
+            config_data = {
+                "user_id": user_id,
+                "name": name,
+                "version": version,
+                "params": config.model_dump(),
+                "updated_at": datetime.now(timezone.utc).isoformat()
+            }
+
+            if versioning == "overwrite":
+                # Try to update existing, insert if not found
+                existing = self.supabase.table("strategy_configs") \
+                    .select("id") \
+                    .eq("user_id", user_id) \
+                    .eq("name", name) \
+                    .limit(1) \
+                    .execute()
+
+                if existing.data:
+                    self.supabase.table("strategy_configs") \
+                        .update(config_data) \
+                        .eq("user_id", user_id) \
+                        .eq("name", name) \
+                        .execute()
+                else:
+                    self.supabase.table("strategy_configs").insert(config_data).execute()
+            else:
+                # increment: always insert new row
+                self.supabase.table("strategy_configs").insert(config_data).execute()
+
+            logger.info(f"Persisted strategy config '{name}' v{version} for user {user_id}")
+        except Exception as e:
+            logger.error(f"Failed to persist strategy config: {e}")

@@ -30,6 +30,13 @@ class HistoricalRunConfig(BaseModel):
     option_dte: Optional[int] = 30
     option_moneyness: Optional[Literal["atm", "otm_5pct", "itm_5pct"]] = "atm"
 
+    # PR4: Training loop fields
+    train: bool = False
+    train_target_streak: int = 3
+    train_max_attempts: int = 20
+    train_strategy_name: Optional[str] = None
+    train_versioning: Literal["increment", "overwrite"] = "increment"
+
 class ValidationRunRequest(BaseModel):
     mode: str # 'paper'|'historical'
     historical: Optional[HistoricalRunConfig] = None

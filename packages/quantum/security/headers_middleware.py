@@ -17,10 +17,21 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
         response.headers["X-XSS-Protection"] = "1; mode=block"
         response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
 
+        # 🛡️ Sentinel: Prevent Flash/PDF cross-domain leaks
+        response.headers["X-Permitted-Cross-Domain-Policies"] = "none"
+
         # 🛡️ Sentinel: Content Security Policy (CSP)
-        # We start with a relatively permissive policy for API compatibility but restrict object-src and base-uri.
-        # In a real frontend-serving app, we'd be stricter, but for an API, this prevents it from being used in XSS chains.
-        response.headers["Content-Security-Policy"] = "default-src 'self'; frame-ancestors 'none'; object-src 'none'; base-uri 'self';"
+        # Enhanced to strictly limit form actions and mixed content.
+        # - form-action 'self': Prevents forms from submitting data to external sites.
+        # - block-all-mixed-content: Ensures no HTTP content is loaded on HTTPS pages.
+        response.headers["Content-Security-Policy"] = (
+            "default-src 'self'; "
+            "frame-ancestors 'none'; "
+            "object-src 'none'; "
+            "base-uri 'self'; "
+            "form-action 'self'; "
+            "block-all-mixed-content;"
+        )
 
         # 🛡️ Sentinel: Permissions Policy
         # Disable powerful features that the API definitely doesn't need to use.

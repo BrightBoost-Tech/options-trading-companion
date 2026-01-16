@@ -22,7 +22,7 @@ def test_security_headers():
 
     # Check new headers
     assert "Content-Security-Policy" in response.headers
-    assert response.headers["Content-Security-Policy"] == "default-src 'self'; frame-ancestors 'none'; object-src 'none'; base-uri 'self';"
+    assert response.headers["Content-Security-Policy"] == "default-src 'self'; frame-ancestors 'none'; object-src 'none'; base-uri 'self'; form-action 'self'; block-all-mixed-content;"
 
     assert "Permissions-Policy" in response.headers
     assert response.headers["Permissions-Policy"] == "geolocation=(), microphone=(), camera=(), payment=(), usb=()"

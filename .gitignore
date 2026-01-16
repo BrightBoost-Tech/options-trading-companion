@@ -34,3 +34,18 @@ venv/
 env/
 __pycache__/
 *.pyc
+*.pyo
+
+# Cache directories
+market_data_cache/
+**/market_data_cache/
+
+# Temp/dev files
+*.pid
+api_log.txt
+server.log
+
+# Test artifacts
+.pytest_cache/
+.coverage
+htmlcov/

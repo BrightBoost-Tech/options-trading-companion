@@ -1,163 +1,240 @@
-# Options Trading Companion — v2
+# Options Trading Companion
 
-**v2 (major)** — Active Development
-*Next.js Frontend • FastAPI Backend • Supabase Database*
+Personal options trading companion with AI-powered scouting, backtesting, and go-live validation guardrails.
 
-## 1. Architecture
+## Architecture
 
-The system is a monorepo composed of three main parts:
+| Component | Location | Description |
+|-----------|----------|-------------|
+| **Frontend** | `apps/web/` | Next.js 14 + Shadcn UI, runs on `http://localhost:3000` |
+| **Backend** | `packages/quantum/` | FastAPI Python service for optimization, market data, validation. Runs on `http://127.0.0.1:8000` |
+| **Database** | `supabase/` | PostgreSQL via Supabase with migrations |
+| **Infra** | `infra/` | Deployment scripts and env checks |
 
-*   **Frontend (`apps/web`)**: A Next.js 14 application using Shadcn UI. It runs on `http://localhost:3000` and proxies auth/analytics requests.
-*   **Backend (`packages/quantum`)**: A FastAPI Python service handling complex logic (optimization, market data, workflows). It runs on `http://127.0.0.1:8000`.
-    *   API Documentation (Swagger) is available at `http://127.0.0.1:8000/docs`.
-*   **Database (`supabase`)**: PostgreSQL managed via Supabase, containing migrations for schema management.
+API Documentation (Swagger): `http://127.0.0.1:8000/docs`
 
-## 2. Local Development Workflow
+## Prerequisites
 
-We recommend using **pnpm** for package management.
+- Node.js 18+ and pnpm 8+
+- Python 3.9+
+- Supabase CLI (for local database)
 
-### Prerequisites
-*   Node.js & pnpm
-*   Python 3.9+
-*   Supabase CLI (for local DB)
+## Quickstart
 
-### Step-by-Step Setup
+```bash
+# 1. Install Node dependencies
+pnpm install
 
-1.  **Install Dependencies**
-    ```bash
-    pnpm install
-    ```
+# 2. Start Supabase (local PostgreSQL)
+supabase start
+supabase db reset  # First time or after schema changes
 
-2.  **Start Database**
-    ```bash
-    supabase start
-    # If starting fresh or after schema changes:
-    supabase db reset
-    ```
+# 3. Start Backend
+cd packages/quantum
+python -m venv venv
+# Mac/Linux: source venv/bin/activate
+# Windows: venv\Scripts\activate
+pip install -r requirements.txt
+./run_server.sh  # or .\run_server.bat on Windows
 
-3.  **Start Backend (Quantum)**
-    Open a terminal:
-    ```bash
-    cd packages/quantum
+# 4. Start Frontend (new terminal)
+pnpm --filter "./apps/web" dev
+```
 
-    # Create/Activate Virtual Env
-    # Mac/Linux:
-    python3 -m venv venv
-    source venv/bin/activate
+**Windows One-Click:** Run `start.bat` from the repo root to launch both backend and frontend.
 
-    # Windows:
-    # python -m venv venv
-    # venv\Scripts\activate
+## Environment Variables
 
-    # Install Python Deps
-    pip install -r requirements.txt
+### Root / Frontend (`.env` or `.env.local`)
 
-    # Run Server
-    # Mac/Linux:
-    ./run_server.sh
-    # Windows:
-    # .\run_server.bat
-    ```
+Copy `.env.example` to `.env`:
 
-4.  **Start Frontend**
-    Open a new terminal:
-    ```bash
-    pnpm --filter "./apps/web" dev
-    ```
-
-*Note: Windows users can use `start_app.bat` in the root for a one-click launch, but the manual steps above are preferred for debugging.*
-
-## 3. Environment Variables
-
-This project uses two separate `.env` contexts. **Do not mix them.**
-
-### Frontend & Root (`.env.local` / `.env`)
-Copy `.env.example` to `.env` (or `.env.local` for Next.js).
-Required variables:
-*   `NEXT_PUBLIC_SUPABASE_URL`
-*   `NEXT_PUBLIC_SUPABASE_ANON_KEY` (Publishable)
-*   `SUPABASE_SERVICE_ROLE_KEY` (Secret - used by backend, but often read from root in dev)
+| Variable | Purpose |
+|----------|---------|
+| `NEXT_PUBLIC_SUPABASE_URL` | Supabase API URL |
+| `NEXT_PUBLIC_SUPABASE_ANON_KEY` | Supabase anon/public key |
+| `SUPABASE_SERVICE_ROLE_KEY` | Supabase service role key (secret) |
 
 ### Backend (`packages/quantum/.env`)
-The backend **must** have its own `.env` file for secrets not shared with the client.
-Required variables:
-*   `SUPABASE_URL`: The API URL of your Supabase instance.
-*   `SUPABASE_SERVICE_ROLE_KEY`: The service role key for database access (bypassing RLS).
-*   `ENCRYPTION_KEY`: A Fernet URL-safe base64 key.
-    *   *Generate one via:* `python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"`
-*   `APP_ENV`: Set to `development` to enable test-mode auth.
-*   `CRON_SECRET`: A secret string to protect task endpoints.
-*   `PLAID_ENV`, `PLAID_CLIENT_ID`, `PLAID_SECRET` (if using Plaid).
 
-## 4. Authentication Modes
+Copy `packages/quantum/.env.example`:
 
-The backend supports two authentication methods:
+| Variable | Purpose |
+|----------|---------|
+| `SUPABASE_URL` | Supabase API URL |
+| `SUPABASE_SERVICE_ROLE_KEY` | Service role key for DB access |
+| `ENCRYPTION_KEY` | Fernet key for credential encryption |
+| `APP_ENV` | `development` enables test-mode auth |
+| `TASK_SIGNING_SECRET` | Secret for internal task endpoints |
+| `POLYGON_API_KEY` | (Optional) Polygon.io market data |
+| `PLAID_*` | (Optional) Plaid integration |
 
-1.  **Standard (Production)**
-    *   Header: `Authorization: Bearer <SUPABASE_JWT>`
-    *   Used by the frontend when a user is logged in.
+Generate encryption key: `python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"`
 
-2.  **Dev/Test Mode** (Only when `APP_ENV != production`)
-    *   Header: `X-Test-Mode-User: <UUID>`
-    *   Bypasses JWT validation and impersonates the specified UUID.
-    *   Default Test User ID: `75ee12ad-b119-4f32-aeea-19b4ef55d587`
+## Core Commands
 
-**Example (Curl):**
+### Backend (from `packages/quantum/`)
+
 ```bash
-curl -X GET "http://127.0.0.1:8000/suggestions?window=midday_entry" \
-     -H "X-Test-Mode-User: 75ee12ad-b119-4f32-aeea-19b4ef55d587"
+# Run API server
+./run_server.sh  # or .\run_server.bat
+
+# Run tests
+python -m pytest tests/ -q
+
+# Run specific test file
+python -m pytest tests/test_historical_training_loop.py -v
 ```
 
-## 5. Cron & Task Endpoints
+### Frontend (from repo root)
 
-Scheduled tasks are triggered via POST requests protected by the `X-Cron-Secret` header.
-
-**Endpoints:**
-*   `/tasks/morning-brief`: Runs morning exit logic (Take Profit).
-*   `/tasks/midday-scan`: Runs scanner and sizing for new entries.
-*   `/tasks/weekly-report`: Generates weekly performance summaries.
-*   `/tasks/universe/sync`: Updates the scanner universe (market caps, volume).
-*   `/tasks/plaid/backfill-history`: Backfills portfolio snapshots.
-
-**Example:**
 ```bash
-curl -X POST "http://127.0.0.1:8000/tasks/midday-scan" \
-     -H "X-Cron-Secret: YOUR_SECRET_HERE"
+pnpm --filter "./apps/web" dev    # Development
+pnpm --filter "./apps/web" build  # Production build
+pnpm --filter "./apps/web" lint   # Lint
 ```
 
-## 6. Database & Migrations
+### Monorepo
 
-Supabase migrations are the source of truth for the database schema.
+```bash
+pnpm dev      # Start all apps in parallel
+pnpm build    # Build all packages and apps
+pnpm test     # Run vitest
+pnpm lint     # ESLint
+```
 
-*   **Location:** `supabase/migrations/`
-*   **Key Migration:** `20250101000010_add_strategy_fields_to_learning_feedback_loops.sql` (Adds strategy/window tracking).
-*   **To Apply:**
-    ```bash
-    supabase db reset
-    ```
-    *Warning: This wipes local data and reseeds it.*
+## Historical Validation / Backtesting
 
-## 7. Dark Mode
+The validation system tests trading strategies against historical data before going live.
 
-*   **Current Status:** The CSS (`apps/web/app/globals.css`) supports `.dark` class variables, but there is no UI toggle exposed yet.
-*   **Planned:**
-    *   Header toggle switch.
-    *   Defaulting to dark mode.
-    *   Persistence via localStorage or user settings.
+### API Endpoint
 
-## 8. Troubleshooting
+```bash
+POST /validation/run
+```
 
-*   **Backend Crashes on Start:**
-    *   *Cause:* Missing `ENCRYPTION_KEY` in `packages/quantum/.env`.
-    *   *Fix:* Generate a Fernet key and add it to the backend `.env`.
+### Example: Run Historical Validation (Stock)
 
-*   **401 Unauthorized on Task Endpoints:**
-    *   *Cause:* Missing or incorrect `X-Cron-Secret` header.
-    *   *Fix:* Ensure `CRON_SECRET` is set in backend env and matches the header in your request.
+```bash
+curl -X POST "http://127.0.0.1:8000/validation/run" \
+  -H "X-Test-Mode-User: 75ee12ad-b119-4f32-aeea-19b4ef55d587" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "mode": "historical",
+    "historical": {
+      "symbol": "SPY",
+      "window_days": 90,
+      "concurrent_runs": 3,
+      "goal_return_pct": 10.0
+    }
+  }'
+```
 
-*   **Weekly Report Errors (`win_rate` NoneType):**
-    *   *Risk:* In `workflow_orchestrator.py`, if a user has no trades, `win_rate` might be `None` or missing.
-    *   *Workaround:* Ensure `JournalService` returns a valid default (0.0) or handle `None` explicitly in the reporting logic.
+### Example: Run Historical Validation (Options)
+
+```bash
+curl -X POST "http://127.0.0.1:8000/validation/run" \
+  -H "X-Test-Mode-User: 75ee12ad-b119-4f32-aeea-19b4ef55d587" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "mode": "historical",
+    "historical": {
+      "symbol": "SPY",
+      "instrument_type": "option",
+      "option_right": "call",
+      "option_dte": 60,
+      "option_moneyness": "itm_5pct",
+      "use_rolling_contracts": true,
+      "strict_option_mode": true,
+      "segment_tolerance_pct": 1.5,
+      "window_days": 90,
+      "concurrent_runs": 3,
+      "goal_return_pct": 10.0
+    }
+  }'
+```
+
+### Training Mode (Self-Learning Loop)
+
+```bash
+curl -X POST "http://127.0.0.1:8000/validation/run" \
+  -H "X-Test-Mode-User: 75ee12ad-b119-4f32-aeea-19b4ef55d587" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "mode": "historical",
+    "historical": {
+      "symbol": "SPY",
+      "instrument_type": "option",
+      "train": true,
+      "train_target_streak": 3,
+      "train_max_attempts": 20
+    }
+  }'
+```
+
+## Authentication
+
+### Production
+- Header: `Authorization: Bearer <SUPABASE_JWT>`
+
+### Development (when `APP_ENV != production`)
+- Header: `X-Test-Mode-User: <UUID>`
+- Default test user: `75ee12ad-b119-4f32-aeea-19b4ef55d587`
+
+## Task Endpoints
+
+Protected by `X-Cron-Secret` header:
+
+| Endpoint | Purpose |
+|----------|---------|
+| `/tasks/morning-brief` | Morning exit logic |
+| `/tasks/midday-scan` | Scanner and sizing |
+| `/tasks/weekly-report` | Weekly performance |
+| `/tasks/universe/sync` | Update scanner universe |
+
+## Database
+
+Migrations in `supabase/migrations/`. Apply with:
+
+```bash
+supabase db reset  # Warning: wipes local data
+```
+
+## Repo Structure
+
+```
+options-trading-companion/
+├── apps/
+│   └── web/              # Next.js frontend
+├── packages/
+│   └── quantum/          # FastAPI backend
+│       ├── services/     # Core business logic
+│       ├── jobs/         # Background job handlers
+│       ├── tests/        # Pytest tests
+│       └── api.py        # Main API routes
+├── supabase/
+│   └── migrations/       # Database migrations
+├── infra/
+│   └── scripts/          # Deployment helpers
+├── docs/                 # Documentation
+├── scripts/              # Dev scripts
+│   └── win/              # Windows launchers
+└── .github/
+    └── workflows/        # CI/CD
+```
+
+## Troubleshooting
+
+**Backend won't start:**
+- Missing `ENCRYPTION_KEY` in `packages/quantum/.env`
+- Generate with: `python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"`
+
+**401 on task endpoints:**
+- Check `TASK_SIGNING_SECRET` / `X-Cron-Secret` header match
+
+**Database connection errors:**
+- Ensure `supabase start` is running
+- Check `SUPABASE_URL` and keys in `.env`
 
 ---
 *Private use only.*

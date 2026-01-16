@@ -15,11 +15,7 @@
     "isolatedModules": true,
     "incremental": true,
     "paths": {
-      "@core/*": ["./packages/core/src/*"],
-      "@server/*": ["./packages/server/src/*"],
-      "@data/*": ["./packages/data/src/*"],
-      "@ai/*": ["./packages/ai/src/*"],
-      "@risk/*": ["./packages/risk/src/*"]
+      "@quantum/*": ["./packages/quantum/*"]
     }
   },
   "exclude": ["node_modules", ".next", "dist", "build"]

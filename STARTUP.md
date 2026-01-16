@@ -2,7 +2,7 @@
 
 ## One-Click Start (Recommended)
 
-Double-click **`start.bat`** (or `start_app.bat`) in the repository root.
+Double-click **`start.bat`** in the repository root.
 
 This will:
 1. Launch the **Backend** (Uvicorn) in a new terminal window.

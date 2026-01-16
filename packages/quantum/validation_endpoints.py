@@ -37,6 +37,11 @@ class HistoricalRunConfig(BaseModel):
     train_strategy_name: Optional[str] = None
     train_versioning: Literal["increment", "overwrite"] = "increment"
 
+    # PR7/PR8/PR10: Runtime knobs
+    use_rolling_contracts: bool = True
+    strict_option_mode: bool = False
+    segment_tolerance_pct: float = 0.0
+
 class ValidationRunRequest(BaseModel):
     mode: str # 'paper'|'historical'
     historical: Optional[HistoricalRunConfig] = None

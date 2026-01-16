@@ -358,5 +358,63 @@ class TestOptionModeFallback:
         assert symbol_used == "SPY"
 
 
+class TestPR10RuntimeKnobsInSchema:
+    """PR10: Tests for runtime knobs exposed in HistoricalRunConfig schema."""
+
+    def test_default_values(self):
+        """New fields have correct default values."""
+        config = HistoricalRunConfig()
+        assert config.use_rolling_contracts is True
+        assert config.strict_option_mode is False
+        assert config.segment_tolerance_pct == 0.0
+
+    def test_accepts_custom_values(self):
+        """New fields accept custom values."""
+        config = HistoricalRunConfig(
+            use_rolling_contracts=False,
+            strict_option_mode=True,
+            segment_tolerance_pct=5.0
+        )
+        assert config.use_rolling_contracts is False
+        assert config.strict_option_mode is True
+        assert config.segment_tolerance_pct == 5.0
+
+    def test_dict_includes_new_fields(self):
+        """dict() includes the new PR7/PR8 runtime knob fields."""
+        config = HistoricalRunConfig(
+            symbol="SPY",
+            use_rolling_contracts=False,
+            strict_option_mode=True,
+            segment_tolerance_pct=3.5
+        )
+        d = config.dict()
+        assert "use_rolling_contracts" in d
+        assert "strict_option_mode" in d
+        assert "segment_tolerance_pct" in d
+        assert d["use_rolling_contracts"] is False
+        assert d["strict_option_mode"] is True
+        assert d["segment_tolerance_pct"] == 3.5
+
+    def test_full_payload_with_all_knobs(self):
+        """Full ValidationRunRequest with all runtime knobs."""
+        request = ValidationRunRequest(
+            mode="historical",
+            historical=HistoricalRunConfig(
+                symbol="AAPL",
+                instrument_type="option",
+                option_right="call",
+                option_dte=45,
+                use_rolling_contracts=True,
+                strict_option_mode=True,
+                segment_tolerance_pct=2.0,
+                train=True,
+                train_target_streak=5
+            )
+        )
+        assert request.historical.use_rolling_contracts is True
+        assert request.historical.strict_option_mode is True
+        assert request.historical.segment_tolerance_pct == 2.0
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

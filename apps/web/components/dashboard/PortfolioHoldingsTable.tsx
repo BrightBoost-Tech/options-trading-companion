@@ -56,9 +56,10 @@ export default function PortfolioHoldingsTable({ holdings, onSync, onGenerateSug
         <tr key={`${position.symbol}-${idx}`} className="hover:bg-muted/50 transition-colors group">
             <th scope="row" className={`px-6 py-4 font-medium text-left ${type === 'option' ? 'text-purple-600 dark:text-purple-400' : 'text-foreground'}`}>
                 <div className="flex flex-col items-start gap-1">
-                    <button
+                    <Button
+                        variant="ghost"
                         onClick={() => handleCopy(displaySymbol)}
-                        className="flex items-center gap-2 hover:opacity-80 transition-opacity text-left"
+                        className="flex justify-start items-center gap-2 hover:opacity-80 hover:bg-transparent hover:text-inherit transition-opacity text-left p-0 h-auto font-medium text-inherit"
                         title="Click to copy symbol"
                         aria-label={`Copy symbol ${displaySymbol}`}
                     >
@@ -68,7 +69,7 @@ export default function PortfolioHoldingsTable({ holdings, onSync, onGenerateSug
                         ) : (
                             <Copy className="w-3 h-3 text-muted-foreground opacity-0 group-hover:opacity-100 transition-opacity" aria-hidden="true" />
                         )}
-                    </button>
+                    </Button>
                     {position.sector && (
                         <span className="text-[10px] text-muted-foreground uppercase">{position.sector}</span>
                     )}

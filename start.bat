@@ -1,34 +1,12 @@
 @echo off
-setlocal
+:: ============================================================================
+:: Options Trading Companion - Quick Start
+:: Delegates to scripts\win\start_all.cmd
+:: ============================================================================
 
-set "REPO_ROOT=%~dp0"
-if "%REPO_ROOT:~-1%"=="\" set "REPO_ROOT=%REPO_ROOT:~0,-1%"
+:: Get the directory where this script lives
+set "SCRIPT_DIR=%~dp0"
+if "%SCRIPT_DIR:~-1%"=="\" set "SCRIPT_DIR=%SCRIPT_DIR:~0,-1%"
 
-set "BACKEND_LAUNCHER=%REPO_ROOT%\scripts\win\start_backend.cmd"
-set "FRONTEND_LAUNCHER=%REPO_ROOT%\scripts\win\start_frontend.cmd"
-
-if not exist "%BACKEND_LAUNCHER%" (
-  echo [ERROR] Missing backend launcher:
-  echo         "%BACKEND_LAUNCHER%"
-  pause
-  exit /b 1
-)
-
-if not exist "%FRONTEND_LAUNCHER%" (
-  echo [ERROR] Missing frontend launcher:
-  echo         "%FRONTEND_LAUNCHER%"
-  pause
-  exit /b 1
-)
-
-echo ============================================
-echo Starting Options Trading Companion (1-click)
-echo Repo root: %REPO_ROOT%
-echo ============================================
-
-REM Use start "" /D to avoid fragile quoting and Windows title parsing.
-start "OTC Backend" /D "%REPO_ROOT%" cmd /k "call \"%BACKEND_LAUNCHER%\""
-start "OTC Frontend" /D "%REPO_ROOT%" cmd /k "%FRONTEND_LAUNCHER%"
-
-echo [OK] Spawned backend + frontend terminals.
-endlocal
+:: Call the full launcher
+call "%SCRIPT_DIR%\scripts\win\start_all.cmd"

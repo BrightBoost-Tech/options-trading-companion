@@ -41,7 +41,7 @@ pip install -r requirements.txt
 pnpm --filter "./apps/web" dev
 ```
 
-**Windows One-Click:** Run `start.bat` from the repo root to launch all services (Redis, Backend, Worker, Frontend). See [STARTUP.md](STARTUP.md) for desktop shortcut instructions.
+**Windows One-Click:** Run `start.bat` from the repo root to launch all services (Redis, Backend, Worker, Frontend). The launcher uses PowerShell scripts (`scripts\win\*.ps1`) for reliable environment loading. See [STARTUP.md](STARTUP.md) for desktop shortcut instructions.
 
 ## Environment Variables
 

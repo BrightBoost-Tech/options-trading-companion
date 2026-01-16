@@ -356,6 +356,19 @@ class GoLiveValidationService:
 
         # PR3: Option-native validation parameters
         instrument_type = suite_config.get("instrument_type", "stock")
+
+        # PR11: Canonical V3 defaults for option mode (only if caller omits them)
+        if instrument_type == "option":
+            suite_config.setdefault("use_rolling_contracts", True)
+            suite_config.setdefault("strict_option_mode", True)
+            suite_config.setdefault("segment_tolerance_pct", 1.5)
+            suite_config.setdefault("option_dte", 60)
+            suite_config.setdefault("option_moneyness", "itm_5pct")
+            suite_config.setdefault("option_right", "call")
+            if not suite_config.get("strategy_name"):
+                suite_config["strategy_name"] = "spy_opt_autolearn_v6"
+                strategy_name = "spy_opt_autolearn_v6"
+
         option_right = suite_config.get("option_right", "call")
         option_dte = int(suite_config.get("option_dte", 30))
         option_moneyness = suite_config.get("option_moneyness", "atm")
@@ -797,6 +810,16 @@ class GoLiveValidationService:
 
         # Option parameters
         instrument_type = suite_config.get("instrument_type", "stock")
+
+        # PR11: Canonical V3 defaults for option mode (only if caller omits them)
+        if instrument_type == "option":
+            suite_config.setdefault("use_rolling_contracts", True)
+            suite_config.setdefault("strict_option_mode", True)
+            suite_config.setdefault("segment_tolerance_pct", 1.5)
+            suite_config.setdefault("option_dte", 60)
+            suite_config.setdefault("option_moneyness", "itm_5pct")
+            suite_config.setdefault("option_right", "call")
+
         option_right = suite_config.get("option_right", "call")
         option_dte = int(suite_config.get("option_dte", 30))
         option_moneyness = suite_config.get("option_moneyness", "atm")

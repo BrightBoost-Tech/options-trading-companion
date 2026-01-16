@@ -416,5 +416,147 @@ class TestPR10RuntimeKnobsInSchema:
         assert request.historical.segment_tolerance_pct == 2.0
 
 
+class TestPR11CanonicalV3OptionDefaults:
+    """PR11: Tests for canonical V3 defaults applied to option mode."""
+
+    @patch('packages.quantum.services.go_live_validation_service.BacktestEngine')
+    @patch('packages.quantum.services.go_live_validation_service.OptionContractResolver')
+    def test_option_mode_applies_v3_defaults(self, mock_resolver_class, mock_engine_class):
+        """Option mode applies V3 defaults when fields are omitted."""
+        from packages.quantum.services.go_live_validation_service import GoLiveValidationService
+
+        mock_supabase = MagicMock()
+        mock_supabase.table.return_value.select.return_value.eq.return_value.single.return_value.execute.return_value.data = {
+            "user_id": "test-user",
+            "paper_baseline_capital": 10000,
+        }
+        mock_supabase.table.return_value.select.return_value.eq.return_value.order.return_value.limit.return_value.execute.return_value.data = []
+        mock_supabase.table.return_value.insert.return_value.execute.return_value = MagicMock()
+        mock_supabase.table.return_value.update.return_value.eq.return_value.execute.return_value = MagicMock()
+
+        mock_resolver = MagicMock()
+        mock_resolver.resolve_contract_with_coverage.return_value = "O:SPY240315C00450000"
+        mock_resolver_class.return_value = mock_resolver
+
+        mock_engine = MagicMock()
+        mock_bt_result = MagicMock()
+        mock_bt_result.equity_curve = [{"equity": 11000, "date": "2024-03-31"}]
+        mock_bt_result.trades = [{"exit_date": "2024-02-15", "pnl": 1000}]
+        mock_engine.run_single.return_value = mock_bt_result
+        mock_engine_class.return_value = mock_engine
+
+        service = GoLiveValidationService(mock_supabase)
+
+        # Only specify instrument_type=option, omit all other option fields
+        suite_config = {
+            "symbol": "SPY",
+            "instrument_type": "option",
+            "window_days": 30,
+            "concurrent_runs": 1
+        }
+
+        service.eval_historical("test-user", suite_config)
+
+        # Verify V3 defaults were applied to suite_config
+        assert suite_config.get("use_rolling_contracts") is True
+        assert suite_config.get("strict_option_mode") is True
+        assert suite_config.get("segment_tolerance_pct") == 1.5
+        assert suite_config.get("option_dte") == 60
+        assert suite_config.get("option_moneyness") == "itm_5pct"
+        assert suite_config.get("option_right") == "call"
+        assert suite_config.get("strategy_name") == "spy_opt_autolearn_v6"
+
+    @patch('packages.quantum.services.go_live_validation_service.BacktestEngine')
+    def test_stock_mode_does_not_apply_option_defaults(self, mock_engine_class):
+        """Stock mode does NOT apply V3 option defaults."""
+        from packages.quantum.services.go_live_validation_service import GoLiveValidationService
+
+        mock_supabase = MagicMock()
+        mock_supabase.table.return_value.select.return_value.eq.return_value.single.return_value.execute.return_value.data = {
+            "user_id": "test-user",
+            "paper_baseline_capital": 10000,
+        }
+        mock_supabase.table.return_value.select.return_value.eq.return_value.order.return_value.limit.return_value.execute.return_value.data = []
+        mock_supabase.table.return_value.insert.return_value.execute.return_value = MagicMock()
+        mock_supabase.table.return_value.update.return_value.eq.return_value.execute.return_value = MagicMock()
+
+        mock_engine = MagicMock()
+        mock_bt_result = MagicMock()
+        mock_bt_result.equity_curve = [{"equity": 11000, "date": "2024-03-31"}]
+        mock_bt_result.trades = [{"exit_date": "2024-02-15", "pnl": 1000}]
+        mock_engine.run_single.return_value = mock_bt_result
+        mock_engine_class.return_value = mock_engine
+
+        service = GoLiveValidationService(mock_supabase)
+
+        # Stock mode (default)
+        suite_config = {
+            "symbol": "SPY",
+            "instrument_type": "stock",
+            "window_days": 30,
+            "concurrent_runs": 1
+        }
+
+        service.eval_historical("test-user", suite_config)
+
+        # Stock mode should NOT have option defaults applied
+        assert suite_config.get("strict_option_mode") is None
+        assert suite_config.get("segment_tolerance_pct") is None
+        assert suite_config.get("option_dte") is None
+        assert suite_config.get("strategy_name") is None  # Not auto-set for stock
+
+    @patch('packages.quantum.services.go_live_validation_service.BacktestEngine')
+    @patch('packages.quantum.services.go_live_validation_service.OptionContractResolver')
+    def test_explicit_values_not_overwritten(self, mock_resolver_class, mock_engine_class):
+        """Explicit values in suite_config are NOT overwritten by V3 defaults."""
+        from packages.quantum.services.go_live_validation_service import GoLiveValidationService
+
+        mock_supabase = MagicMock()
+        mock_supabase.table.return_value.select.return_value.eq.return_value.single.return_value.execute.return_value.data = {
+            "user_id": "test-user",
+            "paper_baseline_capital": 10000,
+        }
+        mock_supabase.table.return_value.select.return_value.eq.return_value.order.return_value.limit.return_value.execute.return_value.data = []
+        mock_supabase.table.return_value.insert.return_value.execute.return_value = MagicMock()
+        mock_supabase.table.return_value.update.return_value.eq.return_value.execute.return_value = MagicMock()
+
+        mock_resolver = MagicMock()
+        mock_resolver.resolve_contract_with_coverage.return_value = "O:SPY240315P00450000"
+        mock_resolver_class.return_value = mock_resolver
+
+        mock_engine = MagicMock()
+        mock_bt_result = MagicMock()
+        mock_bt_result.equity_curve = [{"equity": 11000, "date": "2024-03-31"}]
+        mock_bt_result.trades = [{"exit_date": "2024-02-15", "pnl": 1000}]
+        mock_engine.run_single.return_value = mock_bt_result
+        mock_engine_class.return_value = mock_engine
+
+        service = GoLiveValidationService(mock_supabase)
+
+        # Explicit custom values
+        suite_config = {
+            "symbol": "SPY",
+            "instrument_type": "option",
+            "window_days": 30,
+            "concurrent_runs": 1,
+            "option_right": "put",  # Explicit: not call
+            "option_dte": 45,       # Explicit: not 60
+            "option_moneyness": "atm",  # Explicit: not itm_5pct
+            "strict_option_mode": False,  # Explicit: not True
+            "segment_tolerance_pct": 5.0,  # Explicit: not 1.5
+            "strategy_name": "my_custom_strategy"  # Explicit: not spy_opt_autolearn_v6
+        }
+
+        service.eval_historical("test-user", suite_config)
+
+        # Explicit values should be preserved
+        assert suite_config.get("option_right") == "put"
+        assert suite_config.get("option_dte") == 45
+        assert suite_config.get("option_moneyness") == "atm"
+        assert suite_config.get("strict_option_mode") is False
+        assert suite_config.get("segment_tolerance_pct") == 5.0
+        assert suite_config.get("strategy_name") == "my_custom_strategy"
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

@@ -669,8 +669,10 @@ async def optimize_discrete(
         return response
     except Exception as e:
         print(f"Discrete optimization failed: {e}")
-        # Return a safe error response or raise HTTP exception depending on preference
-        # The requirements say "response.status should be 'ok' even when classical fallback used",
-        # but for an exception we might want to return 500 or 422.
-        # Given "Simplicity", let's raise HTTPException if it crashes.
-        raise HTTPException(status_code=500, detail=f"Discrete optimization failed: {str(e)}")
+        # 🛡️ Sentinel: Suppress stack trace in production
+        import traceback
+        if os.getenv("APP_ENV") != "production":
+            traceback.print_exc()
+
+        # SECURITY: Do not leak exception details
+        raise HTTPException(status_code=500, detail="Discrete optimization failed")

@@ -9,3 +9,7 @@
 ## 2026-01-15 - [Vectorized Indicators in Simulation]
 **Learning:** Calculating technical indicators iteratively inside a simulation loop creates O(N^2) complexity due to repeated list slicing and re-computation. Pre-calculating them vectorized (O(N)) reduced simulation time by ~45%.
 **Action:** For historical simulations where the full price series is known upfront, always pre-calculate indicators using vectorized operations (Pandas/NumPy) instead of computing them step-by-step.
+
+## 2026-05-24 - [Pandas Rolling Overhead]
+**Learning:** Pandas `rolling()` operations carry significant overhead compared to NumPy's `sliding_window_view` + `mean/std` for simple sliding windows. Switching to pure NumPy yielded a ~2.4x speedup for indicator calculations.
+**Action:** Prefer `numpy.lib.stride_tricks.sliding_window_view` for sliding window calculations on arrays when Pandas index alignment/features are not strictly necessary.

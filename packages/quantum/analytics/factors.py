@@ -1,13 +1,13 @@
 import numpy as np
-import pandas as pd
 import math
 from numpy.lib.stride_tricks import sliding_window_view
-from typing import List, Union, Dict
+from typing import List, Dict
 
 def calculate_indicators_vectorized(prices: List[float]) -> Dict[str, np.ndarray]:
     """
     Calculates Trend, Volatility, and RSI for the entire price series using vectorized operations.
     Returns aligned numpy arrays matching the input length.
+    Optimized to use NumPy directly instead of Pandas for performance.
     """
     if not prices:
         return {
@@ -16,60 +16,100 @@ def calculate_indicators_vectorized(prices: List[float]) -> Dict[str, np.ndarray
             "rsi": np.array([])
         }
 
-    s = pd.Series(prices)
-    n = len(s)
+    # Convert to array once
+    prices_arr = np.array(prices, dtype=np.float64)
+    n = len(prices_arr)
 
-    # 1. Trend (SMA20 > SMA50)
-    # Existing logic: if len < 50 return "NEUTRAL"
-    sma20 = s.rolling(20).mean()
-    sma50 = s.rolling(50).mean()
-
+    # --- 1. Trend (SMA20 > SMA50) ---
     trend = np.full(n, 'NEUTRAL', dtype=object)
 
-    # Only compare where we have data for SMA50 (implied index >= 49)
-    # sma20 will also be valid there
-    valid_mask = sma50.notna()
+    if n >= 50:
+        # Helper for SMA using sliding window
+        def fast_sma(arr, window):
+            windows = sliding_window_view(arr, window_shape=window)
+            return np.mean(windows, axis=1)
 
-    if valid_mask.any():
-        up_mask = (sma20 > sma50) & valid_mask
-        down_mask = (sma20 <= sma50) & valid_mask
+        sma20_valid = fast_sma(prices_arr, 20)
+        sma50_valid = fast_sma(prices_arr, 50)
 
-        trend[up_mask] = 'UP'
-        trend[down_mask] = 'DOWN'
+        # Align them
+        # sma50_valid length is N - 49. It covers indices [49, ..., N-1].
+        # sma20_valid length is N - 19. It covers indices [19, ..., N-1].
+        # We need sma20 values starting from index 49.
+        # Index 49 in original array corresponds to index (49-19)=30 in sma20_valid.
 
-    # 2. Volatility
+        sma20_aligned = sma20_valid[30:]
+
+        # Compare
+        up_mask = sma20_aligned > sma50_valid
+        down_mask = sma20_aligned <= sma50_valid
+
+        # Map to original trend array indices [49:]
+        trend_slice = trend[49:]
+        trend_slice[up_mask] = 'UP'
+        trend_slice[down_mask] = 'DOWN'
+
+    # --- 2. Volatility ---
     # Annualized vol of 30-day returns.
-    # Existing logic: if len < 31 return 0.0
-    # Rolling window of 30 on returns requires 30 returns, which requires 31 prices.
-    # Pandas: s.pct_change() gives returns. rolling(30) on returns gives result at index 30 (len 31).
+    # Matches logic: pct_change().rolling(30).std(ddof=0) * sqrt(252)
+    vol = np.zeros(n, dtype=np.float64)
 
-    pct_change = s.pct_change()
-    # ddof=0 to match population std dev used in original code
-    vol = pct_change.rolling(30).std(ddof=0) * np.sqrt(252)
-    vol = vol.fillna(0.0).values
+    # We need at least 31 prices to get 30 returns and 1 window
+    if n >= 31:
+        # Calculate Returns: (p[i+1] - p[i]) / p[i]
+        # Handle division by zero
+        denom = prices_arr[:-1].copy()
+        # Avoid division by zero
+        denom[denom == 0] = np.nan
 
-    # 3. RSI
-    # Existing logic: Simple average of gains/losses over period 14.
-    # if len < 15 return 50.0
-    period = 14
-    delta = s.diff()
-    up = delta.clip(lower=0)
-    down = -1 * delta.clip(upper=0)
+        returns = (prices_arr[1:] - prices_arr[:-1]) / denom
+        # Replace infs/nans with 0.0 to handle bad data safely
+        returns = np.nan_to_num(returns, nan=0.0, posinf=0.0, neginf=0.0)
 
-    ma_up = up.rolling(period).mean()
-    ma_down = down.rolling(period).mean()
+        # Rolling std(30) on returns
+        # sliding_window_view on returns (length N-1)
+        windows_ret = sliding_window_view(returns, window_shape=30)
 
-    # Calculate RS
-    # Existing logic quirk: if down average is 0, rs = 0.
-    with np.errstate(divide='ignore', invalid='ignore'):
-        rs = ma_up / ma_down
-        # Fix division by zero or where ma_down is 0 (pure uptrend -> 0 in existing logic)
-        rs[ma_down == 0] = 0.0
+        # ddof=0 matches population std
+        stds = np.std(windows_ret, axis=1, ddof=0)
+        vol_valid = stds * np.sqrt(252)
 
-    rsi = 100 - (100 / (1 + rs))
+        # Align
+        # Returns index 0 is p1/p0 - 1.
+        # First window of returns [0..29] corresponds to result at index 30 (p30).
+        # So vol_valid corresponds to prices[30:]
+        vol[30:] = vol_valid
 
-    # Fill NaN (initial period) with 50.0
-    rsi = rsi.fillna(50.0).values
+    # --- 3. RSI ---
+    # Period 14
+    # Legacy behavior: if pure uptrend (down avg=0), RSI=0.
+    # Initial 14 values (0..13) are 50.0
+    rsi = np.full(n, 50.0, dtype=np.float64)
+
+    if n >= 15: # need 15 prices for first RSI at index 14
+        period = 14
+        deltas = np.diff(prices_arr)
+
+        up = np.maximum(deltas, 0)
+        down = -np.minimum(deltas, 0)
+
+        # Rolling mean of period 14
+        windows_up = sliding_window_view(up, window_shape=period)
+        windows_down = sliding_window_view(down, window_shape=period)
+
+        ma_up = np.mean(windows_up, axis=1)
+        ma_down = np.mean(windows_down, axis=1)
+
+        with np.errstate(divide='ignore', invalid='ignore'):
+            rs = ma_up / ma_down
+            # Preserve legacy behavior: if ma_down is 0, rs=0 -> RSI=0
+            rs[ma_down == 0] = 0.0
+
+        rsi_valid = 100 - (100 / (1 + rs))
+
+        # Align
+        # First valid window corresponds to index 14
+        rsi[period:] = rsi_valid
 
     return {
         "trend": trend,

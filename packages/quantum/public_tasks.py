@@ -130,3 +130,154 @@ async def task_validation_eval(
         idempotency_key=key,
         payload=job_payload
     )
+
+
+# =============================================================================
+# Suggestion Generation Tasks (8 AM / 11 AM Chicago)
+# =============================================================================
+
+DEFAULT_STRATEGY_NAME = "spy_opt_autolearn_v6"
+
+
+@router.post("/suggestions/close", status_code=202)
+async def task_suggestions_close(
+    payload: Optional[Dict[str, Any]] = Body(None),
+    authorized: bool = Depends(verify_cron_secret)
+):
+    """
+    8:00 AM Chicago - Generate CLOSE/manage existing positions suggestions.
+
+    This task:
+    1. Ensures holdings are up to date (syncs Plaid if connected)
+    2. Loads strategy config by name (default: spy_opt_autolearn_v6)
+    3. Generates exit suggestions for existing positions
+    4. Persists suggestions to trade_suggestions table with window='morning_limit'
+
+    Payload options:
+    - strategy_name: Override strategy config name (default: spy_opt_autolearn_v6)
+    - user_id: Run for specific user only (default: all users)
+    - skip_sync: Skip holdings sync (default: false)
+    """
+    today = datetime.now().strftime("%Y-%m-%d")
+    job_name = "suggestions_close"
+
+    job_payload = {
+        "date": today,
+        "type": "close",
+        "strategy_name": (payload or {}).get("strategy_name", DEFAULT_STRATEGY_NAME),
+        "user_id": (payload or {}).get("user_id"),
+        "skip_sync": (payload or {}).get("skip_sync", False),
+    }
+
+    return enqueue_job_run(
+        job_name=job_name,
+        idempotency_key=f"{today}-close",
+        payload=job_payload
+    )
+
+
+@router.post("/suggestions/open", status_code=202)
+async def task_suggestions_open(
+    payload: Optional[Dict[str, Any]] = Body(None),
+    authorized: bool = Depends(verify_cron_secret)
+):
+    """
+    11:00 AM Chicago - Generate OPEN/new positions suggestions.
+
+    This task:
+    1. Ensures holdings are up to date (syncs Plaid if connected)
+    2. Loads strategy config by name (default: spy_opt_autolearn_v6)
+    3. Scans for new entry opportunities
+    4. Persists suggestions to trade_suggestions table with window='midday_entry'
+
+    Payload options:
+    - strategy_name: Override strategy config name (default: spy_opt_autolearn_v6)
+    - user_id: Run for specific user only (default: all users)
+    - skip_sync: Skip holdings sync (default: false)
+    """
+    today = datetime.now().strftime("%Y-%m-%d")
+    job_name = "suggestions_open"
+
+    job_payload = {
+        "date": today,
+        "type": "open",
+        "strategy_name": (payload or {}).get("strategy_name", DEFAULT_STRATEGY_NAME),
+        "user_id": (payload or {}).get("user_id"),
+        "skip_sync": (payload or {}).get("skip_sync", False),
+    }
+
+    return enqueue_job_run(
+        job_name=job_name,
+        idempotency_key=f"{today}-open",
+        payload=job_payload
+    )
+
+
+@router.post("/learning/ingest", status_code=202)
+async def task_learning_ingest(
+    payload: Optional[Dict[str, Any]] = Body(None),
+    authorized: bool = Depends(verify_cron_secret)
+):
+    """
+    Daily outcome ingestion - Maps executed trades to suggestions for learning.
+
+    This task:
+    1. Reads Plaid investment transactions since last run
+    2. Matches transactions to trade_suggestions by symbol/direction/time
+    3. Inserts outcomes into learning_feedback_loops table
+    4. Computes win/loss, slippage proxy, holding time
+
+    Payload options:
+    - user_id: Run for specific user only (default: all users)
+    - lookback_days: How far back to look for transactions (default: 7)
+    """
+    today = datetime.now().strftime("%Y-%m-%d")
+    job_name = "learning_ingest"
+
+    job_payload = {
+        "date": today,
+        "user_id": (payload or {}).get("user_id"),
+        "lookback_days": (payload or {}).get("lookback_days", 7),
+    }
+
+    return enqueue_job_run(
+        job_name=job_name,
+        idempotency_key=today,
+        payload=job_payload
+    )
+
+
+@router.post("/strategy/autotune", status_code=202)
+async def task_strategy_autotune(
+    payload: Optional[Dict[str, Any]] = Body(None),
+    authorized: bool = Depends(verify_cron_secret)
+):
+    """
+    Weekly strategy auto-tuning based on live outcomes.
+
+    This task:
+    1. Reads learning_feedback_loops for past 30 days
+    2. Computes win_rate, avg_pnl per strategy
+    3. If performance below threshold, mutates strategy config
+    4. Persists new version to strategy_configs table
+
+    Payload options:
+    - user_id: Run for specific user only (default: all users)
+    - strategy_name: Strategy to tune (default: spy_opt_autolearn_v6)
+    - min_samples: Minimum trades required to trigger update (default: 10)
+    """
+    week = datetime.now().strftime("%Y-W%V")
+    job_name = "strategy_autotune"
+
+    job_payload = {
+        "week": week,
+        "user_id": (payload or {}).get("user_id"),
+        "strategy_name": (payload or {}).get("strategy_name", DEFAULT_STRATEGY_NAME),
+        "min_samples": (payload or {}).get("min_samples", 10),
+    }
+
+    return enqueue_job_run(
+        job_name=job_name,
+        idempotency_key=f"{week}-autotune",
+        payload=job_payload
+    )

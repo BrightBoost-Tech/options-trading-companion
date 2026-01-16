@@ -1,22 +1,27 @@
-# Scheduling is disabled until API_URL is deployed and added as a secret
-# Run manually via Actions tab -> workflow_dispatch
+# Daily Workflow Scheduler for Options Trading Companion
+# Timezone: America/Chicago (CST/CDT)
+#
+# Schedule (all times America/Chicago):
+# - 8:00 AM: Close/manage existing positions suggestions
+# - 11:00 AM: Open/new positions suggestions
+#
+# UTC Conversion:
+# - CST (Nov-Mar): Chicago = UTC-6, so 8 AM CST = 14:00 UTC, 11 AM CST = 17:00 UTC
+# - CDT (Mar-Nov): Chicago = UTC-5, so 8 AM CDT = 13:00 UTC, 11 AM CDT = 16:00 UTC
+#
+# We use CST times (14:00/17:00 UTC) as the baseline. During DST, jobs run 1 hour
+# late in local time (9 AM / 12 PM CDT). This is acceptable for suggestions that
+# remain valid for hours. For precise DST handling, consider an internal scheduler.
 
-name: Schedule Tasks
+name: Daily Workflow
 
 on:
-  # schedule:
-  #   # 8:00 AM local time (Assuming UTC or adjust accordingly)
-  #   # If local is EST (UTC-5), 8:00 AM is 13:00 UTC.
-  #   # The prompt says "pick a consistent timezone; document it".
-  #   # I will assume UTC for simplicity and consistency in cloud runners.
-  #   # So 8:00 AM UTC.
-  #   - cron: '0 8 * * *'
-  #
-  #   # 8:05 AM UTC - Morning Brief
-  #   - cron: '5 8 * * *'
-  #
-  #   # 12:00 PM UTC - Midday Scan
-  #   - cron: '0 12 * * *'
+  schedule:
+    # 8:00 AM Chicago (CST) = 14:00 UTC
+    - cron: '0 14 * * 1-5'  # Mon-Fri only (market days)
+
+    # 11:00 AM Chicago (CST) = 17:00 UTC
+    - cron: '0 17 * * 1-5'  # Mon-Fri only
 
   workflow_dispatch:
     inputs:
@@ -27,31 +32,69 @@ on:
         type: choice
         options:
         - all
+        - suggestions_close
+        - suggestions_open
         - universe_sync
         - morning_brief
         - midday_scan
 
+env:
+  TZ: America/Chicago
+
 jobs:
-  run-task:
+  suggestions-close:
+    if: github.event.schedule == '0 14 * * 1-5' || (github.event_name == 'workflow_dispatch' && (github.event.inputs.task == 'all' || github.event.inputs.task == 'suggestions_close'))
+    runs-on: ubuntu-latest
+    steps:
+    - name: Run Suggestions Close (8 AM Chicago)
+      run: |
+        echo "Running at $(TZ=America/Chicago date)"
+        curl -sf -X POST "${{ secrets.API_URL }}/tasks/suggestions/close" \
+          -H "X-Cron-Secret: ${{ secrets.CRON_SECRET }}" \
+          -H "Content-Type: application/json" \
+          --retry 3 \
+          --retry-delay 5
+
+  suggestions-open:
+    if: github.event.schedule == '0 17 * * 1-5' || (github.event_name == 'workflow_dispatch' && (github.event.inputs.task == 'all' || github.event.inputs.task == 'suggestions_open'))
+    runs-on: ubuntu-latest
+    steps:
+    - name: Run Suggestions Open (11 AM Chicago)
+      run: |
+        echo "Running at $(TZ=America/Chicago date)"
+        curl -sf -X POST "${{ secrets.API_URL }}/tasks/suggestions/open" \
+          -H "X-Cron-Secret: ${{ secrets.CRON_SECRET }}" \
+          -H "Content-Type: application/json" \
+          --retry 3 \
+          --retry-delay 5
+
+  # Legacy tasks (can be triggered manually)
+  universe-sync:
+    if: github.event_name == 'workflow_dispatch' && (github.event.inputs.task == 'all' || github.event.inputs.task == 'universe_sync')
     runs-on: ubuntu-latest
     steps:
     - name: Run Universe Sync
-      if: github.event.schedule == '0 8 * * *' || (github.event_name == 'workflow_dispatch' && (github.event.inputs.task == 'all' || github.event.inputs.task == 'universe_sync'))
       run: |
-        curl -X POST "${{ secrets.API_URL }}/tasks/universe/sync" \
-        -H "X-Cron-Secret: ${{ secrets.CRON_SECRET }}" \
-        -H "Content-Type: application/json"
+        curl -sf -X POST "${{ secrets.API_URL }}/tasks/universe/sync" \
+          -H "X-Cron-Secret: ${{ secrets.CRON_SECRET }}" \
+          -H "Content-Type: application/json"
 
+  morning-brief:
+    if: github.event_name == 'workflow_dispatch' && (github.event.inputs.task == 'all' || github.event.inputs.task == 'morning_brief')
+    runs-on: ubuntu-latest
+    steps:
     - name: Run Morning Brief
-      if: github.event.schedule == '5 8 * * *' || (github.event_name == 'workflow_dispatch' && (github.event.inputs.task == 'all' || github.event.inputs.task == 'morning_brief'))
       run: |
-        curl -X POST "${{ secrets.API_URL }}/tasks/morning-brief" \
-        -H "X-Cron-Secret: ${{ secrets.CRON_SECRET }}" \
-        -H "Content-Type: application/json"
+        curl -sf -X POST "${{ secrets.API_URL }}/tasks/morning-brief" \
+          -H "X-Cron-Secret: ${{ secrets.CRON_SECRET }}" \
+          -H "Content-Type: application/json"
 
+  midday-scan:
+    if: github.event_name == 'workflow_dispatch' && (github.event.inputs.task == 'all' || github.event.inputs.task == 'midday_scan')
+    runs-on: ubuntu-latest
+    steps:
     - name: Run Midday Scan
-      if: github.event.schedule == '0 12 * * *' || (github.event_name == 'workflow_dispatch' && (github.event.inputs.task == 'all' || github.event.inputs.task == 'midday_scan'))
       run: |
-        curl -X POST "${{ secrets.API_URL }}/tasks/midday-scan" \
-        -H "X-Cron-Secret: ${{ secrets.CRON_SECRET }}" \
-        -H "Content-Type: application/json"
+        curl -sf -X POST "${{ secrets.API_URL }}/tasks/midday-scan" \
+          -H "X-Cron-Secret: ${{ secrets.CRON_SECRET }}" \
+          -H "Content-Type: application/json"

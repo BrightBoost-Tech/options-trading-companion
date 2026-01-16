@@ -1,10 +1,77 @@
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List
 import os
+from pathlib import Path
 from datetime import datetime, date
 from decimal import Decimal
 from enum import Enum
 from uuid import UUID
 from supabase import create_client, Client
+
+# ---------------------------------------------------------------------------
+# Environment Loading
+# ---------------------------------------------------------------------------
+
+def _find_repo_root() -> Path:
+    """
+    Find the repository root by looking for marker files.
+    Walks up from this file's location until we find pnpm-workspace.yaml or .git.
+    """
+    current = Path(__file__).resolve().parent
+    for _ in range(10):  # Max 10 levels up
+        if (current / "pnpm-workspace.yaml").exists() or (current / ".git").exists():
+            return current
+        parent = current.parent
+        if parent == current:
+            break
+        current = parent
+    # Fallback: assume packages/quantum/jobs/db.py -> repo root is 3 levels up
+    return Path(__file__).resolve().parent.parent.parent.parent
+
+
+def _load_env_files() -> List[str]:
+    """
+    Load environment files in priority order using python-dotenv.
+    Returns list of files that were successfully loaded.
+
+    Priority (first match wins for each var):
+    1. repo_root/.env.local
+    2. repo_root/.env
+    3. repo_root/packages/quantum/.env.local
+    4. repo_root/packages/quantum/.env
+    """
+    try:
+        from dotenv import load_dotenv
+    except ImportError:
+        # python-dotenv not installed, skip loading
+        return []
+
+    repo_root = _find_repo_root()
+    loaded_files = []
+
+    # Files to check in priority order (later files don't override earlier)
+    env_files = [
+        repo_root / ".env.local",
+        repo_root / ".env",
+        repo_root / "packages" / "quantum" / ".env.local",
+        repo_root / "packages" / "quantum" / ".env",
+    ]
+
+    for env_file in env_files:
+        if env_file.exists():
+            # override=False means existing env vars won't be overwritten
+            load_dotenv(env_file, override=False)
+            loaded_files.append(str(env_file))
+
+    return loaded_files
+
+
+# Load env files on module import
+_ENV_FILES_LOADED = _load_env_files()
+
+
+# ---------------------------------------------------------------------------
+# JSON Serialization Helper
+# ---------------------------------------------------------------------------
 
 def _to_jsonable(obj: Any) -> Any:
     """
@@ -41,17 +108,77 @@ def _to_jsonable(obj: Any) -> Any:
     # Fallback
     return str(obj)
 
+
+# ---------------------------------------------------------------------------
+# Supabase Client Creation
+# ---------------------------------------------------------------------------
+
 def create_supabase_admin_client() -> Client:
     """
     Creates a Supabase client with the service role key for admin access.
+
+    Environment variables (checked in order):
+    - URL: SUPABASE_URL or NEXT_PUBLIC_SUPABASE_URL
+    - Key: SUPABASE_SERVICE_ROLE_KEY or SUPABASE_SERVICE_KEY
+
+    Raises ValueError with detailed instructions if required vars are missing.
     """
-    url = os.getenv("NEXT_PUBLIC_SUPABASE_URL")
-    key = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
+    # URL: prefer SUPABASE_URL, fallback to NEXT_PUBLIC_SUPABASE_URL
+    url = os.getenv("SUPABASE_URL") or os.getenv("NEXT_PUBLIC_SUPABASE_URL")
+
+    # Key: prefer SUPABASE_SERVICE_ROLE_KEY, fallback to SUPABASE_SERVICE_KEY
+    key = os.getenv("SUPABASE_SERVICE_ROLE_KEY") or os.getenv("SUPABASE_SERVICE_KEY")
 
     if not url or not key:
-        raise ValueError("NEXT_PUBLIC_SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY are required for worker database access.")
+        repo_root = _find_repo_root()
+        missing = []
+        if not url:
+            missing.append("SUPABASE_URL (or NEXT_PUBLIC_SUPABASE_URL)")
+        if not key:
+            missing.append("SUPABASE_SERVICE_ROLE_KEY")
+
+        # Build helpful error message
+        env_files_checked = [
+            str(repo_root / ".env.local"),
+            str(repo_root / ".env"),
+            str(repo_root / "packages" / "quantum" / ".env.local"),
+            str(repo_root / "packages" / "quantum" / ".env"),
+        ]
+
+        loaded_str = ", ".join(_ENV_FILES_LOADED) if _ENV_FILES_LOADED else "(none found)"
+
+        error_msg = f"""
+Missing required environment variables for worker database access.
+
+Missing variables:
+  {chr(10).join(f'  - {v}' for v in missing)}
+
+Environment files loaded:
+  {loaded_str}
+
+Files searched:
+  {chr(10).join(f'  - {f}' for f in env_files_checked)}
+
+To fix:
+  1. Copy .env.example to .env in the repo root:
+       cp .env.example .env
+
+  2. Fill in the required values:
+       SUPABASE_URL=https://<project>.supabase.co
+       SUPABASE_SERVICE_ROLE_KEY=<your_service_role_key>
+
+  3. For local Supabase, run 'supabase start' and use the local URL/keys.
+
+See README.md for more details.
+"""
+        raise ValueError(error_msg.strip())
 
     return create_client(url, key)
+
+
+# ---------------------------------------------------------------------------
+# Job Queue Database Operations
+# ---------------------------------------------------------------------------
 
 def claim_job_run(client: Client, worker_id: str) -> Optional[Dict[str, Any]]:
     try:

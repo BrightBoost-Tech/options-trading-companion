@@ -45,6 +45,16 @@ pnpm --filter "./apps/web" dev
 
 ## Environment Variables
 
+### Required Variables
+
+| Variable | Purpose | Aliases |
+|----------|---------|---------|
+| `SUPABASE_URL` | Supabase API URL | `NEXT_PUBLIC_SUPABASE_URL` |
+| `SUPABASE_SERVICE_ROLE_KEY` | Service role key for DB/worker access | `SUPABASE_SERVICE_KEY` |
+| `SUPABASE_ANON_KEY` | Supabase anon/public key | `NEXT_PUBLIC_SUPABASE_ANON_KEY` |
+
+The backend and worker accept both naming conventions for compatibility.
+
 ### Root / Frontend (`.env` or `.env.local`)
 
 Copy `.env.example` to `.env`:
@@ -61,7 +71,7 @@ Copy `packages/quantum/.env.example`:
 
 | Variable | Purpose |
 |----------|---------|
-| `SUPABASE_URL` | Supabase API URL |
+| `SUPABASE_URL` | Supabase API URL (preferred) |
 | `SUPABASE_SERVICE_ROLE_KEY` | Service role key for DB access |
 | `ENCRYPTION_KEY` | Fernet key for credential encryption |
 | `APP_ENV` | `development` enables test-mode auth |
@@ -183,12 +193,28 @@ curl -X POST "http://127.0.0.1:8000/validation/run" \
 
 ## Task Endpoints
 
-Protected by `X-Cron-Secret` header:
+Protected by `X-Cron-Secret` header. See [docs/daily_workflow.md](docs/daily_workflow.md) for details.
+
+### Daily Workflow (Scheduled)
+
+| Endpoint | Time (America/Chicago) | Purpose |
+|----------|------------------------|---------|
+| `/tasks/suggestions/close` | 8:00 AM | Exit suggestions for existing positions |
+| `/tasks/suggestions/open` | 11:00 AM | Entry suggestions for new positions |
+
+### Learning & Maintenance
+
+| Endpoint | Schedule | Purpose |
+|----------|----------|---------|
+| `/tasks/learning/ingest` | Daily | Map executed trades to suggestions |
+| `/tasks/strategy/autotune` | Weekly | Adjust strategy based on outcomes |
+
+### Legacy Endpoints
 
 | Endpoint | Purpose |
 |----------|---------|
-| `/tasks/morning-brief` | Morning exit logic |
-| `/tasks/midday-scan` | Scanner and sizing |
+| `/tasks/morning-brief` | Morning exit logic (deprecated, use suggestions/close) |
+| `/tasks/midday-scan` | Scanner and sizing (deprecated, use suggestions/open) |
 | `/tasks/weekly-report` | Weekly performance |
 | `/tasks/universe/sync` | Update scanner universe |
 
@@ -228,6 +254,19 @@ options-trading-companion/
 **Backend won't start:**
 - Missing `ENCRYPTION_KEY` in `packages/quantum/.env`
 - Generate with: `python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"`
+
+**Worker fails with "SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY are required":**
+- The worker needs environment variables to connect to the database
+- Fix:
+  1. Copy `.env.example` to `.env` in the repo root
+  2. Fill in `SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY`
+  3. For local dev, run `supabase start` and use the local URL/keys
+- The worker auto-loads `.env` files from:
+  - `.env.local` (highest priority)
+  - `.env`
+  - `packages/quantum/.env.local`
+  - `packages/quantum/.env`
+- Accepts both `SUPABASE_URL` and `NEXT_PUBLIC_SUPABASE_URL`
 
 **401 on task endpoints:**
 - Check `TASK_SIGNING_SECRET` / `X-Cron-Secret` header match

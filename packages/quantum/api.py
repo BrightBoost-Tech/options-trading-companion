@@ -28,6 +28,10 @@ from packages.quantum.security import encrypt_token, decrypt_token, get_current_
 from packages.quantum.security.config import validate_security_config
 from packages.quantum.security.secrets_provider import SecretsProvider
 from packages.quantum.security.headers_middleware import SecurityHeadersMiddleware
+from packages.quantum.security.supabase_config import (
+    load_supabase_config, create_admin_client, validate_admin_connection,
+    print_config_summary, KeyType
+)
 from packages.quantum.core.rate_limiter import limiter
 
 # Validate Security Config on Startup
@@ -293,52 +297,39 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Initialize Supabase Admin Client (Service Role)
-secrets_provider = SecretsProvider()
-supa_secrets = secrets_provider.get_supabase_secrets()
-url = supa_secrets.url
+# ---------------------------------------------------------------------------
+# Supabase Admin Client Initialization (Unified Configuration)
+# ---------------------------------------------------------------------------
+# Uses the unified config module which:
+# - Loads env files in priority order (repo/.env.local, repo/.env, quantum/.env)
+# - Prefers SUPABASE_* over NEXT_PUBLIC_* variables
+# - Provides clear warnings for misconfigurations
 
-# Deterministic Key Selection
-key = None
-key_type = "none"
+supa_config = load_supabase_config()
+supabase_admin, supa_key_type, supa_warnings = create_admin_client(supa_config)
 
-if supa_secrets.service_role_key:
-    key = supa_secrets.service_role_key
-    key_type = "service_role"
-elif supa_secrets.anon_key:
-    key = supa_secrets.anon_key
-    key_type = "anon (degraded)"
-    print("⚠️ WARNING: Using Anon Key for Admin Client. Some operations may fail.")
+# Validate connection
+supa_validated, supa_error = validate_admin_connection(supabase_admin)
 
-supabase_admin: Client = create_client(url, key) if url and key else None
-
-# Supabase Startup Validation
+# Build status for health check
 SUPABASE_STATUS = {
-    "ok": False,
-    "url": url,
-    "key_type": key_type,
-    "error": None
+    "ok": supa_validated,
+    "url": supa_config.url,
+    "key_type": supa_key_type.value,
+    "error": supa_error
 }
 
-if supabase_admin:
-    try:
-        # Real network request to validate credentials
-        # We try to fetch 1 row from scanner_universe which should exist.
-        # If this fails with APIError (401), we know keys are bad.
-        supabase_admin.table("scanner_universe").select("symbol").limit(1).execute()
+# Print configuration summary (single, clean output)
+print_config_summary(supa_config, supa_key_type, supa_validated)
 
-        # Redact key for logging
-        redacted_key = f"{key[:6]}...{key[-4:]}" if key and len(key) > 10 else "N/A"
-        print(f"✅ Supabase Validated: URL={url}, KeyType={key_type}, Key={redacted_key}")
-        SUPABASE_STATUS["ok"] = True
-    except Exception as e:
-        print(f"❌ Supabase Startup Validation Failed: {e}")
-        SUPABASE_STATUS["error"] = str(e)
-        # We do NOT kill the app, but health check will report failure.
-else:
-    msg = "Supabase URL or Key missing in environment."
-    print(f"❌ {msg}")
-    SUPABASE_STATUS["error"] = msg
+if supa_error:
+    print(f"❌ Supabase Validation Error:\n{supa_error}")
+    # In dev mode, continue with warning. In prod, this is a critical issue.
+    if os.getenv("APP_ENV") == "production":
+        print("⚠️  CRITICAL: Running in production without valid Supabase connection!")
+
+# Keep secrets_provider for backward compatibility with other code
+secrets_provider = SecretsProvider()
 
 # Initialize Analytics Service (Use Admin Client for system logging)
 analytics_service = AnalyticsService(supabase_admin)

@@ -45,15 +45,30 @@ pnpm --filter "./apps/web" dev
 
 ## Environment Variables
 
-### Required Variables
+### Supabase Configuration
 
-| Variable | Purpose | Aliases |
-|----------|---------|---------|
-| `SUPABASE_URL` | Supabase API URL | `NEXT_PUBLIC_SUPABASE_URL` |
-| `SUPABASE_SERVICE_ROLE_KEY` | Service role key for DB/worker access | `SUPABASE_SERVICE_KEY` |
-| `SUPABASE_ANON_KEY` | Supabase anon/public key | `NEXT_PUBLIC_SUPABASE_ANON_KEY` |
+The backend and worker use a unified configuration system that loads env files in priority order:
 
-The backend and worker accept both naming conventions for compatibility.
+1. `.env.local` (repo root) - highest priority
+2. `.env` (repo root)
+3. `packages/quantum/.env.local`
+4. `packages/quantum/.env`
+
+**Variable precedence** (backend prefers non-prefixed names):
+
+| Component | URL Variable | Key Variable |
+|-----------|--------------|--------------|
+| **Backend/Worker** | `SUPABASE_URL` (preferred) | `SUPABASE_SERVICE_ROLE_KEY` (required) |
+| **Frontend** | `NEXT_PUBLIC_SUPABASE_URL` | `NEXT_PUBLIC_SUPABASE_ANON_KEY` |
+
+Fallback aliases are supported for compatibility:
+- `SUPABASE_URL` ← `NEXT_PUBLIC_SUPABASE_URL`
+- `SUPABASE_SERVICE_ROLE_KEY` ← `SUPABASE_SERVICE_KEY`
+- `SUPABASE_ANON_KEY` ← `NEXT_PUBLIC_SUPABASE_ANON_KEY`
+
+**Key types:**
+- **Service Role Key**: Required for backend/worker. Bypasses RLS, can call RPC functions.
+- **Anon Key**: Used by frontend. Subject to Row Level Security.
 
 ### Root / Frontend (`.env` or `.env.local`)
 
@@ -63,7 +78,7 @@ Copy `.env.example` to `.env`:
 |----------|---------|
 | `NEXT_PUBLIC_SUPABASE_URL` | Supabase API URL |
 | `NEXT_PUBLIC_SUPABASE_ANON_KEY` | Supabase anon/public key |
-| `SUPABASE_SERVICE_ROLE_KEY` | Supabase service role key (secret) |
+| `SUPABASE_SERVICE_ROLE_KEY` | Service role key (for server-side operations) |
 
 ### Backend (`packages/quantum/.env`)
 
@@ -71,8 +86,10 @@ Copy `packages/quantum/.env.example`:
 
 | Variable | Purpose |
 |----------|---------|
-| `SUPABASE_URL` | Supabase API URL (preferred) |
-| `SUPABASE_SERVICE_ROLE_KEY` | Service role key for DB access |
+| `SUPABASE_URL` | Supabase API URL (preferred over NEXT_PUBLIC_*) |
+| `SUPABASE_SERVICE_ROLE_KEY` | Service role key for admin DB access |
+| `SUPABASE_ANON_KEY` | Anon key for user-scoped operations |
+| `SUPABASE_JWT_SECRET` | JWT secret for token verification |
 | `ENCRYPTION_KEY` | Fernet key for credential encryption |
 | `APP_ENV` | `development` enables test-mode auth |
 | `TASK_SIGNING_SECRET` | Secret for internal task endpoints |
@@ -254,6 +271,19 @@ options-trading-companion/
 **Backend won't start:**
 - Missing `ENCRYPTION_KEY` in `packages/quantum/.env`
 - Generate with: `python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"`
+
+**Supabase Startup Validation Failed (401 Invalid API key):**
+- This means the backend connected to Supabase but the key was rejected
+- Common causes:
+  1. **Wrong key type**: Using anon key instead of service role key
+  2. **Key mismatch**: Production URL paired with development key (or vice versa)
+  3. **Expired/rotated key**: Key was regenerated in Supabase dashboard
+- Fix:
+  1. Go to Supabase Dashboard → Project Settings → API
+  2. Copy the `service_role` key (not anon key)
+  3. Set `SUPABASE_SERVICE_ROLE_KEY` in `packages/quantum/.env`
+  4. Ensure `SUPABASE_URL` matches the same project
+- The backend will show which env files were loaded and key type detected
 
 **Worker fails with "SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY are required":**
 - The worker needs environment variables to connect to the database

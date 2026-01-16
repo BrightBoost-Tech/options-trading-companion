@@ -117,47 +117,35 @@ def create_supabase_admin_client() -> Client:
     """
     Creates a Supabase client with the service role key for admin access.
 
-    Environment variables (checked in order):
-    - URL: SUPABASE_URL or NEXT_PUBLIC_SUPABASE_URL
-    - Key: SUPABASE_SERVICE_ROLE_KEY or SUPABASE_SERVICE_KEY
+    Uses the unified supabase_config module for consistent env var resolution.
+    Worker MUST have valid service role key - fails fast if missing.
 
     Raises ValueError with detailed instructions if required vars are missing.
     """
-    # URL: prefer SUPABASE_URL, fallback to NEXT_PUBLIC_SUPABASE_URL
-    url = os.getenv("SUPABASE_URL") or os.getenv("NEXT_PUBLIC_SUPABASE_URL")
+    # Import here to avoid circular imports
+    from packages.quantum.security.supabase_config import (
+        load_supabase_config, create_admin_client, KeyType
+    )
 
-    # Key: prefer SUPABASE_SERVICE_ROLE_KEY, fallback to SUPABASE_SERVICE_KEY
-    key = os.getenv("SUPABASE_SERVICE_ROLE_KEY") or os.getenv("SUPABASE_SERVICE_KEY")
+    config = load_supabase_config()
+    client, key_type, warnings = create_admin_client(config)
 
-    if not url or not key:
+    # Print any warnings
+    for w in warnings:
+        print(f"[worker] ⚠️  {w}")
+
+    # Worker requires service role key - fail fast if not available
+    if key_type == KeyType.NONE:
         repo_root = _find_repo_root()
-        missing = []
-        if not url:
-            missing.append("SUPABASE_URL (or NEXT_PUBLIC_SUPABASE_URL)")
-        if not key:
-            missing.append("SUPABASE_SERVICE_ROLE_KEY")
-
-        # Build helpful error message
-        env_files_checked = [
-            str(repo_root / ".env.local"),
-            str(repo_root / ".env"),
-            str(repo_root / "packages" / "quantum" / ".env.local"),
-            str(repo_root / "packages" / "quantum" / ".env"),
-        ]
-
         loaded_str = ", ".join(_ENV_FILES_LOADED) if _ENV_FILES_LOADED else "(none found)"
 
         error_msg = f"""
 Missing required environment variables for worker database access.
 
-Missing variables:
-  {chr(10).join(f'  - {v}' for v in missing)}
+Missing: SUPABASE_URL and/or SUPABASE_SERVICE_ROLE_KEY
 
 Environment files loaded:
   {loaded_str}
-
-Files searched:
-  {chr(10).join(f'  - {f}' for f in env_files_checked)}
 
 To fix:
   1. Copy .env.example to .env in the repo root:
@@ -169,11 +157,18 @@ To fix:
 
   3. For local Supabase, run 'supabase start' and use the local URL/keys.
 
-See README.md for more details.
+See README.md "Supabase Configuration" section for more details.
 """
         raise ValueError(error_msg.strip())
 
-    return create_client(url, key)
+    if key_type == KeyType.ANON:
+        raise ValueError(
+            "Worker requires SUPABASE_SERVICE_ROLE_KEY for admin access.\n"
+            "Only anon key was found. Set SUPABASE_SERVICE_ROLE_KEY in .env"
+        )
+
+    print(f"[worker] ✅ Supabase client created (key_type={key_type.value})")
+    return client
 
 
 # ---------------------------------------------------------------------------

@@ -93,7 +93,6 @@ const SuggestionCard = ({
                 className="w-full h-full text-green-500 opacity-20"
                 role="img"
                 aria-label="Payoff diagram preview"
-                aria-hidden="true"
             >
                 <path d="M0,40 L40,40 L60,10 L100,10" fill="none" stroke="currentColor" strokeWidth="2" />
                 <line x1="0" y1="40" x2="100" y2="40" stroke="currentColor" className="text-muted-foreground/50" strokeWidth="1" strokeDasharray="2,2" />

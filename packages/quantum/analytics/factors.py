@@ -3,6 +3,31 @@ import math
 from numpy.lib.stride_tricks import sliding_window_view
 from typing import List, Dict
 
+def fast_rolling_mean(arr: np.ndarray, window: int) -> np.ndarray:
+    """
+    Calculates rolling mean using O(N) cumsum approach.
+    Significantly faster than sliding_window_view + mean (O(N*W)).
+    Handles NaNs by falling back to robust sliding window method.
+    """
+    if len(arr) < window:
+        return np.array([])
+
+    # Fast check for NaNs - if present, use robust slow path
+    if np.isnan(arr).any():
+        windows = sliding_window_view(arr, window_shape=window)
+        return np.mean(windows, axis=1)
+
+    # Optimization: O(N) using cumsum
+    # Prepend 0 to simplify indexing
+    cs = np.insert(np.cumsum(arr, dtype=np.float64), 0, 0)
+
+    # Calculate sum of windows
+    # window_sum[i] = cs[i+window] - cs[i]
+    # corresponding to arr[i : i+window]
+    window_sums = cs[window:] - cs[:-window]
+
+    return window_sums / window
+
 def calculate_indicators_vectorized(prices: List[float]) -> Dict[str, np.ndarray]:
     """
     Calculates Trend, Volatility, and RSI for the entire price series using vectorized operations.
@@ -24,13 +49,8 @@ def calculate_indicators_vectorized(prices: List[float]) -> Dict[str, np.ndarray
     trend = np.full(n, 'NEUTRAL', dtype=object)
 
     if n >= 50:
-        # Helper for SMA using sliding window
-        def fast_sma(arr, window):
-            windows = sliding_window_view(arr, window_shape=window)
-            return np.mean(windows, axis=1)
-
-        sma20_valid = fast_sma(prices_arr, 20)
-        sma50_valid = fast_sma(prices_arr, 50)
+        sma20_valid = fast_rolling_mean(prices_arr, 20)
+        sma50_valid = fast_rolling_mean(prices_arr, 50)
 
         # Align them
         # sma50_valid length is N - 49. It covers indices [49, ..., N-1].
@@ -93,12 +113,9 @@ def calculate_indicators_vectorized(prices: List[float]) -> Dict[str, np.ndarray
         up = np.maximum(deltas, 0)
         down = -np.minimum(deltas, 0)
 
-        # Rolling mean of period 14
-        windows_up = sliding_window_view(up, window_shape=period)
-        windows_down = sliding_window_view(down, window_shape=period)
-
-        ma_up = np.mean(windows_up, axis=1)
-        ma_down = np.mean(windows_down, axis=1)
+        # Rolling mean of period 14 - Optimized using cumsum
+        ma_up = fast_rolling_mean(up, period)
+        ma_down = fast_rolling_mean(down, period)
 
         with np.errstate(divide='ignore', invalid='ignore'):
             rs = ma_up / ma_down

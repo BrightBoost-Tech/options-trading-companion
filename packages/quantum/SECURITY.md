@@ -196,6 +196,162 @@ TASK_SIGNING_KEYS=new:new-secret-key
 
 ---
 
+## Calling /tasks/* Endpoints
+
+### Required Headers (v4 Signing)
+
+Every request to `/tasks/*` endpoints must include these headers:
+
+| Header | Description |
+|--------|-------------|
+| `X-Task-Ts` | Unix timestamp (seconds) |
+| `X-Task-Nonce` | Random 16-byte hex string |
+| `X-Task-Scope` | Required scope (e.g., `tasks:suggestions_open`) |
+| `X-Task-Signature` | HMAC-SHA256 signature |
+| `X-Task-Key-Id` | (Optional) Key ID for rotation |
+
+### Signature Generation
+
+```python
+from packages.quantum.security.task_signing_v4 import sign_task_request
+
+headers = sign_task_request(
+    method="POST",
+    path="/tasks/suggestions/open",
+    body=b'{"user_id": "optional-uuid"}',
+    scope="tasks:suggestions_open",
+    secret=os.environ["TASK_SIGNING_SECRET"],
+    key_id="primary"  # Optional
+)
+# Returns: {"X-Task-Ts": "...", "X-Task-Nonce": "...", ...}
+```
+
+### Task Scopes
+
+| Endpoint | Scope | Schedule |
+|----------|-------|----------|
+| `/tasks/universe/sync` | `tasks:universe_sync` | Manual |
+| `/tasks/morning-brief` | `tasks:morning_brief` | Manual |
+| `/tasks/midday-scan` | `tasks:midday_scan` | Manual |
+| `/tasks/weekly-report` | `tasks:weekly_report` | Manual |
+| `/tasks/validation/eval` | `tasks:validation_eval` | Manual |
+| `/tasks/suggestions/close` | `tasks:suggestions_close` | 8 AM Chicago |
+| `/tasks/suggestions/open` | `tasks:suggestions_open` | 11 AM Chicago |
+| `/tasks/learning/ingest` | `tasks:learning_ingest` | 4:10 PM Chicago |
+| `/tasks/strategy/autotune` | `tasks:strategy_autotune` | Manual |
+
+---
+
+## Local Development
+
+### `.env.local` Setup
+
+```bash
+# Task signing (pick one)
+TASK_SIGNING_SECRET=dev-secret-at-least-32-characters-long
+
+# Or for key rotation testing
+TASK_SIGNING_KEYS=dev:dev-secret-at-least-32-characters-long
+
+# API base URL
+BASE_URL=http://localhost:8000
+
+# Optional: run for specific user
+USER_ID=your-user-uuid
+```
+
+### Running Tasks Locally
+
+```bash
+# Run a task
+python scripts/run_signed_task.py suggestions_close
+
+# Dry run (validate without sending)
+DRY_RUN=1 python scripts/run_signed_task.py suggestions_open
+
+# Skip time gate (run anytime)
+python scripts/run_signed_task.py learning_ingest --skip-time-gate
+
+# For specific user
+python scripts/run_signed_task.py suggestions_close --user-id abc-123
+
+# List all tasks
+python scripts/run_signed_task.py --list
+```
+
+---
+
+## GitHub Actions Setup
+
+### Required Secrets
+
+Add these to your repository secrets (Settings > Secrets and variables > Actions):
+
+| Secret | Description |
+|--------|-------------|
+| `TASK_SIGNING_KEYS` | Format: `kid1:secret1,kid2:secret2` |
+| `QUANTUM_BASE_URL` | API base URL (e.g., `https://api.example.com`) |
+| `TASK_USER_ID` | (Optional) Run tasks for specific user |
+
+### Generating a Signing Key
+
+```bash
+# Generate a secure 64-character hex string
+python -c "import secrets; print(secrets.token_hex(32))"
+```
+
+### Workflow Files
+
+| Workflow | Purpose |
+|----------|---------|
+| `.github/workflows/trading_tasks.yml` | Scheduled trading tasks (8 AM, 11 AM, 4:10 PM Chicago) |
+| `.github/workflows/security_v4_smoketest.yml` | Manual smoke test for signing validation |
+
+### Manual Dispatch
+
+1. Go to Actions > Trading Tasks (v4 Signed)
+2. Click "Run workflow"
+3. Select task, optionally enable dry-run or skip time gate
+4. Click "Run workflow"
+
+---
+
+## Migration Cutover Checklist
+
+### Phase 1: Deploy v4 (Keep Legacy)
+
+```bash
+# Production env
+ALLOW_LEGACY_CRON_SECRET=1    # Keep legacy working
+TASK_SIGNING_KEYS=primary:new-secret-here
+```
+
+1. [ ] Deploy backend with v4 signing support
+2. [ ] Add `TASK_SIGNING_KEYS` secret to GitHub
+3. [ ] Deploy new `trading_tasks.yml` workflow
+4. [ ] Run smoke test workflow to validate signing
+
+### Phase 2: Monitor (24-48 hours)
+
+1. [ ] Watch for `[V4_AUTH]` logs (new signing)
+2. [ ] Watch for `[LEGACY_AUTH]` logs (old CRON_SECRET)
+3. [ ] Confirm scheduled tasks are running successfully
+
+### Phase 3: Disable Legacy
+
+```bash
+# Production env
+ALLOW_LEGACY_CRON_SECRET=0    # Disable legacy
+# Optionally remove CRON_SECRET entirely
+```
+
+1. [ ] Set `ALLOW_LEGACY_CRON_SECRET=0` in production
+2. [ ] Delete old `schedule_tasks.yml` workflow (if exists)
+3. [ ] Monitor for 403 errors (any missed callers)
+4. [ ] Remove `CRON_SECRET` from secrets
+
+---
+
 ## Files Reference
 
 | Module | Purpose |
@@ -207,3 +363,4 @@ TASK_SIGNING_KEYS=new:new-secret-key
 | `security/supabase_config.py` | Unified Supabase client config |
 | `security/secrets_provider.py` | Centralized secrets access |
 | `security/cron_auth.py` | Legacy CRON_SECRET (deprecated) |
+| `scripts/run_signed_task.py` | CLI tool for calling signed endpoints |

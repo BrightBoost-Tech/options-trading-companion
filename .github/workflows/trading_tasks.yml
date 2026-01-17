@@ -1,0 +1,178 @@
+# Trading Tasks - Security v4 HMAC Signed Requests
+#
+# This workflow calls /tasks/* endpoints with v4 HMAC signing.
+# Schedules are in UTC but include Python time-gate for DST-aware Chicago time.
+#
+# Required Secrets:
+#   TASK_SIGNING_KEYS  - Format: kid1:secret1,kid2:secret2
+#   QUANTUM_BASE_URL   - API base URL (e.g., https://api.example.com)
+#
+# Optional Secrets:
+#   TASK_USER_ID       - Run tasks for specific user only
+
+name: Trading Tasks (v4 Signed)
+
+on:
+  schedule:
+    # Suggestions Close - 8:00 AM Chicago
+    # CST (winter): 14:00 UTC | CDT (summer): 13:00 UTC
+    # Schedule at 13:00 UTC to catch both; time-gate handles the rest
+    - cron: '0 13 * * 1-5'
+
+    # Suggestions Open - 11:00 AM Chicago
+    # CST (winter): 17:00 UTC | CDT (summer): 16:00 UTC
+    # Schedule at 16:00 UTC to catch both
+    - cron: '0 16 * * 1-5'
+
+    # Learning Ingest - 4:10 PM Chicago
+    # CST (winter): 22:10 UTC | CDT (summer): 21:10 UTC
+    # Schedule at 21:10 UTC to catch both
+    - cron: '10 21 * * 1-5'
+
+  workflow_dispatch:
+    inputs:
+      task:
+        description: 'Task to run'
+        required: true
+        type: choice
+        options:
+          - suggestions_close
+          - suggestions_open
+          - learning_ingest
+          - universe_sync
+          - morning_brief
+          - midday_scan
+          - weekly_report
+          - validation_eval
+          - strategy_autotune
+      skip_time_gate:
+        description: 'Skip time gate check'
+        required: false
+        type: boolean
+        default: false
+      dry_run:
+        description: 'Dry run (print request without sending)'
+        required: false
+        type: boolean
+        default: false
+
+env:
+  PYTHON_VERSION: '3.11'
+
+jobs:
+  # ============================================================================
+  # Scheduled: Suggestions Close (8 AM Chicago)
+  # ============================================================================
+  suggestions-close:
+    name: Suggestions Close (8 AM Chicago)
+    runs-on: ubuntu-latest
+    if: github.event_name == 'schedule' && github.event.schedule == '0 13 * * 1-5'
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install dependencies
+        run: pip install requests
+
+      - name: Run Suggestions Close
+        env:
+          TASK_SIGNING_KEYS: ${{ secrets.TASK_SIGNING_KEYS }}
+          BASE_URL: ${{ secrets.QUANTUM_BASE_URL }}
+          USER_ID: ${{ secrets.TASK_USER_ID }}
+        run: |
+          python scripts/run_signed_task.py suggestions_close
+
+  # ============================================================================
+  # Scheduled: Suggestions Open (11 AM Chicago)
+  # ============================================================================
+  suggestions-open:
+    name: Suggestions Open (11 AM Chicago)
+    runs-on: ubuntu-latest
+    if: github.event_name == 'schedule' && github.event.schedule == '0 16 * * 1-5'
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install dependencies
+        run: pip install requests
+
+      - name: Run Suggestions Open
+        env:
+          TASK_SIGNING_KEYS: ${{ secrets.TASK_SIGNING_KEYS }}
+          BASE_URL: ${{ secrets.QUANTUM_BASE_URL }}
+          USER_ID: ${{ secrets.TASK_USER_ID }}
+        run: |
+          python scripts/run_signed_task.py suggestions_open
+
+  # ============================================================================
+  # Scheduled: Learning Ingest (4:10 PM Chicago)
+  # ============================================================================
+  learning-ingest:
+    name: Learning Ingest (4:10 PM Chicago)
+    runs-on: ubuntu-latest
+    if: github.event_name == 'schedule' && github.event.schedule == '10 21 * * 1-5'
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install dependencies
+        run: pip install requests
+
+      - name: Run Learning Ingest
+        env:
+          TASK_SIGNING_KEYS: ${{ secrets.TASK_SIGNING_KEYS }}
+          BASE_URL: ${{ secrets.QUANTUM_BASE_URL }}
+          USER_ID: ${{ secrets.TASK_USER_ID }}
+        run: |
+          python scripts/run_signed_task.py learning_ingest
+
+  # ============================================================================
+  # Manual Dispatch: Any Task
+  # ============================================================================
+  manual-task:
+    name: Manual Task (${{ inputs.task }})
+    runs-on: ubuntu-latest
+    if: github.event_name == 'workflow_dispatch'
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install dependencies
+        run: pip install requests
+
+      - name: Run Task
+        env:
+          TASK_SIGNING_KEYS: ${{ secrets.TASK_SIGNING_KEYS }}
+          BASE_URL: ${{ secrets.QUANTUM_BASE_URL }}
+          USER_ID: ${{ secrets.TASK_USER_ID }}
+          DRY_RUN: ${{ inputs.dry_run && '1' || '0' }}
+        run: |
+          ARGS="${{ inputs.task }}"
+          if [ "${{ inputs.skip_time_gate }}" = "true" ]; then
+            ARGS="$ARGS --skip-time-gate"
+          fi
+          python scripts/run_signed_task.py $ARGS

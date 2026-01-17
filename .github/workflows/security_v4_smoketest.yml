@@ -1,0 +1,130 @@
+# Security v4 Smoke Test
+#
+# Validates that v4 HMAC signing is working correctly.
+# Can be run manually to test signing configuration.
+#
+# Required Secrets:
+#   TASK_SIGNING_KEYS  - Format: kid1:secret1,kid2:secret2
+#   QUANTUM_BASE_URL   - API base URL
+
+name: Security v4 Smoke Test
+
+on:
+  workflow_dispatch:
+    inputs:
+      task:
+        description: 'Task to test'
+        required: false
+        type: choice
+        default: 'universe_sync'
+        options:
+          - universe_sync
+          - suggestions_close
+          - suggestions_open
+          - learning_ingest
+          - morning_brief
+          - midday_scan
+          - weekly_report
+          - validation_eval
+          - strategy_autotune
+      dry_run:
+        description: 'Dry run (validate signing without sending request)'
+        required: false
+        type: boolean
+        default: true
+
+env:
+  PYTHON_VERSION: '3.11'
+
+jobs:
+  smoke-test:
+    name: Smoke Test v4 Signing
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install dependencies
+        run: pip install requests
+
+      - name: Validate environment
+        env:
+          TASK_SIGNING_KEYS: ${{ secrets.TASK_SIGNING_KEYS }}
+          BASE_URL: ${{ secrets.QUANTUM_BASE_URL }}
+        run: |
+          echo "=== Environment Validation ==="
+
+          if [ -z "$TASK_SIGNING_KEYS" ]; then
+            echo "ERROR: TASK_SIGNING_KEYS secret is not set"
+            exit 1
+          fi
+          echo "TASK_SIGNING_KEYS: [SET]"
+
+          if [ -z "$BASE_URL" ]; then
+            echo "ERROR: QUANTUM_BASE_URL secret is not set"
+            exit 1
+          fi
+          echo "BASE_URL: $BASE_URL"
+
+          echo "=== Environment OK ==="
+
+      - name: Test signing module import
+        run: |
+          echo "=== Testing signing module import ==="
+          python -c "
+          import sys
+          sys.path.insert(0, '.')
+          from packages.quantum.security.task_signing_v4 import sign_task_request
+          print('sign_task_request imported successfully')
+
+          # Test signing (no secret needed for import test)
+          headers = sign_task_request(
+              method='POST',
+              path='/tasks/universe/sync',
+              body=b'{}',
+              scope='tasks:universe_sync',
+              secret='test-secret-for-import-validation'
+          )
+
+          assert 'X-Task-Ts' in headers, 'Missing X-Task-Ts header'
+          assert 'X-Task-Nonce' in headers, 'Missing X-Task-Nonce header'
+          assert 'X-Task-Scope' in headers, 'Missing X-Task-Scope header'
+          assert 'X-Task-Signature' in headers, 'Missing X-Task-Signature header'
+
+          print('All required headers present:')
+          for key in ['X-Task-Ts', 'X-Task-Nonce', 'X-Task-Scope', 'X-Task-Signature']:
+              print(f'  {key}: {headers[key][:20]}...' if len(headers[key]) > 20 else f'  {key}: {headers[key]}')
+
+          print('=== Signing module test PASSED ===')
+          "
+
+      - name: Run smoke test
+        env:
+          TASK_SIGNING_KEYS: ${{ secrets.TASK_SIGNING_KEYS }}
+          BASE_URL: ${{ secrets.QUANTUM_BASE_URL }}
+          DRY_RUN: ${{ inputs.dry_run && '1' || '0' }}
+        run: |
+          echo "=== Running Smoke Test ==="
+          echo "Task: ${{ inputs.task }}"
+          echo "Dry Run: ${{ inputs.dry_run }}"
+          echo ""
+
+          python scripts/run_signed_task.py ${{ inputs.task }} --skip-time-gate
+
+          echo ""
+          echo "=== Smoke Test Complete ==="
+
+      - name: Summary
+        if: always()
+        run: |
+          echo "## Security v4 Smoke Test Results" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "- **Task:** ${{ inputs.task }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Dry Run:** ${{ inputs.dry_run }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Status:** ${{ job.status }}" >> $GITHUB_STEP_SUMMARY

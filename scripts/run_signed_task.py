@@ -1,0 +1,428 @@
+#!/usr/bin/env python3
+"""
+Run Signed Task - Security v4 HMAC Request Signing
+
+Calls /tasks/* endpoints with X-Task-* headers using v4 HMAC signing.
+Used by GitHub Actions workflows and local development.
+
+Usage:
+    python scripts/run_signed_task.py suggestions_close
+    python scripts/run_signed_task.py suggestions_open --user-id <uuid>
+    DRY_RUN=1 python scripts/run_signed_task.py learning_ingest
+
+Environment Variables:
+    TASK_SIGNING_SECRET  - Single signing secret (simple setup)
+    TASK_SIGNING_KEYS    - Multiple keys for rotation (kid1:secret1,kid2:secret2)
+    BASE_URL             - API base URL (e.g., https://api.example.com)
+    DRY_RUN              - Set to "1" to print request without sending
+    USER_ID              - Optional: run for specific user only
+
+Supported Tasks:
+    suggestions_close   - POST /tasks/suggestions/close (8 AM Chicago)
+    suggestions_open    - POST /tasks/suggestions/open (11 AM Chicago)
+    learning_ingest     - POST /tasks/learning/ingest (4:10 PM Chicago)
+    universe_sync       - POST /tasks/universe/sync
+    morning_brief       - POST /tasks/morning-brief
+    midday_scan         - POST /tasks/midday-scan
+    weekly_report       - POST /tasks/weekly-report
+    validation_eval     - POST /tasks/validation/eval
+    strategy_autotune   - POST /tasks/strategy/autotune
+"""
+
+import argparse
+import json
+import os
+import sys
+from datetime import datetime
+from typing import Optional
+from zoneinfo import ZoneInfo
+
+import requests
+
+# Add packages to path for imports
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+
+from packages.quantum.security.task_signing_v4 import sign_task_request
+
+
+# =============================================================================
+# Task Definitions
+# =============================================================================
+
+TASKS = {
+    "suggestions_close": {
+        "path": "/tasks/suggestions/close",
+        "scope": "tasks:suggestions_close",
+        "description": "Generate CLOSE suggestions (8 AM Chicago)",
+    },
+    "suggestions_open": {
+        "path": "/tasks/suggestions/open",
+        "scope": "tasks:suggestions_open",
+        "description": "Generate OPEN suggestions (11 AM Chicago)",
+    },
+    "learning_ingest": {
+        "path": "/tasks/learning/ingest",
+        "scope": "tasks:learning_ingest",
+        "description": "Ingest learning outcomes (4:10 PM Chicago)",
+    },
+    "universe_sync": {
+        "path": "/tasks/universe/sync",
+        "scope": "tasks:universe_sync",
+        "description": "Sync trading universe",
+    },
+    "morning_brief": {
+        "path": "/tasks/morning-brief",
+        "scope": "tasks:morning_brief",
+        "description": "Generate morning brief",
+    },
+    "midday_scan": {
+        "path": "/tasks/midday-scan",
+        "scope": "tasks:midday_scan",
+        "description": "Run midday market scan",
+    },
+    "weekly_report": {
+        "path": "/tasks/weekly-report",
+        "scope": "tasks:weekly_report",
+        "description": "Generate weekly report",
+    },
+    "validation_eval": {
+        "path": "/tasks/validation/eval",
+        "scope": "tasks:validation_eval",
+        "description": "Run validation evaluation",
+    },
+    "strategy_autotune": {
+        "path": "/tasks/strategy/autotune",
+        "scope": "tasks:strategy_autotune",
+        "description": "Auto-tune strategy parameters",
+    },
+}
+
+
+# =============================================================================
+# Time Gate Logic (DST-aware)
+# =============================================================================
+
+CHICAGO_TZ = ZoneInfo("America/Chicago")
+
+
+def is_market_day() -> bool:
+    """Check if today is a market day (Mon-Fri, excluding holidays)."""
+    now_chicago = datetime.now(CHICAGO_TZ)
+    # Monday=0, Sunday=6
+    if now_chicago.weekday() >= 5:
+        return False
+    # TODO: Add holiday calendar check if needed
+    return True
+
+
+def is_within_time_window(
+    target_hour: int,
+    target_minute: int = 0,
+    window_minutes: int = 30
+) -> bool:
+    """
+    Check if current Chicago time is within window of target time.
+
+    Args:
+        target_hour: Target hour in Chicago time (0-23)
+        target_minute: Target minute (0-59)
+        window_minutes: How many minutes after target to allow
+
+    Returns:
+        True if within window, False otherwise
+    """
+    now_chicago = datetime.now(CHICAGO_TZ)
+    target_minutes_from_midnight = target_hour * 60 + target_minute
+    current_minutes_from_midnight = now_chicago.hour * 60 + now_chicago.minute
+
+    diff = current_minutes_from_midnight - target_minutes_from_midnight
+    return 0 <= diff < window_minutes
+
+
+def check_time_gate(task_name: str, skip_time_gate: bool = False) -> bool:
+    """
+    Check if task should run based on time gate.
+
+    Args:
+        task_name: Name of the task to run
+        skip_time_gate: If True, skip time gate check
+
+    Returns:
+        True if task should run, False if time-gated out
+    """
+    if skip_time_gate:
+        return True
+
+    # Define time windows for scheduled tasks
+    TIME_GATES = {
+        "suggestions_close": (8, 0),   # 8:00 AM Chicago
+        "suggestions_open": (11, 0),   # 11:00 AM Chicago
+        "learning_ingest": (16, 10),   # 4:10 PM Chicago
+    }
+
+    if task_name not in TIME_GATES:
+        # No time gate for this task
+        return True
+
+    if not is_market_day():
+        print(f"[TIME-GATE] Skipping {task_name}: not a market day")
+        return False
+
+    target_hour, target_minute = TIME_GATES[task_name]
+    if not is_within_time_window(target_hour, target_minute, window_minutes=30):
+        now_chicago = datetime.now(CHICAGO_TZ)
+        print(
+            f"[TIME-GATE] Skipping {task_name}: current time {now_chicago.strftime('%H:%M')} "
+            f"not within 30 min of {target_hour:02d}:{target_minute:02d} Chicago"
+        )
+        return False
+
+    return True
+
+
+# =============================================================================
+# Request Execution
+# =============================================================================
+
+def get_signing_secret() -> tuple[str, Optional[str]]:
+    """
+    Get signing secret from environment.
+
+    Returns:
+        Tuple of (secret, key_id) - key_id may be None for single-key setup
+
+    Raises:
+        ValueError if no signing secret is configured
+    """
+    # Try multi-key format first
+    keys_str = os.environ.get("TASK_SIGNING_KEYS", "")
+    if keys_str:
+        # Format: kid1:secret1,kid2:secret2
+        # Use first key by default
+        first_pair = keys_str.split(",")[0]
+        if ":" in first_pair:
+            key_id, secret = first_pair.split(":", 1)
+            return secret.strip(), key_id.strip()
+
+    # Fall back to single secret
+    secret = os.environ.get("TASK_SIGNING_SECRET", "")
+    if secret:
+        return secret, None
+
+    raise ValueError(
+        "No signing secret configured. "
+        "Set TASK_SIGNING_SECRET or TASK_SIGNING_KEYS environment variable."
+    )
+
+
+def build_payload(task_name: str, user_id: Optional[str] = None) -> dict:
+    """Build the request payload for a task."""
+    payload = {}
+
+    # Add user_id if specified
+    if user_id:
+        payload["user_id"] = user_id
+
+    # Add task-specific defaults
+    if task_name in ("suggestions_close", "suggestions_open"):
+        payload.setdefault("strategy_name", "spy_opt_autolearn_v6")
+
+    return payload
+
+
+def run_task(
+    task_name: str,
+    user_id: Optional[str] = None,
+    dry_run: bool = False,
+    skip_time_gate: bool = False,
+    timeout: int = 120,
+) -> int:
+    """
+    Run a signed task request.
+
+    Args:
+        task_name: Name of the task to run
+        user_id: Optional user ID to run for
+        dry_run: If True, print request without sending
+        skip_time_gate: If True, skip time gate check
+        timeout: Request timeout in seconds
+
+    Returns:
+        0 on success, 1 on failure
+    """
+    # Validate task name
+    if task_name not in TASKS:
+        print(f"[ERROR] Unknown task: {task_name}")
+        print(f"Available tasks: {', '.join(TASKS.keys())}")
+        return 1
+
+    task = TASKS[task_name]
+
+    # Check time gate
+    if not check_time_gate(task_name, skip_time_gate):
+        return 0  # Not an error, just skipped
+
+    # Get base URL
+    base_url = os.environ.get("BASE_URL", "")
+    if not base_url:
+        print("[ERROR] BASE_URL environment variable is required")
+        return 1
+
+    # Get signing secret
+    try:
+        secret, key_id = get_signing_secret()
+    except ValueError as e:
+        print(f"[ERROR] {e}")
+        return 1
+
+    # Build request
+    method = "POST"
+    path = task["path"]
+    scope = task["scope"]
+    payload = build_payload(task_name, user_id)
+    body = json.dumps(payload).encode("utf-8") if payload else b"{}"
+
+    # Sign request
+    headers = sign_task_request(
+        method=method,
+        path=path,
+        body=body,
+        scope=scope,
+        secret=secret,
+        key_id=key_id,
+    )
+    headers["Content-Type"] = "application/json"
+
+    url = f"{base_url.rstrip('/')}{path}"
+
+    # Log request (without sensitive data)
+    print(f"[REQUEST] {method} {url}")
+    print(f"[REQUEST] Scope: {scope}")
+    print(f"[REQUEST] Payload: {json.dumps(payload)}")
+    print(f"[REQUEST] Headers: X-Task-Ts, X-Task-Nonce, X-Task-Scope, X-Task-Signature" +
+          (", X-Task-Key-Id" if key_id else ""))
+
+    if dry_run:
+        print("[DRY-RUN] Request would be sent (not actually sending)")
+        return 0
+
+    # Send request
+    try:
+        print(f"[SENDING] Making request with {timeout}s timeout...")
+        response = requests.post(
+            url,
+            data=body,
+            headers=headers,
+            timeout=timeout,
+        )
+
+        print(f"[RESPONSE] Status: {response.status_code}")
+
+        if response.status_code >= 200 and response.status_code < 300:
+            print(f"[SUCCESS] Task {task_name} completed successfully")
+            try:
+                result = response.json()
+                # Only log non-sensitive fields
+                if "job_run_id" in result:
+                    print(f"[SUCCESS] Job run ID: {result['job_run_id']}")
+                if "status" in result:
+                    print(f"[SUCCESS] Status: {result['status']}")
+            except Exception:
+                pass
+            return 0
+        else:
+            print(f"[ERROR] Request failed: {response.status_code}")
+            try:
+                error_detail = response.json()
+                print(f"[ERROR] Detail: {error_detail.get('detail', response.text[:200])}")
+            except Exception:
+                print(f"[ERROR] Response: {response.text[:200]}")
+            return 1
+
+    except requests.exceptions.Timeout:
+        print(f"[ERROR] Request timed out after {timeout}s")
+        return 1
+    except requests.exceptions.RequestException as e:
+        print(f"[ERROR] Request failed: {e}")
+        return 1
+
+
+# =============================================================================
+# CLI Interface
+# =============================================================================
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="Run signed task requests to /tasks/* endpoints",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+    python scripts/run_signed_task.py suggestions_close
+    python scripts/run_signed_task.py suggestions_open --user-id abc-123
+    DRY_RUN=1 python scripts/run_signed_task.py learning_ingest
+    python scripts/run_signed_task.py suggestions_close --skip-time-gate
+
+Environment Variables:
+    TASK_SIGNING_SECRET  - Single signing secret
+    TASK_SIGNING_KEYS    - Multiple keys (kid1:secret1,kid2:secret2)
+    BASE_URL             - API base URL
+    DRY_RUN              - Set to "1" for dry run mode
+    USER_ID              - Default user ID (can be overridden with --user-id)
+""",
+    )
+
+    parser.add_argument(
+        "task",
+        choices=list(TASKS.keys()),
+        help="Task to run",
+    )
+    parser.add_argument(
+        "--user-id",
+        default=os.environ.get("USER_ID"),
+        help="Run for specific user ID",
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        default=os.environ.get("DRY_RUN", "").lower() in ("1", "true", "yes"),
+        help="Print request without sending",
+    )
+    parser.add_argument(
+        "--skip-time-gate",
+        action="store_true",
+        help="Skip time gate check (run regardless of current time)",
+    )
+    parser.add_argument(
+        "--timeout",
+        type=int,
+        default=120,
+        help="Request timeout in seconds (default: 120)",
+    )
+    parser.add_argument(
+        "--list",
+        action="store_true",
+        dest="list_tasks",
+        help="List all available tasks",
+    )
+
+    args = parser.parse_args()
+
+    if args.list_tasks:
+        print("Available tasks:")
+        for name, task in TASKS.items():
+            print(f"  {name:20s} - {task['description']}")
+            print(f"    Path:  {task['path']}")
+            print(f"    Scope: {task['scope']}")
+        return 0
+
+    return run_task(
+        task_name=args.task,
+        user_id=args.user_id,
+        dry_run=args.dry_run,
+        skip_time_gate=args.skip_time_gate,
+        timeout=args.timeout,
+    )
+
+
+if __name__ == "__main__":
+    sys.exit(main())

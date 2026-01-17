@@ -46,9 +46,119 @@ MIDDAY_TEST_MODE = os.getenv("MIDDAY_TEST_MODE", "false").lower() == "true"
 COMPOUNDING_MODE = os.getenv("COMPOUNDING_MODE", "false").lower() == "true"
 APP_VERSION = os.getenv("APP_VERSION", "v2-dev")
 
+# Exit Mode Router Guardrails
+# Threshold for treating a position as a "deep loser" (default: 50% loss)
+LOSS_EXIT_THRESHOLD = float(os.getenv("LOSS_EXIT_THRESHOLD", "0.5"))
+# Maximum multiplier for take_profit_limit relative to current price
+MAX_TAKE_PROFIT_MULTIPLIER = float(os.getenv("MAX_TAKE_PROFIT_MULTIPLIER", "3.0"))
+# Optional absolute cap on take_profit_limit (0 = disabled)
+MAX_TAKE_PROFIT_ABS = float(os.getenv("MAX_TAKE_PROFIT_ABS", "0"))
+
 
 def clamp_risk_budget(per_trade_budget: float, remaining: float) -> float:
     return max(0.0, min(float(per_trade_budget or 0.0), float(remaining or 0.0)))
+
+
+def compute_exit_mode(
+    unit_price: float,
+    unit_cost: float,
+    market_data: dict = None
+) -> dict:
+    """
+    Exit Mode Router: Determines the appropriate exit strategy for a position.
+
+    Returns dict with:
+        - mode: "normal" | "salvage" | "lottery_trap" | "not_executable"
+        - limit_price: float or None
+        - rationale_prefix: str (to prepend to rationale)
+        - warning: str or None
+        - clamp_reason: str or None (if limit was clamped)
+    """
+    result = {
+        "mode": "normal",
+        "limit_price": None,
+        "rationale_prefix": "",
+        "warning": None,
+        "clamp_reason": None
+    }
+
+    # Check for missing/stale quotes
+    if market_data is None:
+        # Allow normal flow but flag as potentially stale
+        pass
+
+    # Check if this is a deep loser (e.g., down 50%+)
+    if unit_cost > 0 and unit_price <= unit_cost * LOSS_EXIT_THRESHOLD:
+        # Deep loser - use LossMinimizer
+        loss_pct = ((unit_cost - unit_price) / unit_cost) * 100 if unit_cost > 0 else 0
+
+        # Build position dict for LossMinimizer
+        position_for_analysis = {
+            "current_price": unit_price,
+            "quantity": 1,  # Per-unit analysis
+            "cost_basis": unit_cost
+        }
+
+        # Get bid/ask from market_data if available
+        analysis_market_data = None
+        if market_data:
+            bid = market_data.get("bid", unit_price)
+            ask = market_data.get("ask", unit_price)
+            if bid is not None and ask is not None:
+                analysis_market_data = {"bid": bid, "ask": ask}
+
+        # Call LossMinimizer
+        analysis = LossMinimizer.analyze_position(
+            position=position_for_analysis,
+            market_data=analysis_market_data
+        )
+
+        result["limit_price"] = analysis.limit_price
+        result["warning"] = analysis.warning
+
+        # Determine mode from scenario
+        if "Salvage" in analysis.scenario:
+            result["mode"] = "salvage"
+            result["rationale_prefix"] = f"SALVAGE EXIT ({loss_pct:.0f}% loss): "
+        else:
+            result["mode"] = "lottery_trap"
+            result["rationale_prefix"] = f"LOTTERY TRAP ({loss_pct:.0f}% loss): "
+
+    return result
+
+
+def clamp_take_profit_limit(
+    limit_price: float,
+    unit_price: float,
+    mode: str = "normal"
+) -> tuple:
+    """
+    Clamps take_profit_limit to prevent absurd targets.
+
+    Returns (clamped_price, clamp_reason or None)
+    """
+    if limit_price is None or limit_price <= 0:
+        return limit_price, None
+
+    # Don't clamp salvage/lottery modes - they already have reasonable limits
+    if mode in ("salvage", "lottery_trap"):
+        return limit_price, None
+
+    clamp_reason = None
+    original_limit = limit_price
+
+    # Apply multiplier cap
+    max_by_multiplier = unit_price * MAX_TAKE_PROFIT_MULTIPLIER
+    if limit_price > max_by_multiplier and max_by_multiplier > 0:
+        limit_price = max_by_multiplier
+        clamp_reason = f"Clamped from ${original_limit:.2f} (>{MAX_TAKE_PROFIT_MULTIPLIER}x current)"
+
+    # Apply absolute cap if configured
+    if MAX_TAKE_PROFIT_ABS > 0 and limit_price > MAX_TAKE_PROFIT_ABS:
+        limit_price = MAX_TAKE_PROFIT_ABS
+        clamp_reason = f"Clamped from ${original_limit:.2f} (>abs cap ${MAX_TAKE_PROFIT_ABS:.2f})"
+
+    return round(limit_price, 2), clamp_reason
 
 
 def normalize_win_rate(value) -> tuple[float, float]:
@@ -301,16 +411,73 @@ async def run_morning_cycle(supabase: Client, user_id: str):
         )
 
         # Risk Budget Check Annotation
-        # If over budget, we might want to flag this trade for closer if it helps reduce risk
         budget_note = ""
         if is_over_budget:
             budget_note = f" [Risk Budget Exceeded: {budget_usage_pct:.0f}% used]"
 
-        if unit_price < unit_cost * 0.5:
-             pass
+        # === EXIT MODE ROUTER ===
+        # Gather market data for LossMinimizer (bid/ask from truth layer)
+        exit_market_data = None
+        try:
+            norm_ref = truth_layer.normalize_symbol(ref_symbol)
+            first_snap = snapshots.get(norm_ref, {})
+            if first_snap:
+                exit_market_data = {
+                    "bid": first_snap.get("bid"),
+                    "ask": first_snap.get("ask")
+                }
+        except Exception:
+            pass
 
-        if metrics.expected_value > 0 and metrics.limit_price > unit_price:
+        exit_mode_result = compute_exit_mode(unit_price, unit_cost, exit_market_data)
+        exit_mode = exit_mode_result["mode"]
+        exit_warning = exit_mode_result.get("warning")
 
+        # Determine final limit price and strategy based on exit mode
+        final_limit_price = None
+        strategy_name = "take_profit_limit"
+        clamp_reason = None
+
+        if exit_mode in ("salvage", "lottery_trap"):
+            # Use LossMinimizer's recommended limit price
+            final_limit_price = exit_mode_result.get("limit_price") or unit_price
+            strategy_name = "salvage_exit" if exit_mode == "salvage" else "lottery_trap"
+        elif metrics.expected_value > 0 and metrics.limit_price > unit_price:
+            # Normal take-profit path - apply clamping guardrails
+            final_limit_price, clamp_reason = clamp_take_profit_limit(
+                metrics.limit_price, unit_price, exit_mode
+            )
+        else:
+            # No suggestion for this position (negative EV or price already above target)
+            continue
+
+        # Skip if no valid limit price
+        if final_limit_price is None or final_limit_price <= 0:
+            continue
+
+        # Build rationale text based on exit mode
+        if exit_mode == "salvage":
+            hist_stats = {"insufficient_history": True}  # Don't fetch stats for salvage
+            rationale_text = (
+                f"{exit_mode_result['rationale_prefix']}"
+                f"Exit near bid/mid at ${final_limit_price:.2f} to preserve remaining capital. "
+                f"Current: ${unit_price:.2f}, Cost: ${unit_cost:.2f}.{budget_note}"
+            )
+            if exit_warning:
+                rationale_text += f" ⚠️ {exit_warning}"
+
+        elif exit_mode == "lottery_trap":
+            hist_stats = {"insufficient_history": True}  # Don't fetch stats for lottery
+            rationale_text = (
+                f"{exit_mode_result['rationale_prefix']}"
+                f"GTC limit at ${final_limit_price:.2f} (volatility trap). "
+                f"Position near worthless (${unit_price:.2f}); may catch spike.{budget_note}"
+            )
+            if exit_warning:
+                rationale_text += f" ⚠️ {exit_warning}"
+
+        else:
+            # Normal take-profit
             hist_stats = ExitStatsService.get_stats(
                 underlying=underlying,
                 regime=iv_regime,
@@ -320,15 +487,18 @@ async def run_morning_cycle(supabase: Client, user_id: str):
 
             if hist_stats.get("insufficient_history") or hist_stats.get("win_rate") is None:
                 rationale_text = (
-                    f"Take profit at ${metrics.limit_price:.2f} based on EV model. "
+                    f"Take profit at ${final_limit_price:.2f} based on EV model. "
                     f"(Insufficient history for win-rate stats in {iv_regime} regime.){budget_note}"
                 )
             else:
                 win_rate_pct = hist_stats['win_rate'] * 100
                 rationale_text = (
-                    f"Take profit at ${metrics.limit_price:.2f} based on {win_rate_pct:.0f}% "
+                    f"Take profit at ${final_limit_price:.2f} based on {win_rate_pct:.0f}% "
                     f"historical win rate for similar exits in {iv_regime} regime.{budget_note}"
                 )
+
+            if clamp_reason:
+                rationale_text += f" [{clamp_reason}]"
 
             # Compute input-only features for hash (stable across price/EV changes)
             # features_for_hash: inputs only (ticker, spread_type, DTE, width, iv_regime, global_regime, symbol_regime, effective_regime)
@@ -358,14 +528,14 @@ async def run_morning_cycle(supabase: Client, user_id: str):
             ctx = TradeContext.create_new(
                 model_version=APP_VERSION,
                 window="morning_limit",
-                strategy="take_profit_limit",
+                strategy=strategy_name,
                 regime=iv_regime
             )
             ctx.features_hash = compute_features_hash(features_for_hash)
 
             order_json = {
                 "side": "close_spread",
-                "limit_price": round(metrics.limit_price, 2),
+                "limit_price": round(final_limit_price, 2),
                 "legs": [
                     {
                         "symbol": l["symbol"],
@@ -375,6 +545,12 @@ async def run_morning_cycle(supabase: Client, user_id: str):
                     } for l in legs
                 ]
             }
+
+            # Add exit mode info to order_json for UI display
+            if exit_mode != "normal":
+                order_json["exit_mode"] = exit_mode
+                if exit_warning:
+                    order_json["warning"] = exit_warning
 
             # Calculate fingerprint
             fingerprint = compute_legs_fingerprint(order_json)
@@ -386,15 +562,17 @@ async def run_morning_cycle(supabase: Client, user_id: str):
                     "window": "morning_limit",
                     "ticker": spread.ticker,
                     "display_symbol": spread.ticker,
-                    "strategy": "take_profit_limit",
+                    "strategy": strategy_name,
                     "direction": "close",
-                    "ev": metrics.expected_value,
-                    "probability_of_profit": metrics.prob_of_profit,
+                    "ev": metrics.expected_value if exit_mode == "normal" else 0.0,
+                    "probability_of_profit": metrics.prob_of_profit if exit_mode == "normal" else None,
                     "rationale": rationale_text,
                     "historical_stats": hist_stats,
                     "order_json": order_json,
                 "sizing_metadata": {
-                    "reason": metrics.reason,
+                    "reason": metrics.reason if exit_mode == "normal" else f"exit_mode={exit_mode}",
+                    "exit_mode": exit_mode,
+                    "clamp_reason": clamp_reason,
                     "context": {
                         "iv_rank": iv_rank_score,
                         "iv_regime": iv_regime,

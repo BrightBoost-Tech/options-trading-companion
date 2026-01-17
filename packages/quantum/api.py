@@ -25,7 +25,12 @@ env_path = Path(__file__).resolve().parent / ".env"
 load_dotenv(dotenv_path=env_path)
 
 from packages.quantum.security import encrypt_token, decrypt_token, get_current_user, get_supabase_user_client
-from packages.quantum.security.config import validate_security_config
+from packages.quantum.security.config import (
+    validate_security_config,
+    SecurityConfigError,
+    is_production_env,
+    is_debug_routes_enabled,
+)
 from packages.quantum.security.secrets_provider import SecretsProvider
 from packages.quantum.security.headers_middleware import SecurityHeadersMiddleware
 from packages.quantum.security.supabase_config import (
@@ -109,123 +114,114 @@ def health_check():
     }
 
 
-@app.get("/__auth_debug")
-def auth_debug(request: Request, user_id: str = Depends(get_current_user)):
-    """
-    Dev-only endpoint to debug authentication resolution.
-    Strictly limited to localhost AND development/test environments.
-    """
-    app_env = os.getenv("APP_ENV", "development")
+# =============================================================================
+# Dev/Debug Routes (Security v4: Not registered in production)
+# =============================================================================
 
-    # 🛡️ Sentinel: Whitelist safe environments only
-    if app_env not in ["development", "test"]:
-        raise HTTPException(status_code=403, detail="Forbidden")
+# These routes are only registered when ENABLE_DEBUG_ROUTES=1 (explicit in prod)
+# or when running in development/test environments.
 
-    # 🛡️ Sentinel: Enforce localhost check regardless of environment setting
-    is_local = request.client.host in ("127.0.0.1", "::1", "localhost") if request.client else False
-    if not is_local:
-        raise HTTPException(status_code=403, detail="Forbidden: Localhost only")
+if is_debug_routes_enabled():
+    print("🔧 Debug routes ENABLED (/__auth_debug, /dev/*)")
 
-    return {
-        "app_env": app_env,
-        "enable_dev_auth_bypass": os.getenv("ENABLE_DEV_AUTH_BYPASS"),
-        "has_authorization_header": "Authorization" in request.headers,
-        "has_x_test_mode_user": "X-Test-Mode-User" in request.headers,
-        "resolved_user_id": user_id,
-        "is_localhost": is_local
-    }
+    @app.get("/__auth_debug")
+    def auth_debug(request: Request, user_id: str = Depends(get_current_user)):
+        """
+        Dev-only endpoint to debug authentication resolution.
+        Strictly limited to localhost AND development/test environments.
+        """
+        app_env = os.getenv("APP_ENV", "development")
 
+        # Enforce localhost check regardless of environment setting
+        is_local = request.client.host in ("127.0.0.1", "::1", "localhost") if request.client else False
+        if not is_local:
+            raise HTTPException(status_code=403, detail="Forbidden: Localhost only")
 
-@app.post("/dev/run-midday")
-async def dev_run_midday(
-    request: Request,
-    body: Optional[Dict[str, bool]] = Body(None),
-    user_id: str = Depends(get_current_user),
-    supabase: Client = Depends(get_supabase_user_client)
-):
-    """
-    Dev-only endpoint to force run the midday cycle inline.
-    Bypasses Redis/RQ.
-    """
-    # 1. Guardrails
-    app_env = os.getenv("APP_ENV", "production")
-    dev_bypass = os.getenv("ENABLE_DEV_AUTH_BYPASS") == "1"
+        return {
+            "app_env": app_env,
+            "enable_dev_auth_bypass": os.getenv("ENABLE_DEV_AUTH_BYPASS"),
+            "has_authorization_header": "Authorization" in request.headers,
+            "has_x_test_mode_user": "X-Test-Mode-User" in request.headers,
+            "resolved_user_id": user_id,
+            "is_localhost": is_local
+        }
 
-    if app_env not in ["development", "test"] and not dev_bypass:
-        raise HTTPException(status_code=403, detail="Dev mode only")
-
-    is_local = request.client.host in ("127.0.0.1", "::1", "localhost") if request.client else False
-    if not is_local:
-        raise HTTPException(status_code=403, detail="Localhost only")
-
-    print(f"🔧 DEV run_midday_cycle invoked for user {user_id}")
-
-    # 2. Run Cycle Inline
-    try:
-        if not supabase:
-            raise HTTPException(status_code=503, detail="Database not available")
-
-        await run_midday_cycle(supabase, user_id)
-    except Exception as e:
-        print(f"❌ DEV Midday Cycle Failed: {e}")
-        if app_env != "production":
-            traceback.print_exc()
-        # 🛡️ Sentinel: Mask error details in non-dev environment even if we shouldn't be here
-        detail = f"Cycle failed: {str(e)}" if app_env in ["development", "test"] else "Cycle failed"
-        raise HTTPException(status_code=500, detail=detail)
-
-    return {"status": "ok", "note": "midday cycle executed inline"}
-
-
-@app.post("/dev/run-all")
-async def dev_run_all(
-    request: Request,
-    user_id: str = Depends(get_current_user),
-    x_test_mode_user: Optional[str] = Header(None, alias="X-Test-Mode-User")
-):
-    """
-    Dev-only endpoint to force run morning, midday, and weekly cycles inline.
-    Bypasses Redis/RQ. Requires ENABLE_DEV_AUTH_BYPASS=1.
-    Strictly restricted to localhost.
-    Accepts valid auth token OR X-Test-Mode-User header.
-    """
-    # 1. Enforce Dev Mode
-    if os.getenv("ENABLE_DEV_AUTH_BYPASS") != "1":
-        raise HTTPException(status_code=403, detail="Dev mode only")
-
-    # 2. Enforce Localhost
-    is_local = request.client.host in ("127.0.0.1", "::1", "localhost") if request.client else False
-    if not is_local:
-        raise HTTPException(status_code=403, detail="Forbidden: Localhost only")
-
-    # Resolve effective user_id
-    effective_user_id = user_id or x_test_mode_user
-    if not effective_user_id:
-        raise HTTPException(status_code=401, detail="Authentication required (Token or X-Test-Mode-User)")
-
-    print(f"🔧 DEV: Manually triggering ALL workflows for {effective_user_id}")
-
-    try:
-        # Run sequentially
-        print(">>> Starting Morning Cycle...")
-        await run_morning_cycle(supabase_admin, effective_user_id)
-
-        print(">>> Starting Midday Cycle...")
-        await run_midday_cycle(supabase_admin, effective_user_id)
-
-        print(">>> Starting Weekly Report...")
-        await run_weekly_report(supabase_admin, effective_user_id)
-
-    except Exception as e:
-        print(f"❌ DEV Run-All Failed: {e}")
+    @app.post("/dev/run-midday")
+    async def dev_run_midday(
+        request: Request,
+        body: Optional[Dict[str, bool]] = Body(None),
+        user_id: str = Depends(get_current_user),
+        supabase: Client = Depends(get_supabase_user_client)
+    ):
+        """
+        Dev-only endpoint to force run the midday cycle inline.
+        Bypasses Redis/RQ. Requires localhost.
+        """
         app_env = os.getenv("APP_ENV", "production")
-        if app_env != "production":
-            traceback.print_exc()
-        # 🛡️ Sentinel: Mask error details in production
-        detail = f"Cycle failed: {str(e)}" if app_env in ["development", "test"] else "Cycle failed"
-        raise HTTPException(status_code=500, detail=detail)
 
-    return {"status": "ok", "message": "All workflows executed inline"}
+        is_local = request.client.host in ("127.0.0.1", "::1", "localhost") if request.client else False
+        if not is_local:
+            raise HTTPException(status_code=403, detail="Localhost only")
+
+        print(f"🔧 DEV run_midday_cycle invoked for user {user_id}")
+
+        try:
+            if not supabase:
+                raise HTTPException(status_code=503, detail="Database not available")
+
+            await run_midday_cycle(supabase, user_id)
+        except Exception as e:
+            print(f"❌ DEV Midday Cycle Failed: {e}")
+            if app_env != "production":
+                traceback.print_exc()
+            detail = f"Cycle failed: {str(e)}" if app_env in ["development", "test"] else "Cycle failed"
+            raise HTTPException(status_code=500, detail=detail)
+
+        return {"status": "ok", "note": "midday cycle executed inline"}
+
+    @app.post("/dev/run-all")
+    async def dev_run_all(
+        request: Request,
+        user_id: str = Depends(get_current_user),
+        x_test_mode_user: Optional[str] = Header(None, alias="X-Test-Mode-User")
+    ):
+        """
+        Dev-only endpoint to force run morning, midday, and weekly cycles inline.
+        Bypasses Redis/RQ. Requires localhost.
+        Accepts valid auth token OR X-Test-Mode-User header.
+        """
+        is_local = request.client.host in ("127.0.0.1", "::1", "localhost") if request.client else False
+        if not is_local:
+            raise HTTPException(status_code=403, detail="Forbidden: Localhost only")
+
+        effective_user_id = user_id or x_test_mode_user
+        if not effective_user_id:
+            raise HTTPException(status_code=401, detail="Authentication required (Token or X-Test-Mode-User)")
+
+        print(f"🔧 DEV: Manually triggering ALL workflows for {effective_user_id}")
+
+        try:
+            print(">>> Starting Morning Cycle...")
+            await run_morning_cycle(supabase_admin, effective_user_id)
+
+            print(">>> Starting Midday Cycle...")
+            await run_midday_cycle(supabase_admin, effective_user_id)
+
+            print(">>> Starting Weekly Report...")
+            await run_weekly_report(supabase_admin, effective_user_id)
+
+        except Exception as e:
+            print(f"❌ DEV Run-All Failed: {e}")
+            app_env = os.getenv("APP_ENV", "production")
+            if app_env != "production":
+                traceback.print_exc()
+            detail = f"Cycle failed: {str(e)}" if app_env in ["development", "test"] else "Cycle failed"
+            raise HTTPException(status_code=500, detail=detail)
+
+        return {"status": "ok", "message": "All workflows executed inline"}
+
+else:
+    print("🔒 Debug routes DISABLED (production mode)")
 
 
 # Initialize Limiter

@@ -6,7 +6,19 @@ from datetime import datetime
 
 from packages.quantum.jobs.rq_enqueue import enqueue_idempotent
 from packages.quantum.jobs.job_runs import JobRunStore
-from packages.quantum.security.cron_auth import verify_cron_secret
+from packages.quantum.security.task_signing_v4 import verify_task_signature, TaskSignatureResult
+from packages.quantum.public_tasks_models import (
+    UniverseSyncPayload,
+    MorningBriefPayload,
+    MiddayScanPayload,
+    WeeklyReportPayload,
+    ValidationEvalPayload,
+    SuggestionsClosePayload,
+    SuggestionsOpenPayload,
+    LearningIngestPayload,
+    StrategyAutotunePayload,
+    DEFAULT_STRATEGY_NAME,
+)
 
 router = APIRouter(
     prefix="/tasks",
@@ -42,10 +54,13 @@ def enqueue_job_run(job_name: str, idempotency_key: str, payload: Dict[str, Any]
 
 @router.post("/universe/sync", status_code=202)
 async def task_universe_sync(
-    authorized: bool = Depends(verify_cron_secret)
+    payload: UniverseSyncPayload = Body(default_factory=UniverseSyncPayload),
+    auth: TaskSignatureResult = Depends(verify_task_signature("tasks:universe_sync"))
 ):
     """
     Triggers the universe sync job via JobRun system.
+
+    Auth: Requires v4 HMAC signature with scope 'tasks:universe_sync'.
     """
     today = datetime.now().strftime("%Y-%m-%d")
     job_name = "universe_sync"
@@ -58,10 +73,13 @@ async def task_universe_sync(
 
 @router.post("/morning-brief", status_code=202)
 async def task_morning_brief(
-    authorized: bool = Depends(verify_cron_secret)
+    payload: MorningBriefPayload = Body(default_factory=MorningBriefPayload),
+    auth: TaskSignatureResult = Depends(verify_task_signature("tasks:morning_brief"))
 ):
     """
     Triggers morning brief job.
+
+    Auth: Requires v4 HMAC signature with scope 'tasks:morning_brief'.
     """
     today = datetime.now().strftime("%Y-%m-%d")
     job_name = "morning_brief"
@@ -74,10 +92,13 @@ async def task_morning_brief(
 
 @router.post("/midday-scan", status_code=202)
 async def task_midday_scan(
-    authorized: bool = Depends(verify_cron_secret)
+    payload: MiddayScanPayload = Body(default_factory=MiddayScanPayload),
+    auth: TaskSignatureResult = Depends(verify_task_signature("tasks:midday_scan"))
 ):
     """
     Triggers midday scan job.
+
+    Auth: Requires v4 HMAC signature with scope 'tasks:midday_scan'.
     """
     today = datetime.now().strftime("%Y-%m-%d")
     job_name = "midday_scan"
@@ -90,10 +111,13 @@ async def task_midday_scan(
 
 @router.post("/weekly-report", status_code=202)
 async def task_weekly_report(
-    authorized: bool = Depends(verify_cron_secret)
+    payload: WeeklyReportPayload = Body(default_factory=WeeklyReportPayload),
+    auth: TaskSignatureResult = Depends(verify_task_signature("tasks:weekly_report"))
 ):
     """
     Triggers weekly report job.
+
+    Auth: Requires v4 HMAC signature with scope 'tasks:weekly_report'.
     """
     # Weekly bucket
     week = datetime.now().strftime("%Y-W%V")
@@ -107,23 +131,28 @@ async def task_weekly_report(
 
 @router.post("/validation/eval", status_code=202)
 async def task_validation_eval(
-    payload: Optional[Dict[str, Any]] = Body(None),
-    authorized: bool = Depends(verify_cron_secret)
+    payload: ValidationEvalPayload = Body(default_factory=ValidationEvalPayload),
+    auth: TaskSignatureResult = Depends(verify_task_signature("tasks:validation_eval"))
 ):
     """
     Triggers go-live validation evaluation (Paper/Historical).
-    Payload can specify mode='paper' and optional user_id.
+
+    Auth: Requires v4 HMAC signature with scope 'tasks:validation_eval'.
+
+    Payload:
+    - mode: 'paper' or 'historical' (default: 'paper')
+    - user_id: Optional user UUID to run for specific user
     """
     # Generate idempotency key based on date + params
     today = datetime.now().strftime("%Y-%m-%d")
-    mode = payload.get("mode", "paper") if payload else "paper"
-    user_id = payload.get("user_id", "all") if payload else "all"
+    mode = payload.mode
+    user_id = payload.user_id or "all"
 
     key = f"{today}-{mode}-{user_id}"
     job_name = "validation_eval"
 
     # Pass input payload to job
-    job_payload = payload or {"mode": "paper"}
+    job_payload = payload.model_dump()
 
     return enqueue_job_run(
         job_name=job_name,
@@ -136,16 +165,16 @@ async def task_validation_eval(
 # Suggestion Generation Tasks (8 AM / 11 AM Chicago)
 # =============================================================================
 
-DEFAULT_STRATEGY_NAME = "spy_opt_autolearn_v6"
-
 
 @router.post("/suggestions/close", status_code=202)
 async def task_suggestions_close(
-    payload: Optional[Dict[str, Any]] = Body(None),
-    authorized: bool = Depends(verify_cron_secret)
+    payload: SuggestionsClosePayload = Body(default_factory=SuggestionsClosePayload),
+    auth: TaskSignatureResult = Depends(verify_task_signature("tasks:suggestions_close"))
 ):
     """
     8:00 AM Chicago - Generate CLOSE/manage existing positions suggestions.
+
+    Auth: Requires v4 HMAC signature with scope 'tasks:suggestions_close'.
 
     This task:
     1. Ensures holdings are up to date (syncs Plaid if connected)
@@ -164,9 +193,9 @@ async def task_suggestions_close(
     job_payload = {
         "date": today,
         "type": "close",
-        "strategy_name": (payload or {}).get("strategy_name", DEFAULT_STRATEGY_NAME),
-        "user_id": (payload or {}).get("user_id"),
-        "skip_sync": (payload or {}).get("skip_sync", False),
+        "strategy_name": payload.strategy_name,
+        "user_id": payload.user_id,
+        "skip_sync": payload.skip_sync,
     }
 
     return enqueue_job_run(
@@ -178,11 +207,13 @@ async def task_suggestions_close(
 
 @router.post("/suggestions/open", status_code=202)
 async def task_suggestions_open(
-    payload: Optional[Dict[str, Any]] = Body(None),
-    authorized: bool = Depends(verify_cron_secret)
+    payload: SuggestionsOpenPayload = Body(default_factory=SuggestionsOpenPayload),
+    auth: TaskSignatureResult = Depends(verify_task_signature("tasks:suggestions_open"))
 ):
     """
     11:00 AM Chicago - Generate OPEN/new positions suggestions.
+
+    Auth: Requires v4 HMAC signature with scope 'tasks:suggestions_open'.
 
     This task:
     1. Ensures holdings are up to date (syncs Plaid if connected)
@@ -201,9 +232,9 @@ async def task_suggestions_open(
     job_payload = {
         "date": today,
         "type": "open",
-        "strategy_name": (payload or {}).get("strategy_name", DEFAULT_STRATEGY_NAME),
-        "user_id": (payload or {}).get("user_id"),
-        "skip_sync": (payload or {}).get("skip_sync", False),
+        "strategy_name": payload.strategy_name,
+        "user_id": payload.user_id,
+        "skip_sync": payload.skip_sync,
     }
 
     return enqueue_job_run(
@@ -215,11 +246,13 @@ async def task_suggestions_open(
 
 @router.post("/learning/ingest", status_code=202)
 async def task_learning_ingest(
-    payload: Optional[Dict[str, Any]] = Body(None),
-    authorized: bool = Depends(verify_cron_secret)
+    payload: LearningIngestPayload = Body(default_factory=LearningIngestPayload),
+    auth: TaskSignatureResult = Depends(verify_task_signature("tasks:learning_ingest"))
 ):
     """
     Daily outcome ingestion - Maps executed trades to suggestions for learning.
+
+    Auth: Requires v4 HMAC signature with scope 'tasks:learning_ingest'.
 
     This task:
     1. Reads Plaid investment transactions since last run
@@ -236,8 +269,8 @@ async def task_learning_ingest(
 
     job_payload = {
         "date": today,
-        "user_id": (payload or {}).get("user_id"),
-        "lookback_days": (payload or {}).get("lookback_days", 7),
+        "user_id": payload.user_id,
+        "lookback_days": payload.lookback_days,
     }
 
     return enqueue_job_run(
@@ -249,11 +282,13 @@ async def task_learning_ingest(
 
 @router.post("/strategy/autotune", status_code=202)
 async def task_strategy_autotune(
-    payload: Optional[Dict[str, Any]] = Body(None),
-    authorized: bool = Depends(verify_cron_secret)
+    payload: StrategyAutotunePayload = Body(default_factory=StrategyAutotunePayload),
+    auth: TaskSignatureResult = Depends(verify_task_signature("tasks:strategy_autotune"))
 ):
     """
     Weekly strategy auto-tuning based on live outcomes.
+
+    Auth: Requires v4 HMAC signature with scope 'tasks:strategy_autotune'.
 
     This task:
     1. Reads learning_feedback_loops for past 30 days
@@ -271,9 +306,9 @@ async def task_strategy_autotune(
 
     job_payload = {
         "week": week,
-        "user_id": (payload or {}).get("user_id"),
-        "strategy_name": (payload or {}).get("strategy_name", DEFAULT_STRATEGY_NAME),
-        "min_samples": (payload or {}).get("min_samples", 10),
+        "user_id": payload.user_id,
+        "strategy_name": payload.strategy_name,
+        "min_samples": payload.min_samples,
     }
 
     return enqueue_job_run(

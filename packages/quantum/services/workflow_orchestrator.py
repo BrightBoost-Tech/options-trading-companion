@@ -36,6 +36,10 @@ from packages.quantum.nested_logging import log_decision, log_inference
 from packages.quantum.observability.telemetry import TradeContext, compute_features_hash, emit_trade_event
 import uuid
 
+# v4 Observability: Lineage Signing & Audit Logging
+from packages.quantum.observability.lineage import LineageSigner, get_code_sha
+from packages.quantum.observability.audit_log_service import AuditLogService, build_attribution_from_lineage
+
 # Constants for table names
 TRADE_SUGGESTIONS_TABLE = "trade_suggestions"
 WEEKLY_REPORTS_TABLE = "weekly_trade_reports"
@@ -533,6 +537,16 @@ async def run_morning_cycle(supabase: Client, user_id: str):
             )
             ctx.features_hash = compute_features_hash(features_for_hash)
 
+            # v4: Build lineage for exit suggestion
+            exit_lineage = DecisionLineageBuilder()
+            exit_lineage.set_strategy(strategy_name)
+            exit_lineage.add_constraint("exit_mode", exit_mode)
+            exit_lineage.add_constraint("target_price", final_limit_price)
+            if is_over_budget:
+                exit_lineage.add_constraint("risk_budget_status", "violated")
+            exit_lineage_dict = exit_lineage.build()
+            exit_sig_result = LineageSigner.sign(exit_lineage_dict)
+
             order_json = {
                 "side": "close_spread",
                 "limit_price": round(final_limit_price, 2),
@@ -597,21 +611,31 @@ async def run_morning_cycle(supabase: Client, user_id: str):
                 "model_version": ctx.model_version,
                 "features_hash": ctx.features_hash,
                 "regime": ctx.regime,
-                "legs_fingerprint": fingerprint
+                "legs_fingerprint": fingerprint,
+                # v4 Observability Fields
+                "decision_lineage": exit_lineage_dict,
+                "lineage_hash": exit_sig_result.hash,
+                "lineage_sig": exit_sig_result.signature,
+                "lineage_version": exit_sig_result.version,
+                "code_sha": get_code_sha(),
+                "data_hash": ctx.features_hash
+            }
+            # Store v4 context for post-insert event emission
+            suggestion["_v4_ctx"] = ctx
+            suggestion["_v4_lineage"] = exit_lineage_dict
+            suggestion["_v4_budget_info"] = {
+                "remaining": remaining_global,
+                "usage_pct": budget_usage_pct,
+                "status": "violated" if is_over_budget else "ok"
+            }
+            suggestion["_v4_props"] = {
+                "ev": metrics.expected_value,
+                "ticker": spread.ticker,
+                "probability_of_profit": metrics.prob_of_profit
             }
             suggestions.append(suggestion)
 
-            emit_trade_event(
-                analytics_service,
-                user_id,
-                ctx,
-                "suggestion_generated",
-                properties={
-                    "ev": metrics.expected_value,
-                    "ticker": spread.ticker,
-                    "probability_of_profit": metrics.prob_of_profit
-                }
-            )
+            # Note: emit_trade_event moved to post-insert to ensure suggestion_id exists first (v4 ordering)
 
             # Log Decision
             if ctx.trace_id:
@@ -702,13 +726,97 @@ async def run_morning_cycle(supabase: Client, user_id: str):
                     inserts += 1
                 upserts.append(s)
 
+            # Clean v4 internal fields before upsert
+            clean_upserts = []
+            for u in upserts:
+                clean_u = {k: v for k, v in u.items() if not k.startswith("_v4_")}
+                clean_upserts.append(clean_u)
+
             supabase.table(TRADE_SUGGESTIONS_TABLE).upsert(
-                upserts,
+                clean_upserts,
                 on_conflict="user_id,window,cycle_date,ticker,strategy,legs_fingerprint"
             ).execute()
             print(f"Upserted morning suggestions: {inserts} inserted, {updates} updated.")
         except Exception as e:
             print(f"Error inserting morning suggestions: {e}")
+
+        # === v4 OBSERVABILITY: Post-insert event emission ===
+        try:
+            audit_service = AuditLogService(supabase)
+
+            # Fetch suggestions by trace_id to get their database IDs
+            trace_ids = [s.get("trace_id") for s in suggestions if s.get("trace_id")]
+            if trace_ids:
+                fetched_res = supabase.table(TRADE_SUGGESTIONS_TABLE) \
+                    .select("id,trace_id") \
+                    .in_("trace_id", trace_ids) \
+                    .execute()
+
+                # Map trace_id -> suggestion_id
+                trace_to_id = {r["trace_id"]: r["id"] for r in (fetched_res.data or [])}
+
+                for s in suggestions:
+                    trace_id = s.get("trace_id")
+                    suggestion_id = trace_to_id.get(trace_id)
+
+                    if not suggestion_id:
+                        continue
+
+                    # Get stored v4 context
+                    ctx = s.get("_v4_ctx")
+                    lineage_dict = s.get("_v4_lineage", {})
+                    budget_info = s.get("_v4_budget_info", {})
+                    props = s.get("_v4_props", {})
+
+                    if ctx:
+                        # Set suggestion_id on context
+                        ctx.suggestion_id = suggestion_id
+
+                        # Emit analytics event (now with valid suggestion_id)
+                        emit_trade_event(
+                            analytics_service,
+                            user_id,
+                            ctx,
+                            "suggestion_generated",
+                            properties=props
+                        )
+
+                    # Write audit event
+                    audit_payload = {
+                        "lineage": lineage_dict,
+                        "ticker": s.get("ticker"),
+                        "strategy": s.get("strategy"),
+                        "ev": s.get("ev"),
+                        "window": s.get("window")
+                    }
+                    audit_service.log_audit_event(
+                        user_id=user_id,
+                        trace_id=trace_id,
+                        suggestion_id=suggestion_id,
+                        event_name="suggestion_generated",
+                        payload=audit_payload,
+                        strategy=s.get("strategy"),
+                        regime=s.get("regime")
+                    )
+
+                    # Write XAI attribution
+                    attribution = build_attribution_from_lineage(
+                        lineage=lineage_dict,
+                        ctx_regime=s.get("regime"),
+                        sym_regime=s.get("sizing_metadata", {}).get("context", {}).get("regime_v3_symbol"),
+                        global_regime=global_snap.state.value if global_snap else None,
+                        budget_info=budget_info
+                    )
+                    audit_service.write_attribution(
+                        suggestion_id=suggestion_id,
+                        trace_id=trace_id,
+                        **attribution
+                    )
+
+                print(f"[v4] Emitted events and wrote audit/attribution for {len(trace_to_id)} morning suggestions")
+
+        except Exception as e:
+            print(f"[v4] Error in morning post-insert observability: {e}")
 
         # 5. Log suggestions
         try:
@@ -1260,6 +1368,10 @@ async def run_midday_cycle(supabase: Client, user_id: str):
                 print(f"[Midday] Final Gate: Rejecting {ticker} {strategy} due to policy.")
                 continue
 
+            # v4: Build and sign lineage
+            lineage_dict = lineage.build()
+            sig_result = LineageSigner.sign(lineage_dict)
+
             suggestion = {
                 "user_id": user_id,
                 "created_at": datetime.now(timezone.utc).isoformat(),
@@ -1270,7 +1382,7 @@ async def run_midday_cycle(supabase: Client, user_id: str):
                 "direction": "long",
                 "order_json": order_json,
                 "sizing_metadata": sizing,
-                "decision_lineage": lineage.build(),
+                "decision_lineage": lineage_dict,
                 "status": "pending",
                 "source": "scanner",
                 "ev": ev,
@@ -1280,7 +1392,13 @@ async def run_midday_cycle(supabase: Client, user_id: str):
                 "model_version": ctx.model_version,
                 "features_hash": ctx.features_hash,
                 "regime": ctx.regime,
-                "legs_fingerprint": fingerprint
+                "legs_fingerprint": fingerprint,
+                # v4 Observability Fields
+                "lineage_hash": sig_result.hash,
+                "lineage_sig": sig_result.signature,
+                "lineage_version": sig_result.version,
+                "code_sha": get_code_sha(),
+                "data_hash": ctx.features_hash  # For now, same as features_hash
             }
 
             # --- AGENT FIELDS ---
@@ -1289,19 +1407,18 @@ async def run_midday_cycle(supabase: Client, user_id: str):
             if "agent_summary" in cand:
                 suggestion["agent_summary"] = cand["agent_summary"]
 
+            # Store v4 context for post-insert event emission
+            suggestion["_v4_ctx"] = ctx
+            suggestion["_v4_lineage"] = lineage_dict
+            suggestion["_v4_budget_info"] = {
+                "remaining": remaining_global,
+                "usage_pct": (usage_global / max_global * 100) if max_global > 0 else 0,
+                "status": "ok" if remaining_global > 0 else "violated"
+            }
+
             suggestions.append(suggestion)
 
-            props = {"ev": ev, "score": cand.get("score")}
-            if pop is not None:
-                props["probability_of_profit"] = pop
-
-            emit_trade_event(
-                analytics_service,
-                user_id,
-                ctx,
-                "suggestion_generated",
-                properties=props
-            )
+            # Note: emit_trade_event moved to post-insert to ensure suggestion_id exists first (v4 ordering)
 
             # Log Decision
             if ctx.trace_id:
@@ -1361,8 +1478,8 @@ async def run_midday_cycle(supabase: Client, user_id: str):
                     s["status"] = "pending"
                     inserts += 1
 
-                # Clean internal fields
-                clean_s = {k: v for k, v in s.items() if k != 'internal_cand'}
+                # Clean internal fields (including v4 context stored for post-insert processing)
+                clean_s = {k: v for k, v in s.items() if k != 'internal_cand' and not k.startswith('_v4_')}
                 upserts.append(clean_s)
 
             # Try to upsert with agent fields
@@ -1395,6 +1512,89 @@ async def run_midday_cycle(supabase: Client, user_id: str):
 
         except Exception as e:
             print(f"Error inserting midday suggestions: {e}")
+
+        # === v4 OBSERVABILITY: Post-insert event emission ===
+        # Query for inserted suggestions to get their IDs, then emit events
+        try:
+            audit_service = AuditLogService(supabase)
+
+            # Fetch suggestions by trace_id to get their database IDs
+            trace_ids = [s.get("trace_id") for s in suggestions if s.get("trace_id")]
+            if trace_ids:
+                fetched_res = supabase.table(TRADE_SUGGESTIONS_TABLE) \
+                    .select("id,trace_id") \
+                    .in_("trace_id", trace_ids) \
+                    .execute()
+
+                # Map trace_id -> suggestion_id
+                trace_to_id = {r["trace_id"]: r["id"] for r in (fetched_res.data or [])}
+
+                for s in suggestions:
+                    trace_id = s.get("trace_id")
+                    suggestion_id = trace_to_id.get(trace_id)
+
+                    if not suggestion_id:
+                        continue
+
+                    # Get stored v4 context
+                    ctx = s.get("_v4_ctx")
+                    lineage_dict = s.get("_v4_lineage", {})
+                    budget_info = s.get("_v4_budget_info", {})
+
+                    if ctx:
+                        # Set suggestion_id on context
+                        ctx.suggestion_id = suggestion_id
+
+                        # Emit analytics event (now with valid suggestion_id)
+                        cand = s.get("internal_cand", {})
+                        props = {"ev": s.get("ev"), "score": cand.get("score")}
+                        if s.get("probability_of_profit") is not None:
+                            props["probability_of_profit"] = s.get("probability_of_profit")
+
+                        emit_trade_event(
+                            analytics_service,
+                            user_id,
+                            ctx,
+                            "suggestion_generated",
+                            properties=props
+                        )
+
+                    # Write audit event
+                    audit_payload = {
+                        "lineage": lineage_dict,
+                        "ticker": s.get("ticker"),
+                        "strategy": s.get("strategy"),
+                        "ev": s.get("ev"),
+                        "window": s.get("window")
+                    }
+                    audit_service.log_audit_event(
+                        user_id=user_id,
+                        trace_id=trace_id,
+                        suggestion_id=suggestion_id,
+                        event_name="suggestion_generated",
+                        payload=audit_payload,
+                        strategy=s.get("strategy"),
+                        regime=s.get("regime")
+                    )
+
+                    # Write XAI attribution
+                    attribution = build_attribution_from_lineage(
+                        lineage=lineage_dict,
+                        ctx_regime=s.get("regime"),
+                        sym_regime=s.get("sizing_metadata", {}).get("context", {}).get("regime_v3_symbol"),
+                        global_regime=global_snap.state.value if global_snap else None,
+                        budget_info=budget_info
+                    )
+                    audit_service.write_attribution(
+                        suggestion_id=suggestion_id,
+                        trace_id=trace_id,
+                        **attribution
+                    )
+
+                print(f"[v4] Emitted events and wrote audit/attribution for {len(trace_to_id)} suggestions")
+
+        except Exception as e:
+            print(f"[v4] Error in post-insert observability: {e}")
 
         try:
             logs = []

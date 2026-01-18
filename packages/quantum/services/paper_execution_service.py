@@ -6,6 +6,8 @@ from supabase import Client
 from packages.quantum.models import TradeTicket
 from packages.quantum.services.transaction_cost_model import TransactionCostModel, CostModelConfig
 from packages.quantum.observability.telemetry import TradeContext, emit_trade_event
+from packages.quantum.observability.audit_log_service import AuditLogService
+from packages.quantum.observability.lineage import sign_payload
 
 class PaperExecutionService:
     def __init__(self, supabase: Client):
@@ -53,8 +55,9 @@ class PaperExecutionService:
             raise Exception("Failed to stage order")
 
         order = res.data[0]
+        order_id = order.get("id")
 
-        # Telemetry
+        # Telemetry context
         ctx = TradeContext(
             trace_id=trace_id,
             suggestion_id=suggestion_id,
@@ -64,7 +67,33 @@ class PaperExecutionService:
             features_hash=features_hash,
             window="paper"
         )
-        # Emit order_staged (handled by analytics service if we pass it, or just return ctx)
+
+        # v4: Emit order_staged event after insert (now that order_id exists)
+        # Note: analytics_service is optional, passed to process_order
+        # For stage_order, we write audit log directly
+
+        try:
+            audit_service = AuditLogService(self.supabase)
+            audit_payload = {
+                "paper_order_id": order_id,
+                "suggestion_id": suggestion_id,
+                "trace_id": trace_id,
+                "portfolio_id": portfolio_id,
+                "order_json": ticket.model_dump(mode="json"),
+                "event": "order_staged"
+            }
+            audit_service.log_audit_event(
+                user_id=user_id,
+                trace_id=trace_id,
+                suggestion_id=suggestion_id,
+                event_name="order_staged",
+                payload=audit_payload,
+                strategy=strategy,
+                regime=regime
+            )
+        except Exception as e:
+            print(f"[PaperExec] Failed to write order_staged audit: {e}")
+
         return order, ctx
 
     def process_order(self, order_id: str, user_id: str, analytics_service=None) -> Dict:
@@ -121,11 +150,59 @@ class PaperExecutionService:
         if sim_result.status == "filled":
             self._update_holdings(order["portfolio_id"], ticket_data, sim_result, side)
 
-        # 5. Telemetry
-        if analytics_service:
-            # Reconstruct context (expensive? or pass through?)
-            # Just minimal event
-            pass
+        # 5. v4 Telemetry: Emit order_filled or order_rejected
+        trace_id = order.get("trace_id")
+        suggestion_id = order.get("suggestion_id")
+
+        event_name = "order_filled" if sim_result.status == "filled" else "order_rejected"
+
+        # Emit analytics event if service provided
+        if analytics_service and trace_id:
+            ctx = TradeContext(
+                trace_id=trace_id,
+                suggestion_id=suggestion_id,
+                model_version="v4",
+                window="paper"
+            )
+            emit_trade_event(
+                analytics_service,
+                user_id,
+                ctx,
+                event_name,
+                is_paper=True,
+                properties={
+                    "paper_order_id": order_id,
+                    "fill_status": sim_result.status,
+                    "fill_price": sim_result.fill_price,
+                    "filled_quantity": sim_result.filled_quantity,
+                    "commission": sim_result.commission_paid,
+                    "slippage": sim_result.slippage_paid
+                }
+            )
+
+        # Write audit log
+        try:
+            audit_service = AuditLogService(self.supabase)
+            audit_payload = {
+                "paper_order_id": order_id,
+                "suggestion_id": suggestion_id,
+                "trace_id": trace_id,
+                "fill_status": sim_result.status,
+                "fill_price": sim_result.fill_price,
+                "filled_quantity": sim_result.filled_quantity,
+                "commission": sim_result.commission_paid,
+                "slippage": sim_result.slippage_paid,
+                "event": event_name
+            }
+            audit_service.log_audit_event(
+                user_id=user_id,
+                trace_id=trace_id,
+                suggestion_id=suggestion_id,
+                event_name=event_name,
+                payload=audit_payload
+            )
+        except Exception as e:
+            print(f"[PaperExec] Failed to write {event_name} audit: {e}")
 
         return {**order, **update_payload}
 

@@ -6,6 +6,7 @@ import { Suggestion, InboxResponse, InboxMeta } from '@/lib/types';
 import SuggestionCard from './SuggestionCard';
 import { Card, CardContent } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
+import { Checkbox } from '@/components/ui/checkbox';
 import { Loader2, RefreshCw, ChevronDown, ChevronUp, AlertCircle, CheckCircle2, Wand2 } from 'lucide-react';
 import { useToast } from '@/components/ui/use-toast';
 import { QuantumTooltip } from '@/components/ui/QuantumTooltip';
@@ -323,11 +324,11 @@ export default function TradeInbox() {
                     <div className="transform transition-all duration-300 hover:scale-[1.01]">
                         <div className="flex gap-3">
                             <div className="pt-8">
-                                <input
-                                    type="checkbox"
+                                <Checkbox
                                     checked={selectedIds.has(hero.id)}
                                     onChange={() => handleToggleSelect(hero)}
-                                    className="w-4 h-4 rounded border-gray-300 text-purple-600 focus:ring-purple-500 cursor-pointer"
+                                    className="checked:bg-purple-600 checked:border-purple-600"
+                                    aria-label={`Select ${displaySymbol(hero)} for batch action`}
                                 />
                             </div>
                             <div className="flex-1">
@@ -376,11 +377,11 @@ export default function TradeInbox() {
                              {visibleQueue.map(item => (
                                  <div key={item.id} className="flex gap-3">
                                      <div className="pt-8">
-                                        <input
-                                            type="checkbox"
+                                        <Checkbox
                                             checked={selectedIds.has(item.id)}
                                             onChange={() => handleToggleSelect(item)}
-                                            className="w-4 h-4 rounded border-gray-300 text-purple-600 focus:ring-purple-500 cursor-pointer"
+                                            className="checked:bg-purple-600 checked:border-purple-600"
+                                            aria-label={`Select ${displaySymbol(item)} for batch action`}
                                         />
                                      </div>
                                      <div className="flex-1">

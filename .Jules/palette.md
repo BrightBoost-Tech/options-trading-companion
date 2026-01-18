@@ -21,3 +21,7 @@
 ## 2024-05-22 - [Copy Symbol Pattern]
 **Learning:** Users often need to copy symbols to external tools (trading platforms, research sites). A hidden-on-hover copy action reduces noise while keeping the utility accessible.
 **Action:** When displaying financial identifiers (Tickers, ISINs, Contract IDs), wrap them in a group that reveals a copy action on hover, and confirm with a toast.
+
+## 2025-05-29 - [Inconsistent Focus Indicators]
+**Learning:** Mixing raw HTML inputs with design system components creates a jarring experience for keyboard users because focus rings differ (browser default vs. custom ring).
+**Action:** Audit forms for raw `<input>` tags and replace them with design system components to ensure uniform `focus-visible` styles.

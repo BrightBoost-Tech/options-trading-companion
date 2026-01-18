@@ -145,14 +145,24 @@ class TestSignature:
             assert result.version == LINEAGE_VERSION
 
     def test_sign_without_secret_returns_unverified(self):
-        """Sign without secret in non-prod should use dev secret."""
+        """Wave 1.1: Sign without secret in non-prod requires ALLOW_DEV_SIGNING=true."""
         data = {"test": "data"}
 
-        with patch.dict("os.environ", {"OBSERVABILITY_HMAC_SECRET": "", "APP_ENV": "development"}):
+        # Without ALLOW_DEV_SIGNING, should return UNVERIFIED
+        with patch.dict("os.environ", {"OBSERVABILITY_HMAC_SECRET": "", "APP_ENV": "development", "ALLOW_DEV_SIGNING": ""}):
             from packages.quantum.observability import lineage
             result = lineage.LineageSigner.sign(data)
 
-            # In dev, uses dev secret so should be SIGNED
+            # Wave 1.1: Without explicit ALLOW_DEV_SIGNING, should be UNVERIFIED
+            assert result.status == "UNVERIFIED"
+            assert result.signature == ""
+
+        # With ALLOW_DEV_SIGNING=true, should work
+        with patch.dict("os.environ", {"OBSERVABILITY_HMAC_SECRET": "", "APP_ENV": "development", "ALLOW_DEV_SIGNING": "true"}):
+            from packages.quantum.observability import lineage
+            result = lineage.LineageSigner.sign(data)
+
+            # With explicit flag, should be SIGNED
             assert result.status == "SIGNED"
             assert result.signature  # Should have a signature
 
@@ -437,3 +447,276 @@ class TestIntegrationPatterns:
             )
             assert is_valid is False
             assert status == "TAMPERED"
+
+
+# =============================================================================
+# Wave 1.1 Tests: Runtime Secret Read
+# =============================================================================
+
+class TestWave11RuntimeSecretRead:
+    """Wave 1.1: Test that secrets are read at runtime, not import time."""
+
+    def test_secret_changes_are_picked_up_at_runtime(self):
+        """Changing OBSERVABILITY_HMAC_SECRET should affect subsequent sign() calls."""
+        data = {"test": "data"}
+
+        # Sign with first secret
+        with patch.dict("os.environ", {"OBSERVABILITY_HMAC_SECRET": "secret-one-32-chars-minimum-here"}):
+            from packages.quantum.observability import lineage as lineage_module
+            result1 = lineage_module.LineageSigner.sign(data)
+
+        # Sign with different secret
+        with patch.dict("os.environ", {"OBSERVABILITY_HMAC_SECRET": "secret-two-32-chars-minimum-here"}):
+            from packages.quantum.observability import lineage as lineage_module
+            result2 = lineage_module.LineageSigner.sign(data)
+
+        # Same data, different secrets = different signatures
+        assert result1.hash == result2.hash  # Hash is deterministic from data
+        assert result1.signature != result2.signature  # Signature depends on secret
+
+    def test_dev_signing_requires_explicit_flag(self):
+        """Without ALLOW_DEV_SIGNING=true, no secret in dev should return UNVERIFIED."""
+        data = {"test": "data"}
+
+        # No secret, no explicit allow flag
+        with patch.dict("os.environ", {"OBSERVABILITY_HMAC_SECRET": "", "APP_ENV": "development", "ALLOW_DEV_SIGNING": ""}):
+            from packages.quantum.observability import lineage as lineage_module
+            result = lineage_module.LineageSigner.sign(data)
+
+            assert result.status == "UNVERIFIED"
+            assert result.signature == ""
+
+    def test_dev_signing_with_explicit_flag(self):
+        """With ALLOW_DEV_SIGNING=true in dev, signing should succeed."""
+        data = {"test": "data"}
+
+        with patch.dict("os.environ", {"OBSERVABILITY_HMAC_SECRET": "", "APP_ENV": "development", "ALLOW_DEV_SIGNING": "true"}):
+            from packages.quantum.observability import lineage as lineage_module
+            result = lineage_module.LineageSigner.sign(data)
+
+            assert result.status == "SIGNED"
+            assert result.signature != ""
+
+    def test_production_without_secret_returns_unverified(self):
+        """In production, missing secret should return UNVERIFIED."""
+        data = {"test": "data"}
+
+        with patch.dict("os.environ", {"OBSERVABILITY_HMAC_SECRET": "", "APP_ENV": "production"}):
+            from packages.quantum.observability import lineage as lineage_module
+            result = lineage_module.LineageSigner.sign(data)
+
+            assert result.status == "UNVERIFIED"
+            assert result.signature == ""
+
+
+# =============================================================================
+# Wave 1.1 Tests: Event Key Determinism
+# =============================================================================
+
+class TestWave11EventKeyDeterminism:
+    """Wave 1.1: Test event_key computation for idempotency."""
+
+    def test_same_inputs_produce_same_event_key(self):
+        """Same inputs should always produce the same event_key."""
+        from packages.quantum.observability.audit_log_service import compute_event_key
+
+        suggestion_id = "suggestion-123"
+        trace_id = "trace-456"
+        event_name = "suggestion_generated"
+        payload_hash = "abcd1234"
+
+        key1 = compute_event_key(suggestion_id, trace_id, event_name, payload_hash)
+        key2 = compute_event_key(suggestion_id, trace_id, event_name, payload_hash)
+
+        assert key1 == key2
+
+    def test_event_key_is_sha256_hex(self):
+        """event_key should be a 64-character hex string (SHA256)."""
+        from packages.quantum.observability.audit_log_service import compute_event_key
+
+        key = compute_event_key("suggestion-123", "trace-456", "event", "hash")
+
+        assert len(key) == 64
+        assert all(c in '0123456789abcdef' for c in key)
+
+    def test_suggestion_scoped_event_key_ignores_payload_hash(self):
+        """For suggestion-scoped events, different payload_hash = same event_key."""
+        from packages.quantum.observability.audit_log_service import compute_event_key
+
+        suggestion_id = "suggestion-123"
+        event_name = "suggestion_generated"
+
+        # Different payload hashes
+        key1 = compute_event_key(suggestion_id, "trace-1", event_name, "hash-aaa")
+        key2 = compute_event_key(suggestion_id, "trace-2", event_name, "hash-bbb")
+
+        # Same key because suggestion_id + event_name determines it
+        assert key1 == key2
+
+    def test_trace_scoped_event_key_includes_payload_hash(self):
+        """For trace-scoped events (no suggestion_id), payload_hash affects key."""
+        from packages.quantum.observability.audit_log_service import compute_event_key
+
+        trace_id = "trace-456"
+        event_name = "some_event"
+
+        # No suggestion_id, different payload hashes
+        key1 = compute_event_key(None, trace_id, event_name, "hash-aaa")
+        key2 = compute_event_key(None, trace_id, event_name, "hash-bbb")
+
+        # Different keys because payload_hash is included
+        assert key1 != key2
+
+    def test_different_events_produce_different_keys(self):
+        """Different event names should produce different keys."""
+        from packages.quantum.observability.audit_log_service import compute_event_key
+
+        suggestion_id = "suggestion-123"
+        trace_id = "trace-456"
+        payload_hash = "hash-123"
+
+        key1 = compute_event_key(suggestion_id, trace_id, "event_a", payload_hash)
+        key2 = compute_event_key(suggestion_id, trace_id, "event_b", payload_hash)
+
+        assert key1 != key2
+
+
+# =============================================================================
+# Wave 1.1 Tests: Payload Hash Verification
+# =============================================================================
+
+class TestWave11PayloadHashVerification:
+    """Wave 1.1: Test that verification checks both hash AND signature."""
+
+    def test_verify_with_hash_detects_hash_mismatch(self):
+        """verify_with_hash should detect when stored hash doesn't match computed hash."""
+        data = {"test": "data"}
+        wrong_hash = "0" * 64  # Wrong hash
+
+        with patch.dict("os.environ", {"OBSERVABILITY_HMAC_SECRET": "test-secret-32-chars-minimum-here"}):
+            from packages.quantum.observability import lineage as lineage_module
+
+            # Sign the data to get a valid signature
+            result = lineage_module.LineageSigner.sign(data)
+
+            # Verify with wrong stored hash
+            is_valid, computed_hash, status = lineage_module.LineageSigner.verify_with_hash(
+                stored_hash=wrong_hash,
+                stored_signature=result.signature,
+                data=data
+            )
+
+            assert is_valid is False
+            assert status == "TAMPERED"
+            assert computed_hash != wrong_hash
+
+    def test_verify_with_hash_detects_signature_failure(self):
+        """verify_with_hash should detect invalid signature even if hash matches."""
+        data = {"test": "data"}
+
+        with patch.dict("os.environ", {"OBSERVABILITY_HMAC_SECRET": "test-secret-32-chars-minimum-here"}):
+            from packages.quantum.observability import lineage as lineage_module
+
+            # Compute correct hash
+            correct_hash = lineage_module.LineageSigner.compute_hash(data)
+
+            # Verify with correct hash but wrong signature
+            is_valid, computed_hash, status = lineage_module.LineageSigner.verify_with_hash(
+                stored_hash=correct_hash,
+                stored_signature="invalid-signature",
+                data=data
+            )
+
+            assert is_valid is False
+            assert status == "TAMPERED"
+            assert computed_hash == correct_hash
+
+    def test_verify_with_hash_returns_verified_for_valid_data(self):
+        """verify_with_hash should return VERIFIED when both hash and signature match."""
+        data = {"test": "data"}
+
+        with patch.dict("os.environ", {"OBSERVABILITY_HMAC_SECRET": "test-secret-32-chars-minimum-here"}):
+            from packages.quantum.observability import lineage as lineage_module
+
+            result = lineage_module.LineageSigner.sign(data)
+
+            is_valid, computed_hash, status = lineage_module.LineageSigner.verify_with_hash(
+                stored_hash=result.hash,
+                stored_signature=result.signature,
+                data=data
+            )
+
+            assert is_valid is True
+            assert status == "VERIFIED"
+            assert computed_hash == result.hash
+
+
+# =============================================================================
+# Wave 1.1 Tests: AuditLogService Strengthened Verification
+# =============================================================================
+
+class TestWave11AuditLogServiceVerification:
+    """Wave 1.1: Test strengthened verify_audit_event behavior."""
+
+    def test_verify_audit_event_returns_dict_with_status(self):
+        """verify_audit_event should return a dict with detailed verification info."""
+        from packages.quantum.observability.audit_log_service import AuditLogService
+
+        audit_service = AuditLogService(None)
+
+        # Mock event with valid fields
+        with patch.dict("os.environ", {"OBSERVABILITY_HMAC_SECRET": "test-secret-32-chars-minimum-here"}):
+            from packages.quantum.observability.lineage import sign_payload
+
+            payload = {"test": "data"}
+            payload_hash, payload_sig = sign_payload(payload)
+
+            event = {
+                "payload": payload,
+                "payload_hash": payload_hash,
+                "payload_sig": payload_sig
+            }
+
+            result = audit_service.verify_audit_event(event)
+
+            assert isinstance(result, dict)
+            assert "valid" in result
+            assert "status" in result
+            assert "stored_hash" in result
+            assert "computed_hash" in result
+            assert "signature_checked" in result
+
+    def test_verify_audit_event_returns_unverified_for_missing_fields(self):
+        """verify_audit_event should return UNVERIFIED when hash/sig are missing."""
+        from packages.quantum.observability.audit_log_service import AuditLogService
+
+        audit_service = AuditLogService(None)
+
+        # Event with missing signature fields
+        event = {
+            "payload": {"test": "data"},
+            "payload_hash": "",
+            "payload_sig": ""
+        }
+
+        result = audit_service.verify_audit_event(event)
+
+        assert result["valid"] is False
+        assert result["status"] == "UNVERIFIED"
+
+    def test_verify_audit_event_simple_returns_boolean(self):
+        """verify_audit_event_simple should return a simple boolean."""
+        from packages.quantum.observability.audit_log_service import AuditLogService
+
+        audit_service = AuditLogService(None)
+
+        event = {
+            "payload": {"test": "data"},
+            "payload_hash": "",
+            "payload_sig": ""
+        }
+
+        result = audit_service.verify_audit_event_simple(event)
+
+        assert isinstance(result, bool)
+        assert result is False

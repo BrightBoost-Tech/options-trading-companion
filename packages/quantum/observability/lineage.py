@@ -18,7 +18,8 @@ Usage:
 Security Notes:
     - OBSERVABILITY_HMAC_SECRET must be set in production
     - If missing in production, signing returns UNVERIFIED status
-    - Never use dev-secret silently in production
+    - Wave 1.1: Dev signing requires ALLOW_DEV_SIGNING=true explicitly
+    - Wave 1.1: Secrets read at runtime, not import time
 """
 
 import hashlib
@@ -33,15 +34,11 @@ from typing import Any, Dict, Optional, Tuple
 # Configuration
 # =============================================================================
 
-# Environment detection
-APP_ENV = os.getenv("APP_ENV", "development")
-IS_PRODUCTION = APP_ENV == "production"
-
-# HMAC secret for signing
-OBSERVABILITY_HMAC_SECRET = os.getenv("OBSERVABILITY_HMAC_SECRET", "")
-
 # Version identifier for the signing scheme
 LINEAGE_VERSION = "v4"
+
+# Wave 1.1: Dev signing placeholder (only used when explicitly allowed)
+_DEV_SECRET_PLACEHOLDER = b"dev-lineage-secret-do-not-use-in-production"
 
 
 @dataclass
@@ -116,21 +113,33 @@ class LineageSigner:
         """
         Get the HMAC secret, with production safety checks.
 
+        Wave 1.1: Reads environment at runtime (not import time).
+        Wave 1.1: Dev signing requires ALLOW_DEV_SIGNING=true explicitly.
+
         Returns:
             Secret as bytes, or None if not configured
         """
-        secret = OBSERVABILITY_HMAC_SECRET
+        # Wave 1.1: Read at runtime, not import time
+        secret = os.getenv("OBSERVABILITY_HMAC_SECRET", "")
+        app_env = os.getenv("APP_ENV", "development")
+        is_production = app_env == "production"
+        allow_dev_signing = os.getenv("ALLOW_DEV_SIGNING", "").lower() in ("true", "1", "yes")
 
         if not secret:
-            if IS_PRODUCTION:
+            if is_production:
                 # In production, missing secret is a configuration error
                 # Log warning but don't raise - allow unverified marking
                 print("[LINEAGE] WARNING: OBSERVABILITY_HMAC_SECRET not configured in production")
                 return None
+            elif allow_dev_signing:
+                # Wave 1.1: Only allow dev signing when explicitly enabled
+                # This prevents silent signing with dev secret
+                print("[LINEAGE] Using dev signing placeholder (ALLOW_DEV_SIGNING=true)")
+                return _DEV_SECRET_PLACEHOLDER
             else:
-                # In development, use a dev-only placeholder
-                # This is ONLY for local testing - never in production
-                return b"dev-lineage-secret-do-not-use-in-production"
+                # Wave 1.1: No secret and dev signing not allowed -> UNVERIFIED
+                print("[LINEAGE] WARNING: No secret configured and ALLOW_DEV_SIGNING not enabled")
+                return None
 
         return secret.encode('utf-8')
 

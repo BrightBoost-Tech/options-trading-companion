@@ -8,6 +8,7 @@ from packages.quantum.services.transaction_cost_model import TransactionCostMode
 from packages.quantum.observability.telemetry import TradeContext, emit_trade_event
 from packages.quantum.observability.audit_log_service import AuditLogService
 from packages.quantum.observability.lineage import sign_payload
+from packages.quantum.services.analytics_service import AnalyticsService
 
 class PaperExecutionService:
     def __init__(self, supabase: Client):
@@ -156,29 +157,34 @@ class PaperExecutionService:
 
         event_name = "order_filled" if sim_result.status == "filled" else "order_rejected"
 
-        # Emit analytics event if service provided
-        if analytics_service and trace_id:
+        # Wave 1.1: Emit analytics event unconditionally when trace_id exists
+        # Instantiate analytics_service if not provided
+        if trace_id:
+            effective_analytics = analytics_service or AnalyticsService(self.supabase)
             ctx = TradeContext(
                 trace_id=trace_id,
                 suggestion_id=suggestion_id,
                 model_version="v4",
                 window="paper"
             )
-            emit_trade_event(
-                analytics_service,
-                user_id,
-                ctx,
-                event_name,
-                is_paper=True,
-                properties={
-                    "paper_order_id": order_id,
-                    "fill_status": sim_result.status,
-                    "fill_price": sim_result.fill_price,
-                    "filled_quantity": sim_result.filled_quantity,
-                    "commission": sim_result.commission_paid,
-                    "slippage": sim_result.slippage_paid
-                }
-            )
+            try:
+                emit_trade_event(
+                    effective_analytics,
+                    user_id,
+                    ctx,
+                    event_name,
+                    is_paper=True,
+                    properties={
+                        "paper_order_id": order_id,
+                        "fill_status": sim_result.status,
+                        "fill_price": sim_result.fill_price,
+                        "filled_quantity": sim_result.filled_quantity,
+                        "commission": sim_result.commission_paid,
+                        "slippage": sim_result.slippage_paid
+                    }
+                )
+            except Exception as e:
+                print(f"[PaperExec] Failed to emit analytics event: {e}")
 
         # Write audit log
         try:

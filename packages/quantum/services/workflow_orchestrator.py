@@ -65,6 +65,7 @@ def clamp_risk_budget(per_trade_budget: float, remaining: float) -> float:
 
 # =============================================================================
 # Wave 1.2: Insert-idempotent suggestion helper
+# Wave 1.3: Fixed NULL legs_fingerprint handling
 # =============================================================================
 
 def insert_or_get_suggestion(
@@ -78,6 +79,10 @@ def insert_or_get_suggestion(
     This prevents updates to immutable integrity fields (lineage_hash, lineage_sig,
     decision_lineage, trace_id, code_sha, data_hash) which are protected by
     Wave 1.1 database trigger.
+
+    Wave 1.3: Fixed NULL legs_fingerprint handling. When fingerprint is None/falsy,
+    we omit the fingerprint filter and use order by created_at desc to get the
+    latest matching row. This avoids incorrect SQL NULL matching.
 
     Args:
         supabase: Supabase client
@@ -114,21 +119,24 @@ def insert_or_get_suggestion(
                     .eq("ticker", ticker) \
                     .eq("strategy", strategy)
 
-                # Handle None fingerprint
+                # Wave 1.3: Handle None/falsy fingerprint safely
+                # Don't use .is_("legs_fingerprint", "null") as it doesn't match SQL NULL correctly.
+                # Instead, omit the filter and order by created_at desc to get the latest row.
                 if legs_fingerprint:
                     query = query.eq("legs_fingerprint", legs_fingerprint)
                 else:
-                    query = query.is_("legs_fingerprint", "null")
+                    # Without fingerprint, we can't uniquely identify; get latest by created_at
+                    query = query.order("created_at", desc=True)
 
                 existing = query.limit(1).execute()
 
                 if existing.data:
                     row = existing.data[0]
-                    print(f"[Wave1.2] Suggestion already exists for {ticker}/{strategy} (id={row.get('id')})")
+                    print(f"[Wave1.3] Suggestion already exists for {ticker}/{strategy} (id={row.get('id')})")
                     return (row.get("id"), row.get("trace_id"), False)
 
             except Exception as fetch_err:
-                print(f"[Wave1.2] Error fetching existing suggestion: {fetch_err}")
+                print(f"[Wave1.3] Error fetching existing suggestion: {fetch_err}")
 
             return (None, None, False)
 
@@ -162,6 +170,9 @@ def supersede_prior_close_suggestions(
     the old suggestion should not remain visible. This function marks prior close
     suggestions as 'superseded' so the UI only shows the best current exit suggestion.
 
+    Wave 1.3: Now emits audit and analytics events for each superseded suggestion
+    to provide forensic visibility in traces.
+
     Args:
         supabase: Supabase admin client
         user_id: User UUID
@@ -191,9 +202,9 @@ def supersede_prior_close_suggestions(
         if not other_strategies:
             return 0
 
-        # Query for existing suggestions to supersede
+        # Wave 1.3: Fetch trace_id as well for audit/analytics events
         query = supabase.table(TRADE_SUGGESTIONS_TABLE) \
-            .select("id, strategy, status") \
+            .select("id, strategy, status, trace_id") \
             .eq("user_id", user_id) \
             .eq("cycle_date", cycle_date) \
             .eq("window", window) \
@@ -207,10 +218,15 @@ def supersede_prior_close_suggestions(
         if not result.data:
             return 0
 
+        # Wave 1.3: Initialize services for event emission
+        audit_service = AuditLogService(supabase)
+        analytics_service = AnalyticsService(supabase)
+
         superseded_count = 0
         for row in result.data:
             suggestion_id = row.get("id")
             old_strategy = row.get("strategy")
+            trace_id = row.get("trace_id")
 
             try:
                 # Mark as superseded
@@ -222,6 +238,51 @@ def supersede_prior_close_suggestions(
                 print(f"[Supersede] Marked {old_strategy} suggestion {suggestion_id} as superseded "
                       f"(replaced by {new_strategy})")
                 superseded_count += 1
+
+                # Wave 1.3: Emit audit event for forensics
+                supersede_payload = {
+                    "superseded_suggestion_id": suggestion_id,
+                    "old_strategy": old_strategy,
+                    "new_strategy": new_strategy,
+                    "reason": reason,
+                    "cycle_date": cycle_date,
+                    "window": window,
+                    "ticker": ticker,
+                    "legs_fingerprint": legs_fingerprint
+                }
+
+                try:
+                    audit_service.log_audit_event(
+                        user_id=user_id,
+                        trace_id=trace_id or str(uuid.uuid4()),
+                        suggestion_id=suggestion_id,
+                        event_name="suggestion_superseded",
+                        payload=supersede_payload,
+                        strategy=old_strategy
+                    )
+                except Exception as audit_err:
+                    print(f"[Supersede] Failed to write audit event: {audit_err}")
+
+                # Wave 1.3: Emit analytics event with idempotency_payload
+                try:
+                    analytics_service.log_event(
+                        user_id=user_id,
+                        event_name="suggestion_superseded",
+                        category="system",
+                        properties={
+                            "suggestion_id": suggestion_id,
+                            "old_strategy": old_strategy,
+                            "new_strategy": new_strategy,
+                            "reason": reason,
+                            "ticker": ticker,
+                            "window": window,
+                            "cycle_date": cycle_date
+                        },
+                        trace_id=trace_id,
+                        idempotency_payload=supersede_payload  # Wave 1.3: enables trace-scoped idempotency
+                    )
+                except Exception as analytics_err:
+                    print(f"[Supersede] Failed to write analytics event: {analytics_err}")
 
             except Exception as update_err:
                 print(f"[Supersede] Failed to update suggestion {suggestion_id}: {update_err}")

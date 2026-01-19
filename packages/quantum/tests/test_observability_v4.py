@@ -839,3 +839,179 @@ class TestWave12PaperStageAnalytics:
 
         assert hasattr(PaperExecutionService, 'stage_order')
         assert callable(getattr(PaperExecutionService, 'stage_order'))
+
+
+# =============================================================================
+# Wave 1.3 Tests: Trace-Scoped Analytics Idempotency with Payload Hash
+# =============================================================================
+
+class TestWave13TraceScopedAnalyticsIdempotency:
+    """Wave 1.3: Test trace-scoped analytics idempotency with payload_hash."""
+
+    def test_trace_scoped_idempotency_payload_produces_same_key(self):
+        """Same trace_id + event_name + payload_hash should produce same key regardless of timestamp."""
+        from packages.quantum.services.analytics_service import (
+            compute_analytics_event_key_v2,
+            compute_payload_hash
+        )
+
+        trace_id = "trace-789"
+        event_name = "suggestion_superseded"
+        payload = {"superseded_id": "abc", "reason": "mode_change"}
+        payload_hash = compute_payload_hash(payload)
+
+        # Different timestamps but same payload_hash
+        key1 = compute_analytics_event_key_v2(
+            event_name=event_name,
+            trace_id=trace_id,
+            timestamp="2026-01-18T12:00:00Z",
+            payload_hash=payload_hash
+        )
+        key2 = compute_analytics_event_key_v2(
+            event_name=event_name,
+            trace_id=trace_id,
+            timestamp="2026-01-18T15:00:00Z",  # Different timestamp
+            payload_hash=payload_hash
+        )
+
+        # Same key because payload_hash is used instead of timestamp
+        assert key1 == key2
+
+    def test_trace_scoped_fallback_still_uses_timestamp_when_no_payload_hash(self):
+        """Without payload_hash, trace-scoped events should still use timestamp (original behavior)."""
+        from packages.quantum.services.analytics_service import compute_analytics_event_key_v2
+
+        trace_id = "trace-789"
+        event_name = "scan_started"
+
+        # No payload_hash, different timestamps
+        key1 = compute_analytics_event_key_v2(
+            event_name=event_name,
+            trace_id=trace_id,
+            timestamp="2026-01-18T12:00:00Z",
+            payload_hash=None
+        )
+        key2 = compute_analytics_event_key_v2(
+            event_name=event_name,
+            trace_id=trace_id,
+            timestamp="2026-01-18T15:00:00Z",
+            payload_hash=None
+        )
+
+        # Different keys because timestamp is included (original behavior)
+        assert key1 != key2
+
+    def test_explicit_idempotency_key_takes_priority(self):
+        """explicit_idempotency_key should take highest priority over all other fields."""
+        from packages.quantum.services.analytics_service import compute_analytics_event_key_v2
+
+        explicit_key = "my-explicit-idempotency-key-abc123"
+
+        # All other fields populated but explicit_idempotency_key should override
+        key1 = compute_analytics_event_key_v2(
+            event_name="event_a",
+            suggestion_id="sugg-123",
+            trace_id="trace-456",
+            timestamp="2026-01-18T12:00:00Z",
+            payload_hash="hash-xyz",
+            explicit_idempotency_key=explicit_key
+        )
+        key2 = compute_analytics_event_key_v2(
+            event_name="event_b",  # Different event
+            suggestion_id="sugg-different",  # Different suggestion
+            trace_id="trace-different",  # Different trace
+            timestamp="2026-01-19T00:00:00Z",  # Different timestamp
+            payload_hash="hash-different",  # Different payload
+            explicit_idempotency_key=explicit_key  # Same explicit key
+        )
+
+        # Same key because explicit_idempotency_key overrides everything
+        assert key1 == key2
+
+    def test_payload_hash_is_deterministic(self):
+        """compute_payload_hash should produce deterministic results for same payload."""
+        from packages.quantum.services.analytics_service import compute_payload_hash
+
+        payload = {"field_b": "value2", "field_a": "value1", "nested": {"z": 1, "a": 2}}
+
+        hash1 = compute_payload_hash(payload)
+        hash2 = compute_payload_hash(payload)
+
+        # Same payload = same hash
+        assert hash1 == hash2
+        # Should be 64-char hex (SHA256)
+        assert len(hash1) == 64
+        assert all(c in '0123456789abcdef' for c in hash1)
+
+    def test_payload_hash_key_order_independent(self):
+        """compute_payload_hash should be independent of key order."""
+        from packages.quantum.services.analytics_service import compute_payload_hash
+
+        payload1 = {"b": 2, "a": 1, "c": 3}
+        payload2 = {"a": 1, "c": 3, "b": 2}
+        payload3 = {"c": 3, "a": 1, "b": 2}
+
+        hash1 = compute_payload_hash(payload1)
+        hash2 = compute_payload_hash(payload2)
+        hash3 = compute_payload_hash(payload3)
+
+        # All should produce same hash
+        assert hash1 == hash2 == hash3
+
+    def test_canonical_json_produces_stable_output(self):
+        """canonical_json should produce stable, deterministic output."""
+        from packages.quantum.services.analytics_service import canonical_json
+
+        data = {"b": 2, "a": 1}
+
+        json1 = canonical_json(data)
+        json2 = canonical_json(data)
+
+        assert json1 == json2
+        # Should have sorted keys and minimal separators
+        assert json1 == '{"a":1,"b":2}'
+
+    def test_canonical_json_handles_none(self):
+        """canonical_json should treat None as empty dict."""
+        from packages.quantum.services.analytics_service import canonical_json
+
+        result = canonical_json(None)
+        assert result == "{}"
+
+    def test_v2_key_backward_compatible_with_v1(self):
+        """v2 key without new params should match v1 behavior."""
+        from packages.quantum.services.analytics_service import (
+            compute_analytics_event_key,
+            compute_analytics_event_key_v2
+        )
+
+        suggestion_id = "sugg-123"
+        event_name = "suggestion_generated"
+        trace_id = "trace-456"
+        timestamp = "2026-01-18T12:00:00Z"
+
+        # Suggestion-scoped (v1 and v2 should match)
+        key_v1 = compute_analytics_event_key(event_name, suggestion_id, trace_id, timestamp)
+        key_v2 = compute_analytics_event_key_v2(
+            event_name=event_name,
+            suggestion_id=suggestion_id,
+            trace_id=trace_id,
+            timestamp=timestamp,
+            payload_hash=None,
+            explicit_idempotency_key=None
+        )
+
+        assert key_v1 == key_v2
+
+        # Trace-scoped without payload_hash (v1 and v2 should match)
+        key_v1_trace = compute_analytics_event_key(event_name, None, trace_id, timestamp)
+        key_v2_trace = compute_analytics_event_key_v2(
+            event_name=event_name,
+            suggestion_id=None,
+            trace_id=trace_id,
+            timestamp=timestamp,
+            payload_hash=None,
+            explicit_idempotency_key=None
+        )
+
+        assert key_v1_trace == key_v2_trace

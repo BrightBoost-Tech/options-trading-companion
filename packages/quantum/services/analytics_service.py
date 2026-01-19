@@ -4,13 +4,57 @@ Analytics Service for logging UX, system, and trade events.
 Wave 1.2 Enhancements:
     - event_key computed for idempotency (sha256 of suggestion_id:event_name or trace_id:event_name:timestamp)
     - Idempotent inserts: unique violations return existing row
+
+Wave 1.3 Enhancements:
+    - Added payload_hash support for trace-scoped idempotent events
+    - New compute_analytics_event_key_v2() with explicit_idempotency_key option
+    - canonical_json() helper for deterministic payload hashing
 """
 
 import hashlib
+import json
 import os
 import uuid
 from datetime import datetime, timezone
 from typing import Optional, Dict, Any, Tuple
+
+
+def canonical_json(data: Dict[str, Any]) -> str:
+    """
+    Wave 1.3: Convert dict to canonical JSON string for deterministic hashing.
+
+    Uses sorted keys and minimal separators to ensure the same logical dict
+    always produces the same string representation.
+
+    Args:
+        data: Dictionary to canonicalize
+
+    Returns:
+        Canonical JSON string
+    """
+    if data is None:
+        data = {}
+    return json.dumps(
+        data,
+        sort_keys=True,
+        separators=(',', ':'),
+        ensure_ascii=True,
+        default=str
+    )
+
+
+def compute_payload_hash(payload: Dict[str, Any]) -> str:
+    """
+    Wave 1.3: Compute SHA256 hash of a payload for idempotency.
+
+    Args:
+        payload: Dictionary to hash
+
+    Returns:
+        64-character hex string (SHA256)
+    """
+    canonical = canonical_json(payload)
+    return hashlib.sha256(canonical.encode('utf-8')).hexdigest()
 
 
 def compute_analytics_event_key(
@@ -49,6 +93,54 @@ def compute_analytics_event_key(
     return hashlib.sha256(key_input.encode('utf-8')).hexdigest()
 
 
+def compute_analytics_event_key_v2(
+    event_name: str,
+    suggestion_id: Optional[str] = None,
+    trace_id: Optional[str] = None,
+    timestamp: Optional[str] = None,
+    payload_hash: Optional[str] = None,
+    explicit_idempotency_key: Optional[str] = None
+) -> str:
+    """
+    Wave 1.3: Compute deterministic event_key with enhanced idempotency options.
+
+    Strategy (in priority order):
+        1. If explicit_idempotency_key provided: sha256(explicit_idempotency_key)
+        2. If suggestion_id present: sha256(suggestion_id:event_name)
+        3. If trace_id AND payload_hash present: sha256(trace_id:event_name:payload_hash)
+        4. If trace_id present (no payload_hash): sha256(trace_id:event_name:timestamp) [original behavior]
+        5. Fallback: sha256(event_name:timestamp)
+
+    Args:
+        event_name: Event type name
+        suggestion_id: Optional suggestion UUID (makes event suggestion-scoped)
+        trace_id: Optional trace ID
+        timestamp: Event timestamp (ISO format) - used when no payload_hash
+        payload_hash: Optional hash of idempotency payload (enables trace-scoped idempotency)
+        explicit_idempotency_key: Optional explicit key (highest priority)
+
+    Returns:
+        64-character hex string (SHA256)
+    """
+    if explicit_idempotency_key:
+        # Explicit key takes priority - hash it for consistency
+        key_input = explicit_idempotency_key
+    elif suggestion_id:
+        # Suggestion-scoped events: one event per (suggestion, event_name)
+        key_input = f"{suggestion_id}:{event_name}"
+    elif trace_id and payload_hash:
+        # Wave 1.3: Trace-scoped idempotent events with payload_hash
+        key_input = f"{trace_id}:{event_name}:{payload_hash}"
+    elif trace_id:
+        # Trace-scoped time-series events (original Wave 1.2 behavior)
+        key_input = f"{trace_id}:{event_name}:{timestamp or ''}"
+    else:
+        # Fallback: event_name + timestamp
+        key_input = f"{event_name}:{timestamp or ''}"
+
+    return hashlib.sha256(key_input.encode('utf-8')).hexdigest()
+
+
 class AnalyticsService:
     """
     Low-friction analytics service for logging UX, system, and trade events to Supabase.
@@ -65,6 +157,8 @@ class AnalyticsService:
         properties: Dict[str, Any],
         trace_id: Optional[str] = None,
         session_id: Optional[str] = None,
+        idempotency_payload: Optional[Dict[str, Any]] = None,
+        idempotency_key: Optional[str] = None,
     ) -> Optional[Dict[str, Any]]:
         """
         Logs a generic event to the analytics_events table.
@@ -72,6 +166,20 @@ class AnalyticsService:
 
         Wave 1.2: This method is idempotent. If an event with the same event_key
         already exists, the existing record is returned instead of failing.
+
+        Wave 1.3: Added idempotency_payload and idempotency_key options for
+        trace-scoped idempotent events. When provided, the event_key is computed
+        deterministically without timestamp, allowing true idempotency on retries.
+
+        Args:
+            user_id: User UUID
+            event_name: Event type name
+            category: Event category (ux, system, trade)
+            properties: Event properties dict
+            trace_id: Optional trace ID
+            session_id: Optional session ID
+            idempotency_payload: Optional dict used to compute payload_hash for idempotent key
+            idempotency_key: Optional explicit idempotency key (highest priority)
 
         Returns:
             Inserted or existing record, or None on failure
@@ -113,12 +221,19 @@ class AnalyticsService:
 
             timestamp = datetime.now(timezone.utc).isoformat()
 
-            # Wave 1.2: Compute event_key for idempotency
-            event_key = compute_analytics_event_key(
+            # Wave 1.3: Compute payload_hash if idempotency_payload provided
+            payload_hash = None
+            if idempotency_payload:
+                payload_hash = compute_payload_hash(idempotency_payload)
+
+            # Wave 1.3: Use v2 event_key computation with payload_hash support
+            event_key = compute_analytics_event_key_v2(
                 event_name=event_name,
                 suggestion_id=str(suggestion_id) if suggestion_id else None,
                 trace_id=str(trace_id) if trace_id else None,
-                timestamp=timestamp
+                timestamp=timestamp,
+                payload_hash=payload_hash,
+                explicit_idempotency_key=idempotency_key
             )
 
             data = {
@@ -129,7 +244,7 @@ class AnalyticsService:
                 "trace_id": str(trace_id) if trace_id else None,
                 "session_id": session_id,
                 "timestamp": timestamp,
-                "event_key": event_key,  # Wave 1.2
+                "event_key": event_key,  # Wave 1.2/1.3
                 # v3 Typed Columns
                 "suggestion_id": str(suggestion_id) if suggestion_id else None,
                 "execution_id": str(execution_id) if execution_id else None,

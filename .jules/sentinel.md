@@ -14,3 +14,8 @@
 **Vulnerability:** The Next.js frontend (`apps/web`) lacked standard HTTP security headers (HSTS, X-Frame-Options, X-XSS-Protection), leaving it potentially vulnerable to Clickjacking and XSS despite backend protections.
 **Learning:** In a proxied architecture (Next.js -> FastAPI), backend middleware headers often don't cover the frontend's static assets or initial HTML document delivery. The frontend server (Next.js) must strictly define its own security headers.
 **Prevention:** Always configure `headers()` in `next.config.js` to enforce `SAMEORIGIN`, `HSTS`, and `nosniff` at the edge/application layer, independent of backend API security.
+
+## 2025-05-25 - [Fix] Exception Leak in Historical Simulation
+**Vulnerability:** The `/historical/run-cycle` endpoint was catching generic `Exception` and returning `str(e)` in the 500 response, similar to the previous optimizer issue.
+**Learning:** Repeating the same pattern of returning `str(e)` in exception handlers leaks implementation details.
+**Prevention:** Applied consistent error masking in `packages/quantum/historical_endpoints.py` to return "Internal Server Error" in production.

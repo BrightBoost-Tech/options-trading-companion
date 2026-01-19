@@ -1,4 +1,5 @@
 import traceback
+import os
 from fastapi import APIRouter, Depends, HTTPException
 from typing import Optional, Literal, Dict, Any
 from pydantic import BaseModel
@@ -49,6 +50,17 @@ async def run_historical_cycle(
         return result
 
     except Exception as e:
+        app_env = os.getenv("APP_ENV", "development")
         print(f"Historical cycle error: {e}")
+
+        # Always log stack trace server-side for debugging
         traceback.print_exc()
-        raise HTTPException(status_code=500, detail=str(e))
+
+        # 🛡️ Sentinel: Suppress detail in production API response
+        if app_env != "production":
+            detail = str(e)
+        else:
+            # Mask error in production
+            detail = "Internal Server Error"
+
+        raise HTTPException(status_code=500, detail=detail)

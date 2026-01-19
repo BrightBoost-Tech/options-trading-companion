@@ -19,12 +19,10 @@ from packages.quantum.analytics.regime_integration import (
     DEFAULT_CATALYST_PROFILES,
     DEFAULT_LIQUIDITY_SCALAR,
     DEFAULT_REGIME_PROFILES,
-    map_market_regime,
-    run_historical_scoring
+    calculate_regime_vectorized
 )
 from packages.quantum.market_data import PolygonService
 from packages.quantum.analytics.factors import calculate_indicators_vectorized
-from packages.quantum.nested.backbone import infer_global_context, GlobalContext
 from packages.quantum.services.transaction_cost_model import TransactionCostModel
 from packages.quantum.common_enums import UnifiedScore
 
@@ -327,6 +325,12 @@ class HistoricalCycleService:
         vol_series = indicators["volatility"]
         rsi_series = indicators["rsi"]
 
+        # Pre-calculate Regime and Conviction (Vectorized)
+        regime_data = calculate_regime_vectorized(trend_series, vol_series, rsi_series)
+        regime_series = regime_data["regime"]
+        conviction_series = regime_data["conviction"]
+        factor_scores_series = regime_data["factors"]
+
         while current_idx < len(dates):
             # GUARD: Future Leakage Check
             # We strictly slice up to current_idx (inclusive)
@@ -335,61 +339,15 @@ class HistoricalCycleService:
             current_price = prices[current_idx]
 
             # --- Shared Logic Usage ---
-            # 1. Compute Factors
-            # usage of pre-calculated series
-            trend = trend_series[current_idx]
-            vol_annual = vol_series[current_idx]
-            rsi_val = rsi_series[current_idx]
-
-            # 2. Detect Regime (Global Backbone)
-            features = {
-                "spy_trend": trend.lower(),
-                "vix_level": 20.0, # Baseline
-            }
-            # Enhanced VIX proxy from vol
-            if vol_annual > 0.30: features["vix_level"] = 35.0
-            elif vol_annual > 0.20: features["vix_level"] = 25.0
-            else: features["vix_level"] = 15.0
-
-            global_context: GlobalContext = infer_global_context(features)
-
-            # 3. Map to Scoring Regime (Centralized Helper)
-            regime_mapped = map_market_regime({
-                "state": global_context.global_regime,
-                "vol_annual": vol_annual
-            })
-
-            # 4. Score using Centralized Pipeline
-            # Map factors to scoring inputs (0-100)
-            trend_score = 100.0 if trend == "UP" else (0.0 if trend == "DOWN" else 50.0)
-
-            vol_score = 50.0
-            if vol_annual < 0.15: vol_score = 100.0
-            elif vol_annual > 0.30: vol_score = 0.0
-
-            value_score = 50.0
-            if rsi_val < 30: value_score = 100.0
-            elif rsi_val > 70: value_score = 0.0
+            # 1. Fetch pre-calculated state
+            regime_mapped = regime_series[current_idx]
+            c_i = conviction_series[current_idx]
 
             factors_input = {
-                "trend": trend_score,
-                "volatility": vol_score,
-                "value": value_score
+                "trend": factor_scores_series["trend"][current_idx],
+                "volatility": factor_scores_series["volatility"][current_idx],
+                "value": factor_scores_series["value"][current_idx]
             }
-
-            scoring_result = run_historical_scoring(
-                symbol_data={
-                    "symbol": chosen_symbol,
-                    "factors": factors_input,
-                    "liquidity_tier": "top"
-                },
-                regime=regime_mapped,
-                scoring_engine=self.scoring_engine,
-                conviction_transform=self.conviction_transform,
-                universe_median=None
-            )
-
-            c_i = scoring_result['conviction']
 
             # Capture state for trajectory
             step_snapshot = {

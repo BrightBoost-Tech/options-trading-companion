@@ -13,3 +13,7 @@
 ## 2026-05-24 - [Pandas Rolling Overhead]
 **Learning:** Pandas `rolling()` operations carry significant overhead compared to NumPy's `sliding_window_view` + `mean/std` for simple sliding windows. Switching to pure NumPy yielded a ~2.4x speedup for indicator calculations.
 **Action:** Prefer `numpy.lib.stride_tricks.sliding_window_view` for sliding window calculations on arrays when Pandas index alignment/features are not strictly necessary.
+
+## 2026-06-02 - [Vectorized Conditional Logic]
+**Learning:** Complex conditional logic (e.g., state machines, regime detection) inside loops can be vectorized using `np.select` and `np.where`, eliminating Python interpreter overhead. This yielded a ~30% speedup for historical simulations.
+**Action:** Replace "if-else" chains inside hot loops with `np.select` when the logic depends on vectorized inputs.

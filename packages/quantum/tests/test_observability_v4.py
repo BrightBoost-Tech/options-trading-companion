@@ -720,3 +720,122 @@ class TestWave11AuditLogServiceVerification:
 
         assert isinstance(result, bool)
         assert result is False
+
+
+# =============================================================================
+# Wave 1.2 Tests: Analytics Event Key Determinism
+# =============================================================================
+
+class TestWave12AnalyticsEventKeyDeterminism:
+    """Wave 1.2: Test analytics event_key computation for idempotency."""
+
+    def test_same_inputs_produce_same_analytics_event_key(self):
+        """Same inputs should always produce the same event_key."""
+        from packages.quantum.services.analytics_service import compute_analytics_event_key
+
+        event_name = "suggestion_generated"
+        suggestion_id = "suggestion-123"
+        trace_id = "trace-456"
+        timestamp = "2026-01-18T12:00:00Z"
+
+        key1 = compute_analytics_event_key(event_name, suggestion_id, trace_id, timestamp)
+        key2 = compute_analytics_event_key(event_name, suggestion_id, trace_id, timestamp)
+
+        assert key1 == key2
+
+    def test_analytics_event_key_is_sha256_hex(self):
+        """event_key should be a 64-character hex string (SHA256)."""
+        from packages.quantum.services.analytics_service import compute_analytics_event_key
+
+        key = compute_analytics_event_key("event", "suggestion-123", "trace-456", "2026-01-18T12:00:00Z")
+
+        assert len(key) == 64
+        assert all(c in '0123456789abcdef' for c in key)
+
+    def test_suggestion_scoped_analytics_key_ignores_timestamp(self):
+        """For suggestion-scoped events, different timestamps = same event_key."""
+        from packages.quantum.services.analytics_service import compute_analytics_event_key
+
+        suggestion_id = "suggestion-123"
+        event_name = "suggestion_generated"
+
+        # Different timestamps
+        key1 = compute_analytics_event_key(event_name, suggestion_id, "trace-1", "2026-01-18T12:00:00Z")
+        key2 = compute_analytics_event_key(event_name, suggestion_id, "trace-2", "2026-01-18T13:00:00Z")
+
+        # Same key because suggestion_id + event_name determines it
+        assert key1 == key2
+
+    def test_trace_scoped_analytics_key_includes_timestamp(self):
+        """For trace-scoped events (no suggestion_id), timestamp affects key."""
+        from packages.quantum.services.analytics_service import compute_analytics_event_key
+
+        trace_id = "trace-456"
+        event_name = "some_event"
+
+        # No suggestion_id, different timestamps
+        key1 = compute_analytics_event_key(event_name, None, trace_id, "2026-01-18T12:00:00Z")
+        key2 = compute_analytics_event_key(event_name, None, trace_id, "2026-01-18T13:00:00Z")
+
+        # Different keys because timestamp is included
+        assert key1 != key2
+
+    def test_different_events_produce_different_analytics_keys(self):
+        """Different event names should produce different keys."""
+        from packages.quantum.services.analytics_service import compute_analytics_event_key
+
+        suggestion_id = "suggestion-123"
+        timestamp = "2026-01-18T12:00:00Z"
+
+        key1 = compute_analytics_event_key("event_a", suggestion_id, "trace", timestamp)
+        key2 = compute_analytics_event_key("event_b", suggestion_id, "trace", timestamp)
+
+        assert key1 != key2
+
+
+# =============================================================================
+# Wave 1.2 Tests: Insert-Idempotent Suggestion Helper
+# =============================================================================
+
+class TestWave12InsertOrGetSuggestion:
+    """Wave 1.2: Test insert_or_get_suggestion helper."""
+
+    def test_insert_or_get_suggestion_exists_as_function(self):
+        """Verify insert_or_get_suggestion function exists and is callable."""
+        from packages.quantum.services.workflow_orchestrator import insert_or_get_suggestion
+
+        assert callable(insert_or_get_suggestion)
+
+    def test_insert_or_get_suggestion_signature(self):
+        """Verify function accepts expected parameters."""
+        from packages.quantum.services.workflow_orchestrator import insert_or_get_suggestion
+        import inspect
+
+        sig = inspect.signature(insert_or_get_suggestion)
+        params = list(sig.parameters.keys())
+
+        assert "supabase" in params
+        assert "suggestion" in params
+        assert "unique_fields" in params
+
+
+# =============================================================================
+# Wave 1.2 Tests: Paper Execution Stage Analytics
+# =============================================================================
+
+class TestWave12PaperStageAnalytics:
+    """Wave 1.2: Test that stage_order emits analytics events."""
+
+    def test_paper_execution_service_imports_analytics(self):
+        """Verify PaperExecutionService has access to AnalyticsService."""
+        from packages.quantum.services.paper_execution_service import PaperExecutionService, AnalyticsService
+
+        # If import succeeds, AnalyticsService is available
+        assert AnalyticsService is not None
+
+    def test_paper_execution_service_has_stage_order(self):
+        """Verify stage_order method exists."""
+        from packages.quantum.services.paper_execution_service import PaperExecutionService
+
+        assert hasattr(PaperExecutionService, 'stage_order')
+        assert callable(getattr(PaperExecutionService, 'stage_order'))

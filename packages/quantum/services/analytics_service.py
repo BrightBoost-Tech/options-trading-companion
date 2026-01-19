@@ -1,7 +1,53 @@
+"""
+Analytics Service for logging UX, system, and trade events.
+
+Wave 1.2 Enhancements:
+    - event_key computed for idempotency (sha256 of suggestion_id:event_name or trace_id:event_name:timestamp)
+    - Idempotent inserts: unique violations return existing row
+"""
+
+import hashlib
 import os
 import uuid
-from datetime import datetime
-from typing import Optional, Dict, Any
+from datetime import datetime, timezone
+from typing import Optional, Dict, Any, Tuple
+
+
+def compute_analytics_event_key(
+    event_name: str,
+    suggestion_id: Optional[str] = None,
+    trace_id: Optional[str] = None,
+    timestamp: Optional[str] = None
+) -> str:
+    """
+    Wave 1.2: Compute deterministic event_key for analytics idempotency.
+
+    Strategy:
+        - If suggestion_id is present: sha256(suggestion_id:event_name)
+        - Else if trace_id is present: sha256(trace_id:event_name:timestamp)
+        - Else: sha256(event_name:timestamp) as fallback
+
+    Args:
+        event_name: Event type name
+        suggestion_id: Optional suggestion UUID
+        trace_id: Optional trace ID
+        timestamp: Event timestamp (ISO format)
+
+    Returns:
+        64-character hex string (SHA256)
+    """
+    if suggestion_id:
+        # Suggestion-scoped events: one event per (suggestion, event_name)
+        key_input = f"{suggestion_id}:{event_name}"
+    elif trace_id:
+        # Trace-scoped events: include timestamp for uniqueness
+        key_input = f"{trace_id}:{event_name}:{timestamp or ''}"
+    else:
+        # Fallback: event_name + timestamp
+        key_input = f"{event_name}:{timestamp or ''}"
+
+    return hashlib.sha256(key_input.encode('utf-8')).hexdigest()
+
 
 class AnalyticsService:
     """
@@ -19,14 +65,21 @@ class AnalyticsService:
         properties: Dict[str, Any],
         trace_id: Optional[str] = None,
         session_id: Optional[str] = None,
-    ) -> None:
+    ) -> Optional[Dict[str, Any]]:
         """
         Logs a generic event to the analytics_events table.
         Extracts typed columns from properties if present for v3 observability.
+
+        Wave 1.2: This method is idempotent. If an event with the same event_key
+        already exists, the existing record is returned instead of failing.
+
+        Returns:
+            Inserted or existing record, or None on failure
         """
         if not self.supabase:
-            return
+            return None
 
+        event_key = None
         try:
             # Ensure trace_id is valid UUID string if provided
             if trace_id:
@@ -58,6 +111,16 @@ class AnalyticsService:
                 except ValueError:
                     execution_id = None
 
+            timestamp = datetime.now(timezone.utc).isoformat()
+
+            # Wave 1.2: Compute event_key for idempotency
+            event_key = compute_analytics_event_key(
+                event_name=event_name,
+                suggestion_id=str(suggestion_id) if suggestion_id else None,
+                trace_id=str(trace_id) if trace_id else None,
+                timestamp=timestamp
+            )
+
             data = {
                 "user_id": user_id,
                 "event_name": event_name,
@@ -65,7 +128,8 @@ class AnalyticsService:
                 "properties": properties,
                 "trace_id": str(trace_id) if trace_id else None,
                 "session_id": session_id,
-                "timestamp": datetime.now().isoformat(),
+                "timestamp": timestamp,
+                "event_key": event_key,  # Wave 1.2
                 # v3 Typed Columns
                 "suggestion_id": str(suggestion_id) if suggestion_id else None,
                 "execution_id": str(execution_id) if execution_id else None,
@@ -78,11 +142,30 @@ class AnalyticsService:
             }
 
             # Fire and forget (async ideally, but simple synchronous insert here is fine for low volume)
-            self.supabase.table("analytics_events").insert(data).execute()
+            result = self.supabase.table("analytics_events").insert(data).execute()
+            if result.data:
+                return result.data[0]
+            return None
 
         except Exception as e:
+            error_str = str(e).lower()
+            # Wave 1.2: Handle unique violation as success (idempotent insert)
+            if event_key and ("unique" in error_str or "duplicate" in error_str or "23505" in error_str):
+                try:
+                    existing = self.supabase.table("analytics_events") \
+                        .select("*") \
+                        .eq("event_key", event_key) \
+                        .limit(1) \
+                        .execute()
+                    if existing.data:
+                        print(f"[Analytics] Event '{event_name}' already exists (idempotent)")
+                        return existing.data[0]
+                except Exception:
+                    pass
+                return None
             # Swallow error, maybe print to stderr
             print(f"[Analytics] Failed to log event '{event_name}': {e}")
+            return None
 
     def log_suggestion_event(
         self,

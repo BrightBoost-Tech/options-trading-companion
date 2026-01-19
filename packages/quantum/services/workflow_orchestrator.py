@@ -63,6 +63,176 @@ def clamp_risk_budget(per_trade_budget: float, remaining: float) -> float:
     return max(0.0, min(float(per_trade_budget or 0.0), float(remaining or 0.0)))
 
 
+# =============================================================================
+# Wave 1.2: Insert-idempotent suggestion helper
+# =============================================================================
+
+def insert_or_get_suggestion(
+    supabase: Client,
+    suggestion: dict,
+    unique_fields: tuple
+) -> tuple:
+    """
+    Wave 1.2: Insert a suggestion or return existing row if already exists.
+
+    This prevents updates to immutable integrity fields (lineage_hash, lineage_sig,
+    decision_lineage, trace_id, code_sha, data_hash) which are protected by
+    Wave 1.1 database trigger.
+
+    Args:
+        supabase: Supabase client
+        suggestion: Cleaned suggestion dict (no _v4_* fields)
+        unique_fields: Tuple of (user_id, window, cycle_date, ticker, strategy, legs_fingerprint)
+
+    Returns:
+        Tuple of (suggestion_id, trace_id, is_new)
+        - suggestion_id: UUID of the inserted or existing suggestion
+        - trace_id: trace_id of the inserted or existing suggestion
+        - is_new: True if newly inserted, False if existing
+    """
+    user_id, window, cycle_date, ticker, strategy, legs_fingerprint = unique_fields
+
+    try:
+        # Attempt insert
+        result = supabase.table(TRADE_SUGGESTIONS_TABLE).insert(suggestion).execute()
+        if result.data:
+            row = result.data[0]
+            return (row.get("id"), row.get("trace_id"), True)
+        return (None, None, False)
+
+    except Exception as e:
+        error_str = str(e).lower()
+        # Handle unique violation - fetch existing row
+        if "unique" in error_str or "duplicate" in error_str or "23505" in error_str:
+            try:
+                # Query for existing suggestion using unique constraint fields
+                query = supabase.table(TRADE_SUGGESTIONS_TABLE) \
+                    .select("id, trace_id, lineage_hash, lineage_sig, status") \
+                    .eq("user_id", user_id) \
+                    .eq("window", window) \
+                    .eq("cycle_date", cycle_date) \
+                    .eq("ticker", ticker) \
+                    .eq("strategy", strategy)
+
+                # Handle None fingerprint
+                if legs_fingerprint:
+                    query = query.eq("legs_fingerprint", legs_fingerprint)
+                else:
+                    query = query.is_("legs_fingerprint", "null")
+
+                existing = query.limit(1).execute()
+
+                if existing.data:
+                    row = existing.data[0]
+                    print(f"[Wave1.2] Suggestion already exists for {ticker}/{strategy} (id={row.get('id')})")
+                    return (row.get("id"), row.get("trace_id"), False)
+
+            except Exception as fetch_err:
+                print(f"[Wave1.2] Error fetching existing suggestion: {fetch_err}")
+
+            return (None, None, False)
+
+        # Re-raise non-unique errors
+        raise e
+
+
+# =============================================================================
+# Close Suggestion Supersede Helper
+# =============================================================================
+
+# Close strategies that can supersede each other (same position, different exit modes)
+CLOSE_STRATEGIES = ("take_profit_limit", "salvage_exit", "lottery_trap")
+
+
+def supersede_prior_close_suggestions(
+    supabase: Client,
+    *,
+    user_id: str,
+    cycle_date: str,
+    window: str,
+    ticker: str,
+    legs_fingerprint: str,
+    new_strategy: str,
+    reason: str = "superseded_by_new_exit_mode"
+) -> int:
+    """
+    Supersede prior pending/staged close suggestions for the same position.
+
+    When the exit router changes strategy (e.g., take_profit_limit → salvage_exit),
+    the old suggestion should not remain visible. This function marks prior close
+    suggestions as 'superseded' so the UI only shows the best current exit suggestion.
+
+    Args:
+        supabase: Supabase admin client
+        user_id: User UUID
+        cycle_date: Cycle date (YYYY-MM-DD)
+        window: Window (e.g., "morning_limit")
+        ticker: Underlying ticker
+        legs_fingerprint: Fingerprint identifying the position structure
+        new_strategy: The new strategy being inserted (won't be superseded)
+        reason: Reason string stored in dismissed_reason
+
+    Returns:
+        Number of suggestions superseded
+
+    Notes:
+        - Only supersedes status in ('pending', 'queued', 'staged')
+        - Never touches 'executed', 'filled', 'cancelled' suggestions
+        - Only considers close strategies: take_profit_limit, salvage_exit, lottery_trap
+    """
+    if not supabase or not legs_fingerprint:
+        return 0
+
+    try:
+        # Find prior close suggestions for the same position
+        # Strategy must be in CLOSE_STRATEGIES but NOT the new strategy
+        other_strategies = [s for s in CLOSE_STRATEGIES if s != new_strategy]
+
+        if not other_strategies:
+            return 0
+
+        # Query for existing suggestions to supersede
+        query = supabase.table(TRADE_SUGGESTIONS_TABLE) \
+            .select("id, strategy, status") \
+            .eq("user_id", user_id) \
+            .eq("cycle_date", cycle_date) \
+            .eq("window", window) \
+            .eq("ticker", ticker) \
+            .eq("legs_fingerprint", legs_fingerprint) \
+            .in_("strategy", other_strategies) \
+            .in_("status", ["pending", "queued", "staged"])
+
+        result = query.execute()
+
+        if not result.data:
+            return 0
+
+        superseded_count = 0
+        for row in result.data:
+            suggestion_id = row.get("id")
+            old_strategy = row.get("strategy")
+
+            try:
+                # Mark as superseded
+                supabase.table(TRADE_SUGGESTIONS_TABLE).update({
+                    "status": "superseded",
+                    "dismissed_reason": reason
+                }).eq("id", suggestion_id).execute()
+
+                print(f"[Supersede] Marked {old_strategy} suggestion {suggestion_id} as superseded "
+                      f"(replaced by {new_strategy})")
+                superseded_count += 1
+
+            except Exception as update_err:
+                print(f"[Supersede] Failed to update suggestion {suggestion_id}: {update_err}")
+
+        return superseded_count
+
+    except Exception as e:
+        print(f"[Supersede] Error querying prior suggestions: {e}")
+        return 0
+
+
 def compute_exit_mode(
     unit_price: float,
     unit_cost: float,
@@ -652,168 +822,142 @@ async def run_morning_cycle(supabase: Client, user_id: str):
                     }
                 )
 
-    # 4. Insert suggestions
+    # 4. Insert suggestions (Wave 1.2: insert-idempotent, no upsert of integrity fields)
     if suggestions:
-        try:
-            cycle_date = datetime.now(timezone.utc).date().isoformat()
+        cycle_date = datetime.now(timezone.utc).date().isoformat()
+        inserts_count = 0
+        existing_count = 0
 
-            # Fetch existing to preserve status (using new key if possible, but map still relies on ticker/strategy)
-            # With fingerprinting, ticker+strategy is no longer unique.
-            # We need to map by fingerprint if available, or ticker+strategy as fallback?
-            # Or just blindly insert new ones?
-            # Ideally we want to update status if re-suggested.
-            # We can use fingerprint for key now.
+        # Deduplicate by fingerprint to prevent conflicts
+        suggestion_map_by_fp = {}
+        for s in suggestions:
+            fp = s.get("legs_fingerprint")
+            if fp:
+                suggestion_map_by_fp[fp] = s
 
-            existing_map = {}
+        final_suggestion_list = list(suggestion_map_by_fp.values())
+
+        # Map to track suggestion_id by original trace_id (for post-insert events)
+        inserted_suggestions = []
+
+        for s in final_suggestion_list:
+            s["cycle_date"] = cycle_date
+            s["status"] = "pending"
+
+            # Clean v4 internal fields before insert
+            clean_s = {k: v for k, v in s.items() if not k.startswith("_v4_")}
+
+            # Wave 1.2: Use insert-or-get to avoid updating immutable fields
+            unique_fields = (
+                user_id,
+                "morning_limit",
+                cycle_date,
+                s.get("ticker"),
+                s.get("strategy"),
+                s.get("legs_fingerprint")
+            )
+
+            # Supersede prior close suggestions if this is a close suggestion
+            # This ensures only ONE pending exit suggestion exists per position
+            strategy = s.get("strategy")
+            direction = s.get("direction")
+            if direction == "close" and strategy in CLOSE_STRATEGIES:
+                supersede_prior_close_suggestions(
+                    supabase,
+                    user_id=user_id,
+                    cycle_date=cycle_date,
+                    window="morning_limit",
+                    ticker=s.get("ticker"),
+                    legs_fingerprint=s.get("legs_fingerprint"),
+                    new_strategy=strategy,
+                    reason=f"superseded_by_{strategy}"
+                )
+
             try:
-                # We select legs_fingerprint as well
-                ex = supabase.table(TRADE_SUGGESTIONS_TABLE).select("ticker,strategy,legs_fingerprint,status") \
-                    .eq("user_id", user_id) \
-                    .eq("window", "morning_limit") \
-                    .eq("cycle_date", cycle_date).execute()
-                for r in (ex.data or []):
-                    # Key is fingerprint if available, else (ticker, strategy)
-                    fp = r.get("legs_fingerprint")
-                    if fp and fp != 'legacy':
-                        existing_map[fp] = r["status"]
+                suggestion_id, existing_trace_id, is_new = insert_or_get_suggestion(
+                    supabase, clean_s, unique_fields
+                )
+
+                if suggestion_id:
+                    # Store result for post-insert event emission
+                    inserted_suggestions.append({
+                        "suggestion_id": suggestion_id,
+                        "trace_id": existing_trace_id if not is_new else s.get("trace_id"),
+                        "is_new": is_new,
+                        "original": s
+                    })
+
+                    if is_new:
+                        inserts_count += 1
                     else:
-                        existing_map[(r["ticker"], r["strategy"])] = r["status"]
-            except Exception:
-                pass
+                        existing_count += 1
 
-            upserts = []
-            inserts = 0
-            updates = 0
+            except Exception as e:
+                print(f"[Wave1.2] Error inserting morning suggestion {s.get('ticker')}: {e}")
 
-            # Deduplicate by fingerprint to prevent batch upsert conflicts
-            # If multiple suggestions share the same fingerprint, keep the last one (assumed most recent/best)
-            # Using a dict to map fingerprint -> suggestion is cleaner.
-            suggestion_map_by_fp = {}
-
-            for s in suggestions:
-                fp = s.get("legs_fingerprint")
-                # If no fingerprint, fallback to ticker:strategy unique key simulation or just append
-                # But for safety in this strict mode, we rely on fingerprint.
-                if fp:
-                    suggestion_map_by_fp[fp] = s
-                else:
-                    # No fingerprint? Should generally not happen with updated scanner.
-                    # Generate a temp key or allow if it doesn't conflict.
-                    # We'll just append to a separate list or handle gracefully.
-                    # For now, assuming all have fingerprints.
-                    pass
-
-            # Convert back to list
-            final_suggestion_list = list(suggestion_map_by_fp.values())
-
-            for s in final_suggestion_list:
-                s["cycle_date"] = cycle_date
-                fp = s.get("legs_fingerprint")
-
-                # Check by fingerprint first
-                status = None
-                if fp and fp in existing_map:
-                    status = existing_map[fp]
-                elif (s["ticker"], s["strategy"]) in existing_map:
-                    # Fallback for transition
-                    status = existing_map[(s["ticker"], s["strategy"])]
-
-                if status:
-                    s["status"] = status
-                    updates += 1
-                else:
-                    s["status"] = "pending"
-                    inserts += 1
-                upserts.append(s)
-
-            # Clean v4 internal fields before upsert
-            clean_upserts = []
-            for u in upserts:
-                clean_u = {k: v for k, v in u.items() if not k.startswith("_v4_")}
-                clean_upserts.append(clean_u)
-
-            supabase.table(TRADE_SUGGESTIONS_TABLE).upsert(
-                clean_upserts,
-                on_conflict="user_id,window,cycle_date,ticker,strategy,legs_fingerprint"
-            ).execute()
-            print(f"Upserted morning suggestions: {inserts} inserted, {updates} updated.")
-        except Exception as e:
-            print(f"Error inserting morning suggestions: {e}")
+        print(f"Morning suggestions: {inserts_count} inserted, {existing_count} existing (unchanged)")
 
         # === v4 OBSERVABILITY: Post-insert event emission ===
         try:
             audit_service = AuditLogService(supabase)
 
-            # Fetch suggestions by trace_id to get their database IDs
-            trace_ids = [s.get("trace_id") for s in suggestions if s.get("trace_id")]
-            if trace_ids:
-                fetched_res = supabase.table(TRADE_SUGGESTIONS_TABLE) \
-                    .select("id,trace_id") \
-                    .in_("trace_id", trace_ids) \
-                    .execute()
+            for item in inserted_suggestions:
+                suggestion_id = item["suggestion_id"]
+                trace_id = item["trace_id"]
+                s = item["original"]
 
-                # Map trace_id -> suggestion_id
-                trace_to_id = {r["trace_id"]: r["id"] for r in (fetched_res.data or [])}
+                # Get stored v4 context
+                ctx = s.get("_v4_ctx")
+                lineage_dict = s.get("_v4_lineage", {})
+                budget_info = s.get("_v4_budget_info", {})
+                props = s.get("_v4_props", {})
 
-                for s in suggestions:
-                    trace_id = s.get("trace_id")
-                    suggestion_id = trace_to_id.get(trace_id)
+                if ctx:
+                    # Set suggestion_id on context
+                    ctx.suggestion_id = suggestion_id
 
-                    if not suggestion_id:
-                        continue
-
-                    # Get stored v4 context
-                    ctx = s.get("_v4_ctx")
-                    lineage_dict = s.get("_v4_lineage", {})
-                    budget_info = s.get("_v4_budget_info", {})
-                    props = s.get("_v4_props", {})
-
-                    if ctx:
-                        # Set suggestion_id on context
-                        ctx.suggestion_id = suggestion_id
-
-                        # Emit analytics event (now with valid suggestion_id)
-                        emit_trade_event(
-                            analytics_service,
-                            user_id,
-                            ctx,
-                            "suggestion_generated",
-                            properties=props
-                        )
-
-                    # Write audit event
-                    audit_payload = {
-                        "lineage": lineage_dict,
-                        "ticker": s.get("ticker"),
-                        "strategy": s.get("strategy"),
-                        "ev": s.get("ev"),
-                        "window": s.get("window")
-                    }
-                    audit_service.log_audit_event(
-                        user_id=user_id,
-                        trace_id=trace_id,
-                        suggestion_id=suggestion_id,
-                        event_name="suggestion_generated",
-                        payload=audit_payload,
-                        strategy=s.get("strategy"),
-                        regime=s.get("regime")
+                    # Emit analytics event (now idempotent via Wave 1.2)
+                    emit_trade_event(
+                        analytics_service,
+                        user_id,
+                        ctx,
+                        "suggestion_generated",
+                        properties=props
                     )
 
-                    # Write XAI attribution
-                    attribution = build_attribution_from_lineage(
-                        lineage=lineage_dict,
-                        ctx_regime=s.get("regime"),
-                        sym_regime=s.get("sizing_metadata", {}).get("context", {}).get("regime_v3_symbol"),
-                        global_regime=global_snap.state.value if global_snap else None,
-                        budget_info=budget_info
-                    )
-                    audit_service.write_attribution(
-                        suggestion_id=suggestion_id,
-                        trace_id=trace_id,
-                        **attribution
-                    )
+                # Write audit event (idempotent via Wave 1.1)
+                audit_payload = {
+                    "lineage": lineage_dict,
+                    "ticker": s.get("ticker"),
+                    "strategy": s.get("strategy"),
+                    "ev": s.get("ev"),
+                    "window": s.get("window")
+                }
+                audit_service.log_audit_event(
+                    user_id=user_id,
+                    trace_id=trace_id,
+                    suggestion_id=suggestion_id,
+                    event_name="suggestion_generated",
+                    payload=audit_payload,
+                    strategy=s.get("strategy"),
+                    regime=s.get("regime")
+                )
 
-                print(f"[v4] Emitted events and wrote audit/attribution for {len(trace_to_id)} morning suggestions")
+                # Write XAI attribution (idempotent via Wave 1.1)
+                attribution = build_attribution_from_lineage(
+                    lineage=lineage_dict,
+                    ctx_regime=s.get("regime"),
+                    sym_regime=s.get("sizing_metadata", {}).get("context", {}).get("regime_v3_symbol"),
+                    global_regime=global_snap.state.value if global_snap else None,
+                    budget_info=budget_info
+                )
+                audit_service.write_attribution(
+                    suggestion_id=suggestion_id,
+                    trace_id=trace_id,
+                    **attribution
+                )
+
+            print(f"[v4] Emitted events and wrote audit/attribution for {len(inserted_suggestions)} morning suggestions")
 
         except Exception as e:
             print(f"[v4] Error in morning post-insert observability: {e}")
@@ -1437,164 +1581,148 @@ async def run_midday_cycle(supabase: Client, user_id: str):
 
     print(f"FINAL MIDDAY SUGGESTION COUNT: {len(suggestions)}")
 
+    # Wave 1.2: Insert-idempotent, no upsert of integrity fields
     if suggestions:
-        try:
-            cycle_date = datetime.now(timezone.utc).date().isoformat()
+        cycle_date = datetime.now(timezone.utc).date().isoformat()
+        inserts_count = 0
+        existing_count = 0
 
-            # Fetch existing to preserve status using fingerprint or fallback
-            existing_map = {}
+        # Map to track suggestion_id by original trace_id (for post-insert events)
+        inserted_suggestions = []
+
+        for s in suggestions:
+            s["cycle_date"] = cycle_date
+            s["status"] = "pending"
+
+            # Clean internal fields (including v4 context stored for post-insert processing)
+            clean_s = {k: v for k, v in s.items() if k != 'internal_cand' and not k.startswith('_v4_')}
+
+            # Wave 1.2: Use insert-or-get to avoid updating immutable fields
+            unique_fields = (
+                user_id,
+                "midday_entry",
+                cycle_date,
+                s.get("ticker"),
+                s.get("strategy"),
+                s.get("legs_fingerprint")
+            )
+
             try:
-                ex = supabase.table(TRADE_SUGGESTIONS_TABLE).select("ticker,strategy,legs_fingerprint,status") \
-                    .eq("user_id", user_id) \
-                    .eq("window", "midday_entry") \
-                    .eq("cycle_date", cycle_date).execute()
-                for r in (ex.data or []):
-                    fp = r.get("legs_fingerprint")
-                    if fp and fp != 'legacy':
-                        existing_map[fp] = r["status"]
+                suggestion_id, existing_trace_id, is_new = insert_or_get_suggestion(
+                    supabase, clean_s, unique_fields
+                )
+
+                if suggestion_id:
+                    # Store result for post-insert event emission
+                    inserted_suggestions.append({
+                        "suggestion_id": suggestion_id,
+                        "trace_id": existing_trace_id if not is_new else s.get("trace_id"),
+                        "is_new": is_new,
+                        "original": s
+                    })
+
+                    if is_new:
+                        inserts_count += 1
                     else:
-                        existing_map[(r["ticker"], r["strategy"])] = r["status"]
-            except Exception:
-                pass
+                        existing_count += 1
 
-            upserts = []
-            inserts = 0
-            updates = 0
-
-            for s in suggestions:
-                s["cycle_date"] = cycle_date
-                fp = s.get("legs_fingerprint")
-
-                status = None
-                if fp and fp in existing_map:
-                    status = existing_map[fp]
-                elif (s["ticker"], s["strategy"]) in existing_map:
-                    status = existing_map[(s["ticker"], s["strategy"])]
-
-                if status:
-                    s["status"] = status
-                    updates += 1
-                else:
-                    s["status"] = "pending"
-                    inserts += 1
-
-                # Clean internal fields (including v4 context stored for post-insert processing)
-                clean_s = {k: v for k, v in s.items() if k != 'internal_cand' and not k.startswith('_v4_')}
-                upserts.append(clean_s)
-
-            # Try to upsert with agent fields
-            # UPDATED: Use the new unique constraint including legs_fingerprint
-            try:
-                supabase.table(TRADE_SUGGESTIONS_TABLE).upsert(
-                    upserts,
-                    on_conflict="user_id,window,cycle_date,ticker,strategy,legs_fingerprint"
-                ).execute()
-                print(f"Upserted midday suggestions: {inserts} inserted, {updates} updated.")
             except Exception as e:
-                # Fallback: remove agent fields if upsert failed (likely missing columns)
-                if "agent_signals" in str(e) or "agent_summary" in str(e) or "column" in str(e).lower():
-                    print(f"Upsert failed, likely due to missing agent columns. Retrying without them. Error: {e}")
-                    fallback_upserts = []
-                    for u in upserts:
-                        # Create a copy to avoid modifying original
-                        u_clean = u.copy()
-                        u_clean.pop("agent_signals", None)
-                        u_clean.pop("agent_summary", None)
-                        fallback_upserts.append(u_clean)
-
-                    supabase.table(TRADE_SUGGESTIONS_TABLE).upsert(
-                        fallback_upserts,
-                        on_conflict="user_id,window,cycle_date,ticker,strategy,legs_fingerprint"
-                    ).execute()
-                    print(f"Upserted midday suggestions (fallback): {inserts} inserted, {updates} updated.")
+                error_str = str(e).lower()
+                # Fallback: remove agent fields if insert failed (likely missing columns)
+                if "agent_signals" in error_str or "agent_summary" in error_str or "column" in error_str:
+                    print(f"[Wave1.2] Insert failed due to agent columns, retrying without them: {e}")
+                    clean_s_fallback = {k: v for k, v in clean_s.items()
+                                        if k not in ("agent_signals", "agent_summary")}
+                    try:
+                        suggestion_id, existing_trace_id, is_new = insert_or_get_suggestion(
+                            supabase, clean_s_fallback, unique_fields
+                        )
+                        if suggestion_id:
+                            inserted_suggestions.append({
+                                "suggestion_id": suggestion_id,
+                                "trace_id": existing_trace_id if not is_new else s.get("trace_id"),
+                                "is_new": is_new,
+                                "original": s
+                            })
+                            if is_new:
+                                inserts_count += 1
+                            else:
+                                existing_count += 1
+                    except Exception as fallback_err:
+                        print(f"[Wave1.2] Fallback insert also failed: {fallback_err}")
                 else:
-                    raise e
+                    print(f"[Wave1.2] Error inserting midday suggestion {s.get('ticker')}: {e}")
 
-        except Exception as e:
-            print(f"Error inserting midday suggestions: {e}")
+        print(f"Midday suggestions: {inserts_count} inserted, {existing_count} existing (unchanged)")
 
         # === v4 OBSERVABILITY: Post-insert event emission ===
-        # Query for inserted suggestions to get their IDs, then emit events
         try:
             audit_service = AuditLogService(supabase)
 
-            # Fetch suggestions by trace_id to get their database IDs
-            trace_ids = [s.get("trace_id") for s in suggestions if s.get("trace_id")]
-            if trace_ids:
-                fetched_res = supabase.table(TRADE_SUGGESTIONS_TABLE) \
-                    .select("id,trace_id") \
-                    .in_("trace_id", trace_ids) \
-                    .execute()
+            for item in inserted_suggestions:
+                suggestion_id = item["suggestion_id"]
+                trace_id = item["trace_id"]
+                s = item["original"]
 
-                # Map trace_id -> suggestion_id
-                trace_to_id = {r["trace_id"]: r["id"] for r in (fetched_res.data or [])}
+                # Get stored v4 context
+                ctx = s.get("_v4_ctx")
+                lineage_dict = s.get("_v4_lineage", {})
+                budget_info = s.get("_v4_budget_info", {})
 
-                for s in suggestions:
-                    trace_id = s.get("trace_id")
-                    suggestion_id = trace_to_id.get(trace_id)
+                if ctx:
+                    # Set suggestion_id on context
+                    ctx.suggestion_id = suggestion_id
 
-                    if not suggestion_id:
-                        continue
+                    # Emit analytics event (now idempotent via Wave 1.2)
+                    cand = s.get("internal_cand", {})
+                    props = {"ev": s.get("ev"), "score": cand.get("score")}
+                    if s.get("probability_of_profit") is not None:
+                        props["probability_of_profit"] = s.get("probability_of_profit")
 
-                    # Get stored v4 context
-                    ctx = s.get("_v4_ctx")
-                    lineage_dict = s.get("_v4_lineage", {})
-                    budget_info = s.get("_v4_budget_info", {})
-
-                    if ctx:
-                        # Set suggestion_id on context
-                        ctx.suggestion_id = suggestion_id
-
-                        # Emit analytics event (now with valid suggestion_id)
-                        cand = s.get("internal_cand", {})
-                        props = {"ev": s.get("ev"), "score": cand.get("score")}
-                        if s.get("probability_of_profit") is not None:
-                            props["probability_of_profit"] = s.get("probability_of_profit")
-
-                        emit_trade_event(
-                            analytics_service,
-                            user_id,
-                            ctx,
-                            "suggestion_generated",
-                            properties=props
-                        )
-
-                    # Write audit event
-                    audit_payload = {
-                        "lineage": lineage_dict,
-                        "ticker": s.get("ticker"),
-                        "strategy": s.get("strategy"),
-                        "ev": s.get("ev"),
-                        "window": s.get("window")
-                    }
-                    audit_service.log_audit_event(
-                        user_id=user_id,
-                        trace_id=trace_id,
-                        suggestion_id=suggestion_id,
-                        event_name="suggestion_generated",
-                        payload=audit_payload,
-                        strategy=s.get("strategy"),
-                        regime=s.get("regime")
+                    emit_trade_event(
+                        analytics_service,
+                        user_id,
+                        ctx,
+                        "suggestion_generated",
+                        properties=props
                     )
 
-                    # Write XAI attribution
-                    attribution = build_attribution_from_lineage(
-                        lineage=lineage_dict,
-                        ctx_regime=s.get("regime"),
-                        sym_regime=s.get("sizing_metadata", {}).get("context", {}).get("regime_v3_symbol"),
-                        global_regime=global_snap.state.value if global_snap else None,
-                        budget_info=budget_info
-                    )
-                    audit_service.write_attribution(
-                        suggestion_id=suggestion_id,
-                        trace_id=trace_id,
-                        **attribution
-                    )
+                # Write audit event (idempotent via Wave 1.1)
+                audit_payload = {
+                    "lineage": lineage_dict,
+                    "ticker": s.get("ticker"),
+                    "strategy": s.get("strategy"),
+                    "ev": s.get("ev"),
+                    "window": s.get("window")
+                }
+                audit_service.log_audit_event(
+                    user_id=user_id,
+                    trace_id=trace_id,
+                    suggestion_id=suggestion_id,
+                    event_name="suggestion_generated",
+                    payload=audit_payload,
+                    strategy=s.get("strategy"),
+                    regime=s.get("regime")
+                )
 
-                print(f"[v4] Emitted events and wrote audit/attribution for {len(trace_to_id)} suggestions")
+                # Write XAI attribution (idempotent via Wave 1.1)
+                attribution = build_attribution_from_lineage(
+                    lineage=lineage_dict,
+                    ctx_regime=s.get("regime"),
+                    sym_regime=s.get("sizing_metadata", {}).get("context", {}).get("regime_v3_symbol"),
+                    global_regime=global_snap.state.value if global_snap else None,
+                    budget_info=budget_info
+                )
+                audit_service.write_attribution(
+                    suggestion_id=suggestion_id,
+                    trace_id=trace_id,
+                    **attribution
+                )
+
+            print(f"[v4] Emitted events and wrote audit/attribution for {len(inserted_suggestions)} midday suggestions")
 
         except Exception as e:
-            print(f"[v4] Error in post-insert observability: {e}")
+            print(f"[v4] Error in midday post-insert observability: {e}")
 
         try:
             logs = []

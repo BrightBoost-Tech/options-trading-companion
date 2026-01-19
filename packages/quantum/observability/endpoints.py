@@ -154,6 +154,13 @@ async def get_trace(
         audit_service = AuditLogService(client)
         audit_log = audit_service.get_audit_events_for_trace(trace_id)
 
+        # Wave 1.2: Add verification per audit event for institutional usability
+        audit_log_verified = []
+        for event in audit_log:
+            event_copy = dict(event)
+            event_copy["verification"] = audit_service.verify_audit_event(event)
+            audit_log_verified.append(event_copy)
+
         # 5. Fetch attribution
         suggestion_id = suggestion.get("id")
         attribution = None
@@ -166,7 +173,7 @@ async def get_trace(
             "integrity": integrity,
             "lifecycle": {
                 "suggestion": suggestion,
-                "audit_log": audit_log,
+                "audit_log": audit_log_verified,  # Wave 1.2: includes verification per event
                 "attribution": attribution
             }
         }

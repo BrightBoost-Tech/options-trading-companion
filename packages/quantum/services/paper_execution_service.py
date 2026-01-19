@@ -69,10 +69,30 @@ class PaperExecutionService:
             window="paper"
         )
 
-        # v4: Emit order_staged event after insert (now that order_id exists)
-        # Note: analytics_service is optional, passed to process_order
-        # For stage_order, we write audit log directly
+        # v4/Wave 1.2: Emit order_staged event after insert (now that order_id exists)
+        # Wave 1.2: Also emit analytics event unconditionally when trace_id exists
 
+        # Emit analytics event (idempotent via Wave 1.2 event_key)
+        if trace_id:
+            try:
+                effective_analytics = AnalyticsService(self.supabase)
+                emit_trade_event(
+                    effective_analytics,
+                    user_id,
+                    ctx,
+                    "order_staged",
+                    is_paper=True,
+                    properties={
+                        "paper_order_id": order_id,
+                        "suggestion_id": suggestion_id,
+                        "portfolio_id": portfolio_id,
+                        "strategy": strategy
+                    }
+                )
+            except Exception as e:
+                print(f"[PaperExec] Failed to emit order_staged analytics: {e}")
+
+        # Write audit log (idempotent via Wave 1.1 event_key)
         try:
             audit_service = AuditLogService(self.supabase)
             audit_payload = {

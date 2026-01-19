@@ -1,4 +1,5 @@
 from typing import List, Dict, Any
+import numpy as np
 from .regime_scoring import ScoringEngine, ConvictionTransform
 from .risk_manager import RiskBudgetManager, MorningManager
 
@@ -217,3 +218,170 @@ def get_morning_exits(
     # Sort by urgency desc
     exits.sort(key=lambda x: x['urgency'], reverse=True)
     return exits
+
+def calculate_regime_vectorized(
+    trend_series: np.ndarray,
+    vol_series: np.ndarray,
+    rsi_series: np.ndarray
+) -> Dict[str, np.ndarray]:
+    """
+    Vectorized calculation of regime and conviction for the entire simulation window.
+    Replaces step-by-step logic in HistoricalCycleService.
+
+    Returns:
+        Dict containing:
+        - "regime": np.ndarray of strings ('normal', 'high_vol', 'panic')
+        - "conviction": np.ndarray of floats [0.0, 1.0]
+    """
+    # --- 1. Infer Global Context (Vectorized) ---
+
+    # VIX Level Logic
+    # if vol > 0.30: vix = 35.0
+    # elif vol > 0.20: vix = 25.0
+    # else: vix = 15.0
+    vix_level = np.select(
+        [vol_series > 0.30, vol_series > 0.20],
+        [35.0, 25.0],
+        default=15.0
+    )
+
+    # Vol State Logic
+    # if vix > 30: "high"
+    # elif vix > 20: "medium"
+    # else: "low"
+    vol_state = np.select(
+        [vix_level > 30.0, vix_level > 20.0],
+        ["high", "medium"],
+        default="low"
+    )
+
+    # Global Regime Logic
+    # if vol_state == "high": "shock"
+    # elif vol_state == "medium": if trend=="DOWN": "bear" else "crab"
+    # else: if trend=="UP": "bull", elif trend=="DOWN": "bear", else "crab"
+
+    is_down = trend_series == "DOWN"
+    is_up = trend_series == "UP"
+
+    regime_global = np.select(
+        [
+            vol_state == "high",
+            (vol_state == "medium") & is_down,
+            (vol_state == "medium"), # default for medium
+            (vol_state == "low") & is_up,
+            (vol_state == "low") & is_down
+        ],
+        [
+            "shock",
+            "bear",
+            "crab",
+            "bull",
+            "bear"
+        ],
+        default="crab" # low & neutral -> crab
+    )
+
+    # --- 2. Map Market Regime (Vectorized) ---
+    # if state == 'shock': 'panic'
+    # if vol > 0.20: 'high_vol'
+    # if state == 'bear': 'high_vol'
+    # else: 'normal'
+
+    regime_mapped = np.select(
+        [
+            regime_global == "shock",
+            vol_series > 0.20,
+            regime_global == "bear"
+        ],
+        [
+            "panic",
+            "high_vol",
+            "high_vol"
+        ],
+        default="normal"
+    )
+
+    # --- 3. Run Historical Scoring (Vectorized) ---
+
+    # Factor Scores (Inputs)
+    # Trend: UP=100, DOWN=0, NEUTRAL=50
+    trend_score = np.select(
+        [is_up, is_down],
+        [100.0, 0.0],
+        default=50.0
+    )
+
+    # Vol Score: <0.15 -> 100, >0.30 -> 0, else 50
+    vol_score = np.select(
+        [vol_series < 0.15, vol_series > 0.30],
+        [100.0, 0.0],
+        default=50.0
+    )
+
+    # Value Score: <30 -> 100, >70 -> 0, else 50
+    value_score = np.select(
+        [rsi_series < 30, rsi_series > 70],
+        [100.0, 0.0],
+        default=50.0
+    )
+
+    # Weights based on regime_mapped
+    # 'normal': {'trend': 0.4, 'value': 0.3, 'volatility': 0.3}
+    # 'high_vol': {'trend': 0.2, 'value': 0.3, 'volatility': 0.5}
+    # 'panic': {'trend': 0.1, 'value': 0.1, 'volatility': 0.8}
+
+    is_normal = regime_mapped == "normal"
+    is_high_vol = regime_mapped == "high_vol"
+    is_panic = regime_mapped == "panic"
+
+    w_trend = np.select([is_normal, is_high_vol, is_panic], [0.4, 0.2, 0.1])
+    w_value = np.select([is_normal, is_high_vol, is_panic], [0.3, 0.3, 0.1])
+    w_vol = np.select([is_normal, is_high_vol, is_panic], [0.3, 0.5, 0.8])
+
+    # Raw Score Calculation
+    # Assuming liquidity_tier='top' -> scalar=1.0
+    raw_score = (w_trend * trend_score) + (w_value * value_score) + (w_vol * vol_score)
+
+    # --- 4. Conviction Transform (Vectorized) ---
+    # Using DEFAULT_REGIME_PROFILES
+
+    # Profiles
+    # normal: k=0.1, mu=50, floor=30, mu_dyn=0.5
+    # high_vol: k=0.08, mu=60, floor=40, mu_dyn=0.7
+    # panic: k=0.2, mu=40, floor=20, mu_dyn=0.2, panic_scale=0.5
+
+    k = np.select([is_normal, is_high_vol, is_panic], [0.1, 0.08, 0.2])
+    mu = np.select([is_normal, is_high_vol, is_panic], [50.0, 60.0, 40.0])
+    floor = np.select([is_normal, is_high_vol, is_panic], [30.0, 40.0, 20.0])
+    panic_scale = np.select([is_panic], [0.5], default=1.0)
+
+    # mu_eff calculation (assuming universe_median=None)
+    mu_eff = np.maximum(mu, floor)
+
+    # Sigmoid: 1 / (1 + exp(-k * (raw_score - mu_eff)))
+    # Use np.exp safely
+    exponent = -k * (raw_score - mu_eff)
+    # Clamp exponent to avoid overflow
+    exponent = np.clip(exponent, -500, 500)
+
+    sigmoid = 1.0 / (1.0 + np.exp(exponent))
+
+    # Hard floor check
+    # if raw_score < floor: 0.0
+    c_i = np.where(raw_score < floor, 0.0, sigmoid)
+
+    # Panic scaling
+    c_i = c_i * panic_scale
+
+    # Clamp
+    c_i = np.clip(c_i, 0.0, 1.0)
+
+    return {
+        "regime": regime_mapped,
+        "conviction": c_i,
+        "factors": {
+            "trend": trend_score,
+            "volatility": vol_score,
+            "value": value_score
+        }
+    }

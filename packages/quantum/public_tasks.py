@@ -29,7 +29,19 @@ router = APIRouter(
 def enqueue_job_run(job_name: str, idempotency_key: str, payload: Dict[str, Any], queue_name: str = "otc") -> Dict[str, Any]:
     """
     Helper to create a JobRun and enqueue the runner.
+
+    v4-L5 Ops Console: Enforces pause gate - blocks enqueue when trading is paused.
     """
+    # v4-L5: PAUSE GATE - check if trading is paused before enqueue
+    from packages.quantum.ops_endpoints import is_trading_paused
+    is_paused, pause_reason = is_trading_paused()
+    if is_paused:
+        raise HTTPException(
+            status_code=503,
+            detail=f"Trading is paused: {pause_reason or 'No reason provided'}. "
+                   f"Job '{job_name}' was not enqueued. Resume trading via /ops/pause."
+        )
+
     store = JobRunStore()
 
     # 1. Create or Get DB record

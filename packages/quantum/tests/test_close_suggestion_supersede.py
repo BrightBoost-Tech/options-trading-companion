@@ -1056,7 +1056,13 @@ class TestWave131IntegrityIncidentEmission:
 
     def test_integrity_incident_emitted_when_fingerprint_missing(self):
         """When fingerprint is missing on unique violation fallback, emit integrity incident."""
-        from packages.quantum.services.workflow_orchestrator import insert_or_get_suggestion
+        from packages.quantum.services.workflow_orchestrator import (
+            insert_or_get_suggestion,
+            _clear_integrity_incident_cache
+        )
+
+        # Wave 1.3.2: Clear cache to ensure emission
+        _clear_integrity_incident_cache()
 
         mock_client = MagicMock()
         mock_table = MagicMock()
@@ -1098,21 +1104,23 @@ class TestWave131IntegrityIncidentEmission:
 
                 insert_or_get_suggestion(mock_client, suggestion, unique_fields)
 
-                # Verify audit event was emitted with event_name="integrity_incident"
-                mock_audit_service.log_audit_event.assert_called_once()
-                audit_kwargs = mock_audit_service.log_audit_event.call_args[1]
-                assert audit_kwargs["event_name"] == "integrity_incident"
-                assert audit_kwargs["payload"]["type"] == "missing_legs_fingerprint"
-                assert audit_kwargs["payload"]["ticker"] == "KURA"
-                assert audit_kwargs["payload"]["strategy"] == "take_profit_limit"
+                # Wave 1.3.2: Now emits 2 events (integrity_incident + integrity_incident_linked)
+                # Verify integrity_incident was emitted
+                audit_calls = mock_audit_service.log_audit_event.call_args_list
+                integrity_call = [c for c in audit_calls if c[1]["event_name"] == "integrity_incident"][0]
+                assert integrity_call[1]["payload"]["type"] == "missing_legs_fingerprint"
+                assert integrity_call[1]["payload"]["ticker"] == "KURA"
+                assert integrity_call[1]["payload"]["strategy"] == "take_profit_limit"
 
-                # Verify analytics event was emitted with idempotency_payload
-                mock_analytics_service.log_event.assert_called_once()
-                analytics_kwargs = mock_analytics_service.log_event.call_args[1]
-                assert analytics_kwargs["event_name"] == "integrity_incident"
-                assert analytics_kwargs["category"] == "system"
-                assert "idempotency_payload" in analytics_kwargs
-                assert analytics_kwargs["idempotency_payload"]["type"] == "missing_legs_fingerprint"
+                # Verify analytics integrity_incident was emitted with idempotency_payload
+                analytics_calls = mock_analytics_service.log_event.call_args_list
+                analytics_integrity_call = [c for c in analytics_calls if c[1]["event_name"] == "integrity_incident"][0]
+                assert analytics_integrity_call[1]["category"] == "system"
+                assert "idempotency_payload" in analytics_integrity_call[1]
+                assert analytics_integrity_call[1]["idempotency_payload"]["type"] == "missing_legs_fingerprint"
+
+        # Clean up
+        _clear_integrity_incident_cache()
 
     def test_integrity_incident_not_emitted_when_fingerprint_present(self):
         """When fingerprint is present, no integrity incident should be emitted."""
@@ -1157,8 +1165,12 @@ class TestWave131IntegrityIncidentEmission:
         """Integrity incident should use deterministic trace_id for forensic continuity."""
         from packages.quantum.services.workflow_orchestrator import (
             insert_or_get_suggestion,
-            deterministic_integrity_trace_id
+            deterministic_integrity_trace_id,
+            _clear_integrity_incident_cache
         )
+
+        # Wave 1.3.2: Clear cache to ensure emission
+        _clear_integrity_incident_cache()
 
         mock_client = MagicMock()
         mock_table = MagicMock()
@@ -1205,9 +1217,328 @@ class TestWave131IntegrityIncidentEmission:
 
                 insert_or_get_suggestion(mock_client, suggestion, unique_fields)
 
-                # Verify deterministic trace_id was used
-                audit_trace_id = mock_audit_service.log_audit_event.call_args[1]["trace_id"]
-                analytics_trace_id = mock_analytics_service.log_event.call_args[1]["trace_id"]
+                # Verify deterministic trace_id was used (first call is integrity_incident)
+                audit_calls = mock_audit_service.log_audit_event.call_args_list
+                integrity_call = [c for c in audit_calls if c[1]["event_name"] == "integrity_incident"][0]
+                audit_trace_id = integrity_call[1]["trace_id"]
+
+                analytics_calls = mock_analytics_service.log_event.call_args_list
+                analytics_integrity_call = [c for c in analytics_calls if c[1]["event_name"] == "integrity_incident"][0]
+                analytics_trace_id = analytics_integrity_call[1]["trace_id"]
 
                 assert audit_trace_id == expected_trace_id
                 assert analytics_trace_id == expected_trace_id
+
+
+# =============================================================================
+# Wave 1.3.2 Tests: In-Memory Dedupe Guard
+# =============================================================================
+
+class TestWave132InMemoryDedupe:
+    """Wave 1.3.2: Test in-memory dedupe guard for integrity incidents."""
+
+    def test_dedupe_guard_prevents_duplicate_emissions(self):
+        """Calling _emit_integrity_incident twice with same inputs should emit once."""
+        from packages.quantum.services.workflow_orchestrator import (
+            _emit_integrity_incident,
+            _clear_integrity_incident_cache
+        )
+
+        # Clear cache before test
+        _clear_integrity_incident_cache()
+
+        mock_client = MagicMock()
+
+        with patch("packages.quantum.services.workflow_orchestrator.AuditLogService") as mock_audit_cls:
+            mock_audit_service = MagicMock()
+            mock_audit_cls.return_value = mock_audit_service
+
+            with patch("packages.quantum.services.workflow_orchestrator.AnalyticsService") as mock_analytics_cls:
+                mock_analytics_service = MagicMock()
+                mock_analytics_cls.return_value = mock_analytics_service
+
+                # Call twice with same inputs
+                _emit_integrity_incident(
+                    supabase=mock_client,
+                    user_id="user-123",
+                    cycle_date="2026-01-19",
+                    window="morning_limit",
+                    ticker="KURA",
+                    strategy="take_profit_limit"
+                )
+
+                _emit_integrity_incident(
+                    supabase=mock_client,
+                    user_id="user-123",
+                    cycle_date="2026-01-19",
+                    window="morning_limit",
+                    ticker="KURA",
+                    strategy="take_profit_limit"
+                )
+
+                # Should only emit once due to dedupe
+                assert mock_audit_service.log_audit_event.call_count == 1
+                assert mock_analytics_service.log_event.call_count == 1
+
+        # Clean up
+        _clear_integrity_incident_cache()
+
+    def test_dedupe_guard_allows_different_inputs(self):
+        """Different inputs should still emit separately."""
+        from packages.quantum.services.workflow_orchestrator import (
+            _emit_integrity_incident,
+            _clear_integrity_incident_cache
+        )
+
+        # Clear cache before test
+        _clear_integrity_incident_cache()
+
+        mock_client = MagicMock()
+
+        with patch("packages.quantum.services.workflow_orchestrator.AuditLogService") as mock_audit_cls:
+            mock_audit_service = MagicMock()
+            mock_audit_cls.return_value = mock_audit_service
+
+            with patch("packages.quantum.services.workflow_orchestrator.AnalyticsService") as mock_analytics_cls:
+                mock_analytics_service = MagicMock()
+                mock_analytics_cls.return_value = mock_analytics_service
+
+                # Call with different tickers
+                _emit_integrity_incident(
+                    supabase=mock_client,
+                    user_id="user-123",
+                    cycle_date="2026-01-19",
+                    window="morning_limit",
+                    ticker="KURA",
+                    strategy="take_profit_limit"
+                )
+
+                _emit_integrity_incident(
+                    supabase=mock_client,
+                    user_id="user-123",
+                    cycle_date="2026-01-19",
+                    window="morning_limit",
+                    ticker="AAPL",  # Different ticker
+                    strategy="take_profit_limit"
+                )
+
+                # Should emit twice (different keys)
+                assert mock_audit_service.log_audit_event.call_count == 2
+                assert mock_analytics_service.log_event.call_count == 2
+
+        # Clean up
+        _clear_integrity_incident_cache()
+
+    def test_dedupe_returns_trace_id_even_when_skipped(self):
+        """_emit_integrity_incident should return trace_id even on dedupe skip."""
+        from packages.quantum.services.workflow_orchestrator import (
+            _emit_integrity_incident,
+            _clear_integrity_incident_cache,
+            deterministic_integrity_trace_id
+        )
+
+        # Clear cache before test
+        _clear_integrity_incident_cache()
+
+        mock_client = MagicMock()
+
+        expected_trace_id = deterministic_integrity_trace_id(
+            user_id="user-123",
+            cycle_date="2026-01-19",
+            window="morning_limit",
+            ticker="KURA",
+            strategy="take_profit_limit"
+        )
+
+        with patch("packages.quantum.services.workflow_orchestrator.AuditLogService"):
+            with patch("packages.quantum.services.workflow_orchestrator.AnalyticsService"):
+                # First call
+                trace_id_1 = _emit_integrity_incident(
+                    supabase=mock_client,
+                    user_id="user-123",
+                    cycle_date="2026-01-19",
+                    window="morning_limit",
+                    ticker="KURA",
+                    strategy="take_profit_limit"
+                )
+
+                # Second call (will be skipped by dedupe)
+                trace_id_2 = _emit_integrity_incident(
+                    supabase=mock_client,
+                    user_id="user-123",
+                    cycle_date="2026-01-19",
+                    window="morning_limit",
+                    ticker="KURA",
+                    strategy="take_profit_limit"
+                )
+
+                # Both should return the same deterministic trace_id
+                assert trace_id_1 == expected_trace_id
+                assert trace_id_2 == expected_trace_id
+
+        # Clean up
+        _clear_integrity_incident_cache()
+
+
+# =============================================================================
+# Wave 1.3.2 Tests: Linked Integrity Incident
+# =============================================================================
+
+class TestWave132LinkedIntegrityIncident:
+    """Wave 1.3.2: Test integrity_incident_linked event emission."""
+
+    def test_linked_incident_emitted_after_fallback_finds_row(self):
+        """When fallback finds a row, integrity_incident_linked should be emitted."""
+        from packages.quantum.services.workflow_orchestrator import (
+            insert_or_get_suggestion,
+            _clear_integrity_incident_cache
+        )
+
+        # Clear cache before test
+        _clear_integrity_incident_cache()
+
+        mock_client = MagicMock()
+        mock_table = MagicMock()
+        mock_client.table.return_value = mock_table
+
+        # Setup insert to fail with unique violation
+        mock_insert = MagicMock()
+        mock_table.insert.return_value = mock_insert
+        mock_insert.execute.side_effect = Exception("duplicate key value violates unique constraint")
+
+        # Setup query chain for fallback - returns a row
+        mock_select = MagicMock()
+        mock_table.select.return_value = mock_select
+        mock_select.eq.return_value = mock_select
+        mock_select.order.return_value = mock_select
+        mock_select.limit.return_value = mock_select
+        mock_select.execute.return_value = MagicMock(data=[
+            {"id": "found-sugg-123", "trace_id": "trace-found"}
+        ])
+
+        suggestion = {
+            "user_id": "user-123",
+            "ticker": "KURA",
+            "cycle_date": "2026-01-19",
+            "window": "morning_limit",
+            "strategy": "take_profit_limit",
+            "legs_fingerprint": None,  # Missing fingerprint
+        }
+
+        unique_fields = ("user-123", "morning_limit", "2026-01-19", "KURA", "take_profit_limit", None)
+
+        with patch("packages.quantum.services.workflow_orchestrator.AuditLogService") as mock_audit_cls:
+            mock_audit_service = MagicMock()
+            mock_audit_cls.return_value = mock_audit_service
+
+            with patch("packages.quantum.services.workflow_orchestrator.AnalyticsService") as mock_analytics_cls:
+                mock_analytics_service = MagicMock()
+                mock_analytics_cls.return_value = mock_analytics_service
+
+                insert_or_get_suggestion(mock_client, suggestion, unique_fields)
+
+                # Should have 2 audit events: integrity_incident + integrity_incident_linked
+                assert mock_audit_service.log_audit_event.call_count == 2
+
+                audit_calls = mock_audit_service.log_audit_event.call_args_list
+                event_names = [c[1]["event_name"] for c in audit_calls]
+                assert "integrity_incident" in event_names
+                assert "integrity_incident_linked" in event_names
+
+                # Verify linked event has suggestion_id
+                linked_call = [c for c in audit_calls if c[1]["event_name"] == "integrity_incident_linked"][0]
+                assert linked_call[1]["suggestion_id"] == "found-sugg-123"
+
+                # Should have 2 analytics events as well
+                assert mock_analytics_service.log_event.call_count == 2
+
+                analytics_calls = mock_analytics_service.log_event.call_args_list
+                analytics_events = [c[1]["event_name"] for c in analytics_calls]
+                assert "integrity_incident" in analytics_events
+                assert "integrity_incident_linked" in analytics_events
+
+        # Clean up
+        _clear_integrity_incident_cache()
+
+    def test_linked_incident_not_emitted_when_fingerprint_present(self):
+        """No linked incident when fingerprint is present (no integrity issue)."""
+        from packages.quantum.services.workflow_orchestrator import insert_or_get_suggestion
+
+        mock_client = MagicMock()
+        mock_table = MagicMock()
+        mock_client.table.return_value = mock_table
+
+        # Setup insert to fail with unique violation
+        mock_insert = MagicMock()
+        mock_table.insert.return_value = mock_insert
+        mock_insert.execute.side_effect = Exception("23505: duplicate key")
+
+        # Setup query chain for fallback
+        mock_select = MagicMock()
+        mock_table.select.return_value = mock_select
+        mock_select.eq.return_value = mock_select
+        mock_select.limit.return_value = mock_select
+        mock_select.execute.return_value = MagicMock(data=[
+            {"id": "existing-456", "trace_id": "trace-existing-456"}
+        ])
+
+        suggestion = {
+            "user_id": "user-123",
+            "ticker": "KURA",
+            "cycle_date": "2026-01-19",
+            "window": "morning_limit",
+            "strategy": "take_profit_limit",
+            "legs_fingerprint": "fp-valid-123",  # Valid fingerprint
+        }
+
+        unique_fields = ("user-123", "morning_limit", "2026-01-19", "KURA", "take_profit_limit", "fp-valid-123")
+
+        with patch("packages.quantum.services.workflow_orchestrator._emit_integrity_incident") as mock_emit:
+            with patch("packages.quantum.services.workflow_orchestrator._emit_integrity_incident_linked") as mock_linked:
+                insert_or_get_suggestion(mock_client, suggestion, unique_fields)
+
+                # No integrity events should be emitted
+                mock_emit.assert_not_called()
+                mock_linked.assert_not_called()
+
+
+# =============================================================================
+# Wave 1.3.2 Tests: Migration File Verification
+# =============================================================================
+
+class TestWave132MigrationFile:
+    """Wave 1.3.2: Verify migration file exists with corrected documentation."""
+
+    def test_migration_file_exists(self):
+        """Migration 00005 should exist."""
+        import os
+        migration_path = os.path.join(
+            os.path.dirname(__file__),
+            "..", "..", "..",
+            "supabase", "migrations",
+            "20260118000005_v4_fingerprint_integrity_fix.sql"
+        )
+        assert os.path.exists(migration_path), f"Migration file not found at {migration_path}"
+
+    def test_migration_contains_corrected_comments(self):
+        """Migration should have corrected documentation (no false grandfathering claim)."""
+        import os
+        migration_path = os.path.join(
+            os.path.dirname(__file__),
+            "..", "..", "..",
+            "supabase", "migrations",
+            "20260118000005_v4_fingerprint_integrity_fix.sql"
+        )
+
+        with open(migration_path, "r") as f:
+            content = f.read()
+
+        # Should mention Wave 1.3.2
+        assert "Wave 1.3.2" in content
+
+        # Should NOT claim date-based grandfathering in the function
+        assert "created_at < '2026-01-20'" not in content
+
+        # Should clarify that bypass is via window/source only
+        assert "window IN ('paper', 'legacy', 'test')" in content or "window IN (paper,legacy,test)" in content.replace("'", "")
+        assert "source = 'legacy'" in content or "source=legacy" in content.replace("'", "").replace(" ", "")

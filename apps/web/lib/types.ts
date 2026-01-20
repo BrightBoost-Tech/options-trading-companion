@@ -358,3 +358,39 @@ export interface DiscreteSolveResponse {
   metrics: DiscreteSolveMetrics;
   diagnostics: Record<string, any>;
 }
+
+// --- PR C: Ops Console Types ---
+
+export interface OpsControlState {
+  mode: string;  // "paper" | "micro_live" | "live"
+  paused: boolean;
+  pause_reason?: string | null;
+  updated_at: string;
+}
+
+export interface FreshnessItem {
+  symbol: string;
+  freshness_ms: number | null;
+  status: string;  // "OK" | "WARN" | "STALE" | "ERROR"
+  score: number | null;
+  issues: string[] | null;
+}
+
+export interface PipelineJobState {
+  status: string;
+  created_at: string | null;
+  finished_at: string | null;
+}
+
+export interface HealthBlock {
+  status: string;  // "healthy" | "degraded" | "unhealthy" | "paused"
+  issues: string[];
+  checks: Record<string, string>;
+}
+
+export interface OpsDashboardState {
+  control: OpsControlState;
+  freshness: FreshnessItem[];
+  pipeline: Record<string, PipelineJobState>;
+  health: HealthBlock;
+}

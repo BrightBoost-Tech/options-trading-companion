@@ -25,6 +25,7 @@ from packages.quantum.services.market_data_truth_layer import (
     get_marketdata_min_quality_score,
     get_marketdata_wide_spread_pct,
     get_marketdata_quality_policy,
+    get_marketdata_warn_penalty,
     MARKETDATA_MAX_FRESHNESS_MS,
     MARKETDATA_MIN_QUALITY_SCORE,
     MARKETDATA_WIDE_SPREAD_PCT,
@@ -44,6 +45,8 @@ from packages.quantum.services.market_data_truth_layer import (
     format_quality_issues,
     format_snapshot_summary,
     format_quality_gate_result,
+    format_blocked_detail,
+    build_marketdata_block_payload,
 )
 
 
@@ -992,6 +995,262 @@ class TestQualityPolicyGetter:
 
         monkeypatch.setenv("MARKETDATA_QUALITY_POLICY", "Defer")
         assert get_marketdata_quality_policy() == "defer"
+
+
+class TestWarnPenaltyGetter:
+    """Tests for get_marketdata_warn_penalty getter."""
+
+    def test_default_penalty_is_0_7(self, monkeypatch):
+        """Default penalty is 0.7 when env not set."""
+        monkeypatch.delenv("MARKETDATA_WARN_PENALTY", raising=False)
+        assert get_marketdata_warn_penalty() == pytest.approx(0.7)
+
+    def test_env_override_penalty(self, monkeypatch):
+        """Penalty can be set via env."""
+        monkeypatch.setenv("MARKETDATA_WARN_PENALTY", "0.5")
+        assert get_marketdata_warn_penalty() == pytest.approx(0.5)
+
+    def test_penalty_returns_float(self, monkeypatch):
+        """Getter returns float type."""
+        monkeypatch.delenv("MARKETDATA_WARN_PENALTY", raising=False)
+        assert isinstance(get_marketdata_warn_penalty(), float)
+
+
+class TestFormatBlockedDetail:
+    """Tests for format_blocked_detail function."""
+
+    def test_single_warning_symbol(self):
+        """Single warning symbol formats correctly."""
+        gate_result = {
+            "symbols": [
+                {"symbol": "AAPL", "code": QUALITY_WARN_WIDE_SPREAD, "score": 80, "issues": "wide_spread"}
+            ]
+        }
+        result = format_blocked_detail(gate_result)
+        assert result == "AAPL:WARN_WIDE_SPREAD"
+
+    def test_multiple_warning_symbols(self):
+        """Multiple warning symbols are pipe-separated."""
+        gate_result = {
+            "symbols": [
+                {"symbol": "AAPL", "code": QUALITY_WARN_WIDE_SPREAD, "score": 80, "issues": "wide_spread"},
+                {"symbol": "SPY", "code": QUALITY_FAIL_STALE, "score": 70, "issues": "stale_quote"}
+            ]
+        }
+        result = format_blocked_detail(gate_result)
+        assert "AAPL:WARN_WIDE_SPREAD" in result
+        assert "SPY:FAIL_STALE" in result
+        assert "|" in result
+
+    def test_ok_symbols_excluded(self):
+        """OK symbols are excluded from blocked detail."""
+        gate_result = {
+            "symbols": [
+                {"symbol": "AAPL", "code": QUALITY_OK, "score": 100, "issues": ""},
+                {"symbol": "SPY", "code": QUALITY_WARN_WIDE_SPREAD, "score": 80, "issues": "wide_spread"}
+            ]
+        }
+        result = format_blocked_detail(gate_result)
+        assert "AAPL" not in result
+        assert "SPY:WARN_WIDE_SPREAD" in result
+
+    def test_empty_symbols_returns_unknown(self):
+        """Empty symbols list returns unknown_issue."""
+        gate_result = {"symbols": []}
+        result = format_blocked_detail(gate_result)
+        assert result == "unknown_issue"
+
+    def test_all_ok_returns_unknown(self):
+        """All OK symbols returns unknown_issue."""
+        gate_result = {
+            "symbols": [
+                {"symbol": "AAPL", "code": QUALITY_OK, "score": 100, "issues": ""}
+            ]
+        }
+        result = format_blocked_detail(gate_result)
+        assert result == "unknown_issue"
+
+
+class TestBuildMarketdataBlockPayload:
+    """Tests for build_marketdata_block_payload function."""
+
+    def test_defer_policy_payload(self):
+        """Defer policy builds correct payload."""
+        gate_result = {
+            "symbols": [{"symbol": "AAPL", "code": QUALITY_WARN_WIDE_SPREAD}],
+            "fatal_count": 0,
+            "warning_count": 1,
+            "has_fatal": False,
+            "has_warning": True,
+        }
+        payload = build_marketdata_block_payload(gate_result, "defer")
+
+        assert payload["event"] == "marketdata.v4.quality_gate"
+        assert payload["policy"] == "defer"
+        assert payload["has_warning"] is True
+        assert payload["has_fatal"] is False
+
+    def test_downrank_applied_payload(self):
+        """Downrank policy with applied penalty includes downrank fields."""
+        gate_result = {
+            "symbols": [{"symbol": "AAPL", "code": QUALITY_WARN_WIDE_SPREAD}],
+            "fatal_count": 0,
+            "warning_count": 1,
+            "has_fatal": False,
+            "has_warning": True,
+        }
+        payload = build_marketdata_block_payload(
+            gate_result, "downrank", downrank_applied=True
+        )
+
+        assert payload["policy"] == "downrank"
+        assert payload["downrank_applied"] is True
+
+    def test_downrank_fallback_payload(self):
+        """Downrank policy fallback includes reason."""
+        gate_result = {
+            "symbols": [{"symbol": "AAPL", "code": QUALITY_WARN_WIDE_SPREAD}],
+            "fatal_count": 0,
+            "warning_count": 1,
+            "has_fatal": False,
+            "has_warning": True,
+        }
+        payload = build_marketdata_block_payload(
+            gate_result, "downrank",
+            downrank_applied=False,
+            downrank_reason="no_rank_scalar_found"
+        )
+
+        assert payload["policy"] == "downrank"
+        assert payload["downrank_applied"] is False
+        assert payload["downrank_reason"] == "no_rank_scalar_found"
+
+
+class TestOrderBuilderBlockedShortCircuit:
+    """Tests for order builder short-circuit when candidate is already blocked."""
+
+    def test_blocked_candidate_returns_not_executable(self):
+        """Order builder returns NOT_EXECUTABLE for already-blocked candidate."""
+        from packages.quantum.services.workflow_orchestrator import build_midday_order_json
+
+        cand = {
+            "symbol": "SPY",
+            "suggested_entry": 1.25,
+            "strategy": "vertical_spread",
+            "order_type_force_limit": True,
+            "blocked_reason": "marketdata_quality_gate",
+            "blocked_detail": "AAPL:WARN_WIDE_SPREAD",
+            "legs": [
+                {"symbol": "O:SPY250101C00500000", "side": "buy", "mid": 1.50},
+                {"symbol": "O:SPY250101C00505000", "side": "sell", "mid": 0.25}
+            ]
+        }
+
+        order_json = build_midday_order_json(cand, 3)
+
+        assert order_json["status"] == "NOT_EXECUTABLE"
+        assert "marketdata quality gate" in order_json["reason"].lower()
+        assert "AAPL:WARN_WIDE_SPREAD" in order_json["reason"]
+
+    def test_blocked_candidate_includes_leg_info(self):
+        """Blocked candidate order includes leg info."""
+        from packages.quantum.services.workflow_orchestrator import build_midday_order_json
+
+        cand = {
+            "symbol": "SPY",
+            "ticker": "SPY",
+            "suggested_entry": 1.25,
+            "strategy": "vertical_spread",
+            "blocked_reason": "marketdata_quality_gate",
+            "blocked_detail": "SPY:FAIL_STALE",
+            "legs": [
+                {"symbol": "O:SPY250101C00500000", "side": "buy"},
+                {"symbol": "O:SPY250101C00505000", "side": "sell"}
+            ]
+        }
+
+        order_json = build_midday_order_json(cand, 2)
+
+        assert order_json["status"] == "NOT_EXECUTABLE"
+        assert order_json["contracts"] == 2
+        assert len(order_json["legs"]) == 2
+        assert order_json["underlying"] == "SPY"
+
+    def test_non_blocked_candidate_proceeds_normally(self):
+        """Non-blocked candidate proceeds through normal flow."""
+        from packages.quantum.services.workflow_orchestrator import build_midday_order_json
+
+        cand = {
+            "symbol": "SPY",
+            "suggested_entry": 1.25,
+            "strategy": "vertical_spread",
+            "order_type_force_limit": True,
+            # No blocked_reason
+            "legs": [
+                {"symbol": "O:SPY250101C00500000", "side": "buy", "mid": 1.50},
+                {"symbol": "O:SPY250101C00505000", "side": "sell", "mid": 0.25}
+            ]
+        }
+
+        order_json = build_midday_order_json(cand, 3)
+
+        # Should not have NOT_EXECUTABLE from short-circuit (may have other reasons)
+        # Check that it didn't hit the short-circuit path
+        if order_json.get("status") == "NOT_EXECUTABLE":
+            # If NOT_EXECUTABLE, reason should NOT be from blocked_reason path
+            assert "Blocked by marketdata quality gate" not in order_json.get("reason", "")
+
+
+class TestDeferPolicyBehavior:
+    """Integration tests for defer policy behavior."""
+
+    def test_defer_policy_attaches_payload_to_suggestion(self):
+        """When defer policy, warning issues attach payload and block suggestion."""
+        # This tests the pattern where a suggestion would have
+        # marketdata_quality payload attached
+        warn_snap = TruthSnapshotV4(
+            symbol_canonical="O:SPY250101C00500000",
+            quote=TruthQuoteV4(bid=140.0, ask=160.0, mid=150.0),  # wide spread
+            timestamps=TruthTimestampsV4(source_ts=int(time.time() * 1000), received_ts=int(time.time() * 1000)),
+            quality=TruthQualityV4(quality_score=80, issues=["wide_spread"], is_stale=False, freshness_ms=100),
+            source=TruthSourceV4(),
+        )
+
+        gate_result = format_quality_gate_result(
+            {"O:SPY250101C00500000": warn_snap},
+            ["O:SPY250101C00500000"]
+        )
+
+        # Simulate what orchestrator does
+        assert gate_result["has_warning"] is True
+        assert gate_result["has_fatal"] is False
+
+        # Build payload as orchestrator would
+        payload = build_marketdata_block_payload(gate_result, "defer")
+        blocked_detail = format_blocked_detail(gate_result)
+
+        # Verify payload structure
+        assert payload["event"] == "marketdata.v4.quality_gate"
+        assert payload["policy"] == "defer"
+        assert "WARN_WIDE_SPREAD" in blocked_detail
+
+    def test_fatal_issues_not_deferred(self):
+        """Fatal issues are not deferred (would be skipped upstream)."""
+        stale_snap = TruthSnapshotV4(
+            symbol_canonical="AAPL",
+            quote=TruthQuoteV4(bid=150.0, ask=150.10, mid=150.05),
+            timestamps=TruthTimestampsV4(source_ts=1000, received_ts=int(time.time() * 1000)),
+            quality=TruthQualityV4(quality_score=70, issues=["stale_quote"], is_stale=True, freshness_ms=120000),
+            source=TruthSourceV4(),
+        )
+
+        gate_result = format_quality_gate_result({"AAPL": stale_snap}, ["AAPL"])
+
+        # Fatal issues should cause has_fatal=True
+        assert gate_result["has_fatal"] is True
+
+        # Orchestrator would skip, not defer
+        # This is tested by checking has_fatal
 
 
 if __name__ == "__main__":

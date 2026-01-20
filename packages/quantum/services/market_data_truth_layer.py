@@ -66,6 +66,16 @@ def get_marketdata_quality_policy() -> str:
     return os.getenv("MARKETDATA_QUALITY_POLICY", "defer").lower()
 
 
+def get_marketdata_warn_penalty() -> float:
+    """
+    Get penalty multiplier for downrank policy (env-safe, reads at call time).
+
+    Applied to ranking scalar (score, ev) when downrank policy is active.
+    Default: 0.7 (30% penalty)
+    """
+    return float(os.getenv("MARKETDATA_WARN_PENALTY", "0.7"))
+
+
 # =============================================================================
 # V4 Quality Status Codes (machine-readable for UI, alerts, routing)
 # =============================================================================
@@ -253,6 +263,57 @@ def format_quality_gate_result(
         "min_quality_score": min_quality_score,
         "max_freshness_ms": get_marketdata_max_freshness_ms(),
     }
+
+
+def format_blocked_detail(gate_result: Dict[str, Any]) -> str:
+    """
+    Format a compact blocked_detail string from gate result for UI display.
+
+    Args:
+        gate_result: Output from format_quality_gate_result()
+
+    Returns:
+        Compact string like "AAPL:WARN_WIDE_SPREAD|SPY:FAIL_STALE"
+    """
+    parts = []
+    for sym_info in gate_result.get("symbols", []):
+        symbol = sym_info.get("symbol", "?")
+        code = sym_info.get("code", "?")
+        if code != QUALITY_OK:
+            parts.append(f"{symbol}:{code}")
+    return "|".join(parts) if parts else "unknown_issue"
+
+
+def build_marketdata_block_payload(
+    gate_result: Dict[str, Any],
+    policy: str,
+    downrank_applied: bool = False,
+    downrank_reason: Optional[str] = None
+) -> Dict[str, Any]:
+    """
+    Build a complete marketdata_quality payload for attaching to candidates/suggestions.
+
+    Args:
+        gate_result: Output from format_quality_gate_result()
+        policy: Current policy (skip/defer/downrank)
+        downrank_applied: Whether downrank penalty was applied
+        downrank_reason: Reason for downrank status (if not applied)
+
+    Returns:
+        Complete payload dict for candidate["marketdata_quality"]
+    """
+    payload = {
+        "event": "marketdata.v4.quality_gate",
+        "policy": policy,
+        **gate_result,
+    }
+
+    if policy == "downrank":
+        payload["downrank_applied"] = downrank_applied
+        if not downrank_applied and downrank_reason:
+            payload["downrank_reason"] = downrank_reason
+
+    return payload
 
 
 # =============================================================================

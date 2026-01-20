@@ -6,7 +6,7 @@ import { Badge } from '@/components/ui/badge';
 import { Suggestion } from '@/lib/types';
 import { logEvent } from '@/lib/analytics';
 import { QuantumTooltip } from '@/components/ui/QuantumTooltip';
-import { X, RefreshCw, Clock, Loader2 } from 'lucide-react';
+import { X, RefreshCw, Clock, Loader2, ShieldAlert, AlertTriangle } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Checkbox } from '@/components/ui/checkbox';
 
@@ -44,6 +44,13 @@ const SuggestionCard = ({
     const hasLoggedView = useRef(false);
     const firstDismissReasonRef = useRef<HTMLButtonElement>(null);
     const displaySymbol = suggestion.display_symbol ?? suggestion.symbol ?? suggestion.ticker ?? '---';
+
+    // PR4: Detect blocked state from quality gate
+    const isBlocked = suggestion.status === 'NOT_EXECUTABLE' || !!suggestion.blocked_reason;
+    const blockedReason = suggestion.blocked_reason;
+    const blockedDetail = suggestion.blocked_detail;
+    const marketdataQuality = suggestion.marketdata_quality;
+    const effectiveAction = marketdataQuality?.effective_action;
     const exitPrice = typeof order_json?.limit_price === 'number'
         ? order_json.limit_price
         : order_json?.limit_price !== undefined
@@ -108,9 +115,37 @@ const SuggestionCard = ({
         return 'bg-green-100 text-green-800 dark:bg-green-900/30 dark:text-green-400';
     };
 
+    // PR4: Get badge info for effective action
+    const getEffectiveActionBadge = (action?: string) => {
+        if (!action) return null;
+        switch (action) {
+            case 'skip_fatal':
+                return { label: 'Fatal Quality', color: 'bg-red-100 text-red-800 dark:bg-red-900/30 dark:text-red-400 border-red-200 dark:border-red-900' };
+            case 'skip_policy':
+                return { label: 'Blocked by Policy', color: 'bg-red-100 text-red-800 dark:bg-red-900/30 dark:text-red-400 border-red-200 dark:border-red-900' };
+            case 'defer':
+                return { label: 'Deferred', color: 'bg-yellow-100 text-yellow-800 dark:bg-yellow-900/30 dark:text-yellow-400 border-yellow-200 dark:border-yellow-900' };
+            case 'downrank':
+                return { label: 'Downranked', color: 'bg-orange-100 text-orange-800 dark:bg-orange-900/30 dark:text-orange-400 border-orange-200 dark:border-orange-900' };
+            case 'downrank_fallback_to_defer':
+                return { label: 'Deferred (Fallback)', color: 'bg-yellow-100 text-yellow-800 dark:bg-yellow-900/30 dark:text-yellow-400 border-yellow-200 dark:border-yellow-900' };
+            default:
+                return { label: action, color: 'bg-muted text-muted-foreground' };
+        }
+    };
+
+    // PR4: Parse blocked_detail for display
+    const parseBlockedDetail = (detail?: string): Array<{ symbol: string; code: string }> => {
+        if (!detail) return [];
+        return detail.split('|').map(part => {
+            const [symbol, code] = part.split(':');
+            return { symbol: symbol || '?', code: code || '?' };
+        }).filter(item => item.symbol !== '?' || item.code !== '?');
+    };
+
     // Analytics Wrappers for Actions
     const handleStage = () => {
-        if (isStale || isStaging) return; // Guard
+        if (isStale || isStaging || isBlocked) return; // Guard - PR4: also block if blocked
         logEvent({
             eventName: "suggestion_staged",
             category: "ux",
@@ -161,10 +196,73 @@ const SuggestionCard = ({
     };
 
     return (
-        <Card className={`mb-3 border-l-4 ${staged ? 'border-l-green-500' : 'border-l-purple-500'} hover:shadow-md transition-shadow bg-card border-border`}>
+        <Card className={`mb-3 border-l-4 ${
+            isBlocked
+                ? 'border-l-orange-500 opacity-90'
+                : staged
+                    ? 'border-l-green-500'
+                    : 'border-l-purple-500'
+        } hover:shadow-md transition-shadow bg-card border-border`}>
             <CardContent className="p-4 relative">
+                {/* PR4: Blocked Banner */}
+                {isBlocked && (
+                    <div className="mb-3 p-2 bg-orange-50 dark:bg-orange-950/30 border border-orange-200 dark:border-orange-900 rounded-md">
+                        <div className="flex items-start gap-2">
+                            <ShieldAlert className="w-4 h-4 text-orange-600 dark:text-orange-400 mt-0.5 flex-shrink-0" />
+                            <div className="flex-1 min-w-0">
+                                <div className="flex items-center gap-2 flex-wrap">
+                                    <span className="text-xs font-medium text-orange-800 dark:text-orange-300">
+                                        Not Executable
+                                    </span>
+                                    {effectiveAction && getEffectiveActionBadge(effectiveAction) && (
+                                        <Badge
+                                            variant="outline"
+                                            className={`text-[10px] h-4 px-1 ${getEffectiveActionBadge(effectiveAction)!.color}`}
+                                        >
+                                            {getEffectiveActionBadge(effectiveAction)!.label}
+                                        </Badge>
+                                    )}
+                                </div>
+                                {blockedDetail && (
+                                    <div className="mt-1 flex flex-wrap gap-1">
+                                        {parseBlockedDetail(blockedDetail).map((item, idx) => (
+                                            <Badge
+                                                key={idx}
+                                                variant="outline"
+                                                className="text-[9px] h-4 px-1 bg-orange-100/50 dark:bg-orange-900/20 text-orange-700 dark:text-orange-300 border-orange-200 dark:border-orange-800"
+                                            >
+                                                {item.symbol}: {item.code}
+                                            </Badge>
+                                        ))}
+                                    </div>
+                                )}
+                                {marketdataQuality?.symbols && marketdataQuality.symbols.length > 0 && !blockedDetail && (
+                                    <div className="mt-1 flex flex-wrap gap-1">
+                                        {marketdataQuality.symbols.map((sym, idx) => (
+                                            <Badge
+                                                key={idx}
+                                                variant="outline"
+                                                className={`text-[9px] h-4 px-1 ${
+                                                    sym.code.startsWith('FAIL')
+                                                        ? 'bg-red-100/50 dark:bg-red-900/20 text-red-700 dark:text-red-300 border-red-200 dark:border-red-800'
+                                                        : sym.code.startsWith('WARN')
+                                                            ? 'bg-yellow-100/50 dark:bg-yellow-900/20 text-yellow-700 dark:text-yellow-300 border-yellow-200 dark:border-yellow-800'
+                                                            : 'bg-muted text-muted-foreground'
+                                                }`}
+                                            >
+                                                {sym.symbol}: {sym.code}
+                                                {sym.score !== null && sym.score !== undefined && ` (${sym.score})`}
+                                            </Badge>
+                                        ))}
+                                    </div>
+                                )}
+                            </div>
+                        </div>
+                    </div>
+                )}
+
                 {/* Batch Selection Checkbox */}
-                {batchModeEnabled && onToggleSelect && (
+                {batchModeEnabled && onToggleSelect && !isBlocked && (
                      <div className="absolute top-4 left-[-30px] md:left-[-30px] flex items-center justify-center h-full w-[30px]">
                         <Checkbox
                             checked={isSelected}
@@ -424,18 +522,27 @@ const SuggestionCard = ({
 
                     <Button
                         onClick={handleStage}
-                        disabled={(isStale && !staged) || isStaging}
+                        disabled={(isStale && !staged) || isStaging || isBlocked}
                         className={`h-7 text-xs px-3 font-medium transition-colors gap-1 ${
                             staged
                                 ? 'bg-green-100 text-green-800 hover:bg-green-200 dark:bg-green-900/30 dark:text-green-400 dark:hover:bg-green-900/50'
-                                : isStale
-                                    ? 'bg-muted text-muted-foreground hover:bg-muted cursor-not-allowed opacity-70'
-                                    : 'bg-purple-600 text-white hover:bg-purple-700'
+                                : isBlocked
+                                    ? 'bg-orange-100 text-orange-600 hover:bg-orange-100 cursor-not-allowed opacity-70 dark:bg-orange-900/30 dark:text-orange-400'
+                                    : isStale
+                                        ? 'bg-muted text-muted-foreground hover:bg-muted cursor-not-allowed opacity-70'
+                                        : 'bg-purple-600 text-white hover:bg-purple-700'
                         }`}
-                        aria-label={staged ? `Trade for ${displaySymbol} is staged` : `Stage trade for ${displaySymbol}`}
+                        aria-label={
+                            isBlocked
+                                ? `Cannot stage ${displaySymbol} - blocked by quality gate`
+                                : staged
+                                    ? `Trade for ${displaySymbol} is staged`
+                                    : `Stage trade for ${displaySymbol}`
+                        }
                     >
                         {isStaging && <Loader2 className="w-3 h-3 animate-spin" />}
-                        {staged ? 'Staged' : 'Stage Trade'}
+                        {isBlocked && <ShieldAlert className="w-3 h-3" />}
+                        {staged ? 'Staged' : isBlocked ? 'Blocked' : 'Stage Trade'}
                     </Button>
                 </div>
             </CardContent>

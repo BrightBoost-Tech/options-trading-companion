@@ -173,6 +173,27 @@ export interface Suggestion {
     top_reasons: string[];
     vetoed?: boolean;
   };
+
+  // PR4: Market Data Quality Gate Fields
+  blocked_reason?: string;  // e.g., "marketdata_quality_gate"
+  blocked_detail?: string;  // e.g., "SPY:WARN_STALE|QQQ:FAIL_CROSSED"
+  marketdata_quality?: {
+    event?: string;
+    policy?: string;
+    effective_action?: string;  // "skip_fatal" | "skip_policy" | "defer" | "downrank" | "downrank_fallback_to_defer"
+    warning_count?: number;
+    fatal_count?: number;
+    has_warning?: boolean;
+    has_fatal?: boolean;
+    symbols?: Array<{
+      symbol: string;
+      code: string;  // "OK" | "WARN_STALE" | "WARN_WIDE_SPREAD" | "FAIL_CROSSED" | etc.
+      score?: number | null;
+      freshness_ms?: number | null;
+    }>;
+    downrank_applied?: boolean;
+    warn_penalty?: number;
+  };
 }
 
 export interface BatchStageRequest {

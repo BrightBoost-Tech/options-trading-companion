@@ -26,6 +26,11 @@ router = APIRouter()
 class DismissSuggestionRequest(BaseModel):
     reason: str
 
+# PR4: Active statuses include both pending and NOT_EXECUTABLE (blocked by quality gate)
+# NOT_EXECUTABLE suggestions should appear in the queue so users can see/manage them.
+ACTIVE_STATUSES = ["pending", "NOT_EXECUTABLE"]
+
+
 @router.get("/inbox")
 async def get_inbox(
     user_id: str = Depends(get_current_user),
@@ -33,46 +38,54 @@ async def get_inbox(
 ):
     """
     Returns the Inbox State:
-    - hero: Top ranked pending suggestion
-    - queue: Remaining pending suggestions
-    - completed: Today's non-pending suggestions (dismissed/staged/executed)
+    - hero: Top ranked active suggestion (pending or NOT_EXECUTABLE)
+    - queue: Remaining active suggestions
+    - completed: Today's non-active suggestions (dismissed/staged/executed)
     - meta: { total_ev_available, deployable_capital, stale_after_seconds }
+
+    PR4: NOT_EXECUTABLE suggestions (blocked by marketdata quality gate) now appear
+    in the active queue instead of completed, so users can see and manage them.
     """
     if not supabase:
         raise HTTPException(status_code=503, detail="Database Unavailable")
 
     try:
-        # Fetch Pending
-        pending_res = supabase.table(TRADE_SUGGESTIONS_TABLE) \
+        # PR4: Fetch Active suggestions (pending + NOT_EXECUTABLE)
+        # Using .in_() to match multiple statuses
+        active_res = supabase.table(TRADE_SUGGESTIONS_TABLE) \
             .select("*") \
             .eq("user_id", user_id) \
-            .eq("status", "pending") \
+            .in_("status", ACTIVE_STATUSES) \
             .execute()
-        pending_list = pending_res.data or []
+        active_list = active_res.data or []
 
-        # Fetch Completed (Today)
-        # We define "Today" as last 24h or strictly same calendar day UTC?
-        # Typically "Inbox" implies "Active Workflow".
-        # Let's use start of UTC day for "Today".
+        # Fetch Completed (Today) - excludes active statuses
+        # We define "Today" as same calendar day UTC.
         today_start = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
 
-        completed_res = supabase.table(TRADE_SUGGESTIONS_TABLE) \
+        # PR4: Fetch all today's suggestions and filter in Python
+        # (Postgrest .not_.in_() syntax can be tricky, so we filter client-side for reliability)
+        today_res = supabase.table(TRADE_SUGGESTIONS_TABLE) \
             .select("*") \
             .eq("user_id", user_id) \
-            .neq("status", "pending") \
             .gte("created_at", today_start) \
             .execute()
-        completed_list = completed_res.data or []
+        today_list = today_res.data or []
 
-        # Rank Pending
-        ranked_pending = rank_suggestions(pending_list)
+        # Filter completed = today's suggestions NOT in active statuses
+        completed_list = [s for s in today_list if s.get("status") not in ACTIVE_STATUSES]
+
+        # Rank Active suggestions
+        ranked_active = rank_suggestions(active_list)
 
         # Split Hero vs Queue
-        hero = ranked_pending[0] if ranked_pending else None
-        queue = ranked_pending[1:] if len(ranked_pending) > 1 else []
+        hero = ranked_active[0] if ranked_active else None
+        queue = ranked_active[1:] if len(ranked_active) > 1 else []
 
-        # Compute Meta
-        total_ev = sum(s.get("ev", 0) for s in ranked_pending if s.get("ev"))
+        # PR4: Compute Meta - total_ev_available only for executable (pending) suggestions
+        # Blocked suggestions shouldn't inflate "available" EV since they can't be executed
+        executable_list = [s for s in ranked_active if s.get("status") == "pending"]
+        total_ev = sum(s.get("ev", 0) for s in executable_list if s.get("ev"))
 
         # Deployable Capital - Ideally fetched from CashService, but simpler proxy here or fetch from snapshot
         # For now, placeholder or fetch latest snapshot's cash?

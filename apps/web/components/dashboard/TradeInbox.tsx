@@ -7,13 +7,21 @@ import SuggestionCard from './SuggestionCard';
 import { Card, CardContent } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Checkbox } from '@/components/ui/checkbox';
-import { Loader2, RefreshCw, ChevronDown, ChevronUp, AlertCircle, CheckCircle2, Wand2 } from 'lucide-react';
+import { Loader2, RefreshCw, ChevronDown, ChevronUp, AlertCircle, CheckCircle2, Wand2, Filter, ShieldAlert } from 'lucide-react';
 import { useToast } from '@/components/ui/use-toast';
 import { QuantumTooltip } from '@/components/ui/QuantumTooltip';
 import { useInboxActions } from '@/hooks/useInboxActions';
 
 // --- Helpers ---
 const displaySymbol = (s: Suggestion | { symbol?: string, ticker?: string }) => s.symbol ?? s.ticker ?? "Symbol";
+
+// PR4: Check if suggestion is blocked by quality gate
+const isBlocked = (s: Suggestion): boolean => {
+    return s.status === 'NOT_EXECUTABLE' || !!s.blocked_reason;
+};
+
+// PR4: Filter types for inbox view
+type InboxFilter = 'all' | 'executable' | 'blocked';
 
 // --- Sub-components ---
 
@@ -99,6 +107,9 @@ export default function TradeInbox() {
     const [isAutoSelecting, setIsAutoSelecting] = useState(false);
     const { toast } = useToast();
 
+    // PR4: Filter state
+    const [filter, setFilter] = useState<InboxFilter>('all');
+
     // -- Actions Hook --
     const fetchInbox = useCallback(async () => {
         // Don't set loading true if we already have data (background refresh)
@@ -138,24 +149,42 @@ export default function TradeInbox() {
     // -- Handlers --
 
     const handleToggleSelect = useCallback((s: Suggestion) => {
+        // PR4: Prevent selecting blocked suggestions for staging
+        if (isBlocked(s)) {
+            toast({
+                variant: "destructive",
+                title: "Cannot Select",
+                description: "Blocked suggestions cannot be staged. Resolve the quality issue first."
+            });
+            return;
+        }
+
         setSelectedIds(prev => {
             const next = new Set(prev);
             if (next.has(s.id)) next.delete(s.id);
             else next.add(s.id);
             return next;
         });
-    }, []);
+    }, [toast]);
 
     const handleAutoSelect = async () => {
         if (!data) return;
         setIsAutoSelecting(true);
 
-        const allCandidates = [];
-        if (data.hero && !dismissedIds.has(data.hero.id)) allCandidates.push(data.hero);
-        if (data.queue) allCandidates.push(...data.queue.filter(q => !dismissedIds.has(q.id)));
+        // PR4: Only include executable (non-blocked) suggestions in auto-select
+        const allCandidates: Suggestion[] = [];
+        if (data.hero && !dismissedIds.has(data.hero.id) && !isBlocked(data.hero)) {
+            allCandidates.push(data.hero);
+        }
+        if (data.queue) {
+            allCandidates.push(...data.queue.filter(q => !dismissedIds.has(q.id) && !isBlocked(q)));
+        }
 
         if (allCandidates.length === 0) {
             setIsAutoSelecting(false);
+            toast({
+                description: "No executable suggestions available for auto-select.",
+            });
             return;
         }
 
@@ -275,11 +304,26 @@ export default function TradeInbox() {
 
     // Filter out dismissed items optimistically
     const isHeroDismissed = hero && dismissedIds.has(hero.id);
-    const hasHero = !!hero && !isHeroDismissed;
-    const visibleQueue = queue.filter(q => !dismissedIds.has(q.id));
+
+    // PR4: Apply filter to hero and queue
+    const applyFilter = (s: Suggestion): boolean => {
+        if (filter === 'all') return true;
+        if (filter === 'executable') return !isBlocked(s);
+        if (filter === 'blocked') return isBlocked(s);
+        return true;
+    };
+
+    const hasHero = !!hero && !isHeroDismissed && applyFilter(hero);
+    const visibleQueue = queue.filter(q => !dismissedIds.has(q.id) && applyFilter(q));
     const hasQueue = visibleQueue.length > 0;
 
-    const totalCandidates = (hasHero ? 1 : 0) + visibleQueue.length;
+    // PR4: Count blocked vs executable for filter badges
+    const allActive = [hero, ...queue].filter((s): s is Suggestion => !!s && !dismissedIds.has(s.id));
+    const blockedCount = allActive.filter(isBlocked).length;
+    const executableCount = allActive.filter(s => !isBlocked(s)).length;
+
+    // Only executable (non-blocked) items can be selected for staging/auto-select
+    const totalCandidates = executableCount;
     const isSelectionEnabled = totalCandidates > 0;
 
     return (
@@ -308,6 +352,38 @@ export default function TradeInbox() {
                         >
                             {isStagingBatch && <Loader2 className="w-4 h-4 animate-spin" />}
                             Stage Selected ({selectedIds.size})
+                        </Button>
+                    )}
+                 </div>
+
+                 {/* PR4: Filter Controls */}
+                 <div className="flex items-center gap-1">
+                    <Filter className="w-4 h-4 text-muted-foreground mr-1" />
+                    <Button
+                        variant={filter === 'all' ? 'secondary' : 'ghost'}
+                        size="sm"
+                        onClick={() => setFilter('all')}
+                        className="h-7 px-2 text-xs"
+                    >
+                        All ({allActive.length})
+                    </Button>
+                    <Button
+                        variant={filter === 'executable' ? 'secondary' : 'ghost'}
+                        size="sm"
+                        onClick={() => setFilter('executable')}
+                        className="h-7 px-2 text-xs"
+                    >
+                        Executable ({executableCount})
+                    </Button>
+                    {blockedCount > 0 && (
+                        <Button
+                            variant={filter === 'blocked' ? 'secondary' : 'ghost'}
+                            size="sm"
+                            onClick={() => setFilter('blocked')}
+                            className="h-7 px-2 text-xs text-orange-600 dark:text-orange-400"
+                        >
+                            <ShieldAlert className="w-3 h-3 mr-1" />
+                            Blocked ({blockedCount})
                         </Button>
                     )}
                  </div>

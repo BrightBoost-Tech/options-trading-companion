@@ -81,6 +81,23 @@ class MarketDataFreshnessResult:
     reason: str  # "ok" | "stale_symbols" | "no_data" | "missing_api_key" | "exception:..."
 
 
+@dataclass
+class MarketFreshnessBlock:
+    """
+    Unified market freshness response for UI and alerts.
+
+    Phase 1.1.1: Canonical response used by both /ops/dashboard_state and ops_health_check
+    to ensure UI and alerts show consistent stale symbol information.
+    """
+    status: str  # "OK" | "WARN" | "STALE" | "ERROR"
+    as_of: Optional[str]  # ISO timestamp string
+    age_seconds: Optional[float]
+    universe_size: int
+    symbols_checked: List[str]  # Capped to max_display_symbols for UI
+    stale_symbols: List[str]  # Capped to max_display_symbols for UI
+    issues: List[str]
+
+
 def compute_data_freshness(
     client,
     stale_threshold_minutes: int = DATA_STALE_THRESHOLD_MINUTES
@@ -308,25 +325,67 @@ def get_suggestions_stats(client) -> Dict[str, Any]:
         return {"last_cycle_date": None, "count_last_cycle": 0}
 
 
-def get_integrity_stats(client) -> Dict[str, Any]:
+def get_integrity_stats(client, hours: int = 24) -> Dict[str, Any]:
     """
-    Get integrity incident statistics.
+    Get integrity incident statistics from decision_audit_events.
 
-    Placeholder for future integrity monitoring.
-    Currently returns empty results.
+    Phase 1.1.1: Queries the immutable audit stream for integrity incidents.
+
+    Integrity incidents are events matching:
+    - "integrity_incident" - detected missing fingerprint
+    - "integrity_incident_linked" - linked to existing suggestion
 
     Args:
         client: Supabase client
+        hours: Lookback window in hours (default: 24)
 
     Returns:
-        Dict with recent_incidents count and last_incident_at
+        Dict with:
+        - recent_incidents_24h: count of incidents
+        - last_incident_at: ISO timestamp of most recent
+        - top_incident_types_24h: breakdown by type [{event_name, count}]
     """
-    # Future: Query for integrity violations/incidents
-    # For now, return placeholder
-    return {
-        "recent_incidents": 0,
-        "last_incident_at": None
-    }
+    try:
+        since = (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat()
+
+        # Query for integrity events from decision_audit_events
+        result = client.table("decision_audit_events") \
+            .select("id, event_name, created_at, payload") \
+            .in_("event_name", ["integrity_incident", "integrity_incident_linked"]) \
+            .gte("created_at", since) \
+            .order("created_at", desc=True) \
+            .limit(100) \
+            .execute()
+
+        incidents = result.data or []
+
+        # Count by incident type (from payload.type)
+        type_counts: Dict[str, int] = {}
+        for incident in incidents:
+            payload = incident.get("payload") or {}
+            incident_type = payload.get("type", "unknown")
+            type_counts[incident_type] = type_counts.get(incident_type, 0) + 1
+
+        # Build top types list (sorted by count descending)
+        top_types = [
+            {"event_name": t, "count": c}
+            for t, c in sorted(type_counts.items(), key=lambda x: -x[1])
+        ][:5]  # Top 5
+
+        return {
+            "recent_incidents_24h": len(incidents),
+            "last_incident_at": incidents[0]["created_at"] if incidents else None,
+            "top_incident_types_24h": top_types,
+        }
+
+    except Exception as e:
+        logger.warning(f"[INTEGRITY] Failed to get integrity stats: {e}")
+        return {
+            "recent_incidents_24h": 0,
+            "last_incident_at": None,
+            "top_incident_types_24h": [],
+            "diagnostic": f"Query failed: {str(e)[:50]}"
+        }
 
 
 def send_ops_alert(
@@ -548,6 +607,65 @@ def compute_market_data_freshness(
             source="exception",
             reason=f"exception:{str(e)[:50]}"
         )
+
+
+def compute_market_freshness_block(
+    client,
+    universe: Optional[List[str]] = None,
+    max_display_symbols: int = 10
+) -> MarketFreshnessBlock:
+    """
+    Canonical function for computing market freshness.
+
+    Phase 1.1.1: Used by both /ops/dashboard_state and ops_health_check to ensure
+    UI and alerts show consistent stale symbol information.
+
+    Args:
+        client: Supabase client (used for building universe if not provided)
+        universe: Optional pre-built universe. If None, builds expanded universe.
+        max_display_symbols: Max symbols to include in response (default: 10)
+
+    Returns:
+        MarketFreshnessBlock with status badge, symbols checked, and stale symbols
+    """
+    # Build universe if not provided
+    if universe is None:
+        universe = build_freshness_universe(client)
+
+    # Use existing compute_market_data_freshness
+    result = compute_market_data_freshness(universe)
+
+    # Map to status badge
+    if result.source == "missing_api_key":
+        status = "ERROR"
+    elif result.source == "exception":
+        status = "ERROR"
+    elif result.is_stale:
+        status = "STALE"
+    elif result.stale_symbols:
+        # Some stale but not critical (not SPY/QQQ, not majority)
+        status = "WARN"
+    else:
+        status = "OK"
+
+    # Build issues list
+    issues = []
+    if result.source == "missing_api_key":
+        issues.append("POLYGON_API_KEY not configured")
+    elif result.source == "exception":
+        issues.append(f"Market data check failed: {result.reason}")
+    elif result.stale_symbols:
+        issues.append(f"{len(result.stale_symbols)} symbol(s) stale")
+
+    return MarketFreshnessBlock(
+        status=status,
+        as_of=result.as_of.isoformat() if result.as_of else None,
+        age_seconds=result.age_seconds,
+        universe_size=result.universe_size,
+        symbols_checked=universe[:max_display_symbols],
+        stale_symbols=result.stale_symbols[:max_display_symbols],
+        issues=issues
+    )
 
 
 # =============================================================================

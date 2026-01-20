@@ -13,7 +13,7 @@ Endpoints:
 """
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Body
-from typing import Optional, Dict, Any, List
+from typing import Optional, Dict, Any, List, Tuple
 from pydantic import BaseModel
 from datetime import datetime, timezone
 import os
@@ -87,9 +87,17 @@ class HealthBlock(BaseModel):
     checks: Dict[str, str]  # Component -> status mapping
 
 
+class FreshnessMeta(BaseModel):
+    """Phase 1.1.1: Metadata for expanded freshness universe."""
+    universe_size: int
+    total_stale_count: int
+    stale_symbols: List[str]  # All stale symbols (capped to 10)
+
+
 class DashboardStateResponse(BaseModel):
     control: OpsControlState
     freshness: List[FreshnessItem]
+    freshness_meta: Optional[FreshnessMeta] = None  # Phase 1.1.1: Expanded universe metadata
     pipeline: Dict[str, PipelineJobState]
     health: HealthBlock  # PR B: Aggregated health status
 
@@ -193,41 +201,55 @@ def _get_ops_control(client: Client) -> Dict[str, Any]:
     }
 
 
-def _get_market_freshness() -> List[FreshnessItem]:
+def _get_market_freshness(client: Client) -> Tuple[List[FreshnessItem], Optional[FreshnessMeta]]:
     """
-    Get market data freshness for key symbols.
-    Uses MarketDataTruthLayer snapshot_many_v4.
+    Get market data freshness using expanded universe.
+
+    Phase 1.1.1: Uses build_freshness_universe() to check same symbols that
+    ops_health_check uses for alerts, ensuring UI/alerts consistency.
+
+    Args:
+        client: Supabase client for building universe
+
+    Returns:
+        Tuple of (List[FreshnessItem], FreshnessMeta) for dashboard response
     """
     try:
         from packages.quantum.services.market_data_truth_layer import MarketDataTruthLayer
+        from packages.quantum.services.ops_health_service import build_freshness_universe
 
         # Check for API key
         api_key = os.getenv("POLYGON_API_KEY")
         if not api_key:
-            return [
-                FreshnessItem(
-                    symbol="SPY",
-                    freshness_ms=None,
-                    status="ERROR",
-                    score=None,
-                    issues=["POLYGON_API_KEY not configured"]
-                ),
-                FreshnessItem(
-                    symbol="QQQ",
-                    freshness_ms=None,
-                    status="ERROR",
-                    score=None,
-                    issues=["POLYGON_API_KEY not configured"]
-                ),
-            ]
+            return (
+                [
+                    FreshnessItem(
+                        symbol="ALL",
+                        freshness_ms=None,
+                        status="ERROR",
+                        score=None,
+                        issues=["POLYGON_API_KEY not configured"]
+                    ),
+                ],
+                FreshnessMeta(
+                    universe_size=0,
+                    total_stale_count=0,
+                    stale_symbols=[]
+                )
+            )
+
+        # Build expanded universe (SPY/QQQ + holdings + suggestions)
+        universe = build_freshness_universe(client)
+        logger.info(f"[FRESHNESS] Expanded universe: {len(universe)} symbols")
 
         layer = MarketDataTruthLayer(api_key=api_key)
-        symbols = ["SPY", "QQQ"]
-
-        snapshots = layer.snapshot_many_v4(symbols)
+        snapshots = layer.snapshot_many_v4(universe)
 
         results = []
-        for sym in symbols:
+        stale_symbols = []
+        max_display = 10  # Cap for UI payload
+
+        for sym in universe[:max_display]:
             snap = snapshots.get(sym)
             if not snap:
                 results.append(FreshnessItem(
@@ -237,6 +259,7 @@ def _get_market_freshness() -> List[FreshnessItem]:
                     score=None,
                     issues=["No snapshot returned"]
                 ))
+                stale_symbols.append(sym)
                 continue
 
             freshness_ms = snap.quality.freshness_ms
@@ -257,6 +280,9 @@ def _get_market_freshness() -> List[FreshnessItem]:
             if snap.quality.is_stale:
                 status = "STALE"
 
+            if status == "STALE":
+                stale_symbols.append(sym)
+
             results.append(FreshnessItem(
                 symbol=sym,
                 freshness_ms=freshness_ms,
@@ -265,25 +291,38 @@ def _get_market_freshness() -> List[FreshnessItem]:
                 issues=issues if issues else None
             ))
 
-        return results
+        # Check remaining symbols (beyond max_display) for staleness count
+        for sym in universe[max_display:]:
+            snap = snapshots.get(sym)
+            if snap and (snap.quality.is_stale or (snap.quality.freshness_ms and snap.quality.freshness_ms > FRESHNESS_WARN_MS)):
+                stale_symbols.append(sym)
+
+        meta = FreshnessMeta(
+            universe_size=len(universe),
+            total_stale_count=len(stale_symbols),
+            stale_symbols=stale_symbols[:max_display]  # Cap for payload
+        )
+
+        return results, meta
 
     except Exception as e:
-        return [
-            FreshnessItem(
-                symbol="SPY",
-                freshness_ms=None,
-                status="ERROR",
-                score=None,
-                issues=[str(e)]
-            ),
-            FreshnessItem(
-                symbol="QQQ",
-                freshness_ms=None,
-                status="ERROR",
-                score=None,
-                issues=[str(e)]
-            ),
-        ]
+        logger.error(f"[FRESHNESS] Market freshness check failed: {e}")
+        return (
+            [
+                FreshnessItem(
+                    symbol="ALL",
+                    freshness_ms=None,
+                    status="ERROR",
+                    score=None,
+                    issues=[f"Check failed: {str(e)[:50]}"]
+                ),
+            ],
+            FreshnessMeta(
+                universe_size=0,
+                total_stale_count=0,
+                stale_symbols=[]
+            )
+        )
 
 
 def _get_pipeline_status(client: Client) -> Dict[str, PipelineJobState]:
@@ -434,8 +473,8 @@ async def get_dashboard_state(
         updated_at=control_row.get("updated_at", datetime.now()),
     )
 
-    # 2. Get market freshness
-    freshness = _get_market_freshness()
+    # 2. Get market freshness (Phase 1.1.1: expanded universe)
+    freshness, freshness_meta = _get_market_freshness(client)
 
     # 3. Get pipeline status
     pipeline = _get_pipeline_status(client)
@@ -446,6 +485,7 @@ async def get_dashboard_state(
     return DashboardStateResponse(
         control=control,
         freshness=freshness,
+        freshness_meta=freshness_meta,  # Phase 1.1.1: expanded universe metadata
         pipeline=pipeline,
         health=health,
     )

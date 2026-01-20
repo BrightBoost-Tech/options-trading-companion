@@ -562,51 +562,62 @@ class TestMarketFreshnessWithMock:
 
     def test_market_freshness_no_api_key(self):
         """Returns ERROR status when POLYGON_API_KEY not set"""
-        with patch.dict("os.environ", {"POLYGON_API_KEY": ""}, clear=False):
-            # Need to patch os.getenv in the ops_endpoints module
-            import packages.quantum.ops_endpoints as ops_mod
-            original_getenv = ops_mod.os.getenv
+        mock_client = MagicMock()
 
-            def mock_getenv(key, default=None):
-                if key == "POLYGON_API_KEY":
-                    return None
-                return original_getenv(key, default)
+        # Mock build_freshness_universe at service level
+        with patch("packages.quantum.services.ops_health_service.build_freshness_universe") as mock_universe:
+            mock_universe.return_value = ["SPY", "QQQ"]
 
-            with patch.object(ops_mod.os, "getenv", side_effect=mock_getenv):
-                results = _get_market_freshness()
+            with patch.dict("os.environ", {"POLYGON_API_KEY": ""}, clear=False):
+                # Need to patch os.getenv in the ops_endpoints module
+                import packages.quantum.ops_endpoints as ops_mod
+                original_getenv = ops_mod.os.getenv
 
-                assert len(results) == 2
-                for item in results:
-                    assert item.status == "ERROR"
-                    assert item.issues is not None
-                    assert any("POLYGON_API_KEY" in issue for issue in item.issues)
+                def mock_getenv(key, default=None):
+                    if key == "POLYGON_API_KEY":
+                        return None
+                    return original_getenv(key, default)
+
+                with patch.object(ops_mod.os, "getenv", side_effect=mock_getenv):
+                    results, meta = _get_market_freshness(mock_client)
+
+                    assert len(results) == 1  # Returns single ALL item now
+                    assert results[0].status == "ERROR"
+                    assert results[0].issues is not None
+                    assert any("POLYGON_API_KEY" in issue for issue in results[0].issues)
 
     def test_market_freshness_with_snapshot(self):
         """Returns proper status when snapshots available"""
-        import packages.quantum.ops_endpoints as ops_mod
+        mock_client = MagicMock()
 
-        # Mock the MarketDataTruthLayer import inside the function
-        with patch.object(ops_mod.os, "getenv", return_value="test-api-key"):
-            with patch("packages.quantum.services.market_data_truth_layer.MarketDataTruthLayer") as mock_layer:
-                # Mock snapshot response
-                mock_snap = MagicMock()
-                mock_snap.quality.freshness_ms = 5000
-                mock_snap.quality.quality_score = 100
-                mock_snap.quality.issues = []
-                mock_snap.quality.is_stale = False
+        # Mock build_freshness_universe at service level
+        with patch("packages.quantum.services.ops_health_service.build_freshness_universe") as mock_universe:
+            mock_universe.return_value = ["SPY", "QQQ"]
 
-                mock_layer.return_value.snapshot_many_v4.return_value = {
-                    "SPY": mock_snap,
-                    "QQQ": mock_snap,
-                }
+            import packages.quantum.ops_endpoints as ops_mod
 
-                results = _get_market_freshness()
+            # Mock the MarketDataTruthLayer import inside the function
+            with patch.object(ops_mod.os, "getenv", return_value="test-api-key"):
+                with patch("packages.quantum.services.market_data_truth_layer.MarketDataTruthLayer") as mock_layer:
+                    # Mock snapshot response
+                    mock_snap = MagicMock()
+                    mock_snap.quality.freshness_ms = 5000
+                    mock_snap.quality.quality_score = 100
+                    mock_snap.quality.issues = []
+                    mock_snap.quality.is_stale = False
 
-                assert len(results) == 2
-                for item in results:
-                    assert item.status == "OK"
-                    assert item.freshness_ms == 5000
-                    assert item.score == 100
+                    mock_layer.return_value.snapshot_many_v4.return_value = {
+                        "SPY": mock_snap,
+                        "QQQ": mock_snap,
+                    }
+
+                    results, meta = _get_market_freshness(mock_client)
+
+                    assert len(results) == 2
+                    for item in results:
+                        assert item.status == "OK"
+                        assert item.freshness_ms == 5000
+                        assert item.score == 100
 
 
 # =============================================================================
@@ -1274,3 +1285,215 @@ class TestAlertSeverity:
 
             assert result["sent"] is False
             assert result["suppressed_reason"] == "no_webhook"
+
+
+# =============================================================================
+# Phase 1.1.1 Tests: Dashboard Truth Alignment
+# =============================================================================
+
+from packages.quantum.services.ops_health_service import (
+    MarketFreshnessBlock,
+    compute_market_freshness_block,
+    get_integrity_stats,
+)
+
+
+class TestMarketFreshnessBlock:
+    """Tests for MarketFreshnessBlock dataclass and compute function."""
+
+    def test_block_has_required_fields(self):
+        """MarketFreshnessBlock has all required fields."""
+        block = MarketFreshnessBlock(
+            status="OK",
+            as_of="2026-01-20T12:00:00+00:00",
+            age_seconds=60.0,
+            universe_size=5,
+            symbols_checked=["SPY", "QQQ", "AAPL"],
+            stale_symbols=[],
+            issues=[]
+        )
+
+        assert block.status == "OK"
+        assert block.universe_size == 5
+        assert len(block.symbols_checked) == 3
+        assert block.stale_symbols == []
+
+    def test_compute_block_missing_api_key(self):
+        """Returns ERROR status when API key missing."""
+        mock_client = MagicMock()
+
+        # Mock empty holdings/suggestions
+        mock_client.table.return_value.select.return_value.limit.return_value.execute.return_value = MagicMock(
+            data=[]
+        )
+        mock_client.table.return_value.select.return_value.gte.return_value.limit.return_value.execute.return_value = MagicMock(
+            data=[]
+        )
+
+        with patch.dict("os.environ", {"POLYGON_API_KEY": ""}, clear=False):
+            block = compute_market_freshness_block(mock_client)
+
+            assert block.status == "ERROR"
+            assert "POLYGON_API_KEY not configured" in block.issues
+
+
+class TestExpandedFreshnessDashboard:
+    """Tests that dashboard uses expanded freshness universe."""
+
+    def test_dashboard_freshness_includes_holdings(self):
+        """Dashboard freshness builds universe from holdings."""
+        from packages.quantum.ops_endpoints import _get_market_freshness, FreshnessItem
+
+        mock_client = MagicMock()
+
+        # Mock build_freshness_universe at service level to return expanded list
+        with patch("packages.quantum.services.ops_health_service.build_freshness_universe") as mock_build:
+            mock_build.return_value = ["AAPL", "MSFT", "QQQ", "SPY"]  # Expanded universe
+
+            with patch.dict("os.environ", {"POLYGON_API_KEY": "test_key"}, clear=False):
+                import packages.quantum.ops_endpoints as ops_mod
+
+                with patch.object(ops_mod.os, "getenv", return_value="test_key"):
+                    with patch("packages.quantum.services.market_data_truth_layer.MarketDataTruthLayer") as mock_layer_class:
+                        # Mock snapshot_many_v4 to return data for all symbols
+                        mock_layer = MagicMock()
+                        mock_layer_class.return_value = mock_layer
+
+                        mock_snap = MagicMock()
+                        mock_snap.quality.freshness_ms = 5000
+                        mock_snap.quality.quality_score = 95
+                        mock_snap.quality.issues = []
+                        mock_snap.quality.is_stale = False
+
+                        mock_layer.snapshot_many_v4.return_value = {
+                            "SPY": mock_snap,
+                            "QQQ": mock_snap,
+                            "AAPL": mock_snap,
+                            "MSFT": mock_snap,
+                        }
+
+                        freshness_items, meta = _get_market_freshness(mock_client)
+
+                        # Should have expanded universe
+                        assert meta.universe_size == 4  # SPY, QQQ, AAPL, MSFT
+                        symbols = [item.symbol for item in freshness_items]
+                        assert "AAPL" in symbols
+                        assert "MSFT" in symbols
+
+    def test_freshness_meta_tracks_stale_count(self):
+        """FreshnessMeta correctly tracks stale symbol count."""
+        from packages.quantum.ops_endpoints import FreshnessMeta
+
+        meta = FreshnessMeta(
+            universe_size=10,
+            total_stale_count=3,
+            stale_symbols=["AAPL", "MSFT", "GOOGL"]
+        )
+
+        assert meta.universe_size == 10
+        assert meta.total_stale_count == 3
+        assert len(meta.stale_symbols) == 3
+
+
+class TestIntegrityStatsReal:
+    """Tests for real integrity stats from decision_audit_events."""
+
+    def test_integrity_stats_returns_nonzero_with_events(self):
+        """Returns actual count when audit events exist."""
+        mock_client = MagicMock()
+
+        # Mock query returning integrity incidents
+        mock_client.table.return_value.select.return_value.in_.return_value.gte.return_value.order.return_value.limit.return_value.execute.return_value = MagicMock(
+            data=[
+                {
+                    "id": "123",
+                    "event_name": "integrity_incident",
+                    "created_at": "2026-01-20T12:00:00+00:00",
+                    "payload": {"type": "missing_legs_fingerprint"}
+                },
+                {
+                    "id": "456",
+                    "event_name": "integrity_incident_linked",
+                    "created_at": "2026-01-20T11:00:00+00:00",
+                    "payload": {"type": "missing_legs_fingerprint_linked"}
+                }
+            ]
+        )
+
+        stats = get_integrity_stats(mock_client, hours=24)
+
+        assert stats["recent_incidents_24h"] == 2
+        assert stats["last_incident_at"] == "2026-01-20T12:00:00+00:00"
+
+    def test_integrity_stats_returns_top_types(self):
+        """Returns breakdown of incident types."""
+        mock_client = MagicMock()
+
+        # Mock query returning multiple incidents of same type
+        mock_client.table.return_value.select.return_value.in_.return_value.gte.return_value.order.return_value.limit.return_value.execute.return_value = MagicMock(
+            data=[
+                {"id": "1", "event_name": "integrity_incident", "created_at": "2026-01-20T12:00:00+00:00", "payload": {"type": "missing_legs_fingerprint"}},
+                {"id": "2", "event_name": "integrity_incident", "created_at": "2026-01-20T11:00:00+00:00", "payload": {"type": "missing_legs_fingerprint"}},
+                {"id": "3", "event_name": "integrity_incident", "created_at": "2026-01-20T10:00:00+00:00", "payload": {"type": "data_mismatch"}},
+            ]
+        )
+
+        stats = get_integrity_stats(mock_client, hours=24)
+
+        assert stats["recent_incidents_24h"] == 3
+        assert len(stats["top_incident_types_24h"]) >= 1
+        # missing_legs_fingerprint should be first (count=2)
+        assert stats["top_incident_types_24h"][0]["event_name"] == "missing_legs_fingerprint"
+        assert stats["top_incident_types_24h"][0]["count"] == 2
+
+    def test_integrity_stats_handles_empty_table(self):
+        """Gracefully returns zeros when no events."""
+        mock_client = MagicMock()
+
+        mock_client.table.return_value.select.return_value.in_.return_value.gte.return_value.order.return_value.limit.return_value.execute.return_value = MagicMock(
+            data=[]
+        )
+
+        stats = get_integrity_stats(mock_client, hours=24)
+
+        assert stats["recent_incidents_24h"] == 0
+        assert stats["last_incident_at"] is None
+        assert stats["top_incident_types_24h"] == []
+
+    def test_integrity_stats_handles_query_error(self):
+        """Returns zeros with diagnostic on query error."""
+        mock_client = MagicMock()
+
+        mock_client.table.return_value.select.return_value.in_.return_value.gte.return_value.order.return_value.limit.return_value.execute.side_effect = Exception("DB error")
+
+        stats = get_integrity_stats(mock_client, hours=24)
+
+        assert stats["recent_incidents_24h"] == 0
+        assert stats["last_incident_at"] is None
+        assert "diagnostic" in stats
+
+
+class TestNoRegressionDeterminism:
+    """Guard tests ensuring banned terms don't appear."""
+
+    def test_canonical_jobs_no_regression(self):
+        """CANONICAL_JOB_NAMES doesn't include regression/determinism."""
+        from packages.quantum.ops_endpoints import CANONICAL_JOB_NAMES
+
+        for job in CANONICAL_JOB_NAMES:
+            assert "regression" not in job.lower(), f"Found 'regression' in {job}"
+            assert "determinism" not in job.lower(), f"Found 'determinism' in {job}"
+
+    def test_expected_jobs_no_regression(self):
+        """EXPECTED_JOBS doesn't include regression/determinism."""
+        from packages.quantum.services.ops_health_service import EXPECTED_JOBS
+
+        for job_name, cadence in EXPECTED_JOBS:
+            assert "regression" not in job_name.lower(), f"Found 'regression' in {job_name}"
+            assert "determinism" not in job_name.lower(), f"Found 'determinism' in {job_name}"
+
+    def test_alert_severity_no_regression(self):
+        """ALERT_SEVERITY keys don't include regression/determinism."""
+        for alert_type in ALERT_SEVERITY.keys():
+            assert "regression" not in alert_type.lower()
+            assert "determinism" not in alert_type.lower()

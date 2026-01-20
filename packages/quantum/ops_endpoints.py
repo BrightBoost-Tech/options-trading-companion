@@ -72,10 +72,21 @@ class PipelineJobState(BaseModel):
     finished_at: Optional[datetime] = None
 
 
+class HealthBlock(BaseModel):
+    """
+    PR B: Aggregated health status for mobile dashboard.
+    Provides at-a-glance system health from all components.
+    """
+    status: str  # "healthy", "degraded", "unhealthy", "paused"
+    issues: List[str]  # List of active issues/alerts
+    checks: Dict[str, str]  # Component -> status mapping
+
+
 class DashboardStateResponse(BaseModel):
     control: OpsControlState
     freshness: List[FreshnessItem]
     pipeline: Dict[str, PipelineJobState]
+    health: HealthBlock  # PR B: Aggregated health status
 
 
 class PauseRequest(BaseModel):
@@ -257,6 +268,74 @@ def _get_pipeline_status(client: Client) -> Dict[str, PipelineJobState]:
     return pipeline
 
 
+def _compute_health(
+    control: OpsControlState,
+    freshness: List[FreshnessItem],
+    pipeline: Dict[str, PipelineJobState]
+) -> HealthBlock:
+    """
+    PR B: Compute aggregated system health from components.
+
+    Status hierarchy:
+    - "healthy": All systems nominal
+    - "paused": Trading is paused (not necessarily unhealthy)
+    - "degraded": Some warnings but operational
+    - "unhealthy": Critical issues present
+
+    Returns HealthBlock with status, issues list, and per-component checks.
+    """
+    issues = []
+    checks = {}
+
+    # Check 1: Pause state
+    if control.paused:
+        issues.append(f"Trading paused: {control.pause_reason or 'No reason provided'}")
+        checks["trading"] = "paused"
+    else:
+        checks["trading"] = "active"
+
+    # Check 2: Market data freshness
+    stale_symbols = [f.symbol for f in freshness if f.status in ("STALE", "ERROR")]
+    warn_symbols = [f.symbol for f in freshness if f.status == "WARN"]
+
+    if stale_symbols:
+        issues.append(f"Stale market data: {', '.join(stale_symbols)}")
+        checks["market_data"] = "stale"
+    elif warn_symbols:
+        checks["market_data"] = "warn"
+    else:
+        checks["market_data"] = "ok"
+
+    # Check 3: Pipeline jobs
+    failed_statuses = ("failed", "dead_lettered", "error", "failed_retryable")
+    failed_jobs = [name for name, state in pipeline.items() if state.status in failed_statuses]
+    running_jobs = [name for name, state in pipeline.items() if state.status == "running"]
+
+    if failed_jobs:
+        issues.append(f"Failed jobs: {', '.join(failed_jobs)}")
+        checks["pipeline"] = "failed"
+    elif running_jobs:
+        checks["pipeline"] = "running"
+    else:
+        checks["pipeline"] = "ok"
+
+    # Determine overall status
+    has_critical = checks.get("market_data") == "stale" or checks.get("pipeline") == "failed"
+    has_warning = checks.get("market_data") == "warn"
+    is_paused = control.paused
+
+    if has_critical:
+        status = "unhealthy"
+    elif is_paused:
+        status = "paused"
+    elif has_warning:
+        status = "degraded"
+    else:
+        status = "healthy"
+
+    return HealthBlock(status=status, issues=issues, checks=checks)
+
+
 # ---------------------------------------------------------------------------
 # Endpoints
 # ---------------------------------------------------------------------------
@@ -274,6 +353,7 @@ async def get_dashboard_state(
     - control: Current ops control state (mode, paused, etc.)
     - freshness: Market data freshness for key symbols
     - pipeline: Status of canonical job runs
+    - health: PR B - Aggregated system health status
 
     Auth: Requires admin access.
     """
@@ -292,10 +372,14 @@ async def get_dashboard_state(
     # 3. Get pipeline status
     pipeline = _get_pipeline_status(client)
 
+    # 4. PR B: Compute aggregated health
+    health = _compute_health(control, freshness, pipeline)
+
     return DashboardStateResponse(
         control=control,
         freshness=freshness,
         pipeline=pipeline,
+        health=health,
     )
 
 

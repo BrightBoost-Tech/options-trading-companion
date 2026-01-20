@@ -16,10 +16,12 @@ from packages.quantum.ops_endpoints import (
     OpsControlState,
     FreshnessItem,
     PipelineJobState,
+    HealthBlock,
     DashboardStateResponse,
     is_trading_paused,
     get_global_ops_control,
     _get_market_freshness,
+    _compute_health,
     FRESHNESS_OK_MS,
     FRESHNESS_WARN_MS,
     CANONICAL_JOB_NAMES,
@@ -161,7 +163,7 @@ class TestDashboardStateResponse:
     """Test dashboard state response structure."""
 
     def test_dashboard_state_structure(self):
-        """DashboardStateResponse has all required fields"""
+        """DashboardStateResponse has all required fields including health"""
         control = OpsControlState(
             mode="paper",
             paused=True,
@@ -176,17 +178,210 @@ class TestDashboardStateResponse:
             "suggestions_close": PipelineJobState(status="succeeded", created_at=None, finished_at=None),
             "suggestions_open": PipelineJobState(status="queued", created_at=None, finished_at=None),
         }
+        health = HealthBlock(
+            status="paused",
+            issues=["Trading paused: Testing"],
+            checks={"trading": "paused", "market_data": "ok", "pipeline": "ok"}
+        )
 
         response = DashboardStateResponse(
             control=control,
             freshness=freshness,
             pipeline=pipeline,
+            health=health,
         )
 
         assert response.control.mode == "paper"
         assert response.control.paused is True
         assert len(response.freshness) == 2
         assert "suggestions_close" in response.pipeline
+        assert response.health.status == "paused"
+        assert "trading" in response.health.checks
+
+
+class TestHealthBlock:
+    """PR B: Test health block computation."""
+
+    def test_healthy_when_all_ok(self):
+        """Health status is 'healthy' when all components are OK"""
+        control = OpsControlState(
+            mode="paper",
+            paused=False,
+            pause_reason=None,
+            updated_at=datetime.now()
+        )
+        freshness = [
+            FreshnessItem(symbol="SPY", freshness_ms=5000, status="OK", score=100, issues=None),
+            FreshnessItem(symbol="QQQ", freshness_ms=5000, status="OK", score=100, issues=None),
+        ]
+        pipeline = {
+            "suggestions_close": PipelineJobState(status="succeeded", created_at=None, finished_at=None),
+            "suggestions_open": PipelineJobState(status="succeeded", created_at=None, finished_at=None),
+        }
+
+        health = _compute_health(control, freshness, pipeline)
+
+        assert health.status == "healthy"
+        assert len(health.issues) == 0
+        assert health.checks["trading"] == "active"
+        assert health.checks["market_data"] == "ok"
+        assert health.checks["pipeline"] == "ok"
+
+    def test_paused_status_when_trading_paused(self):
+        """Health status is 'paused' when trading is paused"""
+        control = OpsControlState(
+            mode="paper",
+            paused=True,
+            pause_reason="System maintenance",
+            updated_at=datetime.now()
+        )
+        freshness = [
+            FreshnessItem(symbol="SPY", freshness_ms=5000, status="OK", score=100, issues=None),
+        ]
+        pipeline = {
+            "suggestions_close": PipelineJobState(status="succeeded", created_at=None, finished_at=None),
+        }
+
+        health = _compute_health(control, freshness, pipeline)
+
+        assert health.status == "paused"
+        assert health.checks["trading"] == "paused"
+        assert any("paused" in issue.lower() for issue in health.issues)
+
+    def test_unhealthy_when_market_data_stale(self):
+        """Health status is 'unhealthy' when market data is stale"""
+        control = OpsControlState(
+            mode="paper",
+            paused=False,
+            pause_reason=None,
+            updated_at=datetime.now()
+        )
+        freshness = [
+            FreshnessItem(symbol="SPY", freshness_ms=5000, status="OK", score=100, issues=None),
+            FreshnessItem(symbol="QQQ", freshness_ms=None, status="STALE", score=0, issues=["stale"]),
+        ]
+        pipeline = {
+            "suggestions_close": PipelineJobState(status="succeeded", created_at=None, finished_at=None),
+        }
+
+        health = _compute_health(control, freshness, pipeline)
+
+        assert health.status == "unhealthy"
+        assert health.checks["market_data"] == "stale"
+        assert any("stale" in issue.lower() for issue in health.issues)
+
+    def test_unhealthy_when_pipeline_failed(self):
+        """Health status is 'unhealthy' when pipeline jobs have failed"""
+        control = OpsControlState(
+            mode="paper",
+            paused=False,
+            pause_reason=None,
+            updated_at=datetime.now()
+        )
+        freshness = [
+            FreshnessItem(symbol="SPY", freshness_ms=5000, status="OK", score=100, issues=None),
+        ]
+        pipeline = {
+            "suggestions_close": PipelineJobState(status="failed", created_at=None, finished_at=None),
+            "suggestions_open": PipelineJobState(status="succeeded", created_at=None, finished_at=None),
+        }
+
+        health = _compute_health(control, freshness, pipeline)
+
+        assert health.status == "unhealthy"
+        assert health.checks["pipeline"] == "failed"
+        assert any("failed" in issue.lower() for issue in health.issues)
+
+    def test_degraded_when_market_data_warn(self):
+        """Health status is 'degraded' when market data has warnings"""
+        control = OpsControlState(
+            mode="paper",
+            paused=False,
+            pause_reason=None,
+            updated_at=datetime.now()
+        )
+        freshness = [
+            FreshnessItem(symbol="SPY", freshness_ms=90000, status="WARN", score=80, issues=["stale_quote"]),
+            FreshnessItem(symbol="QQQ", freshness_ms=5000, status="OK", score=100, issues=None),
+        ]
+        pipeline = {
+            "suggestions_close": PipelineJobState(status="succeeded", created_at=None, finished_at=None),
+        }
+
+        health = _compute_health(control, freshness, pipeline)
+
+        assert health.status == "degraded"
+        assert health.checks["market_data"] == "warn"
+
+    def test_unhealthy_takes_precedence_over_paused(self):
+        """Unhealthy status takes precedence over paused"""
+        control = OpsControlState(
+            mode="paper",
+            paused=True,
+            pause_reason="Testing",
+            updated_at=datetime.now()
+        )
+        freshness = [
+            FreshnessItem(symbol="SPY", freshness_ms=None, status="STALE", score=0, issues=["stale"]),
+        ]
+        pipeline = {
+            "suggestions_close": PipelineJobState(status="succeeded", created_at=None, finished_at=None),
+        }
+
+        health = _compute_health(control, freshness, pipeline)
+
+        assert health.status == "unhealthy"  # Unhealthy takes precedence
+
+    def test_pipeline_running_tracked(self):
+        """Running jobs are tracked in checks"""
+        control = OpsControlState(
+            mode="paper",
+            paused=False,
+            pause_reason=None,
+            updated_at=datetime.now()
+        )
+        freshness = [
+            FreshnessItem(symbol="SPY", freshness_ms=5000, status="OK", score=100, issues=None),
+        ]
+        pipeline = {
+            "suggestions_close": PipelineJobState(status="running", created_at=None, finished_at=None),
+        }
+
+        health = _compute_health(control, freshness, pipeline)
+
+        assert health.status == "healthy"
+        assert health.checks["pipeline"] == "running"
+
+    def test_dead_lettered_treated_as_failed(self):
+        """dead_lettered status is treated as failed"""
+        control = OpsControlState(
+            mode="paper",
+            paused=False,
+            pause_reason=None,
+            updated_at=datetime.now()
+        )
+        freshness = [
+            FreshnessItem(symbol="SPY", freshness_ms=5000, status="OK", score=100, issues=None),
+        ]
+        pipeline = {
+            "suggestions_close": PipelineJobState(status="dead_lettered", created_at=None, finished_at=None),
+        }
+
+        health = _compute_health(control, freshness, pipeline)
+
+        assert health.status == "unhealthy"
+        assert health.checks["pipeline"] == "failed"
+
+    def test_health_block_model(self):
+        """HealthBlock model has expected fields"""
+        health = HealthBlock(
+            status="healthy",
+            issues=[],
+            checks={"trading": "active", "market_data": "ok", "pipeline": "ok"}
+        )
+        assert health.status == "healthy"
+        assert isinstance(health.issues, list)
+        assert isinstance(health.checks, dict)
 
 
 class TestOpsControlModes:

@@ -122,7 +122,6 @@ export default function OpsPage() {
       case 'succeeded': return 'bg-green-500/10 text-green-500';
       case 'running': return 'bg-blue-500/10 text-blue-500';
       case 'queued': return 'bg-yellow-500/10 text-yellow-500';
-      case 'failed':
       case 'failed_retryable':
       case 'dead_lettered':
       case 'error': return 'bg-red-500/10 text-red-500';

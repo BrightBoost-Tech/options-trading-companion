@@ -307,11 +307,18 @@ def _compute_health(
         checks["market_data"] = "ok"
 
     # Check 3: Pipeline jobs
-    failed_statuses = ("failed", "dead_lettered", "error", "failed_retryable")
+    # Canonical failure statuses from DB enum: failed_retryable, dead_lettered
+    # Note: "cancelled" is NOT a failure (used by pause gate for auditable records)
+    # Note: "error" is a synthetic status meaning we couldn't fetch pipeline state
+    failed_statuses = ("failed_retryable", "dead_lettered")
     failed_jobs = [name for name, state in pipeline.items() if state.status in failed_statuses]
+    error_jobs = [name for name, state in pipeline.items() if state.status == "error"]
     running_jobs = [name for name, state in pipeline.items() if state.status == "running"]
 
-    if failed_jobs:
+    if error_jobs:
+        issues.append(f"Pipeline fetch error: {', '.join(error_jobs)}")
+        checks["pipeline"] = "error"
+    elif failed_jobs:
         issues.append(f"Failed jobs: {', '.join(failed_jobs)}")
         checks["pipeline"] = "failed"
     elif running_jobs:
@@ -320,7 +327,10 @@ def _compute_health(
         checks["pipeline"] = "ok"
 
     # Determine overall status
-    has_critical = checks.get("market_data") == "stale" or checks.get("pipeline") == "failed"
+    has_critical = (
+        checks.get("market_data") == "stale" or
+        checks.get("pipeline") in ("failed", "error")
+    )
     has_warning = checks.get("market_data") == "warn"
     is_paused = control.paused
 

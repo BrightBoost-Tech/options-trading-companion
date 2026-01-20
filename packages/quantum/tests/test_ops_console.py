@@ -270,8 +270,8 @@ class TestHealthBlock:
         assert health.checks["market_data"] == "stale"
         assert any("stale" in issue.lower() for issue in health.issues)
 
-    def test_unhealthy_when_pipeline_failed(self):
-        """Health status is 'unhealthy' when pipeline jobs have failed"""
+    def test_unhealthy_when_pipeline_failed_retryable(self):
+        """Health status is 'unhealthy' when pipeline jobs are failed_retryable"""
         control = OpsControlState(
             mode="paper",
             paused=False,
@@ -282,7 +282,7 @@ class TestHealthBlock:
             FreshnessItem(symbol="SPY", freshness_ms=5000, status="OK", score=100, issues=None),
         ]
         pipeline = {
-            "suggestions_close": PipelineJobState(status="failed", created_at=None, finished_at=None),
+            "suggestions_close": PipelineJobState(status="failed_retryable", created_at=None, finished_at=None),
             "suggestions_open": PipelineJobState(status="succeeded", created_at=None, finished_at=None),
         }
 
@@ -371,6 +371,51 @@ class TestHealthBlock:
 
         assert health.status == "unhealthy"
         assert health.checks["pipeline"] == "failed"
+
+    def test_cancelled_not_treated_as_failure(self):
+        """PR D: cancelled status is NOT treated as pipeline failure"""
+        control = OpsControlState(
+            mode="paper",
+            paused=False,
+            pause_reason=None,
+            updated_at=datetime.now()
+        )
+        freshness = [
+            FreshnessItem(symbol="SPY", freshness_ms=5000, status="OK", score=100, issues=None),
+        ]
+        pipeline = {
+            "suggestions_close": PipelineJobState(status="cancelled", created_at=None, finished_at=None),
+            "suggestions_open": PipelineJobState(status="succeeded", created_at=None, finished_at=None),
+        }
+
+        health = _compute_health(control, freshness, pipeline)
+
+        # cancelled should NOT trigger unhealthy or failed pipeline check
+        assert health.status == "healthy"
+        assert health.checks["pipeline"] == "ok"
+
+    def test_error_status_treated_as_unhealthy(self):
+        """PR D: error status (synthetic, fetch failure) triggers unhealthy"""
+        control = OpsControlState(
+            mode="paper",
+            paused=False,
+            pause_reason=None,
+            updated_at=datetime.now()
+        )
+        freshness = [
+            FreshnessItem(symbol="SPY", freshness_ms=5000, status="OK", score=100, issues=None),
+        ]
+        pipeline = {
+            "suggestions_close": PipelineJobState(status="error", created_at=None, finished_at=None),
+            "suggestions_open": PipelineJobState(status="succeeded", created_at=None, finished_at=None),
+        }
+
+        health = _compute_health(control, freshness, pipeline)
+
+        # error status indicates we couldn't fetch pipeline state - treat as unhealthy
+        assert health.status == "unhealthy"
+        assert health.checks["pipeline"] == "error"
+        assert any("error" in issue.lower() for issue in health.issues)
 
     def test_health_block_model(self):
         """HealthBlock model has expected fields"""

@@ -25,3 +25,7 @@
 ## 2025-05-29 - [Inconsistent Focus Indicators]
 **Learning:** Mixing raw HTML inputs with design system components creates a jarring experience for keyboard users because focus rings differ (browser default vs. custom ring).
 **Action:** Audit forms for raw `<input>` tags and replace them with design system components to ensure uniform `focus-visible` styles.
+
+## 2025-05-30 - Styling Links as Buttons
+**Learning:** Using 'Button asChild' with Next.js 'Link' can sometimes cause runtime errors if children structure isn't perfect. The 'buttonVariants' helper is a more robust alternative for styling navigation links as buttons.
+**Action:** Prefer 'className={buttonVariants({ variant: ... })}' on 'Link' components over wrapping them in 'Button asChild'.

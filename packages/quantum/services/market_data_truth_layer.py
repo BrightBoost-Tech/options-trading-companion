@@ -25,9 +25,31 @@ logger = logging.getLogger(__name__)
 # =============================================================================
 # V4 Configuration (env-configurable with safe defaults)
 # =============================================================================
-MARKETDATA_MAX_FRESHNESS_MS = int(os.getenv("MARKETDATA_MAX_FRESHNESS_MS", "60000"))
-MARKETDATA_MIN_QUALITY_SCORE = int(os.getenv("MARKETDATA_MIN_QUALITY_SCORE", "60"))
-MARKETDATA_WIDE_SPREAD_PCT = float(os.getenv("MARKETDATA_WIDE_SPREAD_PCT", "0.10"))
+# Default values (used when env vars are not set)
+_DEFAULT_MAX_FRESHNESS_MS = 60000
+_DEFAULT_MIN_QUALITY_SCORE = 60
+_DEFAULT_WIDE_SPREAD_PCT = 0.10
+
+# Legacy module-level constants for backward compatibility
+# NOTE: These are read at import time; prefer getter functions for dynamic env access
+MARKETDATA_MAX_FRESHNESS_MS = int(os.getenv("MARKETDATA_MAX_FRESHNESS_MS", str(_DEFAULT_MAX_FRESHNESS_MS)))
+MARKETDATA_MIN_QUALITY_SCORE = int(os.getenv("MARKETDATA_MIN_QUALITY_SCORE", str(_DEFAULT_MIN_QUALITY_SCORE)))
+MARKETDATA_WIDE_SPREAD_PCT = float(os.getenv("MARKETDATA_WIDE_SPREAD_PCT", str(_DEFAULT_WIDE_SPREAD_PCT)))
+
+
+def get_marketdata_max_freshness_ms() -> int:
+    """Get max freshness threshold in milliseconds (env-safe, reads at call time)."""
+    return int(os.getenv("MARKETDATA_MAX_FRESHNESS_MS", str(_DEFAULT_MAX_FRESHNESS_MS)))
+
+
+def get_marketdata_min_quality_score() -> int:
+    """Get minimum quality score threshold (env-safe, reads at call time)."""
+    return int(os.getenv("MARKETDATA_MIN_QUALITY_SCORE", str(_DEFAULT_MIN_QUALITY_SCORE)))
+
+
+def get_marketdata_wide_spread_pct() -> float:
+    """Get wide spread percentage threshold (env-safe, reads at call time)."""
+    return float(os.getenv("MARKETDATA_WIDE_SPREAD_PCT", str(_DEFAULT_WIDE_SPREAD_PCT)))
 
 
 # =============================================================================
@@ -88,8 +110,8 @@ class TruthSnapshotV4(BaseModel):
 def compute_quote_quality(
     quote: TruthQuoteV4,
     freshness_ms: Optional[float],
-    max_freshness_ms: int = MARKETDATA_MAX_FRESHNESS_MS,
-    wide_spread_pct: float = MARKETDATA_WIDE_SPREAD_PCT
+    max_freshness_ms: Optional[int] = None,
+    wide_spread_pct: Optional[float] = None
 ) -> TruthQualityV4:
     """
     Deterministic rule-based quality scoring for market quotes.
@@ -102,7 +124,19 @@ def compute_quote_quality(
     - Wide spread (> threshold): score-=20, issue="wide_spread"
     - Stale timestamp: score-=30, issue="stale_quote"
     - Missing timestamp: is_stale=True, issue="missing_timestamp"
+
+    Args:
+        quote: The quote to score
+        freshness_ms: Quote freshness in milliseconds (None if unknown)
+        max_freshness_ms: Max freshness threshold (uses env getter if None)
+        wide_spread_pct: Wide spread threshold (uses env getter if None)
     """
+    # Use getters for env-safe defaults (read at call time, not import time)
+    if max_freshness_ms is None:
+        max_freshness_ms = get_marketdata_max_freshness_ms()
+    if wide_spread_pct is None:
+        wide_spread_pct = get_marketdata_wide_spread_pct()
+
     score = 100
     issues: List[str] = []
 
@@ -117,8 +151,10 @@ def compute_quote_quality(
         score -= 40
         issues.append("missing_quote_fields")
 
-    # Check 3: Wide spread (only if we have valid mid)
-    if quote.mid and quote.bid and quote.ask and quote.mid > 0:
+    # Check 3: Wide spread (only if we have valid values)
+    # Use explicit None checks to handle 0.0 values correctly
+    if (quote.mid is not None and quote.bid is not None and
+            quote.ask is not None and quote.mid > 0):
         spread_pct = (quote.ask - quote.bid) / quote.mid
         if spread_pct > wide_spread_pct:
             score -= 20
@@ -148,33 +184,56 @@ def compute_quote_quality(
 def check_snapshots_executable(
     snapshots: Dict[str, TruthSnapshotV4],
     required_symbols: List[str],
-    min_quality_score: int = MARKETDATA_MIN_QUALITY_SCORE
+    min_quality_score: Optional[int] = None
 ) -> Tuple[bool, List[str]]:
     """
     Checks if all required symbols have executable-quality snapshots.
+
+    Handles symbol normalization automatically - tries both raw and canonical
+    key lookups to prevent false "missing_snapshot" errors.
 
     Returns:
         (is_executable, list_of_issues)
 
     A snapshot is NOT executable if:
-    - Missing from the snapshots dict
+    - Missing from the snapshots dict (after trying normalized lookup)
     - is_stale is True
     - quality_score < min_quality_score
     """
+    # Use getter for env-safe default (read at call time, not import time)
+    if min_quality_score is None:
+        min_quality_score = get_marketdata_min_quality_score()
+
     issues: List[str] = []
 
-    for sym in required_symbols:
-        snap = snapshots.get(sym)
+    for raw_sym in required_symbols:
+        # Try both raw and normalized key lookups to handle mismatches
+        snap = snapshots.get(raw_sym)
+        canonical_sym = raw_sym
+
         if snap is None:
-            issues.append(f"{sym}: missing_snapshot")
+            # Try normalized/canonical lookup
+            try:
+                canonical_sym = normalize_symbol(raw_sym)
+                snap = snapshots.get(canonical_sym)
+            except Exception:
+                # If normalization fails, treat symbol as-is
+                pass
+
+        if snap is None:
+            # Include both raw and canonical in error for debugging
+            if canonical_sym != raw_sym:
+                issues.append(f"{raw_sym} (canon={canonical_sym}): missing_snapshot")
+            else:
+                issues.append(f"{raw_sym}: missing_snapshot")
             continue
 
         if snap.quality.is_stale:
-            issues.append(f"{sym}: stale_quote (freshness={snap.quality.freshness_ms}ms)")
+            issues.append(f"{raw_sym}: stale_quote (freshness={snap.quality.freshness_ms}ms)")
 
         if snap.quality.quality_score < min_quality_score:
             issues.append(
-                f"{sym}: low_quality (score={snap.quality.quality_score}, "
+                f"{raw_sym}: low_quality (score={snap.quality.quality_score}, "
                 f"issues={snap.quality.issues})"
             )
 
@@ -333,7 +392,11 @@ class MarketDataTruthLayer:
 
         return results
 
-    def snapshot_many_v4(self, tickers: List[str]) -> Dict[str, TruthSnapshotV4]:
+    def snapshot_many_v4(
+        self,
+        tickers: List[str],
+        raw_snapshots: Optional[Dict[str, Dict]] = None
+    ) -> Dict[str, TruthSnapshotV4]:
         """
         V4 API: Returns canonical TruthSnapshotV4 objects with quality scoring.
 
@@ -342,12 +405,15 @@ class MarketDataTruthLayer:
 
         Args:
             tickers: List of ticker symbols to fetch
+            raw_snapshots: Optional pre-fetched raw snapshots to avoid double fetch.
+                           If provided, snapshot_many() will NOT be called.
 
         Returns:
             Dict mapping ticker to TruthSnapshotV4 with quality scoring
         """
-        # Get raw snapshots using existing method
-        raw_snapshots = self.snapshot_many(tickers)
+        # Use provided raw_snapshots or fetch them
+        if raw_snapshots is None:
+            raw_snapshots = self.snapshot_many(tickers)
 
         v4_results: Dict[str, TruthSnapshotV4] = {}
         received_ts = int(time.time() * 1000)

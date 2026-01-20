@@ -940,7 +940,8 @@ async def run_morning_cycle(supabase: Client, user_id: str):
             snapshots = truth_layer.snapshot_many(leg_symbols)
 
             # V4: Get quality-scored snapshots and check for stale/invalid quotes
-            snapshots_v4 = truth_layer.snapshot_many_v4(leg_symbols)
+            # Pass raw_snapshots to avoid double fetch
+            snapshots_v4 = truth_layer.snapshot_many_v4(leg_symbols, raw_snapshots=snapshots)
             from packages.quantum.services.market_data_truth_layer import check_snapshots_executable
             is_executable, quality_issues = check_snapshots_executable(snapshots_v4, leg_symbols)
 

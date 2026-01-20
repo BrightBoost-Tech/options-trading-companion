@@ -11,7 +11,7 @@ These tests verify:
 
 import pytest
 import time
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch, MagicMock, call
 from packages.quantum.services.market_data_truth_layer import (
     MarketDataTruthLayer,
     TruthQuoteV4,
@@ -21,6 +21,9 @@ from packages.quantum.services.market_data_truth_layer import (
     TruthSnapshotV4,
     compute_quote_quality,
     check_snapshots_executable,
+    get_marketdata_max_freshness_ms,
+    get_marketdata_min_quality_score,
+    get_marketdata_wide_spread_pct,
     MARKETDATA_MAX_FRESHNESS_MS,
     MARKETDATA_MIN_QUALITY_SCORE,
     MARKETDATA_WIDE_SPREAD_PCT,
@@ -227,6 +230,136 @@ class TestCheckSnapshotsExecutable:
 
         assert is_exec is False
         assert any("SPY" in issue for issue in issues)
+
+
+class TestSymbolNormalization:
+    """Tests for symbol normalization in check_snapshots_executable."""
+
+    def test_raw_symbol_matches_canonical_key(self):
+        """Raw symbol finds snapshot when key is canonical."""
+        snap = TruthSnapshotV4(
+            symbol_canonical="O:AAPL250117C00200000",
+            quote=TruthQuoteV4(bid=5.0, ask=5.10, mid=5.05),
+            timestamps=TruthTimestampsV4(source_ts=int(time.time() * 1000), received_ts=int(time.time() * 1000)),
+            quality=TruthQualityV4(quality_score=100, issues=[], is_stale=False, freshness_ms=100),
+            source=TruthSourceV4(),
+        )
+
+        # Snapshot stored with canonical key (O: prefix)
+        # Required symbol is raw (no O: prefix)
+        # Should still find it via normalization
+        is_exec, issues = check_snapshots_executable(
+            {"O:AAPL250117C00200000": snap},
+            ["AAPL250117C00200000"]  # raw symbol without O: prefix
+        )
+
+        assert is_exec is True
+        assert issues == []
+
+    def test_canonical_symbol_matches_canonical_key(self):
+        """Canonical symbol directly matches canonical key."""
+        snap = TruthSnapshotV4(
+            symbol_canonical="O:SPY250117P00500000",
+            quote=TruthQuoteV4(bid=10.0, ask=10.20, mid=10.10),
+            timestamps=TruthTimestampsV4(source_ts=int(time.time() * 1000), received_ts=int(time.time() * 1000)),
+            quality=TruthQualityV4(quality_score=100, issues=[], is_stale=False, freshness_ms=100),
+            source=TruthSourceV4(),
+        )
+
+        is_exec, issues = check_snapshots_executable(
+            {"O:SPY250117P00500000": snap},
+            ["O:SPY250117P00500000"]  # canonical symbol
+        )
+
+        assert is_exec is True
+        assert issues == []
+
+    def test_missing_snapshot_error_includes_canonical(self):
+        """Error message includes canonical key when different from raw."""
+        # Empty snapshots dict
+        is_exec, issues = check_snapshots_executable(
+            {},
+            ["AAPL250117C00200000"]  # raw symbol
+        )
+
+        assert is_exec is False
+        assert len(issues) == 1
+        # Error should mention that the canonical form was also tried
+        assert "missing_snapshot" in issues[0]
+
+
+class TestTruthinessExplicitChecks:
+    """Tests for explicit None checks (no truthiness bugs with 0.0 values)."""
+
+    def test_zero_bid_spread_calculation(self):
+        """Spread calculation works correctly when bid is 0.0."""
+        # bid=0.0 should not be treated as "falsy"/missing
+        quote = TruthQuoteV4(bid=0.0, ask=0.1, mid=0.05)
+        quality = compute_quote_quality(quote, freshness_ms=1000)
+
+        # With mid=0.05, spread = (0.1 - 0.0) / 0.05 = 2.0 = 200%
+        # This should trigger wide_spread issue
+        assert "wide_spread" in quality.issues
+        assert quality.quality_score < 100
+
+    def test_zero_values_not_treated_as_missing(self):
+        """Values of 0.0 are not treated as missing."""
+        # All values present but some are 0.0
+        quote = TruthQuoteV4(bid=0.0, ask=0.0, mid=0.0)
+        quality = compute_quote_quality(quote, freshness_ms=1000)
+
+        # Should NOT have missing_quote_fields since bid and ask are present (just 0)
+        assert "missing_quote_fields" not in quality.issues
+
+    def test_narrow_spread_with_small_values(self):
+        """Narrow spread works correctly with small but non-zero values."""
+        # Small values but narrow spread
+        quote = TruthQuoteV4(bid=0.01, ask=0.02, mid=0.015)
+        quality = compute_quote_quality(quote, freshness_ms=1000, wide_spread_pct=1.0)  # 100% threshold
+
+        # Spread = (0.02 - 0.01) / 0.015 = 0.667 = 66.7%
+        # With 100% threshold, this should NOT be wide
+        assert "wide_spread" not in quality.issues
+
+
+class TestRawSnapshotsParameter:
+    """Tests for raw_snapshots parameter to avoid double fetch."""
+
+    def test_raw_snapshots_skips_fetch(self):
+        """snapshot_many_v4 with raw_snapshots does NOT call snapshot_many."""
+        layer = MarketDataTruthLayer(api_key="test")
+
+        # Pre-fetched raw snapshots
+        raw_snapshots = {
+            "AAPL": {
+                "ticker": "AAPL",
+                "quote": {"bid": 150.0, "ask": 150.10, "mid": 150.05},
+                "provider_ts": int(time.time() * 1000) - 1000,
+                "staleness_ms": 1000,
+            }
+        }
+
+        # Patch snapshot_many to track if it's called
+        with patch.object(layer, 'snapshot_many') as mock_snapshot_many:
+            results = layer.snapshot_many_v4(["AAPL"], raw_snapshots=raw_snapshots)
+
+            # snapshot_many should NOT be called
+            mock_snapshot_many.assert_not_called()
+
+        # Results should still be valid
+        assert "AAPL" in results
+        assert isinstance(results["AAPL"], TruthSnapshotV4)
+        assert results["AAPL"].quote.bid == 150.0
+
+    def test_no_raw_snapshots_calls_fetch(self):
+        """snapshot_many_v4 without raw_snapshots DOES call snapshot_many."""
+        layer = MarketDataTruthLayer(api_key="test")
+
+        with patch.object(layer, 'snapshot_many', return_value={}) as mock_snapshot_many:
+            layer.snapshot_many_v4(["AAPL"])
+
+            # snapshot_many SHOULD be called
+            mock_snapshot_many.assert_called_once_with(["AAPL"])
 
 
 class TestSnapshotManyV4:
@@ -456,20 +589,74 @@ class TestIntegrationOrderBuilder:
         assert order_json["limit_price"] == 1.25
 
 
-class TestConfigurationDefaults:
-    """Tests for configuration defaults and environment overrides."""
+class TestConfigurationGetters:
+    """Tests for configuration getters (env-safe, read at call time)."""
 
-    def test_default_max_freshness(self):
-        """Default MARKETDATA_MAX_FRESHNESS_MS is 60000."""
-        assert MARKETDATA_MAX_FRESHNESS_MS == 60000
+    def test_env_override_max_freshness(self, monkeypatch):
+        """Getter reads MARKETDATA_MAX_FRESHNESS_MS from env at call time."""
+        monkeypatch.setenv("MARKETDATA_MAX_FRESHNESS_MS", "12345")
+        assert get_marketdata_max_freshness_ms() == 12345
 
-    def test_default_min_quality_score(self):
-        """Default MARKETDATA_MIN_QUALITY_SCORE is 60."""
-        assert MARKETDATA_MIN_QUALITY_SCORE == 60
+    def test_env_override_min_quality_score(self, monkeypatch):
+        """Getter reads MARKETDATA_MIN_QUALITY_SCORE from env at call time."""
+        monkeypatch.setenv("MARKETDATA_MIN_QUALITY_SCORE", "75")
+        assert get_marketdata_min_quality_score() == 75
 
-    def test_default_wide_spread_pct(self):
-        """Default MARKETDATA_WIDE_SPREAD_PCT is 0.10 (10%)."""
-        assert MARKETDATA_WIDE_SPREAD_PCT == pytest.approx(0.10)
+    def test_env_override_wide_spread_pct(self, monkeypatch):
+        """Getter reads MARKETDATA_WIDE_SPREAD_PCT from env at call time."""
+        monkeypatch.setenv("MARKETDATA_WIDE_SPREAD_PCT", "0.25")
+        assert get_marketdata_wide_spread_pct() == pytest.approx(0.25)
+
+    def test_getters_return_correct_types(self, monkeypatch):
+        """Getters return correct types when env is not set."""
+        # Clear any existing env vars
+        monkeypatch.delenv("MARKETDATA_MAX_FRESHNESS_MS", raising=False)
+        monkeypatch.delenv("MARKETDATA_MIN_QUALITY_SCORE", raising=False)
+        monkeypatch.delenv("MARKETDATA_WIDE_SPREAD_PCT", raising=False)
+
+        assert isinstance(get_marketdata_max_freshness_ms(), int)
+        assert isinstance(get_marketdata_min_quality_score(), int)
+        assert isinstance(get_marketdata_wide_spread_pct(), float)
+
+    def test_getters_return_positive_values(self, monkeypatch):
+        """Getters return positive values when env is not set."""
+        monkeypatch.delenv("MARKETDATA_MAX_FRESHNESS_MS", raising=False)
+        monkeypatch.delenv("MARKETDATA_MIN_QUALITY_SCORE", raising=False)
+        monkeypatch.delenv("MARKETDATA_WIDE_SPREAD_PCT", raising=False)
+
+        assert get_marketdata_max_freshness_ms() > 0
+        assert get_marketdata_min_quality_score() > 0
+        assert get_marketdata_wide_spread_pct() > 0
+
+    def test_compute_quote_quality_uses_env_overrides(self, monkeypatch):
+        """compute_quote_quality uses getter values, respecting env overrides."""
+        # Set very strict freshness threshold (1 second)
+        monkeypatch.setenv("MARKETDATA_MAX_FRESHNESS_MS", "1000")
+
+        quote = TruthQuoteV4(bid=99.0, ask=100.0, mid=99.5)
+        # 5 seconds old - should be stale with 1s threshold
+        quality = compute_quote_quality(quote, freshness_ms=5000)
+
+        assert quality.is_stale is True
+        assert "stale_quote" in quality.issues
+
+    def test_check_snapshots_executable_uses_env_overrides(self, monkeypatch):
+        """check_snapshots_executable uses getter values, respecting env overrides."""
+        # Set very high quality threshold
+        monkeypatch.setenv("MARKETDATA_MIN_QUALITY_SCORE", "99")
+
+        snap = TruthSnapshotV4(
+            symbol_canonical="AAPL",
+            quote=TruthQuoteV4(bid=150.0, ask=150.10, mid=150.05),
+            timestamps=TruthTimestampsV4(source_ts=int(time.time() * 1000), received_ts=int(time.time() * 1000)),
+            quality=TruthQualityV4(quality_score=80, issues=[], is_stale=False, freshness_ms=100),
+            source=TruthSourceV4(),
+        )
+
+        # Score of 80 should fail with threshold of 99
+        is_exec, issues = check_snapshots_executable({"AAPL": snap}, ["AAPL"])
+        assert is_exec is False
+        assert any("low_quality" in issue for issue in issues)
 
 
 class TestTimestampNormalization:

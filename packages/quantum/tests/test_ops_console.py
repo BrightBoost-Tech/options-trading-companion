@@ -12,6 +12,10 @@ import pytest
 from unittest.mock import MagicMock, patch
 from datetime import datetime, timezone, timedelta
 
+from packages.quantum.services.ops_health_service import (
+    MarketDataFreshnessResult,
+)
+
 from packages.quantum.ops_endpoints import (
     OpsControlState,
     FreshnessItem,
@@ -845,42 +849,66 @@ class TestOpsHealthCheckHandler:
                                     assert "timing_ms" in result
 
     def test_handler_sends_alert_on_stale_data(self):
-        """Handler sends alert when data is stale."""
+        """Handler sends alert when data is stale (Phase 1.1 version)."""
         from packages.quantum.jobs.handlers.ops_health_check import run
 
         with patch("packages.quantum.jobs.handlers.ops_health_check.get_admin_client") as mock_client:
             mock_client.return_value = MagicMock()
 
-            with patch("packages.quantum.jobs.handlers.ops_health_check.compute_data_freshness") as mock_fresh:
-                mock_fresh.return_value = DataFreshnessResult(
-                    is_stale=True,
-                    as_of=datetime.now(timezone.utc) - timedelta(hours=1),
-                    age_seconds=3600,
-                    reason="Data too old",
-                    source="job_runs"
-                )
+            # Phase 1.1: Mock build_freshness_universe
+            with patch("packages.quantum.jobs.handlers.ops_health_check.build_freshness_universe") as mock_universe:
+                mock_universe.return_value = ["SPY", "QQQ"]
 
-                with patch("packages.quantum.jobs.handlers.ops_health_check.get_expected_jobs") as mock_jobs:
-                    mock_jobs.return_value = []
+                # Phase 1.1: Mock compute_market_data_freshness (stale)
+                with patch("packages.quantum.jobs.handlers.ops_health_check.compute_market_data_freshness") as mock_market_fresh:
+                    mock_market_fresh.return_value = MarketDataFreshnessResult(
+                        is_stale=True,
+                        as_of=datetime.now(timezone.utc) - timedelta(hours=1),
+                        age_seconds=3600,
+                        universe_size=2,
+                        stale_symbols=["SPY"],
+                        source="MarketDataTruthLayer",
+                        reason="stale_symbols"
+                    )
 
-                    with patch("packages.quantum.jobs.handlers.ops_health_check.get_recent_failures") as mock_fail:
-                        mock_fail.return_value = []
+                    # Also mock job-based freshness (for backwards compat check)
+                    with patch("packages.quantum.jobs.handlers.ops_health_check.compute_data_freshness") as mock_fresh:
+                        mock_fresh.return_value = DataFreshnessResult(
+                            is_stale=False,
+                            as_of=datetime.now(timezone.utc),
+                            age_seconds=60,
+                            reason="ok",
+                            source="job_runs"
+                        )
 
-                        with patch("packages.quantum.jobs.handlers.ops_health_check.get_suggestions_stats") as mock_stats:
-                            mock_stats.return_value = {"last_cycle_date": None, "count_last_cycle": 0}
+                        with patch("packages.quantum.jobs.handlers.ops_health_check.get_expected_jobs") as mock_jobs:
+                            mock_jobs.return_value = []
 
-                            with patch("packages.quantum.jobs.handlers.ops_health_check.get_integrity_stats") as mock_int:
-                                mock_int.return_value = {"recent_incidents": 0, "last_incident_at": None}
+                            with patch("packages.quantum.jobs.handlers.ops_health_check.get_recent_failures") as mock_fail:
+                                mock_fail.return_value = []
 
-                                with patch("packages.quantum.jobs.handlers.ops_health_check.send_ops_alert") as mock_alert:
-                                    mock_alert.return_value = True
+                                with patch("packages.quantum.jobs.handlers.ops_health_check.get_suggestions_stats") as mock_stats:
+                                    mock_stats.return_value = {"last_cycle_date": None, "count_last_cycle": 0}
 
-                                    with patch("packages.quantum.jobs.handlers.ops_health_check.AuditLogService"):
-                                        result = run({"timestamp": datetime.now().isoformat()})
+                                    with patch("packages.quantum.jobs.handlers.ops_health_check.get_integrity_stats") as mock_int:
+                                        mock_int.return_value = {"recent_incidents": 0, "last_incident_at": None}
 
-                                        # Verify alert was attempted for stale data
-                                        mock_alert.assert_called()
-                                        assert "data_stale" in result["alerts_sent"]
+                                        # Phase 1.1: Mock alert functions
+                                        with patch("packages.quantum.jobs.handlers.ops_health_check.get_alert_fingerprint") as mock_fp:
+                                            mock_fp.return_value = "abc123"
+
+                                            with patch("packages.quantum.jobs.handlers.ops_health_check.should_suppress_alert") as mock_suppress:
+                                                mock_suppress.return_value = (False, None)  # Not suppressed
+
+                                                with patch("packages.quantum.jobs.handlers.ops_health_check.send_ops_alert_v2") as mock_alert:
+                                                    mock_alert.return_value = {"sent": True, "suppressed_reason": None}
+
+                                                    with patch("packages.quantum.jobs.handlers.ops_health_check.AuditLogService"):
+                                                        result = run({"timestamp": datetime.now().isoformat()})
+
+                                                        # Verify alert was attempted for stale data
+                                                        mock_alert.assert_called()
+                                                        assert "data_stale" in result["alerts_sent"]
 
 
 class TestPauseAuditEvent:
@@ -966,3 +994,283 @@ class TestOpsHealthEndpoint:
 
         assert response.data_freshness.as_of is None
         assert response.suggestions.last_cycle_date is None
+
+
+# =============================================================================
+# Phase 1.1 Tests: Mode Audit + Expanded Freshness + Cooldown + Severity
+# =============================================================================
+
+from packages.quantum.services.ops_health_service import (
+    build_freshness_universe,
+    compute_market_data_freshness,
+    get_alert_fingerprint,
+    should_suppress_alert,
+    send_ops_alert_v2,
+    MarketDataFreshnessResult,
+    ALERT_SEVERITY,
+)
+
+
+class TestModeAuditEvent:
+    """Test POST /ops/mode writes audit event."""
+
+    def test_mode_code_contains_audit_call(self):
+        """Verify ops_endpoints mode function contains audit logging code."""
+        import inspect
+        import packages.quantum.ops_endpoints as ops_mod
+
+        # Get the source of the mode endpoint
+        source = inspect.getsource(ops_mod.set_mode)
+
+        # Verify audit logging code is present
+        assert "AuditLogService" in source
+        assert "log_audit_event" in source
+        assert "ops.mode.changed" in source
+        assert "previous_mode" in source
+
+
+class TestExpandedFreshnessUniverse:
+    """Tests for build_freshness_universe function."""
+
+    def test_universe_includes_baseline(self):
+        """Universe always includes SPY, QQQ."""
+        mock_client = MagicMock()
+
+        # Mock empty results for both queries
+        mock_client.table.return_value.select.return_value.limit.return_value.execute.return_value = MagicMock(data=[])
+        mock_client.table.return_value.select.return_value.gte.return_value.limit.return_value.execute.return_value = MagicMock(data=[])
+
+        universe = build_freshness_universe(mock_client)
+
+        assert "SPY" in universe
+        assert "QQQ" in universe
+
+    def test_universe_adds_holdings(self):
+        """Holdings tickers added to universe."""
+        mock_client = MagicMock()
+
+        def table_side_effect(name):
+            mock_table = MagicMock()
+            if name == "positions":
+                mock_table.select.return_value.limit.return_value.execute.return_value = MagicMock(
+                    data=[{"symbol": "AAPL"}, {"symbol": "MSFT"}]
+                )
+            else:
+                mock_table.select.return_value.gte.return_value.limit.return_value.execute.return_value = MagicMock(data=[])
+            return mock_table
+
+        mock_client.table.side_effect = table_side_effect
+
+        universe = build_freshness_universe(mock_client)
+
+        assert "AAPL" in universe
+        assert "MSFT" in universe
+        assert "SPY" in universe
+        assert "QQQ" in universe
+
+    def test_universe_adds_suggestions(self):
+        """Recent suggestion underlyings added to universe."""
+        mock_client = MagicMock()
+
+        def table_side_effect(name):
+            mock_table = MagicMock()
+            if name == "positions":
+                mock_table.select.return_value.limit.return_value.execute.return_value = MagicMock(data=[])
+            else:
+                mock_table.select.return_value.gte.return_value.limit.return_value.execute.return_value = MagicMock(
+                    data=[{"ticker": "NVDA"}, {"ticker": "AMD"}]
+                )
+            return mock_table
+
+        mock_client.table.side_effect = table_side_effect
+
+        universe = build_freshness_universe(mock_client)
+
+        assert "NVDA" in universe
+        assert "AMD" in universe
+
+    def test_universe_capped_at_max(self):
+        """Universe capped at max_symbols."""
+        mock_client = MagicMock()
+
+        # Create many symbols
+        many_positions = [{"symbol": f"SYM{i}"} for i in range(50)]
+
+        def table_side_effect(name):
+            mock_table = MagicMock()
+            if name == "positions":
+                mock_table.select.return_value.limit.return_value.execute.return_value = MagicMock(data=many_positions)
+            else:
+                mock_table.select.return_value.gte.return_value.limit.return_value.execute.return_value = MagicMock(data=[])
+            return mock_table
+
+        mock_client.table.side_effect = table_side_effect
+
+        universe = build_freshness_universe(mock_client, max_symbols=10)
+
+        assert len(universe) == 10
+
+    def test_universe_fallback_on_error(self):
+        """Falls back to SPY/QQQ on query errors."""
+        mock_client = MagicMock()
+        mock_client.table.side_effect = Exception("DB error")
+
+        universe = build_freshness_universe(mock_client)
+
+        # Should still have baseline
+        assert "SPY" in universe
+        assert "QQQ" in universe
+
+
+class TestMarketDataFreshnessResult:
+    """Tests for MarketDataFreshnessResult dataclass."""
+
+    def test_missing_api_key_returns_stale(self):
+        """Missing POLYGON_API_KEY returns stale result."""
+        with patch.dict("os.environ", {"POLYGON_API_KEY": ""}, clear=False):
+            # Need to patch at module level where it's checked
+            import packages.quantum.services.ops_health_service as service_mod
+            original_getenv = service_mod.os.getenv
+
+            def mock_getenv(key, default=None):
+                if key == "POLYGON_API_KEY":
+                    return None
+                return original_getenv(key, default)
+
+            with patch.object(service_mod.os, "getenv", side_effect=mock_getenv):
+                result = compute_market_data_freshness(["SPY", "QQQ"])
+
+                assert result.is_stale is True
+                assert result.source == "missing_api_key"
+                assert result.reason == "missing_api_key"
+
+
+class TestAlertFingerprint:
+    """Tests for alert fingerprint generation."""
+
+    def test_same_inputs_same_fingerprint(self):
+        """Same inputs produce same fingerprint."""
+        fp1 = get_alert_fingerprint("data_stale", {"symbols": ["SPY", "QQQ"]})
+        fp2 = get_alert_fingerprint("data_stale", {"symbols": ["SPY", "QQQ"]})
+
+        assert fp1 == fp2
+
+    def test_different_inputs_different_fingerprint(self):
+        """Different inputs produce different fingerprints."""
+        fp1 = get_alert_fingerprint("data_stale", {"symbols": ["SPY"]})
+        fp2 = get_alert_fingerprint("data_stale", {"symbols": ["QQQ"]})
+
+        assert fp1 != fp2
+
+    def test_different_alert_types_different_fingerprint(self):
+        """Different alert types produce different fingerprints."""
+        fp1 = get_alert_fingerprint("data_stale", {"symbols": ["SPY"]})
+        fp2 = get_alert_fingerprint("job_late", {"symbols": ["SPY"]})
+
+        assert fp1 != fp2
+
+
+class TestAlertCooldown:
+    """Tests for alert cooldown suppression."""
+
+    def test_cooldown_suppresses_repeat_alert(self):
+        """Same fingerprint within cooldown is suppressed."""
+        mock_client = MagicMock()
+
+        # Simulate recent job_run with matching fingerprint
+        mock_client.table.return_value.select.return_value.eq.return_value.eq.return_value.gte.return_value.order.return_value.limit.return_value.execute.return_value = MagicMock(
+            data=[{
+                "result": {"alert_fingerprints": ["abc123"]},
+                "finished_at": datetime.now(timezone.utc).isoformat()
+            }]
+        )
+
+        suppressed, last_sent = should_suppress_alert(mock_client, "abc123", cooldown_minutes=30)
+
+        assert suppressed is True
+        assert last_sent is not None
+
+    def test_different_fingerprint_not_suppressed(self):
+        """Different fingerprint not suppressed."""
+        mock_client = MagicMock()
+
+        # Simulate recent job_run with different fingerprint
+        mock_client.table.return_value.select.return_value.eq.return_value.eq.return_value.gte.return_value.order.return_value.limit.return_value.execute.return_value = MagicMock(
+            data=[{
+                "result": {"alert_fingerprints": ["xyz789"]},
+                "finished_at": datetime.now(timezone.utc).isoformat()
+            }]
+        )
+
+        suppressed, last_sent = should_suppress_alert(mock_client, "abc123", cooldown_minutes=30)
+
+        assert suppressed is False
+        assert last_sent is None
+
+    def test_no_recent_jobs_not_suppressed(self):
+        """No recent jobs means no suppression."""
+        mock_client = MagicMock()
+
+        mock_client.table.return_value.select.return_value.eq.return_value.eq.return_value.gte.return_value.order.return_value.limit.return_value.execute.return_value = MagicMock(
+            data=[]
+        )
+
+        suppressed, last_sent = should_suppress_alert(mock_client, "abc123", cooldown_minutes=30)
+
+        assert suppressed is False
+
+
+class TestAlertSeverity:
+    """Tests for severity-based alert filtering."""
+
+    def test_alert_severity_mapping_exists(self):
+        """ALERT_SEVERITY mapping has expected entries."""
+        assert "data_stale" in ALERT_SEVERITY
+        assert "job_late" in ALERT_SEVERITY
+        assert "job_failure" in ALERT_SEVERITY
+
+        assert ALERT_SEVERITY["data_stale"] == "error"
+        assert ALERT_SEVERITY["job_late"] == "warning"
+
+    def test_warning_filtered_when_min_error(self):
+        """Warning alerts filtered when min_severity=error."""
+        result = send_ops_alert_v2(
+            "job_late",  # warning severity
+            "Test message",
+            severity="warning",
+            min_severity="error",
+            webhook_url="https://hooks.example.com/test"
+        )
+
+        assert result["sent"] is False
+        assert result["suppressed_reason"] == "below_min_severity"
+
+    def test_error_sent_when_min_error(self):
+        """Error alerts pass severity filter when min_severity=error."""
+        import requests as req_module
+        with patch.object(req_module, "post") as mock_post:
+            mock_post.return_value.status_code = 200
+
+            result = send_ops_alert_v2(
+                "data_stale",  # error severity
+                "Test message",
+                severity="error",
+                min_severity="error",
+                webhook_url="https://hooks.example.com/test"
+            )
+
+            assert result["sent"] is True
+            mock_post.assert_called_once()
+
+    def test_no_webhook_returns_suppressed(self):
+        """No webhook URL returns suppressed reason."""
+        with patch.dict("os.environ", {"OPS_ALERT_WEBHOOK_URL": ""}, clear=False):
+            result = send_ops_alert_v2(
+                "data_stale",
+                "Test message",
+                min_severity="warning",
+                webhook_url=None
+            )
+
+            assert result["sent"] is False
+            assert result["suppressed_reason"] == "no_webhook"

@@ -622,6 +622,10 @@ async def set_mode(
             detail=f"Invalid mode '{body.mode}'. Must be one of: {valid_modes}"
         )
 
+    # Capture previous mode before update
+    previous_state = _get_ops_control(client)
+    previous_mode = previous_state.get("mode", "paper")
+
     update_data = {
         "mode": body.mode,
         "updated_by": admin.user_id,
@@ -632,7 +636,7 @@ async def set_mode(
         .eq("key", "global") \
         .execute()
 
-    # Audit log the mutation
+    # Audit log the mutation (stdout)
     log_admin_mutation(
         request=request,
         user_id=admin.user_id,
@@ -641,8 +645,34 @@ async def set_mode(
         resource_id="global",
         details={
             "mode": body.mode,
+            "previous_mode": previous_mode,
         }
     )
+
+    # Write immutable audit event to decision_audit_events
+    try:
+        from packages.quantum.observability.audit_log_service import AuditLogService
+        audit_service = AuditLogService(client)
+        trace_id = str(uuid.uuid4())
+
+        audit_service.log_audit_event(
+            user_id=admin.user_id,
+            trace_id=trace_id,
+            event_name="ops.mode.changed",
+            payload={
+                "mode": body.mode,
+                "previous_mode": previous_mode,
+                "actor": admin.user_id,
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+            },
+            suggestion_id=None,
+            strategy=None,
+            regime=None
+        )
+        logger.info(f"[OPS] Audit event written for mode change: {previous_mode} -> {body.mode}")
+    except Exception as e:
+        # Log but don't fail the request
+        logger.warning(f"Failed to write mode audit event: {e}")
 
     # Fetch updated row
     updated = _get_ops_control(client)

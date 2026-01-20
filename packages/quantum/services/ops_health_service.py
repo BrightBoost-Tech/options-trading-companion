@@ -15,15 +15,31 @@ Used by:
 
 from dataclasses import dataclass
 from datetime import datetime, timezone, timedelta
-from typing import Dict, Any, Optional, List
+from typing import Dict, Any, Optional, List, Tuple
 import os
 import json
+import hashlib
 import logging
 
 logger = logging.getLogger(__name__)
 
 # Configuration
 DATA_STALE_THRESHOLD_MINUTES = int(os.getenv("OPS_DATA_STALE_MINUTES", "30"))
+MARKET_DATA_STALE_THRESHOLD_MS = int(os.getenv("OPS_MARKET_DATA_STALE_MS", str(20 * 60 * 1000)))  # 20 minutes
+MAX_FRESHNESS_UNIVERSE_SIZE = int(os.getenv("OPS_MAX_FRESHNESS_UNIVERSE", "25"))
+
+# Alert configuration
+OPS_ALERT_MIN_SEVERITY = os.getenv("OPS_ALERT_MIN_SEVERITY", "warning")
+OPS_ALERT_COOLDOWN_MINUTES = int(os.getenv("OPS_ALERT_COOLDOWN_MINUTES", "30"))
+
+# Alert severity mapping
+ALERT_SEVERITY = {
+    "data_stale": "error",
+    "job_failure": "error",
+    "health_unhealthy": "error",
+    "job_late": "warning",
+    "health_degraded": "warning",
+}
 
 # Expected jobs with their cadences
 EXPECTED_JOBS = [
@@ -51,6 +67,18 @@ class ExpectedJob:
     cadence: str  # "daily" | "weekly"
     last_success_at: Optional[datetime]
     status: str  # "ok" | "late" | "never_run" | "error"
+
+
+@dataclass
+class MarketDataFreshnessResult:
+    """Result of expanded market data freshness check."""
+    is_stale: bool
+    as_of: Optional[datetime]
+    age_seconds: Optional[float]
+    universe_size: int
+    stale_symbols: List[str]
+    source: str  # "MarketDataTruthLayer" | "fallback" | "missing_api_key" | "exception"
+    reason: str  # "ok" | "stale_symbols" | "no_data" | "missing_api_key" | "exception:..."
 
 
 def compute_data_freshness(
@@ -378,3 +406,318 @@ def send_ops_alert(
     except Exception as e:
         logger.warning(f"[OPS_ALERT] Failed to send alert: {e}")
         return False
+
+
+# =============================================================================
+# Phase 1.1: Expanded Freshness Universe
+# =============================================================================
+
+
+def build_freshness_universe(
+    client,
+    user_id: Optional[str] = None,
+    max_symbols: int = MAX_FRESHNESS_UNIVERSE_SIZE
+) -> List[str]:
+    """
+    Build expanded freshness universe from multiple sources.
+
+    Sources (in order):
+    1. Baseline: SPY, QQQ (always included)
+    2. Holdings tickers from positions table
+    3. Underlyings from recent trade suggestions (last 7 days)
+
+    Args:
+        client: Supabase client
+        user_id: Optional user filter
+        max_symbols: Maximum universe size (default: 25)
+
+    Returns:
+        List of ticker symbols (uppercase, deduplicated, capped)
+    """
+    universe = {"SPY", "QQQ"}  # Baseline always included
+
+    # Add holdings tickers
+    try:
+        query = client.table("positions").select("symbol")
+        if user_id:
+            query = query.eq("user_id", user_id)
+        result = query.limit(50).execute()
+        for row in result.data or []:
+            symbol = row.get("symbol")
+            if symbol and isinstance(symbol, str):
+                universe.add(symbol.upper())
+    except Exception as e:
+        logger.warning(f"[FRESHNESS] Failed to fetch holdings: {e}")
+
+    # Add suggestion underlyings (last 7 days)
+    try:
+        since = (datetime.now(timezone.utc) - timedelta(days=7)).isoformat()
+        query = client.table("trade_suggestions").select("ticker").gte("created_at", since)
+        if user_id:
+            query = query.eq("user_id", user_id)
+        result = query.limit(50).execute()
+        for row in result.data or []:
+            ticker = row.get("ticker")
+            if ticker and isinstance(ticker, str):
+                universe.add(ticker.upper())
+    except Exception as e:
+        logger.warning(f"[FRESHNESS] Failed to fetch suggestions: {e}")
+
+    # Cap and return as sorted list
+    return sorted(list(universe))[:max_symbols]
+
+
+def compute_market_data_freshness(
+    universe: List[str],
+    stale_threshold_ms: int = MARKET_DATA_STALE_THRESHOLD_MS
+) -> MarketDataFreshnessResult:
+    """
+    Check actual market data freshness for symbols in universe.
+
+    Uses MarketDataTruthLayer.snapshot_many_v4() for real-time freshness.
+    Stale if ANY core symbol (SPY/QQQ) stale OR >50% universe stale.
+
+    Args:
+        universe: List of ticker symbols to check
+        stale_threshold_ms: Staleness threshold in milliseconds (default: 20 min)
+
+    Returns:
+        MarketDataFreshnessResult with detailed freshness status
+    """
+    api_key = os.getenv("POLYGON_API_KEY")
+    if not api_key:
+        return MarketDataFreshnessResult(
+            is_stale=True,
+            as_of=None,
+            age_seconds=None,
+            universe_size=len(universe),
+            stale_symbols=[],
+            source="missing_api_key",
+            reason="missing_api_key"
+        )
+
+    try:
+        from packages.quantum.services.market_data_truth_layer import MarketDataTruthLayer
+        layer = MarketDataTruthLayer(api_key)
+
+        # Get raw snapshots first, then process with v4
+        raw_snapshots = layer.snapshot_many(universe)
+        snapshots = layer.snapshot_many_v4(universe, raw_snapshots)
+
+        stale_symbols = []
+        worst_age_ms = 0
+
+        for symbol, snap in snapshots.items():
+            freshness_ms = snap.quality.freshness_ms
+            is_symbol_stale = snap.quality.is_stale or (
+                freshness_ms is not None and freshness_ms > stale_threshold_ms
+            )
+            if is_symbol_stale:
+                stale_symbols.append(symbol)
+            if freshness_ms is not None and freshness_ms > worst_age_ms:
+                worst_age_ms = freshness_ms
+
+        # Compute overall staleness
+        core_stale = any(s in stale_symbols for s in ["SPY", "QQQ"])
+        majority_stale = len(stale_symbols) > len(universe) * 0.5
+        is_stale = core_stale or majority_stale
+
+        # Derive as_of from worst_age_ms
+        as_of = None
+        if worst_age_ms > 0:
+            as_of = datetime.now(timezone.utc) - timedelta(milliseconds=worst_age_ms)
+
+        return MarketDataFreshnessResult(
+            is_stale=is_stale,
+            as_of=as_of,
+            age_seconds=worst_age_ms / 1000 if worst_age_ms else None,
+            universe_size=len(universe),
+            stale_symbols=stale_symbols,
+            source="MarketDataTruthLayer",
+            reason="stale_symbols" if stale_symbols else "ok"
+        )
+
+    except Exception as e:
+        logger.error(f"[FRESHNESS] Market data freshness check failed: {e}")
+        return MarketDataFreshnessResult(
+            is_stale=True,
+            as_of=None,
+            age_seconds=None,
+            universe_size=len(universe),
+            stale_symbols=[],
+            source="exception",
+            reason=f"exception:{str(e)[:50]}"
+        )
+
+
+# =============================================================================
+# Phase 1.1: Alert Cooldown & Severity
+# =============================================================================
+
+
+def get_alert_fingerprint(alert_type: str, key_details: Dict[str, Any]) -> str:
+    """
+    Create unique fingerprint for alert deduplication.
+
+    Fingerprint is based on alert_type + sorted key details.
+
+    Args:
+        alert_type: Type of alert (e.g., "data_stale", "job_late")
+        key_details: Dict of key identifying details (e.g., {"symbols": ["SPY"]})
+
+    Returns:
+        16-character hex fingerprint
+    """
+    content = f"{alert_type}:{json.dumps(key_details, sort_keys=True, default=str)}"
+    return hashlib.sha256(content.encode()).hexdigest()[:16]
+
+
+def should_suppress_alert(
+    client,
+    fingerprint: str,
+    cooldown_minutes: int = OPS_ALERT_COOLDOWN_MINUTES
+) -> Tuple[bool, Optional[str]]:
+    """
+    Check if alert should be suppressed due to cooldown.
+
+    Uses job_runs.result to track last alert times by checking
+    recently completed ops_health_check jobs for sent fingerprints.
+
+    Args:
+        client: Supabase client
+        fingerprint: Alert fingerprint to check
+        cooldown_minutes: Cooldown window in minutes (default: 30)
+
+    Returns:
+        Tuple of (should_suppress, last_sent_at_iso)
+    """
+    try:
+        since = (datetime.now(timezone.utc) - timedelta(minutes=cooldown_minutes)).isoformat()
+        result = client.table("job_runs") \
+            .select("result, finished_at") \
+            .eq("job_name", "ops_health_check") \
+            .eq("status", "succeeded") \
+            .gte("finished_at", since) \
+            .order("finished_at", desc=True) \
+            .limit(5) \
+            .execute()
+
+        for row in result.data or []:
+            result_json = row.get("result") or {}
+            sent_fingerprints = result_json.get("alert_fingerprints", [])
+            if fingerprint in sent_fingerprints:
+                return True, row.get("finished_at")
+
+        return False, None
+    except Exception as e:
+        logger.warning(f"[ALERT] Cooldown check failed: {e}")
+        return False, None  # Don't suppress on error - fail open
+
+
+def send_ops_alert_v2(
+    alert_type: str,
+    message: str,
+    details: Optional[Dict[str, Any]] = None,
+    severity: Optional[str] = None,
+    webhook_url: Optional[str] = None,
+    min_severity: str = OPS_ALERT_MIN_SEVERITY
+) -> Dict[str, Any]:
+    """
+    Enhanced alert sender with severity filtering.
+
+    Args:
+        alert_type: Type of alert
+        message: Human-readable alert message
+        details: Optional additional context
+        severity: Override severity (defaults to ALERT_SEVERITY mapping)
+        webhook_url: Override webhook URL
+        min_severity: Minimum severity to send (default from env)
+
+    Returns:
+        Dict with: sent, suppressed_reason, fingerprint, severity
+    """
+    import requests
+
+    # Determine severity
+    severity = severity or ALERT_SEVERITY.get(alert_type, "warning")
+
+    # Build fingerprint for tracking
+    fingerprint = get_alert_fingerprint(alert_type, details or {})
+
+    result = {
+        "sent": False,
+        "suppressed_reason": None,
+        "fingerprint": fingerprint,
+        "severity": severity,
+    }
+
+    # Check severity threshold
+    severity_order = {"error": 2, "warning": 1}
+    if severity_order.get(severity, 0) < severity_order.get(min_severity, 0):
+        result["suppressed_reason"] = "below_min_severity"
+        logger.info(f"[OPS_ALERT] Suppressed {alert_type} (severity {severity} < min {min_severity})")
+        return result
+
+    # Get webhook URL
+    url = webhook_url or os.getenv("OPS_ALERT_WEBHOOK_URL")
+    if not url:
+        result["suppressed_reason"] = "no_webhook"
+        logger.info(f"[OPS_ALERT] No webhook configured, skipping: {alert_type}")
+        return result
+
+    # Build Slack-compatible payload with severity
+    emoji_map = {
+        "data_stale": ":warning:",
+        "job_late": ":clock1:",
+        "job_failure": ":x:",
+        "health_degraded": ":yellow_circle:",
+        "health_unhealthy": ":red_circle:",
+    }
+    severity_emoji = {
+        "error": ":rotating_light:",
+        "warning": ":warning:",
+    }
+
+    emoji = emoji_map.get(alert_type, severity_emoji.get(severity, ":bell:"))
+
+    payload = {
+        "text": f"{emoji} *OPS ALERT [{severity.upper()}]: {alert_type}*\n{message}",
+        "blocks": [
+            {
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn",
+                    "text": f"{emoji} *OPS ALERT [{severity.upper()}]: {alert_type}*"
+                }
+            },
+            {
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn",
+                    "text": message
+                }
+            }
+        ]
+    }
+
+    if details:
+        payload["blocks"].append({
+            "type": "context",
+            "elements": [
+                {"type": "mrkdwn", "text": f"```{json.dumps(details, indent=2, default=str)}```"}
+            ]
+        })
+
+    try:
+        response = requests.post(url, json=payload, timeout=10)
+        if response.status_code == 200:
+            logger.info(f"[OPS_ALERT] Sent {alert_type} ({severity}) alert successfully")
+            result["sent"] = True
+        else:
+            logger.warning(f"[OPS_ALERT] Webhook returned {response.status_code}")
+            result["suppressed_reason"] = f"webhook_error:{response.status_code}"
+    except Exception as e:
+        logger.warning(f"[OPS_ALERT] Failed to send alert: {e}")
+        result["suppressed_reason"] = f"exception:{str(e)[:30]}"
+
+    return result

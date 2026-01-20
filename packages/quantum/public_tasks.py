@@ -31,27 +31,49 @@ def enqueue_job_run(job_name: str, idempotency_key: str, payload: Dict[str, Any]
     Helper to create a JobRun and enqueue the runner.
 
     v4-L5 Ops Console: Enforces pause gate - blocks enqueue when trading is paused.
+
+    PR A (Pause Gate Auditability): When paused, instead of raising HTTP 503:
+    - Creates a job_runs record with status='cancelled'
+    - Includes cancelled_reason='global_ops_pause' and pause_reason in payload
+    - Does NOT enqueue to RQ
+    - Returns the cancelled JobRun record for auditability
+
+    This ensures all attempted runs while paused are visible in the admin jobs page.
     """
     # v4-L5: PAUSE GATE - check if trading is paused before enqueue
     from packages.quantum.ops_endpoints import is_trading_paused
     is_paused, pause_reason = is_trading_paused()
-    if is_paused:
-        raise HTTPException(
-            status_code=503,
-            detail=f"Trading is paused: {pause_reason or 'No reason provided'}. "
-                   f"Job '{job_name}' was not enqueued. Resume trading via /ops/pause."
-        )
 
     store = JobRunStore()
 
-    # 1. Create or Get DB record
+    if is_paused:
+        # PR A: Create auditable cancelled record instead of raising exception
+        job_run = store.create_or_get_cancelled(
+            job_name=job_name,
+            idempotency_key=idempotency_key,
+            payload=payload,
+            cancelled_reason="global_ops_pause",
+            cancelled_detail=pause_reason
+        )
+
+        return {
+            "job_run_id": job_run["id"],
+            "job_name": job_name,
+            "idempotency_key": idempotency_key,
+            "rq_job_id": None,  # No RQ job was created
+            "status": job_run["status"],  # Should be 'cancelled'
+            "cancelled_reason": "global_ops_pause",
+            "pause_reason": pause_reason
+        }
+
+    # Normal flow: create job run and enqueue
     job_run = store.create_or_get(job_name, idempotency_key, payload)
 
     result = enqueue_idempotent(
         job_name=job_name,
         idempotency_key=idempotency_key,
-        payload={"job_run_id": job_run["id"]}, # Pass ID to runner
-        handler_path="packages.quantum.jobs.runner.run_job_run", # New runner path
+        payload={"job_run_id": job_run["id"]},  # Pass ID to runner
+        handler_path="packages.quantum.jobs.runner.run_job_run",  # New runner path
         queue_name=queue_name
     )
 

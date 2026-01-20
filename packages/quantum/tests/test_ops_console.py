@@ -220,26 +220,67 @@ class TestOpsControlModes:
 class TestEnqueuePauseGate:
     """Test that enqueue_job_run respects pause gate."""
 
-    def test_enqueue_blocked_when_paused(self):
-        """enqueue_job_run raises HTTPException when trading is paused"""
-        from fastapi import HTTPException
+    def test_enqueue_creates_cancelled_record_when_paused(self):
+        """PR A: enqueue_job_run creates cancelled JobRun when trading is paused"""
+        import packages.quantum.public_tasks as pt_mod
 
         # Patch on the ops_endpoints module where it's defined
         with patch("packages.quantum.ops_endpoints.is_trading_paused") as mock_paused:
             mock_paused.return_value = (True, "System maintenance")
 
-            from packages.quantum.public_tasks import enqueue_job_run
+            # Patch JobRunStore.create_or_get_cancelled
+            with patch.object(pt_mod, "JobRunStore") as mock_store:
+                mock_store.return_value.create_or_get_cancelled.return_value = {
+                    "id": "cancelled-id-123",
+                    "status": "cancelled",
+                    "job_name": "test_job",
+                    "idempotency_key": "test-key",
+                }
 
-            with pytest.raises(HTTPException) as exc_info:
-                enqueue_job_run(
+                result = pt_mod.enqueue_job_run(
                     job_name="test_job",
                     idempotency_key="test-key",
-                    payload={}
+                    payload={"foo": "bar"}
                 )
 
-            assert exc_info.value.status_code == 503
-            assert "Trading is paused" in exc_info.value.detail
-            assert "System maintenance" in exc_info.value.detail
+                # Verify cancelled record returned
+                assert result["job_run_id"] == "cancelled-id-123"
+                assert result["status"] == "cancelled"
+                assert result["cancelled_reason"] == "global_ops_pause"
+                assert result["pause_reason"] == "System maintenance"
+                assert result["rq_job_id"] is None  # No RQ job created
+
+                # Verify create_or_get_cancelled was called with correct args
+                mock_store.return_value.create_or_get_cancelled.assert_called_once_with(
+                    job_name="test_job",
+                    idempotency_key="test-key",
+                    payload={"foo": "bar"},
+                    cancelled_reason="global_ops_pause",
+                    cancelled_detail="System maintenance"
+                )
+
+    def test_enqueue_does_not_call_rq_when_paused(self):
+        """PR A: enqueue_job_run does NOT enqueue to RQ when paused"""
+        import packages.quantum.public_tasks as pt_mod
+
+        with patch("packages.quantum.ops_endpoints.is_trading_paused") as mock_paused:
+            mock_paused.return_value = (True, "System maintenance")
+
+            with patch.object(pt_mod, "JobRunStore") as mock_store:
+                mock_store.return_value.create_or_get_cancelled.return_value = {
+                    "id": "cancelled-id",
+                    "status": "cancelled",
+                }
+
+                with patch.object(pt_mod, "enqueue_idempotent") as mock_enqueue:
+                    pt_mod.enqueue_job_run(
+                        job_name="test_job",
+                        idempotency_key="test-key",
+                        payload={}
+                    )
+
+                    # Verify enqueue_idempotent was NOT called
+                    mock_enqueue.assert_not_called()
 
     def test_enqueue_allowed_when_not_paused(self):
         """enqueue_job_run proceeds when trading is not paused"""

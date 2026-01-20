@@ -942,12 +942,52 @@ async def run_morning_cycle(supabase: Client, user_id: str):
             # V4: Get quality-scored snapshots and check for stale/invalid quotes
             # Pass raw_snapshots to avoid double fetch
             snapshots_v4 = truth_layer.snapshot_many_v4(leg_symbols, raw_snapshots=snapshots)
-            from packages.quantum.services.market_data_truth_layer import check_snapshots_executable
+            from packages.quantum.services.market_data_truth_layer import (
+                check_snapshots_executable,
+                format_quality_gate_result,
+                get_marketdata_quality_policy,
+                get_marketdata_min_quality_score,
+                get_marketdata_max_freshness_ms,
+            )
             is_executable, quality_issues = check_snapshots_executable(snapshots_v4, leg_symbols)
 
             if not is_executable:
-                print(f"Skipping spread {spread.id}: quote quality issues: {quality_issues}")
-                continue
+                # V4 structured logging: emit full quality gate result
+                gate_result = format_quality_gate_result(snapshots_v4, leg_symbols)
+                policy = get_marketdata_quality_policy()
+
+                log_payload = {
+                    "event": "marketdata.v4.quality_gate",
+                    "spread_id": str(spread.id),
+                    "underlying": underlying,
+                    "leg_symbols": leg_symbols,
+                    "policy": policy,
+                    "min_quality_score": get_marketdata_min_quality_score(),
+                    "max_freshness_ms": get_marketdata_max_freshness_ms(),
+                    **gate_result,
+                }
+
+                # Decide action based on policy and fatal/non-fatal codes
+                if gate_result["has_fatal"]:
+                    # Fatal issues always cause skip, regardless of policy
+                    logger.warning(
+                        f"Skipping spread {spread.id}: fatal quality issues",
+                        extra={"quality_gate": log_payload}
+                    )
+                    continue
+                elif policy == "skip":
+                    # Skip policy: treat any warning as skip
+                    logger.warning(
+                        f"Skipping spread {spread.id}: quality warning (policy=skip)",
+                        extra={"quality_gate": log_payload}
+                    )
+                    continue
+                else:
+                    # Defer/downrank policy: log but continue (will mark NOT_EXECUTABLE downstream)
+                    logger.info(
+                        f"Quality warning for spread {spread.id}: deferring to order builder (policy={policy})",
+                        extra={"quality_gate": log_payload}
+                    )
 
             # V3 Symbol Snapshot
             sym_snap = regime_engine.compute_symbol_snapshot(underlying, global_snap)

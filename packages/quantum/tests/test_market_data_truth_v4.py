@@ -24,9 +24,26 @@ from packages.quantum.services.market_data_truth_layer import (
     get_marketdata_max_freshness_ms,
     get_marketdata_min_quality_score,
     get_marketdata_wide_spread_pct,
+    get_marketdata_quality_policy,
     MARKETDATA_MAX_FRESHNESS_MS,
     MARKETDATA_MIN_QUALITY_SCORE,
     MARKETDATA_WIDE_SPREAD_PCT,
+    # V4 Quality codes and classifiers
+    QUALITY_OK,
+    QUALITY_WARN_WIDE_SPREAD,
+    QUALITY_WARN_LOW_QUALITY,
+    QUALITY_FAIL_STALE,
+    QUALITY_FAIL_CROSSED,
+    QUALITY_FAIL_MISSING_SNAPSHOT,
+    QUALITY_FAIL_MISSING_TIMESTAMP,
+    QUALITY_FAIL_MISSING_QUOTE_FIELDS,
+    FATAL_QUALITY_CODES,
+    classify_snapshot_quality,
+    classify_missing_snapshot,
+    is_fatal_quality_code,
+    format_quality_issues,
+    format_snapshot_summary,
+    format_quality_gate_result,
 )
 
 
@@ -696,6 +713,285 @@ class TestTimestampNormalization:
         """None input returns None."""
         layer = MarketDataTruthLayer(api_key="test")
         assert layer._normalize_timestamp_to_ms(None) is None
+
+
+class TestQualityStatusCodes:
+    """Tests for V4 quality status codes and classifiers."""
+
+    def test_quality_ok_for_healthy_snapshot(self):
+        """Healthy snapshot classifies as QUALITY_OK."""
+        snap = TruthSnapshotV4(
+            symbol_canonical="AAPL",
+            quote=TruthQuoteV4(bid=150.0, ask=150.10, mid=150.05),
+            timestamps=TruthTimestampsV4(source_ts=int(time.time() * 1000), received_ts=int(time.time() * 1000)),
+            quality=TruthQualityV4(quality_score=100, issues=[], is_stale=False, freshness_ms=100),
+            source=TruthSourceV4(),
+        )
+
+        code = classify_snapshot_quality(snap)
+        assert code == QUALITY_OK
+
+    def test_fail_crossed_for_crossed_market(self):
+        """Crossed market classifies as QUALITY_FAIL_CROSSED."""
+        snap = TruthSnapshotV4(
+            symbol_canonical="AAPL",
+            quote=TruthQuoteV4(bid=150.10, ask=150.0),  # crossed
+            timestamps=TruthTimestampsV4(source_ts=int(time.time() * 1000), received_ts=int(time.time() * 1000)),
+            quality=TruthQualityV4(quality_score=0, issues=["crossed_market"], is_stale=False, freshness_ms=100),
+            source=TruthSourceV4(),
+        )
+
+        code = classify_snapshot_quality(snap)
+        assert code == QUALITY_FAIL_CROSSED
+
+    def test_fail_stale_for_stale_quote(self):
+        """Stale quote classifies as QUALITY_FAIL_STALE."""
+        snap = TruthSnapshotV4(
+            symbol_canonical="AAPL",
+            quote=TruthQuoteV4(bid=150.0, ask=150.10, mid=150.05),
+            timestamps=TruthTimestampsV4(source_ts=1000, received_ts=int(time.time() * 1000)),
+            quality=TruthQualityV4(quality_score=70, issues=["stale_quote"], is_stale=True, freshness_ms=120000),
+            source=TruthSourceV4(),
+        )
+
+        code = classify_snapshot_quality(snap)
+        assert code == QUALITY_FAIL_STALE
+
+    def test_fail_missing_timestamp_when_stale_with_missing_ts(self):
+        """Missing timestamp classifies as QUALITY_FAIL_MISSING_TIMESTAMP."""
+        snap = TruthSnapshotV4(
+            symbol_canonical="AAPL",
+            quote=TruthQuoteV4(bid=150.0, ask=150.10, mid=150.05),
+            timestamps=TruthTimestampsV4(source_ts=None, received_ts=int(time.time() * 1000)),
+            quality=TruthQualityV4(quality_score=70, issues=["missing_timestamp"], is_stale=True, freshness_ms=None),
+            source=TruthSourceV4(),
+        )
+
+        code = classify_snapshot_quality(snap)
+        assert code == QUALITY_FAIL_MISSING_TIMESTAMP
+
+    def test_fail_missing_quote_fields(self):
+        """Missing quote fields classifies as QUALITY_FAIL_MISSING_QUOTE_FIELDS."""
+        snap = TruthSnapshotV4(
+            symbol_canonical="AAPL",
+            quote=TruthQuoteV4(bid=None, ask=150.10),
+            timestamps=TruthTimestampsV4(source_ts=int(time.time() * 1000), received_ts=int(time.time() * 1000)),
+            quality=TruthQualityV4(quality_score=60, issues=["missing_quote_fields"], is_stale=False, freshness_ms=100),
+            source=TruthSourceV4(),
+        )
+
+        code = classify_snapshot_quality(snap)
+        assert code == QUALITY_FAIL_MISSING_QUOTE_FIELDS
+
+    def test_warn_wide_spread(self):
+        """Wide spread without other issues classifies as QUALITY_WARN_WIDE_SPREAD."""
+        snap = TruthSnapshotV4(
+            symbol_canonical="AAPL",
+            quote=TruthQuoteV4(bid=140.0, ask=160.0, mid=150.0),  # 13% spread
+            timestamps=TruthTimestampsV4(source_ts=int(time.time() * 1000), received_ts=int(time.time() * 1000)),
+            quality=TruthQualityV4(quality_score=80, issues=["wide_spread"], is_stale=False, freshness_ms=100),
+            source=TruthSourceV4(),
+        )
+
+        code = classify_snapshot_quality(snap)
+        assert code == QUALITY_WARN_WIDE_SPREAD
+
+    def test_warn_low_quality_score(self):
+        """Low quality score classifies as QUALITY_WARN_LOW_QUALITY."""
+        snap = TruthSnapshotV4(
+            symbol_canonical="AAPL",
+            quote=TruthQuoteV4(bid=150.0, ask=150.10, mid=150.05),
+            timestamps=TruthTimestampsV4(source_ts=int(time.time() * 1000), received_ts=int(time.time() * 1000)),
+            quality=TruthQualityV4(quality_score=50, issues=[], is_stale=False, freshness_ms=100),
+            source=TruthSourceV4(),
+        )
+
+        # Default min_quality_score is 60, so 50 should trigger WARN_LOW_QUALITY
+        code = classify_snapshot_quality(snap)
+        assert code == QUALITY_WARN_LOW_QUALITY
+
+    def test_classify_missing_snapshot(self):
+        """classify_missing_snapshot returns QUALITY_FAIL_MISSING_SNAPSHOT."""
+        code = classify_missing_snapshot("AAPL")
+        assert code == QUALITY_FAIL_MISSING_SNAPSHOT
+
+        code = classify_missing_snapshot("O:AAPL250117C00200000", canon_sym="O:AAPL250117C00200000")
+        assert code == QUALITY_FAIL_MISSING_SNAPSHOT
+
+    def test_is_fatal_quality_code_true_for_fail_codes(self):
+        """Fatal codes return True from is_fatal_quality_code."""
+        assert is_fatal_quality_code(QUALITY_FAIL_STALE) is True
+        assert is_fatal_quality_code(QUALITY_FAIL_CROSSED) is True
+        assert is_fatal_quality_code(QUALITY_FAIL_MISSING_SNAPSHOT) is True
+        assert is_fatal_quality_code(QUALITY_FAIL_MISSING_TIMESTAMP) is True
+        assert is_fatal_quality_code(QUALITY_FAIL_MISSING_QUOTE_FIELDS) is True
+
+    def test_is_fatal_quality_code_false_for_non_fatal(self):
+        """Non-fatal codes return False from is_fatal_quality_code."""
+        assert is_fatal_quality_code(QUALITY_OK) is False
+        assert is_fatal_quality_code(QUALITY_WARN_WIDE_SPREAD) is False
+        assert is_fatal_quality_code(QUALITY_WARN_LOW_QUALITY) is False
+
+    def test_fatal_quality_codes_is_frozenset(self):
+        """FATAL_QUALITY_CODES is an immutable frozenset."""
+        assert isinstance(FATAL_QUALITY_CODES, frozenset)
+        assert len(FATAL_QUALITY_CODES) == 5
+
+
+class TestIssueFormatters:
+    """Tests for V4 issue formatting functions."""
+
+    def test_format_quality_issues_empty(self):
+        """Empty issues list returns empty string."""
+        assert format_quality_issues([]) == ""
+
+    def test_format_quality_issues_single(self):
+        """Single issue returns just that issue."""
+        assert format_quality_issues(["stale_quote"]) == "stale_quote"
+
+    def test_format_quality_issues_multiple_sorted(self):
+        """Multiple issues are sorted and pipe-separated."""
+        issues = ["wide_spread", "stale_quote", "crossed_market"]
+        result = format_quality_issues(issues)
+        assert result == "crossed_market|stale_quote|wide_spread"
+
+    def test_format_snapshot_summary(self):
+        """format_snapshot_summary returns correct structure."""
+        snap = TruthSnapshotV4(
+            symbol_canonical="AAPL",
+            quote=TruthQuoteV4(bid=150.0, ask=150.10, mid=150.05),
+            timestamps=TruthTimestampsV4(source_ts=int(time.time() * 1000), received_ts=int(time.time() * 1000)),
+            quality=TruthQualityV4(quality_score=80, issues=["wide_spread"], is_stale=False, freshness_ms=100),
+            source=TruthSourceV4(),
+        )
+
+        summary = format_snapshot_summary("AAPL", snap)
+
+        assert summary["symbol"] == "AAPL"
+        assert summary["code"] == QUALITY_WARN_WIDE_SPREAD
+        assert summary["score"] == 80
+        assert summary["freshness_ms"] == 100
+        assert summary["issues"] == "wide_spread"
+
+    def test_format_quality_gate_result_all_healthy(self):
+        """format_quality_gate_result with all healthy snapshots."""
+        snap1 = TruthSnapshotV4(
+            symbol_canonical="AAPL",
+            quote=TruthQuoteV4(bid=150.0, ask=150.10, mid=150.05),
+            timestamps=TruthTimestampsV4(source_ts=int(time.time() * 1000), received_ts=int(time.time() * 1000)),
+            quality=TruthQualityV4(quality_score=100, issues=[], is_stale=False, freshness_ms=100),
+            source=TruthSourceV4(),
+        )
+        snap2 = TruthSnapshotV4(
+            symbol_canonical="SPY",
+            quote=TruthQuoteV4(bid=500.0, ask=500.10, mid=500.05),
+            timestamps=TruthTimestampsV4(source_ts=int(time.time() * 1000), received_ts=int(time.time() * 1000)),
+            quality=TruthQualityV4(quality_score=100, issues=[], is_stale=False, freshness_ms=100),
+            source=TruthSourceV4(),
+        )
+
+        result = format_quality_gate_result(
+            {"AAPL": snap1, "SPY": snap2},
+            ["AAPL", "SPY"]
+        )
+
+        assert result["fatal_count"] == 0
+        assert result["warning_count"] == 0
+        assert result["has_fatal"] is False
+        assert result["has_warning"] is False
+        assert len(result["symbols"]) == 2
+
+    def test_format_quality_gate_result_with_fatal(self):
+        """format_quality_gate_result with fatal issues."""
+        stale_snap = TruthSnapshotV4(
+            symbol_canonical="AAPL",
+            quote=TruthQuoteV4(bid=150.0, ask=150.10, mid=150.05),
+            timestamps=TruthTimestampsV4(source_ts=1000, received_ts=int(time.time() * 1000)),
+            quality=TruthQualityV4(quality_score=70, issues=["stale_quote"], is_stale=True, freshness_ms=120000),
+            source=TruthSourceV4(),
+        )
+
+        result = format_quality_gate_result({"AAPL": stale_snap}, ["AAPL"])
+
+        assert result["fatal_count"] == 1
+        assert result["has_fatal"] is True
+
+    def test_format_quality_gate_result_with_warning(self):
+        """format_quality_gate_result with warning issues."""
+        warn_snap = TruthSnapshotV4(
+            symbol_canonical="AAPL",
+            quote=TruthQuoteV4(bid=140.0, ask=160.0, mid=150.0),  # wide spread
+            timestamps=TruthTimestampsV4(source_ts=int(time.time() * 1000), received_ts=int(time.time() * 1000)),
+            quality=TruthQualityV4(quality_score=80, issues=["wide_spread"], is_stale=False, freshness_ms=100),
+            source=TruthSourceV4(),
+        )
+
+        result = format_quality_gate_result({"AAPL": warn_snap}, ["AAPL"])
+
+        assert result["warning_count"] == 1
+        assert result["has_warning"] is True
+        assert result["has_fatal"] is False
+
+    def test_format_quality_gate_result_missing_snapshot(self):
+        """format_quality_gate_result with missing snapshot."""
+        result = format_quality_gate_result({}, ["AAPL"])
+
+        assert result["fatal_count"] == 1
+        assert result["has_fatal"] is True
+        assert result["symbols"][0]["code"] == QUALITY_FAIL_MISSING_SNAPSHOT
+        assert result["symbols"][0]["issues"] == "missing_snapshot"
+
+    def test_format_quality_gate_result_uses_symbol_normalization(self):
+        """format_quality_gate_result normalizes symbols for lookup."""
+        snap = TruthSnapshotV4(
+            symbol_canonical="O:AAPL250117C00200000",
+            quote=TruthQuoteV4(bid=5.0, ask=5.10, mid=5.05),
+            timestamps=TruthTimestampsV4(source_ts=int(time.time() * 1000), received_ts=int(time.time() * 1000)),
+            quality=TruthQualityV4(quality_score=100, issues=[], is_stale=False, freshness_ms=100),
+            source=TruthSourceV4(),
+        )
+
+        # Snapshot stored with canonical key, but requested with raw symbol
+        result = format_quality_gate_result(
+            {"O:AAPL250117C00200000": snap},
+            ["AAPL250117C00200000"]  # raw symbol without O: prefix
+        )
+
+        # Should find it via normalization
+        assert result["fatal_count"] == 0
+        assert result["has_fatal"] is False
+
+
+class TestQualityPolicyGetter:
+    """Tests for get_marketdata_quality_policy getter."""
+
+    def test_default_policy_is_defer(self, monkeypatch):
+        """Default policy is 'defer' when env not set."""
+        monkeypatch.delenv("MARKETDATA_QUALITY_POLICY", raising=False)
+        assert get_marketdata_quality_policy() == "defer"
+
+    def test_env_override_skip(self, monkeypatch):
+        """Policy can be set to 'skip' via env."""
+        monkeypatch.setenv("MARKETDATA_QUALITY_POLICY", "skip")
+        assert get_marketdata_quality_policy() == "skip"
+
+    def test_env_override_defer(self, monkeypatch):
+        """Policy can be set to 'defer' via env."""
+        monkeypatch.setenv("MARKETDATA_QUALITY_POLICY", "defer")
+        assert get_marketdata_quality_policy() == "defer"
+
+    def test_env_override_downrank(self, monkeypatch):
+        """Policy can be set to 'downrank' via env."""
+        monkeypatch.setenv("MARKETDATA_QUALITY_POLICY", "downrank")
+        assert get_marketdata_quality_policy() == "downrank"
+
+    def test_policy_is_lowercased(self, monkeypatch):
+        """Policy is lowercased from env."""
+        monkeypatch.setenv("MARKETDATA_QUALITY_POLICY", "SKIP")
+        assert get_marketdata_quality_policy() == "skip"
+
+        monkeypatch.setenv("MARKETDATA_QUALITY_POLICY", "Defer")
+        assert get_marketdata_quality_policy() == "defer"
 
 
 if __name__ == "__main__":

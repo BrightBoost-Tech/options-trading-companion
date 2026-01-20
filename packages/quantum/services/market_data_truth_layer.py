@@ -52,6 +52,209 @@ def get_marketdata_wide_spread_pct() -> float:
     return float(os.getenv("MARKETDATA_WIDE_SPREAD_PCT", str(_DEFAULT_WIDE_SPREAD_PCT)))
 
 
+def get_marketdata_quality_policy() -> str:
+    """
+    Get quality gate policy (env-safe, reads at call time).
+
+    Policies:
+    - "skip": Hard skip spreads with any quality issues (original behavior)
+    - "defer": Mark non-fatal issues as NOT_EXECUTABLE but don't skip
+    - "downrank": Apply penalty to ranking score (not yet implemented, falls back to defer)
+
+    Default: "defer"
+    """
+    return os.getenv("MARKETDATA_QUALITY_POLICY", "defer").lower()
+
+
+# =============================================================================
+# V4 Quality Status Codes (machine-readable for UI, alerts, routing)
+# =============================================================================
+# OK status
+QUALITY_OK = "OK"
+
+# Warning codes (non-fatal, can be deferred)
+QUALITY_WARN_WIDE_SPREAD = "WARN_WIDE_SPREAD"
+QUALITY_WARN_LOW_QUALITY = "WARN_LOW_QUALITY"
+
+# Failure codes (fatal, always skip)
+QUALITY_FAIL_STALE = "FAIL_STALE"
+QUALITY_FAIL_CROSSED = "FAIL_CROSSED"
+QUALITY_FAIL_MISSING_SNAPSHOT = "FAIL_MISSING_SNAPSHOT"
+QUALITY_FAIL_MISSING_TIMESTAMP = "FAIL_MISSING_TIMESTAMP"
+QUALITY_FAIL_MISSING_QUOTE_FIELDS = "FAIL_MISSING_QUOTE_FIELDS"
+
+# Fatal codes that always cause skip regardless of policy
+FATAL_QUALITY_CODES = frozenset({
+    QUALITY_FAIL_STALE,
+    QUALITY_FAIL_CROSSED,
+    QUALITY_FAIL_MISSING_SNAPSHOT,
+    QUALITY_FAIL_MISSING_TIMESTAMP,
+    QUALITY_FAIL_MISSING_QUOTE_FIELDS,
+})
+
+
+def classify_snapshot_quality(
+    snap: "TruthSnapshotV4",
+    min_quality_score: Optional[int] = None
+) -> str:
+    """
+    Classify a snapshot's quality into a machine-readable status code.
+
+    Args:
+        snap: The TruthSnapshotV4 to classify
+        min_quality_score: Minimum quality score threshold (uses getter if None)
+
+    Returns:
+        One of the QUALITY_* constants
+    """
+    if min_quality_score is None:
+        min_quality_score = get_marketdata_min_quality_score()
+
+    issues = snap.quality.issues
+
+    # Check fatal issues first (order matters for priority)
+    if "crossed_market" in issues:
+        return QUALITY_FAIL_CROSSED
+
+    if snap.quality.is_stale:
+        if "missing_timestamp" in issues:
+            return QUALITY_FAIL_MISSING_TIMESTAMP
+        return QUALITY_FAIL_STALE
+
+    if "missing_quote_fields" in issues:
+        return QUALITY_FAIL_MISSING_QUOTE_FIELDS
+
+    # Check warnings
+    if snap.quality.quality_score < min_quality_score:
+        return QUALITY_WARN_LOW_QUALITY
+
+    if "wide_spread" in issues:
+        return QUALITY_WARN_WIDE_SPREAD
+
+    return QUALITY_OK
+
+
+def classify_missing_snapshot(raw_sym: str, canon_sym: Optional[str] = None) -> str:
+    """
+    Classify a missing snapshot as FAIL_MISSING_SNAPSHOT.
+
+    Args:
+        raw_sym: The raw symbol that was requested
+        canon_sym: The canonical symbol (if different from raw)
+
+    Returns:
+        QUALITY_FAIL_MISSING_SNAPSHOT
+    """
+    return QUALITY_FAIL_MISSING_SNAPSHOT
+
+
+def is_fatal_quality_code(code: str) -> bool:
+    """Check if a quality code is fatal (always causes skip)."""
+    return code in FATAL_QUALITY_CODES
+
+
+# =============================================================================
+# V4 Issue Formatters (human-readable for UI, logs, alerts)
+# =============================================================================
+def format_quality_issues(issues: List[str]) -> str:
+    """
+    Format quality issues into a compact, deterministic string.
+
+    Args:
+        issues: List of issue codes (e.g., ["stale_quote", "wide_spread"])
+
+    Returns:
+        Pipe-separated string in sorted order (e.g., "stale_quote|wide_spread")
+    """
+    if not issues:
+        return ""
+    return "|".join(sorted(issues))
+
+
+def format_snapshot_summary(symbol: str, snap: "TruthSnapshotV4") -> Dict[str, Any]:
+    """
+    Format a snapshot into a compact summary dict for logs/UI.
+
+    Args:
+        symbol: The symbol (raw or canonical)
+        snap: The TruthSnapshotV4 to summarize
+
+    Returns:
+        Dict with symbol, code, score, freshness_ms, issues
+    """
+    return {
+        "symbol": symbol,
+        "code": classify_snapshot_quality(snap),
+        "score": snap.quality.quality_score,
+        "freshness_ms": snap.quality.freshness_ms,
+        "issues": format_quality_issues(snap.quality.issues),
+    }
+
+
+def format_quality_gate_result(
+    snapshots: Dict[str, "TruthSnapshotV4"],
+    required_symbols: List[str],
+    min_quality_score: Optional[int] = None
+) -> Dict[str, Any]:
+    """
+    Format the full quality gate result for structured logging.
+
+    Args:
+        snapshots: Dict of symbol -> TruthSnapshotV4
+        required_symbols: List of required symbols
+        min_quality_score: Minimum quality score threshold
+
+    Returns:
+        Dict with per-symbol summaries, overall status, fatal/warning counts
+    """
+    if min_quality_score is None:
+        min_quality_score = get_marketdata_min_quality_score()
+
+    summaries = []
+    fatal_count = 0
+    warning_count = 0
+
+    for raw_sym in required_symbols:
+        # Try both raw and normalized lookup
+        snap = snapshots.get(raw_sym)
+        if snap is None:
+            try:
+                canon_sym = normalize_symbol(raw_sym)
+                snap = snapshots.get(canon_sym)
+            except Exception:
+                pass
+
+        if snap is None:
+            code = QUALITY_FAIL_MISSING_SNAPSHOT
+            summaries.append({
+                "symbol": raw_sym,
+                "code": code,
+                "score": None,
+                "freshness_ms": None,
+                "issues": "missing_snapshot",
+            })
+            fatal_count += 1
+        else:
+            summary = format_snapshot_summary(raw_sym, snap)
+            summary["code"] = classify_snapshot_quality(snap, min_quality_score)
+            summaries.append(summary)
+
+            if is_fatal_quality_code(summary["code"]):
+                fatal_count += 1
+            elif summary["code"] != QUALITY_OK:
+                warning_count += 1
+
+    return {
+        "symbols": summaries,
+        "fatal_count": fatal_count,
+        "warning_count": warning_count,
+        "has_fatal": fatal_count > 0,
+        "has_warning": warning_count > 0,
+        "min_quality_score": min_quality_score,
+        "max_freshness_ms": get_marketdata_max_freshness_ms(),
+    }
+
+
 # =============================================================================
 # V4 Canonical Models (Pydantic)
 # =============================================================================

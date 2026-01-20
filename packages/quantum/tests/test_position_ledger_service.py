@@ -128,7 +128,7 @@ class TestPositionLedgerService(unittest.TestCase):
             fill_data={
                 "symbol": "AAPL240119C00150000",
                 "underlying": "AAPL",
-                "side": "buy",
+                "action": "BUY",  # Use action instead of side
                 "qty": 1,
                 "price": 2.50,
                 "fee": 0.65,
@@ -180,7 +180,7 @@ class TestPositionLedgerService(unittest.TestCase):
             trade_execution_id="exec-123",
             fill_data={
                 "symbol": "AAPL",
-                "side": "buy",
+                "action": "BUY",
                 "qty": 1,
                 "price": 2.50,
                 "filled_at": "2024-01-15T10:30:00Z",
@@ -223,7 +223,7 @@ class TestPositionLedgerService(unittest.TestCase):
             trade_execution_id=None,  # No trade_execution_id
             fill_data={
                 "symbol": "AAPL",
-                "side": "buy",
+                "action": "BUY",
                 "qty": 1,
                 "price": 2.50,
                 "broker_exec_id": "broker-123",  # Broker ID for dedup
@@ -243,7 +243,7 @@ class TestPositionLedgerService(unittest.TestCase):
             user_id=self.user_id,
             trade_execution_id="exec-123",
             fill_data={
-                "side": "buy",
+                "action": "BUY",
                 "qty": 1,
                 "price": 2.50,
             },
@@ -261,7 +261,7 @@ class TestPositionLedgerService(unittest.TestCase):
             trade_execution_id="exec-123",
             fill_data={
                 "symbol": "AAPL",
-                "side": "buy",
+                "action": "BUY",
                 "qty": 0,
                 "price": 2.50,
             },
@@ -270,6 +270,54 @@ class TestPositionLedgerService(unittest.TestCase):
 
         self.assertFalse(result.get("success"))
         self.assertIn("qty", result.get("error", "").lower())
+
+    def test_record_fill_rejects_invalid_action(self):
+        """record_fill fails if action is invalid."""
+
+        result = self.service.record_fill(
+            user_id=self.user_id,
+            trade_execution_id="exec-123",
+            fill_data={
+                "symbol": "AAPL",
+                "action": "INVALID",
+                "qty": 1,
+                "price": 2.50,
+            },
+            context={},
+        )
+
+        self.assertFalse(result.get("success"))
+        self.assertIn("action", result.get("error", "").lower())
+
+    def test_record_fill_legacy_side_support(self):
+        """record_fill supports legacy 'side' parameter."""
+
+        def table_side_effect(name):
+            chain = self._mock_table_chain(name)
+            # Return empty to trigger validation path only
+            chain.execute.return_value.data = []
+            return chain
+
+        self.mock_supabase.table.side_effect = table_side_effect
+
+        # Use legacy 'side' instead of 'action'
+        result = self.service.record_fill(
+            user_id=self.user_id,
+            trade_execution_id=None,
+            fill_data={
+                "symbol": "AAPL",
+                "side": "sell",  # Legacy parameter
+                "qty": 1,
+                "price": 2.50,
+            },
+            context={},
+        )
+
+        # Should not fail validation - 'sell' maps to 'SELL' action
+        # (May fail later due to mock limitations, but action validation passes)
+        if not result.get("success"):
+            # Error should NOT be about action validation
+            self.assertNotIn("action must be", result.get("error", ""))
 
 
 class TestReconcileSnapshot(unittest.TestCase):
@@ -490,11 +538,11 @@ class TestUtilityMethods(unittest.TestCase):
         self.assertEqual(self.service._extract_underlying(None), "UNKNOWN")
 
     def test_compute_cash_impact_buy(self):
-        """_compute_cash_impact computes outflow for buy."""
+        """_compute_cash_impact computes outflow for BUY action."""
 
-        # Buy 1 contract @ $2.50 + $0.65 fee = -$250.65
+        # BUY 1 contract @ $2.50 + $0.65 fee = -$250.65
         impact = self.service._compute_cash_impact(
-            side="buy",
+            action="BUY",
             qty=1,
             price=Decimal("2.50"),
             fee=Decimal("0.65"),
@@ -504,11 +552,11 @@ class TestUtilityMethods(unittest.TestCase):
         self.assertEqual(impact, Decimal("-250.65"))
 
     def test_compute_cash_impact_sell(self):
-        """_compute_cash_impact computes inflow for sell."""
+        """_compute_cash_impact computes inflow for SELL action."""
 
-        # Sell 1 contract @ $2.50 - $0.65 fee = $249.35
+        # SELL 1 contract @ $2.50 - $0.65 fee = $249.35
         impact = self.service._compute_cash_impact(
-            side="sell",
+            action="SELL",
             qty=1,
             price=Decimal("2.50"),
             fee=Decimal("0.65"),
@@ -516,6 +564,213 @@ class TestUtilityMethods(unittest.TestCase):
         )
 
         self.assertEqual(impact, Decimal("249.35"))
+
+    def test_is_opening_fill_v2_long_buy(self):
+        """BUY on LONG leg is opening."""
+        self.assertTrue(self.service._is_opening_fill_v2("LONG", "BUY"))
+
+    def test_is_opening_fill_v2_long_sell(self):
+        """SELL on LONG leg is closing."""
+        self.assertFalse(self.service._is_opening_fill_v2("LONG", "SELL"))
+
+    def test_is_opening_fill_v2_short_sell(self):
+        """SELL on SHORT leg is opening."""
+        self.assertTrue(self.service._is_opening_fill_v2("SHORT", "SELL"))
+
+    def test_is_opening_fill_v2_short_buy(self):
+        """BUY on SHORT leg is closing."""
+        self.assertFalse(self.service._is_opening_fill_v2("SHORT", "BUY"))
+
+
+class TestFillSemantics(unittest.TestCase):
+    """
+    Acceptance tests for corrected fill semantics.
+
+    Tests verify:
+    - Leg orientation is determined on FIRST fill only
+    - Closing fills update the SAME leg (not create phantom legs)
+    - BUY/SELL actions work correctly for both LONG and SHORT positions
+    """
+
+    def setUp(self):
+        self.mock_supabase = MagicMock()
+        self.service = PositionLedgerService(self.mock_supabase)
+        self.user_id = "test-user-123"
+
+    def test_find_or_create_leg_by_symbol_creates_long_on_buy(self):
+        """First BUY action creates LONG leg."""
+
+        def table_side_effect(name):
+            chain = MagicMock()
+            chain.select.return_value = chain
+            chain.eq.return_value = chain
+            chain.limit.return_value = chain
+            chain.insert.return_value = chain
+
+            result = MagicMock()
+
+            if name == "position_legs":
+                # No existing leg
+                result.data = []
+                chain.execute.return_value = result
+
+                def insert_effect(data):
+                    insert_result = MagicMock()
+                    insert_result.data = [{"id": "leg-1", **data}]
+                    insert_chain = MagicMock()
+                    insert_chain.execute.return_value = insert_result
+                    return insert_chain
+
+                chain.insert.side_effect = insert_effect
+
+            return chain
+
+        self.mock_supabase.table.side_effect = table_side_effect
+
+        leg, is_new = self.service._find_or_create_leg_by_symbol(
+            group_id="group-1",
+            user_id=self.user_id,
+            symbol="AAPL240119C00150000",
+            underlying="AAPL",
+            right="C",
+            strike=150.0,
+            expiry="2024-01-19",
+            multiplier=100,
+            action="BUY",  # First action is BUY
+        )
+
+        self.assertTrue(is_new)
+        self.assertEqual(leg["side"], "LONG")  # BUY creates LONG leg
+
+    def test_find_or_create_leg_by_symbol_creates_short_on_sell(self):
+        """First SELL action creates SHORT leg."""
+
+        def table_side_effect(name):
+            chain = MagicMock()
+            chain.select.return_value = chain
+            chain.eq.return_value = chain
+            chain.limit.return_value = chain
+            chain.insert.return_value = chain
+
+            result = MagicMock()
+
+            if name == "position_legs":
+                # No existing leg
+                result.data = []
+                chain.execute.return_value = result
+
+                def insert_effect(data):
+                    insert_result = MagicMock()
+                    insert_result.data = [{"id": "leg-1", **data}]
+                    insert_chain = MagicMock()
+                    insert_chain.execute.return_value = insert_result
+                    return insert_chain
+
+                chain.insert.side_effect = insert_effect
+
+            return chain
+
+        self.mock_supabase.table.side_effect = table_side_effect
+
+        leg, is_new = self.service._find_or_create_leg_by_symbol(
+            group_id="group-1",
+            user_id=self.user_id,
+            symbol="AAPL240119P00150000",
+            underlying="AAPL",
+            right="P",
+            strike=150.0,
+            expiry="2024-01-19",
+            multiplier=100,
+            action="SELL",  # First action is SELL (sell to open)
+        )
+
+        self.assertTrue(is_new)
+        self.assertEqual(leg["side"], "SHORT")  # SELL creates SHORT leg
+
+    def test_find_or_create_leg_by_symbol_finds_existing(self):
+        """Subsequent fills find existing leg by symbol (not by side)."""
+
+        existing_leg = {
+            "id": "leg-1",
+            "symbol": "AAPL240119C00150000",
+            "side": "LONG",  # Existing LONG leg
+            "qty_opened": 5,
+            "qty_closed": 0,
+        }
+
+        def table_side_effect(name):
+            chain = MagicMock()
+            chain.select.return_value = chain
+            chain.eq.return_value = chain
+            chain.limit.return_value = chain
+
+            result = MagicMock()
+
+            if name == "position_legs":
+                # Return existing leg
+                result.data = [existing_leg]
+                chain.execute.return_value = result
+
+            return chain
+
+        self.mock_supabase.table.side_effect = table_side_effect
+
+        # Try to find leg with SELL action (closing trade)
+        leg, is_new = self.service._find_or_create_leg_by_symbol(
+            group_id="group-1",
+            user_id=self.user_id,
+            symbol="AAPL240119C00150000",
+            underlying="AAPL",
+            right="C",
+            strike=150.0,
+            expiry="2024-01-19",
+            multiplier=100,
+            action="SELL",  # Closing action
+        )
+
+        # Should find existing LONG leg, not create new SHORT leg
+        self.assertFalse(is_new)
+        self.assertEqual(leg["id"], "leg-1")
+        self.assertEqual(leg["side"], "LONG")  # Orientation unchanged
+
+    def test_event_key_includes_action(self):
+        """Event key includes action for idempotency."""
+
+        key = self.service._build_event_key(
+            trade_execution_id="exec-123",
+            symbol="AAPL",
+            action="BUY",
+            filled_at="2024-01-15T10:30:00Z",
+            qty=1,
+            price=Decimal("2.50"),
+        )
+
+        self.assertIn("BUY", key)
+        self.assertIn("exec-123", key)
+        self.assertIn("AAPL", key)
+
+    def test_event_key_different_for_different_actions(self):
+        """Different actions produce different event keys."""
+
+        key_buy = self.service._build_event_key(
+            trade_execution_id="exec-123",
+            symbol="AAPL",
+            action="BUY",
+            filled_at="2024-01-15T10:30:00Z",
+            qty=1,
+            price=Decimal("2.50"),
+        )
+
+        key_sell = self.service._build_event_key(
+            trade_execution_id="exec-123",
+            symbol="AAPL",
+            action="SELL",
+            filled_at="2024-01-15T10:30:00Z",
+            qty=1,
+            price=Decimal("2.50"),
+        )
+
+        self.assertNotEqual(key_buy, key_sell)
 
 
 if __name__ == "__main__":

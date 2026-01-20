@@ -183,7 +183,11 @@ class ExecutionService:
         fill_details: Dict[str, Any],
     ) -> None:
         """
-        Record fill to v4 position ledger (best-effort).
+        Record fill(s) to v4 position ledger (best-effort).
+
+        For multi-leg strategies, records a fill for EACH leg in order_json.
+        Price allocation: If only total fill_price is available, it's split
+        evenly across legs. Per-leg prices from order_json take precedence.
 
         Wraps PositionLedgerService.record_fill() with error handling
         to ensure ledger failures don't break execution registration.
@@ -193,50 +197,10 @@ class ExecutionService:
 
             ledger = PositionLedgerService(self.supabase)
 
-            # Build fill_data from execution and fill_details
-            symbol = execution.get("symbol", "UNKNOWN")
             order_json = execution.get("order_json") or (suggestion.get("order_json") if suggestion else None)
+            legs = order_json.get("legs", []) if order_json else []
 
-            # Extract option details from order_json if available
-            right = "S"  # Default to stock
-            strike = None
-            expiry = None
-            multiplier = 100
-
-            if order_json and order_json.get("legs"):
-                # For multi-leg, use first leg's details (simplified)
-                first_leg = order_json["legs"][0]
-                right = first_leg.get("right", "S")
-                strike = first_leg.get("strike")
-                expiry = first_leg.get("expiry")
-                multiplier = first_leg.get("multiplier", 100)
-
-            # Determine side from fill_details or order_json
-            side = fill_details.get("side", "buy")
-            if not fill_details.get("side") and order_json:
-                # Infer from first leg action
-                first_leg_action = order_json.get("legs", [{}])[0].get("action", "")
-                if first_leg_action.lower() in ["sell", "sell_to_open", "sell_to_close"]:
-                    side = "sell"
-                else:
-                    side = "buy"
-
-            fill_data = {
-                "symbol": symbol,
-                "underlying": self._extract_underlying(symbol),
-                "side": side,
-                "qty": int(fill_details.get("quantity", 1)),
-                "price": float(fill_details.get("fill_price", 0)),
-                "fee": float(fill_details.get("fees", 0)),
-                "filled_at": execution.get("timestamp"),
-                "broker_exec_id": fill_details.get("broker_exec_id"),
-                "right": right,
-                "strike": strike,
-                "expiry": expiry,
-                "multiplier": multiplier,
-            }
-
-            # Build context from suggestion fields
+            # Build shared context from suggestion fields
             context = {
                 "trace_id": execution.get("trace_id"),
                 "legs_fingerprint": _build_legs_fingerprint(order_json),
@@ -249,27 +213,229 @@ class ExecutionService:
                 "source": "LIVE",
             }
 
-            result = ledger.record_fill(
-                user_id=user_id,
-                trade_execution_id=execution.get("id"),
-                fill_data=fill_data,
-                context=context,
-            )
-
-            if result.get("success"):
-                logger.info(
-                    f"[LEDGER] Fill recorded: exec={execution.get('id')}, "
-                    f"group={result.get('group_id')}, status={result.get('group_status')}"
+            if legs:
+                # Multi-leg: record a fill for each leg
+                self._record_multi_leg_fills(
+                    ledger=ledger,
+                    user_id=user_id,
+                    execution=execution,
+                    fill_details=fill_details,
+                    legs=legs,
+                    context=context,
                 )
             else:
-                logger.warning(
-                    f"[LEDGER] Fill recording failed: exec={execution.get('id')}, "
-                    f"error={result.get('error')}"
+                # Single-leg or no order_json: record single fill
+                self._record_single_leg_fill(
+                    ledger=ledger,
+                    user_id=user_id,
+                    execution=execution,
+                    fill_details=fill_details,
+                    context=context,
                 )
 
         except Exception as e:
             # Best-effort: log error but don't fail execution registration
             logger.error(f"[LEDGER] Error recording fill to ledger: {e}")
+
+    def _record_multi_leg_fills(
+        self,
+        ledger,
+        user_id: str,
+        execution: Dict[str, Any],
+        fill_details: Dict[str, Any],
+        legs: List[Dict[str, Any]],
+        context: Dict[str, Any],
+    ) -> None:
+        """
+        Record fills for a multi-leg strategy.
+
+        For each leg in the order_json.legs array:
+        - Determine symbol from leg.symbol
+        - Determine action (BUY/SELL) from leg.action
+        - Determine qty from leg.quantity or default to fill_details.quantity
+        - Determine price from leg.price or split total evenly
+
+        Idempotency: Uses leg_index in broker_exec_id derivation for uniqueness.
+        """
+        total_fill_price = float(fill_details.get("fill_price", 0))
+        total_fees = float(fill_details.get("fees", 0))
+        total_qty = int(fill_details.get("quantity", 1))
+        num_legs = len(legs)
+
+        # Price allocation: if no per-leg prices, split total evenly
+        # Fee allocation: split fees evenly across legs
+        fee_per_leg = total_fees / num_legs if num_legs > 0 else total_fees
+
+        results = []
+
+        for leg_index, leg in enumerate(legs):
+            # Extract leg symbol
+            leg_symbol = leg.get("symbol")
+            if not leg_symbol:
+                logger.warning(f"[LEDGER] Leg {leg_index} missing symbol, skipping")
+                continue
+
+            # Extract leg action (BUY/SELL)
+            leg_action = self._resolve_leg_action(leg)
+
+            # Extract leg quantity (per-leg or default to 1)
+            leg_qty = int(leg.get("quantity", leg.get("qty", 1)))
+
+            # Extract leg price
+            # Priority: leg.price > leg.fill_price > proportional split of total
+            leg_price = leg.get("price") or leg.get("fill_price")
+            if leg_price is None:
+                # Proportional split based on leg qty vs total qty
+                # If legs have equal qty, this is even split
+                if total_qty > 0 and num_legs > 0:
+                    leg_price = total_fill_price / num_legs
+                else:
+                    leg_price = 0
+
+            leg_price = float(leg_price)
+
+            # Extract option details
+            right = leg.get("right", "C" if leg_symbol and len(leg_symbol) > 10 else "S")
+            strike = leg.get("strike")
+            expiry = leg.get("expiry")
+            multiplier = int(leg.get("multiplier", 100))
+
+            # Build unique broker_exec_id for this leg (for idempotency)
+            base_broker_id = fill_details.get("broker_exec_id")
+            leg_broker_id = f"{base_broker_id}:leg{leg_index}" if base_broker_id else None
+
+            fill_data = {
+                "symbol": leg_symbol,
+                "underlying": self._extract_underlying(leg_symbol),
+                "action": leg_action,
+                "qty": leg_qty,
+                "price": leg_price,
+                "fee": fee_per_leg,
+                "filled_at": execution.get("timestamp"),
+                "broker_exec_id": leg_broker_id,
+                "right": right,
+                "strike": strike,
+                "expiry": expiry,
+                "multiplier": multiplier,
+                "leg_index": leg_index,  # For event_key uniqueness
+            }
+
+            # Record this leg's fill
+            # Include leg_index in trade_execution_id for event_key uniqueness
+            result = ledger.record_fill(
+                user_id=user_id,
+                trade_execution_id=f"{execution.get('id')}:leg{leg_index}",
+                fill_data=fill_data,
+                context=context,
+            )
+
+            results.append(result)
+
+            if result.get("success"):
+                logger.info(
+                    f"[LEDGER] Multi-leg fill recorded: exec={execution.get('id')}, "
+                    f"leg_index={leg_index}, symbol={leg_symbol}, action={leg_action}, "
+                    f"group={result.get('group_id')}"
+                )
+            else:
+                logger.warning(
+                    f"[LEDGER] Multi-leg fill failed: exec={execution.get('id')}, "
+                    f"leg_index={leg_index}, error={result.get('error')}"
+                )
+
+        # Log summary
+        success_count = sum(1 for r in results if r.get("success"))
+        logger.info(
+            f"[LEDGER] Multi-leg recording complete: exec={execution.get('id')}, "
+            f"legs={num_legs}, success={success_count}/{len(results)}"
+        )
+
+    def _record_single_leg_fill(
+        self,
+        ledger,
+        user_id: str,
+        execution: Dict[str, Any],
+        fill_details: Dict[str, Any],
+        context: Dict[str, Any],
+    ) -> None:
+        """Record a single-leg fill (original logic)."""
+        symbol = execution.get("symbol", "UNKNOWN")
+
+        # Determine action from fill_details
+        action = fill_details.get("action", "").upper()
+        if not action:
+            legacy_side = fill_details.get("side", "").lower()
+            if legacy_side:
+                action = "BUY" if legacy_side == "buy" else "SELL"
+
+        if not action:
+            action = "BUY"
+
+        # Default option details for single-leg
+        right = "S"
+        if symbol and len(symbol) > 10 and any(c.isdigit() for c in symbol):
+            # Likely an option symbol
+            right = "C" if "C" in symbol else "P"
+
+        fill_data = {
+            "symbol": symbol,
+            "underlying": self._extract_underlying(symbol),
+            "action": action,
+            "qty": int(fill_details.get("quantity", 1)),
+            "price": float(fill_details.get("fill_price", 0)),
+            "fee": float(fill_details.get("fees", 0)),
+            "filled_at": execution.get("timestamp"),
+            "broker_exec_id": fill_details.get("broker_exec_id"),
+            "right": right,
+            "strike": None,
+            "expiry": None,
+            "multiplier": 100,
+        }
+
+        result = ledger.record_fill(
+            user_id=user_id,
+            trade_execution_id=execution.get("id"),
+            fill_data=fill_data,
+            context=context,
+        )
+
+        if result.get("success"):
+            logger.info(
+                f"[LEDGER] Fill recorded: exec={execution.get('id')}, "
+                f"group={result.get('group_id')}, status={result.get('group_status')}"
+            )
+        else:
+            logger.warning(
+                f"[LEDGER] Fill recording failed: exec={execution.get('id')}, "
+                f"error={result.get('error')}"
+            )
+
+    def _resolve_leg_action(self, leg: Dict[str, Any]) -> str:
+        """
+        Resolve action (BUY/SELL) from leg data.
+
+        Handles various formats:
+        - leg.action: "buy", "sell", "BUY", "SELL"
+        - leg.action: "buy_to_open", "sell_to_open", "buy_to_close", "sell_to_close"
+        - leg.side: "buy", "sell" (legacy)
+        """
+        action = leg.get("action", "").lower()
+
+        if action in ["buy", "buy_to_open", "buy_to_close"]:
+            return "BUY"
+        elif action in ["sell", "sell_to_open", "sell_to_close"]:
+            return "SELL"
+
+        # Try legacy 'side' field
+        side = leg.get("side", "").lower()
+        if side == "buy":
+            return "BUY"
+        elif side == "sell":
+            return "SELL"
+
+        # Default to BUY if can't determine
+        logger.warning(f"[LEDGER] Could not resolve action for leg, defaulting to BUY: {leg}")
+        return "BUY"
 
     def _extract_underlying(self, symbol: str) -> str:
         """Extract underlying from option symbol or return as-is for stock."""

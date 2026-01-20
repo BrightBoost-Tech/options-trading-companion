@@ -69,7 +69,7 @@ class PositionLedgerService:
             fill_data: Fill details {
                 symbol: str,           # Full symbol (e.g., "AAPL240119C00150000")
                 underlying: str,       # e.g., "AAPL"
-                side: str,             # "buy" or "sell"
+                action: str,           # "BUY" or "SELL" (fill action, NOT leg orientation)
                 qty: int,              # Quantity (always positive)
                 price: float,          # Fill price
                 fee: float,            # Fee for this fill
@@ -106,7 +106,14 @@ class PositionLedgerService:
             # Extract fill details with defaults
             symbol = fill_data.get("symbol")
             underlying = fill_data.get("underlying") or self._extract_underlying(symbol)
-            side = fill_data.get("side", "buy").lower()
+
+            # Support both 'action' (new) and 'side' (legacy) parameters
+            action = fill_data.get("action", "").upper()
+            if not action:
+                # Legacy fallback: map side -> action
+                legacy_side = fill_data.get("side", "buy").lower()
+                action = "BUY" if legacy_side == "buy" else "SELL"
+
             qty = int(fill_data.get("qty", 0))
             price = Decimal(str(fill_data.get("price", 0)))
             fee = Decimal(str(fill_data.get("fee", 0)))
@@ -132,13 +139,12 @@ class PositionLedgerService:
                 return {"success": False, "error": "symbol is required"}
             if qty <= 0:
                 return {"success": False, "error": "qty must be positive"}
+            if action not in ("BUY", "SELL"):
+                return {"success": False, "error": f"action must be BUY or SELL, got: {action}"}
 
-            # Determine leg_side based on fill side
-            leg_side = "LONG" if side == "buy" else "SHORT"
-
-            # Build idempotent event_key
+            # Build idempotent event_key (includes action for uniqueness)
             event_key = self._build_event_key(
-                trade_execution_id, symbol, filled_at, qty, price
+                trade_execution_id, symbol, action, filled_at, qty, price
             )
 
             # Check for duplicate event (idempotency)
@@ -183,7 +189,9 @@ class PositionLedgerService:
             group_id = group["id"]
 
             # Step 2: Find or create position leg
-            leg = self._find_or_create_leg(
+            # Leg is resolved by (group_id, symbol) only, NOT by side
+            # Orientation is determined on first fill only
+            leg, is_new_leg = self._find_or_create_leg_by_symbol(
                 group_id=group_id,
                 user_id=user_id,
                 symbol=symbol,
@@ -192,21 +200,44 @@ class PositionLedgerService:
                 strike=strike,
                 expiry=expiry,
                 multiplier=multiplier,
-                side=leg_side,
+                action=action,  # Used to determine orientation if new leg
             )
             leg_id = leg["id"]
+            leg_side = leg["side"]  # LONG or SHORT (stable property)
 
-            # Step 3: Determine if opening or closing
-            is_opening = self._is_opening_fill(leg, side)
+            # Step 3: Determine if opening or closing based on leg orientation + action
+            is_opening = self._is_opening_fill_v2(leg_side, action)
 
-            # Step 4: Insert fill
+            # Step 4: Check for over-close (flip) scenario
+            qty_current = leg.get("qty_opened", 0) - leg.get("qty_closed", 0)
+            if not is_opening and qty > qty_current:
+                # Over-close: close current position, open new group for remainder
+                return self._handle_over_close(
+                    user_id=user_id,
+                    trade_execution_id=trade_execution_id,
+                    group_id=group_id,
+                    leg=leg,
+                    action=action,
+                    total_qty=qty,
+                    close_qty=qty_current,
+                    price=price,
+                    fee=fee,
+                    filled_at=filled_at,
+                    broker_exec_id=broker_exec_id,
+                    source=source,
+                    context=context,
+                    fill_data=fill_data,
+                )
+
+            # Step 5: Insert fill with action
             fill_id = self._insert_fill(
                 user_id=user_id,
                 group_id=group_id,
                 leg_id=leg_id,
                 trade_execution_id=trade_execution_id,
                 broker_exec_id=broker_exec_id,
-                side=leg_side,
+                action=action,
+                side=leg_side,  # Deprecated, kept for backward compat
                 qty=qty,
                 price=price,
                 fee=fee,
@@ -214,7 +245,7 @@ class PositionLedgerService:
                 source=source,
             )
 
-            # Step 5: Update leg quantities
+            # Step 6: Update leg quantities
             self._update_leg_quantities(
                 leg_id=leg_id,
                 qty=qty,
@@ -222,15 +253,17 @@ class PositionLedgerService:
                 is_opening=is_opening,
             )
 
-            # Step 6: Compute cash impact and insert event
+            # Step 7: Compute cash impact and insert event
+            # Cash impact based on action: BUY = cash outflow, SELL = cash inflow
             cash_impact = self._compute_cash_impact(
-                side=side,
+                action=action,
                 qty=qty,
                 price=price,
                 fee=fee,
                 multiplier=multiplier,
             )
-            qty_delta = qty if side == "buy" else -qty
+            # qty_delta is signed based on action
+            qty_delta = qty if action == "BUY" else -qty
 
             event_id = self._insert_event(
                 user_id=user_id,
@@ -243,15 +276,15 @@ class PositionLedgerService:
                 event_key=event_key,
             )
 
-            # Step 7: Update group materialized stats
+            # Step 8: Update group materialized stats
             self._update_group_stats(group_id, fee, cash_impact if not is_opening else None)
 
-            # Step 8: Check if group should be closed
+            # Step 9: Check if group should be closed
             group_status = self._check_and_close_group(group_id)
 
             logger.info(
                 f"[LEDGER] Recorded fill: user={user_id}, group={group_id}, "
-                f"leg={leg_id}, fill={fill_id}, status={group_status}"
+                f"leg={leg_id}, fill={fill_id}, action={action}, status={group_status}"
             )
 
             return {
@@ -490,6 +523,64 @@ class PositionLedgerService:
     # Private: Leg management
     # -------------------------------------------------------------------------
 
+    def _find_or_create_leg_by_symbol(
+        self,
+        group_id: str,
+        user_id: str,
+        symbol: str,
+        underlying: str,
+        right: str,
+        strike: Optional[float],
+        expiry: Optional[str],
+        multiplier: int,
+        action: str,
+    ) -> Tuple[Dict[str, Any], bool]:
+        """
+        Find existing leg by (group_id, symbol) or create new one.
+
+        Leg orientation (LONG/SHORT) is determined on FIRST fill only:
+        - BUY first -> LONG
+        - SELL first -> SHORT
+
+        Returns:
+            Tuple of (leg_dict, is_new_leg)
+        """
+        # Find existing leg by group_id and symbol (NOT by side)
+        result = self.client.table("position_legs") \
+            .select("*") \
+            .eq("group_id", group_id) \
+            .eq("symbol", symbol) \
+            .limit(1) \
+            .execute()
+
+        if result.data and len(result.data) > 0:
+            return result.data[0], False
+
+        # Create new leg - determine orientation from first fill action
+        # BUY first -> LONG position, SELL first -> SHORT position
+        leg_side = "LONG" if action == "BUY" else "SHORT"
+
+        new_leg = {
+            "group_id": group_id,
+            "user_id": user_id,
+            "symbol": symbol,
+            "underlying": underlying,
+            "right": right,
+            "strike": float(strike) if strike else None,
+            "expiry": expiry,
+            "multiplier": multiplier,
+            "side": leg_side,
+            "qty_opened": 0,
+            "qty_closed": 0,
+        }
+
+        result = self.client.table("position_legs").insert(new_leg).execute()
+        if result.data and len(result.data) > 0:
+            logger.info(f"[LEDGER] Created new leg: {result.data[0]['id']}, side={leg_side}")
+            return result.data[0], True
+
+        raise Exception("Failed to create position leg")
+
     def _find_or_create_leg(
         self,
         group_id: str,
@@ -502,61 +593,184 @@ class PositionLedgerService:
         multiplier: int,
         side: str,
     ) -> Dict[str, Any]:
-        """Find existing leg or create new one."""
+        """
+        DEPRECATED: Use _find_or_create_leg_by_symbol instead.
+        Kept for backward compatibility.
+        """
+        # Map side to action for the new method
+        action = "BUY" if side == "LONG" else "SELL"
+        leg, _ = self._find_or_create_leg_by_symbol(
+            group_id=group_id,
+            user_id=user_id,
+            symbol=symbol,
+            underlying=underlying,
+            right=right,
+            strike=strike,
+            expiry=expiry,
+            multiplier=multiplier,
+            action=action,
+        )
+        return leg
 
-        # Find existing leg with same symbol and side
-        result = self.client.table("position_legs") \
-            .select("*") \
-            .eq("group_id", group_id) \
-            .eq("symbol", symbol) \
-            .eq("side", side) \
-            .limit(1) \
-            .execute()
+    def _is_opening_fill_v2(self, leg_side: str, action: str) -> bool:
+        """
+        Determine if fill is opening or closing based on leg orientation and action.
 
-        if result.data and len(result.data) > 0:
-            return result.data[0]
+        For LONG leg:
+          - BUY increases position (opening)
+          - SELL decreases position (closing)
 
-        # Create new leg
-        new_leg = {
-            "group_id": group_id,
-            "user_id": user_id,
-            "symbol": symbol,
-            "underlying": underlying,
-            "right": right,
-            "strike": float(strike) if strike else None,
-            "expiry": expiry,
-            "multiplier": multiplier,
-            "side": side,
-            "qty_opened": 0,
-            "qty_closed": 0,
-        }
-
-        result = self.client.table("position_legs").insert(new_leg).execute()
-        if result.data and len(result.data) > 0:
-            logger.info(f"[LEDGER] Created new leg: {result.data[0]['id']}")
-            return result.data[0]
-
-        raise Exception("Failed to create position leg")
+        For SHORT leg:
+          - SELL increases position (opening)
+          - BUY decreases position (closing)
+        """
+        if leg_side == "LONG":
+            return action == "BUY"
+        else:  # SHORT
+            return action == "SELL"
 
     def _is_opening_fill(self, leg: Dict[str, Any], fill_side: str) -> bool:
         """
-        Determine if fill is opening or closing.
-
-        Opening: adding to position in same direction
-        Closing: reducing position (opposite direction)
+        DEPRECATED: Use _is_opening_fill_v2 instead.
+        Kept for backward compatibility.
         """
         leg_side = leg.get("side")  # "LONG" or "SHORT"
-        qty_current = leg.get("qty_opened", 0) - leg.get("qty_closed", 0)
+        action = "BUY" if fill_side == "buy" else "SELL"
+        return self._is_opening_fill_v2(leg_side, action)
 
-        if qty_current == 0:
-            return True  # New position, always opening
+    def _handle_over_close(
+        self,
+        user_id: str,
+        trade_execution_id: Optional[str],
+        group_id: str,
+        leg: Dict[str, Any],
+        action: str,
+        total_qty: int,
+        close_qty: int,
+        price: Decimal,
+        fee: Decimal,
+        filled_at: str,
+        broker_exec_id: Optional[str],
+        source: str,
+        context: Dict[str, Any],
+        fill_data: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """
+        Handle over-close scenario where closing qty exceeds current position.
 
-        # LONG position: buy opens, sell closes
-        # SHORT position: sell opens, buy closes
-        if leg_side == "LONG":
-            return fill_side == "buy"
-        else:  # SHORT
-            return fill_side == "sell"
+        Strategy:
+        1. Close the current position with close_qty
+        2. Open a new group with the remainder (total_qty - close_qty)
+           with opposite orientation
+        """
+        remainder_qty = total_qty - close_qty
+        leg_id = leg["id"]
+        leg_side = leg["side"]
+
+        logger.info(
+            f"[LEDGER] Over-close detected: closing {close_qty}, "
+            f"opening new position with {remainder_qty}"
+        )
+
+        # Proportionally split fee between close and open
+        fee_per_unit = fee / total_qty if total_qty > 0 else Decimal(0)
+        close_fee = fee_per_unit * close_qty
+        open_fee = fee_per_unit * remainder_qty
+
+        results = {"close": None, "open": None}
+
+        # Step 1: Close current position (if any qty to close)
+        if close_qty > 0:
+            close_fill_id = self._insert_fill(
+                user_id=user_id,
+                group_id=group_id,
+                leg_id=leg_id,
+                trade_execution_id=trade_execution_id,
+                broker_exec_id=broker_exec_id,  # Use original broker_exec_id for first fill
+                action=action,
+                side=leg_side,
+                qty=close_qty,
+                price=price,
+                fee=close_fee,
+                filled_at=filled_at,
+                source=source,
+            )
+
+            self._update_leg_quantities(
+                leg_id=leg_id,
+                qty=close_qty,
+                price=price,
+                is_opening=False,
+            )
+
+            cash_impact = self._compute_cash_impact(
+                action=action,
+                qty=close_qty,
+                price=price,
+                fee=close_fee,
+                multiplier=int(fill_data.get("multiplier", 100)),
+            )
+
+            event_key = self._build_event_key(
+                trade_execution_id, fill_data.get("symbol"), action, filled_at, close_qty, price
+            )
+            event_id = self._insert_event(
+                user_id=user_id,
+                group_id=group_id,
+                fill_id=close_fill_id,
+                leg_id=leg_id,
+                event_type="FILL",
+                amount_cash=cash_impact,
+                qty_delta=-close_qty if action == "SELL" else close_qty,
+                event_key=event_key,
+            )
+
+            self._update_group_stats(group_id, close_fee, cash_impact)
+            group_status = self._check_and_close_group(group_id)
+
+            results["close"] = {
+                "group_id": group_id,
+                "leg_id": leg_id,
+                "fill_id": close_fill_id,
+                "event_id": event_id,
+                "group_status": group_status,
+                "qty": close_qty,
+            }
+
+        # Step 2: Open new group with remainder (opposite orientation)
+        if remainder_qty > 0:
+            # New fill data with remainder qty
+            new_fill_data = fill_data.copy()
+            new_fill_data["qty"] = remainder_qty
+            new_fill_data["fee"] = float(open_fee)
+            new_fill_data["action"] = action
+            new_fill_data["broker_exec_id"] = None  # New fill, no broker ID
+
+            # Clear strategy_key/legs_fingerprint to create new group
+            new_context = context.copy()
+            new_context["strategy_key"] = None
+            new_context["legs_fingerprint"] = None
+
+            open_result = self.record_fill(
+                user_id=user_id,
+                trade_execution_id=trade_execution_id,
+                fill_data=new_fill_data,
+                context=new_context,
+            )
+            results["open"] = open_result
+
+        # Return combined result
+        return {
+            "success": True,
+            "group_id": results["close"]["group_id"] if results["close"] else results["open"]["group_id"],
+            "leg_id": results["close"]["leg_id"] if results["close"] else results["open"]["leg_id"],
+            "fill_id": results["close"]["fill_id"] if results["close"] else results["open"]["fill_id"],
+            "event_id": results["close"]["event_id"] if results["close"] else results["open"]["event_id"],
+            "group_status": results["close"]["group_status"] if results["close"] else "OPEN",
+            "over_close": True,
+            "close_result": results["close"],
+            "open_result": results["open"],
+        }
 
     def _update_leg_quantities(
         self,
@@ -619,6 +833,7 @@ class PositionLedgerService:
         leg_id: str,
         trade_execution_id: Optional[str],
         broker_exec_id: Optional[str],
+        action: str,
         side: str,
         qty: int,
         price: Decimal,
@@ -634,7 +849,8 @@ class PositionLedgerService:
             "leg_id": leg_id,
             "trade_execution_id": trade_execution_id,
             "broker_exec_id": broker_exec_id,
-            "side": side,
+            "action": action,  # BUY or SELL
+            "side": side,      # LONG or SHORT (deprecated, kept for compat)
             "qty": qty,
             "price": float(price),
             "fee": float(fee),
@@ -716,13 +932,14 @@ class PositionLedgerService:
         self,
         trade_execution_id: Optional[str],
         symbol: str,
+        action: str,
         filled_at: str,
         qty: int,
         price: Decimal,
     ) -> Optional[str]:
         """Build deterministic event key for idempotency."""
         if trade_execution_id:
-            return f"fill:{trade_execution_id}:{symbol}:{filled_at}:{qty}:{price}"
+            return f"fill:{trade_execution_id}:{symbol}:{action}:{filled_at}:{qty}:{price}"
         return None  # No event_key for broker-imported fills without execution ID
 
     # -------------------------------------------------------------------------
@@ -847,16 +1064,28 @@ class PositionLedgerService:
 
     def _compute_cash_impact(
         self,
-        side: str,
+        action: str,
         qty: int,
         price: Decimal,
         fee: Decimal,
         multiplier: int,
     ) -> Decimal:
-        """Compute cash impact of a fill."""
+        """
+        Compute cash impact of a fill.
+
+        Args:
+            action: "BUY" or "SELL"
+            qty: Quantity filled
+            price: Fill price per unit
+            fee: Fee for this fill
+            multiplier: Contract multiplier (100 for options, 1 for stock)
+
+        Returns:
+            Cash impact (negative for outflow, positive for inflow)
+        """
         notional = price * qty * multiplier
 
-        if side == "buy":
+        if action == "BUY":
             # Buying: cash outflow (negative)
             return -(notional + fee)
         else:

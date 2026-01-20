@@ -28,6 +28,33 @@ def fast_rolling_mean(arr: np.ndarray, window: int) -> np.ndarray:
 
     return window_sums / window
 
+def fast_rolling_std(arr: np.ndarray, window: int) -> np.ndarray:
+    """
+    Calculates rolling standard deviation using O(N) cumsum approach.
+    Var(X) = E[X^2] - (E[X])^2
+    """
+    if len(arr) < window:
+        return np.array([])
+
+    if np.isnan(arr).any():
+        windows = sliding_window_view(arr, window_shape=window)
+        return np.std(windows, axis=1, ddof=0)
+
+    # 1. E[X^2]
+    # Note: For returns (small numbers), squaring them might lead to underflow if float32,
+    # but we are using float64 implicitly in Python/NumPy usually.
+    mean_sq = fast_rolling_mean(arr * arr, window)
+
+    # 2. (E[X])^2
+    mean = fast_rolling_mean(arr, window)
+    sq_mean = mean * mean
+
+    # 3. Variance
+    # Precision issues can cause slightly negative variance for constant arrays, clamp it.
+    var = np.maximum(mean_sq - sq_mean, 0)
+
+    return np.sqrt(var)
+
 def calculate_indicators_vectorized(prices: List[float]) -> Dict[str, np.ndarray]:
     """
     Calculates Trend, Volatility, and RSI for the entire price series using vectorized operations.
@@ -87,11 +114,8 @@ def calculate_indicators_vectorized(prices: List[float]) -> Dict[str, np.ndarray
         returns = np.nan_to_num(returns, nan=0.0, posinf=0.0, neginf=0.0)
 
         # Rolling std(30) on returns
-        # sliding_window_view on returns (length N-1)
-        windows_ret = sliding_window_view(returns, window_shape=30)
-
-        # ddof=0 matches population std
-        stds = np.std(windows_ret, axis=1, ddof=0)
+        # Optimization: Use fast_rolling_std (O(N)) instead of sliding_window_view (O(N*W))
+        stds = fast_rolling_std(returns, 30)
         vol_valid = stds * np.sqrt(252)
 
         # Align

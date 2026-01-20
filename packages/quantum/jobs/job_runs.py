@@ -110,3 +110,84 @@ class JobRunStore:
 
     def mark_dead_letter(self, job_run_id: str, error: Dict[str, Any]) -> None:
         dead_letter_job_run(self.client, job_run_id, error)
+
+    def create_or_get_cancelled(
+        self,
+        job_name: str,
+        idempotency_key: str,
+        payload: Dict[str, Any],
+        cancelled_reason: str,
+        cancelled_detail: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """
+        Creates a cancelled job run if it doesn't exist (based on job_name + idempotency_key).
+        Returns the job run record.
+
+        PR A: Used by pause gate to create auditable records when trading is paused.
+        This ensures all attempted job runs are visible in the admin UI, even when blocked.
+
+        Args:
+            job_name: The job name (e.g., 'suggestions_open')
+            idempotency_key: Unique key for deduplication
+            payload: Original job payload
+            cancelled_reason: Why it was cancelled (e.g., 'global_ops_pause')
+            cancelled_detail: Additional detail (e.g., pause_reason from ops_control)
+        """
+        # Try to find existing first (idempotency)
+        existing = self.client.table("job_runs")\
+            .select("*")\
+            .eq("job_name", job_name)\
+            .eq("idempotency_key", idempotency_key)\
+            .maybe_single()\
+            .execute()
+
+        existing_data = self._data(existing)
+        if existing_data:
+            return existing_data
+
+        # Create new cancelled record
+        try:
+            # Merge cancelled metadata into payload
+            payload_with_meta = {
+                **payload,
+                "cancelled_reason": cancelled_reason,
+                "cancelled_detail": cancelled_detail,
+            }
+
+            data = {
+                "job_name": job_name,
+                "idempotency_key": idempotency_key,
+                "payload": payload_with_meta,
+                "status": "cancelled",
+                "completed_at": datetime.now().isoformat(),  # Mark as immediately completed
+            }
+
+            # upsert with ignore_duplicates=True will do nothing if conflict
+            res = self.client.table("job_runs").upsert(
+                data, on_conflict="job_name,idempotency_key", ignore_duplicates=True
+            ).execute()
+
+            res_data = self._data(res)
+            if res_data:
+                return res_data[0] if isinstance(res_data, list) else res_data
+
+            # If we are here, duplicate existed and was ignored. Fetch again.
+            existing_retry = self.client.table("job_runs")\
+                .select("*")\
+                .eq("job_name", job_name)\
+                .eq("idempotency_key", idempotency_key)\
+                .maybe_single()\
+                .execute()
+
+            retry_data = self._data(existing_retry)
+            if retry_data:
+                return retry_data
+
+            raise RuntimeError(
+                "Failed to create_or_get_cancelled job_run: Supabase returned None/empty response "
+                f"(job_name={job_name}, idempotency_key={idempotency_key})."
+            )
+
+        except Exception as e:
+            print(f"Error in create_or_get_cancelled: {e}")
+            raise e

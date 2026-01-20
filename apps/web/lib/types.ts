@@ -173,6 +173,27 @@ export interface Suggestion {
     top_reasons: string[];
     vetoed?: boolean;
   };
+
+  // PR4: Market Data Quality Gate Fields
+  blocked_reason?: string;  // e.g., "marketdata_quality_gate"
+  blocked_detail?: string;  // e.g., "SPY:WARN_STALE|QQQ:FAIL_CROSSED"
+  marketdata_quality?: {
+    event?: string;
+    policy?: string;
+    effective_action?: string;  // "skip_fatal" | "skip_policy" | "defer" | "downrank" | "downrank_fallback_to_defer"
+    warning_count?: number;
+    fatal_count?: number;
+    has_warning?: boolean;
+    has_fatal?: boolean;
+    symbols?: Array<{
+      symbol: string;
+      code: string;  // "OK" | "WARN_STALE" | "WARN_WIDE_SPREAD" | "FAIL_CROSSED" | etc.
+      score?: number | null;
+      freshness_ms?: number | null;
+    }>;
+    downrank_applied?: boolean;
+    warn_penalty?: number;
+  };
 }
 
 export interface BatchStageRequest {
@@ -257,6 +278,7 @@ export interface InboxMeta {
   total_ev_available: number;
   deployable_capital: number;
   stale_after_seconds: number;
+  include_backlog?: boolean;  // PR4.1: indicates if backlog mode is active
 }
 
 export interface InboxResponse {
@@ -335,4 +357,40 @@ export interface DiscreteSolveResponse {
   selected_trades: SelectedTrade[];
   metrics: DiscreteSolveMetrics;
   diagnostics: Record<string, any>;
+}
+
+// --- PR C: Ops Console Types ---
+
+export interface OpsControlState {
+  mode: string;  // "paper" | "micro_live" | "live"
+  paused: boolean;
+  pause_reason?: string | null;
+  updated_at: string;
+}
+
+export interface FreshnessItem {
+  symbol: string;
+  freshness_ms: number | null;
+  status: string;  // "OK" | "WARN" | "STALE" | "ERROR"
+  score: number | null;
+  issues: string[] | null;
+}
+
+export interface PipelineJobState {
+  status: string;
+  created_at: string | null;
+  finished_at: string | null;
+}
+
+export interface HealthBlock {
+  status: string;  // "healthy" | "degraded" | "unhealthy" | "paused"
+  issues: string[];
+  checks: Record<string, string>;
+}
+
+export interface OpsDashboardState {
+  control: OpsControlState;
+  freshness: FreshnessItem[];
+  pipeline: Record<string, PipelineJobState>;
+  health: HealthBlock;
 }

@@ -26,53 +26,102 @@ router = APIRouter()
 class DismissSuggestionRequest(BaseModel):
     reason: str
 
+# PR4: Active statuses include both pending and NOT_EXECUTABLE (blocked by quality gate)
+# NOT_EXECUTABLE suggestions should appear in the queue so users can see/manage them.
+ACTIVE_STATUSES = ["pending", "NOT_EXECUTABLE"]
+
+
+def compute_today_window(now: Optional[datetime] = None) -> tuple:
+    """
+    PR4.1: Compute explicit today window bounds for deterministic queries.
+
+    Returns:
+        (today_start_iso, tomorrow_start_iso): Both as ISO strings for Postgrest queries.
+
+    The window is [today_start, tomorrow_start) - inclusive start, exclusive end.
+    This ensures "today" is strictly bounded to a single calendar day UTC.
+    """
+    if now is None:
+        now = datetime.now(timezone.utc)
+
+    today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    tomorrow_start = today_start + timedelta(days=1)
+
+    return today_start.isoformat(), tomorrow_start.isoformat()
+
+
 @router.get("/inbox")
 async def get_inbox(
     user_id: str = Depends(get_current_user),
-    supabase: Client = Depends(get_supabase_user_client)
+    supabase: Client = Depends(get_supabase_user_client),
+    include_backlog: bool = Query(False, description="Include older active items beyond today")
 ):
     """
     Returns the Inbox State:
-    - hero: Top ranked pending suggestion
-    - queue: Remaining pending suggestions
-    - completed: Today's non-pending suggestions (dismissed/staged/executed)
-    - meta: { total_ev_available, deployable_capital, stale_after_seconds }
+    - hero: Top ranked active suggestion (pending or NOT_EXECUTABLE)
+    - queue: Remaining active suggestions
+    - completed: Today's non-active suggestions (dismissed/staged/executed)
+    - meta: { total_ev_available, deployable_capital, stale_after_seconds, include_backlog }
+
+    PR4: NOT_EXECUTABLE suggestions (blocked by marketdata quality gate) now appear
+    in the active queue instead of completed, so users can see and manage them.
+
+    PR4.1: Explicit time bounds for deterministic behavior:
+    - Default (include_backlog=false): Active queue is bounded to today only.
+    - include_backlog=true: Active queue includes older pending/NOT_EXECUTABLE items.
+    - Completed is ALWAYS bounded to today only (regardless of include_backlog).
+
+    Example requests:
+    - /inbox (default: today-only active queue)
+    - /inbox?include_backlog=true (include older active items)
     """
     if not supabase:
         raise HTTPException(status_code=503, detail="Database Unavailable")
 
     try:
-        # Fetch Pending
-        pending_res = supabase.table(TRADE_SUGGESTIONS_TABLE) \
+        # PR4.1: Compute explicit today window bounds
+        today_start, tomorrow_start = compute_today_window()
+
+        # PR4.1: Fetch Active suggestions with time bounds (unless include_backlog)
+        active_query = supabase.table(TRADE_SUGGESTIONS_TABLE) \
             .select("*") \
             .eq("user_id", user_id) \
-            .eq("status", "pending") \
-            .execute()
-        pending_list = pending_res.data or []
+            .in_("status", ACTIVE_STATUSES)
 
-        # Fetch Completed (Today)
-        # We define "Today" as last 24h or strictly same calendar day UTC?
-        # Typically "Inbox" implies "Active Workflow".
-        # Let's use start of UTC day for "Today".
-        today_start = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
+        if not include_backlog:
+            # Default: only today's active items
+            active_query = active_query \
+                .gte("created_at", today_start) \
+                .lt("created_at", tomorrow_start)
 
-        completed_res = supabase.table(TRADE_SUGGESTIONS_TABLE) \
+        active_res = active_query.execute()
+        active_list = active_res.data or []
+
+        # PR4.1: Fetch Completed (Today) - ALWAYS bounded to today window
+        # Using both lower and upper bounds for deterministic "today" semantics.
+        # We filter in Python because Postgrest .not_.in_() can be unreliable.
+        today_res = supabase.table(TRADE_SUGGESTIONS_TABLE) \
             .select("*") \
             .eq("user_id", user_id) \
-            .neq("status", "pending") \
             .gte("created_at", today_start) \
+            .lt("created_at", tomorrow_start) \
             .execute()
-        completed_list = completed_res.data or []
+        today_list = today_res.data or []
 
-        # Rank Pending
-        ranked_pending = rank_suggestions(pending_list)
+        # Filter completed = today's suggestions NOT in active statuses
+        completed_list = [s for s in today_list if s.get("status") not in ACTIVE_STATUSES]
+
+        # Rank Active suggestions
+        ranked_active = rank_suggestions(active_list)
 
         # Split Hero vs Queue
-        hero = ranked_pending[0] if ranked_pending else None
-        queue = ranked_pending[1:] if len(ranked_pending) > 1 else []
+        hero = ranked_active[0] if ranked_active else None
+        queue = ranked_active[1:] if len(ranked_active) > 1 else []
 
-        # Compute Meta
-        total_ev = sum(s.get("ev", 0) for s in ranked_pending if s.get("ev"))
+        # PR4: Compute Meta - total_ev_available only for executable (pending) suggestions
+        # Blocked suggestions shouldn't inflate "available" EV since they can't be executed
+        executable_list = [s for s in ranked_active if s.get("status") == "pending"]
+        total_ev = sum(s.get("ev", 0) for s in executable_list if s.get("ev"))
 
         # Deployable Capital - Ideally fetched from CashService, but simpler proxy here or fetch from snapshot
         # For now, placeholder or fetch latest snapshot's cash?
@@ -96,7 +145,8 @@ async def get_inbox(
             "meta": {
                 "total_ev_available": total_ev,
                 "deployable_capital": deployable_capital,
-                "stale_after_seconds": 300
+                "stale_after_seconds": 300,
+                "include_backlog": include_backlog  # PR4.1: indicates if backlog mode is active
             }
         }
     except Exception as e:

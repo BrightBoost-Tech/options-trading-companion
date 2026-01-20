@@ -2,8 +2,7 @@
 
 import { useState } from 'react';
 import { fetchWithAuth, ApiError } from '@/lib/api';
-import { API_URL } from '@/lib/constants';
-import { cn } from '@/lib/utils';
+import { Button } from '@/components/ui/button';
 import { RefreshCw } from 'lucide-react';
 
 interface SyncHoldingsButtonProps {
@@ -53,25 +52,20 @@ export default function SyncHoldingsButton({ onSyncComplete, className }: SyncHo
           {error && <span className="text-red-500 mr-2" title={error}>{error}</span>}
        </div>
 
-       {/* Button - using native element with existing styles but improved a11y */}
-       <button
+       <Button
+        variant="outline"
+        size="sm"
         onClick={handleSync}
-        disabled={loading}
-        aria-busy={loading}
-        className={cn(
-            "flex items-center gap-1.5 px-3 py-1.5 bg-white border border-gray-300 rounded-md text-sm text-gray-700 hover:bg-gray-50 disabled:opacity-50 shadow-sm transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-gray-400",
-            className
-        )}
+        loading={loading}
+        className={className}
       >
-        <RefreshCw
-            className={cn(
-                "w-3.5 h-3.5",
-                loading ? "animate-spin text-blue-600" : "text-gray-500"
-            )}
-            aria-hidden="true"
-        />
-        <span>{loading ? 'Syncing...' : 'Sync'}</span>
-      </button>
+        {loading ? 'Syncing...' : (
+            <>
+                <RefreshCw className="mr-2 h-3.5 w-3.5 text-gray-500" aria-hidden="true" />
+                Sync
+            </>
+        )}
+      </Button>
     </div>
   );
 }

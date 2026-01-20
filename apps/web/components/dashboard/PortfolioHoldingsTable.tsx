@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useMemo } from 'react';
 import { formatOptionDisplay } from '@/lib/formatters';
 import { Wallet, RefreshCw, Copy, Check } from 'lucide-react';
 import { Button } from '@/components/ui/button';
@@ -98,20 +98,21 @@ export default function PortfolioHoldingsTable({ holdings, onSync, onGenerateSug
 
   // Grouping Logic (Phase 8.1)
   // Treat '{}' as OPTION if asset_type says so OR symbol pattern looks like OCC.
-  const optionHoldings = holdings.filter(h =>
+  // Memoize filtering to prevent O(N) iterations on every render (e.g. when copying symbols)
+  const optionHoldings = useMemo(() => holdings.filter(h =>
     h.asset_type === 'OPTION' || (!h.asset_type && isLikelyOptionSymbol(h.symbol))
-  );
+  ), [holdings]);
 
   // Long Term / Equity holds:
   // - asset_type === 'EQUITY'
   // - OR legacy records with missing asset_type and NOT option-like and NOT cash
-  const equityHoldings = holdings.filter(h =>
+  const equityHoldings = useMemo(() => holdings.filter(h =>
     (h.asset_type === 'EQUITY' || (!h.asset_type && !isLikelyOptionSymbol(h.symbol) && h.symbol !== 'CUR:USD')) &&
     // Optional: restrict to "true long-term" if we have is_locked/strategy_tag in holdings
     (h.is_locked || h.strategy_tag === 'LONG_TERM_HOLD' || h.symbol === 'VTSI')
-  );
+  ), [holdings]);
 
-  const cashHoldings = holdings.filter(h => h.asset_type === 'CASH' || h.symbol === 'CUR:USD');
+  const cashHoldings = useMemo(() => holdings.filter(h => h.asset_type === 'CASH' || h.symbol === 'CUR:USD'), [holdings]);
 
   return (
     <div className="overflow-x-auto">

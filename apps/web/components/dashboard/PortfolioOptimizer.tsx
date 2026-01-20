@@ -10,11 +10,13 @@ import {
   RefreshCw,
   Cpu,
   ShieldCheck,
-  Zap
+  Zap,
+  X
 } from 'lucide-react'
 import clsx from 'clsx'
 import { API_URL, TEST_USER_ID } from '@/lib/constants'
 import { supabase } from '@/lib/supabase'
+import { Button } from '@/components/ui/button'
 
 // --- Types ---
 interface Trade {
@@ -179,7 +181,12 @@ export default function PortfolioOptimizer({ positions, onOptimizationComplete }
         </div>
 
         <div className="flex items-center gap-4 flex-wrap justify-end">
-             <button onClick={runDiagnostics} className="text-[10px] font-mono text-muted-foreground hover:text-indigo-600 dark:hover:text-indigo-400 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500 rounded">
+             <button
+               onClick={runDiagnostics}
+               className="text-[10px] font-mono text-muted-foreground hover:text-indigo-600 dark:hover:text-indigo-400 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500 rounded"
+               aria-label="Run system diagnostics"
+               title="Run system diagnostics"
+             >
                 TEST_CORE_SYSTEM
              </button>
 
@@ -358,12 +365,14 @@ export default function PortfolioOptimizer({ positions, onOptimizationComplete }
               </div>
             </div>
 
-             <button
+            <Button
+                variant="outline"
                 onClick={handleOptimize}
-                className="w-full py-3 mt-2 text-xs font-medium text-slate-400 hover:text-indigo-600 border border-transparent hover:border-indigo-100 rounded-lg transition-all"
-             >
+                className="w-full mt-2"
+            >
+                <RefreshCw className="w-3 h-3 mr-2" />
                 Re-run Optimization Model
-             </button>
+            </Button>
           </div>
         )}
       </div>
@@ -379,7 +388,14 @@ export default function PortfolioOptimizer({ positions, onOptimizationComplete }
           >
              <div className="flex justify-between items-center mb-6">
                 <h3 className="font-bold text-lg text-slate-800">System Diagnostics</h3>
-                <button onClick={() => setShowDiag(false)} className="text-slate-400 hover:text-slate-600">Close</button>
+                <Button
+                    variant="ghost"
+                    size="icon"
+                    onClick={() => setShowDiag(false)}
+                    aria-label="Close diagnostics"
+                >
+                    <X className="w-4 h-4" />
+                </Button>
              </div>
 
              {isDiagLoading ? (

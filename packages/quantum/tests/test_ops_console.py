@@ -10,7 +10,7 @@ Tests:
 
 import pytest
 from unittest.mock import MagicMock, patch
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 
 from packages.quantum.ops_endpoints import (
     OpsControlState,
@@ -603,3 +603,366 @@ class TestMarketFreshnessWithMock:
                     assert item.status == "OK"
                     assert item.freshness_ms == 5000
                     assert item.score == 100
+
+
+# =============================================================================
+# Phase 1 Gap-Closure Tests: ops_health_service
+# =============================================================================
+
+from packages.quantum.services.ops_health_service import (
+    DataFreshnessResult,
+    ExpectedJob,
+    compute_data_freshness,
+    get_expected_jobs,
+    get_recent_failures,
+    get_suggestions_stats,
+    send_ops_alert,
+    DATA_STALE_THRESHOLD_MINUTES,
+)
+
+
+class TestComputeDataFreshness:
+    """Tests for compute_data_freshness function."""
+
+    def test_freshness_from_job_runs_fresh(self):
+        """Returns fresh data when recent job_runs exist."""
+        mock_client = MagicMock()
+
+        # Mock job_runs query returning recent success
+        mock_now = datetime.now(timezone.utc)
+        recent_time = (mock_now - timedelta(minutes=5)).isoformat()
+
+        mock_client.table.return_value.select.return_value.in_.return_value.eq.return_value.order.return_value.limit.return_value.execute.return_value = MagicMock(
+            data=[{"finished_at": recent_time, "job_name": "suggestions_close"}]
+        )
+
+        result = compute_data_freshness(mock_client)
+
+        assert result.is_stale is False
+        assert result.source == "job_runs"
+        assert result.as_of is not None
+        assert result.age_seconds < 600  # Less than 10 minutes
+
+    def test_freshness_from_job_runs_stale(self):
+        """Returns stale when job_runs are old."""
+        mock_client = MagicMock()
+
+        # Mock job_runs query returning old success (> 30 min)
+        mock_now = datetime.now(timezone.utc)
+        old_time = (mock_now - timedelta(minutes=60)).isoformat()
+
+        mock_client.table.return_value.select.return_value.in_.return_value.eq.return_value.order.return_value.limit.return_value.execute.return_value = MagicMock(
+            data=[{"finished_at": old_time, "job_name": "suggestions_open"}]
+        )
+
+        result = compute_data_freshness(mock_client)
+
+        assert result.is_stale is True
+        assert result.source == "job_runs"
+        assert result.reason is not None
+
+    def test_freshness_fallback_to_trade_suggestions(self):
+        """Falls back to trade_suggestions when no job_runs."""
+        mock_client = MagicMock()
+
+        # Mock job_runs returning empty
+        mock_job_runs = MagicMock()
+        mock_job_runs.data = []
+
+        # Mock trade_suggestions returning recent data
+        mock_now = datetime.now(timezone.utc)
+        recent_time = (mock_now - timedelta(minutes=10)).isoformat()
+        mock_suggestions = MagicMock()
+        mock_suggestions.data = [{"created_at": recent_time}]
+
+        def table_side_effect(name):
+            mock_table = MagicMock()
+            if name == "job_runs":
+                mock_table.select.return_value.in_.return_value.eq.return_value.order.return_value.limit.return_value.execute.return_value = mock_job_runs
+            else:
+                mock_table.select.return_value.order.return_value.limit.return_value.execute.return_value = mock_suggestions
+            return mock_table
+
+        mock_client.table.side_effect = table_side_effect
+
+        result = compute_data_freshness(mock_client)
+
+        assert result.source == "trade_suggestions"
+        assert result.is_stale is False
+
+    def test_freshness_no_data_source_found(self):
+        """Returns stale with reason when no data sources found."""
+        mock_client = MagicMock()
+
+        # Mock both queries returning empty
+        mock_empty = MagicMock()
+        mock_empty.data = []
+
+        mock_client.table.return_value.select.return_value.in_.return_value.eq.return_value.order.return_value.limit.return_value.execute.return_value = mock_empty
+        mock_client.table.return_value.select.return_value.order.return_value.limit.return_value.execute.return_value = mock_empty
+
+        result = compute_data_freshness(mock_client)
+
+        assert result.is_stale is True
+        assert result.source == "none"
+        assert result.reason == "no_data_source_found"
+        assert result.as_of is None
+
+
+class TestGetExpectedJobs:
+    """Tests for get_expected_jobs function."""
+
+    def test_job_ok_when_recent(self):
+        """Returns ok status when job ran recently."""
+        mock_client = MagicMock()
+
+        mock_now = datetime.now(timezone.utc)
+        recent_time = (mock_now - timedelta(hours=2)).isoformat()
+
+        mock_client.table.return_value.select.return_value.eq.return_value.eq.return_value.order.return_value.limit.return_value.execute.return_value = MagicMock(
+            data=[{"finished_at": recent_time, "status": "succeeded"}]
+        )
+
+        results = get_expected_jobs(mock_client)
+
+        # Should have all expected jobs
+        assert len(results) == 4
+        suggestions_close = next(j for j in results if j.name == "suggestions_close")
+        assert suggestions_close.status == "ok"
+
+    def test_job_late_when_stale(self):
+        """Returns late status when daily job > 26 hours old."""
+        mock_client = MagicMock()
+
+        mock_now = datetime.now(timezone.utc)
+        old_time = (mock_now - timedelta(hours=30)).isoformat()
+
+        mock_client.table.return_value.select.return_value.eq.return_value.eq.return_value.order.return_value.limit.return_value.execute.return_value = MagicMock(
+            data=[{"finished_at": old_time, "status": "succeeded"}]
+        )
+
+        results = get_expected_jobs(mock_client)
+
+        suggestions_close = next(j for j in results if j.name == "suggestions_close")
+        assert suggestions_close.status == "late"
+
+    def test_job_never_run(self):
+        """Returns never_run when no successful runs exist."""
+        mock_client = MagicMock()
+
+        mock_client.table.return_value.select.return_value.eq.return_value.eq.return_value.order.return_value.limit.return_value.execute.return_value = MagicMock(
+            data=[]
+        )
+
+        results = get_expected_jobs(mock_client)
+
+        for job in results:
+            assert job.status == "never_run"
+            assert job.last_success_at is None
+
+
+class TestSendOpsAlert:
+    """Tests for send_ops_alert function."""
+
+    def test_alert_skipped_when_no_webhook(self):
+        """Returns False when no webhook URL configured."""
+        with patch.dict("os.environ", {"OPS_ALERT_WEBHOOK_URL": ""}, clear=False):
+            result = send_ops_alert("test_alert", "Test message", webhook_url=None)
+            assert result is False
+
+    def test_alert_sent_successfully(self):
+        """Returns True when webhook responds with 200."""
+        import requests as req_module
+        with patch.object(req_module, "post") as mock_post:
+            mock_post.return_value.status_code = 200
+
+            result = send_ops_alert(
+                "data_stale",
+                "Test alert message",
+                {"detail": "test"},
+                webhook_url="https://hooks.example.com/test"
+            )
+
+            assert result is True
+            mock_post.assert_called_once()
+
+    def test_alert_handles_webhook_failure(self):
+        """Returns False and doesn't raise when webhook fails."""
+        import requests as req_module
+        with patch.object(req_module, "post") as mock_post:
+            mock_post.side_effect = Exception("Connection failed")
+
+            result = send_ops_alert(
+                "job_late",
+                "Test alert",
+                webhook_url="https://hooks.example.com/test"
+            )
+
+            assert result is False  # Graceful failure
+
+
+class TestOpsHealthCheckHandler:
+    """Tests for ops_health_check job handler."""
+
+    def test_handler_returns_expected_structure(self):
+        """Handler returns dict with ok, issues_found, alerts_sent, health_snapshot."""
+        from packages.quantum.jobs.handlers.ops_health_check import run
+
+        with patch("packages.quantum.jobs.handlers.ops_health_check.get_admin_client") as mock_client:
+            mock_client.return_value = MagicMock()
+
+            # Mock all service calls
+            with patch("packages.quantum.jobs.handlers.ops_health_check.compute_data_freshness") as mock_fresh:
+                mock_fresh.return_value = DataFreshnessResult(
+                    is_stale=False,
+                    as_of=datetime.now(timezone.utc),
+                    age_seconds=100,
+                    reason=None,
+                    source="job_runs"
+                )
+
+                with patch("packages.quantum.jobs.handlers.ops_health_check.get_expected_jobs") as mock_jobs:
+                    mock_jobs.return_value = [
+                        ExpectedJob("suggestions_close", "daily", datetime.now(timezone.utc), "ok")
+                    ]
+
+                    with patch("packages.quantum.jobs.handlers.ops_health_check.get_recent_failures") as mock_fail:
+                        mock_fail.return_value = []
+
+                        with patch("packages.quantum.jobs.handlers.ops_health_check.get_suggestions_stats") as mock_stats:
+                            mock_stats.return_value = {"last_cycle_date": "2026-01-20", "count_last_cycle": 5}
+
+                            with patch("packages.quantum.jobs.handlers.ops_health_check.get_integrity_stats") as mock_int:
+                                mock_int.return_value = {"recent_incidents": 0, "last_incident_at": None}
+
+                                with patch("packages.quantum.jobs.handlers.ops_health_check.AuditLogService"):
+                                    result = run({"timestamp": datetime.now().isoformat(), "force": False})
+
+                                    assert "ok" in result
+                                    assert "issues_found" in result
+                                    assert "alerts_sent" in result
+                                    assert "health_snapshot" in result
+                                    assert "timing_ms" in result
+
+    def test_handler_sends_alert_on_stale_data(self):
+        """Handler sends alert when data is stale."""
+        from packages.quantum.jobs.handlers.ops_health_check import run
+
+        with patch("packages.quantum.jobs.handlers.ops_health_check.get_admin_client") as mock_client:
+            mock_client.return_value = MagicMock()
+
+            with patch("packages.quantum.jobs.handlers.ops_health_check.compute_data_freshness") as mock_fresh:
+                mock_fresh.return_value = DataFreshnessResult(
+                    is_stale=True,
+                    as_of=datetime.now(timezone.utc) - timedelta(hours=1),
+                    age_seconds=3600,
+                    reason="Data too old",
+                    source="job_runs"
+                )
+
+                with patch("packages.quantum.jobs.handlers.ops_health_check.get_expected_jobs") as mock_jobs:
+                    mock_jobs.return_value = []
+
+                    with patch("packages.quantum.jobs.handlers.ops_health_check.get_recent_failures") as mock_fail:
+                        mock_fail.return_value = []
+
+                        with patch("packages.quantum.jobs.handlers.ops_health_check.get_suggestions_stats") as mock_stats:
+                            mock_stats.return_value = {"last_cycle_date": None, "count_last_cycle": 0}
+
+                            with patch("packages.quantum.jobs.handlers.ops_health_check.get_integrity_stats") as mock_int:
+                                mock_int.return_value = {"recent_incidents": 0, "last_incident_at": None}
+
+                                with patch("packages.quantum.jobs.handlers.ops_health_check.send_ops_alert") as mock_alert:
+                                    mock_alert.return_value = True
+
+                                    with patch("packages.quantum.jobs.handlers.ops_health_check.AuditLogService"):
+                                        result = run({"timestamp": datetime.now().isoformat()})
+
+                                        # Verify alert was attempted for stale data
+                                        mock_alert.assert_called()
+                                        assert "data_stale" in result["alerts_sent"]
+
+
+class TestPauseAuditEvent:
+    """Test that pause/resume writes audit events."""
+
+    def test_pause_code_contains_audit_call(self):
+        """Verify ops_endpoints pause function contains audit logging code."""
+        import inspect
+        import packages.quantum.ops_endpoints as ops_mod
+
+        # Get the source of the pause endpoint
+        source = inspect.getsource(ops_mod.set_pause_state)
+
+        # Verify audit logging code is present
+        assert "AuditLogService" in source
+        assert "log_audit_event" in source
+        assert "ops." in source  # ops.trading.paused or similar event name
+
+
+class TestOpsHealthEndpoint:
+    """Tests for GET /ops/health endpoint."""
+
+    def test_ops_health_response_model_structure(self):
+        """OpsHealthResponse has all required fields."""
+        from packages.quantum.ops_endpoints import (
+            OpsHealthResponse,
+            DataFreshnessResponse,
+            JobsResponse,
+            ExpectedJobResponse,
+            IntegrityResponse,
+            SuggestionsStatsResponse,
+        )
+
+        # Create a valid response using Pydantic models
+        response = OpsHealthResponse(
+            now=datetime.now(timezone.utc),
+            paused=False,
+            pause_reason=None,
+            data_freshness=DataFreshnessResponse(
+                is_stale=False,
+                stale_reason=None,
+                as_of=datetime.now(timezone.utc),
+                age_seconds=100,
+                source="job_runs"
+            ),
+            jobs=JobsResponse(
+                expected=[ExpectedJobResponse(name="suggestions_close", cadence="daily", last_success_at=None, status="ok")],
+                recent_failures=[]
+            ),
+            integrity=IntegrityResponse(recent_incidents=0, last_incident_at=None),
+            suggestions=SuggestionsStatsResponse(last_cycle_date="2026-01-20", count_last_cycle=5)
+        )
+
+        assert response.paused is False
+        assert response.data_freshness.is_stale is False
+        assert len(response.jobs.expected) == 1
+
+    def test_ops_health_returns_graceful_nulls(self):
+        """OpsHealthResponse handles null values gracefully."""
+        from packages.quantum.ops_endpoints import (
+            OpsHealthResponse,
+            DataFreshnessResponse,
+            JobsResponse,
+            IntegrityResponse,
+            SuggestionsStatsResponse,
+        )
+
+        response = OpsHealthResponse(
+            now=datetime.now(timezone.utc),
+            paused=True,
+            pause_reason="Testing",
+            data_freshness=DataFreshnessResponse(
+                is_stale=True,
+                stale_reason="no_data_source_found",
+                as_of=None,
+                age_seconds=None,
+                source="none"
+            ),
+            jobs=JobsResponse(expected=[], recent_failures=[]),
+            integrity=IntegrityResponse(recent_incidents=0, last_incident_at=None),
+            suggestions=SuggestionsStatsResponse(last_cycle_date=None, count_last_cycle=0)
+        )
+
+        assert response.data_freshness.as_of is None
+        assert response.suggestions.last_cycle_date is None

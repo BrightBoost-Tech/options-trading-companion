@@ -178,6 +178,26 @@ class StrategyAutotunePayload(TaskPayloadBase):
 
 
 # =============================================================================
+# Ops Tasks
+# =============================================================================
+
+class OpsHealthCheckPayload(TaskPayloadBase):
+    """
+    Payload for /tasks/ops/health_check.
+
+    Scheduled ops health check that:
+    - Computes data freshness
+    - Checks job status
+    - Sends alerts for issues
+    - Writes audit events
+    """
+    force: bool = Field(
+        default=False,
+        description="Force run even if recently completed"
+    )
+
+
+# =============================================================================
 # Scope Constants
 # =============================================================================
 
@@ -192,6 +212,7 @@ TASK_SCOPES = {
     "/tasks/suggestions/open": "tasks:suggestions_open",
     "/tasks/learning/ingest": "tasks:learning_ingest",
     "/tasks/strategy/autotune": "tasks:strategy_autotune",
+    "/tasks/ops/health_check": "tasks:ops_health_check",
 }
 
 

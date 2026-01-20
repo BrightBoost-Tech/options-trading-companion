@@ -27,6 +27,7 @@ Supported Tasks:
     weekly_report       - POST /tasks/weekly-report
     validation_eval     - POST /tasks/validation/eval
     strategy_autotune   - POST /tasks/strategy/autotune
+    ops_health_check    - POST /tasks/ops/health_check (every 30 min)
 """
 
 import argparse
@@ -94,6 +95,11 @@ TASKS = {
         "path": "/tasks/strategy/autotune",
         "scope": "tasks:strategy_autotune",
         "description": "Auto-tune strategy parameters",
+    },
+    "ops_health_check": {
+        "path": "/tasks/ops/health_check",
+        "scope": "tasks:ops_health_check",
+        "description": "Run ops health check (every 30 min)",
     },
 }
 

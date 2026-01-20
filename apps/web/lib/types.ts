@@ -394,3 +394,45 @@ export interface OpsDashboardState {
   pipeline: Record<string, PipelineJobState>;
   health: HealthBlock;
 }
+
+// --- GET /ops/health Response Types ---
+
+export interface OpsDataFreshness {
+  is_stale: boolean;
+  stale_reason?: string | null;
+  as_of?: string | null;
+  age_seconds?: number | null;
+  source: string;  // "job_runs" | "trade_suggestions" | "none"
+}
+
+export interface OpsExpectedJob {
+  name: string;
+  cadence: string;  // "daily" | "weekly"
+  last_success_at?: string | null;
+  status: string;  // "ok" | "late" | "never_run" | "error"
+}
+
+export interface OpsJobsStatus {
+  expected: OpsExpectedJob[];
+  recent_failures: Array<Record<string, any>>;
+}
+
+export interface OpsIntegrity {
+  recent_incidents: number;
+  last_incident_at?: string | null;
+}
+
+export interface OpsSuggestionsStats {
+  last_cycle_date?: string | null;
+  count_last_cycle: number;
+}
+
+export interface OpsHealthResponse {
+  now: string;
+  paused: boolean;
+  pause_reason?: string | null;
+  data_freshness: OpsDataFreshness;
+  jobs: OpsJobsStatus;
+  integrity: OpsIntegrity;
+  suggestions: OpsSuggestionsStats;
+}

@@ -17,6 +17,7 @@ from packages.quantum.public_tasks_models import (
     SuggestionsOpenPayload,
     LearningIngestPayload,
     StrategyAutotunePayload,
+    OpsHealthCheckPayload,
     DEFAULT_STRATEGY_NAME,
 )
 
@@ -348,5 +349,45 @@ async def task_strategy_autotune(
     return enqueue_job_run(
         job_name=job_name,
         idempotency_key=f"{week}-autotune",
+        payload=job_payload
+    )
+
+
+# =============================================================================
+# Ops Tasks
+# =============================================================================
+
+
+@router.post("/ops/health_check", status_code=202)
+async def task_ops_health_check(
+    payload: OpsHealthCheckPayload = Body(default_factory=OpsHealthCheckPayload),
+    auth: TaskSignatureResult = Depends(verify_task_signature("tasks:ops_health_check"))
+):
+    """
+    Triggers ops health check job.
+
+    Auth: Requires v4 HMAC signature with scope 'tasks:ops_health_check'.
+
+    This task:
+    1. Computes full ops health status (data freshness, job status)
+    2. Sends alerts for any issues (data stale, job late, failures)
+    3. Writes audit event with health snapshot
+
+    Payload options:
+    - force: Force run even if recently completed (default: false)
+    """
+    now = datetime.now()
+    job_name = "ops_health_check"
+    # Once per hour max (idempotency by hour)
+    idempotency_key = now.strftime("%Y-%m-%d-%H")
+
+    job_payload = {
+        "timestamp": now.isoformat(),
+        "force": payload.force,
+    }
+
+    return enqueue_job_run(
+        job_name=job_name,
+        idempotency_key=idempotency_key,
         payload=job_payload
     )

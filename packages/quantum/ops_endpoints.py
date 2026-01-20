@@ -7,6 +7,7 @@ Security: These endpoints require admin access (JWT with admin role or ADMIN_USE
 
 Endpoints:
 - GET /ops/dashboard_state - Single-request dashboard data for mobile
+- GET /ops/health - Operational health status (spec-required shape)
 - POST /ops/pause - Toggle pause state
 - POST /ops/mode - Change operating mode (paper/micro_live/live)
 """
@@ -14,8 +15,12 @@ Endpoints:
 from fastapi import APIRouter, Depends, HTTPException, Request, Body
 from typing import Optional, Dict, Any, List
 from pydantic import BaseModel
-from datetime import datetime
+from datetime import datetime, timezone
 import os
+import uuid
+import logging
+
+logger = logging.getLogger(__name__)
 
 from packages.quantum.security.secrets_provider import SecretsProvider
 from packages.quantum.security.admin_auth import (
@@ -96,6 +101,59 @@ class PauseRequest(BaseModel):
 
 class ModeRequest(BaseModel):
     mode: str  # paper, micro_live, live
+
+
+# ---------------------------------------------------------------------------
+# OpsHealth Response Models (spec-required shape)
+# ---------------------------------------------------------------------------
+
+class DataFreshnessResponse(BaseModel):
+    """Data freshness assessment."""
+    is_stale: bool
+    stale_reason: Optional[str] = None
+    as_of: Optional[datetime] = None
+    age_seconds: Optional[float] = None
+    source: str  # "job_runs" | "trade_suggestions" | "none"
+
+
+class ExpectedJobResponse(BaseModel):
+    """Expected job status."""
+    name: str
+    cadence: str  # "daily" | "weekly"
+    last_success_at: Optional[datetime] = None
+    status: str  # "ok" | "late" | "never_run" | "error"
+
+
+class JobsResponse(BaseModel):
+    """Jobs status block."""
+    expected: List[ExpectedJobResponse]
+    recent_failures: List[Dict[str, Any]]
+
+
+class IntegrityResponse(BaseModel):
+    """Integrity incident tracking."""
+    recent_incidents: int
+    last_incident_at: Optional[datetime] = None
+
+
+class SuggestionsStatsResponse(BaseModel):
+    """Suggestion generation statistics."""
+    last_cycle_date: Optional[str] = None
+    count_last_cycle: int
+
+
+class OpsHealthResponse(BaseModel):
+    """
+    Full operational health response.
+    Spec-required shape for monitoring.
+    """
+    now: datetime
+    paused: bool
+    pause_reason: Optional[str] = None
+    data_freshness: DataFreshnessResponse
+    jobs: JobsResponse
+    integrity: IntegrityResponse
+    suggestions: SuggestionsStatsResponse
 
 
 # ---------------------------------------------------------------------------
@@ -393,6 +451,85 @@ async def get_dashboard_state(
     )
 
 
+@router.get("/health", response_model=OpsHealthResponse)
+async def get_ops_health(
+    request: Request,
+    client: Client = Depends(get_admin_client),
+    admin: AdminAuthResult = Depends(verify_admin_access)
+):
+    """
+    Operational health status for monitoring.
+
+    Returns spec-required shape with:
+    - now: Current timestamp
+    - paused: Trading pause state
+    - data_freshness: Data staleness assessment
+    - jobs: Expected job status and recent failures
+    - integrity: Audit log incident tracking
+    - suggestions: Last cycle statistics
+
+    Auth: Requires admin access.
+    """
+    from packages.quantum.services.ops_health_service import (
+        compute_data_freshness,
+        get_expected_jobs,
+        get_recent_failures,
+        get_suggestions_stats,
+        get_integrity_stats,
+    )
+
+    # 1. Get ops control state
+    control_row = _get_ops_control(client)
+
+    # 2. Compute data freshness
+    freshness = compute_data_freshness(client)
+
+    # 3. Get expected jobs status
+    expected_jobs = get_expected_jobs(client)
+
+    # 4. Get recent failures
+    recent_failures = get_recent_failures(client)
+
+    # 5. Get integrity stats
+    integrity = get_integrity_stats(client)
+
+    # 6. Get suggestions stats
+    suggestions = get_suggestions_stats(client)
+
+    return OpsHealthResponse(
+        now=datetime.now(timezone.utc),
+        paused=control_row.get("paused", True),
+        pause_reason=control_row.get("pause_reason"),
+        data_freshness=DataFreshnessResponse(
+            is_stale=freshness.is_stale,
+            stale_reason=freshness.reason,
+            as_of=freshness.as_of,
+            age_seconds=freshness.age_seconds,
+            source=freshness.source
+        ),
+        jobs=JobsResponse(
+            expected=[
+                ExpectedJobResponse(
+                    name=j.name,
+                    cadence=j.cadence,
+                    last_success_at=j.last_success_at,
+                    status=j.status
+                )
+                for j in expected_jobs
+            ],
+            recent_failures=recent_failures
+        ),
+        integrity=IntegrityResponse(
+            recent_incidents=integrity.get("recent_incidents", 0),
+            last_incident_at=integrity.get("last_incident_at")
+        ),
+        suggestions=SuggestionsStatsResponse(
+            last_cycle_date=suggestions.get("last_cycle_date"),
+            count_last_cycle=suggestions.get("count_last_cycle", 0)
+        )
+    )
+
+
 @router.post("/pause", response_model=OpsControlState)
 async def set_pause_state(
     request: Request,
@@ -418,7 +555,7 @@ async def set_pause_state(
         .eq("key", "global") \
         .execute()
 
-    # Audit log the mutation
+    # Audit log the mutation (stdout)
     log_admin_mutation(
         request=request,
         user_id=admin.user_id,
@@ -430,6 +567,31 @@ async def set_pause_state(
             "reason": body.reason,
         }
     )
+
+    # Write immutable audit event to decision_audit_events
+    try:
+        from packages.quantum.observability.audit_log_service import AuditLogService
+        audit_service = AuditLogService(client)
+        trace_id = str(uuid.uuid4())
+        event_name = "ops.pause.toggled" if body.paused else "ops.pause.resumed"
+
+        audit_service.log_audit_event(
+            user_id=admin.user_id,
+            trace_id=trace_id,
+            event_name=event_name,
+            payload={
+                "paused": body.paused,
+                "reason": body.reason,
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+            },
+            suggestion_id=None,
+            strategy=None,
+            regime=None
+        )
+        logger.info(f"[OPS] Audit event written for pause toggle: {event_name}")
+    except Exception as e:
+        # Log but don't fail the request
+        logger.warning(f"Failed to write pause audit event: {e}")
 
     # Fetch updated row
     updated = _get_ops_control(client)

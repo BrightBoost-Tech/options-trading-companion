@@ -3,12 +3,34 @@ from datetime import datetime, timezone, timedelta
 from typing import List, Dict, Any, Optional, TypedDict
 import logging
 import statistics
+import hashlib
 
 from packages.quantum.execution.transaction_cost_model import TransactionCostModel as V3TCM
 from packages.quantum.models import TradeTicket, OptionLeg
 from packages.quantum.strategy_profiles import CostModelConfig
 
 logger = logging.getLogger(__name__)
+
+
+def _build_legs_fingerprint(order_json: Optional[Dict]) -> Optional[str]:
+    """
+    Build a deterministic fingerprint from order legs for position grouping.
+    Returns SHA256 hash of sorted leg symbols.
+    """
+    if not order_json:
+        return None
+
+    legs = order_json.get("legs", [])
+    if not legs:
+        return None
+
+    # Extract symbols and sort for deterministic fingerprint
+    symbols = sorted([leg.get("symbol", "") for leg in legs if leg.get("symbol")])
+    if not symbols:
+        return None
+
+    fingerprint_str = "|".join(symbols)
+    return hashlib.sha256(fingerprint_str.encode()).hexdigest()[:16]
 
 class ExecutionDragStats(TypedDict):
     n: int
@@ -142,7 +164,129 @@ class ExecutionService:
                     "trade_execution_id": execution["id"]
                 }).eq("id", suggestion_id).execute()
 
+        # 6. Record fill in v4 position ledger (best-effort, non-blocking)
+        if execution:
+            self._record_to_position_ledger(
+                user_id=user_id,
+                execution=execution,
+                suggestion=suggestion,
+                fill_details=fill_details,
+            )
+
         return execution
+
+    def _record_to_position_ledger(
+        self,
+        user_id: str,
+        execution: Dict[str, Any],
+        suggestion: Optional[Dict[str, Any]],
+        fill_details: Dict[str, Any],
+    ) -> None:
+        """
+        Record fill to v4 position ledger (best-effort).
+
+        Wraps PositionLedgerService.record_fill() with error handling
+        to ensure ledger failures don't break execution registration.
+        """
+        try:
+            from packages.quantum.services.position_ledger_service import PositionLedgerService
+
+            ledger = PositionLedgerService(self.supabase)
+
+            # Build fill_data from execution and fill_details
+            symbol = execution.get("symbol", "UNKNOWN")
+            order_json = execution.get("order_json") or (suggestion.get("order_json") if suggestion else None)
+
+            # Extract option details from order_json if available
+            right = "S"  # Default to stock
+            strike = None
+            expiry = None
+            multiplier = 100
+
+            if order_json and order_json.get("legs"):
+                # For multi-leg, use first leg's details (simplified)
+                first_leg = order_json["legs"][0]
+                right = first_leg.get("right", "S")
+                strike = first_leg.get("strike")
+                expiry = first_leg.get("expiry")
+                multiplier = first_leg.get("multiplier", 100)
+
+            # Determine side from fill_details or order_json
+            side = fill_details.get("side", "buy")
+            if not fill_details.get("side") and order_json:
+                # Infer from first leg action
+                first_leg_action = order_json.get("legs", [{}])[0].get("action", "")
+                if first_leg_action.lower() in ["sell", "sell_to_open", "sell_to_close"]:
+                    side = "sell"
+                else:
+                    side = "buy"
+
+            fill_data = {
+                "symbol": symbol,
+                "underlying": self._extract_underlying(symbol),
+                "side": side,
+                "qty": int(fill_details.get("quantity", 1)),
+                "price": float(fill_details.get("fill_price", 0)),
+                "fee": float(fill_details.get("fees", 0)),
+                "filled_at": execution.get("timestamp"),
+                "broker_exec_id": fill_details.get("broker_exec_id"),
+                "right": right,
+                "strike": strike,
+                "expiry": expiry,
+                "multiplier": multiplier,
+            }
+
+            # Build context from suggestion fields
+            context = {
+                "trace_id": execution.get("trace_id"),
+                "legs_fingerprint": _build_legs_fingerprint(order_json),
+                "strategy_key": suggestion.get("strategy_key") if suggestion else None,
+                "strategy": execution.get("strategy"),
+                "window": execution.get("window"),
+                "regime": execution.get("regime"),
+                "model_version": execution.get("model_version"),
+                "features_hash": execution.get("features_hash"),
+                "source": "LIVE",
+            }
+
+            result = ledger.record_fill(
+                user_id=user_id,
+                trade_execution_id=execution.get("id"),
+                fill_data=fill_data,
+                context=context,
+            )
+
+            if result.get("success"):
+                logger.info(
+                    f"[LEDGER] Fill recorded: exec={execution.get('id')}, "
+                    f"group={result.get('group_id')}, status={result.get('group_status')}"
+                )
+            else:
+                logger.warning(
+                    f"[LEDGER] Fill recording failed: exec={execution.get('id')}, "
+                    f"error={result.get('error')}"
+                )
+
+        except Exception as e:
+            # Best-effort: log error but don't fail execution registration
+            logger.error(f"[LEDGER] Error recording fill to ledger: {e}")
+
+    def _extract_underlying(self, symbol: str) -> str:
+        """Extract underlying from option symbol or return as-is for stock."""
+        if not symbol:
+            return "UNKNOWN"
+
+        # Options symbols are typically like "AAPL240119C00150000"
+        if len(symbol) > 10 and any(c.isdigit() for c in symbol):
+            underlying = ""
+            for c in symbol:
+                if c.isalpha():
+                    underlying += c
+                else:
+                    break
+            return underlying or symbol
+
+        return symbol
 
     def get_batch_execution_drag_stats(
         self,

@@ -10,9 +10,10 @@ from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 import logging
 import re
-from typing import List, Dict, Optional, Any, Union
+from typing import List, Dict, Optional, Any, Union, Tuple
 from datetime import datetime, timedelta
 import concurrent.futures
+from pydantic import BaseModel
 
 from packages.quantum.services.market_data_cache import get_market_data_cache
 from packages.quantum.services.cache_key_builder import normalize_symbol
@@ -20,6 +21,165 @@ from packages.quantum.analytics.factors import calculate_iv_rank, calculate_tren
 
 # Use a module-level logger
 logger = logging.getLogger(__name__)
+
+# =============================================================================
+# V4 Configuration (env-configurable with safe defaults)
+# =============================================================================
+MARKETDATA_MAX_FRESHNESS_MS = int(os.getenv("MARKETDATA_MAX_FRESHNESS_MS", "60000"))
+MARKETDATA_MIN_QUALITY_SCORE = int(os.getenv("MARKETDATA_MIN_QUALITY_SCORE", "60"))
+MARKETDATA_WIDE_SPREAD_PCT = float(os.getenv("MARKETDATA_WIDE_SPREAD_PCT", "0.10"))
+
+
+# =============================================================================
+# V4 Canonical Models (Pydantic)
+# =============================================================================
+class TruthQuoteV4(BaseModel):
+    """Canonical quote structure for V4 snapshots."""
+    bid: Optional[float] = None
+    ask: Optional[float] = None
+    mid: Optional[float] = None
+    last: Optional[float] = None
+    bid_size: Optional[int] = None
+    ask_size: Optional[int] = None
+
+
+class TruthTimestampsV4(BaseModel):
+    """Timestamp metadata for V4 snapshots."""
+    source_ts: Optional[int] = None  # Provider timestamp (ms)
+    received_ts: int                  # When we received it (ms)
+
+
+class TruthQualityV4(BaseModel):
+    """Quality assessment for V4 snapshots."""
+    quality_score: int                    # 0-100
+    issues: List[str]                     # List of issue codes
+    is_stale: bool
+    freshness_ms: Optional[float] = None  # received_ts - source_ts
+
+
+class TruthSourceV4(BaseModel):
+    """Source metadata for V4 snapshots."""
+    provider: str = "polygon"
+    endpoint: str = "/v3/snapshot"
+    request_id: Optional[str] = None
+
+
+class TruthSnapshotV4(BaseModel):
+    """
+    Canonical V4 market data snapshot with quality scoring.
+    Used for typed, quality-aware market data access.
+    """
+    symbol_canonical: str
+    quote: TruthQuoteV4
+    timestamps: TruthTimestampsV4
+    quality: TruthQualityV4
+    source: TruthSourceV4
+    # Optional fields
+    iv: Optional[float] = None
+    greeks: Optional[dict] = None
+    open_interest: Optional[int] = None
+    volume: Optional[int] = None
+    day: Optional[dict] = None
+
+
+# =============================================================================
+# V4 Quality Scoring Functions
+# =============================================================================
+def compute_quote_quality(
+    quote: TruthQuoteV4,
+    freshness_ms: Optional[float],
+    max_freshness_ms: int = MARKETDATA_MAX_FRESHNESS_MS,
+    wide_spread_pct: float = MARKETDATA_WIDE_SPREAD_PCT
+) -> TruthQualityV4:
+    """
+    Deterministic rule-based quality scoring for market quotes.
+
+    Returns quality_score (0-100), issues list, and is_stale flag.
+
+    Scoring rules:
+    - Crossed market (ask < bid): score=0, issue="crossed_market"
+    - Missing bid/ask: score-=40, issue="missing_quote_fields"
+    - Wide spread (> threshold): score-=20, issue="wide_spread"
+    - Stale timestamp: score-=30, issue="stale_quote"
+    - Missing timestamp: is_stale=True, issue="missing_timestamp"
+    """
+    score = 100
+    issues: List[str] = []
+
+    # Check 1: Crossed market (ask < bid) - fatal quality issue
+    if quote.bid is not None and quote.ask is not None:
+        if quote.ask < quote.bid:
+            score = 0
+            issues.append("crossed_market")
+
+    # Check 2: Missing bid/ask
+    if quote.bid is None or quote.ask is None:
+        score -= 40
+        issues.append("missing_quote_fields")
+
+    # Check 3: Wide spread (only if we have valid mid)
+    if quote.mid and quote.bid and quote.ask and quote.mid > 0:
+        spread_pct = (quote.ask - quote.bid) / quote.mid
+        if spread_pct > wide_spread_pct:
+            score -= 20
+            issues.append("wide_spread")
+
+    # Check 4: Staleness
+    is_stale = False
+    if freshness_ms is None:
+        issues.append("missing_timestamp")
+        is_stale = True  # Conservative: treat missing timestamp as stale
+    elif freshness_ms > max_freshness_ms:
+        is_stale = True
+        issues.append("stale_quote")
+        score -= 30
+
+    # Clamp score to valid range
+    score = max(0, min(100, score))
+
+    return TruthQualityV4(
+        quality_score=score,
+        issues=issues,
+        is_stale=is_stale,
+        freshness_ms=freshness_ms
+    )
+
+
+def check_snapshots_executable(
+    snapshots: Dict[str, TruthSnapshotV4],
+    required_symbols: List[str],
+    min_quality_score: int = MARKETDATA_MIN_QUALITY_SCORE
+) -> Tuple[bool, List[str]]:
+    """
+    Checks if all required symbols have executable-quality snapshots.
+
+    Returns:
+        (is_executable, list_of_issues)
+
+    A snapshot is NOT executable if:
+    - Missing from the snapshots dict
+    - is_stale is True
+    - quality_score < min_quality_score
+    """
+    issues: List[str] = []
+
+    for sym in required_symbols:
+        snap = snapshots.get(sym)
+        if snap is None:
+            issues.append(f"{sym}: missing_snapshot")
+            continue
+
+        if snap.quality.is_stale:
+            issues.append(f"{sym}: stale_quote (freshness={snap.quality.freshness_ms}ms)")
+
+        if snap.quality.quality_score < min_quality_score:
+            issues.append(
+                f"{sym}: low_quality (score={snap.quality.quality_score}, "
+                f"issues={snap.quality.issues})"
+            )
+
+    return (len(issues) == 0, issues)
+
 
 class MarketDataTruthLayer:
     """
@@ -172,6 +332,98 @@ class MarketDataTruthLayer:
                     logger.error(f"Error fetching snapshot chunk: {e}")
 
         return results
+
+    def snapshot_many_v4(self, tickers: List[str]) -> Dict[str, TruthSnapshotV4]:
+        """
+        V4 API: Returns canonical TruthSnapshotV4 objects with quality scoring.
+
+        This is the preferred method for quality-aware market data access.
+        Backward compatible: existing snapshot_many() unchanged.
+
+        Args:
+            tickers: List of ticker symbols to fetch
+
+        Returns:
+            Dict mapping ticker to TruthSnapshotV4 with quality scoring
+        """
+        # Get raw snapshots using existing method
+        raw_snapshots = self.snapshot_many(tickers)
+
+        v4_results: Dict[str, TruthSnapshotV4] = {}
+        received_ts = int(time.time() * 1000)
+
+        for ticker, raw in raw_snapshots.items():
+            quote_data = raw.get("quote", {})
+
+            # Build TruthQuoteV4
+            quote = TruthQuoteV4(
+                bid=quote_data.get("bid"),
+                ask=quote_data.get("ask"),
+                mid=quote_data.get("mid"),
+                last=quote_data.get("last"),
+                bid_size=quote_data.get("bid_size"),
+                ask_size=quote_data.get("ask_size"),
+            )
+
+            # Compute mid if missing but bid/ask present
+            if quote.mid is None and quote.bid is not None and quote.ask is not None:
+                quote = quote.model_copy(update={"mid": (quote.bid + quote.ask) / 2.0})
+
+            # Build timestamps
+            source_ts = raw.get("provider_ts")
+            if source_ts:
+                source_ts = self._normalize_timestamp_to_ms(source_ts)
+
+            timestamps = TruthTimestampsV4(
+                source_ts=source_ts,
+                received_ts=received_ts
+            )
+
+            # Compute freshness from raw staleness_ms or calculate from timestamps
+            freshness_ms = raw.get("staleness_ms")
+            if freshness_ms is None and source_ts:
+                freshness_ms = float(received_ts - source_ts)
+
+            # Compute quality
+            quality = compute_quote_quality(quote, freshness_ms)
+
+            # Build source metadata
+            source = TruthSourceV4(provider="polygon", endpoint="/v3/snapshot")
+
+            v4_results[ticker] = TruthSnapshotV4(
+                symbol_canonical=ticker,
+                quote=quote,
+                timestamps=timestamps,
+                quality=quality,
+                source=source,
+                iv=raw.get("iv"),
+                greeks=raw.get("greeks"),
+                day=raw.get("day"),
+                volume=raw.get("day", {}).get("v"),
+            )
+
+        return v4_results
+
+    def _normalize_timestamp_to_ms(self, ts: Optional[Union[int, float]]) -> Optional[int]:
+        """
+        Normalize timestamp to milliseconds.
+
+        Handles timestamps in nanoseconds, microseconds, milliseconds, or seconds.
+        """
+        if ts is None:
+            return None
+        try:
+            ts_val = float(ts)
+            if ts_val > 1e16:  # Nanoseconds (> 10^16)
+                return int(ts_val / 1e6)
+            elif ts_val > 1e14:  # Microseconds (> 10^14)
+                return int(ts_val / 1e3)
+            elif ts_val > 1e11:  # Already milliseconds (> 10^11)
+                return int(ts_val)
+            else:  # Seconds
+                return int(ts_val * 1000)
+        except (ValueError, TypeError):
+            return None
 
     def _parse_snapshot_item(self, item: Dict) -> Dict:
         """Parses a Polygon snapshot item into our canonical format."""

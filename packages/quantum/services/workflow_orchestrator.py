@@ -1,9 +1,13 @@
 from supabase import Client
 from datetime import datetime, timedelta, timezone
+from typing import Optional, Dict, TYPE_CHECKING
 import json
 import asyncio
 import os
 import sys
+
+if TYPE_CHECKING:
+    from packages.quantum.services.market_data_truth_layer import TruthSnapshotV4
 
 from .cash_service import CashService
 from .sizing_engine import calculate_sizing
@@ -731,7 +735,22 @@ def normalize_win_rate(value) -> tuple[float, float]:
         ratio = 1.0
     return ratio, ratio * 100.0
 
-def build_midday_order_json(cand: dict, contracts: int) -> dict:
+def build_midday_order_json(
+    cand: dict,
+    contracts: int,
+    leg_snapshots_v4: Optional[Dict[str, "TruthSnapshotV4"]] = None
+) -> dict:
+    """
+    Builds order JSON for midday suggestions.
+
+    Args:
+        cand: Candidate dict with legs, symbol, strategy, suggested_entry
+        contracts: Number of contracts
+        leg_snapshots_v4: Optional V4 snapshots for quality gating
+
+    Returns:
+        Order JSON dict. If quality gates fail, returns with status="NOT_EXECUTABLE".
+    """
     legs = cand.get("legs") or []
     leg_orders = []
 
@@ -753,12 +772,33 @@ def build_midday_order_json(cand: dict, contracts: int) -> dict:
     if cand.get("order_type_force_limit"):
         order_type = "limit"
 
+        # V4 Quality Gate: Check snapshots if provided
+        if leg_snapshots_v4:
+            leg_symbols = [leg.get("symbol") for leg in legs if leg.get("symbol")]
+            from packages.quantum.services.market_data_truth_layer import (
+                check_snapshots_executable, MARKETDATA_MIN_QUALITY_SCORE
+            )
+            is_exec, quality_issues = check_snapshots_executable(
+                leg_snapshots_v4, leg_symbols, MARKETDATA_MIN_QUALITY_SCORE
+            )
+            if not is_exec:
+                return {
+                    "order_type": "limit",
+                    "status": "NOT_EXECUTABLE",
+                    "reason": f"Quote quality gate failed: {'; '.join(quality_issues)}",
+                    "contracts": contracts,
+                    "limit_price": None,
+                    "legs": leg_orders,
+                    "underlying": cand.get("symbol"),
+                    "strategy": cand.get("strategy") or cand.get("strategy_key"),
+                }
+
         # Calculate deterministic limit price from mid (if quotes available)
         # Note: 'suggested_entry' from scanner is typically abs(total_cost), which is mid-based.
         # But to be safe and explicit as requested, we re-verify or rely on it.
         # If suggested_entry is 0 or quotes are missing, we should flag it.
 
-        # Check for valid quotes on all legs
+        # Check for valid quotes on all legs (backward compat check)
         quotes_valid = True
         for leg in legs:
             # We check if mid was used/available in scanner
@@ -898,6 +938,15 @@ async def run_morning_cycle(supabase: Client, user_id: str):
             # 3a. Use Truth Layer for Options Data
             leg_symbols = [l["symbol"] for l in legs]
             snapshots = truth_layer.snapshot_many(leg_symbols)
+
+            # V4: Get quality-scored snapshots and check for stale/invalid quotes
+            snapshots_v4 = truth_layer.snapshot_many_v4(leg_symbols)
+            from packages.quantum.services.market_data_truth_layer import check_snapshots_executable
+            is_executable, quality_issues = check_snapshots_executable(snapshots_v4, leg_symbols)
+
+            if not is_executable:
+                print(f"Skipping spread {spread.id}: quote quality issues: {quality_issues}")
+                continue
 
             # V3 Symbol Snapshot
             sym_snap = regime_engine.compute_symbol_snapshot(underlying, global_snap)

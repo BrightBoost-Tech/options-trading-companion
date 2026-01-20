@@ -261,16 +261,27 @@ const SuggestionCard = ({
                     </div>
                 )}
 
-                {/* Batch Selection Checkbox */}
-                {batchModeEnabled && onToggleSelect && !isBlocked && (
+                {/* Batch Selection Checkbox - PR4.1: Always render container for consistent alignment */}
+                {batchModeEnabled && onToggleSelect && (
                      <div className="absolute top-4 left-[-30px] md:left-[-30px] flex items-center justify-center h-full w-[30px]">
-                        <Checkbox
-                            checked={isSelected}
-                            onChange={() => onToggleSelect(suggestion)}
-                            className="checked:bg-purple-600 checked:border-purple-600"
-                            aria-label={`Select ${displaySymbol}`}
-                            title={`Select ${displaySymbol}`}
-                        />
+                        {isBlocked ? (
+                            // PR4.1: Disabled checkbox placeholder for blocked items (maintains alignment)
+                            <Checkbox
+                                checked={false}
+                                disabled
+                                className="opacity-30 cursor-not-allowed"
+                                aria-label={`Blocked suggestion ${displaySymbol} cannot be selected`}
+                                title="Blocked - cannot be selected"
+                            />
+                        ) : (
+                            <Checkbox
+                                checked={isSelected}
+                                onChange={() => onToggleSelect(suggestion)}
+                                className="checked:bg-purple-600 checked:border-purple-600"
+                                aria-label={`Select ${displaySymbol}`}
+                                title={`Select ${displaySymbol}`}
+                            />
+                        )}
                      </div>
                 )}
 

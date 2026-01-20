@@ -31,44 +31,80 @@ class DismissSuggestionRequest(BaseModel):
 ACTIVE_STATUSES = ["pending", "NOT_EXECUTABLE"]
 
 
+def compute_today_window(now: Optional[datetime] = None) -> tuple:
+    """
+    PR4.1: Compute explicit today window bounds for deterministic queries.
+
+    Returns:
+        (today_start_iso, tomorrow_start_iso): Both as ISO strings for Postgrest queries.
+
+    The window is [today_start, tomorrow_start) - inclusive start, exclusive end.
+    This ensures "today" is strictly bounded to a single calendar day UTC.
+    """
+    if now is None:
+        now = datetime.now(timezone.utc)
+
+    today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    tomorrow_start = today_start + timedelta(days=1)
+
+    return today_start.isoformat(), tomorrow_start.isoformat()
+
+
 @router.get("/inbox")
 async def get_inbox(
     user_id: str = Depends(get_current_user),
-    supabase: Client = Depends(get_supabase_user_client)
+    supabase: Client = Depends(get_supabase_user_client),
+    include_backlog: bool = Query(False, description="Include older active items beyond today")
 ):
     """
     Returns the Inbox State:
     - hero: Top ranked active suggestion (pending or NOT_EXECUTABLE)
     - queue: Remaining active suggestions
     - completed: Today's non-active suggestions (dismissed/staged/executed)
-    - meta: { total_ev_available, deployable_capital, stale_after_seconds }
+    - meta: { total_ev_available, deployable_capital, stale_after_seconds, include_backlog }
 
     PR4: NOT_EXECUTABLE suggestions (blocked by marketdata quality gate) now appear
     in the active queue instead of completed, so users can see and manage them.
+
+    PR4.1: Explicit time bounds for deterministic behavior:
+    - Default (include_backlog=false): Active queue is bounded to today only.
+    - include_backlog=true: Active queue includes older pending/NOT_EXECUTABLE items.
+    - Completed is ALWAYS bounded to today only (regardless of include_backlog).
+
+    Example requests:
+    - /inbox (default: today-only active queue)
+    - /inbox?include_backlog=true (include older active items)
     """
     if not supabase:
         raise HTTPException(status_code=503, detail="Database Unavailable")
 
     try:
-        # PR4: Fetch Active suggestions (pending + NOT_EXECUTABLE)
-        # Using .in_() to match multiple statuses
-        active_res = supabase.table(TRADE_SUGGESTIONS_TABLE) \
+        # PR4.1: Compute explicit today window bounds
+        today_start, tomorrow_start = compute_today_window()
+
+        # PR4.1: Fetch Active suggestions with time bounds (unless include_backlog)
+        active_query = supabase.table(TRADE_SUGGESTIONS_TABLE) \
             .select("*") \
             .eq("user_id", user_id) \
-            .in_("status", ACTIVE_STATUSES) \
-            .execute()
+            .in_("status", ACTIVE_STATUSES)
+
+        if not include_backlog:
+            # Default: only today's active items
+            active_query = active_query \
+                .gte("created_at", today_start) \
+                .lt("created_at", tomorrow_start)
+
+        active_res = active_query.execute()
         active_list = active_res.data or []
 
-        # Fetch Completed (Today) - excludes active statuses
-        # We define "Today" as same calendar day UTC.
-        today_start = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
-
-        # PR4: Fetch all today's suggestions and filter in Python
-        # (Postgrest .not_.in_() syntax can be tricky, so we filter client-side for reliability)
+        # PR4.1: Fetch Completed (Today) - ALWAYS bounded to today window
+        # Using both lower and upper bounds for deterministic "today" semantics.
+        # We filter in Python because Postgrest .not_.in_() can be unreliable.
         today_res = supabase.table(TRADE_SUGGESTIONS_TABLE) \
             .select("*") \
             .eq("user_id", user_id) \
             .gte("created_at", today_start) \
+            .lt("created_at", tomorrow_start) \
             .execute()
         today_list = today_res.data or []
 
@@ -109,7 +145,8 @@ async def get_inbox(
             "meta": {
                 "total_ev_available": total_ev,
                 "deployable_capital": deployable_capital,
-                "stale_after_seconds": 300
+                "stale_after_seconds": 300,
+                "include_backlog": include_backlog  # PR4.1: indicates if backlog mode is active
             }
         }
     except Exception as e:

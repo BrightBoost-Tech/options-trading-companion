@@ -278,6 +278,7 @@ export interface InboxMeta {
   total_ev_available: number;
   deployable_capital: number;
   stale_after_seconds: number;
+  include_backlog?: boolean;  // PR4.1: indicates if backlog mode is active
 }
 
 export interface InboxResponse {

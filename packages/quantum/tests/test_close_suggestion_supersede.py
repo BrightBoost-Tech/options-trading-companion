@@ -774,3 +774,440 @@ class TestWave13InsertOrGetSuggestionNullFingerprint:
         fingerprint_eq_call = [c for c in eq_calls if c[0][0] == "legs_fingerprint"]
         assert len(fingerprint_eq_call) == 1
         assert fingerprint_eq_call[0][0][1] == "fp-valid-123"
+
+
+# =============================================================================
+# Wave 1.3.1 Tests: Deterministic Trace ID Helpers
+# =============================================================================
+
+class TestWave131DeterministicTraceId:
+    """Wave 1.3.1: Test deterministic trace ID generation."""
+
+    def test_deterministic_supersede_trace_id_same_inputs_same_output(self):
+        """Same inputs should always produce the same UUID."""
+        from packages.quantum.services.workflow_orchestrator import deterministic_supersede_trace_id
+
+        trace_id_1 = deterministic_supersede_trace_id(
+            user_id="user-123",
+            cycle_date="2026-01-19",
+            window="morning_limit",
+            ticker="KURA",
+            legs_fingerprint="fp-abc123",
+            old_strategy="take_profit_limit",
+            new_strategy="salvage_exit"
+        )
+
+        trace_id_2 = deterministic_supersede_trace_id(
+            user_id="user-123",
+            cycle_date="2026-01-19",
+            window="morning_limit",
+            ticker="KURA",
+            legs_fingerprint="fp-abc123",
+            old_strategy="take_profit_limit",
+            new_strategy="salvage_exit"
+        )
+
+        assert trace_id_1 == trace_id_2
+
+    def test_deterministic_supersede_trace_id_different_strategy_different_output(self):
+        """Different new_strategy should produce different UUID."""
+        from packages.quantum.services.workflow_orchestrator import deterministic_supersede_trace_id
+
+        trace_id_salvage = deterministic_supersede_trace_id(
+            user_id="user-123",
+            cycle_date="2026-01-19",
+            window="morning_limit",
+            ticker="KURA",
+            legs_fingerprint="fp-abc123",
+            old_strategy="take_profit_limit",
+            new_strategy="salvage_exit"
+        )
+
+        trace_id_lottery = deterministic_supersede_trace_id(
+            user_id="user-123",
+            cycle_date="2026-01-19",
+            window="morning_limit",
+            ticker="KURA",
+            legs_fingerprint="fp-abc123",
+            old_strategy="take_profit_limit",
+            new_strategy="lottery_trap"
+        )
+
+        assert trace_id_salvage != trace_id_lottery
+
+    def test_deterministic_supersede_trace_id_valid_uuid_format(self):
+        """Should return a valid UUID string."""
+        from packages.quantum.services.workflow_orchestrator import deterministic_supersede_trace_id
+        import uuid
+
+        trace_id = deterministic_supersede_trace_id(
+            user_id="user-123",
+            cycle_date="2026-01-19",
+            window="morning_limit",
+            ticker="KURA",
+            legs_fingerprint="fp-abc123",
+            old_strategy="take_profit_limit",
+            new_strategy="salvage_exit"
+        )
+
+        # Should be valid UUID format
+        parsed = uuid.UUID(trace_id)
+        assert str(parsed) == trace_id
+
+    def test_deterministic_supersede_trace_id_handles_none_fingerprint(self):
+        """Should handle None fingerprint gracefully with 'nofp' fallback."""
+        from packages.quantum.services.workflow_orchestrator import deterministic_supersede_trace_id
+
+        trace_id_1 = deterministic_supersede_trace_id(
+            user_id="user-123",
+            cycle_date="2026-01-19",
+            window="morning_limit",
+            ticker="KURA",
+            legs_fingerprint=None,  # None fingerprint
+            old_strategy="take_profit_limit",
+            new_strategy="salvage_exit"
+        )
+
+        trace_id_2 = deterministic_supersede_trace_id(
+            user_id="user-123",
+            cycle_date="2026-01-19",
+            window="morning_limit",
+            ticker="KURA",
+            legs_fingerprint=None,
+            old_strategy="take_profit_limit",
+            new_strategy="salvage_exit"
+        )
+
+        # Should be stable even with None fingerprint
+        assert trace_id_1 == trace_id_2
+        # Should be valid UUID
+        import uuid
+        uuid.UUID(trace_id_1)
+
+    def test_deterministic_integrity_trace_id_same_inputs_same_output(self):
+        """Integrity trace ID should be deterministic."""
+        from packages.quantum.services.workflow_orchestrator import deterministic_integrity_trace_id
+
+        trace_id_1 = deterministic_integrity_trace_id(
+            user_id="user-123",
+            cycle_date="2026-01-19",
+            window="morning_limit",
+            ticker="KURA",
+            strategy="take_profit_limit"
+        )
+
+        trace_id_2 = deterministic_integrity_trace_id(
+            user_id="user-123",
+            cycle_date="2026-01-19",
+            window="morning_limit",
+            ticker="KURA",
+            strategy="take_profit_limit"
+        )
+
+        assert trace_id_1 == trace_id_2
+
+
+# =============================================================================
+# Wave 1.3.1 Tests: Supersede Uses Deterministic Trace ID
+# =============================================================================
+
+class TestWave131SupersedeDeterministicTraceId:
+    """Wave 1.3.1: Test that supersede uses deterministic trace_id when missing."""
+
+    def test_supersede_uses_deterministic_trace_id_when_row_has_none(self):
+        """
+        When row.trace_id is None, supersede should use deterministic fallback,
+        not a random UUID.
+        """
+        mock_client = MagicMock()
+        mock_table = MagicMock()
+        mock_client.table.return_value = mock_table
+
+        # Setup query chain - row has NO trace_id
+        mock_select = MagicMock()
+        mock_table.select.return_value = mock_select
+        mock_select.eq.return_value = mock_select
+        mock_select.in_.return_value = mock_select
+        mock_select.execute.return_value = MagicMock(data=[
+            {
+                "id": "sugg-no-trace",
+                "strategy": "take_profit_limit",
+                "status": "pending",
+                "trace_id": None  # Missing trace_id
+            }
+        ])
+
+        # Setup update chain
+        mock_update = MagicMock()
+        mock_table.update.return_value = mock_update
+        mock_update.eq.return_value = mock_update
+        mock_update.execute.return_value = MagicMock()
+
+        with patch("packages.quantum.services.workflow_orchestrator.AuditLogService") as mock_audit_cls:
+            mock_audit_service = MagicMock()
+            mock_audit_cls.return_value = mock_audit_service
+
+            with patch("packages.quantum.services.workflow_orchestrator.AnalyticsService"):
+                # Call supersede twice with same parameters
+                supersede_prior_close_suggestions(
+                    mock_client,
+                    user_id="user-123",
+                    cycle_date="2026-01-19",
+                    window="morning_limit",
+                    ticker="KURA",
+                    legs_fingerprint="fp-123",
+                    new_strategy="salvage_exit"
+                )
+
+                # Get the trace_id used in the first call
+                first_call_trace_id = mock_audit_service.log_audit_event.call_args[1]["trace_id"]
+
+        # Reset mocks and call again
+        mock_audit_service.reset_mock()
+        mock_select.execute.return_value = MagicMock(data=[
+            {
+                "id": "sugg-no-trace",
+                "strategy": "take_profit_limit",
+                "status": "pending",
+                "trace_id": None
+            }
+        ])
+
+        with patch("packages.quantum.services.workflow_orchestrator.AuditLogService") as mock_audit_cls:
+            mock_audit_service = MagicMock()
+            mock_audit_cls.return_value = mock_audit_service
+
+            with patch("packages.quantum.services.workflow_orchestrator.AnalyticsService"):
+                supersede_prior_close_suggestions(
+                    mock_client,
+                    user_id="user-123",
+                    cycle_date="2026-01-19",
+                    window="morning_limit",
+                    ticker="KURA",
+                    legs_fingerprint="fp-123",
+                    new_strategy="salvage_exit"
+                )
+
+                second_call_trace_id = mock_audit_service.log_audit_event.call_args[1]["trace_id"]
+
+        # Both calls should have the SAME trace_id (deterministic, not random)
+        assert first_call_trace_id == second_call_trace_id
+
+        # Verify it's a valid UUID
+        import uuid
+        uuid.UUID(first_call_trace_id)
+
+    def test_supersede_uses_row_trace_id_when_present(self):
+        """When row has trace_id, supersede should use it (not generate)."""
+        mock_client = MagicMock()
+        mock_table = MagicMock()
+        mock_client.table.return_value = mock_table
+
+        mock_select = MagicMock()
+        mock_table.select.return_value = mock_select
+        mock_select.eq.return_value = mock_select
+        mock_select.in_.return_value = mock_select
+        mock_select.execute.return_value = MagicMock(data=[
+            {
+                "id": "sugg-with-trace",
+                "strategy": "take_profit_limit",
+                "status": "pending",
+                "trace_id": "existing-trace-uuid-123"  # Has trace_id
+            }
+        ])
+
+        mock_update = MagicMock()
+        mock_table.update.return_value = mock_update
+        mock_update.eq.return_value = mock_update
+        mock_update.execute.return_value = MagicMock()
+
+        with patch("packages.quantum.services.workflow_orchestrator.AuditLogService") as mock_audit_cls:
+            mock_audit_service = MagicMock()
+            mock_audit_cls.return_value = mock_audit_service
+
+            with patch("packages.quantum.services.workflow_orchestrator.AnalyticsService") as mock_analytics_cls:
+                mock_analytics_service = MagicMock()
+                mock_analytics_cls.return_value = mock_analytics_service
+
+                supersede_prior_close_suggestions(
+                    mock_client,
+                    user_id="user-123",
+                    cycle_date="2026-01-19",
+                    window="morning_limit",
+                    ticker="KURA",
+                    legs_fingerprint="fp-123",
+                    new_strategy="salvage_exit"
+                )
+
+                # Should use the existing trace_id from the row
+                audit_trace_id = mock_audit_service.log_audit_event.call_args[1]["trace_id"]
+                analytics_trace_id = mock_analytics_service.log_event.call_args[1]["trace_id"]
+
+                assert audit_trace_id == "existing-trace-uuid-123"
+                assert analytics_trace_id == "existing-trace-uuid-123"
+
+
+# =============================================================================
+# Wave 1.3.1 Tests: Integrity Incident Emission
+# =============================================================================
+
+class TestWave131IntegrityIncidentEmission:
+    """Wave 1.3.1: Test integrity incident telemetry for missing fingerprint."""
+
+    def test_integrity_incident_emitted_when_fingerprint_missing(self):
+        """When fingerprint is missing on unique violation fallback, emit integrity incident."""
+        from packages.quantum.services.workflow_orchestrator import insert_or_get_suggestion
+
+        mock_client = MagicMock()
+        mock_table = MagicMock()
+        mock_client.table.return_value = mock_table
+
+        # Setup insert to fail with unique violation
+        mock_insert = MagicMock()
+        mock_table.insert.return_value = mock_insert
+        mock_insert.execute.side_effect = Exception("duplicate key value violates unique constraint")
+
+        # Setup query chain for fallback
+        mock_select = MagicMock()
+        mock_table.select.return_value = mock_select
+        mock_select.eq.return_value = mock_select
+        mock_select.order.return_value = mock_select
+        mock_select.limit.return_value = mock_select
+        mock_select.execute.return_value = MagicMock(data=[
+            {"id": "existing-123", "trace_id": "trace-existing"}
+        ])
+
+        suggestion = {
+            "user_id": "user-123",
+            "ticker": "KURA",
+            "cycle_date": "2026-01-19",
+            "window": "morning_limit",
+            "strategy": "take_profit_limit",
+            "legs_fingerprint": None,  # Missing fingerprint
+        }
+
+        unique_fields = ("user-123", "morning_limit", "2026-01-19", "KURA", "take_profit_limit", None)
+
+        with patch("packages.quantum.services.workflow_orchestrator.AuditLogService") as mock_audit_cls:
+            mock_audit_service = MagicMock()
+            mock_audit_cls.return_value = mock_audit_service
+
+            with patch("packages.quantum.services.workflow_orchestrator.AnalyticsService") as mock_analytics_cls:
+                mock_analytics_service = MagicMock()
+                mock_analytics_cls.return_value = mock_analytics_service
+
+                insert_or_get_suggestion(mock_client, suggestion, unique_fields)
+
+                # Verify audit event was emitted with event_name="integrity_incident"
+                mock_audit_service.log_audit_event.assert_called_once()
+                audit_kwargs = mock_audit_service.log_audit_event.call_args[1]
+                assert audit_kwargs["event_name"] == "integrity_incident"
+                assert audit_kwargs["payload"]["type"] == "missing_legs_fingerprint"
+                assert audit_kwargs["payload"]["ticker"] == "KURA"
+                assert audit_kwargs["payload"]["strategy"] == "take_profit_limit"
+
+                # Verify analytics event was emitted with idempotency_payload
+                mock_analytics_service.log_event.assert_called_once()
+                analytics_kwargs = mock_analytics_service.log_event.call_args[1]
+                assert analytics_kwargs["event_name"] == "integrity_incident"
+                assert analytics_kwargs["category"] == "system"
+                assert "idempotency_payload" in analytics_kwargs
+                assert analytics_kwargs["idempotency_payload"]["type"] == "missing_legs_fingerprint"
+
+    def test_integrity_incident_not_emitted_when_fingerprint_present(self):
+        """When fingerprint is present, no integrity incident should be emitted."""
+        from packages.quantum.services.workflow_orchestrator import insert_or_get_suggestion
+
+        mock_client = MagicMock()
+        mock_table = MagicMock()
+        mock_client.table.return_value = mock_table
+
+        # Setup insert to fail with unique violation
+        mock_insert = MagicMock()
+        mock_table.insert.return_value = mock_insert
+        mock_insert.execute.side_effect = Exception("23505: duplicate key")
+
+        # Setup query chain for fallback
+        mock_select = MagicMock()
+        mock_table.select.return_value = mock_select
+        mock_select.eq.return_value = mock_select
+        mock_select.limit.return_value = mock_select
+        mock_select.execute.return_value = MagicMock(data=[
+            {"id": "existing-456", "trace_id": "trace-existing-456"}
+        ])
+
+        suggestion = {
+            "user_id": "user-123",
+            "ticker": "KURA",
+            "cycle_date": "2026-01-19",
+            "window": "morning_limit",
+            "strategy": "take_profit_limit",
+            "legs_fingerprint": "fp-valid-123",  # Valid fingerprint
+        }
+
+        unique_fields = ("user-123", "morning_limit", "2026-01-19", "KURA", "take_profit_limit", "fp-valid-123")
+
+        with patch("packages.quantum.services.workflow_orchestrator._emit_integrity_incident") as mock_emit:
+            insert_or_get_suggestion(mock_client, suggestion, unique_fields)
+
+            # Should NOT emit integrity incident when fingerprint is present
+            mock_emit.assert_not_called()
+
+    def test_integrity_incident_uses_deterministic_trace_id(self):
+        """Integrity incident should use deterministic trace_id for forensic continuity."""
+        from packages.quantum.services.workflow_orchestrator import (
+            insert_or_get_suggestion,
+            deterministic_integrity_trace_id
+        )
+
+        mock_client = MagicMock()
+        mock_table = MagicMock()
+        mock_client.table.return_value = mock_table
+
+        mock_insert = MagicMock()
+        mock_table.insert.return_value = mock_insert
+        mock_insert.execute.side_effect = Exception("duplicate key")
+
+        mock_select = MagicMock()
+        mock_table.select.return_value = mock_select
+        mock_select.eq.return_value = mock_select
+        mock_select.order.return_value = mock_select
+        mock_select.limit.return_value = mock_select
+        mock_select.execute.return_value = MagicMock(data=[{"id": "x", "trace_id": "t"}])
+
+        suggestion = {
+            "user_id": "user-123",
+            "ticker": "KURA",
+            "cycle_date": "2026-01-19",
+            "window": "morning_limit",
+            "strategy": "take_profit_limit",
+            "legs_fingerprint": None,
+        }
+
+        unique_fields = ("user-123", "morning_limit", "2026-01-19", "KURA", "take_profit_limit", None)
+
+        # Compute expected deterministic trace_id
+        expected_trace_id = deterministic_integrity_trace_id(
+            user_id="user-123",
+            cycle_date="2026-01-19",
+            window="morning_limit",
+            ticker="KURA",
+            strategy="take_profit_limit"
+        )
+
+        with patch("packages.quantum.services.workflow_orchestrator.AuditLogService") as mock_audit_cls:
+            mock_audit_service = MagicMock()
+            mock_audit_cls.return_value = mock_audit_service
+
+            with patch("packages.quantum.services.workflow_orchestrator.AnalyticsService") as mock_analytics_cls:
+                mock_analytics_service = MagicMock()
+                mock_analytics_cls.return_value = mock_analytics_service
+
+                insert_or_get_suggestion(mock_client, suggestion, unique_fields)
+
+                # Verify deterministic trace_id was used
+                audit_trace_id = mock_audit_service.log_audit_event.call_args[1]["trace_id"]
+                analytics_trace_id = mock_analytics_service.log_event.call_args[1]["trace_id"]
+
+                assert audit_trace_id == expected_trace_id
+                assert analytics_trace_id == expected_trace_id

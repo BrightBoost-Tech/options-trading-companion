@@ -64,8 +64,161 @@ def clamp_risk_budget(per_trade_budget: float, remaining: float) -> float:
 
 
 # =============================================================================
+# Wave 1.3.1: Deterministic trace ID helper for forensic continuity
+# =============================================================================
+
+def deterministic_supersede_trace_id(
+    user_id: str,
+    cycle_date: str,
+    window: str,
+    ticker: str,
+    legs_fingerprint: str,
+    old_strategy: str,
+    new_strategy: str
+) -> str:
+    """
+    Wave 1.3.1: Generate a deterministic trace_id for supersede events.
+
+    This ensures that supersede events always have the same trace_id for the
+    same logical action, even across retries. This is critical for forensic
+    continuity - random UUIDs fragment the trace chain.
+
+    Uses uuid5 with NAMESPACE_URL for deterministic, reproducible UUIDs.
+
+    Args:
+        user_id: User UUID
+        cycle_date: Cycle date (YYYY-MM-DD)
+        window: Window (e.g., "morning_limit")
+        ticker: Underlying ticker
+        legs_fingerprint: Position fingerprint (or "nofp" if missing)
+        old_strategy: Strategy being superseded
+        new_strategy: New strategy replacing the old one
+
+    Returns:
+        Deterministic UUID string
+    """
+    # Create stable key from all context fields
+    fp = legs_fingerprint or "nofp"
+    key = f"supersede:{user_id}:{cycle_date}:{window}:{ticker}:{fp}:{old_strategy}:{new_strategy}"
+
+    # Generate deterministic UUID using uuid5
+    deterministic_uuid = uuid.uuid5(uuid.NAMESPACE_URL, key)
+    return str(deterministic_uuid)
+
+
+def deterministic_integrity_trace_id(
+    user_id: str,
+    cycle_date: str,
+    window: str,
+    ticker: str,
+    strategy: str
+) -> str:
+    """
+    Wave 1.3.1: Generate a deterministic trace_id for integrity incidents.
+
+    Used when logging missing fingerprint incidents to ensure idempotency
+    and forensic traceability.
+
+    Args:
+        user_id: User UUID
+        cycle_date: Cycle date (YYYY-MM-DD)
+        window: Window (e.g., "morning_limit")
+        ticker: Underlying ticker
+        strategy: Strategy name
+
+    Returns:
+        Deterministic UUID string
+    """
+    key = f"integrity_incident:missing_fingerprint:{user_id}:{cycle_date}:{window}:{ticker}:{strategy}"
+    deterministic_uuid = uuid.uuid5(uuid.NAMESPACE_URL, key)
+    return str(deterministic_uuid)
+
+
+def _emit_integrity_incident(
+    supabase: Client,
+    user_id: str,
+    cycle_date: str,
+    window: str,
+    ticker: str,
+    strategy: str
+) -> None:
+    """
+    Wave 1.3.1: Emit audit and analytics events for missing fingerprint incident.
+
+    This surfaces the issue in forensic logs so upstream fingerprint generation
+    can be fixed. Uses idempotency to avoid spamming on retries.
+
+    Args:
+        supabase: Supabase client
+        user_id: User UUID
+        cycle_date: Cycle date (YYYY-MM-DD)
+        window: Window (e.g., "morning_limit")
+        ticker: Underlying ticker
+        strategy: Strategy name
+    """
+    if not supabase:
+        return
+
+    try:
+        # Create deterministic trace_id for this incident
+        trace_id = deterministic_integrity_trace_id(
+            user_id=user_id,
+            cycle_date=cycle_date,
+            window=window,
+            ticker=ticker,
+            strategy=strategy
+        )
+
+        # Build incident payload (used for both audit and analytics)
+        incident_payload = {
+            "type": "missing_legs_fingerprint",
+            "user_id": user_id,
+            "window": window,
+            "cycle_date": cycle_date,
+            "ticker": ticker,
+            "strategy": strategy,
+            "action": "fallback_query_latest_by_created_at"
+        }
+
+        # Emit audit event
+        try:
+            audit_service = AuditLogService(supabase)
+            audit_service.log_audit_event(
+                user_id=user_id,
+                trace_id=trace_id,
+                suggestion_id=None,  # Not known yet
+                event_name="integrity_incident",
+                payload=incident_payload,
+                strategy=strategy
+            )
+        except Exception as audit_err:
+            print(f"[Wave1.3.1] Failed to write integrity incident audit event: {audit_err}")
+
+        # Emit analytics event with idempotency_payload for deduplication
+        try:
+            analytics_service = AnalyticsService(supabase)
+            analytics_service.log_event(
+                user_id=user_id,
+                event_name="integrity_incident",
+                category="system",
+                properties=incident_payload,
+                trace_id=trace_id,
+                idempotency_payload=incident_payload  # Enables trace-scoped idempotency
+            )
+        except Exception as analytics_err:
+            print(f"[Wave1.3.1] Failed to write integrity incident analytics event: {analytics_err}")
+
+        print(f"[Wave1.3.1] Integrity incident logged: missing_legs_fingerprint for {ticker}/{strategy}")
+
+    except Exception as e:
+        # Swallow errors to not disrupt main flow
+        print(f"[Wave1.3.1] Error emitting integrity incident: {e}")
+
+
+# =============================================================================
 # Wave 1.2: Insert-idempotent suggestion helper
 # Wave 1.3: Fixed NULL legs_fingerprint handling
+# Wave 1.3.1: Added integrity incident telemetry for missing fingerprint
 # =============================================================================
 
 def insert_or_get_suggestion(
@@ -128,6 +281,16 @@ def insert_or_get_suggestion(
                     # Without fingerprint, we can't uniquely identify; get latest by created_at
                     query = query.order("created_at", desc=True)
 
+                    # Wave 1.3.1: Emit integrity incident telemetry for missing fingerprint
+                    _emit_integrity_incident(
+                        supabase=supabase,
+                        user_id=user_id,
+                        cycle_date=cycle_date,
+                        window=window,
+                        ticker=ticker,
+                        strategy=strategy
+                    )
+
                 existing = query.limit(1).execute()
 
                 if existing.data:
@@ -172,6 +335,10 @@ def supersede_prior_close_suggestions(
 
     Wave 1.3: Now emits audit and analytics events for each superseded suggestion
     to provide forensic visibility in traces.
+
+    Wave 1.3.1: Uses deterministic trace_id fallback instead of random UUIDs when
+    the original suggestion lacks a trace_id. This ensures forensic continuity -
+    the same supersede action always produces the same trace_id across retries.
 
     Args:
         supabase: Supabase admin client
@@ -228,6 +395,18 @@ def supersede_prior_close_suggestions(
             old_strategy = row.get("strategy")
             trace_id = row.get("trace_id")
 
+            # Wave 1.3.1: Use deterministic trace_id fallback instead of random UUID
+            # This ensures forensic continuity - same supersede action always gets same trace_id
+            effective_trace_id = trace_id or deterministic_supersede_trace_id(
+                user_id=user_id,
+                cycle_date=cycle_date,
+                window=window,
+                ticker=ticker,
+                legs_fingerprint=legs_fingerprint,
+                old_strategy=old_strategy,
+                new_strategy=new_strategy
+            )
+
             try:
                 # Mark as superseded
                 supabase.table(TRADE_SUGGESTIONS_TABLE).update({
@@ -254,7 +433,7 @@ def supersede_prior_close_suggestions(
                 try:
                     audit_service.log_audit_event(
                         user_id=user_id,
-                        trace_id=trace_id or str(uuid.uuid4()),
+                        trace_id=effective_trace_id,  # Wave 1.3.1: deterministic
                         suggestion_id=suggestion_id,
                         event_name="suggestion_superseded",
                         payload=supersede_payload,
@@ -278,7 +457,7 @@ def supersede_prior_close_suggestions(
                             "window": window,
                             "cycle_date": cycle_date
                         },
-                        trace_id=trace_id,
+                        trace_id=effective_trace_id,  # Wave 1.3.1: deterministic
                         idempotency_payload=supersede_payload  # Wave 1.3: enables trace-scoped idempotency
                     )
                 except Exception as analytics_err:

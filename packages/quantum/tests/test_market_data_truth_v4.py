@@ -37,6 +37,12 @@ from packages.quantum.services.market_data_truth_layer import (
     QUALITY_FAIL_CROSSED,
     QUALITY_FAIL_MISSING_SNAPSHOT,
     QUALITY_FAIL_MISSING_TIMESTAMP,
+    # V4 Effective action constants
+    EFFECTIVE_ACTION_SKIP_FATAL,
+    EFFECTIVE_ACTION_SKIP_POLICY,
+    EFFECTIVE_ACTION_DEFER,
+    EFFECTIVE_ACTION_DOWNRANK,
+    EFFECTIVE_ACTION_DOWNRANK_FALLBACK,
     QUALITY_FAIL_MISSING_QUOTE_FIELDS,
     FATAL_QUALITY_CODES,
     classify_snapshot_quality,
@@ -1042,6 +1048,32 @@ class TestFormatBlockedDetail:
         assert "SPY:FAIL_STALE" in result
         assert "|" in result
 
+    def test_deterministic_ordering_by_symbol(self):
+        """Symbols are sorted deterministically by symbol name then code."""
+        # Provide symbols out of order
+        gate_result = {
+            "symbols": [
+                {"symbol": "ZZZ", "code": QUALITY_FAIL_STALE},
+                {"symbol": "AAA", "code": QUALITY_WARN_WIDE_SPREAD},
+                {"symbol": "MMM", "code": QUALITY_FAIL_CROSSED},
+            ]
+        }
+        result = format_blocked_detail(gate_result)
+        # Should be sorted by symbol: AAA, MMM, ZZZ
+        assert result == "AAA:WARN_WIDE_SPREAD|MMM:FAIL_CROSSED|ZZZ:FAIL_STALE"
+
+    def test_deterministic_ordering_same_symbol_by_code(self):
+        """Same symbol with different codes sorted by code."""
+        gate_result = {
+            "symbols": [
+                {"symbol": "AAPL", "code": "WARN_Z"},
+                {"symbol": "AAPL", "code": "FAIL_A"},
+            ]
+        }
+        result = format_blocked_detail(gate_result)
+        # Same symbol, sorted by code: FAIL_A < WARN_Z
+        assert result == "AAPL:FAIL_A|AAPL:WARN_Z"
+
     def test_ok_symbols_excluded(self):
         """OK symbols are excluded from blocked detail."""
         gate_result = {
@@ -1075,7 +1107,7 @@ class TestBuildMarketdataBlockPayload:
     """Tests for build_marketdata_block_payload function."""
 
     def test_defer_policy_payload(self):
-        """Defer policy builds correct payload."""
+        """Defer policy builds correct payload with effective_action."""
         gate_result = {
             "symbols": [{"symbol": "AAPL", "code": QUALITY_WARN_WIDE_SPREAD}],
             "fatal_count": 0,
@@ -1083,10 +1115,13 @@ class TestBuildMarketdataBlockPayload:
             "has_fatal": False,
             "has_warning": True,
         }
-        payload = build_marketdata_block_payload(gate_result, "defer")
+        payload = build_marketdata_block_payload(
+            gate_result, "defer", EFFECTIVE_ACTION_DEFER
+        )
 
         assert payload["event"] == "marketdata.v4.quality_gate"
         assert payload["policy"] == "defer"
+        assert payload["effective_action"] == EFFECTIVE_ACTION_DEFER
         assert payload["has_warning"] is True
         assert payload["has_fatal"] is False
 
@@ -1100,14 +1135,17 @@ class TestBuildMarketdataBlockPayload:
             "has_warning": True,
         }
         payload = build_marketdata_block_payload(
-            gate_result, "downrank", downrank_applied=True
+            gate_result, "downrank", EFFECTIVE_ACTION_DOWNRANK,
+            downrank_applied=True, warn_penalty=0.7
         )
 
         assert payload["policy"] == "downrank"
+        assert payload["effective_action"] == EFFECTIVE_ACTION_DOWNRANK
         assert payload["downrank_applied"] is True
+        assert payload["warn_penalty"] == 0.7
 
     def test_downrank_fallback_payload(self):
-        """Downrank policy fallback includes reason."""
+        """Downrank policy fallback includes reason and effective_action."""
         gate_result = {
             "symbols": [{"symbol": "AAPL", "code": QUALITY_WARN_WIDE_SPREAD}],
             "fatal_count": 0,
@@ -1116,14 +1154,43 @@ class TestBuildMarketdataBlockPayload:
             "has_warning": True,
         }
         payload = build_marketdata_block_payload(
-            gate_result, "downrank",
+            gate_result, "downrank", EFFECTIVE_ACTION_DOWNRANK_FALLBACK,
             downrank_applied=False,
             downrank_reason="no_rank_scalar_found"
         )
 
         assert payload["policy"] == "downrank"
+        assert payload["effective_action"] == EFFECTIVE_ACTION_DOWNRANK_FALLBACK
         assert payload["downrank_applied"] is False
         assert payload["downrank_reason"] == "no_rank_scalar_found"
+
+
+class TestEffectiveActionConstants:
+    """Tests for effective_action constants."""
+
+    def test_effective_action_constants_exist(self):
+        """All effective_action constants are defined."""
+        assert EFFECTIVE_ACTION_SKIP_FATAL == "skip_fatal"
+        assert EFFECTIVE_ACTION_SKIP_POLICY == "skip_policy"
+        assert EFFECTIVE_ACTION_DEFER == "defer"
+        assert EFFECTIVE_ACTION_DOWNRANK == "downrank"
+        assert EFFECTIVE_ACTION_DOWNRANK_FALLBACK == "downrank_fallback_to_defer"
+
+    def test_payload_includes_effective_action(self):
+        """All payloads include effective_action field."""
+        gate_result = {
+            "symbols": [],
+            "fatal_count": 0,
+            "warning_count": 0,
+            "has_fatal": False,
+            "has_warning": False,
+        }
+
+        for action in [EFFECTIVE_ACTION_SKIP_FATAL, EFFECTIVE_ACTION_SKIP_POLICY,
+                       EFFECTIVE_ACTION_DEFER, EFFECTIVE_ACTION_DOWNRANK,
+                       EFFECTIVE_ACTION_DOWNRANK_FALLBACK]:
+            payload = build_marketdata_block_payload(gate_result, "defer", action)
+            assert payload["effective_action"] == action
 
 
 class TestOrderBuilderBlockedShortCircuit:
@@ -1226,13 +1293,57 @@ class TestDeferPolicyBehavior:
         assert gate_result["has_fatal"] is False
 
         # Build payload as orchestrator would
-        payload = build_marketdata_block_payload(gate_result, "defer")
+        payload = build_marketdata_block_payload(
+            gate_result, "defer", EFFECTIVE_ACTION_DEFER
+        )
         blocked_detail = format_blocked_detail(gate_result)
 
         # Verify payload structure
         assert payload["event"] == "marketdata.v4.quality_gate"
         assert payload["policy"] == "defer"
+        assert payload["effective_action"] == EFFECTIVE_ACTION_DEFER
         assert "WARN_WIDE_SPREAD" in blocked_detail
+
+    def test_downrank_policy_applies_penalty(self):
+        """When downrank policy with ranking scalar, penalty is applied."""
+        gate_result = {
+            "symbols": [{"symbol": "AAPL", "code": QUALITY_WARN_WIDE_SPREAD}],
+            "fatal_count": 0,
+            "warning_count": 1,
+            "has_fatal": False,
+            "has_warning": True,
+        }
+
+        # Simulate what orchestrator does for downrank with ranking scalar
+        payload = build_marketdata_block_payload(
+            gate_result, "downrank", EFFECTIVE_ACTION_DOWNRANK,
+            downrank_applied=True, warn_penalty=0.7
+        )
+
+        assert payload["effective_action"] == EFFECTIVE_ACTION_DOWNRANK
+        assert payload["downrank_applied"] is True
+        assert payload["warn_penalty"] == 0.7
+
+    def test_downrank_policy_fallback_to_defer(self):
+        """When downrank policy without ranking scalar, fallback to defer."""
+        gate_result = {
+            "symbols": [{"symbol": "AAPL", "code": QUALITY_WARN_WIDE_SPREAD}],
+            "fatal_count": 0,
+            "warning_count": 1,
+            "has_fatal": False,
+            "has_warning": True,
+        }
+
+        # Simulate what orchestrator does for downrank without scalar
+        payload = build_marketdata_block_payload(
+            gate_result, "downrank", EFFECTIVE_ACTION_DOWNRANK_FALLBACK,
+            downrank_applied=False,
+            downrank_reason="no_rank_scalar_found_fallback_to_defer"
+        )
+
+        assert payload["effective_action"] == EFFECTIVE_ACTION_DOWNRANK_FALLBACK
+        assert payload["downrank_applied"] is False
+        assert payload["downrank_reason"] == "no_rank_scalar_found_fallback_to_defer"
 
     def test_fatal_issues_not_deferred(self):
         """Fatal issues are not deferred (would be skipped upstream)."""

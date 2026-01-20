@@ -964,32 +964,38 @@ async def run_morning_cycle(supabase: Client, user_id: str):
                 get_marketdata_quality_policy,
                 get_marketdata_min_quality_score,
                 get_marketdata_max_freshness_ms,
+                get_marketdata_warn_penalty,
+                EFFECTIVE_ACTION_SKIP_FATAL,
+                EFFECTIVE_ACTION_SKIP_POLICY,
+                EFFECTIVE_ACTION_DEFER,
+                EFFECTIVE_ACTION_DOWNRANK,
+                EFFECTIVE_ACTION_DOWNRANK_FALLBACK,
             )
             is_executable, quality_issues = check_snapshots_executable(snapshots_v4, leg_symbols)
 
-            # PR3.1: Track deferred gate result for downstream blocking
-            deferred_gate_payload = None
-            deferred_blocked_detail = None
+            # PR3.2: Track deferred gate result for downstream handling
+            # Stored as tuple: (gate_result, policy, blocked_detail) for later processing
+            deferred_quality_warning = None
 
             if not is_executable:
                 # V4 structured logging: emit full quality gate result
                 gate_result = format_quality_gate_result(snapshots_v4, leg_symbols)
                 policy = get_marketdata_quality_policy()
 
-                log_payload = {
-                    "event": "marketdata.v4.quality_gate",
-                    "spread_id": str(spread.id),
-                    "underlying": underlying,
-                    "leg_symbols": leg_symbols,
-                    "policy": policy,
-                    "min_quality_score": get_marketdata_min_quality_score(),
-                    "max_freshness_ms": get_marketdata_max_freshness_ms(),
-                    **gate_result,
-                }
-
                 # Decide action based on policy and fatal/non-fatal codes
                 if gate_result["has_fatal"]:
                     # Fatal issues always cause skip, regardless of policy
+                    log_payload = {
+                        "event": "marketdata.v4.quality_gate",
+                        "effective_action": EFFECTIVE_ACTION_SKIP_FATAL,
+                        "spread_id": str(spread.id),
+                        "underlying": underlying,
+                        "leg_symbols": leg_symbols,
+                        "policy": policy,
+                        "min_quality_score": get_marketdata_min_quality_score(),
+                        "max_freshness_ms": get_marketdata_max_freshness_ms(),
+                        **gate_result,
+                    }
                     logger.warning(
                         f"Skipping spread {spread.id}: fatal quality issues",
                         extra={"quality_gate": log_payload}
@@ -997,31 +1003,27 @@ async def run_morning_cycle(supabase: Client, user_id: str):
                     continue
                 elif policy == "skip":
                     # Skip policy: treat any warning as skip
+                    log_payload = {
+                        "event": "marketdata.v4.quality_gate",
+                        "effective_action": EFFECTIVE_ACTION_SKIP_POLICY,
+                        "spread_id": str(spread.id),
+                        "underlying": underlying,
+                        "leg_symbols": leg_symbols,
+                        "policy": policy,
+                        "min_quality_score": get_marketdata_min_quality_score(),
+                        "max_freshness_ms": get_marketdata_max_freshness_ms(),
+                        **gate_result,
+                    }
                     logger.warning(
                         f"Skipping spread {spread.id}: quality warning (policy=skip)",
                         extra={"quality_gate": log_payload}
                     )
                     continue
                 else:
-                    # PR3.1: Defer/downrank policy - store payload for blocking downstream
-                    deferred_gate_payload = build_marketdata_block_payload(
-                        gate_result, policy, downrank_applied=False,
-                        downrank_reason="exit_suggestions_no_ranking_scalar"
-                    )
+                    # PR3.2: Defer/downrank policy - store for later processing
+                    # Actual downrank/defer decision happens when suggestion is built (has access to metrics)
                     deferred_blocked_detail = format_blocked_detail(gate_result)
-
-                    # Log defer applied event
-                    logger.info(
-                        f"Quality warning for spread {spread.id}: defer applied (policy={policy})",
-                        extra={"quality_gate": {
-                            "event": "marketdata.v4.quality_gate.defer_applied",
-                            "spread_id": str(spread.id),
-                            "underlying": underlying,
-                            "policy": policy,
-                            "warning_count": gate_result["warning_count"],
-                            "symbols": gate_result["symbols"],
-                        }}
-                    )
+                    deferred_quality_warning = (gate_result, policy, deferred_blocked_detail)
 
             # V3 Symbol Snapshot
             sym_snap = regime_engine.compute_symbol_snapshot(underlying, global_snap)
@@ -1303,12 +1305,72 @@ async def run_morning_cycle(supabase: Client, user_id: str):
                 "probability_of_profit": metrics.prob_of_profit
             }
 
-            # PR3.1: Apply deferred marketdata quality block if warnings were present
-            if deferred_gate_payload is not None:
-                suggestion["status"] = "NOT_EXECUTABLE"
-                suggestion["blocked_reason"] = "marketdata_quality_gate"
-                suggestion["blocked_detail"] = deferred_blocked_detail
+            # PR3.2: Apply deferred marketdata quality handling if warnings were present
+            if deferred_quality_warning is not None:
+                gate_result, policy, blocked_detail = deferred_quality_warning
+                downrank_applied = False
+                effective_action = EFFECTIVE_ACTION_DEFER
+                downrank_reason = None
+                warn_penalty = None
+
+                if policy == "downrank":
+                    # Try to find and apply penalty to ranking scalar
+                    # Morning suggestions have 'ev' (expected_value) as the ranking scalar
+                    ev_value = suggestion.get("ev")
+                    if ev_value is not None and ev_value != 0:
+                        warn_penalty = get_marketdata_warn_penalty()
+                        original_ev = ev_value
+                        suggestion["ev"] = float(ev_value) * warn_penalty
+                        downrank_applied = True
+                        effective_action = EFFECTIVE_ACTION_DOWNRANK
+                        logger.info(
+                            f"Downrank applied to spread {spread.id}: ev {original_ev:.4f} -> {suggestion['ev']:.4f}",
+                            extra={"quality_gate": {
+                                "event": "marketdata.v4.quality_gate.downrank_applied",
+                                "effective_action": EFFECTIVE_ACTION_DOWNRANK,
+                                "spread_id": str(spread.id),
+                                "underlying": underlying,
+                                "policy": policy,
+                                "warn_penalty": warn_penalty,
+                                "original_ev": original_ev,
+                                "penalized_ev": suggestion["ev"],
+                            }}
+                        )
+                    else:
+                        # No ranking scalar found, fallback to defer
+                        downrank_reason = "no_rank_scalar_found_fallback_to_defer"
+                        effective_action = EFFECTIVE_ACTION_DOWNRANK_FALLBACK
+
+                # Build the payload with effective_action
+                deferred_gate_payload = build_marketdata_block_payload(
+                    gate_result, policy, effective_action,
+                    downrank_applied=downrank_applied,
+                    downrank_reason=downrank_reason,
+                    warn_penalty=warn_penalty
+                )
+
+                # Attach payload always
                 suggestion["marketdata_quality"] = deferred_gate_payload
+
+                # Block only if NOT successfully downranked
+                if effective_action != EFFECTIVE_ACTION_DOWNRANK:
+                    suggestion["status"] = "NOT_EXECUTABLE"
+                    suggestion["blocked_reason"] = "marketdata_quality_gate"
+                    suggestion["blocked_detail"] = blocked_detail
+
+                    # Log defer/fallback event
+                    logger.info(
+                        f"Quality warning for spread {spread.id}: {effective_action} (policy={policy})",
+                        extra={"quality_gate": {
+                            "event": "marketdata.v4.quality_gate.defer_applied",
+                            "effective_action": effective_action,
+                            "spread_id": str(spread.id),
+                            "underlying": underlying,
+                            "policy": policy,
+                            "warning_count": gate_result["warning_count"],
+                            "symbols": [s["symbol"] + ":" + s["code"] for s in gate_result["symbols"] if s["code"] != "OK"],
+                        }}
+                    )
 
             suggestions.append(suggestion)
 
@@ -1349,7 +1411,9 @@ async def run_morning_cycle(supabase: Client, user_id: str):
 
         for s in final_suggestion_list:
             s["cycle_date"] = cycle_date
-            s["status"] = "pending"
+            # PR3.2: Preserve NOT_EXECUTABLE status from quality gate
+            if s.get("status") != "NOT_EXECUTABLE":
+                s["status"] = "pending"
 
             # Clean v4 internal fields before insert
             clean_s = {k: v for k, v in s.items() if not k.startswith("_v4_")}
@@ -2028,6 +2092,11 @@ async def run_midday_cycle(supabase: Client, user_id: str):
                     get_marketdata_min_quality_score,
                     get_marketdata_max_freshness_ms,
                     get_marketdata_warn_penalty,
+                    EFFECTIVE_ACTION_SKIP_FATAL,
+                    EFFECTIVE_ACTION_SKIP_POLICY,
+                    EFFECTIVE_ACTION_DEFER,
+                    EFFECTIVE_ACTION_DOWNRANK,
+                    EFFECTIVE_ACTION_DOWNRANK_FALLBACK,
                 )
                 midday_raw_snapshots = truth_layer.snapshot_many(midday_leg_symbols)
                 midday_snapshots_v4 = truth_layer.snapshot_many_v4(midday_leg_symbols, raw_snapshots=midday_raw_snapshots)
@@ -2037,19 +2106,19 @@ async def run_midday_cycle(supabase: Client, user_id: str):
                     gate_result = format_quality_gate_result(midday_snapshots_v4, midday_leg_symbols)
                     midday_policy = get_marketdata_quality_policy()
 
-                    log_payload = {
-                        "event": "marketdata.v4.quality_gate",
-                        "ticker": ticker,
-                        "strategy": strategy,
-                        "leg_symbols": midday_leg_symbols,
-                        "policy": midday_policy,
-                        "min_quality_score": get_marketdata_min_quality_score(),
-                        "max_freshness_ms": get_marketdata_max_freshness_ms(),
-                        **gate_result,
-                    }
-
                     if gate_result["has_fatal"]:
                         # Fatal issues always cause skip
+                        log_payload = {
+                            "event": "marketdata.v4.quality_gate",
+                            "effective_action": EFFECTIVE_ACTION_SKIP_FATAL,
+                            "ticker": ticker,
+                            "strategy": strategy,
+                            "leg_symbols": midday_leg_symbols,
+                            "policy": midday_policy,
+                            "min_quality_score": get_marketdata_min_quality_score(),
+                            "max_freshness_ms": get_marketdata_max_freshness_ms(),
+                            **gate_result,
+                        }
                         logger.warning(
                             f"Skipping midday candidate {ticker} {strategy}: fatal quality issues",
                             extra={"quality_gate": log_payload}
@@ -2057,52 +2126,89 @@ async def run_midday_cycle(supabase: Client, user_id: str):
                         continue
                     elif midday_policy == "skip":
                         # Skip policy: treat any warning as skip
+                        log_payload = {
+                            "event": "marketdata.v4.quality_gate",
+                            "effective_action": EFFECTIVE_ACTION_SKIP_POLICY,
+                            "ticker": ticker,
+                            "strategy": strategy,
+                            "leg_symbols": midday_leg_symbols,
+                            "policy": midday_policy,
+                            "min_quality_score": get_marketdata_min_quality_score(),
+                            "max_freshness_ms": get_marketdata_max_freshness_ms(),
+                            **gate_result,
+                        }
                         logger.warning(
                             f"Skipping midday candidate {ticker} {strategy}: quality warning (policy=skip)",
                             extra={"quality_gate": log_payload}
                         )
                         continue
                     else:
-                        # PR3.1: Defer/downrank policy - store payload for blocking
+                        # PR3.2: Defer/downrank policy with effective_action
                         downrank_applied = False
                         downrank_reason = None
+                        effective_action = EFFECTIVE_ACTION_DEFER
+                        warn_penalty = None
 
                         # Attempt downrank if policy is downrank and we have a ranking scalar
                         if midday_policy == "downrank":
                             ranking_scalar = cand.get("score") or cand.get("ev") or cand.get("expected_value")
                             if ranking_scalar is not None:
-                                penalty = get_marketdata_warn_penalty()
+                                warn_penalty = get_marketdata_warn_penalty()
                                 # Apply penalty to the field we found
                                 if cand.get("score") is not None:
-                                    cand["score"] = float(cand["score"]) * penalty
+                                    original_score = cand["score"]
+                                    cand["score"] = float(cand["score"]) * warn_penalty
                                     downrank_applied = True
+                                    effective_action = EFFECTIVE_ACTION_DOWNRANK
                                 elif cand.get("ev") is not None:
-                                    cand["ev"] = float(cand["ev"]) * penalty
+                                    original_ev = cand["ev"]
+                                    cand["ev"] = float(cand["ev"]) * warn_penalty
                                     ev = cand["ev"]  # Update local variable too
                                     downrank_applied = True
+                                    effective_action = EFFECTIVE_ACTION_DOWNRANK
                             else:
                                 downrank_reason = "no_rank_scalar_found_fallback_to_defer"
+                                effective_action = EFFECTIVE_ACTION_DOWNRANK_FALLBACK
 
                         midday_deferred_gate_payload = build_marketdata_block_payload(
-                            gate_result, midday_policy,
+                            gate_result, midday_policy, effective_action,
                             downrank_applied=downrank_applied,
-                            downrank_reason=downrank_reason
+                            downrank_reason=downrank_reason,
+                            warn_penalty=warn_penalty
                         )
                         midday_deferred_blocked_detail = format_blocked_detail(gate_result)
 
-                        # Log defer applied event
-                        logger.info(
-                            f"Quality warning for midday {ticker} {strategy}: defer applied (policy={midday_policy})",
-                            extra={"quality_gate": {
-                                "event": "marketdata.v4.quality_gate.defer_applied",
-                                "ticker": ticker,
-                                "strategy": strategy,
-                                "policy": midday_policy,
-                                "warning_count": gate_result["warning_count"],
-                                "downrank_applied": downrank_applied,
-                                "symbols": gate_result["symbols"],
-                            }}
-                        )
+                        # Log with effective_action
+                        if effective_action == EFFECTIVE_ACTION_DOWNRANK:
+                            logger.info(
+                                f"Downrank applied to midday {ticker} {strategy} (policy={midday_policy})",
+                                extra={"quality_gate": {
+                                    "event": "marketdata.v4.quality_gate.downrank_applied",
+                                    "effective_action": effective_action,
+                                    "ticker": ticker,
+                                    "strategy": strategy,
+                                    "policy": midday_policy,
+                                    "warn_penalty": warn_penalty,
+                                    "warning_count": gate_result["warning_count"],
+                                    "symbols": [s["symbol"] + ":" + s["code"] for s in gate_result["symbols"] if s["code"] != "OK"],
+                                }}
+                            )
+                        else:
+                            logger.info(
+                                f"Quality warning for midday {ticker} {strategy}: {effective_action} (policy={midday_policy})",
+                                extra={"quality_gate": {
+                                    "event": "marketdata.v4.quality_gate.defer_applied",
+                                    "effective_action": effective_action,
+                                    "ticker": ticker,
+                                    "strategy": strategy,
+                                    "policy": midday_policy,
+                                    "warning_count": gate_result["warning_count"],
+                                    "symbols": [s["symbol"] + ":" + s["code"] for s in gate_result["symbols"] if s["code"] != "OK"],
+                                }}
+                            )
+
+                        # Store effective_action for later use
+                        midday_deferred_gate_payload["_effective_action"] = effective_action
 
             order_json = build_midday_order_json(cand, sizing["contracts"], leg_snapshots_v4=midday_snapshots_v4)
 
@@ -2162,12 +2268,18 @@ async def run_midday_cycle(supabase: Client, user_id: str):
                 "status": "ok" if remaining_global > 0 else "violated"
             }
 
-            # PR3.1: Apply deferred marketdata quality block if warnings were present
+            # PR3.2: Apply deferred marketdata quality handling if warnings were present
             if midday_deferred_gate_payload is not None:
-                suggestion["status"] = "NOT_EXECUTABLE"
-                suggestion["blocked_reason"] = "marketdata_quality_gate"
-                suggestion["blocked_detail"] = midday_deferred_blocked_detail
+                # Always attach the payload
+                # Remove internal field before attaching
+                effective_action = midday_deferred_gate_payload.pop("_effective_action", "defer")
                 suggestion["marketdata_quality"] = midday_deferred_gate_payload
+
+                # Only block if NOT successfully downranked
+                if effective_action != "downrank":
+                    suggestion["status"] = "NOT_EXECUTABLE"
+                    suggestion["blocked_reason"] = "marketdata_quality_gate"
+                    suggestion["blocked_detail"] = midday_deferred_blocked_detail
 
             suggestions.append(suggestion)
 
@@ -2201,7 +2313,9 @@ async def run_midday_cycle(supabase: Client, user_id: str):
 
         for s in suggestions:
             s["cycle_date"] = cycle_date
-            s["status"] = "pending"
+            # PR3.2: Preserve NOT_EXECUTABLE status from quality gate
+            if s.get("status") != "NOT_EXECUTABLE":
+                s["status"] = "pending"
 
             # Clean internal fields (including v4 context stored for post-insert processing)
             clean_s = {k: v for k, v in s.items() if k != 'internal_cand' and not k.startswith('_v4_')}

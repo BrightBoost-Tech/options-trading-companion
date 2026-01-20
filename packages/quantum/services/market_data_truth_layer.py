@@ -274,21 +274,39 @@ def format_blocked_detail(gate_result: Dict[str, Any]) -> str:
 
     Returns:
         Compact string like "AAPL:WARN_WIDE_SPREAD|SPY:FAIL_STALE"
+        Sorted deterministically by symbol then code for stable logs/UI diffing.
     """
-    parts = []
+    entries = []
     for sym_info in gate_result.get("symbols", []):
         symbol = sym_info.get("symbol", "?")
         code = sym_info.get("code", "?")
         if code != QUALITY_OK:
-            parts.append(f"{symbol}:{code}")
+            entries.append((symbol, code))
+
+    # Sort deterministically by symbol, then by code
+    entries.sort(key=lambda x: (x[0], x[1]))
+
+    parts = [f"{sym}:{code}" for sym, code in entries]
     return "|".join(parts) if parts else "unknown_issue"
+
+
+# =============================================================================
+# V4 Effective Action Constants (what actually happened)
+# =============================================================================
+EFFECTIVE_ACTION_SKIP_FATAL = "skip_fatal"
+EFFECTIVE_ACTION_SKIP_POLICY = "skip_policy"
+EFFECTIVE_ACTION_DEFER = "defer"
+EFFECTIVE_ACTION_DOWNRANK = "downrank"
+EFFECTIVE_ACTION_DOWNRANK_FALLBACK = "downrank_fallback_to_defer"
 
 
 def build_marketdata_block_payload(
     gate_result: Dict[str, Any],
     policy: str,
+    effective_action: str,
     downrank_applied: bool = False,
-    downrank_reason: Optional[str] = None
+    downrank_reason: Optional[str] = None,
+    warn_penalty: Optional[float] = None
 ) -> Dict[str, Any]:
     """
     Build a complete marketdata_quality payload for attaching to candidates/suggestions.
@@ -296,8 +314,10 @@ def build_marketdata_block_payload(
     Args:
         gate_result: Output from format_quality_gate_result()
         policy: Current policy (skip/defer/downrank)
+        effective_action: What actually happened (EFFECTIVE_ACTION_* constants)
         downrank_applied: Whether downrank penalty was applied
         downrank_reason: Reason for downrank status (if not applied)
+        warn_penalty: The penalty multiplier used (if downrank applied)
 
     Returns:
         Complete payload dict for candidate["marketdata_quality"]
@@ -305,11 +325,14 @@ def build_marketdata_block_payload(
     payload = {
         "event": "marketdata.v4.quality_gate",
         "policy": policy,
+        "effective_action": effective_action,
         **gate_result,
     }
 
     if policy == "downrank":
         payload["downrank_applied"] = downrank_applied
+        if downrank_applied and warn_penalty is not None:
+            payload["warn_penalty"] = warn_penalty
         if not downrank_applied and downrank_reason:
             payload["downrank_reason"] = downrank_reason
 

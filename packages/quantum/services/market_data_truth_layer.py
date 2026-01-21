@@ -22,6 +22,112 @@ from packages.quantum.analytics.factors import calculate_iv_rank, calculate_tren
 # Use a module-level logger
 logger = logging.getLogger(__name__)
 
+
+# =============================================================================
+# Replay Feature Store Integration (lazy import to avoid circular deps)
+# =============================================================================
+def _get_decision_context():
+    """Lazy import of get_current_decision_context to avoid circular imports."""
+    try:
+        from packages.quantum.services.replay.decision_context import (
+            get_current_decision_context,
+            is_replay_enabled,
+        )
+        if not is_replay_enabled():
+            return None
+        return get_current_decision_context()
+    except ImportError:
+        return None
+
+
+def _record_snapshot_to_context(
+    ticker: str,
+    raw_snapshot: Dict[str, Any],
+    v4_snapshot: "TruthSnapshotV4"
+) -> None:
+    """
+    Record a snapshot to the current DecisionContext if one is active.
+
+    Called from snapshot_many_v4 after quality scoring is computed.
+
+    Args:
+        ticker: The ticker symbol
+        raw_snapshot: Raw snapshot data from Polygon
+        v4_snapshot: Quality-scored TruthSnapshotV4
+    """
+    ctx = _get_decision_context()
+    if ctx is None:
+        return
+
+    try:
+        # Build metadata with quality info
+        metadata = {
+            "provider": "polygon",
+            "received_ts": v4_snapshot.timestamps.received_ts,
+            "source_ts": v4_snapshot.timestamps.source_ts,
+            "canon_symbol": normalize_symbol(ticker),
+            "quality": {
+                "score": v4_snapshot.quality.quality_score,
+                "is_stale": v4_snapshot.quality.is_stale,
+                "freshness_ms": v4_snapshot.quality.freshness_ms,
+                "issues": v4_snapshot.quality.issues,
+                "code": classify_snapshot_quality(v4_snapshot),
+            },
+        }
+
+        # Record raw snapshot (for replay) with V4 structure preserved
+        key = f"{ticker}:polygon:snapshot_v4"
+        ctx.record_input(
+            key=key,
+            snapshot_type="quote",
+            payload=raw_snapshot,
+            metadata=metadata,
+        )
+    except Exception as e:
+        logger.debug(f"Failed to record snapshot to context: {e}")
+
+
+def _record_option_chain_to_context(
+    underlying: str,
+    expiration_date: Optional[str],
+    chain_data: List[Dict],
+) -> None:
+    """
+    Record an option chain to the current DecisionContext if one is active.
+
+    Args:
+        underlying: The underlying symbol
+        expiration_date: Expiration date filter (if any)
+        chain_data: List of option contracts
+    """
+    ctx = _get_decision_context()
+    if ctx is None:
+        return
+
+    try:
+        # Build key with expiration if provided
+        if expiration_date:
+            key = f"{underlying}:chain:{expiration_date}"
+        else:
+            key = f"{underlying}:chain:all"
+
+        metadata = {
+            "provider": "polygon",
+            "received_ts": int(time.time() * 1000),
+            "underlying": underlying,
+            "expiration_date": expiration_date,
+            "contracts_count": len(chain_data),
+        }
+
+        ctx.record_input(
+            key=key,
+            snapshot_type="chain",
+            payload=chain_data,
+            metadata=metadata,
+        )
+    except Exception as e:
+        logger.debug(f"Failed to record option chain to context: {e}")
+
 # =============================================================================
 # V4 Configuration (env-configurable with safe defaults)
 # =============================================================================
@@ -755,6 +861,9 @@ class MarketDataTruthLayer:
                 volume=raw.get("day", {}).get("v"),
             )
 
+            # Record to DecisionContext if active (for replay feature store)
+            _record_snapshot_to_context(ticker, raw, v4_results[ticker])
+
         return v4_results
 
     def _normalize_timestamp_to_ms(self, ts: Optional[Union[int, float]]) -> Optional[int]:
@@ -978,6 +1087,9 @@ class MarketDataTruthLayer:
                 params = {} # Params are in the URL now
             else:
                 url = None
+
+        # Record to DecisionContext if active (for replay feature store)
+        _record_option_chain_to_context(underlying, expiration_date, all_contracts)
 
         self.cache.set("option_chain", cache_key, all_contracts, self.ttl_option_chain)
         return all_contracts

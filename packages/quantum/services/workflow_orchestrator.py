@@ -49,6 +49,80 @@ TRADE_SUGGESTIONS_TABLE = "trade_suggestions"
 WEEKLY_REPORTS_TABLE = "weekly_trade_reports"
 SUGGESTION_LOGS_TABLE = "suggestion_logs"
 
+
+# =============================================================================
+# Replay Feature Store Integration
+# =============================================================================
+def _get_decision_context():
+    """Lazy import to get current decision context (avoids circular imports)."""
+    try:
+        from packages.quantum.services.replay.decision_context import (
+            get_current_decision_context,
+            is_replay_enabled,
+        )
+        if not is_replay_enabled():
+            return None
+        return get_current_decision_context()
+    except ImportError:
+        return None
+
+
+def _record_regime_features(global_snap: "GlobalRegimeSnapshot") -> None:
+    """Record global regime features to decision context if active."""
+    ctx = _get_decision_context()
+    if ctx is None:
+        return
+
+    try:
+        # Extract features from global snapshot
+        features = {
+            "state": global_snap.state.value if hasattr(global_snap.state, 'value') else str(global_snap.state),
+            "risk_score": global_snap.risk_score,
+            "risk_scaler": global_snap.risk_scaler,
+            "trend_score": global_snap.trend_score,
+            "vol_score": global_snap.vol_score,
+            "corr_score": global_snap.corr_score,
+            "breadth_score": global_snap.breadth_score,
+            "liquidity_score": getattr(global_snap, 'liquidity_score', None),
+            "as_of_ts": str(global_snap.as_of_ts),
+        }
+        # Include raw features dict if available
+        if hasattr(global_snap, 'features') and global_snap.features:
+            features["raw_features"] = global_snap.features
+
+        ctx.record_feature("__global__", "regime_features", features)
+    except Exception:
+        pass  # Non-critical, don't block on failure
+
+
+def _record_symbol_features(symbol: str, sym_snap, global_snap: "GlobalRegimeSnapshot") -> None:
+    """Record symbol-level features to decision context if active."""
+    ctx = _get_decision_context()
+    if ctx is None:
+        return
+
+    try:
+        features = {
+            "symbol": symbol,
+            "state": sym_snap.state.value if hasattr(sym_snap.state, 'value') else str(sym_snap.state),
+            "score": sym_snap.score,
+            "iv_rank": sym_snap.iv_rank,
+            "atm_iv_30d": getattr(sym_snap, 'atm_iv_30d', None),
+            "rv_20d": getattr(sym_snap, 'rv_20d', None),
+            "iv_rv_spread": getattr(sym_snap, 'iv_rv_spread', None),
+            "skew_25d": getattr(sym_snap, 'skew_25d', None),
+            "term_slope": getattr(sym_snap, 'term_slope', None),
+            "as_of_ts": str(sym_snap.as_of_ts),
+            "global_state": global_snap.state.value if hasattr(global_snap.state, 'value') else str(global_snap.state),
+        }
+        # Include raw features if available
+        if hasattr(sym_snap, 'features') and sym_snap.features:
+            features["raw_features"] = sym_snap.features
+
+        ctx.record_feature(symbol, "symbol_features", features)
+    except Exception:
+        pass  # Non-critical
+
 # 1. Add MIDDAY_TEST_MODE flag
 MIDDAY_TEST_MODE = os.getenv("MIDDAY_TEST_MODE", "false").lower() == "true"
 COMPOUNDING_MODE = os.getenv("COMPOUNDING_MODE", "false").lower() == "true"
@@ -898,6 +972,10 @@ async def run_morning_cycle(supabase: Client, user_id: str):
     )
 
     global_snap = regime_engine.compute_global_snapshot(datetime.now())
+
+    # Record regime features to decision context (for replay feature store)
+    _record_regime_features(global_snap)
+
     # Try to persist global snapshot
     try:
         supabase.table("regime_snapshots").insert(global_snap.to_dict()).execute()
@@ -1028,6 +1106,9 @@ async def run_morning_cycle(supabase: Client, user_id: str):
             # V3 Symbol Snapshot
             sym_snap = regime_engine.compute_symbol_snapshot(underlying, global_snap)
             effective_regime_state = regime_engine.get_effective_regime(sym_snap, global_snap)
+
+            # Record symbol features to decision context (for replay feature store)
+            _record_symbol_features(underlying, sym_snap, global_snap)
 
             # Map to scoring regime string for compatibility
             iv_regime = regime_engine.map_to_scoring_regime(effective_regime_state)
@@ -1597,6 +1678,10 @@ async def run_midday_cycle(supabase: Client, user_id: str):
     )
 
     global_snap = regime_engine.compute_global_snapshot(datetime.now())
+
+    # Record regime features to decision context (for replay feature store)
+    _record_regime_features(global_snap)
+
     # Try to persist global snapshot
     try:
         supabase.table("regime_snapshots").insert(global_snap.to_dict()).execute()
@@ -1738,6 +1823,9 @@ async def run_midday_cycle(supabase: Client, user_id: str):
         effective_regime = regime_engine.get_effective_regime(sym_snap, global_snap)
         effective_regime_str = effective_regime.value
         scoring_regime = regime_engine.map_to_scoring_regime(effective_regime)
+
+        # Record symbol features to decision context (for replay feature store)
+        _record_symbol_features(ticker, sym_snap, global_snap)
 
         # Extract pricing info. structure of candidate varies, assuming basic keys
         price = float(cand.get("suggested_entry", 0))

@@ -10,7 +10,9 @@ This handler:
 4. Persists suggestions to trade_suggestions table with window='midday_entry'
 """
 
+import os
 import time
+from datetime import datetime, timezone
 from typing import Any, Dict
 
 from packages.quantum.services.workflow_orchestrator import run_midday_cycle
@@ -20,6 +22,18 @@ from packages.quantum.jobs.handlers.utils import get_admin_client, get_active_us
 from packages.quantum.jobs.handlers.exceptions import RetryableJobError, PermanentJobError
 
 JOB_NAME = "suggestions_open"
+
+# Replay feature store integration (lazy import to avoid circular deps)
+def _get_decision_context_class():
+    """Lazy import DecisionContext to avoid circular imports."""
+    try:
+        from packages.quantum.services.replay.decision_context import (
+            DecisionContext,
+            is_replay_enabled,
+        )
+        return DecisionContext if is_replay_enabled() else None
+    except ImportError:
+        return None
 
 
 def run(payload: Dict[str, Any], ctx: Any = None) -> Dict[str, Any]:
@@ -75,7 +89,29 @@ def run(payload: Dict[str, Any], ctx: Any = None) -> Dict[str, Any]:
                     notes.append(f"Using strategy {strategy_name} v{strategy_config.get('version', 1)} for {uid[:8]}...")
 
                     # 4. Run midday cycle (generates entry suggestions)
-                    await run_midday_cycle(client, uid)
+                    # Wrap with DecisionContext if replay feature store is enabled
+                    DecisionContext = _get_decision_context_class()
+                    if DecisionContext:
+                        as_of_ts = datetime.now(timezone.utc)
+                        git_sha = os.getenv("GIT_SHA")
+                        ctx = DecisionContext(
+                            strategy_name="suggestions_open",
+                            as_of_ts=as_of_ts,
+                            user_id=uid,
+                            git_sha=git_sha,
+                        )
+                        ctx.__enter__()
+                        try:
+                            await run_midday_cycle(client, uid)
+                            ctx.commit(client, status="ok")
+                        except Exception as cycle_err:
+                            ctx.commit(client, status="failed", error_summary=str(cycle_err)[:500])
+                            raise
+                        finally:
+                            ctx.__exit__(None, None, None)
+                    else:
+                        await run_midday_cycle(client, uid)
+
                     processed += 1
 
                 except Exception as e:

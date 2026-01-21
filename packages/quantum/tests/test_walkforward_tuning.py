@@ -176,7 +176,7 @@ class TestTuneGridCombinations(unittest.TestCase):
         self.assertLess(call_count, 25)  # Significantly less than uncapped (30)
 
     def test_min_trades_per_fold_rejects_low_trade_count(self):
-        """Candidates with insufficient trades are rejected."""
+        """Candidates with insufficient trades are rejected, triggering fallback."""
         from services.walkforward_runner import WalkForwardRunner
 
         # Engine returns 3 trades (below min_trades=5)
@@ -188,11 +188,12 @@ class TestTuneGridCombinations(unittest.TestCase):
         runner = WalkForwardRunner(engine)
         result = runner.run_walk_forward(request, config)
 
-        # All candidates rejected, should use default params
+        # All candidates rejected, triggers v5 fallback
         if result.folds:
             fold = result.folds[0]
-            # train_metrics should be empty since no candidate passed
-            self.assertEqual(fold["train_metrics"], {})
+            # v5: fallback runs populate train_metrics from fallback run
+            self.assertTrue(fold.get("tuning_fallback", False))
+            self.assertIn("fallback", fold["optimized_params"])
 
     def test_best_params_chosen_by_objective(self):
         """Best params selected based on objective metric score."""

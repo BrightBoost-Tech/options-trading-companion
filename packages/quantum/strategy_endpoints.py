@@ -68,6 +68,8 @@ def _persist_v3_results(
         # v4: Identity fingerprints for determinism
         "data_hash": identity["data_hash"],
         "code_sha": identity["code_sha"],
+        # v6: Config hash for reproducibility and cacheability
+        "config_hash": identity["config_hash"],
     }
 
     metrics = {}

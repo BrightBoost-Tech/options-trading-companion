@@ -3,6 +3,7 @@ from typing import List, Dict, Any, Optional
 from pydantic import BaseModel
 import copy
 import itertools
+import numpy as np
 
 # v4 dual-import shim: support both package and PYTHONPATH imports
 try:
@@ -116,6 +117,145 @@ def _compute_objective_score(metrics: Dict[str, Any], objective: str) -> float:
     else:
         # Fallback to sharpe
         return metrics.get("sharpe", -999.0)
+
+
+def _compute_wfa_stability(fold_results: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """
+    Compute walk-forward analysis stability metrics and worst-fold risk indicators.
+
+    v6: Provides institutional-grade robustness diagnostics including:
+    - Dispersion metrics (std, median vs mean)
+    - Worst-fold identification
+    - Bounded stability score (0-100) with categorical tier
+
+    Args:
+        fold_results: List of fold dicts with test_metrics
+
+    Returns:
+        Dict with stability metrics:
+        - fold_count, sharpe_mean, sharpe_median, sharpe_std
+        - max_drawdown_mean, max_drawdown_median, max_drawdown_worst
+        - profit_factor_mean, profit_factor_median
+        - pct_positive_folds
+        - worst_fold_index_by_drawdown, worst_fold_index_by_sharpe
+        - stability_score (0-100), stability_tier (A/B/C/D)
+    """
+    # Edge case: empty folds
+    if not fold_results:
+        return {
+            "fold_count": 0,
+            "sharpe_mean": 0.0,
+            "sharpe_median": 0.0,
+            "sharpe_std": 0.0,
+            "max_drawdown_mean": 0.0,
+            "max_drawdown_median": 0.0,
+            "max_drawdown_worst": 0.0,
+            "profit_factor_mean": 0.0,
+            "profit_factor_median": 0.0,
+            "pct_positive_folds": 0.0,
+            "worst_fold_index_by_drawdown": None,
+            "worst_fold_index_by_sharpe": None,
+            "stability_score": 0.0,
+            "stability_tier": "D"
+        }
+
+    # Extract metrics from folds (handle missing keys with defaults)
+    sharpes = []
+    drawdowns = []
+    profit_factors = []
+    positive_count = 0
+
+    worst_dd_idx = 0
+    worst_dd_val = 0.0
+    worst_sharpe_idx = 0
+    worst_sharpe_val = float("inf")
+
+    for i, fold in enumerate(fold_results):
+        test_metrics = fold.get("test_metrics", {})
+
+        sharpe = test_metrics.get("sharpe", 0.0)
+        dd = test_metrics.get("max_drawdown", 0.0)
+        pf = test_metrics.get("profit_factor", 0.0)
+        total_pnl = test_metrics.get("total_pnl", None)
+        trades_count = fold.get("trades_count", 0)
+
+        sharpes.append(sharpe)
+        drawdowns.append(dd)
+        profit_factors.append(pf)
+
+        # Determine if positive fold
+        if total_pnl is not None:
+            if total_pnl > 0:
+                positive_count += 1
+        elif trades_count > 0 and sharpe > 0:
+            # Fallback heuristic
+            positive_count += 1
+
+        # Track worst folds
+        if dd > worst_dd_val:
+            worst_dd_val = dd
+            worst_dd_idx = i
+        if sharpe < worst_sharpe_val:
+            worst_sharpe_val = sharpe
+            worst_sharpe_idx = i
+
+    fold_count = len(fold_results)
+
+    # Compute statistics safely (avoid NaN)
+    sharpe_arr = np.array(sharpes)
+    dd_arr = np.array(drawdowns)
+    pf_arr = np.array(profit_factors)
+
+    sharpe_mean = float(np.mean(sharpe_arr)) if len(sharpe_arr) > 0 else 0.0
+    sharpe_median = float(np.median(sharpe_arr)) if len(sharpe_arr) > 0 else 0.0
+    sharpe_std = float(np.std(sharpe_arr)) if len(sharpe_arr) > 1 else 0.0
+
+    dd_mean = float(np.mean(dd_arr)) if len(dd_arr) > 0 else 0.0
+    dd_median = float(np.median(dd_arr)) if len(dd_arr) > 0 else 0.0
+    dd_worst = float(np.max(dd_arr)) if len(dd_arr) > 0 else 0.0
+
+    pf_mean = float(np.mean(pf_arr)) if len(pf_arr) > 0 else 0.0
+    pf_median = float(np.median(pf_arr)) if len(pf_arr) > 0 else 0.0
+
+    pct_positive = positive_count / fold_count if fold_count > 0 else 0.0
+
+    # Compute stability score (0-100)
+    # Formula: rewards high median sharpe, low dispersion, low worst drawdown
+    base = max(0.0, sharpe_median)
+    dispersion_penalty = 1.0 / (1.0 + sharpe_std)  # in (0,1]
+    dd_penalty = 1.0 - min(0.95, dd_worst)  # in [0.05,1]
+
+    raw_score = 100.0 * base * dispersion_penalty * dd_penalty
+
+    # Clamp to [0, 100]
+    stability_score = max(0.0, min(100.0, raw_score))
+
+    # Categorical tier
+    if stability_score >= 70:
+        stability_tier = "A"
+    elif stability_score >= 45:
+        stability_tier = "B"
+    elif stability_score >= 25:
+        stability_tier = "C"
+    else:
+        stability_tier = "D"
+
+    return {
+        "fold_count": fold_count,
+        "sharpe_mean": round(sharpe_mean, 4),
+        "sharpe_median": round(sharpe_median, 4),
+        "sharpe_std": round(sharpe_std, 4),
+        "max_drawdown_mean": round(dd_mean, 4),
+        "max_drawdown_median": round(dd_median, 4),
+        "max_drawdown_worst": round(dd_worst, 4),
+        "profit_factor_mean": round(pf_mean, 4),
+        "profit_factor_median": round(pf_median, 4),
+        "pct_positive_folds": round(pct_positive, 4),
+        "worst_fold_index_by_drawdown": worst_dd_idx,
+        "worst_fold_index_by_sharpe": worst_sharpe_idx,
+        "stability_score": round(stability_score, 2),
+        "stability_tier": stability_tier
+    }
 
 
 class WalkForwardRunner:
@@ -323,6 +463,10 @@ class WalkForwardRunner:
             metrics["max_drawdown"] = 0.0
 
         metrics["total_folds"] = len(fold_results)
+
+        # v6: Compute walk-forward stability metrics and worst-fold risk indicators
+        stability = _compute_wfa_stability(fold_results)
+        metrics.update(stability)
 
         return WalkForwardResult(
             folds=fold_results,

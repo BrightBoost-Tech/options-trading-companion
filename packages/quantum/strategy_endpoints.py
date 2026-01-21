@@ -109,6 +109,8 @@ def _persist_v3_results(
     if isinstance(output, WalkForwardResult) and folds:
         fold_rows = []
         for f in folds:
+            # v4: Use full train_metrics if available, fallback to train_sharpe for backward compat
+            train_metrics = f.get("train_metrics", {"sharpe": f.get("train_sharpe", 0.0)})
             f_row = {
                 "backtest_id": backtest_id,
                 "fold_index": f["fold_index"],
@@ -116,9 +118,9 @@ def _persist_v3_results(
                 "train_end": f["train_window"].split(" to ")[1],
                 "test_start": f["test_window"].split(" to ")[0],
                 "test_end": f["test_window"].split(" to ")[1],
-                "train_metrics": {"sharpe": f["train_sharpe"]}, # Simplified
-                "test_metrics": f["test_metrics"],
-                "optimized_params": f["optimized_params"]
+                "train_metrics": train_metrics,
+                "test_metrics": f.get("test_metrics", {}),
+                "optimized_params": f.get("optimized_params", {})
             }
             fold_rows.append(f_row)
 

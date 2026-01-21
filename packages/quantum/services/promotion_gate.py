@@ -19,6 +19,8 @@ class PromotionThresholds:
     micro_live_min_trades: int = 20
     micro_live_min_win_rate: float = 0.35
     micro_live_min_stability_score: float = 25.0
+    micro_live_min_folds: int = 4  # v7.1: Minimum folds required
+    micro_live_max_drawdown_worst: float = 0.25  # v7.1: Worst fold max DD
 
     # Live thresholds (more stringent)
     live_min_sharpe: float = 1.0
@@ -27,6 +29,8 @@ class PromotionThresholds:
     live_min_win_rate: float = 0.45
     live_min_stability_score: float = 50.0
     live_min_pct_positive_folds: float = 0.6  # 60% of folds profitable
+    live_min_folds: int = 6  # v7.1: Minimum folds required
+    live_max_drawdown_worst: float = 0.18  # v7.1: Worst fold max DD
 
 
 # Default thresholds
@@ -41,6 +45,9 @@ def evaluate_promotion_gate(
     """
     Evaluate if a backtest result is eligible for promotion.
 
+    v7.1 Hardening: Walk-forward is REQUIRED for micro_live/live eligibility.
+    Single-run backtests can only reach "paper" tier at best.
+
     Args:
         metrics: Backtest aggregate metrics dict containing:
             - sharpe: Sharpe ratio
@@ -50,6 +57,8 @@ def evaluate_promotion_gate(
             - stability_score: Walk-forward stability score (0-100)
             - pct_positive_folds: Percentage of profitable folds
             - total_pnl: Total profit/loss
+            - fold_count: Number of folds in walk-forward (v7.1)
+            - max_drawdown_worst: Worst fold max drawdown (v7.1)
         run_mode: One of "single", "walk_forward", "monte_carlo"
         thresholds: Optional custom thresholds, defaults to DEFAULT_THRESHOLDS
 
@@ -75,6 +84,15 @@ def evaluate_promotion_gate(
     stability_score = metrics.get("stability_score", 0.0) or 0.0
     pct_positive_folds = metrics.get("pct_positive_folds", 0.0) or 0.0
     total_pnl = metrics.get("total_pnl", 0.0) or 0.0
+    # v7.1: New metrics for hardening
+    fold_count = metrics.get("fold_count", 0) or 0
+    max_drawdown_worst = metrics.get("max_drawdown_worst", 1.0) or 1.0
+
+    # v7.1: Walk-forward is REQUIRED for micro_live/live eligibility
+    requires_walk_forward = run_mode != "walk_forward"
+    if requires_walk_forward:
+        micro_live_failures.append("requires_walk_forward")
+        live_failures.append("requires_walk_forward")
 
     # Check micro-live eligibility
     if sharpe < thresholds.micro_live_min_sharpe:
@@ -99,6 +117,16 @@ def evaluate_promotion_gate(
         if stability_score < thresholds.micro_live_min_stability_score:
             micro_live_failures.append(
                 f"stability_score {stability_score:.1f} < {thresholds.micro_live_min_stability_score}"
+            )
+        # v7.1: Fold count check
+        if fold_count < thresholds.micro_live_min_folds:
+            micro_live_failures.append(
+                f"insufficient_folds: {fold_count} < {thresholds.micro_live_min_folds}"
+            )
+        # v7.1: Worst fold drawdown check
+        if max_drawdown_worst > thresholds.micro_live_max_drawdown_worst:
+            micro_live_failures.append(
+                f"worst_fold_drawdown_too_high: {max_drawdown_worst:.1%} > {thresholds.micro_live_max_drawdown_worst:.0%}"
             )
 
     # Check live eligibility (only if micro-live passes)
@@ -128,6 +156,16 @@ def evaluate_promotion_gate(
         if pct_positive_folds < thresholds.live_min_pct_positive_folds:
             live_failures.append(
                 f"pct_positive_folds {pct_positive_folds:.1%} < {thresholds.live_min_pct_positive_folds:.0%}"
+            )
+        # v7.1: Fold count check for live
+        if fold_count < thresholds.live_min_folds:
+            live_failures.append(
+                f"insufficient_folds: {fold_count} < {thresholds.live_min_folds}"
+            )
+        # v7.1: Worst fold drawdown check for live
+        if max_drawdown_worst > thresholds.live_max_drawdown_worst:
+            live_failures.append(
+                f"worst_fold_drawdown_too_high: {max_drawdown_worst:.1%} > {thresholds.live_max_drawdown_worst:.0%}"
             )
 
     # Determine eligibility

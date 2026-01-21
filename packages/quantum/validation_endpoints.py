@@ -82,9 +82,15 @@ def trigger_validation_run(
     service = GoLiveValidationService(supabase)
 
     if payload.mode == "paper":
-        # Run inline as per spec
-        result = service.eval_paper(user_id)
-        return result
+        # v4-L1: Use checkpoint-based evaluation instead of legacy window-based
+        try:
+            result = service.eval_paper_forward_checkpoint(user_id)
+            return {
+                "status": "checkpoint_evaluated",
+                **result
+            }
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Checkpoint evaluation failed: {e}")
 
     elif payload.mode == "historical":
         # Enqueue Job using public_tasks helper for consistency

@@ -33,10 +33,11 @@ router = APIRouter(
 # v4-L2: Go-Live Gate Helpers
 # ---------------------------------------------------------------------------
 
-# Jobs that require live execution privileges
-LIVE_EXEC_JOB_PREFIXES = ("live_", "broker_")
+# Jobs that require live execution privileges (order execution only)
+# Note: broker_sync and other read-only broker jobs are NOT gated here -
+# they only respect the pause gate, not the go-live readiness gate.
+LIVE_EXEC_JOB_PREFIXES = ("live_",)
 LIVE_EXEC_JOB_NAMES = {
-    "broker_sync",
     "live_order_submit",
     "live_order_cancel",
     "live_order_retry",
@@ -48,8 +49,11 @@ def _job_requires_live_privileges(job_name: str) -> bool:
     Check if a job requires live execution privileges.
 
     Returns True if:
-    - job_name starts with "live_" or "broker_"
+    - job_name starts with "live_" (order execution jobs)
     - job_name is in the explicit LIVE_EXEC_JOB_NAMES set
+
+    Note: broker_sync and other read-only broker jobs do NOT require
+    live privileges - they only respect the pause gate.
     """
     if any(job_name.startswith(prefix) for prefix in LIVE_EXEC_JOB_PREFIXES):
         return True
@@ -110,7 +114,8 @@ def enqueue_job_run(job_name: str, idempotency_key: str, payload: Dict[str, Any]
             "rq_job_id": None,  # No RQ job was created
             "status": job_run["status"],  # Should be 'cancelled'
             "cancelled_reason": "global_ops_pause",
-            "cancelled_detail": pause_reason
+            "cancelled_detail": pause_reason,
+            "pause_reason": pause_reason,  # Backward compat: legacy field
         }
 
     # v4-L2: GO-LIVE GATE - for jobs requiring live execution privileges

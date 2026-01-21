@@ -271,18 +271,19 @@ class TestJobRequiresLivePrivileges(unittest.TestCase):
         self.assertTrue(_job_requires_live_privileges("live_order_cancel"))
         self.assertTrue(_job_requires_live_privileges("live_anything"))
 
-    def test_broker_prefix_requires_privileges(self):
-        """Jobs starting with 'broker_' require privileges."""
+    def test_broker_prefix_does_not_require_privileges(self):
+        """Jobs starting with 'broker_' do NOT require privileges (read-only)."""
         from public_tasks import _job_requires_live_privileges
 
-        self.assertTrue(_job_requires_live_privileges("broker_sync"))
-        self.assertTrue(_job_requires_live_privileges("broker_order"))
+        # broker_sync and other broker jobs are read-only, not gated
+        self.assertFalse(_job_requires_live_privileges("broker_sync"))
+        self.assertFalse(_job_requires_live_privileges("broker_read"))
 
     def test_explicit_job_names_require_privileges(self):
         """Explicit job names in LIVE_EXEC_JOB_NAMES require privileges."""
         from public_tasks import _job_requires_live_privileges
 
-        self.assertTrue(_job_requires_live_privileges("broker_sync"))
+        # Only actual order execution jobs require privileges
         self.assertTrue(_job_requires_live_privileges("live_order_submit"))
         self.assertTrue(_job_requires_live_privileges("live_order_cancel"))
         self.assertTrue(_job_requires_live_privileges("live_order_retry"))

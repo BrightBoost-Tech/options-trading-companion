@@ -6,6 +6,8 @@ from supabase import Client
 from packages.quantum.security import get_current_user, get_supabase_user_client
 from packages.quantum.services.go_live_validation_service import GoLiveValidationService
 from packages.quantum.public_tasks import enqueue_job_run
+from packages.quantum.ops_endpoints import get_global_ops_control
+from packages.quantum.policies.go_live_policy import evaluate_go_live_gate
 
 router = APIRouter(prefix="/validation", tags=["Go Live Validation"])
 
@@ -163,3 +165,34 @@ def get_self_assessment(
             }
         ]
     }
+
+
+@router.get("/gate")
+def get_validation_gate(
+    user_id: str = Depends(get_current_user),
+    supabase: Client = Depends(get_supabase_user_client)
+):
+    """
+    v4-L2: Get go-live readiness gate decision.
+
+    Evaluates the combined state of:
+    - Global ops control (mode, paused)
+    - User readiness (paper_ready, overall_ready)
+
+    Returns the gate decision including:
+    - allowed: Whether live execution is permitted
+    - requires_manual_approval: If True, auto-live jobs blocked but manual approval works
+    - reason: Machine-readable reason code
+    - context: Full state for debugging/UI
+    """
+    # Fetch ops state
+    ops_state = get_global_ops_control()
+
+    # Fetch user readiness
+    service = GoLiveValidationService(supabase)
+    user_readiness = service.get_or_create_state(user_id)
+
+    # Evaluate gate
+    decision = evaluate_go_live_gate(ops_state, user_readiness)
+
+    return decision.to_dict()

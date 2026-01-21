@@ -7,6 +7,7 @@ from datetime import datetime
 from packages.quantum.jobs.rq_enqueue import enqueue_idempotent
 from packages.quantum.jobs.job_runs import JobRunStore
 from packages.quantum.security.task_signing_v4 import verify_task_signature, TaskSignatureResult
+from packages.quantum.policies.go_live_policy import evaluate_go_live_gate
 from packages.quantum.public_tasks_models import (
     UniverseSyncPayload,
     MorningBriefPayload,
@@ -27,6 +28,46 @@ router = APIRouter(
     include_in_schema=True
 )
 
+
+# ---------------------------------------------------------------------------
+# v4-L2: Go-Live Gate Helpers
+# ---------------------------------------------------------------------------
+
+# Jobs that require live execution privileges
+LIVE_EXEC_JOB_PREFIXES = ("live_", "broker_")
+LIVE_EXEC_JOB_NAMES = {
+    "broker_sync",
+    "live_order_submit",
+    "live_order_cancel",
+    "live_order_retry",
+}
+
+
+def _job_requires_live_privileges(job_name: str) -> bool:
+    """
+    Check if a job requires live execution privileges.
+
+    Returns True if:
+    - job_name starts with "live_" or "broker_"
+    - job_name is in the explicit LIVE_EXEC_JOB_NAMES set
+    """
+    if any(job_name.startswith(prefix) for prefix in LIVE_EXEC_JOB_PREFIXES):
+        return True
+    return job_name in LIVE_EXEC_JOB_NAMES
+
+
+def _extract_user_id(payload: Dict[str, Any]) -> Optional[str]:
+    """
+    Extract user_id from job payload.
+
+    Returns None if not present or if value is "all" (batch jobs).
+    """
+    user_id = payload.get("user_id")
+    if not user_id or user_id == "all":
+        return None
+    return user_id
+
+
 def enqueue_job_run(job_name: str, idempotency_key: str, payload: Dict[str, Any], queue_name: str = "otc") -> Dict[str, Any]:
     """
     Helper to create a JobRun and enqueue the runner.
@@ -39,10 +80,15 @@ def enqueue_job_run(job_name: str, idempotency_key: str, payload: Dict[str, Any]
     - Does NOT enqueue to RQ
     - Returns the cancelled JobRun record for auditability
 
+    v4-L2 Go-Live Gate: For jobs requiring live execution privileges:
+    - Checks go-live readiness gate (ops mode + user readiness)
+    - If denied: creates cancelled record with cancelled_reason='go_live_gate'
+    - If requires_manual_approval (micro_live): cancels auto-live jobs
+
     This ensures all attempted runs while paused are visible in the admin jobs page.
     """
     # v4-L5: PAUSE GATE - check if trading is paused before enqueue
-    from packages.quantum.ops_endpoints import is_trading_paused
+    from packages.quantum.ops_endpoints import is_trading_paused, get_global_ops_control
     is_paused, pause_reason = is_trading_paused()
 
     store = JobRunStore()
@@ -64,8 +110,79 @@ def enqueue_job_run(job_name: str, idempotency_key: str, payload: Dict[str, Any]
             "rq_job_id": None,  # No RQ job was created
             "status": job_run["status"],  # Should be 'cancelled'
             "cancelled_reason": "global_ops_pause",
-            "pause_reason": pause_reason
+            "cancelled_detail": pause_reason
         }
+
+    # v4-L2: GO-LIVE GATE - for jobs requiring live execution privileges
+    if _job_requires_live_privileges(job_name):
+        target_user_id = _extract_user_id(payload)
+
+        # Live-exec jobs require a specific user_id (not "all" or missing)
+        if not target_user_id:
+            job_run = store.create_or_get_cancelled(
+                job_name=job_name,
+                idempotency_key=idempotency_key,
+                payload=payload,
+                cancelled_reason="go_live_gate",
+                cancelled_detail="missing_user_id_for_gate"
+            )
+            return {
+                "job_run_id": job_run["id"],
+                "job_name": job_name,
+                "idempotency_key": idempotency_key,
+                "rq_job_id": None,
+                "status": job_run["status"],
+                "cancelled_reason": "go_live_gate",
+                "cancelled_detail": "missing_user_id_for_gate"
+            }
+
+        # Fetch ops state and user readiness
+        ops_state = get_global_ops_control()
+
+        # Use admin client (store.client) to avoid RLS issues
+        from packages.quantum.services.go_live_validation_service import GoLiveValidationService
+        service = GoLiveValidationService(store.client)
+        user_readiness = service.get_or_create_state(target_user_id)
+
+        # Evaluate gate
+        decision = evaluate_go_live_gate(ops_state, user_readiness)
+
+        if not decision.allowed:
+            job_run = store.create_or_get_cancelled(
+                job_name=job_name,
+                idempotency_key=idempotency_key,
+                payload=payload,
+                cancelled_reason="go_live_gate",
+                cancelled_detail=decision.reason
+            )
+            return {
+                "job_run_id": job_run["id"],
+                "job_name": job_name,
+                "idempotency_key": idempotency_key,
+                "rq_job_id": None,
+                "status": job_run["status"],
+                "cancelled_reason": "go_live_gate",
+                "cancelled_detail": decision.reason
+            }
+
+        # If allowed but requires manual approval (micro_live mode), block auto-live jobs
+        if decision.requires_manual_approval:
+            job_run = store.create_or_get_cancelled(
+                job_name=job_name,
+                idempotency_key=idempotency_key,
+                payload=payload,
+                cancelled_reason="manual_approval_required",
+                cancelled_detail=decision.reason
+            )
+            return {
+                "job_run_id": job_run["id"],
+                "job_name": job_name,
+                "idempotency_key": idempotency_key,
+                "rq_job_id": None,
+                "status": job_run["status"],
+                "cancelled_reason": "manual_approval_required",
+                "cancelled_detail": decision.reason
+            }
 
     # Normal flow: create job run and enqueue
     job_run = store.create_or_get(job_name, idempotency_key, payload)

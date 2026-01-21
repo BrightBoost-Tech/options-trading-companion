@@ -43,11 +43,16 @@ def _find_existing_backtest_id(
     data_hash: str,
     config_hash: str,
     param_hash: str,
+    code_sha: str,
 ) -> Optional[str]:
     """
     Check if a backtest with the same identity already exists.
 
-    Dedupe key: (user_id, strategy_name, ticker, run_mode, engine_version, data_hash, config_hash, param_hash)
+    v7.1 Strict dedupe: Includes code_sha, requires status=completed,
+    and orders by created_at desc to return the newest match.
+
+    Dedupe key: (user_id, strategy_name, ticker, run_mode, engine_version,
+                 data_hash, config_hash, param_hash, code_sha, status=completed)
 
     Returns:
         Existing backtest ID if found, None otherwise.
@@ -64,6 +69,9 @@ def _find_existing_backtest_id(
             .eq("data_hash", data_hash)
             .eq("config_hash", config_hash)
             .eq("param_hash", param_hash)
+            .eq("code_sha", code_sha)
+            .eq("status", "completed")
+            .order("created_at", desc=True)
             .limit(1)
             .execute()
         )
@@ -94,7 +102,7 @@ def _persist_v3_results(
         seed=request.seed
     )
 
-    # v7: Dedupe check - skip insert if identical backtest exists
+    # v7.1: Strict dedupe check - includes code_sha, status=completed
     existing_id = _find_existing_backtest_id(
         supabase=supabase,
         user_id=user_id,
@@ -105,6 +113,7 @@ def _persist_v3_results(
         data_hash=identity["data_hash"],
         config_hash=identity["config_hash"],
         param_hash=param_hash,
+        code_sha=identity["code_sha"],
     )
     if existing_id:
         # Return existing ID without re-inserting
@@ -173,7 +182,17 @@ def _persist_v3_results(
             "metrics": metrics
         })
 
-    # v7: Evaluate promotion gate
+    # v7.1: Compute fold_count and max_drawdown_worst for hardened promotion gate
+    fold_count = len(folds) if folds else 0
+    max_drawdown_worst = 0.0
+    if folds:
+        for f in folds:
+            fold_test_metrics = f.get("test_metrics", {})
+            fold_dd = fold_test_metrics.get("max_drawdown", 0.0) or 0.0
+            if fold_dd > max_drawdown_worst:
+                max_drawdown_worst = fold_dd
+
+    # v7.1: Evaluate promotion gate with fold metrics
     promotion_metrics = {
         "sharpe": metrics.get("sharpe", 0.0),
         "max_drawdown": metrics.get("max_drawdown", 1.0),
@@ -182,6 +201,8 @@ def _persist_v3_results(
         "stability_score": metrics.get("stability_score", 0.0),
         "pct_positive_folds": metrics.get("pct_positive_folds", 0.0),
         "total_pnl": metrics.get("total_pnl", 0.0),
+        "fold_count": fold_count,
+        "max_drawdown_worst": max_drawdown_worst,
     }
     promotion = evaluate_promotion_gate(promotion_metrics, request.run_mode)
     row.update({

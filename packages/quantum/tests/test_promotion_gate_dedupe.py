@@ -33,6 +33,9 @@ class TestPromotionGateEligibility(unittest.TestCase):
             "stability_score": 70.0,
             "pct_positive_folds": 0.8,
             "total_pnl": 5000.0,
+            # v7.1: New required metrics
+            "fold_count": 8,
+            "max_drawdown_worst": 0.15,
         }
 
         result = evaluate_promotion_gate(metrics, "walk_forward")
@@ -53,6 +56,9 @@ class TestPromotionGateEligibility(unittest.TestCase):
             "stability_score": 40.0,  # Above micro-live (25) but below live (50)
             "pct_positive_folds": 0.5,  # Below live (0.6)
             "total_pnl": 1000.0,
+            # v7.1: New required metrics
+            "fold_count": 5,  # Above micro-live (4) but below live (6)
+            "max_drawdown_worst": 0.20,  # Above micro-live (0.25) but above live (0.18)
         }
 
         result = evaluate_promotion_gate(metrics, "walk_forward")
@@ -73,6 +79,8 @@ class TestPromotionGateEligibility(unittest.TestCase):
             "stability_score": 20.0,
             "pct_positive_folds": 0.3,
             "total_pnl": 100.0,  # Positive
+            "fold_count": 2,  # Below micro-live min (4)
+            "max_drawdown_worst": 0.35,  # Above micro-live limit (0.25)
         }
 
         result = evaluate_promotion_gate(metrics, "walk_forward")
@@ -93,6 +101,8 @@ class TestPromotionGateEligibility(unittest.TestCase):
             "stability_score": 10.0,
             "pct_positive_folds": 0.2,
             "total_pnl": -500.0,
+            "fold_count": 3,
+            "max_drawdown_worst": 0.50,
         }
 
         result = evaluate_promotion_gate(metrics, "walk_forward")
@@ -113,6 +123,8 @@ class TestPromotionGateEligibility(unittest.TestCase):
             "stability_score": 15.0,
             "pct_positive_folds": 0.3,
             "total_pnl": 100.0,
+            "fold_count": 2,
+            "max_drawdown_worst": 0.40,
         }
 
         result = evaluate_promotion_gate(metrics, "walk_forward")
@@ -123,8 +135,8 @@ class TestPromotionGateEligibility(unittest.TestCase):
         reasons_str = " ".join(result["promotion_reasons"])
         self.assertIn("sharpe", reasons_str.lower())
 
-    def test_single_run_mode_skips_stability_checks(self):
-        """Single run mode doesn't check stability_score."""
+    def test_single_run_mode_cannot_be_promoted_to_live(self):
+        """v7.1: Single run mode is NOT eligible for micro_live or live."""
         from services.promotion_gate import evaluate_promotion_gate
 
         metrics = {
@@ -132,15 +144,21 @@ class TestPromotionGateEligibility(unittest.TestCase):
             "max_drawdown": 0.10,
             "total_trades": 100,
             "win_rate": 0.55,
-            "stability_score": 0.0,  # Would fail walk_forward check
-            "pct_positive_folds": 0.0,
+            "stability_score": 80.0,
+            "pct_positive_folds": 0.8,
             "total_pnl": 5000.0,
         }
 
         result = evaluate_promotion_gate(metrics, "single")
 
-        # Should still be eligible since single mode skips stability
-        self.assertTrue(result["eligible_live"])
+        # v7.1: Single-run cannot be eligible for micro_live or live
+        self.assertFalse(result["eligible_micro_live"])
+        self.assertFalse(result["eligible_live"])
+        # With positive PnL, should get paper tier at best
+        self.assertEqual(result["promotion_tier"], "paper")
+        # Should mention requires_walk_forward
+        reasons_str = " ".join(result["promotion_reasons"])
+        self.assertIn("requires_walk_forward", reasons_str)
 
     def test_custom_thresholds(self):
         """Custom thresholds are respected."""
@@ -154,6 +172,8 @@ class TestPromotionGateEligibility(unittest.TestCase):
             "stability_score": 50.0,
             "pct_positive_folds": 0.6,
             "total_pnl": 1000.0,
+            "fold_count": 5,
+            "max_drawdown_worst": 0.15,
         }
 
         # With default thresholds, sharpe 0.3 fails micro-live (needs 0.5)
@@ -339,6 +359,20 @@ class TestPersistV3ResultsPromotion(unittest.TestCase):
             "pct_positive_folds": 0.8,
         }
 
+        # v7.1: Simulate fold data for fold_count and max_drawdown_worst
+        folds = [
+            {"test_metrics": {"max_drawdown": 0.08}},
+            {"test_metrics": {"max_drawdown": 0.12}},
+            {"test_metrics": {"max_drawdown": 0.10}},
+            {"test_metrics": {"max_drawdown": 0.09}},
+            {"test_metrics": {"max_drawdown": 0.15}},
+            {"test_metrics": {"max_drawdown": 0.11}},
+            {"test_metrics": {"max_drawdown": 0.07}},
+            {"test_metrics": {"max_drawdown": 0.13}},
+        ]
+        fold_count = len(folds)
+        max_drawdown_worst = max(f["test_metrics"]["max_drawdown"] for f in folds)
+
         # Build promotion_metrics as persist function does
         promotion_metrics = {
             "sharpe": metrics.get("sharpe", 0.0),
@@ -348,6 +382,8 @@ class TestPersistV3ResultsPromotion(unittest.TestCase):
             "stability_score": metrics.get("stability_score", 0.0),
             "pct_positive_folds": metrics.get("pct_positive_folds", 0.0),
             "total_pnl": metrics.get("total_pnl", 0.0),
+            "fold_count": fold_count,
+            "max_drawdown_worst": max_drawdown_worst,
         }
 
         promotion = evaluate_promotion_gate(promotion_metrics, "walk_forward")
@@ -377,6 +413,7 @@ class TestPersistV3ResultsPromotion(unittest.TestCase):
             "pct_positive_folds": 0.5,
         }
 
+        # v7.1: Add fold metrics
         promotion_metrics = {
             "sharpe": metrics.get("sharpe", 0.0),
             "max_drawdown": metrics.get("max_drawdown", 1.0),
@@ -385,6 +422,8 @@ class TestPersistV3ResultsPromotion(unittest.TestCase):
             "stability_score": metrics.get("stability_score", 0.0),
             "pct_positive_folds": metrics.get("pct_positive_folds", 0.0),
             "total_pnl": metrics.get("total_pnl", 0.0),
+            "fold_count": 5,  # Above micro-live (4) but below live (6)
+            "max_drawdown_worst": 0.22,  # Above micro-live (0.25) but above live (0.18)
         }
 
         promotion = evaluate_promotion_gate(promotion_metrics, "walk_forward")
@@ -471,6 +510,254 @@ class TestPromotionTierLogic(unittest.TestCase):
         self.assertFalse(result["eligible_micro_live"])
         self.assertFalse(result["eligible_live"])
         self.assertEqual(result["promotion_tier"], "rejected")
+
+
+class TestV71HardeningFoldCount(unittest.TestCase):
+    """v7.1 tests for fold_count threshold requirements."""
+
+    def test_insufficient_folds_blocks_micro_live(self):
+        """fold_count < 4 blocks micro_live eligibility."""
+        from services.promotion_gate import evaluate_promotion_gate
+
+        metrics = {
+            "sharpe": 1.5,
+            "max_drawdown": 0.10,
+            "total_trades": 100,
+            "win_rate": 0.55,
+            "stability_score": 70.0,
+            "pct_positive_folds": 0.8,
+            "total_pnl": 5000.0,
+            "fold_count": 3,  # Below micro-live min (4)
+            "max_drawdown_worst": 0.10,
+        }
+
+        result = evaluate_promotion_gate(metrics, "walk_forward")
+
+        self.assertFalse(result["eligible_micro_live"])
+        self.assertEqual(result["promotion_tier"], "paper")
+        reasons_str = " ".join(result["promotion_reasons"])
+        self.assertIn("insufficient_folds", reasons_str)
+
+    def test_insufficient_folds_blocks_live(self):
+        """fold_count >= 4 but < 6 blocks live eligibility."""
+        from services.promotion_gate import evaluate_promotion_gate
+
+        metrics = {
+            "sharpe": 1.5,
+            "max_drawdown": 0.10,
+            "total_trades": 100,
+            "win_rate": 0.55,
+            "stability_score": 70.0,
+            "pct_positive_folds": 0.8,
+            "total_pnl": 5000.0,
+            "fold_count": 5,  # Above micro-live (4) but below live (6)
+            "max_drawdown_worst": 0.10,
+        }
+
+        result = evaluate_promotion_gate(metrics, "walk_forward")
+
+        self.assertTrue(result["eligible_micro_live"])
+        self.assertFalse(result["eligible_live"])
+        self.assertEqual(result["promotion_tier"], "micro_live")
+        reasons_str = " ".join(result["promotion_reasons"])
+        self.assertIn("insufficient_folds", reasons_str)
+
+
+class TestV71HardeningWorstFoldDrawdown(unittest.TestCase):
+    """v7.1 tests for max_drawdown_worst threshold requirements."""
+
+    def test_worst_fold_drawdown_blocks_micro_live(self):
+        """max_drawdown_worst > 0.25 blocks micro_live eligibility."""
+        from services.promotion_gate import evaluate_promotion_gate
+
+        metrics = {
+            "sharpe": 1.5,
+            "max_drawdown": 0.10,  # Aggregate is fine
+            "total_trades": 100,
+            "win_rate": 0.55,
+            "stability_score": 70.0,
+            "pct_positive_folds": 0.8,
+            "total_pnl": 5000.0,
+            "fold_count": 8,
+            "max_drawdown_worst": 0.30,  # Above micro-live limit (0.25)
+        }
+
+        result = evaluate_promotion_gate(metrics, "walk_forward")
+
+        self.assertFalse(result["eligible_micro_live"])
+        self.assertEqual(result["promotion_tier"], "paper")
+        reasons_str = " ".join(result["promotion_reasons"])
+        self.assertIn("worst_fold_drawdown_too_high", reasons_str)
+
+    def test_worst_fold_drawdown_blocks_live(self):
+        """max_drawdown_worst > 0.18 blocks live eligibility."""
+        from services.promotion_gate import evaluate_promotion_gate
+
+        metrics = {
+            "sharpe": 1.5,
+            "max_drawdown": 0.10,  # Aggregate is fine
+            "total_trades": 100,
+            "win_rate": 0.55,
+            "stability_score": 70.0,
+            "pct_positive_folds": 0.8,
+            "total_pnl": 5000.0,
+            "fold_count": 8,
+            "max_drawdown_worst": 0.22,  # Below micro-live (0.25) but above live (0.18)
+        }
+
+        result = evaluate_promotion_gate(metrics, "walk_forward")
+
+        self.assertTrue(result["eligible_micro_live"])
+        self.assertFalse(result["eligible_live"])
+        self.assertEqual(result["promotion_tier"], "micro_live")
+        reasons_str = " ".join(result["promotion_reasons"])
+        self.assertIn("worst_fold_drawdown_too_high", reasons_str)
+
+
+class TestV71StrictDedupe(unittest.TestCase):
+    """v7.1 tests for strict dedupe with code_sha."""
+
+    def _find_existing_backtest_id_v71(
+        self,
+        supabase,
+        user_id: str,
+        strategy_name: str,
+        ticker: str,
+        run_mode: str,
+        engine_version: str,
+        data_hash: str,
+        config_hash: str,
+        param_hash: str,
+        code_sha: str,
+    ):
+        """v7.1 strict dedupe logic with code_sha and status=completed."""
+        try:
+            result = (
+                supabase.table("strategy_backtests")
+                .select("id")
+                .eq("user_id", user_id)
+                .eq("strategy_name", strategy_name)
+                .eq("ticker", ticker)
+                .eq("run_mode", run_mode)
+                .eq("engine_version", engine_version)
+                .eq("data_hash", data_hash)
+                .eq("config_hash", config_hash)
+                .eq("param_hash", param_hash)
+                .eq("code_sha", code_sha)
+                .eq("status", "completed")
+                .order("created_at", desc=True)
+                .limit(1)
+                .execute()
+            )
+            if result.data:
+                return result.data[0]["id"]
+            return None
+        except Exception:
+            return None
+
+    def test_dedupe_requires_code_sha_match(self):
+        """Dedupe requires code_sha to match."""
+        mock_supabase = MagicMock()
+        mock_result = MagicMock()
+        mock_result.data = []  # No match - simulates different code_sha
+
+        # Chain the mock calls including new code_sha and status
+        chain = mock_supabase.table.return_value.select.return_value
+        for _ in range(10):  # .eq() is called 10 times
+            chain = chain.eq.return_value
+        chain.order.return_value.limit.return_value.execute.return_value = mock_result
+
+        result = self._find_existing_backtest_id_v71(
+            supabase=mock_supabase,
+            user_id="user-1",
+            strategy_name="test-strategy",
+            ticker="SPY",
+            run_mode="walk_forward",
+            engine_version="v3",
+            data_hash="abc123",
+            config_hash="def456",
+            param_hash="ghi789",
+            code_sha="old-code-sha",  # Different from what's in DB
+        )
+
+        # No match because code_sha differs
+        self.assertIsNone(result)
+
+    def test_dedupe_returns_newest_completed(self):
+        """Dedupe returns newest completed backtest."""
+        mock_supabase = MagicMock()
+        mock_result = MagicMock()
+        mock_result.data = [{"id": "newest-completed-uuid"}]
+
+        chain = mock_supabase.table.return_value.select.return_value
+        for _ in range(10):
+            chain = chain.eq.return_value
+        chain.order.return_value.limit.return_value.execute.return_value = mock_result
+
+        result = self._find_existing_backtest_id_v71(
+            supabase=mock_supabase,
+            user_id="user-1",
+            strategy_name="test-strategy",
+            ticker="SPY",
+            run_mode="walk_forward",
+            engine_version="v3",
+            data_hash="abc123",
+            config_hash="def456",
+            param_hash="ghi789",
+            code_sha="current-code-sha",
+        )
+
+        self.assertEqual(result, "newest-completed-uuid")
+
+
+class TestV71WalkForwardRequired(unittest.TestCase):
+    """v7.1 tests that walk-forward is required for promotion."""
+
+    def test_monte_carlo_cannot_be_promoted(self):
+        """Monte Carlo mode is NOT eligible for micro_live or live."""
+        from services.promotion_gate import evaluate_promotion_gate
+
+        metrics = {
+            "sharpe": 1.5,
+            "max_drawdown": 0.10,
+            "total_trades": 100,
+            "win_rate": 0.55,
+            "stability_score": 80.0,
+            "pct_positive_folds": 0.8,
+            "total_pnl": 5000.0,
+            "fold_count": 0,  # N/A for monte_carlo
+            "max_drawdown_worst": 0.0,
+        }
+
+        result = evaluate_promotion_gate(metrics, "monte_carlo")
+
+        self.assertFalse(result["eligible_micro_live"])
+        self.assertFalse(result["eligible_live"])
+        self.assertEqual(result["promotion_tier"], "paper")
+        reasons_str = " ".join(result["promotion_reasons"])
+        self.assertIn("requires_walk_forward", reasons_str)
+
+    def test_walk_forward_can_be_promoted(self):
+        """Walk-forward mode CAN be eligible for live with good metrics."""
+        from services.promotion_gate import evaluate_promotion_gate
+
+        metrics = {
+            "sharpe": 1.5,
+            "max_drawdown": 0.10,
+            "total_trades": 100,
+            "win_rate": 0.55,
+            "stability_score": 80.0,
+            "pct_positive_folds": 0.8,
+            "total_pnl": 5000.0,
+            "fold_count": 8,
+            "max_drawdown_worst": 0.12,
+        }
+
+        result = evaluate_promotion_gate(metrics, "walk_forward")
+
+        self.assertTrue(result["eligible_micro_live"])
+        self.assertTrue(result["eligible_live"])
+        self.assertEqual(result["promotion_tier"], "live")
 
 
 if __name__ == "__main__":

@@ -44,7 +44,7 @@ class TestEnqueueGateEnforcement(unittest.TestCase):
     def test_live_job_cancelled_when_paper_mode(
         self, mock_is_paused, mock_get_ops, mock_service_cls
     ):
-        """Live job is cancelled when ops mode is paper."""
+        """Live order job is cancelled when ops mode is paper."""
         from public_tasks import enqueue_job_run
 
         # Not paused, but paper mode
@@ -59,7 +59,7 @@ class TestEnqueueGateEnforcement(unittest.TestCase):
         }
 
         result = enqueue_job_run(
-            job_name="broker_sync",
+            job_name="live_order_submit",
             idempotency_key="test-key",
             payload={"user_id": "test-user-uuid"}
         )
@@ -74,7 +74,7 @@ class TestEnqueueGateEnforcement(unittest.TestCase):
     def test_live_job_cancelled_when_micro_live_not_ready(
         self, mock_is_paused, mock_get_ops, mock_service_cls
     ):
-        """Live job is cancelled when micro_live mode but paper_ready=False."""
+        """Live order job is cancelled when micro_live mode but paper_ready=False."""
         from public_tasks import enqueue_job_run
 
         mock_is_paused.return_value = (False, None)
@@ -88,7 +88,7 @@ class TestEnqueueGateEnforcement(unittest.TestCase):
         }
 
         result = enqueue_job_run(
-            job_name="broker_sync",
+            job_name="live_order_submit",
             idempotency_key="test-key",
             payload={"user_id": "test-user-uuid"}
         )
@@ -103,7 +103,7 @@ class TestEnqueueGateEnforcement(unittest.TestCase):
     def test_live_job_requires_manual_approval_in_micro_live(
         self, mock_is_paused, mock_get_ops, mock_service_cls
     ):
-        """Live job requires manual approval when micro_live mode and paper_ready=True."""
+        """Live order job requires manual approval when micro_live mode and paper_ready=True."""
         from public_tasks import enqueue_job_run
 
         mock_is_paused.return_value = (False, None)
@@ -117,7 +117,7 @@ class TestEnqueueGateEnforcement(unittest.TestCase):
         }
 
         result = enqueue_job_run(
-            job_name="broker_sync",
+            job_name="live_order_submit",
             idempotency_key="test-key",
             payload={"user_id": "test-user-uuid"}
         )
@@ -132,7 +132,7 @@ class TestEnqueueGateEnforcement(unittest.TestCase):
     def test_live_job_cancelled_when_live_mode_not_ready(
         self, mock_is_paused, mock_get_ops, mock_service_cls
     ):
-        """Live job is cancelled when live mode but overall_ready=False."""
+        """Live order job is cancelled when live mode but overall_ready=False."""
         from public_tasks import enqueue_job_run
 
         mock_is_paused.return_value = (False, None)
@@ -146,7 +146,7 @@ class TestEnqueueGateEnforcement(unittest.TestCase):
         }
 
         result = enqueue_job_run(
-            job_name="broker_sync",
+            job_name="live_order_submit",
             idempotency_key="test-key",
             payload={"user_id": "test-user-uuid"}
         )
@@ -162,7 +162,7 @@ class TestEnqueueGateEnforcement(unittest.TestCase):
     def test_live_job_allowed_when_live_mode_ready(
         self, mock_is_paused, mock_get_ops, mock_service_cls, mock_enqueue
     ):
-        """Live job is allowed when live mode and overall_ready=True."""
+        """Live order job is allowed when live mode and overall_ready=True."""
         from public_tasks import enqueue_job_run
 
         mock_is_paused.return_value = (False, None)
@@ -177,7 +177,7 @@ class TestEnqueueGateEnforcement(unittest.TestCase):
         mock_enqueue.return_value = {"job_id": "rq-job-id"}
 
         result = enqueue_job_run(
-            job_name="broker_sync",
+            job_name="live_order_submit",
             idempotency_key="test-key",
             payload={"user_id": "test-user-uuid"}
         )
@@ -189,13 +189,13 @@ class TestEnqueueGateEnforcement(unittest.TestCase):
 
     @patch("packages.quantum.ops_endpoints.is_trading_paused")
     def test_live_job_cancelled_when_missing_user_id(self, mock_is_paused):
-        """Live job is cancelled when user_id is missing from payload."""
+        """Live order job is cancelled when user_id is missing from payload."""
         from public_tasks import enqueue_job_run
 
         mock_is_paused.return_value = (False, None)
 
         result = enqueue_job_run(
-            job_name="broker_sync",
+            job_name="live_order_submit",
             idempotency_key="test-key",
             payload={}  # No user_id
         )
@@ -278,6 +278,27 @@ class TestNonLiveJobsNotGated(unittest.TestCase):
         self.assertEqual(result["status"], "pending")
         mock_enqueue.assert_called_once()
 
+    @patch("public_tasks.enqueue_idempotent")
+    @patch("packages.quantum.ops_endpoints.is_trading_paused")
+    def test_broker_sync_not_gated_by_go_live(self, mock_is_paused, mock_enqueue):
+        """broker_sync job is NOT gated by go-live gate (read-only broker job)."""
+        from public_tasks import enqueue_job_run
+
+        # Not paused, paper mode - live_order_submit would be blocked
+        # but broker_sync should proceed
+        mock_is_paused.return_value = (False, None)
+        mock_enqueue.return_value = {"job_id": "rq-job-id"}
+
+        result = enqueue_job_run(
+            job_name="broker_sync",
+            idempotency_key="test-key",
+            payload={"user_id": "test-user"}
+        )
+
+        # broker_sync should proceed normally (not blocked by go-live gate)
+        self.assertEqual(result["status"], "pending")
+        mock_enqueue.assert_called_once()
+
 
 class TestPauseGateStillFirst(unittest.TestCase):
     """Tests that pause gate still takes precedence over go-live gate."""
@@ -307,7 +328,7 @@ class TestPauseGateStillFirst(unittest.TestCase):
         mock_is_paused.return_value = (True, "System maintenance")
 
         result = enqueue_job_run(
-            job_name="broker_sync",
+            job_name="live_order_submit",
             idempotency_key="test-key",
             payload={"user_id": "test-user-uuid"}
         )
@@ -316,6 +337,28 @@ class TestPauseGateStillFirst(unittest.TestCase):
         self.assertEqual(result["status"], "cancelled")
         self.assertEqual(result["cancelled_reason"], "global_ops_pause")
         self.assertEqual(result["cancelled_detail"], "System maintenance")
+        # Backward compat: pause_reason field should also be present
+        self.assertEqual(result["pause_reason"], "System maintenance")
+
+    @patch("packages.quantum.ops_endpoints.is_trading_paused")
+    def test_broker_sync_still_respects_pause_gate(self, mock_is_paused):
+        """broker_sync (read-only) still respects pause gate even though not go-live gated."""
+        from public_tasks import enqueue_job_run
+
+        # Paused globally
+        mock_is_paused.return_value = (True, "System maintenance")
+
+        result = enqueue_job_run(
+            job_name="broker_sync",
+            idempotency_key="test-key",
+            payload={"user_id": "test-user-uuid"}
+        )
+
+        # broker_sync should still be blocked by pause gate
+        self.assertEqual(result["status"], "cancelled")
+        self.assertEqual(result["cancelled_reason"], "global_ops_pause")
+        self.assertEqual(result["cancelled_detail"], "System maintenance")
+        self.assertEqual(result["pause_reason"], "System maintenance")
 
 
 if __name__ == "__main__":

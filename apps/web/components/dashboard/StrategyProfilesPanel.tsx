@@ -256,7 +256,7 @@ export default function StrategyProfilesPanel() {
                   {/* JSON Editor */}
                   <div>
                      <div className="flex items-center justify-between mb-2">
-                        <label className="text-sm font-medium flex items-center gap-2">
+                        <label htmlFor="strategy-params" className="text-sm font-medium flex items-center gap-2">
                            <Settings className="w-4 h-4" /> Parameters
                         </label>
                         <Button variant="ghost" size="sm" onClick={handleSaveConfig} className="h-8 text-xs">
@@ -264,6 +264,7 @@ export default function StrategyProfilesPanel() {
                         </Button>
                      </div>
                      <textarea
+                        id="strategy-params"
                         className="w-full h-[300px] font-mono text-sm p-4 bg-muted/30 border border-border rounded-lg focus:ring-2 focus:ring-indigo-500 outline-none text-foreground"
                         value={editingConfig}
                         onChange={(e) => setEditingConfig(e.target.value)}
@@ -292,7 +293,18 @@ export default function StrategyProfilesPanel() {
                                 </thead>
                                 <tbody className="divide-y divide-border">
                                     {backtests.map(bt => (
-                                        <tr key={bt.id} className="hover:bg-muted/50 cursor-pointer" onClick={() => setExpandedRow(expandedRow === bt.id ? null : bt.id)}>
+                                        <tr
+                                          key={bt.id}
+                                          className="hover:bg-muted/50 cursor-pointer focus-visible:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-indigo-500"
+                                          onClick={() => setExpandedRow(expandedRow === bt.id ? null : bt.id)}
+                                          tabIndex={0}
+                                          onKeyDown={(e) => {
+                                            if (e.key === 'Enter' || e.key === ' ') {
+                                              e.preventDefault();
+                                              setExpandedRow(expandedRow === bt.id ? null : bt.id);
+                                            }
+                                          }}
+                                        >
                                             <td className="px-4 py-2">{new Date(bt.created_at).toLocaleDateString()}</td>
                                             <td className={`px-4 py-2 font-medium ${
                                                 bt.total_return != null

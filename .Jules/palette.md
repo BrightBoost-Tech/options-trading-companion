@@ -29,3 +29,7 @@
 ## 2025-05-30 - Styling Links as Buttons
 **Learning:** Using 'Button asChild' with Next.js 'Link' can sometimes cause runtime errors if children structure isn't perfect. The 'buttonVariants' helper is a more robust alternative for styling navigation links as buttons.
 **Action:** Prefer 'className={buttonVariants({ variant: ... })}' on 'Link' components over wrapping them in 'Button asChild'.
+
+## 2025-05-30 - Interactive Table Rows
+**Learning:** Interactive table rows (clickable `tr` elements) are common in dashboards but often inaccessible. They need `tabIndex="0"` to be focusable and an `onKeyDown` handler (for Enter/Space) to be operable by keyboard.
+**Action:** When adding `onClick` to a `tr`, always add `tabIndex="0"`, a matching `onKeyDown` handler, and visible focus styles (e.g. `focus-visible:ring`).

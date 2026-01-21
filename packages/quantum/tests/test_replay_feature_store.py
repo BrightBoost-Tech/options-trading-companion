@@ -724,6 +724,65 @@ class TestMarketDataTruthLayerHook(unittest.TestCase):
             else:
                 os.environ.pop("REPLAY_DIVIDEND_YIELD", None)
 
+    def test_rates_divs_records_input_with_correct_key(self):
+        """rates_divs() records input with expected key format and payload."""
+        from packages.quantum.services.market_data_truth_layer import MarketDataTruthLayer
+        from packages.quantum.services.replay.decision_context import DecisionContext
+
+        layer = MarketDataTruthLayer(api_key="test")
+        fixed_date = datetime(2024, 1, 15, 12, 0, 0, tzinfo=timezone.utc)
+
+        with DecisionContext(
+            strategy_name="test_rates",
+            as_of_ts=datetime.now(timezone.utc)
+        ) as ctx:
+            result = layer.rates_divs("SPY", as_of=fixed_date)
+
+            # Verify key format: "SPY:rates_divs:2024-01-15"
+            expected_key = ("SPY:rates_divs:2024-01-15", "rates_divs")
+            self.assertIn(expected_key, ctx.inputs.keys())
+
+            # Verify payload structure
+            self.assertIn("risk_free_rate", result)
+            self.assertIn("div_yield", result)
+            self.assertIn("as_of", result)
+            self.assertIn("source", result)
+            self.assertEqual(result["as_of"], "2024-01-15")
+
+
+class TestReplayTruthLayerNormalization(unittest.TestCase):
+    """Tests for ReplayTruthLayer key normalization (Patch 2.1)."""
+
+    def test_daily_bars_normalizes_ticker(self):
+        """daily_bars() normalizes ticker to match stored key."""
+        from packages.quantum.services.replay.replay_truth_layer import ReplayTruthLayer
+
+        # Create layer with bars stored under normalized key "SPY"
+        layer = ReplayTruthLayer(
+            decision_id="test-id",
+            decision_run={"strategy_name": "test"},
+            inputs=[{
+                "key": "SPY:bars:2024-01-01:2024-01-10",
+                "snapshot_type": "bars",
+                "blob_hash": "bars123",
+                "metadata": {}
+            }],
+            features=[],
+            supabase=None,
+        )
+
+        # Pre-populate blob cache
+        test_bars = [{"o": 100, "h": 101, "l": 99, "c": 100.5, "v": 1000000}]
+        layer.blobs_cache["bars123"] = test_bars
+
+        # Call with non-normalized ticker (spaces, lowercase)
+        start = datetime(2024, 1, 1)
+        end = datetime(2024, 1, 10)
+        result = layer.daily_bars(" spy ", start, end)
+
+        # Should find stored bars despite non-normalized input
+        self.assertEqual(result, test_bars)
+
 
 if __name__ == "__main__":
     unittest.main()

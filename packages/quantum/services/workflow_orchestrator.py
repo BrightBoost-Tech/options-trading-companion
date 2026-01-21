@@ -1017,6 +1017,9 @@ async def run_morning_cycle(supabase: Client, user_id: str):
     # Record regime features to decision context (for replay feature store)
     _record_regime_features(global_snap)
 
+    # Record rates/divs for deterministic replay (Patch 2.1)
+    truth_layer.rates_divs("SPY", as_of=datetime.now(timezone.utc))
+
     # Try to persist global snapshot
     try:
         supabase.table("regime_snapshots").insert(global_snap.to_dict()).execute()
@@ -1723,6 +1726,9 @@ async def run_midday_cycle(supabase: Client, user_id: str):
 
     # Record regime features to decision context (for replay feature store)
     _record_regime_features(global_snap)
+
+    # Record rates/divs for deterministic replay (Patch 2.1)
+    truth_layer.rates_divs("SPY", as_of=datetime.now(timezone.utc))
 
     # Try to persist global snapshot
     try:

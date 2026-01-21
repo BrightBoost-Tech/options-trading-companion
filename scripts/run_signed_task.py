@@ -187,6 +187,103 @@ def check_time_gate(task_name: str, skip_time_gate: bool = False) -> bool:
 
 
 # =============================================================================
+# GitHub Step Summary
+# =============================================================================
+
+MAX_SNIPPET_LENGTH = 300
+
+
+def write_step_summary(
+    task_name: str,
+    status_code: Optional[int] = None,
+    job_run_id: Optional[str] = None,
+    result_status: Optional[str] = None,
+    error_snippet: Optional[str] = None,
+    skipped: bool = False,
+    skip_reason: Optional[str] = None,
+    dry_run: bool = False,
+) -> None:
+    """
+    Write a concise summary to GITHUB_STEP_SUMMARY if available.
+
+    This provides instant visibility in GitHub Actions UI without digging through logs.
+    Safe: Never includes secrets, signing headers, or full response bodies.
+
+    Args:
+        task_name: Name of the task that ran
+        status_code: HTTP response status code (None if no request made)
+        job_run_id: JobRun ID from response (if present)
+        result_status: Status field from response (if present)
+        error_snippet: Truncated error message for non-2xx responses
+        skipped: Whether task was skipped (time-gate, etc.)
+        skip_reason: Reason for skip
+        dry_run: Whether this was a dry run
+    """
+    summary_path = os.environ.get("GITHUB_STEP_SUMMARY")
+    if not summary_path:
+        return  # Not running in GitHub Actions
+
+    try:
+        # Build summary markdown
+        lines = []
+        lines.append(f"### Task: `{task_name}`")
+        lines.append("")
+
+        if dry_run:
+            lines.append("| Field | Value |")
+            lines.append("|-------|-------|")
+            lines.append(f"| **Mode** | 🔍 Dry Run |")
+            lines.append(f"| **Result** | Request prepared but not sent |")
+        elif skipped:
+            lines.append("| Field | Value |")
+            lines.append("|-------|-------|")
+            lines.append(f"| **Mode** | ⏭️ Skipped |")
+            lines.append(f"| **Reason** | {skip_reason or 'Time gate'} |")
+        elif status_code is not None:
+            is_success = 200 <= status_code < 300
+            status_emoji = "✅" if is_success else "❌"
+
+            lines.append("| Field | Value |")
+            lines.append("|-------|-------|")
+            lines.append(f"| **Status** | {status_emoji} {status_code} |")
+
+            if job_run_id:
+                lines.append(f"| **JobRun ID** | `{job_run_id}` |")
+            if result_status:
+                lines.append(f"| **Result** | {result_status} |")
+
+            if error_snippet and not is_success:
+                # Truncate and sanitize error snippet
+                safe_snippet = error_snippet[:MAX_SNIPPET_LENGTH]
+                if len(error_snippet) > MAX_SNIPPET_LENGTH:
+                    safe_snippet += "..."
+                # Escape pipe characters for markdown table
+                safe_snippet = safe_snippet.replace("|", "\\|").replace("\n", " ")
+                lines.append(f"| **Error** | {safe_snippet} |")
+        else:
+            # Request exception (no status code)
+            lines.append("| Field | Value |")
+            lines.append("|-------|-------|")
+            lines.append(f"| **Status** | ❌ Request Failed |")
+            if error_snippet:
+                safe_snippet = error_snippet[:MAX_SNIPPET_LENGTH]
+                if len(error_snippet) > MAX_SNIPPET_LENGTH:
+                    safe_snippet += "..."
+                safe_snippet = safe_snippet.replace("|", "\\|").replace("\n", " ")
+                lines.append(f"| **Error** | {safe_snippet} |")
+
+        lines.append("")
+
+        # Append to summary file
+        with open(summary_path, "a", encoding="utf-8") as f:
+            f.write("\n".join(lines) + "\n")
+
+    except Exception as e:
+        # Don't fail the task if summary writing fails
+        print(f"[WARN] Failed to write step summary: {e}")
+
+
+# =============================================================================
 # Request Execution
 # =============================================================================
 
@@ -266,6 +363,7 @@ def run_task(
 
     # Check time gate
     if not check_time_gate(task_name, skip_time_gate):
+        write_step_summary(task_name, skipped=True, skip_reason="Time gate")
         return 0  # Not an error, just skipped
 
     # Get base URL
@@ -310,6 +408,7 @@ def run_task(
 
     if dry_run:
         print("[DRY-RUN] Request would be sent (not actually sending)")
+        write_step_summary(task_name, dry_run=True)
         return 0
 
     # Send request
@@ -326,30 +425,56 @@ def run_task(
 
         if response.status_code >= 200 and response.status_code < 300:
             print(f"[SUCCESS] Task {task_name} completed successfully")
+            job_run_id = None
+            result_status = None
             try:
                 result = response.json()
                 # Only log non-sensitive fields
-                if "job_run_id" in result:
-                    print(f"[SUCCESS] Job run ID: {result['job_run_id']}")
-                if "status" in result:
-                    print(f"[SUCCESS] Status: {result['status']}")
+                job_run_id = result.get("job_run_id")
+                result_status = result.get("status")
+                if job_run_id:
+                    print(f"[SUCCESS] Job run ID: {job_run_id}")
+                if result_status:
+                    print(f"[SUCCESS] Status: {result_status}")
             except Exception:
                 pass
+            write_step_summary(
+                task_name,
+                status_code=response.status_code,
+                job_run_id=job_run_id,
+                result_status=result_status,
+            )
             return 0
         else:
             print(f"[ERROR] Request failed: {response.status_code}")
+            error_snippet = None
             try:
                 error_detail = response.json()
-                print(f"[ERROR] Detail: {error_detail.get('detail', response.text[:200])}")
+                error_snippet = str(error_detail.get("detail", response.text[:200]))
+                print(f"[ERROR] Detail: {error_snippet}")
             except Exception:
-                print(f"[ERROR] Response: {response.text[:200]}")
+                error_snippet = response.text[:200]
+                print(f"[ERROR] Response: {error_snippet}")
+            write_step_summary(
+                task_name,
+                status_code=response.status_code,
+                error_snippet=error_snippet,
+            )
             return 1
 
     except requests.exceptions.Timeout:
         print(f"[ERROR] Request timed out after {timeout}s")
+        write_step_summary(
+            task_name,
+            error_snippet=f"Request timed out after {timeout}s",
+        )
         return 1
     except requests.exceptions.RequestException as e:
         print(f"[ERROR] Request failed: {e}")
+        write_step_summary(
+            task_name,
+            error_snippet=str(e),
+        )
         return 1
 
 

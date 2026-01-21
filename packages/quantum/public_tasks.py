@@ -72,6 +72,30 @@ def _extract_user_id(payload: Dict[str, Any]) -> Optional[str]:
     return user_id
 
 
+def _validation_idempotency_key(mode: str, user_id: Optional[str] = None, cadence: str = "daily") -> str:
+    """
+    Generate idempotency key for validation_eval jobs.
+
+    v4-L1: Supports configurable checkpoint bucket cadence.
+
+    Args:
+        mode: Validation mode ('paper' or 'historical')
+        user_id: Optional user ID (defaults to 'all' for batch)
+        cadence: 'daily' (default) or 'intraday' (hourly buckets)
+
+    Returns:
+        Idempotency key string:
+        - daily:    '{YYYY-MM-DD}-{mode}-{user_id}'
+        - intraday: '{YYYY-MM-DD}-{HH}-{mode}-{user_id}'
+    """
+    now = datetime.now()
+    target = user_id or "all"
+
+    if cadence == "intraday":
+        return f"{now.strftime('%Y-%m-%d-%H')}-{mode}-{target}"
+    return f"{now.strftime('%Y-%m-%d')}-{mode}-{target}"
+
+
 def enqueue_job_run(job_name: str, idempotency_key: str, payload: Dict[str, Any], queue_name: str = "otc") -> Dict[str, Any]:
     """
     Helper to create a JobRun and enqueue the runner.
@@ -296,17 +320,21 @@ async def task_validation_eval(
 
     Auth: Requires v4 HMAC signature with scope 'tasks:validation_eval'.
 
+    v4-L1: Uses checkpoint-based evaluation with configurable cadence.
+
     Payload:
     - mode: 'paper' or 'historical' (default: 'paper')
     - user_id: Optional user UUID to run for specific user
+    - cadence: 'daily' (default) or 'intraday' for hourly buckets
     """
-    # Generate idempotency key based on date + params
-    today = datetime.now().strftime("%Y-%m-%d")
-    mode = payload.mode
-    user_id = payload.user_id or "all"
-
-    key = f"{today}-{mode}-{user_id}"
     job_name = "validation_eval"
+
+    # v4-L1: Generate idempotency key with cadence support
+    key = _validation_idempotency_key(
+        mode=payload.mode,
+        user_id=payload.user_id,
+        cadence=payload.cadence
+    )
 
     # Pass input payload to job
     job_payload = payload.model_dump()

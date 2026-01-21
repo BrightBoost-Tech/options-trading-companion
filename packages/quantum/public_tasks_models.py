@@ -59,6 +59,8 @@ class ValidationEvalPayload(TaskPayloadBase):
     Payload for /tasks/validation/eval.
 
     Triggers go-live validation evaluation (Paper/Historical).
+
+    v4-L1: Supports configurable checkpoint cadence for batch scheduling.
     """
     mode: Literal["paper", "historical"] = Field(
         default="paper",
@@ -67,6 +69,10 @@ class ValidationEvalPayload(TaskPayloadBase):
     user_id: Optional[str] = Field(
         default=None,
         description="Run for specific user only. If None, runs for all users."
+    )
+    cadence: Literal["daily", "intraday"] = Field(
+        default="daily",
+        description="Checkpoint bucket cadence: 'daily' (default) or 'intraday' (hourly buckets)"
     )
 
     @field_validator("user_id")

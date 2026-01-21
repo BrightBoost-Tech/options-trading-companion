@@ -868,12 +868,16 @@ class GoLiveValidationService:
             self._log_checkpoint_run(
                 user_id, "paper_checkpoint", window_start, now,
                 0.0, 0.0, False, "no_outcomes_yet",
-                {"bucket": bucket_key, "progress": progress}
+                {"bucket": bucket_key, "progress": progress, "streak_before": current_streak, "streak_after": 0}
             )
 
-            # Update last run timestamp (for deduplication)
+            # PR567: Persist streak reset and clear fail-fast flags
+            # "no outcomes" is a MISS, which resets streak to 0 and clears any stale fail-fast state
             self.supabase.table("v3_go_live_state").update({
+                "paper_consecutive_passes": 0,
                 "paper_checkpoint_last_run_at": now.isoformat(),
+                "paper_fail_fast_triggered": False,
+                "paper_fail_fast_reason": None,
                 "updated_at": now.isoformat()
             }).eq("user_id", user_id).execute()
 
@@ -882,6 +886,7 @@ class GoLiveValidationService:
                 "status": "miss",
                 "reason": "no_outcomes_yet",
                 "paper_consecutive_passes": 0,  # Reset on miss
+                "streak_before": current_streak,
                 "paper_ready": state.get("paper_ready", False)
             }
 

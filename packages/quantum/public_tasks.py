@@ -2,7 +2,7 @@ from fastapi import APIRouter, Header, HTTPException, Request, Depends, Body
 from typing import Optional, Dict, Any
 import os
 import secrets
-from datetime import datetime
+from datetime import datetime, timezone
 
 from packages.quantum.jobs.rq_enqueue import enqueue_idempotent
 from packages.quantum.jobs.job_runs import JobRunStore
@@ -77,6 +77,7 @@ def _validation_idempotency_key(mode: str, user_id: Optional[str] = None, cadenc
     Generate idempotency key for validation_eval jobs.
 
     v4-L1: Supports configurable checkpoint bucket cadence.
+    PR567: Uses UTC for consistent bucket boundaries across timezones.
 
     Args:
         mode: Validation mode ('paper' or 'historical')
@@ -84,11 +85,11 @@ def _validation_idempotency_key(mode: str, user_id: Optional[str] = None, cadenc
         cadence: 'daily' (default) or 'intraday' (hourly buckets)
 
     Returns:
-        Idempotency key string:
+        Idempotency key string (UTC-based):
         - daily:    '{YYYY-MM-DD}-{mode}-{user_id}'
         - intraday: '{YYYY-MM-DD}-{HH}-{mode}-{user_id}'
     """
-    now = datetime.now()
+    now = datetime.now(timezone.utc)
     target = user_id or "all"
 
     if cadence == "intraday":

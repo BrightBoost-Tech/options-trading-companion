@@ -25,9 +25,6 @@ from packages.quantum.services.replay.canonical import (
 
 logger = logging.getLogger(__name__)
 
-# Environment configuration
-REPLAY_ENABLE = os.getenv("REPLAY_ENABLE", "0") == "1"
-
 # ContextVar for async-safe access to current decision context
 _current_decision_context: ContextVar[Optional["DecisionContext"]] = ContextVar(
     "current_decision_context", default=None
@@ -35,8 +32,17 @@ _current_decision_context: ContextVar[Optional["DecisionContext"]] = ContextVar(
 
 
 def is_replay_enabled() -> bool:
-    """Check if replay feature store is enabled."""
-    return REPLAY_ENABLE
+    """
+    Check if replay feature store is enabled.
+
+    Phase 2.1: Reads REPLAY_ENABLE at runtime (not import time).
+    This allows environment variables to be set after module import
+    without requiring a process restart.
+
+    Returns:
+        True if REPLAY_ENABLE=1, False otherwise
+    """
+    return os.getenv("REPLAY_ENABLE", "0") == "1"
 
 
 def get_current_decision_context() -> Optional["DecisionContext"]:

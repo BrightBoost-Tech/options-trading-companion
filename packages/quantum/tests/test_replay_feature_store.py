@@ -642,6 +642,74 @@ class TestReplayDisabled(unittest.TestCase):
             importlib.reload(dc)
 
 
+class TestReplayRuntimeConfig(unittest.TestCase):
+    """Phase 2.1: Tests for runtime config reading (not import-time)."""
+
+    def test_is_replay_enabled_reads_at_runtime(self):
+        """is_replay_enabled() reads env var at runtime, not import time."""
+        from packages.quantum.services.replay.decision_context import is_replay_enabled
+
+        # Store original
+        original = os.environ.get("REPLAY_ENABLE")
+
+        try:
+            # Test enabled
+            os.environ["REPLAY_ENABLE"] = "1"
+            self.assertTrue(is_replay_enabled())
+
+            # Test disabled - should change WITHOUT module reload
+            os.environ["REPLAY_ENABLE"] = "0"
+            self.assertFalse(is_replay_enabled())
+
+            # Test enabled again - should change WITHOUT module reload
+            os.environ["REPLAY_ENABLE"] = "1"
+            self.assertTrue(is_replay_enabled())
+
+        finally:
+            # Restore original
+            if original is not None:
+                os.environ["REPLAY_ENABLE"] = original
+            elif "REPLAY_ENABLE" in os.environ:
+                del os.environ["REPLAY_ENABLE"]
+
+    def test_is_replay_enabled_default_is_false(self):
+        """Default is False when REPLAY_ENABLE not set."""
+        from packages.quantum.services.replay.decision_context import is_replay_enabled
+
+        original = os.environ.get("REPLAY_ENABLE")
+
+        try:
+            # Remove env var
+            if "REPLAY_ENABLE" in os.environ:
+                del os.environ["REPLAY_ENABLE"]
+
+            self.assertFalse(is_replay_enabled())
+
+        finally:
+            if original is not None:
+                os.environ["REPLAY_ENABLE"] = original
+
+    def test_is_replay_enabled_only_accepts_1(self):
+        """Only '1' enables replay, not 'true' or 'yes'."""
+        from packages.quantum.services.replay.decision_context import is_replay_enabled
+
+        original = os.environ.get("REPLAY_ENABLE")
+
+        try:
+            # Only "1" should return True
+            os.environ["REPLAY_ENABLE"] = "1"
+            self.assertTrue(is_replay_enabled())
+
+            # Other truthy-looking values should return False
+            for val in ["true", "yes", "True", "YES", "on", "enabled"]:
+                os.environ["REPLAY_ENABLE"] = val
+                self.assertFalse(is_replay_enabled(), f"Should be False for '{val}'")
+
+        finally:
+            if original is not None:
+                os.environ["REPLAY_ENABLE"] = original
+
+
 class TestMarketDataTruthLayerHook(unittest.TestCase):
     """Tests for MarketDataTruthLayer replay hooks."""
 

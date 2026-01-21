@@ -50,6 +50,33 @@ CRON_SECRET = os.getenv("CRON_SECRET")
 # Nonce replay protection (requires Supabase)
 TASK_NONCE_PROTECTION = os.getenv("TASK_NONCE_PROTECTION", "0") == "1"
 
+# Fail-closed mode for production: reject requests if nonce store unavailable
+# Default "1" in production for safety
+TASK_NONCE_FAIL_CLOSED_IN_PROD = os.getenv("TASK_NONCE_FAIL_CLOSED_IN_PROD", "1") == "1"
+
+
+def _is_production_mode() -> bool:
+    """
+    Check if running in production mode.
+
+    Production if:
+    - ENV=production OR
+    - ENABLE_DEV_AUTH_BYPASS=0 (explicitly disabled)
+
+    Dev mode if:
+    - ENABLE_DEV_AUTH_BYPASS=1 (default in dev)
+    """
+    env = os.getenv("ENV", "").lower()
+    if env == "production":
+        return True
+
+    # If dev auth bypass is explicitly disabled, treat as production
+    dev_bypass = os.getenv("ENABLE_DEV_AUTH_BYPASS", "1")
+    if dev_bypass == "0":
+        return True
+
+    return False
+
 
 # =============================================================================
 # Key Management
@@ -123,15 +150,38 @@ def check_and_store_nonce(nonce: str, scope: str, timestamp: int) -> bool:
 
     Returns:
         True if nonce is fresh (not seen before)
-        False if nonce is a replay (already used)
+        False if nonce is a replay (already used) OR store unavailable in fail-closed mode
+
+    Behavior:
+        - If TASK_NONCE_PROTECTION=0: Always returns True (disabled)
+        - If store unavailable:
+            - Production (fail-closed): Returns False, logs error, writes audit event
+            - Dev mode (fail-open): Returns True with warning
+        - If store error (non-duplicate):
+            - Production (fail-closed): Returns False
+            - Dev mode (fail-open): Returns True with warning
     """
     if not TASK_NONCE_PROTECTION:
         return True  # Nonce protection disabled
 
+    is_prod = _is_production_mode()
+    fail_closed = TASK_NONCE_FAIL_CLOSED_IN_PROD and is_prod
+
     client = _get_nonce_client()
     if not client:
-        print("⚠️ Nonce protection enabled but Supabase unavailable - allowing request")
-        return True  # Fail open in dev if DB unavailable
+        if fail_closed:
+            print("🚨 FAIL-CLOSED: Nonce store unavailable in production - rejecting request")
+            _emit_nonce_audit_event(
+                nonce=nonce,
+                scope=scope,
+                event_type="nonce_store_unavailable",
+                outcome="rejected",
+                reason="Supabase client unavailable in fail-closed production mode"
+            )
+            return False
+        else:
+            print("⚠️ Nonce protection enabled but Supabase unavailable - allowing request (dev mode)")
+            return True
 
     try:
         # Calculate expiry (TTL from now)
@@ -153,9 +203,55 @@ def check_and_store_nonce(nonce: str, scope: str, timestamp: int) -> bool:
         if "duplicate" in error_str or "unique" in error_str or "conflict" in error_str:
             return False  # Replay detected
 
-        # Other errors - log but allow (fail open for availability)
-        print(f"⚠️ Nonce check error: {e}")
-        return True
+        # Other errors - behavior depends on mode
+        if fail_closed:
+            print(f"🚨 FAIL-CLOSED: Nonce store error in production - rejecting request: {e}")
+            _emit_nonce_audit_event(
+                nonce=nonce,
+                scope=scope,
+                event_type="nonce_store_error",
+                outcome="rejected",
+                reason=str(e)[:200]
+            )
+            return False
+        else:
+            print(f"⚠️ Nonce check error (allowing in dev mode): {e}")
+            return True
+
+
+def _emit_nonce_audit_event(
+    nonce: str,
+    scope: str,
+    event_type: str,
+    outcome: str,
+    reason: str
+) -> None:
+    """
+    Emit audit event for nonce protection failures.
+
+    Best-effort: failures to emit don't block the main flow.
+    """
+    try:
+        client = _get_nonce_client()
+        if not client:
+            return
+
+        from datetime import datetime, timezone
+
+        client.table("decision_audit_events").insert({
+            "event_name": f"nonce.{event_type}",
+            "payload": {
+                "nonce": nonce[:32] + "..." if len(nonce) > 32 else nonce,
+                "scope": scope,
+                "outcome": outcome,
+                "reason": reason,
+                "fail_closed_mode": True,
+            },
+            "created_at": datetime.now(timezone.utc).isoformat()
+        }).execute()
+    except Exception as e:
+        # Best effort - don't block on audit failures
+        print(f"⚠️ Failed to emit nonce audit event: {e}")
 
 
 # =============================================================================

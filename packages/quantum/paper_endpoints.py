@@ -17,6 +17,7 @@ from packages.quantum.services.options_utils import parse_option_symbol
 from packages.quantum.execution.transaction_cost_model import TransactionCostModel
 from packages.quantum.execution.pnl_attribution import PnlAttribution
 from packages.quantum.services.paper_execution_service import PaperExecutionService
+from packages.quantum.services.paper_ledger_service import PaperLedgerService, PaperLedgerEventType
 
 # v3 Observability
 from packages.quantum.observability.telemetry import TradeContext, emit_trade_event, TradeEventName
@@ -692,13 +693,47 @@ def _commit_fill(supabase, analytics, user_id, order, fill_res, quote, portfolio
     # Update in-memory portfolio object for subsequent fills in same loop
     portfolio["cash_balance"] = new_cash
 
-    # Ledger uses incremental
-    supabase.table("paper_ledger").insert({
-        "portfolio_id": portfolio["id"],
-        "amount": cash_delta,
-        "description": f"Paper fill {side} {this_fill_qty} @ {this_fill_price:.4f} (fees {fees_delta:.2f})",
-        "balance_after": new_cash
-    }).execute()
+    # Ledger uses incremental - Phase 2.1: Structured events
+    ticket = order.get("order_json", {})
+    symbol = ticket.get("symbol", "UNKNOWN")
+
+    ledger = PaperLedgerService(supabase)
+
+    # Determine event type based on fill status
+    is_partial = fill_res["status"] == "partial"
+    event_type = PaperLedgerEventType.PARTIAL_FILL if is_partial else PaperLedgerEventType.FILL
+
+    fill_metadata = {
+        "side": side,
+        "qty": this_fill_qty,
+        "price": this_fill_price,
+        "symbol": symbol,
+        "fees": fees_delta,
+        "filled_so_far": new_total_filled_qty,
+        "total_qty": float(order.get("requested_qty") or 0),
+        "order_status": fill_res["status"]
+    }
+
+    if is_partial:
+        ledger.emit_partial_fill(
+            portfolio_id=portfolio["id"],
+            amount=cash_delta,
+            balance_after=new_cash,
+            order_id=order.get("id"),
+            position_id=order.get("position_id"),
+            trace_id=order.get("trace_id"),
+            metadata=fill_metadata
+        )
+    else:
+        ledger.emit_fill(
+            portfolio_id=portfolio["id"],
+            amount=cash_delta,
+            balance_after=new_cash,
+            order_id=order.get("id"),
+            position_id=order.get("position_id"),
+            trace_id=order.get("trace_id"),
+            metadata=fill_metadata
+        )
 
     # Position Logic
     pos_id = order.get("position_id")

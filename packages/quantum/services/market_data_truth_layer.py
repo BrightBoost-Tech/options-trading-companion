@@ -128,6 +128,47 @@ def _record_option_chain_to_context(
     except Exception as e:
         logger.debug(f"Failed to record option chain to context: {e}")
 
+
+def _record_daily_bars_to_context(
+    symbol: str,
+    start_date: str,
+    end_date: str,
+    bars: List[Dict],
+) -> None:
+    """
+    Record daily bars to the current DecisionContext if one is active.
+
+    Args:
+        symbol: The normalized symbol
+        start_date: Start date string (YYYY-MM-DD)
+        end_date: End date string (YYYY-MM-DD)
+        bars: List of daily bar dicts
+    """
+    ctx = _get_decision_context()
+    if ctx is None:
+        return
+
+    try:
+        key = f"{symbol}:bars:{start_date}:{end_date}"
+
+        metadata = {
+            "provider": "polygon",
+            "received_ts": int(time.time() * 1000),
+            "symbol": symbol,
+            "start_date": start_date,
+            "end_date": end_date,
+            "bars_count": len(bars),
+        }
+
+        ctx.record_input(
+            key=key,
+            snapshot_type="bars",
+            payload=bars,
+            metadata=metadata,
+        )
+    except Exception as e:
+        logger.debug(f"Failed to record daily bars to context: {e}")
+
 # =============================================================================
 # V4 Configuration (env-configurable with safe defaults)
 # =============================================================================
@@ -1109,6 +1150,8 @@ class MarketDataTruthLayer:
 
         cached = self.cache.get("daily_bars", cache_key)
         if cached:
+            # Record to DecisionContext if active (for replay feature store)
+            _record_daily_bars_to_context(symbol, s_str, e_str, cached)
             return cached
 
         # Fetch
@@ -1133,6 +1176,9 @@ class MarketDataTruthLayer:
                 "volume": r.get("v"),
                 "vwap": r.get("vw")
             })
+
+        # Record to DecisionContext if active (for replay feature store)
+        _record_daily_bars_to_context(symbol, s_str, e_str, bars)
 
         # Cache
         self.cache.set("daily_bars", cache_key, bars, self.ttl_daily_bars)
@@ -1203,3 +1249,54 @@ class MarketDataTruthLayer:
 
     # Backward compat
     _normalize_symbol = normalize_symbol
+
+    def rates_divs(self, underlying: str, as_of: Optional[datetime] = None) -> Dict[str, Any]:
+        """
+        Get risk-free rate and dividend yield for an underlying.
+
+        v1.1: Returns env-based constants for deterministic replay.
+        Future: could query actual rates/dividends from a data source.
+
+        Args:
+            underlying: The underlying symbol
+            as_of: Reference timestamp (default: now)
+
+        Returns:
+            Dict with risk_free_rate, div_yield, as_of, source
+        """
+        if as_of is None:
+            as_of = datetime.utcnow()
+
+        as_of_date = as_of.strftime("%Y-%m-%d")
+
+        # Get rates from environment with safe defaults
+        risk_free_rate = float(os.getenv("REPLAY_RISK_FREE_RATE", "0.05"))
+        div_yield = float(os.getenv("REPLAY_DIVIDEND_YIELD", "0.0"))
+
+        payload = {
+            "underlying": underlying,
+            "risk_free_rate": risk_free_rate,
+            "div_yield": div_yield,
+            "as_of": as_of_date,
+            "source": "env_defaults",
+        }
+
+        # Record to DecisionContext if active (for replay feature store)
+        ctx = _get_decision_context()
+        if ctx is not None:
+            try:
+                key = f"{underlying}:rates_divs:{as_of_date}"
+                metadata = {
+                    "source": "env_defaults",
+                    "received_ts": int(time.time() * 1000),
+                }
+                ctx.record_input(
+                    key=key,
+                    snapshot_type="rates_divs",
+                    payload=payload,
+                    metadata=metadata,
+                )
+            except Exception as e:
+                logger.debug(f"Failed to record rates_divs to context: {e}")
+
+        return payload

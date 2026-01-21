@@ -78,6 +78,11 @@ class BlobStore:
     Stores canonical JSON payloads compressed with gzip.
     Uses SHA256 hash as the unique key.
 
+    v1.1 Write Safety:
+    - Maintains separate persisted_hashes (confirmed in DB) and pending (staged)
+    - Only marks as persisted after commit succeeds
+    - Commit failure does NOT lose pending blobs (can retry)
+
     Usage:
         store = BlobStore()
 
@@ -88,9 +93,12 @@ class BlobStore:
         payload = store.get(supabase, blob_hash)
     """
 
+    # Batch size for upserts (performance optimization)
+    COMMIT_BATCH_SIZE = 200
+
     def __init__(self):
-        # LRU cache for seen hashes (avoids DB lookups)
-        self._seen_cache = LRUCache(max_size=REPLAY_LRU_CACHE_SIZE)
+        # LRU cache for persisted hashes (confirmed in DB)
+        self._persisted_cache = LRUCache(max_size=REPLAY_LRU_CACHE_SIZE)
 
         # Pending blobs for bulk insert (hash -> compressed_blob_info)
         self._pending: Dict[str, Dict[str, Any]] = {}
@@ -105,6 +113,9 @@ class BlobStore:
         Compute blob hash and prepare for storage.
 
         Does NOT write to DB - use commit() for bulk writes.
+
+        v1.1: Only checks persisted_cache for dedup. Pending blobs are always
+        re-staged if not yet persisted (prevents data loss on commit failure).
 
         Args:
             obj: Python object to store
@@ -136,8 +147,9 @@ class BlobStore:
         else:
             raise ValueError(f"Unsupported compression: {compression}")
 
-        # Add to pending if not already seen
-        if not self._seen_cache.contains(blob_hash):
+        # Add to pending if not already persisted (v1.1: only check persisted, not pending)
+        # This ensures commit failures don't prevent re-staging the same blob
+        if not self._persisted_cache.contains(blob_hash):
             with self._pending_lock:
                 if blob_hash not in self._pending:
                     self._pending[blob_hash] = {
@@ -146,7 +158,6 @@ class BlobStore:
                         "payload": compressed_bytes,
                         "size_bytes": uncompressed_size,
                     }
-            self._seen_cache.add(blob_hash)
 
         return blob_hash, compressed_bytes, uncompressed_size
 
@@ -243,61 +254,89 @@ class BlobStore:
         """
         Bulk insert all pending blobs to database.
 
-        Uses upsert (ON CONFLICT DO NOTHING) for deduplication.
+        v1.1 Write Safety:
+        - Batches upserts for performance (COMMIT_BATCH_SIZE rows per call)
+        - Only marks blobs as persisted after successful commit
+        - On failure, keeps blobs in pending for retry (no data loss)
 
         Args:
             supabase: Supabase client
 
         Returns:
-            Number of new blobs inserted
+            Number of blobs successfully committed
         """
         with self._pending_lock:
             if not self._pending:
                 return 0
 
+            # Take snapshot of pending (don't clear yet - wait for success)
             pending_list = list(self._pending.values())
-            self._pending.clear()
+            pending_hashes = set(self._pending.keys())
 
         if not pending_list:
             return 0
 
-        inserted = 0
+        committed_hashes = set()
+        failed_hashes = set()
+
         try:
-            # Batch insert with upsert
-            # Note: Supabase Python client handles binary data
-            for blob_info in pending_list:
+            # Batch insert with upsert in chunks for performance
+            for i in range(0, len(pending_list), self.COMMIT_BATCH_SIZE):
+                batch = pending_list[i:i + self.COMMIT_BATCH_SIZE]
+
                 try:
+                    # Single upsert call for the batch
                     result = supabase.table("data_blobs").upsert(
-                        blob_info,
+                        batch,
                         on_conflict="hash"
                     ).execute()
 
-                    # Check if actually inserted (not conflict)
-                    if result.data:
-                        inserted += 1
-                        self._seen_cache.add(blob_info["hash"])
+                    # Mark all blobs in this batch as committed
+                    for blob_info in batch:
+                        committed_hashes.add(blob_info["hash"])
 
                 except Exception as e:
-                    # Log but continue - blob may already exist
-                    if "duplicate key" not in str(e).lower():
-                        logger.warning(f"Failed to insert blob: {e}")
+                    # Batch failed - mark all in batch as failed
+                    for blob_info in batch:
+                        failed_hashes.add(blob_info["hash"])
 
-            logger.debug(f"BlobStore committed {inserted}/{len(pending_list)} blobs")
+                    if "duplicate key" not in str(e).lower():
+                        logger.warning(f"BlobStore batch commit failed: {e}")
+
+            # Only remove committed blobs from pending, mark as persisted
+            with self._pending_lock:
+                for h in committed_hashes:
+                    self._pending.pop(h, None)
+                    self._persisted_cache.add(h)
+
+            logger.debug(
+                f"BlobStore committed {len(committed_hashes)}/{len(pending_list)} blobs "
+                f"(failed: {len(failed_hashes)})"
+            )
 
         except Exception as e:
             logger.error(f"BlobStore commit failed: {e}")
+            # Don't clear pending on failure - blobs can be retried
 
-        return inserted
+        return len(committed_hashes)
 
     def get_pending_hashes(self) -> List[str]:
         """Get list of pending blob hashes (for debugging/testing)."""
         with self._pending_lock:
             return list(self._pending.keys())
 
+    def is_persisted(self, blob_hash: str) -> bool:
+        """Check if a blob hash is confirmed persisted (for testing)."""
+        return self._persisted_cache.contains(blob_hash)
+
     def clear_pending(self) -> None:
         """Clear pending blobs without committing."""
         with self._pending_lock:
             self._pending.clear()
+
+    def clear_persisted_cache(self) -> None:
+        """Clear persisted cache (for testing)."""
+        self._persisted_cache.clear()
 
 
 # Singleton instance for shared state within a process

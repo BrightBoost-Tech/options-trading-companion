@@ -123,6 +123,47 @@ def _record_symbol_features(symbol: str, sym_snap, global_snap: "GlobalRegimeSna
     except Exception:
         pass  # Non-critical
 
+
+def _record_surface_snapshot(symbol: str, sym_snap) -> None:
+    """
+    Record surface snapshot to decision context if active.
+
+    v1.1: Captures derived surface data from sym_snap for deterministic replay.
+    Stores as an input (market data snapshot) rather than a computed feature.
+    """
+    ctx = _get_decision_context()
+    if ctx is None:
+        return
+
+    try:
+        import time
+
+        # Build surface payload from sym_snap fields (no heavy computation)
+        surface_payload = {
+            "symbol": symbol,
+            "atm_iv_30d": getattr(sym_snap, 'atm_iv_30d', None),
+            "skew_25d": getattr(sym_snap, 'skew_25d', None),
+            "term_slope": getattr(sym_snap, 'term_slope', None),
+            "rv_20d": getattr(sym_snap, 'rv_20d', None),
+            "iv_rv_spread": getattr(sym_snap, 'iv_rv_spread', None),
+            "iv_rank": getattr(sym_snap, 'iv_rank', None),
+            "as_of_ts": str(sym_snap.as_of_ts) if hasattr(sym_snap, 'as_of_ts') else None,
+        }
+
+        metadata = {
+            "derived_from": "regime_engine_v3",
+            "received_ts": int(time.time() * 1000),
+        }
+
+        ctx.record_input(
+            key=f"{symbol}:surface:v1",
+            snapshot_type="surface",
+            payload=surface_payload,
+            metadata=metadata,
+        )
+    except Exception:
+        pass  # Non-critical
+
 # 1. Add MIDDAY_TEST_MODE flag
 MIDDAY_TEST_MODE = os.getenv("MIDDAY_TEST_MODE", "false").lower() == "true"
 COMPOUNDING_MODE = os.getenv("COMPOUNDING_MODE", "false").lower() == "true"
@@ -1109,6 +1150,7 @@ async def run_morning_cycle(supabase: Client, user_id: str):
 
             # Record symbol features to decision context (for replay feature store)
             _record_symbol_features(underlying, sym_snap, global_snap)
+            _record_surface_snapshot(underlying, sym_snap)
 
             # Map to scoring regime string for compatibility
             iv_regime = regime_engine.map_to_scoring_regime(effective_regime_state)
@@ -1826,6 +1868,7 @@ async def run_midday_cycle(supabase: Client, user_id: str):
 
         # Record symbol features to decision context (for replay feature store)
         _record_symbol_features(ticker, sym_snap, global_snap)
+        _record_surface_snapshot(ticker, sym_snap)
 
         # Extract pricing info. structure of candidate varies, assuming basic keys
         price = float(cand.get("suggested_entry", 0))

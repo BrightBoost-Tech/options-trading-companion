@@ -251,11 +251,12 @@ class DecisionContext:
         """
         Commit all collected data to database.
 
-        Performs bulk writes in order:
-        1. data_blobs (upsert for dedup)
-        2. decision_runs (header)
-        3. decision_inputs (link rows)
-        4. decision_features (computed features)
+        v1.1 Atomic Commit:
+        1. data_blobs (upsert for dedup) - via BlobStore.commit()
+        2. decision_runs + decision_inputs + decision_features via RPC
+           (single transaction for atomicity)
+
+        Falls back to sequential inserts if RPC unavailable.
 
         Args:
             supabase: Supabase client
@@ -288,7 +289,7 @@ class DecisionContext:
         }
 
         try:
-            # 1. Commit blobs
+            # 1. Commit blobs first (must succeed before decision commit)
             stats["blobs_committed"] = self._blob_store.commit(supabase)
 
             # 2. Compute aggregate hashes
@@ -298,65 +299,182 @@ class DecisionContext:
             feature_hashes = sorted([f.features_hash for f in self.features])
             features_hash = compute_aggregate_hash(feature_hashes) if feature_hashes else None
 
-            # 3. Insert decision_runs header
-            decision_run = {
-                "decision_id": str(self.decision_id),
-                "strategy_name": self.strategy_name,
-                "as_of_ts": self.as_of_ts.isoformat(),
-                "user_id": self.user_id,
-                "git_sha": self.git_sha,
-                "status": status,
-                "error_summary": error_summary[:500] if error_summary else None,
-                "input_hash": input_hash,
-                "features_hash": features_hash,
-                "inputs_count": len(self.inputs),
-                "features_count": len(self.features),
-                "duration_ms": duration_ms,
-            }
+            # 3. Build inputs/features JSONB arrays for RPC
+            inputs_jsonb = [
+                {
+                    "blob_hash": inp.blob_hash,
+                    "key": inp.key,
+                    "snapshot_type": inp.snapshot_type,
+                    "metadata": inp.metadata,
+                }
+                for inp in self.inputs.values()
+            ]
 
-            supabase.table("decision_runs").insert(decision_run).execute()
+            features_jsonb = [
+                {
+                    "symbol": f.symbol,
+                    "namespace": f.namespace,
+                    "features": f.features,
+                    "features_hash": f.features_hash,
+                }
+                for f in self.features
+            ]
 
-            # 4. Insert decision_inputs
-            if self.inputs:
-                input_rows = [
-                    {
-                        "decision_id": str(self.decision_id),
-                        "blob_hash": inp.blob_hash,
-                        "key": inp.key,
-                        "snapshot_type": inp.snapshot_type,
-                        "metadata": inp.metadata,
-                    }
-                    for inp in self.inputs.values()
-                ]
-                supabase.table("decision_inputs").insert(input_rows).execute()
-                stats["inputs_count"] = len(input_rows)
+            # 4. Try atomic RPC commit
+            rpc_success = self._commit_via_rpc(
+                supabase,
+                input_hash=input_hash,
+                features_hash=features_hash,
+                duration_ms=duration_ms,
+                status=status,
+                error_summary=error_summary,
+                inputs_jsonb=inputs_jsonb,
+                features_jsonb=features_jsonb,
+            )
 
-            # 5. Insert decision_features
-            if self.features:
-                feature_rows = [
-                    {
-                        "decision_id": str(self.decision_id),
-                        "symbol": f.symbol,
-                        "namespace": f.namespace,
-                        "features": f.features,
-                        "features_hash": f.features_hash,
-                    }
-                    for f in self.features
-                ]
-                supabase.table("decision_features").insert(feature_rows).execute()
-                stats["features_count"] = len(feature_rows)
+            if rpc_success:
+                stats["inputs_count"] = len(inputs_jsonb)
+                stats["features_count"] = len(features_jsonb)
+                stats["commit_method"] = "rpc"
+            else:
+                # Fallback to sequential inserts if RPC fails
+                self._commit_sequential(
+                    supabase,
+                    input_hash=input_hash,
+                    features_hash=features_hash,
+                    duration_ms=duration_ms,
+                    status=status,
+                    error_summary=error_summary,
+                )
+                stats["inputs_count"] = len(self.inputs)
+                stats["features_count"] = len(self.features)
+                stats["commit_method"] = "sequential"
 
             logger.info(
                 f"DecisionContext committed: {self.strategy_name} "
                 f"decision_id={self.decision_id} "
-                f"inputs={stats['inputs_count']} features={stats['features_count']}"
+                f"inputs={stats['inputs_count']} features={stats['features_count']} "
+                f"method={stats.get('commit_method', 'unknown')}"
             )
 
         except Exception as e:
             logger.error(f"DecisionContext commit failed: {e}")
             stats["error"] = str(e)
 
-            # Try to write failed decision_run for traceability
+            # Try to write failed decision_run for traceability (don't duplicate)
+            self._try_mark_failed(supabase, str(e))
+
+        return stats
+
+    def _commit_via_rpc(
+        self,
+        supabase,
+        input_hash: Optional[str],
+        features_hash: Optional[str],
+        duration_ms: Optional[int],
+        status: str,
+        error_summary: Optional[str],
+        inputs_jsonb: List[Dict],
+        features_jsonb: List[Dict],
+    ) -> bool:
+        """
+        Commit decision atomically via RPC function.
+
+        Returns True if RPC succeeded, False if should fallback.
+        """
+        try:
+            result = supabase.rpc("rpc_commit_decision_v4", {
+                "p_decision_id": str(self.decision_id),
+                "p_strategy_name": self.strategy_name,
+                "p_as_of_ts": self.as_of_ts.isoformat(),
+                "p_user_id": self.user_id,
+                "p_git_sha": self.git_sha,
+                "p_status": status,
+                "p_error_summary": error_summary[:500] if error_summary else None,
+                "p_input_hash": input_hash,
+                "p_features_hash": features_hash,
+                "p_duration_ms": duration_ms,
+                "p_inputs": inputs_jsonb,
+                "p_features": features_jsonb,
+            }).execute()
+
+            if result.data:
+                logger.debug(f"RPC commit succeeded: {result.data}")
+                return True
+
+            return False
+
+        except Exception as e:
+            # RPC might not exist yet - fall back to sequential
+            logger.debug(f"RPC commit failed, falling back: {e}")
+            return False
+
+    def _commit_sequential(
+        self,
+        supabase,
+        input_hash: Optional[str],
+        features_hash: Optional[str],
+        duration_ms: Optional[int],
+        status: str,
+        error_summary: Optional[str],
+    ) -> None:
+        """Fallback sequential commit (non-atomic)."""
+        # Insert decision_runs header
+        decision_run = {
+            "decision_id": str(self.decision_id),
+            "strategy_name": self.strategy_name,
+            "as_of_ts": self.as_of_ts.isoformat(),
+            "user_id": self.user_id,
+            "git_sha": self.git_sha,
+            "status": status,
+            "error_summary": error_summary[:500] if error_summary else None,
+            "input_hash": input_hash,
+            "features_hash": features_hash,
+            "inputs_count": len(self.inputs),
+            "features_count": len(self.features),
+            "duration_ms": duration_ms,
+        }
+
+        supabase.table("decision_runs").insert(decision_run).execute()
+
+        # Insert decision_inputs
+        if self.inputs:
+            input_rows = [
+                {
+                    "decision_id": str(self.decision_id),
+                    "blob_hash": inp.blob_hash,
+                    "key": inp.key,
+                    "snapshot_type": inp.snapshot_type,
+                    "metadata": inp.metadata,
+                }
+                for inp in self.inputs.values()
+            ]
+            supabase.table("decision_inputs").insert(input_rows).execute()
+
+        # Insert decision_features
+        if self.features:
+            feature_rows = [
+                {
+                    "decision_id": str(self.decision_id),
+                    "symbol": f.symbol,
+                    "namespace": f.namespace,
+                    "features": f.features,
+                    "features_hash": f.features_hash,
+                }
+                for f in self.features
+            ]
+            supabase.table("decision_features").insert(feature_rows).execute()
+
+    def _try_mark_failed(self, supabase, error_msg: str) -> None:
+        """Try to mark decision as failed without duplicating."""
+        try:
+            # Try update first (in case it already exists)
+            supabase.table("decision_runs").update({
+                "status": "failed",
+                "error_summary": f"Commit failed: {error_msg[:450]}",
+            }).eq("decision_id", str(self.decision_id)).execute()
+        except Exception:
+            # If update fails, try insert
             try:
                 supabase.table("decision_runs").insert({
                     "decision_id": str(self.decision_id),
@@ -364,14 +482,12 @@ class DecisionContext:
                     "as_of_ts": self.as_of_ts.isoformat(),
                     "user_id": self.user_id,
                     "status": "failed",
-                    "error_summary": f"Commit failed: {str(e)[:450]}",
+                    "error_summary": f"Commit failed: {error_msg[:450]}",
                     "inputs_count": 0,
                     "features_count": 0,
                 }).execute()
             except Exception:
                 pass  # Best effort
-
-        return stats
 
     def get_input_hash(self) -> Optional[str]:
         """Compute current input hash (for testing/debugging)."""

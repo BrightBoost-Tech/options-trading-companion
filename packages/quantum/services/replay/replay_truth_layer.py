@@ -219,19 +219,17 @@ class ReplayTruthLayer(MarketDataTruthLayer):
         """
         Override: Return stored raw snapshots instead of fetching from API.
 
-        Looks up each ticker in the stored inputs with key pattern:
-        "{ticker}:polygon:snapshot" or "{ticker}:polygon:snapshot_v4"
+        v1.1: Uses consistent key pattern "{ticker}:polygon:snapshot_v4" with
+        snapshot_type="quote" (matches MarketDataTruthLayer recording).
         """
         results = {}
 
         for ticker in tickers:
-            # Try different key patterns
-            for snapshot_type in ["snapshot", "quote"]:
-                key = f"{ticker}:polygon:{snapshot_type}"
-                stored = self.get_stored_input(key, snapshot_type)
-                if stored:
-                    results[ticker] = stored["payload"]
-                    break
+            # Primary key pattern (used by MarketDataTruthLayer._record_snapshot_to_context)
+            key = f"{ticker}:polygon:snapshot_v4"
+            stored = self.get_stored_input(key, "quote")
+            if stored:
+                results[ticker] = stored["payload"]
 
         return results
 
@@ -243,57 +241,48 @@ class ReplayTruthLayer(MarketDataTruthLayer):
         """
         Override: Return stored V4 snapshots with quality scoring.
 
-        First tries to find stored V4 snapshots directly, then falls back
-        to raw snapshots and applies quality scoring.
+        v1.1: Uses consistent key pattern "{ticker}:polygon:snapshot_v4" with
+        snapshot_type="quote" (matches MarketDataTruthLayer recording).
         """
         v4_results: Dict[str, TruthSnapshotV4] = {}
 
         # Preload blobs for efficiency
         blob_hashes = []
         for ticker in tickers:
-            for key_pattern in [
-                f"{ticker}:polygon:snapshot_v4",
-                f"{ticker}:polygon:snapshot",
-                f"{ticker}:polygon:quote",
-            ]:
-                input_key = (key_pattern, "quote")
-                if input_key in self.inputs_map:
-                    blob_hashes.append(self.inputs_map[input_key]["blob_hash"])
-                    break
+            key = f"{ticker}:polygon:snapshot_v4"
+            input_key = (key, "quote")
+            if input_key in self.inputs_map:
+                blob_hashes.append(self.inputs_map[input_key]["blob_hash"])
         self._preload_blobs(blob_hashes)
 
         for ticker in tickers:
-            # Try V4 stored format first
-            for key_pattern, snapshot_type in [
-                (f"{ticker}:polygon:snapshot_v4", "quote"),
-                (f"{ticker}:polygon:snapshot", "quote"),
-                (f"{ticker}:polygon:quote", "quote"),
-            ]:
-                stored = self.get_stored_input(key_pattern, snapshot_type)
-                if stored:
-                    payload = stored["payload"]
-                    metadata = stored["metadata"]
+            # Use canonical key pattern
+            key = f"{ticker}:polygon:snapshot_v4"
+            stored = self.get_stored_input(key, "quote")
 
-                    # Check if it's already a V4 format
-                    if "symbol_canonical" in payload and "quality" in payload:
-                        # Stored as TruthSnapshotV4 dict
-                        v4_results[ticker] = TruthSnapshotV4(
-                            symbol_canonical=payload.get("symbol_canonical", ticker),
-                            quote=TruthQuoteV4(**payload.get("quote", {})),
-                            timestamps=TruthTimestampsV4(**payload.get("timestamps", {"received_ts": 0})),
-                            quality=TruthQualityV4(**payload.get("quality", {"quality_score": 0, "issues": [], "is_stale": True})),
-                            source=TruthSourceV4(**payload.get("source", {})),
-                            iv=payload.get("iv"),
-                            greeks=payload.get("greeks"),
-                            day=payload.get("day"),
-                            volume=payload.get("volume"),
-                        )
-                    else:
-                        # Raw format - apply quality scoring
-                        v4_results[ticker] = self._build_v4_from_raw(
-                            ticker, payload, metadata
-                        )
-                    break
+            if stored:
+                payload = stored["payload"]
+                metadata = stored["metadata"]
+
+                # Check if it's already a V4 format
+                if "symbol_canonical" in payload and "quality" in payload:
+                    # Stored as TruthSnapshotV4 dict
+                    v4_results[ticker] = TruthSnapshotV4(
+                        symbol_canonical=payload.get("symbol_canonical", ticker),
+                        quote=TruthQuoteV4(**payload.get("quote", {})),
+                        timestamps=TruthTimestampsV4(**payload.get("timestamps", {"received_ts": 0})),
+                        quality=TruthQualityV4(**payload.get("quality", {"quality_score": 0, "issues": [], "is_stale": True})),
+                        source=TruthSourceV4(**payload.get("source", {})),
+                        iv=payload.get("iv"),
+                        greeks=payload.get("greeks"),
+                        day=payload.get("day"),
+                        volume=payload.get("volume"),
+                    )
+                else:
+                    # Raw format - apply quality scoring
+                    v4_results[ticker] = self._build_v4_from_raw(
+                        ticker, payload, metadata
+                    )
 
         return v4_results
 
@@ -413,6 +402,50 @@ class ReplayTruthLayer(MarketDataTruthLayer):
 
         logger.warning(f"No stored bars found for {key}")
         return []
+
+    def rates_divs(
+        self,
+        symbol: str,
+        date: Optional[datetime] = None
+    ) -> Dict[str, Any]:
+        """
+        Override: Return stored rates/divs instead of env-based constants.
+
+        Key pattern: "{symbol}:rates_divs:{date}" with snapshot_type="rates_divs"
+        """
+        if date is None:
+            date = datetime.now()
+        date_str = date.strftime("%Y-%m-%d") if hasattr(date, "strftime") else str(date)[:10]
+        key = f"{symbol}:rates_divs:{date_str}"
+
+        stored = self.get_stored_input(key, "rates_divs")
+        if stored:
+            return stored["payload"]
+
+        # Fallback to symbol-only key
+        stored = self.get_stored_input(f"{symbol}:rates_divs", "rates_divs")
+        if stored:
+            return stored["payload"]
+
+        logger.warning(f"No stored rates_divs found for {symbol}")
+        return {"risk_free_rate": None, "dividend_yield": None}
+
+    def surface_snapshot(
+        self,
+        symbol: str
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Return stored surface snapshot for a symbol.
+
+        Key pattern: "{symbol}:surface:v1" with snapshot_type="surface"
+        """
+        key = f"{symbol}:surface:v1"
+        stored = self.get_stored_input(key, "surface")
+        if stored:
+            return stored["payload"]
+
+        logger.warning(f"No stored surface snapshot found for {symbol}")
+        return None
 
     # =========================================================================
     # Determinism verification

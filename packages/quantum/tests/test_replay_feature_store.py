@@ -176,6 +176,52 @@ class TestBlobStore(unittest.TestCase):
         pending = store.get_pending_hashes()
         self.assertEqual(len(pending), 1)
 
+    def test_persisted_cache_only_after_commit(self):
+        """Blobs only marked as persisted after successful commit."""
+        from packages.quantum.services.replay.blob_store import BlobStore
+
+        store = BlobStore()
+        store.clear_pending()
+        store.clear_persisted_cache()
+
+        hash1, _, _ = store.put({"test": "data"})
+
+        # Before commit: not persisted
+        self.assertFalse(store.is_persisted(hash1))
+        self.assertEqual(len(store.get_pending_hashes()), 1)
+
+        # Mock successful commit
+        mock_client = MagicMock()
+        mock_client.table.return_value.upsert.return_value.execute.return_value = MagicMock(data=[{}])
+
+        store.commit(mock_client)
+
+        # After commit: persisted and no pending
+        self.assertTrue(store.is_persisted(hash1))
+        self.assertEqual(len(store.get_pending_hashes()), 0)
+
+    def test_already_persisted_not_readded_to_pending(self):
+        """Blobs already persisted are not re-added to pending."""
+        from packages.quantum.services.replay.blob_store import BlobStore
+
+        store = BlobStore()
+        store.clear_pending()
+        store.clear_persisted_cache()
+
+        # First put - goes to pending
+        hash1, _, _ = store.put({"test": "data"})
+        self.assertEqual(len(store.get_pending_hashes()), 1)
+
+        # Mock commit to mark as persisted
+        mock_client = MagicMock()
+        mock_client.table.return_value.upsert.return_value.execute.return_value = MagicMock(data=[{}])
+        store.commit(mock_client)
+
+        # Second put of same object - should not go to pending
+        hash2, _, _ = store.put({"test": "data"})
+        self.assertEqual(hash1, hash2)
+        self.assertEqual(len(store.get_pending_hashes()), 0)
+
 
 class TestDecisionContext(unittest.TestCase):
     """Tests for DecisionContext context manager."""
@@ -258,10 +304,12 @@ class TestDecisionContext(unittest.TestCase):
 
     @patch("packages.quantum.services.replay.blob_store.BlobStore.commit")
     def test_commit_writes_to_db(self, mock_blob_commit):
-        """commit() writes decision data to database."""
+        """commit() writes decision data to database (via fallback)."""
         from packages.quantum.services.replay.decision_context import DecisionContext
 
         mock_client = MagicMock()
+        # RPC fails, so it falls back to sequential insert
+        mock_client.rpc.side_effect = Exception("RPC not available")
         mock_client.table.return_value.insert.return_value.execute.return_value = MagicMock(data=[{}])
         mock_blob_commit.return_value = 1
 
@@ -277,7 +325,52 @@ class TestDecisionContext(unittest.TestCase):
         self.assertEqual(result["status"], "ok")
         self.assertGreaterEqual(result["inputs_count"], 0)
 
-        # Verify DB calls were made
+        # Verify DB calls were made (via sequential fallback)
+        mock_client.table.assert_called()
+
+    @patch("packages.quantum.services.replay.blob_store.BlobStore.commit")
+    def test_commit_tries_rpc_first(self, mock_blob_commit):
+        """commit() tries RPC atomic commit before falling back."""
+        from packages.quantum.services.replay.decision_context import DecisionContext
+
+        mock_client = MagicMock()
+        mock_blob_commit.return_value = 1
+
+        # Mock RPC success
+        mock_client.rpc.return_value.execute.return_value = MagicMock(data={"status": "inserted"})
+
+        with DecisionContext(
+            strategy_name="test_rpc",
+            as_of_ts=datetime.now(timezone.utc)
+        ) as ctx:
+            ctx.record_input("key1", "quote", {"a": 1})
+            result = ctx.commit(mock_client, status="ok")
+
+        # RPC should have been called
+        mock_client.rpc.assert_called_once()
+        self.assertEqual(result.get("commit_method"), "rpc")
+
+    @patch("packages.quantum.services.replay.blob_store.BlobStore.commit")
+    def test_commit_falls_back_on_rpc_failure(self, mock_blob_commit):
+        """commit() falls back to sequential on RPC failure."""
+        from packages.quantum.services.replay.decision_context import DecisionContext
+
+        mock_client = MagicMock()
+        mock_blob_commit.return_value = 1
+
+        # Mock RPC failure
+        mock_client.rpc.side_effect = Exception("RPC not available")
+        mock_client.table.return_value.insert.return_value.execute.return_value = MagicMock(data=[{}])
+
+        with DecisionContext(
+            strategy_name="test_fallback",
+            as_of_ts=datetime.now(timezone.utc)
+        ) as ctx:
+            ctx.record_input("key1", "quote", {"a": 1})
+            result = ctx.commit(mock_client, status="ok")
+
+        # Should have fallen back to sequential
+        self.assertEqual(result.get("commit_method"), "sequential")
         mock_client.table.assert_called()
 
 
@@ -341,6 +434,99 @@ class TestReplayTruthLayer(unittest.TestCase):
 
         self.assertIsNotNone(result)
         self.assertEqual(result["features"]["iv_rank"], 50.0)
+
+    def test_rates_divs_returns_stored_payload(self):
+        """rates_divs() returns stored rates/divs payload."""
+        from packages.quantum.services.replay.replay_truth_layer import ReplayTruthLayer
+
+        layer = ReplayTruthLayer(
+            decision_id="test-id",
+            decision_run={"strategy_name": "test"},
+            inputs=[{
+                "key": "SPY:rates_divs:2024-01-15",
+                "snapshot_type": "rates_divs",
+                "blob_hash": "rates123",
+                "metadata": {}
+            }],
+            features=[],
+            supabase=None,
+        )
+
+        # Pre-populate blob cache
+        layer.blobs_cache["rates123"] = {
+            "risk_free_rate": 0.05,
+            "dividend_yield": 0.015
+        }
+
+        result = layer.rates_divs("SPY", datetime(2024, 1, 15))
+
+        self.assertIsNotNone(result)
+        self.assertEqual(result["risk_free_rate"], 0.05)
+        self.assertEqual(result["dividend_yield"], 0.015)
+
+    def test_rates_divs_returns_fallback_when_missing(self):
+        """rates_divs() returns default when no stored data."""
+        from packages.quantum.services.replay.replay_truth_layer import ReplayTruthLayer
+
+        layer = ReplayTruthLayer(
+            decision_id="test-id",
+            decision_run={"strategy_name": "test"},
+            inputs=[],
+            features=[],
+            supabase=None,
+        )
+
+        result = layer.rates_divs("MISSING", datetime(2024, 1, 15))
+
+        self.assertEqual(result["risk_free_rate"], None)
+        self.assertEqual(result["dividend_yield"], None)
+
+    def test_surface_snapshot_returns_stored_payload(self):
+        """surface_snapshot() returns stored surface data."""
+        from packages.quantum.services.replay.replay_truth_layer import ReplayTruthLayer
+
+        layer = ReplayTruthLayer(
+            decision_id="test-id",
+            decision_run={"strategy_name": "test"},
+            inputs=[{
+                "key": "SPY:surface:v1",
+                "snapshot_type": "surface",
+                "blob_hash": "surface123",
+                "metadata": {}
+            }],
+            features=[],
+            supabase=None,
+        )
+
+        # Pre-populate blob cache
+        layer.blobs_cache["surface123"] = {
+            "symbol": "SPY",
+            "atm_iv_30d": 0.18,
+            "skew_25d": -0.05,
+            "iv_rank": 45.0
+        }
+
+        result = layer.surface_snapshot("SPY")
+
+        self.assertIsNotNone(result)
+        self.assertEqual(result["atm_iv_30d"], 0.18)
+        self.assertEqual(result["iv_rank"], 45.0)
+
+    def test_surface_snapshot_returns_none_when_missing(self):
+        """surface_snapshot() returns None when no stored data."""
+        from packages.quantum.services.replay.replay_truth_layer import ReplayTruthLayer
+
+        layer = ReplayTruthLayer(
+            decision_id="test-id",
+            decision_run={"strategy_name": "test"},
+            inputs=[],
+            features=[],
+            supabase=None,
+        )
+
+        result = layer.surface_snapshot("MISSING")
+
+        self.assertIsNone(result)
 
 
 class TestGoldenReplay(unittest.TestCase):
@@ -491,6 +677,52 @@ class TestMarketDataTruthLayerHook(unittest.TestCase):
             # Check that SPY was recorded
             input_keys = [k[0] for k in ctx.inputs.keys()]
             self.assertTrue(any("SPY" in k for k in input_keys))
+
+    def test_rates_divs_records_to_context(self):
+        """rates_divs() records inputs when context is active."""
+        from packages.quantum.services.market_data_truth_layer import MarketDataTruthLayer
+        from packages.quantum.services.replay.decision_context import DecisionContext
+
+        layer = MarketDataTruthLayer(api_key="test")
+
+        with DecisionContext(
+            strategy_name="test",
+            as_of_ts=datetime.now(timezone.utc)
+        ) as ctx:
+            # Call rates_divs
+            result = layer.rates_divs("SPY")
+
+            # Should have recorded input with rates_divs key
+            input_keys = [k for k in ctx.inputs.keys()]
+            rates_divs_keys = [k for k in input_keys if "rates_divs" in k[0]]
+            self.assertGreater(len(rates_divs_keys), 0)
+
+    def test_rates_divs_returns_env_values(self):
+        """rates_divs() returns env-based constants."""
+        from packages.quantum.services.market_data_truth_layer import MarketDataTruthLayer
+
+        # Set env vars for testing (using correct var names)
+        original_rf = os.environ.get("REPLAY_RISK_FREE_RATE")
+        original_dy = os.environ.get("REPLAY_DIVIDEND_YIELD")
+
+        try:
+            os.environ["REPLAY_RISK_FREE_RATE"] = "0.045"
+            os.environ["REPLAY_DIVIDEND_YIELD"] = "0.012"
+
+            layer = MarketDataTruthLayer(api_key="test")
+            result = layer.rates_divs("SPY")
+
+            self.assertEqual(result["risk_free_rate"], 0.045)
+            self.assertEqual(result["div_yield"], 0.012)
+        finally:
+            if original_rf:
+                os.environ["REPLAY_RISK_FREE_RATE"] = original_rf
+            else:
+                os.environ.pop("REPLAY_RISK_FREE_RATE", None)
+            if original_dy:
+                os.environ["REPLAY_DIVIDEND_YIELD"] = original_dy
+            else:
+                os.environ.pop("REPLAY_DIVIDEND_YIELD", None)
 
 
 if __name__ == "__main__":

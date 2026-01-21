@@ -20,6 +20,7 @@ from packages.quantum.services.backtest_engine import BacktestEngine, BacktestRu
 from packages.quantum.services.param_search_runner import ParamSearchRunner
 from packages.quantum.services.walkforward_runner import WalkForwardResult
 from packages.quantum.services.backtest_identity import BacktestIdentity
+from packages.quantum.services.promotion_gate import evaluate_promotion_gate, compute_param_hash
 from packages.quantum.market_data import PolygonService
 from packages.quantum.strategy_registry import STRATEGY_REGISTRY
 from packages.quantum.core.rate_limiter import limiter
@@ -30,6 +31,49 @@ from fastapi import Request
 router = APIRouter()
 
 # ... (BatchSimulationRequest, ResearchCompareRequest, get_supabase, generate_param_combinations, _run_simulation_job, _run_backtest_workflow)
+
+
+def _find_existing_backtest_id(
+    supabase,
+    user_id: str,
+    strategy_name: str,
+    ticker: str,
+    run_mode: str,
+    engine_version: str,
+    data_hash: str,
+    config_hash: str,
+    param_hash: str,
+) -> Optional[str]:
+    """
+    Check if a backtest with the same identity already exists.
+
+    Dedupe key: (user_id, strategy_name, ticker, run_mode, engine_version, data_hash, config_hash, param_hash)
+
+    Returns:
+        Existing backtest ID if found, None otherwise.
+    """
+    try:
+        result = (
+            supabase.table("strategy_backtests")
+            .select("id")
+            .eq("user_id", user_id)
+            .eq("strategy_name", strategy_name)
+            .eq("ticker", ticker)
+            .eq("run_mode", run_mode)
+            .eq("engine_version", engine_version)
+            .eq("data_hash", data_hash)
+            .eq("config_hash", config_hash)
+            .eq("param_hash", param_hash)
+            .limit(1)
+            .execute()
+        )
+        if result.data:
+            return result.data[0]["id"]
+        return None
+    except Exception:
+        # If dedupe check fails, continue with insert
+        return None
+
 
 def _persist_v3_results(
     supabase,
@@ -49,6 +93,22 @@ def _persist_v3_results(
         cost_model=request.cost_model,
         seed=request.seed
     )
+
+    # v7: Dedupe check - skip insert if identical backtest exists
+    existing_id = _find_existing_backtest_id(
+        supabase=supabase,
+        user_id=user_id,
+        strategy_name=strategy_name,
+        ticker=request.ticker,
+        run_mode=request.run_mode,
+        engine_version="v3",
+        data_hash=identity["data_hash"],
+        config_hash=identity["config_hash"],
+        param_hash=param_hash,
+    )
+    if existing_id:
+        # Return existing ID without re-inserting
+        return existing_id
 
     row = {
         "user_id": user_id,
@@ -112,6 +172,24 @@ def _persist_v3_results(
             "fill_rate": metrics.get("fill_rate", 0.0),
             "metrics": metrics
         })
+
+    # v7: Evaluate promotion gate
+    promotion_metrics = {
+        "sharpe": metrics.get("sharpe", 0.0),
+        "max_drawdown": metrics.get("max_drawdown", 1.0),
+        "total_trades": metrics.get("trades_count", len(trades)) if trades else metrics.get("trades_count", 0),
+        "win_rate": metrics.get("win_rate", 0.0),
+        "stability_score": metrics.get("stability_score", 0.0),
+        "pct_positive_folds": metrics.get("pct_positive_folds", 0.0),
+        "total_pnl": metrics.get("total_pnl", 0.0),
+    }
+    promotion = evaluate_promotion_gate(promotion_metrics, request.run_mode)
+    row.update({
+        "eligible_micro_live": promotion["eligible_micro_live"],
+        "eligible_live": promotion["eligible_live"],
+        "promotion_tier": promotion["promotion_tier"],
+        "promotion_reasons": promotion["promotion_reasons"],
+    })
 
     # Insert Parent Row
     res = supabase.table("strategy_backtests").insert(row).execute()

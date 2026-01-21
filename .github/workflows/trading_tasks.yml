@@ -29,6 +29,9 @@ on:
     # Schedule at 21:10 UTC to catch both
     - cron: '10 21 * * 1-5'
 
+    # Regression & Determinism - 21:40 UTC (after Learning Ingest)
+    - cron: '40 21 * * 1-5'
+
     # Ops Health Check - Every 30 min during market hours
     # Runs at :00 and :30 from 13:00-22:00 UTC (8 AM - 5 PM Chicago approx)
     - cron: '0,30 13-22 * * 1-5'
@@ -50,6 +53,7 @@ on:
           - validation_eval
           - strategy_autotune
           - ops_health_check
+          - regression_determinism
       skip_time_gate:
         description: 'Skip time gate check'
         required: false
@@ -148,6 +152,33 @@ jobs:
           USER_ID: ${{ secrets.TASK_USER_ID }}
         run: |
           python scripts/run_signed_task.py learning_ingest
+
+  # ============================================================================
+  # Scheduled: Regression & Determinism (21:40 UTC)
+  # ============================================================================
+  regression-determinism:
+    name: Regression & Determinism
+    runs-on: ubuntu-latest
+    if: github.event_name == 'schedule' && github.event.schedule == '40 21 * * 1-5'
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install dependencies
+        run: pip install requests
+
+      - name: Run Regression & Determinism
+        env:
+          TASK_SIGNING_KEYS: ${{ secrets.TASK_SIGNING_KEYS }}
+          BASE_URL: ${{ secrets.QUANTUM_BASE_URL }}
+        run: |
+          python scripts/run_signed_task.py regression_determinism
 
   # ============================================================================
   # Scheduled: Ops Health Check (every 30 min)

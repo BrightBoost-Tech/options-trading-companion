@@ -18,6 +18,7 @@ from packages.quantum.public_tasks_models import (
     LearningIngestPayload,
     StrategyAutotunePayload,
     OpsHealthCheckPayload,
+    RegressionDeterminismPayload,
     DEFAULT_STRATEGY_NAME,
 )
 
@@ -390,4 +391,32 @@ async def task_ops_health_check(
         job_name=job_name,
         idempotency_key=idempotency_key,
         payload=job_payload
+    )
+
+
+@router.post("/regression/determinism", status_code=202)
+async def task_regression_determinism(
+    payload: RegressionDeterminismPayload = Body(default_factory=RegressionDeterminismPayload),
+    auth: TaskSignatureResult = Depends(verify_task_signature("tasks:regression_determinism"))
+):
+    """
+    Triggers Regression & Determinism agent.
+
+    Auth: Requires v4 HMAC signature with scope 'tasks:regression_determinism'.
+
+    This task:
+    1. Validates integrity of recent suggestions
+    2. Checks for code/data drift
+    3. Logs audit events
+    """
+    today = datetime.now().strftime("%Y-%m-%d")
+    job_name = "regression_determinism"
+
+    # Idempotency key: one per day globally
+    idempotency_key = f"{today}-determinism-global"
+
+    return enqueue_job_run(
+        job_name=job_name,
+        idempotency_key=idempotency_key,
+        payload=payload.model_dump()
     )

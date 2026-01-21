@@ -197,6 +197,24 @@ class OpsHealthCheckPayload(TaskPayloadBase):
     )
 
 
+class RegressionDeterminismPayload(TaskPayloadBase):
+    """
+    Payload for /tasks/regression/determinism.
+
+    Validates integrity of suggestions (Observability v4).
+    """
+    lookback_days: int = Field(
+        default=1,
+        ge=1,
+        le=30,
+        description="Days to look back for validation"
+    )
+    mode: Literal["daily", "full"] = Field(
+        default="daily",
+        description="Validation mode"
+    )
+
+
 # =============================================================================
 # Scope Constants
 # =============================================================================
@@ -213,6 +231,7 @@ TASK_SCOPES = {
     "/tasks/learning/ingest": "tasks:learning_ingest",
     "/tasks/strategy/autotune": "tasks:strategy_autotune",
     "/tasks/ops/health_check": "tasks:ops_health_check",
+    "/tasks/regression/determinism": "tasks:regression_determinism",
 }
 
 

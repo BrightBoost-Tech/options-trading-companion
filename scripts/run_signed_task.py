@@ -101,6 +101,11 @@ TASKS = {
         "scope": "tasks:ops_health_check",
         "description": "Run ops health check (every 30 min)",
     },
+    "regression_determinism": {
+        "path": "/tasks/regression/determinism",
+        "scope": "tasks:regression_determinism",
+        "description": "Run Regression & Determinism Bot",
+    },
 }
 
 

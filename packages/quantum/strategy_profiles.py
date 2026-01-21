@@ -42,6 +42,11 @@ class WalkForwardConfig(BaseModel):
     embargo_days: int = 0
     min_trades_per_fold: int = 5
 
+    # v4: Fold-level parameter tuning
+    tune_grid: Optional[Dict[str, List[Any]]] = None  # e.g., {"conviction_floor": [0.5, 0.7], "conviction_slope": [0.3, 0.5]}
+    objective_metric: Optional[Literal["sharpe", "profit_factor", "calmar"]] = "sharpe"
+    max_tune_combinations: int = 50  # Hard cap to bound runtime
+
 class ParamSearchConfig(BaseModel):
     method: Literal["grid", "random"]
     n_samples: Optional[int] = None

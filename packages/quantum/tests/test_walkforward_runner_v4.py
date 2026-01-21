@@ -113,7 +113,7 @@ class TestGenerateFoldsV4(unittest.TestCase):
 class TestWalkForwardRunnerV4(unittest.TestCase):
     """Tests for WalkForwardRunner v4 fold payload upgrades."""
 
-    def _create_mock_engine(self, metrics=None):
+    def _create_mock_engine(self, metrics=None, trade_count=10):
         """Create mock engine that returns specified metrics."""
         if metrics is None:
             metrics = {
@@ -126,7 +126,7 @@ class TestWalkForwardRunnerV4(unittest.TestCase):
 
         mock_result = MagicMock()
         mock_result.metrics = metrics
-        mock_result.trades = []
+        mock_result.trades = [{"pnl": 100}] * trade_count  # v4: sufficient trades
         mock_result.events = []
 
         engine = MagicMock()
@@ -141,6 +141,11 @@ class TestWalkForwardRunnerV4(unittest.TestCase):
         mock_wf_config.step_days = 15
         mock_wf_config.warmup_days = 5
         mock_wf_config.embargo_days = 0
+        # v4: New fields for fold-level tuning
+        mock_wf_config.tune_grid = None  # Fall back to legacy candidates
+        mock_wf_config.objective_metric = "sharpe"
+        mock_wf_config.min_trades_per_fold = 5
+        mock_wf_config.max_tune_combinations = 50
 
         mock_request = MagicMock()
         mock_request.ticker = "SPY"
@@ -193,7 +198,7 @@ class TestWalkForwardRunnerV4(unittest.TestCase):
             return result
 
         engine.run_single.return_value.metrics = train_metrics
-        engine.run_single.return_value.trades = []
+        engine.run_single.return_value.trades = [{"pnl": 100}] * 10  # v4: sufficient trades
         engine.run_single.return_value.events = []
 
         runner = WalkForwardRunner(engine)

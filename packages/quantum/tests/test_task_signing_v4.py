@@ -592,6 +592,127 @@ class TestNonceReplayProtection:
                 assert result2 is False
 
 
+class TestNonceFailClosedBehavior:
+    """Test fail-closed vs fail-open behavior for nonce protection."""
+
+    def test_fail_closed_rejects_when_store_unavailable_in_prod(self):
+        """In production with fail-closed, unavailable nonce store should reject."""
+        with patch.dict("os.environ", {
+            "TASK_NONCE_PROTECTION": "1",
+            "TASK_NONCE_FAIL_CLOSED_IN_PROD": "1",
+            "ENV": "production",
+        }):
+            from packages.quantum.security import task_signing_v4
+            import importlib
+            importlib.reload(task_signing_v4)
+
+            task_signing_v4.TASK_NONCE_PROTECTION = True
+            task_signing_v4.TASK_NONCE_FAIL_CLOSED_IN_PROD = True
+
+            # Mock store as unavailable
+            with patch.object(task_signing_v4, "_get_nonce_client", return_value=None):
+                with patch.object(task_signing_v4, "_is_production_mode", return_value=True):
+                    with patch.object(task_signing_v4, "_emit_nonce_audit_event"):
+                        result = task_signing_v4.check_and_store_nonce("test-nonce", "tasks:test", 12345)
+                        assert result is False  # Rejected in fail-closed mode
+
+    def test_fail_open_allows_when_store_unavailable_in_dev(self):
+        """In dev mode, unavailable nonce store should allow request."""
+        with patch.dict("os.environ", {
+            "TASK_NONCE_PROTECTION": "1",
+            "TASK_NONCE_FAIL_CLOSED_IN_PROD": "1",
+            "ENV": "development",
+            "ENABLE_DEV_AUTH_BYPASS": "1",
+        }):
+            from packages.quantum.security import task_signing_v4
+            import importlib
+            importlib.reload(task_signing_v4)
+
+            task_signing_v4.TASK_NONCE_PROTECTION = True
+            task_signing_v4.TASK_NONCE_FAIL_CLOSED_IN_PROD = True
+
+            # Mock store as unavailable
+            with patch.object(task_signing_v4, "_get_nonce_client", return_value=None):
+                with patch.object(task_signing_v4, "_is_production_mode", return_value=False):
+                    result = task_signing_v4.check_and_store_nonce("test-nonce", "tasks:test", 12345)
+                    assert result is True  # Allowed in dev mode (fail-open)
+
+    def test_fail_closed_rejects_on_store_error_in_prod(self):
+        """In production, non-duplicate store errors should reject."""
+        mock_client = MagicMock()
+        mock_table = MagicMock()
+        mock_client.table.return_value = mock_table
+        mock_table.insert.return_value.execute.side_effect = Exception("Connection timeout")
+
+        with patch.dict("os.environ", {
+            "TASK_NONCE_PROTECTION": "1",
+            "TASK_NONCE_FAIL_CLOSED_IN_PROD": "1",
+            "ENV": "production",
+        }):
+            from packages.quantum.security import task_signing_v4
+            import importlib
+            importlib.reload(task_signing_v4)
+
+            task_signing_v4.TASK_NONCE_PROTECTION = True
+            task_signing_v4.TASK_NONCE_FAIL_CLOSED_IN_PROD = True
+
+            with patch.object(task_signing_v4, "_get_nonce_client", return_value=mock_client):
+                with patch.object(task_signing_v4, "_is_production_mode", return_value=True):
+                    with patch.object(task_signing_v4, "_emit_nonce_audit_event"):
+                        result = task_signing_v4.check_and_store_nonce("test-nonce", "tasks:test", 12345)
+                        assert result is False  # Rejected on error in fail-closed mode
+
+    def test_fail_open_allows_on_store_error_in_dev(self):
+        """In dev mode, non-duplicate store errors should allow request."""
+        mock_client = MagicMock()
+        mock_table = MagicMock()
+        mock_client.table.return_value = mock_table
+        mock_table.insert.return_value.execute.side_effect = Exception("Connection timeout")
+
+        with patch.dict("os.environ", {
+            "TASK_NONCE_PROTECTION": "1",
+            "ENV": "development",
+            "ENABLE_DEV_AUTH_BYPASS": "1",
+        }):
+            from packages.quantum.security import task_signing_v4
+            import importlib
+            importlib.reload(task_signing_v4)
+
+            task_signing_v4.TASK_NONCE_PROTECTION = True
+
+            with patch.object(task_signing_v4, "_get_nonce_client", return_value=mock_client):
+                with patch.object(task_signing_v4, "_is_production_mode", return_value=False):
+                    result = task_signing_v4.check_and_store_nonce("test-nonce", "tasks:test", 12345)
+                    assert result is True  # Allowed in dev mode
+
+    def test_is_production_mode_env_production(self):
+        """ENV=production should return True."""
+        from packages.quantum.security import task_signing_v4
+        import importlib
+
+        with patch.dict("os.environ", {"ENV": "production"}):
+            importlib.reload(task_signing_v4)
+            assert task_signing_v4._is_production_mode() is True
+
+    def test_is_production_mode_dev_bypass_disabled(self):
+        """ENABLE_DEV_AUTH_BYPASS=0 should return True (treated as prod)."""
+        from packages.quantum.security import task_signing_v4
+        import importlib
+
+        with patch.dict("os.environ", {"ENV": "staging", "ENABLE_DEV_AUTH_BYPASS": "0"}):
+            importlib.reload(task_signing_v4)
+            assert task_signing_v4._is_production_mode() is True
+
+    def test_is_production_mode_dev_bypass_enabled(self):
+        """ENABLE_DEV_AUTH_BYPASS=1 should return False (dev mode)."""
+        from packages.quantum.security import task_signing_v4
+        import importlib
+
+        with patch.dict("os.environ", {"ENV": "development", "ENABLE_DEV_AUTH_BYPASS": "1"}):
+            importlib.reload(task_signing_v4)
+            assert task_signing_v4._is_production_mode() is False
+
+
 # =============================================================================
 # Pydantic Model Tests
 # =============================================================================

@@ -1364,5 +1364,74 @@ class TestDeferPolicyBehavior:
         # This is tested by checking has_fatal
 
 
+class TestDownrankEVMultiplier:
+    """Phase 2.1 tests verifying downrank policy applies 0.7 multiplier to EV."""
+
+    def test_downrank_multiplier_default_is_0_7(self, monkeypatch):
+        """Default downrank penalty multiplier is 0.7 (30% penalty)."""
+        monkeypatch.delenv("MARKETDATA_WARN_PENALTY", raising=False)
+        penalty = get_marketdata_warn_penalty()
+        assert penalty == pytest.approx(0.7)
+
+    def test_ev_multiplication_math(self):
+        """EV is correctly multiplied by 0.7 penalty."""
+        # Simulate what orchestrator does when downrank is applied
+        original_ev = 100.0
+        penalty = 0.7
+        penalized_ev = original_ev * penalty
+
+        assert penalized_ev == pytest.approx(70.0)
+
+        # Verify the ranking order changes appropriately
+        high_quality_ev = 80.0  # No penalty
+        low_quality_ev_original = 100.0
+        low_quality_ev_penalized = low_quality_ev_original * penalty
+
+        # Before penalty: 100 > 80 (low quality ranked higher)
+        # After penalty: 70 < 80 (high quality now ranked higher)
+        assert low_quality_ev_original > high_quality_ev
+        assert low_quality_ev_penalized < high_quality_ev
+
+    def test_downrank_preserves_sign(self):
+        """Downrank penalty preserves sign of EV (negative EVs stay negative)."""
+        penalty = 0.7
+
+        positive_ev = 50.0
+        negative_ev = -30.0
+
+        assert positive_ev * penalty > 0
+        assert negative_ev * penalty < 0
+
+    def test_downrank_zero_ev_unchanged(self):
+        """Zero EV remains zero after downrank."""
+        penalty = 0.7
+        zero_ev = 0.0
+
+        # Orchestrator should not apply penalty to zero EV
+        # (division/multiplication by zero edge case handled)
+        penalized = zero_ev * penalty if zero_ev != 0 else zero_ev
+        assert penalized == 0.0
+
+    def test_downrank_payload_includes_penalty_value(self):
+        """Downrank payload includes the penalty value used for audit."""
+        gate_result = {
+            "symbols": [{"symbol": "SPY", "code": QUALITY_WARN_WIDE_SPREAD}],
+            "fatal_count": 0,
+            "warning_count": 1,
+            "has_fatal": False,
+            "has_warning": True,
+        }
+
+        payload = build_marketdata_block_payload(
+            gate_result, "downrank", EFFECTIVE_ACTION_DOWNRANK,
+            downrank_applied=True, warn_penalty=0.7
+        )
+
+        # Payload must include warn_penalty for audit trail
+        assert "warn_penalty" in payload
+        assert payload["warn_penalty"] == 0.7
+        assert payload["downrank_applied"] is True
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

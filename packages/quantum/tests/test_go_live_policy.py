@@ -331,5 +331,210 @@ class TestExtractUserId(unittest.TestCase):
         self.assertIsNone(_extract_user_id(payload))
 
 
+class TestRollingPaperStreakCheckpoint(unittest.TestCase):
+    """Tests for Phase 2.1 rolling paper streak checkpoint."""
+
+    def setUp(self):
+        """Set up mocked supabase client."""
+        from unittest.mock import MagicMock, patch
+        self.mock_client = MagicMock()
+        self.user_id = "test-user-uuid"
+
+        # Default state
+        self.default_state = {
+            "user_id": self.user_id,
+            "paper_window_start": "2024-01-01T00:00:00+00:00",
+            "paper_window_end": "2024-04-01T00:00:00+00:00",
+            "paper_baseline_capital": 100000,
+            "paper_consecutive_passes": 0,
+            "paper_ready": False,
+            "historical_last_run_at": None,
+            "historical_last_result": {},
+            "overall_ready": False,
+            "paper_streak_days": 0,
+            "paper_last_checkpoint_at": None,
+            "paper_checkpoint_window_days": 14
+        }
+
+    def test_checkpoint_pass_increments_streak(self):
+        """Checkpoint that passes increments streak_days."""
+        from unittest.mock import MagicMock
+        from packages.quantum.services.go_live_validation_service import GoLiveValidationService
+        from datetime import datetime, timezone
+
+        # Mock state select
+        mock_state_response = MagicMock()
+        mock_state_response.data = self.default_state
+
+        # Mock trades query - 3% return (above 2% threshold)
+        mock_trades_response = MagicMock()
+        mock_trades_response.data = [
+            {"closed_at": "2024-01-10T00:00:00+00:00", "pnl_realized": 3000.0}
+        ]
+
+        # Setup query chain
+        def table_mock(table_name):
+            mock = MagicMock()
+            if table_name == "v3_go_live_state":
+                mock.select.return_value.eq.return_value.single.return_value.execute.return_value = mock_state_response
+                mock.update.return_value.eq.return_value.execute.return_value = MagicMock()
+            elif table_name == "learning_trade_outcomes_v3":
+                mock.select.return_value.eq.return_value.eq.return_value.gte.return_value.lte.return_value.execute.return_value = mock_trades_response
+            elif table_name == "v3_go_live_runs":
+                mock.insert.return_value.execute.return_value = MagicMock()
+            return mock
+
+        self.mock_client.table = table_mock
+
+        service = GoLiveValidationService(self.mock_client)
+        now = datetime(2024, 1, 15, 12, 0, 0, tzinfo=timezone.utc)
+
+        result = service.checkpoint_paper_streak(self.user_id, now=now, force=True)
+
+        self.assertEqual(result["status"], "pass")
+        self.assertEqual(result["streak_days"], 1)  # 0 + 1
+        self.assertEqual(result["streak_before"], 0)
+        self.assertGreaterEqual(result["rolling_return_pct"], 2.0)
+
+    def test_checkpoint_fail_resets_streak(self):
+        """Checkpoint that fails resets streak_days to 0."""
+        from unittest.mock import MagicMock
+        from packages.quantum.services.go_live_validation_service import GoLiveValidationService
+        from datetime import datetime, timezone
+
+        # Set existing streak
+        state_with_streak = self.default_state.copy()
+        state_with_streak["paper_streak_days"] = 5
+
+        mock_state_response = MagicMock()
+        mock_state_response.data = state_with_streak
+
+        # Mock trades query - negative return (below threshold)
+        mock_trades_response = MagicMock()
+        mock_trades_response.data = [
+            {"closed_at": "2024-01-10T00:00:00+00:00", "pnl_realized": -500.0}
+        ]
+
+        def table_mock(table_name):
+            mock = MagicMock()
+            if table_name == "v3_go_live_state":
+                mock.select.return_value.eq.return_value.single.return_value.execute.return_value = mock_state_response
+                mock.update.return_value.eq.return_value.execute.return_value = MagicMock()
+            elif table_name == "learning_trade_outcomes_v3":
+                mock.select.return_value.eq.return_value.eq.return_value.gte.return_value.lte.return_value.execute.return_value = mock_trades_response
+            elif table_name == "v3_go_live_runs":
+                mock.insert.return_value.execute.return_value = MagicMock()
+            return mock
+
+        self.mock_client.table = table_mock
+
+        service = GoLiveValidationService(self.mock_client)
+        now = datetime(2024, 1, 15, 12, 0, 0, tzinfo=timezone.utc)
+
+        result = service.checkpoint_paper_streak(self.user_id, now=now, force=True)
+
+        self.assertEqual(result["status"], "fail")
+        self.assertEqual(result["streak_days"], 0)  # Reset
+        self.assertEqual(result["streak_before"], 5)
+
+    def test_checkpoint_idempotent_same_day(self):
+        """Checkpoint skips if already run today."""
+        from unittest.mock import MagicMock
+        from packages.quantum.services.go_live_validation_service import GoLiveValidationService
+        from datetime import datetime, timezone
+
+        # State with today's checkpoint already done
+        state_already_checkpointed = self.default_state.copy()
+        state_already_checkpointed["paper_last_checkpoint_at"] = "2024-01-15T08:00:00+00:00"
+        state_already_checkpointed["paper_streak_days"] = 3
+
+        mock_state_response = MagicMock()
+        mock_state_response.data = state_already_checkpointed
+
+        def table_mock(table_name):
+            mock = MagicMock()
+            if table_name == "v3_go_live_state":
+                mock.select.return_value.eq.return_value.single.return_value.execute.return_value = mock_state_response
+            return mock
+
+        self.mock_client.table = table_mock
+
+        service = GoLiveValidationService(self.mock_client)
+        now = datetime(2024, 1, 15, 12, 0, 0, tzinfo=timezone.utc)  # Same day
+
+        result = service.checkpoint_paper_streak(self.user_id, now=now)
+
+        self.assertEqual(result["status"], "skipped")
+        self.assertEqual(result["reason"], "already_checkpointed_today")
+        self.assertEqual(result["streak_days"], 3)  # Unchanged
+
+    def test_checkpoint_sets_paper_ready_on_threshold(self):
+        """Checkpoint sets paper_ready when streak reaches threshold."""
+        from unittest.mock import MagicMock, patch
+        from packages.quantum.services.go_live_validation_service import GoLiveValidationService
+        from datetime import datetime, timezone
+
+        # State at streak 13 (one away from threshold of 14)
+        state_near_ready = self.default_state.copy()
+        state_near_ready["paper_streak_days"] = 13
+
+        mock_state_response = MagicMock()
+        mock_state_response.data = state_near_ready
+
+        # Mock trades query - passing return
+        mock_trades_response = MagicMock()
+        mock_trades_response.data = [
+            {"closed_at": "2024-01-10T00:00:00+00:00", "pnl_realized": 5000.0}
+        ]
+
+        def table_mock(table_name):
+            mock = MagicMock()
+            if table_name == "v3_go_live_state":
+                mock.select.return_value.eq.return_value.single.return_value.execute.return_value = mock_state_response
+                mock.update.return_value.eq.return_value.execute.return_value = MagicMock()
+            elif table_name == "learning_trade_outcomes_v3":
+                mock.select.return_value.eq.return_value.eq.return_value.gte.return_value.lte.return_value.execute.return_value = mock_trades_response
+            elif table_name == "v3_go_live_runs":
+                mock.insert.return_value.execute.return_value = MagicMock()
+            return mock
+
+        self.mock_client.table = table_mock
+
+        service = GoLiveValidationService(self.mock_client)
+        now = datetime(2024, 1, 15, 12, 0, 0, tzinfo=timezone.utc)
+
+        with patch.object(service, 'supabase', self.mock_client):
+            result = service.checkpoint_paper_streak(self.user_id, now=now, force=True)
+
+        self.assertEqual(result["status"], "pass")
+        self.assertEqual(result["streak_days"], 14)  # 13 + 1 = threshold
+        self.assertTrue(result["paper_ready"])
+        self.assertTrue(result["paper_ready_from_streak"])
+
+
+class TestRollingPaperStreakConfig(unittest.TestCase):
+    """Tests for rolling paper streak configuration."""
+
+    def test_default_window_days(self):
+        """Default window is 14 days."""
+        from packages.quantum.services.go_live_validation_service import PAPER_STREAK_WINDOW_DAYS
+        self.assertEqual(PAPER_STREAK_WINDOW_DAYS, 14)
+
+    def test_default_min_return(self):
+        """Default minimum return is 2%."""
+        from packages.quantum.services.go_live_validation_service import PAPER_STREAK_MIN_RETURN_PCT
+        self.assertEqual(PAPER_STREAK_MIN_RETURN_PCT, 2.0)
+
+    def test_default_required_days(self):
+        """Default required consecutive days is 14."""
+        from packages.quantum.services.go_live_validation_service import PAPER_STREAK_REQUIRED_DAYS
+        self.assertEqual(PAPER_STREAK_REQUIRED_DAYS, 14)
+
+    def test_checkpoint_mode_default(self):
+        """Default checkpoint mode is 'rolling'."""
+        from packages.quantum.services.go_live_validation_service import PAPER_STREAK_CHECKPOINT_MODE
+        self.assertEqual(PAPER_STREAK_CHECKPOINT_MODE, "rolling")
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -1,7 +1,8 @@
 import uuid
 import logging
+import os
 from datetime import datetime, timedelta, timezone, date
-from typing import Dict, Any, Optional, List, Literal
+from typing import Dict, Any, Optional, List, Literal, Tuple
 from supabase import Client
 import math
 
@@ -10,6 +11,23 @@ from packages.quantum.strategy_profiles import StrategyConfig, CostModelConfig
 from packages.quantum.services.option_contract_resolver import OptionContractResolver
 
 logger = logging.getLogger(__name__)
+
+
+# =============================================================================
+# Rolling Paper Streak Configuration
+# =============================================================================
+
+# Rolling window size for daily checkpoint (default 14 days = 2 weeks)
+PAPER_STREAK_WINDOW_DAYS = int(os.getenv("PAPER_STREAK_WINDOW_DAYS", "14"))
+
+# Checkpoint mode: "rolling" (continuous daily) or "fixed" (end-of-window only)
+PAPER_STREAK_CHECKPOINT_MODE = os.getenv("PAPER_STREAK_CHECKPOINT_MODE", "rolling")
+
+# Minimum return threshold for rolling window pass (default 2% for 2-week window)
+PAPER_STREAK_MIN_RETURN_PCT = float(os.getenv("PAPER_STREAK_MIN_RETURN_PCT", "2.0"))
+
+# Required consecutive passing days to achieve paper_ready
+PAPER_STREAK_REQUIRED_DAYS = int(os.getenv("PAPER_STREAK_REQUIRED_DAYS", "14"))
 
 
 def compute_segment_returns_from_equity(
@@ -164,11 +182,24 @@ class GoLiveValidationService:
         """
         Fetches the v3_go_live_state for the user.
         If not found, initializes a new state with a 90-day paper window starting now.
+
+        New fields for rolling streak (Phase 2.1):
+        - paper_streak_days: Consecutive passing days (reset on fail)
+        - paper_last_checkpoint_at: Last daily checkpoint timestamp
+        - paper_checkpoint_window_days: Rolling window size used
         """
         try:
             res = self.supabase.table("v3_go_live_state").select("*").eq("user_id", user_id).single().execute()
             if res.data:
-                return res.data
+                # Ensure new fields have defaults for existing records
+                state = res.data
+                if "paper_streak_days" not in state or state.get("paper_streak_days") is None:
+                    state["paper_streak_days"] = 0
+                if "paper_last_checkpoint_at" not in state:
+                    state["paper_last_checkpoint_at"] = None
+                if "paper_checkpoint_window_days" not in state or state.get("paper_checkpoint_window_days") is None:
+                    state["paper_checkpoint_window_days"] = PAPER_STREAK_WINDOW_DAYS
+                return state
         except Exception as e:
             # likely RowNotFound or similar
             pass
@@ -186,7 +217,11 @@ class GoLiveValidationService:
             "paper_ready": False,
             "historical_last_run_at": None,
             "historical_last_result": {},
-            "overall_ready": False
+            "overall_ready": False,
+            # Rolling streak fields (Phase 2.1)
+            "paper_streak_days": 0,
+            "paper_last_checkpoint_at": None,
+            "paper_checkpoint_window_days": PAPER_STREAK_WINDOW_DAYS
         }
 
         res = self.supabase.table("v3_go_live_state").insert(new_state).execute()
@@ -339,6 +374,177 @@ class GoLiveValidationService:
             result["status"] = "in_progress"
 
         return result
+
+    def checkpoint_paper_streak(
+        self,
+        user_id: str,
+        now: Optional[datetime] = None,
+        force: bool = False
+    ) -> Dict[str, Any]:
+        """
+        Daily checkpoint for rolling paper trading streak (Phase 2.1).
+
+        This method:
+        1. Checks idempotency (already run today?) unless force=True
+        2. Calculates rolling window return (last PAPER_STREAK_WINDOW_DAYS days)
+        3. Pass/fail with streak increment/reset
+        4. Updates paper_ready if streak hits PAPER_STREAK_REQUIRED_DAYS
+
+        Args:
+            user_id: User ID
+            now: Override timestamp for testing
+            force: Skip idempotency check (for testing)
+
+        Returns:
+            Dict with checkpoint results:
+            - status: "skipped" | "pass" | "fail"
+            - streak_days: Current streak after this checkpoint
+            - rolling_return_pct: Return over rolling window
+            - paper_ready: Whether user is now paper_ready
+            - window_start/window_end: Rolling window boundaries
+            - idempotency_key: Date string for this checkpoint
+        """
+        if now is None:
+            now = datetime.now(timezone.utc)
+
+        state = self.get_or_create_state(user_id)
+        baseline = float(state.get("paper_baseline_capital", 100000) or 100000)
+
+        # 1. Idempotency check
+        today_key = now.date().isoformat()
+        last_checkpoint = state.get("paper_last_checkpoint_at")
+
+        if not force and last_checkpoint:
+            try:
+                last_date = datetime.fromisoformat(last_checkpoint).date()
+                if last_date >= now.date():
+                    return {
+                        "status": "skipped",
+                        "reason": "already_checkpointed_today",
+                        "idempotency_key": today_key,
+                        "streak_days": state.get("paper_streak_days", 0),
+                        "paper_ready": state.get("paper_ready", False)
+                    }
+            except (ValueError, TypeError):
+                pass  # Invalid date, proceed with checkpoint
+
+        # 2. Calculate rolling window return
+        window_days = state.get("paper_checkpoint_window_days") or PAPER_STREAK_WINDOW_DAYS
+        window_start = now - timedelta(days=window_days)
+        window_end = now
+
+        pnl_total = 0.0
+        trade_count = 0
+
+        try:
+            res = self.supabase.table("learning_trade_outcomes_v3") \
+                .select("closed_at, pnl_realized") \
+                .eq("user_id", user_id) \
+                .eq("is_paper", True) \
+                .gte("closed_at", window_start.isoformat()) \
+                .lte("closed_at", window_end.isoformat()) \
+                .execute()
+
+            rows = res.data or []
+            for r in rows:
+                pnl = float(r.get("pnl_realized") or 0.0)
+                pnl_total += pnl
+                trade_count += 1
+
+        except Exception as e:
+            logger.error(f"Error calculating rolling paper metrics: {e}")
+            return {
+                "status": "error",
+                "error": str(e),
+                "idempotency_key": today_key,
+                "streak_days": state.get("paper_streak_days", 0),
+                "paper_ready": state.get("paper_ready", False)
+            }
+
+        rolling_return_pct = (pnl_total / baseline) * 100 if baseline > 0 else 0.0
+
+        # 3. Pass/fail determination
+        # Pass if return >= minimum threshold (default 2% for 2-week window)
+        min_return = PAPER_STREAK_MIN_RETURN_PCT
+        passed = rolling_return_pct >= min_return
+
+        # 4. Update streak
+        current_streak = state.get("paper_streak_days", 0)
+        if passed:
+            new_streak = current_streak + 1
+        else:
+            new_streak = 0  # Reset on fail
+
+        # 5. Check if paper_ready threshold reached
+        paper_ready_from_streak = new_streak >= PAPER_STREAK_REQUIRED_DAYS
+
+        # Combine with existing paper_ready (don't downgrade if already ready from 90-day eval)
+        existing_paper_ready = state.get("paper_ready", False)
+        paper_ready = existing_paper_ready or paper_ready_from_streak
+
+        # 6. Persist checkpoint
+        updates = {
+            "paper_streak_days": new_streak,
+            "paper_last_checkpoint_at": now.isoformat(),
+            "paper_ready": paper_ready,
+            "updated_at": now.isoformat()
+        }
+
+        # Update overall_ready if paper_ready changed
+        if paper_ready and not existing_paper_ready:
+            hist_res = state.get("historical_last_result") or {}
+            hist_passed = hist_res.get("passed", False)
+            hist_ts_str = state.get("historical_last_run_at")
+
+            hist_recent = False
+            if hist_ts_str:
+                try:
+                    hist_ts = datetime.fromisoformat(hist_ts_str)
+                    if (now - hist_ts).days <= 30:
+                        hist_recent = True
+                except (ValueError, TypeError):
+                    pass
+
+            updates["overall_ready"] = paper_ready and hist_passed and hist_recent
+
+        self.supabase.table("v3_go_live_state").update(updates).eq("user_id", user_id).execute()
+
+        # 7. Log to v3_go_live_runs for audit trail
+        run_data = {
+            "user_id": user_id,
+            "mode": "paper_checkpoint",
+            "window_start": window_start.isoformat(),
+            "window_end": window_end.isoformat(),
+            "return_pct": rolling_return_pct,
+            "pnl_total": pnl_total,
+            "segment_pnls": {},  # N/A for rolling checkpoint
+            "passed": passed,
+            "fail_reason": None if passed else "rolling_return_below_threshold",
+            "details_json": {
+                "checkpoint_date": today_key,
+                "trade_count": trade_count,
+                "streak_before": current_streak,
+                "streak_after": new_streak,
+                "min_return_threshold": min_return,
+                "window_days": window_days
+            }
+        }
+        self.supabase.table("v3_go_live_runs").insert(run_data).execute()
+
+        return {
+            "status": "pass" if passed else "fail",
+            "streak_days": new_streak,
+            "streak_before": current_streak,
+            "rolling_return_pct": rolling_return_pct,
+            "min_return_threshold": min_return,
+            "trade_count": trade_count,
+            "paper_ready": paper_ready,
+            "paper_ready_from_streak": paper_ready_from_streak,
+            "window_start": window_start.isoformat(),
+            "window_end": window_end.isoformat(),
+            "window_days": window_days,
+            "idempotency_key": today_key
+        }
 
     def eval_historical(self, user_id: str, suite_config: Dict[str, Any]) -> Dict[str, Any]:
         state = self.get_or_create_state(user_id)

@@ -316,7 +316,11 @@ class BacktestEngine:
                         "details": {
                             "reason": exit_reason,
                             "commission": fill.commission_paid,
-                            "contract_symbol": trade_symbol if rolling_mode else None
+                            "contract_symbol": trade_symbol if rolling_mode else None,
+                            # v4: Fill tracking for metrics
+                            "requested_qty": position["quantity"],
+                            "filled_qty": fill.filled_quantity,
+                            "multiplier": position.get("multiplier", 1.0)
                         }
                     })
 
@@ -410,7 +414,11 @@ class BacktestEngine:
                                     "conviction": conviction,
                                     "regime": regime_mapped,
                                     "commission": fill.commission_paid,
-                                    "contract_symbol": entry_symbol if rolling_mode else None
+                                    "contract_symbol": entry_symbol if rolling_mode else None,
+                                    # v4: Fill tracking for metrics
+                                    "requested_qty": quantity,
+                                    "filled_qty": fill.filled_quantity,
+                                    "multiplier": multiplier
                                 }
                             })
 

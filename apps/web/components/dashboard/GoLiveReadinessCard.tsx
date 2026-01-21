@@ -5,7 +5,7 @@ import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/com
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { fetchWithAuth } from "@/lib/api";
-import { Loader2, CheckCircle, XCircle, Play, History, FileText } from 'lucide-react';
+import { Loader2, CheckCircle, XCircle, Play, History, FileText, AlertTriangle } from 'lucide-react';
 import { QuantumTooltip } from "@/components/ui/QuantumTooltip";
 
 interface ValidationState {
@@ -19,6 +19,12 @@ interface ValidationState {
         return_pct?: number;
     };
     overall_ready: boolean;
+    // v4-L1: Paper forward checkpoint fields
+    paper_checkpoint_target?: number;
+    paper_checkpoint_last_run_at?: string | null;
+    paper_fail_fast_triggered?: boolean;
+    paper_fail_fast_reason?: string | null;
+    paper_window_days?: number;
 }
 
 interface JournalEntry {
@@ -112,9 +118,11 @@ export function GoLiveReadinessCard() {
         );
     }
 
-    const paperStreak = status.paper_consecutive_passes || 0;
-    const paperTarget = 3;
+    // v4-L1: Use dynamic checkpoint target from state
+    const paperTarget = status.paper_checkpoint_target ?? 10;
+    const paperStreak = status.paper_consecutive_passes ?? 0;
     const paperProgress = Math.min((paperStreak / paperTarget) * 100, 100);
+    const failFastTriggered = status.paper_fail_fast_triggered ?? false;
 
     // Calculate days remaining in current paper window
     const now = new Date();
@@ -154,20 +162,41 @@ export function GoLiveReadinessCard() {
                                 <FileText className="w-4 h-4" /> Paper Forward-Test
                             </h3>
                             <Badge variant={status.paper_ready ? "default" : "secondary"}>
-                                {paperStreak}/{paperTarget} Pass Streak
+                                Streak: {paperStreak}/{paperTarget}
                             </Badge>
                         </div>
 
+                        {/* v4-L1: Fail-fast banner */}
+                        {failFastTriggered && (
+                            <div className="bg-red-50 dark:bg-red-950/30 border border-red-200 dark:border-red-800 rounded-lg p-3 flex items-start gap-2">
+                                <AlertTriangle className="w-4 h-4 text-red-600 dark:text-red-400 mt-0.5 flex-shrink-0" />
+                                <div className="text-sm">
+                                    <p className="font-medium text-red-800 dark:text-red-200">Window Reset Triggered</p>
+                                    <p className="text-red-600 dark:text-red-400 text-xs mt-0.5">
+                                        {status.paper_fail_fast_reason || "Performance threshold breached"}
+                                    </p>
+                                    {status.paper_checkpoint_last_run_at && (
+                                        <p className="text-red-500 dark:text-red-500 text-xs mt-1">
+                                            Last checkpoint: {new Date(status.paper_checkpoint_last_run_at).toLocaleString()}
+                                        </p>
+                                    )}
+                                </div>
+                            </div>
+                        )}
+
                         <div className="bg-muted/50 p-4 rounded-lg space-y-3">
                             <div className="flex justify-between text-sm">
-                                <span className="text-muted-foreground">Current Window Ends:</span>
-                                <span className="font-medium">{daysRemaining} days left</span>
+                                <span className="text-muted-foreground">Window ends:</span>
+                                <span className="font-medium">{windowEnd.toLocaleDateString()} ({daysRemaining} days)</span>
                             </div>
                             <div className="w-full bg-secondary h-2 rounded-full overflow-hidden">
                                 <div className="bg-blue-500 h-full transition-all" style={{ width: `${paperProgress}%` }}></div>
                             </div>
-                            <div className="flex justify-between items-center pt-2">
-                                <span className="text-xs text-muted-foreground">Requires {paperTarget} consecutive winning windows</span>
+                            <div className="flex justify-between text-xs text-muted-foreground">
+                                <span>Streak: {paperStreak} / {paperTarget} checkpoints</span>
+                                <span>{paperProgress.toFixed(0)}%</span>
+                            </div>
+                            <div className="flex justify-end pt-2">
                                 <Button
                                     size="sm"
                                     variant="outline"
@@ -176,7 +205,7 @@ export function GoLiveReadinessCard() {
                                     className="h-7 text-xs"
                                 >
                                     {runningPaper ? <Loader2 className="w-3 h-3 animate-spin mr-1" /> : <Play className="w-3 h-3 mr-1" />}
-                                    Eval Window
+                                    Run Checkpoint
                                 </Button>
                             </div>
                         </div>

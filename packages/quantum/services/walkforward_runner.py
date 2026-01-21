@@ -2,6 +2,7 @@ from datetime import datetime, timedelta
 from typing import List, Dict, Any, Optional
 from pydantic import BaseModel
 import copy
+import itertools
 
 # v4 dual-import shim: support both package and PYTHONPATH imports
 try:
@@ -83,6 +84,36 @@ def generate_folds(
 
     return folds
 
+def _compute_objective_score(metrics: Dict[str, Any], objective: str) -> float:
+    """
+    Compute score for a given objective metric.
+
+    Args:
+        metrics: Backtest metrics dict
+        objective: One of "sharpe", "profit_factor", "calmar"
+
+    Returns:
+        Score value (higher is better)
+    """
+    if objective == "sharpe":
+        return metrics.get("sharpe", -999.0)
+    elif objective == "profit_factor":
+        return metrics.get("profit_factor", 0.0)
+    elif objective == "calmar":
+        # Calmar = total_return / max_drawdown
+        total_return = metrics.get("total_return", 0.0)
+        max_dd = metrics.get("max_drawdown", 0.0)
+        if max_dd > 0:
+            return total_return / max_dd
+        elif total_return > 0:
+            return float("inf")  # Positive return with no drawdown
+        else:
+            return 0.0
+    else:
+        # Fallback to sharpe
+        return metrics.get("sharpe", -999.0)
+
+
 class WalkForwardRunner:
     def __init__(self, engine: BacktestEngine):
         self.engine = engine
@@ -120,39 +151,93 @@ class WalkForwardRunner:
         # and then aggregate the trades to compute global metrics.
 
         for i, fold in enumerate(folds):
-            # 1. TRAIN: Optimize Threshold
+            # 1. TRAIN: Optimize parameters
             # v4: Use train_start_engine (includes warmup) for engine execution
-            best_sharpe = -999.0
-            best_threshold = base_config.conviction_floor
+            best_score = -999.0
+            best_params: Dict[str, Any] = {"conviction_floor": base_config.conviction_floor}
             best_train_metrics: Dict[str, Any] = {}
 
-            # Simple grid for entry threshold
-            candidates = [0.5, 0.6, 0.7, 0.8, 0.9]
+            # v4: Determine objective metric (default: sharpe)
+            objective_metric = getattr(wf_config, "objective_metric", None) or "sharpe"
+            min_trades = getattr(wf_config, "min_trades_per_fold", 5)
+            max_combinations = getattr(wf_config, "max_tune_combinations", 50)
 
-            for thresh in candidates:
-                train_config = base_config.model_copy()
-                train_config.conviction_floor = thresh
+            # v4: Check if tune_grid is provided
+            tune_grid = getattr(wf_config, "tune_grid", None)
 
-                res = self.engine.run_single(
-                    request.ticker,
-                    fold["train_start_engine"],  # v4: use engine start (with warmup)
-                    fold["train_end"],
-                    train_config,
-                    request.cost_model,
-                    request.seed,
-                    initial_equity=100000.0
-                )
+            if tune_grid:
+                # v4: Generate param combinations from tune_grid
+                param_names = list(tune_grid.keys())
+                param_values = [tune_grid[k] for k in param_names]
+                all_combinations = list(itertools.product(*param_values))
 
-                # v4: Track full metrics for best candidate
-                candidate_sharpe = res.metrics.get("sharpe", -999.0)
-                if candidate_sharpe > best_sharpe:
-                    best_sharpe = candidate_sharpe
-                    best_threshold = thresh
-                    best_train_metrics = copy.deepcopy(res.metrics) if res.metrics else {}
+                # Apply max_tune_combinations cap
+                combinations = all_combinations[:max_combinations]
 
-            # 2. TEST: Run with best param
+                for combo in combinations:
+                    train_config = base_config.model_copy()
+                    combo_params = dict(zip(param_names, combo))
+
+                    # Apply params where hasattr
+                    for k, v in combo_params.items():
+                        if hasattr(train_config, k):
+                            setattr(train_config, k, v)
+
+                    res = self.engine.run_single(
+                        request.ticker,
+                        fold["train_start_engine"],
+                        fold["train_end"],
+                        train_config,
+                        request.cost_model,
+                        request.seed,
+                        initial_equity=100000.0
+                    )
+
+                    # v4: Enforce min_trades_per_fold
+                    if len(res.trades) < min_trades:
+                        continue
+
+                    # Score using objective_metric
+                    score = _compute_objective_score(res.metrics or {}, objective_metric)
+                    if score > best_score:
+                        best_score = score
+                        best_params = combo_params.copy()
+                        best_train_metrics = copy.deepcopy(res.metrics) if res.metrics else {}
+
+            else:
+                # Fallback: Simple grid for conviction_floor only
+                candidates = [0.5, 0.6, 0.7, 0.8, 0.9]
+
+                for thresh in candidates:
+                    train_config = base_config.model_copy()
+                    train_config.conviction_floor = thresh
+
+                    res = self.engine.run_single(
+                        request.ticker,
+                        fold["train_start_engine"],
+                        fold["train_end"],
+                        train_config,
+                        request.cost_model,
+                        request.seed,
+                        initial_equity=100000.0
+                    )
+
+                    # v4: Enforce min_trades_per_fold
+                    if len(res.trades) < min_trades:
+                        continue
+
+                    # Score using objective_metric
+                    score = _compute_objective_score(res.metrics or {}, objective_metric)
+                    if score > best_score:
+                        best_score = score
+                        best_params = {"conviction_floor": thresh}
+                        best_train_metrics = copy.deepcopy(res.metrics) if res.metrics else {}
+
+            # 2. TEST: Run with best params
             test_config = base_config.model_copy()
-            test_config.conviction_floor = best_threshold
+            for k, v in best_params.items():
+                if hasattr(test_config, k):
+                    setattr(test_config, k, v)
 
             test_res = self.engine.run_single(
                 request.ticker,
@@ -165,12 +250,15 @@ class WalkForwardRunner:
             )
 
             # v4: Store full train_metrics alongside train_sharpe for backward compat
+            # train_sharpe: use sharpe from best_train_metrics for backward compat
+            train_sharpe = best_train_metrics.get("sharpe", best_score if objective_metric == "sharpe" else 0.0)
+
             fold_results.append({
                 "fold_index": i,
                 "train_window": f"{fold['train_start']} to {fold['train_end']}",
                 "test_window": f"{fold['test_start']} to {fold['test_end']}",
-                "optimized_params": {"conviction_floor": best_threshold},
-                "train_sharpe": best_sharpe,  # backward compat
+                "optimized_params": best_params,
+                "train_sharpe": train_sharpe,  # backward compat
                 "train_metrics": best_train_metrics,  # v4: full metrics dict
                 "test_metrics": test_res.metrics if test_res.metrics else {},
                 "trades_count": len(test_res.trades)

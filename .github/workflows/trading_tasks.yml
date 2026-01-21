@@ -33,6 +33,16 @@ on:
     # Runs at :00 and :30 from 13:00-22:00 UTC (8 AM - 5 PM Chicago approx)
     - cron: '0,30 13-22 * * 1-5'
 
+    # Validation Eval (Checkpoint) - 6:30 PM Chicago (after market close)
+    # CST (winter): 00:30 UTC next day | CDT (summer): 23:30 UTC
+    # Schedule at 23:30 UTC to catch CDT; time-gate bypassed
+    - cron: '30 23 * * 1-5'
+
+    # Learning Ingest Nightly - 3:30 AM Chicago (deep night, Tue-Sat)
+    # CST (winter): 09:30 UTC | CDT (summer): 08:30 UTC
+    # Schedule at 08:30 UTC; runs Tue-Sat to process Mon-Fri data
+    - cron: '30 08 * * 2-6'
+
   workflow_dispatch:
     inputs:
       task:
@@ -83,7 +93,9 @@ jobs:
           python-version: ${{ env.PYTHON_VERSION }}
 
       - name: Install dependencies
-        run: pip install requests
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r packages/quantum/requirements.txt
 
       - name: Run Suggestions Close
         env:
@@ -111,7 +123,9 @@ jobs:
           python-version: ${{ env.PYTHON_VERSION }}
 
       - name: Install dependencies
-        run: pip install requests
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r packages/quantum/requirements.txt
 
       - name: Run Suggestions Open
         env:
@@ -139,7 +153,9 @@ jobs:
           python-version: ${{ env.PYTHON_VERSION }}
 
       - name: Install dependencies
-        run: pip install requests
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r packages/quantum/requirements.txt
 
       - name: Run Learning Ingest
         env:
@@ -167,7 +183,9 @@ jobs:
           python-version: ${{ env.PYTHON_VERSION }}
 
       - name: Install dependencies
-        run: pip install requests
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r packages/quantum/requirements.txt
 
       - name: Run Ops Health Check
         env:
@@ -194,7 +212,9 @@ jobs:
           python-version: ${{ env.PYTHON_VERSION }}
 
       - name: Install dependencies
-        run: pip install requests
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r packages/quantum/requirements.txt
 
       - name: Run Task
         env:
@@ -208,3 +228,63 @@ jobs:
             ARGS="$ARGS --skip-time-gate"
           fi
           python scripts/run_signed_task.py $ARGS
+
+  # ============================================================================
+  # Scheduled: Validation Eval / Checkpoint (6:30 PM Chicago, after market close)
+  # ============================================================================
+  validation-eval:
+    name: Validation Eval (6:30 PM Chicago)
+    runs-on: ubuntu-latest
+    if: github.event_name == 'schedule' && github.event.schedule == '30 23 * * 1-5'
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r packages/quantum/requirements.txt
+
+      - name: Run Validation Eval
+        env:
+          TASK_SIGNING_KEYS: ${{ secrets.TASK_SIGNING_KEYS }}
+          BASE_URL: ${{ secrets.QUANTUM_BASE_URL }}
+          USER_ID: ${{ secrets.TASK_USER_ID }}
+        run: |
+          python scripts/run_signed_task.py validation_eval --skip-time-gate
+
+  # ============================================================================
+  # Scheduled: Learning Ingest Nightly (3:30 AM Chicago, Tue-Sat)
+  # ============================================================================
+  learning-ingest-nightly:
+    name: Learning Ingest Nightly (3:30 AM Chicago)
+    runs-on: ubuntu-latest
+    if: github.event_name == 'schedule' && github.event.schedule == '30 08 * * 2-6'
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r packages/quantum/requirements.txt
+
+      - name: Run Learning Ingest Nightly
+        env:
+          TASK_SIGNING_KEYS: ${{ secrets.TASK_SIGNING_KEYS }}
+          BASE_URL: ${{ secrets.QUANTUM_BASE_URL }}
+          USER_ID: ${{ secrets.TASK_USER_ID }}
+        run: |
+          python scripts/run_signed_task.py learning_ingest --skip-time-gate

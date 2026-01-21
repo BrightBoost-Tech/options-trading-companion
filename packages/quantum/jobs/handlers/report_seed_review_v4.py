@@ -10,6 +10,9 @@ Usage:
         - user_id: str (optional, filters to single user)
         - include_resolved: bool (optional, default false)
         - limit: int (optional, default 100)
+
+v1.2: Prefers RPC function rpc_seed_needs_review_v4 for stable querying,
+      falls back to PostgREST JSON-path filtering if RPC unavailable.
 """
 
 import logging
@@ -24,6 +27,45 @@ JOB_NAME = "report_seed_review_v4"
 logger = logging.getLogger(__name__)
 
 
+# =============================================================================
+# RPC-based query (preferred, stable)
+# =============================================================================
+
+def _query_via_rpc(
+    supabase,
+    user_id: Optional[str] = None,
+    include_resolved: bool = False,
+    limit: int = 100
+) -> Optional[List[Dict[str, Any]]]:
+    """
+    Query needs_review events via RPC function (stable, fast).
+
+    Returns:
+        List of enriched rows if RPC succeeded, None if RPC not available/failed
+    """
+    try:
+        # Build RPC params
+        params = {
+            "p_include_resolved": include_resolved,
+            "p_limit": min(limit, 500)  # Cap at 500
+        }
+        if user_id:
+            params["p_user_id"] = user_id
+
+        result = supabase.rpc("rpc_seed_needs_review_v4", params).execute()
+
+        if result.data is not None:
+            logger.info(f"[REPORT_SEED_REVIEW_V4] RPC returned {len(result.data)} rows")
+            return result.data
+
+        return None
+
+    except Exception as e:
+        # RPC might not exist yet or other error - fall back to legacy query
+        logger.warning(f"[REPORT_SEED_REVIEW_V4] RPC failed, falling back to legacy query: {e}")
+        return None
+
+
 def run(payload: Dict[str, Any], ctx=None) -> Dict[str, Any]:
     """
     Job handler for generating seed review report.
@@ -31,6 +73,8 @@ def run(payload: Dict[str, Any], ctx=None) -> Dict[str, Any]:
     Queries position_events for entries where:
     - meta_json->>'opening_balance' = true (seed entries)
     - meta_json->>'needs_review' = true (ambiguous side inference)
+
+    v1.2: Prefers RPC function for stable querying, falls back to legacy path.
 
     Payload:
         user_id: Optional single user to filter
@@ -51,7 +95,35 @@ def run(payload: Dict[str, Any], ctx=None) -> Dict[str, Any]:
         include_resolved = payload.get("include_resolved", False)
         limit = min(payload.get("limit", 100), 500)  # Cap at 500
 
-        # Query position_events for needs_review entries
+        # Try RPC path first (stable, fast, includes enrichment)
+        rpc_rows = _query_via_rpc(
+            supabase,
+            user_id=user_id,
+            include_resolved=include_resolved,
+            limit=limit
+        )
+
+        if rpc_rows is not None:
+            # RPC returns already-enriched rows
+            if not rpc_rows:
+                return {
+                    "status": "completed",
+                    "count": 0,
+                    "rows": [],
+                    "message": "No positions requiring review found",
+                    "source": "rpc"
+                }
+
+            return {
+                "status": "completed",
+                "count": len(rpc_rows),
+                "rows": rpc_rows,
+                "truncated": len(rpc_rows) >= limit,
+                "source": "rpc"
+            }
+
+        # Fallback: Legacy PostgREST JSON-path query
+        logger.info("[REPORT_SEED_REVIEW_V4] Using legacy query path")
         rows = _query_needs_review_events(
             supabase,
             user_id=user_id,
@@ -64,7 +136,8 @@ def run(payload: Dict[str, Any], ctx=None) -> Dict[str, Any]:
                 "status": "completed",
                 "count": 0,
                 "rows": [],
-                "message": "No positions requiring review found"
+                "message": "No positions requiring review found",
+                "source": "legacy"
             }
 
         # Enrich with leg/group details
@@ -74,7 +147,8 @@ def run(payload: Dict[str, Any], ctx=None) -> Dict[str, Any]:
             "status": "completed",
             "count": len(enriched_rows),
             "rows": enriched_rows,
-            "truncated": len(rows) >= limit
+            "truncated": len(rows) >= limit,
+            "source": "legacy"
         }
 
     except Exception as e:

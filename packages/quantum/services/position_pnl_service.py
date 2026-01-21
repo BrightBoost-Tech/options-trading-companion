@@ -90,6 +90,8 @@ class PositionPnLService:
         groups_updated = set()
         stale_skips = 0
         missing_quote_skips = 0
+        truncation_skips = 0
+        truncated_symbols = 0
 
         try:
             # 1. Get all open legs for the user (or specific groups)
@@ -109,7 +111,9 @@ class PositionPnLService:
                         "symbols_processed": 0,
                         "batches": 0,
                         "stale_skips": 0,
-                        "missing_quote_skips": 0
+                        "missing_quote_skips": 0,
+                        "truncation_skips": 0,
+                        "truncated_symbols": 0
                     }
                 }
 
@@ -120,9 +124,14 @@ class PositionPnLService:
             # Apply max_symbols cap (deterministic truncation on sorted list)
             if max_symbols is not None and len(all_symbols) > max_symbols:
                 symbols_to_fetch = all_symbols[:max_symbols]
-                logger.info(f"Truncated symbols from {len(all_symbols)} to {max_symbols}")
+                truncated_symbols = len(all_symbols) - len(symbols_to_fetch)
+                logger.info(f"Truncated symbols from {len(all_symbols)} to {max_symbols} (truncated_symbols={truncated_symbols})")
             else:
                 symbols_to_fetch = all_symbols
+                truncated_symbols = 0
+
+            # Build set for fast lookup
+            symbols_to_fetch_set = set(symbols_to_fetch)
 
             logger.info(f"Refreshing marks for {len(legs)} legs ({len(symbols_to_fetch)} symbols to fetch)")
 
@@ -143,7 +152,9 @@ class PositionPnLService:
                         "symbols_processed": 0,
                         "batches": batches_used,
                         "stale_skips": 0,
-                        "missing_quote_skips": 0
+                        "missing_quote_skips": 0,
+                        "truncation_skips": 0,
+                        "truncated_symbols": truncated_symbols
                     }
                 }
 
@@ -153,7 +164,8 @@ class PositionPnLService:
                 symbol = leg["symbol"]
 
                 # Skip if symbol wasn't in our fetch list (truncation case)
-                if symbol not in quotes and symbol not in symbols_to_fetch:
+                if symbol not in symbols_to_fetch_set:
+                    truncation_skips += 1
                     continue
 
                 try:
@@ -195,7 +207,9 @@ class PositionPnLService:
                     "batches": batches_used,
                     "total_legs": len(legs),
                     "stale_skips": stale_skips,
-                    "missing_quote_skips": missing_quote_skips
+                    "missing_quote_skips": missing_quote_skips,
+                    "truncation_skips": truncation_skips,
+                    "truncated_symbols": truncated_symbols
                 }
             }
 
@@ -210,7 +224,9 @@ class PositionPnLService:
                 "diagnostics": {
                     "duration_ms": self._duration_ms(start_time),
                     "stale_skips": stale_skips,
-                    "missing_quote_skips": missing_quote_skips
+                    "missing_quote_skips": missing_quote_skips,
+                    "truncation_skips": truncation_skips,
+                    "truncated_symbols": truncated_symbols
                 }
             }
 

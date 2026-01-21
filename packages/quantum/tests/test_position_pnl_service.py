@@ -403,6 +403,89 @@ class TestThrottling(unittest.TestCase):
         # 7 symbols with batch_size=3 should be 3 batches: 3, 3, 1
         self.assertEqual(result["diagnostics"]["batches"], 3)
 
+    def test_truncation_metrics_v12(self):
+        """v1.2: Truncation metrics track skipped symbols and legs."""
+        # Create 10 legs with 10 unique symbols
+        legs = [
+            {"id": f"leg-{i}", "group_id": f"group-{i % 3}", "user_id": "user-1",
+             "symbol": f"SYM{chr(65+i)}", "side": "LONG", "qty_current": 1,
+             "avg_cost_open": 1.0, "multiplier": 100}
+            for i in range(10)
+        ]  # SYMA, SYMB, SYMC, ..., SYMJ
+
+        self.mock_client.table.return_value.select.return_value.eq.return_value.neq.return_value.execute.return_value = MagicMock(
+            data=legs
+        )
+
+        # Mock fetch_quotes_batched to return quotes only for the 5 symbols that will be fetched
+        fetched_symbols = []
+        def mock_fetch_batched(symbols, batch_size):
+            fetched_symbols.extend(symbols)
+            return {s: {"bid": 1, "ask": 1.1, "mid": 1.05, "last": 1, "is_stale": False, "quality_score": 90, "freshness_ms": 100} for s in symbols}
+
+        self.service._fetch_quotes_batched = mock_fetch_batched
+
+        # Mock DB calls for marks and updates
+        self.mock_client.table.return_value.insert.return_value.execute.return_value = MagicMock(data=[{"id": "mark-1"}])
+        self.mock_client.table.return_value.update.return_value.eq.return_value.execute.return_value = MagicMock()
+        self.mock_client.table.return_value.select.return_value.eq.return_value.execute.return_value = MagicMock(data=[])
+        self.mock_client.table.return_value.select.return_value.eq.return_value.single.return_value.execute.return_value = MagicMock(
+            data={"realized_pnl": 0, "fees_paid": 0}
+        )
+
+        # Call with max_symbols=5 to truncate from 10
+        result = self.service.refresh_marks_for_user("user-1", max_symbols=5)
+
+        diag = result["diagnostics"]
+
+        # Verify truncation metrics
+        self.assertEqual(diag["symbols_requested_total"], 10, "Should have 10 total symbols")
+        self.assertEqual(diag["symbols_processed"], 5, "Should process only 5 symbols")
+        self.assertEqual(diag["truncated_symbols"], 5, "Should truncate 5 symbols")
+        self.assertGreater(diag["truncation_skips"], 0, "Should have truncation skips for legs with truncated symbols")
+
+        # Verify only first 5 alphabetically were fetched (SYMA-SYME)
+        self.assertEqual(sorted(fetched_symbols), ["SYMA", "SYMB", "SYMC", "SYMD", "SYME"])
+
+    def test_truncation_metrics_no_truncation(self):
+        """v1.2: Truncation metrics are zero when no truncation occurs."""
+        # Create 3 legs with 3 unique symbols
+        legs = [
+            {"id": f"leg-{i}", "group_id": "group-1", "user_id": "user-1",
+             "symbol": f"SYM{chr(65+i)}", "side": "LONG", "qty_current": 1,
+             "avg_cost_open": 1.0, "multiplier": 100}
+            for i in range(3)
+        ]  # SYMA, SYMB, SYMC
+
+        self.mock_client.table.return_value.select.return_value.eq.return_value.neq.return_value.execute.return_value = MagicMock(
+            data=legs
+        )
+
+        # Mock fetch_quotes_batched
+        def mock_fetch_batched(symbols, batch_size):
+            return {s: {"bid": 1, "ask": 1.1, "mid": 1.05, "last": 1, "is_stale": False, "quality_score": 90, "freshness_ms": 100} for s in symbols}
+
+        self.service._fetch_quotes_batched = mock_fetch_batched
+
+        # Mock DB calls
+        self.mock_client.table.return_value.insert.return_value.execute.return_value = MagicMock(data=[{"id": "mark-1"}])
+        self.mock_client.table.return_value.update.return_value.eq.return_value.execute.return_value = MagicMock()
+        self.mock_client.table.return_value.select.return_value.eq.return_value.execute.return_value = MagicMock(data=[])
+        self.mock_client.table.return_value.select.return_value.eq.return_value.single.return_value.execute.return_value = MagicMock(
+            data={"realized_pnl": 0, "fees_paid": 0}
+        )
+
+        # Call with max_symbols=10 (more than we have)
+        result = self.service.refresh_marks_for_user("user-1", max_symbols=10)
+
+        diag = result["diagnostics"]
+
+        # Verify no truncation
+        self.assertEqual(diag["symbols_requested_total"], 3)
+        self.assertEqual(diag["symbols_processed"], 3)
+        self.assertEqual(diag["truncated_symbols"], 0)
+        self.assertEqual(diag["truncation_skips"], 0)
+
 
 class TestRefreshLedgerMarksV4Handler(unittest.TestCase):
     """Tests for refresh_ledger_marks_v4 job handler."""

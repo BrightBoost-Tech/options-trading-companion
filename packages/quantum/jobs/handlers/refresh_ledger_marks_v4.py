@@ -85,6 +85,8 @@ def run(payload: Dict[str, Any], ctx=None) -> Dict[str, Any]:
                 "total_symbols_processed": 0,
                 "total_stale_skips": 0,
                 "total_missing_quote_skips": 0,
+                "total_truncation_skips": 0,
+                "total_truncated_symbols": 0,
                 "errors": []
             }
 
@@ -97,6 +99,8 @@ def run(payload: Dict[str, Any], ctx=None) -> Dict[str, Any]:
         total_symbols_processed = 0
         total_stale_skips = 0
         total_missing_quote_skips = 0
+        total_truncation_skips = 0
+        total_truncated_symbols = 0
         all_errors = []
         users_processed = 0
 
@@ -123,6 +127,8 @@ def run(payload: Dict[str, Any], ctx=None) -> Dict[str, Any]:
                 total_symbols_processed += diag.get("symbols_processed", 0)
                 total_stale_skips += diag.get("stale_skips", 0)
                 total_missing_quote_skips += diag.get("missing_quote_skips", 0)
+                total_truncation_skips += diag.get("truncation_skips", 0)
+                total_truncated_symbols += diag.get("truncated_symbols", 0)
 
                 if not result["success"]:
                     all_errors.extend([f"User {uid}: {e}" for e in result.get("errors", [])])
@@ -150,6 +156,8 @@ def run(payload: Dict[str, Any], ctx=None) -> Dict[str, Any]:
             "total_symbols_processed": total_symbols_processed,
             "total_stale_skips": total_stale_skips,
             "total_missing_quote_skips": total_missing_quote_skips,
+            "total_truncation_skips": total_truncation_skips,
+            "total_truncated_symbols": total_truncated_symbols,
             "errors": all_errors[:20]  # Cap errors for payload size
         }
 

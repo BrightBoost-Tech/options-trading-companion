@@ -14,6 +14,9 @@ from datetime import datetime, timezone
 from packages.quantum.services.execution_service import (
     ExecutionService,
     _build_legs_fingerprint,
+    _build_legs_fingerprint_v2,
+    _build_legs_fingerprint_with_fallback,
+    _resolve_leg_action_standalone,
 )
 
 
@@ -193,7 +196,8 @@ class TestExecutionLedgerWiring(unittest.TestCase):
         self.assertEqual(mock_ledger.record_fill.call_count, 2)
 
         # Verify legs_fingerprint was computed and passed to ALL legs
-        expected_fingerprint = _build_legs_fingerprint(suggestion["order_json"])
+        # Now uses v2 fingerprint (with fallback)
+        expected_fingerprint = _build_legs_fingerprint_with_fallback(suggestion["order_json"])
 
         for call in mock_ledger.record_fill.call_args_list:
             context = call.kwargs["context"]
@@ -303,6 +307,145 @@ class TestBuildLegsFingerprint(unittest.TestCase):
         self.assertIsNone(_build_legs_fingerprint(None))
         self.assertIsNone(_build_legs_fingerprint({}))
         self.assertIsNone(_build_legs_fingerprint({"legs": []}))
+
+
+class TestBuildLegsFingerprintV2(unittest.TestCase):
+    """Tests for _build_legs_fingerprint_v2 helper."""
+
+    def test_v2_fingerprint_includes_action(self):
+        """V2 fingerprint differs for opposite actions on same symbols."""
+        # Same symbols, different actions
+        legs_buy = [
+            {"symbol": "AAPL240119C00150000", "action": "buy", "quantity": 1},
+            {"symbol": "AAPL240119C00160000", "action": "sell", "quantity": 1},
+        ]
+
+        legs_opposite = [
+            {"symbol": "AAPL240119C00150000", "action": "sell", "quantity": 1},
+            {"symbol": "AAPL240119C00160000", "action": "buy", "quantity": 1},
+        ]
+
+        fp1 = _build_legs_fingerprint_v2(legs_buy)
+        fp2 = _build_legs_fingerprint_v2(legs_opposite)
+
+        self.assertIsNotNone(fp1)
+        self.assertIsNotNone(fp2)
+        self.assertNotEqual(fp1, fp2)  # Must differ!
+
+    def test_v2_fingerprint_includes_quantity(self):
+        """V2 fingerprint differs for different quantities."""
+        legs_qty1 = [
+            {"symbol": "AAPL240119C00150000", "action": "buy", "quantity": 1},
+        ]
+
+        legs_qty2 = [
+            {"symbol": "AAPL240119C00150000", "action": "buy", "quantity": 2},
+        ]
+
+        fp1 = _build_legs_fingerprint_v2(legs_qty1)
+        fp2 = _build_legs_fingerprint_v2(legs_qty2)
+
+        self.assertNotEqual(fp1, fp2)
+
+    def test_v2_fingerprint_is_deterministic(self):
+        """Same legs produce same v2 fingerprint regardless of order."""
+        legs1 = [
+            {"symbol": "AAPL240119C00160000", "action": "sell", "qty": 1},
+            {"symbol": "AAPL240119C00150000", "action": "buy", "qty": 1},
+        ]
+
+        legs2 = [
+            {"symbol": "AAPL240119C00150000", "action": "buy", "qty": 1},
+            {"symbol": "AAPL240119C00160000", "action": "sell", "qty": 1},
+        ]
+
+        # Both should produce same fingerprint (sorted)
+        self.assertEqual(
+            _build_legs_fingerprint_v2(legs1),
+            _build_legs_fingerprint_v2(legs2),
+        )
+
+    def test_v2_fingerprint_returns_none_for_empty(self):
+        """Returns None for empty legs."""
+        self.assertIsNone(_build_legs_fingerprint_v2([]))
+        self.assertIsNone(_build_legs_fingerprint_v2(None))
+
+    def test_v2_fingerprint_handles_various_action_formats(self):
+        """V2 fingerprint resolves various action formats correctly."""
+        legs1 = [{"symbol": "AAPL", "action": "buy_to_open", "qty": 1}]
+        legs2 = [{"symbol": "AAPL", "action": "buy", "qty": 1}]
+        legs3 = [{"symbol": "AAPL", "side": "buy", "qty": 1}]
+
+        # All should resolve to BUY and produce same fingerprint
+        fp1 = _build_legs_fingerprint_v2(legs1)
+        fp2 = _build_legs_fingerprint_v2(legs2)
+        fp3 = _build_legs_fingerprint_v2(legs3)
+
+        self.assertEqual(fp1, fp2)
+        self.assertEqual(fp2, fp3)
+
+
+class TestBuildLegsFingerprintWithFallback(unittest.TestCase):
+    """Tests for _build_legs_fingerprint_with_fallback."""
+
+    def test_fallback_prefers_v2(self):
+        """Uses v2 fingerprint when legs have actions."""
+        order_json = {
+            "legs": [
+                {"symbol": "AAPL240119C00150000", "action": "buy", "qty": 1},
+            ]
+        }
+
+        fp_fallback = _build_legs_fingerprint_with_fallback(order_json)
+        fp_v2 = _build_legs_fingerprint_v2(order_json["legs"])
+
+        self.assertEqual(fp_fallback, fp_v2)
+
+    def test_fallback_returns_v1_when_v2_fails(self):
+        """Falls back to v1 when v2 can't be computed."""
+        # Legs without symbols will fail v2
+        order_json = {
+            "legs": [
+                {"action": "buy", "qty": 1},  # No symbol
+            ]
+        }
+
+        fp = _build_legs_fingerprint_with_fallback(order_json)
+        # Should fall back to v1 which also returns None for no symbols
+        self.assertIsNone(fp)
+
+    def test_fallback_returns_none_for_empty(self):
+        """Returns None for empty order_json."""
+        self.assertIsNone(_build_legs_fingerprint_with_fallback(None))
+        self.assertIsNone(_build_legs_fingerprint_with_fallback({}))
+
+
+class TestResolveLegActionStandalone(unittest.TestCase):
+    """Tests for _resolve_leg_action_standalone helper."""
+
+    def test_resolves_buy_actions(self):
+        """Resolves buy action variants."""
+        self.assertEqual(_resolve_leg_action_standalone({"action": "buy"}), "BUY")
+        self.assertEqual(_resolve_leg_action_standalone({"action": "BUY"}), "BUY")
+        self.assertEqual(_resolve_leg_action_standalone({"action": "buy_to_open"}), "BUY")
+        self.assertEqual(_resolve_leg_action_standalone({"action": "buy_to_close"}), "BUY")
+
+    def test_resolves_sell_actions(self):
+        """Resolves sell action variants."""
+        self.assertEqual(_resolve_leg_action_standalone({"action": "sell"}), "SELL")
+        self.assertEqual(_resolve_leg_action_standalone({"action": "SELL"}), "SELL")
+        self.assertEqual(_resolve_leg_action_standalone({"action": "sell_to_open"}), "SELL")
+        self.assertEqual(_resolve_leg_action_standalone({"action": "sell_to_close"}), "SELL")
+
+    def test_resolves_legacy_side(self):
+        """Falls back to legacy side field."""
+        self.assertEqual(_resolve_leg_action_standalone({"side": "buy"}), "BUY")
+        self.assertEqual(_resolve_leg_action_standalone({"side": "sell"}), "SELL")
+
+    def test_defaults_to_buy(self):
+        """Defaults to BUY when can't determine action."""
+        self.assertEqual(_resolve_leg_action_standalone({}), "BUY")
+        self.assertEqual(_resolve_leg_action_standalone({"action": "unknown"}), "BUY")
 
 
 class TestExtractUnderlying(unittest.TestCase):

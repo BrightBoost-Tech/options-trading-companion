@@ -6,6 +6,8 @@ Tests:
 2. Re-running seed is idempotent (no duplicates)
 3. After seeding, reconcile produces no breaks when quantities match
 4. Handles signed quantities correctly (LONG/SHORT)
+5. V2 side inference from position_type
+6. V2 fingerprint and event_key
 """
 
 import unittest
@@ -17,9 +19,12 @@ from packages.quantum.jobs.handlers.seed_ledger_v4 import (
     _seed_user,
     _create_seed_entries,
     _build_seed_fingerprint,
+    _build_seed_fingerprint_v2,
     _build_seed_event_key,
+    _build_seed_event_key_v2,
     _extract_underlying,
     _infer_right_from_symbol,
+    _infer_side_from_snapshot_row,
     _get_ledger_symbols,
 )
 
@@ -485,6 +490,286 @@ class TestSeedAndReconcileIntegration(unittest.TestCase):
 
         # _create_seed_entries should not be called on second run
         mock_create.assert_not_called()
+
+
+class TestSeedV2SideInference(unittest.TestCase):
+    """Tests for v2 side inference from broker snapshot."""
+
+    def test_infers_short_from_position_type_short(self):
+        """Infers SHORT when position_type is 'short'."""
+        row = {"symbol": "AAPL", "qty": 100, "position_type": "short"}
+        side, meta = _infer_side_from_snapshot_row(row)
+
+        self.assertEqual(side, "SHORT")
+        self.assertEqual(meta["side_inferred"], "position_type")
+        self.assertEqual(meta["version"], "v2")
+
+    def test_infers_short_from_position_type_SHORT(self):
+        """Infers SHORT when position_type is 'SHORT' (uppercase)."""
+        row = {"symbol": "AAPL", "qty": 100, "position_type": "SHORT"}
+        side, meta = _infer_side_from_snapshot_row(row)
+
+        self.assertEqual(side, "SHORT")
+
+    def test_infers_short_from_position_type_sell(self):
+        """Infers SHORT when position_type is 'sell'."""
+        row = {"symbol": "AAPL", "qty": 100, "position_type": "sell"}
+        side, meta = _infer_side_from_snapshot_row(row)
+
+        self.assertEqual(side, "SHORT")
+
+    def test_infers_long_from_position_type_long(self):
+        """Infers LONG when position_type is 'long'."""
+        row = {"symbol": "AAPL", "qty": 100, "position_type": "long"}
+        side, meta = _infer_side_from_snapshot_row(row)
+
+        self.assertEqual(side, "LONG")
+        self.assertEqual(meta["side_inferred"], "position_type")
+
+    def test_infers_long_from_position_type_buy(self):
+        """Infers LONG when position_type is 'buy'."""
+        row = {"symbol": "AAPL", "qty": 100, "position_type": "buy"}
+        side, meta = _infer_side_from_snapshot_row(row)
+
+        self.assertEqual(side, "LONG")
+
+    def test_infers_short_from_side_field(self):
+        """Falls back to side field when position_type not present."""
+        row = {"symbol": "AAPL", "qty": 100, "side": "short"}
+        side, meta = _infer_side_from_snapshot_row(row)
+
+        self.assertEqual(side, "SHORT")
+        self.assertEqual(meta["side_inferred"], "side")
+
+    def test_infers_long_from_direction_field(self):
+        """Falls back to direction field."""
+        row = {"symbol": "AAPL", "qty": 100, "direction": "long"}
+        side, meta = _infer_side_from_snapshot_row(row)
+
+        self.assertEqual(side, "LONG")
+        self.assertEqual(meta["side_inferred"], "direction")
+
+    def test_infers_short_from_negative_qty(self):
+        """Falls back to qty sign when no type fields."""
+        row = {"symbol": "AAPL", "qty": -50}
+        side, meta = _infer_side_from_snapshot_row(row)
+
+        self.assertEqual(side, "SHORT")
+        self.assertEqual(meta["side_inferred"], "qty_sign")
+
+    def test_infers_long_from_positive_qty(self):
+        """Falls back to qty sign when no type fields."""
+        row = {"symbol": "AAPL", "qty": 100}
+        side, meta = _infer_side_from_snapshot_row(row)
+
+        self.assertEqual(side, "LONG")
+        self.assertEqual(meta["side_inferred"], "qty_sign")
+
+    def test_defaults_to_long_with_uncertainty(self):
+        """Defaults to LONG with needs_review when ambiguous."""
+        row = {"symbol": "AAPL"}  # No qty, no position_type
+        side, meta = _infer_side_from_snapshot_row(row)
+
+        self.assertEqual(side, "LONG")
+        self.assertEqual(meta["side_inferred"], "default_long")
+        self.assertTrue(meta["needs_review"])
+
+    def test_position_type_takes_precedence_over_qty_sign(self):
+        """Position type takes precedence even if qty sign differs."""
+        # Positive qty but position_type says short
+        row = {"symbol": "AAPL", "qty": 100, "position_type": "short"}
+        side, meta = _infer_side_from_snapshot_row(row)
+
+        self.assertEqual(side, "SHORT")
+        self.assertEqual(meta["side_inferred"], "position_type")
+
+
+class TestSeedV2Fingerprint(unittest.TestCase):
+    """Tests for v2 seed fingerprint."""
+
+    def test_v2_fingerprint_includes_qty(self):
+        """V2 fingerprint differs for different quantities."""
+        fp1 = _build_seed_fingerprint_v2("AAPL", "LONG", 100, 150.00)
+        fp2 = _build_seed_fingerprint_v2("AAPL", "LONG", 200, 150.00)
+
+        self.assertNotEqual(fp1, fp2)
+
+    def test_v2_fingerprint_includes_price(self):
+        """V2 fingerprint differs for different prices."""
+        fp1 = _build_seed_fingerprint_v2("AAPL", "LONG", 100, 150.00)
+        fp2 = _build_seed_fingerprint_v2("AAPL", "LONG", 100, 160.00)
+
+        self.assertNotEqual(fp1, fp2)
+
+    def test_v2_fingerprint_is_deterministic(self):
+        """Same inputs produce same v2 fingerprint."""
+        fp1 = _build_seed_fingerprint_v2("AAPL", "LONG", 100, 150.00)
+        fp2 = _build_seed_fingerprint_v2("AAPL", "LONG", 100, 150.00)
+
+        self.assertEqual(fp1, fp2)
+
+    def test_v2_fingerprint_handles_null_price(self):
+        """V2 fingerprint handles None price."""
+        fp = _build_seed_fingerprint_v2("AAPL", "LONG", 100, None)
+
+        self.assertIsNotNone(fp)
+        self.assertEqual(len(fp), 16)
+
+
+class TestSeedV2EventKey(unittest.TestCase):
+    """Tests for v2 seed event key."""
+
+    def test_v2_event_key_includes_side(self):
+        """V2 event key includes side."""
+        key = _build_seed_event_key_v2("user-123", "AAPL", 100, 150.00, "LONG")
+
+        self.assertIn("LONG", key)
+        self.assertTrue(key.startswith("seedv2:"))
+
+    def test_v2_event_key_differs_for_different_sides(self):
+        """V2 event key differs for different sides."""
+        key_long = _build_seed_event_key_v2("user-123", "AAPL", 100, 150.00, "LONG")
+        key_short = _build_seed_event_key_v2("user-123", "AAPL", 100, 150.00, "SHORT")
+
+        self.assertNotEqual(key_long, key_short)
+
+    def test_v2_event_key_format(self):
+        """V2 event key has correct format."""
+        key = _build_seed_event_key_v2("user-123", "AAPL", 100, 150.50, "LONG")
+
+        self.assertEqual(key, "seedv2:user-123:AAPL:LONG:100:150.5000")
+
+    def test_v2_event_key_handles_null_price(self):
+        """V2 event key handles None price."""
+        key = _build_seed_event_key_v2("user-123", "AAPL", 100, None, "LONG")
+
+        self.assertEqual(key, "seedv2:user-123:AAPL:LONG:100:null")
+
+
+class TestSeedV2MetaJson(unittest.TestCase):
+    """Tests for v2 meta_json in seeded events."""
+
+    def _setup_mock_supabase(self):
+        """Setup mock Supabase with chained calls."""
+        mock = MagicMock()
+
+        def table_side_effect(name):
+            chain = MagicMock()
+            chain.select.return_value = chain
+            chain.insert.return_value = chain
+            chain.eq.return_value = chain
+            chain.limit.return_value = chain
+
+            result = MagicMock()
+
+            if name == "position_events":
+                result.data = []
+            elif name == "position_groups":
+                result.data = [{"id": "group-123"}]
+            elif name == "position_legs":
+                result.data = [{"id": "leg-123"}]
+
+            chain.execute.return_value = result
+            return chain
+
+        mock.table.side_effect = table_side_effect
+        return mock
+
+    def test_meta_json_includes_seed_version(self):
+        """Meta_json includes seed_version v2."""
+        mock_supabase = self._setup_mock_supabase()
+
+        insert_calls = []
+
+        def table_side_effect(name):
+            chain = MagicMock()
+            chain.select.return_value = chain
+            chain.eq.return_value = chain
+            chain.limit.return_value = chain
+
+            def capture_insert(data):
+                insert_calls.append({"table": name, "data": data})
+                result = MagicMock()
+                if name == "position_groups":
+                    result.data = [{"id": "group-123"}]
+                elif name == "position_legs":
+                    result.data = [{"id": "leg-123"}]
+                elif name == "position_events":
+                    result.data = [{"id": "event-123"}]
+                chain.execute.return_value = result
+                return chain
+
+            chain.insert.side_effect = capture_insert
+
+            result = MagicMock()
+            result.data = []
+            chain.execute.return_value = result
+            return chain
+
+        mock_supabase.table.side_effect = table_side_effect
+
+        _create_seed_entries(
+            supabase=mock_supabase,
+            user_id="user-123",
+            symbol="AAPL",
+            qty=100,
+            avg_price=150.00,
+            side="LONG",
+            side_meta={"side_inferred": "position_type", "version": "v2"},
+        )
+
+        event_insert = next(c for c in insert_calls if c["table"] == "position_events")
+        self.assertEqual(event_insert["data"]["meta_json"]["seed_version"], "v2")
+        self.assertEqual(
+            event_insert["data"]["meta_json"]["side_inference"]["side_inferred"],
+            "position_type"
+        )
+
+    def test_meta_json_includes_needs_review_when_uncertain(self):
+        """Meta_json includes needs_review when side inference is uncertain."""
+        mock_supabase = self._setup_mock_supabase()
+
+        insert_calls = []
+
+        def table_side_effect(name):
+            chain = MagicMock()
+            chain.select.return_value = chain
+            chain.eq.return_value = chain
+            chain.limit.return_value = chain
+
+            def capture_insert(data):
+                insert_calls.append({"table": name, "data": data})
+                result = MagicMock()
+                if name == "position_groups":
+                    result.data = [{"id": "group-123"}]
+                elif name == "position_legs":
+                    result.data = [{"id": "leg-123"}]
+                elif name == "position_events":
+                    result.data = [{"id": "event-123"}]
+                chain.execute.return_value = result
+                return chain
+
+            chain.insert.side_effect = capture_insert
+
+            result = MagicMock()
+            result.data = []
+            chain.execute.return_value = result
+            return chain
+
+        mock_supabase.table.side_effect = table_side_effect
+
+        _create_seed_entries(
+            supabase=mock_supabase,
+            user_id="user-123",
+            symbol="AAPL",
+            qty=100,
+            avg_price=150.00,
+            side="LONG",
+            side_meta={"side_inferred": "default_long", "needs_review": True},
+        )
+
+        event_insert = next(c for c in insert_calls if c["table"] == "position_events")
+        self.assertTrue(event_insert["data"]["meta_json"]["needs_review"])
 
 
 if __name__ == "__main__":

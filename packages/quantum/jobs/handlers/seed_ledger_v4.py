@@ -25,6 +25,18 @@ JOB_NAME = "seed_ledger_v4"
 
 logger = logging.getLogger(__name__)
 
+# Position type values that indicate SHORT position
+SHORT_POSITION_TYPES = {
+    "short", "SHORT", "sell", "SELL", "short_position", "SHORT_POSITION",
+    "sold", "SOLD", "written", "WRITTEN",
+}
+
+# Position type values that indicate LONG position
+LONG_POSITION_TYPES = {
+    "long", "LONG", "buy", "BUY", "long_position", "LONG_POSITION",
+    "bought", "BOUGHT", "held", "HELD",
+}
+
 
 def run(payload: Dict[str, Any], ctx=None) -> Dict[str, Any]:
     """
@@ -163,12 +175,16 @@ def _seed_user(
 
         avg_price = pos.get("avg_price")
 
+        # Infer side using v2 logic (position_type takes precedence)
+        side, side_meta = _infer_side_from_snapshot_row(pos)
+
         if dry_run:
             seeded.append({
                 "symbol": symbol,
                 "qty": qty,
                 "avg_price": avg_price,
-                "side": "LONG" if qty > 0 else "SHORT",
+                "side": side,
+                "side_inference": side_meta,
                 "dry_run": True,
             })
             continue
@@ -181,6 +197,8 @@ def _seed_user(
                 symbol=symbol,
                 qty=qty,
                 avg_price=avg_price,
+                side=side,
+                side_meta=side_meta,
             )
             seeded.append({
                 "symbol": symbol,
@@ -215,22 +233,36 @@ def _create_seed_entries(
     symbol: str,
     qty: int,
     avg_price: Optional[float],
+    side: Optional[str] = None,
+    side_meta: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """
     Create position_group, position_leg, and position_event for a seed entry.
 
+    Args:
+        supabase: Supabase client
+        user_id: User UUID
+        symbol: Position symbol
+        qty: Position quantity (signed)
+        avg_price: Average cost basis
+        side: Pre-computed side ("LONG" or "SHORT"), uses v2 inference if provided
+        side_meta: Metadata about how side was inferred
+
     Returns dict with group_id, leg_id, event_id.
     """
-    # Determine side from qty sign
-    side = "LONG" if qty > 0 else "SHORT"
+    # Use provided side or fall back to qty sign (v1 behavior)
+    if side is None:
+        side = "LONG" if qty > 0 else "SHORT"
+        side_meta = {"side_inferred": "qty_sign", "version": "v1"}
+
     abs_qty = abs(qty)
 
     # Extract underlying from symbol
     underlying = _extract_underlying(symbol)
 
-    # Build deterministic identifiers
-    legs_fingerprint = _build_seed_fingerprint(symbol, side)
-    event_key = _build_seed_event_key(user_id, symbol, qty, avg_price)
+    # Build deterministic identifiers (v2 style)
+    legs_fingerprint = _build_seed_fingerprint_v2(symbol, side, abs_qty, avg_price)
+    event_key = _build_seed_event_key_v2(user_id, symbol, qty, avg_price, side)
 
     # Check for existing event (idempotency)
     existing_event = _check_event_exists(supabase, user_id, event_key)
@@ -291,7 +323,17 @@ def _create_seed_entries(
 
     # Step 3: Compute cash impact (if avg_price known)
     cash_impact = None
-    meta_json = {"opening_balance": True, "source": "broker_snapshot"}
+    meta_json = {
+        "opening_balance": True,
+        "source": "broker_snapshot",
+        "seed_version": "v2",
+    }
+
+    # Include side inference metadata
+    if side_meta:
+        meta_json["side_inference"] = side_meta
+        if side_meta.get("needs_review"):
+            meta_json["needs_review"] = True
 
     if avg_price is not None:
         multiplier = 100 if right in ("C", "P") else 1
@@ -411,8 +453,29 @@ def _check_event_exists(supabase, user_id: str, event_key: str) -> Optional[Dict
 
 
 def _build_seed_fingerprint(symbol: str, side: str) -> str:
-    """Build deterministic fingerprint for seed group."""
+    """
+    Build deterministic fingerprint for seed group (v1).
+
+    DEPRECATED: Use _build_seed_fingerprint_v2 for new code.
+    """
     fingerprint_str = f"SEED:{symbol}:{side}"
+    return hashlib.sha256(fingerprint_str.encode()).hexdigest()[:16]
+
+
+def _build_seed_fingerprint_v2(
+    symbol: str,
+    side: str,
+    qty: int,
+    avg_price: Optional[float],
+) -> str:
+    """
+    Build deterministic fingerprint for seed group (v2).
+
+    V2 includes qty and avg_price for better uniqueness.
+    Format: "SEEDv2:{symbol}:{side}:{qty}:{avg_price|null}"
+    """
+    price_str = f"{avg_price:.4f}" if avg_price else "null"
+    fingerprint_str = f"SEEDv2:{symbol}:{side}:{qty}:{price_str}"
     return hashlib.sha256(fingerprint_str.encode()).hexdigest()[:16]
 
 
@@ -422,9 +485,84 @@ def _build_seed_event_key(
     qty: int,
     avg_price: Optional[float],
 ) -> str:
-    """Build deterministic event key for seed event."""
+    """
+    Build deterministic event key for seed event (v1).
+
+    DEPRECATED: Use _build_seed_event_key_v2 for new code.
+    """
     price_str = f"{avg_price:.4f}" if avg_price else "null"
     return f"seed:{user_id}:{symbol}:{qty}:{price_str}"
+
+
+def _build_seed_event_key_v2(
+    user_id: str,
+    symbol: str,
+    qty: int,
+    avg_price: Optional[float],
+    side: str,
+) -> str:
+    """
+    Build deterministic event key for seed event (v2).
+
+    V2 includes side for cases where same symbol/qty could have different sides.
+    """
+    price_str = f"{avg_price:.4f}" if avg_price else "null"
+    return f"seedv2:{user_id}:{symbol}:{side}:{qty}:{price_str}"
+
+
+def _infer_side_from_snapshot_row(row: Dict[str, Any]) -> tuple:
+    """
+    Infer position side (LONG/SHORT) from broker snapshot row.
+
+    Priority:
+    1. position_type field (most explicit)
+    2. side/direction fields
+    3. qty sign (fallback)
+    4. Default to LONG with uncertainty flag
+
+    Args:
+        row: Broker position row dict
+
+    Returns:
+        Tuple of (side: str, meta: dict) where meta contains inference details
+    """
+    # Priority 1: Check position_type field
+    position_type = row.get("position_type", "")
+    if position_type:
+        position_type_str = str(position_type).strip()
+        if position_type_str in SHORT_POSITION_TYPES:
+            return "SHORT", {"side_inferred": "position_type", "value": position_type_str, "version": "v2"}
+        if position_type_str in LONG_POSITION_TYPES:
+            return "LONG", {"side_inferred": "position_type", "value": position_type_str, "version": "v2"}
+
+    # Priority 2: Check side/direction fields
+    for field in ["side", "direction", "position_side"]:
+        field_value = row.get(field, "")
+        if field_value:
+            field_value_str = str(field_value).strip().lower()
+            if field_value_str in ["short", "sell", "sold", "written"]:
+                return "SHORT", {"side_inferred": field, "value": field_value_str, "version": "v2"}
+            if field_value_str in ["long", "buy", "bought", "held"]:
+                return "LONG", {"side_inferred": field, "value": field_value_str, "version": "v2"}
+
+    # Priority 3: Use qty sign
+    qty = row.get("qty") or row.get("quantity") or 0
+    try:
+        qty_int = int(qty)
+        if qty_int < 0:
+            return "SHORT", {"side_inferred": "qty_sign", "qty": qty_int, "version": "v2"}
+        if qty_int > 0:
+            return "LONG", {"side_inferred": "qty_sign", "qty": qty_int, "version": "v2"}
+    except (ValueError, TypeError):
+        pass
+
+    # Priority 4: Default to LONG with uncertainty
+    return "LONG", {
+        "side_inferred": "default_long",
+        "needs_review": True,
+        "note": "Could not determine side from broker data",
+        "version": "v2",
+    }
 
 
 def _extract_underlying(symbol: str) -> str:

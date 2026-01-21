@@ -16,6 +16,9 @@ def _build_legs_fingerprint(order_json: Optional[Dict]) -> Optional[str]:
     """
     Build a deterministic fingerprint from order legs for position grouping.
     Returns SHA256 hash of sorted leg symbols.
+
+    DEPRECATED: Use _build_legs_fingerprint_v2 for new code.
+    Kept for backward compatibility with existing groups.
     """
     if not order_json:
         return None
@@ -31,6 +34,115 @@ def _build_legs_fingerprint(order_json: Optional[Dict]) -> Optional[str]:
 
     fingerprint_str = "|".join(symbols)
     return hashlib.sha256(fingerprint_str.encode()).hexdigest()[:16]
+
+
+def _build_legs_fingerprint_v2(
+    legs: List[Dict[str, Any]],
+    resolve_action_fn=None,
+) -> Optional[str]:
+    """
+    Build a v2 deterministic fingerprint from order legs.
+
+    V2 fingerprint includes symbol, action, and qty for each leg,
+    reducing collisions when same contracts are traded with opposite actions.
+
+    Format: "v2|{symbol}:{action}:{qty}|..." (sorted, then hashed)
+
+    Args:
+        legs: List of leg dicts with symbol, action/side, and quantity/qty
+        resolve_action_fn: Optional function to resolve action from leg dict.
+                          If None, uses default resolution logic.
+
+    Returns:
+        16-char hex string prefixed conceptually as v2, or None if invalid.
+    """
+    if not legs:
+        return None
+
+    # Build list of (symbol, action, qty) tuples
+    leg_tuples = []
+
+    for leg in legs:
+        symbol = leg.get("symbol", "")
+        if not symbol:
+            continue
+
+        # Resolve action
+        if resolve_action_fn:
+            action = resolve_action_fn(leg)
+        else:
+            action = _resolve_leg_action_standalone(leg)
+
+        # Resolve quantity
+        qty = int(leg.get("quantity") or leg.get("qty") or 1)
+
+        leg_tuples.append((symbol, action, qty))
+
+    if not leg_tuples:
+        return None
+
+    # Sort by (symbol, action, qty) for determinism
+    leg_tuples.sort(key=lambda x: (x[0], x[1], x[2]))
+
+    # Build fingerprint string with v2 prefix
+    parts = [f"{sym}:{act}:{q}" for sym, act, q in leg_tuples]
+    fingerprint_str = "v2|" + "|".join(parts)
+
+    return hashlib.sha256(fingerprint_str.encode()).hexdigest()[:16]
+
+
+def _resolve_leg_action_standalone(leg: Dict[str, Any]) -> str:
+    """
+    Standalone helper to resolve action (BUY/SELL) from leg data.
+
+    Used by _build_legs_fingerprint_v2 when no resolver function provided.
+    """
+    action = leg.get("action", "").lower()
+
+    if action in ["buy", "buy_to_open", "buy_to_close"]:
+        return "BUY"
+    elif action in ["sell", "sell_to_open", "sell_to_close"]:
+        return "SELL"
+
+    # Try legacy 'side' field
+    side = leg.get("side", "").lower()
+    if side == "buy":
+        return "BUY"
+    elif side == "sell":
+        return "SELL"
+
+    # Default to BUY
+    return "BUY"
+
+
+def _build_legs_fingerprint_with_fallback(
+    order_json: Optional[Dict],
+    resolve_action_fn=None,
+) -> Optional[str]:
+    """
+    Build legs fingerprint preferring v2, falling back to v1.
+
+    Args:
+        order_json: Order JSON with legs array
+        resolve_action_fn: Optional action resolver for v2
+
+    Returns:
+        v2 fingerprint if possible, else v1 fingerprint, else None
+    """
+    if not order_json:
+        return None
+
+    legs = order_json.get("legs", [])
+    if not legs:
+        return None
+
+    # Try v2 first
+    v2_fp = _build_legs_fingerprint_v2(legs, resolve_action_fn)
+    if v2_fp:
+        return v2_fp
+
+    # Fall back to v1
+    return _build_legs_fingerprint(order_json)
 
 class ExecutionDragStats(TypedDict):
     n: int
@@ -201,9 +313,10 @@ class ExecutionService:
             legs = order_json.get("legs", []) if order_json else []
 
             # Build shared context from suggestion fields
+            # Use v2 fingerprint (includes action+qty) with v1 fallback
             context = {
                 "trace_id": execution.get("trace_id"),
-                "legs_fingerprint": _build_legs_fingerprint(order_json),
+                "legs_fingerprint": _build_legs_fingerprint_with_fallback(order_json),
                 "strategy_key": suggestion.get("strategy_key") if suggestion else None,
                 "strategy": execution.get("strategy"),
                 "window": execution.get("window"),

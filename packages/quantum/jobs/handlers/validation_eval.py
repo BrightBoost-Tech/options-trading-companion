@@ -49,7 +49,8 @@ def run(payload: Dict[str, Any], ctx=None) -> Dict[str, Any]:
             for uid in users:
                 try:
                     if mode == "paper":
-                        res = service.eval_paper(uid)
+                        # v4-L1: Use checkpoint-based evaluation
+                        res = service.eval_paper_forward_checkpoint(uid)
                         results[uid] = res.get("status")
                     # Historical is usually per-user triggered, but if cron triggered?
                     # Historical is heavy, probably shouldn't run for all users in one job.
@@ -61,7 +62,8 @@ def run(payload: Dict[str, Any], ctx=None) -> Dict[str, Any]:
 
         # Single User Mode
         if mode == "paper":
-            result = service.eval_paper(user_id)
+            # v4-L1: Use checkpoint-based evaluation
+            result = service.eval_paper_forward_checkpoint(user_id)
             return {"status": "completed", "result": result}
 
         elif mode == "historical":

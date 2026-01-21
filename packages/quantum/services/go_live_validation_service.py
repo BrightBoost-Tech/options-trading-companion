@@ -546,6 +546,614 @@ class GoLiveValidationService:
             "idempotency_key": today_key
         }
 
+    # =========================================================================
+    # v4-L1: Forward Checkpoint Evaluation (Rolling + Fail-Fast)
+    # =========================================================================
+
+    def _checkpoint_bucket(self, ts: datetime, cadence: str = "daily") -> str:
+        """
+        Compute checkpoint bucket key for deduplication.
+
+        Args:
+            ts: Timestamp to bucket
+            cadence: Bucket cadence ("daily" for now)
+
+        Returns:
+            Bucket key string (e.g., "2024-01-15" for daily)
+        """
+        if cadence == "daily":
+            return ts.date().isoformat()
+        # Future: support "hourly", "4h", etc.
+        return ts.date().isoformat()
+
+    def _ensure_forward_checkpoint_defaults(self, state: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Ensure forward checkpoint fields have defaults.
+
+        Args:
+            state: Current state dict
+
+        Returns:
+            State dict with defaults applied (mutates in place)
+        """
+        # paper_window_days: default 21 (3 weeks)
+        if state.get("paper_window_days") is None:
+            state["paper_window_days"] = 21
+
+        # paper_checkpoint_target: default 10
+        if state.get("paper_checkpoint_target") is None:
+            state["paper_checkpoint_target"] = 10
+
+        # paper_fail_fast_triggered: default False
+        if state.get("paper_fail_fast_triggered") is None:
+            state["paper_fail_fast_triggered"] = False
+
+        # paper_fail_fast_reason: default None (OK)
+        # paper_checkpoint_last_run_at: default None (OK)
+
+        return state
+
+    def _repair_window_if_needed(
+        self,
+        state: Dict[str, Any],
+        now: datetime
+    ) -> Tuple[datetime, datetime, bool]:
+        """
+        Repair paper_window_start/end if missing or invalid.
+
+        Args:
+            state: Current state dict
+            now: Current timestamp
+
+        Returns:
+            Tuple of (window_start, window_end, was_repaired)
+        """
+        window_days = state.get("paper_window_days") or 21
+        was_repaired = False
+
+        # Parse existing values
+        window_start = None
+        window_end = None
+
+        try:
+            if state.get("paper_window_start"):
+                window_start = datetime.fromisoformat(state["paper_window_start"])
+                if window_start.tzinfo is None:
+                    window_start = window_start.replace(tzinfo=timezone.utc)
+        except (ValueError, TypeError):
+            pass
+
+        try:
+            if state.get("paper_window_end"):
+                window_end = datetime.fromisoformat(state["paper_window_end"])
+                if window_end.tzinfo is None:
+                    window_end = window_end.replace(tzinfo=timezone.utc)
+        except (ValueError, TypeError):
+            pass
+
+        # Repair if missing or invalid
+        if window_start is None or window_end is None:
+            window_start = now
+            window_end = now + timedelta(days=window_days)
+            was_repaired = True
+        elif window_end <= window_start:
+            # Invalid: end before start
+            window_start = now
+            window_end = now + timedelta(days=window_days)
+            was_repaired = True
+
+        return window_start, window_end, was_repaired
+
+    def _compute_drawdown(self, outcomes: List[Dict[str, Any]], baseline: float) -> float:
+        """
+        Compute max drawdown from outcomes using peak-to-trough on cumulative PnL.
+
+        Args:
+            outcomes: List of outcome dicts with pnl_realized
+            baseline: Baseline capital
+
+        Returns:
+            Max drawdown as negative percentage (e.g., -0.03 for -3%)
+        """
+        if not outcomes or baseline <= 0:
+            return 0.0
+
+        # Sort by closed_at
+        sorted_outcomes = sorted(
+            outcomes,
+            key=lambda x: x.get("closed_at", "")
+        )
+
+        # Build cumulative PnL curve
+        cumulative_pnl = 0.0
+        peak_pnl = 0.0
+        max_drawdown = 0.0
+
+        for outcome in sorted_outcomes:
+            pnl = float(outcome.get("pnl_realized") or 0.0)
+            cumulative_pnl += pnl
+
+            # Update peak
+            if cumulative_pnl > peak_pnl:
+                peak_pnl = cumulative_pnl
+
+            # Calculate drawdown from peak
+            if peak_pnl > 0:
+                drawdown = (cumulative_pnl - peak_pnl) / baseline
+            else:
+                drawdown = cumulative_pnl / baseline if cumulative_pnl < 0 else 0.0
+
+            # Track worst drawdown
+            if drawdown < max_drawdown:
+                max_drawdown = drawdown
+
+        return max_drawdown
+
+    def _log_checkpoint_run(
+        self,
+        user_id: str,
+        mode: str,
+        window_start: datetime,
+        window_end: datetime,
+        return_pct: float,
+        pnl_total: float,
+        passed: bool,
+        fail_reason: Optional[str],
+        details: Dict[str, Any]
+    ) -> None:
+        """
+        Log a checkpoint run to v3_go_live_runs.
+
+        Args:
+            user_id: User ID
+            mode: Run mode (paper_checkpoint, paper_fail_fast, paper_window_final)
+            window_start: Window start timestamp
+            window_end: Window end timestamp
+            return_pct: Return percentage
+            pnl_total: Total PnL
+            passed: Whether checkpoint passed
+            fail_reason: Failure reason if applicable
+            details: Additional details dict
+        """
+        try:
+            run_data = {
+                "user_id": user_id,
+                "mode": mode,
+                "window_start": window_start.isoformat(),
+                "window_end": window_end.isoformat(),
+                "return_pct": return_pct,
+                "pnl_total": pnl_total,
+                "segment_pnls": {},
+                "passed": passed,
+                "fail_reason": fail_reason,
+                "details_json": details
+            }
+            self.supabase.table("v3_go_live_runs").insert(run_data).execute()
+        except Exception as e:
+            logger.error(f"Failed to log checkpoint run: {e}")
+
+    def eval_paper_forward_checkpoint(
+        self,
+        user_id: str,
+        now: Optional[datetime] = None,
+        fail_fast_drawdown_pct: float = -0.03,
+        fail_fast_return_pct: float = -0.02,
+        target_return_pct: float = 0.10
+    ) -> Dict[str, Any]:
+        """
+        v4-L1: Forward checkpoint evaluation with rolling checkpoints and fail-fast.
+
+        This method implements:
+        - Daily checkpoint deduplication (one checkpoint per bucket)
+        - Window expiry handling with finalization
+        - Fail-fast rules (drawdown, total return)
+        - Pacing target (progress-based return target)
+
+        Args:
+            user_id: User ID
+            now: Override timestamp for testing
+            fail_fast_drawdown_pct: Max drawdown before fail-fast (default -3%)
+            fail_fast_return_pct: Min return before fail-fast (default -2%)
+            target_return_pct: Target return at window end (default 10%)
+
+        Returns:
+            Dict with checkpoint results:
+            - status: "skipped" | "pass" | "miss" | "fail_fast" | "window_final"
+            - paper_consecutive_passes: Current streak
+            - paper_ready: Whether user achieved paper_ready
+            - return_pct: Total return in window
+            - target_return_now: Current pacing target
+            - max_drawdown_pct: Max drawdown observed
+            - progress: Window progress (0.0 to 1.0)
+        """
+        if now is None:
+            now = datetime.now(timezone.utc)
+
+        # Ensure timezone awareness
+        if now.tzinfo is None:
+            now = now.replace(tzinfo=timezone.utc)
+
+        # 1. Load and prepare state
+        state = self.get_or_create_state(user_id)
+        state = self._ensure_forward_checkpoint_defaults(state)
+
+        baseline = float(state.get("paper_baseline_capital", 100000) or 100000)
+        window_days = state.get("paper_window_days") or 21
+        checkpoint_target = state.get("paper_checkpoint_target") or 10
+
+        # 2. Repair window if needed
+        window_start, window_end, was_repaired = self._repair_window_if_needed(state, now)
+
+        if was_repaired:
+            # Persist repaired window
+            self.supabase.table("v3_go_live_state").update({
+                "paper_window_start": window_start.isoformat(),
+                "paper_window_end": window_end.isoformat(),
+                "updated_at": now.isoformat()
+            }).eq("user_id", user_id).execute()
+            logger.info(f"Repaired paper window for user {user_id}")
+
+        # 3. Checkpoint deduplication
+        bucket_key = self._checkpoint_bucket(now)
+        last_run_at = state.get("paper_checkpoint_last_run_at")
+
+        if last_run_at:
+            try:
+                last_run_ts = datetime.fromisoformat(last_run_at)
+                if last_run_ts.tzinfo is None:
+                    last_run_ts = last_run_ts.replace(tzinfo=timezone.utc)
+                last_bucket = self._checkpoint_bucket(last_run_ts)
+
+                if last_bucket == bucket_key:
+                    return {
+                        "status": "skipped",
+                        "reason": "already_checkpointed_this_bucket",
+                        "bucket": bucket_key,
+                        "paper_consecutive_passes": state.get("paper_consecutive_passes", 0),
+                        "paper_ready": state.get("paper_ready", False)
+                    }
+            except (ValueError, TypeError):
+                pass  # Invalid timestamp, proceed
+
+        # 4. Check for window expiry
+        if now >= window_end:
+            return self._finalize_paper_window_forward(
+                user_id, state, now, window_start, window_end,
+                baseline, window_days, checkpoint_target, target_return_pct
+            )
+
+        # 5. Fetch outcomes for active window
+        outcomes = []
+        try:
+            res = self.supabase.table("learning_trade_outcomes_v3") \
+                .select("closed_at, pnl_realized, profit_pct") \
+                .eq("user_id", user_id) \
+                .eq("is_paper", True) \
+                .gte("closed_at", window_start.isoformat()) \
+                .lte("closed_at", now.isoformat()) \
+                .order("closed_at", desc=False) \
+                .execute()
+            outcomes = res.data or []
+        except Exception as e:
+            logger.error(f"Error fetching paper outcomes: {e}")
+
+        # 6. Calculate metrics
+        total_pnl = sum(float(o.get("pnl_realized") or 0.0) for o in outcomes)
+        total_return_pct = (total_pnl / baseline) if baseline > 0 else 0.0
+        max_drawdown_pct = self._compute_drawdown(outcomes, baseline)
+
+        # 7. Calculate progress and pacing target
+        elapsed = (now - window_start).total_seconds()
+        duration = (window_end - window_start).total_seconds()
+        progress = max(0.0, min(1.0, elapsed / duration)) if duration > 0 else 0.0
+        target_return_now = target_return_pct * progress
+
+        # Build base result
+        current_streak = state.get("paper_consecutive_passes", 0)
+        result_base = {
+            "return_pct": total_return_pct * 100,  # Convert to percentage
+            "target_return_now": target_return_now * 100,
+            "max_drawdown_pct": max_drawdown_pct * 100,
+            "progress": progress,
+            "window_start": window_start.isoformat(),
+            "window_end": window_end.isoformat(),
+            "bucket": bucket_key,
+            "outcome_count": len(outcomes),
+            "pnl_total": total_pnl
+        }
+
+        # 8. Handle no outcomes yet
+        if not outcomes:
+            # Log miss with special reason
+            self._log_checkpoint_run(
+                user_id, "paper_checkpoint", window_start, now,
+                0.0, 0.0, False, "no_outcomes_yet",
+                {"bucket": bucket_key, "progress": progress}
+            )
+
+            # Update last run timestamp (for deduplication)
+            self.supabase.table("v3_go_live_state").update({
+                "paper_checkpoint_last_run_at": now.isoformat(),
+                "updated_at": now.isoformat()
+            }).eq("user_id", user_id).execute()
+
+            return {
+                **result_base,
+                "status": "miss",
+                "reason": "no_outcomes_yet",
+                "paper_consecutive_passes": 0,  # Reset on miss
+                "paper_ready": state.get("paper_ready", False)
+            }
+
+        # 9. Fail-fast checks
+        if max_drawdown_pct <= fail_fast_drawdown_pct:
+            return self._handle_fail_fast(
+                user_id, state, now, window_start, window_end,
+                total_return_pct, total_pnl, max_drawdown_pct,
+                f"max_drawdown_exceeded_{max_drawdown_pct*100:.1f}pct",
+                window_days, result_base
+            )
+
+        if total_return_pct <= fail_fast_return_pct:
+            return self._handle_fail_fast(
+                user_id, state, now, window_start, window_end,
+                total_return_pct, total_pnl, max_drawdown_pct,
+                f"total_return_below_{fail_fast_return_pct*100:.1f}pct",
+                window_days, result_base
+            )
+
+        # 10. Pacing check: pass or miss
+        if total_return_pct >= target_return_now:
+            # PASS checkpoint
+            new_streak = current_streak + 1
+            paper_ready = new_streak >= checkpoint_target
+
+            # Clear fail-fast flags if previously set
+            updates = {
+                "paper_consecutive_passes": new_streak,
+                "paper_checkpoint_last_run_at": now.isoformat(),
+                "paper_fail_fast_triggered": False,
+                "paper_fail_fast_reason": None,
+                "updated_at": now.isoformat()
+            }
+
+            if paper_ready and not state.get("paper_ready", False):
+                updates["paper_ready"] = True
+
+            self.supabase.table("v3_go_live_state").update(updates).eq("user_id", user_id).execute()
+
+            # Log pass
+            self._log_checkpoint_run(
+                user_id, "paper_checkpoint", window_start, now,
+                total_return_pct * 100, total_pnl, True, None,
+                {
+                    "bucket": bucket_key,
+                    "streak_before": current_streak,
+                    "streak_after": new_streak,
+                    "target": target_return_now * 100,
+                    "progress": progress,
+                    "drawdown": max_drawdown_pct * 100
+                }
+            )
+
+            return {
+                **result_base,
+                "status": "pass",
+                "paper_consecutive_passes": new_streak,
+                "streak_before": current_streak,
+                "paper_ready": paper_ready
+            }
+
+        else:
+            # MISS checkpoint - reset streak
+            updates = {
+                "paper_consecutive_passes": 0,
+                "paper_checkpoint_last_run_at": now.isoformat(),
+                "updated_at": now.isoformat()
+            }
+
+            self.supabase.table("v3_go_live_state").update(updates).eq("user_id", user_id).execute()
+
+            # Log miss
+            self._log_checkpoint_run(
+                user_id, "paper_checkpoint", window_start, now,
+                total_return_pct * 100, total_pnl, False, "below_pacing_target",
+                {
+                    "bucket": bucket_key,
+                    "streak_before": current_streak,
+                    "streak_after": 0,
+                    "target": target_return_now * 100,
+                    "progress": progress,
+                    "drawdown": max_drawdown_pct * 100
+                }
+            )
+
+            return {
+                **result_base,
+                "status": "miss",
+                "reason": "below_pacing_target",
+                "paper_consecutive_passes": 0,
+                "streak_before": current_streak,
+                "paper_ready": state.get("paper_ready", False)
+            }
+
+    def _handle_fail_fast(
+        self,
+        user_id: str,
+        state: Dict[str, Any],
+        now: datetime,
+        window_start: datetime,
+        window_end: datetime,
+        total_return_pct: float,
+        total_pnl: float,
+        max_drawdown_pct: float,
+        reason: str,
+        window_days: int,
+        result_base: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """
+        Handle fail-fast: reset streak and restart window.
+
+        Args:
+            user_id: User ID
+            state: Current state
+            now: Current timestamp
+            window_start: Current window start
+            window_end: Current window end
+            total_return_pct: Total return (decimal)
+            total_pnl: Total PnL
+            max_drawdown_pct: Max drawdown (decimal)
+            reason: Fail-fast reason string
+            window_days: Window duration for restart
+            result_base: Base result dict
+
+        Returns:
+            Fail-fast result dict
+        """
+        new_window_start = now
+        new_window_end = now + timedelta(days=window_days)
+
+        # Update state: reset streak, set fail-fast flags, restart window
+        updates = {
+            "paper_consecutive_passes": 0,
+            "paper_fail_fast_triggered": True,
+            "paper_fail_fast_reason": reason,
+            "paper_checkpoint_last_run_at": now.isoformat(),
+            "paper_window_start": new_window_start.isoformat(),
+            "paper_window_end": new_window_end.isoformat(),
+            "updated_at": now.isoformat()
+        }
+
+        self.supabase.table("v3_go_live_state").update(updates).eq("user_id", user_id).execute()
+
+        # Log fail-fast run
+        self._log_checkpoint_run(
+            user_id, "paper_fail_fast", window_start, now,
+            total_return_pct * 100, total_pnl, False, reason,
+            {
+                "bucket": result_base.get("bucket"),
+                "streak_before": state.get("paper_consecutive_passes", 0),
+                "streak_after": 0,
+                "drawdown": max_drawdown_pct * 100,
+                "new_window_start": new_window_start.isoformat(),
+                "new_window_end": new_window_end.isoformat()
+            }
+        )
+
+        return {
+            **result_base,
+            "status": "fail_fast",
+            "reason": reason,
+            "paper_consecutive_passes": 0,
+            "streak_before": state.get("paper_consecutive_passes", 0),
+            "paper_ready": False,
+            "new_window_start": new_window_start.isoformat(),
+            "new_window_end": new_window_end.isoformat()
+        }
+
+    def _finalize_paper_window_forward(
+        self,
+        user_id: str,
+        state: Dict[str, Any],
+        now: datetime,
+        window_start: datetime,
+        window_end: datetime,
+        baseline: float,
+        window_days: int,
+        checkpoint_target: int,
+        target_return_pct: float
+    ) -> Dict[str, Any]:
+        """
+        Finalize paper window when it expires.
+
+        If consecutive passes >= target: paper_ready=True
+        Else: paper_ready=False and restart window
+
+        Args:
+            user_id: User ID
+            state: Current state
+            now: Current timestamp
+            window_start: Window start
+            window_end: Window end
+            baseline: Baseline capital
+            window_days: Window duration for restart
+            checkpoint_target: Required passes for paper_ready
+            target_return_pct: Target return percentage
+
+        Returns:
+            Window finalization result
+        """
+        current_streak = state.get("paper_consecutive_passes", 0)
+
+        # Fetch final outcomes for the window
+        outcomes = []
+        try:
+            res = self.supabase.table("learning_trade_outcomes_v3") \
+                .select("closed_at, pnl_realized") \
+                .eq("user_id", user_id) \
+                .eq("is_paper", True) \
+                .gte("closed_at", window_start.isoformat()) \
+                .lte("closed_at", window_end.isoformat()) \
+                .execute()
+            outcomes = res.data or []
+        except Exception as e:
+            logger.error(f"Error fetching final outcomes: {e}")
+
+        total_pnl = sum(float(o.get("pnl_realized") or 0.0) for o in outcomes)
+        total_return_pct = (total_pnl / baseline) * 100 if baseline > 0 else 0.0
+
+        # Determine if passed
+        passed = current_streak >= checkpoint_target
+        paper_ready = passed
+
+        # Start new window
+        new_window_start = now
+        new_window_end = now + timedelta(days=window_days)
+
+        # Update state
+        updates = {
+            "paper_ready": paper_ready,
+            "paper_window_start": new_window_start.isoformat(),
+            "paper_window_end": new_window_end.isoformat(),
+            "paper_checkpoint_last_run_at": now.isoformat(),
+            "updated_at": now.isoformat()
+        }
+
+        # Reset streak if not passed
+        if not passed:
+            updates["paper_consecutive_passes"] = 0
+
+        self.supabase.table("v3_go_live_state").update(updates).eq("user_id", user_id).execute()
+
+        # Log window finalization
+        self._log_checkpoint_run(
+            user_id, "paper_window_final", window_start, window_end,
+            total_return_pct, total_pnl, passed,
+            None if passed else "checkpoint_target_not_reached",
+            {
+                "streak_final": current_streak,
+                "checkpoint_target": checkpoint_target,
+                "outcome_count": len(outcomes),
+                "new_window_start": new_window_start.isoformat(),
+                "new_window_end": new_window_end.isoformat()
+            }
+        )
+
+        return {
+            "status": "window_final",
+            "passed": passed,
+            "paper_ready": paper_ready,
+            "paper_consecutive_passes": current_streak if passed else 0,
+            "checkpoint_target": checkpoint_target,
+            "return_pct": total_return_pct,
+            "pnl_total": total_pnl,
+            "outcome_count": len(outcomes),
+            "window_start": window_start.isoformat(),
+            "window_end": window_end.isoformat(),
+            "new_window_start": new_window_start.isoformat(),
+            "new_window_end": new_window_end.isoformat()
+        }
+
     def eval_historical(self, user_id: str, suite_config: Dict[str, Any]) -> Dict[str, Any]:
         state = self.get_or_create_state(user_id)
         baseline = float(state.get("paper_baseline_capital", 100000) or 100000)

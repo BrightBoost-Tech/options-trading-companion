@@ -536,5 +536,434 @@ class TestRollingPaperStreakConfig(unittest.TestCase):
         self.assertEqual(PAPER_STREAK_CHECKPOINT_MODE, "rolling")
 
 
+class TestForwardCheckpointEvaluation(unittest.TestCase):
+    """Tests for v4-L1 eval_paper_forward_checkpoint method."""
+
+    def setUp(self):
+        """Set up common mocks."""
+        from unittest.mock import MagicMock
+        self.mock_client = MagicMock()
+        self.user_id = "test-user-uuid"
+
+        # Default state with v4-L1 fields
+        self.default_state = {
+            "user_id": self.user_id,
+            "paper_window_start": "2024-01-01T00:00:00+00:00",
+            "paper_window_end": "2024-01-22T00:00:00+00:00",
+            "paper_baseline_capital": 100000,
+            "paper_consecutive_passes": 0,
+            "paper_ready": False,
+            "paper_window_days": 21,
+            "paper_checkpoint_target": 10,
+            "paper_checkpoint_last_run_at": None,
+            "paper_fail_fast_triggered": False,
+            "paper_fail_fast_reason": None,
+            "historical_last_run_at": None,
+            "historical_last_result": {},
+            "overall_ready": False,
+        }
+
+    def test_checkpoint_pass_increments_streak(self):
+        """Passing checkpoint increments paper_consecutive_passes."""
+        from unittest.mock import MagicMock
+        from packages.quantum.services.go_live_validation_service import GoLiveValidationService
+        from datetime import datetime, timezone
+
+        state = self.default_state.copy()
+        state["paper_consecutive_passes"] = 3
+
+        mock_state_response = MagicMock()
+        mock_state_response.data = state
+
+        # Mock outcomes - good return (need 10% * progress to pass)
+        # At day 10 of 21, progress ~0.43, target ~4.3%, so 5% return should pass
+        mock_outcomes_response = MagicMock()
+        mock_outcomes_response.data = [
+            {"closed_at": "2024-01-05T00:00:00+00:00", "pnl_realized": 5000.0, "profit_pct": 5.0}
+        ]
+
+        def table_mock(table_name):
+            mock = MagicMock()
+            if table_name == "v3_go_live_state":
+                mock.select.return_value.eq.return_value.single.return_value.execute.return_value = mock_state_response
+                mock.update.return_value.eq.return_value.execute.return_value = MagicMock()
+            elif table_name == "learning_trade_outcomes_v3":
+                mock.select.return_value.eq.return_value.eq.return_value.gte.return_value.lte.return_value.order.return_value.execute.return_value = mock_outcomes_response
+            elif table_name == "v3_go_live_runs":
+                mock.insert.return_value.execute.return_value = MagicMock()
+            return mock
+
+        self.mock_client.table = table_mock
+
+        service = GoLiveValidationService(self.mock_client)
+        now = datetime(2024, 1, 10, 12, 0, 0, tzinfo=timezone.utc)
+
+        result = service.eval_paper_forward_checkpoint(self.user_id, now=now)
+
+        self.assertEqual(result["status"], "pass")
+        self.assertEqual(result["paper_consecutive_passes"], 4)  # 3 + 1
+        self.assertEqual(result["streak_before"], 3)
+
+    def test_checkpoint_miss_resets_streak(self):
+        """Missing checkpoint resets streak to 0."""
+        from unittest.mock import MagicMock
+        from packages.quantum.services.go_live_validation_service import GoLiveValidationService
+        from datetime import datetime, timezone
+
+        state = self.default_state.copy()
+        state["paper_consecutive_passes"] = 5
+
+        mock_state_response = MagicMock()
+        mock_state_response.data = state
+
+        # Mock outcomes - poor return (below pacing target)
+        mock_outcomes_response = MagicMock()
+        mock_outcomes_response.data = [
+            {"closed_at": "2024-01-05T00:00:00+00:00", "pnl_realized": 100.0, "profit_pct": 0.1}
+        ]
+
+        def table_mock(table_name):
+            mock = MagicMock()
+            if table_name == "v3_go_live_state":
+                mock.select.return_value.eq.return_value.single.return_value.execute.return_value = mock_state_response
+                mock.update.return_value.eq.return_value.execute.return_value = MagicMock()
+            elif table_name == "learning_trade_outcomes_v3":
+                mock.select.return_value.eq.return_value.eq.return_value.gte.return_value.lte.return_value.order.return_value.execute.return_value = mock_outcomes_response
+            elif table_name == "v3_go_live_runs":
+                mock.insert.return_value.execute.return_value = MagicMock()
+            return mock
+
+        self.mock_client.table = table_mock
+
+        service = GoLiveValidationService(self.mock_client)
+        now = datetime(2024, 1, 10, 12, 0, 0, tzinfo=timezone.utc)
+
+        result = service.eval_paper_forward_checkpoint(self.user_id, now=now)
+
+        self.assertEqual(result["status"], "miss")
+        self.assertEqual(result["paper_consecutive_passes"], 0)
+        self.assertEqual(result["streak_before"], 5)
+
+    def test_checkpoint_deduplication(self):
+        """Checkpoint skips if already run in same bucket."""
+        from unittest.mock import MagicMock
+        from packages.quantum.services.go_live_validation_service import GoLiveValidationService
+        from datetime import datetime, timezone
+
+        state = self.default_state.copy()
+        state["paper_checkpoint_last_run_at"] = "2024-01-10T08:00:00+00:00"
+        state["paper_consecutive_passes"] = 5
+
+        mock_state_response = MagicMock()
+        mock_state_response.data = state
+
+        def table_mock(table_name):
+            mock = MagicMock()
+            if table_name == "v3_go_live_state":
+                mock.select.return_value.eq.return_value.single.return_value.execute.return_value = mock_state_response
+            return mock
+
+        self.mock_client.table = table_mock
+
+        service = GoLiveValidationService(self.mock_client)
+        now = datetime(2024, 1, 10, 14, 0, 0, tzinfo=timezone.utc)  # Same day
+
+        result = service.eval_paper_forward_checkpoint(self.user_id, now=now)
+
+        self.assertEqual(result["status"], "skipped")
+        self.assertEqual(result["reason"], "already_checkpointed_this_bucket")
+        self.assertEqual(result["paper_consecutive_passes"], 5)  # Unchanged
+
+    def test_fail_fast_on_drawdown(self):
+        """Fail-fast triggers when max drawdown exceeds threshold."""
+        from unittest.mock import MagicMock
+        from packages.quantum.services.go_live_validation_service import GoLiveValidationService
+        from datetime import datetime, timezone
+
+        state = self.default_state.copy()
+        state["paper_consecutive_passes"] = 7
+
+        mock_state_response = MagicMock()
+        mock_state_response.data = state
+
+        # Mock outcomes with severe drawdown
+        mock_outcomes_response = MagicMock()
+        mock_outcomes_response.data = [
+            {"closed_at": "2024-01-03T00:00:00+00:00", "pnl_realized": 2000.0, "profit_pct": 2.0},
+            {"closed_at": "2024-01-05T00:00:00+00:00", "pnl_realized": -5000.0, "profit_pct": -5.0},
+        ]
+
+        def table_mock(table_name):
+            mock = MagicMock()
+            if table_name == "v3_go_live_state":
+                mock.select.return_value.eq.return_value.single.return_value.execute.return_value = mock_state_response
+                mock.update.return_value.eq.return_value.execute.return_value = MagicMock()
+            elif table_name == "learning_trade_outcomes_v3":
+                mock.select.return_value.eq.return_value.eq.return_value.gte.return_value.lte.return_value.order.return_value.execute.return_value = mock_outcomes_response
+            elif table_name == "v3_go_live_runs":
+                mock.insert.return_value.execute.return_value = MagicMock()
+            return mock
+
+        self.mock_client.table = table_mock
+
+        service = GoLiveValidationService(self.mock_client)
+        now = datetime(2024, 1, 10, 12, 0, 0, tzinfo=timezone.utc)
+
+        result = service.eval_paper_forward_checkpoint(self.user_id, now=now)
+
+        self.assertEqual(result["status"], "fail_fast")
+        self.assertIn("drawdown", result["reason"])
+        self.assertEqual(result["paper_consecutive_passes"], 0)
+        self.assertEqual(result["streak_before"], 7)
+        # Window should be restarted
+        self.assertIn("new_window_start", result)
+        self.assertIn("new_window_end", result)
+
+    def test_fail_fast_on_total_return(self):
+        """Fail-fast triggers when total return is too negative."""
+        from unittest.mock import MagicMock
+        from packages.quantum.services.go_live_validation_service import GoLiveValidationService
+        from datetime import datetime, timezone
+
+        state = self.default_state.copy()
+        state["paper_consecutive_passes"] = 4
+
+        mock_state_response = MagicMock()
+        mock_state_response.data = state
+
+        # Mock outcomes with negative return (but not severe single drawdown)
+        mock_outcomes_response = MagicMock()
+        mock_outcomes_response.data = [
+            {"closed_at": "2024-01-03T00:00:00+00:00", "pnl_realized": -1000.0, "profit_pct": -1.0},
+            {"closed_at": "2024-01-05T00:00:00+00:00", "pnl_realized": -1500.0, "profit_pct": -1.5},
+        ]
+
+        def table_mock(table_name):
+            mock = MagicMock()
+            if table_name == "v3_go_live_state":
+                mock.select.return_value.eq.return_value.single.return_value.execute.return_value = mock_state_response
+                mock.update.return_value.eq.return_value.execute.return_value = MagicMock()
+            elif table_name == "learning_trade_outcomes_v3":
+                mock.select.return_value.eq.return_value.eq.return_value.gte.return_value.lte.return_value.order.return_value.execute.return_value = mock_outcomes_response
+            elif table_name == "v3_go_live_runs":
+                mock.insert.return_value.execute.return_value = MagicMock()
+            return mock
+
+        self.mock_client.table = table_mock
+
+        service = GoLiveValidationService(self.mock_client)
+        now = datetime(2024, 1, 10, 12, 0, 0, tzinfo=timezone.utc)
+
+        result = service.eval_paper_forward_checkpoint(self.user_id, now=now)
+
+        self.assertEqual(result["status"], "fail_fast")
+        self.assertIn("return", result["reason"])
+        self.assertEqual(result["paper_consecutive_passes"], 0)
+
+    def test_paper_ready_on_target_reached(self):
+        """paper_ready set to True when checkpoint_target reached."""
+        from unittest.mock import MagicMock
+        from packages.quantum.services.go_live_validation_service import GoLiveValidationService
+        from datetime import datetime, timezone
+
+        state = self.default_state.copy()
+        state["paper_consecutive_passes"] = 9  # One away from target of 10
+        state["paper_checkpoint_target"] = 10
+
+        mock_state_response = MagicMock()
+        mock_state_response.data = state
+
+        # Mock good outcomes
+        mock_outcomes_response = MagicMock()
+        mock_outcomes_response.data = [
+            {"closed_at": "2024-01-05T00:00:00+00:00", "pnl_realized": 5000.0, "profit_pct": 5.0}
+        ]
+
+        def table_mock(table_name):
+            mock = MagicMock()
+            if table_name == "v3_go_live_state":
+                mock.select.return_value.eq.return_value.single.return_value.execute.return_value = mock_state_response
+                mock.update.return_value.eq.return_value.execute.return_value = MagicMock()
+            elif table_name == "learning_trade_outcomes_v3":
+                mock.select.return_value.eq.return_value.eq.return_value.gte.return_value.lte.return_value.order.return_value.execute.return_value = mock_outcomes_response
+            elif table_name == "v3_go_live_runs":
+                mock.insert.return_value.execute.return_value = MagicMock()
+            return mock
+
+        self.mock_client.table = table_mock
+
+        service = GoLiveValidationService(self.mock_client)
+        now = datetime(2024, 1, 10, 12, 0, 0, tzinfo=timezone.utc)
+
+        result = service.eval_paper_forward_checkpoint(self.user_id, now=now)
+
+        self.assertEqual(result["status"], "pass")
+        self.assertEqual(result["paper_consecutive_passes"], 10)
+        self.assertTrue(result["paper_ready"])
+
+    def test_no_outcomes_is_miss(self):
+        """No outcomes results in miss, not fail-fast."""
+        from unittest.mock import MagicMock
+        from packages.quantum.services.go_live_validation_service import GoLiveValidationService
+        from datetime import datetime, timezone
+
+        state = self.default_state.copy()
+        state["paper_consecutive_passes"] = 2
+
+        mock_state_response = MagicMock()
+        mock_state_response.data = state
+
+        # No outcomes
+        mock_outcomes_response = MagicMock()
+        mock_outcomes_response.data = []
+
+        def table_mock(table_name):
+            mock = MagicMock()
+            if table_name == "v3_go_live_state":
+                mock.select.return_value.eq.return_value.single.return_value.execute.return_value = mock_state_response
+                mock.update.return_value.eq.return_value.execute.return_value = MagicMock()
+            elif table_name == "learning_trade_outcomes_v3":
+                mock.select.return_value.eq.return_value.eq.return_value.gte.return_value.lte.return_value.order.return_value.execute.return_value = mock_outcomes_response
+            elif table_name == "v3_go_live_runs":
+                mock.insert.return_value.execute.return_value = MagicMock()
+            return mock
+
+        self.mock_client.table = table_mock
+
+        service = GoLiveValidationService(self.mock_client)
+        now = datetime(2024, 1, 10, 12, 0, 0, tzinfo=timezone.utc)
+
+        result = service.eval_paper_forward_checkpoint(self.user_id, now=now)
+
+        self.assertEqual(result["status"], "miss")
+        self.assertEqual(result["reason"], "no_outcomes_yet")
+        # Should NOT be fail_fast
+        self.assertNotEqual(result["status"], "fail_fast")
+
+    def test_window_expiry_finalization(self):
+        """Window expiry triggers finalization."""
+        from unittest.mock import MagicMock
+        from packages.quantum.services.go_live_validation_service import GoLiveValidationService
+        from datetime import datetime, timezone
+
+        state = self.default_state.copy()
+        state["paper_consecutive_passes"] = 10
+        state["paper_checkpoint_target"] = 10
+
+        mock_state_response = MagicMock()
+        mock_state_response.data = state
+
+        # Outcomes for finalization
+        mock_outcomes_response = MagicMock()
+        mock_outcomes_response.data = [
+            {"closed_at": "2024-01-10T00:00:00+00:00", "pnl_realized": 8000.0}
+        ]
+
+        def table_mock(table_name):
+            mock = MagicMock()
+            if table_name == "v3_go_live_state":
+                mock.select.return_value.eq.return_value.single.return_value.execute.return_value = mock_state_response
+                mock.update.return_value.eq.return_value.execute.return_value = MagicMock()
+            elif table_name == "learning_trade_outcomes_v3":
+                mock.select.return_value.eq.return_value.eq.return_value.gte.return_value.lte.return_value.execute.return_value = mock_outcomes_response
+            elif table_name == "v3_go_live_runs":
+                mock.insert.return_value.execute.return_value = MagicMock()
+            return mock
+
+        self.mock_client.table = table_mock
+
+        service = GoLiveValidationService(self.mock_client)
+        # Now is after window_end (2024-01-22)
+        now = datetime(2024, 1, 25, 12, 0, 0, tzinfo=timezone.utc)
+
+        result = service.eval_paper_forward_checkpoint(self.user_id, now=now)
+
+        self.assertEqual(result["status"], "window_final")
+        self.assertTrue(result["passed"])
+        self.assertTrue(result["paper_ready"])
+        self.assertIn("new_window_start", result)
+        self.assertIn("new_window_end", result)
+
+
+class TestCheckpointBucket(unittest.TestCase):
+    """Tests for _checkpoint_bucket helper."""
+
+    def test_daily_bucket_format(self):
+        """Daily bucket returns YYYY-MM-DD format."""
+        from packages.quantum.services.go_live_validation_service import GoLiveValidationService
+        from datetime import datetime, timezone
+        from unittest.mock import MagicMock
+
+        service = GoLiveValidationService(MagicMock())
+
+        ts = datetime(2024, 1, 15, 14, 30, 45, tzinfo=timezone.utc)
+        bucket = service._checkpoint_bucket(ts, cadence="daily")
+
+        self.assertEqual(bucket, "2024-01-15")
+
+    def test_same_day_same_bucket(self):
+        """Different times on same day produce same bucket."""
+        from packages.quantum.services.go_live_validation_service import GoLiveValidationService
+        from datetime import datetime, timezone
+        from unittest.mock import MagicMock
+
+        service = GoLiveValidationService(MagicMock())
+
+        ts1 = datetime(2024, 1, 15, 8, 0, 0, tzinfo=timezone.utc)
+        ts2 = datetime(2024, 1, 15, 20, 0, 0, tzinfo=timezone.utc)
+
+        self.assertEqual(
+            service._checkpoint_bucket(ts1),
+            service._checkpoint_bucket(ts2)
+        )
+
+
+class TestDrawdownCalculation(unittest.TestCase):
+    """Tests for _compute_drawdown helper."""
+
+    def test_no_outcomes_zero_drawdown(self):
+        """No outcomes returns 0 drawdown."""
+        from packages.quantum.services.go_live_validation_service import GoLiveValidationService
+        from unittest.mock import MagicMock
+
+        service = GoLiveValidationService(MagicMock())
+        dd = service._compute_drawdown([], 100000)
+
+        self.assertEqual(dd, 0.0)
+
+    def test_all_positive_no_drawdown(self):
+        """All positive PnL has no significant drawdown."""
+        from packages.quantum.services.go_live_validation_service import GoLiveValidationService
+        from unittest.mock import MagicMock
+
+        service = GoLiveValidationService(MagicMock())
+        outcomes = [
+            {"closed_at": "2024-01-01", "pnl_realized": 1000},
+            {"closed_at": "2024-01-02", "pnl_realized": 500},
+            {"closed_at": "2024-01-03", "pnl_realized": 800},
+        ]
+
+        dd = service._compute_drawdown(outcomes, 100000)
+
+        self.assertEqual(dd, 0.0)
+
+    def test_drawdown_from_peak(self):
+        """Drawdown calculated from peak."""
+        from packages.quantum.services.go_live_validation_service import GoLiveValidationService
+        from unittest.mock import MagicMock
+
+        service = GoLiveValidationService(MagicMock())
+        # Peak at 2000, then drops to 2000-3000 = -1000
+        outcomes = [
+            {"closed_at": "2024-01-01", "pnl_realized": 2000},
+            {"closed_at": "2024-01-02", "pnl_realized": -3000},
+        ]
+
+        dd = service._compute_drawdown(outcomes, 100000)
+
+        # Drawdown = -1000 - 2000 = -3000, / 100000 = -0.03
+        self.assertAlmostEqual(dd, -0.03, places=4)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -195,7 +195,8 @@ class WalkForwardRunner:
         # Approximation: Sum PnL daily?
         # Let's do trade-based metrics fully, and average fold equity metrics for the rest.
 
-        metrics = calculate_backtest_metrics(oos_trades, [], request.initial_equity)
+        # v4: Pass events for fill_rate calculation
+        metrics = calculate_backtest_metrics(oos_trades, [], request.initial_equity, events=oos_events)
 
         # v4: Handle edge case of empty folds gracefully
         if fold_results:

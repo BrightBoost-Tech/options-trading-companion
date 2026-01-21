@@ -16,6 +16,7 @@ This replaces the insecure get_authorized_actor that allowed CRON_SECRET.
 
 import os
 import json
+import jwt
 from typing import Optional, List, Set
 from datetime import datetime, timezone
 from functools import lru_cache
@@ -114,6 +115,7 @@ async def verify_admin_access(
 def _has_admin_role_claim(token: str) -> bool:
     """
     Check if JWT has admin role claim.
+    VERIFIES the signature using SUPABASE_JWT_SECRET.
 
     Checks:
     - `role` claim == "admin"
@@ -121,22 +123,19 @@ def _has_admin_role_claim(token: str) -> bool:
     - `user_metadata.role` == "admin"
     """
     try:
-        import base64
-
-        # JWT has 3 parts: header.payload.signature
-        parts = token.split(".")
-        if len(parts) != 3:
+        jwt_secret = os.getenv("SUPABASE_JWT_SECRET")
+        if not jwt_secret:
+            # Cannot verify without secret -> deny
             return False
 
-        # Decode payload (second part)
-        # Add padding if needed
-        payload_b64 = parts[1]
-        padding = 4 - len(payload_b64) % 4
-        if padding != 4:
-            payload_b64 += "=" * padding
-
-        payload_bytes = base64.urlsafe_b64decode(payload_b64)
-        payload = json.loads(payload_bytes)
+        # Verify Signature
+        payload = jwt.decode(
+            token,
+            jwt_secret,
+            algorithms=["HS256"],
+            audience="authenticated",
+            options={"require": ["sub", "aud", "exp"]}
+        )
 
         # Check role claim
         if payload.get("role") == "admin":
@@ -155,7 +154,7 @@ def _has_admin_role_claim(token: str) -> bool:
         return False
 
     except Exception:
-        # If we can't decode the token, assume not admin
+        # If verification fails (invalid sig, expired, etc.), return False
         return False
 
 

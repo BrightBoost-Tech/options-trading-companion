@@ -10,7 +10,7 @@ Tests the admin authentication logic including:
 
 import pytest
 import json
-import base64
+import jwt
 from unittest.mock import patch, MagicMock, AsyncMock
 from fastapi import HTTPException
 
@@ -29,12 +29,17 @@ from packages.quantum.security.admin_auth import (
 # Test Fixtures
 # =============================================================================
 
-def make_jwt(payload: dict) -> str:
-    """Create a test JWT with the given payload (no signature verification)."""
-    header = base64.urlsafe_b64encode(json.dumps({"alg": "HS256", "typ": "JWT"}).encode()).decode().rstrip("=")
-    body = base64.urlsafe_b64encode(json.dumps(payload).encode()).decode().rstrip("=")
-    signature = "test_signature"
-    return f"{header}.{body}.{signature}"
+TEST_JWT_SECRET = "test-secret-key-must-be-at-least-32-chars-long"
+
+def make_jwt(payload: dict, secret: str = TEST_JWT_SECRET) -> str:
+    """Create a valid JWT signed with the test secret."""
+    # Ensure required claims for verification
+    if "aud" not in payload:
+        payload["aud"] = "authenticated"
+    if "exp" not in payload:
+        payload["exp"] = 9999999999
+
+    return jwt.encode(payload, secret, algorithm="HS256")
 
 
 @pytest.fixture
@@ -53,6 +58,11 @@ def mock_request():
 
 class TestHasAdminRoleClaim:
     """Test JWT role claim detection."""
+
+    @pytest.fixture(autouse=True)
+    def setup_env(self):
+        with patch.dict("os.environ", {"SUPABASE_JWT_SECRET": TEST_JWT_SECRET}):
+            yield
 
     def test_admin_role_in_role_claim(self):
         """JWT with role=admin in root should return True."""
@@ -90,6 +100,12 @@ class TestHasAdminRoleClaim:
         assert _has_admin_role_claim("not.a.valid.token") is False
         assert _has_admin_role_claim("invalid") is False
         assert _has_admin_role_claim("") is False
+
+    def test_invalid_signature(self):
+        """Token with invalid signature should return False."""
+        # Create token with WRONG secret
+        token = make_jwt({"sub": "user123", "role": "admin"}, secret="wrong-secret")
+        assert _has_admin_role_claim(token) is False
 
 
 # =============================================================================
@@ -146,7 +162,11 @@ class TestVerifyAdminAccess:
         from packages.quantum.security import admin_auth
         import importlib
 
-        with patch.dict("os.environ", {"ADMIN_USER_IDS": "admin-user-123,other-admin"}):
+        # Need JWT secret even if testing allowlist because verify_admin_access might read env
+        with patch.dict("os.environ", {
+            "ADMIN_USER_IDS": "admin-user-123,other-admin",
+            "SUPABASE_JWT_SECRET": TEST_JWT_SECRET
+        }):
             # Reload to pick up env var
             importlib.reload(admin_auth)
 
@@ -168,7 +188,10 @@ class TestVerifyAdminAccess:
 
         admin_token = make_jwt({"sub": "jwt-admin-user", "role": "admin"})
 
-        with patch.dict("os.environ", {"ADMIN_USER_IDS": ""}):
+        with patch.dict("os.environ", {
+            "ADMIN_USER_IDS": "",
+            "SUPABASE_JWT_SECRET": TEST_JWT_SECRET
+        }):
             importlib.reload(admin_auth)
 
             result = await admin_auth.verify_admin_access(
@@ -189,7 +212,10 @@ class TestVerifyAdminAccess:
 
         non_admin_token = make_jwt({"sub": "regular-user", "role": "user"})
 
-        with patch.dict("os.environ", {"ADMIN_USER_IDS": "other-admin"}):
+        with patch.dict("os.environ", {
+            "ADMIN_USER_IDS": "other-admin",
+            "SUPABASE_JWT_SECRET": TEST_JWT_SECRET
+        }):
             importlib.reload(admin_auth)
 
             with pytest.raises(HTTPException) as exc_info:
@@ -226,7 +252,10 @@ class TestVerifyAdminAccess:
         # Token without admin role
         non_admin_token = make_jwt({"sub": "allowlist-user", "role": "user"})
 
-        with patch.dict("os.environ", {"ADMIN_USER_IDS": "allowlist-user"}):
+        with patch.dict("os.environ", {
+            "ADMIN_USER_IDS": "allowlist-user",
+            "SUPABASE_JWT_SECRET": TEST_JWT_SECRET
+        }):
             importlib.reload(admin_auth)
 
             result = await admin_auth.verify_admin_access(

@@ -19,3 +19,8 @@
 **Vulnerability:** The `/historical/run-cycle` endpoint was catching generic `Exception` and returning `str(e)` in the 500 response, similar to the previous optimizer issue.
 **Learning:** Repeating the same pattern of returning `str(e)` in exception handlers leaks implementation details.
 **Prevention:** Applied consistent error masking in `packages/quantum/historical_endpoints.py` to return "Internal Server Error" in production.
+
+## 2026-01-21 - [Fix] Admin Auth Bypass via Forged JWT
+**Vulnerability:** The admin authorization check (`verify_admin_access`) decoded the JWT to check for the `role="admin"` claim without verifying the signature. In development environments (or if `ENABLE_DEV_AUTH_BYPASS` was set), an attacker could bypass authentication using `X-Test-Mode-User` and then escalate privileges to Admin by supplying a self-signed or invalid JWT with the admin role.
+**Learning:** Checking claims in a JWT without verifying the signature is dangerous, even if the user identity was established via another method (like a dev bypass). Authentication (Who are you?) and Authorization (Are you Admin?) often rely on the same token, but if they are decoupled, the authorization step must still verify the integrity of its proof.
+**Prevention:** Always use `jwt.decode` with the secret key to verify signatures before trusting any claims, especially for privileged roles. Never use `json.loads(base64...)` on a JWT for security decisions.

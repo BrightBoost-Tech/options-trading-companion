@@ -391,10 +391,13 @@ class ReplayTruthLayer(MarketDataTruthLayer):
     ) -> List[Dict]:
         """
         Override: Return stored daily bars instead of fetching from API.
+
+        v2.1: Normalizes ticker to match live Truth Layer key format.
         """
+        normalized = self.normalize_symbol(ticker)
         start_str = start_date.strftime("%Y-%m-%d")
         end_str = end_date.strftime("%Y-%m-%d")
-        key = f"{ticker}:bars:{start_str}:{end_str}"
+        key = f"{normalized}:bars:{start_str}:{end_str}"
 
         stored = self.get_stored_input(key, "bars")
         if stored:

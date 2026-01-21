@@ -54,7 +54,10 @@ class PositionPnLService:
         self,
         user_id: str,
         group_ids: Optional[List[str]] = None,
-        source: str = "MARKET"
+        source: str = "MARKET",
+        max_symbols: Optional[int] = None,
+        batch_size: int = 50,
+        max_groups: Optional[int] = None
     ) -> Dict[str, Any]:
         """
         Refresh marks for all open position legs for a user.
@@ -67,6 +70,9 @@ class PositionPnLService:
             group_ids: Optional list of specific group IDs to refresh
                        If None, refreshes all open groups for the user
             source: Mark source label (MARKET, EOD, MANUAL)
+            max_symbols: Optional cap on symbols to fetch (deterministic truncation)
+            batch_size: Batch size for quote fetching (default 50)
+            max_groups: Optional cap on groups to process
 
         Returns:
             Dict with:
@@ -75,17 +81,19 @@ class PositionPnLService:
                 groups_updated: int
                 marks_inserted: int
                 errors: List[str]
-                diagnostics: Dict with timing and quota info
+                diagnostics: Dict with timing, quota, and throttle info
         """
         start_time = datetime.now(timezone.utc)
         errors = []
         marks_inserted = 0
         legs_marked = 0
         groups_updated = set()
+        stale_skips = 0
+        missing_quote_skips = 0
 
         try:
             # 1. Get all open legs for the user (or specific groups)
-            legs = self._get_open_legs(user_id, group_ids)
+            legs = self._get_open_legs(user_id, group_ids, max_groups=max_groups)
 
             if not legs:
                 return {
@@ -96,16 +104,31 @@ class PositionPnLService:
                     "errors": [],
                     "diagnostics": {
                         "duration_ms": self._duration_ms(start_time),
-                        "message": "No open legs found"
+                        "message": "No open legs found",
+                        "symbols_requested_total": 0,
+                        "symbols_processed": 0,
+                        "batches": 0,
+                        "stale_skips": 0,
+                        "missing_quote_skips": 0
                     }
                 }
 
-            # 2. Collect unique symbols for batch quote fetch
-            symbols = list(set(leg["symbol"] for leg in legs))
-            logger.info(f"Refreshing marks for {len(legs)} legs ({len(symbols)} unique symbols)")
+            # 2. Collect unique symbols for batch quote fetch (sorted for determinism)
+            all_symbols = sorted(set(leg["symbol"] for leg in legs))
+            symbols_requested_total = len(all_symbols)
 
-            # 3. Fetch quotes in batch
-            quotes = self._fetch_quotes(symbols)
+            # Apply max_symbols cap (deterministic truncation on sorted list)
+            if max_symbols is not None and len(all_symbols) > max_symbols:
+                symbols_to_fetch = all_symbols[:max_symbols]
+                logger.info(f"Truncated symbols from {len(all_symbols)} to {max_symbols}")
+            else:
+                symbols_to_fetch = all_symbols
+
+            logger.info(f"Refreshing marks for {len(legs)} legs ({len(symbols_to_fetch)} symbols to fetch)")
+
+            # 3. Fetch quotes in batches
+            quotes = self._fetch_quotes_batched(symbols_to_fetch, batch_size)
+            batches_used = (len(symbols_to_fetch) + batch_size - 1) // batch_size if symbols_to_fetch else 0
 
             if not quotes:
                 return {
@@ -116,13 +139,23 @@ class PositionPnLService:
                     "errors": ["No quotes fetched - check API key or connectivity"],
                     "diagnostics": {
                         "duration_ms": self._duration_ms(start_time),
-                        "symbols_requested": len(symbols)
+                        "symbols_requested_total": symbols_requested_total,
+                        "symbols_processed": 0,
+                        "batches": batches_used,
+                        "stale_skips": 0,
+                        "missing_quote_skips": 0
                     }
                 }
 
             # 4. Process each leg
             marked_at = datetime.now(timezone.utc)
             for leg in legs:
+                symbol = leg["symbol"]
+
+                # Skip if symbol wasn't in our fetch list (truncation case)
+                if symbol not in quotes and symbol not in symbols_to_fetch:
+                    continue
+
                 try:
                     result = self._mark_leg(leg, quotes, marked_at, source)
                     if result.get("success"):
@@ -130,7 +163,12 @@ class PositionPnLService:
                         legs_marked += 1
                         groups_updated.add(leg["group_id"])
                     else:
-                        errors.append(f"Leg {leg['id']}: {result.get('error', 'Unknown error')}")
+                        error_msg = result.get('error', 'Unknown error')
+                        if "Stale quote" in error_msg:
+                            stale_skips += 1
+                        elif "No quote" in error_msg or "No valid mid" in error_msg:
+                            missing_quote_skips += 1
+                        errors.append(f"Leg {leg['id']}: {error_msg}")
                 except Exception as e:
                     errors.append(f"Leg {leg['id']}: {str(e)}")
                     logger.warning(f"Error marking leg {leg['id']}: {e}")
@@ -151,9 +189,13 @@ class PositionPnLService:
                 "errors": errors[:10],  # Cap errors for payload size
                 "diagnostics": {
                     "duration_ms": self._duration_ms(start_time),
-                    "symbols_requested": len(symbols),
+                    "symbols_requested_total": symbols_requested_total,
+                    "symbols_processed": len(symbols_to_fetch),
                     "quotes_received": len(quotes),
-                    "total_legs": len(legs)
+                    "batches": batches_used,
+                    "total_legs": len(legs),
+                    "stale_skips": stale_skips,
+                    "missing_quote_skips": missing_quote_skips
                 }
             }
 
@@ -166,7 +208,9 @@ class PositionPnLService:
                 "marks_inserted": marks_inserted,
                 "errors": [str(e)],
                 "diagnostics": {
-                    "duration_ms": self._duration_ms(start_time)
+                    "duration_ms": self._duration_ms(start_time),
+                    "stale_skips": stale_skips,
+                    "missing_quote_skips": missing_quote_skips
                 }
             }
 
@@ -270,9 +314,23 @@ class PositionPnLService:
     def _get_open_legs(
         self,
         user_id: str,
-        group_ids: Optional[List[str]] = None
+        group_ids: Optional[List[str]] = None,
+        max_groups: Optional[int] = None
     ) -> List[Dict[str, Any]]:
         """Get all open position legs for a user."""
+        # If max_groups is set and no specific group_ids provided, fetch limited groups first
+        if max_groups is not None and not group_ids:
+            groups_result = self.client.table("position_groups").select(
+                "id"
+            ).eq("user_id", user_id).eq("status", "OPEN").order(
+                "created_at", desc=False
+            ).limit(max_groups).execute()
+
+            if not groups_result.data:
+                return []
+
+            group_ids = [g["id"] for g in groups_result.data]
+
         query = self.client.table("position_legs").select(
             "id, group_id, user_id, symbol, underlying, side, "
             "qty_opened, qty_closed, qty_current, avg_cost_open, multiplier"
@@ -289,12 +347,20 @@ class PositionPnLService:
         return result.data or []
 
     # -------------------------------------------------------------------------
-    # Internal: _fetch_quotes
+    # Internal: _fetch_quotes_batched
     # -------------------------------------------------------------------------
 
-    def _fetch_quotes(self, symbols: List[str]) -> Dict[str, Dict[str, Any]]:
+    def _fetch_quotes_batched(
+        self,
+        symbols: List[str],
+        batch_size: int = 50
+    ) -> Dict[str, Dict[str, Any]]:
         """
-        Fetch quotes for a list of symbols using MarketDataTruthLayer.
+        Fetch quotes for a list of symbols in batches using MarketDataTruthLayer.
+
+        Args:
+            symbols: List of symbols to fetch
+            batch_size: Number of symbols per batch (default 50)
 
         Returns:
             Dict mapping symbol -> quote data with bid, ask, mid, last, quality
@@ -303,30 +369,53 @@ class PositionPnLService:
             logger.warning("No POLYGON_API_KEY configured, cannot fetch quotes")
             return {}
 
+        if not symbols:
+            return {}
+
+        all_quotes = {}
+
         try:
             from packages.quantum.services.market_data_truth_layer import MarketDataTruthLayer
 
             layer = MarketDataTruthLayer(api_key=self.api_key)
-            snapshots = layer.snapshot_many_v4(symbols)
 
-            quotes = {}
-            for symbol, snap in snapshots.items():
-                if snap:
-                    quotes[symbol] = {
-                        "bid": snap.quote.bid,
-                        "ask": snap.quote.ask,
-                        "mid": snap.quote.mid,
-                        "last": snap.quote.last,
-                        "quality_score": snap.quality.quality_score,
-                        "freshness_ms": snap.quality.freshness_ms,
-                        "is_stale": snap.quality.is_stale
-                    }
+            # Process in batches
+            for i in range(0, len(symbols), batch_size):
+                batch = symbols[i:i + batch_size]
+                logger.debug(f"Fetching batch {i // batch_size + 1}: {len(batch)} symbols")
 
-            return quotes
+                snapshots = layer.snapshot_many_v4(batch)
+
+                for symbol, snap in snapshots.items():
+                    if snap:
+                        all_quotes[symbol] = {
+                            "bid": snap.quote.bid,
+                            "ask": snap.quote.ask,
+                            "mid": snap.quote.mid,
+                            "last": snap.quote.last,
+                            "quality_score": snap.quality.quality_score,
+                            "freshness_ms": snap.quality.freshness_ms,
+                            "is_stale": snap.quality.is_stale
+                        }
+
+            return all_quotes
 
         except Exception as e:
             logger.error(f"Failed to fetch quotes: {e}")
-            return {}
+            return all_quotes  # Return partial results if any
+
+    # -------------------------------------------------------------------------
+    # Internal: _fetch_quotes (legacy, single batch)
+    # -------------------------------------------------------------------------
+
+    def _fetch_quotes(self, symbols: List[str]) -> Dict[str, Dict[str, Any]]:
+        """
+        Fetch quotes for a list of symbols using MarketDataTruthLayer (single batch).
+
+        Returns:
+            Dict mapping symbol -> quote data with bid, ask, mid, last, quality
+        """
+        return self._fetch_quotes_batched(symbols, batch_size=len(symbols) if symbols else 1)
 
     # -------------------------------------------------------------------------
     # Internal: _mark_leg

@@ -90,6 +90,7 @@ def run(payload: Dict[str, Any], ctx=None) -> Dict[str, Any]:
         results = {}
         total_seeded = 0
         total_skipped = 0
+        total_needs_review = 0
         errors = 0
 
         for uid in users:
@@ -98,6 +99,7 @@ def run(payload: Dict[str, Any], ctx=None) -> Dict[str, Any]:
                 results[uid] = result
                 total_seeded += result.get("seeded", 0)
                 total_skipped += result.get("skipped", 0)
+                total_needs_review += result.get("needs_review_count", 0)
             except Exception as ex:
                 logger.error(f"[SEED_LEDGER_V4] Error for user {uid}: {ex}")
                 results[uid] = {"status": "error", "error": str(ex)}
@@ -108,6 +110,7 @@ def run(payload: Dict[str, Any], ctx=None) -> Dict[str, Any]:
             "users_processed": len(users),
             "total_seeded": total_seeded,
             "total_skipped": total_skipped,
+            "total_needs_review": total_needs_review,
             "errors": errors,
             "dry_run": dry_run,
             "results": results,
@@ -155,6 +158,7 @@ def _seed_user(
 
     seeded = []
     skipped = []
+    needs_review_count = 0
 
     for pos in broker_positions:
         symbol = pos.get("symbol")
@@ -179,6 +183,8 @@ def _seed_user(
         side, side_meta = _infer_side_from_snapshot_row(pos)
 
         if dry_run:
+            if side_meta and side_meta.get("needs_review"):
+                needs_review_count += 1
             seeded.append({
                 "symbol": symbol,
                 "qty": qty,
@@ -200,6 +206,9 @@ def _seed_user(
                 side=side,
                 side_meta=side_meta,
             )
+            # Track needs_review for actual seeding
+            if side_meta and side_meta.get("needs_review"):
+                needs_review_count += 1
             seeded.append({
                 "symbol": symbol,
                 "qty": qty,
@@ -222,6 +231,7 @@ def _seed_user(
         "broker_positions": len(broker_positions),
         "seeded": len(seeded),
         "skipped": len(skipped),
+        "needs_review_count": needs_review_count,
         "seeded_positions": seeded[:20],  # Cap for payload size
         "skipped_positions": skipped[:20],
     }

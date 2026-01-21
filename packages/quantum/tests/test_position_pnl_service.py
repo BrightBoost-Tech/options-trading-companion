@@ -234,11 +234,11 @@ class TestRefreshMarksForUser(unittest.TestCase):
             "multiplier": 100
         }
 
-        # Create a custom service with mocked _fetch_quotes
+        # Create a custom service with mocked _fetch_quotes_batched
         service = PositionPnLService(self.mock_client, api_key="test-key")
 
-        # Mock _fetch_quotes directly
-        service._fetch_quotes = MagicMock(return_value={
+        # Mock _fetch_quotes_batched directly (v1.1 uses batching)
+        service._fetch_quotes_batched = MagicMock(return_value={
             "AAPL240119C00150000": {
                 "bid": 3.00,
                 "ask": 3.10,
@@ -282,16 +282,126 @@ class TestRefreshMarksForUser(unittest.TestCase):
         """Returns empty quotes when no API key configured."""
         service_no_key = PositionPnLService(self.mock_client, api_key=None)
 
-        # Mock legs
+        # Mock legs with full structure
         self.mock_client.table.return_value.select.return_value.eq.return_value.neq.return_value.execute.return_value = MagicMock(
-            data=[{"id": "leg-1", "symbol": "AAPL", "group_id": "group-1", "user_id": "user-1"}]
+            data=[{
+                "id": "leg-1",
+                "symbol": "AAPL",
+                "group_id": "group-1",
+                "user_id": "user-1",
+                "side": "LONG",
+                "qty_current": 10,
+                "avg_cost_open": 150.0,
+                "multiplier": 100
+            }]
         )
 
+        # Ensure POLYGON_API_KEY is not set
         with patch.dict("os.environ", {}, clear=True):
+            # Also clear the api_key attribute directly
+            service_no_key.api_key = None
             result = service_no_key.refresh_marks_for_user("user-1")
 
         self.assertFalse(result["success"])
         self.assertIn("No quotes fetched", result["errors"][0])
+
+    def test_diagnostics_fields_present(self):
+        """Diagnostics include v1.1 hardening fields."""
+        # Mock empty legs
+        self.mock_client.table.return_value.select.return_value.eq.return_value.neq.return_value.execute.return_value = MagicMock(
+            data=[]
+        )
+
+        result = self.service.refresh_marks_for_user("user-1")
+
+        diag = result["diagnostics"]
+        self.assertIn("symbols_requested_total", diag)
+        self.assertIn("symbols_processed", diag)
+        self.assertIn("batches", diag)
+        self.assertIn("stale_skips", diag)
+        self.assertIn("missing_quote_skips", diag)
+
+
+class TestThrottling(unittest.TestCase):
+    """Tests for v1.1 throttling and batching."""
+
+    def setUp(self):
+        """Set up mock supabase client and service."""
+        self.mock_client = MagicMock()
+        self.service = PositionPnLService(self.mock_client, api_key="test-key")
+
+    def test_max_symbols_truncates_deterministically(self):
+        """max_symbols truncates symbol list deterministically (sorted)."""
+        # Create 10 mock legs with different symbols
+        legs = [
+            {"id": f"leg-{i}", "group_id": "group-1", "user_id": "user-1",
+             "symbol": f"SYM{chr(65+i)}", "side": "LONG", "qty_current": 1,
+             "avg_cost_open": 1.0, "multiplier": 100}
+            for i in range(10)
+        ]  # SYMA, SYMB, SYMC, ... SYMJ
+
+        self.mock_client.table.return_value.select.return_value.eq.return_value.neq.return_value.execute.return_value = MagicMock(
+            data=legs
+        )
+
+        # Mock fetch_quotes to return what's requested
+        fetched_symbols = []
+        def mock_fetch_batched(symbols, batch_size):
+            fetched_symbols.extend(symbols)
+            return {s: {"bid": 1, "ask": 1.1, "mid": 1.05, "last": 1, "is_stale": False, "quality_score": 90, "freshness_ms": 100} for s in symbols}
+
+        self.service._fetch_quotes_batched = mock_fetch_batched
+
+        # Mock mark insert
+        self.mock_client.table.return_value.insert.return_value.execute.return_value = MagicMock(
+            data=[{"id": "mark-1"}]
+        )
+        self.mock_client.table.return_value.update.return_value.eq.return_value.execute.return_value = MagicMock()
+        self.mock_client.table.return_value.select.return_value.eq.return_value.execute.return_value = MagicMock(data=[])
+        self.mock_client.table.return_value.select.return_value.eq.return_value.single.return_value.execute.return_value = MagicMock(
+            data={"realized_pnl": 0, "fees_paid": 0}
+        )
+
+        result = self.service.refresh_marks_for_user("user-1", max_symbols=5)
+
+        # Should process first 5 symbols alphabetically: SYMA, SYMB, SYMC, SYMD, SYME
+        self.assertEqual(result["diagnostics"]["symbols_requested_total"], 10)
+        self.assertEqual(result["diagnostics"]["symbols_processed"], 5)
+        self.assertEqual(sorted(fetched_symbols), ["SYMA", "SYMB", "SYMC", "SYMD", "SYME"])
+
+    def test_batch_size_batches_correctly(self):
+        """batch_size controls batch size for quote fetching."""
+        # Create 7 symbols
+        legs = [
+            {"id": f"leg-{i}", "group_id": "group-1", "user_id": "user-1",
+             "symbol": f"SYM{i}", "side": "LONG", "qty_current": 1,
+             "avg_cost_open": 1.0, "multiplier": 100}
+            for i in range(7)
+        ]
+
+        self.mock_client.table.return_value.select.return_value.eq.return_value.neq.return_value.execute.return_value = MagicMock(
+            data=legs
+        )
+
+        batch_calls = []
+        def mock_fetch_batched(symbols, batch_size):
+            batch_calls.append(len(symbols))
+            return {s: {"bid": 1, "ask": 1.1, "mid": 1.05, "last": 1, "is_stale": False, "quality_score": 90, "freshness_ms": 100} for s in symbols}
+
+        self.service._fetch_quotes_batched = mock_fetch_batched
+
+        # Mock other DB calls
+        self.mock_client.table.return_value.insert.return_value.execute.return_value = MagicMock(data=[{"id": "mark-1"}])
+        self.mock_client.table.return_value.update.return_value.eq.return_value.execute.return_value = MagicMock()
+        self.mock_client.table.return_value.select.return_value.eq.return_value.execute.return_value = MagicMock(data=[])
+        self.mock_client.table.return_value.select.return_value.eq.return_value.single.return_value.execute.return_value = MagicMock(
+            data={"realized_pnl": 0, "fees_paid": 0}
+        )
+
+        result = self.service.refresh_marks_for_user("user-1", batch_size=3)
+
+        # 7 symbols with batch_size=3 should be 3 batches: 3, 3, 1
+        self.assertEqual(result["diagnostics"]["batches"], 3)
 
 
 class TestRefreshLedgerMarksV4Handler(unittest.TestCase):
@@ -325,14 +435,19 @@ class TestRefreshLedgerMarksV4Handler(unittest.TestCase):
         mock_client = MagicMock()
         mock_get_client.return_value = mock_client
 
-        # Mock PnL service
+        # Mock PnL service with v1.1 diagnostic fields
         mock_service = MagicMock()
         mock_service.refresh_marks_for_user.return_value = {
             "success": True,
             "legs_marked": 5,
             "groups_updated": 2,
             "marks_inserted": 5,
-            "errors": []
+            "errors": [],
+            "diagnostics": {
+                "symbols_processed": 5,
+                "stale_skips": 0,
+                "missing_quote_skips": 0
+            }
         }
         mock_pnl_service_class.return_value = mock_service
 
@@ -345,7 +460,10 @@ class TestRefreshLedgerMarksV4Handler(unittest.TestCase):
         mock_service.refresh_marks_for_user.assert_called_once_with(
             user_id="user-123",
             group_ids=None,
-            source="MARKET"
+            source="MARKET",
+            max_symbols=None,
+            batch_size=50,
+            max_groups=None
         )
 
     @patch("packages.quantum.jobs.handlers.refresh_ledger_marks_v4.PositionPnLService")
@@ -358,14 +476,19 @@ class TestRefreshLedgerMarksV4Handler(unittest.TestCase):
         mock_get_client.return_value = MagicMock()
         mock_get_users.return_value = ["user-1", "user-2"]
 
-        # Mock PnL service
+        # Mock PnL service with v1.1 diagnostic fields
         mock_service = MagicMock()
         mock_service.refresh_marks_for_user.return_value = {
             "success": True,
             "legs_marked": 3,
             "groups_updated": 1,
             "marks_inserted": 3,
-            "errors": []
+            "errors": [],
+            "diagnostics": {
+                "symbols_processed": 3,
+                "stale_skips": 0,
+                "missing_quote_skips": 0
+            }
         }
         mock_pnl_service_class.return_value = mock_service
 
@@ -391,7 +514,8 @@ class TestRefreshLedgerMarksV4Handler(unittest.TestCase):
             "legs_marked": 2,
             "groups_updated": 2,
             "marks_inserted": 2,
-            "errors": []
+            "errors": [],
+            "diagnostics": {"symbols_processed": 2, "stale_skips": 0, "missing_quote_skips": 0}
         }
         mock_pnl_service_class.return_value = mock_service
 
@@ -403,7 +527,10 @@ class TestRefreshLedgerMarksV4Handler(unittest.TestCase):
         mock_service.refresh_marks_for_user.assert_called_once_with(
             user_id="user-123",
             group_ids=["group-1", "group-2"],
-            source="MARKET"
+            source="MARKET",
+            max_symbols=None,
+            batch_size=50,
+            max_groups=None
         )
 
     @patch("packages.quantum.jobs.handlers.refresh_ledger_marks_v4.PositionPnLService")
@@ -420,7 +547,8 @@ class TestRefreshLedgerMarksV4Handler(unittest.TestCase):
             "legs_marked": 1,
             "groups_updated": 1,
             "marks_inserted": 1,
-            "errors": []
+            "errors": [],
+            "diagnostics": {"symbols_processed": 1, "stale_skips": 0, "missing_quote_skips": 0}
         }
         mock_pnl_service_class.return_value = mock_service
 
@@ -432,7 +560,74 @@ class TestRefreshLedgerMarksV4Handler(unittest.TestCase):
         mock_service.refresh_marks_for_user.assert_called_once_with(
             user_id="user-123",
             group_ids=None,
-            source="EOD"
+            source="EOD",
+            max_symbols=None,
+            batch_size=50,
+            max_groups=None
+        )
+
+    @patch("packages.quantum.jobs.handlers.refresh_ledger_marks_v4.PositionPnLService")
+    @patch("packages.quantum.jobs.handlers.refresh_ledger_marks_v4._get_users_with_open_positions")
+    @patch("packages.quantum.jobs.handlers.refresh_ledger_marks_v4._get_supabase_client")
+    def test_run_respects_max_users(self, mock_get_client, mock_get_users, mock_pnl_service_class):
+        """Respects max_users throttle by truncating user list."""
+        from packages.quantum.jobs.handlers.refresh_ledger_marks_v4 import run
+
+        mock_get_client.return_value = MagicMock()
+        # Return 5 users
+        mock_get_users.return_value = ["user-1", "user-2", "user-3", "user-4", "user-5"]
+
+        mock_service = MagicMock()
+        mock_service.refresh_marks_for_user.return_value = {
+            "success": True,
+            "legs_marked": 1,
+            "groups_updated": 1,
+            "marks_inserted": 1,
+            "errors": [],
+            "diagnostics": {"symbols_processed": 1, "stale_skips": 0, "missing_quote_skips": 0}
+        }
+        mock_pnl_service_class.return_value = mock_service
+
+        result = run({"max_users": 2})
+
+        # Should only process 2 users
+        self.assertEqual(result["users_selected"], 5)
+        self.assertEqual(result["users_processed"], 2)
+        self.assertEqual(mock_service.refresh_marks_for_user.call_count, 2)
+
+    @patch("packages.quantum.jobs.handlers.refresh_ledger_marks_v4.PositionPnLService")
+    @patch("packages.quantum.jobs.handlers.refresh_ledger_marks_v4._get_supabase_client")
+    def test_run_passes_throttle_params(self, mock_get_client, mock_pnl_service_class):
+        """Passes throttle parameters to PnL service."""
+        from packages.quantum.jobs.handlers.refresh_ledger_marks_v4 import run
+
+        mock_get_client.return_value = MagicMock()
+
+        mock_service = MagicMock()
+        mock_service.refresh_marks_for_user.return_value = {
+            "success": True,
+            "legs_marked": 1,
+            "groups_updated": 1,
+            "marks_inserted": 1,
+            "errors": [],
+            "diagnostics": {"symbols_processed": 50, "stale_skips": 0, "missing_quote_skips": 0}
+        }
+        mock_pnl_service_class.return_value = mock_service
+
+        result = run({
+            "user_id": "user-123",
+            "max_symbols_per_user": 100,
+            "batch_size": 25,
+            "max_groups": 10
+        })
+
+        mock_service.refresh_marks_for_user.assert_called_once_with(
+            user_id="user-123",
+            group_ids=None,
+            source="MARKET",
+            max_symbols=100,
+            batch_size=25,
+            max_groups=10
         )
 
 

@@ -9,6 +9,10 @@ Usage:
         - user_id: str (optional, runs for all users with open positions if omitted)
         - group_ids: List[str] (optional, specific groups to refresh)
         - source: str (optional, mark source label - MARKET, EOD, MANUAL)
+        - max_users: int (optional, cap on users to process in batch mode)
+        - max_symbols_per_user: int (optional, cap on symbols per user)
+        - batch_size: int (optional, quote fetch batch size, default 50)
+        - max_groups: int (optional, cap on groups per user)
 """
 
 import logging
@@ -35,9 +39,13 @@ def run(payload: Dict[str, Any], ctx=None) -> Dict[str, Any]:
         user_id: Optional single user to refresh (if omitted, all users with open positions)
         group_ids: Optional list of specific group IDs to refresh
         source: Mark source label (default "MARKET")
+        max_users: Optional cap on users to process in batch mode
+        max_symbols_per_user: Optional cap on symbols per user
+        batch_size: Quote fetch batch size (default 50)
+        max_groups: Optional cap on groups per user
 
     Returns:
-        Dict with refresh summary
+        Dict with refresh summary including throttle diagnostics
     """
     logger.info(f"[REFRESH_MARKS_V4] Starting with payload: {payload}")
 
@@ -47,6 +55,10 @@ def run(payload: Dict[str, Any], ctx=None) -> Dict[str, Any]:
         user_id = payload.get("user_id")
         group_ids = payload.get("group_ids")
         source = payload.get("source", "MARKET")
+        max_users = payload.get("max_users")
+        max_symbols_per_user = payload.get("max_symbols_per_user")
+        batch_size = payload.get("batch_size", 50)
+        max_groups = payload.get("max_groups")
 
         # Get users to process
         if user_id:
@@ -54,23 +66,37 @@ def run(payload: Dict[str, Any], ctx=None) -> Dict[str, Any]:
         else:
             user_ids = _get_users_with_open_positions(supabase)
 
+        users_selected = len(user_ids)
+
+        # Apply max_users cap (sort for determinism, then truncate)
+        if max_users is not None and len(user_ids) > max_users:
+            user_ids = sorted(user_ids)[:max_users]
+            logger.info(f"[REFRESH_MARKS_V4] Truncated users from {users_selected} to {max_users}")
+
         if not user_ids:
             return {
                 "success": True,
                 "message": "No users with open positions",
+                "users_selected": 0,
                 "users_processed": 0,
                 "total_legs_marked": 0,
                 "total_groups_updated": 0,
                 "total_marks_inserted": 0,
+                "total_symbols_processed": 0,
+                "total_stale_skips": 0,
+                "total_missing_quote_skips": 0,
                 "errors": []
             }
 
-        logger.info(f"[REFRESH_MARKS_V4] Processing {len(user_ids)} users")
+        logger.info(f"[REFRESH_MARKS_V4] Processing {len(user_ids)} users (selected: {users_selected})")
 
         # Process each user
         total_legs_marked = 0
         total_groups_updated = 0
         total_marks_inserted = 0
+        total_symbols_processed = 0
+        total_stale_skips = 0
+        total_missing_quote_skips = 0
         all_errors = []
         users_processed = 0
 
@@ -80,7 +106,10 @@ def run(payload: Dict[str, Any], ctx=None) -> Dict[str, Any]:
                 result = pnl_service.refresh_marks_for_user(
                     user_id=uid,
                     group_ids=group_ids,
-                    source=source
+                    source=source,
+                    max_symbols=max_symbols_per_user,
+                    batch_size=batch_size,
+                    max_groups=max_groups
                 )
 
                 if result["success"]:
@@ -88,14 +117,22 @@ def run(payload: Dict[str, Any], ctx=None) -> Dict[str, Any]:
                     total_groups_updated += result["groups_updated"]
                     total_marks_inserted += result["marks_inserted"]
                     users_processed += 1
-                else:
+
+                # Aggregate diagnostics
+                diag = result.get("diagnostics", {})
+                total_symbols_processed += diag.get("symbols_processed", 0)
+                total_stale_skips += diag.get("stale_skips", 0)
+                total_missing_quote_skips += diag.get("missing_quote_skips", 0)
+
+                if not result["success"]:
                     all_errors.extend([f"User {uid}: {e}" for e in result.get("errors", [])])
 
                 logger.info(
                     f"[REFRESH_MARKS_V4] User {uid}: "
                     f"legs={result['legs_marked']}, "
                     f"groups={result['groups_updated']}, "
-                    f"marks={result['marks_inserted']}"
+                    f"marks={result['marks_inserted']}, "
+                    f"symbols={diag.get('symbols_processed', 0)}"
                 )
 
             except Exception as e:
@@ -105,10 +142,14 @@ def run(payload: Dict[str, Any], ctx=None) -> Dict[str, Any]:
 
         return {
             "success": len(all_errors) == 0,
+            "users_selected": users_selected,
             "users_processed": users_processed,
             "total_legs_marked": total_legs_marked,
             "total_groups_updated": total_groups_updated,
             "total_marks_inserted": total_marks_inserted,
+            "total_symbols_processed": total_symbols_processed,
+            "total_stale_skips": total_stale_skips,
+            "total_missing_quote_skips": total_missing_quote_skips,
             "errors": all_errors[:20]  # Cap errors for payload size
         }
 
@@ -127,7 +168,7 @@ def _get_users_with_open_positions(client) -> List[str]:
     Get list of user IDs that have open position groups.
 
     Returns:
-        List of user_id strings
+        List of user_id strings (sorted for deterministic processing)
     """
     try:
         result = client.table("position_groups").select(
@@ -137,8 +178,8 @@ def _get_users_with_open_positions(client) -> List[str]:
         if not result.data:
             return []
 
-        # Deduplicate user IDs
-        user_ids = list(set(row["user_id"] for row in result.data))
+        # Deduplicate and sort user IDs for determinism
+        user_ids = sorted(set(row["user_id"] for row in result.data))
         return user_ids
 
     except Exception as e:
@@ -153,7 +194,10 @@ def _get_users_with_open_positions(client) -> List[str]:
 def refresh_user_marks(
     user_id: str,
     group_ids: Optional[List[str]] = None,
-    source: str = "MARKET"
+    source: str = "MARKET",
+    max_symbols: Optional[int] = None,
+    batch_size: int = 50,
+    max_groups: Optional[int] = None
 ) -> Dict[str, Any]:
     """
     Convenience function to refresh marks for a single user.
@@ -162,6 +206,9 @@ def refresh_user_marks(
         user_id: User UUID
         group_ids: Optional specific groups to refresh
         source: Mark source label
+        max_symbols: Optional cap on symbols to fetch
+        batch_size: Quote fetch batch size (default 50)
+        max_groups: Optional cap on groups to process
 
     Returns:
         Result dict from PositionPnLService.refresh_marks_for_user()
@@ -172,7 +219,10 @@ def refresh_user_marks(
     return pnl_service.refresh_marks_for_user(
         user_id=user_id,
         group_ids=group_ids,
-        source=source
+        source=source,
+        max_symbols=max_symbols,
+        batch_size=batch_size,
+        max_groups=max_groups
     )
 
 

@@ -772,5 +772,92 @@ class TestSeedV2MetaJson(unittest.TestCase):
         self.assertTrue(event_insert["data"]["meta_json"]["needs_review"])
 
 
+class TestSeedNeedsReviewCount(unittest.TestCase):
+    """Tests for v1.1 needs_review_count in seed summary."""
+
+    @patch("packages.quantum.jobs.handlers.seed_ledger_v4._get_supabase_client")
+    @patch("packages.quantum.jobs.handlers.seed_ledger_v4._get_broker_positions")
+    @patch("packages.quantum.jobs.handlers.seed_ledger_v4._get_ledger_symbols")
+    @patch("packages.quantum.jobs.handlers.seed_ledger_v4._create_seed_entries")
+    @patch("packages.quantum.jobs.handlers.seed_ledger_v4._infer_side_from_snapshot_row")
+    def test_needs_review_count_in_result(
+        self, mock_infer, mock_create, mock_get_ledger, mock_get_broker, mock_get_client
+    ):
+        """needs_review_count is included in seeding result."""
+        mock_client = MagicMock()
+        mock_get_client.return_value = mock_client
+
+        # Two broker positions
+        mock_get_broker.return_value = [
+            {"symbol": "AAPL", "qty": 100, "avg_price": 150.00},
+            {"symbol": "TSLA", "qty": 50, "avg_price": 200.00},
+        ]
+        mock_get_ledger.return_value = set()
+        mock_create.return_value = {
+            "group_id": "group-1",
+            "leg_id": "leg-1",
+            "event_id": "event-1",
+        }
+
+        # First position has needs_review, second doesn't
+        mock_infer.side_effect = [
+            ("LONG", {"side_inferred": "default_long", "needs_review": True}),
+            ("LONG", {"side_inferred": "qty_sign", "version": "v2"}),
+        ]
+
+        result = run({"user_id": "user-123"})
+
+        self.assertEqual(result["status"], "completed")
+        self.assertEqual(result["results"]["user-123"]["seeded"], 2)
+        self.assertEqual(result["results"]["user-123"]["needs_review_count"], 1)
+
+    @patch("packages.quantum.jobs.handlers.seed_ledger_v4._get_supabase_client")
+    @patch("packages.quantum.jobs.handlers.seed_ledger_v4._get_broker_positions")
+    @patch("packages.quantum.jobs.handlers.seed_ledger_v4._get_ledger_symbols")
+    @patch("packages.quantum.jobs.handlers.seed_ledger_v4._infer_side_from_snapshot_row")
+    def test_needs_review_count_in_dry_run(
+        self, mock_infer, mock_get_ledger, mock_get_broker, mock_get_client
+    ):
+        """needs_review_count is tracked in dry_run mode."""
+        mock_client = MagicMock()
+        mock_get_client.return_value = mock_client
+
+        mock_get_broker.return_value = [
+            {"symbol": "AAPL", "qty": 100, "avg_price": 150.00},
+        ]
+        mock_get_ledger.return_value = set()
+
+        # Position has needs_review
+        mock_infer.return_value = ("LONG", {"side_inferred": "default_long", "needs_review": True})
+
+        result = run({"user_id": "user-123", "dry_run": True})
+
+        self.assertEqual(result["status"], "completed")
+        self.assertEqual(result["results"]["user-123"]["seeded"], 1)
+        self.assertEqual(result["results"]["user-123"]["needs_review_count"], 1)
+
+    @patch("packages.quantum.jobs.handlers.seed_ledger_v4._get_supabase_client")
+    @patch("packages.quantum.jobs.handlers.seed_ledger_v4._get_users_with_broker_positions")
+    @patch("packages.quantum.jobs.handlers.seed_ledger_v4._seed_user")
+    def test_total_needs_review_in_batch_mode(
+        self, mock_seed_user, mock_get_users, mock_get_client
+    ):
+        """total_needs_review aggregates across users in batch mode."""
+        mock_get_client.return_value = MagicMock()
+        mock_get_users.return_value = ["user-1", "user-2"]
+
+        # Each user has different needs_review_count
+        mock_seed_user.side_effect = [
+            {"status": "seeded", "seeded": 3, "skipped": 0, "needs_review_count": 2},
+            {"status": "seeded", "seeded": 2, "skipped": 0, "needs_review_count": 1},
+        ]
+
+        result = run({})
+
+        self.assertEqual(result["status"], "completed")
+        self.assertEqual(result["total_seeded"], 5)
+        self.assertEqual(result["total_needs_review"], 3)
+
+
 if __name__ == "__main__":
     unittest.main()

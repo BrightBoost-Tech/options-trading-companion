@@ -840,6 +840,63 @@ class TestForwardCheckpointEvaluation(unittest.TestCase):
         # Should NOT be fail_fast
         self.assertNotEqual(result["status"], "fail_fast")
 
+    def test_no_outcomes_persists_streak_reset(self):
+        """PR567: No outcomes miss persists streak reset and clears fail-fast."""
+        from unittest.mock import MagicMock, call
+        from packages.quantum.services.go_live_validation_service import GoLiveValidationService
+        from datetime import datetime, timezone
+
+        state = self.default_state.copy()
+        state["paper_consecutive_passes"] = 5
+        state["paper_checkpoint_last_run_at"] = None
+        state["paper_fail_fast_triggered"] = True  # Previously triggered
+        state["paper_fail_fast_reason"] = "old_reason"
+
+        mock_state_response = MagicMock()
+        mock_state_response.data = state
+
+        # No outcomes
+        mock_outcomes_response = MagicMock()
+        mock_outcomes_response.data = []
+
+        # Track what gets passed to update()
+        captured_update_data = {}
+
+        def capture_update(data):
+            captured_update_data.update(data)
+            mock_chain = MagicMock()
+            mock_chain.eq.return_value.execute.return_value = MagicMock()
+            return mock_chain
+
+        def table_mock(table_name):
+            mock = MagicMock()
+            if table_name == "v3_go_live_state":
+                mock.select.return_value.eq.return_value.single.return_value.execute.return_value = mock_state_response
+                mock.update.side_effect = capture_update
+            elif table_name == "learning_trade_outcomes_v3":
+                mock.select.return_value.eq.return_value.eq.return_value.gte.return_value.lte.return_value.order.return_value.execute.return_value = mock_outcomes_response
+            elif table_name == "v3_go_live_runs":
+                mock.insert.return_value.execute.return_value = MagicMock()
+            return mock
+
+        self.mock_client.table = table_mock
+
+        service = GoLiveValidationService(self.mock_client)
+        now = datetime(2024, 1, 10, 12, 0, 0, tzinfo=timezone.utc)
+
+        result = service.eval_paper_forward_checkpoint(self.user_id, now=now)
+
+        # Verify result
+        self.assertEqual(result["status"], "miss")
+        self.assertEqual(result["reason"], "no_outcomes_yet")
+        self.assertEqual(result["paper_consecutive_passes"], 0)
+        self.assertEqual(result["streak_before"], 5)
+
+        # PR567: Verify the update included streak reset and fail-fast clear
+        self.assertEqual(captured_update_data.get("paper_consecutive_passes"), 0)
+        self.assertEqual(captured_update_data.get("paper_fail_fast_triggered"), False)
+        self.assertIsNone(captured_update_data.get("paper_fail_fast_reason"))
+
     def test_window_expiry_finalization(self):
         """Window expiry triggers finalization."""
         from unittest.mock import MagicMock
@@ -916,6 +973,65 @@ class TestCheckpointBucket(unittest.TestCase):
             service._checkpoint_bucket(ts1),
             service._checkpoint_bucket(ts2)
         )
+
+
+class TestValidationIdempotencyKeyUTC(unittest.TestCase):
+    """PR567: Tests for UTC-based validation idempotency keys."""
+
+    def test_validation_idempotency_key_uses_utc(self):
+        """Idempotency key uses UTC, not local time."""
+        from public_tasks import _validation_idempotency_key
+        from datetime import datetime, timezone
+        from unittest.mock import patch
+
+        # Freeze time to a known UTC timestamp
+        fixed_utc = datetime(2024, 6, 15, 23, 30, 0, tzinfo=timezone.utc)
+
+        with patch('public_tasks.datetime') as mock_datetime:
+            mock_datetime.now.return_value = fixed_utc
+            mock_datetime.side_effect = lambda *args, **kwargs: datetime(*args, **kwargs)
+
+            key = _validation_idempotency_key("paper")
+
+            # Should use UTC date
+            self.assertEqual(key, "2024-06-15-paper-all")
+
+    def test_validation_idempotency_key_daily_format(self):
+        """Daily cadence produces YYYY-MM-DD format without timezone offset."""
+        from public_tasks import _validation_idempotency_key
+        from datetime import datetime, timezone
+        from unittest.mock import patch
+
+        fixed_utc = datetime(2024, 3, 10, 5, 0, 0, tzinfo=timezone.utc)
+
+        with patch('public_tasks.datetime') as mock_datetime:
+            mock_datetime.now.return_value = fixed_utc
+            mock_datetime.side_effect = lambda *args, **kwargs: datetime(*args, **kwargs)
+
+            key = _validation_idempotency_key("paper", cadence="daily")
+
+            # No timezone offset in key, just YYYY-MM-DD
+            self.assertEqual(key, "2024-03-10-paper-all")
+            self.assertNotIn("+", key)
+            self.assertNotIn("Z", key)
+
+    def test_validation_idempotency_key_intraday_format(self):
+        """Intraday cadence produces YYYY-MM-DD-HH format."""
+        from public_tasks import _validation_idempotency_key
+        from datetime import datetime, timezone
+        from unittest.mock import patch
+
+        fixed_utc = datetime(2024, 3, 10, 14, 30, 0, tzinfo=timezone.utc)
+
+        with patch('public_tasks.datetime') as mock_datetime:
+            mock_datetime.now.return_value = fixed_utc
+            mock_datetime.side_effect = lambda *args, **kwargs: datetime(*args, **kwargs)
+
+            key = _validation_idempotency_key("paper", user_id="user-123", cadence="intraday")
+
+            # Should include hour
+            self.assertEqual(key, "2024-03-10-14-paper-user-123")
+            self.assertNotIn("+", key)
 
 
 class TestDrawdownCalculation(unittest.TestCase):

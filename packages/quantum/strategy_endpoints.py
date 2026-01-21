@@ -19,6 +19,7 @@ from .services.backtest_workflow import _run_backtest_workflow
 from packages.quantum.services.backtest_engine import BacktestEngine, BacktestRunResult
 from packages.quantum.services.param_search_runner import ParamSearchRunner
 from packages.quantum.services.walkforward_runner import WalkForwardResult
+from packages.quantum.services.backtest_identity import BacktestIdentity
 from packages.quantum.market_data import PolygonService
 from packages.quantum.strategy_registry import STRATEGY_REGISTRY
 from packages.quantum.core.rate_limiter import limiter
@@ -41,6 +42,14 @@ def _persist_v3_results(
 ):
     param_hash = json.dumps(params, sort_keys=True)
 
+    # v4: Compute deterministic identity hashes
+    identity = BacktestIdentity.compute_full_identity(
+        request=request,
+        config=config,
+        cost_model=request.cost_model,
+        seed=request.seed
+    )
+
     row = {
         "user_id": user_id,
         "strategy_name": strategy_name,
@@ -55,7 +64,10 @@ def _persist_v3_results(
         "test_days": request.walk_forward.test_days if request.walk_forward else None,
         "step_days": request.walk_forward.step_days if request.walk_forward else None,
         "seed": request.seed,
-        "status": "completed"
+        "status": "completed",
+        # v4: Identity fingerprints for determinism
+        "data_hash": identity["data_hash"],
+        "code_sha": identity["code_sha"],
     }
 
     metrics = {}

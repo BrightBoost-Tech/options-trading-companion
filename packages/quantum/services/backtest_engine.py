@@ -7,6 +7,12 @@ from pydantic import BaseModel, Field
 
 from packages.quantum.strategy_profiles import StrategyConfig, CostModelConfig, BacktestRequestV3
 from packages.quantum.market_data import PolygonService, extract_underlying_symbol
+
+# v5 dual-import shim for unified metrics
+try:
+    from packages.quantum.services.backtest_metrics import calculate_backtest_metrics
+except ImportError:
+    from services.backtest_metrics import calculate_backtest_metrics
 from packages.quantum.analytics.regime_scoring import ScoringEngine, ConvictionTransform
 from packages.quantum.services.options_utils import get_contract_multiplier
 from packages.quantum.analytics.regime_integration import (
@@ -442,8 +448,8 @@ class BacktestEngine:
                 "cash": cash
             })
 
-        # Calculate Metrics
-        metrics = self._calculate_metrics(trades, equity_curve, initial_equity)
+        # Calculate Metrics (v5: pass events for unified v4 metrics)
+        metrics = self._calculate_metrics(trades, equity_curve, initial_equity, events=events)
 
         # PR5: Add debug metrics for options to track scoring vs trading symbols
         if multiplier == 100 and underlying_symbol:
@@ -494,68 +500,32 @@ class BacktestEngine:
         res = V3TCM.simulate_fill(order, quote, cost_model, seed=seed_val)
         return res["avg_fill_price"]
 
-    def _calculate_metrics(self, trades: List[Dict], equity_curve: List[Dict], initial_equity: float) -> Dict[str, Any]:
-        if not trades:
-            return {
-                "sharpe": 0.0,
-                "max_drawdown": 0.0,
-                "profit_factor": 0.0,
-                "win_rate": 0.0,
-                "total_pnl": 0.0,
-                "turnover": 0.0,
-                "slippage_paid": 0.0,
-                "fill_rate": 1.0,
-                "trades_count": 0
-            }
+    def _calculate_metrics(
+        self,
+        trades: List[Dict],
+        equity_curve: List[Dict],
+        initial_equity: float,
+        events: List[Dict] = None
+    ) -> Dict[str, Any]:
+        """
+        Calculate backtest metrics using unified v4 metrics calculator.
 
-        total_pnl = sum(t["pnl"] for t in trades)
-        wins = [t for t in trades if t["pnl"] > 0]
-        losses = [t for t in trades if t["pnl"] <= 0]
+        v5: Delegates to calculate_backtest_metrics for consistent turnover,
+        fill_rate, and cost_drag_bps calculations across single-run and
+        walk-forward modes.
 
-        win_rate = len(wins) / len(trades) if trades else 0.0
+        Args:
+            trades: List of trade records
+            equity_curve: List of equity snapshots
+            initial_equity: Starting capital
+            events: Optional list of trade events for fill_rate calculation
 
-        gross_profit = sum(t["pnl"] for t in wins)
-        gross_loss = abs(sum(t["pnl"] for t in losses))
-        profit_factor = gross_profit / gross_loss if gross_loss > 0 else float('inf')
-
-        # Max Drawdown from equity curve
-        peaks = [initial_equity]
-        drawdowns = []
-        max_eq = initial_equity
-        for point in equity_curve:
-            eq = point["equity"]
-            max_eq = max(max_eq, eq)
-            dd = (max_eq - eq) / max_eq if max_eq > 0 else 0
-            drawdowns.append(dd)
-
-        max_drawdown = max(drawdowns) if drawdowns else 0.0
-
-        # Sharpe (simplified, daily returns)
-        # Need daily returns
-        if len(equity_curve) > 1:
-            returns = []
-            for i in range(1, len(equity_curve)):
-                prev = equity_curve[i-1]["equity"]
-                curr = equity_curve[i]["equity"]
-                ret = (curr - prev) / prev if prev > 0 else 0
-                returns.append(ret)
-
-            mean_ret = np.mean(returns) if returns else 0
-            std_ret = np.std(returns) if returns else 1
-            sharpe = (mean_ret / std_ret) * np.sqrt(252) if std_ret > 0 else 0.0
-        else:
-            sharpe = 0.0
-
-        slippage_paid = sum(t.get("slippage_paid", 0) for t in trades)
-
-        return {
-            "sharpe": float(sharpe),
-            "max_drawdown": float(max_drawdown),
-            "profit_factor": float(profit_factor),
-            "win_rate": float(win_rate),
-            "total_pnl": float(total_pnl),
-            "turnover": 0.0, # Placeholder
-            "slippage_paid": float(slippage_paid),
-            "fill_rate": 1.0, # Placeholder
-            "trades_count": len(trades)
-        }
+        Returns:
+            Dict with all v4 metrics
+        """
+        return calculate_backtest_metrics(
+            trades,
+            equity_curve,
+            initial_equity,
+            events=events
+        )

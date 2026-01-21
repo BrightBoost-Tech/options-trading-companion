@@ -42,6 +42,9 @@ def generate_folds(
     for engine execution, while train_start/train_end remain the persisted
     boundaries for fold metrics.
 
+    v5 fix: Added 1-day gap between train_end and test_start to prevent
+    data leakage. Fold windows: Train [T0..T1], Test [T1+1+embargo .. T2]
+
     Returns:
         List of fold dicts with:
         - train_start, train_end: persisted training window boundaries
@@ -66,7 +69,8 @@ def generate_folds(
         if train_start_engine < request_start:
             train_start_engine = request_start
 
-        test_start = train_end + timedelta(days=embargo_days)
+        # v5 fix: Add 1-day gap to prevent train/test overlap (leakage)
+        test_start = train_end + timedelta(days=1 + embargo_days)
         test_end = test_start + timedelta(days=test_days)
 
         if test_end > final_end:
@@ -233,6 +237,23 @@ class WalkForwardRunner:
                         best_params = {"conviction_floor": thresh}
                         best_train_metrics = copy.deepcopy(res.metrics) if res.metrics else {}
 
+            # v5: Fallback when no tuning candidate passed min_trades_per_fold
+            tuning_fallback = False
+            if not best_train_metrics and best_score == -999.0:
+                # Run ONE fallback with base_config (ignore min_trades for this run)
+                fallback_res = self.engine.run_single(
+                    request.ticker,
+                    fold["train_start_engine"],
+                    fold["train_end"],
+                    base_config,
+                    request.cost_model,
+                    request.seed,
+                    initial_equity=100000.0
+                )
+                tuning_fallback = True
+                best_params = {"fallback": True}
+                best_train_metrics = copy.deepcopy(fallback_res.metrics) if fallback_res.metrics else {}
+
             # 2. TEST: Run with best params
             test_config = base_config.model_copy()
             for k, v in best_params.items():
@@ -250,18 +271,21 @@ class WalkForwardRunner:
             )
 
             # v4: Store full train_metrics alongside train_sharpe for backward compat
-            # train_sharpe: use sharpe from best_train_metrics for backward compat
-            train_sharpe = best_train_metrics.get("sharpe", best_score if objective_metric == "sharpe" else 0.0)
+            # v5: Ensure train_sharpe is never the sentinel -999.0
+            train_sharpe = best_train_metrics.get("sharpe", 0.0)
+            if train_sharpe == -999.0:
+                train_sharpe = 0.0
 
             fold_results.append({
                 "fold_index": i,
                 "train_window": f"{fold['train_start']} to {fold['train_end']}",
                 "test_window": f"{fold['test_start']} to {fold['test_end']}",
                 "optimized_params": best_params,
-                "train_sharpe": train_sharpe,  # backward compat
+                "train_sharpe": train_sharpe,  # backward compat, never sentinel
                 "train_metrics": best_train_metrics,  # v4: full metrics dict
                 "test_metrics": test_res.metrics if test_res.metrics else {},
-                "trades_count": len(test_res.trades)
+                "trades_count": len(test_res.trades),
+                "tuning_fallback": tuning_fallback  # v5: explicit flag for UI/debug
             })
 
             # Collect trades and tag with fold index

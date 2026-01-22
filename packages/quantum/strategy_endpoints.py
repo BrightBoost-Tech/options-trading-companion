@@ -21,6 +21,7 @@ from packages.quantum.services.param_search_runner import ParamSearchRunner
 from packages.quantum.services.walkforward_runner import WalkForwardResult
 from packages.quantum.services.backtest_identity import BacktestIdentity
 from packages.quantum.services.promotion_gate import evaluate_promotion_gate, compute_param_hash
+from packages.quantum.services.replay.canonical import canonical_json_bytes
 from packages.quantum.market_data import PolygonService
 from packages.quantum.strategy_registry import STRATEGY_REGISTRY
 from packages.quantum.core.rate_limiter import limiter
@@ -92,7 +93,8 @@ def _persist_v3_results(
     params: Dict[str, Any],
     output: Any # BacktestRunResult or WalkForwardResult
 ):
-    param_hash = json.dumps(params, sort_keys=True)
+    # Use canonical JSON (sorted, no whitespace) for determinism
+    param_hash = canonical_json_bytes(params).decode("utf-8")
 
     # v4: Compute deterministic identity hashes
     identity = BacktestIdentity.compute_full_identity(

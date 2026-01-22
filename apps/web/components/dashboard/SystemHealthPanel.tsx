@@ -208,7 +208,7 @@ export function SystemHealthPanel() {
               {data.veto_rate_7d.toFixed(1)}% / {data.veto_rate_30d.toFixed(1)}%
             </span>
           </div>
-          <Progress value={data.veto_rate_30d} className="h-2" />
+          <Progress value={data.veto_rate_30d} className="h-2" aria-label="30-day Veto Rate" />
         </div>
 
         {/* Outcome Quality */}

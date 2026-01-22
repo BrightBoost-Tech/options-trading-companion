@@ -1,14 +1,18 @@
 'use client';
 
-import React, { useEffect, useRef, memo, useState } from 'react';
+import React, { useEffect, useRef, memo, useState, useCallback } from 'react';
 import { Card, CardContent } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
-import { Suggestion } from '@/lib/types';
+import { Suggestion, TraceResponse } from '@/lib/types';
 import { logEvent } from '@/lib/analytics';
+import { fetchWithAuth } from '@/lib/api';
 import { QuantumTooltip } from '@/components/ui/QuantumTooltip';
-import { X, RefreshCw, Clock, Loader2, ShieldAlert, AlertTriangle } from 'lucide-react';
+import { X, RefreshCw, Clock, Loader2, ShieldAlert, AlertTriangle, ChevronDown, ChevronUp, Shield, ShieldCheck, ShieldX, Info } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Checkbox } from '@/components/ui/checkbox';
+
+// v4: Card mode for context-aware behavior
+type CardMode = 'DEFAULT' | 'PAPER_INBOX';
 
 interface SuggestionCardProps {
     suggestion: Suggestion;
@@ -22,7 +26,165 @@ interface SuggestionCardProps {
     isSelected?: boolean;
     onToggleSelect?: (suggestion: Suggestion) => void;
     isStaging?: boolean;
+    // v4: Mode for context-aware behavior (PAPER_INBOX hides execute buttons)
+    mode?: CardMode;
 }
+
+// v4: Integrity badge component
+const IntegrityBadge = ({ status }: { status: string }) => {
+    const config = {
+        VERIFIED: { icon: ShieldCheck, color: 'bg-green-100 text-green-800 dark:bg-green-900/30 dark:text-green-400 border-green-200 dark:border-green-900', label: 'Verified' },
+        TAMPERED: { icon: ShieldX, color: 'bg-red-100 text-red-800 dark:bg-red-900/30 dark:text-red-400 border-red-200 dark:border-red-900', label: 'Tampered' },
+        UNVERIFIED: { icon: Shield, color: 'bg-gray-100 text-gray-600 dark:bg-gray-800 dark:text-gray-400 border-gray-200 dark:border-gray-700', label: 'Unverified' },
+    }[status] || { icon: Shield, color: 'bg-gray-100 text-gray-600', label: status };
+
+    const Icon = config.icon;
+    return (
+        <Badge variant="outline" className={`text-[10px] h-5 px-1.5 ${config.color}`}>
+            <Icon className="w-3 h-3 mr-1" />
+            {config.label}
+        </Badge>
+    );
+};
+
+// v4: Details Drawer component (lazy loads trace data)
+const DetailsDrawer = ({ traceId, isExpanded }: { traceId?: string; isExpanded: boolean }) => {
+    const [traceData, setTraceData] = useState<TraceResponse | null>(null);
+    const [loading, setLoading] = useState(false);
+    const [error, setError] = useState<string | null>(null);
+    const hasFetched = useRef(false);
+
+    useEffect(() => {
+        if (!isExpanded || !traceId || hasFetched.current) return;
+
+        const fetchTrace = async () => {
+            setLoading(true);
+            setError(null);
+            try {
+                const res = await fetchWithAuth(`/observability/trace/${traceId}`);
+                setTraceData(res);
+            } catch (e: any) {
+                if (e?.status === 404) {
+                    setError('No v4 trace available');
+                } else {
+                    setError('Failed to load trace details');
+                }
+            } finally {
+                setLoading(false);
+                hasFetched.current = true;
+            }
+        };
+        fetchTrace();
+    }, [isExpanded, traceId]);
+
+    if (!isExpanded) return null;
+
+    if (!traceId) {
+        return (
+            <div className="mt-3 p-3 bg-muted/30 border border-border rounded-md text-xs text-muted-foreground">
+                <Info className="w-4 h-4 inline mr-1" />
+                No v4 trace available for this suggestion
+            </div>
+        );
+    }
+
+    if (loading) {
+        return (
+            <div className="mt-3 p-3 bg-muted/30 border border-border rounded-md flex items-center gap-2 text-xs text-muted-foreground">
+                <Loader2 className="w-4 h-4 animate-spin" />
+                Loading trace details...
+            </div>
+        );
+    }
+
+    if (error) {
+        return (
+            <div className="mt-3 p-3 bg-muted/30 border border-border rounded-md text-xs text-muted-foreground">
+                <Info className="w-4 h-4 inline mr-1" />
+                {error}
+            </div>
+        );
+    }
+
+    if (!traceData) return null;
+
+    const { status, lifecycle } = traceData;
+    const attribution = lifecycle?.attribution;
+    const auditLog = lifecycle?.audit_log || [];
+
+    // Extract drivers
+    const driversAgents = attribution?.drivers_agents || [];
+    const driversRegime = attribution?.drivers_regime;
+    const vetoes = attribution?.vetoes || [];
+
+    return (
+        <div className="mt-3 p-3 bg-muted/20 border border-border rounded-md space-y-3">
+            {/* Integrity Badge */}
+            <div className="flex items-center gap-2">
+                <span className="text-xs font-medium text-muted-foreground">Integrity:</span>
+                <IntegrityBadge status={status} />
+            </div>
+
+            {/* Top Drivers */}
+            {(driversAgents.length > 0 || vetoes.length > 0) && (
+                <div>
+                    <span className="text-xs font-medium text-muted-foreground block mb-1">Top Drivers:</span>
+                    <div className="space-y-1">
+                        {driversAgents.slice(0, 3).map((d, i) => (
+                            <div key={i} className="text-xs text-foreground flex items-start gap-1">
+                                <span className="text-green-600 dark:text-green-400">+</span>
+                                <span>{d.agent}: {d.signal}</span>
+                            </div>
+                        ))}
+                        {vetoes.slice(0, 2).map((v, i) => (
+                            <div key={`veto-${i}`} className="text-xs text-foreground flex items-start gap-1">
+                                <span className="text-red-600 dark:text-red-400">-</span>
+                                <span>{v.agent}: {v.reason}</span>
+                            </div>
+                        ))}
+                    </div>
+                </div>
+            )}
+
+            {/* Regime Context */}
+            {driversRegime && (
+                <div>
+                    <span className="text-xs font-medium text-muted-foreground block mb-1">Regime Context:</span>
+                    <div className="text-xs text-foreground">
+                        {driversRegime.regime}
+                        {driversRegime.context && ` — ${driversRegime.context}`}
+                    </div>
+                </div>
+            )}
+
+            {/* No attribution fallback */}
+            {!attribution && (
+                <div className="text-xs text-muted-foreground">
+                    No attribution available
+                </div>
+            )}
+
+            {/* Audit Events (Collapsed) */}
+            {auditLog.length > 0 && (
+                <details className="text-xs">
+                    <summary className="cursor-pointer text-muted-foreground hover:text-foreground">
+                        Audit Events ({auditLog.length})
+                    </summary>
+                    <div className="mt-2 space-y-1 pl-2 border-l border-border">
+                        {auditLog.slice(0, 10).map((evt, i) => (
+                            <div key={i} className="text-muted-foreground">
+                                <span className="font-mono">{evt.event}</span>
+                                <span className="ml-2 opacity-60">
+                                    {new Date(evt.timestamp).toLocaleTimeString()}
+                                </span>
+                            </div>
+                        ))}
+                    </div>
+                </details>
+            )}
+        </div>
+    );
+};
 
 const SuggestionCard = ({
     suggestion,
@@ -34,16 +196,35 @@ const SuggestionCard = ({
     batchModeEnabled = false,
     isSelected = false,
     onToggleSelect,
-    isStaging = false
+    isStaging = false,
+    mode = 'DEFAULT'
 }: SuggestionCardProps) => {
     const { order_json, score, metrics, iv_regime, iv_rank, delta_impact, theta_impact, staged } = suggestion;
     const [dismissOpen, setDismissOpen] = useState(false);
     const [isRefreshing, setIsRefreshing] = useState(false);
+    const [detailsExpanded, setDetailsExpanded] = useState(false);
     // Cast to any to access optional agent_summary without changing global type
     const agent_summary = (suggestion as any).agent_summary;
+    // v4: Access decision_lineage for constraints
+    const decision_lineage = (suggestion as any).decision_lineage;
+    const active_constraints = decision_lineage?.active_constraints;
     const hasLoggedView = useRef(false);
     const firstDismissReasonRef = useRef<HTMLButtonElement>(null);
     const displaySymbol = suggestion.display_symbol ?? suggestion.symbol ?? suggestion.ticker ?? '---';
+
+    // v4: Compute confidence percentage (prefer agent_summary.overall_score, fallback to score)
+    const confidenceValue = (() => {
+        if (agent_summary?.overall_score !== undefined) {
+            const val = agent_summary.overall_score;
+            // Normalize: if <= 1, treat as 0-1 scale; else assume 0-100
+            return val <= 1 ? Math.round(val * 100) : Math.round(val);
+        }
+        if (score !== undefined) {
+            // Score is typically 0-100
+            return Math.round(score);
+        }
+        return null;
+    })();
 
     // PR4: Detect blocked state from quality gate
     const isBlocked = suggestion.status === 'NOT_EXECUTABLE' || !!suggestion.blocked_reason;
@@ -330,44 +511,52 @@ const SuggestionCard = ({
                             </div>
                         )}
 
-                        <div className="flex gap-2 mt-1">
+                        <div className="flex gap-2 mt-1 flex-wrap">
+                             {/* v4: First-class Confidence Badge */}
+                             {confidenceValue !== null && (
+                                <Badge className="text-[10px] h-5 px-1.5 bg-indigo-50 text-indigo-700 dark:bg-indigo-900/30 dark:text-indigo-300 border-indigo-100 dark:border-indigo-900">
+                                    Confidence {confidenceValue}%
+                                </Badge>
+                             )}
+
                              {/* IV Context */}
                              {iv_regime && (
                                 <Badge className={`text-[10px] px-1 py-0 ${getIVBadgeColor(iv_regime)}`}>
                                     IV: {iv_regime} ({iv_rank?.toFixed(0) || '--'})
                                 </Badge>
                              )}
-                             {/* Score/Conviction */}
-                             {score !== undefined && (
-                                <Badge className="text-[10px] bg-purple-100 text-purple-800 dark:bg-purple-900/30 dark:text-purple-300 px-1 py-0">
-                                    Score: {score.toFixed(0)}
+
+                             {/* Agent Summary VETO indicator */}
+                             {agent_summary && (agent_summary.decision === 'VETOED' || agent_summary.vetoed) && (
+                                <Badge variant="destructive" className="text-[10px] h-5 px-1.5">
+                                    VETOED
                                 </Badge>
                              )}
 
-                             {/* Agent Summary Chip */}
-                             {agent_summary && (
-                                <>
-                                    {(agent_summary.decision === 'VETOED' || agent_summary.vetoed) ? (
-                                        <Badge variant="destructive" className="text-[10px] h-5 px-1.5 ml-1">
-                                            VETOED
-                                        </Badge>
-                                    ) : (typeof agent_summary.overall_score === 'number') && (
-                                        <Badge variant="secondary" className="text-[10px] h-5 px-1.5 bg-indigo-50 text-indigo-700 border-indigo-100 hover:bg-indigo-100 ml-1">
-                                            Confidence {Math.round(agent_summary.overall_score <= 1.0 ? agent_summary.overall_score * 100 : agent_summary.overall_score)}%
-                                        </Badge>
-                                    )}
-                                    <QuantumTooltip
-                                        label="Why this trade?"
-                                        className="ml-1"
-                                        content={
-                                            (agent_summary.top_reasons?.length)
-                                                ? agent_summary.top_reasons.map((r: string) => `• ${r}`).join(' ')
-                                                : "Suggested based on your positions, volatility regime, and risk model. Always confirm it fits your own plan."
-                                        }
-                                    />
-                                </>
+                             {/* Why tooltip */}
+                             {agent_summary?.top_reasons?.length > 0 && (
+                                <QuantumTooltip
+                                    label="Why this trade?"
+                                    className="ml-1"
+                                    content={agent_summary.top_reasons.map((r: string) => `• ${r}`).join(' ')}
+                                />
                              )}
                         </div>
+
+                        {/* v4: Constraints Chips Row */}
+                        {active_constraints && active_constraints.length > 0 && (
+                            <div className="flex gap-1 mt-1.5 flex-wrap">
+                                {active_constraints.slice(0, 5).map((constraint: string, idx: number) => (
+                                    <Badge
+                                        key={idx}
+                                        variant="outline"
+                                        className="text-[9px] h-4 px-1 bg-yellow-50 text-yellow-700 dark:bg-yellow-900/20 dark:text-yellow-400 border-yellow-200 dark:border-yellow-900"
+                                    >
+                                        {constraint}
+                                    </Badge>
+                                ))}
+                            </div>
+                        )}
                     </div>
                     <div className="text-right">
                         <div className="font-bold text-green-600 dark:text-green-400 text-sm">EV: ${metrics?.ev?.toFixed(2) || '--'}</div>
@@ -450,8 +639,22 @@ const SuggestionCard = ({
                     </div>
                 )}
 
+                {/* v4: Details Drawer */}
+                <DetailsDrawer traceId={suggestion.trace_id} isExpanded={detailsExpanded} />
+
                 {/* Footer Actions */}
                 <div className="flex justify-end gap-2 mt-3 pt-2 border-t border-border items-center">
+                    {/* v4: Details Button */}
+                    <Button
+                        variant="ghost"
+                        size="sm"
+                        onClick={() => setDetailsExpanded(!detailsExpanded)}
+                        className="h-7 px-2 text-xs text-muted-foreground hover:text-foreground mr-auto"
+                    >
+                        {detailsExpanded ? <ChevronUp className="w-3 h-3 mr-1" /> : <ChevronDown className="w-3 h-3 mr-1" />}
+                        Details
+                    </Button>
+
                     {/* Stale Warning / Refresh */}
                     {isStale && !staged && (
                         <div className="flex items-center gap-2 mr-auto">

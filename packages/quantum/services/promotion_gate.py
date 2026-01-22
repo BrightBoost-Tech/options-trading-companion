@@ -7,6 +7,7 @@ for promotion to micro-live or live trading modes.
 
 from typing import Any, Dict, List, Optional
 from dataclasses import dataclass
+from packages.quantum.services.replay.canonical import compute_content_hash
 
 
 @dataclass
@@ -207,14 +208,7 @@ def compute_param_hash(optimized_params: Optional[Dict[str, Any]]) -> str:
     Returns:
         SHA256 hex string (64 chars)
     """
-    import hashlib
-    import json
-
-    if not optimized_params:
-        # Return hash of empty dict for consistency
-        params_str = "{}"
-    else:
-        # Sort keys for deterministic ordering
-        params_str = json.dumps(optimized_params, sort_keys=True, default=str)
-
-    return hashlib.sha256(params_str.encode()).hexdigest()
+    # Use canonical hashing (includes sort_keys, no whitespace, float normalization)
+    # Handle None/Empty by treating as empty dict
+    params_to_hash = optimized_params or {}
+    return compute_content_hash(params_to_hash)

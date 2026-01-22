@@ -209,13 +209,10 @@ def calculate_iv_rank(returns: List[float], days: int = 365) -> float:
     if len(returns_arr) < 30:
         return None
 
-    # Create rolling windows of size 30
-    # shape will be (N - 29, 30)
-    windows = sliding_window_view(returns_arr, window_shape=30)
-
-    # Calculate std dev for each window along axis 1
-    # ddof=0 matches original implementation (population std)
-    rolling_vol = np.std(windows, axis=1, ddof=0) * np.sqrt(252)
+    # Optimization: Use fast_rolling_std (O(N)) instead of sliding_window_view (O(N*W))
+    # This aligns with 2026-05-24 journal entry regarding rolling overhead.
+    stds = fast_rolling_std(returns_arr, 30)
+    rolling_vol = stds * np.sqrt(252)
 
     if rolling_vol.size == 0:
         return None

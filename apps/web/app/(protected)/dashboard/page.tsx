@@ -18,10 +18,12 @@ import RiskSummaryCard from '@/components/dashboard/RiskSummaryCard';
 import HoldingsTreemap from '@/components/dashboard/HoldingsTreemap';
 import PortfolioHoldingsTable from '@/components/dashboard/PortfolioHoldingsTable';
 import PaperPortfolioWidget from '@/components/dashboard/PaperPortfolioWidget';
-import { fetchWithAuth, fetchWithAuthTimeout } from '@/lib/api';
+import { fetchWithAuth, fetchWithAuthTimeout, ApiError } from '@/lib/api';
 import { QuantumTooltip } from "@/components/ui/QuantumTooltip";
 import { ThemeToggle } from '@/components/ThemeToggle';
 import { AlertTriangle, Wallet, Loader2, RefreshCw, ChevronDown, ChevronRight } from 'lucide-react';
+import { RequireAuth } from '@/components/RequireAuth';
+import { AuthRequired } from '@/components/AuthRequired';
 
 const mockAlerts = [
   { id: '1', message: 'SPY credit put spread scout: 475/470 for $1.50 credit', time: '2 min ago' },
@@ -31,7 +33,13 @@ const mockAlerts = [
 const isAbortError = (err: any) =>
   err?.name === 'AbortError' || err?.message?.toLowerCase()?.includes('aborted');
 
+const isAuthError = (err: any) =>
+  err instanceof ApiError && err.status === 401;
+
 export default function DashboardPage() {
+  // Auth state
+  const [authMissing, setAuthMissing] = useState(false);
+
   // Snapshot data
   const [snapshot, setSnapshot] = useState<any>(null);
   const [metrics, setMetrics] = useState<any>(null);
@@ -118,6 +126,10 @@ export default function DashboardPage() {
       setSnapshot(data);
     } catch (err: any) {
       if (isAbortError(err)) return;
+      if (isAuthError(err)) {
+        setAuthMissing(true);
+        return;
+      }
       console.error('Failed to load snapshot:', err);
     }
   };
@@ -257,7 +269,17 @@ export default function DashboardPage() {
   const effectiveHoldings = snapshot?.positions ?? snapshot?.holdings ?? [];
   const hasPositions = Array.isArray(effectiveHoldings) && effectiveHoldings.length > 0;
 
+  // Show auth required UI if authentication is missing
+  if (authMissing) {
+    return (
+      <DashboardLayout mockAlerts={[]}>
+        <AuthRequired message="Please log in to view your dashboard." />
+      </DashboardLayout>
+    );
+  }
+
   return (
+    <RequireAuth>
     <DashboardLayout mockAlerts={mockAlerts}>
       <div className="max-w-7xl mx-auto p-8 space-y-6">
 
@@ -561,5 +583,6 @@ export default function DashboardPage() {
 
       </div>
     </DashboardLayout>
+    </RequireAuth>
   );
 }

@@ -4,13 +4,16 @@ import React, { useEffect, useState, useCallback } from 'react';
 import { JobsTable } from '@/components/jobs/JobsTable';
 import { JobFilters } from '@/components/jobs/JobFilters';
 import { JobRun, JobFilters as JobFiltersType } from '@/lib/types';
-import { fetchWithAuth } from '@/lib/api';
+import { fetchWithAuth, ApiError } from '@/lib/api';
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
+import { RequireAuth } from '@/components/RequireAuth';
+import { AuthRequired } from '@/components/AuthRequired';
 
 export default function JobsPage() {
   const [jobs, setJobs] = useState<JobRun[]>([]);
   const [loading, setLoading] = useState(true);
   const [filters, setFilters] = useState<JobFiltersType>({});
+  const [authMissing, setAuthMissing] = useState(false);
 
   const loadJobs = useCallback(async () => {
     setLoading(true);
@@ -31,6 +34,10 @@ export default function JobsPage() {
         console.error("Expected array from /jobs/runs, got:", data);
       }
     } catch (error) {
+      if (error instanceof ApiError && error.status === 401) {
+        setAuthMissing(true);
+        return;
+      }
       console.error("Failed to load jobs:", error);
       setJobs([]);
     } finally {
@@ -42,7 +49,13 @@ export default function JobsPage() {
     loadJobs();
   }, [loadJobs]);
 
+  // Show auth required UI if authentication is missing
+  if (authMissing) {
+    return <AuthRequired message="Please log in to view job history." />;
+  }
+
   return (
+    <RequireAuth>
     <div className="space-y-6">
       <div>
         <h2 className="text-2xl font-bold tracking-tight">Job Monitor</h2>
@@ -64,5 +77,6 @@ export default function JobsPage() {
         </CardContent>
       </Card>
     </div>
+    </RequireAuth>
   );
 }

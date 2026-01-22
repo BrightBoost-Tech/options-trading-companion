@@ -1,102 +1,67 @@
 'use client';
 
 import { useState, useEffect } from 'react';
-import { supabase } from '@/lib/supabase';
 import { useRouter } from 'next/navigation';
 import DashboardLayout from '@/components/DashboardLayout';
 import SyncHoldingsButton from '@/components/SyncHoldingsButton';
-import { API_URL, TEST_USER_ID } from '@/lib/constants';
 import { formatOptionDisplay } from '@/lib/formatters';
-
-interface FetchOptions extends RequestInit {
-  timeout?: number;
-}
-
-// Helper to prevent hanging indefinitely (reused from Dashboard)
-const fetchWithTimeout = async (resource: RequestInfo, options: FetchOptions = {}) => {
-  const { timeout = 15000, ...rest } = options;
-
-  const controller = new AbortController();
-  const id = setTimeout(() => controller.abort(), timeout);
-
-  const response = await fetch(resource, {
-    ...rest,
-    signal: controller.signal
-  });
-
-  clearTimeout(id);
-  return response;
-};
+import { fetchWithAuthTimeout, ApiError } from '@/lib/api';
+import { RequireAuth } from '@/components/RequireAuth';
+import { AuthRequired } from '@/components/AuthRequired';
 
 export default function PortfolioPage() {
-  const [user, setUser] = useState<any>(null);
   const [holdings, setHoldings] = useState<any[]>([]);
   const [snapshot, setSnapshot] = useState<any>(null);
   const [loading, setLoading] = useState(true);
+  const [authMissing, setAuthMissing] = useState(false);
   const router = useRouter();
 
   useEffect(() => {
-    loadUser();
+    loadSnapshot();
   }, []);
-
-  useEffect(() => {
-    if (user) {
-      loadSnapshot();
-    }
-  }, [user]);
-
-  const loadUser = async () => {
-    const { data: { user } } = await supabase.auth.getUser();
-
-    if (user) {
-        setUser(user);
-    } else {
-        // Test Mode / Dev Fallback
-        // If no user found, we can assume test mode if explicitly checking or if we want to support
-        // unauthenticated viewing in dev.
-        // For the purpose of the "Test Mode" requirement:
-        console.log("⚠️ No user found, using Test Mode user.");
-        setUser({ id: TEST_USER_ID, email: 'test@example.com' });
-    }
-  };
 
   const loadSnapshot = async () => {
     setLoading(true);
     try {
-      const { data: { session } } = await supabase.auth.getSession();
-      
-      let headers: any = {};
-      if (session) {
-          headers['Authorization'] = `Bearer ${session.access_token}`;
-      } else {
-           // Test Mode Header
-           headers['X-Test-Mode-User'] = TEST_USER_ID;
-      }
-
-      const response = await fetchWithTimeout(`${API_URL}/portfolio/snapshot`, {
-         headers: headers,
-         timeout: 10000
-      });
-
-      if (response.ok) {
-        const data = await response.json();
-        setSnapshot(data);
-        setHoldings(data.holdings || []);
-      }
+      const data = await fetchWithAuthTimeout('/portfolio/snapshot', 10000);
+      setSnapshot(data);
+      setHoldings(data.holdings || []);
     } catch (err) {
+      if (err instanceof ApiError && err.status === 401) {
+        setAuthMissing(true);
+        return;
+      }
       console.error('Failed to load snapshot:', err);
     } finally {
       setLoading(false);
     }
   };
 
-  if (!user) return <div className="p-8">Loading...</div>;
+  // Show auth required UI if authentication is missing
+  if (authMissing) {
+    return (
+      <DashboardLayout>
+        <AuthRequired message="Please log in to view your portfolio." />
+      </DashboardLayout>
+    );
+  }
+
+  if (loading && !snapshot) {
+    return (
+      <DashboardLayout>
+        <div className="flex h-[50vh] items-center justify-center">
+          <div className="h-8 w-8 animate-spin rounded-full border-4 border-primary border-t-transparent" />
+        </div>
+      </DashboardLayout>
+    );
+  }
 
   // Group holdings by type or other logic if needed. For now, flat list matching dashboard.
   const stockHoldings = holdings.filter(h => !h.option_contract);
   const optionHoldings = holdings.filter(h => h.option_contract);
 
   return (
+    <RequireAuth>
     <DashboardLayout>
       <div className="max-w-7xl mx-auto p-8">
         <div className="flex justify-between items-center mb-6">
@@ -208,5 +173,6 @@ export default function PortfolioPage() {
           </div>
       </div>
     </DashboardLayout>
+    </RequireAuth>
   );
 }

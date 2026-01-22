@@ -29,6 +29,14 @@ let cachedHeadersTimestamp = 0;
 /**
  * Returns cached auth headers if valid (default TTL 5000ms), otherwise fetches new ones.
  * This prevents repeated session calls during component fan-out.
+ *
+ * Production behavior:
+ * - NEVER sends X-Test-Mode-User header
+ * - Requires real Supabase JWT; if missing, sets X-Auth-Missing marker
+ *
+ * Development behavior:
+ * - If NEXT_PUBLIC_ENABLE_DEV_AUTH_BYPASS=1, sends X-Test-Mode-User
+ * - Otherwise uses Supabase JWT if available, or marks as unauthenticated
  */
 export async function getAuthHeadersCached(ttlMs = 5000): Promise<Record<string, string>> {
   const now = Date.now();
@@ -41,19 +49,23 @@ export async function getAuthHeadersCached(ttlMs = 5000): Promise<Record<string,
     'Content-Type': 'application/json',
   };
 
-  // Dev Auth Bypass
-  const devBypass = process.env.NEXT_PUBLIC_ENABLE_DEV_AUTH_BYPASS === '1';
-  // Use the global TEST_USER_ID constant if explicit dev user is not set,
-  // ensuring alignment with backend test user ID.
+  // Environment checks
+  const isProd = process.env.NODE_ENV === 'production';
+  // Dev bypass is ONLY allowed in non-production
+  const devBypassEnabled = !isProd && process.env.NEXT_PUBLIC_ENABLE_DEV_AUTH_BYPASS === '1';
   const devUser = process.env.NEXT_PUBLIC_DEV_USER_ID || TEST_USER_ID;
 
-  if (devBypass) {
+  if (devBypassEnabled) {
+    // Dev-only: use test mode header
     headers['X-Test-Mode-User'] = devUser;
   } else if (session?.access_token) {
+    // Real authentication via Supabase JWT
     headers['Authorization'] = `Bearer ${session.access_token}`;
   } else {
-    // Fallback for tests/local (deprecated behavior, but kept for compatibility)
-    headers['X-Test-Mode-User'] = TEST_USER_ID;
+    // No session available - mark as unauthenticated
+    // In production, this will cause fetchWithAuth to throw
+    // In dev without bypass, this allows pages to detect missing auth
+    headers['X-Auth-Missing'] = '1';
   }
 
   cachedHeaders = headers;
@@ -62,12 +74,21 @@ export async function getAuthHeadersCached(ttlMs = 5000): Promise<Record<string,
 }
 
 /**
+ * Clears the cached auth headers.
+ * Call this when the user logs out or when auth state changes.
+ */
+export function clearAuthHeadersCache(): void {
+  cachedHeaders = null;
+  cachedHeadersTimestamp = 0;
+}
+
+/**
  * Helper for making authenticated requests to the backend.
- * Automatically injects the Supabase session token (via cached helper) or falls back to the test user ID.
+ * Automatically injects the Supabase session token (via cached helper).
  * Prepends API_URL if the input is a relative path starting with '/'.
  *
  * Returns the parsed JSON response by default.
- * Throws a typed ApiError if the response is not ok.
+ * Throws a typed ApiError if the response is not ok or if authentication is missing.
  */
 export async function fetchWithAuth<T = any>(
   input: FetchInput,
@@ -76,8 +97,14 @@ export async function fetchWithAuth<T = any>(
   // 1. Get auth headers (cached)
   const authHeaders = await getAuthHeadersCached();
 
-  // 2. Construct final headers
+  // 2. Check for missing authentication
+  if (authHeaders['X-Auth-Missing'] === '1') {
+    throw new ApiError('Authentication required', 401, { detail: 'not_authenticated' });
+  }
+
+  // 3. Construct final headers (exclude the marker)
   const headers: Record<string, string> = { ...authHeaders };
+  delete headers['X-Auth-Missing'];
 
   // 3. Merge with user-provided headers
   if (init?.headers) {

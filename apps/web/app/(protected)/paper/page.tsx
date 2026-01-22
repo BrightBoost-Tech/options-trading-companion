@@ -6,11 +6,13 @@ import { Button } from "@/components/ui/button"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
 import { Badge } from "@/components/ui/badge"
 import { Loader2, RefreshCw, TrendingUp, DollarSign, Wallet, AlertCircle } from "lucide-react"
-import { fetchWithAuth } from "@/lib/api"
+import { fetchWithAuth, ApiError } from "@/lib/api"
 import { ClosePaperPositionModal } from "@/components/paper/ClosePaperPositionModal"
 import { ResetPaperAccountModal } from "@/components/paper/ResetPaperAccountModal"
 import DashboardLayout from "@/components/DashboardLayout"
 import { useStrategyRegistry } from "@/hooks/useStrategyRegistry"
+import { RequireAuth } from "@/components/RequireAuth"
+import { AuthRequired } from "@/components/AuthRequired"
 
 // Types matching backend response
 interface PaperPortfolio {
@@ -51,6 +53,7 @@ export default function PaperTradingPage() {
   const [loading, setLoading] = useState(true)
   const [data, setData] = useState<PaperResponse | null>(null)
   const [error, setError] = useState<string | null>(null)
+  const [authMissing, setAuthMissing] = useState(false)
 
   // Close Modal State
   const [selectedPosition, setSelectedPosition] = useState<PaperPosition | null>(null)
@@ -74,6 +77,10 @@ export default function PaperTradingPage() {
         setError("Failed to load portfolio data")
       }
     } catch (err) {
+      if (err instanceof ApiError && err.status === 401) {
+        setAuthMissing(true)
+        return
+      }
       setError("An error occurred while fetching data")
       console.error(err)
     } finally {
@@ -118,6 +125,15 @@ export default function PaperTradingPage() {
     }
   }
 
+  // Show auth required UI if authentication is missing
+  if (authMissing) {
+    return (
+      <DashboardLayout>
+        <AuthRequired message="Please log in to access paper trading." />
+      </DashboardLayout>
+    )
+  }
+
   if (loading && !data) {
     return (
       <DashboardLayout>
@@ -129,6 +145,7 @@ export default function PaperTradingPage() {
   }
 
   return (
+    <RequireAuth>
     <DashboardLayout>
       <div className="space-y-6 p-6">
         <div className="flex items-center justify-between">
@@ -310,5 +327,6 @@ export default function PaperTradingPage() {
         />
       </div>
     </DashboardLayout>
+    </RequireAuth>
   )
 }

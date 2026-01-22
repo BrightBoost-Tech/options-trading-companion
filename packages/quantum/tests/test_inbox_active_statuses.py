@@ -3,11 +3,13 @@ Tests for PR4/PR4.1: Trade Inbox active statuses and today window bounds.
 
 PR4: Ensures NOT_EXECUTABLE suggestions appear in the active queue (not completed).
 PR4.1: Ensures explicit today window bounds for deterministic behavior.
+v4-polish: Adds tests for hero selection preference and staged_today updated_at semantics.
 """
 
 import pytest
 from datetime import datetime, timezone, timedelta
-from packages.quantum.dashboard_endpoints import ACTIVE_STATUSES, compute_today_window
+from packages.quantum.dashboard_endpoints import ACTIVE_STATUSES, compute_today_window, filter_staged_by_today_window
+from packages.quantum.inbox.ranker import rank_suggestions
 
 
 class TestActiveStatuses:
@@ -438,3 +440,151 @@ class TestV4ExplicitBucketing:
         legacy_completed = completed_today  # Should be the same
 
         assert {s["id"] for s in completed_today} == {s["id"] for s in legacy_completed}
+
+
+class TestHeroSelection:
+    """v4-polish: Test hero selection prefers executable over blocked."""
+
+    def test_hero_prefers_pending_over_blocked(self):
+        """Hero should be pending even when blocked has higher rank score"""
+        # Setup: blocked has higher ev but pending should still be hero
+        suggestions = [
+            {"id": "blocked-1", "status": "NOT_EXECUTABLE", "ev": 100.0, "score": 95},
+            {"id": "pending-1", "status": "pending", "ev": 10.0, "score": 50},
+            {"id": "blocked-2", "status": "NOT_EXECUTABLE", "ev": 80.0, "score": 90},
+        ]
+
+        # Split into executable vs blocked
+        active_executable = [s for s in suggestions if s.get("status") == "pending"]
+        active_blocked = [s for s in suggestions if s.get("status") == "NOT_EXECUTABLE"]
+
+        # Rank separately (mimics backend logic)
+        ranked_executable = rank_suggestions(active_executable)
+        ranked_blocked = rank_suggestions(active_blocked)
+
+        # Hero selection: prefer executable
+        if ranked_executable:
+            hero = ranked_executable[0]
+            queue = ranked_executable[1:]
+        elif ranked_blocked:
+            hero = ranked_blocked[0]
+            queue = ranked_blocked[1:]
+        else:
+            hero = None
+            queue = []
+
+        # Verify: hero should be the pending suggestion
+        assert hero is not None
+        assert hero["id"] == "pending-1"
+        assert hero["status"] == "pending"
+
+    def test_hero_falls_back_to_blocked_when_no_pending(self):
+        """Hero should be blocked when no pending suggestions exist"""
+        suggestions = [
+            {"id": "blocked-1", "status": "NOT_EXECUTABLE", "ev": 100.0, "score": 95},
+            {"id": "blocked-2", "status": "NOT_EXECUTABLE", "ev": 80.0, "score": 90},
+        ]
+
+        active_executable = [s for s in suggestions if s.get("status") == "pending"]
+        active_blocked = [s for s in suggestions if s.get("status") == "NOT_EXECUTABLE"]
+
+        ranked_executable = rank_suggestions(active_executable)
+        ranked_blocked = rank_suggestions(active_blocked)
+
+        if ranked_executable:
+            hero = ranked_executable[0]
+        elif ranked_blocked:
+            hero = ranked_blocked[0]
+        else:
+            hero = None
+
+        # Verify: hero should be the top blocked suggestion
+        assert hero is not None
+        assert hero["status"] == "NOT_EXECUTABLE"
+
+    def test_hero_is_none_when_no_active(self):
+        """Hero should be None when no active suggestions exist"""
+        suggestions = [
+            {"id": "dismissed-1", "status": "dismissed", "ev": 100.0},
+            {"id": "staged-1", "status": "staged", "ev": 80.0},
+        ]
+
+        active_executable = [s for s in suggestions if s.get("status") == "pending"]
+        active_blocked = [s for s in suggestions if s.get("status") == "NOT_EXECUTABLE"]
+
+        ranked_executable = rank_suggestions(active_executable)
+        ranked_blocked = rank_suggestions(active_blocked)
+
+        if ranked_executable:
+            hero = ranked_executable[0]
+        elif ranked_blocked:
+            hero = ranked_blocked[0]
+        else:
+            hero = None
+
+        assert hero is None
+
+
+class TestStagedTodayFiltering:
+    """v4-polish: Test staged_today uses updated_at when available."""
+
+    def test_staged_today_uses_updated_at_when_available(self):
+        """Suggestion created yesterday but updated (staged) today should be included"""
+        today = datetime(2026, 1, 20, 12, 0, 0, tzinfo=timezone.utc)
+        today_start, tomorrow_start = compute_today_window(today)
+
+        staged_items = [
+            # Created yesterday, updated today -> should be included
+            {"id": "1", "status": "staged", "created_at": "2026-01-19T10:00:00+00:00", "updated_at": "2026-01-20T09:00:00+00:00"},
+            # Created yesterday, updated yesterday -> should NOT be included
+            {"id": "2", "status": "staged", "created_at": "2026-01-19T10:00:00+00:00", "updated_at": "2026-01-19T15:00:00+00:00"},
+            # Created today, no updated_at -> should be included
+            {"id": "3", "status": "staged", "created_at": "2026-01-20T08:00:00+00:00"},
+            # Created today, updated today -> should be included
+            {"id": "4", "status": "staged", "created_at": "2026-01-20T07:00:00+00:00", "updated_at": "2026-01-20T11:00:00+00:00"},
+        ]
+
+        result = filter_staged_by_today_window(staged_items, today_start, tomorrow_start)
+
+        assert len(result) == 3
+        assert {s["id"] for s in result} == {"1", "3", "4"}
+
+    def test_filter_staged_excludes_all_yesterday(self):
+        """Items with both created_at and updated_at yesterday should be excluded"""
+        today = datetime(2026, 1, 20, 12, 0, 0, tzinfo=timezone.utc)
+        today_start, tomorrow_start = compute_today_window(today)
+
+        staged_items = [
+            {"id": "1", "status": "staged", "created_at": "2026-01-19T10:00:00+00:00", "updated_at": "2026-01-19T15:00:00+00:00"},
+            {"id": "2", "status": "staged", "created_at": "2026-01-18T10:00:00+00:00", "updated_at": "2026-01-19T09:00:00+00:00"},
+        ]
+
+        result = filter_staged_by_today_window(staged_items, today_start, tomorrow_start)
+
+        assert len(result) == 0
+
+    def test_filter_staged_handles_missing_updated_at(self):
+        """Items without updated_at should fall back to created_at"""
+        today = datetime(2026, 1, 20, 12, 0, 0, tzinfo=timezone.utc)
+        today_start, tomorrow_start = compute_today_window(today)
+
+        staged_items = [
+            # No updated_at, created today -> included
+            {"id": "1", "status": "staged", "created_at": "2026-01-20T10:00:00+00:00"},
+            # No updated_at, created yesterday -> excluded
+            {"id": "2", "status": "staged", "created_at": "2026-01-19T10:00:00+00:00"},
+        ]
+
+        result = filter_staged_by_today_window(staged_items, today_start, tomorrow_start)
+
+        assert len(result) == 1
+        assert result[0]["id"] == "1"
+
+    def test_filter_staged_empty_list(self):
+        """Empty list should return empty"""
+        today = datetime(2026, 1, 20, 12, 0, 0, tzinfo=timezone.utc)
+        today_start, tomorrow_start = compute_today_window(today)
+
+        result = filter_staged_by_today_window([], today_start, tomorrow_start)
+
+        assert result == []

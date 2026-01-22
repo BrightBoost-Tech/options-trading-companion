@@ -47,6 +47,114 @@ const IntegrityBadge = ({ status }: { status: string }) => {
     );
 };
 
+// v4-polish: Normalized driver item for schema-tolerant rendering
+interface NormalizedDriver {
+    label: string;
+    detail?: string;
+}
+
+/**
+ * v4-polish: Normalize drivers_agents to handle multiple schema shapes.
+ * Priority: name/agent/model -> label, signal/reason/feature/summary -> detail
+ */
+function normalizeDriversAgents(driversAgents: any): NormalizedDriver[] {
+    if (!driversAgents || !Array.isArray(driversAgents)) return [];
+
+    return driversAgents.slice(0, 5).map((d: any) => {
+        if (!d || typeof d !== 'object') {
+            return { label: String(d ?? 'Unknown') };
+        }
+
+        // Label priority: name > agent > model > first string key
+        const label = d.name ?? d.agent ?? d.model ?? d.label ??
+            (typeof d === 'string' ? d : Object.keys(d)[0] ?? 'Unknown');
+
+        // Detail priority: signal > reason > feature > summary > score/weight formatting
+        let detail = d.signal ?? d.reason ?? d.feature ?? d.summary;
+        if (!detail && (d.score !== undefined || d.weight !== undefined)) {
+            const score = d.score ?? d.weight;
+            detail = `score: ${typeof score === 'number' ? score.toFixed(2) : score}`;
+        }
+
+        return { label: String(label), detail: detail ? String(detail) : undefined };
+    }).filter((d: NormalizedDriver) => d.label !== 'Unknown' || d.detail);
+}
+
+/**
+ * v4-polish: Normalize drivers_regime to handle multiple schema shapes.
+ * Returns a formatted string for display.
+ */
+function normalizeRegime(driversRegime: any): string | null {
+    if (!driversRegime) return null;
+
+    // If it's a plain string, use directly
+    if (typeof driversRegime === 'string') {
+        return driversRegime;
+    }
+
+    if (typeof driversRegime !== 'object') {
+        return String(driversRegime);
+    }
+
+    // Standard shape: { regime, context }
+    if (driversRegime.regime) {
+        const base = String(driversRegime.regime);
+        return driversRegime.context ? `${base} — ${driversRegime.context}` : base;
+    }
+
+    // Alternative shape: { effective, global, local }
+    const parts: string[] = [];
+    if (driversRegime.effective !== undefined) parts.push(`effective=${driversRegime.effective}`);
+    if (driversRegime.global !== undefined) parts.push(`global=${driversRegime.global}`);
+    if (driversRegime.local !== undefined) parts.push(`local=${driversRegime.local}`);
+
+    if (parts.length > 0) {
+        return parts.join(' | ');
+    }
+
+    // Fallback: stringify first few keys
+    const keys = Object.keys(driversRegime).slice(0, 3);
+    if (keys.length > 0) {
+        return keys.map(k => `${k}=${driversRegime[k]}`).join(', ');
+    }
+
+    return null;
+}
+
+/**
+ * v4-polish: Normalize vetoes to handle multiple schema shapes.
+ */
+function normalizeVetoes(vetoes: any): NormalizedDriver[] {
+    if (!vetoes || !Array.isArray(vetoes)) return [];
+
+    return vetoes.slice(0, 3).map((v: any) => {
+        if (!v || typeof v !== 'object') {
+            return { label: 'Veto', detail: String(v ?? 'Unknown reason') };
+        }
+
+        // Label priority: agent > name > source
+        const label = v.agent ?? v.name ?? v.source ?? 'Veto';
+
+        // Detail priority: reason > message > detail
+        const detail = v.reason ?? v.message ?? v.detail ?? 'No reason given';
+
+        return { label: String(label), detail: String(detail) };
+    });
+}
+
+/**
+ * v4-polish: Check if attribution has any recognized content
+ */
+function hasRecognizedAttribution(attribution: any): boolean {
+    if (!attribution || typeof attribution !== 'object') return false;
+
+    const normalizedDrivers = normalizeDriversAgents(attribution.drivers_agents);
+    const normalizedRegime = normalizeRegime(attribution.drivers_regime);
+    const normalizedVetoes = normalizeVetoes(attribution.vetoes);
+
+    return normalizedDrivers.length > 0 || normalizedRegime !== null || normalizedVetoes.length > 0;
+}
+
 // v4: Details Drawer component (lazy loads trace data)
 const DetailsDrawer = ({ traceId, isExpanded }: { traceId?: string; isExpanded: boolean }) => {
     const [traceData, setTraceData] = useState<TraceResponse | null>(null);
@@ -112,10 +220,11 @@ const DetailsDrawer = ({ traceId, isExpanded }: { traceId?: string; isExpanded: 
     const attribution = lifecycle?.attribution;
     const auditLog = lifecycle?.audit_log || [];
 
-    // Extract drivers
-    const driversAgents = attribution?.drivers_agents || [];
-    const driversRegime = attribution?.drivers_regime;
-    const vetoes = attribution?.vetoes || [];
+    // v4-polish: Use normalized helpers for schema tolerance
+    const normalizedDrivers = normalizeDriversAgents(attribution?.drivers_agents);
+    const normalizedRegime = normalizeRegime(attribution?.drivers_regime);
+    const normalizedVetoes = normalizeVetoes(attribution?.vetoes);
+    const hasRecognized = hasRecognizedAttribution(attribution);
 
     return (
         <div className="mt-3 p-3 bg-muted/20 border border-border rounded-md space-y-3">
@@ -126,20 +235,20 @@ const DetailsDrawer = ({ traceId, isExpanded }: { traceId?: string; isExpanded: 
             </div>
 
             {/* Top Drivers */}
-            {(driversAgents.length > 0 || vetoes.length > 0) && (
+            {(normalizedDrivers.length > 0 || normalizedVetoes.length > 0) && (
                 <div>
                     <span className="text-xs font-medium text-muted-foreground block mb-1">Top Drivers:</span>
                     <div className="space-y-1">
-                        {driversAgents.slice(0, 3).map((d, i) => (
+                        {normalizedDrivers.slice(0, 3).map((d, i) => (
                             <div key={i} className="text-xs text-foreground flex items-start gap-1">
                                 <span className="text-green-600 dark:text-green-400">+</span>
-                                <span>{d.agent}: {d.signal}</span>
+                                <span>{d.label}{d.detail ? `: ${d.detail}` : ''}</span>
                             </div>
                         ))}
-                        {vetoes.slice(0, 2).map((v, i) => (
+                        {normalizedVetoes.slice(0, 2).map((v, i) => (
                             <div key={`veto-${i}`} className="text-xs text-foreground flex items-start gap-1">
                                 <span className="text-red-600 dark:text-red-400">-</span>
-                                <span>{v.agent}: {v.reason}</span>
+                                <span>{v.label}: {v.detail}</span>
                             </div>
                         ))}
                     </div>
@@ -147,12 +256,22 @@ const DetailsDrawer = ({ traceId, isExpanded }: { traceId?: string; isExpanded: 
             )}
 
             {/* Regime Context */}
-            {driversRegime && (
+            {normalizedRegime && (
                 <div>
                     <span className="text-xs font-medium text-muted-foreground block mb-1">Regime Context:</span>
                     <div className="text-xs text-foreground">
-                        {driversRegime.regime}
-                        {driversRegime.context && ` — ${driversRegime.context}`}
+                        {normalizedRegime}
+                    </div>
+                </div>
+            )}
+
+            {/* Attribution present but unrecognized shape */}
+            {attribution && !hasRecognized && (
+                <div className="text-xs text-muted-foreground">
+                    <span>Attribution present (unrecognized shape)</span>
+                    <div className="mt-1 text-[10px] opacity-70">
+                        Keys: {Object.keys(attribution).slice(0, 5).join(', ')}
+                        {Object.keys(attribution).length > 5 && '...'}
                     </div>
                 </div>
             )}

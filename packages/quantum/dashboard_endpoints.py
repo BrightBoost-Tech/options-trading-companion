@@ -54,6 +54,25 @@ def compute_today_window(now: Optional[datetime] = None) -> tuple:
     return today_start.isoformat(), tomorrow_start.isoformat()
 
 
+def filter_staged_by_today_window(items: List[Dict], today_start: str, tomorrow_start: str) -> List[Dict]:
+    """
+    v4-polish: Filter staged items by today window using updated_at when available.
+
+    A suggestion is included if:
+    - updated_at is present AND falls within [today_start, tomorrow_start), OR
+    - updated_at is missing AND created_at falls within [today_start, tomorrow_start)
+
+    This ensures suggestions staged today (even if created earlier) appear in staged_today.
+    """
+    result = []
+    for item in items:
+        # Prefer updated_at for determining "staged today"
+        timestamp = item.get("updated_at") or item.get("created_at")
+        if timestamp and timestamp >= today_start and timestamp < tomorrow_start:
+            result.append(item)
+    return result
+
+
 @router.get("/inbox")
 async def get_inbox(
     user_id: str = Depends(get_current_user),
@@ -100,15 +119,18 @@ async def get_inbox(
         active_res = active_query.execute()
         active_list = active_res.data or []
 
-        # Fetch staged suggestions (today only)
+        # Fetch staged suggestions (all staged, then filter by today window)
+        # v4-polish: Use updated_at to capture items staged today even if created earlier
         staged_res = supabase.table(TRADE_SUGGESTIONS_TABLE) \
             .select("*") \
             .eq("user_id", user_id) \
             .eq("status", "staged") \
-            .gte("created_at", today_start) \
-            .lt("created_at", tomorrow_start) \
             .execute()
-        staged_list = staged_res.data or []
+        staged_list = filter_staged_by_today_window(
+            staged_res.data or [],
+            today_start,
+            tomorrow_start
+        )
 
         # Fetch all today's suggestions for completed bucket
         today_res = supabase.table(TRADE_SUGGESTIONS_TABLE) \
@@ -131,31 +153,30 @@ async def get_inbox(
         active_executable = [s for s in active_list if s.get("status") == "pending"]
         active_blocked = [s for s in active_list if s.get("status") == "NOT_EXECUTABLE"]
 
-        # Rank Active suggestions (all active for hero selection)
-        ranked_active = rank_suggestions(active_list)
+        # v4-polish: Rank executable and blocked separately for hero selection
+        # Hero preference: executable first, then blocked (avoid "no hero" when executable exists)
+        ranked_executable = rank_suggestions(active_executable)
+        ranked_blocked = rank_suggestions(active_blocked)
 
-        # Split Hero vs Queue (for legacy compat)
-        hero = ranked_active[0] if ranked_active else None
-        queue = ranked_active[1:] if len(ranked_active) > 1 else []
+        # Hero selection: prefer executable over blocked
+        if ranked_executable:
+            hero = ranked_executable[0]
+            queue = ranked_executable[1:]
+        elif ranked_blocked:
+            hero = ranked_blocked[0]
+            queue = ranked_blocked[1:]
+        else:
+            hero = None
+            queue = []
 
         # Compute Meta - total_ev_available only for executable suggestions
         total_ev = sum(s.get("ev", 0) for s in active_executable if s.get("ev"))
 
-        # v4: Use CashService for deployable_capital (accurate calculation)
+        # v4-polish: Use CashService for deployable_capital (simplified async call)
         deployable_capital = 0.0
         try:
             cash_service = CashService(supabase)
-            # CashService.get_deployable_capital is async, but we can call it synchronously
-            # by using a sync wrapper or just accessing it directly since Supabase-py is sync
-            import asyncio
-            loop = asyncio.get_event_loop()
-            if loop.is_running():
-                # If already in async context, create task
-                deployable_capital = await cash_service.get_deployable_capital(user_id)
-            else:
-                deployable_capital = loop.run_until_complete(
-                    cash_service.get_deployable_capital(user_id)
-                )
+            deployable_capital = await cash_service.get_deployable_capital(user_id)
         except Exception as e:
             # Safe fallback: log warning and return 0
             logger.warning(f"CashService.get_deployable_capital failed for user {user_id}: {e}")

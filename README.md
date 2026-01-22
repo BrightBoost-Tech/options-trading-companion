@@ -305,5 +305,12 @@ options-trading-companion/
 - Ensure `supabase start` is running
 - Check `SUPABASE_URL` and keys in `.env`
 
+## Deployment (Railway)
+
+**Frontend (apps/web):**
+- Set `BACKEND_URL` to your backend service URL (e.g., `https://your-backend.railway.app`)
+- The frontend will proxy `/api/*` requests to this URL
+- If `BACKEND_URL` is not set, it defaults to `http://127.0.0.1:8000` (local dev)
+
 ---
 *Private use only.*

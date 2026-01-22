@@ -6,14 +6,18 @@ from pydantic import ValidationError, BaseModel
 from datetime import datetime, timedelta, timezone
 import traceback
 import json
+import logging
 
 from packages.quantum.security import get_current_user, get_supabase_user_client
 from packages.quantum.services.journal_service import JournalService
+from packages.quantum.services.cash_service import CashService
 from packages.quantum.analytics.progress_engine import ProgressEngine, get_week_id_for_last_full_week
 from packages.quantum.models import RiskDashboardResponse, PortfolioSnapshot, TradeTicket
 from packages.quantum.inbox.ranker import rank_suggestions
 from packages.quantum.market_data import PolygonService
 from packages.quantum.execution.transaction_cost_model import TransactionCostModel
+
+logger = logging.getLogger(__name__)
 
 # Table names
 TRADE_SUGGESTIONS_TABLE = "trade_suggestions"
@@ -57,39 +61,38 @@ async def get_inbox(
     include_backlog: bool = Query(False, description="Include older active items beyond today")
 ):
     """
-    Returns the Inbox State:
-    - hero: Top ranked active suggestion (pending or NOT_EXECUTABLE)
-    - queue: Remaining active suggestions
-    - completed: Today's non-active suggestions (dismissed/staged/executed)
-    - meta: { total_ev_available, deployable_capital, stale_after_seconds, include_backlog }
+    Returns the Inbox State with explicit bucketing for UI truthfulness:
 
-    PR4: NOT_EXECUTABLE suggestions (blocked by marketdata quality gate) now appear
-    in the active queue instead of completed, so users can see and manage them.
+    New buckets (v4):
+    - active_executable: Pending suggestions that can be staged
+    - active_blocked: NOT_EXECUTABLE suggestions (blocked by quality gate)
+    - staged_today: Suggestions staged today (for paper trading)
+    - completed_today: Dismissed/superseded suggestions today
 
-    PR4.1: Explicit time bounds for deterministic behavior:
-    - Default (include_backlog=false): Active queue is bounded to today only.
-    - include_backlog=true: Active queue includes older pending/NOT_EXECUTABLE items.
-    - Completed is ALWAYS bounded to today only (regardless of include_backlog).
+    Legacy fields (backwards compat):
+    - hero: Top ranked active suggestion
+    - queue: Remaining active suggestions (derived from active_executable)
+    - completed: Today's non-active suggestions (derived from completed_today)
 
-    Example requests:
-    - /inbox (default: today-only active queue)
-    - /inbox?include_backlog=true (include older active items)
+    meta: { total_ev_available, deployable_capital, stale_after_seconds, include_backlog }
+
+    PR4: NOT_EXECUTABLE suggestions appear in active_blocked for visibility.
+    v4-Inbox: Staged items are now explicitly separated from completed.
     """
     if not supabase:
         raise HTTPException(status_code=503, detail="Database Unavailable")
 
     try:
-        # PR4.1: Compute explicit today window bounds
+        # Compute explicit today window bounds
         today_start, tomorrow_start = compute_today_window()
 
-        # PR4.1: Fetch Active suggestions with time bounds (unless include_backlog)
+        # Fetch Active suggestions (pending or NOT_EXECUTABLE)
         active_query = supabase.table(TRADE_SUGGESTIONS_TABLE) \
             .select("*") \
             .eq("user_id", user_id) \
             .in_("status", ACTIVE_STATUSES)
 
         if not include_backlog:
-            # Default: only today's active items
             active_query = active_query \
                 .gte("created_at", today_start) \
                 .lt("created_at", tomorrow_start)
@@ -97,9 +100,17 @@ async def get_inbox(
         active_res = active_query.execute()
         active_list = active_res.data or []
 
-        # PR4.1: Fetch Completed (Today) - ALWAYS bounded to today window
-        # Using both lower and upper bounds for deterministic "today" semantics.
-        # We filter in Python because Postgrest .not_.in_() can be unreliable.
+        # Fetch staged suggestions (today only)
+        staged_res = supabase.table(TRADE_SUGGESTIONS_TABLE) \
+            .select("*") \
+            .eq("user_id", user_id) \
+            .eq("status", "staged") \
+            .gte("created_at", today_start) \
+            .lt("created_at", tomorrow_start) \
+            .execute()
+        staged_list = staged_res.data or []
+
+        # Fetch all today's suggestions for completed bucket
         today_res = supabase.table(TRADE_SUGGESTIONS_TABLE) \
             .select("*") \
             .eq("user_id", user_id) \
@@ -108,49 +119,67 @@ async def get_inbox(
             .execute()
         today_list = today_res.data or []
 
-        # Filter completed = today's suggestions NOT in active statuses
-        completed_list = [s for s in today_list if s.get("status") not in ACTIVE_STATUSES]
+        # v4: Explicit bucketing
+        # completed_today = dismissed/superseded/executed (NOT staged, NOT active)
+        non_completed_statuses = set(ACTIVE_STATUSES + ["staged"])
+        completed_list = [
+            s for s in today_list
+            if s.get("status") not in non_completed_statuses
+        ]
 
-        # Rank Active suggestions
+        # Split active into executable vs blocked
+        active_executable = [s for s in active_list if s.get("status") == "pending"]
+        active_blocked = [s for s in active_list if s.get("status") == "NOT_EXECUTABLE"]
+
+        # Rank Active suggestions (all active for hero selection)
         ranked_active = rank_suggestions(active_list)
 
-        # Split Hero vs Queue
+        # Split Hero vs Queue (for legacy compat)
         hero = ranked_active[0] if ranked_active else None
         queue = ranked_active[1:] if len(ranked_active) > 1 else []
 
-        # PR4: Compute Meta - total_ev_available only for executable (pending) suggestions
-        # Blocked suggestions shouldn't inflate "available" EV since they can't be executed
-        executable_list = [s for s in ranked_active if s.get("status") == "pending"]
-        total_ev = sum(s.get("ev", 0) for s in executable_list if s.get("ev"))
+        # Compute Meta - total_ev_available only for executable suggestions
+        total_ev = sum(s.get("ev", 0) for s in active_executable if s.get("ev"))
 
-        # Deployable Capital - Ideally fetched from CashService, but simpler proxy here or fetch from snapshot
-        # For now, placeholder or fetch latest snapshot's cash?
+        # v4: Use CashService for deployable_capital (accurate calculation)
         deployable_capital = 0.0
         try:
-             snap_res = supabase.table("portfolio_snapshots") \
-                .select("risk_metrics") \
-                .eq("user_id", user_id) \
-                .order("created_at", desc=True) \
-                .limit(1) \
-                .execute()
-             if snap_res.data and snap_res.data[0].get("risk_metrics"):
-                 deployable_capital = float(snap_res.data[0]["risk_metrics"].get("purchasing_power", 0.0))
-        except:
-             pass
+            cash_service = CashService(supabase)
+            # CashService.get_deployable_capital is async, but we can call it synchronously
+            # by using a sync wrapper or just accessing it directly since Supabase-py is sync
+            import asyncio
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                # If already in async context, create task
+                deployable_capital = await cash_service.get_deployable_capital(user_id)
+            else:
+                deployable_capital = loop.run_until_complete(
+                    cash_service.get_deployable_capital(user_id)
+                )
+        except Exception as e:
+            # Safe fallback: log warning and return 0
+            logger.warning(f"CashService.get_deployable_capital failed for user {user_id}: {e}")
+            deployable_capital = 0.0
 
         return {
+            # v4: New explicit buckets
+            "active_executable": active_executable,
+            "active_blocked": active_blocked,
+            "staged_today": staged_list,
+            "completed_today": completed_list,
+            # Legacy fields (backwards compat)
             "hero": hero,
             "queue": queue,
-            "completed": completed_list,
+            "completed": completed_list,  # Legacy: maps to completed_today
             "meta": {
                 "total_ev_available": total_ev,
                 "deployable_capital": deployable_capital,
                 "stale_after_seconds": 300,
-                "include_backlog": include_backlog  # PR4.1: indicates if backlog mode is active
+                "include_backlog": include_backlog
             }
         }
     except Exception as e:
-        print(f"Inbox Error: {e}")
+        logger.error(f"Inbox Error: {e}")
         traceback.print_exc()
         raise HTTPException(status_code=500, detail="Failed to fetch inbox")
 

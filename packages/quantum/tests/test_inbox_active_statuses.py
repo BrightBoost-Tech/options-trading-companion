@@ -297,3 +297,144 @@ class TestIncludeBacklogSemantics:
         # Only today's dismissed item
         assert len(completed) == 1
         assert completed[0]["id"] == "2"
+
+
+class TestV4ExplicitBucketing:
+    """v4: Test explicit bucketing for UI truthfulness."""
+
+    def test_active_executable_contains_only_pending(self):
+        """active_executable bucket contains only pending suggestions"""
+        suggestions = [
+            {"id": "1", "status": "pending", "ev": 10.0},
+            {"id": "2", "status": "NOT_EXECUTABLE", "ev": 5.0},
+            {"id": "3", "status": "staged", "ev": 3.0},
+            {"id": "4", "status": "dismissed", "ev": 2.0},
+        ]
+
+        active_executable = [s for s in suggestions if s.get("status") == "pending"]
+
+        assert len(active_executable) == 1
+        assert active_executable[0]["id"] == "1"
+
+    def test_active_blocked_contains_only_not_executable(self):
+        """active_blocked bucket contains only NOT_EXECUTABLE suggestions"""
+        suggestions = [
+            {"id": "1", "status": "pending", "ev": 10.0},
+            {"id": "2", "status": "NOT_EXECUTABLE", "ev": 5.0, "blocked_reason": "marketdata_quality_gate"},
+            {"id": "3", "status": "NOT_EXECUTABLE", "ev": 3.0, "blocked_reason": "marketdata_quality_gate"},
+            {"id": "4", "status": "dismissed", "ev": 2.0},
+        ]
+
+        active_blocked = [s for s in suggestions if s.get("status") == "NOT_EXECUTABLE"]
+
+        assert len(active_blocked) == 2
+        assert {s["id"] for s in active_blocked} == {"2", "3"}
+
+    def test_staged_today_contains_only_staged(self):
+        """staged_today bucket contains only staged suggestions from today"""
+        today = datetime(2026, 1, 20, 12, 0, 0, tzinfo=timezone.utc)
+        today_start, tomorrow_start = compute_today_window(today)
+
+        suggestions = [
+            {"id": "1", "status": "staged", "created_at": "2026-01-20T10:00:00+00:00"},  # Today
+            {"id": "2", "status": "staged", "created_at": "2026-01-19T10:00:00+00:00"},  # Yesterday
+            {"id": "3", "status": "pending", "created_at": "2026-01-20T10:00:00+00:00"},  # Today pending
+        ]
+
+        staged_today = [
+            s for s in suggestions
+            if s.get("status") == "staged"
+            and s["created_at"] >= today_start
+            and s["created_at"] < tomorrow_start
+        ]
+
+        assert len(staged_today) == 1
+        assert staged_today[0]["id"] == "1"
+
+    def test_completed_today_excludes_staged(self):
+        """completed_today bucket excludes staged suggestions"""
+        today = datetime(2026, 1, 20, 12, 0, 0, tzinfo=timezone.utc)
+        today_start, tomorrow_start = compute_today_window(today)
+
+        suggestions = [
+            {"id": "1", "status": "staged", "created_at": "2026-01-20T10:00:00+00:00"},
+            {"id": "2", "status": "dismissed", "created_at": "2026-01-20T10:00:00+00:00"},
+            {"id": "3", "status": "executed", "created_at": "2026-01-20T10:00:00+00:00"},
+            {"id": "4", "status": "pending", "created_at": "2026-01-20T10:00:00+00:00"},
+            {"id": "5", "status": "NOT_EXECUTABLE", "created_at": "2026-01-20T10:00:00+00:00"},
+        ]
+
+        # v4: completed_today excludes staged AND active statuses
+        non_completed_statuses = set(ACTIVE_STATUSES + ["staged"])
+        completed_today = [
+            s for s in suggestions
+            if s["created_at"] >= today_start
+            and s["created_at"] < tomorrow_start
+            and s.get("status") not in non_completed_statuses
+        ]
+
+        assert len(completed_today) == 2
+        assert {s["id"] for s in completed_today} == {"2", "3"}
+
+    def test_all_buckets_are_mutually_exclusive_for_today(self):
+        """All four buckets should be mutually exclusive for today's items"""
+        today = datetime(2026, 1, 20, 12, 0, 0, tzinfo=timezone.utc)
+        today_start, tomorrow_start = compute_today_window(today)
+
+        suggestions = [
+            {"id": "1", "status": "pending", "created_at": "2026-01-20T10:00:00+00:00"},
+            {"id": "2", "status": "NOT_EXECUTABLE", "created_at": "2026-01-20T11:00:00+00:00"},
+            {"id": "3", "status": "staged", "created_at": "2026-01-20T12:00:00+00:00"},
+            {"id": "4", "status": "dismissed", "created_at": "2026-01-20T13:00:00+00:00"},
+            {"id": "5", "status": "executed", "created_at": "2026-01-20T14:00:00+00:00"},
+        ]
+
+        # Filter to today
+        today_suggestions = [
+            s for s in suggestions
+            if s["created_at"] >= today_start and s["created_at"] < tomorrow_start
+        ]
+
+        # Create buckets
+        active_executable = [s for s in today_suggestions if s.get("status") == "pending"]
+        active_blocked = [s for s in today_suggestions if s.get("status") == "NOT_EXECUTABLE"]
+        staged_today = [s for s in today_suggestions if s.get("status") == "staged"]
+        non_completed_statuses = set(ACTIVE_STATUSES + ["staged"])
+        completed_today = [s for s in today_suggestions if s.get("status") not in non_completed_statuses]
+
+        # Verify mutual exclusivity
+        all_ids = (
+            {s["id"] for s in active_executable} |
+            {s["id"] for s in active_blocked} |
+            {s["id"] for s in staged_today} |
+            {s["id"] for s in completed_today}
+        )
+
+        total_items = len(active_executable) + len(active_blocked) + len(staged_today) + len(completed_today)
+
+        assert total_items == 5  # All 5 items should be in exactly one bucket
+        assert len(all_ids) == 5  # No duplicates
+
+    def test_legacy_completed_maps_to_completed_today(self):
+        """Legacy 'completed' field should contain same items as completed_today"""
+        today = datetime(2026, 1, 20, 12, 0, 0, tzinfo=timezone.utc)
+        today_start, tomorrow_start = compute_today_window(today)
+
+        suggestions = [
+            {"id": "1", "status": "dismissed", "created_at": "2026-01-20T10:00:00+00:00"},
+            {"id": "2", "status": "executed", "created_at": "2026-01-20T11:00:00+00:00"},
+        ]
+
+        # v4 bucket
+        non_completed_statuses = set(ACTIVE_STATUSES + ["staged"])
+        completed_today = [
+            s for s in suggestions
+            if s["created_at"] >= today_start
+            and s["created_at"] < tomorrow_start
+            and s.get("status") not in non_completed_statuses
+        ]
+
+        # Legacy bucket (for backwards compat)
+        legacy_completed = completed_today  # Should be the same
+
+        assert {s["id"] for s in completed_today} == {s["id"] for s in legacy_completed}

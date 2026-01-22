@@ -7,7 +7,8 @@ import SuggestionCard from './SuggestionCard';
 import { Card, CardContent } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Checkbox } from '@/components/ui/checkbox';
-import { Loader2, RefreshCw, ChevronDown, ChevronUp, AlertCircle, CheckCircle2, Wand2, Filter, ShieldAlert } from 'lucide-react';
+import { Badge } from '@/components/ui/badge';
+import { Loader2, RefreshCw, ChevronDown, ChevronUp, AlertCircle, CheckCircle2, Wand2, Filter, ShieldAlert, FileText, PauseCircle } from 'lucide-react';
 import { useToast } from '@/components/ui/use-toast';
 import { QuantumTooltip } from '@/components/ui/QuantumTooltip';
 import { useInboxActions } from '@/hooks/useInboxActions';
@@ -72,24 +73,164 @@ const InboxMetaBar = ({ meta, isLoading }: { meta?: InboxMeta, isLoading: boolea
   );
 };
 
+// v4: Paper Mode Status Bar
+const PaperModeStatusBar = () => {
+    const [validationStatus, setValidationStatus] = useState<{
+        paused?: boolean;
+        streak?: number;
+        checkpoint_target?: number;
+    } | null>(null);
+
+    useEffect(() => {
+        const fetchStatus = async () => {
+            try {
+                const res = await fetchWithAuth('/validation/status');
+                if (res) setValidationStatus(res);
+            } catch {
+                // Silently ignore - don't break inbox
+            }
+        };
+        fetchStatus();
+    }, []);
+
+    return (
+        <div className="mb-4 p-3 bg-blue-50 dark:bg-blue-950/30 border border-blue-200 dark:border-blue-900 rounded-lg flex items-center justify-between">
+            <div className="flex items-center gap-2">
+                <Badge variant="outline" className="bg-blue-100 text-blue-800 dark:bg-blue-900/50 dark:text-blue-300 border-blue-300 dark:border-blue-800">
+                    Mode: PAPER
+                </Badge>
+                <span className="text-xs text-blue-700 dark:text-blue-400">
+                    Stage trades for paper validation - no live execution
+                </span>
+            </div>
+            {validationStatus && (
+                <div className="flex items-center gap-2 text-xs">
+                    {validationStatus.paused && (
+                        <span className="flex items-center gap-1 text-orange-600 dark:text-orange-400">
+                            <PauseCircle className="w-3 h-3" />
+                            Paused
+                        </span>
+                    )}
+                    {validationStatus.streak !== undefined && validationStatus.checkpoint_target !== undefined && (
+                        <span className="text-blue-600 dark:text-blue-400">
+                            Streak: {validationStatus.streak}/{validationStatus.checkpoint_target}
+                        </span>
+                    )}
+                </div>
+            )}
+        </div>
+    );
+};
+
+// v4: Staged List Section
+const StagedList = ({ items }: { items: Suggestion[] }) => {
+    const [expanded, setExpanded] = useState(true);
+
+    if (!items || items.length === 0) return null;
+
+    return (
+        <div className="mt-6 mb-6">
+            <button
+                type="button"
+                className="w-full flex items-center justify-between py-2 hover:bg-muted/50 rounded px-2 transition-colors select-none"
+                onClick={() => setExpanded(!expanded)}
+            >
+                <h3 className="text-sm font-medium text-green-700 dark:text-green-400 flex items-center gap-2">
+                    <FileText className="w-4 h-4" />
+                    Staged for Paper ({items.length})
+                </h3>
+                {expanded ? <ChevronUp className="w-4 h-4" /> : <ChevronDown className="w-4 h-4" />}
+            </button>
+            {expanded && (
+                <div className="space-y-2 mt-2 pl-2 border-l-2 border-green-200 dark:border-green-900 ml-2">
+                    {items.map(item => (
+                        <SuggestionCard
+                            key={item.id}
+                            suggestion={{...item, staged: true}}
+                            isStale={false}
+                            mode="PAPER_INBOX"
+                        />
+                    ))}
+                </div>
+            )}
+        </div>
+    );
+};
+
+// v4: Blocked Queue Section
+const BlockedList = ({ items, onDismiss, dismissedIds }: {
+    items: Suggestion[];
+    onDismiss: (id: string, reason: string) => void;
+    dismissedIds: Set<string>;
+}) => {
+    const [expanded, setExpanded] = useState(false);
+
+    const visibleItems = items.filter(s => !dismissedIds.has(s.id));
+    if (visibleItems.length === 0) return null;
+
+    return (
+        <div className="mt-6 mb-6">
+            <button
+                type="button"
+                className="w-full flex items-center justify-between py-2 hover:bg-muted/50 rounded px-2 transition-colors select-none"
+                onClick={() => setExpanded(!expanded)}
+            >
+                <h3 className="text-sm font-medium text-orange-600 dark:text-orange-400 flex items-center gap-2">
+                    <ShieldAlert className="w-4 h-4" />
+                    Blocked ({visibleItems.length})
+                    <span className="text-xs font-normal text-muted-foreground">
+                        — cannot be staged until quality issues resolve
+                    </span>
+                </h3>
+                {expanded ? <ChevronUp className="w-4 h-4" /> : <ChevronDown className="w-4 h-4" />}
+            </button>
+            {expanded && (
+                <div className="space-y-2 mt-2 pl-2 border-l-2 border-orange-200 dark:border-orange-900 ml-2">
+                    {visibleItems.map(item => (
+                        <SuggestionCard
+                            key={item.id}
+                            suggestion={item}
+                            onDismiss={(s, r) => onDismiss(s.id, r)}
+                            isStale={false}
+                            mode="PAPER_INBOX"
+                        />
+                    ))}
+                </div>
+            )}
+        </div>
+    );
+};
+
 const CompletedList = ({ items }: { items: Suggestion[] }) => {
+    const [expanded, setExpanded] = useState(false);
+
     if (!items || items.length === 0) return null;
 
     return (
         <div className="mt-8">
-            <h3 className="text-sm font-medium text-muted-foreground mb-3 flex items-center gap-2">
-                <CheckCircle2 className="w-4 h-4" />
-                Completed Today ({items.length})
-            </h3>
-            <div className="space-y-2 opacity-75">
-                {items.map(item => (
-                    <SuggestionCard
-                        key={item.id}
-                        suggestion={item}
-                        isStale={false}
-                    />
-                ))}
-            </div>
+            <button
+                type="button"
+                className="w-full flex items-center justify-between py-2 hover:bg-muted/50 rounded px-2 transition-colors select-none"
+                onClick={() => setExpanded(!expanded)}
+            >
+                <h3 className="text-sm font-medium text-muted-foreground flex items-center gap-2">
+                    <CheckCircle2 className="w-4 h-4" />
+                    Completed Today ({items.length})
+                </h3>
+                {expanded ? <ChevronUp className="w-4 h-4" /> : <ChevronDown className="w-4 h-4" />}
+            </button>
+            {expanded && (
+                <div className="space-y-2 mt-2 opacity-75">
+                    {items.map(item => (
+                        <SuggestionCard
+                            key={item.id}
+                            suggestion={item}
+                            isStale={false}
+                            mode="PAPER_INBOX"
+                        />
+                    ))}
+                </div>
+            )}
         </div>
     );
 };
@@ -300,12 +441,17 @@ export default function TradeInbox() {
 
     if (!data) return null;
 
-    const { hero, queue, completed, meta } = data;
+    // v4: Use new explicit buckets with fallback to legacy fields
+    const activeExecutable = data.active_executable ?? data.queue.filter(s => s.status === 'pending');
+    const activeBlocked = data.active_blocked ?? data.queue.filter(s => isBlocked(s));
+    const stagedToday = data.staged_today ?? [];
+    const completedToday = data.completed_today ?? data.completed;
+    const { hero, meta } = data;
 
     // Filter out dismissed items optimistically
     const isHeroDismissed = hero && dismissedIds.has(hero.id);
 
-    // PR4: Apply filter to hero and queue
+    // PR4: Apply filter to hero and executable queue
     const applyFilter = (s: Suggestion): boolean => {
         if (filter === 'all') return true;
         if (filter === 'executable') return !isBlocked(s);
@@ -313,14 +459,16 @@ export default function TradeInbox() {
         return true;
     };
 
-    const hasHero = !!hero && !isHeroDismissed && applyFilter(hero);
-    const visibleQueue = queue.filter(q => !dismissedIds.has(q.id) && applyFilter(q));
+    const hasHero = !!hero && !isHeroDismissed && applyFilter(hero) && !isBlocked(hero);
+    const visibleQueue = activeExecutable.filter(q => !dismissedIds.has(q.id) && applyFilter(q));
     const hasQueue = visibleQueue.length > 0;
 
-    // PR4: Count blocked vs executable for filter badges
-    const allActive = [hero, ...queue].filter((s): s is Suggestion => !!s && !dismissedIds.has(s.id));
-    const blockedCount = allActive.filter(isBlocked).length;
-    const executableCount = allActive.filter(s => !isBlocked(s)).length;
+    // v4: Count blocked vs executable for filter badges
+    const allExecutable = activeExecutable.filter(s => !dismissedIds.has(s.id));
+    const allBlocked = activeBlocked.filter(s => !dismissedIds.has(s.id));
+    const allActive = [...allExecutable, ...allBlocked];  // Combined for "All" filter count
+    const blockedCount = allBlocked.length;
+    const executableCount = allExecutable.length;
 
     // Only executable (non-blocked) items can be selected for staging/auto-select
     const totalCandidates = executableCount;
@@ -328,6 +476,9 @@ export default function TradeInbox() {
 
     return (
         <div className="max-w-4xl mx-auto pb-10">
+            {/* v4: Paper Mode Status Bar */}
+            <PaperModeStatusBar />
+
             {/* Meta Bar */}
             <InboxMetaBar meta={meta} isLoading={loading} />
 
@@ -415,6 +566,7 @@ export default function TradeInbox() {
                                     onRefreshQuote={(s) => refreshQuote(s.id, displaySymbol(s))}
                                     isStale={isStale(hero)}
                                     isStaging={stagingIds.has(hero.id)}
+                                    mode="PAPER_INBOX"
                                 />
                             </div>
                         </div>
@@ -468,6 +620,7 @@ export default function TradeInbox() {
                                              onRefreshQuote={(s) => refreshQuote(s.id, displaySymbol(s))}
                                              isStale={isStale(item)}
                                              isStaging={stagingIds.has(item.id)}
+                                             mode="PAPER_INBOX"
                                          />
                                      </div>
                                  </div>
@@ -481,8 +634,18 @@ export default function TradeInbox() {
                 </div>
             )}
 
+            {/* v4: Blocked Section */}
+            <BlockedList
+                items={activeBlocked}
+                onDismiss={(id, reason) => dismissItem(id, reason)}
+                dismissedIds={dismissedIds}
+            />
+
+            {/* v4: Staged Section */}
+            <StagedList items={stagedToday} />
+
             {/* Completed Section */}
-            <CompletedList items={completed} />
+            <CompletedList items={completedToday} />
 
         </div>
     );

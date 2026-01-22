@@ -282,10 +282,51 @@ export interface InboxMeta {
 }
 
 export interface InboxResponse {
+  // v4: New explicit buckets
+  active_executable?: Suggestion[];
+  active_blocked?: Suggestion[];
+  staged_today?: Suggestion[];
+  completed_today?: Suggestion[];
+  // Legacy fields (backwards compat)
   hero: Suggestion | null;
   queue: Suggestion[];
   completed: Suggestion[];
   meta: InboxMeta;
+}
+
+// v4: Trace response for Details Drawer
+export interface TraceIntegrity {
+  stored_hash: string;
+  computed_hash: string;
+  signature_valid: boolean;
+}
+
+export interface TraceAttribution {
+  drivers_agents?: Array<{ agent: string; signal: string; weight?: number }>;
+  drivers_regime?: { regime: string; context?: string };
+  vetoes?: Array<{ agent: string; reason: string }>;
+  [key: string]: any;
+}
+
+export interface TraceAuditEvent {
+  event: string;
+  timestamp: string;
+  verification?: {
+    status: string;
+    [key: string]: any;
+  };
+  [key: string]: any;
+}
+
+export interface TraceResponse {
+  status: 'VERIFIED' | 'TAMPERED' | 'UNVERIFIED';
+  trace_id: string;
+  integrity: TraceIntegrity;
+  lifecycle: {
+    suggestion: Suggestion;
+    audit_log: TraceAuditEvent[];
+    attribution: TraceAttribution | null;
+  };
 }
 
 // --- Discrete Optimizer Types ---

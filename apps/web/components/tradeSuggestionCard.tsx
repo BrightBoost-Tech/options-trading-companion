@@ -55,16 +55,32 @@ interface TradeSuggestion {
   compound_score?: number;
 }
 
+// v4: Card mode for context-aware behavior
+type CardMode = 'DEFAULT' | 'PAPER_INBOX';
+
 interface TradeSuggestionCardProps {
   suggestion: TradeSuggestion;
   onLogged?: (id: string) => void;
+  // v4: Mode for context-aware behavior
+  // PAPER_INBOX: hides /paper/execute button to enforce stage-only workflow
+  mode?: CardMode;
 }
+
+// v4: Check if paper execute is allowed (dev override via env var)
+const isPaperExecuteAllowed = (mode: CardMode): boolean => {
+  if (mode === 'DEFAULT') return true;
+  // PAPER_INBOX mode: check for dev override
+  if (typeof window !== 'undefined' && process.env.NEXT_PUBLIC_ENABLE_PAPER_EXECUTE_BUTTON === '1') {
+    return true;
+  }
+  return false;
+};
 
 // Helper for safe numeric formatting
 const safeFixed = (value: number | null | undefined, digits = 2) =>
   typeof value === "number" ? value.toFixed(digits) : "--";
 
-export default function TradeSuggestionCard({ suggestion, onLogged }: TradeSuggestionCardProps) {
+export default function TradeSuggestionCard({ suggestion, onLogged, mode = 'DEFAULT' }: TradeSuggestionCardProps) {
   const [evPreview, setEvPreview] = useState<any | null>(null);
   const [evLoading, setEvLoading] = useState(false);
   const [evError, setEvError] = useState<string | null>(null);
@@ -412,25 +428,28 @@ export default function TradeSuggestionCard({ suggestion, onLogged }: TradeSugge
 
         {(suggestion.window === 'morning_limit' || suggestion.window === 'midday_entry') && (
             <div className="mt-3 flex justify-end gap-2">
-                <Button
-                    variant="outline"
-                    size="sm"
-                    onClick={handlePaperTrade}
-                    disabled={paperTrading || paperSuccess}
-                    aria-label={`Execute paper trade for ${displaySymbol}`}
-                    className={`h-auto py-1 text-xs border-blue-200 transition-colors ${
-                      paperSuccess
-                        ? 'bg-blue-100 text-blue-800'
-                        : 'text-blue-700 hover:bg-blue-50 hover:text-blue-800'
-                    }`}
-                >
-                    {paperTrading ? (
-                      <Loader2 className="mr-2 h-3 w-3 animate-spin" />
-                    ) : paperSuccess ? (
-                      <Check className="mr-2 h-3 w-3" />
-                    ) : null}
-                    {paperTrading ? "Simulating…" : paperSuccess ? "Executed!" : "Paper Trade"}
-                </Button>
+                {/* v4: Paper Trade button - hidden in PAPER_INBOX mode unless dev override */}
+                {isPaperExecuteAllowed(mode) && (
+                    <Button
+                        variant="outline"
+                        size="sm"
+                        onClick={handlePaperTrade}
+                        disabled={paperTrading || paperSuccess}
+                        aria-label={`Execute paper trade for ${displaySymbol}`}
+                        className={`h-auto py-1 text-xs border-blue-200 transition-colors ${
+                          paperSuccess
+                            ? 'bg-blue-100 text-blue-800'
+                            : 'text-blue-700 hover:bg-blue-50 hover:text-blue-800'
+                        }`}
+                    >
+                        {paperTrading ? (
+                          <Loader2 className="mr-2 h-3 w-3 animate-spin" />
+                        ) : paperSuccess ? (
+                          <Check className="mr-2 h-3 w-3" />
+                        ) : null}
+                        {paperTrading ? "Simulating…" : paperSuccess ? "Executed!" : "Paper Trade"}
+                    </Button>
+                )}
                 <Button
                     variant="outline"
                     size="sm"

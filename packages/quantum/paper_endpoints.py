@@ -901,7 +901,7 @@ def _run_attribution(supabase, user_id, order, position, exit_fill, fees, side):
             "exit_fill": exit_fill,
             "updated_at": datetime.now(timezone.utc).isoformat(),
             "outcome_type": "trade_closed",
-            "details_json": {"reason_codes": reason_codes}
+            "details_json": {"reason_codes": reason_codes, "is_paper": True}
         }
 
         # Enrich from suggestion

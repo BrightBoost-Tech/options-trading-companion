@@ -83,6 +83,10 @@ def test_run_attribution_wires_post_trade_review(MockPostTradeReviewAgent, mock_
     assert review["agent_id"] == "post_trade_review"
     assert review["metadata"]["review.outcome"] == "WIN"
 
+    # v4-fix: Assert paper tagging is present in both top-level and details_json
+    assert payload["is_paper"] is True
+    assert payload["details_json"].get("is_paper") is True
+
 @patch("packages.quantum.paper_endpoints.PostTradeReviewAgent")
 def test_run_attribution_handles_missing_suggestion(MockPostTradeReviewAgent, mock_supabase):
     """
@@ -131,3 +135,7 @@ def test_run_attribution_handles_missing_suggestion(MockPostTradeReviewAgent, mo
     call_args = mock_agent_instance.evaluate.call_args
     context = call_args[0][0]
     assert context["agent_signals"] == {}
+
+    # v4-fix: Assert paper tagging is present in both top-level and details_json
+    assert payload["is_paper"] is True
+    assert payload["details_json"].get("is_paper") is True

@@ -1,6 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException, Query, Path
 from typing import List, Optional, Any, Dict
 from packages.quantum.security import get_current_user
+from packages.quantum.security.admin_auth import verify_admin_access, AdminAuthResult
 from packages.quantum.security.secrets_provider import SecretsProvider
 from supabase import create_client, Client
 
@@ -31,10 +32,12 @@ async def get_trade_attribution(
     window: Optional[str] = Query(None),
     strategy: Optional[str] = Query(None),
     regime: Optional[str] = Query(None),
-    client: Client = Depends(get_admin_client)
+    client: Client = Depends(get_admin_client),
+    admin: AdminAuthResult = Depends(verify_admin_access)
 ):
     """
     Query the trade_attribution_v3 view.
+    Requires Admin privileges.
     """
     query = client.table("trade_attribution_v3").select("*").order("created_at", desc=True).limit(limit)
 
@@ -57,10 +60,12 @@ async def get_trade_attribution(
 @router.get("/ev_leakage")
 async def get_ev_leakage(
     limit: int = Query(50, le=100),
-    client: Client = Depends(get_admin_client)
+    client: Client = Depends(get_admin_client),
+    admin: AdminAuthResult = Depends(verify_admin_access)
 ):
     """
     Query ev_leakage_by_bucket_v3 view, sorted by most negative ev_leakage.
+    Requires Admin privileges.
     """
     try:
         query = client.table("ev_leakage_by_bucket_v3").select("*").order("ev_leakage", desc=False).limit(limit)

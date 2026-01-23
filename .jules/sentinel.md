@@ -29,3 +29,8 @@
 **Vulnerability:** The backend (`packages/quantum`) used `request.client.host` for rate limiting. Since the app uses Next.js rewrites to proxy API requests to the backend, all requests originated from `127.0.0.1`. This caused the rate limiter to group all users together, meaning one active user could exhaust the rate limit for the entire platform (DoS).
 **Learning:** In a reverse proxy setup (Next.js -> FastAPI), the backend sees the proxy's IP. Standard IP-based rate limiting libraries (`slowapi`) default to the direct connection IP unless configured to inspect `X-Forwarded-For`.
 **Prevention:** Implemented a custom key function `get_real_ip` that inspects `X-Forwarded-For` headers **only** when the request comes from a trusted proxy (localhost). This distinguishes users correctly while preventing external spoofing attacks.
+
+## 2026-02-18 - [Fix] Broken Access Control in Observability Endpoints
+**Vulnerability:** The `/observability/trade_attribution` and `/observability/ev_leakage` endpoints were exposed to any authenticated user, leaking sensitive system-wide trade data and model performance metrics. They relied on `get_current_user` for authentication but lacked an authorization check for admin privileges.
+**Learning:** Router dependencies (like `Depends(get_current_user)`) only handle authentication (Who are you?), not authorization (What can you do?). Using an admin client (Service Role) inside an endpoint without an accompanying admin check is a critical pattern to avoid.
+**Prevention:** Always pair `get_admin_client` with `verify_admin_access` in endpoint dependencies. If an endpoint uses the admin client, it almost certainly requires admin privileges.

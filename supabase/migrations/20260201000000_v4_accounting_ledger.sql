@@ -99,7 +99,7 @@ CREATE TABLE IF NOT EXISTS position_groups (
     trace_id UUID,
     features_hash TEXT,
     model_version TEXT,
-    window TEXT,                                -- e.g., "earnings_pre", "paper"
+    "window" TEXT,                              -- e.g., "earnings_pre", "paper"
     strategy TEXT,                              -- e.g., "iron_condor", "vertical_call"
     regime TEXT,                                -- Market regime at open
 

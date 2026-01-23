@@ -15,7 +15,7 @@ BEGIN
     -- This grandfathers in existing data while preventing future issues
     IF NEW.legs_fingerprint IS NULL THEN
         -- Allow legacy/paper windows to bypass (if applicable in your system)
-        IF NEW.window IN ('paper', 'legacy', 'test') THEN
+        IF NEW."window" IN ('paper', 'legacy', 'test') THEN
             RETURN NEW;
         END IF;
 

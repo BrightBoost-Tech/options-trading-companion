@@ -6,14 +6,14 @@ CREATE TABLE IF NOT EXISTS model_governance_states (
     user_id uuid NOT NULL REFERENCES auth.users(id),
     model_name text NOT NULL,
     strategy text,
-    window text,
+    "window" text,
     regime text,
     state_json jsonb NOT NULL DEFAULT '{}'::jsonb,
     sample_size integer NOT NULL DEFAULT 0,
     trained_at timestamptz,
     created_at timestamptz NOT NULL DEFAULT now(),
     updated_at timestamptz NOT NULL DEFAULT now(),
-    UNIQUE(user_id, model_name, strategy, window, regime)
+    UNIQUE(user_id, model_name, strategy, "window", regime)
 );
 
 CREATE INDEX IF NOT EXISTS idx_model_governance_retrieval
@@ -41,7 +41,7 @@ ALTER TABLE paper_positions ADD COLUMN IF NOT EXISTS suggestion_id uuid;
 ALTER TABLE paper_positions ADD COLUMN IF NOT EXISTS model_version text;
 ALTER TABLE paper_positions ADD COLUMN IF NOT EXISTS features_hash text;
 ALTER TABLE paper_positions ADD COLUMN IF NOT EXISTS strategy text;
-ALTER TABLE paper_positions ADD COLUMN IF NOT EXISTS window text;
+ALTER TABLE paper_positions ADD COLUMN IF NOT EXISTS "window" text;
 ALTER TABLE paper_positions ADD COLUMN IF NOT EXISTS regime text;
 
 -- Add FK: suggestion_id -> trade_suggestions(id)
@@ -117,7 +117,7 @@ CREATE OR REPLACE VIEW learning_performance_summary_v3 AS
 SELECT
     user_id,
     strategy,
-    window,
+    "window",
     regime,
     count(*) AS total_trades,
     avg(CASE WHEN pnl_realized > 0 THEN 1 ELSE 0 END) AS win_rate,
@@ -127,7 +127,7 @@ SELECT
     stddev_samp(pnl_realized) AS std_realized_pnl,
     max(closed_at) AS last_trade_at
 FROM learning_trade_outcomes_v3
-GROUP BY user_id, strategy, window, regime;
+GROUP BY user_id, strategy, "window", regime;
 
 
 -- 3) View: learning_contract_violations_v3
@@ -141,7 +141,7 @@ SELECT
         CASE WHEN model_version IS NULL THEN 'model_version' END,
         CASE WHEN features_hash IS NULL THEN 'features_hash' END,
         CASE WHEN strategy IS NULL THEN 'strategy' END,
-        CASE WHEN window IS NULL THEN 'window' END
+        CASE WHEN "window" IS NULL THEN 'window' END
     ], NULL) AS missing_fields,
     'Missing core learning fields'::text AS notes
 FROM trade_suggestions
@@ -149,7 +149,7 @@ WHERE trace_id IS NULL
    OR model_version IS NULL
    OR features_hash IS NULL
    OR strategy IS NULL
-   OR window IS NULL
+   OR "window" IS NULL
 
 UNION ALL
 

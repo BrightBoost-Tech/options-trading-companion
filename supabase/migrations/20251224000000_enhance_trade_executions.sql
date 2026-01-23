@@ -22,7 +22,7 @@ END $$;
 -- 2. Add new fields
 ALTER TABLE trade_executions ADD COLUMN IF NOT EXISTS suggestion_id uuid REFERENCES trade_suggestions(id);
 ALTER TABLE trade_executions ADD COLUMN IF NOT EXISTS trace_id uuid;
-ALTER TABLE trade_executions ADD COLUMN IF NOT EXISTS window text;
+ALTER TABLE trade_executions ADD COLUMN IF NOT EXISTS "window" text;
 ALTER TABLE trade_executions ADD COLUMN IF NOT EXISTS strategy text;
 ALTER TABLE trade_executions ADD COLUMN IF NOT EXISTS model_version text;
 ALTER TABLE trade_executions ADD COLUMN IF NOT EXISTS features_hash text;

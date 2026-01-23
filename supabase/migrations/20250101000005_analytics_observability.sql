@@ -35,6 +35,24 @@ CREATE INDEX IF NOT EXISTS idx_learning_user_time ON learning_feedback_loops(use
 CREATE INDEX IF NOT EXISTS idx_learning_trace ON learning_feedback_loops(trace_id);
 
 
+-- 2.5. Execution Drift Logs Table (required by discipline_score_per_user view)
+-- This table stores behavioral drift events for discipline scoring
+CREATE TABLE IF NOT EXISTS execution_drift_logs (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id UUID NOT NULL,
+    symbol TEXT NULL,
+    tag TEXT NOT NULL,
+    details_json JSONB DEFAULT '{}'::jsonb,
+    created_at TIMESTAMPTZ DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_execution_drift_logs_user_time
+    ON execution_drift_logs(user_id, created_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_execution_drift_logs_tag
+    ON execution_drift_logs(tag);
+
+
 -- 3. Views for Metrics
 
 -- View A: Discipline Score (Behavioral Metric)

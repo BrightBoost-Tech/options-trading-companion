@@ -2,7 +2,10 @@ from fastapi import APIRouter, Header, HTTPException, Request, Depends, Body
 from typing import Optional, Dict, Any
 import os
 import secrets
+import logging
 from datetime import datetime, timezone
+
+logger = logging.getLogger(__name__)
 
 from packages.quantum.jobs.rq_enqueue import enqueue_idempotent
 from packages.quantum.jobs.job_runs import JobRunStore
@@ -23,6 +26,7 @@ from packages.quantum.public_tasks_models import (
     PaperAutoClosePayload,
     ValidationShadowEvalPayload,
     ValidationCohortEvalPayload,
+    ValidationAutopromoteCohortPayload,
     DEFAULT_STRATEGY_NAME,
 )
 
@@ -868,6 +872,257 @@ async def task_validation_shadow_eval(
         }
 
 
+# =============================================================================
+# Auto-Promote Guardrail Task (v4-L1E)
+# =============================================================================
+
+
+def _check_autopromote_gates(user_id: str) -> Optional[Dict[str, Any]]:
+    """
+    Check autopromote gating conditions.
+
+    Returns None if all gates pass, otherwise returns error response dict.
+
+    Gates checked:
+    1. AUTOPROMOTE_ENABLED must be "1"
+    2. ops_state.mode must be "paper"
+    3. ops_state.paused must be false
+    """
+    from packages.quantum.ops_endpoints import get_global_ops_control
+
+    # Gate 1: Autopromote enabled
+    if os.environ.get("AUTOPROMOTE_ENABLED", "0") != "1":
+        return {
+            "status": "skipped",
+            "reason": "autopromote_disabled",
+            "detail": "AUTOPROMOTE_ENABLED is not set to '1'"
+        }
+
+    # Gate 2: Paper mode only
+    ops_state = get_global_ops_control()
+    mode = ops_state.get("mode", "paper")
+
+    if mode != "paper":
+        return {
+            "status": "cancelled",
+            "reason": "mode_is_paper_only",
+            "detail": f"Autopromote requires mode='paper', current mode='{mode}'"
+        }
+
+    # Gate 3: Not paused
+    if ops_state.get("paused", False):
+        return {
+            "status": "cancelled",
+            "reason": "paused_globally",
+            "detail": "Trading is paused globally"
+        }
+
+    return None
+
+
+def _get_cohort_overrides_by_name(cohort_name: str) -> Optional[Dict[str, Any]]:
+    """
+    Look up cohort configuration by name from SHADOW_COHORTS_JSON or defaults.
+
+    Returns the override dict (paper_window_days, target_return_pct, etc.)
+    or None if cohort not found.
+    """
+    cohorts = _get_shadow_cohorts()
+    for cohort in cohorts:
+        if cohort.get("name") == cohort_name:
+            # Build overrides dict (exclude paper_checkpoint_target per spec)
+            overrides = {}
+            if "paper_window_days" in cohort:
+                overrides["paper_window_days"] = cohort["paper_window_days"]
+            if "target_return_pct" in cohort:
+                overrides["target_return_pct"] = cohort["target_return_pct"]
+            if "fail_fast_drawdown_pct" in cohort:
+                overrides["fail_fast_drawdown_pct"] = cohort["fail_fast_drawdown_pct"]
+            if "fail_fast_return_pct" in cohort:
+                overrides["fail_fast_return_pct"] = cohort["fail_fast_return_pct"]
+            return overrides
+    return None
+
+
+@router.post("/validation/autopromote-cohort", status_code=200)
+async def task_validation_autopromote_cohort(
+    payload: ValidationAutopromoteCohortPayload = Body(...),
+    auth: TaskSignatureResult = Depends(verify_task_signature("tasks:validation_autopromote_cohort"))
+):
+    """
+    Evaluate and potentially auto-promote a cohort's parameters.
+
+    Auth: Requires v4 HMAC signature with scope 'tasks:validation_autopromote_cohort'.
+
+    v4-L1E: Auto-promote guardrail - adopt best cohort policy after 3-day proof.
+
+    Promotion criteria:
+    - Same winner cohort for 3 consecutive trading-day buckets
+    - No fail-fast on any of those days
+    - Non-decreasing return_pct across the 3 days (today >= yesterday >= day-2)
+
+    Requirements:
+    - Requires specific user_id (not "all")
+    - Must be in paper mode (ops_state.mode == "paper")
+    - Respects pause gate
+    - Requires AUTOPROMOTE_ENABLED=1
+
+    Returns:
+    - promoted: Boolean indicating if promotion occurred
+    - cohort: Name of promoted cohort (if promoted)
+    - overrides: The override dict applied (if promoted)
+    - reason: Explanation of decision
+    """
+    import json
+
+    user_id = payload.user_id
+
+    # Check autopromote gates
+    gate_error = _check_autopromote_gates(user_id)
+    if gate_error:
+        return gate_error
+
+    # Idempotency key
+    bucket_date = datetime.now(timezone.utc).date().isoformat()
+    idempotency_key = f"{bucket_date}-autopromote-{user_id}"
+
+    try:
+        from packages.quantum.jobs.handlers.utils import get_admin_client
+        from packages.quantum.services.go_live_validation_service import GoLiveValidationService
+
+        supabase = get_admin_client()
+
+        # Get required days from env (default 3)
+        required_days = int(os.environ.get("AUTOPROMOTE_REQUIRED_DAYS", "3"))
+        require_nondecreasing = os.environ.get("AUTOPROMOTE_REQUIRE_NONDECREASING_PROFIT", "1") == "1"
+
+        # 1. Read last N records from shadow_cohort_daily
+        history_res = supabase.table("shadow_cohort_daily") \
+            .select("*") \
+            .eq("user_id", user_id) \
+            .order("bucket_date", desc=True) \
+            .limit(required_days) \
+            .execute()
+
+        history = history_res.data or []
+
+        if len(history) < required_days:
+            return {
+                "status": "ok",
+                "promoted": False,
+                "reason": "insufficient_history",
+                "history_count": len(history),
+                "required_days": required_days,
+                "user_id": user_id,
+                "idempotency_key": idempotency_key
+            }
+
+        # 2. Check promotion criteria
+        # All must have same winner_cohort
+        winner_cohorts = [h["winner_cohort"] for h in history]
+        if len(set(winner_cohorts)) != 1:
+            return {
+                "status": "ok",
+                "promoted": False,
+                "reason": "winners_differ",
+                "winners": winner_cohorts,
+                "user_id": user_id,
+                "idempotency_key": idempotency_key
+            }
+
+        cohort_name = winner_cohorts[0]
+
+        # All must have would_fail_fast == False
+        fail_fast_flags = [h["winner_would_fail_fast"] for h in history]
+        if any(fail_fast_flags):
+            return {
+                "status": "ok",
+                "promoted": False,
+                "reason": "fail_fast_triggered",
+                "cohort": cohort_name,
+                "fail_fast_days": [h["bucket_date"] for h in history if h["winner_would_fail_fast"]],
+                "user_id": user_id,
+                "idempotency_key": idempotency_key
+            }
+
+        # Check non-decreasing profit (oldest to newest)
+        # History is DESC order, so reverse for chronological
+        chronological = list(reversed(history))
+        returns = [h["winner_return_pct"] for h in chronological]
+
+        if require_nondecreasing:
+            is_nondecreasing = all(returns[i] <= returns[i+1] for i in range(len(returns)-1))
+            if not is_nondecreasing:
+                return {
+                    "status": "ok",
+                    "promoted": False,
+                    "reason": "profit_not_nondecreasing",
+                    "cohort": cohort_name,
+                    "returns": returns,
+                    "user_id": user_id,
+                    "idempotency_key": idempotency_key
+                }
+
+        # 3. Check current policy (anti-churn)
+        service = GoLiveValidationService(supabase)
+        state = service.get_or_create_state(user_id)
+        current_cohort = state.get("paper_forward_policy_cohort")
+
+        if current_cohort == cohort_name:
+            return {
+                "status": "ok",
+                "promoted": False,
+                "reason": "already_promoted",
+                "cohort": cohort_name,
+                "user_id": user_id,
+                "idempotency_key": idempotency_key
+            }
+
+        # 4. Look up cohort overrides
+        overrides = _get_cohort_overrides_by_name(cohort_name)
+        if not overrides:
+            return {
+                "status": "ok",
+                "promoted": False,
+                "reason": "cohort_not_found",
+                "cohort": cohort_name,
+                "user_id": user_id,
+                "idempotency_key": idempotency_key
+            }
+
+        # 5. Promote: Update v3_go_live_state
+        now = datetime.now(timezone.utc)
+        supabase.table("v3_go_live_state").update({
+            "paper_forward_policy": json.dumps(overrides),
+            "paper_forward_policy_source": "auto_promote",
+            "paper_forward_policy_set_at": now.isoformat(),
+            "paper_forward_policy_cohort": cohort_name,
+            "updated_at": now.isoformat()
+        }).eq("user_id", user_id).execute()
+
+        logger.info(f"Auto-promoted cohort '{cohort_name}' for user {user_id}: {overrides}")
+
+        return {
+            "status": "ok",
+            "promoted": True,
+            "cohort": cohort_name,
+            "overrides": overrides,
+            "proof_days": required_days,
+            "returns": returns,
+            "user_id": user_id,
+            "idempotency_key": idempotency_key,
+            "promoted_at": now.isoformat()
+        }
+
+    except Exception as e:
+        logger.error(f"Autopromote failed for user {user_id}: {e}")
+        return {
+            "status": "error",
+            "error": str(e),
+            "user_id": user_id
+        }
+
+
 @router.post("/validation/cohort-eval", status_code=200)
 async def task_validation_cohort_eval(
     payload: ValidationCohortEvalPayload = Body(...),
@@ -963,6 +1218,46 @@ async def task_validation_cohort_eval(
 
         best = results[0] if results else None
 
+        # v4-L1E: Determine winner and persist to shadow_cohort_daily
+        # Winner is the cohort with highest return_pct among those with would_fail_fast=False
+        winner = None
+        non_fail_fast_results = [r for r in results if not r["would_fail_fast"]]
+        if non_fail_fast_results:
+            # Sort by return_pct desc, then margin_to_target desc, then max_drawdown_pct desc, then name asc
+            non_fail_fast_results.sort(key=lambda r: (
+                -r["return_pct"],
+                -r["margin_to_target"],
+                -r["max_drawdown_pct"],
+                r["cohort"]
+            ))
+            winner = non_fail_fast_results[0]
+        elif results:
+            # All failed fast - still pick the "best" (first sorted result) but mark it
+            winner = results[0]
+
+        winner_persisted = False
+        if winner:
+            try:
+                bucket_date = datetime.now(timezone.utc).date().isoformat()
+                # Upsert winner to shadow_cohort_daily
+                supabase.table("shadow_cohort_daily").upsert(
+                    {
+                        "user_id": user_id,
+                        "bucket_date": bucket_date,
+                        "winner_cohort": winner["cohort"],
+                        "winner_return_pct": winner["return_pct"],
+                        "winner_margin_to_target": winner["margin_to_target"],
+                        "winner_max_drawdown_pct": winner["max_drawdown_pct"],
+                        "winner_would_fail_fast": winner["would_fail_fast"],
+                        "winner_reason": winner.get("reason"),
+                    },
+                    on_conflict="user_id,bucket_date"
+                ).execute()
+                winner_persisted = True
+            except Exception as persist_err:
+                logger.warning(f"Failed to persist cohort winner: {persist_err}")
+                # Fail-open: continue with results
+
         return {
             "status": "ok",
             "user_id": user_id,
@@ -970,6 +1265,8 @@ async def task_validation_cohort_eval(
             "cadence": effective_cadence,
             "results": results,
             "best": best,
+            "winner": winner,
+            "winner_persisted": winner_persisted,
             "cohort_count": len(results),
             "shadow": True
         }

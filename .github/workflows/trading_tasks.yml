@@ -68,6 +68,11 @@ on:
     # Schedule at 22:05 UTC to catch both
     - cron: '5 22 * * 1-5'
 
+    # Autopromote Cohort - 4:15 PM Chicago (after cohort eval)
+    # CST (winter): 22:15 UTC | CDT (summer): 21:15 UTC
+    # Schedule at 22:15 UTC to catch both
+    - cron: '15 22 * * 1-5'
+
   workflow_dispatch:
     inputs:
       task:
@@ -89,6 +94,7 @@ on:
           - paper_auto_close
           - validation_shadow_eval
           - validation_cohort_eval
+          - validation_autopromote_cohort
       skip_time_gate:
         description: 'Skip time gate check'
         required: false
@@ -563,3 +569,41 @@ jobs:
           USER_ID: ${{ secrets.TASK_USER_ID }}
         run: |
           python scripts/run_signed_task.py validation_cohort_eval --skip-time-gate
+
+  # ============================================================================
+  # Scheduled: Autopromote Cohort (4:15 PM Chicago)
+  # ============================================================================
+  validation-autopromote-cohort:
+    name: Autopromote Cohort (4:15 PM Chicago)
+    runs-on: ubuntu-latest
+    if: github.event_name == 'schedule' && github.event.schedule == '15 22 * * 1-5'
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Cache pip dependencies
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('packages/quantum/requirements.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r packages/quantum/requirements.txt
+
+      - name: Run Autopromote Cohort
+        env:
+          TASK_SIGNING_KEYS: ${{ secrets.TASK_SIGNING_KEYS }}
+          BASE_URL: ${{ secrets.QUANTUM_BASE_URL }}
+          USER_ID: ${{ secrets.TASK_USER_ID }}
+        run: |
+          python scripts/run_signed_task.py validation_autopromote_cohort --skip-time-gate

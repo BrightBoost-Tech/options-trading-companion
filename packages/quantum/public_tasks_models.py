@@ -341,6 +341,41 @@ class ValidationCohortEvalPayload(TaskPayloadBase):
         return v
 
 
+class ValidationAutopromoteCohortPayload(TaskPayloadBase):
+    """
+    Payload for /tasks/validation/autopromote-cohort.
+
+    v4-L1E: Evaluates whether to auto-promote a cohort's parameters to the
+    official paper checkpoint configuration based on 3-day proof rule.
+
+    Promotion criteria:
+    - Same winner cohort for 3 consecutive trading-day buckets
+    - No fail-fast on any of those days
+    - Non-decreasing return_pct across the 3 days
+
+    Requirements:
+    - Requires specific user_id (not "all")
+    - Must be in paper mode (ops_state.mode == "paper")
+    - Respects pause gate
+    - Requires AUTOPROMOTE_ENABLED=1
+    """
+    user_id: str = Field(
+        ...,  # Required
+        min_length=32,
+        description="Target user UUID (required, cannot be 'all')"
+    )
+
+    @field_validator("user_id")
+    @classmethod
+    def validate_user_id_not_all(cls, v: str) -> str:
+        """Validate user_id is a specific user, not 'all'."""
+        if v == "all":
+            raise ValueError("user_id must be a specific user UUID, not 'all'")
+        if len(v) < 32:
+            raise ValueError("user_id must be a valid UUID")
+        return v
+
+
 # =============================================================================
 # Scope Constants
 # =============================================================================
@@ -354,6 +389,7 @@ TASK_SCOPES = {
     "/tasks/validation/eval": "tasks:validation_eval",
     "/tasks/validation/shadow-eval": "tasks:validation_shadow_eval",
     "/tasks/validation/cohort-eval": "tasks:validation_cohort_eval",
+    "/tasks/validation/autopromote-cohort": "tasks:validation_autopromote_cohort",
     "/tasks/suggestions/close": "tasks:suggestions_close",
     "/tasks/suggestions/open": "tasks:suggestions_open",
     "/tasks/learning/ingest": "tasks:learning_ingest",

@@ -732,6 +732,52 @@ class GoLiveValidationService:
         except Exception as e:
             logger.error(f"Failed to log checkpoint run: {e}")
 
+    def _get_paper_forward_policy_overrides(self, state: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        v4-L1E: Extract paper forward policy overrides from state.
+
+        Reads state.paper_forward_policy JSONB and returns a dict of override values.
+        Only returns keys that are present and valid.
+
+        Supported overrides:
+        - paper_window_days: int
+        - target_return_pct: float (decimal, e.g., 0.10)
+        - fail_fast_drawdown_pct: float (decimal, e.g., -0.03)
+        - fail_fast_return_pct: float (decimal, e.g., -0.02)
+        """
+        policy = state.get("paper_forward_policy") or {}
+        if not isinstance(policy, dict):
+            return {}
+
+        overrides = {}
+
+        # Extract and validate each override
+        if "paper_window_days" in policy:
+            try:
+                overrides["paper_window_days"] = int(policy["paper_window_days"])
+            except (ValueError, TypeError):
+                pass
+
+        if "target_return_pct" in policy:
+            try:
+                overrides["target_return_pct"] = float(policy["target_return_pct"])
+            except (ValueError, TypeError):
+                pass
+
+        if "fail_fast_drawdown_pct" in policy:
+            try:
+                overrides["fail_fast_drawdown_pct"] = float(policy["fail_fast_drawdown_pct"])
+            except (ValueError, TypeError):
+                pass
+
+        if "fail_fast_return_pct" in policy:
+            try:
+                overrides["fail_fast_return_pct"] = float(policy["fail_fast_return_pct"])
+            except (ValueError, TypeError):
+                pass
+
+        return overrides
+
     def eval_paper_forward_checkpoint(
         self,
         user_id: str,
@@ -748,6 +794,7 @@ class GoLiveValidationService:
         - Window expiry handling with finalization
         - Fail-fast rules (drawdown, total return)
         - Pacing target (progress-based return target)
+        - v4-L1E: Per-user policy overrides from state.paper_forward_policy
 
         Args:
             user_id: User ID
@@ -777,8 +824,19 @@ class GoLiveValidationService:
         state = self.get_or_create_state(user_id)
         state = self._ensure_forward_checkpoint_defaults(state)
 
+        # v4-L1E: Apply policy overrides from state
+        policy_overrides = self._get_paper_forward_policy_overrides(state)
+        if policy_overrides:
+            if "fail_fast_drawdown_pct" in policy_overrides:
+                fail_fast_drawdown_pct = policy_overrides["fail_fast_drawdown_pct"]
+            if "fail_fast_return_pct" in policy_overrides:
+                fail_fast_return_pct = policy_overrides["fail_fast_return_pct"]
+            if "target_return_pct" in policy_overrides:
+                target_return_pct = policy_overrides["target_return_pct"]
+            logger.info(f"Applied policy overrides for user {user_id}: {policy_overrides}")
+
         baseline = float(state.get("paper_baseline_capital", 100000) or 100000)
-        window_days = state.get("paper_window_days") or 21
+        window_days = policy_overrides.get("paper_window_days") or state.get("paper_window_days") or 21
         checkpoint_target = state.get("paper_checkpoint_target") or 10
 
         # 2. Repair window if needed

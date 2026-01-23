@@ -18,20 +18,21 @@ Environment Variables:
     USER_ID              - Optional: run for specific user only
 
 Supported Tasks:
-    suggestions_close       - POST /tasks/suggestions/close (8 AM Chicago)
-    suggestions_open        - POST /tasks/suggestions/open (11 AM Chicago)
-    learning_ingest         - POST /tasks/learning/ingest (4:10 PM Chicago)
-    universe_sync           - POST /tasks/universe/sync
-    morning_brief           - POST /tasks/morning-brief
-    midday_scan             - POST /tasks/midday-scan
-    weekly_report           - POST /tasks/weekly-report
-    validation_eval         - POST /tasks/validation/eval
-    strategy_autotune       - POST /tasks/strategy/autotune
-    ops_health_check        - POST /tasks/ops/health_check (every 30 min)
-    paper_auto_execute      - POST /tasks/paper/auto-execute (requires user_id)
-    paper_auto_close        - POST /tasks/paper/auto-close (requires user_id)
-    validation_shadow_eval  - POST /tasks/validation/shadow-eval (requires user_id)
-    validation_cohort_eval  - POST /tasks/validation/cohort-eval (requires user_id)
+    suggestions_close              - POST /tasks/suggestions/close (8 AM Chicago)
+    suggestions_open               - POST /tasks/suggestions/open (11 AM Chicago)
+    learning_ingest                - POST /tasks/learning/ingest (4:10 PM Chicago)
+    universe_sync                  - POST /tasks/universe/sync
+    morning_brief                  - POST /tasks/morning-brief
+    midday_scan                    - POST /tasks/midday-scan
+    weekly_report                  - POST /tasks/weekly-report
+    validation_eval                - POST /tasks/validation/eval
+    strategy_autotune              - POST /tasks/strategy/autotune
+    ops_health_check               - POST /tasks/ops/health_check (every 30 min)
+    paper_auto_execute             - POST /tasks/paper/auto-execute (requires user_id)
+    paper_auto_close               - POST /tasks/paper/auto-close (requires user_id)
+    validation_shadow_eval         - POST /tasks/validation/shadow-eval (requires user_id)
+    validation_cohort_eval         - POST /tasks/validation/cohort-eval (requires user_id)
+    validation_autopromote_cohort  - POST /tasks/validation/autopromote-cohort (requires user_id)
 """
 
 import argparse
@@ -127,6 +128,12 @@ TASKS = {
         "path": "/tasks/validation/cohort-eval",
         "scope": "tasks:validation_cohort_eval",
         "description": "Run cohort evaluations (requires user_id)",
+        "requires_user_id": True,
+    },
+    "validation_autopromote_cohort": {
+        "path": "/tasks/validation/autopromote-cohort",
+        "scope": "tasks:validation_autopromote_cohort",
+        "description": "Auto-promote best cohort policy (requires user_id)",
         "requires_user_id": True,
     },
 }

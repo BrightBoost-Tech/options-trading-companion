@@ -1,4 +1,5 @@
--- Migration: 20250101000005_analytics_observability.sql
+-- Migration: 20241231235959_analytics_observability.sql
+-- Re-versioned to avoid duplicate version collision with rls_hardening (20250101000005)
 
 -- 1. Analytics Events Table (UX & System Events)
 CREATE TABLE IF NOT EXISTS analytics_events (

@@ -15,19 +15,22 @@ name: Trading Tasks (v4 Signed)
 on:
   schedule:
     # Suggestions Close - 8:00 AM Chicago
-    # CST (winter): 14:00 UTC | CDT (summer): 13:00 UTC
-    # Schedule at 13:00 UTC to catch both; time-gate handles the rest
+    # CDT (summer): 13:00 UTC | CST (winter): 14:00 UTC
+    # Schedule BOTH; Python time-gate allows only the correct local-time run
     - cron: '0 13 * * 1-5'
+    - cron: '0 14 * * 1-5'
 
     # Suggestions Open - 11:00 AM Chicago
-    # CST (winter): 17:00 UTC | CDT (summer): 16:00 UTC
-    # Schedule at 16:00 UTC to catch both
+    # CDT (summer): 16:00 UTC | CST (winter): 17:00 UTC
+    # Schedule BOTH; Python time-gate allows only the correct local-time run
     - cron: '0 16 * * 1-5'
+    - cron: '0 17 * * 1-5'
 
     # Learning Ingest - 4:10 PM Chicago
-    # CST (winter): 22:10 UTC | CDT (summer): 21:10 UTC
-    # Schedule at 21:10 UTC to catch both
+    # CDT (summer): 21:10 UTC | CST (winter): 22:10 UTC
+    # Schedule BOTH; Python time-gate allows only the correct local-time run
     - cron: '10 21 * * 1-5'
+    - cron: '10 22 * * 1-5'
 
     # Ops Health Check - Every 30 min during market hours
     # Runs at :00 and :30 from 13:00-22:00 UTC (8 AM - 5 PM Chicago approx)
@@ -136,7 +139,7 @@ jobs:
   suggestions-close:
     name: Suggestions Close (8 AM Chicago)
     runs-on: ubuntu-latest
-    if: github.event_name == 'schedule' && github.event.schedule == '0 13 * * 1-5'
+    if: github.event_name == 'schedule' && (github.event.schedule == '0 13 * * 1-5' || github.event.schedule == '0 14 * * 1-5')
 
     steps:
       - name: Checkout
@@ -174,7 +177,7 @@ jobs:
   suggestions-open:
     name: Suggestions Open (11 AM Chicago)
     runs-on: ubuntu-latest
-    if: github.event_name == 'schedule' && github.event.schedule == '0 16 * * 1-5'
+    if: github.event_name == 'schedule' && (github.event.schedule == '0 16 * * 1-5' || github.event.schedule == '0 17 * * 1-5')
 
     steps:
       - name: Checkout
@@ -212,7 +215,7 @@ jobs:
   learning-ingest:
     name: Learning Ingest (4:10 PM Chicago)
     runs-on: ubuntu-latest
-    if: github.event_name == 'schedule' && github.event.schedule == '10 21 * * 1-5'
+    if: github.event_name == 'schedule' && (github.event.schedule == '10 21 * * 1-5' || github.event.schedule == '10 22 * * 1-5')
 
     steps:
       - name: Checkout

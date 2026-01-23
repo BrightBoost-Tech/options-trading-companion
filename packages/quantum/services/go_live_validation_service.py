@@ -856,7 +856,9 @@ class GoLiveValidationService:
             }).eq("user_id", user_id).execute()
             logger.info(f"Repaired paper window for user {user_id}")
 
-        # 3. Checkpoint deduplication
+        # 3. Checkpoint deduplication (official checkpoints only)
+        # Note: Shadow checkpoints do NOT participate in deduplication - they are side-effect free
+        # and can run multiple times per bucket without state mutation.
         bucket_key = self._checkpoint_bucket(now)
         last_run_at = state.get("paper_checkpoint_last_run_at")
 
@@ -868,14 +870,22 @@ class GoLiveValidationService:
                 last_bucket = self._checkpoint_bucket(last_run_ts)
 
                 if last_bucket == bucket_key:
+                    # v4-L1F Optimization: Log deduplication for observability
+                    logger.info(
+                        f"Checkpoint dedup for user {user_id}: "
+                        f"bucket={bucket_key}, last_run={last_run_at}, "
+                        f"streak={state.get('paper_consecutive_passes', 0)}"
+                    )
                     return {
                         "status": "skipped",
                         "reason": "already_checkpointed_this_bucket",
                         "bucket": bucket_key,
+                        "last_run_at": last_run_at,
                         "paper_consecutive_passes": state.get("paper_consecutive_passes", 0),
                         "paper_ready": state.get("paper_ready", False)
                     }
             except (ValueError, TypeError):
+                logger.warning(f"Invalid last_run_at timestamp for user {user_id}: {last_run_at}")
                 pass  # Invalid timestamp, proceed
 
         # 4. Check for window expiry
@@ -927,6 +937,59 @@ class GoLiveValidationService:
 
         # 8. Handle no outcomes yet
         if not outcomes:
+            # v4-L1F Optimization: Detect ingestion lag before resetting streak
+            # Check if there are recent paper fills that haven't been ingested yet
+            ingestion_lag_detected = False
+            recent_fills_count = 0
+            try:
+                # Get user's paper portfolios
+                p_res = self.supabase.table("paper_portfolios").select("id").eq("user_id", user_id).execute()
+                portfolio_ids = [p["id"] for p in (p_res.data or [])]
+
+                if portfolio_ids:
+                    # Check for recent paper order fills (last 4 hours)
+                    lag_window = now - timedelta(hours=4)
+                    fills_res = self.supabase.table("paper_orders") \
+                        .select("id, filled_at") \
+                        .in_("portfolio_id", portfolio_ids) \
+                        .eq("status", "filled") \
+                        .gte("filled_at", lag_window.isoformat()) \
+                        .execute()
+                    recent_fills_count = len(fills_res.data or [])
+
+                    if recent_fills_count > 0:
+                        ingestion_lag_detected = True
+                        logger.warning(
+                            f"Ingestion lag detected for user {user_id}: "
+                            f"{recent_fills_count} fills in last 4h but no outcomes in checkpoint window"
+                        )
+            except Exception as e:
+                logger.warning(f"Failed to check ingestion lag for user {user_id}: {e}")
+
+            # If ingestion lag detected, return error instead of resetting streak
+            if ingestion_lag_detected:
+                self._log_checkpoint_run(
+                    user_id, "paper_checkpoint", window_start, now,
+                    0.0, 0.0, False, "ingestion_lag_detected",
+                    {
+                        "bucket": bucket_key,
+                        "progress": progress,
+                        "streak_before": current_streak,
+                        "recent_fills_count": recent_fills_count,
+                        "lag_window_hours": 4
+                    }
+                )
+
+                return {
+                    **result_base,
+                    "status": "error",
+                    "reason": "ingestion_lag_detected",
+                    "detail": f"Found {recent_fills_count} recent fills but no outcomes - check learning_ingest",
+                    "paper_consecutive_passes": current_streak,  # Preserve streak
+                    "streak_before": current_streak,
+                    "paper_ready": state.get("paper_ready", False)
+                }
+
             # Log miss with special reason
             self._log_checkpoint_run(
                 user_id, "paper_checkpoint", window_start, now,

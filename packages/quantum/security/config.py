@@ -29,6 +29,14 @@ OPTIONAL_ENV_VARS = [
     "TASK_SIGNING_SECRET",  # Required if tasks are enabled/exposed
 ]
 
+# =============================================================================
+# Trading Environment Variables (v4-L1F Optimization)
+# =============================================================================
+
+TRADING_ENV_VARS = [
+    "POLYGON_API_KEY",  # Required for market data fetching
+]
+
 
 # =============================================================================
 # Environment Detection
@@ -101,3 +109,33 @@ def validate_security_config():
             "Remove ENABLE_DEV_AUTH_BYPASS from production environment variables.\n"
             "Server startup aborted."
         )
+
+
+class TradingConfigError(Exception):
+    """Raised when trading configuration is invalid."""
+    pass
+
+
+def validate_trading_config():
+    """
+    v4-L1F Optimization: Validates trading-related environment variables at startup.
+
+    In production: Missing POLYGON_API_KEY is a hard failure
+    In development: Missing POLYGON_API_KEY is a warning (allows mock data testing)
+    """
+    missing = []
+    for var in TRADING_ENV_VARS:
+        if not os.getenv(var):
+            missing.append(var)
+
+    if missing:
+        if is_production_env():
+            raise TradingConfigError(
+                f"CRITICAL TRADING CONFIG ERROR: Missing required environment variables: {', '.join(missing)}. "
+                "Paper trading and live execution will fail without market data. "
+                "Server startup aborted."
+            )
+        else:
+            # In development, warn but allow startup (supports mock data testing)
+            print(f"⚠️ WARNING: Missing trading environment variables: {', '.join(missing)}. "
+                  "Market data fetches will fail or use mock data.")

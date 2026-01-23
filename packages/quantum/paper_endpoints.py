@@ -5,6 +5,7 @@ from datetime import datetime, timezone, timedelta
 import logging
 import uuid
 import os
+import time
 
 from packages.quantum.security import get_current_user
 from packages.quantum.models import TradeTicket, OptionLeg
@@ -25,6 +26,49 @@ from packages.quantum.services.analytics_service import AnalyticsService
 from packages.quantum.agents.agents.post_trade_review_agent import PostTradeReviewAgent
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
+
+
+def _fetch_quote_with_retry(
+    poly: PolygonService,
+    symbol: str,
+    max_retries: int = 3,
+    base_delay: float = 0.5
+) -> Optional[Dict[str, Any]]:
+    """
+    Fetch a quote from Polygon with exponential backoff retry.
+
+    v4-L1F Optimization: Prevents transient API failures from causing
+    missing quotes during order staging/processing.
+
+    Args:
+        poly: PolygonService instance
+        symbol: The symbol to fetch quote for
+        max_retries: Maximum number of retry attempts (default: 3)
+        base_delay: Base delay in seconds between retries (default: 0.5)
+
+    Returns:
+        Quote dict on success, None on failure after all retries
+    """
+    last_error = None
+    for attempt in range(max_retries):
+        try:
+            return poly.get_recent_quote(symbol)
+        except Exception as e:
+            last_error = e
+            if attempt < max_retries - 1:
+                delay = base_delay * (2 ** attempt)  # Exponential backoff: 0.5, 1.0, 2.0
+                logger.warning(
+                    f"Polygon quote fetch failed for {symbol} (attempt {attempt + 1}/{max_retries}): {e}. "
+                    f"Retrying in {delay}s..."
+                )
+                time.sleep(delay)
+            else:
+                logger.error(
+                    f"Polygon quote fetch failed for {symbol} after {max_retries} attempts: {e}"
+                )
+    return None
+
 
 def get_supabase():
     # Lazy import to avoid circular imports; use the canonical backend module path.
@@ -160,8 +204,12 @@ def process_orders_endpoint(
     # Process synchronously for immediate feedback in this MVP phase, or queue
     # For better UX, we'll do sync for now, but return count
 
-    processed_count = _process_orders_for_user(supabase, analytics, user_id)
-    return {"status": "processed", "count": processed_count}
+    result = _process_orders_for_user(supabase, analytics, user_id)
+    return {
+        "status": "processed",
+        "count": result["processed"],
+        "errors": result["errors"] if result["errors"] else None
+    }
 
 
 @router.post("/paper/execute")
@@ -474,12 +522,9 @@ def _stage_order_internal(supabase, analytics, user_id, ticket: TradeTicket, por
     if not trace_id:
         trace_id = str(uuid.uuid4())
 
-    # Fetch Quote
+    # Fetch Quote (v4-L1F: with retry and exponential backoff)
     poly = PolygonService()
-    try:
-        quote = poly.get_recent_quote(ticket.symbol)
-    except:
-        quote = None
+    quote = _fetch_quote_with_retry(poly, ticket.symbol)
 
     # TCM Estimate
     tcm_est = TransactionCostModel.estimate(ticket, quote)
@@ -573,68 +618,83 @@ def _compute_fill_deltas(order: dict, fill_res: dict) -> dict:
     }
 
 def _process_orders_for_user(supabase, analytics, user_id, target_order_id=None):
+    """
+    Process paper orders for a user, attempting fills and updating state.
+
+    v4-L1F Optimization: Returns dict with processed count and any errors,
+    allowing callers to detect partial failures without losing progress.
+
+    Returns:
+        dict with keys:
+            - processed: int, number of orders successfully processed
+            - errors: list of dicts with order_id and error message
+            - total_orders: int, total orders attempted
+    """
     # Fetch working orders: staged, working, or partial
     # A1) Replace exact "staged" check with list of in-flight states
     # We need to filter by portfolio owned by user, or join.
     # Simplest is to get user portfolios then filter orders.
     # Or rely on RLS if enabled. Assuming we trust backend:
 
+    result = {"processed": 0, "errors": [], "total_orders": 0}
+
     # Get user portfolios
     p_res = supabase.table("paper_portfolios").select("id, cash_balance").eq("user_id", user_id).execute()
     if not p_res.data:
-        return 0
+        return result
     p_map = {p["id"]: p for p in p_res.data}
     p_ids = list(p_map.keys())
 
     # A1 Implementation
     query = supabase.table("paper_orders").select("*").in_("status", ["staged", "working", "partial"])
     orders_res = query.in_("portfolio_id", p_ids).execute()
-    orders = orders_res.data
+    orders = orders_res.data or []
 
     if target_order_id:
         orders = [o for o in orders if o["id"] == target_order_id]
 
-    processed_count = 0
+    result["total_orders"] = len(orders)
     poly = PolygonService()
 
     for order in orders:
-        # Fetch fresh quote
-        # Extract symbol from order_json
-        ticket_data = order.get("order_json", {})
-        symbol = ticket_data.get("symbol")
+        order_id = order.get("id", "unknown")
+        try:
+            # Fetch fresh quote
+            # Extract symbol from order_json
+            ticket_data = order.get("order_json", {})
+            symbol = ticket_data.get("symbol")
 
-        quote = None
-        if symbol:
-            try:
-                quote = poly.get_recent_quote(symbol)
-            except:
-                pass
+            # v4-L1F: Fetch quote with retry and exponential backoff
+            quote = _fetch_quote_with_retry(poly, symbol) if symbol else None
 
-        # Simulate Fill
-        fill_res = TransactionCostModel.simulate_fill(order, quote)
+            # Simulate Fill
+            fill_res = TransactionCostModel.simulate_fill(order, quote)
 
-        # B) Commit only when a NEW fill happened this tick
-        should_commit = False
+            # B) Commit only when a NEW fill happened this tick
+            should_commit = False
 
-        last_qty = float(fill_res.get("last_fill_qty") or 0.0)
+            last_qty = float(fill_res.get("last_fill_qty") or 0.0)
 
-        # Must be in a valid fill state AND have new quantity
-        if fill_res.get("status") in ("partial", "filled") and last_qty > 0:
-            should_commit = True
+            # Must be in a valid fill state AND have new quantity
+            if fill_res.get("status") in ("partial", "filled") and last_qty > 0:
+                should_commit = True
 
-        if should_commit:
-            # Commit Fill
-            _commit_fill(supabase, analytics, user_id, order, fill_res, quote, p_map[order["portfolio_id"]])
-            processed_count += 1
-            pass
+            if should_commit:
+                # Commit Fill
+                _commit_fill(supabase, analytics, user_id, order, fill_res, quote, p_map[order["portfolio_id"]])
+                result["processed"] += 1
 
-        elif fill_res["status"] == "working":
-            # Update last checked?
-            # Optionally update status to 'working' if it was 'staged'
-            if order["status"] == "staged":
-                supabase.table("paper_orders").update({"status": "working"}).eq("id", order["id"]).execute()
+            elif fill_res["status"] == "working":
+                # Update last checked?
+                # Optionally update status to 'working' if it was 'staged'
+                if order["status"] == "staged":
+                    supabase.table("paper_orders").update({"status": "working"}).eq("id", order["id"]).execute()
 
-    return processed_count
+        except Exception as e:
+            logger.error(f"Error processing order {order_id}: {e}")
+            result["errors"].append({"order_id": order_id, "error": str(e)})
+
+    return result
 
 
 def _commit_fill(supabase, analytics, user_id, order, fill_res, quote, portfolio):

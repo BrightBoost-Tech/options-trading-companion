@@ -27,7 +27,9 @@ load_dotenv(dotenv_path=env_path)
 from packages.quantum.security import encrypt_token, decrypt_token, get_current_user, get_supabase_user_client
 from packages.quantum.security.config import (
     validate_security_config,
+    validate_trading_config,
     SecurityConfigError,
+    TradingConfigError,
     is_production_env,
     is_debug_routes_enabled,
 )
@@ -45,6 +47,7 @@ if os.getenv("ENABLE_DEV_AUTH_BYPASS") == "1":
 else:
     print("🔒 DEV AUTH BYPASS DISABLED (expected for prod)")
 validate_security_config()
+validate_trading_config()  # v4-L1F: Validate trading env vars at startup
 
 # Import models and services
 from packages.quantum.models import Holding, SyncResponse, PortfolioSnapshot, Spread, SpreadPosition, RiskDashboardResponse, UnifiedPosition, OptimizationRationale

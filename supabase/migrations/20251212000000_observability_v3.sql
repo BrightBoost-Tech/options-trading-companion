@@ -5,7 +5,7 @@ ALTER TABLE analytics_events
 ADD COLUMN IF NOT EXISTS suggestion_id uuid NULL,
 ADD COLUMN IF NOT EXISTS execution_id uuid NULL,
 ADD COLUMN IF NOT EXISTS model_version text NULL,
-ADD COLUMN IF NOT EXISTS window text NULL,
+ADD COLUMN IF NOT EXISTS "window" text NULL,
 ADD COLUMN IF NOT EXISTS strategy text NULL,
 ADD COLUMN IF NOT EXISTS regime text NULL,
 ADD COLUMN IF NOT EXISTS features_hash text NULL,
@@ -14,7 +14,7 @@ ADD COLUMN IF NOT EXISTS is_paper boolean NOT NULL DEFAULT false;
 -- Add indexes for performance
 CREATE INDEX IF NOT EXISTS idx_analytics_trace_id ON analytics_events (trace_id);
 CREATE INDEX IF NOT EXISTS idx_analytics_suggestion_id ON analytics_events (suggestion_id);
-CREATE INDEX IF NOT EXISTS idx_analytics_model_context ON analytics_events (model_version, strategy, window, regime);
+CREATE INDEX IF NOT EXISTS idx_analytics_model_context ON analytics_events (model_version, strategy, "window", regime);
 CREATE INDEX IF NOT EXISTS idx_analytics_event_time ON analytics_events (event_name, created_at);
 
 -- 2. Extend trade_suggestions with traceability fields
@@ -51,7 +51,7 @@ BEGIN
         WHEN duplicate_column THEN NULL;
     END;
     BEGIN
-        ALTER TABLE learning_feedback_loops ADD COLUMN window text NULL;
+        ALTER TABLE learning_feedback_loops ADD COLUMN "window" text NULL;
     EXCEPTION
         WHEN duplicate_column THEN NULL;
     END;
@@ -92,7 +92,7 @@ CREATE OR REPLACE VIEW ev_leakage_by_bucket_v3 AS
 SELECT
     model_version,
     strategy,
-    window,
+    "window",
     regime,
     COUNT(ts.id) AS suggestion_count,
     COUNT(po.id) AS execution_count,
@@ -102,4 +102,4 @@ SELECT
 FROM trade_suggestions ts
 LEFT JOIN paper_orders po ON ts.trace_id = po.trace_id
 LEFT JOIN learning_feedback_loops lfl ON ts.id = lfl.suggestion_id
-GROUP BY model_version, strategy, window, regime;
+GROUP BY model_version, strategy, "window", regime;

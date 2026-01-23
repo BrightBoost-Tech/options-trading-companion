@@ -4,7 +4,7 @@
 -- 1. Add missing columns safely
 ALTER TABLE public.learning_feedback_loops
     ADD COLUMN IF NOT EXISTS strategy TEXT NULL,
-    ADD COLUMN IF NOT EXISTS window TEXT NULL,
+    ADD COLUMN IF NOT EXISTS "window" TEXT NULL,
     ADD COLUMN IF NOT EXISTS total_trades INTEGER NULL,
     ADD COLUMN IF NOT EXISTS wins INTEGER NULL,
     ADD COLUMN IF NOT EXISTS losses INTEGER NULL,
@@ -19,4 +19,4 @@ ALTER TABLE public.learning_feedback_loops
 
 -- 3. Add index for faster aggregate lookups
 CREATE INDEX IF NOT EXISTS idx_learning_feedback_agg
-    ON public.learning_feedback_loops(user_id, strategy, window, updated_at DESC);
+    ON public.learning_feedback_loops(user_id, strategy, "window", updated_at DESC);

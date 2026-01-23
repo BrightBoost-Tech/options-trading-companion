@@ -30,7 +30,7 @@ BEGIN
 
     IF NEW.legs_fingerprint IS NULL THEN
         -- Bypass 1: Non-production windows
-        IF NEW.window IN ('paper', 'legacy', 'test') THEN
+        IF NEW."window" IN ('paper', 'legacy', 'test') THEN
             RETURN NEW;
         END IF;
 

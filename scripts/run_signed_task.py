@@ -33,6 +33,9 @@ Supported Tasks:
     validation_shadow_eval         - POST /tasks/validation/shadow-eval (requires user_id)
     validation_cohort_eval         - POST /tasks/validation/cohort-eval (requires user_id)
     validation_autopromote_cohort  - POST /tasks/validation/autopromote-cohort (requires user_id)
+    validation_preflight           - POST /tasks/validation/preflight (requires user_id)
+    validation_init_window         - POST /tasks/validation/init-window (requires user_id)
+    paper_safety_close_one         - POST /tasks/paper/safety-close-one (requires user_id)
 """
 
 import argparse
@@ -134,6 +137,24 @@ TASKS = {
         "path": "/tasks/validation/autopromote-cohort",
         "scope": "tasks:validation_autopromote_cohort",
         "description": "Auto-promote best cohort policy (requires user_id)",
+        "requires_user_id": True,
+    },
+    "validation_preflight": {
+        "path": "/tasks/validation/preflight",
+        "scope": "tasks:validation_preflight",
+        "description": "Preflight readiness report (requires user_id)",
+        "requires_user_id": True,
+    },
+    "validation_init_window": {
+        "path": "/tasks/validation/init-window",
+        "scope": "tasks:validation_init_window",
+        "description": "Initialize forward checkpoint window (requires user_id)",
+        "requires_user_id": True,
+    },
+    "paper_safety_close_one": {
+        "path": "/tasks/paper/safety-close-one",
+        "scope": "tasks:paper_safety_close_one",
+        "description": "Safety close one paper position (requires user_id)",
         "requires_user_id": True,
     },
 }

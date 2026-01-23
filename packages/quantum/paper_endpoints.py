@@ -960,9 +960,27 @@ def _run_attribution(supabase, user_id, order, position, exit_fill, fees, side):
 def reset_paper_portfolio(
     user_id: str = Depends(get_current_user),
 ):
+    """
+    Reset paper portfolio to initial state.
+
+    v4-L1F: Baseline consistency - uses paper_baseline_capital from v3_go_live_state
+    if present, otherwise defaults to 100000. This ensures consistency between:
+    - paper portfolio reset
+    - paper execution ledger
+    - validation baseline used for return calculations
+    """
     supabase = get_supabase()
     if not supabase:
         raise HTTPException(status_code=503, detail="Database not available")
+
+    # v4-L1F: Read baseline from v3_go_live_state if present, otherwise use 100000
+    baseline_capital = 100000.0
+    try:
+        state_res = supabase.table("v3_go_live_state").select("paper_baseline_capital").eq("user_id", user_id).limit(1).execute()
+        if state_res.data and state_res.data[0].get("paper_baseline_capital"):
+            baseline_capital = float(state_res.data[0]["paper_baseline_capital"])
+    except Exception as e:
+        logging.warning(f"Failed to read baseline capital from state, using default: {e}")
 
     port_res = supabase.table("paper_portfolios").select("id").eq("user_id", user_id).execute()
     portfolio_ids = [p["id"] for p in port_res.data] if port_res.data else []
@@ -976,8 +994,8 @@ def reset_paper_portfolio(
     new_port = supabase.table("paper_portfolios").insert({
         "user_id": user_id,
         "name": "Main Paper",
-        "cash_balance": 100000.0,
-        "net_liq": 100000.0
+        "cash_balance": baseline_capital,
+        "net_liq": baseline_capital
     }).execute()
 
     if not new_port.data:
@@ -985,7 +1003,8 @@ def reset_paper_portfolio(
 
     return {
         "status": "reset",
-        "portfolio": new_port.data[0]
+        "portfolio": new_port.data[0],
+        "baseline_capital": baseline_capital
     }
 @router.get("/paper/portfolio")
 def get_paper_portfolio(

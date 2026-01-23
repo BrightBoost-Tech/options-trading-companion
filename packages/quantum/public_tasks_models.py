@@ -377,6 +377,119 @@ class ValidationAutopromoteCohortPayload(TaskPayloadBase):
 
 
 # =============================================================================
+# 10-Day Readiness Hardening Tasks (v4-L1F)
+# =============================================================================
+
+class ValidationPreflightPayload(TaskPayloadBase):
+    """
+    Payload for /tasks/validation/preflight.
+
+    v4-L1F: Computes and returns a layman-friendly preflight summary
+    showing "on track vs at risk" status for the daily checkpoint.
+
+    Outputs a markdown summary to GITHUB_STEP_SUMMARY showing:
+    - outcomes_today_count, open_positions_count
+    - return_pct, target_return_now, margin_to_target
+    - max_drawdown_pct, fail_fast threshold
+    - on_track boolean and reason
+    - time until official checkpoint
+
+    Requirements:
+    - Requires specific user_id (not "all")
+    - Must be in paper mode
+    - Respects pause gate
+    - Idempotent (read-only, no state mutation)
+    """
+    user_id: str = Field(
+        ...,  # Required
+        min_length=32,
+        description="Target user UUID (required, cannot be 'all')"
+    )
+
+    @field_validator("user_id")
+    @classmethod
+    def validate_user_id_not_all(cls, v: str) -> str:
+        """Validate user_id is a specific user, not 'all'."""
+        if v == "all":
+            raise ValueError("user_id must be a specific user UUID, not 'all'")
+        if len(v) < 32:
+            raise ValueError("user_id must be a valid UUID")
+        return v
+
+
+class ValidationInitWindowPayload(TaskPayloadBase):
+    """
+    Payload for /tasks/validation/init-window.
+
+    v4-L1F: Ensures forward checkpoint window fields are valid and
+    initialized BEFORE Day 1 of the test. Prevents "repair window at
+    checkpoint time" surprises.
+
+    This task:
+    - Validates/repairs paper_window_start and paper_window_end
+    - Does NOT increment streak
+    - Does NOT change readiness
+    - Does NOT trigger fail-fast
+
+    Requirements:
+    - Requires specific user_id (not "all")
+    - Must be in paper mode
+    - Respects pause gate
+    - Idempotent once per day (UTC bucket)
+    """
+    user_id: str = Field(
+        ...,  # Required
+        min_length=32,
+        description="Target user UUID (required, cannot be 'all')"
+    )
+
+    @field_validator("user_id")
+    @classmethod
+    def validate_user_id_not_all(cls, v: str) -> str:
+        """Validate user_id is a specific user, not 'all'."""
+        if v == "all":
+            raise ValueError("user_id must be a specific user UUID, not 'all'")
+        if len(v) < 32:
+            raise ValueError("user_id must be a valid UUID")
+        return v
+
+
+class PaperSafetyCloseOnePayload(TaskPayloadBase):
+    """
+    Payload for /tasks/paper/safety-close-one.
+
+    v4-L1F: Safety net to guarantee at least one paper close outcome
+    exists before checkpoint time. Prevents "no outcomes = miss" resets.
+
+    Behavior:
+    - If there is at least one open paper position, closes exactly one
+      (deterministically: oldest opened_at, then position_id asc)
+    - If no open positions exist, no-ops without error
+    - Idempotent once per day (UTC bucket)
+
+    Requirements:
+    - Requires specific user_id (not "all")
+    - Must be in paper mode (ops_state.mode == "paper")
+    - Respects pause gate
+    """
+    user_id: str = Field(
+        ...,  # Required
+        min_length=32,
+        description="Target user UUID (required, cannot be 'all')"
+    )
+
+    @field_validator("user_id")
+    @classmethod
+    def validate_user_id_not_all(cls, v: str) -> str:
+        """Validate user_id is a specific user, not 'all'."""
+        if v == "all":
+            raise ValueError("user_id must be a specific user UUID, not 'all'")
+        if len(v) < 32:
+            raise ValueError("user_id must be a valid UUID")
+        return v
+
+
+# =============================================================================
 # Scope Constants
 # =============================================================================
 
@@ -390,6 +503,8 @@ TASK_SCOPES = {
     "/tasks/validation/shadow-eval": "tasks:validation_shadow_eval",
     "/tasks/validation/cohort-eval": "tasks:validation_cohort_eval",
     "/tasks/validation/autopromote-cohort": "tasks:validation_autopromote_cohort",
+    "/tasks/validation/preflight": "tasks:validation_preflight",
+    "/tasks/validation/init-window": "tasks:validation_init_window",
     "/tasks/suggestions/close": "tasks:suggestions_close",
     "/tasks/suggestions/open": "tasks:suggestions_open",
     "/tasks/learning/ingest": "tasks:learning_ingest",
@@ -397,6 +512,7 @@ TASK_SCOPES = {
     "/tasks/ops/health_check": "tasks:ops_health_check",
     "/tasks/paper/auto-execute": "tasks:paper_auto_execute",
     "/tasks/paper/auto-close": "tasks:paper_auto_close",
+    "/tasks/paper/safety-close-one": "tasks:paper_safety_close_one",
 }
 
 

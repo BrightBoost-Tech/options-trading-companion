@@ -27,6 +27,9 @@ from packages.quantum.public_tasks_models import (
     ValidationShadowEvalPayload,
     ValidationCohortEvalPayload,
     ValidationAutopromoteCohortPayload,
+    ValidationPreflightPayload,
+    ValidationInitWindowPayload,
+    PaperSafetyCloseOnePayload,
     DEFAULT_STRATEGY_NAME,
 )
 
@@ -1120,6 +1123,337 @@ async def task_validation_autopromote_cohort(
             "status": "error",
             "error": str(e),
             "user_id": user_id
+        }
+
+
+# =============================================================================
+# 10-Day Readiness Hardening Tasks (v4-L1F)
+# =============================================================================
+
+
+def _check_readiness_hardening_gates(user_id: str) -> Optional[Dict[str, Any]]:
+    """
+    Check readiness hardening gating conditions.
+
+    Returns None if all gates pass, otherwise returns error response dict.
+
+    Gates checked:
+    1. ops_state.mode must be "paper"
+    2. ops_state.paused must be false
+    """
+    from packages.quantum.ops_endpoints import get_global_ops_control
+
+    # Gate 1: Paper mode only
+    ops_state = get_global_ops_control()
+    mode = ops_state.get("mode", "paper")
+
+    if mode != "paper":
+        return {
+            "status": "cancelled",
+            "reason": "mode_is_paper_only",
+            "detail": f"Readiness hardening requires mode='paper', current mode='{mode}'"
+        }
+
+    # Gate 2: Not paused
+    if ops_state.get("paused", False):
+        return {
+            "status": "cancelled",
+            "reason": "paused_globally",
+            "detail": "Trading is paused globally"
+        }
+
+    return None
+
+
+def _readiness_hardening_idempotency_key(task_type: str, user_id: str) -> str:
+    """
+    Generate UTC-based idempotency key for readiness hardening tasks.
+
+    Format: {YYYY-MM-DD}-{task_type}-{user_id}
+    """
+    date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    return f"{date}-{task_type}-{user_id}"
+
+
+@router.post("/validation/preflight", status_code=200)
+async def task_validation_preflight(
+    payload: ValidationPreflightPayload = Body(...),
+    auth: TaskSignatureResult = Depends(verify_task_signature("tasks:validation_preflight"))
+):
+    """
+    v4-L1F: Compute and return preflight summary for daily checkpoint.
+
+    Auth: Requires v4 HMAC signature with scope 'tasks:validation_preflight'.
+
+    Returns a layman-friendly summary showing:
+    - outcomes_today_count, open_positions_count
+    - return_pct, target_return_now, margin_to_target
+    - max_drawdown_pct, fail_fast threshold
+    - on_track boolean and reason
+    - time until official checkpoint
+
+    Requirements:
+    - Requires specific user_id (not "all")
+    - Must be in paper mode
+    - Respects pause gate
+    - Read-only (no state mutation)
+    """
+    user_id = payload.user_id
+
+    # Check gates
+    gate_error = _check_readiness_hardening_gates(user_id)
+    if gate_error:
+        return gate_error
+
+    try:
+        from packages.quantum.jobs.handlers.utils import get_admin_client
+        from packages.quantum.services.go_live_validation_service import GoLiveValidationService
+
+        supabase = get_admin_client()
+        service = GoLiveValidationService(supabase)
+
+        snapshot = service.compute_forward_checkpoint_snapshot(user_id)
+
+        return {
+            "status": snapshot.get("status", "ok"),
+            "user_id": user_id,
+            "as_of": datetime.now(timezone.utc).isoformat(),
+            **snapshot
+        }
+
+    except Exception as e:
+        logger.error(f"Preflight failed for user {user_id}: {e}")
+        return {
+            "status": "error",
+            "error": str(e),
+            "user_id": user_id
+        }
+
+
+@router.post("/validation/init-window", status_code=200)
+async def task_validation_init_window(
+    payload: ValidationInitWindowPayload = Body(...),
+    auth: TaskSignatureResult = Depends(verify_task_signature("tasks:validation_init_window"))
+):
+    """
+    v4-L1F: Ensure forward checkpoint window is initialized.
+
+    Auth: Requires v4 HMAC signature with scope 'tasks:validation_init_window'.
+
+    Validates/repairs paper_window_start and paper_window_end BEFORE Day 1
+    of the test. Does NOT affect streak or readiness.
+
+    Requirements:
+    - Requires specific user_id (not "all")
+    - Must be in paper mode
+    - Respects pause gate
+    - Idempotent once per day (UTC bucket)
+    """
+    user_id = payload.user_id
+
+    # Check gates
+    gate_error = _check_readiness_hardening_gates(user_id)
+    if gate_error:
+        return gate_error
+
+    # Idempotency check
+    bucket_date = datetime.now(timezone.utc).date().isoformat()
+    idempotency_key = _readiness_hardening_idempotency_key("init-window", user_id)
+
+    try:
+        from packages.quantum.jobs.handlers.utils import get_admin_client
+        from packages.quantum.services.go_live_validation_service import GoLiveValidationService
+
+        supabase = get_admin_client()
+        service = GoLiveValidationService(supabase)
+
+        result = service.ensure_forward_window_initialized(user_id)
+
+        return {
+            **result,
+            "idempotency_key": idempotency_key,
+            "bucket_date": bucket_date,
+            "as_of": datetime.now(timezone.utc).isoformat()
+        }
+
+    except Exception as e:
+        logger.error(f"Init window failed for user {user_id}: {e}")
+        return {
+            "status": "error",
+            "error": str(e),
+            "user_id": user_id,
+            "idempotency_key": idempotency_key
+        }
+
+
+@router.post("/paper/safety-close-one", status_code=200)
+async def task_paper_safety_close_one(
+    payload: PaperSafetyCloseOnePayload = Body(...),
+    auth: TaskSignatureResult = Depends(verify_task_signature("tasks:paper_safety_close_one"))
+):
+    """
+    v4-L1F: Safety net to guarantee at least one paper close outcome before checkpoint.
+
+    Auth: Requires v4 HMAC signature with scope 'tasks:paper_safety_close_one'.
+
+    Behavior:
+    - If there is at least one open paper position, closes exactly one
+      (deterministically: oldest opened_at, then position_id asc)
+    - If no open positions exist, no-ops without error
+    - Idempotent once per day (UTC bucket)
+
+    Requirements:
+    - Requires specific user_id (not "all")
+    - Must be in paper mode
+    - Respects pause gate
+    """
+    user_id = payload.user_id
+
+    # Check gates
+    gate_error = _check_readiness_hardening_gates(user_id)
+    if gate_error:
+        return gate_error
+
+    # Idempotency: check if already closed today
+    bucket_date = datetime.now(timezone.utc).date().isoformat()
+    idempotency_key = _readiness_hardening_idempotency_key("safety-close", user_id)
+
+    try:
+        from packages.quantum.jobs.handlers.utils import get_admin_client
+
+        supabase = get_admin_client()
+
+        # Check if we already ran today by looking for a safety close outcome
+        # We'll check learning_trade_outcomes_v3 for a close with safety_close tag
+        today_start = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
+        today_end = today_start + timedelta(days=1)
+
+        existing_safety_close = supabase.table("learning_trade_outcomes_v3") \
+            .select("id") \
+            .eq("user_id", user_id) \
+            .eq("is_paper", True) \
+            .gte("closed_at", today_start.isoformat()) \
+            .lt("closed_at", today_end.isoformat()) \
+            .execute()
+
+        # For strict idempotency, we'll track via a job_runs check
+        # But for simplicity, we'll just check if there's at least one outcome today
+        outcomes_today = existing_safety_close.data or []
+        if len(outcomes_today) > 0:
+            return {
+                "status": "skipped",
+                "reason": "outcome_exists_today",
+                "outcomes_today_count": len(outcomes_today),
+                "user_id": user_id,
+                "idempotency_key": idempotency_key,
+                "closed": 0
+            }
+
+        # 1. Get user's paper portfolios
+        p_res = supabase.table("paper_portfolios").select("id").eq("user_id", user_id).execute()
+        portfolio_ids = [p["id"] for p in (p_res.data or [])]
+
+        if not portfolio_ids:
+            return {
+                "status": "ok",
+                "reason": "no_portfolio",
+                "user_id": user_id,
+                "idempotency_key": idempotency_key,
+                "closed": 0
+            }
+
+        # 2. Fetch open paper positions - deterministic sort: created_at asc, id asc
+        pos_res = supabase.table("paper_positions") \
+            .select("*") \
+            .in_("portfolio_id", portfolio_ids) \
+            .order("created_at", desc=False) \
+            .order("id", desc=False) \
+            .limit(1) \
+            .execute()
+
+        positions = pos_res.data or []
+
+        if not positions:
+            return {
+                "status": "ok",
+                "reason": "no_open_positions",
+                "user_id": user_id,
+                "idempotency_key": idempotency_key,
+                "closed": 0
+            }
+
+        # 3. Close the oldest position
+        position_to_close = positions[0]
+        position_id = position_to_close["id"]
+
+        logger.info(f"Safety close: closing position {position_id} for user {user_id}")
+
+        # Use the paper close endpoint logic
+        from packages.quantum.paper_endpoints import (
+            get_supabase,
+            get_analytics_service,
+            _process_orders_for_user,
+            _stage_order_internal,
+        )
+        from packages.quantum.models import TradeTicket
+
+        analytics = get_analytics_service()
+
+        # Construct closing ticket
+        qty = float(position_to_close["quantity"])
+        side = "sell" if qty > 0 else "buy"
+
+        ticket = TradeTicket(
+            symbol=position_to_close["symbol"],
+            quantity=abs(qty),
+            order_type="market",
+            strategy_type=position_to_close.get("strategy_key", "").split("_")[-1] if position_to_close.get("strategy_key") else "safety_close",
+            source_engine="safety_close",
+            legs=[
+                {"symbol": position_to_close["symbol"], "action": side, "quantity": abs(qty)}
+            ]
+        )
+
+        # Set source_ref_id for context
+        if position_to_close.get("suggestion_id"):
+            ticket.source_ref_id = position_to_close.get("suggestion_id")
+
+        # Stage and execute
+        order_id = _stage_order_internal(
+            supabase,
+            analytics,
+            user_id,
+            ticket,
+            position_to_close["portfolio_id"],
+            position_id=position_id,
+            trace_id_override=position_to_close.get("trace_id")
+        )
+
+        _process_orders_for_user(supabase, analytics, user_id, target_order_id=order_id)
+
+        # Verify closure
+        order_res = supabase.table("paper_orders").select("status").eq("id", order_id).single().execute()
+        order_status = order_res.data.get("status") if order_res.data else "unknown"
+
+        return {
+            "status": "ok",
+            "closed": 1,
+            "position_id": position_id,
+            "order_id": order_id,
+            "order_status": order_status,
+            "user_id": user_id,
+            "idempotency_key": idempotency_key,
+            "bucket_date": bucket_date
+        }
+
+    except Exception as e:
+        logger.error(f"Safety close failed for user {user_id}: {e}")
+        return {
+            "status": "error",
+            "error": str(e),
+            "user_id": user_id,
+            "idempotency_key": idempotency_key,
+            "closed": 0
         }
 
 

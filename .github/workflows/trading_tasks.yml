@@ -73,6 +73,23 @@ on:
     # Schedule at 22:15 UTC to catch both
     - cron: '15 22 * * 1-5'
 
+    # v4-L1F: Readiness Hardening Tasks
+
+    # Validation Init Window - 8:40 AM Chicago (before suggestions-open)
+    # CST (winter): 14:40 UTC | CDT (summer): 13:40 UTC
+    # Schedule at 14:40 UTC to catch both
+    - cron: '40 14 * * 1-5'
+
+    # Validation Preflight Midday - 1:00 PM Chicago (intraday pacing check)
+    # CST (winter): 19:00 UTC | CDT (summer): 18:00 UTC
+    # Schedule at 19:00 UTC (overlaps with shadow midday, runs after)
+    - cron: '5 19 * * 1-5'
+
+    # Paper Safety Close One - 5:00 PM Chicago (must be before 6:30 PM checkpoint)
+    # CST (winter): 23:00 UTC | CDT (summer): 22:00 UTC
+    # Schedule at 23:00 UTC to catch both
+    - cron: '0 23 * * 1-5'
+
   workflow_dispatch:
     inputs:
       task:
@@ -95,6 +112,9 @@ on:
           - validation_shadow_eval
           - validation_cohort_eval
           - validation_autopromote_cohort
+          - validation_preflight
+          - validation_init_window
+          - paper_safety_close_one
       skip_time_gate:
         description: 'Skip time gate check'
         required: false
@@ -607,3 +627,121 @@ jobs:
           USER_ID: ${{ secrets.TASK_USER_ID }}
         run: |
           python scripts/run_signed_task.py validation_autopromote_cohort --skip-time-gate
+
+  # ============================================================================
+  # v4-L1F: Readiness Hardening Tasks
+  # ============================================================================
+
+  # ============================================================================
+  # Scheduled: Validation Init Window (8:40 AM Chicago)
+  # ============================================================================
+  validation-init-window:
+    name: Validation Init Window (8:40 AM Chicago)
+    runs-on: ubuntu-latest
+    if: github.event_name == 'schedule' && github.event.schedule == '40 14 * * 1-5'
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Cache pip dependencies
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('packages/quantum/requirements.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r packages/quantum/requirements.txt
+
+      - name: Run Validation Init Window
+        env:
+          TASK_SIGNING_KEYS: ${{ secrets.TASK_SIGNING_KEYS }}
+          BASE_URL: ${{ secrets.QUANTUM_BASE_URL }}
+          USER_ID: ${{ secrets.TASK_USER_ID }}
+        run: |
+          python scripts/run_signed_task.py validation_init_window --skip-time-gate
+
+  # ============================================================================
+  # Scheduled: Validation Preflight Midday (1:05 PM Chicago)
+  # ============================================================================
+  validation-preflight-midday:
+    name: Validation Preflight Midday (1:05 PM Chicago)
+    runs-on: ubuntu-latest
+    if: github.event_name == 'schedule' && github.event.schedule == '5 19 * * 1-5'
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Cache pip dependencies
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('packages/quantum/requirements.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r packages/quantum/requirements.txt
+
+      - name: Run Validation Preflight
+        env:
+          TASK_SIGNING_KEYS: ${{ secrets.TASK_SIGNING_KEYS }}
+          BASE_URL: ${{ secrets.QUANTUM_BASE_URL }}
+          USER_ID: ${{ secrets.TASK_USER_ID }}
+        run: |
+          python scripts/run_signed_task.py validation_preflight --skip-time-gate
+
+  # ============================================================================
+  # Scheduled: Paper Safety Close One (5:00 PM Chicago)
+  # ============================================================================
+  paper-safety-close-one:
+    name: Paper Safety Close One (5:00 PM Chicago)
+    runs-on: ubuntu-latest
+    if: github.event_name == 'schedule' && github.event.schedule == '0 23 * * 1-5'
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Cache pip dependencies
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('packages/quantum/requirements.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r packages/quantum/requirements.txt
+
+      - name: Run Paper Safety Close One
+        env:
+          TASK_SIGNING_KEYS: ${{ secrets.TASK_SIGNING_KEYS }}
+          BASE_URL: ${{ secrets.QUANTUM_BASE_URL }}
+          USER_ID: ${{ secrets.TASK_USER_ID }}
+        run: |
+          python scripts/run_signed_task.py paper_safety_close_one --skip-time-gate

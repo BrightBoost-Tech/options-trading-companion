@@ -384,6 +384,11 @@ class GoLiveValidationService:
         """
         Daily checkpoint for rolling paper trading streak (Phase 2.1).
 
+        *** v4-L1F GUARD: This is the LEGACY rolling streak mechanism. ***
+        *** For Phase 3 go-live streak, use eval_paper_forward_checkpoint() instead. ***
+        *** validation_eval MUST call eval_paper_forward_checkpoint, NOT this method. ***
+        *** If called from validation_eval, this should be a NO-OP or shadow-only. ***
+
         This method:
         1. Checks idempotency (already run today?) unless force=True
         2. Calculates rolling window return (last PAPER_STREAK_WINDOW_DAYS days)
@@ -2228,4 +2233,248 @@ class GoLiveValidationService:
                 "shadow": True,
                 "cohort": cohort_name,
                 "cadence": cadence
+            }
+
+    # =========================================================================
+    # v4-L1F: 10-Day Readiness Hardening Helpers
+    # =========================================================================
+
+    def ensure_forward_window_initialized(
+        self,
+        user_id: str,
+        now: Optional[datetime] = None
+    ) -> Dict[str, Any]:
+        """
+        v4-L1F: Ensure forward checkpoint window fields are valid and initialized.
+
+        This method is called daily before Day 1 of the test to prevent
+        "repair window at checkpoint time" surprises. It ONLY updates
+        window fields (start/end/days) and does NOT:
+        - Increment or reset streak
+        - Change readiness fields
+        - Trigger fail-fast
+
+        Args:
+            user_id: User ID
+            now: Override timestamp for testing
+
+        Returns:
+            Dict with:
+            - status: "ok" | "repaired" | "error"
+            - paper_window_start: Current window start
+            - paper_window_end: Current window end
+            - paper_window_days: Window duration
+            - was_repaired: Boolean indicating if repair was needed
+        """
+        if now is None:
+            now = datetime.now(timezone.utc)
+
+        if now.tzinfo is None:
+            now = now.replace(tzinfo=timezone.utc)
+
+        try:
+            state = self.get_or_create_state(user_id)
+            state = self._ensure_forward_checkpoint_defaults(state)
+
+            window_days = state.get("paper_window_days") or 21
+            window_start, window_end, was_repaired = self._repair_window_if_needed(state, now)
+
+            if was_repaired:
+                # Persist ONLY window fields - no streak or readiness changes
+                self.supabase.table("v3_go_live_state").update({
+                    "paper_window_start": window_start.isoformat(),
+                    "paper_window_end": window_end.isoformat(),
+                    "paper_window_days": window_days,
+                    "updated_at": now.isoformat()
+                }).eq("user_id", user_id).execute()
+                logger.info(f"Repaired paper window for user {user_id}: {window_start} to {window_end}")
+
+            return {
+                "status": "repaired" if was_repaired else "ok",
+                "paper_window_start": window_start.isoformat(),
+                "paper_window_end": window_end.isoformat(),
+                "paper_window_days": window_days,
+                "was_repaired": was_repaired,
+                "user_id": user_id
+            }
+
+        except Exception as e:
+            logger.error(f"Failed to ensure window initialized for user {user_id}: {e}")
+            return {
+                "status": "error",
+                "error": str(e),
+                "user_id": user_id
+            }
+
+    def compute_forward_checkpoint_snapshot(
+        self,
+        user_id: str,
+        now: Optional[datetime] = None
+    ) -> Dict[str, Any]:
+        """
+        v4-L1F: Compute preflight snapshot for readiness reporting.
+
+        Returns metrics used for the daily preflight report WITHOUT
+        mutating any state. This is similar to shadow eval but with
+        additional fields needed for layman-friendly reporting.
+
+        Args:
+            user_id: User ID
+            now: Override timestamp for testing
+
+        Returns:
+            Dict with:
+            - return_pct: Total return in window (percentage)
+            - target_return_now: Current pacing target (percentage)
+            - margin_to_target: return_pct - target_return_now
+            - max_drawdown_pct: Max drawdown observed (percentage)
+            - fail_fast_drawdown_pct: Fail-fast threshold (percentage)
+            - outcomes_today_count: Paper closed trades today
+            - open_positions_count: Currently open paper positions
+            - on_track: Boolean - currently meeting pacing target
+            - at_risk_reason: Explanation if not on track
+            - time_until_checkpoint: Seconds until 6:30 PM Chicago
+            - progress: Window progress (0.0 to 1.0)
+            - current_streak: Current consecutive passes
+        """
+        if now is None:
+            now = datetime.now(timezone.utc)
+
+        if now.tzinfo is None:
+            now = now.replace(tzinfo=timezone.utc)
+
+        try:
+            state = self.get_or_create_state(user_id)
+            state = self._ensure_forward_checkpoint_defaults(state)
+
+            # v4-L1E: Apply policy overrides if present
+            policy_overrides = self._get_paper_forward_policy_overrides(state)
+
+            baseline = float(state.get("paper_baseline_capital", 100000) or 100000)
+            window_days = policy_overrides.get("paper_window_days") or state.get("paper_window_days") or 21
+            fail_fast_drawdown_pct = policy_overrides.get("fail_fast_drawdown_pct", -0.03)
+            fail_fast_return_pct = policy_overrides.get("fail_fast_return_pct", -0.02)
+            target_return_pct = policy_overrides.get("target_return_pct", 0.10)
+
+            # Get window bounds (in memory, no repair)
+            window_start, window_end, _ = self._repair_window_if_needed(state, now)
+
+            # Calculate today's UTC date range
+            today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+            today_end = today_start + timedelta(days=1)
+
+            # Fetch outcomes for window
+            outcomes = []
+            try:
+                res = self.supabase.table("learning_trade_outcomes_v3") \
+                    .select("closed_at, pnl_realized") \
+                    .eq("user_id", user_id) \
+                    .eq("is_paper", True) \
+                    .gte("closed_at", window_start.isoformat()) \
+                    .lte("closed_at", now.isoformat()) \
+                    .order("closed_at", desc=False) \
+                    .execute()
+                outcomes = res.data or []
+            except Exception as e:
+                logger.error(f"Error fetching outcomes for snapshot: {e}")
+
+            # Count today's outcomes
+            outcomes_today_count = 0
+            for o in outcomes:
+                try:
+                    closed_at = datetime.fromisoformat(o["closed_at"])
+                    if closed_at.tzinfo is None:
+                        closed_at = closed_at.replace(tzinfo=timezone.utc)
+                    if today_start <= closed_at < today_end:
+                        outcomes_today_count += 1
+                except (ValueError, TypeError):
+                    pass
+
+            # Fetch open paper positions count
+            open_positions_count = 0
+            try:
+                # Get user's paper portfolios
+                p_res = self.supabase.table("paper_portfolios").select("id").eq("user_id", user_id).execute()
+                portfolio_ids = [p["id"] for p in (p_res.data or [])]
+
+                if portfolio_ids:
+                    pos_res = self.supabase.table("paper_positions") \
+                        .select("id") \
+                        .in_("portfolio_id", portfolio_ids) \
+                        .execute()
+                    open_positions_count = len(pos_res.data or [])
+            except Exception as e:
+                logger.warning(f"Error fetching open positions for snapshot: {e}")
+
+            # Calculate metrics
+            total_pnl = sum(float(o.get("pnl_realized") or 0.0) for o in outcomes)
+            total_return_pct = (total_pnl / baseline) * 100 if baseline > 0 else 0.0
+            max_drawdown_pct = self._compute_drawdown(outcomes, baseline) * 100
+
+            # Calculate progress and pacing target
+            elapsed = (now - window_start).total_seconds()
+            duration = (window_end - window_start).total_seconds()
+            progress = max(0.0, min(1.0, elapsed / duration)) if duration > 0 else 0.0
+            target_return_now = target_return_pct * progress * 100  # Convert to percentage
+
+            # Margin to target
+            margin_to_target = total_return_pct - target_return_now
+
+            # Determine on_track status
+            on_track = True
+            at_risk_reason = None
+
+            if len(outcomes) == 0:
+                on_track = False
+                at_risk_reason = "no_outcomes_yet"
+            elif max_drawdown_pct <= (fail_fast_drawdown_pct * 100):
+                on_track = False
+                at_risk_reason = f"drawdown_at_risk_{max_drawdown_pct:.1f}pct"
+            elif total_return_pct <= (fail_fast_return_pct * 100):
+                on_track = False
+                at_risk_reason = f"return_at_risk_{total_return_pct:.1f}pct"
+            elif total_return_pct < target_return_now:
+                on_track = False
+                at_risk_reason = f"below_pacing_{margin_to_target:.2f}pct"
+
+            # Calculate time until 6:30 PM Chicago checkpoint
+            try:
+                from zoneinfo import ZoneInfo
+                chicago_tz = ZoneInfo("America/Chicago")
+                now_chicago = now.astimezone(chicago_tz)
+                checkpoint_time = now_chicago.replace(hour=18, minute=30, second=0, microsecond=0)
+                if now_chicago >= checkpoint_time:
+                    # Checkpoint already passed today, calculate to tomorrow
+                    checkpoint_time = checkpoint_time + timedelta(days=1)
+                time_until_checkpoint = (checkpoint_time - now_chicago).total_seconds()
+            except Exception:
+                time_until_checkpoint = 0
+
+            return {
+                "status": "ok",
+                "return_pct": round(total_return_pct, 4),
+                "target_return_now": round(target_return_now, 4),
+                "margin_to_target": round(margin_to_target, 4),
+                "max_drawdown_pct": round(max_drawdown_pct, 4),
+                "fail_fast_drawdown_pct": round(fail_fast_drawdown_pct * 100, 4),
+                "outcomes_today_count": outcomes_today_count,
+                "open_positions_count": open_positions_count,
+                "on_track": on_track,
+                "at_risk_reason": at_risk_reason,
+                "time_until_checkpoint": int(time_until_checkpoint),
+                "progress": round(progress, 4),
+                "current_streak": state.get("paper_consecutive_passes", 0),
+                "paper_ready": state.get("paper_ready", False),
+                "window_start": window_start.isoformat(),
+                "window_end": window_end.isoformat(),
+                "user_id": user_id,
+                "baseline_capital": baseline
+            }
+
+        except Exception as e:
+            logger.error(f"Failed to compute snapshot for user {user_id}: {e}")
+            return {
+                "status": "error",
+                "error": str(e),
+                "user_id": user_id
             }

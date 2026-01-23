@@ -11,6 +11,19 @@ ADD COLUMN IF NOT EXISTS regime text NULL,
 ADD COLUMN IF NOT EXISTS features_hash text NULL,
 ADD COLUMN IF NOT EXISTS is_paper boolean NOT NULL DEFAULT false;
 
+-- Ensure analytics_events.created_at exists (base table uses timestamp)
+ALTER TABLE analytics_events
+ADD COLUMN IF NOT EXISTS created_at timestamptz;
+
+-- Backfill created_at from timestamp where missing
+UPDATE analytics_events
+SET created_at = COALESCE(timestamp, now())
+WHERE created_at IS NULL;
+
+-- Make created_at default now() for new rows
+ALTER TABLE analytics_events
+ALTER COLUMN created_at SET DEFAULT now();
+
 -- Add indexes for performance
 CREATE INDEX IF NOT EXISTS idx_analytics_trace_id ON analytics_events (trace_id);
 CREATE INDEX IF NOT EXISTS idx_analytics_suggestion_id ON analytics_events (suggestion_id);

@@ -1,28 +1,32 @@
+-- Regime Snapshots: Global and Symbol-level regime state tracking
+-- Canonical migration (consolidated from duplicate versions)
+
 -- Create regime_snapshots table (Global)
 CREATE TABLE IF NOT EXISTS regime_snapshots (
-    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     as_of_ts TIMESTAMPTZ NOT NULL,
     state TEXT NOT NULL,
-    risk_score NUMERIC NOT NULL,
-    risk_scaler NUMERIC NOT NULL,
-    features JSONB NOT NULL DEFAULT '{}'::jsonb,
+    risk_score FLOAT NOT NULL,
+    risk_scaler FLOAT NOT NULL,
+    components JSONB NOT NULL DEFAULT '{}'::jsonb,
+    details JSONB NOT NULL DEFAULT '{}'::jsonb,
     engine_version TEXT NOT NULL DEFAULT 'v3',
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
 CREATE INDEX IF NOT EXISTS idx_regime_snapshots_ts ON regime_snapshots(as_of_ts DESC);
 
--- Create symbol_regime_snapshots table (Symbol)
+-- Create symbol_regime_snapshots table (Symbol-level)
 CREATE TABLE IF NOT EXISTS symbol_regime_snapshots (
-    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     symbol TEXT NOT NULL,
     as_of_ts TIMESTAMPTZ NOT NULL,
     state TEXT NOT NULL,
-    symbol_score NUMERIC NOT NULL,
-    features JSONB NOT NULL DEFAULT '{}'::jsonb,
+    score FLOAT NOT NULL,
+    metrics JSONB NOT NULL DEFAULT '{}'::jsonb,
     quality_flags JSONB NOT NULL DEFAULT '{}'::jsonb,
     engine_version TEXT NOT NULL DEFAULT 'v3',
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
 CREATE INDEX IF NOT EXISTS idx_symbol_regime_snapshots_ts ON symbol_regime_snapshots(as_of_ts DESC);

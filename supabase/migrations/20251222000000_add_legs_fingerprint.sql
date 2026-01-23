@@ -14,4 +14,4 @@ DROP INDEX IF EXISTS unique_suggestion_per_cycle;
 -- New rows will have unique hashes.
 
 CREATE UNIQUE INDEX IF NOT EXISTS unique_suggestion_per_cycle_v2
-ON trade_suggestions (user_id, window, cycle_date, ticker, strategy, legs_fingerprint);
+ON trade_suggestions (user_id, "window", cycle_date, ticker, strategy, legs_fingerprint);

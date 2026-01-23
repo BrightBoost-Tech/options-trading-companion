@@ -140,7 +140,7 @@ SELECT
     ts.created_at AS suggestion_time,
     ts.ticker,
     ts.strategy,
-    ts.window,
+    ts."window",
     ts.regime,
     ts.model_version,
     ts.features_hash,

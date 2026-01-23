@@ -25,7 +25,7 @@ ADD COLUMN IF NOT EXISTS features_hash text NOT NULL DEFAULT 'unknown',
 ADD COLUMN IF NOT EXISTS regime text NULL;
 
 CREATE INDEX IF NOT EXISTS idx_suggestions_trace_id ON trade_suggestions (trace_id);
-CREATE INDEX IF NOT EXISTS idx_suggestions_model_context ON trade_suggestions (window, strategy, regime, model_version);
+CREATE INDEX IF NOT EXISTS idx_suggestions_model_context ON trade_suggestions ("window", strategy, regime, model_version);
 
 -- 3. Extend paper_orders (ensure traceability)
 ALTER TABLE paper_orders ADD COLUMN IF NOT EXISTS trace_id uuid NULL;
@@ -72,7 +72,7 @@ SELECT
     ts.created_at AS suggestion_time,
     ts.ticker,
     ts.strategy,
-    ts.window,
+    ts."window",
     ts.regime,
     ts.model_version,
     ts.features_hash,

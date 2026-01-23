@@ -13,7 +13,7 @@ CREATE TABLE IF NOT EXISTS trade_suggestions (
     ticker TEXT NULL,
     symbol TEXT NULL,  -- Some code uses symbol, some uses ticker
     strategy TEXT NULL,
-    window TEXT NULL,
+    "window" TEXT NULL,
     direction TEXT NULL,
     status TEXT NOT NULL DEFAULT 'pending',
 

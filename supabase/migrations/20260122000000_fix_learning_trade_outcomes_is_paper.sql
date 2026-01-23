@@ -22,7 +22,7 @@ SELECT
     COALESCE(lfl.model_version, ts.model_version) AS model_version,
     COALESCE(lfl.features_hash, ts.features_hash) AS features_hash,
     COALESCE(lfl.strategy, ts.strategy) AS strategy,
-    COALESCE(lfl.window, ts.window) AS window,
+    COALESCE(lfl."window", ts."window") AS "window",
     COALESCE(lfl.regime, ts.regime) AS regime,
     ts.ticker,
     ts.ev AS ev_predicted,

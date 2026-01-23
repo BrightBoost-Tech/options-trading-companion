@@ -6,6 +6,7 @@ import logging
 from typing import Dict, Any, Optional, List
 import numpy as np
 from scipy.stats import norm
+from packages.quantum.services.replay.canonical import compute_content_hash
 
 logger = logging.getLogger(__name__)
 
@@ -150,7 +151,7 @@ class OpportunityScorer:
                 "mu": round(mu, 4),
                 "price": round(underlying_price, 2)
             }
-            features_hash = hashlib.md5(json.dumps(features, sort_keys=True).encode()).hexdigest()
+            features_hash = compute_content_hash(features)
 
             return {
                 "score": round(total_score, 1),

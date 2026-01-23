@@ -1946,3 +1946,228 @@ class GoLiveValidationService:
             logger.info(f"Persisted strategy config '{name}' v{version} for user {user_id}")
         except Exception as e:
             logger.error(f"Failed to persist strategy config: {e}")
+
+    # =========================================================================
+    # v4-L1D: Shadow Checkpoint Evaluation (Side-Effect Free)
+    # =========================================================================
+
+    def _shadow_checkpoint_bucket(self, ts: datetime, cadence: str = "intraday") -> str:
+        """
+        Compute shadow checkpoint bucket key for deduplication.
+
+        Args:
+            ts: Timestamp to bucket
+            cadence: Bucket cadence ("intraday" for hourly, "daily" for date)
+
+        Returns:
+            Bucket key string (e.g., "2024-01-15-14" for intraday hour 14)
+        """
+        if cadence == "intraday":
+            return ts.strftime("%Y-%m-%d-%H")
+        return ts.date().isoformat()
+
+    def eval_paper_forward_checkpoint_shadow(
+        self,
+        user_id: str,
+        now: Optional[datetime] = None,
+        cadence: str = "intraday",
+        cohort_name: Optional[str] = None,
+        overrides: Optional[Dict[str, Any]] = None
+    ) -> Dict[str, Any]:
+        """
+        v4-L1D: Shadow checkpoint evaluation - computes metrics WITHOUT mutating state.
+
+        This method computes the SAME metrics as eval_paper_forward_checkpoint but:
+        - Does NOT update v3_go_live_state fields
+        - Does NOT reset streaks or trigger fail-fast
+        - DOES log the run with shadow=True tag
+        - Returns would_pass / would_fail_fast for "what-if" analysis
+
+        Args:
+            user_id: User ID
+            now: Override timestamp for testing
+            cadence: Bucket cadence ("intraday" for hourly, "daily" for date)
+            cohort_name: Optional cohort identifier for tracking
+            overrides: Optional dict to override default thresholds:
+                - paper_window_days: Override window duration
+                - target_return_pct: Override target return (decimal, e.g., 0.10)
+                - fail_fast_drawdown_pct: Override drawdown threshold (decimal, e.g., -0.03)
+                - fail_fast_return_pct: Override return threshold (decimal, e.g., -0.02)
+
+        Returns:
+            Dict with shadow checkpoint results:
+            - status: "ok" | "error"
+            - return_pct: Total return in window
+            - max_drawdown_pct: Max drawdown observed
+            - progress: Window progress (0.0 to 1.0)
+            - target_return_now: Current pacing target
+            - would_pass: Boolean - would this pass official checkpoint?
+            - would_fail_fast: Boolean - would this trigger fail-fast?
+            - reason: Explanation string
+            - shadow: True (always)
+            - cohort: Cohort name if provided
+        """
+        if now is None:
+            now = datetime.now(timezone.utc)
+
+        # Ensure timezone awareness
+        if now.tzinfo is None:
+            now = now.replace(tzinfo=timezone.utc)
+
+        overrides = overrides or {}
+
+        # Extract override thresholds with defaults
+        fail_fast_drawdown_pct = overrides.get("fail_fast_drawdown_pct", -0.03)
+        fail_fast_return_pct = overrides.get("fail_fast_return_pct", -0.02)
+        target_return_pct = overrides.get("target_return_pct", 0.10)
+        override_window_days = overrides.get("paper_window_days")
+
+        try:
+            # 1. Load state (read-only)
+            state = self.get_or_create_state(user_id)
+            state = self._ensure_forward_checkpoint_defaults(state)
+
+            baseline = float(state.get("paper_baseline_capital", 100000) or 100000)
+            window_days = override_window_days or state.get("paper_window_days") or 21
+
+            # 2. Repair window in memory only (no persist)
+            window_start, window_end, _ = self._repair_window_if_needed(state, now)
+
+            # If override window_days, recalculate window_end
+            if override_window_days:
+                window_end = window_start + timedelta(days=override_window_days)
+
+            # 3. Calculate bucket key for logging
+            bucket_key = self._shadow_checkpoint_bucket(now, cadence)
+
+            # 4. Check if window has expired (for informational purposes)
+            window_expired = now >= window_end
+
+            # 5. Fetch outcomes for the window
+            query_end = window_end if window_expired else now
+            outcomes = []
+            try:
+                res = self.supabase.table("learning_trade_outcomes_v3") \
+                    .select("closed_at, pnl_realized, profit_pct") \
+                    .eq("user_id", user_id) \
+                    .eq("is_paper", True) \
+                    .gte("closed_at", window_start.isoformat()) \
+                    .lte("closed_at", query_end.isoformat()) \
+                    .order("closed_at", desc=False) \
+                    .execute()
+                outcomes = res.data or []
+            except Exception as e:
+                logger.error(f"Error fetching shadow outcomes: {e}")
+                return {
+                    "status": "error",
+                    "error": str(e),
+                    "shadow": True,
+                    "cohort": cohort_name,
+                    "cadence": cadence
+                }
+
+            # 6. Calculate metrics
+            total_pnl = sum(float(o.get("pnl_realized") or 0.0) for o in outcomes)
+            total_return_pct = (total_pnl / baseline) if baseline > 0 else 0.0
+            max_drawdown_pct = self._compute_drawdown(outcomes, baseline)
+
+            # 7. Calculate progress and pacing target
+            elapsed = (query_end - window_start).total_seconds()
+            duration = (window_end - window_start).total_seconds()
+            progress = max(0.0, min(1.0, elapsed / duration)) if duration > 0 else 0.0
+            target_return_now = target_return_pct * progress
+
+            # 8. Determine would_pass / would_fail_fast
+            would_fail_fast = False
+            would_fail_fast_reason = None
+
+            if max_drawdown_pct <= fail_fast_drawdown_pct:
+                would_fail_fast = True
+                would_fail_fast_reason = f"max_drawdown_exceeded_{max_drawdown_pct*100:.1f}pct"
+            elif total_return_pct <= fail_fast_return_pct:
+                would_fail_fast = True
+                would_fail_fast_reason = f"total_return_below_{fail_fast_return_pct*100:.1f}pct"
+
+            # would_pass: meets pacing target and no fail-fast
+            would_pass = (total_return_pct >= target_return_now) and not would_fail_fast
+
+            # Determine reason string
+            if would_fail_fast:
+                reason = would_fail_fast_reason
+            elif not outcomes:
+                reason = "no_outcomes_yet"
+                would_pass = False  # No outcomes = miss
+            elif would_pass:
+                reason = "on_pace"
+            else:
+                reason = "below_pacing_target"
+
+            # Build result
+            result = {
+                "status": "ok",
+                "return_pct": total_return_pct * 100,
+                "target_return_now": target_return_now * 100,
+                "max_drawdown_pct": max_drawdown_pct * 100,
+                "progress": progress,
+                "would_pass": would_pass,
+                "would_fail_fast": would_fail_fast,
+                "reason": reason,
+                "window_start": window_start.isoformat(),
+                "window_end": window_end.isoformat(),
+                "window_expired": window_expired,
+                "bucket": bucket_key,
+                "outcome_count": len(outcomes),
+                "pnl_total": total_pnl,
+                "shadow": True,
+                "cohort": cohort_name,
+                "cadence": cadence,
+                # Include thresholds used for transparency
+                "thresholds": {
+                    "target_return_pct": target_return_pct * 100,
+                    "fail_fast_drawdown_pct": fail_fast_drawdown_pct * 100,
+                    "fail_fast_return_pct": fail_fast_return_pct * 100,
+                    "paper_window_days": window_days
+                },
+                # Include current state for comparison (read-only)
+                "current_streak": state.get("paper_consecutive_passes", 0),
+                "paper_ready": state.get("paper_ready", False)
+            }
+
+            # 9. Log shadow run (fail-open: don't break if logging fails)
+            try:
+                self._log_checkpoint_run(
+                    user_id=user_id,
+                    mode="paper_checkpoint_shadow",
+                    window_start=window_start,
+                    window_end=query_end,
+                    return_pct=total_return_pct * 100,
+                    pnl_total=total_pnl,
+                    passed=would_pass,
+                    fail_reason=reason if not would_pass else None,
+                    details={
+                        "shadow": True,
+                        "cohort": cohort_name,
+                        "cadence": cadence,
+                        "bucket": bucket_key,
+                        "would_pass": would_pass,
+                        "would_fail_fast": would_fail_fast,
+                        "target_return_now": target_return_now * 100,
+                        "progress": progress,
+                        "thresholds": result["thresholds"]
+                    }
+                )
+            except Exception as e:
+                logger.warning(f"Failed to log shadow checkpoint run: {e}")
+                # Fail-open: return results anyway
+
+            return result
+
+        except Exception as e:
+            logger.error(f"Shadow checkpoint failed for user {user_id}: {e}")
+            return {
+                "status": "error",
+                "error": str(e),
+                "shadow": True,
+                "cohort": cohort_name,
+                "cadence": cadence
+            }

@@ -21,6 +21,8 @@ from packages.quantum.public_tasks_models import (
     OpsHealthCheckPayload,
     PaperAutoExecutePayload,
     PaperAutoClosePayload,
+    ValidationShadowEvalPayload,
+    ValidationCohortEvalPayload,
     DEFAULT_STRATEGY_NAME,
 )
 
@@ -691,3 +693,291 @@ async def task_paper_auto_close(
         idempotency_key=idempotency_key,
         payload=job_payload
     )
+
+
+# =============================================================================
+# Shadow Checkpoint Tasks (v4-L1D)
+# =============================================================================
+
+
+# Default cohorts if SHADOW_COHORTS_JSON is not set
+DEFAULT_SHADOW_COHORTS = [
+    {
+        "name": "baseline_21d_10pct",
+        "paper_window_days": 21,
+        "target_return_pct": 0.10,
+        "fail_fast_drawdown_pct": -0.03,
+        "fail_fast_return_pct": -0.02
+    },
+    {
+        "name": "conservative_21d_8pct",
+        "paper_window_days": 21,
+        "target_return_pct": 0.08,
+        "fail_fast_drawdown_pct": -0.025,
+        "fail_fast_return_pct": -0.015
+    },
+    {
+        "name": "aggressive_14d_10pct",
+        "paper_window_days": 14,
+        "target_return_pct": 0.10,
+        "fail_fast_drawdown_pct": -0.03,
+        "fail_fast_return_pct": -0.02
+    }
+]
+
+
+def _validation_shadow_idempotency_key(
+    user_id: str,
+    cadence: str,
+    cohort_name: Optional[str] = None
+) -> str:
+    """
+    Generate UTC-based idempotency key for shadow checkpoint tasks.
+
+    Format depends on cadence:
+    - intraday: {YYYY-MM-DD-HH}-shadow-{cohort_or_single}-{user_id}
+    - daily:    {YYYY-MM-DD}-shadow-{cohort_or_single}-{user_id}
+
+    Must include "shadow" to avoid collision with official validation_eval keys.
+    """
+    now = datetime.now(timezone.utc)
+    cohort_part = cohort_name or "single"
+
+    if cadence == "intraday":
+        return f"{now.strftime('%Y-%m-%d-%H')}-shadow-{cohort_part}-{user_id}"
+    return f"{now.strftime('%Y-%m-%d')}-shadow-{cohort_part}-{user_id}"
+
+
+def _check_shadow_checkpoint_gates(user_id: str) -> Optional[Dict[str, Any]]:
+    """
+    Check shadow checkpoint gating conditions.
+
+    Returns None if all gates pass, otherwise returns error response dict.
+
+    Gates checked:
+    1. SHADOW_CHECKPOINT_ENABLED must be "1"
+    2. ops_state.mode must be "paper"
+    3. Pause gate (handled by enqueue_job_run, but we check mode first)
+    """
+    from packages.quantum.ops_endpoints import get_global_ops_control
+
+    # Gate 1: Shadow enabled
+    if os.environ.get("SHADOW_CHECKPOINT_ENABLED", "0") != "1":
+        return {
+            "status": "skipped",
+            "reason": "shadow_disabled",
+            "detail": "SHADOW_CHECKPOINT_ENABLED is not set to '1'"
+        }
+
+    # Gate 2: Paper mode only
+    ops_state = get_global_ops_control()
+    mode = ops_state.get("mode", "paper")
+
+    if mode != "paper":
+        return {
+            "status": "cancelled",
+            "reason": "mode_is_paper_only",
+            "detail": f"Shadow checkpoint requires mode='paper', current mode='{mode}'"
+        }
+
+    return None
+
+
+def _get_shadow_cohorts() -> list:
+    """
+    Get shadow cohort configurations from environment or use defaults.
+
+    Reads SHADOW_COHORTS_JSON env var as JSON list, falls back to DEFAULT_SHADOW_COHORTS.
+    """
+    import json
+
+    cohorts_json = os.environ.get("SHADOW_COHORTS_JSON", "")
+    if cohorts_json:
+        try:
+            cohorts = json.loads(cohorts_json)
+            if isinstance(cohorts, list) and len(cohorts) > 0:
+                return cohorts
+        except (json.JSONDecodeError, TypeError):
+            pass  # Fall back to defaults
+
+    return DEFAULT_SHADOW_COHORTS
+
+
+@router.post("/validation/shadow-eval", status_code=200)
+async def task_validation_shadow_eval(
+    payload: ValidationShadowEvalPayload = Body(...),
+    auth: TaskSignatureResult = Depends(verify_task_signature("tasks:validation_shadow_eval"))
+):
+    """
+    Run a shadow checkpoint evaluation (side-effect free).
+
+    Auth: Requires v4 HMAC signature with scope 'tasks:validation_shadow_eval'.
+
+    v4-L1D: Computes checkpoint metrics WITHOUT mutating go-live streak state.
+
+    Requirements:
+    - Requires specific user_id (not "all")
+    - Must be in paper mode (ops_state.mode == "paper")
+    - Respects pause gate
+    - Requires SHADOW_CHECKPOINT_ENABLED=1
+
+    Returns:
+    - return_pct, max_drawdown_pct, progress, target_return_now
+    - would_pass, would_fail_fast, reason
+    - shadow=True (always)
+    """
+    user_id = payload.user_id
+    cadence = payload.cadence
+
+    # Check shadow gates (enabled, paper mode)
+    gate_error = _check_shadow_checkpoint_gates(user_id)
+    if gate_error:
+        return gate_error
+
+    # Get cadence from env (can be overridden)
+    effective_cadence = os.environ.get("SHADOW_CHECKPOINT_CADENCE", cadence)
+
+    # Run shadow evaluation directly (synchronous, no job queue needed)
+    # Shadow eval is fast and side-effect free, so we can run it inline
+    try:
+        from packages.quantum.jobs.handlers.utils import get_admin_client
+        from packages.quantum.services.go_live_validation_service import GoLiveValidationService
+
+        supabase = get_admin_client()
+        service = GoLiveValidationService(supabase)
+
+        result = service.eval_paper_forward_checkpoint_shadow(
+            user_id=user_id,
+            cadence=effective_cadence,
+            cohort_name=None
+        )
+
+        return {
+            "status": result.get("status", "ok"),
+            "user_id": user_id,
+            "as_of": datetime.now(timezone.utc).isoformat(),
+            **result
+        }
+
+    except Exception as e:
+        return {
+            "status": "error",
+            "error": str(e),
+            "user_id": user_id,
+            "shadow": True
+        }
+
+
+@router.post("/validation/cohort-eval", status_code=200)
+async def task_validation_cohort_eval(
+    payload: ValidationCohortEvalPayload = Body(...),
+    auth: TaskSignatureResult = Depends(verify_task_signature("tasks:validation_cohort_eval"))
+):
+    """
+    Run multiple shadow evaluations with different cohort configurations.
+
+    Auth: Requires v4 HMAC signature with scope 'tasks:validation_cohort_eval'.
+
+    v4-L1D: Extracts more learning per day by testing multiple threshold configs.
+
+    Requirements:
+    - Requires specific user_id (not "all")
+    - Must be in paper mode (ops_state.mode == "paper")
+    - Respects pause gate
+    - Requires SHADOW_CHECKPOINT_ENABLED=1
+
+    Cohorts are read from SHADOW_COHORTS_JSON env var, or use defaults if not set.
+
+    Returns:
+    - results: Array of cohort results sorted by (would_pass desc, margin_to_target desc)
+    - best: Top-performing cohort
+    """
+    user_id = payload.user_id
+    cadence = payload.cadence
+
+    # Check shadow gates (enabled, paper mode)
+    gate_error = _check_shadow_checkpoint_gates(user_id)
+    if gate_error:
+        return gate_error
+
+    # Get cadence from env (can be overridden)
+    effective_cadence = os.environ.get("SHADOW_CHECKPOINT_CADENCE", cadence)
+
+    # Get cohort configurations
+    cohorts = _get_shadow_cohorts()
+
+    try:
+        from packages.quantum.jobs.handlers.utils import get_admin_client
+        from packages.quantum.services.go_live_validation_service import GoLiveValidationService
+
+        supabase = get_admin_client()
+        service = GoLiveValidationService(supabase)
+
+        results = []
+
+        for cohort in cohorts:
+            cohort_name = cohort.get("name", "unnamed")
+
+            # Build overrides from cohort config
+            overrides = {
+                "paper_window_days": cohort.get("paper_window_days"),
+                "target_return_pct": cohort.get("target_return_pct"),
+                "fail_fast_drawdown_pct": cohort.get("fail_fast_drawdown_pct"),
+                "fail_fast_return_pct": cohort.get("fail_fast_return_pct"),
+            }
+            # Remove None values
+            overrides = {k: v for k, v in overrides.items() if v is not None}
+
+            result = service.eval_paper_forward_checkpoint_shadow(
+                user_id=user_id,
+                cadence=effective_cadence,
+                cohort_name=cohort_name,
+                overrides=overrides
+            )
+
+            # Calculate margin_to_target
+            return_pct = result.get("return_pct", 0.0)
+            target_now = result.get("target_return_now", 0.0)
+            margin = return_pct - target_now
+
+            results.append({
+                "cohort": cohort_name,
+                "would_pass": result.get("would_pass", False),
+                "would_fail_fast": result.get("would_fail_fast", False),
+                "margin_to_target": margin,
+                "return_pct": return_pct,
+                "target_return_now": target_now,
+                "max_drawdown_pct": result.get("max_drawdown_pct", 0.0),
+                "progress": result.get("progress", 0.0),
+                "reason": result.get("reason"),
+                "thresholds": result.get("thresholds"),
+            })
+
+        # Sort results: would_pass desc, margin_to_target desc, max_drawdown_pct desc (less negative), cohort_name asc
+        results.sort(key=lambda r: (
+            -int(r["would_pass"]),  # True first
+            -r["margin_to_target"],  # Higher margin first
+            -r["max_drawdown_pct"],  # Less negative (closer to 0) first
+            r["cohort"]  # Alphabetical tiebreaker
+        ))
+
+        best = results[0] if results else None
+
+        return {
+            "status": "ok",
+            "user_id": user_id,
+            "as_of": datetime.now(timezone.utc).isoformat(),
+            "cadence": effective_cadence,
+            "results": results,
+            "best": best,
+            "cohort_count": len(results),
+            "shadow": True
+        }
+
+    except Exception as e:
+        return {
+            "status": "error",
+            "error": str(e),
+            "user_id": user_id,
+            "shadow": True
+        }

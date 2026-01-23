@@ -268,6 +268,80 @@ class PaperAutoClosePayload(TaskPayloadBase):
 
 
 # =============================================================================
+# Shadow Checkpoint Tasks (v4-L1D)
+# =============================================================================
+
+class ValidationShadowEvalPayload(TaskPayloadBase):
+    """
+    Payload for /tasks/validation/shadow-eval.
+
+    Runs a shadow checkpoint evaluation that computes metrics WITHOUT
+    mutating go-live streak state. Used for "what-if" analysis and
+    intraday pacing visibility.
+
+    Requirements:
+    - Requires specific user_id (not "all")
+    - Must be in paper mode (ops_state.mode == "paper")
+    - Respects pause gate
+    - Requires SHADOW_CHECKPOINT_ENABLED=1
+    """
+    user_id: str = Field(
+        ...,  # Required
+        min_length=32,
+        description="Target user UUID (required, cannot be 'all')"
+    )
+    cadence: Literal["daily", "intraday"] = Field(
+        default="intraday",
+        description="Bucket cadence: 'intraday' (hourly) or 'daily'"
+    )
+
+    @field_validator("user_id")
+    @classmethod
+    def validate_user_id_not_all(cls, v: str) -> str:
+        """Validate user_id is a specific user, not 'all'."""
+        if v == "all":
+            raise ValueError("user_id must be a specific user UUID, not 'all'")
+        if len(v) < 32:
+            raise ValueError("user_id must be a valid UUID")
+        return v
+
+
+class ValidationCohortEvalPayload(TaskPayloadBase):
+    """
+    Payload for /tasks/validation/cohort-eval.
+
+    Runs multiple shadow evaluations with different threshold configurations
+    (cohorts) to extract more learning per day. Returns a leaderboard of
+    cohort results sorted by would_pass and margin_to_target.
+
+    Requirements:
+    - Requires specific user_id (not "all")
+    - Must be in paper mode (ops_state.mode == "paper")
+    - Respects pause gate
+    - Requires SHADOW_CHECKPOINT_ENABLED=1
+    """
+    user_id: str = Field(
+        ...,  # Required
+        min_length=32,
+        description="Target user UUID (required, cannot be 'all')"
+    )
+    cadence: Literal["daily", "intraday"] = Field(
+        default="intraday",
+        description="Bucket cadence: 'intraday' (hourly) or 'daily'"
+    )
+
+    @field_validator("user_id")
+    @classmethod
+    def validate_user_id_not_all(cls, v: str) -> str:
+        """Validate user_id is a specific user, not 'all'."""
+        if v == "all":
+            raise ValueError("user_id must be a specific user UUID, not 'all'")
+        if len(v) < 32:
+            raise ValueError("user_id must be a valid UUID")
+        return v
+
+
+# =============================================================================
 # Scope Constants
 # =============================================================================
 
@@ -278,6 +352,8 @@ TASK_SCOPES = {
     "/tasks/midday-scan": "tasks:midday_scan",
     "/tasks/weekly-report": "tasks:weekly_report",
     "/tasks/validation/eval": "tasks:validation_eval",
+    "/tasks/validation/shadow-eval": "tasks:validation_shadow_eval",
+    "/tasks/validation/cohort-eval": "tasks:validation_cohort_eval",
     "/tasks/suggestions/close": "tasks:suggestions_close",
     "/tasks/suggestions/open": "tasks:suggestions_open",
     "/tasks/learning/ingest": "tasks:learning_ingest",

@@ -19,7 +19,8 @@ ALTER TABLE paper_orders
   ADD COLUMN IF NOT EXISTS quote_at_stage JSONB,
   ADD COLUMN IF NOT EXISTS quote_at_fill JSONB,
   ADD COLUMN IF NOT EXISTS tcm JSONB,
-  ADD COLUMN IF NOT EXISTS position_id UUID;
+  ADD COLUMN IF NOT EXISTS position_id UUID,
+  ADD COLUMN IF NOT EXISTS trace_id UUID;
 
 -- Add indexes (IF NOT EXISTS for idempotency)
 CREATE INDEX IF NOT EXISTS idx_paper_orders_trace_id ON paper_orders(trace_id);

@@ -103,10 +103,10 @@ LEFT JOIN learning_feedback_loops lfl ON ts.id = lfl.suggestion_id;
 -- ev_leakage_by_bucket_v3 (aggregate view)
 CREATE OR REPLACE VIEW ev_leakage_by_bucket_v3 AS
 SELECT
-    model_version,
-    strategy,
-    "window",
-    regime,
+    ts.model_version,
+    ts.strategy,
+    ts."window",
+    ts.regime,
     COUNT(ts.id) AS suggestion_count,
     COUNT(po.id) AS execution_count,
     AVG(ts.ev) AS avg_predicted_ev,
@@ -115,4 +115,4 @@ SELECT
 FROM trade_suggestions ts
 LEFT JOIN paper_orders po ON ts.trace_id = po.trace_id
 LEFT JOIN learning_feedback_loops lfl ON ts.id = lfl.suggestion_id
-GROUP BY model_version, strategy, "window", regime;
+GROUP BY ts.model_version, ts.strategy, ts."window", ts.regime;

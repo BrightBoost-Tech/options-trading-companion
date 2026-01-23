@@ -17,7 +17,8 @@ class FakeQuery:
     def eq(self, *args, **kwargs):
         return self
 
-    def maybe_single(self):
+    def limit(self, n):
+        # Replaces maybe_single() - returns self for chaining
         return self
 
     def upsert(self, *args, **kwargs):
@@ -66,12 +67,12 @@ class TestJobRunStoreCreateOrGet(unittest.TestCase):
         self.assertEqual(result, expected_row)
 
     def test_existing_select_returns_row(self):
-        # Scenario 2: existing check returns data
+        # Scenario 2: existing check returns data (as list from limit(1))
 
         expected_row = {"id": "123", "job_name": "test", "status": "queued"}
 
         mock_client = FakeClient([
-            FakeResponse(expected_row) # existing check succeeds
+            FakeResponse([expected_row]) # existing check succeeds (list format)
         ])
         self.store.client = mock_client
 
@@ -86,7 +87,7 @@ class TestJobRunStoreCreateOrGet(unittest.TestCase):
         mock_client = FakeClient([
             None, # existing check fails
             None, # upsert returns None
-            FakeResponse(expected_row) # retry succeeds
+            FakeResponse([expected_row]) # retry succeeds (list format)
         ])
         self.store.client = mock_client
 
@@ -111,7 +112,7 @@ class TestJobRunStoreCreateOrGet(unittest.TestCase):
     def test_get_job_returns_data(self):
         expected_row = {"id": "123", "status": "queued"}
         mock_client = FakeClient([
-            FakeResponse(expected_row)
+            FakeResponse([expected_row]) # list format from limit(1)
         ])
         self.store.client = mock_client
 
@@ -126,6 +127,50 @@ class TestJobRunStoreCreateOrGet(unittest.TestCase):
 
         result = self.store.get_job("123")
         self.assertIsNone(result)
+
+    def test_get_job_empty_list_returns_none(self):
+        """
+        Simulate 204 "no rows" scenario: Supabase returns empty list instead of None.
+        This should return None without raising an exception.
+        """
+        mock_client = FakeClient([
+            FakeResponse([]) # empty list (no rows found)
+        ])
+        self.store.client = mock_client
+
+        result = self.store.get_job("nonexistent-id")
+        self.assertIsNone(result)
+
+    def test_existing_select_empty_list_falls_through_to_upsert(self):
+        """
+        Simulate 204 scenario on existing check: empty list should behave like None.
+        """
+        expected_row = {"id": "123", "job_name": "test", "status": "queued"}
+
+        mock_client = FakeClient([
+            FakeResponse([]), # existing check returns empty list (no row)
+            FakeResponse([expected_row]) # upsert succeeds
+        ])
+        self.store.client = mock_client
+
+        result = self.store.create_or_get("test", "key", {})
+        self.assertEqual(result, expected_row)
+
+    def test_all_empty_lists_raises_runtime_error(self):
+        """
+        All queries return empty lists (simulating 204 responses) -> RuntimeError.
+        """
+        mock_client = FakeClient([
+            FakeResponse([]), # existing check empty
+            FakeResponse([]), # upsert empty (ignored duplicate)
+            FakeResponse([])  # retry empty
+        ])
+        self.store.client = mock_client
+
+        with self.assertRaises(RuntimeError) as cm:
+            self.store.create_or_get("test", "key", {})
+
+        self.assertIn("Supabase returned None/empty response", str(cm.exception))
 
 if __name__ == "__main__":
     unittest.main()

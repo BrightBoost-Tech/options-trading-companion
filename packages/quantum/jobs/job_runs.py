@@ -9,20 +9,33 @@ class JobRunStore:
     def _data(self, resp):
         return getattr(resp, "data", None) if resp is not None else None
 
+    def _first_row(self, resp) -> Optional[Dict[str, Any]]:
+        """
+        Safely extract first row from a response that uses .limit(1).
+        Returns None if no rows, avoiding 204 "Missing response" crashes from maybe_single().
+        """
+        data = self._data(resp)
+        if data is None:
+            return None
+        if isinstance(data, list):
+            return data[0] if len(data) > 0 else None
+        # If data is a dict (shouldn't happen with limit(1), but handle gracefully)
+        return data
+
     def create_or_get(self, job_name: str, idempotency_key: str, payload: Dict[str, Any]) -> Dict[str, Any]:
         """
         Creates a new job run if it doesn't exist (based on job_name + idempotency_key).
         Returns the job run record.
         """
-        # Try to find existing first
+        # Try to find existing first (use limit(1) to avoid 204 crash from maybe_single)
         existing = self.client.table("job_runs")\
             .select("*")\
             .eq("job_name", job_name)\
             .eq("idempotency_key", idempotency_key)\
-            .maybe_single()\
+            .limit(1)\
             .execute()
 
-        existing_data = self._data(existing)
+        existing_data = self._first_row(existing)
         if existing_data:
             return existing_data
 
@@ -49,10 +62,10 @@ class JobRunStore:
                 .select("*")\
                 .eq("job_name", job_name)\
                 .eq("idempotency_key", idempotency_key)\
-                .maybe_single()\
+                .limit(1)\
                 .execute()
 
-            retry_data = self._data(existing_retry)
+            retry_data = self._first_row(existing_retry)
             if retry_data:
                 return retry_data
 
@@ -67,8 +80,9 @@ class JobRunStore:
             raise e
 
     def get_job(self, job_run_id: str) -> Optional[Dict[str, Any]]:
-        res = self.client.table("job_runs").select("*").eq("id", job_run_id).maybe_single().execute()
-        return self._data(res)
+        # Use limit(1) to avoid 204 crash from maybe_single()
+        res = self.client.table("job_runs").select("*").eq("id", job_run_id).limit(1).execute()
+        return self._first_row(res)
 
     def mark_running(self, job_run_id: str, worker_id: str) -> None:
         """
@@ -133,15 +147,15 @@ class JobRunStore:
             cancelled_reason: Why it was cancelled (e.g., 'global_ops_pause')
             cancelled_detail: Additional detail (e.g., pause_reason from ops_control)
         """
-        # Try to find existing first (idempotency)
+        # Try to find existing first (idempotency) - use limit(1) to avoid 204 crash
         existing = self.client.table("job_runs")\
             .select("*")\
             .eq("job_name", job_name)\
             .eq("idempotency_key", idempotency_key)\
-            .maybe_single()\
+            .limit(1)\
             .execute()
 
-        existing_data = self._data(existing)
+        existing_data = self._first_row(existing)
         if existing_data:
             return existing_data
 
@@ -176,10 +190,10 @@ class JobRunStore:
                 .select("*")\
                 .eq("job_name", job_name)\
                 .eq("idempotency_key", idempotency_key)\
-                .maybe_single()\
+                .limit(1)\
                 .execute()
 
-            retry_data = self._data(existing_retry)
+            retry_data = self._first_row(existing_retry)
             if retry_data:
                 return retry_data
 

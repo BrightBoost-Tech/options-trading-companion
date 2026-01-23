@@ -156,7 +156,7 @@ function hasRecognizedAttribution(attribution: any): boolean {
 }
 
 // v4: Details Drawer component (lazy loads trace data)
-const DetailsDrawer = ({ traceId, isExpanded }: { traceId?: string; isExpanded: boolean }) => {
+const DetailsDrawer = ({ traceId, isExpanded, id }: { traceId?: string; isExpanded: boolean; id: string }) => {
     const [traceData, setTraceData] = useState<TraceResponse | null>(null);
     const [loading, setLoading] = useState(false);
     const [error, setError] = useState<string | null>(null);
@@ -189,7 +189,7 @@ const DetailsDrawer = ({ traceId, isExpanded }: { traceId?: string; isExpanded: 
 
     if (!traceId) {
         return (
-            <div className="mt-3 p-3 bg-muted/30 border border-border rounded-md text-xs text-muted-foreground">
+            <div id={id} className="mt-3 p-3 bg-muted/30 border border-border rounded-md text-xs text-muted-foreground">
                 <Info className="w-4 h-4 inline mr-1" />
                 No v4 trace available for this suggestion
             </div>
@@ -198,7 +198,7 @@ const DetailsDrawer = ({ traceId, isExpanded }: { traceId?: string; isExpanded: 
 
     if (loading) {
         return (
-            <div className="mt-3 p-3 bg-muted/30 border border-border rounded-md flex items-center gap-2 text-xs text-muted-foreground">
+            <div id={id} className="mt-3 p-3 bg-muted/30 border border-border rounded-md flex items-center gap-2 text-xs text-muted-foreground">
                 <Loader2 className="w-4 h-4 animate-spin" />
                 Loading trace details...
             </div>
@@ -207,7 +207,7 @@ const DetailsDrawer = ({ traceId, isExpanded }: { traceId?: string; isExpanded: 
 
     if (error) {
         return (
-            <div className="mt-3 p-3 bg-muted/30 border border-border rounded-md text-xs text-muted-foreground">
+            <div id={id} className="mt-3 p-3 bg-muted/30 border border-border rounded-md text-xs text-muted-foreground">
                 <Info className="w-4 h-4 inline mr-1" />
                 {error}
             </div>
@@ -227,7 +227,7 @@ const DetailsDrawer = ({ traceId, isExpanded }: { traceId?: string; isExpanded: 
     const hasRecognized = hasRecognizedAttribution(attribution);
 
     return (
-        <div className="mt-3 p-3 bg-muted/20 border border-border rounded-md space-y-3">
+        <div id={id} className="mt-3 p-3 bg-muted/20 border border-border rounded-md space-y-3">
             {/* Integrity Badge */}
             <div className="flex items-center gap-2">
                 <span className="text-xs font-medium text-muted-foreground">Integrity:</span>
@@ -330,6 +330,7 @@ const SuggestionCard = ({
     const hasLoggedView = useRef(false);
     const firstDismissReasonRef = useRef<HTMLButtonElement>(null);
     const displaySymbol = suggestion.display_symbol ?? suggestion.symbol ?? suggestion.ticker ?? '---';
+    const detailsId = `details-${suggestion.id}`;
 
     // v4: Compute confidence percentage (prefer agent_summary.overall_score, fallback to score)
     const confidenceValue = (() => {
@@ -759,7 +760,7 @@ const SuggestionCard = ({
                 )}
 
                 {/* v4: Details Drawer */}
-                <DetailsDrawer traceId={suggestion.trace_id} isExpanded={detailsExpanded} />
+                <DetailsDrawer traceId={suggestion.trace_id} isExpanded={detailsExpanded} id={detailsId} />
 
                 {/* Footer Actions */}
                 <div className="flex justify-end gap-2 mt-3 pt-2 border-t border-border items-center">
@@ -769,6 +770,8 @@ const SuggestionCard = ({
                         size="sm"
                         onClick={() => setDetailsExpanded(!detailsExpanded)}
                         className="h-7 px-2 text-xs text-muted-foreground hover:text-foreground mr-auto"
+                        aria-expanded={detailsExpanded}
+                        aria-controls={detailsId}
                     >
                         {detailsExpanded ? <ChevronUp className="w-3 h-3 mr-1" /> : <ChevronDown className="w-3 h-3 mr-1" />}
                         Details

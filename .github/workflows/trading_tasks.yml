@@ -43,6 +43,16 @@ on:
     # Schedule at 08:30 UTC; runs Tue-Sat to process Mon-Fri data
     - cron: '30 08 * * 2-6'
 
+    # Paper Auto-Execute - 11:30 AM Chicago (after suggestions/open)
+    # CST (winter): 17:30 UTC | CDT (summer): 16:30 UTC
+    # Schedule at 16:30 UTC to catch CDT
+    - cron: '30 16 * * 1-5'
+
+    # Paper Auto-Close - 3:30 PM Chicago (before market close)
+    # CST (winter): 21:30 UTC | CDT (summer): 20:30 UTC
+    # Schedule at 20:30 UTC to catch CDT
+    - cron: '30 20 * * 1-5'
+
   workflow_dispatch:
     inputs:
       task:
@@ -60,6 +70,8 @@ on:
           - validation_eval
           - strategy_autotune
           - ops_health_check
+          - paper_auto_execute
+          - paper_auto_close
       skip_time_gate:
         description: 'Skip time gate check'
         required: false
@@ -344,3 +356,79 @@ jobs:
           USER_ID: ${{ secrets.TASK_USER_ID }}
         run: |
           python scripts/run_signed_task.py learning_ingest --skip-time-gate
+
+  # ============================================================================
+  # Scheduled: Paper Auto-Execute (11:30 AM Chicago)
+  # ============================================================================
+  paper-auto-execute:
+    name: Paper Auto-Execute (11:30 AM Chicago)
+    runs-on: ubuntu-latest
+    if: github.event_name == 'schedule' && github.event.schedule == '30 16 * * 1-5'
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Cache pip dependencies
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('packages/quantum/requirements.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r packages/quantum/requirements.txt
+
+      - name: Run Paper Auto-Execute
+        env:
+          TASK_SIGNING_KEYS: ${{ secrets.TASK_SIGNING_KEYS }}
+          BASE_URL: ${{ secrets.QUANTUM_BASE_URL }}
+          USER_ID: ${{ secrets.TASK_USER_ID }}
+        run: |
+          python scripts/run_signed_task.py paper_auto_execute --skip-time-gate
+
+  # ============================================================================
+  # Scheduled: Paper Auto-Close (3:30 PM Chicago)
+  # ============================================================================
+  paper-auto-close:
+    name: Paper Auto-Close (3:30 PM Chicago)
+    runs-on: ubuntu-latest
+    if: github.event_name == 'schedule' && github.event.schedule == '30 20 * * 1-5'
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Cache pip dependencies
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('packages/quantum/requirements.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r packages/quantum/requirements.txt
+
+      - name: Run Paper Auto-Close
+        env:
+          TASK_SIGNING_KEYS: ${{ secrets.TASK_SIGNING_KEYS }}
+          BASE_URL: ${{ secrets.QUANTUM_BASE_URL }}
+          USER_ID: ${{ secrets.TASK_USER_ID }}
+        run: |
+          python scripts/run_signed_task.py paper_auto_close --skip-time-gate

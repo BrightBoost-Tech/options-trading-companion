@@ -28,6 +28,8 @@ Supported Tasks:
     validation_eval     - POST /tasks/validation/eval
     strategy_autotune   - POST /tasks/strategy/autotune
     ops_health_check    - POST /tasks/ops/health_check (every 30 min)
+    paper_auto_execute  - POST /tasks/paper/auto-execute (requires user_id)
+    paper_auto_close    - POST /tasks/paper/auto-close (requires user_id)
 """
 
 import argparse
@@ -100,6 +102,18 @@ TASKS = {
         "path": "/tasks/ops/health_check",
         "scope": "tasks:ops_health_check",
         "description": "Run ops health check (every 30 min)",
+    },
+    "paper_auto_execute": {
+        "path": "/tasks/paper/auto-execute",
+        "scope": "tasks:paper_auto_execute",
+        "description": "Auto-execute top paper suggestions (requires user_id)",
+        "requires_user_id": True,
+    },
+    "paper_auto_close": {
+        "path": "/tasks/paper/auto-close",
+        "scope": "tasks:paper_auto_close",
+        "description": "Auto-close paper positions (requires user_id)",
+        "requires_user_id": True,
     },
 }
 
@@ -360,6 +374,16 @@ def run_task(
         return 1
 
     task = TASKS[task_name]
+
+    # Check if task requires user_id
+    if task.get("requires_user_id") and not user_id:
+        print(f"[ERROR] Task {task_name} requires --user-id or USER_ID environment variable")
+        write_step_summary(
+            task_name,
+            skipped=True,
+            skip_reason="Missing required user_id"
+        )
+        return 1
 
     # Check time gate
     if not check_time_gate(task_name, skip_time_gate):

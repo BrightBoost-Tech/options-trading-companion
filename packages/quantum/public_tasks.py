@@ -19,6 +19,8 @@ from packages.quantum.public_tasks_models import (
     LearningIngestPayload,
     StrategyAutotunePayload,
     OpsHealthCheckPayload,
+    PaperAutoExecutePayload,
+    PaperAutoClosePayload,
     DEFAULT_STRATEGY_NAME,
 )
 
@@ -537,6 +539,153 @@ async def task_ops_health_check(
         "force": payload.force,
     }
 
+    return enqueue_job_run(
+        job_name=job_name,
+        idempotency_key=idempotency_key,
+        payload=job_payload
+    )
+
+
+# =============================================================================
+# Paper Autopilot Tasks (v4-L1C)
+# =============================================================================
+
+
+def _paper_autopilot_idempotency_key(task_type: str, user_id: str) -> str:
+    """
+    Generate UTC-based idempotency key for paper autopilot tasks.
+
+    Format: {YYYY-MM-DD}-paper-auto-{task_type}-{user_id}
+    """
+    date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    return f"{date}-paper-auto-{task_type}-{user_id}"
+
+
+def _check_paper_autopilot_gates(user_id: str) -> Optional[Dict[str, Any]]:
+    """
+    Check paper autopilot gating conditions.
+
+    Returns None if all gates pass, otherwise returns error response dict.
+
+    Gates checked:
+    1. PAPER_AUTOPILOT_ENABLED must be "1"
+    2. ops_state.mode must be "paper"
+    3. Pause gate (handled by enqueue_job_run, but we check mode first)
+    """
+    import os
+    from packages.quantum.ops_endpoints import get_global_ops_control
+
+    # Gate 1: Autopilot enabled
+    if os.environ.get("PAPER_AUTOPILOT_ENABLED", "0") != "1":
+        return {
+            "status": "skipped",
+            "reason": "autopilot_disabled",
+            "detail": "PAPER_AUTOPILOT_ENABLED is not set to '1'"
+        }
+
+    # Gate 2: Paper mode only
+    ops_state = get_global_ops_control()
+    mode = ops_state.get("mode", "paper")
+
+    if mode != "paper":
+        return {
+            "status": "cancelled",
+            "reason": "mode_is_paper_only",
+            "detail": f"Paper autopilot requires mode='paper', current mode='{mode}'"
+        }
+
+    return None
+
+
+@router.post("/paper/auto-execute", status_code=202)
+async def task_paper_auto_execute(
+    payload: PaperAutoExecutePayload = Body(...),
+    auth: TaskSignatureResult = Depends(verify_task_signature("tasks:paper_auto_execute"))
+):
+    """
+    Automatically execute top executable suggestions for paper trading.
+
+    Auth: Requires v4 HMAC signature with scope 'tasks:paper_auto_execute'.
+
+    v4-L1C: Part of Phase-3 streak automation.
+
+    Requirements:
+    - Requires specific user_id (not "all")
+    - Must be in paper mode (ops_state.mode == "paper")
+    - Respects pause gate
+    - Requires PAPER_AUTOPILOT_ENABLED=1
+
+    Behavior:
+    1. Fetches today's executable suggestions
+    2. Selects top N (PAPER_AUTOPILOT_MAX_TRADES_PER_DAY, default 3)
+    3. Filters by min score (PAPER_AUTOPILOT_MIN_SCORE, default 0.0)
+    4. Deduplicates against already-executed today
+    5. Stages and executes via paper trading service
+    """
+    user_id = payload.user_id
+
+    # Check autopilot gates (enabled, paper mode)
+    gate_error = _check_paper_autopilot_gates(user_id)
+    if gate_error:
+        return gate_error
+
+    job_name = "paper_auto_execute"
+    idempotency_key = _paper_autopilot_idempotency_key("execute", user_id)
+
+    job_payload = {
+        "user_id": user_id,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    }
+
+    # enqueue_job_run handles pause gate
+    return enqueue_job_run(
+        job_name=job_name,
+        idempotency_key=idempotency_key,
+        payload=job_payload
+    )
+
+
+@router.post("/paper/auto-close", status_code=202)
+async def task_paper_auto_close(
+    payload: PaperAutoClosePayload = Body(...),
+    auth: TaskSignatureResult = Depends(verify_task_signature("tasks:paper_auto_close"))
+):
+    """
+    Automatically close paper positions before checkpoint.
+
+    Auth: Requires v4 HMAC signature with scope 'tasks:paper_auto_close'.
+
+    v4-L1C: Part of Phase-3 streak automation.
+
+    Requirements:
+    - Requires specific user_id (not "all")
+    - Must be in paper mode (ops_state.mode == "paper")
+    - Respects pause gate
+    - Requires PAPER_AUTOPILOT_ENABLED=1
+
+    Behavior:
+    1. Fetches open paper positions
+    2. Checks positions already closed today (for deduplication)
+    3. Closes up to PAPER_AUTOPILOT_MAX_CLOSES_PER_DAY (default 1)
+    4. Uses oldest-first ordering for determinism
+    5. Creates learning outcomes for checkpoint validation
+    """
+    user_id = payload.user_id
+
+    # Check autopilot gates (enabled, paper mode)
+    gate_error = _check_paper_autopilot_gates(user_id)
+    if gate_error:
+        return gate_error
+
+    job_name = "paper_auto_close"
+    idempotency_key = _paper_autopilot_idempotency_key("close", user_id)
+
+    job_payload = {
+        "user_id": user_id,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    }
+
+    # enqueue_job_run handles pause gate
     return enqueue_job_run(
         job_name=job_name,
         idempotency_key=idempotency_key,

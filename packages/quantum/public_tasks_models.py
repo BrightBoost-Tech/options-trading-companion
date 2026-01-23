@@ -204,6 +204,70 @@ class OpsHealthCheckPayload(TaskPayloadBase):
 
 
 # =============================================================================
+# Paper Autopilot Tasks (v4-L1C)
+# =============================================================================
+
+class PaperAutoExecutePayload(TaskPayloadBase):
+    """
+    Payload for /tasks/paper/auto-execute.
+
+    Automatically executes top executable suggestions for paper trading.
+    Part of Phase-3 streak automation.
+
+    Requirements:
+    - Requires specific user_id (not "all")
+    - Must be in paper mode (ops_state.mode == "paper")
+    - Respects pause gate
+    - Requires PAPER_AUTOPILOT_ENABLED=1
+    """
+    user_id: str = Field(
+        ...,  # Required
+        min_length=32,
+        description="Target user UUID (required, cannot be 'all')"
+    )
+
+    @field_validator("user_id")
+    @classmethod
+    def validate_user_id_not_all(cls, v: str) -> str:
+        """Validate user_id is a specific user, not 'all'."""
+        if v == "all":
+            raise ValueError("user_id must be a specific user UUID, not 'all'")
+        if len(v) < 32:
+            raise ValueError("user_id must be a valid UUID")
+        return v
+
+
+class PaperAutoClosePayload(TaskPayloadBase):
+    """
+    Payload for /tasks/paper/auto-close.
+
+    Automatically closes paper positions before checkpoint.
+    Part of Phase-3 streak automation.
+
+    Requirements:
+    - Requires specific user_id (not "all")
+    - Must be in paper mode (ops_state.mode == "paper")
+    - Respects pause gate
+    - Requires PAPER_AUTOPILOT_ENABLED=1
+    """
+    user_id: str = Field(
+        ...,  # Required
+        min_length=32,
+        description="Target user UUID (required, cannot be 'all')"
+    )
+
+    @field_validator("user_id")
+    @classmethod
+    def validate_user_id_not_all(cls, v: str) -> str:
+        """Validate user_id is a specific user, not 'all'."""
+        if v == "all":
+            raise ValueError("user_id must be a specific user UUID, not 'all'")
+        if len(v) < 32:
+            raise ValueError("user_id must be a valid UUID")
+        return v
+
+
+# =============================================================================
 # Scope Constants
 # =============================================================================
 
@@ -219,6 +283,8 @@ TASK_SCOPES = {
     "/tasks/learning/ingest": "tasks:learning_ingest",
     "/tasks/strategy/autotune": "tasks:strategy_autotune",
     "/tasks/ops/health_check": "tasks:ops_health_check",
+    "/tasks/paper/auto-execute": "tasks:paper_auto_execute",
+    "/tasks/paper/auto-close": "tasks:paper_auto_close",
 }
 
 

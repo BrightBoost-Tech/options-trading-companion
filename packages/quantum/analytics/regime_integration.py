@@ -233,69 +233,31 @@ def calculate_regime_vectorized(
         - "regime": np.ndarray of strings ('normal', 'high_vol', 'panic')
         - "conviction": np.ndarray of floats [0.0, 1.0]
     """
-    # --- 1. Infer Global Context (Vectorized) ---
+    # --- 1. Infer Global Context & Map Regime (Vectorized & Optimized) ---
 
-    # VIX Level Logic
-    # if vol > 0.30: vix = 35.0
-    # elif vol > 0.20: vix = 25.0
-    # else: vix = 15.0
-    vix_level = np.select(
-        [vol_series > 0.30, vol_series > 0.20],
-        [35.0, 25.0],
-        default=15.0
-    )
-
-    # Vol State Logic
-    # if vix > 30: "high"
-    # elif vix > 20: "medium"
-    # else: "low"
-    vol_state = np.select(
-        [vix_level > 30.0, vix_level > 20.0],
-        ["high", "medium"],
-        default="low"
-    )
-
-    # Global Regime Logic
-    # if vol_state == "high": "shock"
-    # elif vol_state == "medium": if trend=="DOWN": "bear" else "crab"
-    # else: if trend=="UP": "bull", elif trend=="DOWN": "bear", else "crab"
-
+    # Pre-compute boolean masks
     is_down = trend_series == "DOWN"
     is_up = trend_series == "UP"
 
-    regime_global = np.select(
-        [
-            vol_state == "high",
-            (vol_state == "medium") & is_down,
-            (vol_state == "medium"), # default for medium
-            (vol_state == "low") & is_up,
-            (vol_state == "low") & is_down
-        ],
-        [
-            "shock",
-            "bear",
-            "crab",
-            "bull",
-            "bear"
-        ],
-        default="crab" # low & neutral -> crab
-    )
-
-    # --- 2. Map Market Regime (Vectorized) ---
-    # if state == 'shock': 'panic'
-    # if vol > 0.20: 'high_vol'
-    # if state == 'bear': 'high_vol'
-    # else: 'normal'
+    # Simplified Logic (Direct Mapping):
+    # This replaces the legacy multi-step inference (vix_level -> vol_state -> regime_global -> regime_mapped)
+    # which created multiple intermediate string arrays (O(N) allocations and comparisons).
+    #
+    # Logic derivation:
+    # 1. Panic: Matches legacy `vol_state="high"` (vix>30 => vol>0.30).
+    # 2. High Vol: Matches legacy `vol > 0.20` OR `regime_global="bear"`.
+    #    - `vol > 0.20` catches medium/high vol.
+    #    - `regime_global="bear"` catches `is_down` (regardless of vol being medium or low).
+    #    - Thus, High Vol = `vol > 0.20` OR `is_down`. (Panic takes precedence).
+    # 3. Normal: Everything else.
 
     regime_mapped = np.select(
         [
-            regime_global == "shock",
-            vol_series > 0.20,
-            regime_global == "bear"
+            vol_series > 0.30,               # Panic
+            (vol_series > 0.20) | is_down    # High Vol
         ],
         [
             "panic",
-            "high_vol",
             "high_vol"
         ],
         default="normal"

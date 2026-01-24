@@ -17,6 +17,7 @@ import clsx from 'clsx'
 import { API_URL, TEST_USER_ID } from '@/lib/constants'
 import { supabase } from '@/lib/supabase'
 import { Button } from '@/components/ui/button'
+import { useToast } from '@/components/ui/use-toast'
 
 // --- Types ---
 interface Trade {
@@ -58,6 +59,7 @@ export default function PortfolioOptimizer({ positions, onOptimizationComplete }
   const [profile, setProfile] = useState<"balanced" | "aggressive">("aggressive") // Default to aggressive per user request
   const [isOptimizing, setIsOptimizing] = useState(false)
   const [results, setResults] = useState<OptimizationResult | null>(null)
+  const { toast } = useToast()
 
   // Diagnostics State
   const [diagnostic, setDiagnostic] = useState<any>(null)
@@ -123,9 +125,17 @@ export default function PortfolioOptimizer({ positions, onOptimizationComplete }
         const errorText = await res.text();
         try {
            const errJson = JSON.parse(errorText);
-           alert(`Error: ${errJson.detail?.[0]?.msg || errJson.detail || "Unknown Backend Error"}`);
+           toast({
+             variant: "destructive",
+             title: "Optimization Failed",
+             description: errJson.detail?.[0]?.msg || errJson.detail || "Unknown Backend Error"
+           })
         } catch {
-           alert(`Optimization Failed (Status ${res.status})`);
+           toast({
+             variant: "destructive",
+             title: "Optimization Failed",
+             description: `Status ${res.status}`
+           })
         }
         return;
       }
@@ -136,7 +146,11 @@ export default function PortfolioOptimizer({ positions, onOptimizationComplete }
 
     } catch (e) {
       console.error("Optimization Error:", e)
-      alert("Could not connect to optimization engine. Check backend.")
+      toast({
+        variant: "destructive",
+        title: "Connection Error",
+        description: "Could not connect to optimization engine. Check backend."
+      })
     } finally {
       setIsOptimizing(false)
     }
@@ -181,35 +195,36 @@ export default function PortfolioOptimizer({ positions, onOptimizationComplete }
         </div>
 
         <div className="flex items-center gap-4 flex-wrap justify-end">
-             <button
+             <Button
+               variant="ghost"
                onClick={runDiagnostics}
-               className="text-[10px] font-mono text-muted-foreground hover:text-indigo-600 dark:hover:text-indigo-400 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500 rounded"
+               className="h-auto p-1 text-[10px] font-mono text-muted-foreground hover:text-indigo-600 dark:hover:text-indigo-400 hover:bg-transparent"
                aria-label="Run system diagnostics"
                title="Run system diagnostics"
              >
                 TEST_CORE_SYSTEM
-             </button>
+             </Button>
 
              {/* Profile Badge (User Request) */}
-             <button
-               type="button"
+             <Button
+               variant="outline"
                className={clsx(
-                  "px-2 py-0.5 rounded text-[10px] font-bold uppercase tracking-wide transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500",
-                  profile === 'aggressive' ? "bg-rose-100 text-rose-700 dark:bg-rose-900/30 dark:text-rose-400" : "bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-400"
+                  "h-auto px-2 py-0.5 border-0 text-[10px] font-bold uppercase tracking-wide",
+                  profile === 'aggressive' ? "bg-rose-100 text-rose-700 hover:bg-rose-200 dark:bg-rose-900/30 dark:text-rose-400 dark:hover:bg-rose-900/40" : "bg-blue-100 text-blue-700 hover:bg-blue-200 dark:bg-blue-900/30 dark:text-blue-400 dark:hover:bg-blue-900/40"
                )}
                onClick={() => setProfile(prev => prev === 'aggressive' ? 'balanced' : 'aggressive')}
                title="Click to toggle profile"
                aria-label={`Toggle risk profile. Current: ${profile}`}
              >
                 Profile: {profile}
-             </button>
+             </Button>
 
              {/* The requested Toggle */}
              <div className="flex items-center gap-2">
                 <span
+                  id="tail-risk-label"
                   className={`text-xs font-medium transition-colors cursor-pointer select-none ${isQuantum ? 'text-purple-700 dark:text-purple-400' : 'text-muted-foreground'}`}
                   onClick={() => setIsQuantum(!isQuantum)}
-                  aria-hidden="true"
                 >
                   <span className="hidden sm:inline">Optimize Tail Risk</span>
                   <span className="sm:hidden">Tail Risk</span>
@@ -218,7 +233,7 @@ export default function PortfolioOptimizer({ positions, onOptimizationComplete }
                   type="button"
                   role="switch"
                   aria-checked={isQuantum}
-                  aria-label="Optimize Tail Risk"
+                  aria-labelledby="tail-risk-label"
                   onClick={() => setIsQuantum(!isQuantum)}
                   className={clsx(
                     "relative w-10 h-5 rounded-full transition-colors duration-300 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-purple-500 focus-visible:ring-offset-2",
@@ -251,15 +266,15 @@ export default function PortfolioOptimizer({ positions, onOptimizationComplete }
                 ? "Utilizes QCI Dirac-3 hardware to minimize tail risk (skewness) and maximize momentum."
                 : "Standard Markowitz model. Balances expected return against volatility."}
             </p>
-            <button
+            <Button
               onClick={handleOptimize}
               className={clsx(
-                "px-6 py-2.5 rounded-lg text-white text-sm font-medium transition-all shadow-md hover:shadow-lg transform hover:-translate-y-0.5",
-                isQuantum ? "bg-gradient-to-r from-purple-600 to-indigo-600" : "bg-emerald-600 hover:bg-emerald-700"
+                "h-auto px-6 py-2.5 rounded-lg text-white shadow-md hover:shadow-lg hover:-translate-y-0.5 transition-all",
+                isQuantum ? "bg-gradient-to-r from-purple-600 to-indigo-600 hover:from-purple-700 hover:to-indigo-700 border-0" : "bg-emerald-600 hover:bg-emerald-700"
               )}
             >
               Run Optimization
-            </button>
+            </Button>
           </div>
         )}
 

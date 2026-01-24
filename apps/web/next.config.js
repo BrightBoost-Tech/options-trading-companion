@@ -13,6 +13,26 @@ const nextConfig = {
     ]
   },
   async headers() {
+    const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL || '';
+    const backendUrl = (process.env.BACKEND_URL || 'http://127.0.0.1:8000').replace(/\/$/, '');
+
+    // 🛡️ Sentinel: Content Security Policy (CSP)
+    // Enhanced to allow necessary integrations (Plaid, Supabase) while enforcing security.
+    const cspHeader = `
+      default-src 'self';
+      script-src 'self' 'unsafe-inline' 'unsafe-eval' https://cdn.plaid.com https://*.supabase.co ${supabaseUrl};
+      style-src 'self' 'unsafe-inline';
+      img-src 'self' blob: data: https://*.supabase.co ${supabaseUrl};
+      connect-src 'self' https://cdn.plaid.com https://*.supabase.co wss://*.supabase.co ${supabaseUrl} ${backendUrl};
+      font-src 'self';
+      object-src 'none';
+      base-uri 'self';
+      form-action 'self';
+      frame-ancestors 'none';
+      block-all-mixed-content;
+      upgrade-insecure-requests;
+    `.replace(/\s{2,}/g, ' ').trim();
+
     const securityHeaders = [
       {
         key: 'X-DNS-Prefetch-Control',
@@ -34,12 +54,10 @@ const nextConfig = {
         key: 'Referrer-Policy',
         value: 'strict-origin-when-cross-origin',
       },
-      // 🛡️ Sentinel: CSP is omitted for now to avoid breaking inline scripts (theme toggle)
-      // and external integrations (Plaid, Supabase) without a rigorous nonce strategy.
-      // {
-      //   key: 'Content-Security-Policy',
-      //   value: "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval' ...",
-      // }
+      {
+        key: 'Content-Security-Policy',
+        value: cspHeader,
+      }
     ];
 
     if (process.env.NODE_ENV === 'production') {

@@ -159,7 +159,7 @@ CREATE TABLE IF NOT EXISTS position_legs (
     -- Instrument identification
     symbol TEXT NOT NULL,                       -- Full option symbol (e.g., "AAPL240119C00150000")
     underlying TEXT NOT NULL,                   -- e.g., "AAPL"
-    right option_right NOT NULL DEFAULT 'S',    -- C=Call, P=Put, S=Stock
+    "right" option_right NOT NULL DEFAULT 'S',  -- C=Call, P=Put, S=Stock
     strike NUMERIC,                             -- Strike price (NULL for stock)
     expiry DATE,                                -- Expiration date (NULL for stock)
     multiplier INTEGER NOT NULL DEFAULT 100,    -- Contract multiplier

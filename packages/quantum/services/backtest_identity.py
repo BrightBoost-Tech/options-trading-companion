@@ -19,6 +19,8 @@ import json
 import os
 from typing import Any, Dict, Optional
 
+from packages.quantum.services.replay.canonical import compute_content_hash
+
 # v4 dual-import shim
 try:
     from packages.quantum.strategy_profiles import (
@@ -47,7 +49,8 @@ class BacktestIdentity:
     """
 
     # Data version for cache invalidation when data processing changes
-    DATA_VERSION = "v1"
+    # v2: switched to canonical_json_bytes (compute_content_hash) for determinism
+    DATA_VERSION = "v2"
 
     @staticmethod
     def hash_dict(obj: Any) -> str:
@@ -66,9 +69,8 @@ class BacktestIdentity:
         elif hasattr(obj, "dict"):
             obj = obj.dict()
 
-        # Deterministic serialization
-        json_str = json.dumps(obj, sort_keys=True, default=str, separators=(",", ":"))
-        return hashlib.sha256(json_str.encode("utf-8")).hexdigest()
+        # Deterministic serialization using canonical utility
+        return compute_content_hash(obj)
 
     @staticmethod
     def compute_data_hash(

@@ -34,3 +34,8 @@
 **Vulnerability:** The `/observability/trade_attribution` and `/observability/ev_leakage` endpoints were exposed to any authenticated user, leaking sensitive system-wide trade data and model performance metrics. They relied on `get_current_user` for authentication but lacked an authorization check for admin privileges.
 **Learning:** Router dependencies (like `Depends(get_current_user)`) only handle authentication (Who are you?), not authorization (What can you do?). Using an admin client (Service Role) inside an endpoint without an accompanying admin check is a critical pattern to avoid.
 **Prevention:** Always pair `get_admin_client` with `verify_admin_access` in endpoint dependencies. If an endpoint uses the admin client, it almost certainly requires admin privileges.
+
+## 2026-02-18 - [Enhancement] CSP in Next.js Config
+**Vulnerability:** The frontend lacked an active Content Security Policy, relying on commented-out code due to complexity with external services (Plaid, Supabase) and inline scripts.
+**Learning:** CSPs in Next.js can be effectively managed within `next.config.js` headers by dynamically injecting environment variables (like `NEXT_PUBLIC_SUPABASE_URL`) into the policy string. This allows for strict whitelisting of external integrations without hardcoding domains or disabling the policy entirely.
+**Prevention:** Use the `headers()` async function in `next.config.js` to construct a dynamic CSP that includes necessary environment-specific origins while enforcing `frame-ancestors 'none'` and `form-action 'self'`.

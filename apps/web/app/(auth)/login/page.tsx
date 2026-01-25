@@ -1,8 +1,9 @@
 'use client';
 
 import { useState } from 'react';
-import { createBrowserClient } from '@supabase/ssr';
 import { useRouter } from 'next/navigation';
+import { supabase } from '@/lib/supabase';
+import { clearAuthHeadersCache } from '@/lib/api';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 
@@ -12,11 +13,6 @@ export default function LoginPage() {
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
   const router = useRouter();
-
-  const supabase = createBrowserClient(
-    process.env.NEXT_PUBLIC_SUPABASE_URL!,
-    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
-  );
 
   const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -32,7 +28,9 @@ export default function LoginPage() {
       if (error) {
         setError(error.message);
       } else {
-        router.push('/dashboard');
+        // Clear cached auth headers so new session is used immediately
+        clearAuthHeadersCache();
+        router.replace('/dashboard');
         router.refresh();
       }
     } catch (err) {

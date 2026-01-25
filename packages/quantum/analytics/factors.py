@@ -18,13 +18,23 @@ def fast_rolling_mean(arr: np.ndarray, window: int) -> np.ndarray:
         return np.mean(windows, axis=1)
 
     # Optimization: O(N) using cumsum
-    # Prepend 0 to simplify indexing
-    cs = np.insert(np.cumsum(arr, dtype=np.float64), 0, 0)
+    # Avoid np.insert to prevent O(N) copy overhead
+    cs = np.cumsum(arr, dtype=np.float64)
 
     # Calculate sum of windows
-    # window_sum[i] = cs[i+window] - cs[i]
-    # corresponding to arr[i : i+window]
-    window_sums = cs[window:] - cs[:-window]
+    # window_sum[0] = cs[window-1]
+    # window_sum[i] = cs[i+window-1] - cs[i-1] for i > 0
+
+    # Initialize result array
+    window_sums = np.empty(len(arr) - window + 1, dtype=np.float64)
+
+    # First window sum
+    window_sums[0] = cs[window-1]
+
+    # Subsequent window sums
+    # cs[window:] corresponds to end of windows starting from index 1
+    # cs[:-window] corresponds to elements just before the start of windows
+    window_sums[1:] = cs[window:] - cs[:-window]
 
     return window_sums / window
 

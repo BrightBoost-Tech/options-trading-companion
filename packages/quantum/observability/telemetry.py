@@ -1,9 +1,10 @@
 from dataclasses import dataclass, field
 from typing import Optional, Literal, Dict, Any
 import hashlib
-import json
 import uuid
 from datetime import datetime, timezone
+
+from packages.quantum.observability.canonical import compute_content_hash
 
 TradeEventName = Literal[
     "suggestion_generated",
@@ -46,9 +47,7 @@ def compute_features_hash(features: Dict[str, Any]) -> str:
     if not features:
         return "empty"
     try:
-        # Sort keys and use stable separators
-        canonical_json = json.dumps(features, sort_keys=True, separators=(',', ':'))
-        return hashlib.sha256(canonical_json.encode('utf-8')).hexdigest()
+        return compute_content_hash(features)
     except Exception:
         return "hash_error"
 

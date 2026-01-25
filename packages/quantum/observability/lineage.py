@@ -24,10 +24,11 @@ Security Notes:
 
 import hashlib
 import hmac
-import json
 import os
 from dataclasses import dataclass
 from typing import Any, Dict, Optional, Tuple
+
+from packages.quantum.observability.canonical import canonical_json_bytes, compute_content_hash
 
 
 # =============================================================================
@@ -83,16 +84,7 @@ class LineageSigner:
         """
         if data is None:
             data = {}
-
-        # Sort keys recursively and use minimal separators
-        canonical_json = json.dumps(
-            data,
-            sort_keys=True,
-            separators=(',', ':'),
-            ensure_ascii=True,  # Ensure consistent encoding
-            default=str  # Handle non-serializable types gracefully
-        )
-        return canonical_json.encode('utf-8')
+        return canonical_json_bytes(data)
 
     @staticmethod
     def compute_hash(data: Dict[str, Any]) -> str:
@@ -105,8 +97,7 @@ class LineageSigner:
         Returns:
             Hex string of SHA256 hash
         """
-        canonical_bytes = LineageSigner.canonicalize(data)
-        return hashlib.sha256(canonical_bytes).hexdigest()
+        return compute_content_hash(data)
 
     @staticmethod
     def _get_secret() -> Optional[bytes]:

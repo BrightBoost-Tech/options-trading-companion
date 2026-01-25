@@ -33,3 +33,7 @@
 ## 2025-05-30 - Interactive Table Rows
 **Learning:** Interactive table rows (clickable `tr` elements) are common in dashboards but often inaccessible. They need `tabIndex="0"` to be focusable and an `onKeyDown` handler (for Enter/Space) to be operable by keyboard.
 **Action:** When adding `onClick` to a `tr`, always add `tabIndex="0"`, a matching `onKeyDown` handler, and visible focus styles (e.g. `focus-visible:ring`).
+
+## 2025-05-30 - Dynamic DOM & Theming
+**Learning:** Manually creating DOM elements in hooks (like custom toasts) often bypasses CSS variables if styles are hardcoded, breaking Dark Mode support.
+**Action:** Use Tailwind semantic classes (`bg-background`, `text-foreground`) instead of inline styles for dynamically created elements to ensure they inherit the active theme automatically.

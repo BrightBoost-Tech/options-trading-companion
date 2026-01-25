@@ -22,8 +22,9 @@ const nextConfig = {
       default-src 'self';
       script-src 'self' 'unsafe-inline' 'unsafe-eval' https://cdn.plaid.com https://*.supabase.co ${supabaseUrl};
       style-src 'self' 'unsafe-inline';
-      img-src 'self' blob: data: https://*.supabase.co ${supabaseUrl};
-      connect-src 'self' https://cdn.plaid.com https://*.supabase.co wss://*.supabase.co ${supabaseUrl} ${backendUrl};
+      img-src 'self' blob: data: https://cdn.plaid.com https://*.plaid.com https://*.supabase.co ${supabaseUrl};
+      connect-src 'self' https://cdn.plaid.com https://*.plaid.com https://*.supabase.co wss://*.supabase.co ${supabaseUrl} ${backendUrl};
+      frame-src 'self' https://cdn.plaid.com https://*.plaid.com;
       font-src 'self';
       object-src 'none';
       base-uri 'self';

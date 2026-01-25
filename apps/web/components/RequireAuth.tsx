@@ -3,6 +3,7 @@
 import { useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { supabase } from '@/lib/supabase';
+import { clearAuthHeadersCache } from '@/lib/api';
 
 interface RequireAuthProps {
   children: React.ReactNode;
@@ -62,6 +63,9 @@ export function RequireAuth({ children }: RequireAuthProps) {
     // Listen for auth state changes
     const { data: { subscription } } = supabase.auth.onAuthStateChange((event, session) => {
       if (!mounted) return;
+
+      // Clear cached auth headers on any auth state change
+      clearAuthHeadersCache();
 
       if (event === 'SIGNED_OUT' || (!session && process.env.NODE_ENV === 'production')) {
         router.replace('/login');

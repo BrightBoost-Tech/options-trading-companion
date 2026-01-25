@@ -1,67 +1,79 @@
 // Simplified useToast hook for missing shadcn component
-import { useState, useEffect } from "react"
+import { useState } from "react"
 
 export function useToast() {
   const [toasts, setToasts] = useState<Array<{ id: string; title?: string; description?: string; variant?: "default" | "destructive" }>>([])
 
   const toast = ({ title, description, variant = "default" }: { title?: string; description?: string; variant?: "default" | "destructive" }) => {
     const id = Math.random().toString(36).substr(2, 9)
-    const newToast = { id, title, description, variant }
 
-    // Create a temporary visual element
+    // Create visual element
     const el = document.createElement('div')
     el.id = `toast-${id}`
-    el.style.position = 'fixed'
-    el.style.bottom = '20px'
-    el.style.right = '20px'
-    el.style.padding = '16px'
-    el.style.background = variant === 'destructive' ? '#fee2e2' : '#ffffff'
-    el.style.color = variant === 'destructive' ? '#b91c1c' : '#1f2937'
-    el.style.border = variant === 'destructive' ? '1px solid #fca5a5' : '1px solid #e5e7eb'
-    el.style.borderRadius = '8px'
-    el.style.boxShadow = '0 4px 6px -1px rgba(0, 0, 0, 0.1)'
-    el.style.zIndex = '9999'
-    el.style.minWidth = '300px'
-    el.style.marginBottom = '10px'
-    el.style.fontFamily = 'system-ui, -apple-system, sans-serif'
 
-    const titleEl = document.createElement('div')
-    titleEl.style.fontWeight = '600'
-    titleEl.style.marginBottom = '4px'
-    titleEl.textContent = title || ''
+    // Tailwind classes
+    // Container handles positioning (flex-col-reverse)
+    // We add pointer-events-auto to the toast so it can be clicked
+    const baseClasses = "relative p-4 rounded-lg shadow-lg min-w-[300px] mb-3 font-sans transition-all duration-300 ease-out border translate-y-2 opacity-0 data-[state=open]:translate-y-0 data-[state=open]:opacity-100 pointer-events-auto cursor-pointer flex flex-col gap-1"
 
-    const descEl = document.createElement('div')
-    descEl.style.fontSize = '14px'
-    descEl.textContent = description || ''
+    const variantClasses = variant === 'destructive'
+        ? "bg-destructive text-destructive-foreground border-destructive"
+        : "bg-background text-foreground border-border"
 
-    el.appendChild(titleEl)
-    el.appendChild(descEl)
+    el.className = `${baseClasses} ${variantClasses}`
+
+    // A11y
+    el.setAttribute("role", variant === "destructive" ? "alert" : "status")
+
+    // Title
+    if (title) {
+        const titleEl = document.createElement('div')
+        titleEl.className = "font-semibold text-sm"
+        titleEl.textContent = title
+        el.appendChild(titleEl)
+    }
+
+    // Description
+    if (description) {
+        const descEl = document.createElement('div')
+        descEl.className = "text-sm opacity-90"
+        descEl.textContent = description
+        el.appendChild(descEl)
+    }
 
     // Append to a container or body
     let container = document.getElementById('toast-container')
     if (!container) {
         container = document.createElement('div')
         container.id = 'toast-container'
-        container.style.position = 'fixed'
-        container.style.bottom = '0'
-        container.style.right = '0'
-        container.style.padding = '20px'
-        container.style.zIndex = '9999'
-        container.style.display = 'flex'
-        container.style.flexDirection = 'column-reverse' // Newest at bottom/top depending on preference, usually bottom up
+        // Container is fixed, but lets clicks pass through (pointer-events-none)
+        container.className = "fixed bottom-0 right-0 p-5 z-[9999] flex flex-col-reverse pointer-events-none max-h-screen overflow-hidden"
+        container.setAttribute("aria-live", "polite")
         document.body.appendChild(container)
     }
 
     container.appendChild(el)
 
-    // Auto remove
-    setTimeout(() => {
-        el.style.opacity = '0'
-        el.style.transition = 'opacity 0.5s ease-out'
+    // Animation entry
+    requestAnimationFrame(() => {
+        el.setAttribute("data-state", "open")
+    })
+
+    const remove = () => {
+        el.removeAttribute("data-state") // triggers exit transition if defined in CSS, but here we rely on classes
+        el.classList.remove("opacity-100", "translate-y-0")
+        el.classList.add("opacity-0", "translate-y-2")
+
         setTimeout(() => {
             if (el.parentNode) el.parentNode.removeChild(el)
-        }, 500)
-    }, 3000)
+        }, 300)
+    }
+
+    // Auto remove
+    setTimeout(remove, 4000)
+
+    // Click to dismiss
+    el.onclick = remove
   }
 
   return {

@@ -8,6 +8,7 @@ from packages.quantum.services.go_live_validation_service import GoLiveValidatio
 from packages.quantum.public_tasks import enqueue_job_run
 from packages.quantum.ops_endpoints import get_global_ops_control
 from packages.quantum.policies.go_live_policy import evaluate_go_live_gate
+from packages.quantum.security.config import is_production_env
 
 router = APIRouter(prefix="/validation", tags=["Go Live Validation"])
 
@@ -90,7 +91,8 @@ def trigger_validation_run(
                 **result
             }
         except Exception as e:
-            raise HTTPException(status_code=500, detail=f"Checkpoint evaluation failed: {e}")
+            detail = f"Checkpoint evaluation failed: {e}" if not is_production_env() else "Internal Server Error"
+            raise HTTPException(status_code=500, detail=detail)
 
     elif payload.mode == "historical":
         # Enqueue Job using public_tasks helper for consistency
@@ -116,7 +118,8 @@ def trigger_validation_run(
             )
             return {"status": "queued", "job_run_id": result.get("job_run_id")}
         except Exception as e:
-            raise HTTPException(status_code=500, detail=f"Failed to enqueue job: {e}")
+            detail = f"Failed to enqueue job: {e}" if not is_production_env() else "Internal Server Error"
+            raise HTTPException(status_code=500, detail=detail)
 
     else:
         raise HTTPException(status_code=400, detail="Invalid mode. Supported: paper, historical")
@@ -135,7 +138,8 @@ def get_validation_journal(
             .execute()
         return {"entries": res.data or []}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        detail = str(e) if not is_production_env() else "Internal Server Error"
+        raise HTTPException(status_code=500, detail=detail)
 
 @router.get("/self-assessment")
 def get_self_assessment(

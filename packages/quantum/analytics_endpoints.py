@@ -3,6 +3,7 @@ from typing import Dict, Any, Optional
 from packages.quantum.security import get_current_user
 from packages.quantum.analytics.behavior_analysis import BehaviorAnalysisService
 from packages.quantum.services.system_health_service import SystemHealthService
+from packages.quantum.security.config import is_production_env
 
 router = APIRouter()
 
@@ -24,7 +25,8 @@ def get_behavior_summary(
         return service.get_behavior_summary(user_id, window_days=days, strategy_family=strategy)
     except Exception as e:
         print(f"Error fetching behavior summary: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        detail = str(e) if not is_production_env() else "Internal Server Error"
+        raise HTTPException(status_code=500, detail=detail)
 
 @router.get("/system/health")
 def get_system_health(
@@ -48,7 +50,7 @@ def get_system_health(
             "active_constraints": [],
             "not_executable_pct": 0.0,
             "partial_outcomes_pct": 0.0,
-            "error": str(e)
+            "error": str(e) if not is_production_env() else "System health check failed"
         }
 
 @router.post("/analytics/events")

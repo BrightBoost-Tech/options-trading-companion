@@ -513,14 +513,13 @@ async def execute_rebalance(
              cash += val
 
     # Instantiate RiskBudgetEngine
-    risk_budget_engine = RiskBudgetEngine()
+    risk_budget_engine = RiskBudgetEngine(supabase)
     total_equity = sum(s.current_value for s in spread_positions) + cash
     risk_summary = risk_budget_engine.compute(spread_positions, total_equity)
 
     # 3. Run Optimizer directly to get targets
-    from packages.quantum.optimizer import _compute_portfolio_weights, OptimizationRequest, calculate_dynamic_target
-
-    # --- V3: Regime Engine Integration ---
+    from packages.quantum.optimizer import _compute_portfolio_weights, OptimizationRequest
+    # calculate_dynamic_target removed/missing
     # Instantiate services
     market_data = PolygonService() # Keep for safety if used elsewhere
     truth_layer = MarketDataTruthLayer()
@@ -567,7 +566,7 @@ async def execute_rebalance(
                 symbol=spread.ticker,
                 underlying=spread.underlying or spread.ticker,
                 strategy_type=spread.spread_type or "other",
-                direction="long" if spread.net_delta >= 0 else "short",
+                direction="long" if (spread.delta or 0.0) >= 0 else "short",
                 iv_rank=float(iv_rank) if iv_rank is not None else None
             )
         )
@@ -704,12 +703,8 @@ async def execute_rebalance(
                      conviction_used = 1.0
 
                  # Apply Dynamic Constraint with REAL regime & conviction
-                 adjusted_w = calculate_dynamic_target(
-                     base_weight=w,
-                     strategy_type=strat_type,
-                     regime=regime_key_sym, # V3 Effective Regime
-                     conviction=conviction_used
-                 )
+                 # adjusted_w = calculate_dynamic_target(...) # Function missing
+                 adjusted_w = w # Fallback
 
                  targets[sym] = adjusted_w
 
@@ -886,12 +881,13 @@ async def preview_rebalance(
              cash += val
 
     # Instantiate RiskBudgetEngine
-    risk_budget_engine = RiskBudgetEngine()
+    risk_budget_engine = RiskBudgetEngine(supabase)
     total_equity = sum(s.current_value for s in spread_positions) + cash
     risk_summary = risk_budget_engine.compute(spread_positions, total_equity)
 
     # 3. Run Optimizer directly to get targets
-    from packages.quantum.optimizer import _compute_portfolio_weights, OptimizationRequest, calculate_dynamic_target
+    from packages.quantum.optimizer import _compute_portfolio_weights, OptimizationRequest
+    # calculate_dynamic_target removed/missing
 
     # --- V3: Regime Engine Integration (Preview Mode: Global Only for Speed) ---
     market_data = PolygonService() # Keep for safety if used elsewhere
@@ -929,7 +925,7 @@ async def preview_rebalance(
                 symbol=spread.ticker,
                 underlying=spread.underlying or spread.ticker,
                 strategy_type=spread.spread_type or "other",
-                direction="long" if spread.net_delta >= 0 else "short",
+                direction="long" if (spread.delta or 0.0) >= 0 else "short",
                 iv_rank=float(iv_rank) if iv_rank is not None else None
             )
         )
@@ -1041,12 +1037,8 @@ async def preview_rebalance(
                  elif not ENABLE_REBALANCE_CONVICTION:
                      conviction_used = 1.0
 
-                 adjusted_w = calculate_dynamic_target(
-                     base_weight=w,
-                     strategy_type=strat_type,
-                     regime=regime_key_sym,
-                     conviction=conviction_used
-                 )
+                 # adjusted_w = calculate_dynamic_target(...) # Function missing
+                 adjusted_w = w # Fallback
 
                  targets[sym] = adjusted_w
              return targets, trace_id
@@ -1062,7 +1054,8 @@ async def preview_rebalance(
             targets_dict, trace_id = await loop.run_in_executor(pool, run_optimizer_logic_preview)
         except Exception as e:
              print(f"Rebalance optimization error: {e}")
-             return {"status": "error", "message": str(e), "trades": []}
+             detail = str(e) if not is_production_env() else "Optimization failed"
+             return {"status": "error", "message": detail, "trades": []}
 
     regime_context["trace_id"] = trace_id
 

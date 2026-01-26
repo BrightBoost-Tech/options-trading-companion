@@ -37,3 +37,7 @@
 ## 2025-05-30 - Dynamic DOM & Theming
 **Learning:** Manually creating DOM elements in hooks (like custom toasts) often bypasses CSS variables if styles are hardcoded, breaking Dark Mode support.
 **Action:** Use Tailwind semantic classes (`bg-background`, `text-foreground`) instead of inline styles for dynamically created elements to ensure they inherit the active theme automatically.
+
+## 2025-05-30 - Landing Page Consistency
+**Learning:** Landing pages often drift from the main app design system because they are built as 'one-offs' with raw CSS. Applying system tokens (like 'buttonVariants') to landing pages restores visual cohesion and ensures accessibility features (focus rings) are present from the very first interaction.
+**Action:** Audit landing pages for raw CSS buttons and replace them with design system components or variants.

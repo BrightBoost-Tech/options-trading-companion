@@ -1,6 +1,5 @@
-import hashlib
-import json
 from datetime import datetime, date
+from packages.quantum.observability.canonical import compute_content_hash
 
 def daily_key(d: date, suffix: str = None) -> str:
     """Returns a key for daily idempotency (e.g. 2023-10-27)."""
@@ -20,6 +19,5 @@ def weekly_key(d: date) -> str:
 
 def stable_hash(payload: dict) -> str:
     """Returns a short SHA256 hash of the payload dictionary."""
-    # sort_keys=True ensures consistent ordering for the same dictionary content
-    encoded = json.dumps(payload, sort_keys=True, default=str).encode("utf-8")
-    return hashlib.sha256(encoded).hexdigest()
+    # Using compute_content_hash for deterministic serialization (float normalization, sorted keys, etc)
+    return compute_content_hash(payload)

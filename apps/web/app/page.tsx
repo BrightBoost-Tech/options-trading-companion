@@ -1,4 +1,5 @@
 import Link from 'next/link';
+import { buttonVariants } from '@/components/ui/button';
 
 export default function Home() {
   return (
@@ -11,13 +12,13 @@ export default function Home() {
         <div className="flex gap-4 justify-center">
           <Link
             href="/login"
-            className="px-6 py-3 bg-blue-600 text-white rounded-lg hover:bg-blue-700 font-medium"
+            className={buttonVariants({ size: 'lg' })}
           >
             Login
           </Link>
           <Link
             href="/signup"
-            className="px-6 py-3 border border-gray-300 rounded-lg hover:bg-gray-50 font-medium"
+            className={buttonVariants({ variant: 'outline', size: 'lg' })}
           >
             Sign Up
           </Link>

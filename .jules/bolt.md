@@ -21,3 +21,7 @@
 ## 2026-06-12 - [SciPy Norm CDF Overhead]
 **Learning:** `scipy.stats.norm.cdf` has significant overhead (~8.4s for 100k calls) compared to a pure Python implementation using `math.erf` (~0.03s). This overhead is critical in hot loops like option scanners.
 **Action:** Replace `scipy.stats.norm.cdf` with a custom `math.erf` based implementation (`0.5 * (1 + erf(x / sqrt(2)))`) for scalar calculations in performance-critical paths.
+
+## 2026-06-15 - [Decimal Overhead in Float Normalization]
+**Learning:** Converting floats to `Decimal` solely for fixed-point rounding (e.g. `Decimal(str(val)).quantize(...)`) is ~2.5x slower than using integer arithmetic (`int(val * 1e6 + 0.5) / 1e6`). For high-frequency serialization/hashing of floats, this overhead adds up.
+**Action:** Use integer scaling and rounding for fixed-precision float normalization in performance-critical paths, while ensuring proper handling of NaN/Inf and overflow risks.

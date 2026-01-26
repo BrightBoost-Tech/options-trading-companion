@@ -24,7 +24,7 @@ import traceback
 env_path = Path(__file__).resolve().parent / ".env"
 load_dotenv(dotenv_path=env_path)
 
-from packages.quantum.security import encrypt_token, decrypt_token, get_current_user, get_supabase_user_client
+from packages.quantum.security import encrypt_token, decrypt_token, get_current_user, get_supabase_user_client, is_localhost
 from packages.quantum.security.config import (
     validate_security_config,
     validate_trading_config,
@@ -136,7 +136,7 @@ if is_debug_routes_enabled():
         app_env = os.getenv("APP_ENV", "development")
 
         # Enforce localhost check regardless of environment setting
-        is_local = request.client.host in ("127.0.0.1", "::1", "localhost") if request.client else False
+        is_local = is_localhost(request)
         if not is_local:
             raise HTTPException(status_code=403, detail="Forbidden: Localhost only")
 
@@ -162,7 +162,7 @@ if is_debug_routes_enabled():
         """
         app_env = os.getenv("APP_ENV", "production")
 
-        is_local = request.client.host in ("127.0.0.1", "::1", "localhost") if request.client else False
+        is_local = is_localhost(request)
         if not is_local:
             raise HTTPException(status_code=403, detail="Localhost only")
 
@@ -193,7 +193,7 @@ if is_debug_routes_enabled():
         Bypasses Redis/RQ. Requires localhost.
         Accepts valid auth token OR X-Test-Mode-User header.
         """
-        is_local = request.client.host in ("127.0.0.1", "::1", "localhost") if request.client else False
+        is_local = is_localhost(request)
         if not is_local:
             raise HTTPException(status_code=403, detail="Forbidden: Localhost only")
 

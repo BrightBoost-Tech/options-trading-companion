@@ -44,8 +44,27 @@ security = HTTPBearer(auto_error=False)
 # But validation ensures it exists at startup in production.
 
 def is_localhost(request: Request) -> bool:
+    """
+    Check if the request originated from localhost.
+    Robustly handles requests proxied via Next.js (local rewrites).
+
+    If the direct connection is localhost, we MUST check X-Forwarded-For
+    to ensure the original client is also localhost.
+    """
     client_host = request.client.host if request.client else ""
-    return client_host in ("127.0.0.1", "::1", "localhost")
+
+    # Check direct connection
+    if client_host not in ("127.0.0.1", "::1", "localhost", "testclient"):
+        return False
+
+    # If direct connection is local, check for proxy headers
+    forwarded_for = request.headers.get("X-Forwarded-For")
+    if forwarded_for:
+        # Get the first IP (original client)
+        real_ip = forwarded_for.split(",")[0].strip()
+        return real_ip in ("127.0.0.1", "::1", "localhost", "testclient")
+
+    return True
 
 async def get_current_user(
     request: Request,

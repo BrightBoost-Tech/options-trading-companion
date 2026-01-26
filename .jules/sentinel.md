@@ -39,3 +39,8 @@
 **Vulnerability:** The frontend lacked an active Content Security Policy, relying on commented-out code due to complexity with external services (Plaid, Supabase) and inline scripts.
 **Learning:** CSPs in Next.js can be effectively managed within `next.config.js` headers by dynamically injecting environment variables (like `NEXT_PUBLIC_SUPABASE_URL`) into the policy string. This allows for strict whitelisting of external integrations without hardcoding domains or disabling the policy entirely.
 **Prevention:** Use the `headers()` async function in `next.config.js` to construct a dynamic CSP that includes necessary environment-specific origins while enforcing `frame-ancestors 'none'` and `form-action 'self'`.
+
+## 2026-02-18 - [Fix] Localhost Auth Bypass via Reverse Proxy
+**Vulnerability:** The backend checks `request.client.host` to restrict sensitive endpoints (e.g., debug routes, dev auth bypass) to "localhost only". Since the Next.js frontend proxies API requests to the backend (via rewrites), external requests appear to come from `127.0.0.1`, inadvertently satisfying the security check and allowing potential external access to dev tools.
+**Learning:** `request.client.host` reflects the immediate TCP connection, which is the proxy in a reverse proxy architecture. Checking it for "is local" is insufficient.
+**Prevention:** Implement a robust `is_localhost` check that inspects `X-Forwarded-For` if and only if the direct connection is from a trusted local proxy. If `X-Forwarded-For` is present, the original client is remote.

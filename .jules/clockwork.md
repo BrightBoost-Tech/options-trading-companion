@@ -12,3 +12,8 @@
 **Issue:** `stable_hash` in `idempotency.py` used `json.dumps(default=str)` which caused nondeterministic hashes for sets (random iteration order) and unnormalized floats.
 **Learning:** Even functions explicitly named "stable" can be flawed if they rely on standard library defaults like `default=str`. `compute_content_hash` provides stronger guarantees.
 **Prevention:** Replaced implementation with `compute_content_hash`. Future code should strictly avoid `json.dumps` for hashing purposes.
+
+## 2025-02-25 - Nondeterministic Alert Fingerprinting
+**Issue:** `get_alert_fingerprint` in `ops_health_service.py` used `json.dumps(default=str)`, causing nondeterministic fingerprints for float values (precision noise) and sets (random iteration order), risking duplicate alerts.
+**Learning:** `json.dumps` with `default=str` is fundamentally unsafe for hashing identity if inputs can contain floats or sets.
+**Prevention:** Replaced implementation with `compute_content_hash`. Migrated `ops_health_service.py` to use `packages.quantum.observability.canonical` for all identity hashing.

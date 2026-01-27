@@ -21,6 +21,8 @@ import json
 import hashlib
 import logging
 
+from packages.quantum.observability.canonical import compute_content_hash
+
 logger = logging.getLogger(__name__)
 
 # Configuration
@@ -686,8 +688,9 @@ def get_alert_fingerprint(alert_type: str, key_details: Dict[str, Any]) -> str:
     Returns:
         16-character hex fingerprint
     """
-    content = f"{alert_type}:{json.dumps(key_details, sort_keys=True, default=str)}"
-    return hashlib.sha256(content.encode()).hexdigest()[:16]
+    # Use canonical serialization to ensure determinism for floats and sets
+    payload = {"alert_type": alert_type, "details": key_details}
+    return compute_content_hash(payload)[:16]
 
 
 def should_suppress_alert(

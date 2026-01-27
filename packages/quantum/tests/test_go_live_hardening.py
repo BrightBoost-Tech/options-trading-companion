@@ -3,8 +3,72 @@ from unittest.mock import MagicMock, patch
 import sys
 # Bypass version check
 with patch.dict(sys.modules, {"packages.quantum.check_version": MagicMock()}):
-    from packages.quantum.services.go_live_validation_service import GoLiveValidationService
+    from packages.quantum.services.go_live_validation_service import GoLiveValidationService, chicago_day_window_utc
 from datetime import datetime, timezone, timedelta
+
+
+class TestChicagoDayWindow(unittest.TestCase):
+    """Unit tests for DST-safe Chicago day window computation."""
+
+    def test_chicago_window_cst_winter(self):
+        """Test Chicago window during CST (winter, UTC-6)."""
+        # January 15, 2024, 14:00 UTC (8:00 AM Chicago CST)
+        now_utc = datetime(2024, 1, 15, 14, 0, 0, tzinfo=timezone.utc)
+        start_utc, end_utc = chicago_day_window_utc(now_utc)
+
+        # CST: Chicago midnight = 06:00 UTC
+        expected_start = datetime(2024, 1, 15, 6, 0, 0, tzinfo=timezone.utc)
+        expected_end = datetime(2024, 1, 16, 6, 0, 0, tzinfo=timezone.utc)
+
+        self.assertEqual(start_utc, expected_start)
+        self.assertEqual(end_utc, expected_end)
+
+    def test_chicago_window_cdt_summer(self):
+        """Test Chicago window during CDT (summer, UTC-5)."""
+        # July 15, 2024, 14:00 UTC (9:00 AM Chicago CDT)
+        now_utc = datetime(2024, 7, 15, 14, 0, 0, tzinfo=timezone.utc)
+        start_utc, end_utc = chicago_day_window_utc(now_utc)
+
+        # CDT: Chicago midnight = 05:00 UTC
+        expected_start = datetime(2024, 7, 15, 5, 0, 0, tzinfo=timezone.utc)
+        expected_end = datetime(2024, 7, 16, 5, 0, 0, tzinfo=timezone.utc)
+
+        self.assertEqual(start_utc, expected_start)
+        self.assertEqual(end_utc, expected_end)
+
+    def test_chicago_window_dst_spring_forward(self):
+        """Test Chicago window around DST spring forward (March 2024)."""
+        # March 10, 2024 is DST spring forward day
+        # At 2:00 AM Chicago, clocks spring forward to 3:00 AM
+        # Before DST: CST (UTC-6), After DST: CDT (UTC-5)
+
+        # March 11, 2024, 12:00 UTC (first full day after spring forward, 7:00 AM CDT)
+        now_utc = datetime(2024, 3, 11, 12, 0, 0, tzinfo=timezone.utc)
+        start_utc, end_utc = chicago_day_window_utc(now_utc)
+
+        # CDT: Chicago midnight = 05:00 UTC
+        expected_start = datetime(2024, 3, 11, 5, 0, 0, tzinfo=timezone.utc)
+        expected_end = datetime(2024, 3, 12, 5, 0, 0, tzinfo=timezone.utc)
+
+        self.assertEqual(start_utc, expected_start)
+        self.assertEqual(end_utc, expected_end)
+
+    def test_chicago_window_dst_fall_back(self):
+        """Test Chicago window around DST fall back (November 2024)."""
+        # November 3, 2024 is DST fall back day
+        # At 2:00 AM Chicago, clocks fall back to 1:00 AM
+        # Before DST: CDT (UTC-5), After DST: CST (UTC-6)
+
+        # November 4, 2024, 12:00 UTC (first full day after fall back, 6:00 AM CST)
+        now_utc = datetime(2024, 11, 4, 12, 0, 0, tzinfo=timezone.utc)
+        start_utc, end_utc = chicago_day_window_utc(now_utc)
+
+        # CST: Chicago midnight = 06:00 UTC
+        expected_start = datetime(2024, 11, 4, 6, 0, 0, tzinfo=timezone.utc)
+        expected_end = datetime(2024, 11, 5, 6, 0, 0, tzinfo=timezone.utc)
+
+        self.assertEqual(start_utc, expected_start)
+        self.assertEqual(end_utc, expected_end)
 
 class TestGoLiveHardening(unittest.TestCase):
     def setUp(self):

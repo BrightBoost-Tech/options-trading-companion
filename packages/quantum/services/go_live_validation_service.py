@@ -30,6 +30,55 @@ PAPER_STREAK_MIN_RETURN_PCT = float(os.getenv("PAPER_STREAK_MIN_RETURN_PCT", "2.
 PAPER_STREAK_REQUIRED_DAYS = int(os.getenv("PAPER_STREAK_REQUIRED_DAYS", "14"))
 
 
+# =============================================================================
+# DST-Safe Chicago Day Window Helpers
+# =============================================================================
+
+def chicago_day_window_utc(now_utc: datetime) -> Tuple[datetime, datetime]:
+    """
+    Compute the Chicago day window [00:00, next day 00:00) in UTC.
+
+    Uses ZoneInfo for proper DST handling (CDT = UTC-5, CST = UTC-6).
+    Falls back to UTC-6 approximation if ZoneInfo unavailable.
+
+    Args:
+        now_utc: Current time in UTC (must be timezone-aware)
+
+    Returns:
+        Tuple of (start_utc, end_utc) representing the Chicago day boundaries in UTC.
+    """
+    try:
+        from zoneinfo import ZoneInfo
+        chicago_tz = ZoneInfo("America/Chicago")
+
+        # Convert UTC to Chicago time
+        now_chicago = now_utc.astimezone(chicago_tz)
+
+        # Get start of day in Chicago (00:00:00)
+        day_start_chicago = now_chicago.replace(hour=0, minute=0, second=0, microsecond=0)
+        day_end_chicago = day_start_chicago + timedelta(days=1)
+
+        # Convert back to UTC
+        start_utc = day_start_chicago.astimezone(timezone.utc)
+        end_utc = day_end_chicago.astimezone(timezone.utc)
+
+        return (start_utc, end_utc)
+
+    except Exception as e:
+        logger.warning(f"ZoneInfo unavailable, using UTC-6 fallback for Chicago window: {e}")
+        # Fallback: Use CST (UTC-6) as conservative approximation
+        # This is safe because it errs on the side of a wider window
+        chicago_offset = timedelta(hours=-6)
+        now_chicago = now_utc + chicago_offset
+        day_start_chicago = now_chicago.replace(hour=0, minute=0, second=0, microsecond=0)
+        day_end_chicago = day_start_chicago + timedelta(days=1)
+
+        start_utc = day_start_chicago - chicago_offset
+        end_utc = day_end_chicago - chicago_offset
+
+        return (start_utc, end_utc)
+
+
 def compute_segment_returns_from_equity(
     equity_curve: List[Dict],
     window_start: date,
@@ -1016,24 +1065,29 @@ class GoLiveValidationService:
                     "paper_ready": state.get("paper_ready", False)
                 }
 
-            # B. Open Positions Check
+            # B. Open Positions Check (via portfolio_id join)
             try:
-                # Open positions (quantity != 0)
-                pos_res = self.supabase.table("paper_positions") \
-                    .select("id") \
-                    .eq("user_id", user_id) \
-                    .neq("quantity", 0) \
-                    .limit(1) \
-                    .execute()
-                if pos_res.data:
-                    return {
-                        **result_base,
-                        "status": "skipped_no_close_activity",
-                        "reason": "open_positions_held",
-                        "paper_consecutive_passes": current_streak,
-                        "streak_before": current_streak,
-                        "paper_ready": state.get("paper_ready", False)
-                    }
+                # Get user's paper portfolios first
+                p_res = self.supabase.table("paper_portfolios").select("id").eq("user_id", user_id).execute()
+                portfolio_ids = [p["id"] for p in (p_res.data or [])]
+
+                if portfolio_ids:
+                    # Check for open positions (quantity != 0) in user's portfolios
+                    pos_res = self.supabase.table("paper_positions") \
+                        .select("id") \
+                        .in_("portfolio_id", portfolio_ids) \
+                        .neq("quantity", 0) \
+                        .limit(1) \
+                        .execute()
+                    if pos_res.data:
+                        return {
+                            **result_base,
+                            "status": "skipped_no_close_activity",
+                            "reason": "open_positions_held",
+                            "paper_consecutive_passes": current_streak,
+                            "streak_before": current_streak,
+                            "paper_ready": state.get("paper_ready", False)
+                        }
             except Exception as e:
                 logger.warning(f"Failed to check open positions for user {user_id}: {e}")
 
@@ -1074,20 +1128,8 @@ class GoLiveValidationService:
                 }
 
             # D. Executable Suggestions & Autopilot Activity Check (Strict Linkage)
-            # Define Chicago day window (approximate or precise if libraries available)
-            # We'll use UTC day for simplicity if no timezone lib, but user asked for Chicago.
-            # UTC-6 is a safe approximation for "start of day"
-            # 00:00 Chicago = 06:00 UTC. 
-            # We want today's window.
-            # Let's try to do it properly with offset.
-            chicago_offset = timedelta(hours=-6) 
-            now_chicago = now + chicago_offset
-            day_start_chicago = now_chicago.replace(hour=0, minute=0, second=0, microsecond=0)
-            day_end_chicago = day_start_chicago + timedelta(days=1)
-            
-            # Convert back to UTC for DB
-            query_start_utc = day_start_chicago - chicago_offset # e.g. 06:00 UTC
-            query_end_utc = day_end_chicago - chicago_offset
+            # Compute DST-safe Chicago day window using ZoneInfo
+            query_start_utc, query_end_utc = chicago_day_window_utc(now)
 
             pending_suggestion_ids = []
             

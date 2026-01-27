@@ -49,3 +49,6 @@ server.log
 .pytest_cache/
 .coverage
 htmlcov/
+
+# Supabase Temp
+supabase/.temp/

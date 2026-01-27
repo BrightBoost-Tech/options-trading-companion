@@ -41,3 +41,7 @@
 ## 2025-05-30 - Landing Page Consistency
 **Learning:** Landing pages often drift from the main app design system because they are built as 'one-offs' with raw CSS. Applying system tokens (like 'buttonVariants') to landing pages restores visual cohesion and ensures accessibility features (focus rings) are present from the very first interaction.
 **Action:** Audit landing pages for raw CSS buttons and replace them with design system components or variants.
+
+## 2025-06-01 - Preventing Double Spinners in Buttons
+**Learning:** Using the `loading` prop on the `Button` component automatically prepends a spinner. If the button also contains a static icon (like `RefreshCw` or `Save`), this results in two icons when loading.
+**Action:** Always wrap the static icon in a conditional check (`{!loading && <Icon />}`) when using the `loading` prop to ensure a clean state transition.

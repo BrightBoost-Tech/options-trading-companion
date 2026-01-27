@@ -2,6 +2,7 @@
 
 import { useState, useEffect } from 'react';
 import { Button } from '@/components/ui/button';
+import { useToast } from '@/components/ui/use-toast';
 import { getAuthHeadersCached, fetchWithAuth, ApiError, normalizeList } from '@/lib/api';
 import { Play, Clock, Settings, Save, RefreshCw, AlertTriangle } from 'lucide-react';
 import { StrategyConfig } from '@/lib/types';
@@ -31,6 +32,7 @@ const pct = (val: number | null | undefined, digits: number = 1) => {
 };
 
 export default function StrategyProfilesPanel() {
+  const { toast } = useToast();
   const [strategies, setStrategies] = useState<StrategyConfig[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -42,6 +44,8 @@ export default function StrategyProfilesPanel() {
 
   // New simulation state
   const [simRunning, setSimRunning] = useState(false);
+  const [batchLoading, setBatchLoading] = useState(false);
+  const [saveLoading, setSaveLoading] = useState(false);
   const [simResult, setSimResult] = useState<any>(null);
 
   useEffect(() => {
@@ -110,6 +114,7 @@ export default function StrategyProfilesPanel() {
   const handleSaveConfig = async () => {
     if (!selectedStrategy) return;
     try {
+      setSaveLoading(true);
       const params = JSON.parse(editingConfig);
 
       const updated = await fetchWithAuth('/strategies', {
@@ -127,18 +132,34 @@ export default function StrategyProfilesPanel() {
       if (newConfig && newConfig.name) {
           setStrategies(prev => prev.map(s => s.name === newConfig.name ? newConfig : s));
           setSelectedStrategy(newConfig);
-          alert('Configuration saved!');
+          toast({
+            title: "Configuration saved",
+            description: "Your changes have been saved successfully."
+          });
       } else {
           // If response structure is unexpected but no error thrown
-          alert('Configuration saved (refresh to see changes).');
+          toast({
+            title: "Configuration saved",
+            description: "Refresh to see changes."
+          });
       }
     } catch (err: any) {
       console.error(err);
       if (err instanceof SyntaxError) {
-          alert('Invalid JSON');
+          toast({
+            variant: "destructive",
+            title: "Invalid JSON",
+            description: "Please check your configuration syntax."
+          });
       } else {
-          alert(`Failed to save: ${err.detail || err.message}`);
+          toast({
+            variant: "destructive",
+            title: "Failed to save",
+            description: err.detail || err.message || "Unknown error occurred"
+          });
       }
+    } finally {
+      setSaveLoading(false);
     }
   };
 
@@ -175,6 +196,7 @@ export default function StrategyProfilesPanel() {
   const triggerBatchSim = async () => {
     if (!selectedStrategy) return;
     try {
+      setBatchLoading(true);
       await fetchWithAuth(`/simulation/batch`, {
          method: 'POST',
          body: JSON.stringify({
@@ -188,10 +210,19 @@ export default function StrategyProfilesPanel() {
              }
          })
       });
-      alert("Batch simulation queued!");
+      toast({
+        title: "Batch simulation queued",
+        description: "The simulation has been added to the queue."
+      });
     } catch (err: any) {
         console.error("Batch sim failed", err);
-        alert(`Failed to queue batch sim: ${JSON.stringify(err.detail || err.message)}`);
+        toast({
+          variant: "destructive",
+          title: "Simulation failed",
+          description: err.detail || err.message || "Failed to queue simulation"
+        });
+    } finally {
+      setBatchLoading(false);
     }
   };
 
@@ -216,7 +247,7 @@ export default function StrategyProfilesPanel() {
              <button
                key={s.name}
                onClick={() => setSelectedStrategy(s)}
-               className={`w-full text-left px-4 py-3 rounded-lg border transition-colors ${
+               className={`w-full text-left px-4 py-3 rounded-lg border transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500 ${
                  selectedStrategy?.name === s.name
                  ? 'bg-indigo-50 border-indigo-200 text-indigo-900 dark:bg-indigo-900/20 dark:border-indigo-800 dark:text-indigo-100'
                  : 'bg-card border-border hover:bg-muted/50'
@@ -241,8 +272,8 @@ export default function StrategyProfilesPanel() {
                     <p className="text-muted-foreground">{selectedStrategy.description}</p>
                  </div>
                  <div className="flex gap-2">
-                    <Button variant="outline" size="sm" onClick={triggerBatchSim}>
-                        <RefreshCw className="w-4 h-4 mr-2" />
+                    <Button variant="outline" size="sm" onClick={triggerBatchSim} loading={batchLoading}>
+                        {!batchLoading && <RefreshCw className="w-4 h-4 mr-2" />}
                         Batch Sim
                     </Button>
                     <Button onClick={runBacktest} disabled={simRunning}>
@@ -259,8 +290,8 @@ export default function StrategyProfilesPanel() {
                         <label htmlFor="strategy-params" className="text-sm font-medium flex items-center gap-2">
                            <Settings className="w-4 h-4" /> Parameters
                         </label>
-                        <Button variant="ghost" size="sm" onClick={handleSaveConfig} className="h-8 text-xs">
-                           <Save className="w-3 h-3 mr-1" /> Save
+                        <Button variant="ghost" size="sm" onClick={handleSaveConfig} className="h-8 text-xs" loading={saveLoading}>
+                           {!saveLoading && <Save className="w-3 h-3 mr-1" />} Save
                         </Button>
                      </div>
                      <textarea

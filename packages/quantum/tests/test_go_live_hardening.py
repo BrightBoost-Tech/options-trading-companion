@@ -3,8 +3,48 @@ from unittest.mock import MagicMock, patch
 import sys
 # Bypass version check
 with patch.dict(sys.modules, {"packages.quantum.check_version": MagicMock()}):
-    from packages.quantum.services.go_live_validation_service import GoLiveValidationService, chicago_day_window_utc
+    from packages.quantum.services.go_live_validation_service import GoLiveValidationService, chicago_day_window_utc, is_weekend_chicago
 from datetime import datetime, timezone, timedelta
+
+
+class TestIsWeekendChicago(unittest.TestCase):
+    """Unit tests for DST-safe weekend check in Chicago timezone."""
+
+    def test_weekend_saturday_cst(self):
+        """Test Saturday detection during CST (winter)."""
+        # Saturday January 20, 2024, 14:00 UTC (8:00 AM Chicago CST)
+        now_utc = datetime(2024, 1, 20, 14, 0, 0, tzinfo=timezone.utc)
+        self.assertTrue(is_weekend_chicago(now_utc))
+
+    def test_weekend_sunday_cst(self):
+        """Test Sunday detection during CST (winter)."""
+        # Sunday January 21, 2024, 14:00 UTC (8:00 AM Chicago CST)
+        now_utc = datetime(2024, 1, 21, 14, 0, 0, tzinfo=timezone.utc)
+        self.assertTrue(is_weekend_chicago(now_utc))
+
+    def test_weekday_monday_cst(self):
+        """Test Monday is not weekend during CST (winter)."""
+        # Monday January 15, 2024, 14:00 UTC (8:00 AM Chicago CST)
+        now_utc = datetime(2024, 1, 15, 14, 0, 0, tzinfo=timezone.utc)
+        self.assertFalse(is_weekend_chicago(now_utc))
+
+    def test_weekend_saturday_cdt(self):
+        """Test Saturday detection during CDT (summer)."""
+        # Saturday July 20, 2024, 14:00 UTC (9:00 AM Chicago CDT)
+        now_utc = datetime(2024, 7, 20, 14, 0, 0, tzinfo=timezone.utc)
+        self.assertTrue(is_weekend_chicago(now_utc))
+
+    def test_weekday_friday_late_utc_still_friday_chicago(self):
+        """Test late Friday UTC that is still Friday in Chicago."""
+        # Friday January 19, 2024, 23:00 UTC (5:00 PM Chicago CST - still Friday)
+        now_utc = datetime(2024, 1, 19, 23, 0, 0, tzinfo=timezone.utc)
+        self.assertFalse(is_weekend_chicago(now_utc))
+
+    def test_saturday_early_utc_is_saturday_chicago(self):
+        """Test early Saturday UTC that is Saturday in Chicago."""
+        # Saturday January 20, 2024, 07:00 UTC (1:00 AM Chicago CST - Saturday)
+        now_utc = datetime(2024, 1, 20, 7, 0, 0, tzinfo=timezone.utc)
+        self.assertTrue(is_weekend_chicago(now_utc))
 
 
 class TestChicagoDayWindow(unittest.TestCase):
@@ -75,18 +115,6 @@ class TestGoLiveHardening(unittest.TestCase):
         self.mock_client = MagicMock()
         self.user_id = "test-user-uuid"
         self.service = GoLiveValidationService(self.mock_client)
-        
-        # Setup default mocks for pandas_market_calendars to assume TRADING DAY
-        # This allows tests to proceed past the Holiday check unless specified otherwise
-        self.mock_mcal = MagicMock()
-        # Setup get_calendar('NYSE').schedule(...).empty = False
-        mock_nyse = self.mock_mcal.get_calendar.return_value
-        # schedule() returns a DataFrame-like object, checking .empty
-        mock_nyse.schedule.return_value.empty = False
-        
-        self.mcal_patcher = patch.dict(sys.modules, {"pandas_market_calendars": self.mock_mcal})
-        self.mcal_patcher.start()
-        self.addCleanup(self.mcal_patcher.stop)
 
         # Default passing state
         self.default_state = {
@@ -229,29 +257,6 @@ class TestGoLiveHardening(unittest.TestCase):
         result = self.service.eval_paper_forward_checkpoint(self.user_id, now=now)
         
         self.assertEqual(result["status"], "skipped_no_signal_day")
-        self.assertEqual(result["paper_consecutive_passes"], 5)
-
-    def test_skip_non_trading_day_unknown(self):
-        """Task: Skip reset if holiday check fails (fail-open)."""
-        self._mock_db_responses(outcomes=[])
-        
-        # Weekday
-        now = datetime(2024, 1, 10, 14, 0, 0, tzinfo=timezone.utc)
-        
-        # We'll mock the internal holiday check to raise/fail if possible, 
-        # or just assume the implementation returns this status when dependencies missing.
-        # Check if 'pandas_market_calendars' is in sys.modules, if not, we can simulate import error.
-        # But easier to patch the class method if it's mocking the library.
-        # But wait, the code imports it *inside* the function.
-        # We can use patch.dict on sys.modules to effectively hide it
-        with patch.dict(sys.modules, {"pandas_market_calendars": None}):
-             # Note: If it was already imported, this might not work without reload, but new shell per test run helps?
-             # No, using pytest, imports persist.
-             # Alternatively, we patch the 'get_calendar' if we can import it in test
-             # Let's try to pass a side_effect that raises Exception
-             result = self.service.eval_paper_forward_checkpoint(self.user_id, now=now)
-
-        self.assertEqual(result["status"], "skipped_non_trading_day_unknown")
         self.assertEqual(result["paper_consecutive_passes"], 5)
 
     def test_skip_autopilot_inactive(self):

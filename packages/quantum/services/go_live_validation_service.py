@@ -79,6 +79,33 @@ def chicago_day_window_utc(now_utc: datetime) -> Tuple[datetime, datetime]:
         return (start_utc, end_utc)
 
 
+def is_weekend_chicago(now_utc: datetime) -> bool:
+    """
+    Check if the current time is a weekend (Saturday or Sunday) in Chicago timezone.
+
+    Uses ZoneInfo for proper DST handling (CDT = UTC-5, CST = UTC-6).
+    Falls back to UTC-6 approximation if ZoneInfo unavailable.
+
+    Args:
+        now_utc: Current time in UTC (must be timezone-aware)
+
+    Returns:
+        True if it's Saturday or Sunday in Chicago, False otherwise.
+    """
+    try:
+        from zoneinfo import ZoneInfo
+        chicago_tz = ZoneInfo("America/Chicago")
+        now_chicago = now_utc.astimezone(chicago_tz)
+        return now_chicago.weekday() >= 5  # Saturday=5, Sunday=6
+
+    except Exception as e:
+        logger.warning(f"ZoneInfo unavailable, using UTC-6 fallback for weekend check: {e}")
+        # Fallback: Use CST (UTC-6) as conservative approximation
+        chicago_offset = timedelta(hours=-6)
+        now_chicago = now_utc + chicago_offset
+        return now_chicago.weekday() >= 5
+
+
 def compute_segment_returns_from_equity(
     equity_curve: List[Dict],
     window_start: date,
@@ -991,75 +1018,19 @@ class GoLiveValidationService:
             # In practice, with strict constraints, "no outcomes" almost always results in a SKIP.
 
             # Statuses:
-            # - skipped_non_trading_day: Weekend or Known Holiday
-            # - skipped_non_trading_day_unknown: Holiday check failed (Fail-Open)
+            # - skipped_non_trading_day: Weekend (Saturday/Sunday in Chicago time)
             # - skipped_no_close_activity: Open positions exist
             # - skipped_no_signal_day: No pending suggestions
             # - skipped_no_signal_day (autopilot_inactive): Suggestions exist but no linked orders
             # - skipped_no_fill_activity: Orders exist but no fills (Ambiguous)
 
-            # A. Trading Day Check (Chicago Time)
-            # We fail-open to SKIP if anything goes wrong or if it's weekend/holiday.
-            try:
-                # Naive check first for safety
-                if now.weekday() >= 5:
-                    return {
-                        **result_base,
-                        "status": "skipped_non_trading_day",
-                        "reason": "weekend",
-                        "paper_consecutive_passes": current_streak,
-                        "streak_before": current_streak,
-                        "paper_ready": state.get("paper_ready", False)
-                    }
-
-                # Try pandas_market_calendars if available
-                try:
-                    import pandas_market_calendars as mcal
-                    from datetime import time as dt_time
-                    nyse = mcal.get_calendar('NYSE')
-                    # check if 'now' date is in schedule
-                    # simple check: is valid trading day?
-                    # We need the date in market timezone (America/New_York usually, close enough to Chicago for day boundary)
-                    # Let's just check if the UTC date is a holiday or valid day
-                    schedule = nyse.schedule(start_date=now.date(), end_date=now.date())
-                    if schedule.empty:
-                         return {
-                            **result_base,
-                            "status": "skipped_non_trading_day",
-                            "reason": "market_holiday",
-                            "paper_consecutive_passes": current_streak,
-                            "streak_before": current_streak,
-                            "paper_ready": state.get("paper_ready", False)
-                        }
-                except ImportError:
-                    # strict requirement: if calendar missing, fail-open to SKIP
-                    logger.warning("pandas_market_calendars not found, skipping streak reset check.")
-                    return {
-                        **result_base,
-                        "status": "skipped_non_trading_day_unknown",
-                        "reason": "calendar_library_missing",
-                        "paper_consecutive_passes": current_streak,
-                        "streak_before": current_streak,
-                        "paper_ready": state.get("paper_ready", False)
-                    }
-                except Exception as e:
-                    # If calendar check fails, we Fail-Open to SKIP (unknown status)
-                    logger.warning(f"Market calendar check failed: {e}")
-                    return {
-                        **result_base,
-                        "status": "skipped_non_trading_day_unknown",
-                        "reason": "calendar_check_failed",
-                        "paper_consecutive_passes": current_streak,
-                        "streak_before": current_streak,
-                        "paper_ready": state.get("paper_ready", False)
-                    }
-
-            except Exception as e:
-                # Catch-all for date/time errors
+            # A. Weekend Check (Chicago Time)
+            # Skip streak evaluation on weekends (no trading activity expected).
+            if is_weekend_chicago(now):
                 return {
                     **result_base,
-                    "status": "skipped_non_trading_day_unknown",
-                    "reason": f"date_check_error: {e}",
+                    "status": "skipped_non_trading_day",
+                    "reason": "weekend",
                     "paper_consecutive_passes": current_streak,
                     "streak_before": current_streak,
                     "paper_ready": state.get("paper_ready", False)

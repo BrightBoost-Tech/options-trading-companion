@@ -5,6 +5,7 @@ import time
 import ipaddress
 from fastapi import Request, HTTPException, Header
 from typing import Optional
+from packages.quantum.security.masking import sanitize_message
 
 # Configuration
 TASK_SIGNING_SECRET = os.getenv("TASK_SIGNING_SECRET")
@@ -65,7 +66,8 @@ async def verify_internal_task_request(
 
     if not hmac.compare_digest(expected_signature, x_task_signature):
         # SECURITY: Do not log the expected signature, as it allows signature forgery if logs are compromised.
-        print(f"🚨 Invalid Task Signature. Got: {x_task_signature}, Payload: {payload}")
+        sanitized_payload = sanitize_message(payload)
+        print(f"🚨 Invalid Task Signature. Got: {x_task_signature}, Payload: {sanitized_payload}")
         raise HTTPException(status_code=401, detail="Invalid signature")
 
     # 3. IP Allowlist (Optional)

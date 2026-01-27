@@ -44,3 +44,8 @@
 **Vulnerability:** The backend checks `request.client.host` to restrict sensitive endpoints (e.g., debug routes, dev auth bypass) to "localhost only". Since the Next.js frontend proxies API requests to the backend (via rewrites), external requests appear to come from `127.0.0.1`, inadvertently satisfying the security check and allowing potential external access to dev tools.
 **Learning:** `request.client.host` reflects the immediate TCP connection, which is the proxy in a reverse proxy architecture. Checking it for "is local" is insufficient.
 **Prevention:** Implement a robust `is_localhost` check that inspects `X-Forwarded-For` if and only if the direct connection is from a trusted local proxy. If `X-Forwarded-For` is present, the original client is remote.
+
+## 2026-03-01 - [Enhancement] Log Masking for Secrets
+**Vulnerability:** Exception handlers in API endpoints and task runners were printing raw exception messages (`print(e)`) to stdout. If an exception contained a secret (e.g. database connection string with password), it would be leaked to logs.
+**Learning:** Even if client responses are sanitized (returning generic 500s), server-side logs must also be sanitized. Dynamic exceptions are unpredictable and can contain sensitive data.
+**Prevention:** Introduced `packages.quantum.security.masking.sanitize_exception` which uses regexes to mask known secret patterns (DB URLs, API keys, JWTs) before logging. Applied this to all catch-all exception handlers.

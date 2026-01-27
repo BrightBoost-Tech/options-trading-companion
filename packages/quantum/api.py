@@ -40,6 +40,7 @@ from packages.quantum.security.supabase_config import (
     print_config_summary, KeyType
 )
 from packages.quantum.core.rate_limiter import limiter
+from packages.quantum.security.masking import sanitize_exception
 
 # Validate Security Config on Startup
 if os.getenv("ENABLE_DEV_AUTH_BYPASS") == "1":
@@ -259,7 +260,8 @@ async def global_exception_handler(request: Request, exc: Exception):
     # In production, we log the error but suppress the stack trace to avoid leaking sensitive data.
     app_env = os.getenv("APP_ENV", "development")
 
-    print(f"Global Exception Handler [Trace: {trace_id}]: {type(exc).__name__}: {exc}")
+    sanitized_exc = sanitize_exception(exc)
+    print(f"Global Exception Handler [Trace: {trace_id}]: {type(exc).__name__}: {sanitized_exc}")
 
     if app_env != "production":
         traceback.print_exc()
@@ -425,7 +427,7 @@ def scout_weekly(request: Request, user_id: str = Depends(get_current_user)):
             "generated_at": datetime.now().isoformat()
         }
     except Exception as e:
-        print(f"Scout weekly error: {e}")
+        print(f"Scout weekly error: {sanitize_exception(e)}")
         raise HTTPException(status_code=500, detail="Failed to generate scout picks")
 
 # --- IV & Market Context Endpoints ---
@@ -443,7 +445,7 @@ async def get_iv_context(
         context = repo.get_iv_context(symbol.upper())
         return context
     except Exception as e:
-        print(f"Error getting IV context for {symbol}: {e}")
+        print(f"Error getting IV context for {symbol}: {sanitize_exception(e)}")
         # SECURITY: Do not leak exception details
         raise HTTPException(status_code=500, detail="Internal Server Error")
 
@@ -718,7 +720,7 @@ async def execute_rebalance(
              return targets, trace_id, red_flags, global_snap.state.value
 
         except Exception as e:
-            print(f"Optimization failed during rebalance: {e}")
+            print(f"Optimization failed during rebalance: {sanitize_exception(e)}")
             raise e
 
     # Offload heavy compute to thread
@@ -727,7 +729,7 @@ async def execute_rebalance(
         try:
             targets_dict, trace_id, red_flags, regime_val = await loop.run_in_executor(pool, run_optimizer_logic)
         except Exception as e:
-             print(f"Rebalance optimization error: {e}")
+             print(f"Rebalance optimization error: {sanitize_exception(e)}")
              # SECURITY: Do not leak exception details
              raise HTTPException(status_code=500, detail="Optimization failed")
 
@@ -1053,7 +1055,7 @@ async def preview_rebalance(
         try:
             targets_dict, trace_id = await loop.run_in_executor(pool, run_optimizer_logic_preview)
         except Exception as e:
-             print(f"Rebalance optimization error: {e}")
+             print(f"Rebalance optimization error: {sanitize_exception(e)}")
              detail = str(e) if not is_production_env() else "Optimization failed"
              return {"status": "error", "message": detail, "trades": []}
 

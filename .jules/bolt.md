@@ -25,3 +25,7 @@
 ## 2026-06-15 - [Decimal Overhead in Float Normalization]
 **Learning:** Converting floats to `Decimal` solely for fixed-point rounding (e.g. `Decimal(str(val)).quantize(...)`) is ~2.5x slower than using integer arithmetic (`int(val * 1e6 + 0.5) / 1e6`). For high-frequency serialization/hashing of floats, this overhead adds up.
 **Action:** Use integer scaling and rounding for fixed-precision float normalization in performance-critical paths, while ensuring proper handling of NaN/Inf and overflow risks.
+
+## 2026-06-18 - [JSX Conditional Rendering Efficiency]
+**Learning:** Performing O(N) operations like `.filter(...).length` inside JSX for conditional rendering triggers redundant computations on every re-render, even if the result is static. Using `useMemo` to pre-calculate these values ensures O(1) checks during the render phase.
+**Action:** Move expensive conditional logic (like array filtering) into `useMemo` blocks and reference the memoized value in JSX.

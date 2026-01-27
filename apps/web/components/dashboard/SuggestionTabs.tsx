@@ -293,8 +293,9 @@ export default function SuggestionTabs({
         className="p-4 flex-1 overflow-y-auto bg-muted/20 min-h-[400px]"
       >
 
+        {/* Bolt Optimization: Use memoized counts to avoid re-filtering O(N) lists during render */}
         {activeTab === 'morning' && (
-             morningSuggestions.filter(s => !dismissedIds.has(s.id)).length === 0 ? (
+             counts.morning === 0 ? (
                <TabEmptyState
                  icon={Coffee}
                  title="No morning moves"
@@ -306,7 +307,7 @@ export default function SuggestionTabs({
         )}
 
         {activeTab === 'midday' && (
-             middaySuggestions.filter(s => !dismissedIds.has(s.id)).length === 0 ? (
+             counts.midday === 0 ? (
                 <TabEmptyState
                   icon={Clock}
                   title="Midday scan clear"
@@ -322,7 +323,7 @@ export default function SuggestionTabs({
         )}
 
         {activeTab === 'rebalance' && (
-            optimizerSuggestions.filter(s => !dismissedIds.has(s.id)).length === 0 ? (
+            counts.rebalance === 0 ? (
                <TabEmptyState
                  icon={Activity}
                  title="Portfolio is balanced"
@@ -349,7 +350,7 @@ export default function SuggestionTabs({
                 </Button>
             </div>
 
-            {scoutSuggestions.filter(s => !dismissedIds.has(s.id)).length === 0 ? (
+            {counts.scout === 0 ? (
                <TabEmptyState
                  icon={Sparkles}
                  title="Scout is searching"
@@ -363,7 +364,7 @@ export default function SuggestionTabs({
 
         {activeTab === 'journal' && (
           <div className="space-y-4">
-            {journalQueue.filter(s => !dismissedIds.has(s.id)).length === 0 ? (
+            {counts.journal === 0 ? (
                <TabEmptyState
                  icon={BookOpen}
                  title="Journal is empty"

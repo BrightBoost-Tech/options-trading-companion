@@ -28,6 +28,7 @@ from functools import wraps
 
 from fastapi import Request, HTTPException, Header, Depends
 from pydantic import BaseModel
+from packages.quantum.security.masking import sanitize_exception, sanitize_message
 
 
 # =============================================================================
@@ -205,7 +206,7 @@ def check_and_store_nonce(nonce: str, scope: str, timestamp: int) -> bool:
 
         # Other errors - behavior depends on mode
         if fail_closed:
-            print(f"🚨 FAIL-CLOSED: Nonce store error in production - rejecting request: {e}")
+            print(f"🚨 FAIL-CLOSED: Nonce store error in production - rejecting request: {sanitize_exception(e)}")
             _emit_nonce_audit_event(
                 nonce=nonce,
                 scope=scope,
@@ -215,7 +216,7 @@ def check_and_store_nonce(nonce: str, scope: str, timestamp: int) -> bool:
             )
             return False
         else:
-            print(f"⚠️ Nonce check error (allowing in dev mode): {e}")
+            print(f"⚠️ Nonce check error (allowing in dev mode): {sanitize_exception(e)}")
             return True
 
 
@@ -251,7 +252,7 @@ def _emit_nonce_audit_event(
         }).execute()
     except Exception as e:
         # Best effort - don't block on audit failures
-        print(f"⚠️ Failed to emit nonce audit event: {e}")
+        print(f"⚠️ Failed to emit nonce audit event: {sanitize_exception(e)}")
 
 
 # =============================================================================

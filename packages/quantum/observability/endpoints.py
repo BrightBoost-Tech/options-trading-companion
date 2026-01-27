@@ -3,6 +3,7 @@ from typing import List, Optional, Any, Dict
 from packages.quantum.security import get_current_user
 from packages.quantum.security.admin_auth import verify_admin_access, AdminAuthResult
 from packages.quantum.security.secrets_provider import SecretsProvider
+from packages.quantum.security.masking import sanitize_exception
 from supabase import create_client, Client
 
 from .lineage import LineageSigner
@@ -54,7 +55,7 @@ async def get_trade_attribution(
         res = query.execute()
         return res.data
     except Exception as e:
-        print(f"Error querying trade_attribution_v3: {e}")
+        print(f"Error querying trade_attribution_v3: {sanitize_exception(e)}")
         raise HTTPException(status_code=500, detail="Failed to query trade attribution")
 
 @router.get("/ev_leakage")
@@ -72,7 +73,7 @@ async def get_ev_leakage(
         res = query.execute()
         return res.data
     except Exception as e:
-        print(f"Error querying ev_leakage_by_bucket_v3: {e}")
+        print(f"Error querying ev_leakage_by_bucket_v3: {sanitize_exception(e)}")
         raise HTTPException(status_code=500, detail="Failed to query EV leakage")
 
 
@@ -186,5 +187,5 @@ async def get_trace(
     except HTTPException:
         raise
     except Exception as e:
-        print(f"Error in get_trace: {e}")
+        print(f"Error in get_trace: {sanitize_exception(e)}")
         raise HTTPException(status_code=500, detail="Failed to retrieve trace")

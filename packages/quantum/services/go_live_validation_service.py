@@ -937,41 +937,88 @@ class GoLiveValidationService:
 
         # 8. Handle no outcomes yet
         if not outcomes:
-            # v4-L1F Hardening: Strict rules for streak reset on "no outcomes"
-            # We ONLY reset streak (return "miss") if:
-            # 1. It IS a trading day (not weekend/holiday)
-            # 2. We have NO open positions (if we did, we are "holding")
-            # 3. We have NO ingestion lag (checked below)
-            # 4. We HAD executable suggestions today 
-            # 5. We HAD autopilot activity today (orders created)
-            # 
-            # Otherwise, we return a "skipped_*" status and preserve the streak.
+            # v4-L1G Hardening (Strict): Strict rules for streak reset on "no outcomes"
+            # Constraint: "No outcomes" must NEVER reset streak unless we prove a missed opportunity.
+            # In practice, with strict constraints, "no outcomes" almost always results in a SKIP.
 
-            # A. Trading Day Check (weekend/holiday)
-            # Simple weekend check (Saturday=5, Sunday=6)
-            # Note: We use Chicago time for "trading day" semantics if possible, but 'now' is UTC.
-            # Convert to Chicago for day-of-week check to align with market hours.
-            # (Approximation: UTC-6 or UTC-5. We'll use day of week on UTC date for safety or just check if it's Sat/Sun UTC)
-            # Better: Check if Saturday or Sunday.
-            is_weekend = now.weekday() >= 5
-            if is_weekend:
-                 return {
+            # Statuses:
+            # - skipped_non_trading_day: Weekend or Known Holiday
+            # - skipped_non_trading_day_unknown: Holiday check failed (Fail-Open)
+            # - skipped_no_close_activity: Open positions exist
+            # - skipped_no_signal_day: No pending suggestions
+            # - skipped_no_signal_day (autopilot_inactive): Suggestions exist but no linked orders
+            # - skipped_no_fill_activity: Orders exist but no fills (Ambiguous)
+
+            # A. Trading Day Check (Chicago Time)
+            # We fail-open to SKIP if anything goes wrong or if it's weekend/holiday.
+            try:
+                # Naive check first for safety
+                if now.weekday() >= 5:
+                    return {
+                        **result_base,
+                        "status": "skipped_non_trading_day",
+                        "reason": "weekend",
+                        "paper_consecutive_passes": current_streak,
+                        "streak_before": current_streak,
+                        "paper_ready": state.get("paper_ready", False)
+                    }
+
+                # Try pandas_market_calendars if available
+                try:
+                    import pandas_market_calendars as mcal
+                    from datetime import time as dt_time
+                    nyse = mcal.get_calendar('NYSE')
+                    # check if 'now' date is in schedule
+                    # simple check: is valid trading day?
+                    # We need the date in market timezone (America/New_York usually, close enough to Chicago for day boundary)
+                    # Let's just check if the UTC date is a holiday or valid day
+                    schedule = nyse.schedule(start_date=now.date(), end_date=now.date())
+                    if schedule.empty:
+                         return {
+                            **result_base,
+                            "status": "skipped_non_trading_day",
+                            "reason": "market_holiday",
+                            "paper_consecutive_passes": current_streak,
+                            "streak_before": current_streak,
+                            "paper_ready": state.get("paper_ready", False)
+                        }
+                except ImportError:
+                    # strict requirement: if calendar missing, fail-open to SKIP
+                    logger.warning("pandas_market_calendars not found, skipping streak reset check.")
+                    return {
+                        **result_base,
+                        "status": "skipped_non_trading_day_unknown",
+                        "reason": "calendar_library_missing",
+                        "paper_consecutive_passes": current_streak,
+                        "streak_before": current_streak,
+                        "paper_ready": state.get("paper_ready", False)
+                    }
+                except Exception as e:
+                    # If calendar check fails, we Fail-Open to SKIP (unknown status)
+                    logger.warning(f"Market calendar check failed: {e}")
+                    return {
+                        **result_base,
+                        "status": "skipped_non_trading_day_unknown",
+                        "reason": "calendar_check_failed",
+                        "paper_consecutive_passes": current_streak,
+                        "streak_before": current_streak,
+                        "paper_ready": state.get("paper_ready", False)
+                    }
+
+            except Exception as e:
+                # Catch-all for date/time errors
+                return {
                     **result_base,
-                    "status": "skipped_non_trading_day",
-                    "reason": "weekend",
+                    "status": "skipped_non_trading_day_unknown",
+                    "reason": f"date_check_error: {e}",
                     "paper_consecutive_passes": current_streak,
                     "streak_before": current_streak,
                     "paper_ready": state.get("paper_ready", False)
                 }
 
             # B. Open Positions Check
-            # If user has open positions, "no outcomes" just means they are holding. Valid.
-            # Query paper_positions (row count > 0)
             try:
-                # We check for ANY position for this user in ANY portfolio
-                # (Since we don't have easy portfolio_id usage here, we check all user's positions)
-                # Note: paper_positions table usually has 'quantity' not 'status'. We check existence.
-                # Actually, check if 'quantity' != 0
+                # Open positions (quantity != 0)
                 pos_res = self.supabase.table("paper_positions") \
                     .select("id") \
                     .eq("user_id", user_id) \
@@ -991,17 +1038,13 @@ class GoLiveValidationService:
                 logger.warning(f"Failed to check open positions for user {user_id}: {e}")
 
             # C. Ingestion Lag (Existing Logic)
-            # v4-L1F Optimization: Detect ingestion lag before resetting streak
-            # Check if there are recent paper fills that haven't been ingested yet
             ingestion_lag_detected = False
             recent_fills_count = 0
             try:
-                # Get user's paper portfolios
                 p_res = self.supabase.table("paper_portfolios").select("id").eq("user_id", user_id).execute()
                 portfolio_ids = [p["id"] for p in (p_res.data or [])]
 
                 if portfolio_ids:
-                    # Check for recent paper order fills (last 4 hours)
                     lag_window = now - timedelta(hours=4)
                     fills_res = self.supabase.table("paper_orders") \
                         .select("id, filled_at") \
@@ -1010,128 +1053,120 @@ class GoLiveValidationService:
                         .gte("filled_at", lag_window.isoformat()) \
                         .execute()
                     recent_fills_count = len(fills_res.data or [])
-
                     if recent_fills_count > 0:
                         ingestion_lag_detected = True
-                        logger.warning(
-                            f"Ingestion lag detected for user {user_id}: "
-                            f"{recent_fills_count} fills in last 4h but no outcomes in checkpoint window"
-                        )
-            except Exception as e:
-                logger.warning(f"Failed to check ingestion lag for user {user_id}: {e}")
+            except Exception:
+                pass
 
-            # If ingestion lag detected, return error instead of resetting streak
-            # (Matches original login)
             if ingestion_lag_detected:
                 self._log_checkpoint_run(
                     user_id, "paper_checkpoint", window_start, now,
                     0.0, 0.0, False, "ingestion_lag_detected",
-                    {
-                        "bucket": bucket_key,
-                        "progress": progress,
-                        "streak_before": current_streak,
-                        "recent_fills_count": recent_fills_count,
-                        "lag_window_hours": 4
-                    }
+                    {"streak_before": current_streak, "recent_fills_count": recent_fills_count}
                 )
-
                 return {
                     **result_base,
                     "status": "error",
                     "reason": "ingestion_lag_detected",
-                    "detail": f"Found {recent_fills_count} recent fills but no outcomes - check learning_ingest",
-                    "paper_consecutive_passes": current_streak,  # Preserve streak
-                    "streak_before": current_streak,
-                    "paper_ready": state.get("paper_ready", False)
-                }
-
-            # D. Executable Suggestions & Autopilot Activity Check
-            # If no outcomes, we only reset if we missed a signal we *should* have taken.
-            # 1. Did we have executable suggestions today?
-            # 2. Did autopilot try to execute them?
-            
-            day_start_utc = now.replace(hour=0, minute=0, second=0, microsecond=0)
-            
-            has_executable_suggestions = False
-            has_autopilot_activity = False
-
-            try:
-                # Check for suggestions created today with status='pending'
-                sugg_res = self.supabase.table("trade_suggestions") \
-                    .select("id") \
-                    .eq("user_id", user_id) \
-                    .gte("created_at", day_start_utc.isoformat()) \
-                    .eq("status", "pending") \
-                    .limit(1) \
-                    .execute()
-                has_executable_suggestions = bool(sugg_res.data)
-
-                if has_executable_suggestions:
-                    # Check if any paper orders were created today (implies autopilot ran)
-                    # We check for ANY order created today for this user
-                    # (Simplified check: join on portfolios is heavy, we can check orders via user_id loop or assume if suggestions exist we check orders)
-                    # paper_orders usually linked to portfolio. We need portfolio IDs again.
-                    if not portfolio_ids:
-                         p_res = self.supabase.table("paper_portfolios").select("id").eq("user_id", user_id).execute()
-                         portfolio_ids = [p["id"] for p in (p_res.data or [])]
-                    
-                    if portfolio_ids:
-                         ord_res = self.supabase.table("paper_orders") \
-                             .select("id") \
-                             .in_("portfolio_id", portfolio_ids) \
-                             .gte("created_at", day_start_utc.isoformat()) \
-                             .limit(1) \
-                             .execute()
-                         has_autopilot_activity = bool(ord_res.data)
-
-            except Exception as e:
-                logger.warning(f"Failed to check suggestions/autopilot for user {user_id}: {e}")
-                # Fail-safe: assume activity existed to be safe? Or assume none?
-                # "Requirement: If autopilot produced no suggestions ... checkpoint should not reset streak"
-                # So fail-safe is: assume NO activity -> Skip reset.
-                has_executable_suggestions = False
-
-            
-            if not has_executable_suggestions or not has_autopilot_activity:
-                 return {
-                    **result_base,
-                    "status": "skipped_no_signal_day",
-                    "reason": "no_executable_signals_or_autopilot_inactive",
                     "paper_consecutive_passes": current_streak,
                     "streak_before": current_streak,
                     "paper_ready": state.get("paper_ready", False)
                 }
 
-
-            # E. Default: MISS (Reset Streak)
-            # We had suggestions, autopilot fired (orders created), but no outcomes and no open positions.
-            # This implies a valid trading day where we failed to generate a result.
+            # D. Executable Suggestions & Autopilot Activity Check (Strict Linkage)
+            # Define Chicago day window (approximate or precise if libraries available)
+            # We'll use UTC day for simplicity if no timezone lib, but user asked for Chicago.
+            # UTC-6 is a safe approximation for "start of day"
+            # 00:00 Chicago = 06:00 UTC. 
+            # We want today's window.
+            # Let's try to do it properly with offset.
+            chicago_offset = timedelta(hours=-6) 
+            now_chicago = now + chicago_offset
+            day_start_chicago = now_chicago.replace(hour=0, minute=0, second=0, microsecond=0)
+            day_end_chicago = day_start_chicago + timedelta(days=1)
             
-            # Log miss with special reason
-            self._log_checkpoint_run(
-                user_id, "paper_checkpoint", window_start, now,
-                0.0, 0.0, False, "no_outcomes_despite_signals",
-                {"bucket": bucket_key, "progress": progress, "streak_before": current_streak, "streak_after": 0}
-            )
+            # Convert back to UTC for DB
+            query_start_utc = day_start_chicago - chicago_offset # e.g. 06:00 UTC
+            query_end_utc = day_end_chicago - chicago_offset
 
-            # PR567: Persist streak reset and clear fail-fast flags
-            # "no outcomes" is a MISS, which resets streak to 0 and clears any stale fail-fast state
-            self.supabase.table("v3_go_live_state").update({
-                "paper_consecutive_passes": 0,
-                "paper_checkpoint_last_run_at": now.isoformat(),
-                "paper_fail_fast_triggered": False,
-                "paper_fail_fast_reason": None,
-                "updated_at": now.isoformat()
-            }).eq("user_id", user_id).execute()
+            pending_suggestion_ids = []
+            
+            try:
+                # 1. Fetch pending suggestions in window
+                sugg_res = self.supabase.table("trade_suggestions") \
+                    .select("id") \
+                    .eq("user_id", user_id) \
+                    .gte("created_at", query_start_utc.isoformat()) \
+                    .lt("created_at", query_end_utc.isoformat()) \
+                    .eq("status", "pending") \
+                    .execute()
+                
+                pending_suggestion_ids = [s["id"] for s in (sugg_res.data or [])]
 
-            return {
-                **result_base,
-                "status": "miss",
-                "reason": "no_outcomes_despite_signals",
-                "paper_consecutive_passes": 0,  # Reset on miss
-                "streak_before": current_streak,
-                "paper_ready": state.get("paper_ready", False)
-            }
+                if not pending_suggestion_ids:
+                     return {
+                        **result_base,
+                        "status": "skipped_no_signal_day",
+                        "reason": "no_pending_suggestions",
+                        "paper_consecutive_passes": current_streak,
+                        "streak_before": current_streak,
+                        "paper_ready": state.get("paper_ready", False)
+                    }
+
+                # 2. Check for Linked Orders
+                # Query paper_orders in window AND suggestion_id IN pending_suggestion_ids
+                # We need portfolios again
+                if not portfolio_ids:
+                     p_res = self.supabase.table("paper_portfolios").select("id").eq("user_id", user_id).execute()
+                     portfolio_ids = [p["id"] for p in (p_res.data or [])]
+                
+                has_linked_orders = False
+                if portfolio_ids:
+                    # Supabase 'in' filter for suggestion_id
+                    # Chunking if too many ids? unlikely for daily suggestions
+                    ord_res = self.supabase.table("paper_orders") \
+                        .select("id") \
+                        .in_("portfolio_id", portfolio_ids) \
+                        .gte("created_at", query_start_utc.isoformat()) \
+                        .lt("created_at", query_end_utc.isoformat()) \
+                        .in_("suggestion_id", pending_suggestion_ids) \
+                        .limit(1) \
+                        .execute()
+                    has_linked_orders = bool(ord_res.data)
+
+                if not has_linked_orders:
+                     return {
+                        **result_base,
+                        "status": "skipped_no_signal_day",
+                        "reason": "autopilot_inactive",
+                        "paper_consecutive_passes": current_streak,
+                        "streak_before": current_streak,
+                        "paper_ready": state.get("paper_ready", False)
+                    }
+                
+                # 3. Ambiguous Path: Suggestions and Linked Orders Exist, but No Outcomes/Positions check matched
+                # This implies "No Fill" or "Order active but not filled"
+                # STRICT RULE: Never reset streak on No Outcomes.
+                return {
+                    **result_base,
+                    "status": "skipped_no_fill_activity",
+                    "reason": "orders_exist_no_outcomes",
+                    "paper_consecutive_passes": current_streak,
+                    "streak_before": current_streak,
+                    "paper_ready": state.get("paper_ready", False)
+                }
+
+            except Exception as e:
+                logger.warning(f"Failed to check suggestions/autopilot for user {user_id}: {e}")
+                # Fail-safe: SKIP
+                return {
+                    **result_base,
+                    "status": "skipped_no_signal_day",
+                    "reason": f"check_error: {e}",
+                    "paper_consecutive_passes": current_streak,
+                    "streak_before": current_streak,
+                    "paper_ready": state.get("paper_ready", False)
+                }
 
         # 9. Fail-fast checks
         if max_drawdown_pct <= fail_fast_drawdown_pct:

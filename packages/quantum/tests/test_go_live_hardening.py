@@ -12,6 +12,18 @@ class TestGoLiveHardening(unittest.TestCase):
         self.user_id = "test-user-uuid"
         self.service = GoLiveValidationService(self.mock_client)
         
+        # Setup default mocks for pandas_market_calendars to assume TRADING DAY
+        # This allows tests to proceed past the Holiday check unless specified otherwise
+        self.mock_mcal = MagicMock()
+        # Setup get_calendar('NYSE').schedule(...).empty = False
+        mock_nyse = self.mock_mcal.get_calendar.return_value
+        # schedule() returns a DataFrame-like object, checking .empty
+        mock_nyse.schedule.return_value.empty = False
+        
+        self.mcal_patcher = patch.dict(sys.modules, {"pandas_market_calendars": self.mock_mcal})
+        self.mcal_patcher.start()
+        self.addCleanup(self.mcal_patcher.stop)
+
         # Default passing state
         self.default_state = {
             "user_id": self.user_id,
@@ -32,52 +44,88 @@ class TestGoLiveHardening(unittest.TestCase):
         if suggestions is None: suggestions = []
         if orders is None: orders = []
 
-        mock_state_res = MagicMock()
-        mock_state_res.data = state
+        # Create response objects
+        def make_res(data):
+            r = MagicMock()
+            r.data = data
+            return r
 
-        mock_outcomes_res = MagicMock()
-        mock_outcomes_res.data = outcomes
-        
-        mock_positions_res = MagicMock()
-        mock_positions_res.data = positions
-        
-        # We need to mock different table calls
+        # Generic recursive mock that returns self for any call until execute()
+        def create_chain_mock(return_value):
+            chain = MagicMock()
+            # execute() returns the final result
+            chain.execute.return_value = return_value
+            # Any other attribute access returns the chain itself (builder pattern)
+            # We use side_effect to return self for any method call
+            def return_self(*args, **kwargs):
+                return chain
+            
+            # We need to catch all common builder methods
+            # Using __getattr__ on a MagicMock is tricky, so we just set commonly used ones
+            for method in ['select', 'eq', 'neq', 'gt', 'gte', 'lt', 'lte', 'in_', 'order', 'limit', 'single']:
+                setattr(chain, method, MagicMock(side_effect=return_self))
+            
+            return chain
+
+        # Mock for ingestion lag (empty by default to pass check)
+        mock_orders_lag_res = make_res([])
+        # Mock for autopilot (actual test data)
+        mock_orders_autopilot_res = make_res(orders)
+
+        # Restore missing mocks
+        mock_state_res = make_res(state)
+        mock_outcomes_res = make_res(outcomes)
+        mock_positions_res = make_res(positions)
+        mock_suggestions_res = make_res(suggestions)
+        mock_orders_res = make_res(orders) # Fallback if needed, but we use specific ones above
+        mock_portfolios_res = make_res([{"id": "port1"}])
+
         def table_mock(table_name):
-            mock = MagicMock()
             if table_name == "v3_go_live_state":
-                mock.select.return_value.eq.return_value.single.return_value.execute.return_value = mock_state_res
-                mock.update.return_value.eq.return_value.execute.return_value = MagicMock()
+                return create_chain_mock(mock_state_res)
             elif table_name == "learning_trade_outcomes_v3":
-                mock.select.return_value.eq.return_value.eq.return_value.gte.return_value.lte.return_value.order.return_value.execute.return_value = mock_outcomes_res
+                return create_chain_mock(mock_outcomes_res)
             elif table_name == "paper_positions":
-                 # Mock query: select("id").eq("user_id", user_id).neq("quantity", 0).limit(1).execute()
-                 pos_res = MagicMock()
-                 pos_res.data = positions
-                 # Setup chain: select -> eq -> neq -> limit -> execute
-                 # Or shorter variants if code uses them differently
-                 mock.select.return_value.eq.return_value.neq.return_value.limit.return_value.execute.return_value = pos_res
+                return create_chain_mock(mock_positions_res)
             elif table_name == "trade_suggestions":
-                 # Mock query: select("id").eq...gte...eq("status", "pending").limit(1).execute()
-                 sugg_res = MagicMock()
-                 sugg_res.data = suggestions
-                 # The chain is long and variable. Let's make a generous chain mock
-                 # Code: .select().eq().gte().eq().limit().execute()
-                 mock.select.return_value.eq.return_value.gte.return_value.eq.return_value.limit.return_value.execute.return_value = sugg_res
+                # Suggestions query needs to return suggestions
+                # Logic: We might query suggestions twice? (Checking code...)
+                # Code queries suggestions once in step D.
+                return create_chain_mock(mock_suggestions_res)
             elif table_name == "paper_orders":
-                 # Mock query: .select().in_().gte().limit().execute()
-                 ord_res = MagicMock()
-                 ord_res.data = orders
-                 mock.select.return_value.in_.return_value.gte.return_value.limit.return_value.execute.return_value = ord_res
+                # Called twice: 1. Ingestion Lag, 2. Autopilot
+                # We return a NEW mock each time
+                # We can't use side_effect on the return value of THIS function easily if we use it directly as side_effect of table()
+                # Instead, let's make a stateful mock for this table or use side_effect on the result
+                pass
             elif table_name == "v3_go_live_runs":
-                mock.insert.return_value.execute.return_value = MagicMock()
+                chain = MagicMock()
+                chain.insert.return_value.execute.return_value = MagicMock()
+                return chain
             elif table_name == "paper_portfolios":
-                 # Mock for ingestion lag check needing portfolio id
-                 port_res = MagicMock()
-                 port_res.data = [{"id": "port1"}]
-                 mock.select.return_value.eq.return_value.execute.return_value = port_res
-            return mock
+                return create_chain_mock(mock_portfolios_res)
+            return MagicMock()
 
-        self.mock_client.table = table_mock
+        # To handle sequential calls to .table("paper_orders"), we set the side_effect on the client.table mock itself?
+        # But we act as the dispatcher.
+        # Let's make table_mock stateful
+        paper_orders_call_count = [0]
+        
+        def stateful_table_mock(table_name):
+            if table_name == "paper_orders":
+                count = paper_orders_call_count[0]
+                paper_orders_call_count[0] += 1
+                if count == 0:
+                    # 1. Ingestion Lag Check -> Return Empty (No lag)
+                    return create_chain_mock(mock_orders_lag_res)
+                else:
+                    # 2. Autopilot Check -> Return Actual Orders
+                    return create_chain_mock(mock_orders_autopilot_res)
+            
+            # Delegate to static dispatcher for others
+            return table_mock(table_name)
+
+        self.mock_client.table = MagicMock(side_effect=stateful_table_mock)
 
     def test_skip_non_trading_day_weekend(self):
         """Task: Skip reset on weekends."""
@@ -119,16 +167,38 @@ class TestGoLiveHardening(unittest.TestCase):
         self.assertEqual(result["status"], "skipped_no_signal_day")
         self.assertEqual(result["paper_consecutive_passes"], 5)
 
+    def test_skip_non_trading_day_unknown(self):
+        """Task: Skip reset if holiday check fails (fail-open)."""
+        self._mock_db_responses(outcomes=[])
+        
+        # Weekday
+        now = datetime(2024, 1, 10, 14, 0, 0, tzinfo=timezone.utc)
+        
+        # We'll mock the internal holiday check to raise/fail if possible, 
+        # or just assume the implementation returns this status when dependencies missing.
+        # Check if 'pandas_market_calendars' is in sys.modules, if not, we can simulate import error.
+        # But easier to patch the class method if it's mocking the library.
+        # But wait, the code imports it *inside* the function.
+        # We can use patch.dict on sys.modules to effectively hide it
+        with patch.dict(sys.modules, {"pandas_market_calendars": None}):
+             # Note: If it was already imported, this might not work without reload, but new shell per test run helps?
+             # No, using pytest, imports persist.
+             # Alternatively, we patch the 'get_calendar' if we can import it in test
+             # Let's try to pass a side_effect that raises Exception
+             result = self.service.eval_paper_forward_checkpoint(self.user_id, now=now)
+
+        self.assertEqual(result["status"], "skipped_non_trading_day_unknown")
+        self.assertEqual(result["paper_consecutive_passes"], 5)
+
     def test_skip_autopilot_inactive(self):
-        """Task: Skip reset if suggestions exist but autopilot didn't execute (no orders)."""
-        # No outcomes, no positions
+        """Task: Skip if suggestions exist but no LINKED orders created."""
         # Suggestions exist (pending)
-        # No orders created today
+        # No LINKED orders (simulate query returning empty)
         self._mock_db_responses(
             outcomes=[], 
             positions=[],
             suggestions=[{"id": "sugg1", "status": "pending"}],
-            orders=[]
+            orders=[] # Query returns empty
         )
         
         # Weekday
@@ -137,5 +207,23 @@ class TestGoLiveHardening(unittest.TestCase):
         result = self.service.eval_paper_forward_checkpoint(self.user_id, now=now)
         
         self.assertEqual(result["status"], "skipped_no_signal_day")
-        # Optional: check reason but status is main contract
+        self.assertEqual(result["paper_consecutive_passes"], 5)
+
+    def test_skip_orders_exist_but_no_positions_or_outcomes(self):
+        """Task: Skip if LINKED orders exist but no fills (ambiguous/no-fill)."""
+        # Suggestions exist
+        # Orders exist AND linked
+        self._mock_db_responses(
+            outcomes=[], 
+            positions=[],
+            suggestions=[{"id": "sugg1", "status": "pending"}],
+            orders=[{"id": "ord1", "suggestion_id": "sugg1", "status": "new"}]
+        )
+        
+        # Weekday
+        now = datetime(2024, 1, 10, 14, 0, 0, tzinfo=timezone.utc)
+        
+        result = self.service.eval_paper_forward_checkpoint(self.user_id, now=now)
+        
+        self.assertEqual(result["status"], "skipped_no_fill_activity")
         self.assertEqual(result["paper_consecutive_passes"], 5)

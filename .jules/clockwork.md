@@ -17,3 +17,8 @@
 **Issue:** `get_alert_fingerprint` in `ops_health_service.py` used `json.dumps(default=str)`, causing nondeterministic fingerprints for float values (precision noise) and sets (random iteration order), risking duplicate alerts.
 **Learning:** `json.dumps` with `default=str` is fundamentally unsafe for hashing identity if inputs can contain floats or sets.
 **Prevention:** Replaced implementation with `compute_content_hash`. Migrated `ops_health_service.py` to use `packages.quantum.observability.canonical` for all identity hashing.
+
+## 2025-02-26 - Unstable List Order in Hashing
+**Issue:** Alert fingerprints in `ops_health_service.py` were non-deterministic because they hashed the `stale_symbols` list, which was constructed from iterating over a dictionary (`snapshots.items()`). The dictionary population order depended on concurrent thread completion order in `MarketDataTruthLayer`.
+**Learning:** `compute_content_hash` preserves list order (unlike sets/dicts which it sorts). Any list fed into a hash function must be explicitly sorted if its source is not order-guaranteed (e.g., parallel results, dict keys).
+**Prevention:** Always apply `sorted()` to lists derived from unordered sources before using them in identity hashing or signatures.

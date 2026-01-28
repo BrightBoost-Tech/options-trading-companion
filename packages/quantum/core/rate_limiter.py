@@ -13,10 +13,10 @@ def get_real_ip(request: Request) -> str:
 
     Solution:
     1. If the request comes from localhost (trusted proxy), use X-Forwarded-For.
-    2. We use the FIRST IP in X-Forwarded-For.
-       Note: This technically allows a sophisticated attacker to bypass rate limits
-       by spoofing headers (if Next.js doesn't strip them), but it resolves the
-       critical "block everyone" DoS vulnerability.
+    2. We use the LAST IP in X-Forwarded-For.
+       Next.js (or any standard proxy) appends the connecting client's IP to the end of the list.
+       By taking the last IP, we ensure we are using the IP that actually connected to Next.js,
+       preventing attackers from bypassing rate limits by spoofing the header (injecting IPs at the start).
     """
     # Starlette's request.client can be None in some test scenarios
     client_host = request.client.host if request.client else "127.0.0.1"
@@ -26,8 +26,9 @@ def get_real_ip(request: Request) -> str:
     if client_host in ("127.0.0.1", "::1", "localhost", "testclient"):
         forwarded_for = request.headers.get("X-Forwarded-For")
         if forwarded_for:
-            # Return the first IP in the list (Client IP)
-            return forwarded_for.split(",")[0].strip()
+            # Return the LAST IP in the list (The IP that connected to Next.js)
+            # This prevents spoofing (attacker injects at start of list)
+            return forwarded_for.split(",")[-1].strip()
 
     return client_host
 

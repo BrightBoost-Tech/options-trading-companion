@@ -25,6 +25,11 @@
 **Learning:** Checking claims in a JWT without verifying the signature is dangerous, even if the user identity was established via another method (like a dev bypass). Authentication (Who are you?) and Authorization (Are you Admin?) often rely on the same token, but if they are decoupled, the authorization step must still verify the integrity of its proof.
 **Prevention:** Always use `jwt.decode` with the secret key to verify signatures before trusting any claims, especially for privileged roles. Never use `json.loads(base64...)` on a JWT for security decisions.
 
+## 2026-01-28 - [Fix] IP Spoofing in Rate Limiter
+**Vulnerability:** The rate limiter's `get_real_ip` function extracted the *first* IP from the `X-Forwarded-For` header. An attacker could spoof their IP by sending `X-Forwarded-For: <spoofed_ip>`. Next.js (trusted proxy) appended the real IP, resulting in `<spoofed_ip>, <real_ip>`, causing the rate limiter to use the spoofed IP.
+**Learning:** When parsing `X-Forwarded-For` behind a trusted proxy, the "Client IP" is the one *added by the trusted proxy*, which is the last entry in the list (assuming the proxy appends). Trusting the first entry allows users to inject arbitrary values.
+**Prevention:** When extracting the real IP behind a trusted proxy, always use the *last* IP in the `X-Forwarded-For` list, as it is the only one guaranteed to be written by the trusted proxy.
+
 ## 2026-02-12 - [Fix] Rate Limiting Bypass in Proxied Architecture
 **Vulnerability:** The backend (`packages/quantum`) used `request.client.host` for rate limiting. Since the app uses Next.js rewrites to proxy API requests to the backend, all requests originated from `127.0.0.1`. This caused the rate limiter to group all users together, meaning one active user could exhaust the rate limit for the entire platform (DoS).
 **Learning:** In a reverse proxy setup (Next.js -> FastAPI), the backend sees the proxy's IP. Standard IP-based rate limiting libraries (`slowapi`) default to the direct connection IP unless configured to inspect `X-Forwarded-For`.

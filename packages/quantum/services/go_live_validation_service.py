@@ -859,6 +859,87 @@ class GoLiveValidationService:
 
         return overrides
 
+    # =========================================================================
+    # Phase 3 Hardening: Patchable DB Read Seams
+    # =========================================================================
+    # These helper methods encapsulate DB reads used in the "no outcomes" branch
+    # of eval_paper_forward_checkpoint. They exist to enable deterministic testing
+    # without complex Supabase query-chain mocking.
+
+    def _get_paper_portfolio_ids(self, user_id: str) -> List[str]:
+        """Get paper portfolio IDs for a user."""
+        try:
+            res = self.supabase.table("paper_portfolios").select("id").eq("user_id", user_id).execute()
+            return [p["id"] for p in (res.data or [])]
+        except Exception as e:
+            logger.warning(f"Failed to get paper portfolios for user {user_id}: {e}")
+            return []
+
+    def _has_open_paper_positions(self, portfolio_ids: List[str]) -> bool:
+        """Check if any open positions (quantity != 0) exist in given portfolios."""
+        if not portfolio_ids:
+            return False
+        try:
+            res = self.supabase.table("paper_positions") \
+                .select("id") \
+                .in_("portfolio_id", portfolio_ids) \
+                .neq("quantity", 0) \
+                .limit(1) \
+                .execute()
+            return bool(res.data)
+        except Exception as e:
+            logger.warning(f"Failed to check open positions: {e}")
+            return False
+
+    def _recent_paper_fills_count(self, portfolio_ids: List[str], since_utc: datetime) -> int:
+        """Count recent filled orders (ingestion lag detection)."""
+        if not portfolio_ids:
+            return 0
+        try:
+            res = self.supabase.table("paper_orders") \
+                .select("id") \
+                .in_("portfolio_id", portfolio_ids) \
+                .eq("status", "filled") \
+                .gte("filled_at", since_utc.isoformat()) \
+                .execute()
+            return len(res.data or [])
+        except Exception as e:
+            logger.warning(f"Failed to count recent fills: {e}")
+            return 0
+
+    def _pending_suggestion_ids(self, user_id: str, start_utc: datetime, end_utc: datetime) -> List[str]:
+        """Get pending suggestion IDs in the given time window."""
+        try:
+            res = self.supabase.table("trade_suggestions") \
+                .select("id") \
+                .eq("user_id", user_id) \
+                .gte("created_at", start_utc.isoformat()) \
+                .lt("created_at", end_utc.isoformat()) \
+                .eq("status", "pending") \
+                .execute()
+            return [s["id"] for s in (res.data or [])]
+        except Exception as e:
+            logger.warning(f"Failed to get pending suggestions for user {user_id}: {e}")
+            return []
+
+    def _has_linked_orders(self, portfolio_ids: List[str], suggestion_ids: List[str], start_utc: datetime, end_utc: datetime) -> bool:
+        """Check if any orders exist that are linked to the given suggestions."""
+        if not portfolio_ids or not suggestion_ids:
+            return False
+        try:
+            res = self.supabase.table("paper_orders") \
+                .select("id") \
+                .in_("portfolio_id", portfolio_ids) \
+                .gte("created_at", start_utc.isoformat()) \
+                .lt("created_at", end_utc.isoformat()) \
+                .in_("suggestion_id", suggestion_ids) \
+                .limit(1) \
+                .execute()
+            return bool(res.data)
+        except Exception as e:
+            logger.warning(f"Failed to check linked orders: {e}")
+            return False
+
     def eval_paper_forward_checkpoint(
         self,
         user_id: str,
@@ -1037,53 +1118,22 @@ class GoLiveValidationService:
                 }
 
             # B. Open Positions Check (via portfolio_id join)
-            try:
-                # Get user's paper portfolios first
-                p_res = self.supabase.table("paper_portfolios").select("id").eq("user_id", user_id).execute()
-                portfolio_ids = [p["id"] for p in (p_res.data or [])]
+            portfolio_ids = self._get_paper_portfolio_ids(user_id)
+            if self._has_open_paper_positions(portfolio_ids):
+                return {
+                    **result_base,
+                    "status": "skipped_no_close_activity",
+                    "reason": "open_positions_held",
+                    "paper_consecutive_passes": current_streak,
+                    "streak_before": current_streak,
+                    "paper_ready": state.get("paper_ready", False)
+                }
 
-                if portfolio_ids:
-                    # Check for open positions (quantity != 0) in user's portfolios
-                    pos_res = self.supabase.table("paper_positions") \
-                        .select("id") \
-                        .in_("portfolio_id", portfolio_ids) \
-                        .neq("quantity", 0) \
-                        .limit(1) \
-                        .execute()
-                    if pos_res.data:
-                        return {
-                            **result_base,
-                            "status": "skipped_no_close_activity",
-                            "reason": "open_positions_held",
-                            "paper_consecutive_passes": current_streak,
-                            "streak_before": current_streak,
-                            "paper_ready": state.get("paper_ready", False)
-                        }
-            except Exception as e:
-                logger.warning(f"Failed to check open positions for user {user_id}: {e}")
+            # C. Ingestion Lag Check
+            lag_window = now - timedelta(hours=4)
+            recent_fills_count = self._recent_paper_fills_count(portfolio_ids, lag_window)
 
-            # C. Ingestion Lag (Existing Logic)
-            ingestion_lag_detected = False
-            recent_fills_count = 0
-            try:
-                p_res = self.supabase.table("paper_portfolios").select("id").eq("user_id", user_id).execute()
-                portfolio_ids = [p["id"] for p in (p_res.data or [])]
-
-                if portfolio_ids:
-                    lag_window = now - timedelta(hours=4)
-                    fills_res = self.supabase.table("paper_orders") \
-                        .select("id, filled_at") \
-                        .in_("portfolio_id", portfolio_ids) \
-                        .eq("status", "filled") \
-                        .gte("filled_at", lag_window.isoformat()) \
-                        .execute()
-                    recent_fills_count = len(fills_res.data or [])
-                    if recent_fills_count > 0:
-                        ingestion_lag_detected = True
-            except Exception:
-                pass
-
-            if ingestion_lag_detected:
+            if recent_fills_count > 0:
                 self._log_checkpoint_run(
                     user_id, "paper_checkpoint", window_start, now,
                     0.0, 0.0, False, "ingestion_lag_detected",
@@ -1102,84 +1152,43 @@ class GoLiveValidationService:
             # Compute DST-safe Chicago day window using ZoneInfo
             query_start_utc, query_end_utc = chicago_day_window_utc(now)
 
-            pending_suggestion_ids = []
-            
-            try:
-                # 1. Fetch pending suggestions in window
-                sugg_res = self.supabase.table("trade_suggestions") \
-                    .select("id") \
-                    .eq("user_id", user_id) \
-                    .gte("created_at", query_start_utc.isoformat()) \
-                    .lt("created_at", query_end_utc.isoformat()) \
-                    .eq("status", "pending") \
-                    .execute()
-                
-                pending_suggestion_ids = [s["id"] for s in (sugg_res.data or [])]
+            # 1. Fetch pending suggestions in window
+            pending_suggestion_ids = self._pending_suggestion_ids(user_id, query_start_utc, query_end_utc)
 
-                if not pending_suggestion_ids:
-                     return {
-                        **result_base,
-                        "status": "skipped_no_signal_day",
-                        "reason": "no_pending_suggestions",
-                        "paper_consecutive_passes": current_streak,
-                        "streak_before": current_streak,
-                        "paper_ready": state.get("paper_ready", False)
-                    }
-
-                # 2. Check for Linked Orders
-                # Query paper_orders in window AND suggestion_id IN pending_suggestion_ids
-                # We need portfolios again
-                if not portfolio_ids:
-                     p_res = self.supabase.table("paper_portfolios").select("id").eq("user_id", user_id).execute()
-                     portfolio_ids = [p["id"] for p in (p_res.data or [])]
-                
-                has_linked_orders = False
-                if portfolio_ids:
-                    # Supabase 'in' filter for suggestion_id
-                    # Chunking if too many ids? unlikely for daily suggestions
-                    ord_res = self.supabase.table("paper_orders") \
-                        .select("id") \
-                        .in_("portfolio_id", portfolio_ids) \
-                        .gte("created_at", query_start_utc.isoformat()) \
-                        .lt("created_at", query_end_utc.isoformat()) \
-                        .in_("suggestion_id", pending_suggestion_ids) \
-                        .limit(1) \
-                        .execute()
-                    has_linked_orders = bool(ord_res.data)
-
-                if not has_linked_orders:
-                     return {
-                        **result_base,
-                        "status": "skipped_no_signal_day",
-                        "reason": "autopilot_inactive",
-                        "paper_consecutive_passes": current_streak,
-                        "streak_before": current_streak,
-                        "paper_ready": state.get("paper_ready", False)
-                    }
-                
-                # 3. Ambiguous Path: Suggestions and Linked Orders Exist, but No Outcomes/Positions check matched
-                # This implies "No Fill" or "Order active but not filled"
-                # STRICT RULE: Never reset streak on No Outcomes.
-                return {
-                    **result_base,
-                    "status": "skipped_no_fill_activity",
-                    "reason": "orders_exist_no_outcomes",
-                    "paper_consecutive_passes": current_streak,
-                    "streak_before": current_streak,
-                    "paper_ready": state.get("paper_ready", False)
-                }
-
-            except Exception as e:
-                logger.warning(f"Failed to check suggestions/autopilot for user {user_id}: {e}")
-                # Fail-safe: SKIP
+            if not pending_suggestion_ids:
                 return {
                     **result_base,
                     "status": "skipped_no_signal_day",
-                    "reason": f"check_error: {e}",
+                    "reason": "no_pending_suggestions",
                     "paper_consecutive_passes": current_streak,
                     "streak_before": current_streak,
                     "paper_ready": state.get("paper_ready", False)
                 }
+
+            # 2. Check for Linked Orders
+            has_linked_orders = self._has_linked_orders(portfolio_ids, pending_suggestion_ids, query_start_utc, query_end_utc)
+
+            if not has_linked_orders:
+                return {
+                    **result_base,
+                    "status": "skipped_no_signal_day",
+                    "reason": "autopilot_inactive",
+                    "paper_consecutive_passes": current_streak,
+                    "streak_before": current_streak,
+                    "paper_ready": state.get("paper_ready", False)
+                }
+
+            # 3. Ambiguous Path: Suggestions and Linked Orders Exist, but No Outcomes/Positions check matched
+            # This implies "No Fill" or "Order active but not filled"
+            # STRICT RULE: Never reset streak on No Outcomes.
+            return {
+                **result_base,
+                "status": "skipped_no_fill_activity",
+                "reason": "orders_exist_no_outcomes",
+                "paper_consecutive_passes": current_streak,
+                "streak_before": current_streak,
+                "paper_ready": state.get("paper_ready", False)
+            }
 
         # 9. Fail-fast checks
         if max_drawdown_pct <= fail_fast_drawdown_pct:

@@ -8,7 +8,8 @@
 #   QUANTUM_BASE_URL   - API base URL (e.g., https://api.example.com)
 #
 # Optional Secrets:
-#   TASK_USER_ID       - Run tasks for specific user only
+#   USER_ID            - Run tasks for specific user only (preferred)
+#   TASK_USER_ID       - Legacy fallback for USER_ID
 
 name: Trading Tasks (v4 Signed)
 
@@ -167,7 +168,7 @@ jobs:
         env:
           TASK_SIGNING_KEYS: ${{ secrets.TASK_SIGNING_KEYS }}
           BASE_URL: ${{ secrets.QUANTUM_BASE_URL }}
-          USER_ID: ${{ secrets.TASK_USER_ID }}
+          USER_ID: ${{ secrets.USER_ID || secrets.TASK_USER_ID }}
         run: |
           python scripts/run_signed_task.py suggestions_close
 
@@ -205,7 +206,7 @@ jobs:
         env:
           TASK_SIGNING_KEYS: ${{ secrets.TASK_SIGNING_KEYS }}
           BASE_URL: ${{ secrets.QUANTUM_BASE_URL }}
-          USER_ID: ${{ secrets.TASK_USER_ID }}
+          USER_ID: ${{ secrets.USER_ID || secrets.TASK_USER_ID }}
         run: |
           python scripts/run_signed_task.py suggestions_open
 
@@ -243,7 +244,7 @@ jobs:
         env:
           TASK_SIGNING_KEYS: ${{ secrets.TASK_SIGNING_KEYS }}
           BASE_URL: ${{ secrets.QUANTUM_BASE_URL }}
-          USER_ID: ${{ secrets.TASK_USER_ID }}
+          USER_ID: ${{ secrets.USER_ID || secrets.TASK_USER_ID }}
         run: |
           python scripts/run_signed_task.py learning_ingest
 
@@ -318,7 +319,7 @@ jobs:
         env:
           TASK_SIGNING_KEYS: ${{ secrets.TASK_SIGNING_KEYS }}
           BASE_URL: ${{ secrets.QUANTUM_BASE_URL }}
-          USER_ID: ${{ secrets.TASK_USER_ID }}
+          USER_ID: ${{ secrets.USER_ID || secrets.TASK_USER_ID }}
           DRY_RUN: ${{ inputs.dry_run && '1' || '0' }}
         run: |
           ARGS="${{ inputs.task }}"
@@ -361,7 +362,7 @@ jobs:
         env:
           TASK_SIGNING_KEYS: ${{ secrets.TASK_SIGNING_KEYS }}
           BASE_URL: ${{ secrets.QUANTUM_BASE_URL }}
-          USER_ID: ${{ secrets.TASK_USER_ID }}
+          USER_ID: ${{ secrets.USER_ID || secrets.TASK_USER_ID }}
         run: |
           python scripts/run_signed_task.py validation_eval --skip-time-gate
 
@@ -399,7 +400,7 @@ jobs:
         env:
           TASK_SIGNING_KEYS: ${{ secrets.TASK_SIGNING_KEYS }}
           BASE_URL: ${{ secrets.QUANTUM_BASE_URL }}
-          USER_ID: ${{ secrets.TASK_USER_ID }}
+          USER_ID: ${{ secrets.USER_ID || secrets.TASK_USER_ID }}
         run: |
           python scripts/run_signed_task.py learning_ingest --skip-time-gate
 
@@ -437,7 +438,7 @@ jobs:
         env:
           TASK_SIGNING_KEYS: ${{ secrets.TASK_SIGNING_KEYS }}
           BASE_URL: ${{ secrets.QUANTUM_BASE_URL }}
-          USER_ID: ${{ secrets.TASK_USER_ID }}
+          USER_ID: ${{ secrets.USER_ID || secrets.TASK_USER_ID }}
         run: |
           python scripts/run_signed_task.py paper_auto_execute --skip-time-gate
 
@@ -475,7 +476,7 @@ jobs:
         env:
           TASK_SIGNING_KEYS: ${{ secrets.TASK_SIGNING_KEYS }}
           BASE_URL: ${{ secrets.QUANTUM_BASE_URL }}
-          USER_ID: ${{ secrets.TASK_USER_ID }}
+          USER_ID: ${{ secrets.USER_ID || secrets.TASK_USER_ID }}
         run: |
           python scripts/run_signed_task.py paper_auto_close --skip-time-gate
 
@@ -513,7 +514,7 @@ jobs:
         env:
           TASK_SIGNING_KEYS: ${{ secrets.TASK_SIGNING_KEYS }}
           BASE_URL: ${{ secrets.QUANTUM_BASE_URL }}
-          USER_ID: ${{ secrets.TASK_USER_ID }}
+          USER_ID: ${{ secrets.USER_ID || secrets.TASK_USER_ID }}
         run: |
           python scripts/run_signed_task.py validation_shadow_eval --skip-time-gate
 
@@ -551,7 +552,7 @@ jobs:
         env:
           TASK_SIGNING_KEYS: ${{ secrets.TASK_SIGNING_KEYS }}
           BASE_URL: ${{ secrets.QUANTUM_BASE_URL }}
-          USER_ID: ${{ secrets.TASK_USER_ID }}
+          USER_ID: ${{ secrets.USER_ID || secrets.TASK_USER_ID }}
         run: |
           python scripts/run_signed_task.py validation_shadow_eval --skip-time-gate
 
@@ -589,7 +590,7 @@ jobs:
         env:
           TASK_SIGNING_KEYS: ${{ secrets.TASK_SIGNING_KEYS }}
           BASE_URL: ${{ secrets.QUANTUM_BASE_URL }}
-          USER_ID: ${{ secrets.TASK_USER_ID }}
+          USER_ID: ${{ secrets.USER_ID || secrets.TASK_USER_ID }}
         run: |
           python scripts/run_signed_task.py validation_cohort_eval --skip-time-gate
 
@@ -627,7 +628,7 @@ jobs:
         env:
           TASK_SIGNING_KEYS: ${{ secrets.TASK_SIGNING_KEYS }}
           BASE_URL: ${{ secrets.QUANTUM_BASE_URL }}
-          USER_ID: ${{ secrets.TASK_USER_ID }}
+          USER_ID: ${{ secrets.USER_ID || secrets.TASK_USER_ID }}
         run: |
           python scripts/run_signed_task.py validation_autopromote_cohort --skip-time-gate
 
@@ -669,7 +670,7 @@ jobs:
         env:
           TASK_SIGNING_KEYS: ${{ secrets.TASK_SIGNING_KEYS }}
           BASE_URL: ${{ secrets.QUANTUM_BASE_URL }}
-          USER_ID: ${{ secrets.TASK_USER_ID }}
+          USER_ID: ${{ secrets.USER_ID || secrets.TASK_USER_ID }}
         run: |
           python scripts/run_signed_task.py validation_init_window --skip-time-gate
 
@@ -707,7 +708,7 @@ jobs:
         env:
           TASK_SIGNING_KEYS: ${{ secrets.TASK_SIGNING_KEYS }}
           BASE_URL: ${{ secrets.QUANTUM_BASE_URL }}
-          USER_ID: ${{ secrets.TASK_USER_ID }}
+          USER_ID: ${{ secrets.USER_ID || secrets.TASK_USER_ID }}
         run: |
           python scripts/run_signed_task.py validation_preflight --skip-time-gate
 
@@ -745,6 +746,6 @@ jobs:
         env:
           TASK_SIGNING_KEYS: ${{ secrets.TASK_SIGNING_KEYS }}
           BASE_URL: ${{ secrets.QUANTUM_BASE_URL }}
-          USER_ID: ${{ secrets.TASK_USER_ID }}
+          USER_ID: ${{ secrets.USER_ID || secrets.TASK_USER_ID }}
         run: |
           python scripts/run_signed_task.py paper_safety_close_one --skip-time-gate

@@ -593,7 +593,7 @@ def compute_market_data_freshness(
             as_of=as_of,
             age_seconds=worst_age_ms / 1000 if worst_age_ms else None,
             universe_size=len(universe),
-            stale_symbols=stale_symbols,
+            stale_symbols=sorted(stale_symbols),
             source="MarketDataTruthLayer",
             reason="stale_symbols" if stale_symbols else "ok"
         )

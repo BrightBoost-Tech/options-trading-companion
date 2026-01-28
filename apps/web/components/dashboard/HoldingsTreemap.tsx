@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useMemo, memo } from 'react';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 
 interface HoldingsTreemapProps {
@@ -6,15 +6,26 @@ interface HoldingsTreemapProps {
   loading?: boolean;
 }
 
-export default function HoldingsTreemap({ exposure, loading }: HoldingsTreemapProps) {
-  if (loading) return <div className="h-48 bg-muted animate-pulse rounded"></div>;
-  if (!exposure?.bySector) return null;
+function HoldingsTreemap({ exposure, loading }: HoldingsTreemapProps) {
+  // Memoize sectors calculation
+  const sectors = useMemo(() => {
+    if (loading || !exposure?.bySector) return [];
 
-  // Simple visual representation using flex bars for now (simulating a treemap/bar chart)
-  // Sort sectors by percentage
-  const sectors = Object.entries(exposure.bySector)
+    return Object.entries(exposure.bySector)
       .sort(([, a]: any, [, b]: any) => b - a)
       .filter(([, val]: any) => val > 0); // Hide zero exposure
+  }, [exposure?.bySector, loading]);
+
+  // Memoize strategy tags calculation
+  const strategies = useMemo(() => {
+     if (loading || !exposure?.byStrategy) return [];
+
+     return Object.entries(exposure.byStrategy)
+        .filter(([, v]: any) => v > 1); // Only show > 1% strategies
+  }, [exposure?.byStrategy, loading]);
+
+  if (loading) return <div className="h-48 bg-muted animate-pulse rounded"></div>;
+  if (!exposure?.bySector) return null;
 
   return (
     <Card className="shadow-sm border-border">
@@ -47,9 +58,7 @@ export default function HoldingsTreemap({ exposure, loading }: HoldingsTreemapPr
 
             {/* Strategy Tags (Mini Cloud) */}
             <div className="mt-4 pt-3 border-t border-border flex flex-wrap gap-2">
-                {Object.entries(exposure?.byStrategy || {})
-                    .filter(([, v]: any) => v > 1) // Only show > 1% strategies
-                    .map(([strat, pct]: any) => (
+                {strategies.map(([strat, pct]: any) => (
                         <span key={strat} className="text-[10px] bg-muted text-muted-foreground px-2 py-1 rounded-full">
                             {strat}: {pct.toFixed(0)}%
                         </span>
@@ -60,3 +69,5 @@ export default function HoldingsTreemap({ exposure, loading }: HoldingsTreemapPr
     </Card>
   );
 }
+
+export default memo(HoldingsTreemap);

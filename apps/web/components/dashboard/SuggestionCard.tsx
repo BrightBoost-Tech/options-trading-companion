@@ -7,9 +7,10 @@ import { Suggestion, TraceResponse } from '@/lib/types';
 import { logEvent } from '@/lib/analytics';
 import { fetchWithAuth } from '@/lib/api';
 import { QuantumTooltip } from '@/components/ui/QuantumTooltip';
-import { X, RefreshCw, Clock, Loader2, ShieldAlert, AlertTriangle, ChevronDown, ChevronUp, Shield, ShieldCheck, ShieldX, Info } from 'lucide-react';
+import { X, RefreshCw, Clock, Loader2, ShieldAlert, AlertTriangle, ChevronDown, ChevronUp, Shield, ShieldCheck, ShieldX, Info, Copy } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Checkbox } from '@/components/ui/checkbox';
+import { useToast } from '@/components/ui/use-toast';
 
 // v4: Card mode for context-aware behavior
 type CardMode = 'DEFAULT' | 'PAPER_INBOX';
@@ -319,6 +320,7 @@ const SuggestionCard = ({
     mode = 'DEFAULT'
 }: SuggestionCardProps) => {
     const { order_json, score, metrics, iv_regime, iv_rank, delta_impact, theta_impact, staged } = suggestion;
+    const { toast } = useToast();
     const [dismissOpen, setDismissOpen] = useState(false);
     const [isRefreshing, setIsRefreshing] = useState(false);
     const [detailsExpanded, setDetailsExpanded] = useState(false);
@@ -496,6 +498,19 @@ const SuggestionCard = ({
         }
     };
 
+    const handleCopySymbol = async (e: React.MouseEvent | React.KeyboardEvent) => {
+        e.stopPropagation();
+        try {
+            await navigator.clipboard.writeText(displaySymbol);
+            toast({
+                title: "Copied symbol",
+                description: `${displaySymbol} copied to clipboard`,
+            });
+        } catch (err) {
+            // Fallback or silence
+        }
+    };
+
     return (
         <Card className={`mb-3 border-l-4 ${
             isBlocked
@@ -598,7 +613,23 @@ const SuggestionCard = ({
                                     aria-label={`Select ${displaySymbol}`}
                                 />
                             )}
-                            <span className="font-bold text-lg text-foreground">{displaySymbol}</span>
+                            <div
+                                className="flex items-center gap-1 group cursor-pointer hover:bg-muted/50 rounded px-1 -ml-1 transition-colors"
+                                onClick={handleCopySymbol}
+                                onKeyDown={(e) => {
+                                    if (e.key === 'Enter' || e.key === ' ') {
+                                        e.preventDefault();
+                                        handleCopySymbol(e);
+                                    }
+                                }}
+                                role="button"
+                                tabIndex={0}
+                                aria-label={`Copy ${displaySymbol} to clipboard`}
+                                title="Click to copy symbol"
+                            >
+                                <span className="font-bold text-lg text-foreground group-hover:underline decoration-dotted underline-offset-4">{displaySymbol}</span>
+                                <Copy className="w-3 h-3 text-muted-foreground opacity-0 group-hover:opacity-100 transition-opacity" aria-hidden="true" />
+                            </div>
                             <span className="text-sm font-medium text-muted-foreground">{suggestion.strategy}</span>
                             {suggestion.expiration && (
                                 <span className="text-xs text-muted-foreground border border-border px-1 rounded">{suggestion.expiration}</span>

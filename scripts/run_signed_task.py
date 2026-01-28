@@ -248,6 +248,68 @@ def check_time_gate(task_name: str, skip_time_gate: bool = False) -> bool:
 
 MAX_SNIPPET_LENGTH = 300
 
+# Semantic error statuses that indicate task failure despite HTTP 200
+SEMANTIC_ERROR_STATUSES = {"error", "cancelled"}
+
+
+def extract_error_snippet(data: dict) -> Optional[str]:
+    """
+    Extract error details from response JSON.
+
+    Checks common error fields in priority order.
+
+    Args:
+        data: Parsed JSON response
+
+    Returns:
+        Error snippet string or None if no error details found
+    """
+    # Priority order for error extraction
+    for key in ("detail", "error", "reason", "cancelled_detail", "cancelled_reason", "message"):
+        value = data.get(key)
+        if value and isinstance(value, str):
+            return value
+
+    # Fallback: if we have status but no detail, summarize available keys
+    if data.get("status") in SEMANTIC_ERROR_STATUSES:
+        # Extract a few safe keys for context
+        safe_keys = ["status", "reason", "cancelled_reason", "task", "user_id"]
+        summary_parts = []
+        for k in safe_keys:
+            if k in data and data[k]:
+                summary_parts.append(f"{k}={data[k]}")
+        if summary_parts:
+            return "; ".join(summary_parts)
+
+    return None
+
+
+def sanitize_snippet(s: str) -> str:
+    """
+    Truncate and escape snippet for safe display in markdown tables and logs.
+
+    Args:
+        s: Raw snippet string
+
+    Returns:
+        Sanitized string safe for markdown tables
+    """
+    if not s:
+        return ""
+
+    # Truncate first
+    truncated = s[:MAX_SNIPPET_LENGTH]
+    if len(s) > MAX_SNIPPET_LENGTH:
+        truncated += "..."
+
+    # Escape characters that break markdown tables
+    sanitized = truncated.replace("|", "\\|").replace("\n", " ").replace("\r", " ")
+
+    # Remove any control characters
+    sanitized = "".join(c if c.isprintable() or c == " " else " " for c in sanitized)
+
+    return sanitized
+
 
 def write_step_summary(
     task_name: str,
@@ -265,12 +327,16 @@ def write_step_summary(
     This provides instant visibility in GitHub Actions UI without digging through logs.
     Safe: Never includes secrets, signing headers, or full response bodies.
 
+    Shows error details for:
+    - HTTP non-2xx responses
+    - HTTP 2xx with semantic error status (status="error" or "cancelled")
+
     Args:
         task_name: Name of the task that ran
         status_code: HTTP response status code (None if no request made)
         job_run_id: JobRun ID from response (if present)
         result_status: Status field from response (if present)
-        error_snippet: Truncated error message for non-2xx responses
+        error_snippet: Truncated error message for errors (HTTP or semantic)
         skipped: Whether task was skipped (time-gate, etc.)
         skip_reason: Reason for skip
         dry_run: Whether this was a dry run
@@ -296,8 +362,16 @@ def write_step_summary(
             lines.append(f"| **Mode** | ⏭️ Skipped |")
             lines.append(f"| **Reason** | {skip_reason or 'Time gate'} |")
         elif status_code is not None:
-            is_success = 200 <= status_code < 300
-            status_emoji = "✅" if is_success else "❌"
+            is_http_success = 200 <= status_code < 300
+            is_semantic_error = result_status in SEMANTIC_ERROR_STATUSES
+
+            # Show warning emoji for semantic errors even on HTTP 200
+            if is_semantic_error:
+                status_emoji = "⚠️"
+            elif is_http_success:
+                status_emoji = "✅"
+            else:
+                status_emoji = "❌"
 
             lines.append("| Field | Value |")
             lines.append("|-------|-------|")
@@ -306,14 +380,15 @@ def write_step_summary(
             if job_run_id:
                 lines.append(f"| **JobRun ID** | `{job_run_id}` |")
             if result_status:
-                lines.append(f"| **Result** | {result_status} |")
+                result_emoji = "⚠️ " if is_semantic_error else ""
+                lines.append(f"| **Result** | {result_emoji}{result_status} |")
 
-            if error_snippet and not is_success:
-                # Truncate and sanitize error snippet
+            # Show error row for HTTP errors OR semantic errors
+            if error_snippet and (not is_http_success or is_semantic_error):
+                # Snippet should already be sanitized, but ensure safe for markdown
                 safe_snippet = error_snippet[:MAX_SNIPPET_LENGTH]
                 if len(error_snippet) > MAX_SNIPPET_LENGTH:
                     safe_snippet += "..."
-                # Escape pipe characters for markdown table
                 safe_snippet = safe_snippet.replace("|", "\\|").replace("\n", " ")
                 lines.append(f"| **Error** | {safe_snippet} |")
         else:
@@ -490,26 +565,45 @@ def run_task(
         print(f"[RESPONSE] Status: {response.status_code}")
 
         if response.status_code >= 200 and response.status_code < 300:
-            print(f"[SUCCESS] Task {task_name} completed successfully")
             job_run_id = None
             result_status = None
+            error_snippet = None
+
             try:
                 result = response.json()
-                # Only log non-sensitive fields
+                # Extract standard fields
                 job_run_id = result.get("job_run_id")
                 result_status = result.get("status")
-                if job_run_id:
-                    print(f"[SUCCESS] Job run ID: {job_run_id}")
-                if result_status:
-                    print(f"[SUCCESS] Status: {result_status}")
+
+                # Check for semantic error (HTTP 200 but status=error/cancelled)
+                if result_status in SEMANTIC_ERROR_STATUSES:
+                    error_snippet = sanitize_snippet(
+                        extract_error_snippet(result) or "Unknown error"
+                    )
+                    print(f"[WARN] Semantic failure: status={result_status}")
+                    print(f"[WARN] Detail: {error_snippet}")
+                else:
+                    print(f"[SUCCESS] Task {task_name} completed successfully")
+                    if job_run_id:
+                        print(f"[SUCCESS] Job run ID: {job_run_id}")
+                    if result_status:
+                        print(f"[SUCCESS] Status: {result_status}")
+
             except Exception:
-                pass
+                # JSON parsing failed, treat as success (no semantic error detectable)
+                print(f"[SUCCESS] Task {task_name} completed (non-JSON response)")
+
             write_step_summary(
                 task_name,
                 status_code=response.status_code,
                 job_run_id=job_run_id,
                 result_status=result_status,
+                error_snippet=error_snippet,
             )
+
+            # Return 1 for semantic errors, 0 for success
+            if result_status in SEMANTIC_ERROR_STATUSES:
+                return 1
             return 0
         else:
             print(f"[ERROR] Request failed: {response.status_code}")

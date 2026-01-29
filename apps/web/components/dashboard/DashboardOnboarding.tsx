@@ -4,6 +4,8 @@ import Link from "next/link";
 import { ShieldCheck, LineChart } from "lucide-react";
 import { usePlaidStatus } from "@/hooks/usePlaidStatus";
 import SyncHoldingsButton from "@/components/SyncHoldingsButton";
+import { buttonVariants } from "@/components/ui/button";
+import { cn } from "@/lib/utils";
 
 interface DashboardOnboardingProps {
   hasPositions: boolean; // server-side info from snapshot
@@ -50,9 +52,9 @@ export default function DashboardOnboarding({
             // STATE 1: Not connected → go to Settings
             <Link
               href="/settings"
-              className="inline-flex items-center gap-2 bg-blue-600 hover:bg-blue-500 text-white px-4 py-2 rounded-lg text-sm font-medium transition-colors"
+              className={cn(buttonVariants({ variant: "default", className: "bg-blue-600 hover:bg-blue-500 text-white" }))}
             >
-              <ShieldCheck className="w-4 h-4" />
+              <ShieldCheck className="w-4 h-4 mr-2" />
               Connect Brokerage
             </Link>
           ) : (

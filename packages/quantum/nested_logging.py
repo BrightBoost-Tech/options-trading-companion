@@ -12,8 +12,8 @@ from packages.quantum.common_enums import OutcomeStatus
 load_dotenv()
 
 def _get_supabase_client() -> Optional[Client]:
-    url = os.getenv("NEXT_PUBLIC_SUPABASE_URL")
-    key = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
+    from packages.quantum.supabase_env import get_sanitized_supabase_env
+    url, key = get_sanitized_supabase_env()
     if not url or not key:
         print("Logging Warning: Supabase credentials missing. Logging disabled.")
         return None

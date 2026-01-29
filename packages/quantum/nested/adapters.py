@@ -6,10 +6,10 @@ from datetime import datetime
 import numpy as np
 from supabase import create_client, Client
 
-# Use the same client helper as logging if possible, or duplicate
+# Use shared sanitization to prevent DNS failures from env whitespace
 def _get_supabase_client() -> Optional[Client]:
-    url = os.getenv("NEXT_PUBLIC_SUPABASE_URL")
-    key = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
+    from packages.quantum.supabase_env import get_sanitized_supabase_env
+    url, key = get_sanitized_supabase_env()
     if not url or not key:
         return None
     try:

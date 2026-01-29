@@ -3,10 +3,10 @@ from typing import Dict, Any, Optional
 import os
 from supabase import create_client, Client
 
-# Reuse or recreate the Supabase client helper to avoid circular imports with adapters
+# Use shared sanitization to prevent DNS failures from env whitespace
 def _get_supabase_client() -> Optional[Client]:
-    url = os.getenv("NEXT_PUBLIC_SUPABASE_URL")
-    key = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
+    from packages.quantum.supabase_env import get_sanitized_supabase_env
+    url, key = get_sanitized_supabase_env()
     if not url or not key:
         return None
     try:

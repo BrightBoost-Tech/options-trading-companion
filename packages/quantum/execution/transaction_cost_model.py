@@ -146,8 +146,9 @@ class TransactionCostModel:
         Determines the outcome of a working order given a new quote update.
         Returns dict with status, filled_qty, avg_fill_price.
         """
-        if seed is not None:
-            random.seed(seed)
+        # Clockwork: Use local random instance if seed provided to avoid polluting global state.
+        # Fallback to global random module if seed is None (preserves external seeding).
+        rng_gen = random.Random(seed) if seed is not None else random
 
         # Parse Order
         requested_qty = float(order.get("requested_qty") or order.get("quantity") or 0)
@@ -209,13 +210,13 @@ class TransactionCostModel:
                 elif bid <= limit_price:
                      # Maybe partial fill or lucky fill?
                      # Let's use probabilistic fill if inside spread
-                     rng = random.random()
+                     rand_val = rng_gen.random()
                      # closer to ask = higher prob
                      spread = ask - bid
                      if spread > 0:
                         dist_from_bid = limit_price - bid
                         prob = (dist_from_bid / spread) * 0.5 # max 50% chance inside spread
-                        if rng < prob:
+                        if rand_val < prob:
                             should_fill = True
                             fill_price = limit_price
             else: # sell
@@ -224,12 +225,12 @@ class TransactionCostModel:
                     should_fill = True
                     fill_price = bid
                 elif ask >= limit_price:
-                    rng = random.random()
+                    rand_val = rng_gen.random()
                     spread = ask - bid
                     if spread > 0:
                         dist_from_ask = ask - limit_price
                         prob = (dist_from_ask / spread) * 0.5
-                        if rng < prob:
+                        if rand_val < prob:
                             should_fill = True
                             fill_price = limit_price
 
@@ -242,7 +243,7 @@ class TransactionCostModel:
             # Let's rarely do partials for large orders.
 
             this_fill_qty = remaining_qty
-            if remaining_qty > 10 and random.random() < 0.1:
+            if remaining_qty > 10 and rng_gen.random() < 0.1:
                 this_fill_qty = math.floor(remaining_qty / 2)
 
             # Update avg price

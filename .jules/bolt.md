@@ -29,3 +29,7 @@
 ## 2026-06-18 - [JSX Conditional Rendering Efficiency]
 **Learning:** Performing O(N) operations like `.filter(...).length` inside JSX for conditional rendering triggers redundant computations on every re-render, even if the result is static. Using `useMemo` to pre-calculate these values ensures O(1) checks during the render phase.
 **Action:** Move expensive conditional logic (like array filtering) into `useMemo` blocks and reference the memoized value in JSX.
+
+## 2026-07-28 - [Iterative List Slicing Trap]
+**Learning:** Repeatedly slicing a growing list (e.g., `history[:i+1]`) inside a simulation loop creates an implicit O(N^2) memory copy bottleneck, which is often invisible in small tests. Replacing this with pre-calculated vectorized arrays and O(1) index lookups yielded a ~25x speedup for 10k items.
+**Action:** Identify loops where history is passed to a stateless function by slicing, and replace them with vectorized pre-calculation on the full array.

@@ -21,9 +21,15 @@ from packages.quantum.analytics.regime_integration import (
     DEFAULT_LIQUIDITY_SCALAR,
     DEFAULT_REGIME_PROFILES,
     map_market_regime,
-    run_historical_scoring
+    run_historical_scoring,
+    calculate_regime_vectorized
 )
-from packages.quantum.analytics.factors import calculate_trend, calculate_volatility, calculate_rsi
+from packages.quantum.analytics.factors import (
+    calculate_trend,
+    calculate_volatility,
+    calculate_rsi,
+    calculate_indicators_vectorized
+)
 from packages.quantum.nested.backbone import infer_global_context, GlobalContext
 from packages.quantum.execution.transaction_cost_model import TransactionCostModel as V3TCM
 from packages.quantum.services.transaction_cost_model import TransactionCostModel as LegacyTCM
@@ -173,72 +179,54 @@ class BacktestEngine:
         events = []
         equity_curve = []
 
+        # 3. Pre-calculate Indicators & Scoring (Vectorized Optimization)
+
+        # A. Calculate for default 'prices' (used for stocks or fallback)
+        indicators_vec = calculate_indicators_vectorized(prices)
+        regime_vec = calculate_regime_vectorized(
+            indicators_vec["trend"],
+            indicators_vec["volatility"],
+            indicators_vec["rsi"]
+        )
+        vec_regime_arr = regime_vec["regime"]
+        vec_conviction_arr = regime_vec["conviction"]
+
+        # B. Calculate for 'underlying_prices' (preferred for options)
+        und_regime_arr = None
+        und_conviction_arr = None
+
+        if underlying_prices and len(underlying_prices) > 0:
+            und_indicators = calculate_indicators_vectorized(underlying_prices)
+            und_regime = calculate_regime_vectorized(
+                und_indicators["trend"],
+                und_indicators["volatility"],
+                und_indicators["rsi"]
+            )
+            und_regime_arr = und_regime["regime"]
+            und_conviction_arr = und_regime["conviction"]
+
         # 3. Loop
         for i in range(start_idx, len(dates)):
             current_date = dates[i]
             current_price = prices[i]
 
-            # Helper to calculate scoring
-            # PR5: For options, use underlying prices for scoring (not option prices)
-            # Option prices are dominated by theta decay and don't reflect underlying trend
-            if underlying_prices and current_date in underlying_date_map:
-                # Use underlying prices for scoring
-                underlying_idx = underlying_date_map[current_date]
-                scoring_slice = underlying_prices[:underlying_idx+1]
-                scoring_symbol = underlying_symbol
-            else:
-                # Fallback to traded symbol prices (stocks, or if underlying data unavailable)
-                scoring_slice = prices[:i+1]
-                scoring_symbol = symbol
+            # Logic: Prefer underlying if available and aligned, else fallback to prices
+            regime_mapped = "normal"
+            conviction = 0.5
+            used_underlying = False
 
-            # --- Scoring Logic (Reused) ---
-            trend = calculate_trend(scoring_slice)
-            vol_annual = calculate_volatility(scoring_slice, window=30)
-            rsi_val = calculate_rsi(scoring_slice, period=14)
+            if und_regime_arr is not None and current_date in underlying_date_map:
+                u_idx = underlying_date_map[current_date]
+                if u_idx < len(und_regime_arr):
+                    regime_mapped = und_regime_arr[u_idx]
+                    conviction = float(und_conviction_arr[u_idx])
+                    used_underlying = True
 
-            # Global Context
-            features = {
-                "spy_trend": trend.lower(),
-                "vix_level": 20.0,
-            }
-            if vol_annual > 0.30: features["vix_level"] = 35.0
-            elif vol_annual > 0.20: features["vix_level"] = 25.0
-            else: features["vix_level"] = 15.0
-
-            global_context: GlobalContext = infer_global_context(features)
-
-            regime_mapped = map_market_regime({
-                "state": global_context.global_regime,
-                "vol_annual": vol_annual
-            })
-
-            # Score
-            trend_score = 100.0 if trend == "UP" else (0.0 if trend == "DOWN" else 50.0)
-            vol_score = 50.0
-            if vol_annual < 0.15: vol_score = 100.0
-            elif vol_annual > 0.30: vol_score = 0.0
-            value_score = 50.0
-            if rsi_val < 30: value_score = 100.0
-            elif rsi_val > 70: value_score = 0.0
-
-            factors_input = {
-                "trend": trend_score,
-                "volatility": vol_score,
-                "value": value_score
-            }
-
-            scoring_result = run_historical_scoring(
-                symbol_data={
-                    "symbol": scoring_symbol,  # PR5: Use underlying for regime matching
-                    "factors": factors_input,
-                    "liquidity_tier": "top"
-                },
-                regime=regime_mapped,
-                scoring_engine=self.scoring_engine,
-                conviction_transform=self.conviction_transform,
-                universe_median=None
-            )
-            conviction = scoring_result['conviction']
+            if not used_underlying:
+                # Fallback to default prices
+                if i < len(vec_regime_arr):
+                    regime_mapped = vec_regime_arr[i]
+                    conviction = float(vec_conviction_arr[i])
 
             # --- Trade Logic ---
 

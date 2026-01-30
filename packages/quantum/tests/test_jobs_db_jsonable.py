@@ -91,11 +91,11 @@ class TestJobsDbJsonable(unittest.TestCase):
         rpc_params = args[1]
 
         self.assertEqual(rpc_name, 'complete_job_run')
-        self.assertEqual(rpc_params['job_id'], job_id)
+        self.assertEqual(rpc_params['p_job_id'], job_id)
 
         # Verify serializability
         try:
-            json.dumps(rpc_params['result'])
+            json.dumps(rpc_params['p_result'])
         except TypeError:
             self.fail("complete_job_run result is not JSON serializable")
 
@@ -114,10 +114,10 @@ class TestJobsDbJsonable(unittest.TestCase):
         args, kwargs = mock_client.rpc.call_args
         rpc_params = args[1]
 
-        self.assertEqual(rpc_params['job_id'], job_id)
-        self.assertEqual(rpc_params['run_after'], run_after)
+        self.assertEqual(rpc_params['p_job_id'], job_id)
+        self.assertEqual(rpc_params['p_run_after'], run_after)
         try:
-            json.dumps(rpc_params['error'])
+            json.dumps(rpc_params['p_error'])
         except TypeError:
             self.fail("requeue_job_run error is not JSON serializable")
 
@@ -136,5 +136,36 @@ class TestJobsDbJsonable(unittest.TestCase):
         rpc_params = args[1]
 
         # Exception should be converted to string fallback
-        self.assertEqual(rpc_params['error']['exception'], "test")
-        self.assertEqual(rpc_params['error']['enum'], "value_a")
+        self.assertEqual(rpc_params['p_error']['exception'], "test")
+        self.assertEqual(rpc_params['p_error']['enum'], "value_a")
+
+    def test_set_determinism(self):
+        """Test that sets are serialized to sorted lists."""
+        # Simple types
+        s1 = {"b", "a", "c"}
+        jsonable1 = jobs_db._to_jsonable(s1)
+        self.assertEqual(jsonable1, ["a", "b", "c"])
+
+        # Mixed types (fallback to string sort)
+        # Note: In Python 3, str and int are not comparable, so they will trigger TypeError in sorted(),
+        # and fall back to key=str.
+        # "1" < "2", "apple" > "1" (lexicographically)
+        s2 = {2, 1, "apple"}
+        jsonable2 = jobs_db._to_jsonable(s2)
+        # Check that it's sorted by string representation
+        # str(1)="1", str(2)="2", str("apple")="apple"
+        # "1" < "2" < "apple"
+        self.assertEqual(jsonable2, [1, 2, "apple"])
+
+        # Test collision case: {1, "1"}
+        # Both stringify to "1", but types differ ("int" vs "str")
+        # "int" < "str", so 1 comes before "1"
+        s_collision = {1, "1"}
+        jsonable_collision = jobs_db._to_jsonable(s_collision)
+        self.assertEqual(jsonable_collision, [1, "1"])
+
+        # Nested sets
+        s3 = {3, 1, 2}
+        data = {"nested": [s3]}
+        jsonable3 = jobs_db._to_jsonable(data)
+        self.assertEqual(jsonable3["nested"][0], [1, 2, 3])

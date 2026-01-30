@@ -1,6 +1,6 @@
 from fastapi import APIRouter, Depends, Header, HTTPException, Body
 from typing import Optional, Dict
-from packages.quantum.security.task_auth import verify_internal_task_request
+from packages.quantum.security.task_signing_v4 import verify_task_signature, TaskSignatureResult
 from packages.quantum.security.secrets_provider import SecretsProvider
 from supabase import create_client, Client
 from datetime import datetime, timedelta
@@ -29,7 +29,6 @@ router = APIRouter(
     prefix="/internal/tasks",
     tags=["internal-tasks"],
     include_in_schema=False, # Hidden from public OpenAPI docs
-    dependencies=[Depends(verify_internal_task_request)]
 )
 
 # Admin Client Init
@@ -57,7 +56,8 @@ def get_active_user_ids(client: Client) -> list[str]:
 
 @router.post("/morning-brief", status_code=202)
 async def morning_brief(
-    client: Client = Depends(get_admin_client)
+    client: Client = Depends(get_admin_client),
+    auth: TaskSignatureResult = Depends(verify_task_signature("tasks:morning_brief"))
 ):
     today = datetime.now().strftime("%Y-%m-%d")
     job_name = "morning-brief"
@@ -83,7 +83,8 @@ async def morning_brief(
 
 @router.post("/midday-scan", status_code=202)
 async def midday_scan(
-    client: Client = Depends(get_admin_client)
+    client: Client = Depends(get_admin_client),
+    auth: TaskSignatureResult = Depends(verify_task_signature("tasks:midday_scan"))
 ):
     today = datetime.now().strftime("%Y-%m-%d")
     job_name = "midday-scan"
@@ -109,7 +110,8 @@ async def midday_scan(
 
 @router.post("/weekly-report", status_code=202)
 async def weekly_report_task(
-    client: Client = Depends(get_admin_client)
+    client: Client = Depends(get_admin_client),
+    auth: TaskSignatureResult = Depends(verify_task_signature("tasks:weekly_report"))
 ):
     # Weekly bucket
     week = datetime.now().strftime("%Y-W%V")
@@ -136,7 +138,8 @@ async def weekly_report_task(
 
 @router.post("/universe/sync", status_code=202)
 async def universe_sync_task(
-    client: Client = Depends(get_admin_client)
+    client: Client = Depends(get_admin_client),
+    auth: TaskSignatureResult = Depends(verify_task_signature("tasks:universe_sync"))
 ):
     today = datetime.now().strftime("%Y-%m-%d")
     job_name = "universe-sync"
@@ -164,7 +167,8 @@ async def universe_sync_task(
 async def backfill_history(
     start_date: str = Body(..., embed=True),
     end_date: str = Body(..., embed=True),
-    client: Client = Depends(get_admin_client)
+    client: Client = Depends(get_admin_client),
+    auth: TaskSignatureResult = Depends(verify_task_signature("tasks:plaid_backfill"))
 ):
     today = datetime.now().strftime("%Y-%m-%d")
     job_name = "plaid-backfill-history"
@@ -193,7 +197,8 @@ async def backfill_history(
 # Keep remaining endpoints unchanged as they were not in the target list
 @router.post("/iv/daily-refresh")
 async def iv_daily_refresh_task(
-    client: Client = Depends(get_admin_client)
+    client: Client = Depends(get_admin_client),
+    auth: TaskSignatureResult = Depends(verify_task_signature("tasks:iv_daily_refresh"))
 ):
     """
     Refreshes IV points for universe.
@@ -273,7 +278,8 @@ async def iv_daily_refresh_task(
 async def train_learning_v3(
     lookback_days: int = Body(90, embed=True),
     min_samples: int = Body(40, embed=True),
-    client: Client = Depends(get_admin_client)
+    client: Client = Depends(get_admin_client),
+    auth: TaskSignatureResult = Depends(verify_task_signature("tasks:learning_train"))
 ):
     """
     Triggers Learned Nesting v3 training cycle.

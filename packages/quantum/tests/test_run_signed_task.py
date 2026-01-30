@@ -242,7 +242,9 @@ class TestTaskDefinitions:
         """Every task should have a path."""
         for name, task in TASKS.items():
             assert "path" in task, f"Task {name} missing 'path'"
-            assert task["path"].startswith("/tasks/"), f"Task {name} path should start with /tasks/"
+            # Allow both public (/tasks/) and internal (/internal/tasks/) paths
+            assert task["path"].startswith("/tasks/") or task["path"].startswith("/internal/tasks/"), \
+                f"Task {name} path should start with /tasks/ or /internal/tasks/"
 
     def test_all_tasks_have_scope(self):
         """Every task should have a scope."""
@@ -268,6 +270,9 @@ class TestTaskDefinitions:
             "weekly_report",
             "validation_eval",
             "strategy_autotune",
+            "plaid_backfill",
+            "iv_daily_refresh",
+            "learning_train",
         ]
         for task_name in expected:
             assert task_name in TASKS, f"Missing expected task: {task_name}"

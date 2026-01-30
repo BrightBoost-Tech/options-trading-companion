@@ -244,18 +244,21 @@ export default function StrategyProfilesPanel() {
                <div className="text-sm text-muted-foreground italic p-2">No strategies found.</div>
            )}
            {strategies.map(s => (
-             <button
+             <Button
                key={s.name}
+               variant="ghost"
                onClick={() => setSelectedStrategy(s)}
-               className={`w-full text-left px-4 py-3 rounded-lg border transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500 ${
+               className={`w-full justify-start h-auto px-4 py-3 border rounded-lg ${
                  selectedStrategy?.name === s.name
-                 ? 'bg-indigo-50 border-indigo-200 text-indigo-900 dark:bg-indigo-900/20 dark:border-indigo-800 dark:text-indigo-100'
+                 ? 'bg-indigo-50 border-indigo-200 text-indigo-900 dark:bg-indigo-900/20 dark:border-indigo-800 dark:text-indigo-100 hover:bg-indigo-100 dark:hover:bg-indigo-900/30'
                  : 'bg-card border-border hover:bg-muted/50'
                }`}
              >
-               <div className="font-medium">{s.name}</div>
-               <div className="text-xs text-muted-foreground mt-1 truncate">{s.description}</div>
-             </button>
+               <div className="flex flex-col items-start text-left w-full">
+                 <div className="font-medium">{s.name}</div>
+                 <div className="text-xs text-muted-foreground mt-1 truncate w-full">{s.description}</div>
+               </div>
+             </Button>
            ))}
            <Button variant="outline" className="w-full mt-4 text-xs">
              + Create New Profile
@@ -276,8 +279,8 @@ export default function StrategyProfilesPanel() {
                         {!batchLoading && <RefreshCw className="w-4 h-4 mr-2" />}
                         Batch Sim
                     </Button>
-                    <Button onClick={runBacktest} disabled={simRunning}>
-                       {simRunning ? <RefreshCw className="w-4 h-4 animate-spin mr-2" /> : <Play className="w-4 h-4 mr-2" />}
+                    <Button onClick={runBacktest} loading={simRunning}>
+                       {!simRunning && <Play className="w-4 h-4 mr-2" />}
                        Run Test
                     </Button>
                  </div>

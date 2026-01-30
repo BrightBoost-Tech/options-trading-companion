@@ -45,3 +45,7 @@
 ## 2025-06-01 - Preventing Double Spinners in Buttons
 **Learning:** Using the `loading` prop on the `Button` component automatically prepends a spinner. If the button also contains a static icon (like `RefreshCw` or `Save`), this results in two icons when loading.
 **Action:** Always wrap the static icon in a conditional check (`{!loading && <Icon />}`) when using the `loading` prop to ensure a clean state transition.
+
+## 2025-06-02 - Multi-line Buttons
+**Learning:** The design system's `Button` component centers content and has a fixed height by default, breaking layout for list items containing titles and descriptions.
+**Action:** When using `Button` for multi-line content, apply `h-auto` and `flex-col items-start` classes to override default centering and height constraints while maintaining accessibility features.

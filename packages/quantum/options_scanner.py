@@ -146,11 +146,19 @@ def _select_best_expiry_chain(chain: List[Dict[str, Any]], target_dte: int = 35,
     if not chain:
         return None, []
 
-    # Bolt Optimization: Use defaultdict for cleaner and faster grouping (approx 10-15% speedup on large lists)
+    # Bolt Optimization: Detect expiry key once
+    # Use defaultdict for cleaner and faster grouping (approx 10-15% speedup on large lists)
     buckets = defaultdict(list)
+
+    # Detect key from first element if available
+    exp_key = "expiration"
+    if chain:
+        if "expiry" in chain[0]:
+            exp_key = "expiry"
+
     for c in chain:
         # Support canonical format (expiry) fallback
-        exp = c.get("expiration") or c.get("expiry")
+        exp = c.get(exp_key)
         if exp:
             buckets[exp].append(c)
 
@@ -207,21 +215,42 @@ def _select_legs_from_chain(
     sample = calls[0] if calls else (puts[0] if puts else None)
     is_nested = sample is not None and "greeks" in sample and isinstance(sample.get("greeks"), dict)
 
-    # Accessors
-    def _delta(c): return c.get("greeks", {}).get("delta") if is_nested else c.get("delta")
-    def _gamma(c): return c.get("greeks", {}).get("gamma") if is_nested else c.get("gamma")
-    def _vega(c): return c.get("greeks", {}).get("vega") if is_nested else c.get("vega")
-    def _theta(c): return c.get("greeks", {}).get("theta") if is_nested else c.get("theta")
-    def _ticker(c): return c.get("contract") if is_nested else c.get("ticker")
-    def _expiry(c): return c.get("expiry") if is_nested else c.get("expiration")
-    def _bid(c): return c.get("quote", {}).get("bid") if is_nested else c.get("bid")
-    def _ask(c): return c.get("quote", {}).get("ask") if is_nested else c.get("ask")
-    def _premium(c):
-        if is_nested:
-            q = c.get("quote", {})
+    # Optimized Accessors definition outside the loop
+    if is_nested:
+        def _delta(c):
+            g = c.get("greeks")
+            return g.get("delta") if g else None
+        def _gamma(c):
+            g = c.get("greeks")
+            return g.get("gamma") if g else 0.0
+        def _vega(c):
+            g = c.get("greeks")
+            return g.get("vega") if g else 0.0
+        def _theta(c):
+            g = c.get("greeks")
+            return g.get("theta") if g else 0.0
+        def _ticker(c): return c.get("contract")
+        def _expiry(c): return c.get("expiry")
+        def _bid(c):
+            q = c.get("quote")
+            return q.get("bid") if q else None
+        def _ask(c):
+            q = c.get("quote")
+            return q.get("ask") if q else None
+        def _premium(c):
+            q = c.get("quote")
+            if not q: return None
             return q.get("mid") if q.get("mid") is not None else q.get("last")
-        else:
-            return c.get("price") or c.get("close")
+    else:
+        def _delta(c): return c.get("delta")
+        def _gamma(c): return c.get("gamma")
+        def _vega(c): return c.get("vega")
+        def _theta(c): return c.get("theta")
+        def _ticker(c): return c.get("ticker")
+        def _expiry(c): return c.get("expiration")
+        def _bid(c): return c.get("bid")
+        def _ask(c): return c.get("ask")
+        def _premium(c): return c.get("price") or c.get("close")
 
     for leg_def in leg_defs:
         target_delta = leg_def["delta_target"]
@@ -310,21 +339,42 @@ def _select_iron_condor_legs(
     sample = calls[0] if calls else (puts[0] if puts else None)
     is_nested = sample is not None and "greeks" in sample and isinstance(sample.get("greeks"), dict)
 
-    # Accessors
-    def _delta(c): return c.get("greeks", {}).get("delta") if is_nested else c.get("delta")
-    def _gamma(c): return c.get("greeks", {}).get("gamma") if is_nested else c.get("gamma")
-    def _vega(c): return c.get("greeks", {}).get("vega") if is_nested else c.get("vega")
-    def _theta(c): return c.get("greeks", {}).get("theta") if is_nested else c.get("theta")
-    def _ticker(c): return c.get("contract") if is_nested else c.get("ticker")
-    def _expiry(c): return c.get("expiry") if is_nested else c.get("expiration")
-    def _bid(c): return c.get("quote", {}).get("bid") if is_nested else c.get("bid")
-    def _ask(c): return c.get("quote", {}).get("ask") if is_nested else c.get("ask")
-    def _premium(c):
-        if is_nested:
-            q = c.get("quote", {})
+    # Optimized Accessors definition outside the loop
+    if is_nested:
+        def _delta(c):
+            g = c.get("greeks")
+            return g.get("delta") if g else None
+        def _gamma(c):
+            g = c.get("greeks")
+            return g.get("gamma") if g else 0.0
+        def _vega(c):
+            g = c.get("greeks")
+            return g.get("vega") if g else 0.0
+        def _theta(c):
+            g = c.get("greeks")
+            return g.get("theta") if g else 0.0
+        def _ticker(c): return c.get("contract")
+        def _expiry(c): return c.get("expiry")
+        def _bid(c):
+            q = c.get("quote")
+            return q.get("bid") if q else None
+        def _ask(c):
+            q = c.get("quote")
+            return q.get("ask") if q else None
+        def _premium(c):
+            q = c.get("quote")
+            if not q: return None
             return q.get("mid") if q.get("mid") is not None else q.get("last")
-        else:
-            return c.get("price") or c.get("close")
+    else:
+        def _delta(c): return c.get("delta")
+        def _gamma(c): return c.get("gamma")
+        def _vega(c): return c.get("vega")
+        def _theta(c): return c.get("theta")
+        def _ticker(c): return c.get("ticker")
+        def _expiry(c): return c.get("expiration")
+        def _bid(c): return c.get("bid")
+        def _ask(c): return c.get("ask")
+        def _premium(c): return c.get("price") or c.get("close")
 
     # 2. Select Shorts by Delta
     # Target delta is usually ~0.15 (abs)
@@ -1108,9 +1158,18 @@ def scan_for_opportunities(
 
             calls_list = []
             puts_list = []
+
+            # Detect schema key from first element to optimize loop
+            type_key = 'type'
+            if chain_subset:
+                # TruthLayer uses 'right', Polygon uses 'type'
+                if 'right' in chain_subset[0]:
+                    type_key = 'right'
+
             for c in chain_subset:
                 # Native handling of 'type' (Polygon/Flat) or 'right' (TruthLayer/Nested)
-                ctype = c.get('type') or c.get('right')
+                # Optimization: Use detected key
+                ctype = c.get(type_key)
                 if ctype == 'call':
                     calls_list.append(c)
                 elif ctype == 'put':

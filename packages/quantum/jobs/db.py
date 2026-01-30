@@ -100,8 +100,15 @@ def _to_jsonable(obj: Any) -> Any:
     if hasattr(obj, 'dict'):
         return _to_jsonable(obj.dict())
 
-    if isinstance(obj, (list, tuple, set)):
+    if isinstance(obj, (list, tuple)):
         return [_to_jsonable(item) for item in obj]
+    if isinstance(obj, set):
+        items = [_to_jsonable(item) for item in obj]
+        try:
+            return sorted(items)
+        except TypeError:
+            # Fallback for non-comparable types: sort by string representation then type name
+            return sorted(items, key=lambda x: (str(x), type(x).__name__))
     if isinstance(obj, dict):
         return {str(k): _to_jsonable(v) for k, v in obj.items()}
 

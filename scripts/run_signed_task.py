@@ -157,6 +157,21 @@ TASKS = {
         "description": "Safety close one paper position (requires user_id)",
         "requires_user_id": True,
     },
+    "plaid_backfill": {
+        "path": "/internal/tasks/plaid/backfill-history",
+        "scope": "tasks:plaid_backfill",
+        "description": "Backfill Plaid history",
+    },
+    "iv_daily_refresh": {
+        "path": "/internal/tasks/iv/daily-refresh",
+        "scope": "tasks:iv_daily_refresh",
+        "description": "Refresh IV points",
+    },
+    "learning_train": {
+        "path": "/internal/tasks/train-learning-v3",
+        "scope": "tasks:learning_train",
+        "description": "Train learned nesting v3",
+    },
 }
 
 

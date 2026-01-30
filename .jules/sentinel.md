@@ -54,3 +54,8 @@
 **Vulnerability:** Exception handlers in API endpoints and task runners were printing raw exception messages (`print(e)`) to stdout. If an exception contained a secret (e.g. database connection string with password), it would be leaked to logs.
 **Learning:** Even if client responses are sanitized (returning generic 500s), server-side logs must also be sanitized. Dynamic exceptions are unpredictable and can contain sensitive data.
 **Prevention:** Introduced `packages.quantum.security.masking.sanitize_exception` which uses regexes to mask known secret patterns (DB URLs, API keys, JWTs) before logging. Applied this to all catch-all exception handlers.
+
+## 2026-03-04 - [Fix] Legacy Auth on Internal Tasks
+**Vulnerability:** The `/internal/tasks/*` endpoints (e.g., `iv/daily-refresh`) relied on a legacy `verify_internal_task_request` (v1) authentication scheme which lacked nonce replay protection and key rotation, unlike the v4 scheme used for public tasks.
+**Learning:** When migrating authentication schemes, "internal" or "deprecated" endpoints are often overlooked. Having parallel router implementations (`/tasks` vs `/internal/tasks`) increases the risk of drift.
+**Prevention:** Enforce a single authentication dependency across all task-related routers. If deprecating an auth scheme, grepping for its usage should be part of the migration checklist.

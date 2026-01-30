@@ -1329,11 +1329,12 @@ async def task_paper_safety_close_one(
         today_end = today_start + timedelta(days=1)
 
         existing_safety_close = supabase.table("learning_trade_outcomes_v3") \
-            .select("id") \
+            .select("closed_at") \
             .eq("user_id", user_id) \
             .eq("is_paper", True) \
             .gte("closed_at", today_start.isoformat()) \
             .lt("closed_at", today_end.isoformat()) \
+            .limit(1) \
             .execute()
 
         # For strict idempotency, we'll track via a job_runs check

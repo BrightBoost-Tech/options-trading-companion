@@ -55,7 +55,7 @@ export default function SuggestionTabs({
           aria-controls="panel-morning"
           type="button"
           onClick={() => setActiveTab('morning')}
-          className={`flex-1 py-4 px-2 min-w-[120px] text-sm font-medium text-center border-b-2 transition-colors whitespace-nowrap ${
+          className={`flex-1 py-4 px-2 min-w-[120px] text-sm font-medium text-center border-b-2 transition-colors whitespace-nowrap focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-offset-2 focus-visible:ring-orange-500 ${
             activeTab === 'morning'
               ? 'border-orange-500 text-orange-600 bg-orange-50/50'
               : 'border-transparent text-gray-500 hover:text-gray-700'
@@ -79,7 +79,7 @@ export default function SuggestionTabs({
           aria-controls="panel-midday"
           type="button"
           onClick={() => setActiveTab('midday')}
-          className={`flex-1 py-4 px-2 min-w-[120px] text-sm font-medium text-center border-b-2 transition-colors whitespace-nowrap ${
+          className={`flex-1 py-4 px-2 min-w-[120px] text-sm font-medium text-center border-b-2 transition-colors whitespace-nowrap focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-offset-2 focus-visible:ring-blue-500 ${
             activeTab === 'midday'
               ? 'border-blue-500 text-blue-600 bg-blue-50/50'
               : 'border-transparent text-gray-500 hover:text-gray-700'
@@ -103,7 +103,7 @@ export default function SuggestionTabs({
           aria-controls="panel-rebalance"
           type="button"
           onClick={() => setActiveTab('rebalance')}
-          className={`flex-1 py-4 px-2 min-w-[120px] text-sm font-medium text-center border-b-2 transition-colors whitespace-nowrap ${
+          className={`flex-1 py-4 px-2 min-w-[120px] text-sm font-medium text-center border-b-2 transition-colors whitespace-nowrap focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-offset-2 focus-visible:ring-indigo-500 ${
             activeTab === 'rebalance'
               ? 'border-indigo-500 text-indigo-600 bg-indigo-50/50'
               : 'border-transparent text-gray-500 hover:text-gray-700'
@@ -127,7 +127,7 @@ export default function SuggestionTabs({
           aria-controls="panel-scout"
           type="button"
           onClick={() => setActiveTab('scout')}
-          className={`flex-1 py-4 px-2 min-w-[120px] text-sm font-medium text-center border-b-2 transition-colors whitespace-nowrap ${
+          className={`flex-1 py-4 px-2 min-w-[120px] text-sm font-medium text-center border-b-2 transition-colors whitespace-nowrap focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-offset-2 focus-visible:ring-green-500 ${
             activeTab === 'scout'
               ? 'border-green-500 text-green-600 bg-green-50/50'
               : 'border-transparent text-gray-500 hover:text-gray-700'
@@ -151,7 +151,7 @@ export default function SuggestionTabs({
           aria-controls="panel-journal"
           type="button"
           onClick={() => setActiveTab('journal')}
-          className={`flex-1 py-4 px-2 min-w-[120px] text-sm font-medium text-center border-b-2 transition-colors whitespace-nowrap ${
+          className={`flex-1 py-4 px-2 min-w-[120px] text-sm font-medium text-center border-b-2 transition-colors whitespace-nowrap focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-offset-2 focus-visible:ring-purple-500 ${
             activeTab === 'journal'
               ? 'border-purple-500 text-purple-600 bg-purple-50/50'
               : 'border-transparent text-gray-500 hover:text-gray-700'
@@ -175,7 +175,7 @@ export default function SuggestionTabs({
           aria-controls="panel-weekly"
           type="button"
           onClick={() => setActiveTab('weekly')}
-          className={`flex-1 py-4 px-2 min-w-[120px] text-sm font-medium text-center border-b-2 transition-colors whitespace-nowrap ${
+          className={`flex-1 py-4 px-2 min-w-[120px] text-sm font-medium text-center border-b-2 transition-colors whitespace-nowrap focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-offset-2 focus-visible:ring-slate-500 ${
             activeTab === 'weekly'
               ? 'border-slate-500 text-slate-600 bg-slate-50/50'
               : 'border-transparent text-gray-500 hover:text-gray-700'

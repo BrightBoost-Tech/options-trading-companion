@@ -49,3 +49,11 @@
 ## 2025-06-02 - Multi-line Buttons
 **Learning:** The design system's `Button` component centers content and has a fixed height by default, breaking layout for list items containing titles and descriptions.
 **Action:** When using `Button` for multi-line content, apply `h-auto` and `flex-col items-start` classes to override default centering and height constraints while maintaining accessibility features.
+
+## 2025-06-03 - Custom Tabs Accessibility
+**Learning:** Custom tab implementations using raw `<button>` elements often lack focus rings, making them invisible to keyboard navigation. Using `focus-visible` utility classes restores accessibility without disrupting the mouse user experience.
+**Action:** When building custom tabs or navigation lists, explicitly add `focus-visible:ring-2` and `focus-visible:outline-none` to ensure keyboard focus is visible.
+
+## 2025-06-03 - Standardizing Loading States
+**Learning:** Custom buttons often implement ad-hoc loading states (e.g. manually disabling and changing text), leading to inconsistent UI. The design system's `Button` component handles `loading` prop uniformly (spinner + text preservation or replacement).
+**Action:** When refactoring legacy buttons, switch to `Button` component and map custom loading logic to the `loading` prop to ensure consistent behavior.

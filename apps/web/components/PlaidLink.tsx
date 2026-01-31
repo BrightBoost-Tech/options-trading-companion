@@ -2,6 +2,7 @@
 
 import { useEffect, useState, useCallback, useRef } from 'react';
 import { usePlaidLink, PlaidLinkOptions } from 'react-plaid-link';
+import { Button } from '@/components/ui/button';
 import { fetchWithAuth } from '@/lib/api';
 import { API_URL } from '@/lib/constants';
 import { logEvent } from '@/lib/analytics';
@@ -158,24 +159,14 @@ export default function PlaidLink({ userId, onSuccess, onExit }: PlaidLinkProps)
 
   return (
     <div className="space-y-3">
-      <button
+      <Button
         onClick={fetchToken}
         disabled={loading || !!linkToken}
-        className={`px-6 py-3 rounded-lg font-medium transition-all shadow-sm flex items-center gap-2
-          ${loading || linkToken
-            ? 'bg-gray-100 text-gray-500 cursor-wait'
-            : 'bg-green-600 text-white hover:bg-green-700 hover:shadow-md'}
-        `}
+        loading={loading || !!linkToken}
+        className="bg-green-600 hover:bg-green-700 text-white shadow-sm hover:shadow-md h-12 px-6"
       >
-        {loading || linkToken ? (
-           <>
-             <div className="h-4 w-4 border-2 border-gray-400 border-t-transparent rounded-full animate-spin"></div>
-             <span>{loading ? 'Preparing...' : 'Opening Plaid...'}</span>
-           </>
-        ) : (
-           'Connect Broker Account'
-        )}
-      </button>
+        {loading ? 'Preparing...' : (linkToken ? 'Opening Plaid...' : 'Connect Broker Account')}
+      </Button>
 
       <div className="flex flex-col gap-1">
           <p className="text-xs text-gray-500 flex items-center gap-1">

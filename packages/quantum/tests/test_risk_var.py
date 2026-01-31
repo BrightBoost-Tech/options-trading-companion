@@ -81,17 +81,22 @@ def test_monotonicity():
 
     assert cvar_99 > cvar_95
 
-def test_fallback_logic():
-    # Simulate missing scipy by patching the module attribute SCIPY_AVAILABLE
-    with patch.object(risk_var_module, 'SCIPY_AVAILABLE', False):
-        # 95% should return approx 1.645
-        z_95 = risk_var_module._get_z_score(0.95)
-        assert abs(z_95 - 1.64485) < 0.01
+def test_fast_math_accuracy():
+    # We replaced scipy with a fast math implementation.
+    # We verify it maintains high accuracy across different alphas.
 
-        # 99% should return approx 2.326
-        z_99 = risk_var_module._get_z_score(0.99)
-        assert abs(z_99 - 2.326) < 0.01
+    # 95% -> 1.64485
+    z_95 = risk_var_module._get_z_score(0.95)
+    assert abs(z_95 - 1.64485) < 0.0001
 
-        # Fallback default
-        z_other = risk_var_module._get_z_score(0.90)
-        assert z_other == 1.645 # Logic falls back to 1.645 for unknown alphas in non-scipy mode
+    # 99% -> 2.32634
+    z_99 = risk_var_module._get_z_score(0.99)
+    assert abs(z_99 - 2.32634) < 0.0001
+
+    # 90% -> 1.28155 (Previously this would fallback to 1.645 if scipy missing)
+    z_90 = risk_var_module._get_z_score(0.90)
+    assert abs(z_90 - 1.28155) < 0.0001
+
+    # Extreme tail: 99.9% -> 3.09023
+    z_999 = risk_var_module._get_z_score(0.999)
+    assert abs(z_999 - 3.09023) < 0.0001

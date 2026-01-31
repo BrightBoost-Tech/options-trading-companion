@@ -102,6 +102,9 @@ app = FastAPI(
 # Diagnostic endpoint to confirm backend is running correctly
 @app.get("/__whoami")
 def __whoami():
+    # 🛡️ Sentinel: Hide diagnostic info in production
+    if not is_debug_routes_enabled():
+        raise HTTPException(status_code=404, detail="Not Found")
     return {"server": "packages.quantum.api", "version": APP_VERSION}
 
 
@@ -110,12 +113,17 @@ def health_check():
     # 🛡️ Sentinel: Minimal exposure for health check
     is_connected = SUPABASE_STATUS.get("ok", False)
 
-    return {
+    response = {
         "status": "ok",
-        "app_env": os.getenv("APP_ENV"),
         "database_connected": is_connected,
         "env_loaded": os.path.exists(env_path)
     }
+
+    # Only expose app_env in non-production environments
+    if not is_production_env():
+        response["app_env"] = os.getenv("APP_ENV")
+
+    return response
 
 
 # =============================================================================

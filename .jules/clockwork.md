@@ -22,3 +22,8 @@
 **Issue:** Alert fingerprints in `ops_health_service.py` were non-deterministic because they hashed the `stale_symbols` list, which was constructed from iterating over a dictionary (`snapshots.items()`). The dictionary population order depended on concurrent thread completion order in `MarketDataTruthLayer`.
 **Learning:** `compute_content_hash` preserves list order (unlike sets/dicts which it sorts). Any list fed into a hash function must be explicitly sorted if its source is not order-guaranteed (e.g., parallel results, dict keys).
 **Prevention:** Always apply `sorted()` to lists derived from unordered sources before using them in identity hashing or signatures.
+
+## 2025-02-27 - Analytics Event Hashing
+**Issue:** `AnalyticsService` used a local `canonical_json` with `json.dumps(default=str)`, causing potential nondeterminism for sets and floats in analytics event keys.
+**Learning:** `default=str` is pervasive and should be aggressively hunted down. Even code labeled "canonical" might be flawed if it relies on standard `json` defaults.
+**Prevention:** Refactored `AnalyticsService` to use `packages.quantum.observability.canonical`.

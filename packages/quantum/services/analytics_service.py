@@ -18,6 +18,11 @@ import uuid
 from datetime import datetime, timezone
 from typing import Optional, Dict, Any, Tuple
 
+from packages.quantum.observability.canonical import (
+    compute_content_hash,
+    canonical_json_bytes,
+)
+
 
 def canonical_json(data: Dict[str, Any]) -> str:
     """
@@ -34,13 +39,7 @@ def canonical_json(data: Dict[str, Any]) -> str:
     """
     if data is None:
         data = {}
-    return json.dumps(
-        data,
-        sort_keys=True,
-        separators=(',', ':'),
-        ensure_ascii=True,
-        default=str
-    )
+    return canonical_json_bytes(data).decode("utf-8")
 
 
 def compute_payload_hash(payload: Dict[str, Any]) -> str:
@@ -53,8 +52,9 @@ def compute_payload_hash(payload: Dict[str, Any]) -> str:
     Returns:
         64-character hex string (SHA256)
     """
-    canonical = canonical_json(payload)
-    return hashlib.sha256(canonical.encode('utf-8')).hexdigest()
+    if payload is None:
+        payload = {}
+    return compute_content_hash(payload)
 
 
 def compute_analytics_event_key(

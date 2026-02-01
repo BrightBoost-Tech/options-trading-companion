@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState } from 'react';
+import React, { useState, memo } from 'react';
 import { Card, CardContent } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -80,7 +80,7 @@ const isPaperExecuteAllowed = (mode: CardMode): boolean => {
 const safeFixed = (value: number | null | undefined, digits = 2) =>
   typeof value === "number" ? value.toFixed(digits) : "--";
 
-export default function TradeSuggestionCard({ suggestion, onLogged, mode = 'DEFAULT' }: TradeSuggestionCardProps) {
+const TradeSuggestionCard = ({ suggestion, onLogged, mode = 'DEFAULT' }: TradeSuggestionCardProps) => {
   const [evPreview, setEvPreview] = useState<any | null>(null);
   const [evLoading, setEvLoading] = useState(false);
   const [evError, setEvError] = useState<string | null>(null);
@@ -474,4 +474,6 @@ export default function TradeSuggestionCard({ suggestion, onLogged, mode = 'DEFA
       </CardContent>
     </Card>
   );
-}
+};
+
+export default memo(TradeSuggestionCard);

@@ -57,3 +57,7 @@
 ## 2025-06-03 - Standardizing Loading States
 **Learning:** Custom buttons often implement ad-hoc loading states (e.g. manually disabling and changing text), leading to inconsistent UI. The design system's `Button` component handles `loading` prop uniformly (spinner + text preservation or replacement).
 **Action:** When refactoring legacy buttons, switch to `Button` component and map custom loading logic to the `loading` prop to ensure consistent behavior.
+
+## 2025-06-05 - Reusable Empty States
+**Learning:** Empty states in list views are often neglected and inconsistent. A dedicated `EmptyState` component with icon support and proper typography ensures that "zero data" is a deliberate, polished state rather than an error or afterthought.
+**Action:** Replace inline "No data" messages with the `EmptyState` component to provide consistent visual feedback and actionable guidance.

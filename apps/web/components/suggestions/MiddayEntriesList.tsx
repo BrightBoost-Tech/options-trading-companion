@@ -1,8 +1,10 @@
 'use client';
 
 import React from 'react';
+import { Sun } from 'lucide-react';
 import { Suggestion } from '@/lib/types';
 import SuggestionCard from '../dashboard/SuggestionCard';
+import { EmptyState } from '@/components/ui/empty-state';
 
 interface MiddayEntriesListProps {
   suggestions: Suggestion[];
@@ -11,9 +13,11 @@ interface MiddayEntriesListProps {
 export default function MiddayEntriesList({ suggestions }: MiddayEntriesListProps) {
   if (suggestions.length === 0) {
       return (
-        <div className="text-center py-10 text-gray-400">
-          <p>No midday suggestions.</p>
-        </div>
+        <EmptyState
+          icon={Sun}
+          title="No midday suggestions"
+          description="Midday opportunities will appear here as market conditions evolve."
+        />
       );
   }
 

@@ -60,8 +60,9 @@ def is_localhost(request: Request) -> bool:
     # If direct connection is local, check for proxy headers
     forwarded_for = request.headers.get("X-Forwarded-For")
     if forwarded_for:
-        # Get the first IP (original client)
-        real_ip = forwarded_for.split(",")[0].strip()
+        # Get the LAST IP (the one that connected to our trusted proxy)
+        # Prevents spoofing where attacker injects IP at start of list
+        real_ip = forwarded_for.split(",")[-1].strip()
         return real_ip in ("127.0.0.1", "::1", "localhost", "testclient")
 
     return True

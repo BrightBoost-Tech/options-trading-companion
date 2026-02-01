@@ -1,8 +1,10 @@
 'use client';
 
 import React from 'react';
+import { Sunrise } from 'lucide-react';
 import { Suggestion } from '@/lib/types';
 import SuggestionCard from '../dashboard/SuggestionCard';
+import { EmptyState } from '@/components/ui/empty-state';
 
 interface MorningOrdersListProps {
   suggestions: Suggestion[];
@@ -11,9 +13,11 @@ interface MorningOrdersListProps {
 export default function MorningOrdersList({ suggestions }: MorningOrdersListProps) {
   if (suggestions.length === 0) {
     return (
-      <div className="text-center py-10 text-gray-400">
-        <p>No morning suggestions.</p>
-      </div>
+      <EmptyState
+        icon={Sunrise}
+        title="No morning suggestions"
+        description="Check back before the market opens for new trade ideas."
+      />
     );
   }
 

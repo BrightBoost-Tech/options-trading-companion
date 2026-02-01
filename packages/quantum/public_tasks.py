@@ -7,6 +7,7 @@ from datetime import datetime, timedelta, timezone
 
 logger = logging.getLogger(__name__)
 
+from packages.quantum.observability.canonical import canonical_json_bytes
 from packages.quantum.jobs.rq_enqueue import enqueue_idempotent
 from packages.quantum.jobs.job_runs import JobRunStore
 from packages.quantum.security.task_signing_v4 import verify_task_signature, TaskSignatureResult
@@ -1096,7 +1097,7 @@ async def task_validation_autopromote_cohort(
         # 5. Promote: Update v3_go_live_state
         now = datetime.now(timezone.utc)
         supabase.table("v3_go_live_state").update({
-            "paper_forward_policy": json.dumps(overrides),
+            "paper_forward_policy": canonical_json_bytes(overrides).decode("utf-8"),
             "paper_forward_policy_source": "auto_promote",
             "paper_forward_policy_set_at": now.isoformat(),
             "paper_forward_policy_cohort": cohort_name,

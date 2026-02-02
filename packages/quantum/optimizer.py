@@ -27,7 +27,8 @@ from packages.quantum.nested_logging import log_inference, log_decision
 from packages.quantum.nested.adapters import load_symbol_adapters, apply_biases
 from packages.quantum.nested.backbone import compute_macro_features, infer_global_context, log_global_context
 from packages.quantum.nested.session import load_session_state, refresh_session_from_db, get_session_sigma_scale
-from packages.quantum.security import get_current_user_id
+from packages.quantum.security import get_current_user_id, is_localhost
+from packages.quantum.security.config import is_debug_routes_enabled
 from fastapi import Request
 
 from packages.quantum.models import Spread, SpreadLeg, SpreadPosition
@@ -644,11 +645,27 @@ async def optimize_portfolio(req: OptimizationRequest, request: Request, user_id
         raise HTTPException(status_code=500, detail="Optimization failed")
 
 @router.get("/diagnostics/phase1")
-async def run_phase1_test():
+@limiter.limit("5/minute")
+async def run_phase1_test(request: Request):
+    # 🛡️ Sentinel: Secure diagnostic endpoints
+    if not is_debug_routes_enabled():
+        raise HTTPException(status_code=404, detail="Not Found")
+
+    if not is_localhost(request):
+        raise HTTPException(status_code=403, detail="Forbidden: Localhost only")
+
     return {"status": "ok", "message": "Phase 1 test not modified in this update"}
 
 @router.post("/diagnostics/phase2/qci_uplink")
-async def verify_qci_uplink():
+@limiter.limit("5/minute")
+async def verify_qci_uplink(request: Request):
+    # 🛡️ Sentinel: Secure diagnostic endpoints
+    if not is_debug_routes_enabled():
+        raise HTTPException(status_code=404, detail="Not Found")
+
+    if not is_localhost(request):
+        raise HTTPException(status_code=403, detail="Forbidden: Localhost only")
+
     return {"status": "ok", "message": "Phase 2 test not modified"}
 
 

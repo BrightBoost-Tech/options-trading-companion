@@ -59,3 +59,8 @@
 **Vulnerability:** The `/internal/tasks/*` endpoints (e.g., `iv/daily-refresh`) relied on a legacy `verify_internal_task_request` (v1) authentication scheme which lacked nonce replay protection and key rotation, unlike the v4 scheme used for public tasks.
 **Learning:** When migrating authentication schemes, "internal" or "deprecated" endpoints are often overlooked. Having parallel router implementations (`/tasks` vs `/internal/tasks`) increases the risk of drift.
 **Prevention:** Enforce a single authentication dependency across all task-related routers. If deprecating an auth scheme, grepping for its usage should be part of the migration checklist.
+
+## 2026-05-24 - [Fix] Exposed Diagnostic Endpoints
+**Vulnerability:** Diagnostic endpoints (`/diagnostics/phase1` and `/diagnostics/phase2/qci_uplink`) in `optimizer.py` were publicly exposed without authentication, rate limiting, or environment checks.
+**Learning:** Endpoints added for testing or diagnostics often escape standard security reviews if they are not part of the main API surface or are considered "stubs". Even stubs can be used for fingerprinting or DoS.
+**Prevention:** All endpoints, including diagnostics, must be protected by `is_debug_routes_enabled()` and restricted to localhost/admin access. Rate limiting must be applied by default or explicitly.

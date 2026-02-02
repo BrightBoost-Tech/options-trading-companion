@@ -27,3 +27,8 @@
 **Issue:** `AnalyticsService` used a local `canonical_json` with `json.dumps(default=str)`, causing potential nondeterminism for sets and floats in analytics event keys.
 **Learning:** `default=str` is pervasive and should be aggressively hunted down. Even code labeled "canonical" might be flawed if it relies on standard `json` defaults.
 **Prevention:** Refactored `AnalyticsService` to use `packages.quantum.observability.canonical`.
+
+## 2025-03-01 - Mixed Key Types in Canonicalization
+**Issue:** `compute_content_hash` crashed when processing dictionaries with mixed key types (e.g., `str` and `int`) or non-standard keys (e.g., `datetime`), because Python's `sorted()` raises `TypeError` on mixed/complex types, and `json.dumps(sort_keys=True)` strictly requires basic key types.
+**Learning:** To create a truly robust canonical serializer for arbitrary internal state, we must handle key sorting and stringification explicitly before handing off to `json.dumps`. Stringifying keys provides a stable sort order for mixed types and allows complex objects to be used as keys (via their string representation).
+**Prevention:** Updated `_normalize_value` in `canonical.py` to stringify keys and sort by string representation. This ensures robustness against mixed keys and supports broader key types without breaking JSON compatibility.

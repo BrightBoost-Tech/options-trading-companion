@@ -172,7 +172,7 @@ def _normalize_value(value: Any) -> Any:
     - Datetimes: ISO Z format
     """
     if isinstance(value, dict):
-        return {k: _normalize_value(v) for k, v in sorted(value.items())}
+        return {str(k): _normalize_value(v) for k, v in sorted(value.items(), key=lambda i: str(i[0]))}
 
     if isinstance(value, (list, tuple)):
         return [_normalize_value(v) for v in value]

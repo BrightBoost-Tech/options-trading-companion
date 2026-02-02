@@ -33,7 +33,8 @@ def test_select_legs_persists_quotes():
         {"delta_target": 0.5, "side": "buy", "type": "call"}
     ]
 
-    legs, cost = _select_legs_from_chain(chain, leg_defs, current_price=400.0)
+    # calls=chain, puts=[], leg_defs=leg_defs
+    legs, cost = _select_legs_from_chain(chain, [], leg_defs, current_price=400.0)
 
     assert len(legs) == 1
     leg = legs[0]

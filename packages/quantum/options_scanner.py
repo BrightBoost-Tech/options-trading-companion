@@ -2,6 +2,7 @@ import os
 import math
 import requests
 import numpy as np
+import operator
 from datetime import datetime, timedelta, timezone, date
 from typing import List, Dict, Any, Optional
 from supabase import Client
@@ -1175,8 +1176,9 @@ def scan_for_opportunities(
                 elif ctype == 'put':
                     puts_list.append(c)
 
-            calls_sorted = sorted(calls_list, key=lambda x: x['strike'])
-            puts_sorted = sorted(puts_list, key=lambda x: x['strike'])
+            # Bolt Optimization: Use operator.itemgetter for faster sort key access
+            calls_sorted = sorted(calls_list, key=operator.itemgetter('strike'))
+            puts_sorted = sorted(puts_list, key=operator.itemgetter('strike'))
 
             # Normalize Strategy Key early
             raw_strategy = suggestion["strategy"]

@@ -4,6 +4,7 @@ from supabase import Client
 import pandas as pd
 import numpy as np
 import concurrent.futures
+from packages.quantum.security.masking import sanitize_exception
 
 class IVRepository:
     """
@@ -114,12 +115,14 @@ class IVRepository:
             }
 
         except Exception as e:
-            print(f"[IVRepo] Error fetching context for {underlying}: {e}")
+            # 🛡️ Sentinel: Sanitize exception in logs and return generic error to client
+            sanitized_err = sanitize_exception(e)
+            print(f"[IVRepo] Error fetching context for {underlying}: {sanitized_err}")
             return {
                 "iv_30d": None,
                 "iv_rank": None,
                 "iv_regime": None,
-                "error": str(e)
+                "error": "Failed to retrieve IV context"
             }
 
     def get_iv_context_batch(self, symbols: List[str]) -> Dict[str, Any]:

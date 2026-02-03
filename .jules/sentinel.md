@@ -64,3 +64,7 @@
 **Vulnerability:** Diagnostic endpoints (`/diagnostics/phase1` and `/diagnostics/phase2/qci_uplink`) in `optimizer.py` were publicly exposed without authentication, rate limiting, or environment checks.
 **Learning:** Endpoints added for testing or diagnostics often escape standard security reviews if they are not part of the main API surface or are considered "stubs". Even stubs can be used for fingerprinting or DoS.
 **Prevention:** All endpoints, including diagnostics, must be protected by `is_debug_routes_enabled()` and restricted to localhost/admin access. Rate limiting must be applied by default or explicitly.
+## 2025-02-12 - Information Leak in Exception Handling
+**Vulnerability:** Raw exception strings (e.g., `str(e)`) were being returned in JSON error responses from the `IVRepository`.
+**Learning:** Developers often return `{"error": str(e)}` for convenience, but this leaks internal database details (connection strings, table names) if the exception is not sanitized.
+**Prevention:** Always use `sanitize_exception()` for logging and return generic error messages (e.g., "Internal Error") to the client.

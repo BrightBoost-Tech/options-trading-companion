@@ -132,6 +132,10 @@ class BacktestEngine:
         # Map dates to indices
         date_map = {d: i for i, d in enumerate(dates)}
 
+        # Pre-parse dates to datetime objects for faster iteration
+        # Optimization: parsing inside the loop is expensive (O(N) * strptime cost)
+        date_objs = [datetime.strptime(d, "%Y-%m-%d") for d in dates]
+
         # PR5: For options, fetch underlying prices for scoring
         # Option prices are dominated by theta decay, so scoring should use underlying trend
         underlying_symbol = None
@@ -153,8 +157,8 @@ class BacktestEngine:
 
         # Determine start index
         start_idx = -1
-        for i, d in enumerate(dates):
-            if datetime.strptime(d, "%Y-%m-%d") >= start_dt:
+        for i, d_obj in enumerate(date_objs):
+            if d_obj >= start_dt:
                 start_idx = i
                 break
 
@@ -208,6 +212,7 @@ class BacktestEngine:
         # 3. Loop
         for i in range(start_idx, len(dates)):
             current_date = dates[i]
+            current_date_obj = date_objs[i]
             current_price = prices[i]
 
             # Logic: Prefer underlying if available and aligned, else fallback to prices
@@ -262,7 +267,7 @@ class BacktestEngine:
                     elif conviction < 0.5: # Conviction lost
                         should_exit = True
                         exit_reason = "conviction_lost"
-                    elif (datetime.strptime(current_date, "%Y-%m-%d") - datetime.strptime(position["entry_date"], "%Y-%m-%d")).days > config.max_holding_days:
+                    elif (current_date_obj - position["_entry_date_dt"]).days > config.max_holding_days:
                         should_exit = True
                         exit_reason = "time_exit"
                     elif i == len(dates) - 1: # End of data
@@ -338,7 +343,7 @@ class BacktestEngine:
 
                     if rolling_mode:
                         # Resolve contract for this entry date
-                        entry_date_obj = datetime.strptime(current_date, "%Y-%m-%d").date()
+                        entry_date_obj = current_date_obj.date()
                         resolved_contract = option_resolver.resolve_contract_asof(
                             underlying=underlying_for_rolling,
                             right=rolling_options.get("right", "call"),
@@ -385,6 +390,7 @@ class BacktestEngine:
                             position = {
                                 "trade_id": trade_id,
                                 "entry_date": current_date,
+                                "_entry_date_dt": current_date_obj,
                                 "entry_price": fill.fill_price,
                                 "ideal_entry": ideal_price,
                                 "quantity": fill.filled_quantity,

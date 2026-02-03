@@ -3,6 +3,8 @@
 import { useState, useRef, useCallback, useEffect } from 'react';
 import PlaidLink from '@/components/PlaidLink';
 import DashboardLayout from '@/components/DashboardLayout';
+import { Button } from '@/components/ui/button';
+import { Unplug, CheckCircle2 } from 'lucide-react';
 import { supabase } from '@/lib/supabase';
 import { fetchWithAuth } from '@/lib/api';
 import { API_URL } from '@/lib/constants';
@@ -110,17 +112,26 @@ export default function SettingsPage() {
           )}
 
           {connectedInstitution ? (
-             <div className="bg-green-50 border border-green-200 p-4 rounded-lg flex items-center justify-between">
-                <div>
-                   <h3 className="text-lg font-medium text-green-900">✅ Connected</h3>
-                   <p className="text-sm text-green-700">Linked to: {connectedInstitution}</p>
+             <div className="bg-green-50/50 dark:bg-green-900/20 border border-green-200 dark:border-green-900 p-4 rounded-lg flex items-center justify-between">
+                <div className="flex items-center gap-3">
+                   <div className="h-10 w-10 rounded-full bg-green-100 dark:bg-green-900/40 flex items-center justify-center">
+                     <CheckCircle2 className="h-6 w-6 text-green-600 dark:text-green-400" />
+                   </div>
+                   <div>
+                      <h3 className="text-base font-medium text-green-900 dark:text-green-100">Connected</h3>
+                      <p className="text-sm text-green-700 dark:text-green-300">Linked to <span className="font-semibold">{connectedInstitution}</span></p>
+                   </div>
                 </div>
-                <button
+                <Button
+                  variant="ghost"
+                  size="sm"
                   onClick={() => setConnectedInstitution(null)}
-                  className="px-3 py-1 text-sm text-green-800 underline hover:text-green-900"
+                  className="text-red-600 hover:text-red-700 hover:bg-red-50 dark:hover:bg-red-900/20"
+                  aria-label="Disconnect broker account"
                 >
+                  <Unplug className="mr-2 h-4 w-4" />
                   Disconnect
-                </button>
+                </Button>
              </div>
           ) : (
             <div className="bg-gray-50 border border-gray-200 p-6 rounded-lg">

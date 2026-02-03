@@ -32,3 +32,8 @@
 **Issue:** `compute_content_hash` crashed when processing dictionaries with mixed key types (e.g., `str` and `int`) or non-standard keys (e.g., `datetime`), because Python's `sorted()` raises `TypeError` on mixed/complex types, and `json.dumps(sort_keys=True)` strictly requires basic key types.
 **Learning:** To create a truly robust canonical serializer for arbitrary internal state, we must handle key sorting and stringification explicitly before handing off to `json.dumps`. Stringifying keys provides a stable sort order for mixed types and allows complex objects to be used as keys (via their string representation).
 **Prevention:** Updated `_normalize_value` in `canonical.py` to stringify keys and sort by string representation. This ensures robustness against mixed keys and supports broader key types without breaking JSON compatibility.
+
+## 2025-03-02 - Numpy Support in Canonical Serialization
+**Issue:** `canonical.py` did not support numpy types (`np.integer`, `np.floating`, `np.ndarray`), causing `compute_content_hash` to crash or be nondeterministic (falling back to `str()`) when processing scientific data structures.
+**Learning:** Data science applications frequently mix numpy types with native types. A robust canonical serializer must explicitly handle numpy types by converting them to native equivalents (int, float, list) to ensure consistent hashing and prevent crashes in downstream consumers.
+**Prevention:** Enhanced `_normalize_value` in `packages/quantum/observability/canonical.py` to detect and convert numpy types to native Python types before serialization.

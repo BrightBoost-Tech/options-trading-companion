@@ -14,6 +14,11 @@ from datetime import datetime, timezone
 from decimal import Decimal, ROUND_HALF_UP
 from typing import Any, Union
 
+try:
+    import numpy as np
+except ImportError:
+    np = None
+
 # Precision for float normalization (6 decimal places)
 FLOAT_PRECISION = 6
 DECIMAL_QUANTIZE = Decimal(10) ** -FLOAT_PRECISION
@@ -176,6 +181,16 @@ def _normalize_value(value: Any) -> Any:
 
     if isinstance(value, (list, tuple)):
         return [_normalize_value(v) for v in value]
+
+    # Handle numpy types if available
+    if np is not None:
+        if isinstance(value, np.integer):
+            return int(value)
+        if isinstance(value, np.floating):
+            # Convert to float and let it fall through to float normalization
+            value = float(value)
+        if isinstance(value, np.ndarray):
+            return _normalize_value(value.tolist())
 
     if isinstance(value, float):
         # Handle special values

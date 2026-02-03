@@ -71,5 +71,36 @@ class TestCanonicalRobustness(unittest.TestCase):
         h2 = compute_content_hash({str((1, 2)): "val"})
         self.assertEqual(h, h2)
 
+    def test_numpy_types(self):
+        """
+        Verify that numpy types (integer, float, ndarray) are handled correctly.
+        """
+        try:
+            import numpy as np
+        except ImportError:
+            self.skipTest("numpy not installed")
+
+        data_numpy = {
+            "int": np.int64(42),
+            "float": np.float64(1.23456789),
+            "array": np.array([1, 2, 3]),
+            "nested": np.array([[1.0, 2.0], [3.0, 4.0]])
+        }
+
+        # Expected equivalent Python structure
+        # Note: floats are normalized to strings in hash computation,
+        # but here we just want to ensure it matches the native equivalent
+        data_native = {
+            "int": 42,
+            "float": 1.23456789,
+            "array": [1, 2, 3],
+            "nested": [[1.0, 2.0], [3.0, 4.0]]
+        }
+
+        h1 = compute_content_hash(data_numpy)
+        h2 = compute_content_hash(data_native)
+
+        self.assertEqual(h1, h2, "Numpy types should produce same hash as native types")
+
 if __name__ == "__main__":
     unittest.main()

@@ -69,6 +69,7 @@ def run(payload: Dict[str, Any], ctx: Any = None) -> Dict[str, Any]:
             failed = 0
             synced = 0
             skipped = 0
+            cycle_results = []  # Capture budget info per user
 
             for uid in active_users:
                 try:
@@ -102,7 +103,7 @@ def run(payload: Dict[str, Any], ctx: Any = None) -> Dict[str, Any]:
                         )
                         ctx.__enter__()
                         try:
-                            await run_midday_cycle(client, uid)
+                            cycle_result = await run_midday_cycle(client, uid)
                             ctx.commit(client, status="ok")
                         except Exception as cycle_err:
                             ctx.commit(client, status="failed", error_summary=str(cycle_err)[:500])
@@ -110,7 +111,11 @@ def run(payload: Dict[str, Any], ctx: Any = None) -> Dict[str, Any]:
                         finally:
                             ctx.__exit__(None, None, None)
                     else:
-                        await run_midday_cycle(client, uid)
+                        cycle_result = await run_midday_cycle(client, uid)
+
+                    # Capture cycle result for observability
+                    if cycle_result:
+                        cycle_results.append({"user_id": uid[:8], **cycle_result})
 
                     processed += 1
 
@@ -118,9 +123,9 @@ def run(payload: Dict[str, Any], ctx: Any = None) -> Dict[str, Any]:
                     notes.append(f"Failed for user {uid[:8]}...: {str(e)}")
                     failed += 1
 
-            return processed, failed, synced, skipped
+            return processed, failed, synced, skipped, cycle_results
 
-        processed, failed, synced, skipped = run_async(process_users())
+        processed, failed, synced, skipped, cycle_results = run_async(process_users())
         counts["processed"] = processed
         counts["failed"] = failed
         counts["synced"] = synced
@@ -134,6 +139,7 @@ def run(payload: Dict[str, Any], ctx: Any = None) -> Dict[str, Any]:
             "timing_ms": timing_ms,
             "strategy_name": strategy_name,
             "notes": notes[:20],  # Limit notes to avoid huge payloads
+            "cycle_results": cycle_results[:10],  # Budget/reason info per user
         }
 
     except ValueError as e:

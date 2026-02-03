@@ -331,6 +331,12 @@ class RiskBudgetEngine:
         total_equity = deployable_capital + positions_value
         if total_equity <= 0: total_equity = 1.0
 
+        # Guardrail: detect capital basis mismatch (positions sized for higher capital)
+        if current_risk_usage > deployable_capital * 2 and deployable_capital > 0:
+            diagnostics.append(
+                f"capital_mismatch:usage={current_risk_usage:.2f},deployable={deployable_capital:.2f}"
+            )
+
         # 2. Determine Global Caps (Regime Based)
         global_caps_map = {
             RegimeState.SUPPRESSED: 0.50,

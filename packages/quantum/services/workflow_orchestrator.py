@@ -1708,7 +1708,17 @@ async def run_midday_cycle(supabase: Client, user_id: str):
     can_scan, scan_reason = CapitalScanPolicy.can_scan(deployable_capital)
     if not can_scan:
         print(f"Skipping scan: {scan_reason}")
-        return
+        return {
+            "skipped": True,
+            "reason": scan_reason,
+            "budget": {
+                "deployable_capital": deployable_capital,
+                "cap": 0,
+                "usage": 0,
+                "remaining": 0,
+            },
+            "counts": {"candidates": 0, "created": 0},
+        }
 
     # V3: Compute Global Regime Snapshot ONCE
     truth_layer = MarketDataTruthLayer()
@@ -1776,7 +1786,19 @@ async def run_midday_cycle(supabase: Client, user_id: str):
              )
          except Exception as e:
              print(f"Error logging global veto: {e}")
-         return
+         return {
+             "skipped": True,
+             "reason": "global_risk_budget_exhausted",
+             "budget": {
+                 "deployable_capital": deployable_capital,
+                 "cap": max_global,
+                 "usage": usage_global,
+                 "remaining": remaining_global,
+                 "regime": budgets.regime,
+                 "diagnostics": budgets.diagnostics,
+             },
+             "counts": {"candidates": 0, "created": 0},
+         }
 
     # 2. Call Scanner (market-wide)
     candidates = []
@@ -1848,11 +1870,33 @@ async def run_midday_cycle(supabase: Client, user_id: str):
 
         if not candidates:
             print("No candidates selected for midday entries.")
-            return
+            return {
+                "skipped": False,
+                "reason": "no_candidates",
+                "budget": {
+                    "deployable_capital": deployable_capital,
+                    "cap": max_global,
+                    "usage": usage_global,
+                    "remaining": remaining_global,
+                    "regime": budgets.regime,
+                },
+                "counts": {"candidates": 0, "created": 0},
+            }
 
     except Exception as e:
         print(f"Scanner failed: {e}")
-        return
+        return {
+            "skipped": True,
+            "reason": f"scanner_failed: {e}",
+            "budget": {
+                "deployable_capital": deployable_capital,
+                "cap": max_global,
+                "usage": usage_global,
+                "remaining": remaining_global,
+                "regime": budgets.regime,
+            },
+            "counts": {"candidates": 0, "created": 0},
+        }
 
     suggestions = []
 
@@ -2612,6 +2656,23 @@ async def run_midday_cycle(supabase: Client, user_id: str):
                 print(f"Logged {len(logs)} midday suggestions to ledger.")
         except Exception as e:
             print(f"Error logging midday suggestions: {e}")
+
+        return {
+            "skipped": False,
+            "reason": None,
+            "budget": {
+                "deployable_capital": deployable_capital,
+                "cap": max_global,
+                "usage": usage_global,
+                "remaining": remaining_global,
+                "regime": budgets.regime,
+            },
+            "counts": {
+                "candidates": len(candidates),
+                "created": inserts_count,
+                "existing": existing_count,
+            },
+        }
 
 
 async def run_weekly_report(supabase: Client, user_id: str):

@@ -6,9 +6,10 @@ logger = logging.getLogger(__name__)
 
 
 class CashService:
-    # If buying_power is below this in paper mode and snapshot was missing,
-    # fall back to paper_baseline_capital from v3_go_live_state.
-    _PAPER_CAPITAL_THRESHOLD = 1.0
+    # If buying_power is below this in paper mode, fall back to
+    # paper_baseline_capital from v3_go_live_state.  Matches the micro-tier
+    # scan minimum so paper accounts are never blocked by stale snapshots.
+    _PAPER_CAPITAL_THRESHOLD = 15.0
 
     def __init__(self, supabase: Client):
         self.supabase = supabase
@@ -66,10 +67,12 @@ class CashService:
                 print(f"CashService: error aggregating cash from positions: {e}")
                 buying_power = 0.0
 
-        # 2b. Paper-mode fallback: if snapshot was missing and buying_power
-        #     is still tiny, use paper_baseline_capital from v3_go_live_state.
-        if not snapshot_had_buying_power and (buying_power or 0) < self._PAPER_CAPITAL_THRESHOLD:
-            buying_power = self._paper_baseline_fallback(user_id, buying_power or 0.0)
+        # 2b. Paper-mode capital consistency: In paper mode, use the maximum of
+        #     current buying_power and paper_baseline_capital. This ensures
+        #     budget calculations are consistent with how positions were sized.
+        #     Without this, positions sized for 100k baseline would be checked
+        #     against a tiny budget cap if buying_power shows a stale small value.
+        buying_power = self._paper_baseline_fallback(user_id, buying_power or 0.0)
 
         # 3. Get Cash Buffer
         cash_buffer = 0.0
@@ -112,8 +115,13 @@ class CashService:
 
     def _paper_baseline_fallback(self, user_id: str, current_buying_power: float) -> float:
         """
-        Paper-mode fallback: read paper_baseline_capital from v3_go_live_state.
-        Only applies when global ops mode == "paper".
+        Paper-mode capital consistency: ensures deployable capital is at least
+        paper_baseline_capital when in paper mode.
+
+        This prevents a mismatch where positions sized for a 100k baseline are
+        checked against a tiny budget cap when buying_power shows a stale value.
+
+        Returns max(current_buying_power, paper_baseline_capital) in paper mode.
         Returns current_buying_power unchanged if not in paper mode or on error.
         """
         try:
@@ -138,11 +146,15 @@ class CashService:
         except Exception as e:
             logger.warning("[CAPITAL] Failed to read paper_baseline_capital, using default: %s", e)
 
-        logger.info(
-            "[CAPITAL] paper fallback used baseline=%s user_id=%s",
-            baseline, user_id,
-        )
-        return baseline
+        # Use max to ensure consistency: if positions were sized for baseline,
+        # budget calculations should use at least baseline
+        result = max(current_buying_power, baseline)
+        if result > current_buying_power:
+            logger.info(
+                "[CAPITAL] paper mode: using baseline=%s over buying_power=%s user_id=%s",
+                baseline, current_buying_power, user_id,
+            )
+        return result
 
     def check_capital_guardrail(self, cost_basis: float, deployable: float) -> bool:
         """Return True if this trade fits within deployable capital."""

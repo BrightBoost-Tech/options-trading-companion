@@ -441,7 +441,9 @@ def scout_weekly(request: Request, user_id: str = Depends(get_current_user)):
 # --- IV & Market Context Endpoints ---
 
 @app.get("/market/iv-context")
+@limiter.limit("20/minute")
 async def get_iv_context(
+    request: Request,
     symbol: str,
     supabase: Client = Depends(get_supabase_user_client)
 ):

@@ -286,10 +286,10 @@ export default function PortfolioOptimizer({ positions, onOptimizationComplete }
                 {isQuantum && <div className="absolute inset-0 bg-purple-500 blur-xl opacity-20 animate-pulse"></div>}
              </div>
              <div className="text-center space-y-1">
-                <p className="font-medium text-slate-800">
+                <p className="font-medium text-foreground">
                     {isQuantum ? "Accessing Quantum Backend..." : "Solving Quadratic Equation..."}
                 </p>
-                <p className="text-xs text-slate-400 font-mono">
+                <p className="text-xs text-muted-foreground font-mono">
                     {isQuantum ? "Constructing Hamiltonian (N³ Tensor)" : "Calculating Covariance Matrix"}
                 </p>
              </div>
@@ -312,13 +312,13 @@ export default function PortfolioOptimizer({ positions, onOptimizationComplete }
 
             {/* 1b. Portfolio Stats (Compounding Mode) */}
             {results.portfolio_stats && (
-                <div className="flex justify-between px-3 py-2 bg-slate-50 border border-slate-100 rounded-lg text-xs">
+                <div className="flex justify-between px-3 py-2 bg-muted border border-border rounded-lg text-xs">
                     <div className="flex flex-col">
-                        <span className="text-[10px] text-slate-400 uppercase">Drawdown Risk</span>
-                        <span className="font-bold text-slate-700">{results.portfolio_stats.projected_drawdown_risk}</span>
+                        <span className="text-[10px] text-muted-foreground uppercase">Drawdown Risk</span>
+                        <span className="font-bold text-foreground">{results.portfolio_stats.projected_drawdown_risk}</span>
                     </div>
                     <div className="flex flex-col text-right">
-                        <span className="text-[10px] text-slate-400 uppercase">Velocity</span>
+                        <span className="text-[10px] text-muted-foreground uppercase">Velocity</span>
                         <span className="font-bold text-emerald-600">{results.portfolio_stats.growth_velocity}</span>
                     </div>
                 </div>
@@ -329,7 +329,7 @@ export default function PortfolioOptimizer({ positions, onOptimizationComplete }
               <MetricTile
                 label="Exp. Return"
                 value={metrics?.expected_return !== undefined ? `${(metrics.expected_return * 100).toFixed(1)}%` : "--"}
-                color="text-slate-900"
+                color="text-foreground"
               />
               <MetricTile
                 label="Sharpe"
@@ -339,40 +339,40 @@ export default function PortfolioOptimizer({ positions, onOptimizationComplete }
               <MetricTile
                 label="Tail Risk"
                 value={metrics?.tail_risk_score !== undefined ? metrics.tail_risk_score.toFixed(4) : "--"}
-                color={isQuantum ? "text-purple-600" : "text-slate-500"}
+                color={isQuantum ? "text-purple-600" : "text-muted-foreground"}
                 active={isQuantum}
               />
             </div>
 
             {/* 3. Trades List */}
             <div>
-              <h3 className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-3">
+              <h3 className="text-[10px] font-bold text-muted-foreground uppercase tracking-widest mb-3">
                 Strategic Rebalance
               </h3>
               <div className="space-y-2">
                 {trades.length === 0 ? (
-                    <div className="p-4 bg-slate-50 rounded-lg text-center border border-slate-100">
+                    <div className="p-4 bg-muted rounded-lg text-center border border-border">
                         <CheckCircle className="w-5 h-5 text-emerald-500 mx-auto mb-2" />
-                        <p className="text-sm text-slate-600">Portfolio is optimal.</p>
+                        <p className="text-sm text-muted-foreground">Portfolio is optimal.</p>
                     </div>
                 ) : (
                     trades.map((trade, idx) => (
-                      <div key={idx} className="flex items-center justify-between p-3 bg-white rounded-lg border border-slate-100 shadow-sm hover:shadow-md transition-shadow">
+                      <div key={idx} className="flex items-center justify-between p-3 bg-card rounded-lg border border-border shadow-sm hover:shadow-md transition-shadow">
                         <div className="flex items-center gap-3">
                           <span className={clsx(
                               "px-2.5 py-1 rounded text-[10px] font-bold uppercase tracking-wider",
-                              trade.action === 'BUY' ? 'bg-emerald-100 text-emerald-700' : 'bg-rose-100 text-rose-700'
+                              trade.action === 'BUY' ? "bg-emerald-100 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-400" : "bg-rose-100 text-rose-700 dark:bg-rose-900/30 dark:text-rose-400"
                           )}>
                             {trade.action}
                           </span>
                           <div>
-                            <span className="font-bold text-sm text-slate-800">{trade.display_symbol ?? trade.symbol}</span>
-                            <span className="text-xs text-slate-500 ml-2">x {trade.est_quantity}</span>
+                            <span className="font-bold text-sm text-foreground">{trade.display_symbol ?? trade.symbol}</span>
+                            <span className="text-xs text-muted-foreground ml-2">x {trade.est_quantity}</span>
                           </div>
                         </div>
                         <div className="text-right">
-                            <div className="text-sm font-bold text-slate-700">${trade.value.toLocaleString()}</div>
-                            <div className="text-[10px] text-slate-400">{trade.rationale}</div>
+                            <div className="text-sm font-bold text-foreground">${trade.value.toLocaleString()}</div>
+                            <div className="text-[10px] text-muted-foreground">{trade.rationale}</div>
                         </div>
                       </div>
                     ))
@@ -399,10 +399,10 @@ export default function PortfolioOptimizer({ positions, onOptimizationComplete }
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}
             exit={{ opacity: 0 }}
-            className="absolute inset-0 bg-white/95 backdrop-blur-md z-20 flex flex-col p-6"
+            className="absolute inset-0 bg-background/95 backdrop-blur-md z-20 flex flex-col p-6"
           >
              <div className="flex justify-between items-center mb-6">
-                <h3 className="font-bold text-lg text-slate-800">System Diagnostics</h3>
+                <h3 className="font-bold text-lg text-foreground">System Diagnostics</h3>
                 <Button
                     variant="ghost"
                     size="icon"
@@ -414,7 +414,7 @@ export default function PortfolioOptimizer({ positions, onOptimizationComplete }
              </div>
 
              {isDiagLoading ? (
-                <div className="flex-1 flex flex-col items-center justify-center text-slate-400 space-y-3">
+                <div className="flex-1 flex flex-col items-center justify-center text-muted-foreground space-y-3">
                     <Zap className="w-8 h-8 animate-bounce text-yellow-500" />
                     <span className="text-sm font-mono">Running Unit Tests...</span>
                 </div>
@@ -422,7 +422,7 @@ export default function PortfolioOptimizer({ positions, onOptimizationComplete }
                 <div className="space-y-4">
                     <div className={clsx(
                         "p-4 rounded-lg border flex items-center gap-3",
-                        diagnostic.test_passed ? "bg-emerald-50 border-emerald-200" : "bg-red-50 border-red-200"
+                        diagnostic.test_passed ? "bg-emerald-50 border-emerald-200 dark:bg-emerald-900/10 dark:border-emerald-900/30" : "bg-red-50 border-red-200 dark:bg-red-900/10 dark:border-red-900/30"
                     )}>
                         {diagnostic.test_passed
                             ? <CheckCircle className="text-emerald-600 w-6 h-6"/>
@@ -436,8 +436,8 @@ export default function PortfolioOptimizer({ positions, onOptimizationComplete }
                     </div>
 
                     <div className="grid grid-cols-2 gap-3 text-[10px] font-mono">
-                        <div className="bg-slate-100 p-3 rounded">
-                            <div className="text-slate-500 mb-1">CLASSICAL (MVO)</div>
+                        <div className="bg-muted p-3 rounded">
+                            <div className="text-muted-foreground mb-1">CLASSICAL (MVO)</div>
                             <div className="flex justify-between"><span>SAFE:</span> <span>{diagnostic.classical_weights?.SAFE}</span></div>
                             <div className="flex justify-between"><span>RISKY:</span> <span>{diagnostic.classical_weights?.RISKY}</span></div>
                         </div>
@@ -470,7 +470,7 @@ function OptimizationBadge({ mode }: { mode: string }) {
     // New: Specific Trial Badges
     if (mode.includes('Quota')) {
         return (
-            <div className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-amber-50 text-amber-700 border border-amber-100">
+            <div className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-amber-100 text-amber-800 dark:bg-amber-900/30 dark:text-amber-400 border border-amber-100 dark:border-amber-900">
                 <AlertTriangle className="w-3 h-3" />
                 <span className="text-[10px] font-bold tracking-wide uppercase">Trial Quota Exceeded (Simulated)</span>
             </div>
@@ -478,7 +478,7 @@ function OptimizationBadge({ mode }: { mode: string }) {
     }
     if (mode.includes('Limit')) {
         return (
-            <div className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-blue-50 text-blue-700 border border-blue-100">
+            <div className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-blue-100 text-blue-800 dark:bg-blue-900/30 dark:text-blue-400 border border-blue-100 dark:border-blue-900">
                 <ShieldCheck className="w-3 h-3" />
                 <span className="text-[10px] font-bold tracking-wide uppercase">Asset Limit (Simulated)</span>
             </div>
@@ -486,7 +486,7 @@ function OptimizationBadge({ mode }: { mode: string }) {
     }
     if (mode.includes('Surrogate')) {
         return (
-            <div className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-blue-50 text-blue-700 border border-blue-100">
+            <div className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-blue-100 text-blue-800 dark:bg-blue-900/30 dark:text-blue-400 border border-blue-100 dark:border-blue-900">
                 <Cpu className="w-3 h-3" />
                 <span className="text-[10px] font-bold tracking-wide uppercase">Quantum Surrogate</span>
             </div>
@@ -501,7 +501,7 @@ function OptimizationBadge({ mode }: { mode: string }) {
         )
     }
     return (
-        <div className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-slate-100 text-slate-600">
+        <div className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-muted text-muted-foreground">
             <Activity className="w-3 h-3" />
             <span className="text-[10px] font-bold tracking-wide uppercase">Classical Algorithm</span>
         </div>
@@ -519,9 +519,9 @@ function MetricTile({ label, value, color, active = false }: MetricTileProps) {
     return (
         <div className={clsx(
             "p-3 rounded-lg border transition-colors",
-            active ? "bg-purple-50 border-purple-200" : "bg-slate-50 border-slate-100"
+            active ? "bg-purple-50 dark:bg-purple-900/20 border-purple-200 dark:border-purple-800" : "bg-muted border-border"
         )}>
-            <div className="text-[10px] text-slate-500 uppercase tracking-wider mb-1 font-semibold">{label}</div>
+            <div className="text-[10px] text-muted-foreground uppercase tracking-wider mb-1 font-semibold">{label}</div>
             <div className={clsx("text-lg font-bold", color)}>{value}</div>
         </div>
     )

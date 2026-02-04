@@ -61,3 +61,11 @@
 ## 2025-06-05 - Reusable Empty States
 **Learning:** Empty states in list views are often neglected and inconsistent. A dedicated `EmptyState` component with icon support and proper typography ensures that "zero data" is a deliberate, polished state rather than an error or afterthought.
 **Action:** Replace inline "No data" messages with the `EmptyState` component to provide consistent visual feedback and actionable guidance.
+
+## 2025-06-06 - Dark Mode & Semantic Tokens
+**Learning:** Hardcoded color classes (e.g., `bg-white`, `text-slate-800`) in cards break Dark Mode support, creating glaring visual inconsistencies. Semantic tokens (`bg-card`, `text-foreground`) ensure components adapt seamlessly to any theme.
+**Action:** Audit legacy components for hardcoded colors and replace them with semantic `shadcn/ui` tokens.
+
+## 2025-06-06 - Accessible Disabled Tooltips
+**Learning:** Browsers disable mouse events on `disabled` buttons, preventing tooltips from appearing. Wrapping the disabled button in a focusable `span` (`tabIndex={0}`) allows the tooltip to trigger on hover and focus.
+**Action:** Always wrap disabled buttons in a `span` with `tabIndex={0}` and an explanatory `aria-label` when tooltips are required.

@@ -129,6 +129,16 @@ on:
         required: false
         type: boolean
         default: false
+      skip_sync:
+        description: 'Skip holdings sync (for suggestions_open)'
+        required: false
+        type: boolean
+        default: false
+      payload_json:
+        description: 'Custom JSON payload (overrides defaults, e.g. {"skip_sync":true})'
+        required: false
+        type: string
+        default: ''
 
 env:
   PYTHON_VERSION: '3.11'
@@ -325,6 +335,13 @@ jobs:
           ARGS="${{ inputs.task }}"
           if [ "${{ inputs.skip_time_gate }}" = "true" ]; then
             ARGS="$ARGS --skip-time-gate"
+          fi
+          # Pass custom payload JSON if provided
+          if [ -n "${{ inputs.payload_json }}" ]; then
+            ARGS="$ARGS --payload-json '${{ inputs.payload_json }}'"
+          elif [ "${{ inputs.skip_sync }}" = "true" ]; then
+            # Convenience: build payload from skip_sync checkbox
+            ARGS="$ARGS --payload-json '{\"skip_sync\":true}'"
           fi
           python scripts/run_signed_task.py $ARGS
 

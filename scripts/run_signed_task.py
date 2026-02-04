@@ -8,6 +8,7 @@ Used by GitHub Actions workflows and local development.
 Usage:
     python scripts/run_signed_task.py suggestions_close
     python scripts/run_signed_task.py suggestions_open --user-id <uuid>
+    python scripts/run_signed_task.py suggestions_open --payload-json '{"skip_sync":true}'
     DRY_RUN=1 python scripts/run_signed_task.py learning_ingest
 
 Environment Variables:
@@ -464,17 +465,53 @@ def get_signing_secret() -> tuple[str, Optional[str]]:
     )
 
 
-def build_payload(task_name: str, user_id: Optional[str] = None) -> dict:
-    """Build the request payload for a task."""
+def build_payload(
+    task_name: str,
+    user_id: Optional[str] = None,
+    payload_json: Optional[str] = None,
+) -> dict:
+    """
+    Build the request payload for a task.
+
+    Priority (later overrides earlier):
+    1. Task-specific defaults (e.g., strategy_name)
+    2. user_id from environment/CLI
+    3. payload_json (if provided, merges and overrides)
+
+    Args:
+        task_name: Name of the task
+        user_id: User ID from environment or CLI
+        payload_json: Optional JSON string to parse and merge
+
+    Returns:
+        Combined payload dict
+
+    Raises:
+        ValueError: If payload_json is invalid JSON
+    """
     payload = {}
 
-    # Add user_id if specified
+    # 1. Add task-specific defaults
+    if task_name in ("suggestions_close", "suggestions_open"):
+        payload["strategy_name"] = "spy_opt_autolearn_v6"
+
+    # 2. Add user_id if specified
     if user_id:
         payload["user_id"] = user_id
 
-    # Add task-specific defaults
-    if task_name in ("suggestions_close", "suggestions_open"):
-        payload.setdefault("strategy_name", "spy_opt_autolearn_v6")
+    # 3. Merge payload_json (overrides defaults)
+    if payload_json:
+        payload_json = payload_json.strip()
+        if payload_json:
+            try:
+                custom = json.loads(payload_json)
+                if not isinstance(custom, dict):
+                    raise ValueError(
+                        f"payload_json must be a JSON object, got {type(custom).__name__}"
+                    )
+                payload.update(custom)
+            except json.JSONDecodeError as e:
+                raise ValueError(f"Invalid JSON in payload_json: {e}")
 
     return payload
 
@@ -485,6 +522,7 @@ def run_task(
     dry_run: bool = False,
     skip_time_gate: bool = False,
     timeout: int = 120,
+    payload_json: Optional[str] = None,
 ) -> int:
     """
     Run a signed task request.
@@ -495,6 +533,7 @@ def run_task(
         dry_run: If True, print request without sending
         skip_time_gate: If True, skip time gate check
         timeout: Request timeout in seconds
+        payload_json: Optional JSON string to merge into payload
 
     Returns:
         0 on success, 1 on failure
@@ -539,7 +578,16 @@ def run_task(
     method = "POST"
     path = task["path"]
     scope = task["scope"]
-    payload = build_payload(task_name, user_id)
+    try:
+        payload = build_payload(task_name, user_id, payload_json)
+    except ValueError as e:
+        print(f"[ERROR] {e}")
+        write_step_summary(
+            task_name,
+            skipped=True,
+            skip_reason=str(e),
+        )
+        return 1
     body = json.dumps(payload).encode("utf-8") if payload else b"{}"
 
     # Sign request
@@ -665,6 +713,8 @@ def main():
 Examples:
     python scripts/run_signed_task.py suggestions_close
     python scripts/run_signed_task.py suggestions_open --user-id abc-123
+    python scripts/run_signed_task.py suggestions_open --payload-json '{"skip_sync":true}'
+    python scripts/run_signed_task.py suggestions_open --payload-json '{"user_id":"<uuid>","skip_sync":true}'
     DRY_RUN=1 python scripts/run_signed_task.py learning_ingest
     python scripts/run_signed_task.py suggestions_close --skip-time-gate
 
@@ -673,7 +723,7 @@ Environment Variables:
     TASK_SIGNING_KEYS    - Multiple keys (kid1:secret1,kid2:secret2)
     BASE_URL             - API base URL
     DRY_RUN              - Set to "1" for dry run mode
-    USER_ID              - Default user ID (can be overridden with --user-id)
+    USER_ID              - Default user ID (can be overridden with --user-id or payload_json)
 """,
     )
 
@@ -705,6 +755,12 @@ Environment Variables:
         help="Request timeout in seconds (default: 120)",
     )
     parser.add_argument(
+        "--payload-json",
+        type=str,
+        default=None,
+        help='Custom JSON payload to merge (e.g., \'{"skip_sync":true}\')',
+    )
+    parser.add_argument(
         "--list",
         action="store_true",
         dest="list_tasks",
@@ -727,6 +783,7 @@ Environment Variables:
         dry_run=args.dry_run,
         skip_time_gate=args.skip_time_gate,
         timeout=args.timeout,
+        payload_json=args.payload_json,
     )
 
 

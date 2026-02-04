@@ -1,6 +1,12 @@
 from typing import Optional, Dict, Any
 from datetime import datetime
-from packages.quantum.jobs.db import create_supabase_admin_client, complete_job_run, requeue_job_run, dead_letter_job_run
+from packages.quantum.jobs.db import (
+    create_supabase_admin_client,
+    complete_job_run,
+    requeue_job_run,
+    dead_letter_job_run,
+    _to_jsonable,
+)
 
 class JobRunStore:
     def __init__(self):
@@ -113,7 +119,7 @@ class JobRunStore:
         """
         self.client.table("job_runs").update({
             "status": "failed_retryable",
-            "result": result,
+            "result": _to_jsonable(result),
             "completed_at": datetime.now().isoformat(),
             "locked_by": None,
             "locked_at": None

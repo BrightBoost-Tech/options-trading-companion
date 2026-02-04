@@ -169,3 +169,40 @@ class TestJobsDbJsonable(unittest.TestCase):
         data = {"nested": [s3]}
         jsonable3 = jobs_db._to_jsonable(data)
         self.assertEqual(jsonable3["nested"][0], [1, 2, 3])
+
+    def test_mark_partial_failure_serialization(self):
+        """
+        Regression test: mark_partial_failure must serialize result with datetime.
+
+        Bug: suggestions_open returns cycle_results with datetime objects,
+        causing "Object of type datetime is not JSON serializable" errors.
+
+        This test verifies that _to_jsonable handles the exact payload structure
+        returned by suggestions_open cycle_results.
+        """
+        # Simulate result with datetime (the bug scenario from suggestions_open)
+        result_with_datetime = {
+            "ok": True,
+            "counts": {"processed": 1, "failed": 1},
+            "cycle_results": [
+                {
+                    "user_id": "abc123",
+                    "as_of": datetime(2024, 1, 15, 12, 30, 0),
+                    "budget": {"deployable": Decimal("1000.50")},
+                }
+            ],
+        }
+
+        # Apply the same serialization that mark_partial_failure uses
+        serialized = jobs_db._to_jsonable(result_with_datetime)
+
+        # Verify result is JSON-serializable (this was failing before the fix)
+        try:
+            json.dumps(serialized)
+        except TypeError as e:
+            self.fail(f"mark_partial_failure result is not JSON serializable: {e}")
+
+        # Verify datetime was converted to ISO string
+        cycle_result = serialized["cycle_results"][0]
+        self.assertEqual(cycle_result["as_of"], "2024-01-15T12:30:00")
+        self.assertEqual(cycle_result["budget"]["deployable"], 1000.5)

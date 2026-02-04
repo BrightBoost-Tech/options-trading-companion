@@ -9,6 +9,7 @@ from supabase import Client
 import logging
 import concurrent.futures
 from collections import defaultdict
+from functools import lru_cache
 
 from packages.quantum.services.universe_service import UniverseService
 from packages.quantum.analytics.strategy_selector import StrategySelector
@@ -32,6 +33,80 @@ SCANNER_MIN_DTE = 25
 SCANNER_MAX_DTE = 45
 
 logger = logging.getLogger(__name__)
+
+# Bolt Optimization: Cache expiry date parsing
+# Using maxsize=4096 to prevent unbounded memory growth while keeping cache hot
+@lru_cache(maxsize=4096)
+def parse_expiry_date(exp_str: str) -> date:
+    try:
+        return datetime.fromisoformat(exp_str).date()
+    except ValueError:
+        return datetime.strptime(exp_str, "%Y-%m-%d").date()
+
+# Bolt Optimization: Module-level accessor functions to avoid closure overhead
+# Nested Schema Accessors (TruthLayer)
+def _get_delta_nested(c):
+    g = c.get("greeks")
+    return g.get("delta") if g else None
+
+def _get_gamma_nested(c):
+    g = c.get("greeks")
+    return g.get("gamma") if g else 0.0
+
+def _get_vega_nested(c):
+    g = c.get("greeks")
+    return g.get("vega") if g else 0.0
+
+def _get_theta_nested(c):
+    g = c.get("greeks")
+    return g.get("theta") if g else 0.0
+
+def _get_ticker_nested(c):
+    return c.get("contract")
+
+def _get_expiry_nested(c):
+    return c.get("expiry")
+
+def _get_bid_nested(c):
+    q = c.get("quote")
+    return q.get("bid") if q else None
+
+def _get_ask_nested(c):
+    q = c.get("quote")
+    return q.get("ask") if q else None
+
+def _get_premium_nested(c):
+    q = c.get("quote")
+    if not q: return None
+    return q.get("mid") if q.get("mid") is not None else q.get("last")
+
+# Flat Schema Accessors (PolygonService)
+def _get_delta_flat(c):
+    return c.get("delta")
+
+def _get_gamma_flat(c):
+    return c.get("gamma")
+
+def _get_vega_flat(c):
+    return c.get("vega")
+
+def _get_theta_flat(c):
+    return c.get("theta")
+
+def _get_ticker_flat(c):
+    return c.get("ticker")
+
+def _get_expiry_flat(c):
+    return c.get("expiration")
+
+def _get_bid_flat(c):
+    return c.get("bid")
+
+def _get_ask_flat(c):
+    return c.get("ask")
+
+def _get_premium_flat(c):
+    return c.get("price") or c.get("close")
 
 def _apply_agent_constraints(candidate: Dict[str, Any], portfolio_cash: Optional[float] = None) -> Optional[Dict[str, Any]]:
     """
@@ -171,14 +246,10 @@ def _select_best_expiry_chain(chain: List[Dict[str, Any]], target_dte: int = 35,
     if today_date is None:
         today_date = datetime.now().date()
 
+    # Bolt Optimization: Use cached date parser
     def get_dte_diff(exp_str):
         try:
-            # Try fast ISO format first (30x faster)
-            try:
-                exp_dt = datetime.fromisoformat(exp_str).date()
-            except ValueError:
-                exp_dt = datetime.strptime(exp_str, "%Y-%m-%d").date()
-
+            exp_dt = parse_expiry_date(exp_str)
             return abs((exp_dt - today_date).days - target_dte)
         except ValueError:
             return 9999
@@ -216,42 +287,27 @@ def _select_legs_from_chain(
     sample = calls[0] if calls else (puts[0] if puts else None)
     is_nested = sample is not None and "greeks" in sample and isinstance(sample.get("greeks"), dict)
 
-    # Optimized Accessors definition outside the loop
+    # Optimized Accessors definition using module-level functions
     if is_nested:
-        def _delta(c):
-            g = c.get("greeks")
-            return g.get("delta") if g else None
-        def _gamma(c):
-            g = c.get("greeks")
-            return g.get("gamma") if g else 0.0
-        def _vega(c):
-            g = c.get("greeks")
-            return g.get("vega") if g else 0.0
-        def _theta(c):
-            g = c.get("greeks")
-            return g.get("theta") if g else 0.0
-        def _ticker(c): return c.get("contract")
-        def _expiry(c): return c.get("expiry")
-        def _bid(c):
-            q = c.get("quote")
-            return q.get("bid") if q else None
-        def _ask(c):
-            q = c.get("quote")
-            return q.get("ask") if q else None
-        def _premium(c):
-            q = c.get("quote")
-            if not q: return None
-            return q.get("mid") if q.get("mid") is not None else q.get("last")
+        _delta = _get_delta_nested
+        _gamma = _get_gamma_nested
+        _vega = _get_vega_nested
+        _theta = _get_theta_nested
+        _ticker = _get_ticker_nested
+        _expiry = _get_expiry_nested
+        _bid = _get_bid_nested
+        _ask = _get_ask_nested
+        _premium = _get_premium_nested
     else:
-        def _delta(c): return c.get("delta")
-        def _gamma(c): return c.get("gamma")
-        def _vega(c): return c.get("vega")
-        def _theta(c): return c.get("theta")
-        def _ticker(c): return c.get("ticker")
-        def _expiry(c): return c.get("expiration")
-        def _bid(c): return c.get("bid")
-        def _ask(c): return c.get("ask")
-        def _premium(c): return c.get("price") or c.get("close")
+        _delta = _get_delta_flat
+        _gamma = _get_gamma_flat
+        _vega = _get_vega_flat
+        _theta = _get_theta_flat
+        _ticker = _get_ticker_flat
+        _expiry = _get_expiry_flat
+        _bid = _get_bid_flat
+        _ask = _get_ask_flat
+        _premium = _get_premium_flat
 
     for leg_def in leg_defs:
         target_delta = leg_def["delta_target"]
@@ -340,42 +396,27 @@ def _select_iron_condor_legs(
     sample = calls[0] if calls else (puts[0] if puts else None)
     is_nested = sample is not None and "greeks" in sample and isinstance(sample.get("greeks"), dict)
 
-    # Optimized Accessors definition outside the loop
+    # Optimized Accessors definition using module-level functions
     if is_nested:
-        def _delta(c):
-            g = c.get("greeks")
-            return g.get("delta") if g else None
-        def _gamma(c):
-            g = c.get("greeks")
-            return g.get("gamma") if g else 0.0
-        def _vega(c):
-            g = c.get("greeks")
-            return g.get("vega") if g else 0.0
-        def _theta(c):
-            g = c.get("greeks")
-            return g.get("theta") if g else 0.0
-        def _ticker(c): return c.get("contract")
-        def _expiry(c): return c.get("expiry")
-        def _bid(c):
-            q = c.get("quote")
-            return q.get("bid") if q else None
-        def _ask(c):
-            q = c.get("quote")
-            return q.get("ask") if q else None
-        def _premium(c):
-            q = c.get("quote")
-            if not q: return None
-            return q.get("mid") if q.get("mid") is not None else q.get("last")
+        _delta = _get_delta_nested
+        _gamma = _get_gamma_nested
+        _vega = _get_vega_nested
+        _theta = _get_theta_nested
+        _ticker = _get_ticker_nested
+        _expiry = _get_expiry_nested
+        _bid = _get_bid_nested
+        _ask = _get_ask_nested
+        _premium = _get_premium_nested
     else:
-        def _delta(c): return c.get("delta")
-        def _gamma(c): return c.get("gamma")
-        def _vega(c): return c.get("vega")
-        def _theta(c): return c.get("theta")
-        def _ticker(c): return c.get("ticker")
-        def _expiry(c): return c.get("expiration")
-        def _bid(c): return c.get("bid")
-        def _ask(c): return c.get("ask")
-        def _premium(c): return c.get("price") or c.get("close")
+        _delta = _get_delta_flat
+        _gamma = _get_gamma_flat
+        _vega = _get_vega_flat
+        _theta = _get_theta_flat
+        _ticker = _get_ticker_flat
+        _expiry = _get_expiry_flat
+        _bid = _get_bid_flat
+        _ask = _get_ask_flat
+        _premium = _get_premium_flat
 
     # 2. Select Shorts by Delta
     # Target delta is usually ~0.15 (abs)
@@ -1376,14 +1417,32 @@ def scan_for_opportunities(
                 try:
                     # Support datetime object or YYYY-MM-DD string
                     earnings_dt = None
-                    if isinstance(earnings_val, datetime):
-                        earnings_dt = earnings_val
-                    elif isinstance(earnings_val, str):
-                        earnings_dt = datetime.fromisoformat(earnings_val)
+                    # Bolt Optimization: Reuse parse_expiry_date cache for earnings strings if compatible
+                    if isinstance(earnings_val, str):
+                        try:
+                            earnings_dt = parse_expiry_date(earnings_val)
+                            # Convert back to datetime if needed, or work with date.
+                            # Scanner logic below uses .date() from datetime, but parse_expiry_date returns date.
+                            # So we wrap in datetime if needed or adjust logic.
+                            # Logic: (earnings_dt.date() - today_date).days
+                            # If earnings_dt is date, we can use it directly.
+                            # But code below expects earnings_dt to have .date() method if it was datetime.
+                            # Let's adjust logic.
+                        except ValueError:
+                            # Fallback if cache fails (e.g. invalid format)
+                             earnings_dt = datetime.fromisoformat(earnings_val).date()
+                    elif isinstance(earnings_val, datetime):
+                        earnings_dt = earnings_val.date()
+                    elif isinstance(earnings_val, date):
+                         earnings_dt = earnings_val
 
                     if earnings_dt:
                         # Use now_dt (hoisted) instead of calling datetime.now() again
-                        days_to_earnings = (earnings_dt.date() - today_date).days
+                        # Ensure earnings_dt is a date object for subtraction
+                        if isinstance(earnings_dt, datetime):
+                             earnings_dt = earnings_dt.date()
+
+                        days_to_earnings = (earnings_dt - today_date).days
 
                         # Normalize strategy key for safety checks (already lowercased above but ensuring consistency)
                         safe_strategy_key = strategy_key.lower()

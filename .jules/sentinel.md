@@ -68,3 +68,8 @@
 **Vulnerability:** Raw exception strings (e.g., `str(e)`) were being returned in JSON error responses from the `IVRepository`.
 **Learning:** Developers often return `{"error": str(e)}` for convenience, but this leaks internal database details (connection strings, table names) if the exception is not sanitized.
 **Prevention:** Always use `sanitize_exception()` for logging and return generic error messages (e.g., "Internal Error") to the client.
+
+## 2026-05-27 - [Enhancement] Comprehensive Redaction for Sensitive Fields
+**Vulnerability:** The `redact_sensitive_fields` utility used a limited list of keys (`access_token`, etc.) and case-sensitive matching. This meant common sensitive keys like `password`, `secret`, `api_key`, or `Access_Token` would not be redacted if they appeared in logs or debug outputs.
+**Learning:** Hardcoded "blocklists" for redaction are often incomplete and fragile to naming convention changes (e.g., camelCase vs snake_case).
+**Prevention:** Expanded the sensitive fields list to include standard credentials (`password`, `secret`, `key`) and implemented case-insensitive matching in the redaction logic.

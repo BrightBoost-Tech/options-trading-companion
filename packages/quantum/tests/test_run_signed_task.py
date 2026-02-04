@@ -230,6 +230,93 @@ class TestBuildPayload:
         assert payload["user_id"] == "user-456"
         assert payload["strategy_name"] == "spy_opt_autolearn_v6"
 
+    # === payload_json tests ===
+
+    def test_payload_json_empty_string_no_error(self):
+        """Empty string payload_json should not error, just skip parsing."""
+        payload = build_payload("suggestions_open", payload_json="")
+        assert payload == {"strategy_name": "spy_opt_autolearn_v6"}
+
+    def test_payload_json_whitespace_only_no_error(self):
+        """Whitespace-only payload_json should not error, just skip parsing."""
+        payload = build_payload("suggestions_open", payload_json="   \n\t  ")
+        assert payload == {"strategy_name": "spy_opt_autolearn_v6"}
+
+    def test_payload_json_none_no_error(self):
+        """None payload_json should not error."""
+        payload = build_payload("suggestions_open", payload_json=None)
+        assert payload == {"strategy_name": "spy_opt_autolearn_v6"}
+
+    def test_payload_json_empty_object_valid(self):
+        """Empty JSON object {} should be valid and merge nothing."""
+        payload = build_payload("suggestions_open", payload_json="{}")
+        assert payload == {"strategy_name": "spy_opt_autolearn_v6"}
+
+    def test_payload_json_valid_merges(self):
+        """Valid JSON should merge into payload."""
+        payload = build_payload(
+            "suggestions_open",
+            user_id="user-123",
+            payload_json='{"skip_sync": true, "custom_key": "value"}'
+        )
+        assert payload["strategy_name"] == "spy_opt_autolearn_v6"
+        assert payload["user_id"] == "user-123"
+        assert payload["skip_sync"] is True
+        assert payload["custom_key"] == "value"
+
+    def test_payload_json_overrides_user_id(self):
+        """payload_json should override user_id from CLI."""
+        payload = build_payload(
+            "suggestions_open",
+            user_id="cli-user",
+            payload_json='{"user_id": "json-user"}'
+        )
+        assert payload["user_id"] == "json-user"
+
+    def test_payload_json_invalid_raises_error(self):
+        """Invalid JSON should raise ValueError with clear message."""
+        with pytest.raises(ValueError) as exc_info:
+            build_payload("suggestions_open", payload_json="{")
+        assert "Invalid JSON in payload_json" in str(exc_info.value)
+
+    def test_payload_json_non_object_raises_error(self):
+        """Non-object JSON should raise ValueError."""
+        with pytest.raises(ValueError) as exc_info:
+            build_payload("suggestions_open", payload_json='["array"]')
+        assert "must be a JSON object" in str(exc_info.value)
+
+    # === skip_sync tests ===
+
+    def test_skip_sync_flag_adds_to_payload(self):
+        """skip_sync=True should add skip_sync to payload."""
+        payload = build_payload("suggestions_open", skip_sync=True)
+        assert payload["skip_sync"] is True
+
+    def test_skip_sync_false_not_added(self):
+        """skip_sync=False should not add skip_sync to payload."""
+        payload = build_payload("suggestions_open", skip_sync=False)
+        assert "skip_sync" not in payload
+
+    def test_skip_sync_and_payload_json_both_work(self):
+        """skip_sync flag and payload_json can both be provided."""
+        payload = build_payload(
+            "suggestions_open",
+            skip_sync=True,
+            payload_json='{"custom": "value"}'
+        )
+        assert payload["skip_sync"] is True
+        assert payload["custom"] == "value"
+
+    def test_payload_json_overrides_skip_sync_flag(self):
+        """payload_json skip_sync should override --skip-sync flag."""
+        payload = build_payload(
+            "suggestions_open",
+            skip_sync=True,
+            payload_json='{"skip_sync": false}'
+        )
+        # payload_json takes precedence
+        assert payload["skip_sync"] is False
+
 
 # =============================================================================
 # Task Definition Tests

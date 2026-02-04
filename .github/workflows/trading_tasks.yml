@@ -331,19 +331,22 @@ jobs:
           BASE_URL: ${{ secrets.QUANTUM_BASE_URL }}
           USER_ID: ${{ secrets.USER_ID || secrets.TASK_USER_ID }}
           DRY_RUN: ${{ inputs.dry_run && '1' || '0' }}
+          PAYLOAD_JSON: ${{ inputs.payload_json }}
         run: |
           ARGS="${{ inputs.task }}"
           if [ "${{ inputs.skip_time_gate }}" = "true" ]; then
             ARGS="$ARGS --skip-time-gate"
           fi
-          # Pass custom payload JSON if provided
-          if [ -n "${{ inputs.payload_json }}" ]; then
-            ARGS="$ARGS --payload-json '${{ inputs.payload_json }}'"
-          elif [ "${{ inputs.skip_sync }}" = "true" ]; then
-            # Convenience: build payload from skip_sync checkbox
-            ARGS="$ARGS --payload-json '{\"skip_sync\":true}'"
+          # Pass skip_sync flag if checked
+          if [ "${{ inputs.skip_sync }}" = "true" ]; then
+            ARGS="$ARGS --skip-sync"
           fi
-          python scripts/run_signed_task.py $ARGS
+          # Pass custom payload JSON only if non-empty (use env var to avoid YAML injection)
+          if [ -n "$PAYLOAD_JSON" ]; then
+            python scripts/run_signed_task.py $ARGS --payload-json "$PAYLOAD_JSON"
+          else
+            python scripts/run_signed_task.py $ARGS
+          fi
 
   # ============================================================================
   # Scheduled: Validation Eval / Checkpoint (6:30 PM Chicago, after market close)

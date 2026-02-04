@@ -469,6 +469,7 @@ def build_payload(
     task_name: str,
     user_id: Optional[str] = None,
     payload_json: Optional[str] = None,
+    skip_sync: bool = False,
 ) -> dict:
     """
     Build the request payload for a task.
@@ -476,12 +477,14 @@ def build_payload(
     Priority (later overrides earlier):
     1. Task-specific defaults (e.g., strategy_name)
     2. user_id from environment/CLI
-    3. payload_json (if provided, merges and overrides)
+    3. skip_sync flag
+    4. payload_json (if provided, merges and overrides all above)
 
     Args:
         task_name: Name of the task
         user_id: User ID from environment or CLI
         payload_json: Optional JSON string to parse and merge
+        skip_sync: If True, adds skip_sync=true to payload
 
     Returns:
         Combined payload dict
@@ -499,12 +502,17 @@ def build_payload(
     if user_id:
         payload["user_id"] = user_id
 
-    # 3. Merge payload_json (overrides defaults)
-    if payload_json:
-        payload_json = payload_json.strip()
-        if payload_json:
+    # 3. Add skip_sync if specified
+    if skip_sync:
+        payload["skip_sync"] = True
+
+    # 4. Merge payload_json (overrides all above)
+    # Treat None, empty string, and whitespace-only as "not provided"
+    if payload_json is not None:
+        payload_json_stripped = payload_json.strip()
+        if payload_json_stripped:
             try:
-                custom = json.loads(payload_json)
+                custom = json.loads(payload_json_stripped)
                 if not isinstance(custom, dict):
                     raise ValueError(
                         f"payload_json must be a JSON object, got {type(custom).__name__}"
@@ -523,6 +531,7 @@ def run_task(
     skip_time_gate: bool = False,
     timeout: int = 120,
     payload_json: Optional[str] = None,
+    skip_sync: bool = False,
 ) -> int:
     """
     Run a signed task request.
@@ -534,6 +543,7 @@ def run_task(
         skip_time_gate: If True, skip time gate check
         timeout: Request timeout in seconds
         payload_json: Optional JSON string to merge into payload
+        skip_sync: If True, adds skip_sync=true to payload
 
     Returns:
         0 on success, 1 on failure
@@ -579,7 +589,7 @@ def run_task(
     path = task["path"]
     scope = task["scope"]
     try:
-        payload = build_payload(task_name, user_id, payload_json)
+        payload = build_payload(task_name, user_id, payload_json, skip_sync)
     except ValueError as e:
         print(f"[ERROR] {e}")
         write_step_summary(
@@ -761,6 +771,11 @@ Environment Variables:
         help='Custom JSON payload to merge (e.g., \'{"skip_sync":true}\')',
     )
     parser.add_argument(
+        "--skip-sync",
+        action="store_true",
+        help="Skip holdings sync (adds skip_sync=true to payload)",
+    )
+    parser.add_argument(
         "--list",
         action="store_true",
         dest="list_tasks",
@@ -784,6 +799,7 @@ Environment Variables:
         skip_time_gate=args.skip_time_gate,
         timeout=args.timeout,
         payload_json=args.payload_json,
+        skip_sync=args.skip_sync,
     )
 
 

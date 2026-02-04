@@ -6,6 +6,7 @@ class BatchSimulationRequest(BaseModel):
     start_date: str
     end_date: str
     ticker: str
+    seed: Optional[int] = None
     # Add other necessary fields
 
 class ResearchCompareRequest(BaseModel):

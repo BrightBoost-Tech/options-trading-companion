@@ -37,3 +37,8 @@
 **Issue:** `canonical.py` did not support numpy types (`np.integer`, `np.floating`, `np.ndarray`), causing `compute_content_hash` to crash or be nondeterministic (falling back to `str()`) when processing scientific data structures.
 **Learning:** Data science applications frequently mix numpy types with native types. A robust canonical serializer must explicitly handle numpy types by converting them to native equivalents (int, float, list) to ensure consistent hashing and prevent crashes in downstream consumers.
 **Prevention:** Enhanced `_normalize_value` in `packages/quantum/observability/canonical.py` to detect and convert numpy types to native Python types before serialization.
+
+## 2025-03-03 - Unseeded Backtest Workflow
+**Issue:** `_run_backtest_workflow` (Legacy V2) used unseeded randomness because it didn't pass a seed to `HistoricalCycleService.run_cycle`, even though the underlying service supported it. This caused nondeterministic jitter/slippage in batch simulations.
+**Learning:** Even if a low-level service supports determinism (via seed), it is useless if the orchestration layer drops the seed.
+**Prevention:** Ensure top-level request models (like `BatchSimulationRequest`) include a `seed` field and propagate it down to all stochastic components.

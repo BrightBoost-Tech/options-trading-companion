@@ -165,22 +165,36 @@ def get_supabase_user_client(
     # Never fall back to admin client if user context was expected but not established.
     raise HTTPException(status_code=500, detail="Secure Database Context Unavailable")
 
-SENSITIVE_TOKEN_FIELDS = {
+SENSITIVE_FIELDS = {
     "access_token",
     "public_token",
     "processor_token",
     "item_id",
     "account_number",
     "routing_number",
+    "password",
+    "secret",
+    "api_key",
+    "client_secret",
+    "refresh_token",
+    "private_key",
+    "token",
+    "secret_key",
+    "verification_token",
+    "connection_string",
 }
 
-def is_sensitive_token_field(field_name: str) -> bool:
-    return field_name in SENSITIVE_TOKEN_FIELDS
+def is_sensitive_field(field_name: str) -> bool:
+    """Check if a field name is sensitive (case-insensitive)."""
+    return field_name.lower() in SENSITIVE_FIELDS
+
+# Kept for backward compatibility if imported elsewhere (though strictly internal)
+is_sensitive_token_field = is_sensitive_field
 
 def redact_sensitive_fields(obj):
     if isinstance(obj, dict):
         return {
-            k: ("****" if is_sensitive_token_field(k) else redact_sensitive_fields(v))
+            k: ("****" if is_sensitive_field(str(k)) else redact_sensitive_fields(v))
             for k, v in obj.items()
         }
     elif isinstance(obj, list):

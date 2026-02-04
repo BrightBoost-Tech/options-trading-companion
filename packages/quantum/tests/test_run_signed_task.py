@@ -317,6 +317,53 @@ class TestBuildPayload:
         # payload_json takes precedence
         assert payload["skip_sync"] is False
 
+    # === force_rerun tests ===
+
+    def test_force_rerun_flag_adds_to_payload(self):
+        """force_rerun=True should add force_rerun to payload."""
+        payload = build_payload("suggestions_open", force_rerun=True)
+        assert payload["force_rerun"] is True
+
+    def test_force_rerun_false_not_added(self):
+        """force_rerun=False should not add force_rerun to payload."""
+        payload = build_payload("suggestions_open", force_rerun=False)
+        assert "force_rerun" not in payload
+
+    def test_force_rerun_and_skip_sync_both_work(self):
+        """force_rerun and skip_sync flags can both be provided."""
+        payload = build_payload(
+            "suggestions_open",
+            skip_sync=True,
+            force_rerun=True
+        )
+        assert payload["skip_sync"] is True
+        assert payload["force_rerun"] is True
+
+    def test_payload_json_overrides_force_rerun_flag(self):
+        """payload_json force_rerun should override --force-rerun flag."""
+        payload = build_payload(
+            "suggestions_open",
+            force_rerun=True,
+            payload_json='{"force_rerun": false}'
+        )
+        # payload_json takes precedence
+        assert payload["force_rerun"] is False
+
+    def test_all_flags_together(self):
+        """All CLI flags should work together with correct priority."""
+        payload = build_payload(
+            "suggestions_open",
+            user_id="cli-user",
+            skip_sync=True,
+            force_rerun=True,
+            payload_json='{"custom_key": "value"}'
+        )
+        assert payload["strategy_name"] == "spy_opt_autolearn_v6"
+        assert payload["user_id"] == "cli-user"
+        assert payload["skip_sync"] is True
+        assert payload["force_rerun"] is True
+        assert payload["custom_key"] == "value"
+
 
 # =============================================================================
 # Task Definition Tests

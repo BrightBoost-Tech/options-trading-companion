@@ -109,6 +109,54 @@ def _validation_idempotency_key(mode: str, user_id: Optional[str] = None, cadenc
     return f"{now.strftime('%Y-%m-%d')}-{mode}-{target}"
 
 
+def _suggestions_idempotency_key(
+    task_type: str,
+    user_id: Optional[str] = None,
+    skip_sync: bool = False,
+    strategy_name: str = DEFAULT_STRATEGY_NAME,
+    force_rerun: bool = False,
+    force_nonce: Optional[str] = None,
+) -> str:
+    """
+    Generate idempotency key for suggestions_open/close tasks.
+
+    Includes user_id, skip_sync, and strategy in the key so that changing
+    these inputs produces a new JobRun instead of returning the existing one.
+
+    Args:
+        task_type: 'open' or 'close'
+        user_id: Optional user ID (defaults to 'all' for batch)
+        skip_sync: Whether to skip holdings sync
+        strategy_name: Strategy config name
+        force_rerun: If True, append a nonce to guarantee a fresh run
+        force_nonce: Optional deterministic nonce (auto-generated if not provided)
+
+    Returns:
+        Idempotency key string:
+        - Normal: '{YYYY-MM-DD}-{type}-{user}-ss{0|1}-{strategy}'
+        - Force:  '{YYYY-MM-DD}-{type}-{user}-ss{0|1}-{strategy}-force-{nonce}'
+    """
+    today = datetime.now().strftime("%Y-%m-%d")
+    user_part = user_id or "all"
+    ss_part = f"ss{int(skip_sync)}"
+
+    # Shorten strategy name if it's the default (most common case)
+    if strategy_name == DEFAULT_STRATEGY_NAME:
+        strat_part = "default"
+    else:
+        # Use first 16 chars to keep key manageable
+        strat_part = strategy_name[:16]
+
+    base_key = f"{today}-{task_type}-{user_part}-{ss_part}-{strat_part}"
+
+    if force_rerun:
+        # Use provided nonce or generate one
+        nonce = force_nonce if force_nonce else secrets.token_hex(4)
+        return f"{base_key}-force-{nonce}"
+
+    return base_key
+
+
 def enqueue_job_run(job_name: str, idempotency_key: str, payload: Dict[str, Any], queue_name: str = "otc") -> Dict[str, Any]:
     """
     Helper to create a JobRun and enqueue the runner.
@@ -396,9 +444,18 @@ async def task_suggestions_close(
         "skip_sync": payload.skip_sync,
     }
 
+    idempotency_key = _suggestions_idempotency_key(
+        task_type="close",
+        user_id=payload.user_id,
+        skip_sync=payload.skip_sync,
+        strategy_name=payload.strategy_name,
+        force_rerun=payload.force_rerun,
+        force_nonce=payload.force_nonce,
+    )
+
     return enqueue_job_run(
         job_name=job_name,
-        idempotency_key=f"{today}-close",
+        idempotency_key=idempotency_key,
         payload=job_payload
     )
 
@@ -435,9 +492,18 @@ async def task_suggestions_open(
         "skip_sync": payload.skip_sync,
     }
 
+    idempotency_key = _suggestions_idempotency_key(
+        task_type="open",
+        user_id=payload.user_id,
+        skip_sync=payload.skip_sync,
+        strategy_name=payload.strategy_name,
+        force_rerun=payload.force_rerun,
+        force_nonce=payload.force_nonce,
+    )
+
     return enqueue_job_run(
         job_name=job_name,
-        idempotency_key=f"{today}-open",
+        idempotency_key=idempotency_key,
         payload=job_payload
     )
 

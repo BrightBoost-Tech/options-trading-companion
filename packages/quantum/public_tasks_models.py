@@ -113,6 +113,15 @@ class SuggestionsClosePayload(TaskPayloadBase):
         default=False,
         description="Skip holdings sync before generating suggestions"
     )
+    force_rerun: bool = Field(
+        default=False,
+        description="Force a new JobRun even if one exists for this day/config"
+    )
+    force_nonce: Optional[str] = Field(
+        default=None,
+        max_length=32,
+        description="Optional nonce for deterministic force_rerun (auto-generated if not provided)"
+    )
 
 
 class SuggestionsOpenPayload(TaskPayloadBase):
@@ -134,6 +143,15 @@ class SuggestionsOpenPayload(TaskPayloadBase):
     skip_sync: bool = Field(
         default=False,
         description="Skip holdings sync before generating suggestions"
+    )
+    force_rerun: bool = Field(
+        default=False,
+        description="Force a new JobRun even if one exists for this day/config"
+    )
+    force_nonce: Optional[str] = Field(
+        default=None,
+        max_length=32,
+        description="Optional nonce for deterministic force_rerun (auto-generated if not provided)"
     )
 
 

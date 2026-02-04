@@ -130,7 +130,12 @@ on:
         type: boolean
         default: false
       skip_sync:
-        description: 'Skip holdings sync (for suggestions_open)'
+        description: 'Skip holdings sync (for suggestions_open/close)'
+        required: false
+        type: boolean
+        default: false
+      force_rerun:
+        description: 'Force a new JobRun even if one exists today (for debugging)'
         required: false
         type: boolean
         default: false
@@ -340,6 +345,10 @@ jobs:
           # Pass skip_sync flag if checked
           if [ "${{ inputs.skip_sync }}" = "true" ]; then
             ARGS="$ARGS --skip-sync"
+          fi
+          # Pass force_rerun flag if checked (creates new JobRun even if one exists today)
+          if [ "${{ inputs.force_rerun }}" = "true" ]; then
+            ARGS="$ARGS --force-rerun"
           fi
           # Pass custom payload JSON only if non-empty (use env var to avoid YAML injection)
           if [ -n "$PAYLOAD_JSON" ]; then

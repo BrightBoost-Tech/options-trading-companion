@@ -9,6 +9,7 @@ Usage:
     python scripts/run_signed_task.py suggestions_close
     python scripts/run_signed_task.py suggestions_open --user-id <uuid>
     python scripts/run_signed_task.py suggestions_open --payload-json '{"skip_sync":true}'
+    python scripts/run_signed_task.py suggestions_open --force-rerun
     DRY_RUN=1 python scripts/run_signed_task.py learning_ingest
 
 Environment Variables:
@@ -470,6 +471,7 @@ def build_payload(
     user_id: Optional[str] = None,
     payload_json: Optional[str] = None,
     skip_sync: bool = False,
+    force_rerun: bool = False,
 ) -> dict:
     """
     Build the request payload for a task.
@@ -478,13 +480,15 @@ def build_payload(
     1. Task-specific defaults (e.g., strategy_name)
     2. user_id from environment/CLI
     3. skip_sync flag
-    4. payload_json (if provided, merges and overrides all above)
+    4. force_rerun flag
+    5. payload_json (if provided, merges and overrides all above)
 
     Args:
         task_name: Name of the task
         user_id: User ID from environment or CLI
         payload_json: Optional JSON string to parse and merge
         skip_sync: If True, adds skip_sync=true to payload
+        force_rerun: If True, adds force_rerun=true to payload
 
     Returns:
         Combined payload dict
@@ -506,7 +510,11 @@ def build_payload(
     if skip_sync:
         payload["skip_sync"] = True
 
-    # 4. Merge payload_json (overrides all above)
+    # 4. Add force_rerun if specified
+    if force_rerun:
+        payload["force_rerun"] = True
+
+    # 5. Merge payload_json (overrides all above)
     # Treat None, empty string, and whitespace-only as "not provided"
     if payload_json is not None:
         payload_json_stripped = payload_json.strip()
@@ -532,6 +540,7 @@ def run_task(
     timeout: int = 120,
     payload_json: Optional[str] = None,
     skip_sync: bool = False,
+    force_rerun: bool = False,
 ) -> int:
     """
     Run a signed task request.
@@ -544,6 +553,7 @@ def run_task(
         timeout: Request timeout in seconds
         payload_json: Optional JSON string to merge into payload
         skip_sync: If True, adds skip_sync=true to payload
+        force_rerun: If True, adds force_rerun=true to payload
 
     Returns:
         0 on success, 1 on failure
@@ -589,7 +599,7 @@ def run_task(
     path = task["path"]
     scope = task["scope"]
     try:
-        payload = build_payload(task_name, user_id, payload_json, skip_sync)
+        payload = build_payload(task_name, user_id, payload_json, skip_sync, force_rerun)
     except ValueError as e:
         print(f"[ERROR] {e}")
         write_step_summary(
@@ -725,6 +735,7 @@ Examples:
     python scripts/run_signed_task.py suggestions_open --user-id abc-123
     python scripts/run_signed_task.py suggestions_open --payload-json '{"skip_sync":true}'
     python scripts/run_signed_task.py suggestions_open --payload-json '{"user_id":"<uuid>","skip_sync":true}'
+    python scripts/run_signed_task.py suggestions_open --force-rerun
     DRY_RUN=1 python scripts/run_signed_task.py learning_ingest
     python scripts/run_signed_task.py suggestions_close --skip-time-gate
 
@@ -776,6 +787,11 @@ Environment Variables:
         help="Skip holdings sync (adds skip_sync=true to payload)",
     )
     parser.add_argument(
+        "--force-rerun",
+        action="store_true",
+        help="Force new JobRun even if one exists for this day/config",
+    )
+    parser.add_argument(
         "--list",
         action="store_true",
         dest="list_tasks",
@@ -800,6 +816,7 @@ Environment Variables:
         timeout=args.timeout,
         payload_json=args.payload_json,
         skip_sync=args.skip_sync,
+        force_rerun=args.force_rerun,
     )
 
 

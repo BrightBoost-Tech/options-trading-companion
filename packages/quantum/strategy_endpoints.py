@@ -372,7 +372,7 @@ def run_backtest(
          raise HTTPException(status_code=404, detail="Strategy config not found")
     config_data = res.data[0]
     config = StrategyConfig(**config_data["params"])
-    results = _run_backtest_workflow(user_id, request, name, config)
+    results = _run_backtest_workflow(user_id, request, name, config, seed=request.seed)
     return {"status": "completed", "results_count": len(results), "results": results}
 
 @router.post("/strategies/{name}/backtest/v3")
@@ -526,7 +526,7 @@ async def run_batch_simulation_endpoint(
     }
     supabase.table("strategy_backtests").insert(row).execute()
 
-    background_tasks.add_task(_run_backtest_workflow, user_id, req, req.strategy_name, config, batch_id)
+    background_tasks.add_task(_run_backtest_workflow, user_id, req, req.strategy_name, config, batch_id, seed=req.seed)
 
     return {"status": "queued", "batch_id": batch_id}
 

@@ -27,6 +27,7 @@ class BacktestRequest(BaseModel):
     end_date: str
     ticker: str
     param_grid: Optional[Dict[str, List[Any]]] = None
+    seed: Optional[int] = None
 
 class CostModelConfig(BaseModel):
     commission_per_contract: float = 0.65

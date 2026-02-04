@@ -1,5 +1,6 @@
 from typing import List, Dict, Any, Optional
 import json
+import random
 import numpy as np
 from datetime import datetime
 from .historical_simulation import HistoricalCycleService
@@ -16,7 +17,7 @@ def _serialize(obj):
         return obj.isoformat()
     return obj
 
-def _run_backtest_workflow(user_id: str, request, name: str, config, batch_id: Optional[str] = None) -> List[Dict[str, Any]]:
+def _run_backtest_workflow(user_id: str, request, name: str, config, batch_id: Optional[str] = None, seed: Optional[int] = None) -> List[Dict[str, Any]]:
     """
     Restored backtest workflow that iterates through historical cycles.
     Intended for V2/Legacy backtest requests.
@@ -28,6 +29,10 @@ def _run_backtest_workflow(user_id: str, request, name: str, config, batch_id: O
     cursor = request.start_date
     end_date_str = request.end_date
     symbol = request.ticker
+
+    # Deterministic RNG for cycle seeds
+    # If seed is None, we use system entropy (nondeterministic)
+    rng = random.Random(seed)
 
     # Safety check for infinite loops
     max_cycles = 1000
@@ -48,13 +53,18 @@ def _run_backtest_workflow(user_id: str, request, name: str, config, batch_id: O
         except ValueError:
             break
 
+        # Generate deterministic seed for this cycle
+        # We use randint to generate a seed for the cycle's local RNG
+        cycle_seed = rng.randint(0, 1000000)
+
         # Run one cycle
         result = service.run_cycle(
             cursor_date_str=cursor,
             symbol=symbol,
             user_id=user_id,
             config=config,
-            mode="deterministic"
+            mode="deterministic",
+            seed=cycle_seed
         )
 
         # Add to results if it was a trade or relevant event

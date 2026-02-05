@@ -1611,6 +1611,7 @@ def scan_for_opportunities(
                 print(f"[Scanner] Exception in thread for {sym}: {exc}")
 
     # Sort by Unified Score descending
-    candidates.sort(key=lambda x: x['score'], reverse=True)
+    # Bolt Determinism: Add symbol as tie-breaker for stable ordering across concurrent runs
+    candidates.sort(key=lambda x: (x['score'], x['symbol']), reverse=True)
 
     return candidates

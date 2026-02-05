@@ -130,11 +130,18 @@ def health_check():
 def get_version():
     """
     Deployment fingerprint endpoint for build verification.
-    Returns git SHA and build timestamp from Docker build args.
+    Returns git SHA and build timestamp from environment.
     """
+    # Check multiple sources for git SHA (Railway auto-injects RAILWAY_GIT_COMMIT_SHA)
+    git_sha = (
+        os.getenv("GIT_SHA")
+        or os.getenv("RAILWAY_GIT_COMMIT_SHA")
+        or os.getenv("VERCEL_GIT_COMMIT_SHA")
+        or "unknown"
+    )
     return {
         "version": APP_VERSION,
-        "git_sha": os.getenv("GIT_SHA", "unknown"),
+        "git_sha": git_sha,
         "build_time": os.getenv("BUILD_TIME", "unknown"),
     }
 

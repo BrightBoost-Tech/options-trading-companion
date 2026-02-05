@@ -68,6 +68,35 @@ def _get_strategy_type(pos: Union[Dict, SpreadPosition]) -> str:
         return str(pos.spread_type or "unknown").lower()
     return str(pos.get("strategy") or pos.get("type") or pos.get("instrument_type") or "unknown").lower()
 
+def _option_cost_basis_usd(pos: Dict, cost_basis: float) -> float:
+    """
+    Return option cost_basis normalised to per-contract USD.
+
+    Plaid and most brokers store cost_basis as the *total* cost for the
+    position (premium x 100 x qty / qty = premium x 100).  The old code
+    multiplied by 100 again, inflating usage 100x.
+
+    Heuristic: compare cost_basis to ``current_price * 100`` (per-contract
+    market value).  If cost_basis exceeds that estimate by >10x, it was
+    probably stored in cents (e.g. 875 => $8.75/share); in that case
+    divide by 100 to get per-share USD, then x100 back (which cancels out).
+    Otherwise treat cost_basis as already per-contract USD.
+    """
+    raw = abs(cost_basis)
+    if raw == 0:
+        # No cost info - fall back to current market value of the contract
+        current_price = float(pos.get("current_price") or pos.get("price") or 0.0)
+        return current_price * 100.0
+
+    current_price = float(pos.get("current_price") or pos.get("price") or 0.0)
+    premium_est_usd = current_price * 100.0  # per-contract market value
+
+    if premium_est_usd > 0 and raw > premium_est_usd * 10:
+        # Likely stored in cents - normalise
+        return raw / 100.0
+    return raw
+
+
 def _estimate_risk_usage_usd(pos: Union[Dict, SpreadPosition], underlying_price: float = None) -> float:
     """
     Returns risk usage in USD for this position.
@@ -159,7 +188,7 @@ def _estimate_risk_usage_usd(pos: Union[Dict, SpreadPosition], underlying_price:
     if is_option:
         opt_type = str(option_type_field or "").lower()
         if is_long:
-            return abs(cost_basis) * 100.0 * qty
+            return _option_cost_basis_usd(pos, cost_basis) * qty
 
         # Short Option Logic
         if strike is not None:
@@ -174,7 +203,7 @@ def _estimate_risk_usage_usd(pos: Union[Dict, SpreadPosition], underlying_price:
                 pass
 
         # Fallback
-        return abs(cost_basis) * 100.0 * qty
+        return _option_cost_basis_usd(pos, cost_basis) * qty
 
     # Stocks
     return abs(float(pos.get("current_value") or 0.0))

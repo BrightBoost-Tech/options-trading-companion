@@ -126,6 +126,19 @@ def health_check():
     return response
 
 
+@app.get("/__version")
+def get_version():
+    """
+    Deployment fingerprint endpoint for build verification.
+    Returns git SHA and build timestamp from Docker build args.
+    """
+    return {
+        "version": APP_VERSION,
+        "git_sha": os.getenv("GIT_SHA", "unknown"),
+        "build_time": os.getenv("BUILD_TIME", "unknown"),
+    }
+
+
 # =============================================================================
 # Dev/Debug Routes (Security v4: Not registered in production)
 # =============================================================================

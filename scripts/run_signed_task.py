@@ -60,119 +60,140 @@ from packages.quantum.security.task_signing_v4 import sign_task_request
 # Task Definitions
 # =============================================================================
 
+# User ID mode for each task:
+#   "require" - task MUST have user_id, fail early if missing
+#   "allow"   - task accepts user_id optionally, inject if provided
+#   "none"    - task does NOT accept user_id, never inject it
+#
+# This prevents 422 errors when tasks with empty payload schemas
+# (like universe_sync) receive unexpected user_id field.
+
 TASKS = {
     "suggestions_close": {
         "path": "/tasks/suggestions/close",
         "scope": "tasks:suggestions_close",
         "description": "Generate CLOSE suggestions (8 AM Chicago)",
+        "user_id_mode": "allow",
     },
     "suggestions_open": {
         "path": "/tasks/suggestions/open",
         "scope": "tasks:suggestions_open",
         "description": "Generate OPEN suggestions (11 AM Chicago)",
+        "user_id_mode": "allow",
     },
     "learning_ingest": {
         "path": "/tasks/learning/ingest",
         "scope": "tasks:learning_ingest",
         "description": "Ingest learning outcomes (4:10 PM Chicago)",
+        "user_id_mode": "allow",
     },
     "universe_sync": {
         "path": "/tasks/universe/sync",
         "scope": "tasks:universe_sync",
         "description": "Sync trading universe",
+        "user_id_mode": "none",
     },
     "morning_brief": {
         "path": "/tasks/morning-brief",
         "scope": "tasks:morning_brief",
         "description": "Generate morning brief",
+        "user_id_mode": "none",
     },
     "midday_scan": {
         "path": "/tasks/midday-scan",
         "scope": "tasks:midday_scan",
         "description": "Run midday market scan",
+        "user_id_mode": "none",
     },
     "weekly_report": {
         "path": "/tasks/weekly-report",
         "scope": "tasks:weekly_report",
         "description": "Generate weekly report",
+        "user_id_mode": "none",
     },
     "validation_eval": {
         "path": "/tasks/validation/eval",
         "scope": "tasks:validation_eval",
         "description": "Run validation evaluation",
+        "user_id_mode": "allow",
     },
     "strategy_autotune": {
         "path": "/tasks/strategy/autotune",
         "scope": "tasks:strategy_autotune",
         "description": "Auto-tune strategy parameters",
+        "user_id_mode": "none",
     },
     "ops_health_check": {
         "path": "/tasks/ops/health_check",
         "scope": "tasks:ops_health_check",
         "description": "Run ops health check (every 30 min)",
+        "user_id_mode": "none",
     },
     "paper_auto_execute": {
         "path": "/tasks/paper/auto-execute",
         "scope": "tasks:paper_auto_execute",
         "description": "Auto-execute top paper suggestions (requires user_id)",
-        "requires_user_id": True,
+        "user_id_mode": "require",
     },
     "paper_auto_close": {
         "path": "/tasks/paper/auto-close",
         "scope": "tasks:paper_auto_close",
         "description": "Auto-close paper positions (requires user_id)",
-        "requires_user_id": True,
+        "user_id_mode": "require",
     },
     "validation_shadow_eval": {
         "path": "/tasks/validation/shadow-eval",
         "scope": "tasks:validation_shadow_eval",
         "description": "Run shadow checkpoint evaluation (requires user_id)",
-        "requires_user_id": True,
+        "user_id_mode": "require",
     },
     "validation_cohort_eval": {
         "path": "/tasks/validation/cohort-eval",
         "scope": "tasks:validation_cohort_eval",
         "description": "Run cohort evaluations (requires user_id)",
-        "requires_user_id": True,
+        "user_id_mode": "require",
     },
     "validation_autopromote_cohort": {
         "path": "/tasks/validation/autopromote-cohort",
         "scope": "tasks:validation_autopromote_cohort",
         "description": "Auto-promote best cohort policy (requires user_id)",
-        "requires_user_id": True,
+        "user_id_mode": "require",
     },
     "validation_preflight": {
         "path": "/tasks/validation/preflight",
         "scope": "tasks:validation_preflight",
         "description": "Preflight readiness report (requires user_id)",
-        "requires_user_id": True,
+        "user_id_mode": "require",
     },
     "validation_init_window": {
         "path": "/tasks/validation/init-window",
         "scope": "tasks:validation_init_window",
         "description": "Initialize forward checkpoint window (requires user_id)",
-        "requires_user_id": True,
+        "user_id_mode": "require",
     },
     "paper_safety_close_one": {
         "path": "/tasks/paper/safety-close-one",
         "scope": "tasks:paper_safety_close_one",
         "description": "Safety close one paper position (requires user_id)",
-        "requires_user_id": True,
+        "user_id_mode": "require",
     },
     "plaid_backfill": {
         "path": "/internal/tasks/plaid/backfill-history",
         "scope": "tasks:plaid_backfill",
         "description": "Backfill Plaid history",
+        "user_id_mode": "allow",
     },
     "iv_daily_refresh": {
         "path": "/internal/tasks/iv/daily-refresh",
         "scope": "tasks:iv_daily_refresh",
         "description": "Refresh IV points",
+        "user_id_mode": "none",
     },
     "learning_train": {
         "path": "/internal/tasks/train-learning-v3",
         "scope": "tasks:learning_train",
         "description": "Train learned nesting v3",
+        "user_id_mode": "none",
     },
 }
 
@@ -478,7 +499,7 @@ def build_payload(
 
     Priority (later overrides earlier):
     1. Task-specific defaults (e.g., strategy_name)
-    2. user_id from environment/CLI
+    2. user_id from environment/CLI (only if task allows it)
     3. skip_sync flag
     4. force_rerun flag
     5. payload_json (if provided, merges and overrides all above)
@@ -494,17 +515,31 @@ def build_payload(
         Combined payload dict
 
     Raises:
-        ValueError: If payload_json is invalid JSON
+        ValueError: If payload_json is invalid JSON or task requires user_id but none provided
     """
     payload = {}
+
+    # Get task config
+    task = TASKS.get(task_name, {})
+    user_id_mode = task.get("user_id_mode", "none")
 
     # 1. Add task-specific defaults
     if task_name in ("suggestions_close", "suggestions_open"):
         payload["strategy_name"] = "spy_opt_autolearn_v6"
 
-    # 2. Add user_id if specified
-    if user_id:
+    # 2. Handle user_id based on task's user_id_mode
+    if user_id_mode == "require":
+        if not user_id:
+            raise ValueError(
+                f"Task '{task_name}' requires user_id but none was provided. "
+                f"Use --user-id or set USER_ID environment variable."
+            )
         payload["user_id"] = user_id
+    elif user_id_mode == "allow":
+        # Only inject if provided
+        if user_id:
+            payload["user_id"] = user_id
+    # user_id_mode == "none": never inject user_id automatically
 
     # 3. Add skip_sync if specified
     if skip_sync:
@@ -565,16 +600,6 @@ def run_task(
         return 1
 
     task = TASKS[task_name]
-
-    # Check if task requires user_id
-    if task.get("requires_user_id") and not user_id:
-        print(f"[ERROR] Task {task_name} requires --user-id or USER_ID environment variable")
-        write_step_summary(
-            task_name,
-            skipped=True,
-            skip_reason="Missing required user_id"
-        )
-        return 1
 
     # Check time gate
     if not check_time_gate(task_name, skip_time_gate):

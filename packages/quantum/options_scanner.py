@@ -10,6 +10,7 @@ import logging
 import concurrent.futures
 from collections import defaultdict
 from functools import lru_cache
+from bisect import bisect_left
 
 from packages.quantum.services.universe_service import UniverseService
 from packages.quantum.analytics.strategy_selector import StrategySelector
@@ -322,12 +323,49 @@ def _select_legs_from_chain(
         # 2. Find best contract (Delta or Moneyness)
         # Note: Optimization - candidates are sorted by strike.
 
-        has_delta = any(_delta(c) is not None for c in candidates)
+        # Bolt Optimization: Check first element (O(1)) instead of scanning all (O(N))
+        # Assumes homogeneity in chain data (if one has greeks, all usually do)
+        has_delta = candidates and _delta(candidates[0]) is not None
 
         if has_delta:
             target_d = abs(target_delta)
-            # Bolt: Use accessor
-            best_contract = min(candidates, key=lambda x: abs(abs(_delta(x) or 0) - target_d))
+
+            # Bolt Optimization: Use bisect (O(log N)) instead of min scan (O(N))
+            # Candidates sorted by strike.
+            # Calls: Delta decreases with strike. Negate delta to make ascending.
+            # Puts: Abs(Delta) increases with strike. Use as is.
+
+            if op_type == "call":
+                # Descending (0.9 -> 0.1) -> Ascending (-0.9 -> -0.1)
+                key_func = lambda x: -abs(_delta(x) or 0)
+                target_val = -target_d
+            else:
+                # Ascending (0.1 -> 0.9)
+                key_func = lambda x: abs(_delta(x) or 0)
+                target_val = target_d
+
+            # Find insertion point
+            idx = bisect_left(candidates, target_val, key=key_func)
+
+            # Find closest neighbor (idx-1 or idx)
+            best_contract = candidates[0]
+            best_diff = float('inf')
+
+            # Check left neighbor
+            if idx > 0:
+                c = candidates[idx - 1]
+                diff = abs(abs(_delta(c) or 0) - target_d)
+                if diff < best_diff:
+                    best_diff = diff
+                    best_contract = c
+
+            # Check right neighbor (insertion point)
+            if idx < len(candidates):
+                c = candidates[idx]
+                diff = abs(abs(_delta(c) or 0) - target_d)
+                if diff < best_diff:
+                    best_diff = diff
+                    best_contract = c
         else:
             moneyness = 1.0
             if op_type == 'call':

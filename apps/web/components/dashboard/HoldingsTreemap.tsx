@@ -45,7 +45,14 @@ function HoldingsTreemap({ exposure, loading }: HoldingsTreemapProps) {
                                 <span className="font-medium text-foreground">{sector}</span>
                                 <span className="text-muted-foreground">{pct.toFixed(1)}%</span>
                             </div>
-                            <div className="w-full bg-muted rounded-full h-1.5 overflow-hidden">
+                            <div
+                                className="w-full bg-muted rounded-full h-1.5 overflow-hidden"
+                                role="progressbar"
+                                aria-valuenow={Math.round(pct)}
+                                aria-valuemin={0}
+                                aria-valuemax={100}
+                                aria-label={`${sector} exposure`}
+                            >
                                 <div
                                     className="bg-indigo-500 h-1.5 rounded-full"
                                     style={{ width: `${Math.min(pct, 100)}%` }}

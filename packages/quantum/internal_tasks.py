@@ -195,84 +195,36 @@ async def backfill_history(
     }
 
 # Keep remaining endpoints unchanged as they were not in the target list
-@router.post("/iv/daily-refresh")
+@router.post("/iv/daily-refresh", status_code=202)
 async def iv_daily_refresh_task(
     client: Client = Depends(get_admin_client),
     auth: TaskSignatureResult = Depends(verify_task_signature("tasks:iv_daily_refresh"))
 ):
     """
     Refreshes IV points for universe.
+    Now enqueued as a background job to prevent blocking the API.
     """
-    print("[IV Task] Starting daily IV refresh...")
-    try:
-        universe_service = UniverseService(client)
-        candidates = universe_service.get_scan_candidates(limit=200)
-        symbols = list(set([c['symbol'] for c in candidates] + ['SPY', 'QQQ', 'IWM', 'DIA']))
-        print(f"[IV Task] Found {len(symbols)} symbols to process.")
-    except Exception as e:
-        print(f"[IV Task] Error fetching universe: {e}")
-        return {"status": "error", "message": "Failed to fetch universe"}
+    today = datetime.now().strftime("%Y-%m-%d")
+    job_name = "iv-daily-refresh"
+    key = f"{job_name}-{today}"
 
-    truth_layer = MarketDataTruthLayer()
-    iv_repo = IVRepository(client)
-    stats = {"ok": 0, "failed": 0, "errors": []}
+    job_id = enqueue_idempotent(
+        client=client,
+        job_name=job_name,
+        idempotency_key=key,
+        payload={
+            "app_version": APP_VERSION,
+            "trigger_ts": datetime.now().isoformat(),
+            "task_name": job_name
+        }
+    )
 
-    for sym in symbols:
-        try:
-            # 1. Normalize symbol
-            norm_sym = truth_layer.normalize_symbol(sym)
-
-            # 2. Get Spot Price via Snapshot (TruthLayer)
-            # Use snapshot_many for consistency (handles single list too)
-            snapshots = truth_layer.snapshot_many([norm_sym])
-            snap = snapshots.get(norm_sym, {})
-            quote = snap.get("quote", {})
-            spot = quote.get("mid") or quote.get("last") or 0.0
-
-            # Fallback to history if spot missing
-            if spot <= 0:
-                end_dt = datetime.now()
-                start_dt = end_dt - timedelta(days=5)
-                bars = truth_layer.daily_bars(norm_sym, start_dt, end_dt)
-                if bars:
-                    spot = bars[-1]["close"]
-
-            if spot <= 0:
-                stats["failed"] += 1
-                continue
-
-            # 3. Get Chain via TruthLayer
-            chain = truth_layer.option_chain(norm_sym, strike_range=0.20)
-
-            if not chain:
-                stats["failed"] += 1
-                continue
-
-            # 4. Adapt Chain for IVPointService (Legacy Compatibility)
-            # IVPointService expects: details.expiration_date, details.strike_price, details.contract_type, greeks.iv
-            adapted_chain = []
-            for c in chain:
-                adapted_chain.append({
-                    "details": {
-                        "expiration_date": c.get("expiry"),
-                        "strike_price": c.get("strike"),
-                        "contract_type": c.get("right")
-                    },
-                    "greeks": c.get("greeks") or {},
-                    "implied_volatility": c.get("iv")
-                })
-
-            result = IVPointService.compute_atm_iv_target_from_chain(adapted_chain, spot, datetime.now())
-            if result.get("iv_30d") is None:
-                stats["failed"] += 1
-            else:
-                iv_repo.upsert_iv_point(sym, result, datetime.now())
-                stats["ok"] += 1
-        except Exception as e:
-             stats["failed"] += 1
-             stats["errors"].append(f"{sym}: {e}")
-
-    return {"status": "ok", "stats": stats}
+    return {
+        "job_run_id": str(job_id),
+        "job_name": job_name,
+        "idempotency_key": key,
+        "status": "queued"
+    }
 
 @router.post("/train-learning-v3")
 async def train_learning_v3(

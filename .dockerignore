@@ -1,0 +1,53 @@
+# Git
+.git
+.gitignore
+
+# Node.js / pnpm
+node_modules
+.pnpm-store
+
+# Frontend apps (not needed for BE container)
+apps/
+
+# IDE and editor files
+.vscode
+.idea
+*.swp
+*.swo
+
+# Screenshots and images (user-generated)
+screenshot*.png
+*.screenshot.png
+
+# Test artifacts
+.pytest_cache
+__pycache__
+*.pyc
+.coverage
+htmlcov/
+.tox
+
+# Environment files (secrets injected via Railway)
+.env
+.env.local
+.env.*.local
+packages/quantum/.env
+packages/quantum/.env.local
+
+# Documentation and specs
+*.md
+docs/
+
+# Claude/AI tooling
+.claude/
+.jules/
+
+# Build artifacts
+dist/
+build/
+*.egg-info/
+
+# Misc
+.DS_Store
+Thumbs.db
+nul

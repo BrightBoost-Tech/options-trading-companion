@@ -3,7 +3,10 @@
 import { useState, useEffect } from 'react';
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
+import { Progress } from "@/components/ui/progress";
+import { EmptyState } from "@/components/ui/empty-state";
 import { fetchWithAuth, ApiError } from "@/lib/api";
+import { BarChart3, AlertCircle } from "lucide-react";
 
 interface WeeklySnapshot {
     week_id: string;
@@ -66,10 +69,13 @@ export function WeeklyProgressCard() {
     if (error) {
          return (
              <Card className="opacity-75">
-                <CardHeader>
-                    <CardTitle>Weekly Progress</CardTitle>
-                    <CardDescription>Unavailable at the moment.</CardDescription>
-                </CardHeader>
+                <CardContent className="pt-6">
+                    <EmptyState
+                        icon={AlertCircle}
+                        title="Weekly Progress"
+                        description="Unavailable at the moment."
+                    />
+                </CardContent>
             </Card>
         );
     }
@@ -77,10 +83,13 @@ export function WeeklyProgressCard() {
     if (!data) {
         return (
             <Card>
-                <CardHeader>
-                    <CardTitle>Weekly Progress</CardTitle>
-                    <CardDescription>Metrics will appear after one week of activity.</CardDescription>
-                </CardHeader>
+                <CardContent className="pt-6">
+                    <EmptyState
+                        icon={BarChart3}
+                        title="Weekly Progress"
+                        description="Metrics will appear after one week of activity."
+                    />
+                </CardContent>
             </Card>
         );
     }
@@ -91,10 +100,13 @@ export function WeeklyProgressCard() {
     if (!user_metrics || !system_metrics) {
         return (
              <Card>
-                <CardHeader>
-                    <CardTitle>Weekly Progress</CardTitle>
-                    <CardDescription>Data is incomplete.</CardDescription>
-                </CardHeader>
+                <CardContent className="pt-6">
+                    <EmptyState
+                        icon={BarChart3}
+                        title="Weekly Progress"
+                        description="Data is incomplete."
+                    />
+                </CardContent>
             </Card>
         );
     }
@@ -109,10 +121,13 @@ export function WeeklyProgressCard() {
     if (overallScore === null && qualityScore === null && !hasUserComponents && !hasSystemComponents) {
          return (
             <Card>
-                <CardHeader>
-                    <CardTitle>Weekly Progress</CardTitle>
-                    <CardDescription>Metrics will appear after one week of activity.</CardDescription>
-                </CardHeader>
+                <CardContent className="pt-6">
+                    <EmptyState
+                        icon={BarChart3}
+                        title="Weekly Progress"
+                        description="Metrics will appear after one week of activity."
+                    />
+                </CardContent>
             </Card>
         );
     }
@@ -143,11 +158,14 @@ export function WeeklyProgressCard() {
                             </span>
                             <span className="text-xs text-muted-foreground">Overall Score</span>
                         </div>
-                        <div className="space-y-2">
+                        <div className="space-y-4">
                             {user_metrics.components && Object.entries(user_metrics.components).map(([key, metric]: [string, any]) => (
-                                <div key={key} className="flex justify-between text-sm">
-                                    <span className="text-muted-foreground">{metric?.label || key}</span>
-                                    <span className="font-medium">{metric?.value != null ? (metric.value * 100).toFixed(0) : '--'}%</span>
+                                <div key={key} className="space-y-1.5">
+                                    <div className="flex justify-between text-sm">
+                                        <span className="text-muted-foreground">{metric?.label || key}</span>
+                                        <span className="font-medium">{metric?.value != null ? (metric.value * 100).toFixed(0) : '--'}%</span>
+                                    </div>
+                                    <Progress value={metric?.value != null ? metric.value * 100 : 0} className="h-2" />
                                 </div>
                             ))}
                         </div>
@@ -162,11 +180,14 @@ export function WeeklyProgressCard() {
                             </span>
                             <span className="text-xs text-muted-foreground">Quality Score</span>
                         </div>
-                         <div className="space-y-2">
+                         <div className="space-y-4">
                             {system_metrics.components && Object.entries(system_metrics.components).map(([key, metric]: [string, any]) => (
-                                <div key={key} className="flex justify-between text-sm">
-                                    <span className="text-muted-foreground">{metric?.label || key}</span>
-                                    <span className="font-medium">{metric?.value != null ? (metric.value * 100).toFixed(0) : '--'}%</span>
+                                <div key={key} className="space-y-1.5">
+                                    <div className="flex justify-between text-sm">
+                                        <span className="text-muted-foreground">{metric?.label || key}</span>
+                                        <span className="font-medium">{metric?.value != null ? (metric.value * 100).toFixed(0) : '--'}%</span>
+                                    </div>
+                                    <Progress value={metric?.value != null ? metric.value * 100 : 0} className="h-2" />
                                 </div>
                             ))}
                         </div>

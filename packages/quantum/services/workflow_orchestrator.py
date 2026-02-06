@@ -1814,7 +1814,8 @@ async def run_midday_cycle(supabase: Client, user_id: str):
             banned_strategies = settings_res.data.get("banned_strategies") or []
     except Exception as e:
         # settings table might not exist or column missing, non-critical
-        print(f"Note: Could not fetch banned_strategies for user {user_id}: {e}")
+        # Log once per run, not per user
+        logger.debug(f"banned_strategies not available for user {user_id[:8]}...: {type(e).__name__}")
 
     # Initialize Policy for Final Gate
     policy = StrategyPolicy(banned_strategies)

@@ -586,16 +586,32 @@ class ExecutionService:
         try:
             # Step 1: Pull executions in ONE query
             # We need to check both suggestion_id and suggestion_log_id
-            query = self.supabase.table(self.executions_table)\
-                .select("symbol, fill_price, fees, suggestion_id, suggestion_log_id, quantity, target_price")\
-                .eq("user_id", user_id)\
-                .in_("symbol", symbols)\
-                .not_.is_("suggestion_id", "null")\
-                .not_.is_("fill_price", "null")\
-                .gte("timestamp", cutoff_date)
-
-            ex_res = query.order("timestamp", desc=True).execute()
-            executions = ex_res.data or []
+            # Handle missing columns gracefully
+            try:
+                query = self.supabase.table(self.executions_table)\
+                    .select("symbol, fill_price, fees, suggestion_id, suggestion_log_id, quantity, target_price")\
+                    .eq("user_id", user_id)\
+                    .in_("symbol", symbols)\
+                    .not_.is_("suggestion_id", "null")\
+                    .not_.is_("fill_price", "null")\
+                    .gte("timestamp", cutoff_date)
+                ex_res = query.order("timestamp", desc=True).execute()
+                executions = ex_res.data or []
+            except Exception as col_err:
+                # suggestion_log_id column might not exist, try without it
+                if "suggestion_log_id" in str(col_err) or "column" in str(col_err).lower():
+                    logger.debug(f"suggestion_log_id column not available, using fallback query")
+                    query = self.supabase.table(self.executions_table)\
+                        .select("symbol, fill_price, fees, suggestion_id, quantity, target_price")\
+                        .eq("user_id", user_id)\
+                        .in_("symbol", symbols)\
+                        .not_.is_("suggestion_id", "null")\
+                        .not_.is_("fill_price", "null")\
+                        .gte("timestamp", cutoff_date)
+                    ex_res = query.order("timestamp", desc=True).execute()
+                    executions = ex_res.data or []
+                else:
+                    raise
 
             if not executions:
                 return {}

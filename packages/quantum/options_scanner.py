@@ -1248,7 +1248,8 @@ def scan_for_opportunities(
             surface_v4_summary = None
             surface_result = None
             if _is_surface_v4_enabled():
-                policy = _get_surface_v4_policy()
+                # Use distinct name to avoid shadowing outer 'policy' variable
+                surface_policy = _get_surface_v4_policy()
                 try:
                     from packages.quantum.services.surface_geometry_v4 import (
                         build_arb_free_surface,
@@ -1297,12 +1298,12 @@ def scan_for_opportunities(
                 except Exception as e:
                     logger.warning(f"[Scanner] Surface V4 computation failed for {symbol}: {e}")
                     surface_v4_summary = {"error": str(e)}
-                    # If policy is skip, reject on build failure
-                    if policy == "skip":
+                    # If surface_policy is skip, reject on build failure
+                    if surface_policy == "skip":
                         return None
 
                 # Policy enforcement (outside try/except so it always runs)
-                if policy == "skip" and surface_result is not None:
+                if surface_policy == "skip" and surface_result is not None:
                     # Reject if surface is invalid
                     if not surface_result.is_valid:
                         return None

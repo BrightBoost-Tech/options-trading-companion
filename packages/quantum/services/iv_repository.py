@@ -83,7 +83,18 @@ class IVRepository:
                 .limit(365)\
                 .execute()
 
-            history = [float(r['iv_30d']) for r in history_res.data if r.get('iv_30d') is not None]
+            # Handle "null" strings and convert to float safely
+            history = []
+            for r in history_res.data:
+                iv_val = r.get('iv_30d')
+                if iv_val is None:
+                    continue
+                if isinstance(iv_val, str) and iv_val.strip().lower() in ("null", "none", ""):
+                    continue
+                try:
+                    history.append(float(iv_val))
+                except (ValueError, TypeError):
+                    continue
             sample_size = len(history)
 
             iv_rank = None
@@ -169,6 +180,12 @@ class IVRepository:
 
                     if not sym or iv_val is None:
                         continue
+
+                    # Handle string "null" or empty strings as None
+                    if isinstance(iv_val, str):
+                        iv_val_str = iv_val.strip().lower()
+                        if iv_val_str in ("null", "none", ""):
+                            continue
 
                     try:
                         iv_float = float(iv_val)

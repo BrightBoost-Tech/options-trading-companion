@@ -12,6 +12,7 @@ from packages.quantum.jobs.rq_enqueue import enqueue_idempotent
 from packages.quantum.jobs.job_runs import JobRunStore
 from packages.quantum.security.task_signing_v4 import verify_task_signature, TaskSignatureResult
 from packages.quantum.policies.go_live_policy import evaluate_go_live_gate
+from packages.quantum.core.rate_limiter import limiter
 from packages.quantum.public_tasks_models import (
     UniverseSyncPayload,
     MorningBriefPayload,
@@ -295,7 +296,9 @@ def enqueue_job_run(job_name: str, idempotency_key: str, payload: Dict[str, Any]
 
 
 @router.post("/universe/sync", status_code=202)
+@limiter.limit("20/minute")
 async def task_universe_sync(
+    request: Request,
     payload: UniverseSyncPayload = Body(default_factory=UniverseSyncPayload),
     auth: TaskSignatureResult = Depends(verify_task_signature("tasks:universe_sync"))
 ):
@@ -314,7 +317,9 @@ async def task_universe_sync(
     )
 
 @router.post("/morning-brief", status_code=202)
+@limiter.limit("20/minute")
 async def task_morning_brief(
+    request: Request,
     payload: MorningBriefPayload = Body(default_factory=MorningBriefPayload),
     auth: TaskSignatureResult = Depends(verify_task_signature("tasks:morning_brief"))
 ):
@@ -333,7 +338,9 @@ async def task_morning_brief(
     )
 
 @router.post("/midday-scan", status_code=202)
+@limiter.limit("20/minute")
 async def task_midday_scan(
+    request: Request,
     payload: MiddayScanPayload = Body(default_factory=MiddayScanPayload),
     auth: TaskSignatureResult = Depends(verify_task_signature("tasks:midday_scan"))
 ):
@@ -352,7 +359,9 @@ async def task_midday_scan(
     )
 
 @router.post("/weekly-report", status_code=202)
+@limiter.limit("20/minute")
 async def task_weekly_report(
+    request: Request,
     payload: WeeklyReportPayload = Body(default_factory=WeeklyReportPayload),
     auth: TaskSignatureResult = Depends(verify_task_signature("tasks:weekly_report"))
 ):
@@ -372,7 +381,9 @@ async def task_weekly_report(
     )
 
 @router.post("/validation/eval", status_code=202)
+@limiter.limit("20/minute")
 async def task_validation_eval(
+    request: Request,
     payload: ValidationEvalPayload = Body(default_factory=ValidationEvalPayload),
     auth: TaskSignatureResult = Depends(verify_task_signature("tasks:validation_eval"))
 ):
@@ -413,7 +424,9 @@ async def task_validation_eval(
 
 
 @router.post("/suggestions/close", status_code=202)
+@limiter.limit("20/minute")
 async def task_suggestions_close(
+    request: Request,
     payload: SuggestionsClosePayload = Body(default_factory=SuggestionsClosePayload),
     auth: TaskSignatureResult = Depends(verify_task_signature("tasks:suggestions_close"))
 ):
@@ -461,7 +474,9 @@ async def task_suggestions_close(
 
 
 @router.post("/suggestions/open", status_code=202)
+@limiter.limit("20/minute")
 async def task_suggestions_open(
+    request: Request,
     payload: SuggestionsOpenPayload = Body(default_factory=SuggestionsOpenPayload),
     auth: TaskSignatureResult = Depends(verify_task_signature("tasks:suggestions_open"))
 ):
@@ -509,7 +524,9 @@ async def task_suggestions_open(
 
 
 @router.post("/learning/ingest", status_code=202)
+@limiter.limit("20/minute")
 async def task_learning_ingest(
+    request: Request,
     payload: LearningIngestPayload = Body(default_factory=LearningIngestPayload),
     auth: TaskSignatureResult = Depends(verify_task_signature("tasks:learning_ingest"))
 ):
@@ -545,7 +562,9 @@ async def task_learning_ingest(
 
 
 @router.post("/strategy/autotune", status_code=202)
+@limiter.limit("20/minute")
 async def task_strategy_autotune(
+    request: Request,
     payload: StrategyAutotunePayload = Body(default_factory=StrategyAutotunePayload),
     auth: TaskSignatureResult = Depends(verify_task_signature("tasks:strategy_autotune"))
 ):
@@ -588,7 +607,9 @@ async def task_strategy_autotune(
 
 
 @router.post("/ops/health_check", status_code=202)
+@limiter.limit("20/minute")
 async def task_ops_health_check(
+    request: Request,
     payload: OpsHealthCheckPayload = Body(default_factory=OpsHealthCheckPayload),
     auth: TaskSignatureResult = Depends(verify_task_signature("tasks:ops_health_check"))
 ):
@@ -674,7 +695,9 @@ def _check_paper_autopilot_gates(user_id: str) -> Optional[Dict[str, Any]]:
 
 
 @router.post("/paper/auto-execute", status_code=202)
+@limiter.limit("20/minute")
 async def task_paper_auto_execute(
+    request: Request,
     payload: PaperAutoExecutePayload = Body(...),
     auth: TaskSignatureResult = Depends(verify_task_signature("tasks:paper_auto_execute"))
 ):
@@ -722,7 +745,9 @@ async def task_paper_auto_execute(
 
 
 @router.post("/paper/auto-close", status_code=202)
+@limiter.limit("20/minute")
 async def task_paper_auto_close(
+    request: Request,
     payload: PaperAutoClosePayload = Body(...),
     auth: TaskSignatureResult = Depends(verify_task_signature("tasks:paper_auto_close"))
 ):
@@ -878,7 +903,9 @@ def _get_shadow_cohorts() -> list:
 
 
 @router.post("/validation/shadow-eval", status_code=200)
+@limiter.limit("20/minute")
 async def task_validation_shadow_eval(
+    request: Request,
     payload: ValidationShadowEvalPayload = Body(...),
     auth: TaskSignatureResult = Depends(verify_task_signature("tasks:validation_shadow_eval"))
 ):
@@ -1015,7 +1042,9 @@ def _get_cohort_overrides_by_name(cohort_name: str) -> Optional[Dict[str, Any]]:
 
 
 @router.post("/validation/autopromote-cohort", status_code=200)
+@limiter.limit("20/minute")
 async def task_validation_autopromote_cohort(
+    request: Request,
     payload: ValidationAutopromoteCohortPayload = Body(...),
     auth: TaskSignatureResult = Depends(verify_task_signature("tasks:validation_autopromote_cohort"))
 ):
@@ -1243,7 +1272,9 @@ def _readiness_hardening_idempotency_key(task_type: str, user_id: str) -> str:
 
 
 @router.post("/validation/preflight", status_code=200)
+@limiter.limit("20/minute")
 async def task_validation_preflight(
+    request: Request,
     payload: ValidationPreflightPayload = Body(...),
     auth: TaskSignatureResult = Depends(verify_task_signature("tasks:validation_preflight"))
 ):
@@ -1298,7 +1329,9 @@ async def task_validation_preflight(
 
 
 @router.post("/validation/init-window", status_code=200)
+@limiter.limit("20/minute")
 async def task_validation_init_window(
+    request: Request,
     payload: ValidationInitWindowPayload = Body(...),
     auth: TaskSignatureResult = Depends(verify_task_signature("tasks:validation_init_window"))
 ):
@@ -1354,7 +1387,9 @@ async def task_validation_init_window(
 
 
 @router.post("/paper/safety-close-one", status_code=200)
+@limiter.limit("20/minute")
 async def task_paper_safety_close_one(
+    request: Request,
     payload: PaperSafetyCloseOnePayload = Body(...),
     auth: TaskSignatureResult = Depends(verify_task_signature("tasks:paper_safety_close_one"))
 ):
@@ -1526,7 +1561,9 @@ async def task_paper_safety_close_one(
 
 
 @router.post("/validation/cohort-eval", status_code=200)
+@limiter.limit("20/minute")
 async def task_validation_cohort_eval(
+    request: Request,
     payload: ValidationCohortEvalPayload = Body(...),
     auth: TaskSignatureResult = Depends(verify_task_signature("tasks:validation_cohort_eval"))
 ):

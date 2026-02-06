@@ -5,6 +5,10 @@ from datetime import datetime, date
 from decimal import Decimal
 from enum import Enum
 from uuid import UUID
+try:
+    import numpy as np
+except ImportError:
+    np = None
 from supabase import create_client, Client
 
 # ---------------------------------------------------------------------------
@@ -82,6 +86,16 @@ def _to_jsonable(obj: Any) -> Any:
     # exact bool check before int, though both are safe for json.dumps
     if isinstance(obj, bool):
         return obj
+
+    # Numpy support
+    if np is not None:
+        if isinstance(obj, np.integer):
+            return int(obj)
+        if isinstance(obj, np.floating):
+            return float(obj)
+        if isinstance(obj, np.ndarray):
+            return _to_jsonable(obj.tolist())
+
     if isinstance(obj, (str, int, float)):
         return obj
     if isinstance(obj, (datetime, date)):

@@ -5,17 +5,7 @@ import numpy as np
 from datetime import datetime
 from .historical_simulation import HistoricalCycleService
 from packages.quantum.nested_logging import _get_supabase_client
-
-def _serialize(obj):
-    if isinstance(obj, np.integer):
-        return int(obj)
-    if isinstance(obj, np.floating):
-        return float(obj)
-    if isinstance(obj, np.ndarray):
-        return obj.tolist()
-    if isinstance(obj, datetime):
-        return obj.isoformat()
-    return obj
+from packages.quantum.jobs.db import _to_jsonable
 
 def _run_backtest_workflow(user_id: str, request, name: str, config, batch_id: Optional[str] = None, seed: Optional[int] = None) -> List[Dict[str, Any]]:
     """
@@ -94,8 +84,8 @@ def _run_backtest_workflow(user_id: str, request, name: str, config, batch_id: O
                 win_rate = len(wins) / trades_count if trades_count > 0 else 0.0
 
                 # Serialize results for JSONB storage
-                # Use json.dumps with default=_serialize to handle numpy types, then json.loads back to dict/list
-                serialized_results = json.loads(json.dumps(results, default=_serialize))
+                # Use _to_jsonable for robust handling of numpy, sets, etc.
+                serialized_results = _to_jsonable(results)
 
                 supabase.table("strategy_backtests").update({
                     "status": "completed",

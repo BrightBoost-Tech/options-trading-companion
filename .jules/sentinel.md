@@ -73,3 +73,8 @@
 **Vulnerability:** The `redact_sensitive_fields` utility used a limited list of keys (`access_token`, etc.) and case-sensitive matching. This meant common sensitive keys like `password`, `secret`, `api_key`, or `Access_Token` would not be redacted if they appeared in logs or debug outputs.
 **Learning:** Hardcoded "blocklists" for redaction are often incomplete and fragile to naming convention changes (e.g., camelCase vs snake_case).
 **Prevention:** Expanded the sensitive fields list to include standard credentials (`password`, `secret`, `key`) and implemented case-insensitive matching in the redaction logic.
+
+## 2026-05-28 - [Fix] Missing Rate Limiting on Public Tasks
+**Vulnerability:** Public task endpoints (e.g., `/tasks/universe/sync`) were protected by signature verification but lacked rate limiting. This allowed authenticated clients (or attackers with a compromised key) to flood the job queue with requests, potentially causing Denial of Service or exhausting the nonce storage.
+**Learning:** Authentication (Who are you?) does not imply resource control (How much can you do?). Even trusted machine-to-machine endpoints need rate limits to prevent accidents (infinite retry loops) or abuse if credentials leak.
+**Prevention:** Applied `@limiter.limit("20/minute")` to all public task endpoints in `packages/quantum/public_tasks.py` as a defense-in-depth measure.

@@ -1270,7 +1270,7 @@ def scan_for_opportunities(
                         # Reject if surface is invalid or has calendar arbitrage
                         if not surface_result.is_valid:
                             return None
-                        if surface_result.surface and surface_result.surface.calendar_arb_detected:
+                        if surface_result.surface and surface_result.surface.calendar_arb_detected_post:
                             return None
 
                 except Exception as e:

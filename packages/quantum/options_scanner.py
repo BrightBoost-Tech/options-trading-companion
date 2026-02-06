@@ -28,6 +28,15 @@ from packages.quantum.analytics.guardrails import earnings_week_penalty
 from packages.quantum.services.earnings_calendar_service import EarningsCalendarService
 from packages.quantum.agents.runner import AgentRunner, build_agent_pipeline
 
+# Surface V4 integration (optional, gated by env)
+def _is_surface_v4_enabled() -> bool:
+    """Check if Surface V4 hook is enabled."""
+    return os.getenv("SURFACE_V4_ENABLE", "").lower() in ("1", "true", "yes")
+
+def _get_surface_v4_policy() -> str:
+    """Get Surface V4 policy: 'off', 'observe', or 'skip'."""
+    return os.getenv("SURFACE_V4_POLICY", "observe").lower()
+
 # Configuration
 SCANNER_LIMIT_DEV = int(os.getenv("SCANNER_LIMIT_DEV", "40")) # Limit universe in dev
 SCANNER_MIN_DTE = 25
@@ -1230,6 +1239,45 @@ def scan_for_opportunities(
             if not expiry_selected or not chain_subset:
                 return None
 
+            # ========== SURFACE V4 HOOK (Optional) ==========
+            # Compute arb-free surface when enabled for consistency contract
+            surface_v4_summary = None
+            if _is_surface_v4_enabled():
+                try:
+                    from packages.quantum.services.surface_geometry_v4 import build_arb_free_surface
+
+                    surface_result = build_arb_free_surface(
+                        chain=chain_subset,
+                        spot=current_price,
+                        symbol=symbol,
+                        as_of_ts=now_dt,
+                    )
+
+                    # Build compact summary (do NOT store full surface in candidate)
+                    surface_v4_summary = {
+                        "is_valid": surface_result.is_valid,
+                        "content_hash": surface_result.content_hash,
+                        "calendar_arb_detected": surface_result.surface.calendar_arb_detected if surface_result.surface else None,
+                        "calendar_arb_expiries": surface_result.surface.calendar_arb_expiries if surface_result.surface else [],
+                        "butterfly_arb": any(sm.butterfly_arb_detected for sm in surface_result.surface.smiles) if surface_result.surface else None,
+                        "warnings": surface_result.warnings[:3],
+                        "errors": surface_result.errors[:3],
+                    }
+
+                    # Policy enforcement
+                    policy = _get_surface_v4_policy()
+                    if policy == "skip":
+                        # Reject if surface is invalid or has calendar arbitrage
+                        if not surface_result.is_valid:
+                            return None
+                        if surface_result.surface and surface_result.surface.calendar_arb_detected:
+                            return None
+
+                except Exception as e:
+                    logger.warning(f"[Scanner] Surface V4 computation failed for {symbol}: {e}")
+                    surface_v4_summary = {"error": str(e)}
+            # ================================================
+
             # Optimization: Sort and index chain ONCE per symbol
             # Single-pass split into calls and puts
 
@@ -1538,7 +1586,9 @@ def scan_for_opportunities(
                 "earnings_risk": earnings_risk,
                 "earnings_penalty": earnings_penalty_val,
                 # Agent Data
-                "option_spread_pct": option_spread_pct
+                "option_spread_pct": option_spread_pct,
+                # Surface V4 (optional, only populated when SURFACE_V4_ENABLE=1)
+                "surface_v4": surface_v4_summary,
             }
 
             # Calculate Probability of Profit

@@ -34,11 +34,10 @@ from typing import Any, Dict, List, Optional, Tuple
 from pydantic import BaseModel, ConfigDict, Field
 
 from packages.quantum.observability.canonical import (
-    canonical_json_bytes,
     compute_content_hash,
     normalize_float,
 )
-from packages.quantum.observability.lineage import LineageSigner, SignatureResult
+from packages.quantum.observability.lineage import LineageSigner
 
 logger = logging.getLogger(__name__)
 
@@ -528,11 +527,21 @@ def record_surface_to_context(
 
         # Record as v4 surface key
         key = f"{symbol}:surface:v4"
+
+        # Build metadata with content hash and quality summary
+        metadata = {
+            "content_hash": surface_result.content_hash,
+            "signature_status": surface_result.signature_status,
+            "version": SURFACE_VERSION,
+            "warnings": surface_result.warnings[:5],
+            "errors": surface_result.errors[:5],
+        }
+
         ctx.record_input(
             key=key,
             snapshot_type="surface",
             payload=surface_result.to_dict(),
-            content_hash=surface_result.content_hash,
+            metadata=metadata,
         )
 
     except Exception as e:

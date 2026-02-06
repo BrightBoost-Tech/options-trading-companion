@@ -33,3 +33,7 @@
 ## 2026-07-28 - [Iterative List Slicing Trap]
 **Learning:** Repeatedly slicing a growing list (e.g., `history[:i+1]`) inside a simulation loop creates an implicit O(N^2) memory copy bottleneck, which is often invisible in small tests. Replacing this with pre-calculated vectorized arrays and O(1) index lookups yielded a ~25x speedup for 10k items.
 **Action:** Identify loops where history is passed to a stateless function by slicing, and replace them with vectorized pre-calculation on the full array.
+
+## 2026-08-15 - [Linear Search in Sorted Time Series]
+**Learning:** Iterating linearly to find a start date in a sorted time series is O(N) and can be slow in tight loops (e.g., parameter sweeps). Using `bisect_left` (binary search) reduces this to O(log N).
+**Action:** Always use the `bisect` module for finding insertion points or values in sorted lists, especially for date/time lookups in simulations.

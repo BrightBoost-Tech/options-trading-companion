@@ -156,11 +156,11 @@ class BacktestEngine:
                 underlying_date_map = {d: i for i, d in enumerate(underlying_dates)}
 
         # Determine start index
-        start_idx = -1
-        for i, d_obj in enumerate(date_objs):
-            if d_obj >= start_dt:
-                start_idx = i
-                break
+        # Bolt Optimization: Use bisect for O(log N) lookup instead of O(N) scan
+        from bisect import bisect_left
+        start_idx = bisect_left(date_objs, start_dt)
+        if start_idx == len(date_objs):
+            start_idx = -1
 
         if start_idx == -1 or start_idx < self.lookback_window:
              if len(dates) > self.lookback_window and start_idx != -1:

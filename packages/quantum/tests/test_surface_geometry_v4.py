@@ -453,6 +453,39 @@ class TestBuildArbFreeSurface:
         # Forward should be > spot with r > q
         assert smile.forward >= 100.0
 
+    def test_calendar_overlap_missing_invalidates_surface(self):
+        """When 2+ expiries have disjoint k ranges, surface is invalid."""
+        as_of = datetime(2024, 6, 15, 12, 0, 0, tzinfo=timezone.utc)
+        exp1 = "2024-07-15"  # 30 days
+        exp2 = "2024-08-15"  # 61 days
+
+        # expiry1: deep ITM strikes -> negative k range (strikes 50-60 vs spot 100)
+        # expiry2: deep OTM strikes -> positive k range (strikes 140-150 vs spot 100)
+        # No overlap in k-space => calendar arb cannot be verified
+        chain = [
+            {"strike": 50.0, "iv": 0.20, "expiry": exp1, "right": "call", "greeks": {}},
+            {"strike": 55.0, "iv": 0.20, "expiry": exp1, "right": "call", "greeks": {}},
+            {"strike": 60.0, "iv": 0.20, "expiry": exp1, "right": "call", "greeks": {}},
+            {"strike": 140.0, "iv": 0.20, "expiry": exp2, "right": "call", "greeks": {}},
+            {"strike": 145.0, "iv": 0.20, "expiry": exp2, "right": "call", "greeks": {}},
+            {"strike": 150.0, "iv": 0.20, "expiry": exp2, "right": "call", "greeks": {}},
+        ]
+
+        result = build_arb_free_surface(
+            chain=chain,
+            spot=100.0,
+            symbol="TEST",
+            as_of_ts=as_of,
+        )
+
+        # Surface should be invalid due to overlap missing
+        assert result.is_valid is False
+        assert any("calendar_overlap_missing" in e for e in result.errors)
+
+        # Surface should still be populated for diagnostics
+        assert result.surface is not None
+        assert len(result.surface.smiles) == 2
+
 
 class TestDeterministicHashing:
     def test_same_input_same_hash(self, sample_chain):

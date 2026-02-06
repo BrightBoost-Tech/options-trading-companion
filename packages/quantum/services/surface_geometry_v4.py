@@ -972,24 +972,30 @@ def build_arb_free_surface(
     # Build common k-grid
     common_k_grid = build_common_k_grid(slices)
 
+    # GAP A: If 2+ expiries but no common k overlap, calendar arb cannot be verified
+    calendar_overlap_missing = False
+    if len(smiles) >= 2 and common_k_grid is None:
+        calendar_overlap_missing = True
+        result.errors.append("calendar_overlap_missing")
+
     # Detect calendar arb pre-repair
     calendar_count_pre = 0
     calendar_max_pre = 0.0
     calendar_violating_pre = []
 
-    if common_k_grid and len(slices) >= 2:
+    if common_k_grid and len(slices) >= 2 and not calendar_overlap_missing:
         calendar_count_pre, calendar_max_pre, calendar_violating_pre = detect_calendar_violations(slices, common_k_grid)
 
     calendar_detected_pre = calendar_count_pre > 0
 
-    # Iterative repair loop
+    # Iterative repair loop (skip if overlap missing)
     repair_iterations = 0
     for iteration in range(MAX_REPAIR_ITERS):
         repair_iterations = iteration + 1
         any_violation = False
 
-        # 1. Calendar repair
-        if common_k_grid and len(slices) >= 2:
+        # 1. Calendar repair (only if we have overlap)
+        if common_k_grid and len(slices) >= 2 and not calendar_overlap_missing:
             cal_count, _, _ = detect_calendar_violations(slices, common_k_grid)
             if cal_count > 0:
                 slices = repair_calendar(slices, common_k_grid)
@@ -1013,7 +1019,7 @@ def build_arb_free_surface(
     calendar_max_post = 0.0
     calendar_violating_post = []
 
-    if common_k_grid and len(slices) >= 2:
+    if common_k_grid and len(slices) >= 2 and not calendar_overlap_missing:
         calendar_count_post, calendar_max_post, calendar_violating_post = detect_calendar_violations(slices, common_k_grid)
 
     calendar_detected_post = calendar_count_post > 0
@@ -1078,7 +1084,7 @@ def build_arb_free_surface(
 
     # Determine overall validity
     any_butterfly_post = any(s.butterfly_arb_detected_post for s in updated_smiles)
-    surface_valid = not any_butterfly_post and not calendar_detected_post
+    surface_valid = (not any_butterfly_post) and (not calendar_detected_post) and (not calendar_overlap_missing)
 
     if any_butterfly_post:
         result.errors.append("Butterfly arbitrage violations remain after repair")

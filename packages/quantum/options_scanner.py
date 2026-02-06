@@ -37,6 +37,10 @@ def _get_surface_v4_policy() -> str:
     """Get Surface V4 policy: 'off', 'observe', or 'skip'."""
     return os.getenv("SURFACE_V4_POLICY", "observe").lower()
 
+def _get_surface_v4_strike_range() -> float:
+    """Get Surface V4 strike range as fraction of spot (default 0.20 = ±20%)."""
+    return float(os.getenv("SURFACE_V4_STRIKE_RANGE", "0.20"))
+
 # Configuration
 SCANNER_LIMIT_DEV = int(os.getenv("SCANNER_LIMIT_DEV", "40")) # Limit universe in dev
 SCANNER_MIN_DTE = 25
@@ -1242,40 +1246,74 @@ def scan_for_opportunities(
             # ========== SURFACE V4 HOOK (Optional) ==========
             # Compute arb-free surface when enabled for consistency contract
             surface_v4_summary = None
+            surface_result = None
             if _is_surface_v4_enabled():
+                policy = _get_surface_v4_policy()
                 try:
-                    from packages.quantum.services.surface_geometry_v4 import build_arb_free_surface
+                    from packages.quantum.services.surface_geometry_v4 import (
+                        build_arb_free_surface,
+                        record_surface_to_context,
+                    )
+
+                    # Build surface on MULTI-EXPIRY chain (not chain_subset) so
+                    # calendar arb is meaningful. Filter strikes to reduce noise.
+                    sr = _get_surface_v4_strike_range()
+                    strike_lo = current_price * (1 - sr)
+                    strike_hi = current_price * (1 + sr)
+                    surface_chain = [
+                        c for c in chain
+                        if strike_lo <= float(c.get("strike") or 0) <= strike_hi
+                    ]
 
                     surface_result = build_arb_free_surface(
-                        chain=chain_subset,
+                        chain=surface_chain,
                         spot=current_price,
                         symbol=symbol,
                         as_of_ts=now_dt,
                     )
 
-                    # Build compact summary (do NOT store full surface in candidate)
+                    # Record to DecisionContext
+                    record_surface_to_context(symbol, surface_result)
+
+                    # Build compact summary using STRICT field names
+                    surface = surface_result.surface
+                    butterfly_any_post = (
+                        any(sm.butterfly_arb_detected_post for sm in surface.smiles)
+                        if surface else None
+                    )
                     surface_v4_summary = {
                         "is_valid": surface_result.is_valid,
                         "content_hash": surface_result.content_hash,
-                        "calendar_arb_detected": surface_result.surface.calendar_arb_detected if surface_result.surface else None,
-                        "calendar_arb_expiries": surface_result.surface.calendar_arb_expiries if surface_result.surface else [],
-                        "butterfly_arb": any(sm.butterfly_arb_detected for sm in surface_result.surface.smiles) if surface_result.surface else None,
+                        "calendar_arb_pre": surface.calendar_arb_detected_pre if surface else None,
+                        "calendar_arb_post": surface.calendar_arb_detected_post if surface else None,
+                        "calendar_arb_count_post": surface.calendar_arb_count_post if surface else None,
+                        "calendar_arb_expiries": surface.calendar_arb_expiries if surface else [],
+                        "butterfly_any_post": butterfly_any_post,
+                        "repair_iterations": surface.repair_iterations if surface else None,
                         "warnings": surface_result.warnings[:3],
                         "errors": surface_result.errors[:3],
                     }
 
-                    # Policy enforcement
-                    policy = _get_surface_v4_policy()
-                    if policy == "skip":
-                        # Reject if surface is invalid or has calendar arbitrage
-                        if not surface_result.is_valid:
-                            return None
-                        if surface_result.surface and surface_result.surface.calendar_arb_detected_post:
-                            return None
-
                 except Exception as e:
                     logger.warning(f"[Scanner] Surface V4 computation failed for {symbol}: {e}")
                     surface_v4_summary = {"error": str(e)}
+                    # If policy is skip, reject on build failure
+                    if policy == "skip":
+                        return None
+
+                # Policy enforcement (outside try/except so it always runs)
+                if policy == "skip" and surface_result is not None:
+                    # Reject if surface is invalid
+                    if not surface_result.is_valid:
+                        return None
+                    # Reject if calendar arb detected post-repair
+                    if surface_result.surface and surface_result.surface.calendar_arb_detected_post:
+                        return None
+                    # Reject if any butterfly arb remains post-repair
+                    if surface_result.surface and any(
+                        sm.butterfly_arb_detected_post for sm in surface_result.surface.smiles
+                    ):
+                        return None
             # ================================================
 
             # Optimization: Sort and index chain ONCE per symbol

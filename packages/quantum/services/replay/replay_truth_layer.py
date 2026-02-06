@@ -440,10 +440,18 @@ class ReplayTruthLayer(MarketDataTruthLayer):
         """
         Return stored surface snapshot for a symbol.
 
-        Key pattern: "{symbol}:surface:v1" with snapshot_type="surface"
+        Key pattern: "{symbol}:surface:v4" (preferred) or "{symbol}:surface:v1" (fallback)
+        with snapshot_type="surface"
         """
-        key = f"{symbol}:surface:v1"
-        stored = self.get_stored_input(key, "surface")
+        # Try v4 key first (arb-free surface)
+        key_v4 = f"{symbol}:surface:v4"
+        stored = self.get_stored_input(key_v4, "surface")
+        if stored:
+            return stored["payload"]
+
+        # Fall back to v1 key
+        key_v1 = f"{symbol}:surface:v1"
+        stored = self.get_stored_input(key_v1, "surface")
         if stored:
             return stored["payload"]
 

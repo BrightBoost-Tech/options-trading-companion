@@ -1037,21 +1037,38 @@ class MarketDataTruthLayer:
                      min_expiry: Optional[str] = None,
                      max_expiry: Optional[str] = None,
                      strike_range: Optional[float] = None,
-                     right: Optional[str] = None) -> List[Dict]:
+                     right: Optional[str] = None,
+                     spot: Optional[float] = None) -> List[Dict]:
         """
         Fetches option chain snapshot for an underlying.
         Returns a list of canonical option objects.
         """
-        # 1. Check Cache
-        cache_key = f"{underlying}_{expiration_date}_{min_expiry}_{max_expiry}_{right}"
+        # 1. Check Cache (include strike_range for determinism)
+        cache_key = f"{underlying}_{expiration_date}_{min_expiry}_{max_expiry}_{right}_{strike_range}"
         cached = self.cache.get("option_chain", cache_key)
         if cached:
             return cached
 
-        # 2. Fetch from Polygon
+        # 2. Get spot price if not provided (for strike filtering)
+        spot_for_filter = spot
+        if spot_for_filter is None and strike_range is not None:
+            # Fetch spot from snapshot to apply strike filtering
+            snapshots = self.snapshot_many([underlying])
+            snap = snapshots.get(underlying, {})
+            quote = snap.get("quote", {})
+            spot_for_filter = quote.get("mid") or quote.get("last")
+
+        # 3. Fetch from Polygon
         # Endpoint: /v3/snapshot/options/{underlyingAsset}
 
         params = {"limit": 250}
+
+        # Apply strike range filter if spot is available
+        if strike_range is not None and spot_for_filter and spot_for_filter > 0:
+            strike_low = spot_for_filter * (1 - strike_range)
+            strike_high = spot_for_filter * (1 + strike_range)
+            params["strike_price.gte"] = strike_low
+            params["strike_price.lte"] = strike_high
 
         if expiration_date:
             params["expiration_date"] = expiration_date

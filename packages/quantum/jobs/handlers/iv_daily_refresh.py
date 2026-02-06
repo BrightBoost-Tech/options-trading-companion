@@ -61,8 +61,8 @@ def run(payload: Dict[str, Any], ctx: Any = None) -> Dict[str, Any]:
                     stats["failed"] += 1
                     continue
 
-                # 3. Get Chain via TruthLayer
-                chain = truth_layer.option_chain(norm_sym, strike_range=0.20)
+                # 3. Get Chain via TruthLayer (pass spot to avoid redundant snapshot fetch)
+                chain = truth_layer.option_chain(norm_sym, strike_range=0.20, spot=spot)
 
                 if not chain:
                     stats["failed"] += 1

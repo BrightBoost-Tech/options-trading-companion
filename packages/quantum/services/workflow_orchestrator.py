@@ -3,8 +3,11 @@ from datetime import datetime, timedelta, timezone
 from typing import Optional, Dict, TYPE_CHECKING
 import json
 import asyncio
+import logging
 import os
 import sys
+
+logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from packages.quantum.services.market_data_truth_layer import TruthSnapshotV4

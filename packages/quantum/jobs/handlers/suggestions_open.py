@@ -20,6 +20,7 @@ from packages.quantum.services.holdings_sync_service import ensure_holdings_fres
 from packages.quantum.services.strategy_loader import load_strategy_config, ensure_default_strategy_exists
 from packages.quantum.jobs.handlers.utils import get_admin_client, get_active_user_ids, run_async
 from packages.quantum.jobs.handlers.exceptions import RetryableJobError, PermanentJobError
+from packages.quantum.jobs.db import _to_jsonable
 
 JOB_NAME = "suggestions_open"
 
@@ -133,14 +134,15 @@ def run(payload: Dict[str, Any], ctx: Any = None) -> Dict[str, Any]:
 
         timing_ms = (time.time() - start_time) * 1000
 
-        return {
+        # Ensure all values are JSON-serializable (datetime -> isoformat, etc.)
+        return _to_jsonable({
             "ok": failed == 0,
             "counts": counts,
             "timing_ms": timing_ms,
             "strategy_name": strategy_name,
             "notes": notes[:20],  # Limit notes to avoid huge payloads
             "cycle_results": cycle_results[:10],  # Budget/reason info per user
-        }
+        })
 
     except ValueError as e:
         raise PermanentJobError(f"Configuration error: {e}")

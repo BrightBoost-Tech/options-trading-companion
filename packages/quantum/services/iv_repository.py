@@ -1,10 +1,32 @@
-from typing import Dict, Optional, Any, List
+from typing import Dict, Optional, Any, List, Union
 from datetime import datetime, timedelta
 from supabase import Client
 import pandas as pd
 import numpy as np
 import concurrent.futures
 from packages.quantum.security.masking import sanitize_exception
+
+
+def _sanitize_numeric(value: Any) -> Optional[float]:
+    """
+    Sanitize a value for numeric DB columns.
+    Converts string "null", "none", "" to None.
+    Returns float or None.
+    """
+    if value is None:
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, str):
+        val_str = value.strip().lower()
+        if val_str in ("null", "none", ""):
+            return None
+        try:
+            return float(value)
+        except (ValueError, TypeError):
+            return None
+    return None
+
 
 class IVRepository:
     """
@@ -18,22 +40,23 @@ class IVRepository:
     def upsert_iv_point(self, underlying: str, data: Dict[str, Any], as_of_ts: datetime) -> None:
         """
         Upserts an IV point record.
+        Sanitizes numeric fields to prevent "null" strings from being written.
         """
         payload = {
             "underlying": underlying,
             "as_of_date": as_of_ts.strftime('%Y-%m-%d'),
             "as_of_ts": as_of_ts.isoformat(),
-            "spot": data.get("inputs", {}).get("spot", 0),
-            "iv_30d": data.get("iv_30d"),
+            "spot": _sanitize_numeric(data.get("inputs", {}).get("spot")) or 0,
+            "iv_30d": _sanitize_numeric(data.get("iv_30d")),
             "iv_30d_method": data.get("iv_30d_method", "unknown"),
             "expiry1": data.get("expiry1"),
             "expiry2": data.get("expiry2"),
-            "iv1": data.get("iv1"),
-            "iv2": data.get("iv2"),
-            "strike1": data.get("strike1"),
-            "strike2": data.get("strike2"),
+            "iv1": _sanitize_numeric(data.get("iv1")),
+            "iv2": _sanitize_numeric(data.get("iv2")),
+            "strike1": _sanitize_numeric(data.get("strike1")),
+            "strike2": _sanitize_numeric(data.get("strike2")),
             "source": "polygon",
-            "quality_score": data.get("quality_score"),
+            "quality_score": _sanitize_numeric(data.get("quality_score")),
             "inputs": data.get("inputs"),
         }
 
@@ -61,7 +84,10 @@ class IVRepository:
 
             latest = latest_res.data[0] if latest_res.data else None
 
-            if not latest or not latest.get('iv_30d'):
+            # Sanitize iv_30d to handle string "null" values
+            iv_30d_current = _sanitize_numeric(latest.get('iv_30d')) if latest else None
+
+            if not latest or iv_30d_current is None:
                 return {
                     "iv_30d": None,
                     "iv_rank": None,
@@ -69,16 +95,15 @@ class IVRepository:
                     "sample_size": 0
                 }
 
-            iv_30d_current = float(latest['iv_30d'])
-
             # 2. Get history for Rank
             # Fetch last 365 days of points where iv_30d is not null
             # Note: Supabase/PostgREST limit might apply, but we need enough samples.
             # Default limit is usually 1000, which covers > 2 years of daily data.
+            # Filter where iv_30d IS NOT NULL using proper PostgREST syntax
             history_res = self.supabase.table(self.table)\
                 .select("iv_30d")\
                 .eq("underlying", underlying)\
-                .neq("iv_30d", "null")\
+                .not_.is_("iv_30d", "null")\
                 .order("as_of_date", desc=True)\
                 .limit(365)\
                 .execute()
@@ -157,11 +182,12 @@ class IVRepository:
             batch_results = {}
             try:
                 # Fetch history for this chunk
+                # Filter where iv_30d IS NOT NULL using proper PostgREST syntax
                 res = self.supabase.table(self.table)\
                     .select("underlying, iv_30d, as_of_date")\
                     .in_("underlying", batch_symbols)\
                     .gte("as_of_date", cutoff)\
-                    .neq("iv_30d", "null")\
+                    .not_.is_("iv_30d", "null")\
                     .execute()
 
                 data = res.data

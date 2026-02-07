@@ -6,6 +6,7 @@ import numpy as np
 import logging
 import concurrent.futures
 import math
+import os
 
 from packages.quantum.services.market_data_truth_layer import MarketDataTruthLayer
 from packages.quantum.services.iv_repository import IVRepository
@@ -15,6 +16,13 @@ from packages.quantum.analytics.factors import calculate_trend, calculate_iv_ran
 from packages.quantum.common_enums import RegimeState
 
 logger = logging.getLogger(__name__)
+
+# V4 Engine Version
+ENGINE_VERSION = "v4"
+
+# Liquidity z-score constants
+LIQUIDITY_BASELINE_SPREAD = 0.002  # 0.2% median spread = neutral (z=0)
+LIQUIDITY_SCALE = 0.001            # 0.1% per z-unit
 
 # Removed local RegimeState definition in favor of common_enums.py
 
@@ -36,13 +44,35 @@ class GlobalRegimeSnapshot:
     details: Dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self):
+        # V4: Include components dict with z-scores and intermediates for DB persistence
+        components = {
+            "trend_z": self.trend_score,
+            "vol_z": self.vol_score,
+            "corr_z": self.corr_score,
+            "breadth_z": self.breadth_score,
+            "liquidity_z": self.liquidity_score,
+        }
+        # Add intermediates from details if available
+        if self.details:
+            if "rv_20d" in self.details:
+                components["rv_20d"] = self.details["rv_20d"]
+            if "avg_corr" in self.details:
+                components["avg_corr"] = self.details["avg_corr"]
+            if "breadth_pct" in self.details:
+                components["breadth_pct"] = self.details["breadth_pct"]
+            if "median_spread_pct" in self.details:
+                components["median_spread_pct"] = self.details["median_spread_pct"]
+
         return {
             "as_of_ts": self.as_of_ts,
             "state": self.state.value,
             "risk_score": self.risk_score,
             "risk_scaler": self.risk_scaler,
+            "components": components,
+            "details": self.details,
+            "engine_version": ENGINE_VERSION,
+            # Keep features for backward compatibility
             "features": self.features,
-            "details": self.details
         }
 
 @dataclass
@@ -64,13 +94,32 @@ class SymbolRegimeSnapshot:
     features: Dict[str, float] = field(default_factory=dict)
 
     def to_dict(self):
+        # V4: Include metrics dict with all symbol-level measurements
+        metrics = {
+            "iv_rank": self.iv_rank,
+            "atm_iv_30d": self.atm_iv_30d,
+            "rv_20d": self.rv_20d,
+            "iv_rv_spread": self.iv_rv_spread,
+            "skew_25d": self.skew_25d,
+            "term_slope": self.term_slope,
+        }
+        # Add scoring inputs from features
+        if self.features:
+            metrics["f_rank"] = self.features.get("iv_rank")
+            metrics["f_spread"] = self.features.get("iv_rv_spread")
+            metrics["f_skew"] = self.features.get("skew")
+            metrics["f_term"] = self.features.get("term")
+
         return {
             "symbol": self.symbol,
             "as_of_ts": self.as_of_ts,
             "state": self.state.value,
             "score": self.score,
+            "metrics": metrics,
+            "quality_flags": self.quality_flags,
+            "engine_version": ENGINE_VERSION,
+            # Keep features for backward compatibility
             "features": self.features,
-            "quality_flags": self.quality_flags
         }
 
 class RegimeEngineV3:
@@ -150,6 +199,7 @@ class RegimeEngineV3:
 
         # C. Correlation (Basket)
         corr_z = 0.0
+        avg_corr = None
         if len(basket_data) > 3:
             corrs = []
             base_rets = returns[-20:]
@@ -166,7 +216,7 @@ class RegimeEngineV3:
                             corrs.append(c)
 
             if corrs:
-                avg_corr = np.mean(corrs)
+                avg_corr = float(np.mean(corrs))
                 corr_z = (avg_corr - 0.5) / 0.2
 
         # D. Breadth (% > SMA50)
@@ -183,20 +233,64 @@ class RegimeEngineV3:
                         above_sma += 1
                 valid_cnt += 1
 
+        breadth_pct = 0.6  # default neutral
         if valid_cnt > 0:
             breadth_pct = above_sma / valid_cnt
             breadth_z = (breadth_pct - 0.6) / 0.2
 
+        # E. Liquidity (V4: real computation from basket quote spreads)
         liquidity_z = 0.0
+        median_spread_pct = None
+        liquidity_issues = []
 
-        # 3. Aggregation
-        w_vol = 0.4
-        w_trend = 0.3
-        w_corr = 0.2
-        w_breadth = 0.1
+        try:
+            # Fetch basket quotes for spread calculation
+            basket_quotes = self.market_data.snapshot_many(self.BASKET)
+            spread_pcts = []
 
-        # Invert trend/breadth (High trend = Low Risk)
-        raw_risk = (w_vol * vol_z) + (w_corr * corr_z) - (w_trend * trend_z) - (w_breadth * breadth_z)
+            for sym in self.BASKET:
+                snap = basket_quotes.get(sym, {})
+                quote = snap.get("quote", {})
+                bid = quote.get("bid")
+                ask = quote.get("ask")
+                mid = quote.get("mid")
+
+                if bid is not None and ask is not None and mid is not None and mid > 0:
+                    spread_pct = (ask - bid) / mid
+                    if spread_pct >= 0:  # Valid spread
+                        spread_pcts.append(spread_pct)
+                else:
+                    liquidity_issues.append(f"{sym}:missing_quote")
+
+            if spread_pcts:
+                # Compute median spread
+                sorted_spreads = sorted(spread_pcts)
+                n = len(sorted_spreads)
+                if n % 2 == 0:
+                    median_spread_pct = (sorted_spreads[n//2 - 1] + sorted_spreads[n//2]) / 2.0
+                else:
+                    median_spread_pct = sorted_spreads[n//2]
+
+                # Liquidity z-score: higher spread = worse liquidity = higher risk
+                # Neutral at 0.2% spread, each 0.1% adds 1 z-unit
+                liquidity_z = (median_spread_pct - LIQUIDITY_BASELINE_SPREAD) / LIQUIDITY_SCALE
+                liquidity_z = np.clip(liquidity_z, -3, 3)
+            else:
+                liquidity_issues.append("no_valid_spreads")
+
+        except Exception as e:
+            logger.warning(f"Failed to compute liquidity: {e}")
+            liquidity_issues.append(f"error:{str(e)[:50]}")
+
+        # 3. Aggregation (V4: includes liquidity with small weight)
+        w_vol = 0.35      # Reduced from 0.4 to make room for liquidity
+        w_trend = 0.30
+        w_corr = 0.15     # Reduced from 0.2
+        w_breadth = 0.10
+        w_liq = 0.10      # New liquidity weight
+
+        # Invert trend/breadth (High trend = Low Risk), liquidity adds to risk
+        raw_risk = (w_vol * vol_z) + (w_corr * corr_z) + (w_liq * liquidity_z) - (w_trend * trend_z) - (w_breadth * breadth_z)
 
         risk_score = 50 + (raw_risk * 16.6)
         risk_score = max(0.0, min(100.0, risk_score))
@@ -243,6 +337,20 @@ class RegimeEngineV3:
             "liquidity_z": liquidity_z
         }
 
+        # Build details dict with all intermediates for V4 DB persistence
+        details = {
+            "spy_price": price,
+            "spy_sma50": sma50,
+            "rv_20d": rv_20d,
+            "breadth_pct": breadth_pct,
+        }
+        if avg_corr is not None:
+            details["avg_corr"] = avg_corr
+        if median_spread_pct is not None:
+            details["median_spread_pct"] = median_spread_pct
+        if liquidity_issues:
+            details["liquidity_issues"] = liquidity_issues
+
         return GlobalRegimeSnapshot(
             as_of_ts=as_of_ts.isoformat(),
             state=state,
@@ -254,11 +362,7 @@ class RegimeEngineV3:
             breadth_score=breadth_z,
             liquidity_score=liquidity_z,
             features=features,
-            details={
-                "spy_price": price,
-                "spy_sma50": sma50,
-                "rv_20d": rv_20d
-            }
+            details=details
         )
 
     def _calculate_realized_volatility(self, closes: List[float]) -> Optional[float]:
@@ -291,10 +395,48 @@ class RegimeEngineV3:
         # Annualize
         return math.sqrt(var) * 15.874507866387544 # sqrt(252)
 
-    def compute_symbol_snapshot(self, symbol: str, global_snapshot: GlobalRegimeSnapshot, existing_bars: List[Dict] = None, iv_context: Dict[str, Any] = None) -> SymbolRegimeSnapshot:
+    def _adapt_chain_to_raw_schema(self, chain_results: List[Dict]) -> List[Dict]:
+        """
+        Adapts TruthLayer canonical chain format to raw-ish schema expected by IVPointService.
+
+        TruthLayer format: {contract, underlying, strike, expiry, right, quote, iv, greeks, ...}
+        IVPointService format: {details: {expiration_date, strike_price, contract_type}, greeks, implied_volatility}
+        """
+        adapted = []
+        for c in chain_results:
+            adapted_contract = {
+                "details": {
+                    "expiration_date": c.get("expiry"),
+                    "strike_price": c.get("strike"),
+                    "contract_type": c.get("right"),  # 'call' or 'put'
+                },
+                "greeks": c.get("greeks", {}),
+                "implied_volatility": c.get("iv"),
+            }
+            # Also copy greeks.iv if available and implied_volatility is missing
+            if adapted_contract["implied_volatility"] is None:
+                greeks = c.get("greeks", {})
+                adapted_contract["implied_volatility"] = greeks.get("iv")
+
+            adapted.append(adapted_contract)
+        return adapted
+
+    def compute_symbol_snapshot(
+        self,
+        symbol: str,
+        global_snapshot: GlobalRegimeSnapshot,
+        existing_bars: List[Dict] = None,
+        iv_context: Dict[str, Any] = None,
+        chain_results: Optional[List[Dict]] = None,
+        spot: Optional[float] = None
+    ) -> SymbolRegimeSnapshot:
         """
         Computes regime state for a single symbol.
-        Accepts optional `existing_bars` and `iv_context` to avoid redundant API calls.
+
+        V4 Enhancements:
+        - Accepts optional `chain_results` to compute skew_25d and term_slope
+        - Falls back to chain fetch if REGIME_V4_FETCH_CHAIN=1 env var is set
+        - Accepts optional `existing_bars` and `iv_context` to avoid redundant API calls
         """
         as_of = datetime.fromisoformat(global_snapshot.as_of_ts)
 
@@ -334,25 +476,67 @@ class RegimeEngineV3:
         if atm_iv and rv_20d:
             iv_rv_spread = atm_iv - rv_20d
 
-        # 4. Skew and Term Structure
+        # 4. Skew and Term Structure (V4: real computation from chain)
         skew_25d = None
         term_slope = None
 
-        # Only try if we have spot
-        spot = bars[-1]['close'] if bars else 0
-        if spot > 0 and self.iv_point_service:
-             # Just use point service if available as shortcut
-             # Not implementing full chain fetch here to keep it simple
-             pass
+        # Get spot price
+        if spot is None:
+            spot = bars[-1]['close'] if bars else 0
+
+        # V4: Compute skew and term from chain if provided
+        if chain_results and spot > 0:
+            try:
+                # Adapt TruthLayer chain to IVPointService format
+                adapted_chain = self._adapt_chain_to_raw_schema(chain_results)
+
+                # Compute skew_25d
+                skew_25d = IVPointService.compute_skew_25d_from_chain(
+                    adapted_chain, spot, as_of, target_dte=30.0
+                )
+
+                # Compute term_slope
+                term_slope = IVPointService.compute_term_slope(
+                    adapted_chain, spot, as_of
+                )
+            except Exception as e:
+                logger.warning(f"Failed to compute skew/term for {symbol}: {e}")
+
+        # V4: Optional fallback - fetch chain if env var set and no chain provided
+        elif spot > 0 and chain_results is None:
+            fetch_chain_enabled = os.getenv("REGIME_V4_FETCH_CHAIN", "0").lower() in ("1", "true", "yes")
+            if fetch_chain_enabled:
+                try:
+                    # Fetch chain with 20% strike range for skew/term calculation
+                    fetched_chain = self.market_data.option_chain(
+                        symbol, strike_range=0.20, spot=spot
+                    )
+                    if fetched_chain:
+                        adapted_chain = self._adapt_chain_to_raw_schema(fetched_chain)
+                        skew_25d = IVPointService.compute_skew_25d_from_chain(
+                            adapted_chain, spot, as_of, target_dte=30.0
+                        )
+                        term_slope = IVPointService.compute_term_slope(
+                            adapted_chain, spot, as_of
+                        )
+                except Exception as e:
+                    logger.warning(f"Failed to fetch/compute chain for {symbol}: {e}")
 
         if skew_25d is None: quality_flags["skew_missing"] = True
         if term_slope is None: quality_flags["term_missing"] = True
 
-        # 5. Classification
+        # 5. Classification (V4: skew and term now contribute to score)
         f_rank = iv_rank if iv_rank is not None else 50.0
         f_spread = (iv_rv_spread * 100) if iv_rv_spread is not None else 0
-        f_skew = 0 # Default
-        f_term = 0 # Default
+
+        # V4: Scale skew and term to contribute to score
+        # skew_25d is typically in range [-0.1, 0.3], scale by 100 for score contribution
+        # Positive skew (puts more expensive) indicates fear/risk
+        f_skew = (skew_25d * 100) if skew_25d is not None else 0
+
+        # term_slope is IV_90d - IV_30d, typically in range [-0.1, 0.1]
+        # Negative slope (backwardation) indicates near-term fear
+        f_term = (-term_slope * 100) if term_slope is not None else 0
 
         raw_score = (0.5 * f_rank) + (1.0 * f_spread) + (0.5 * f_skew) + (0.5 * f_term)
         score = max(0.0, min(100.0, raw_score))

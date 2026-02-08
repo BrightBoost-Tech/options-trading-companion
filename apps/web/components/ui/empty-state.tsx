@@ -11,6 +11,10 @@ interface EmptyStateProps {
   className?: string
 }
 
+/**
+ * A standard Empty State component for displaying when no data is available.
+ * Supports an icon, title, description, and an optional action button.
+ */
 export function EmptyState({
   icon: Icon,
   title,

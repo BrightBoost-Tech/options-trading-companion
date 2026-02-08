@@ -6,9 +6,10 @@ import OptimizerSuggestionCard from './suggestions/OptimizerSuggestionCard';
 import MorningOrdersList from './suggestions/MorningOrdersList';
 import MiddayEntriesList from './suggestions/MiddayEntriesList';
 import WeeklyReportList from './suggestions/WeeklyReportList';
-import { Sparkles, RefreshCw, Activity, Sun, Clock, FileText } from 'lucide-react';
+import { Sparkles, RefreshCw, Activity, Sun, Clock, FileText, BookOpen } from 'lucide-react';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
+import { EmptyState } from '@/components/ui/empty-state';
 import {
   Tooltip,
   TooltipContent,
@@ -46,7 +47,7 @@ export default function SuggestionTabs({
   const [activeTab, setActiveTab] = useState<'morning' | 'midday' | 'rebalance' | 'scout' | 'journal' | 'weekly'>('morning');
 
   return (
-    <div className="bg-white rounded-lg shadow overflow-hidden h-full flex flex-col">
+    <div className="bg-card rounded-lg shadow overflow-hidden h-full flex flex-col">
       {/* Tabs Header */}
       <div className="flex border-b border-gray-100 overflow-x-auto no-scrollbar" role="tablist">
         <button
@@ -159,7 +160,7 @@ export default function SuggestionTabs({
           }`}
         >
           <div className="flex items-center justify-center gap-2">
-            <span>📖</span>
+            <BookOpen className="w-4 h-4" />
             Journal
             {journalQueue.length > 0 && (
               <span className="bg-purple-100 text-purple-600 py-0.5 px-2 rounded-full text-xs">
@@ -190,7 +191,7 @@ export default function SuggestionTabs({
       </div>
 
       {/* Tab Content */}
-      <div className="p-4 flex-1 overflow-y-auto bg-gray-50/50 min-h-[400px]">
+      <div className="p-4 flex-1 overflow-y-auto bg-muted/50 min-h-[400px]">
 
         {activeTab === 'morning' && (
           <div role="tabpanel" id="panel-morning" aria-labelledby="tab-morning">
@@ -213,11 +214,11 @@ export default function SuggestionTabs({
         {activeTab === 'rebalance' && (
           <div role="tabpanel" id="panel-rebalance" aria-labelledby="tab-rebalance" className="space-y-4">
              {optimizerSuggestions.length === 0 ? (
-               <div className="text-center py-10 text-gray-400">
-                 <Activity className="w-10 h-10 mx-auto mb-3 opacity-20" />
-                 <p>No rebalance suggestions.</p>
-                 <p className="text-xs mt-1">Run the optimizer to generate trades.</p>
-               </div>
+               <EmptyState
+                 icon={Activity}
+                 title="No rebalance suggestions"
+                 description="Run the optimizer to generate trades."
+               />
              ) : (
                optimizerSuggestions.map((trade, idx) => (
                  <OptimizerSuggestionCard key={idx} trade={trade} />
@@ -251,10 +252,11 @@ export default function SuggestionTabs({
             </div>
 
             {scoutSuggestions.length === 0 ? (
-               <div className="text-center py-10 text-gray-400">
-                 <Sparkles className="w-10 h-10 mx-auto mb-3 opacity-20" />
-                 <p>No scout picks found.</p>
-               </div>
+               <EmptyState
+                 icon={Sparkles}
+                 title="No scout picks found"
+                 description="Market scan returned no results."
+               />
             ) : (
                scoutSuggestions.map((opp, idx) => (
                  <TradeSuggestionCard key={idx} suggestion={opp} />
@@ -266,10 +268,11 @@ export default function SuggestionTabs({
         {activeTab === 'journal' && (
           <div role="tabpanel" id="panel-journal" aria-labelledby="tab-journal" className="space-y-4">
             {journalQueue.length === 0 ? (
-               <div className="text-center py-10 text-gray-400">
-                 <p>Journal queue is empty.</p>
-                 <p className="text-xs mt-1">Add trades from Scout or Rebalance to track them.</p>
-               </div>
+               <EmptyState
+                 icon={BookOpen}
+                 title="Journal queue is empty"
+                 description="Add trades from Scout or Rebalance to track them."
+               />
             ) : (
                journalQueue.map((item, idx) => (
                  <TradeSuggestionCard key={idx} suggestion={item} />

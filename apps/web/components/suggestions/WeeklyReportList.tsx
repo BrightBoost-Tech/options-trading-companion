@@ -1,6 +1,7 @@
 import React from 'react';
 import { FileText, TrendingUp, TrendingDown, Crosshair, Download } from 'lucide-react';
 import { Badge } from '@/components/ui/badge';
+import { EmptyState } from '@/components/ui/empty-state';
 
 interface WeeklyReport {
   id: string;
@@ -37,11 +38,11 @@ export default function WeeklyReportList({ reports }: WeeklyReportListProps) {
 
   if (!reports || reports.length === 0) {
     return (
-      <div className="text-center py-10 text-gray-400">
-        <FileText className="w-10 h-10 mx-auto mb-3 opacity-20" />
-        <p>No weekly reports available.</p>
-        <p className="text-xs mt-1">Reports are generated at the end of each trading week.</p>
-      </div>
+      <EmptyState
+        icon={FileText}
+        title="No weekly reports available"
+        description="Reports are generated at the end of each trading week."
+      />
     );
   }
 

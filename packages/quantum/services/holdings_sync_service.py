@@ -10,6 +10,7 @@ from datetime import datetime, timedelta, timezone
 from supabase import Client
 
 from packages.quantum.services.token_store import PlaidTokenStore
+from packages.quantum.jobs.db import _to_jsonable
 
 
 # Holdings are considered stale after this many minutes
@@ -123,13 +124,14 @@ async def sync_holdings_from_plaid(user_id: str, supabase: Client) -> Dict[str, 
             buying_power += float(balances.get("available") or balances.get("current") or 0)
 
         # Insert portfolio snapshot
+        # Wrap holdings with _to_jsonable to ensure datetime fields are serialized
         snapshot = {
             "user_id": user_id,
             "created_at": datetime.now(timezone.utc).isoformat(),
             "data_source": "plaid",
-            "holdings": holdings,
+            "holdings": _to_jsonable(holdings),
             "buying_power": buying_power,
-            "risk_metrics": {"accounts_synced": len(accounts)},
+            "risk_metrics": _to_jsonable({"accounts_synced": len(accounts)}),
         }
 
         supabase.table("portfolio_snapshots").insert(snapshot).execute()

@@ -53,17 +53,55 @@ logger = logging.getLogger(__name__)
 class RejectionStats:
     """Thread-safe rejection statistics tracker for scanner diagnostics."""
 
+    # Default cap for rejection samples (can be overridden via env var)
+    DEFAULT_SAMPLES_CAP = 3
+
     def __init__(self):
         self._counts: Dict[str, int] = defaultdict(int)
         self._lock = threading.Lock()
         self.symbols_processed = 0
         self.chains_loaded = 0
         self.chains_empty = 0
+        self._samples: List[Dict[str, Any]] = []
+        self._samples_cap: int = int(os.getenv("REJECTION_SAMPLES_CAP", str(self.DEFAULT_SAMPLES_CAP)))
 
     def record(self, reason: str) -> None:
         """Record a rejection reason (thread-safe)."""
         with self._lock:
             self._counts[reason] += 1
+
+    def record_with_sample(self, reason: str, sample: Dict[str, Any]) -> None:
+        """
+        Record a rejection reason with a diagnostic sample (thread-safe).
+
+        Args:
+            reason: The rejection reason key (e.g., 'condor_no_credit')
+            sample: A dict containing diagnostic info (must be JSON-serializable)
+        """
+        with self._lock:
+            self._counts[reason] += 1
+            if len(self._samples) < self._samples_cap:
+                # Ensure sample includes the reason
+                safe_sample = self._make_json_safe(sample)
+                safe_sample["reason"] = reason
+                self._samples.append(safe_sample)
+
+    @staticmethod
+    def _make_json_safe(obj: Any) -> Any:
+        """Recursively convert objects to JSON-serializable types."""
+        if obj is None:
+            return None
+        if isinstance(obj, bool):
+            return obj
+        if isinstance(obj, (str, int, float)):
+            return obj
+        if isinstance(obj, (datetime, date)):
+            return obj.isoformat()
+        if isinstance(obj, (list, tuple)):
+            return [RejectionStats._make_json_safe(item) for item in obj]
+        if isinstance(obj, dict):
+            return {str(k): RejectionStats._make_json_safe(v) for k, v in obj.items()}
+        return str(obj)
 
     def increment_processed(self) -> None:
         """Increment symbols processed counter."""
@@ -89,6 +127,8 @@ class RejectionStats:
                 "chains_loaded": self.chains_loaded,
                 "chains_empty": self.chains_empty,
                 "total_rejections": sum(self._counts.values()),
+                "rejection_samples": list(self._samples),
+                "rejection_samples_cap": self._samples_cap,
             }
 
     def top_reasons(self, n: int = 5) -> List[Tuple[str, int]]:
@@ -96,6 +136,95 @@ class RejectionStats:
         with self._lock:
             sorted_items = sorted(self._counts.items(), key=lambda x: x[1], reverse=True)
             return sorted_items[:n]
+
+
+def _to_float_or_none(val: Any) -> Optional[float]:
+    """Convert value to float or None if invalid."""
+    if val is None:
+        return None
+    try:
+        return float(val)
+    except (TypeError, ValueError):
+        return None
+
+
+def _build_condor_rejection_sample(
+    symbol: str,
+    strategy_key: str,
+    expiry_selected: Optional[str],
+    legs: List[Dict[str, Any]],
+    total_cost: Optional[float],
+    calls_count: int = 0,
+    puts_count: int = 0,
+) -> Dict[str, Any]:
+    """
+    Build a diagnostic sample for condor rejection.
+
+    Args:
+        symbol: The underlying symbol
+        strategy_key: The strategy key (e.g., 'iron_condor')
+        expiry_selected: The selected expiry date (or None)
+        legs: List of leg dicts (may be empty for legs_not_found)
+        total_cost: The computed total cost (negative for credit, None if legs not found)
+        calls_count: Number of calls in chain (for diagnostics)
+        puts_count: Number of puts in chain (for diagnostics)
+
+    Returns:
+        A JSON-safe sample dict with diagnostic info
+    """
+    # Extract strikes from legs
+    strikes = sorted([float(leg.get("strike", 0)) for leg in legs]) if legs else []
+
+    # Build compact leg info
+    leg_samples = []
+    legs_with_missing_quotes = []
+
+    for leg in legs:
+        bid = _to_float_or_none(leg.get("bid"))
+        ask = _to_float_or_none(leg.get("ask"))
+        mid = _to_float_or_none(leg.get("mid") or leg.get("premium"))
+
+        leg_sample = {
+            "symbol": str(leg.get("symbol") or ""),
+            "type": leg.get("type"),
+            "side": leg.get("side"),
+            "strike": _to_float_or_none(leg.get("strike")),
+            "bid": bid,
+            "ask": ask,
+            "mid": mid,
+            "premium": _to_float_or_none(leg.get("premium")),
+        }
+        leg_samples.append(leg_sample)
+
+        # Track legs with missing quotes
+        if bid is None or ask is None or bid <= 0 or ask <= 0:
+            legs_with_missing_quotes.append(str(leg.get("symbol") or "unknown"))
+
+    # Compute net credit
+    net_credit = None
+    if total_cost is not None:
+        net_credit = -total_cost if total_cost < 0 else 0.0
+
+    # Ensure expiry is a string
+    expiry_str = None
+    if expiry_selected is not None:
+        expiry_str = str(expiry_selected) if not isinstance(expiry_selected, str) else expiry_selected
+
+    return {
+        "symbol": symbol,
+        "strategy_key": strategy_key,
+        "expiry": expiry_str,
+        "strikes": strikes,
+        "legs": leg_samples,
+        "legs_expected": 4,
+        "legs_found": len(legs),
+        "total_cost_share": _to_float_or_none(total_cost),
+        "net_credit_share": _to_float_or_none(net_credit),
+        "legs_with_missing_quotes": legs_with_missing_quotes,
+        "chain_calls_count": calls_count,
+        "chain_puts_count": puts_count,
+    }
+
 
 # Bolt Optimization: Cache expiry date parsing
 # Using maxsize=4096 to prevent unbounded memory growth while keeping cache hot
@@ -1426,7 +1555,17 @@ def scan_for_opportunities(
                 # Specialized logic for Iron Condor
                 legs, total_cost = _select_iron_condor_legs(calls_sorted, puts_sorted, current_price)
                 if not legs:
-                    rej_stats.record("condor_legs_not_found")
+                    # Sample even when legs not found for diagnostics
+                    sample = _build_condor_rejection_sample(
+                        symbol=symbol,
+                        strategy_key=strategy_key,
+                        expiry_selected=expiry_selected,
+                        legs=[],
+                        total_cost=None,
+                        calls_count=len(calls_sorted),
+                        puts_count=len(puts_sorted),
+                    )
+                    rej_stats.record_with_sample("condor_legs_not_found", sample)
                     return None
 
                 # Invariant Validation
@@ -1437,7 +1576,17 @@ def scan_for_opportunities(
                 # Sanity Checks
                 credit_share = abs(total_cost) if total_cost < 0 else 0.0
                 if credit_share <= 0:
-                    rej_stats.record("condor_no_credit")
+                    # Sample with legs for debugging credit calculation
+                    sample = _build_condor_rejection_sample(
+                        symbol=symbol,
+                        strategy_key=strategy_key,
+                        expiry_selected=expiry_selected,
+                        legs=legs,
+                        total_cost=total_cost,
+                        calls_count=len(calls_sorted),
+                        puts_count=len(puts_sorted),
+                    )
+                    rej_stats.record_with_sample("condor_no_credit", sample)
                     return None
 
                 # Width Check

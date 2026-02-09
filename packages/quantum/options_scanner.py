@@ -370,6 +370,7 @@ def _hydrate_legs_quotes_v4(
         fallback_attempted = 0
         fallback_hydrated = 0
         fallback_still_missing = []
+        fallback_diagnostics = []  # Cap at 4 entries
 
         for leg in legs:
             sym = leg.get("symbol")
@@ -383,7 +384,17 @@ def _hydrate_legs_quotes_v4(
 
             fallback_attempted += 1
             try:
-                q = market_data.get_recent_quote(sym)
+                # Use new method with diagnostics if available
+                if hasattr(market_data, 'get_recent_quote_with_meta'):
+                    q, meta = market_data.get_recent_quote_with_meta(sym)
+                    # Capture diagnostic (cap at 4)
+                    if len(fallback_diagnostics) < 4:
+                        fallback_diagnostics.append(meta)
+                else:
+                    # Fallback to old method without diagnostics
+                    q = market_data.get_recent_quote(sym)
+                    meta = None
+
                 # Support multiple key formats
                 bid = q.get("bid") or q.get("bid_price") or 0.0
                 ask = q.get("ask") or q.get("ask_price") or 0.0
@@ -398,8 +409,17 @@ def _hydrate_legs_quotes_v4(
                     hydrated_count += 1
                 else:
                     fallback_still_missing.append(sym)
-            except Exception:
+            except Exception as e:
                 fallback_still_missing.append(sym)
+                # Add exception diagnostic if room
+                if len(fallback_diagnostics) < 4:
+                    fallback_diagnostics.append({
+                        "symbol": sym,
+                        "status_code": 0,
+                        "error_type": "exception",
+                        "results_len": 0,
+                        "msg_snippet": str(e)[:120]
+                    })
 
         fallback_meta = {
             "source": "polygon_v3_quotes",
@@ -407,6 +427,9 @@ def _hydrate_legs_quotes_v4(
             "hydrated": fallback_hydrated,
             "still_missing": fallback_still_missing,
         }
+
+        if fallback_diagnostics:
+            fallback_meta["diagnostics"] = fallback_diagnostics
 
     # Final list of symbols still missing valid quotes
     missing_after = [

@@ -3,8 +3,9 @@ import os
 import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
+from urllib.parse import quote as urlquote
 from datetime import datetime, timedelta, timezone, date
-from typing import List, Dict, Optional, Any
+from typing import List, Dict, Optional, Any, Tuple
 import numpy as np
 import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -432,6 +433,121 @@ class PolygonService:
                 }
 
         return {"bid": 0.0, "ask": 0.0, "bid_price": 0.0, "ask_price": 0.0, "price": None}
+
+    def get_recent_quote_with_meta(self, symbol: str) -> Tuple[Dict[str, float], Dict[str, Any]]:
+        """
+        Returns a tuple of (quote_dict, meta_dict) for the given symbol.
+
+        meta_dict includes diagnostic info:
+        - symbol: the requested symbol
+        - status_code: HTTP status code (or 0 for exceptions)
+        - error_type: "ok", "http_403", "http_404", "http_429", "http_4xx", "http_5xx", "no_results", "exception"
+        - results_len: number of results returned (0 if error/empty)
+        - msg_snippet: truncated response text for errors (apiKey stripped)
+
+        Uses URL-encoding for option tickers to handle special characters safely.
+        """
+        empty_quote = {"bid": 0.0, "ask": 0.0, "bid_price": 0.0, "ask_price": 0.0, "price": None}
+        meta = {
+            "symbol": symbol,
+            "status_code": 0,
+            "error_type": "exception",
+            "results_len": 0,
+            "msg_snippet": None
+        }
+
+        try:
+            search_symbol = normalize_option_symbol(symbol)
+            is_option = search_symbol.startswith('O:')
+
+            if is_option:
+                # URL-encode the option ticker to handle O: prefix safely
+                safe_ticker = urlquote(search_symbol, safe="")
+                url = f"{self.base_url}/v3/quotes/{safe_ticker}"
+                params = {
+                    'limit': 1,
+                    'order': 'desc',
+                    'sort': 'timestamp',
+                    'apiKey': self.api_key
+                }
+            else:
+                url = f"{self.base_url}/v2/last/nbbo/{search_symbol}"
+                params = {'apiKey': self.api_key}
+
+            response = self.session.get(url, params=params, timeout=5)
+            meta["status_code"] = response.status_code
+
+            if response.status_code != 200:
+                # Map status code to error_type
+                code = response.status_code
+                if code == 403:
+                    meta["error_type"] = "http_403"
+                elif code == 404:
+                    meta["error_type"] = "http_404"
+                elif code == 429:
+                    meta["error_type"] = "http_429"
+                elif code == 400:
+                    meta["error_type"] = "http_400"
+                elif 400 <= code < 500:
+                    meta["error_type"] = f"http_{code}"
+                else:
+                    meta["error_type"] = f"http_{code}"
+
+                # Capture snippet of response (strip apiKey for safety)
+                snippet = response.text[:120] if response.text else ""
+                # Remove any apiKey that might be echoed back
+                if self.api_key and self.api_key in snippet:
+                    snippet = snippet.replace(self.api_key, "[REDACTED]")
+                meta["msg_snippet"] = snippet
+
+                return (empty_quote, meta)
+
+            data = response.json()
+
+            if is_option:
+                results = data.get('results', [])
+                meta["results_len"] = len(results)
+
+                if len(results) > 0:
+                    quote = results[0]
+                    bid = float(quote.get('bid_price', 0.0))
+                    ask = float(quote.get('ask_price', 0.0))
+                    mid = (bid + ask) / 2.0 if (bid > 0 and ask > 0) else None
+                    meta["error_type"] = "ok"
+                    return ({
+                        "bid": bid,
+                        "ask": ask,
+                        "bid_price": bid,
+                        "ask_price": ask,
+                        "price": mid
+                    }, meta)
+                else:
+                    meta["error_type"] = "no_results"
+                    return (empty_quote, meta)
+            else:
+                # Stock NBBO
+                if 'results' in data:
+                    meta["results_len"] = 1
+                    res = data['results']
+                    bid = float(res.get('p', 0.0))
+                    ask = float(res.get('P', 0.0))
+                    mid = (bid + ask) / 2.0 if (bid > 0 and ask > 0) else None
+                    meta["error_type"] = "ok"
+                    return ({
+                        "bid": bid,
+                        "ask": ask,
+                        "bid_price": bid,
+                        "ask_price": ask,
+                        "price": mid
+                    }, meta)
+                else:
+                    meta["error_type"] = "no_results"
+                    return (empty_quote, meta)
+
+        except Exception as e:
+            meta["error_type"] = "exception"
+            meta["msg_snippet"] = str(e)[:120]
+            return (empty_quote, meta)
 
     def get_option_snapshot(self, symbol: str) -> Dict:
         """

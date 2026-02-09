@@ -3,8 +3,9 @@ import math
 import requests
 import numpy as np
 import operator
+import threading
 from datetime import datetime, timedelta, timezone, date
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Tuple
 from supabase import Client
 import logging
 import concurrent.futures
@@ -47,6 +48,54 @@ SCANNER_MIN_DTE = 25
 SCANNER_MAX_DTE = 45
 
 logger = logging.getLogger(__name__)
+
+
+class RejectionStats:
+    """Thread-safe rejection statistics tracker for scanner diagnostics."""
+
+    def __init__(self):
+        self._counts: Dict[str, int] = defaultdict(int)
+        self._lock = threading.Lock()
+        self.symbols_processed = 0
+        self.chains_loaded = 0
+        self.chains_empty = 0
+
+    def record(self, reason: str) -> None:
+        """Record a rejection reason (thread-safe)."""
+        with self._lock:
+            self._counts[reason] += 1
+
+    def increment_processed(self) -> None:
+        """Increment symbols processed counter."""
+        with self._lock:
+            self.symbols_processed += 1
+
+    def increment_chains_loaded(self) -> None:
+        """Increment chains loaded counter."""
+        with self._lock:
+            self.chains_loaded += 1
+
+    def increment_chains_empty(self) -> None:
+        """Increment chains empty counter."""
+        with self._lock:
+            self.chains_empty += 1
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Return rejection stats as a dictionary."""
+        with self._lock:
+            return {
+                "rejection_counts": dict(self._counts),
+                "symbols_processed": self.symbols_processed,
+                "chains_loaded": self.chains_loaded,
+                "chains_empty": self.chains_empty,
+                "total_rejections": sum(self._counts.values()),
+            }
+
+    def top_reasons(self, n: int = 5) -> List[Tuple[str, int]]:
+        """Return top N rejection reasons sorted by count descending."""
+        with self._lock:
+            sorted_items = sorted(self._counts.items(), key=lambda x: x[1], reverse=True)
+            return sorted_items[:n]
 
 # Bolt Optimization: Cache expiry date parsing
 # Using maxsize=4096 to prevent unbounded memory growth while keeping cache hot
@@ -922,12 +971,12 @@ def scan_for_opportunities(
     global_snapshot: GlobalRegimeSnapshot = None,
     banned_strategies: List[str] = None,
     portfolio_cash: float = None
-) -> List[Dict[str, Any]]:
+) -> Tuple[List[Dict[str, Any]], RejectionStats]:
     """
     Scans the provided symbols (or universe) for option trade opportunities.
-    Returns a list of trade candidates (dictionaries) with risk primitives.
+    Returns a tuple of (candidates, rejection_stats) for diagnostics.
 
-    Output Schema:
+    Output Schema (candidates):
     - symbol, ticker, strategy, ev, score
     - max_loss_per_contract (USD)
     - max_profit_per_contract (USD)
@@ -936,8 +985,15 @@ def scan_for_opportunities(
     - net_vega_per_contract (USD per 1% vol change per contract)
     - data_quality: "realtime" | "degraded"
     - pricing_mode: "exact" | "approximate"
+
+    Output (rejection_stats):
+    - rejection_counts: Dict[str, int] - histogram of rejection reasons
+    - symbols_processed: int
+    - chains_loaded: int
+    - chains_empty: int
     """
     candidates = []
+    rejection_stats = RejectionStats()
 
     # Initialize services
     market_data = PolygonService()
@@ -1056,8 +1112,9 @@ def scan_for_opportunities(
     ta_end_date = now_dt
     ta_start_date = ta_end_date - timedelta(days=90)
 
-    def process_symbol(symbol: str, drag_map: Dict[str, Any], quotes_map: Dict[str, Any], earnings_map: Dict[str, Any], iv_context: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    def process_symbol(symbol: str, drag_map: Dict[str, Any], quotes_map: Dict[str, Any], earnings_map: Dict[str, Any], iv_context: Dict[str, Any], rej_stats: RejectionStats) -> Optional[Dict[str, Any]]:
         """Process a single symbol and return a candidate dict or None."""
+        rej_stats.increment_processed()
         try:
             # A. Enrich Data
             # Use batched quote from map
@@ -1095,7 +1152,9 @@ def scan_for_opportunities(
                 if current_price is None and bid is not None and ask is not None and bid > 0 and ask > 0:
                     current_price = (float(bid) + float(ask)) / 2.0
 
-            if not current_price: return None
+            if not current_price:
+                rej_stats.record("missing_quotes")
+                return None
 
             # B. Check Liquidity (Deferred)
             # We calculate threshold here but apply it later using Option Spread Pct
@@ -1143,6 +1202,7 @@ def scan_for_opportunities(
 
             # Ensure we have enough data (need at least 50 for SMA50)
             if not closes or len(closes) < 50:
+                rej_stats.record("insufficient_history")
                 return None
 
             # C. Compute Symbol Regime (Authoritative)
@@ -1206,10 +1266,12 @@ def scan_for_opportunities(
             # -----------------------------------------
 
             if suggestion["strategy"] == "HOLD" or suggestion["strategy"] == "CASH":
+                rej_stats.record("strategy_hold")
                 return None
 
             # Double check policy (redundant but safe)
             if not policy.is_allowed(suggestion["strategy"]):
+                rej_stats.record("strategy_banned")
                 return None
 
             # F. Construct Contract & Calculate EV
@@ -1228,12 +1290,17 @@ def scan_for_opportunities(
                 # Pass chain_objects directly to selector. We defer flattening until we select the best expiry.
                 # This reduces dictionary creation/copying from ~5000 (all contracts) to ~200 (one expiry).
                 chain = chain_objects
+                rej_stats.increment_chains_loaded()
 
             # Fallback if empty
             if not chain:
                 chain = market_data.get_option_chain(symbol, min_dte=SCANNER_MIN_DTE, max_dte=SCANNER_MAX_DTE)
+                if chain:
+                    rej_stats.increment_chains_loaded()
 
             if not chain:
+                rej_stats.increment_chains_empty()
+                rej_stats.record("no_chain")
                 return None
 
             # Enforce shared expiry
@@ -1241,6 +1308,7 @@ def scan_for_opportunities(
             # Bolt Optimization: Pass today_date to avoid calling datetime.now().date() in loop
             expiry_selected, chain_subset = _select_best_expiry_chain(chain, target_dte=35, today_date=today_date)
             if not expiry_selected or not chain_subset:
+                rej_stats.record("dte_out_of_range")
                 return None
 
             # ========== SURFACE V4 HOOK (Optional) ==========
@@ -1300,20 +1368,24 @@ def scan_for_opportunities(
                     surface_v4_summary = {"error": str(e)}
                     # If surface_policy is skip, reject on build failure
                     if surface_policy == "skip":
+                        rej_stats.record("surface_build_failed")
                         return None
 
                 # Policy enforcement (outside try/except so it always runs)
                 if surface_policy == "skip" and surface_result is not None:
                     # Reject if surface is invalid
                     if not surface_result.is_valid:
+                        rej_stats.record("surface_invalid")
                         return None
                     # Reject if calendar arb detected post-repair
                     if surface_result.surface and surface_result.surface.calendar_arb_detected_post:
+                        rej_stats.record("surface_calendar_arb")
                         return None
                     # Reject if any butterfly arb remains post-repair
                     if surface_result.surface and any(
                         sm.butterfly_arb_detected_post for sm in surface_result.surface.smiles
                     ):
+                        rej_stats.record("surface_butterfly_arb")
                         return None
             # ================================================
 
@@ -1354,15 +1426,18 @@ def scan_for_opportunities(
                 # Specialized logic for Iron Condor
                 legs, total_cost = _select_iron_condor_legs(calls_sorted, puts_sorted, current_price)
                 if not legs:
-                     return None
+                    rej_stats.record("condor_legs_not_found")
+                    return None
 
                 # Invariant Validation
                 if not _validate_iron_condor_invariants(legs):
+                    rej_stats.record("condor_invariants_failed")
                     return None
 
                 # Sanity Checks
                 credit_share = abs(total_cost) if total_cost < 0 else 0.0
                 if credit_share <= 0:
+                    rej_stats.record("condor_no_credit")
                     return None
 
                 # Width Check
@@ -1375,14 +1450,17 @@ def scan_for_opportunities(
 
                 if credit_share >= width_max:
                     # Credit cannot exceed width (no risk? impossible/arb)
+                    rej_stats.record("condor_credit_exceeds_width")
                     return None
 
                 if width_call <= 0 or width_put <= 0:
+                    rej_stats.record("condor_invalid_width")
                     return None
             else:
                 legs, total_cost = _select_legs_from_chain(calls_sorted, puts_sorted, suggestion["legs"], current_price)
 
             if not legs:
+                rej_stats.record("legs_not_found")
                 return None
 
             pricing_mode = "exact"
@@ -1448,6 +1526,7 @@ def scan_for_opportunities(
                 leg = legs[0]
                 st_type = _map_single_leg_strategy(leg)
                 if not st_type:
+                    rej_stats.record("single_leg_strategy_unmapped")
                     return None
 
                 ev_obj = calculate_ev(
@@ -1480,6 +1559,7 @@ def scan_for_opportunities(
             # NEW: Liquidity Gating (Option Spread Based)
             if option_spread_pct > threshold:
                  # REJECT: Illiquid Options
+                 rej_stats.record("spread_too_wide")
                  return None
 
             # H. Unified Scoring
@@ -1522,6 +1602,7 @@ def scan_for_opportunities(
             # Requirement: Hard-reject if execution cost > EV
             # Use expected_execution_cost as per instruction
             if expected_execution_cost >= total_ev:
+                rej_stats.record("execution_cost_exceeds_ev")
                 return None
 
             # Define Missing Greeks for Candidate Dict
@@ -1576,6 +1657,7 @@ def scan_for_opportunities(
                         if days_to_earnings <= 2:
                             is_short_premium = ("credit" in safe_strategy_key) or ("condor" in safe_strategy_key) or ("short" in safe_strategy_key)
                             if is_short_premium:
+                                rej_stats.record("earnings_short_premium")
                                 return None
 
                         # 2. Score Penalty: Within 7 days
@@ -1672,6 +1754,7 @@ def scan_for_opportunities(
                     # Apply Constraints & Veto
                     candidate_dict = _apply_agent_constraints(candidate_dict, portfolio_cash=portfolio_cash)
                     if candidate_dict is None:
+                        rej_stats.record("agent_veto")
                         return None
 
                 except Exception as e:
@@ -1681,12 +1764,13 @@ def scan_for_opportunities(
 
         except Exception as e:
             print(f"[Scanner] Error processing {symbol}: {e}")
+            rej_stats.record("processing_error")
             return None
 
     # Corrected Indentation: ThreadPoolExecutor is now OUTSIDE process_symbol
     with concurrent.futures.ThreadPoolExecutor(max_workers=batch_size) as executor:
         future_to_symbol = {
-            executor.submit(process_symbol, sym, drag_map, quotes_map, earnings_map, iv_context_map): sym
+            executor.submit(process_symbol, sym, drag_map, quotes_map, earnings_map, iv_context_map, rejection_stats): sym
             for sym in symbols
         }
 
@@ -1703,4 +1787,10 @@ def scan_for_opportunities(
     # Bolt Determinism: Add symbol as tie-breaker for stable ordering across concurrent runs
     candidates.sort(key=lambda x: (x['score'], x['symbol']), reverse=True)
 
-    return candidates
+    # Log rejection summary if no candidates
+    if not candidates:
+        top_reasons = rejection_stats.top_reasons(5)
+        if top_reasons:
+            logger.info(f"[Scanner] Top rejection reasons: {top_reasons}")
+
+    return candidates, rejection_stats

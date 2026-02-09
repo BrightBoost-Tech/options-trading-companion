@@ -1823,9 +1823,10 @@ async def run_midday_cycle(supabase: Client, user_id: str):
     # Initialize Policy for Final Gate
     policy = StrategyPolicy(banned_strategies)
 
+    rejection_stats = None
     try:
         # Step C: Wire user_id from cycle orchestration into scanner
-        scout_results = scan_for_opportunities(
+        scout_results, rejection_stats = scan_for_opportunities(
             supabase_client=supabase,
             user_id=user_id,
             global_snapshot=global_snap,
@@ -1874,6 +1875,11 @@ async def run_midday_cycle(supabase: Client, user_id: str):
 
         if not candidates:
             print("No candidates selected for midday entries.")
+            # Log top rejection reasons for diagnostics
+            if rejection_stats:
+                top_reasons = rejection_stats.top_reasons(5)
+                if top_reasons:
+                    print(f"[Midday] Top rejection reasons: {top_reasons}")
             return {
                 "skipped": False,
                 "reason": "no_candidates",
@@ -1885,6 +1891,7 @@ async def run_midday_cycle(supabase: Client, user_id: str):
                     "regime": budgets.regime,
                 },
                 "counts": {"candidates": 0, "created": 0},
+                "debug": rejection_stats.to_dict() if rejection_stats else None,
             }
 
     except Exception as e:

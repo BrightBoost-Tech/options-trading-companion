@@ -1,6 +1,6 @@
 # Options Trading Companion
 
-Personal options trading companion with AI-powered scouting, backtesting, and go-live validation guardrails.
+Personal options trading companion with AI-powered scouting, backtesting, and go-live validation guardrails!
 
 ## Architecture
 

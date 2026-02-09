@@ -245,10 +245,14 @@ def _leg_has_valid_bidask(leg: Dict[str, Any]) -> bool:
 
 def _hydrate_legs_quotes_v4(
     truth_layer,
-    legs: List[Dict[str, Any]]
+    legs: List[Dict[str, Any]],
+    market_data: Optional[PolygonService] = None
 ) -> Dict[str, Any]:
     """
     Attempt to hydrate missing leg quotes using MarketDataTruthLayer.snapshot_many_v4().
+
+    If v4 snapshots don't provide valid bid/ask, falls back to market_data.get_recent_quote()
+    which uses Polygon's /v3/quotes endpoint for individual option tickers.
 
     Only fetches quotes for the specific leg option tickers (max 4 for condor).
     Updates leg dicts in place with hydrated bid/ask/mid/premium.
@@ -257,6 +261,7 @@ def _hydrate_legs_quotes_v4(
         - hydrated: count of legs that were updated
         - missing_after: list of leg symbols still missing valid quotes
         - quality: list of quality info for each leg (capped)
+        - fallback: dict with fallback attempt info (if used)
     """
     if not legs:
         return {"hydrated": 0, "missing_after": [], "quality": []}
@@ -353,17 +358,72 @@ def _hydrate_legs_quotes_v4(
         if updated:
             hydrated_count += 1
 
-    # Collect symbols still missing valid quotes
+    # Collect symbols still missing valid quotes after v4 snapshot
+    missing_after_v4 = [
+        leg.get("symbol") for leg in legs
+        if not _leg_has_valid_bidask(leg)
+    ]
+
+    # Fallback: Use /v3/quotes for legs still missing valid bid/ask
+    fallback_meta = None
+    if missing_after_v4 and market_data is not None:
+        fallback_attempted = 0
+        fallback_hydrated = 0
+        fallback_still_missing = []
+
+        for leg in legs:
+            sym = leg.get("symbol")
+            if not sym or _leg_has_valid_bidask(leg):
+                continue
+
+            # Only fetch for option symbols (O: prefix)
+            if not sym.startswith("O:"):
+                fallback_still_missing.append(sym)
+                continue
+
+            fallback_attempted += 1
+            try:
+                q = market_data.get_recent_quote(sym)
+                # Support multiple key formats
+                bid = q.get("bid") or q.get("bid_price") or 0.0
+                ask = q.get("ask") or q.get("ask_price") or 0.0
+
+                if bid > 0 and ask > 0 and ask >= bid:
+                    mid = (bid + ask) / 2.0
+                    leg["bid"] = bid
+                    leg["ask"] = ask
+                    leg["mid"] = mid
+                    leg["premium"] = mid
+                    fallback_hydrated += 1
+                    hydrated_count += 1
+                else:
+                    fallback_still_missing.append(sym)
+            except Exception:
+                fallback_still_missing.append(sym)
+
+        fallback_meta = {
+            "source": "polygon_v3_quotes",
+            "attempted": fallback_attempted,
+            "hydrated": fallback_hydrated,
+            "still_missing": fallback_still_missing,
+        }
+
+    # Final list of symbols still missing valid quotes
     missing_after = [
         leg.get("symbol") for leg in legs
         if not _leg_has_valid_bidask(leg)
     ]
 
-    return {
+    result = {
         "hydrated": hydrated_count,
         "missing_after": missing_after,
         "quality": quality_info,
     }
+
+    if fallback_meta:
+        result["fallback"] = fallback_meta
+
+    return result
 
 
 def _reprice_total_cost_from_legs(legs: List[Dict[str, Any]]) -> Optional[float]:
@@ -1737,6 +1797,9 @@ def scan_for_opportunities(
             raw_strategy = suggestion["strategy"]
             strategy_key = raw_strategy.lower().replace(" ", "_")
 
+            # Initialize hydration_meta for both condor and non-condor paths
+            hydration_meta = None
+
             if "iron_condor" in strategy_key or "condor" in strategy_key:
                 # Specialized logic for Iron Condor
                 legs, total_cost = _select_iron_condor_legs(calls_sorted, puts_sorted, current_price)
@@ -1765,10 +1828,10 @@ def scan_for_opportunities(
                     if not _leg_has_valid_bidask(leg)
                 ]
 
-                hydration_meta = None
                 if missing_quotes_before:
                     # Attempt targeted quote hydration for the 4 leg tickers
-                    hydration_meta = _hydrate_legs_quotes_v4(truth_layer, legs)
+                    # Falls back to /v3/quotes if v4 snapshots don't provide valid quotes
+                    hydration_meta = _hydrate_legs_quotes_v4(truth_layer, legs, market_data=market_data)
 
                     # Reprice total_cost from hydrated legs
                     new_total = _reprice_total_cost_from_legs(legs)
@@ -1851,8 +1914,16 @@ def scan_for_opportunities(
                 rej_stats.record("legs_not_found")
                 return None
 
+            # Determine data quality based on hydration source
+            # If fallback was used and hydrated > 0, mark as degraded/approximate
             pricing_mode = "exact"
             data_quality = "realtime"
+            if hydration_meta and hydration_meta.get("fallback"):
+                fallback = hydration_meta["fallback"]
+                if fallback.get("hydrated", 0) > 0:
+                    pricing_mode = "approximate"
+                    data_quality = "degraded"
+
             total_ev = 0.0
 
             # Compute EV for the selected legs

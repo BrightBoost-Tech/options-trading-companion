@@ -226,6 +226,177 @@ def _build_condor_rejection_sample(
     }
 
 
+def _leg_has_valid_bidask(leg: Dict[str, Any]) -> bool:
+    """
+    Check if a leg has valid bid/ask quotes for execution.
+    Returns True only if bid > 0, ask > 0, and ask >= bid.
+    """
+    try:
+        bid = leg.get("bid")
+        ask = leg.get("ask")
+        if bid is None or ask is None:
+            return False
+        bid_f = float(bid)
+        ask_f = float(ask)
+        return bid_f > 0 and ask_f > 0 and ask_f >= bid_f
+    except (TypeError, ValueError):
+        return False
+
+
+def _hydrate_legs_quotes_v4(
+    truth_layer,
+    legs: List[Dict[str, Any]]
+) -> Dict[str, Any]:
+    """
+    Attempt to hydrate missing leg quotes using MarketDataTruthLayer.snapshot_many_v4().
+
+    Only fetches quotes for the specific leg option tickers (max 4 for condor).
+    Updates leg dicts in place with hydrated bid/ask/mid/premium.
+
+    Returns metadata dict with:
+        - hydrated: count of legs that were updated
+        - missing_after: list of leg symbols still missing valid quotes
+        - quality: list of quality info for each leg (capped)
+    """
+    if not legs:
+        return {"hydrated": 0, "missing_after": [], "quality": []}
+
+    # Collect leg symbols
+    leg_syms = [leg.get("symbol") for leg in legs if leg.get("symbol")]
+    if not leg_syms:
+        return {"hydrated": 0, "missing_after": [], "quality": []}
+
+    # Fetch v4 snapshots for leg tickers
+    try:
+        v4_snaps = truth_layer.snapshot_many_v4(leg_syms) or {}
+    except Exception:
+        v4_snaps = {}
+
+    hydrated_count = 0
+    quality_info = []
+
+    for leg in legs:
+        sym = leg.get("symbol")
+        if not sym:
+            continue
+
+        # Try normalized key first, then raw symbol
+        key = truth_layer.normalize_symbol(sym) if hasattr(truth_layer, "normalize_symbol") else sym
+        snap = v4_snaps.get(key) or v4_snaps.get(sym)
+
+        if not snap:
+            continue
+
+        # Extract quote from v4 snapshot
+        q = snap.quote if hasattr(snap, "quote") else None
+        if not q:
+            continue
+
+        # Track quality info (cap at 6 entries)
+        if len(quality_info) < 6 and hasattr(snap, "quality"):
+            qual = snap.quality
+            quality_info.append({
+                "symbol": sym,
+                "quality_score": _to_float_or_none(getattr(qual, "quality_score", None)),
+                "is_stale": getattr(qual, "is_stale", None),
+                "issues": getattr(qual, "issues", [])[:3] if hasattr(qual, "issues") else [],
+            })
+
+        updated = False
+
+        # Update bid if missing/invalid
+        q_bid = getattr(q, "bid", None)
+        if q_bid is not None:
+            try:
+                q_bid_f = float(q_bid)
+                if q_bid_f > 0:
+                    leg_bid = leg.get("bid")
+                    if leg_bid is None or float(leg_bid) <= 0:
+                        leg["bid"] = q_bid_f
+                        updated = True
+            except (TypeError, ValueError):
+                pass
+
+        # Update ask if missing/invalid
+        q_ask = getattr(q, "ask", None)
+        if q_ask is not None:
+            try:
+                q_ask_f = float(q_ask)
+                if q_ask_f > 0:
+                    leg_ask = leg.get("ask")
+                    if leg_ask is None or float(leg_ask) <= 0:
+                        leg["ask"] = q_ask_f
+                        updated = True
+            except (TypeError, ValueError):
+                pass
+
+        # Compute mid from hydrated or existing bid/ask
+        q_mid = getattr(q, "mid", None)
+        pref_mid = None
+        if q_mid is not None:
+            try:
+                q_mid_f = float(q_mid)
+                if q_mid_f > 0:
+                    pref_mid = q_mid_f
+            except (TypeError, ValueError):
+                pass
+
+        if pref_mid is None and _leg_has_valid_bidask(leg):
+            # Compute from bid/ask
+            pref_mid = (float(leg["bid"]) + float(leg["ask"])) / 2.0
+
+        if pref_mid is not None and pref_mid > 0:
+            leg["mid"] = pref_mid
+            leg["premium"] = pref_mid
+            updated = True
+
+        if updated:
+            hydrated_count += 1
+
+    # Collect symbols still missing valid quotes
+    missing_after = [
+        leg.get("symbol") for leg in legs
+        if not _leg_has_valid_bidask(leg)
+    ]
+
+    return {
+        "hydrated": hydrated_count,
+        "missing_after": missing_after,
+        "quality": quality_info,
+    }
+
+
+def _reprice_total_cost_from_legs(legs: List[Dict[str, Any]]) -> Optional[float]:
+    """
+    Recompute total cost from leg mid/premium values.
+
+    Returns None if any leg is missing a valid premium (> 0).
+    For buy legs, adds to cost. For sell legs, subtracts from cost.
+    """
+    if not legs:
+        return None
+
+    total = 0.0
+    for leg in legs:
+        prem = leg.get("mid") or leg.get("premium")
+        if prem is None:
+            return None
+        try:
+            prem_f = float(prem)
+            if prem_f <= 0:
+                return None
+        except (TypeError, ValueError):
+            return None
+
+        side = leg.get("side")
+        if side == "buy":
+            total += prem_f
+        else:
+            total -= prem_f
+
+    return total
+
+
 # Bolt Optimization: Cache expiry date parsing
 # Using maxsize=4096 to prevent unbounded memory growth while keeping cache hot
 @lru_cache(maxsize=4096)
@@ -268,9 +439,24 @@ def _get_ask_nested(c):
     return q.get("ask") if q else None
 
 def _get_premium_nested(c):
+    """
+    Get premium from nested quote structure.
+    Returns mid if > 0, else last if > 0, else None.
+    Zero values are treated as missing/invalid.
+    """
     q = c.get("quote")
-    if not q: return None
-    return q.get("mid") if q.get("mid") is not None else q.get("last")
+    if not q:
+        return None
+    try:
+        mid = q.get("mid")
+        if mid is not None and float(mid) > 0:
+            return float(mid)
+        last = q.get("last")
+        if last is not None and float(last) > 0:
+            return float(last)
+    except (TypeError, ValueError):
+        pass
+    return None
 
 # Flat Schema Accessors (PolygonService)
 def _get_delta_flat(c):
@@ -1573,7 +1759,60 @@ def scan_for_opportunities(
                     rej_stats.record("condor_invariants_failed")
                     return None
 
-                # Sanity Checks
+                # Quote Hydration: Check for missing/invalid quotes and attempt to fill
+                missing_quotes_before = [
+                    leg.get("symbol") for leg in legs
+                    if not _leg_has_valid_bidask(leg)
+                ]
+
+                hydration_meta = None
+                if missing_quotes_before:
+                    # Attempt targeted quote hydration for the 4 leg tickers
+                    hydration_meta = _hydrate_legs_quotes_v4(truth_layer, legs)
+
+                    # Reprice total_cost from hydrated legs
+                    new_total = _reprice_total_cost_from_legs(legs)
+                    if new_total is None:
+                        # Could not compute valid pricing even after hydration
+                        sample = _build_condor_rejection_sample(
+                            symbol=symbol,
+                            strategy_key=strategy_key,
+                            expiry_selected=expiry_selected,
+                            legs=legs,
+                            total_cost=None,
+                            calls_count=len(calls_sorted),
+                            puts_count=len(puts_sorted),
+                        )
+                        sample["hydration"] = hydration_meta
+                        rej_stats.record_with_sample("condor_missing_quotes", sample)
+                        return None
+                    else:
+                        total_cost = new_total
+
+                # Re-check for missing quotes after hydration
+                missing_quotes_after = [
+                    leg.get("symbol") for leg in legs
+                    if not _leg_has_valid_bidask(leg)
+                ]
+
+                if missing_quotes_after:
+                    # Still have legs with unusable quotes
+                    sample = _build_condor_rejection_sample(
+                        symbol=symbol,
+                        strategy_key=strategy_key,
+                        expiry_selected=expiry_selected,
+                        legs=legs,
+                        total_cost=total_cost,
+                        calls_count=len(calls_sorted),
+                        puts_count=len(puts_sorted),
+                    )
+                    sample["missing_after"] = missing_quotes_after
+                    if hydration_meta:
+                        sample["hydration"] = hydration_meta
+                    rej_stats.record_with_sample("condor_missing_quotes", sample)
+                    return None
+
+                # Credit Check: Only reached when quotes are usable
                 credit_share = abs(total_cost) if total_cost < 0 else 0.0
                 if credit_share <= 0:
                     # Sample with legs for debugging credit calculation

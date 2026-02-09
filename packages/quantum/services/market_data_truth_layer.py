@@ -928,43 +928,131 @@ class MarketDataTruthLayer:
         except (ValueError, TypeError):
             return None
 
+    @staticmethod
+    def _get_first(d: Optional[Dict], keys: List[str]) -> Optional[Any]:
+        """Get first non-None value from dict using multiple possible keys."""
+        if d is None:
+            return None
+        for k in keys:
+            val = d.get(k)
+            if val is not None:
+                return val
+        return None
+
+    @staticmethod
+    def _extract_last_quote_fields(last_quote: Optional[Dict]) -> Tuple[Optional[float], Optional[float], Optional[int], Optional[int], Optional[int]]:
+        """
+        Extract quote fields from Polygon last_quote with multi-key support.
+
+        Returns: (bid, ask, quote_ts, bid_size, ask_size)
+
+        Supports multiple key variants:
+        - ask: ["a", "ask", "P", "ap", "ask_price"]
+        - bid: ["b", "bid", "p", "bp", "bid_price"]
+        - ts: ["t", "timestamp", "quote_ts", "updated", "last_updated"]
+        - bid_size: ["bx", "bid_size", "bs"]
+        - ask_size: ["ax", "ask_size", "as"]
+        """
+        if not last_quote:
+            return (None, None, None, None, None)
+
+        # Extract with fallback keys
+        ask_raw = MarketDataTruthLayer._get_first(last_quote, ["a", "ask", "P", "ap", "ask_price"])
+        bid_raw = MarketDataTruthLayer._get_first(last_quote, ["b", "bid", "p", "bp", "bid_price"])
+        ts_raw = MarketDataTruthLayer._get_first(last_quote, ["t", "timestamp", "quote_ts", "updated", "last_updated"])
+        bid_size_raw = MarketDataTruthLayer._get_first(last_quote, ["bx", "bid_size", "bs"])
+        ask_size_raw = MarketDataTruthLayer._get_first(last_quote, ["ax", "ask_size", "as"])
+
+        # Convert to proper types
+        def to_float(v):
+            if v is None:
+                return None
+            try:
+                return float(v)
+            except (TypeError, ValueError):
+                return None
+
+        def to_int(v):
+            if v is None:
+                return None
+            try:
+                return int(v)
+            except (TypeError, ValueError):
+                return None
+
+        return (
+            to_float(bid_raw),
+            to_float(ask_raw),
+            to_int(ts_raw),
+            to_int(bid_size_raw),
+            to_int(ask_size_raw)
+        )
+
+    @staticmethod
+    def _extract_last_trade_fields(last_trade: Optional[Dict], session: Optional[Dict] = None) -> Tuple[Optional[float], Optional[int]]:
+        """
+        Extract trade fields from Polygon last_trade with multi-key support.
+
+        Returns: (last_price, trade_ts)
+
+        Supports multiple key variants:
+        - price: ["p", "price", "last", "c", "close"]
+        - ts: ["t", "timestamp", "trade_ts", "updated"]
+        Falls back to session.close if no trade price found.
+        """
+        if not last_trade:
+            last_trade = {}
+
+        # Extract with fallback keys
+        price_raw = MarketDataTruthLayer._get_first(last_trade, ["p", "price", "last", "c", "close"])
+        ts_raw = MarketDataTruthLayer._get_first(last_trade, ["t", "timestamp", "trade_ts", "updated"])
+
+        # Fallback to session close if no trade price
+        if price_raw is None and session:
+            price_raw = session.get("close")
+
+        # Convert to proper types
+        def to_float(v):
+            if v is None:
+                return None
+            try:
+                return float(v)
+            except (TypeError, ValueError):
+                return None
+
+        def to_int(v):
+            if v is None:
+                return None
+            try:
+                return int(v)
+            except (TypeError, ValueError):
+                return None
+
+        return (to_float(price_raw), to_int(ts_raw))
+
     def _parse_snapshot_item(self, item: Dict) -> Dict:
-        """Parses a Polygon snapshot item into our canonical format."""
-        # item structure varies by asset type but usually has:
-        # last_quote: {P: ask, p: bid, t: timestamp} or similar
-        # session: {price, change, ...}
-        # But wait, Universal Snapshot structure:
-        # { ticker: "...", type: "...", session: {...}, last_quote: {...}, last_trade: {...} }
+        """
+        Parses a Polygon snapshot item into our canonical format.
 
-        # Quote handling
-        # Polygon V3 snapshot response for stocks:
-        # last_quote: { "a": ask_price, "b": bid_price, "t": timestamp ... }
-        # Options might have "last_quote" similarly.
+        Uses robust extractors to support multiple key variants for bid/ask/timestamps
+        across different Polygon API versions and asset types.
+        """
+        # Extract quote fields using robust multi-key extractor
+        last_quote = item.get("last_quote") or item.get("quote") or {}
+        last_trade = item.get("last_trade") or {}
+        session = item.get("session") or {}
 
-        quote_data = item.get("last_quote", {})
+        # Use extractors for consistent parsing
+        bid, ask, quote_ts, bid_size, ask_size = self._extract_last_quote_fields(last_quote)
+        last_price, trade_ts = self._extract_last_trade_fields(last_trade, session)
 
-        # Note: keys might differ based on asset class if not unified?
-        # Checking docs: v3/snapshot returns Universal Snapshot.
-        # "a" = ask price, "b" = bid price, "ax" = ask size, "bx" = bid size, "t" = timestamp
-
-        ask = quote_data.get("a") or quote_data.get("P") # Fallback to P just in case (v2 style)
-        bid = quote_data.get("b") or quote_data.get("p")
-
-        # Convert to float if exists
-        ask = float(ask) if ask is not None else None
-        bid = float(bid) if bid is not None else None
-
-        # Mid calculation
+        # Mid calculation with strict validation
         mid = None
-        if ask is not None and bid is not None and ask > 0 and bid > 0:
+        if bid is not None and ask is not None and bid > 0 and ask > 0 and ask >= bid:
             mid = (ask + bid) / 2.0
 
-        last_trade = item.get("last_trade", {})
-        last_price = last_trade.get("p") or item.get("session", {}).get("close")
-        if last_price is not None:
-            last_price = float(last_price)
-
-        day_data = item.get("session", {})
+        # Provider timestamp: prefer item.updated, fallback to quote_ts, then trade_ts
+        provider_ts = item.get("updated") or quote_ts or trade_ts
 
         # Greek handling (if available - e.g. for options)
         greeks = item.get("greeks", {})
@@ -972,21 +1060,23 @@ class MarketDataTruthLayer:
 
         return {
             "ticker": item.get("ticker"),
-            "asset_type": item.get("type"), # e.g. "CS" (Common Stock), "O" (Option)
+            "asset_type": item.get("type"),  # e.g. "CS" (Common Stock), "O" (Option)
             "quote": {
                 "bid": bid,
                 "ask": ask,
                 "mid": mid,
                 "last": last_price,
-                "quote_ts": quote_data.get("t")
+                "quote_ts": quote_ts,
+                "bid_size": bid_size,
+                "ask_size": ask_size,
             },
             "day": {
-                "o": day_data.get("open"),
-                "h": day_data.get("high"),
-                "l": day_data.get("low"),
-                "c": day_data.get("close"),
-                "v": day_data.get("volume"),
-                "vwap": None # Not always in snapshot
+                "o": session.get("open"),
+                "h": session.get("high"),
+                "l": session.get("low"),
+                "c": session.get("close"),
+                "v": session.get("volume"),
+                "vwap": None  # Not always in snapshot
             },
             "greeks": {
                 "delta": greeks.get("delta"),
@@ -997,8 +1087,9 @@ class MarketDataTruthLayer:
             "iv": iv,
             "source": "polygon",
             "retrieved_ts": datetime.utcnow().isoformat(),
-            "provider_ts": item.get("updated"), # Polygon timestamp in nanos usually? or millis?
-            "staleness_ms": self._compute_staleness(item.get("updated"))
+            "provider_ts": provider_ts,
+            "staleness_ms": self._compute_staleness(provider_ts),
+            "parser_version": "v2",  # Track parser version for debugging
         }
 
     def _compute_staleness(self, provider_ts: Optional[Union[int, float]]) -> Optional[float]:
@@ -1098,6 +1189,24 @@ class MarketDataTruthLayer:
 
                 details = item.get("details", {})
 
+                # Extract quote/trade fields using robust multi-key extractors
+                last_quote = item.get("last_quote")
+                last_trade = item.get("last_trade")
+                bid, ask, quote_ts, bid_size, ask_size = self._extract_last_quote_fields(last_quote)
+                last_price, trade_ts = self._extract_last_trade_fields(last_trade)
+
+                # Compute mid if both bid and ask available
+                mid = None
+                if bid is not None and ask is not None:
+                    mid = (bid + ask) / 2.0
+
+                # Compute provider_ts from available timestamps
+                provider_ts = None
+                for ts in [quote_ts, trade_ts]:
+                    if ts is not None:
+                        provider_ts = ts
+                        break
+
                 # Parse
                 contract = {
                     "contract": details.get("ticker"),
@@ -1106,10 +1215,10 @@ class MarketDataTruthLayer:
                     "expiry": details.get("expiration_date"),
                     "right": details.get("contract_type"), # 'call' or 'put'
                     "quote": {
-                        "bid": item.get("last_quote", {}).get("b"),
-                        "ask": item.get("last_quote", {}).get("a"),
-                        "mid": None, # Compute below
-                        "last": item.get("last_trade", {}).get("p")
+                        "bid": bid,
+                        "ask": ask,
+                        "mid": mid,
+                        "last": last_price
                     },
                     "iv": item.get("implied_volatility"),
                     "greeks": {
@@ -1121,14 +1230,9 @@ class MarketDataTruthLayer:
                     "oi": item.get("open_interest"),
                     "volume": item.get("day", {}).get("volume"),
                     "retrieved_ts": datetime.utcnow().isoformat(),
+                    "provider_ts": provider_ts,
                     "source": "polygon"
                 }
-
-                # Fix Mid
-                b = contract["quote"]["bid"]
-                a = contract["quote"]["ask"]
-                if b and a:
-                    contract["quote"]["mid"] = (b + a) / 2.0
 
                 all_contracts.append(contract)
 

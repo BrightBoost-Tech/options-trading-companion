@@ -11,6 +11,12 @@ import { X, RefreshCw, Clock, Loader2, ShieldAlert, AlertTriangle, ChevronDown, 
 import { Button } from '@/components/ui/button';
 import { Checkbox } from '@/components/ui/checkbox';
 import { useToast } from '@/components/ui/use-toast';
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipProvider,
+  TooltipTrigger,
+} from '@/components/ui/tooltip';
 
 // v4: Card mode for context-aware behavior
 type CardMode = 'DEFAULT' | 'PAPER_INBOX';
@@ -613,23 +619,31 @@ const SuggestionCard = ({
                                     aria-label={`Select ${displaySymbol}`}
                                 />
                             )}
-                            <div
-                                className="flex items-center gap-1 group cursor-pointer hover:bg-muted/50 rounded px-1 -ml-1 transition-colors"
-                                onClick={handleCopySymbol}
-                                onKeyDown={(e) => {
-                                    if (e.key === 'Enter' || e.key === ' ') {
-                                        e.preventDefault();
-                                        handleCopySymbol(e);
-                                    }
-                                }}
-                                role="button"
-                                tabIndex={0}
-                                aria-label={`Copy ${displaySymbol} to clipboard`}
-                                title="Click to copy symbol"
-                            >
-                                <span className="font-bold text-lg text-foreground group-hover:underline decoration-dotted underline-offset-4">{displaySymbol}</span>
-                                <Copy className="w-3 h-3 text-muted-foreground opacity-0 group-hover:opacity-100 transition-opacity" aria-hidden="true" />
-                            </div>
+                            <TooltipProvider>
+                                <Tooltip>
+                                    <TooltipTrigger asChild>
+                                        <div
+                                            className="flex items-center gap-1 group cursor-pointer hover:bg-muted/50 rounded px-1 -ml-1 transition-colors"
+                                            onClick={handleCopySymbol}
+                                            onKeyDown={(e) => {
+                                                if (e.key === 'Enter' || e.key === ' ') {
+                                                    e.preventDefault();
+                                                    handleCopySymbol(e);
+                                                }
+                                            }}
+                                            role="button"
+                                            tabIndex={0}
+                                            aria-label={`Copy ${displaySymbol} to clipboard`}
+                                        >
+                                            <span className="font-bold text-lg text-foreground group-hover:underline decoration-dotted underline-offset-4">{displaySymbol}</span>
+                                            <Copy className="w-3 h-3 text-muted-foreground opacity-0 group-hover:opacity-100 transition-opacity" aria-hidden="true" />
+                                        </div>
+                                    </TooltipTrigger>
+                                    <TooltipContent>
+                                        <p>Click to copy symbol</p>
+                                    </TooltipContent>
+                                </Tooltip>
+                            </TooltipProvider>
                             <span className="text-sm font-medium text-muted-foreground">{suggestion.strategy}</span>
                             {suggestion.expiration && (
                                 <span className="text-xs text-muted-foreground border border-border px-1 rounded">{suggestion.expiration}</span>

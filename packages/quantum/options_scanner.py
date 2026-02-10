@@ -16,7 +16,7 @@ from bisect import bisect_left
 from packages.quantum.services.universe_service import UniverseService
 from packages.quantum.analytics.strategy_selector import StrategySelector
 from packages.quantum.analytics.strategy_policy import StrategyPolicy
-from packages.quantum.ev_calculator import calculate_ev, calculate_condor_ev
+from packages.quantum.ev_calculator import calculate_ev, calculate_condor_ev, calculate_condor_ev_tail
 from packages.quantum.market_data import PolygonService
 from packages.quantum.analytics.regime_integration import map_market_regime
 from packages.quantum.services.iv_repository import IVRepository
@@ -57,6 +57,12 @@ EXECUTION_SPREAD_TAKE_FRAC_MARKET = float(os.getenv("EXECUTION_SPREAD_TAKE_FRAC_
 CONDOR_TARGET_DELTAS = [float(d) for d in os.getenv("CONDOR_TARGET_DELTAS", "0.06,0.08,0.10,0.12,0.15").split(",")]
 CONDOR_WIDTHS = [float(w) for w in os.getenv("CONDOR_WIDTHS", "2.5,5,7.5").split(",")]
 CONDOR_MIN_CREDIT = float(os.getenv("CONDOR_MIN_CREDIT", "0.60"))  # Min credit per share
+
+# Condor EV model configuration
+# "strict" = original model (short delta only), "tail" = tail-aware model (short + long delta)
+CONDOR_EV_MODEL = os.getenv("CONDOR_EV_MODEL", "strict").lower()
+CONDOR_TAIL_LOSS_SEVERITY = float(os.getenv("CONDOR_TAIL_LOSS_SEVERITY", "0.50"))  # 0..1
+CONDOR_TAIL_PROB_MULT = float(os.getenv("CONDOR_TAIL_PROB_MULT", "1.00"))  # 0.3..1.2
 
 logger = logging.getLogger(__name__)
 
@@ -1281,22 +1287,43 @@ def _select_best_iron_condor_ev_aware(
             width_call = abs(calls_legs[1]["strike"] - calls_legs[0]["strike"])
             width_put = abs(puts_legs[1]["strike"] - puts_legs[0]["strike"])
 
-            # Get short deltas
-            short_call = calls_legs[0]  # lower strike = short
-            short_put = puts_legs[1]    # higher strike = short
+            # Identify legs for EV calc
+            # calls_legs[0] = short call (lower strike), calls_legs[1] = long call (higher strike)
+            # puts_legs[0] = long put (lower strike), puts_legs[1] = short put (higher strike)
+            short_call = calls_legs[0]
+            long_call = calls_legs[1]
+            long_put = puts_legs[0]
+            short_put = puts_legs[1]
 
+            # Extract deltas
             short_call_delta = abs(short_call.get("delta") or 0)
             short_put_delta = abs(short_put.get("delta") or 0)
+            long_call_delta = abs(long_call.get("delta") or 0)
+            long_put_delta = abs(long_put.get("delta") or 0)
 
-            # Compute EV
+            # Compute EV using configured model
             try:
-                ev_obj = calculate_condor_ev(
-                    credit=credit_share,
-                    width_put=width_put,
-                    width_call=width_call,
-                    delta_short_put=short_put_delta,
-                    delta_short_call=short_call_delta
-                )
+                if CONDOR_EV_MODEL == "tail":
+                    ev_obj = calculate_condor_ev_tail(
+                        credit=credit_share,
+                        width_put=width_put,
+                        width_call=width_call,
+                        delta_short_put=short_put_delta,
+                        delta_short_call=short_call_delta,
+                        delta_long_put=long_put_delta,
+                        delta_long_call=long_call_delta,
+                        tail_loss_severity=CONDOR_TAIL_LOSS_SEVERITY,
+                        tail_prob_mult=CONDOR_TAIL_PROB_MULT
+                    )
+                else:
+                    # Default: strict model
+                    ev_obj = calculate_condor_ev(
+                        credit=credit_share,
+                        width_put=width_put,
+                        width_call=width_call,
+                        delta_short_put=short_put_delta,
+                        delta_short_call=short_call_delta
+                    )
                 total_ev = ev_obj.expected_value
             except Exception as e:
                 combos_ev_errors += 1
@@ -1315,7 +1342,12 @@ def _select_best_iron_condor_ev_aware(
                 "max_leg_spread_pct": round(max_leg_spread, 4),
                 "width_call": width_call,
                 "width_put": width_put,
+                "ev_model": CONDOR_EV_MODEL,
             }
+            # Include tail model params when applicable
+            if CONDOR_EV_MODEL == "tail":
+                meta["tail_loss_severity"] = CONDOR_TAIL_LOSS_SEVERITY
+                meta["tail_prob_mult"] = CONDOR_TAIL_PROB_MULT
 
             # Track best overall (even if negative)
             if best_ev_overall is None or total_ev > best_ev_overall:

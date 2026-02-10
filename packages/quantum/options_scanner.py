@@ -1729,6 +1729,118 @@ def _combo_width_share_from_legs(truth_layer, legs, fallback_width_share):
 
     return total if found > 0 else float(fallback_width_share or 0.0)
 
+
+def _combo_cost_range_from_legs(legs: List[Dict[str, Any]]) -> Optional[Dict[str, float]]:
+    """
+    Compute combo cost range from leg bid/ask values.
+
+    For a multi-leg trade:
+    - cost_min = Σ(buy_bid) - Σ(sell_ask)  # Best case: buy at bid, sell at ask
+    - cost_max = Σ(buy_ask) - Σ(sell_bid)  # Worst case: buy at ask, sell at bid
+    - combo_spread_share = cost_max - cost_min
+
+    Returns dict with cost_min, cost_max, combo_spread_share or None if any leg
+    has invalid NBBO.
+    """
+    if not legs:
+        return None
+
+    buy_bid_sum = 0.0
+    buy_ask_sum = 0.0
+    sell_bid_sum = 0.0
+    sell_ask_sum = 0.0
+
+    for leg in legs:
+        bid = leg.get("bid")
+        ask = leg.get("ask")
+        side = leg.get("side", "").lower()
+
+        # Validate NBBO
+        if bid is None or ask is None:
+            return None
+        try:
+            bid = float(bid)
+            ask = float(ask)
+        except (TypeError, ValueError):
+            return None
+
+        if bid <= 0 or ask < bid:
+            return None
+
+        if side == "buy":
+            buy_bid_sum += bid
+            buy_ask_sum += ask
+        elif side == "sell":
+            sell_bid_sum += bid
+            sell_ask_sum += ask
+        else:
+            # Unknown side, cannot determine direction
+            return None
+
+    # cost_min: buy at bid (favorable), sell at ask (favorable)
+    cost_min = buy_bid_sum - sell_ask_sum
+    # cost_max: buy at ask (unfavorable), sell at bid (unfavorable)
+    cost_max = buy_ask_sum - sell_bid_sum
+    # combo spread is the range between best and worst case
+    combo_spread_share = cost_max - cost_min
+
+    return {
+        "cost_min": cost_min,
+        "cost_max": cost_max,
+        "combo_spread_share": combo_spread_share,
+    }
+
+
+def _sum_leg_spreads_share(legs: List[Dict[str, Any]]) -> Optional[float]:
+    """
+    Sum of (ask - bid) for each leg (debugging/comparison helper).
+
+    Returns the sum of per-leg spreads, or None if any leg has invalid NBBO.
+    """
+    if not legs:
+        return None
+
+    total = 0.0
+    for leg in legs:
+        bid = leg.get("bid")
+        ask = leg.get("ask")
+
+        if bid is None or ask is None:
+            return None
+        try:
+            bid = float(bid)
+            ask = float(ask)
+        except (TypeError, ValueError):
+            return None
+
+        if bid <= 0 or ask < bid:
+            return None
+
+        total += (ask - bid)
+
+    return total
+
+
+def _condor_pop_from_legs(legs: List[Dict[str, Any]]) -> Optional[float]:
+    """
+    Estimate PoP for condor as 1 - (|delta_short_put| + |delta_short_call|).
+    Clamped to [0.01, 0.99]. Returns None if required legs not found.
+    """
+    try:
+        short_puts = [l for l in legs if l.get("type") == "put" and l.get("side") == "sell"]
+        short_calls = [l for l in legs if l.get("type") == "call" and l.get("side") == "sell"]
+        if not short_puts or not short_calls:
+            return None
+        sp = short_puts[0]
+        sc = short_calls[0]
+        p_loss_put = abs(float(sp.get("delta") or 0.0))
+        p_loss_call = abs(float(sc.get("delta") or 0.0))
+        p_win = 1.0 - min(1.0, p_loss_put + p_loss_call)
+        return max(0.01, min(0.99, p_win))
+    except Exception:
+        return None
+
+
 def _determine_execution_cost(
     drag_map: Dict[str, Any],
     symbol: str,
@@ -2343,6 +2455,7 @@ def scan_for_opportunities(
                     data_quality = "degraded"
 
             total_ev = 0.0
+            ev_obj = None  # Initialize to avoid UnboundLocalError in PoP block
 
             # Compute EV for the selected legs
             if len(legs) == 4 and ("condor" in strategy_key or "iron_condor" in strategy_key):
@@ -2394,13 +2507,32 @@ def scan_for_opportunities(
             max_profit_contract = primitives["max_profit_per_contract"]
             collateral_contract = primitives["collateral_required_per_contract"]
 
-            # NEW: Compute explicit combo width via Truth Layer
-            # Fallback based on underlying spread or default
-            fallback_width_share = abs(total_cost) * 0.05 # Default 5%
-            if bid is not None and ask is not None and current_price and current_price > 0:
-                 fallback_width_share = abs(total_cost) * ((ask - bid) / current_price)
+            # NEW: Compute combo cost range from legs for execution cost
+            # Primary method: _combo_cost_range_from_legs for accurate combo spread
+            cost_range = _combo_cost_range_from_legs(legs)
 
-            combo_width_share = _combo_width_share_from_legs(truth_layer, legs, fallback_width_share)
+            # Also compute legacy sum_leg_spreads for comparison/debugging
+            sum_leg_spreads = _sum_leg_spreads_share(legs)
+
+            # Fallback based on underlying spread or default
+            fallback_width_share = abs(total_cost) * 0.05  # Default 5%
+            if bid is not None and ask is not None and current_price and current_price > 0:
+                fallback_width_share = abs(total_cost) * ((ask - bid) / current_price)
+
+            # Use combo_spread_share from cost range as canonical spread input
+            # Fallback to legacy combo_width if cost range unavailable
+            if cost_range is not None:
+                combo_spread_share = cost_range["combo_spread_share"]
+                combo_cost_min_share = cost_range["cost_min"]
+                combo_cost_max_share = cost_range["cost_max"]
+            else:
+                # Fallback: use legacy method
+                combo_spread_share = _combo_width_share_from_legs(truth_layer, legs, fallback_width_share)
+                combo_cost_min_share = None
+                combo_cost_max_share = None
+
+            # Keep legacy combo_width_share for backwards compatibility in reporting
+            combo_width_share = combo_spread_share
 
             # Compute option-spread-based pct (relative to entry)
             entry_cost_share = abs(float(total_cost or 0.0))
@@ -2495,6 +2627,10 @@ def scan_for_opportunities(
                     "expected_execution_cost": round(expected_execution_cost, 4),
                     "entry_cost_share": round(abs(total_cost), 4),
                     "combo_width_share": round(combo_width_share, 4),
+                    "combo_spread_share": round(combo_spread_share, 4),
+                    "combo_cost_min_share": round(combo_cost_min_share, 4) if combo_cost_min_share is not None else None,
+                    "combo_cost_max_share": round(combo_cost_max_share, 4) if combo_cost_max_share is not None else None,
+                    "sum_leg_spreads_share": round(sum_leg_spreads, 4) if sum_leg_spreads is not None else None,
                     "max_leg_spread_pct": round(max_leg_spread_pct, 4) if max_leg_spread_pct is not None else None,
                     "is_limit_order": is_limit_order,
                     "thresholds": {
@@ -2621,18 +2757,31 @@ def scan_for_opportunities(
             gs_dict = global_snapshot.to_dict() if global_snapshot else None
 
             pop = None
-            if ev_obj is not None and hasattr(ev_obj, "win_probability"):
-                pop = float(ev_obj.win_probability)
-            elif ev_obj is not None and isinstance(ev_obj, dict) and "win_probability" in ev_obj:
-                pop = float(ev_obj["win_probability"])
+            pop_source = None
 
-            if pop is not None:
-                pop = max(0.0, min(1.0, pop))
-                candidate_dict["probability_of_profit"] = pop
-                candidate_dict["probability_of_profit_source"] = "ev"
-            else:
-                candidate_dict["probability_of_profit"] = _estimate_probability_of_profit(candidate_dict, gs_dict)
-                candidate_dict["probability_of_profit_source"] = "score_fallback"
+            # Use EV object if available (1-leg / 2-leg paths)
+            if ev_obj is not None:
+                if hasattr(ev_obj, "win_probability"):
+                    pop = float(ev_obj.win_probability)
+                    pop_source = "ev"
+                elif isinstance(ev_obj, dict) and "win_probability" in ev_obj:
+                    pop = float(ev_obj["win_probability"])
+                    pop_source = "ev"
+
+            # Condor fallback PoP (no ev_obj in condor path)
+            if pop is None and len(legs) == 4 and ("condor" in strategy_key or "iron_condor" in strategy_key):
+                pop = _condor_pop_from_legs(legs)
+                pop_source = "condor_delta_tail" if pop is not None else None
+
+            # Final fallback
+            if pop is None:
+                pop = _estimate_probability_of_profit(candidate_dict, gs_dict)
+                pop_source = "score_fallback"
+
+            # Clamp + set on candidate
+            pop = max(0.0, min(1.0, float(pop)))
+            candidate_dict["probability_of_profit"] = pop
+            candidate_dict["probability_of_profit_source"] = pop_source or "unknown"
 
             # --- QUANT AGENTS V3 INTEGRATION ---
             scanner_agents = build_agent_pipeline(phase="scanner")

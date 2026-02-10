@@ -46,6 +46,8 @@ def _get_surface_v4_strike_range() -> float:
 SCANNER_LIMIT_DEV = int(os.getenv("SCANNER_LIMIT_DEV", "40")) # Limit universe in dev
 SCANNER_MIN_DTE = 25
 SCANNER_MAX_DTE = 45
+# Condor max per-leg spread threshold (default 35%)
+CONDOR_MAX_LEG_SPREAD_PCT = float(os.getenv("CONDOR_MAX_LEG_SPREAD_PCT", "0.35"))
 
 logger = logging.getLogger(__name__)
 
@@ -241,6 +243,43 @@ def _leg_has_valid_bidask(leg: Dict[str, Any]) -> bool:
         return bid_f > 0 and ask_f > 0 and ask_f >= bid_f
     except (TypeError, ValueError):
         return False
+
+
+def _is_valid_nbbo(bid: Any, ask: Any) -> bool:
+    """
+    Check if bid/ask values constitute a valid NBBO.
+    Returns True only if bid > 0, ask > 0, and ask >= bid.
+    Used to prevent computing mid from one-sided quotes (e.g., bid=0).
+    """
+    try:
+        if bid is None or ask is None:
+            return False
+        bid_f = float(bid)
+        ask_f = float(ask)
+        return bid_f > 0 and ask_f > 0 and ask_f >= bid_f
+    except (TypeError, ValueError):
+        return False
+
+
+def _leg_spread_pct(leg: Dict[str, Any]) -> Optional[float]:
+    """
+    Compute per-leg spread percentage: (ask - bid) / mid.
+    Returns None if leg doesn't have valid NBBO or mid <= 0.
+    Used for condor liquidity gating.
+    """
+    try:
+        bid = leg.get("bid")
+        ask = leg.get("ask")
+        if not _is_valid_nbbo(bid, ask):
+            return None
+        bid_f = float(bid)
+        ask_f = float(ask)
+        mid = (bid_f + ask_f) / 2.0
+        if mid <= 0:
+            return None
+        return (ask_f - bid_f) / mid
+    except (TypeError, ValueError):
+        return None
 
 
 def _hydrate_legs_quotes_v4(
@@ -845,8 +884,9 @@ def _select_legs_from_chain(
         bid = _bid(best_contract)
         ask = _ask(best_contract)
         mid = None
-        if bid is not None and ask is not None:
-             mid = (float(bid) + float(ask)) / 2.0
+        # Only compute mid if we have valid NBBO (bid > 0, ask > 0, ask >= bid)
+        if _is_valid_nbbo(bid, ask):
+            mid = (float(bid) + float(ask)) / 2.0
 
         legs.append({
             "symbol": _ticker(best_contract),
@@ -967,7 +1007,8 @@ def _select_iron_condor_legs(
         bid = _bid(contract)
         ask = _ask(contract)
         mid_calc = None
-        if bid is not None and ask is not None and ask >= bid:
+        # Only compute mid if we have valid NBBO (bid > 0, ask > 0, ask >= bid)
+        if _is_valid_nbbo(bid, ask):
             mid_calc = (float(bid) + float(ask)) / 2.0
 
         premium = mid_calc if mid_calc is not None else (_premium(contract) or 0.0)
@@ -2036,13 +2077,48 @@ def scan_for_opportunities(
 
             # Compute option-spread-based pct (relative to entry)
             entry_cost_share = abs(float(total_cost or 0.0))
-            option_spread_pct = (combo_width_share / entry_cost_share) if entry_cost_share > 1e-9 else 0.0
+            legacy_spread_pct = (combo_width_share / entry_cost_share) if entry_cost_share > 1e-9 else 0.0
 
-            # NEW: Liquidity Gating (Option Spread Based)
-            if option_spread_pct > threshold:
-                 # REJECT: Illiquid Options
-                 rej_stats.record("spread_too_wide")
-                 return None
+            # NEW: Liquidity Gating
+            # For condors: use max per-leg spread pct (more appropriate for credit structures)
+            # For other strategies: use legacy spread_pct (combo_width / entry_cost)
+            is_condor = len(legs) == 4 and ("condor" in strategy_key or "iron_condor" in strategy_key)
+            max_leg_spread_pct = None
+
+            if is_condor:
+                per_leg_pcts = [p for p in (_leg_spread_pct(l) for l in legs) if p is not None]
+                if per_leg_pcts:
+                    max_leg_spread_pct = max(per_leg_pcts)
+                    option_spread_pct = max_leg_spread_pct
+                else:
+                    # No valid NBBO on any leg - use conservative default
+                    option_spread_pct = 1.0
+                effective_threshold = CONDOR_MAX_LEG_SPREAD_PCT
+            else:
+                option_spread_pct = legacy_spread_pct
+                effective_threshold = threshold
+
+            if option_spread_pct > effective_threshold:
+                # REJECT: Illiquid Options - attach debug info
+                debug_spread = {
+                    "option_spread_pct": round(option_spread_pct, 4),
+                    "max_leg_spread_pct": round(max_leg_spread_pct, 4) if max_leg_spread_pct is not None else None,
+                    "combo_width_share": round(combo_width_share, 4),
+                    "entry_cost_share": round(entry_cost_share, 4),
+                    "threshold": round(effective_threshold, 4),
+                    "is_condor": is_condor,
+                }
+                # Use record_with_sample if available for diagnostics
+                if hasattr(rej_stats, 'record_with_sample'):
+                    sample = {
+                        "symbol": symbol,
+                        "strategy_key": strategy_key,
+                        "spread_debug": debug_spread,
+                    }
+                    rej_stats.record_with_sample("spread_too_wide", sample)
+                else:
+                    rej_stats.record("spread_too_wide")
+                return None
 
             # H. Unified Scoring
             trade_dict = {

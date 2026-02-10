@@ -4,7 +4,14 @@ from supabase import Client
 import pandas as pd
 import numpy as np
 import concurrent.futures
+import os
+import time
 from packages.quantum.security.masking import sanitize_exception
+
+# Configurable concurrency for batch fetch (default 4 to reduce DB load)
+IVREPO_MAX_WORKERS = int(os.getenv("IVREPO_MAX_WORKERS", "4"))
+IVREPO_RETRY_COUNT = int(os.getenv("IVREPO_RETRY_COUNT", "2"))
+IVREPO_RETRY_DELAY = float(os.getenv("IVREPO_RETRY_DELAY", "0.5"))
 
 
 def _sanitize_numeric(value: Any) -> Optional[float]:
@@ -180,19 +187,40 @@ class IVRepository:
 
         def fetch_batch(batch_symbols):
             batch_results = {}
-            try:
-                # Fetch history for this chunk
-                # Filter where iv_30d IS NOT NULL using proper PostgREST syntax
-                res = self.supabase.table(self.table)\
-                    .select("underlying, iv_30d, as_of_date")\
-                    .in_("underlying", batch_symbols)\
-                    .gte("as_of_date", cutoff)\
-                    .not_.is_("iv_30d", "null")\
-                    .execute()
+            last_error = None
 
-                data = res.data
-                if not data:
-                    return {}
+            for attempt in range(IVREPO_RETRY_COUNT + 1):
+                try:
+                    # Fetch history for this chunk
+                    # Filter where iv_30d IS NOT NULL using proper PostgREST syntax
+                    res = self.supabase.table(self.table)\
+                        .select("underlying, iv_30d, as_of_date")\
+                        .in_("underlying", batch_symbols)\
+                        .gte("as_of_date", cutoff)\
+                        .not_.is_("iv_30d", "null")\
+                        .execute()
+
+                    data = res.data
+                    if not data:
+                        return {}
+                    break  # Success, exit retry loop
+                except Exception as e:
+                    last_error = e
+                    if attempt < IVREPO_RETRY_COUNT:
+                        time.sleep(IVREPO_RETRY_DELAY * (attempt + 1))  # Exponential backoff
+                        continue
+                    else:
+                        # All retries exhausted - sanitize error and return empty
+                        err_str = str(e)
+                        # Sanitize: truncate and remove potential HTML/sensitive content
+                        if len(err_str) > 100:
+                            err_str = err_str[:100] + "..."
+                        if "<" in err_str or ">" in err_str:
+                            err_str = "[HTML content redacted]"
+                        print(f"[IVRepo] Batch fetch failed after {IVREPO_RETRY_COUNT + 1} attempts for {batch_symbols}: {err_str}")
+                        return {}
+
+            try:
 
                 # Bolt Optimization: Manual aggregation is 15x faster than pandas DataFrame overhead for small batches
                 # Avoid pd.DataFrame creation, to_numeric, dropna, groupby, sort_values
@@ -263,17 +291,21 @@ class IVRepository:
                         "as_of_date": as_of
                     }
             except Exception as e:
-                # Log but continue to next batch
-                print(f"[IVRepo] Batch fetch error for {batch_symbols}: {e}")
+                # Sanitize processing errors
+                err_str = str(e)
+                if len(err_str) > 100:
+                    err_str = err_str[:100] + "..."
+                if "<" in err_str or ">" in err_str:
+                    err_str = "[HTML content redacted]"
+                print(f"[IVRepo] Batch processing error for {batch_symbols}: {err_str}")
 
             return batch_results
 
         # 1. Prepare batches
         batches = [symbols[i : i + chunk_size] for i in range(0, len(symbols), chunk_size)]
 
-        # 2. Execute in parallel
-        # Use max_workers=10 to keep concurrent DB connections reasonable
-        with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
+        # 2. Execute in parallel with configurable concurrency
+        with concurrent.futures.ThreadPoolExecutor(max_workers=IVREPO_MAX_WORKERS) as executor:
             future_to_batch = {executor.submit(fetch_batch, batch): batch for batch in batches}
 
             for future in concurrent.futures.as_completed(future_to_batch):
@@ -281,6 +313,12 @@ class IVRepository:
                     batch_res = future.result()
                     results.update(batch_res)
                 except Exception as exc:
-                    print(f"[IVRepo] Thread exception: {exc}")
+                    # Sanitize thread exceptions
+                    err_str = str(exc)
+                    if len(err_str) > 100:
+                        err_str = err_str[:100] + "..."
+                    if "<" in err_str or ">" in err_str:
+                        err_str = "[HTML content redacted]"
+                    print(f"[IVRepo] Thread exception: {err_str}")
 
         return results

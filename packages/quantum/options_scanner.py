@@ -53,6 +53,11 @@ EXECUTION_SPREAD_TAKE_FRAC_LIMIT = float(os.getenv("EXECUTION_SPREAD_TAKE_FRAC_L
 # Execution slippage fraction for market orders (default 50% of spread)
 EXECUTION_SPREAD_TAKE_FRAC_MARKET = float(os.getenv("EXECUTION_SPREAD_TAKE_FRAC_MARKET", "0.50"))
 
+# EV-aware condor grid search configuration
+CONDOR_TARGET_DELTAS = [float(d) for d in os.getenv("CONDOR_TARGET_DELTAS", "0.06,0.08,0.10,0.12,0.15").split(",")]
+CONDOR_WIDTHS = [float(w) for w in os.getenv("CONDOR_WIDTHS", "2.5,5,7.5").split(",")]
+CONDOR_MIN_CREDIT = float(os.getenv("CONDOR_MIN_CREDIT", "0.60"))  # Min credit per share
+
 logger = logging.getLogger(__name__)
 
 
@@ -284,6 +289,28 @@ def _leg_spread_pct(leg: Dict[str, Any]) -> Optional[float]:
         return (ask_f - bid_f) / mid
     except (TypeError, ValueError):
         return None
+
+
+def _mid_from_nbbo(bid: Any, ask: Any) -> Optional[float]:
+    """
+    Compute mid price only if bid/ask constitute valid NBBO.
+    Returns None if NBBO is invalid (one-sided, zero, or crossed).
+    """
+    if not _is_valid_nbbo(bid, ask):
+        return None
+    try:
+        return (float(bid) + float(ask)) / 2.0
+    except (TypeError, ValueError):
+        return None
+
+
+def _max_leg_spread_pct(legs: List[Dict[str, Any]]) -> float:
+    """
+    Compute max per-leg spread percentage across all legs.
+    Returns float('inf') if no legs have valid NBBO.
+    """
+    pcts = [p for p in (_leg_spread_pct(l) for l in legs) if p is not None]
+    return max(pcts) if pcts else float('inf')
 
 
 def _hydrate_legs_quotes_v4(
@@ -1041,6 +1068,258 @@ def _select_iron_condor_legs(
             total_cost -= premium
 
     return legs, total_cost
+
+
+def _select_iron_condor_legs_param(
+    calls: List[Dict[str, Any]],
+    puts: List[Dict[str, Any]],
+    target_delta: float,
+    width: float,
+    _delta,
+    _bid,
+    _ask,
+    _ticker,
+    _expiry,
+    _gamma,
+    _vega,
+    _theta
+) -> tuple[List[Dict[str, Any]], float]:
+    """
+    Parameterized iron condor constructor for EV-aware grid search.
+    Only builds legs with valid NBBO (bid > 0, ask > 0, ask >= bid).
+
+    Returns (legs, total_cost) or ([], 0.0) if construction fails.
+    """
+    if not calls or not puts:
+        return [], 0.0
+
+    # Select shorts by delta
+    short_call = min(calls, key=lambda x: abs(abs(_delta(x) or 0) - target_delta))
+    short_put = min(puts, key=lambda x: abs(abs(_delta(x) or 0) - target_delta))
+
+    # Select longs by strike offset
+    target_long_call_strike = short_call["strike"] + width
+    target_long_put_strike = short_put["strike"] - width
+
+    valid_long_calls = [c for c in calls if c["strike"] > short_call["strike"]]
+    valid_long_puts = [p for p in puts if p["strike"] < short_put["strike"]]
+
+    if not valid_long_calls or not valid_long_puts:
+        return [], 0.0
+
+    long_call = min(valid_long_calls, key=lambda x: abs(x["strike"] - target_long_call_strike))
+    long_put = min(valid_long_puts, key=lambda x: abs(x["strike"] - target_long_put_strike))
+
+    # Verify strike ordering
+    if long_call["strike"] <= short_call["strike"] or long_put["strike"] >= short_put["strike"]:
+        return [], 0.0
+
+    # Build legs - ONLY if all 4 have valid NBBO
+    selected_contracts = [
+        (short_put, "sell", "put"),
+        (long_put, "buy", "put"),
+        (short_call, "sell", "call"),
+        (long_call, "buy", "call")
+    ]
+
+    legs = []
+    total_cost = 0.0
+
+    for contract, side, type_hint in selected_contracts:
+        bid = _bid(contract)
+        ask = _ask(contract)
+
+        # Strict: require valid NBBO for all legs
+        mid = _mid_from_nbbo(bid, ask)
+        if mid is None or mid <= 0:
+            return [], 0.0
+
+        leg = {
+            "symbol": _ticker(contract),
+            "strike": contract['strike'],
+            "expiry": _expiry(contract),
+            "type": contract.get('type') or contract.get('right') or type_hint,
+            "side": side,
+            "premium": mid,
+            "delta": _delta(contract) or 0.0,
+            "gamma": _gamma(contract) or 0.0,
+            "vega": _vega(contract) or 0.0,
+            "theta": _theta(contract) or 0.0,
+            "bid": bid,
+            "ask": ask,
+            "mid": mid
+        }
+        legs.append(leg)
+
+        if side == "buy":
+            total_cost += mid
+        else:
+            total_cost -= mid
+
+    return legs, total_cost
+
+
+def _select_best_iron_condor_ev_aware(
+    calls: List[Dict[str, Any]],
+    puts: List[Dict[str, Any]],
+    condor_spread_threshold: float,
+    current_price: float = 0.0
+) -> tuple[List[Dict[str, Any]], float, Dict[str, Any]]:
+    """
+    EV-aware grid search for iron condor selection.
+
+    Iterates over (target_delta, width) combinations to find the
+    condor with highest positive EV that meets all constraints:
+    - All 4 legs have valid NBBO
+    - Credit >= CONDOR_MIN_CREDIT
+    - max_leg_spread_pct <= condor_spread_threshold
+    - Passes invariant validation
+
+    Returns (legs, total_cost, meta) where:
+    - legs: selected legs or [] if none viable
+    - total_cost: net cost (negative = credit)
+    - meta: diagnostic info including best_seen if no positive EV found
+    """
+    if not calls or not puts:
+        return [], 0.0, {"reason": "empty_chain"}
+
+    # Schema detection
+    sample = calls[0] if calls else (puts[0] if puts else None)
+    is_nested = sample is not None and "greeks" in sample and isinstance(sample.get("greeks"), dict)
+
+    if is_nested:
+        _delta = _get_delta_nested
+        _gamma = _get_gamma_nested
+        _vega = _get_vega_nested
+        _theta = _get_theta_nested
+        _ticker = _get_ticker_nested
+        _expiry = _get_expiry_nested
+        _bid = _get_bid_nested
+        _ask = _get_ask_nested
+    else:
+        _delta = _get_delta_flat
+        _gamma = _get_gamma_flat
+        _vega = _get_vega_flat
+        _theta = _get_theta_flat
+        _ticker = _get_ticker_flat
+        _expiry = _get_expiry_flat
+        _bid = _get_bid_flat
+        _ask = _get_ask_flat
+
+    # Check if chain has deltas (required for EV-aware search)
+    has_deltas = _delta(sample) is not None
+    if not has_deltas:
+        return [], 0.0, {"reason": "no_deltas_in_chain"}
+
+    best_ev_positive = None
+    best_legs_positive = None
+    best_cost_positive = None
+    best_meta_positive = None
+
+    best_ev_overall = None
+    best_meta_overall = None
+
+    combos_tried = 0
+    combos_valid_nbbo = 0
+
+    for target_delta in CONDOR_TARGET_DELTAS:
+        for width in CONDOR_WIDTHS:
+            combos_tried += 1
+
+            legs, total_cost = _select_iron_condor_legs_param(
+                calls, puts, target_delta, width,
+                _delta, _bid, _ask, _ticker, _expiry, _gamma, _vega, _theta
+            )
+
+            if not legs:
+                continue
+
+            combos_valid_nbbo += 1
+
+            # Validate invariants
+            if not _validate_iron_condor_invariants(legs):
+                continue
+
+            # Check credit
+            credit_share = abs(total_cost) if total_cost < 0 else 0.0
+            if credit_share < CONDOR_MIN_CREDIT:
+                continue
+
+            # Check spread
+            max_leg_spread = _max_leg_spread_pct(legs)
+            if max_leg_spread > condor_spread_threshold:
+                continue
+
+            # Compute widths for EV calc
+            calls_legs = sorted([l for l in legs if l["type"] == "call"], key=lambda x: x["strike"])
+            puts_legs = sorted([l for l in legs if l["type"] == "put"], key=lambda x: x["strike"])
+
+            if len(calls_legs) != 2 or len(puts_legs) != 2:
+                continue
+
+            width_call = abs(calls_legs[1]["strike"] - calls_legs[0]["strike"])
+            width_put = abs(puts_legs[1]["strike"] - puts_legs[0]["strike"])
+
+            # Get short deltas
+            short_call = calls_legs[0]  # lower strike = short
+            short_put = puts_legs[1]    # higher strike = short
+
+            short_call_delta = abs(short_call.get("delta") or 0)
+            short_put_delta = abs(short_put.get("delta") or 0)
+
+            # Compute EV
+            try:
+                ev_obj = calculate_condor_ev(
+                    credit=credit_share,
+                    width_put=width_put,
+                    width_call=width_call,
+                    short_put_delta=short_put_delta,
+                    short_call_delta=short_call_delta
+                )
+                total_ev = ev_obj.expected_value
+            except Exception:
+                continue
+
+            meta = {
+                "target_delta": target_delta,
+                "width": width,
+                "credit_share": round(credit_share, 4),
+                "total_ev": round(total_ev, 4),
+                "max_leg_spread_pct": round(max_leg_spread, 4),
+                "width_call": width_call,
+                "width_put": width_put,
+            }
+
+            # Track best overall (even if negative)
+            if best_ev_overall is None or total_ev > best_ev_overall:
+                best_ev_overall = total_ev
+                best_meta_overall = meta
+
+            # Track best positive
+            if total_ev > 0:
+                if best_ev_positive is None or total_ev > best_ev_positive:
+                    best_ev_positive = total_ev
+                    best_legs_positive = legs
+                    best_cost_positive = total_cost
+                    best_meta_positive = meta
+
+    # Return best positive if found
+    if best_legs_positive:
+        best_meta_positive["combos_tried"] = combos_tried
+        best_meta_positive["combos_valid_nbbo"] = combos_valid_nbbo
+        return best_legs_positive, best_cost_positive, best_meta_positive
+
+    # No positive EV found - return meta for diagnostics
+    result_meta = {
+        "reason": "no_positive_ev",
+        "combos_tried": combos_tried,
+        "combos_valid_nbbo": combos_valid_nbbo,
+    }
+    if best_meta_overall:
+        result_meta["best_seen"] = best_meta_overall
+
+    return [], 0.0, result_meta
+
 
 def _validate_iron_condor_invariants(legs: List[Dict[str, Any]]) -> bool:
     """
@@ -1881,112 +2160,59 @@ def scan_for_opportunities(
             hydration_meta = None
 
             if "iron_condor" in strategy_key or "condor" in strategy_key:
-                # Specialized logic for Iron Condor
-                legs, total_cost = _select_iron_condor_legs(calls_sorted, puts_sorted, current_price)
+                # EV-aware Iron Condor selection
+                # Grid search over (delta, width) to find best positive EV condor
+                legs, total_cost, condor_meta = _select_best_iron_condor_ev_aware(
+                    calls_sorted, puts_sorted,
+                    condor_spread_threshold=CONDOR_MAX_LEG_SPREAD_PCT,
+                    current_price=current_price
+                )
+
                 if not legs:
-                    # Sample even when legs not found for diagnostics
-                    sample = _build_condor_rejection_sample(
-                        symbol=symbol,
-                        strategy_key=strategy_key,
-                        expiry_selected=expiry_selected,
-                        legs=[],
-                        total_cost=None,
-                        calls_count=len(calls_sorted),
-                        puts_count=len(puts_sorted),
-                    )
-                    rej_stats.record_with_sample("condor_legs_not_found", sample)
-                    return None
+                    # EV-aware search failed - categorize rejection reason
+                    reason = condor_meta.get("reason", "unknown")
 
-                # Invariant Validation
-                if not _validate_iron_condor_invariants(legs):
-                    rej_stats.record("condor_invariants_failed")
-                    return None
-
-                # Quote Hydration: Check for missing/invalid quotes and attempt to fill
-                missing_quotes_before = [
-                    leg.get("symbol") for leg in legs
-                    if not _leg_has_valid_bidask(leg)
-                ]
-
-                if missing_quotes_before:
-                    # Attempt targeted quote hydration for the 4 leg tickers
-                    # Falls back to /v3/quotes if v4 snapshots don't provide valid quotes
-                    hydration_meta = _hydrate_legs_quotes_v4(truth_layer, legs, market_data=market_data)
-
-                    # Reprice total_cost from hydrated legs
-                    new_total = _reprice_total_cost_from_legs(legs)
-                    if new_total is None:
-                        # Could not compute valid pricing even after hydration
-                        sample = _build_condor_rejection_sample(
-                            symbol=symbol,
-                            strategy_key=strategy_key,
-                            expiry_selected=expiry_selected,
-                            legs=legs,
-                            total_cost=None,
-                            calls_count=len(calls_sorted),
-                            puts_count=len(puts_sorted),
-                        )
-                        sample["hydration"] = hydration_meta
-                        rej_stats.record_with_sample("condor_missing_quotes", sample)
+                    if reason == "no_positive_ev":
+                        # Found valid condors but all have non-positive EV
+                        sample = {
+                            "symbol": symbol,
+                            "strategy_key": strategy_key,
+                            "expiry_selected": expiry_selected,
+                            "combos_tried": condor_meta.get("combos_tried", 0),
+                            "combos_valid_nbbo": condor_meta.get("combos_valid_nbbo", 0),
+                            "best_seen": condor_meta.get("best_seen"),
+                        }
+                        rej_stats.record_with_sample("ev_non_positive", sample)
+                        return None
+                    elif reason == "empty_chain":
+                        rej_stats.record("condor_empty_chain")
+                        return None
+                    elif reason == "no_deltas_in_chain":
+                        rej_stats.record("condor_no_deltas")
                         return None
                     else:
-                        total_cost = new_total
+                        # No viable condors found (no valid NBBO combos, etc.)
+                        sample = {
+                            "symbol": symbol,
+                            "strategy_key": strategy_key,
+                            "expiry_selected": expiry_selected,
+                            "combos_tried": condor_meta.get("combos_tried", 0),
+                            "combos_valid_nbbo": condor_meta.get("combos_valid_nbbo", 0),
+                            "calls_count": len(calls_sorted),
+                            "puts_count": len(puts_sorted),
+                        }
+                        rej_stats.record_with_sample("condor_no_viable", sample)
+                        return None
 
-                # Re-check for missing quotes after hydration
-                missing_quotes_after = [
-                    leg.get("symbol") for leg in legs
-                    if not _leg_has_valid_bidask(leg)
-                ]
+                # EV-aware builder already validated:
+                # - All 4 legs have valid NBBO
+                # - credit >= CONDOR_MIN_CREDIT
+                # - max_leg_spread_pct <= threshold
+                # - invariants pass
+                # - EV is positive
 
-                if missing_quotes_after:
-                    # Still have legs with unusable quotes
-                    sample = _build_condor_rejection_sample(
-                        symbol=symbol,
-                        strategy_key=strategy_key,
-                        expiry_selected=expiry_selected,
-                        legs=legs,
-                        total_cost=total_cost,
-                        calls_count=len(calls_sorted),
-                        puts_count=len(puts_sorted),
-                    )
-                    sample["missing_after"] = missing_quotes_after
-                    if hydration_meta:
-                        sample["hydration"] = hydration_meta
-                    rej_stats.record_with_sample("condor_missing_quotes", sample)
-                    return None
-
-                # Credit Check: Only reached when quotes are usable
-                credit_share = abs(total_cost) if total_cost < 0 else 0.0
-                if credit_share <= 0:
-                    # Sample with legs for debugging credit calculation
-                    sample = _build_condor_rejection_sample(
-                        symbol=symbol,
-                        strategy_key=strategy_key,
-                        expiry_selected=expiry_selected,
-                        legs=legs,
-                        total_cost=total_cost,
-                        calls_count=len(calls_sorted),
-                        puts_count=len(puts_sorted),
-                    )
-                    rej_stats.record_with_sample("condor_no_credit", sample)
-                    return None
-
-                # Width Check
-                calls = sorted([l for l in legs if l["type"] == "call"], key=lambda x: x["strike"])
-                puts = sorted([l for l in legs if l["type"] == "put"], key=lambda x: x["strike"])
-
-                width_call = abs(calls[1]["strike"] - calls[0]["strike"])
-                width_put = abs(puts[1]["strike"] - puts[0]["strike"])
-                width_max = max(width_call, width_put)
-
-                if credit_share >= width_max:
-                    # Credit cannot exceed width (no risk? impossible/arb)
-                    rej_stats.record("condor_credit_exceeds_width")
-                    return None
-
-                if width_call <= 0 or width_put <= 0:
-                    rej_stats.record("condor_invalid_width")
-                    return None
+                # Store EV from the grid search for later use
+                condor_precomputed_ev = condor_meta.get("total_ev", 0.0)
             else:
                 legs, total_cost = _select_legs_from_chain(calls_sorted, puts_sorted, suggestion["legs"], current_price)
 
@@ -2008,35 +2234,8 @@ def scan_for_opportunities(
 
             # Compute EV for the selected legs
             if len(legs) == 4 and ("condor" in strategy_key or "iron_condor" in strategy_key):
-                 # Iron Condor EV
-                 credit_share = abs(total_cost)
-
-                 # Identify legs for EV params
-                 calls = sorted([l for l in legs if l["type"] == "call"], key=lambda x: x["strike"])
-                 puts = sorted([l for l in legs if l["type"] == "put"], key=lambda x: x["strike"])
-
-                 if len(calls) == 2 and len(puts) == 2:
-                     # calls[0] is Short Call (Lower K), calls[1] is Long Call (Higher K)
-                     short_call = calls[0]
-                     long_call = calls[1]
-
-                     # puts[0] is Long Put (Lower K), puts[1] is Short Put (Higher K)
-                     long_put = puts[0]
-                     short_put = puts[1]
-
-                     width_put = abs(short_put["strike"] - long_put["strike"])
-                     width_call = abs(long_call["strike"] - short_call["strike"])
-
-                     ev_obj = calculate_condor_ev(
-                        credit=credit_share,
-                        width_put=width_put,
-                        width_call=width_call,
-                        delta_short_put=short_put.get("delta", 0),
-                        delta_short_call=short_call.get("delta", 0)
-                     )
-                     total_ev = ev_obj.expected_value
-                 else:
-                     total_ev = 0.0
+                # Use precomputed EV from EV-aware builder (already validated as positive)
+                total_ev = condor_precomputed_ev
 
             elif len(legs) == 2:
                 long_leg = next((l for l in legs if l['side'] == 'buy'), None)
@@ -2095,46 +2294,43 @@ def scan_for_opportunities(
             entry_cost_share = abs(float(total_cost or 0.0))
             legacy_spread_pct = (combo_width_share / entry_cost_share) if entry_cost_share > 1e-9 else 0.0
 
-            # NEW: Liquidity Gating
-            # For condors: use max per-leg spread pct (more appropriate for credit structures)
+            # Liquidity Gating
+            # For condors: spread was already validated by EV-aware builder
             # For other strategies: use legacy spread_pct (combo_width / entry_cost)
             is_condor = len(legs) == 4 and ("condor" in strategy_key or "iron_condor" in strategy_key)
             max_leg_spread_pct = None
 
             if is_condor:
-                per_leg_pcts = [p for p in (_leg_spread_pct(l) for l in legs) if p is not None]
-                if per_leg_pcts:
-                    max_leg_spread_pct = max(per_leg_pcts)
-                    option_spread_pct = max_leg_spread_pct
-                else:
-                    # No valid NBBO on any leg - use conservative default
-                    option_spread_pct = 1.0
+                # EV-aware builder already validated max_leg_spread_pct <= threshold
+                # Just compute for reporting purposes
+                max_leg_spread_pct = condor_meta.get("max_leg_spread_pct")
+                option_spread_pct = max_leg_spread_pct if max_leg_spread_pct is not None else 0.0
                 effective_threshold = CONDOR_MAX_LEG_SPREAD_PCT
+                # No need to check - already validated by _select_best_iron_condor_ev_aware
             else:
                 option_spread_pct = legacy_spread_pct
                 effective_threshold = threshold
 
-            if option_spread_pct > effective_threshold:
-                # REJECT: Illiquid Options - attach debug info
-                debug_spread = {
-                    "option_spread_pct": round(option_spread_pct, 4),
-                    "max_leg_spread_pct": round(max_leg_spread_pct, 4) if max_leg_spread_pct is not None else None,
-                    "combo_width_share": round(combo_width_share, 4),
-                    "entry_cost_share": round(entry_cost_share, 4),
-                    "threshold": round(effective_threshold, 4),
-                    "is_condor": is_condor,
-                }
-                # Use record_with_sample if available for diagnostics
-                if hasattr(rej_stats, 'record_with_sample'):
-                    sample = {
-                        "symbol": symbol,
-                        "strategy_key": strategy_key,
-                        "spread_debug": debug_spread,
+                if option_spread_pct > effective_threshold:
+                    # REJECT: Illiquid Options - attach debug info
+                    debug_spread = {
+                        "option_spread_pct": round(option_spread_pct, 4),
+                        "max_leg_spread_pct": None,
+                        "combo_width_share": round(combo_width_share, 4),
+                        "entry_cost_share": round(entry_cost_share, 4),
+                        "threshold": round(effective_threshold, 4),
+                        "is_condor": False,
                     }
-                    rej_stats.record_with_sample("spread_too_wide", sample)
-                else:
-                    rej_stats.record("spread_too_wide")
-                return None
+                    if hasattr(rej_stats, 'record_with_sample'):
+                        sample = {
+                            "symbol": symbol,
+                            "strategy_key": strategy_key,
+                            "spread_debug": debug_spread,
+                        }
+                        rej_stats.record_with_sample("spread_too_wide", sample)
+                    else:
+                        rej_stats.record("spread_too_wide")
+                    return None
 
             # H. Unified Scoring
             trade_dict = {

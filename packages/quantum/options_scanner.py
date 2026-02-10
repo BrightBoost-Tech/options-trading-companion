@@ -1232,6 +1232,8 @@ def _select_best_iron_condor_ev_aware(
     combos_pass_credit = 0
     combos_pass_spread = 0
     combos_ev_computed = 0
+    combos_ev_errors = 0
+    ev_error_first = None
     best_credit_seen = 0.0
 
     for target_delta in CONDOR_TARGET_DELTAS:
@@ -1292,11 +1294,15 @@ def _select_best_iron_condor_ev_aware(
                     credit=credit_share,
                     width_put=width_put,
                     width_call=width_call,
-                    short_put_delta=short_put_delta,
-                    short_call_delta=short_call_delta
+                    delta_short_put=short_put_delta,
+                    delta_short_call=short_call_delta
                 )
                 total_ev = ev_obj.expected_value
-            except Exception:
+            except Exception as e:
+                combos_ev_errors += 1
+                if ev_error_first is None:
+                    # Capture first error (sanitized/truncated)
+                    ev_error_first = str(e)[:120]
                 continue
 
             combos_ev_computed += 1
@@ -1331,6 +1337,7 @@ def _select_best_iron_condor_ev_aware(
         best_meta_positive["combos_pass_credit"] = combos_pass_credit
         best_meta_positive["combos_pass_spread"] = combos_pass_spread
         best_meta_positive["combos_ev_computed"] = combos_ev_computed
+        best_meta_positive["combos_ev_errors"] = combos_ev_errors
         return best_legs_positive, best_cost_positive, best_meta_positive
 
     # No positive EV found - determine specific reason based on which stage failed
@@ -1353,12 +1360,17 @@ def _select_best_iron_condor_ev_aware(
         "combos_pass_credit": combos_pass_credit,
         "combos_pass_spread": combos_pass_spread,
         "combos_ev_computed": combos_ev_computed,
+        "combos_ev_errors": combos_ev_errors,
     }
 
     # Include best_credit_seen for credit diagnostics
     if reason == "credit_below_min":
         result_meta["best_credit_seen"] = round(best_credit_seen, 4)
         result_meta["min_credit_required"] = CONDOR_MIN_CREDIT
+
+    # Include EV error details when EV computation failed
+    if reason == "ev_not_computed" and ev_error_first:
+        result_meta["ev_error_first"] = ev_error_first
 
     # Include best_seen when EV was computed (even if all were negative)
     if best_meta_overall and combos_ev_computed > 0:
@@ -2228,6 +2240,7 @@ def scan_for_opportunities(
                         "combos_pass_credit": condor_meta.get("combos_pass_credit", 0),
                         "combos_pass_spread": condor_meta.get("combos_pass_spread", 0),
                         "combos_ev_computed": condor_meta.get("combos_ev_computed", 0),
+                        "combos_ev_errors": condor_meta.get("combos_ev_errors", 0),
                         "calls_count": len(calls_sorted),
                         "puts_count": len(puts_sorted),
                     }
@@ -2255,7 +2268,9 @@ def scan_for_opportunities(
                         return None
                     elif reason == "ev_not_computed":
                         # EV calculation failed for all combos
-                        rej_stats.record_with_sample("condor_ev_not_computed", base_sample)
+                        sample = base_sample.copy()
+                        sample["ev_error_first"] = condor_meta.get("ev_error_first")
+                        rej_stats.record_with_sample("condor_ev_not_computed", sample)
                         return None
                     elif reason == "no_positive_ev":
                         # EV was computed but all were <= 0

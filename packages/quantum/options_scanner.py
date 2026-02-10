@@ -1207,8 +1207,15 @@ def _select_best_iron_condor_ev_aware(
         _ask = _get_ask_flat
 
     # Check if chain has deltas (required for EV-aware search)
-    has_deltas = _delta(sample) is not None
-    if not has_deltas:
+    # Check across the chain, not just first contract - some contracts may have None delta
+    def _chain_has_any_delta(calls_list, puts_list, delta_fn):
+        for c in (calls_list[:25] + puts_list[:25]):
+            d = delta_fn(c)
+            if d is not None:
+                return True
+        return False
+
+    if not _chain_has_any_delta(calls, puts, _delta):
         return [], 0.0, {"reason": "no_deltas_in_chain"}
 
     best_ev_positive = None
@@ -1219,8 +1226,13 @@ def _select_best_iron_condor_ev_aware(
     best_ev_overall = None
     best_meta_overall = None
 
+    # Stage counters for diagnostics
     combos_tried = 0
     combos_valid_nbbo = 0
+    combos_pass_credit = 0
+    combos_pass_spread = 0
+    combos_ev_computed = 0
+    best_credit_seen = 0.0
 
     for target_delta in CONDOR_TARGET_DELTAS:
         for width in CONDOR_WIDTHS:
@@ -1242,13 +1254,20 @@ def _select_best_iron_condor_ev_aware(
 
             # Check credit
             credit_share = abs(total_cost) if total_cost < 0 else 0.0
+            # Track best credit seen for diagnostics
+            if credit_share > best_credit_seen:
+                best_credit_seen = credit_share
             if credit_share < CONDOR_MIN_CREDIT:
                 continue
+
+            combos_pass_credit += 1
 
             # Check spread
             max_leg_spread = _max_leg_spread_pct(legs)
             if max_leg_spread > condor_spread_threshold:
                 continue
+
+            combos_pass_spread += 1
 
             # Compute widths for EV calc
             calls_legs = sorted([l for l in legs if l["type"] == "call"], key=lambda x: x["strike"])
@@ -1280,6 +1299,8 @@ def _select_best_iron_condor_ev_aware(
             except Exception:
                 continue
 
+            combos_ev_computed += 1
+
             meta = {
                 "target_delta": target_delta,
                 "width": width,
@@ -1307,15 +1328,40 @@ def _select_best_iron_condor_ev_aware(
     if best_legs_positive:
         best_meta_positive["combos_tried"] = combos_tried
         best_meta_positive["combos_valid_nbbo"] = combos_valid_nbbo
+        best_meta_positive["combos_pass_credit"] = combos_pass_credit
+        best_meta_positive["combos_pass_spread"] = combos_pass_spread
+        best_meta_positive["combos_ev_computed"] = combos_ev_computed
         return best_legs_positive, best_cost_positive, best_meta_positive
 
-    # No positive EV found - return meta for diagnostics
+    # No positive EV found - determine specific reason based on which stage failed
+    # Priority: NBBO → credit → spread → EV computed → no_positive_ev
+    if combos_valid_nbbo == 0:
+        reason = "no_valid_nbbo"
+    elif combos_pass_credit == 0:
+        reason = "credit_below_min"
+    elif combos_pass_spread == 0:
+        reason = "spread_above_threshold"
+    elif combos_ev_computed == 0:
+        reason = "ev_not_computed"
+    else:
+        reason = "no_positive_ev"
+
     result_meta = {
-        "reason": "no_positive_ev",
+        "reason": reason,
         "combos_tried": combos_tried,
         "combos_valid_nbbo": combos_valid_nbbo,
+        "combos_pass_credit": combos_pass_credit,
+        "combos_pass_spread": combos_pass_spread,
+        "combos_ev_computed": combos_ev_computed,
     }
-    if best_meta_overall:
+
+    # Include best_credit_seen for credit diagnostics
+    if reason == "credit_below_min":
+        result_meta["best_credit_seen"] = round(best_credit_seen, 4)
+        result_meta["min_credit_required"] = CONDOR_MIN_CREDIT
+
+    # Include best_seen when EV was computed (even if all were negative)
+    if best_meta_overall and combos_ev_computed > 0:
         result_meta["best_seen"] = best_meta_overall
 
     return [], 0.0, result_meta
@@ -2172,36 +2218,55 @@ def scan_for_opportunities(
                     # EV-aware search failed - categorize rejection reason
                     reason = condor_meta.get("reason", "unknown")
 
-                    if reason == "no_positive_ev":
-                        # Found valid condors but all have non-positive EV
-                        sample = {
-                            "symbol": symbol,
-                            "strategy_key": strategy_key,
-                            "expiry_selected": expiry_selected,
-                            "combos_tried": condor_meta.get("combos_tried", 0),
-                            "combos_valid_nbbo": condor_meta.get("combos_valid_nbbo", 0),
-                            "best_seen": condor_meta.get("best_seen"),
-                        }
-                        rej_stats.record_with_sample("ev_non_positive", sample)
-                        return None
-                    elif reason == "empty_chain":
+                    # Build base sample with all stage counters
+                    base_sample = {
+                        "symbol": symbol,
+                        "strategy_key": strategy_key,
+                        "expiry_selected": expiry_selected,
+                        "combos_tried": condor_meta.get("combos_tried", 0),
+                        "combos_valid_nbbo": condor_meta.get("combos_valid_nbbo", 0),
+                        "combos_pass_credit": condor_meta.get("combos_pass_credit", 0),
+                        "combos_pass_spread": condor_meta.get("combos_pass_spread", 0),
+                        "combos_ev_computed": condor_meta.get("combos_ev_computed", 0),
+                        "calls_count": len(calls_sorted),
+                        "puts_count": len(puts_sorted),
+                    }
+
+                    if reason == "empty_chain":
                         rej_stats.record("condor_empty_chain")
                         return None
                     elif reason == "no_deltas_in_chain":
                         rej_stats.record("condor_no_deltas")
                         return None
+                    elif reason == "no_valid_nbbo":
+                        # No combos produced valid NBBO legs
+                        rej_stats.record_with_sample("condor_no_viable", base_sample)
+                        return None
+                    elif reason == "credit_below_min":
+                        # All combos had credit below minimum
+                        sample = base_sample.copy()
+                        sample["best_credit_seen"] = condor_meta.get("best_credit_seen")
+                        sample["min_credit_required"] = condor_meta.get("min_credit_required")
+                        rej_stats.record_with_sample("condor_credit_too_low", sample)
+                        return None
+                    elif reason == "spread_above_threshold":
+                        # All combos had spread above threshold
+                        rej_stats.record_with_sample("condor_spread_too_wide", base_sample)
+                        return None
+                    elif reason == "ev_not_computed":
+                        # EV calculation failed for all combos
+                        rej_stats.record_with_sample("condor_ev_not_computed", base_sample)
+                        return None
+                    elif reason == "no_positive_ev":
+                        # EV was computed but all were <= 0
+                        sample = base_sample.copy()
+                        sample["best_seen"] = condor_meta.get("best_seen")
+                        rej_stats.record_with_sample("ev_non_positive", sample)
+                        return None
                     else:
-                        # No viable condors found (no valid NBBO combos, etc.)
-                        sample = {
-                            "symbol": symbol,
-                            "strategy_key": strategy_key,
-                            "expiry_selected": expiry_selected,
-                            "combos_tried": condor_meta.get("combos_tried", 0),
-                            "combos_valid_nbbo": condor_meta.get("combos_valid_nbbo", 0),
-                            "calls_count": len(calls_sorted),
-                            "puts_count": len(puts_sorted),
-                        }
-                        rej_stats.record_with_sample("condor_no_viable", sample)
+                        # Unknown reason - log with full meta
+                        base_sample["reason"] = reason
+                        rej_stats.record_with_sample("condor_no_viable", base_sample)
                         return None
 
                 # EV-aware builder already validated:

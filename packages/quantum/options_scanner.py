@@ -48,6 +48,10 @@ SCANNER_MIN_DTE = 25
 SCANNER_MAX_DTE = 45
 # Condor max per-leg spread threshold (default 35%)
 CONDOR_MAX_LEG_SPREAD_PCT = float(os.getenv("CONDOR_MAX_LEG_SPREAD_PCT", "0.35"))
+# Execution slippage fraction for limit orders (default 25% of spread)
+EXECUTION_SPREAD_TAKE_FRAC_LIMIT = float(os.getenv("EXECUTION_SPREAD_TAKE_FRAC_LIMIT", "0.25"))
+# Execution slippage fraction for market orders (default 50% of spread)
+EXECUTION_SPREAD_TAKE_FRAC_MARKET = float(os.getenv("EXECUTION_SPREAD_TAKE_FRAC_MARKET", "0.50"))
 
 logger = logging.getLogger(__name__)
 
@@ -1360,16 +1364,26 @@ def _determine_execution_cost(
     drag_map: Dict[str, Any],
     symbol: str,
     combo_width_share: float,
-    num_legs: int
+    num_legs: int,
+    is_limit: bool = True
 ) -> Dict[str, Any]:
     """
     Determines the execution cost to use for scoring and rejection.
     Logic: max(history_cost, proxy_cost).
+
+    Args:
+        drag_map: Historical execution drag data by symbol
+        symbol: Underlying symbol
+        combo_width_share: Combined bid-ask spread width (per share)
+        num_legs: Number of legs in the trade
+        is_limit: If True, use limit order slippage (default for multi-leg).
+                  If False, use market order slippage.
     """
     # 1. Compute Proxy Cost ALWAYS
-    # Formula: (combo_width_share * 0.5) + (num_legs * 0.0065) -> per share
-    # Multiplied by 100 for contract dollars
-    proxy_cost_share = (combo_width_share * 0.5) + (num_legs * 0.0065)
+    # Formula: (combo_width_share * take_frac) + (num_legs * commission_per_leg) -> per share
+    # Use limit order slippage for multi-leg (we should always place limits)
+    take_frac = EXECUTION_SPREAD_TAKE_FRAC_LIMIT if is_limit else EXECUTION_SPREAD_TAKE_FRAC_MARKET
+    proxy_cost_share = (combo_width_share * take_frac) + (num_legs * 0.0065)
     proxy_cost_contract = proxy_cost_share * 100.0
 
     # 2. Fetch History Cost
@@ -1400,7 +1414,9 @@ def _determine_execution_cost(
         "expected_execution_cost": expected_execution_cost,
         "execution_cost_source_used": execution_cost_source_used,
         "execution_cost_samples_used": execution_cost_samples_used,
-        "execution_drag_source": execution_drag_source
+        "execution_drag_source": execution_drag_source,
+        "spread_take_frac": take_frac,
+        "proxy_cost_contract": proxy_cost_contract,
     }
 
 def scan_for_opportunities(
@@ -2137,11 +2153,14 @@ def scan_for_opportunities(
             }
 
             # Determine Execution Cost
+            # Use limit order slippage for multi-leg trades (we should always use limits)
+            is_limit_order = len(legs) >= 2
             cost_details = _determine_execution_cost(
                 drag_map=drag_map,
                 symbol=symbol,
                 combo_width_share=combo_width_share,
-                num_legs=len(legs)
+                num_legs=len(legs),
+                is_limit=is_limit_order
             )
             expected_execution_cost = cost_details["expected_execution_cost"]
 
@@ -2160,7 +2179,26 @@ def scan_for_opportunities(
             # Requirement: Hard-reject if execution cost > EV
             # Use expected_execution_cost as per instruction
             if expected_execution_cost >= total_ev:
-                rej_stats.record("execution_cost_exceeds_ev")
+                # Add diagnostic sample for execution_cost_exceeds_ev
+                exec_sample = {
+                    "symbol": symbol,
+                    "strategy_key": strategy_key,
+                    "total_ev": round(total_ev, 4),
+                    "expected_execution_cost": round(expected_execution_cost, 4),
+                    "entry_cost_share": round(abs(total_cost), 4),
+                    "combo_width_share": round(combo_width_share, 4),
+                    "max_leg_spread_pct": round(max_leg_spread_pct, 4) if max_leg_spread_pct is not None else None,
+                    "is_limit_order": is_limit_order,
+                    "thresholds": {
+                        "condor_max_leg_spread_pct": CONDOR_MAX_LEG_SPREAD_PCT,
+                        "spread_take_frac": cost_details.get("spread_take_frac"),
+                    },
+                    "cost_details": {
+                        "source_used": cost_details.get("execution_cost_source_used"),
+                        "proxy_cost": round(cost_details.get("proxy_cost_contract", 0), 4),
+                    }
+                }
+                rej_stats.record_with_sample("execution_cost_exceeds_ev", exec_sample)
                 return None
 
             # Define Missing Greeks for Candidate Dict

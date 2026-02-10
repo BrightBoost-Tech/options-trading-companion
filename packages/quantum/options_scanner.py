@@ -1821,6 +1821,26 @@ def _sum_leg_spreads_share(legs: List[Dict[str, Any]]) -> Optional[float]:
     return total
 
 
+def _condor_pop_from_legs(legs: List[Dict[str, Any]]) -> Optional[float]:
+    """
+    Estimate PoP for condor as 1 - (|delta_short_put| + |delta_short_call|).
+    Clamped to [0.01, 0.99]. Returns None if required legs not found.
+    """
+    try:
+        short_puts = [l for l in legs if l.get("type") == "put" and l.get("side") == "sell"]
+        short_calls = [l for l in legs if l.get("type") == "call" and l.get("side") == "sell"]
+        if not short_puts or not short_calls:
+            return None
+        sp = short_puts[0]
+        sc = short_calls[0]
+        p_loss_put = abs(float(sp.get("delta") or 0.0))
+        p_loss_call = abs(float(sc.get("delta") or 0.0))
+        p_win = 1.0 - min(1.0, p_loss_put + p_loss_call)
+        return max(0.01, min(0.99, p_win))
+    except Exception:
+        return None
+
+
 def _determine_execution_cost(
     drag_map: Dict[str, Any],
     symbol: str,
@@ -2435,6 +2455,7 @@ def scan_for_opportunities(
                     data_quality = "degraded"
 
             total_ev = 0.0
+            ev_obj = None  # Initialize to avoid UnboundLocalError in PoP block
 
             # Compute EV for the selected legs
             if len(legs) == 4 and ("condor" in strategy_key or "iron_condor" in strategy_key):
@@ -2736,18 +2757,31 @@ def scan_for_opportunities(
             gs_dict = global_snapshot.to_dict() if global_snapshot else None
 
             pop = None
-            if ev_obj is not None and hasattr(ev_obj, "win_probability"):
-                pop = float(ev_obj.win_probability)
-            elif ev_obj is not None and isinstance(ev_obj, dict) and "win_probability" in ev_obj:
-                pop = float(ev_obj["win_probability"])
+            pop_source = None
 
-            if pop is not None:
-                pop = max(0.0, min(1.0, pop))
-                candidate_dict["probability_of_profit"] = pop
-                candidate_dict["probability_of_profit_source"] = "ev"
-            else:
-                candidate_dict["probability_of_profit"] = _estimate_probability_of_profit(candidate_dict, gs_dict)
-                candidate_dict["probability_of_profit_source"] = "score_fallback"
+            # Use EV object if available (1-leg / 2-leg paths)
+            if ev_obj is not None:
+                if hasattr(ev_obj, "win_probability"):
+                    pop = float(ev_obj.win_probability)
+                    pop_source = "ev"
+                elif isinstance(ev_obj, dict) and "win_probability" in ev_obj:
+                    pop = float(ev_obj["win_probability"])
+                    pop_source = "ev"
+
+            # Condor fallback PoP (no ev_obj in condor path)
+            if pop is None and len(legs) == 4 and ("condor" in strategy_key or "iron_condor" in strategy_key):
+                pop = _condor_pop_from_legs(legs)
+                pop_source = "condor_delta_tail" if pop is not None else None
+
+            # Final fallback
+            if pop is None:
+                pop = _estimate_probability_of_profit(candidate_dict, gs_dict)
+                pop_source = "score_fallback"
+
+            # Clamp + set on candidate
+            pop = max(0.0, min(1.0, float(pop)))
+            candidate_dict["probability_of_profit"] = pop
+            candidate_dict["probability_of_profit_source"] = pop_source or "unknown"
 
             # --- QUANT AGENTS V3 INTEGRATION ---
             scanner_agents = build_agent_pipeline(phase="scanner")

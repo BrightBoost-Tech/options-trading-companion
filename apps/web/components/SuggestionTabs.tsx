@@ -46,15 +46,49 @@ export default function SuggestionTabs({
 }: SuggestionTabsProps) {
   const [activeTab, setActiveTab] = useState<'morning' | 'midday' | 'rebalance' | 'scout' | 'journal' | 'weekly'>('morning');
 
+  const handleKeyDown = (e: React.KeyboardEvent) => {
+    const tabs = ['morning', 'midday', 'rebalance', 'scout', 'journal', 'weekly'];
+    const currentTabId = (e.target as HTMLElement).id.replace('tab-', '');
+    const currentIndex = tabs.indexOf(currentTabId);
+
+    if (currentIndex === -1) return;
+
+    let nextIndex;
+    if (e.key === 'ArrowRight') {
+      nextIndex = (currentIndex + 1) % tabs.length;
+    } else if (e.key === 'ArrowLeft') {
+      nextIndex = (currentIndex - 1 + tabs.length) % tabs.length;
+    } else if (e.key === 'Home') {
+      nextIndex = 0;
+    } else if (e.key === 'End') {
+      nextIndex = tabs.length - 1;
+    } else {
+      return;
+    }
+
+    e.preventDefault();
+    const nextTab = tabs[nextIndex];
+    setActiveTab(nextTab as any);
+    // Focus next tab immediately
+    setTimeout(() => {
+      document.getElementById(`tab-${nextTab}`)?.focus();
+    }, 0);
+  };
+
   return (
     <div className="bg-card rounded-lg shadow overflow-hidden h-full flex flex-col">
       {/* Tabs Header */}
-      <div className="flex border-b border-gray-100 overflow-x-auto no-scrollbar" role="tablist">
+      <div
+        className="flex border-b border-gray-100 overflow-x-auto no-scrollbar"
+        role="tablist"
+        onKeyDown={handleKeyDown}
+      >
         <button
           id="tab-morning"
           role="tab"
           aria-selected={activeTab === 'morning'}
           aria-controls="panel-morning"
+          tabIndex={activeTab === 'morning' ? 0 : -1}
           type="button"
           onClick={() => setActiveTab('morning')}
           className={`flex-1 py-4 px-2 min-w-[120px] text-sm font-medium text-center border-b-2 transition-colors whitespace-nowrap focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-offset-2 focus-visible:ring-orange-500 ${
@@ -79,6 +113,7 @@ export default function SuggestionTabs({
           role="tab"
           aria-selected={activeTab === 'midday'}
           aria-controls="panel-midday"
+          tabIndex={activeTab === 'midday' ? 0 : -1}
           type="button"
           onClick={() => setActiveTab('midday')}
           className={`flex-1 py-4 px-2 min-w-[120px] text-sm font-medium text-center border-b-2 transition-colors whitespace-nowrap focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-offset-2 focus-visible:ring-blue-500 ${
@@ -103,6 +138,7 @@ export default function SuggestionTabs({
           role="tab"
           aria-selected={activeTab === 'rebalance'}
           aria-controls="panel-rebalance"
+          tabIndex={activeTab === 'rebalance' ? 0 : -1}
           type="button"
           onClick={() => setActiveTab('rebalance')}
           className={`flex-1 py-4 px-2 min-w-[120px] text-sm font-medium text-center border-b-2 transition-colors whitespace-nowrap focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-offset-2 focus-visible:ring-indigo-500 ${
@@ -127,6 +163,7 @@ export default function SuggestionTabs({
           role="tab"
           aria-selected={activeTab === 'scout'}
           aria-controls="panel-scout"
+          tabIndex={activeTab === 'scout' ? 0 : -1}
           type="button"
           onClick={() => setActiveTab('scout')}
           className={`flex-1 py-4 px-2 min-w-[120px] text-sm font-medium text-center border-b-2 transition-colors whitespace-nowrap focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-offset-2 focus-visible:ring-green-500 ${
@@ -151,6 +188,7 @@ export default function SuggestionTabs({
           role="tab"
           aria-selected={activeTab === 'journal'}
           aria-controls="panel-journal"
+          tabIndex={activeTab === 'journal' ? 0 : -1}
           type="button"
           onClick={() => setActiveTab('journal')}
           className={`flex-1 py-4 px-2 min-w-[120px] text-sm font-medium text-center border-b-2 transition-colors whitespace-nowrap focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-offset-2 focus-visible:ring-purple-500 ${
@@ -175,6 +213,7 @@ export default function SuggestionTabs({
           role="tab"
           aria-selected={activeTab === 'weekly'}
           aria-controls="panel-weekly"
+          tabIndex={activeTab === 'weekly' ? 0 : -1}
           type="button"
           onClick={() => setActiveTab('weekly')}
           className={`flex-1 py-4 px-2 min-w-[120px] text-sm font-medium text-center border-b-2 transition-colors whitespace-nowrap focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-offset-2 focus-visible:ring-slate-500 ${

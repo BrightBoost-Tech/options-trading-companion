@@ -482,3 +482,108 @@ def calculate_condor_ev(
         breakeven_price=None, # Multiple B/E points, skipping for simple model
         capped=False
     )
+
+
+def calculate_condor_ev_tail(
+    credit: float,
+    width_put: float,
+    width_call: float,
+    delta_short_put: float,
+    delta_short_call: float,
+    delta_long_put: float,
+    delta_long_call: float,
+    tail_loss_severity: float = 0.50,
+    tail_prob_mult: float = 1.0
+) -> EVResult:
+    """
+    Calculates EV for an Iron Condor using tail-aware probability model.
+
+    This model distinguishes between:
+    - Breach probability (short delta): price enters the spread
+    - Max loss probability (long delta): price goes through the entire spread
+
+    When breached but not max-loss, we model partial loss using tail_loss_severity.
+
+    Parameters:
+    - credit: Net credit received (positive value, per share)
+    - width_put/width_call: Width of put/call spreads
+    - delta_short_put/delta_short_call: Absolute deltas of short strikes
+    - delta_long_put/delta_long_call: Absolute deltas of long strikes
+    - tail_loss_severity: Fraction of max loss when breached but not max (0..1)
+    - tail_prob_mult: Multiplier for breach probabilities (0.3..1.2)
+
+    Logic:
+    - p_breach = |delta_short| * tail_prob_mult (clamped)
+    - p_max = |delta_long| (clamped, <= p_breach)
+    - p_partial = p_breach - p_max (in-the-spread region)
+
+    Expected loss per side:
+    - E_loss = p_max * L + p_partial * (severity * L)
+    - where L = width - credit
+
+    Expected profit:
+    - p_win = 1 - p_breach_put - p_breach_call (clamped >= 0)
+    - E_profit = p_win * credit
+    """
+
+    def clamp(x: float, lo: float = 0.0, hi: float = 1.0) -> float:
+        return max(lo, min(hi, x))
+
+    # Breach probabilities (adjusted by multiplier)
+    p_breach_put = clamp(abs(delta_short_put) * tail_prob_mult)
+    p_breach_call = clamp(abs(delta_short_call) * tail_prob_mult)
+
+    # Max loss probabilities (long deltas, clamped to not exceed breach)
+    p_max_put = clamp(abs(delta_long_put), 0.0, p_breach_put)
+    p_max_call = clamp(abs(delta_long_call), 0.0, p_breach_call)
+
+    # Partial breach probabilities (in-the-spread but not max loss)
+    p_partial_put = p_breach_put - p_max_put
+    p_partial_call = p_breach_call - p_max_call
+
+    # Win probability
+    p_win = clamp(1.0 - p_breach_put - p_breach_call)
+    p_loss = 1.0 - p_win
+
+    # Max loss per side (per share)
+    L_put = max(0.0, width_put - credit)
+    L_call = max(0.0, width_call - credit)
+
+    # Expected loss per side (per share)
+    # Full max loss for p_max region, partial loss for in-spread region
+    E_loss_put = (p_max_put * L_put) + (p_partial_put * tail_loss_severity * L_put)
+    E_loss_call = (p_max_call * L_call) + (p_partial_call * tail_loss_severity * L_call)
+
+    # Expected profit
+    E_profit = p_win * credit
+
+    # Total EV per share
+    ev_share = E_profit - E_loss_put - E_loss_call
+
+    # Convert to dollars per contract
+    ev = ev_share * 100.0
+
+    if not math.isfinite(ev):
+        ev = 0.0
+
+    # Financials for reporting
+    profit = credit * 100.0
+    loss_put = L_put * 100.0
+    loss_call = L_call * 100.0
+    structure_max_loss = max(loss_put, loss_call)
+
+    risk_reward = None
+    if structure_max_loss > 0 and profit > 0:
+        risk_reward = structure_max_loss / profit
+
+    return EVResult(
+        expected_value=ev,
+        win_probability=p_win,
+        loss_probability=p_loss,
+        max_gain=profit,
+        max_loss=structure_max_loss,
+        risk_reward_ratio=risk_reward,
+        trade_cost=-profit,
+        breakeven_price=None,
+        capped=False
+    )

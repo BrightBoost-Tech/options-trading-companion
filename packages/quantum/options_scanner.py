@@ -64,6 +64,16 @@ CONDOR_EV_MODEL = os.getenv("CONDOR_EV_MODEL", "strict").lower()
 CONDOR_TAIL_LOSS_SEVERITY = float(os.getenv("CONDOR_TAIL_LOSS_SEVERITY", "0.50"))  # 0..1
 CONDOR_TAIL_PROB_MULT = float(os.getenv("CONDOR_TAIL_PROB_MULT", "1.00"))  # 0.3..1.2
 
+# Multi-expiry condor search configuration
+CONDOR_EXPIRY_CANDIDATES = int(os.getenv("CONDOR_EXPIRY_CANDIDATES", "3"))  # How many expiries to try
+
+# Execution cost gate configuration
+# When "1", hard reject if execution_cost >= EV (current behavior)
+# When "0", soft mode: badge + penalty instead of rejection
+EXECUTION_COST_HARD_REJECT = os.getenv("EXECUTION_COST_HARD_REJECT", "1").lower() in ("1", "true", "yes")
+EXECUTION_COST_SOFT_PENALTY = float(os.getenv("EXECUTION_COST_SOFT_PENALTY", "10"))  # Score penalty in soft mode
+EXECUTION_COST_MAX_MULT = float(os.getenv("EXECUTION_COST_MAX_MULT", "1.5"))  # Still hard reject if cost >= EV * max_mult
+
 logger = logging.getLogger(__name__)
 
 
@@ -802,6 +812,68 @@ def _select_best_expiry_chain(chain: List[Dict[str, Any]], target_dte: int = 35,
 
     best_expiry = sorted_expiries[0]
     return best_expiry, buckets[best_expiry]
+
+
+def _select_top_expiry_candidates(
+    chain: List[Dict[str, Any]],
+    target_dte: int,
+    k: int,
+    today_date: date = None
+) -> List[Tuple[str, List[Dict[str, Any]]]]:
+    """
+    Select top K expiry candidates from chain, sorted by proximity to target DTE.
+
+    Args:
+        chain: Full options chain (all expiries)
+        target_dte: Target days-to-expiration (e.g., 35)
+        k: Number of top expiry candidates to return
+        today_date: Reference date for DTE calculation
+
+    Returns:
+        List of (expiry_str, contracts_subset) tuples, sorted by:
+        1. Closest to target_dte (ascending)
+        2. More contracts (descending, as tiebreaker)
+    """
+    if not chain:
+        return []
+
+    # Bucket by expiry
+    buckets = defaultdict(list)
+    exp_key = "expiration"
+    if chain and "expiry" in chain[0]:
+        exp_key = "expiry"
+
+    for c in chain:
+        exp = c.get(exp_key)
+        if exp:
+            buckets[exp].append(c)
+
+    if not buckets:
+        return []
+
+    if today_date is None:
+        today_date = datetime.now().date()
+
+    def get_dte_diff(exp_str):
+        try:
+            exp_dt = parse_expiry_date(exp_str)
+            return abs((exp_dt - today_date).days - target_dte)
+        except ValueError:
+            return 9999
+
+    # Sort by: (dte_diff ascending, -count descending)
+    sorted_expiries = sorted(
+        buckets.keys(),
+        key=lambda e: (get_dte_diff(e), -len(buckets[e]))
+    )
+
+    # Return top K
+    result = []
+    for exp in sorted_expiries[:k]:
+        result.append((exp, buckets[exp]))
+
+    return result
+
 
 def _select_legs_from_chain(
     calls: List[Dict[str, Any]],
@@ -2239,13 +2311,30 @@ def scan_for_opportunities(
                 rej_stats.record("no_chain")
                 return None
 
-            # Enforce shared expiry
-            # Optimization: Select bucket and return contracts directly to avoid re-filtering
-            # Bolt Optimization: Pass today_date to avoid calling datetime.now().date() in loop
-            expiry_selected, chain_subset = _select_best_expiry_chain(chain, target_dte=35, today_date=today_date)
-            if not expiry_selected or not chain_subset:
-                rej_stats.record("dte_out_of_range")
-                return None
+            # Normalize Strategy Key early (needed before expiry selection for condor path)
+            raw_strategy = suggestion["strategy"]
+            strategy_key = raw_strategy.lower().replace(" ", "_")
+            is_condor_strategy = "iron_condor" in strategy_key or "condor" in strategy_key
+
+            # For condors, we'll try multiple expiries; for other strategies, use single best expiry
+            if is_condor_strategy:
+                # Multi-expiry condor search: get top K expiry candidates
+                expiry_candidates = _select_top_expiry_candidates(
+                    chain, target_dte=35, k=CONDOR_EXPIRY_CANDIDATES, today_date=today_date
+                )
+                if not expiry_candidates:
+                    rej_stats.record("dte_out_of_range")
+                    return None
+                # Will iterate over expiries in condor branch below
+                expiry_selected = None  # Set later when we find best
+                chain_subset = None
+            else:
+                # Non-condor: use single best expiry
+                expiry_selected, chain_subset = _select_best_expiry_chain(chain, target_dte=35, today_date=today_date)
+                if not expiry_selected or not chain_subset:
+                    rej_stats.record("dte_out_of_range")
+                    return None
+                expiry_candidates = None  # Not used for non-condors
 
             # ========== SURFACE V4 HOOK (Optional) ==========
             # Compute arb-free surface when enabled for consistency contract
@@ -2325,119 +2414,134 @@ def scan_for_opportunities(
                         return None
             # ================================================
 
-            # Optimization: Sort and index chain ONCE per symbol
-            # Single-pass split into calls and puts
-
-            # Bolt Optimization: Removed flattening loop to avoid O(N) dict overhead.
-            # Splitting logic now handles 'type' vs 'right' access natively.
-
-            calls_list = []
-            puts_list = []
-
-            # Detect schema key from first element to optimize loop
-            type_key = 'type'
-            if chain_subset:
-                # TruthLayer uses 'right', Polygon uses 'type'
-                if 'right' in chain_subset[0]:
-                    type_key = 'right'
-
-            for c in chain_subset:
-                # Native handling of 'type' (Polygon/Flat) or 'right' (TruthLayer/Nested)
-                # Optimization: Use detected key
-                ctype = c.get(type_key)
-                if ctype == 'call':
-                    calls_list.append(c)
-                elif ctype == 'put':
-                    puts_list.append(c)
-
-            # Bolt Optimization: Use operator.itemgetter for faster sort key access
-            calls_sorted = sorted(calls_list, key=operator.itemgetter('strike'))
-            puts_sorted = sorted(puts_list, key=operator.itemgetter('strike'))
-
-            # Normalize Strategy Key early
-            raw_strategy = suggestion["strategy"]
-            strategy_key = raw_strategy.lower().replace(" ", "_")
-
             # Initialize hydration_meta for both condor and non-condor paths
             hydration_meta = None
 
-            if "iron_condor" in strategy_key or "condor" in strategy_key:
-                # EV-aware Iron Condor selection
-                # Grid search over (delta, width) to find best positive EV condor
-                legs, total_cost, condor_meta = _select_best_iron_condor_ev_aware(
-                    calls_sorted, puts_sorted,
-                    condor_spread_threshold=CONDOR_MAX_LEG_SPREAD_PCT,
-                    current_price=current_price
-                )
+            # Helper function to split chain_subset into calls/puts
+            def _split_chain_to_calls_puts(subset):
+                calls_list = []
+                puts_list = []
+                if not subset:
+                    return [], []
+                type_key = 'type'
+                if 'right' in subset[0]:
+                    type_key = 'right'
+                for c in subset:
+                    ctype = c.get(type_key)
+                    if ctype == 'call':
+                        calls_list.append(c)
+                    elif ctype == 'put':
+                        puts_list.append(c)
+                calls_sorted = sorted(calls_list, key=operator.itemgetter('strike'))
+                puts_sorted = sorted(puts_list, key=operator.itemgetter('strike'))
+                return calls_sorted, puts_sorted
 
-                if not legs:
-                    # EV-aware search failed - categorize rejection reason
-                    reason = condor_meta.get("reason", "unknown")
+            if is_condor_strategy:
+                # Multi-expiry condor search: try each expiry candidate
+                # Find the best viable candidate across all expiries
+                best_condor_legs = None
+                best_condor_cost = None
+                best_condor_meta = None
+                best_condor_expiry = None
+                best_condor_ev = None
 
-                    # Build base sample with all stage counters
-                    base_sample = {
-                        "symbol": symbol,
-                        "strategy_key": strategy_key,
-                        "expiry_selected": expiry_selected,
+                # Track diagnostics per expiry for rejection reporting
+                expiry_diagnostics = []
+
+                for exp_str, exp_subset in expiry_candidates:
+                    calls_sorted, puts_sorted = _split_chain_to_calls_puts(exp_subset)
+
+                    legs, total_cost, condor_meta = _select_best_iron_condor_ev_aware(
+                        calls_sorted, puts_sorted,
+                        condor_spread_threshold=CONDOR_MAX_LEG_SPREAD_PCT,
+                        current_price=current_price
+                    )
+
+                    # Record diagnostics for this expiry
+                    exp_diag = {
+                        "expiry": exp_str,
+                        "reason": condor_meta.get("reason") if not legs else "viable",
                         "combos_tried": condor_meta.get("combos_tried", 0),
                         "combos_valid_nbbo": condor_meta.get("combos_valid_nbbo", 0),
-                        "combos_pass_credit": condor_meta.get("combos_pass_credit", 0),
-                        "combos_pass_spread": condor_meta.get("combos_pass_spread", 0),
                         "combos_ev_computed": condor_meta.get("combos_ev_computed", 0),
-                        "combos_ev_errors": condor_meta.get("combos_ev_errors", 0),
                         "calls_count": len(calls_sorted),
                         "puts_count": len(puts_sorted),
                     }
+                    if condor_meta.get("best_seen"):
+                        exp_diag["best_seen_ev"] = condor_meta["best_seen"].get("total_ev")
+                    expiry_diagnostics.append(exp_diag)
 
-                    if reason == "empty_chain":
+                    if legs:
+                        # Found viable candidate - compare with current best
+                        candidate_ev = condor_meta.get("total_ev", 0.0)
+                        candidate_spread = condor_meta.get("max_leg_spread_pct", float('inf'))
+
+                        is_better = False
+                        if best_condor_legs is None:
+                            is_better = True
+                        elif candidate_ev > best_condor_ev:
+                            is_better = True
+                        elif candidate_ev == best_condor_ev and candidate_spread < best_condor_meta.get("max_leg_spread_pct", float('inf')):
+                            is_better = True
+
+                        if is_better:
+                            best_condor_legs = legs
+                            best_condor_cost = total_cost
+                            best_condor_meta = condor_meta
+                            best_condor_expiry = exp_str
+                            best_condor_ev = candidate_ev
+
+                if best_condor_legs:
+                    # Found a viable condor
+                    legs = best_condor_legs
+                    total_cost = best_condor_cost
+                    condor_meta = best_condor_meta
+                    expiry_selected = best_condor_expiry
+                    chain_subset = dict(expiry_candidates).get(expiry_selected, [])
+                    condor_precomputed_ev = best_condor_ev
+
+                    # Update calls/puts for later use (e.g., logging)
+                    calls_sorted, puts_sorted = _split_chain_to_calls_puts(chain_subset)
+                else:
+                    # No viable condor across any expiry - determine primary rejection reason
+                    # Aggregate diagnostics to find most common failure mode
+                    total_valid_nbbo = sum(d.get("combos_valid_nbbo", 0) for d in expiry_diagnostics)
+                    total_ev_computed = sum(d.get("combos_ev_computed", 0) for d in expiry_diagnostics)
+
+                    base_sample = {
+                        "symbol": symbol,
+                        "strategy_key": strategy_key,
+                        "tried_expiries": [d["expiry"] for d in expiry_diagnostics],
+                        "expiry_diagnostics": expiry_diagnostics,
+                        "total_valid_nbbo_across_expiries": total_valid_nbbo,
+                        "total_ev_computed_across_expiries": total_ev_computed,
+                    }
+
+                    # Check if all expiries had empty/no delta chains
+                    reasons = [d.get("reason") for d in expiry_diagnostics]
+                    if all(r == "empty_chain" for r in reasons):
                         rej_stats.record("condor_empty_chain")
                         return None
-                    elif reason == "no_deltas_in_chain":
+                    elif all(r == "no_deltas_in_chain" for r in reasons):
                         rej_stats.record("condor_no_deltas")
                         return None
-                    elif reason == "no_valid_nbbo":
-                        # No combos produced valid NBBO legs
+                    elif total_valid_nbbo == 0:
                         rej_stats.record_with_sample("condor_no_viable", base_sample)
                         return None
-                    elif reason == "credit_below_min":
-                        # All combos had credit below minimum
-                        sample = base_sample.copy()
-                        sample["best_credit_seen"] = condor_meta.get("best_credit_seen")
-                        sample["min_credit_required"] = condor_meta.get("min_credit_required")
-                        rej_stats.record_with_sample("condor_credit_too_low", sample)
+                    elif total_ev_computed == 0:
+                        rej_stats.record_with_sample("condor_ev_not_computed", base_sample)
                         return None
-                    elif reason == "spread_above_threshold":
-                        # All combos had spread above threshold
-                        rej_stats.record_with_sample("condor_spread_too_wide", base_sample)
-                        return None
-                    elif reason == "ev_not_computed":
-                        # EV calculation failed for all combos
-                        sample = base_sample.copy()
-                        sample["ev_error_first"] = condor_meta.get("ev_error_first")
-                        rej_stats.record_with_sample("condor_ev_not_computed", sample)
-                        return None
-                    elif reason == "no_positive_ev":
-                        # EV was computed but all were <= 0
-                        sample = base_sample.copy()
-                        sample["best_seen"] = condor_meta.get("best_seen")
-                        rej_stats.record_with_sample("ev_non_positive", sample)
+                    elif all(r == "no_positive_ev" for r in reasons if r):
+                        # All had EV computed but none positive
+                        rej_stats.record_with_sample("ev_non_positive", base_sample)
                         return None
                     else:
-                        # Unknown reason - log with full meta
-                        base_sample["reason"] = reason
+                        # Mixed reasons - report as no_viable with diagnostics
                         rej_stats.record_with_sample("condor_no_viable", base_sample)
                         return None
-
-                # EV-aware builder already validated:
-                # - All 4 legs have valid NBBO
-                # - credit >= CONDOR_MIN_CREDIT
-                # - max_leg_spread_pct <= threshold
-                # - invariants pass
-                # - EV is positive
-
-                # Store EV from the grid search for later use
-                condor_precomputed_ev = condor_meta.get("total_ev", 0.0)
             else:
+                # Non-condor path: use single expiry
+                calls_sorted, puts_sorted = _split_chain_to_calls_puts(chain_subset)
                 legs, total_cost = _select_legs_from_chain(calls_sorted, puts_sorted, suggestion["legs"], current_price)
 
             if not legs:
@@ -2616,10 +2720,13 @@ def scan_for_opportunities(
             # Retrieve final execution cost (contract dollars) from UnifiedScore
             final_execution_cost = unified_score.execution_cost_dollars
 
-            # Requirement: Hard-reject if execution cost > EV
-            # Use expected_execution_cost as per instruction
+            # Execution cost gate: reject or badge based on configuration
+            # When EXECUTION_COST_HARD_REJECT=1 (default): hard reject if cost >= EV
+            # When EXECUTION_COST_HARD_REJECT=0: soft mode - badge + penalty instead
+            execution_cost_soft_gate_triggered = False
+
             if expected_execution_cost >= total_ev:
-                # Add diagnostic sample for execution_cost_exceeds_ev
+                # Build diagnostic sample (always recorded)
                 exec_sample = {
                     "symbol": symbol,
                     "strategy_key": strategy_key,
@@ -2643,7 +2750,22 @@ def scan_for_opportunities(
                     }
                 }
                 rej_stats.record_with_sample("execution_cost_exceeds_ev", exec_sample)
-                return None
+
+                if EXECUTION_COST_HARD_REJECT:
+                    # Hard reject mode (default)
+                    return None
+
+                # Soft mode: check if cost is extremely high (still reject)
+                if total_ev > 0 and expected_execution_cost >= (total_ev * EXECUTION_COST_MAX_MULT):
+                    # Cost is way too high even for soft mode
+                    return None
+
+                # Soft mode: allow candidate but with badge + penalty
+                unified_score.score = max(0.0, unified_score.score - EXECUTION_COST_SOFT_PENALTY)
+                if not hasattr(unified_score, 'badges') or unified_score.badges is None:
+                    unified_score.badges = []
+                unified_score.badges.append("HIGH_EXECUTION_COST")
+                execution_cost_soft_gate_triggered = True
 
             # Define Missing Greeks for Candidate Dict
             net_delta_contract = sum((l.get('delta') or 0.0) * (1 if l['side'] == 'buy' else -1) for l in legs)
@@ -2751,6 +2873,14 @@ def scan_for_opportunities(
                 # Surface V4 (optional, only populated when SURFACE_V4_ENABLE=1)
                 "surface_v4": surface_v4_summary,
             }
+
+            # Add soft execution cost gate fields if triggered
+            if execution_cost_soft_gate_triggered:
+                candidate_dict["execution_cost_soft_gate"] = True
+                candidate_dict["execution_cost_soft_penalty"] = EXECUTION_COST_SOFT_PENALTY
+                candidate_dict["execution_cost_ev_ratio"] = round(
+                    expected_execution_cost / max(1e-9, total_ev), 4
+                )
 
             # Calculate Probability of Profit
             # Pass dictionary representation of global snapshot for compatibility

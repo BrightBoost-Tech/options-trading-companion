@@ -9,6 +9,7 @@ import time
 
 from packages.quantum.security import get_current_user
 from packages.quantum.models import TradeTicket, OptionLeg
+from packages.quantum.table_constants import TRADE_SUGGESTIONS_TABLE
 from packages.quantum.strategy_registry import STRATEGY_REGISTRY, infer_strategy_key_from_suggestion
 from packages.quantum.market_data import PolygonService
 from packages.quantum.strategy_profiles import CostModelConfig
@@ -80,6 +81,22 @@ def get_analytics_service():
     from packages.quantum.api import analytics_service
     return analytics_service
 
+
+def _is_pgrst204_order_type_error(exc: Exception) -> bool:
+    """
+    Check if exception is a PGRST204 schema cache error for order_type column.
+
+    PostgREST intermittently returns PGRST204 when schema cache is stale.
+    This helper detects the specific error to allow targeted retry.
+    """
+    err_str = str(exc).lower()
+    # Check for PGRST204 code AND order_type column reference
+    is_pgrst204 = "pgrst204" in err_str
+    mentions_order_type = "order_type" in err_str
+    mentions_schema_cache = "schema cache" in err_str or "could not find" in err_str
+    return is_pgrst204 and mentions_order_type and mentions_schema_cache
+
+
 class StageOrderRequest(BaseModel):
     ticket: TradeTicket
     portfolio_id: Optional[str] = None  # if null, use/create default
@@ -121,7 +138,7 @@ def stage_batch_endpoint(
 
     # Fetch all suggestions
     try:
-        s_res = supabase.table("trade_suggestions").select("*").in_("id", req.suggestion_ids).eq("user_id", user_id).execute()
+        s_res = supabase.table(TRADE_SUGGESTIONS_TABLE).select("*").in_("id", req.suggestion_ids).eq("user_id", user_id).execute()
         suggestions = s_res.data or []
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to fetch suggestions: {e}")
@@ -172,7 +189,7 @@ def stage_batch_endpoint(
             )
 
             # Update Suggestion Status - STRICTLY status only
-            supabase.table("trade_suggestions").update({
+            supabase.table(TRADE_SUGGESTIONS_TABLE).update({
                 "status": "staged"
             }).eq("id", s_id).execute()
 
@@ -504,7 +521,7 @@ def _stage_order_internal(supabase, analytics, user_id, ticket: TradeTicket, por
     if suggestion_id:
         # Fetch suggestion context
         try:
-             s_res = supabase.table("trade_suggestions").select("*").eq("id", suggestion_id).single().execute()
+             s_res = supabase.table(TRADE_SUGGESTIONS_TABLE).select("*").eq("id", suggestion_id).single().execute()
              if s_res.data:
                  s_data = s_res.data
                  # Prefer suggestion's trace_id unless overridden (which shouldn't happen usually if linked)
@@ -550,7 +567,21 @@ def _stage_order_internal(supabase, analytics, user_id, ticket: TradeTicket, por
         "position_id": position_id
     }
 
-    res = supabase.table("paper_orders").insert(order_payload).execute()
+    # Insert with retry for PGRST204(order_type) schema cache errors
+    try:
+        res = supabase.table("paper_orders").insert(order_payload).execute()
+    except Exception as e:
+        if _is_pgrst204_order_type_error(e):
+            # Retry without order_type field (schema cache may be stale)
+            logger.warning(
+                f"paper_orders insert PGRST204(order_type) retry_without_order_type=true "
+                f"trace_id={trace_id} suggestion_id={suggestion_id}"
+            )
+            retry_payload = {k: v for k, v in order_payload.items() if k != "order_type"}
+            res = supabase.table("paper_orders").insert(retry_payload).execute()
+        else:
+            raise
+
     if not res.data:
         raise HTTPException(status_code=500, detail="Failed to stage order")
 
@@ -884,7 +915,7 @@ def _commit_fill(supabase, analytics, user_id, order, fill_res, quote, portfolio
         # Enrich with model metadata from suggestion if available
         if order.get("suggestion_id"):
             try:
-                s_res = supabase.table("trade_suggestions").select("model_version, features_hash, strategy, window, regime").eq("id", order.get("suggestion_id")).single().execute()
+                s_res = supabase.table(TRADE_SUGGESTIONS_TABLE).select("model_version, features_hash, strategy, window, regime").eq("id", order.get("suggestion_id")).single().execute()
                 if s_res.data:
                     pos_payload.update(s_res.data)
             except Exception as e:
@@ -968,7 +999,7 @@ def _run_attribution(supabase, user_id, order, position, exit_fill, fees, side):
         agent_signals_snapshot = {}
         if suggestion_id:
             try:
-                s_res = supabase.table("trade_suggestions").select("ev, model_version, features_hash, strategy, window, regime, agent_signals").eq("id", suggestion_id).single().execute()
+                s_res = supabase.table(TRADE_SUGGESTIONS_TABLE).select("ev, model_version, features_hash, strategy, window, regime, agent_signals").eq("id", suggestion_id).single().execute()
                 if s_res.data:
                     data = s_res.data
                     payload["pnl_predicted"] = data.get("ev")

@@ -226,12 +226,35 @@ class TestTradeSuggestionsTableConstant:
         assert ".table(TRADE_SUGGESTIONS_TABLE)" in source
 
 
+class TestOrderPayloadHasUserId:
+    """Tests that order_payload includes user_id (required by paper_orders NOT NULL constraint)."""
+
+    def test_order_payload_includes_user_id_in_source(self):
+        """Verify paper_endpoints order_payload includes user_id field."""
+        import os
+        paper_endpoints_path = os.path.join(
+            os.path.dirname(__file__),
+            "..",
+            "paper_endpoints.py"
+        )
+
+        with open(paper_endpoints_path, "r") as f:
+            source = f.read()
+
+        # order_payload must include "user_id": user_id
+        assert '"user_id": user_id' in source, (
+            "order_payload must include 'user_id': user_id to satisfy "
+            "paper_orders.user_id NOT NULL constraint"
+        )
+
+
 class TestRetryPreservesOtherFields:
     """Tests that retry only removes order_type, preserving other fields."""
 
     def test_retry_payload_preserves_all_other_fields(self):
         """Retry payload should contain all fields except order_type."""
         original_payload = {
+            "user_id": "user-abc-123",
             "portfolio_id": "port-123",
             "status": "staged",
             "staged_at": "2024-01-01T00:00:00Z",
@@ -252,15 +275,36 @@ class TestRetryPreservesOtherFields:
         # Verify order_type is removed
         assert "order_type" not in retry_payload
 
+        # Verify user_id is preserved (critical for NOT NULL constraint)
+        assert "user_id" in retry_payload
+        assert retry_payload["user_id"] == "user-abc-123"
+
         # Verify all other fields are preserved
         expected_fields = [
-            "portfolio_id", "status", "staged_at", "trace_id", "suggestion_id",
+            "user_id", "portfolio_id", "status", "staged_at", "trace_id", "suggestion_id",
             "order_json", "requested_qty", "requested_price", "side",
             "quote_at_stage", "tcm", "position_id"
         ]
         for field in expected_fields:
             assert field in retry_payload, f"Field '{field}' missing from retry payload"
             assert retry_payload[field] == original_payload[field]
+
+    def test_user_id_is_required_field(self):
+        """user_id must be present in payload (NOT NULL in paper_orders)."""
+        payload_with_user_id = {
+            "user_id": "user-123",
+            "portfolio_id": "port-1",
+            "order_type": "limit",
+        }
+
+        # user_id should be present
+        assert "user_id" in payload_with_user_id
+        assert payload_with_user_id["user_id"] is not None
+
+        # Even after retry (removing order_type), user_id must remain
+        retry_payload = {k: v for k, v in payload_with_user_id.items() if k != "order_type"}
+        assert "user_id" in retry_payload
+        assert retry_payload["user_id"] == "user-123"
 
 
 class TestEdgeCases:

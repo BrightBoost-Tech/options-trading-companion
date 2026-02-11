@@ -550,6 +550,7 @@ def _stage_order_internal(supabase, analytics, user_id, ticket: TradeTicket, por
     side = ticket.legs[0].action if ticket.legs else "buy"
 
     order_payload = {
+        "user_id": user_id,
         "portfolio_id": portfolio_id,
         "status": "staged",
         "staged_at": datetime.now(timezone.utc).isoformat(),

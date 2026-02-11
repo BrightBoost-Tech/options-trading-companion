@@ -20,6 +20,8 @@ import logging
 from typing import Dict, Any, List, Optional, Tuple
 from datetime import datetime, timezone, timedelta
 
+from packages.quantum.table_constants import TRADE_SUGGESTIONS_TABLE
+
 logger = logging.getLogger(__name__)
 
 
@@ -84,7 +86,7 @@ class PaperAutopilotService:
         """
         today_start, tomorrow_start = _compute_today_window()
 
-        query = self.client.table("trade_suggestions") \
+        query = self.client.table(TRADE_SUGGESTIONS_TABLE) \
             .select("*") \
             .eq("user_id", user_id) \
             .eq("status", "pending")
@@ -221,7 +223,7 @@ class PaperAutopilotService:
                 )
 
                 # Update suggestion status
-                supabase.table("trade_suggestions").update({
+                supabase.table(TRADE_SUGGESTIONS_TABLE).update({
                     "status": "staged"
                 }).eq("id", sid).execute()
 

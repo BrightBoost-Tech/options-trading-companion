@@ -285,6 +285,41 @@ class PaperAutoClosePayload(TaskPayloadBase):
         return v
 
 
+class PaperProcessOrdersPayload(TaskPayloadBase):
+    """
+    Payload for /tasks/paper/process-orders.
+
+    Processes staged paper orders for a user, attempting fills and
+    updating order state. Returns detailed observability info about
+    each order's processing outcome.
+
+    Use cases:
+    - Manual re-processing of stuck staged orders
+    - Debugging order fill simulation
+    - Observability into paper order lifecycle
+
+    Requirements:
+    - Requires specific user_id (not "all")
+    - Must be in paper mode (ops_state.mode == "paper")
+    - Respects pause gate
+    """
+    user_id: str = Field(
+        ...,  # Required
+        min_length=32,
+        description="Target user UUID (required, cannot be 'all')"
+    )
+
+    @field_validator("user_id")
+    @classmethod
+    def validate_user_id_not_all(cls, v: str) -> str:
+        """Validate user_id is a specific user, not 'all'."""
+        if v == "all":
+            raise ValueError("user_id must be a specific user UUID, not 'all'")
+        if len(v) < 32:
+            raise ValueError("user_id must be a valid UUID")
+        return v
+
+
 # =============================================================================
 # Shadow Checkpoint Tasks (v4-L1D)
 # =============================================================================
@@ -530,6 +565,7 @@ TASK_SCOPES = {
     "/tasks/ops/health_check": "tasks:ops_health_check",
     "/tasks/paper/auto-execute": "tasks:paper_auto_execute",
     "/tasks/paper/auto-close": "tasks:paper_auto_close",
+    "/tasks/paper/process-orders": "tasks:paper_process_orders",
     "/tasks/paper/safety-close-one": "tasks:paper_safety_close_one",
 }
 

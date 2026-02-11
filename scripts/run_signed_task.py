@@ -32,6 +32,7 @@ Supported Tasks:
     ops_health_check               - POST /tasks/ops/health_check (every 30 min)
     paper_auto_execute             - POST /tasks/paper/auto-execute (requires user_id)
     paper_auto_close               - POST /tasks/paper/auto-close (requires user_id)
+    paper_process_orders           - POST /tasks/paper/process-orders (requires user_id)
     validation_shadow_eval         - POST /tasks/validation/shadow-eval (requires user_id)
     validation_cohort_eval         - POST /tasks/validation/cohort-eval (requires user_id)
     validation_autopromote_cohort  - POST /tasks/validation/autopromote-cohort (requires user_id)
@@ -139,6 +140,12 @@ TASKS = {
         "path": "/tasks/paper/auto-close",
         "scope": "tasks:paper_auto_close",
         "description": "Auto-close paper positions (requires user_id)",
+        "user_id_mode": "require",
+    },
+    "paper_process_orders": {
+        "path": "/tasks/paper/process-orders",
+        "scope": "tasks:paper_process_orders",
+        "description": "Process staged paper orders (requires user_id)",
         "user_id_mode": "require",
     },
     "validation_shadow_eval": {

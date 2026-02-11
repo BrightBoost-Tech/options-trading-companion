@@ -26,6 +26,7 @@ from packages.quantum.public_tasks_models import (
     OpsHealthCheckPayload,
     PaperAutoExecutePayload,
     PaperAutoClosePayload,
+    PaperProcessOrdersPayload,
     ValidationShadowEvalPayload,
     ValidationCohortEvalPayload,
     ValidationAutopromoteCohortPayload,
@@ -792,6 +793,67 @@ async def task_paper_auto_close(
         idempotency_key=idempotency_key,
         payload=job_payload
     )
+
+
+@router.post("/paper/process-orders", status_code=200)
+@limiter.limit("20/minute")
+async def task_paper_process_orders(
+    request: Request,
+    payload: PaperProcessOrdersPayload = Body(...),
+    auth: TaskSignatureResult = Depends(verify_task_signature("tasks:paper_process_orders"))
+):
+    """
+    Process staged paper orders for a user.
+
+    Auth: Requires v4 HMAC signature with scope 'tasks:paper_process_orders'.
+
+    This endpoint directly processes paper orders (staged/working/partial)
+    and returns detailed observability info about each order's outcome.
+    Unlike auto-execute/auto-close, this does NOT enqueue a background job -
+    it runs synchronously for immediate feedback.
+
+    Use cases:
+    - Manual re-processing of stuck staged orders
+    - Debugging order fill simulation
+    - Observability into paper order lifecycle
+
+    Requirements:
+    - Requires specific user_id (not "all")
+    - Must be in paper mode (ops_state.mode == "paper")
+    """
+    user_id = payload.user_id
+
+    # Check paper mode gate (reuse autopilot gate but skip autopilot-enabled check)
+    from packages.quantum.ops_endpoints import get_global_ops_control
+    ops_state = get_global_ops_control()
+    mode = ops_state.get("mode", "paper")
+
+    if mode != "paper":
+        return {
+            "status": "cancelled",
+            "reason": "mode_is_paper_only",
+            "detail": f"Paper process-orders requires mode='paper', current mode='{mode}'"
+        }
+
+    # Import and run _process_orders_for_user directly
+    from packages.quantum.paper_endpoints import (
+        _process_orders_for_user,
+        get_supabase,
+        get_analytics_service,
+    )
+
+    supabase = get_supabase()
+    analytics = get_analytics_service()
+
+    result = _process_orders_for_user(supabase, analytics, user_id)
+
+    return {
+        "status": "ok" if not result.get("errors") else "partial",
+        "user_id": user_id,
+        "processed": result.get("processed", 0),
+        "total_orders": result.get("total_orders", 0),
+        "errors": result.get("errors") or None,
+    }
 
 
 # =============================================================================

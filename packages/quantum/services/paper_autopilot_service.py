@@ -234,21 +234,46 @@ class PaperAutopilotService:
                     )
 
                 # Process order (execute) - always proceed even if status update failed
-                _process_orders_for_user(supabase, analytics, user_id, target_order_id=order_id)
+                process_result = _process_orders_for_user(supabase, analytics, user_id, target_order_id=order_id)
 
-                executed.append({"suggestion_id": sid, "order_id": order_id})
+                executed.append({
+                    "suggestion_id": sid,
+                    "order_id": order_id,
+                    "processed": process_result.get("processed", 0),
+                    "processing_errors": process_result.get("errors") or None,
+                })
 
             except Exception as e:
                 logger.error(f"Failed to execute suggestion {sid}: {e}")
                 errors.append({"suggestion_id": sid, "error": str(e)})
 
+        # Compute processing summary: count orders that had processing errors
+        processing_error_count = sum(
+            1 for e in executed if e.get("processing_errors")
+        )
+        total_processed = sum(e.get("processed", 0) for e in executed)
+
+        # Status: "partial" if staging or processing errors, else "ok"
+        has_staging_errors = len(errors) > 0
+        has_processing_errors = processing_error_count > 0
+        if has_staging_errors or has_processing_errors:
+            status = "partial"
+        elif executed:
+            status = "ok"
+        else:
+            status = "ok"
+
         return {
-            "status": "ok" if executed else "partial" if errors else "ok",
+            "status": status,
             "executed_count": len(executed),
             "skipped_count": len(suggestions) - len(to_execute),
             "error_count": len(errors),
             "executed": executed,
             "errors": errors if errors else None,
+            "processed_summary": {
+                "total_processed": total_processed,
+                "processing_error_count": processing_error_count,
+            },
         }
 
     def get_open_positions(self, user_id: str) -> List[Dict[str, Any]]:
@@ -401,18 +426,43 @@ class PaperAutopilotService:
                 )
 
                 # Process order
-                _process_orders_for_user(supabase, analytics, user_id, target_order_id=order_id)
+                process_result = _process_orders_for_user(supabase, analytics, user_id, target_order_id=order_id)
 
-                closed.append({"position_id": pos_id, "order_id": order_id})
+                closed.append({
+                    "position_id": pos_id,
+                    "order_id": order_id,
+                    "processed": process_result.get("processed", 0),
+                    "processing_errors": process_result.get("errors") or None,
+                })
 
             except Exception as e:
                 logger.error(f"Failed to close position {pos_id}: {e}")
                 errors.append({"position_id": pos_id, "error": str(e)})
 
+        # Compute processing summary
+        processing_error_count = sum(
+            1 for c in closed if c.get("processing_errors")
+        )
+        total_processed = sum(c.get("processed", 0) for c in closed)
+
+        # Status: "partial" if staging or processing errors
+        has_staging_errors = len(errors) > 0
+        has_processing_errors = processing_error_count > 0
+        if has_staging_errors or has_processing_errors:
+            status = "partial"
+        elif closed:
+            status = "ok"
+        else:
+            status = "ok"
+
         return {
-            "status": "ok" if closed else "partial" if errors else "ok",
+            "status": status,
             "closed_count": len(closed),
             "error_count": len(errors),
             "closed": closed,
             "errors": errors if errors else None,
+            "processed_summary": {
+                "total_processed": total_processed,
+                "processing_error_count": processing_error_count,
+            },
         }

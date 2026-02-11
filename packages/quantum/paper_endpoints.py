@@ -690,6 +690,7 @@ def _process_orders_for_user(supabase, analytics, user_id, target_order_id=None)
 
     for order in orders:
         order_id = order.get("id", "unknown")
+        prior_status = order.get("status", "unknown")
         try:
             # Fetch fresh quote
             # Extract symbol from order_json
@@ -698,32 +699,47 @@ def _process_orders_for_user(supabase, analytics, user_id, target_order_id=None)
 
             # v4-L1F: Fetch quote with retry and exponential backoff
             quote = _fetch_quote_with_retry(poly, symbol) if symbol else None
+            quote_present = quote is not None
 
             # Simulate Fill
             fill_res = TransactionCostModel.simulate_fill(order, quote)
+            fill_status = fill_res.get("status", "unknown")
+            last_fill_qty = float(fill_res.get("last_fill_qty") or 0.0)
+
+            # Structured log for observability
+            logger.info(
+                f"paper_order_process: order_id={order_id} prior_status={prior_status} "
+                f"symbol={symbol} quote_present={quote_present} fill_status={fill_status} "
+                f"last_fill_qty={last_fill_qty}"
+            )
 
             # B) Commit only when a NEW fill happened this tick
             should_commit = False
 
-            last_qty = float(fill_res.get("last_fill_qty") or 0.0)
-
             # Must be in a valid fill state AND have new quantity
-            if fill_res.get("status") in ("partial", "filled") and last_qty > 0:
+            if fill_status in ("partial", "filled") and last_fill_qty > 0:
                 should_commit = True
 
             if should_commit:
                 # Commit Fill
                 _commit_fill(supabase, analytics, user_id, order, fill_res, quote, p_map[order["portfolio_id"]])
                 result["processed"] += 1
+                logger.info(
+                    f"paper_order_filled: order_id={order_id} fill_status={fill_status} "
+                    f"last_fill_qty={last_fill_qty}"
+                )
 
-            elif fill_res["status"] == "working":
+            elif fill_status == "working":
                 # Update last checked?
                 # Optionally update status to 'working' if it was 'staged'
-                if order["status"] == "staged":
+                if prior_status == "staged":
                     supabase.table("paper_orders").update({"status": "working"}).eq("id", order["id"]).execute()
+                    logger.info(f"paper_order_transition: order_id={order_id} staged->working")
 
         except Exception as e:
-            logger.error(f"Error processing order {order_id}: {e}")
+            logger.error(
+                f"paper_order_error: order_id={order_id} prior_status={prior_status} error={e}"
+            )
             result["errors"].append({"order_id": order_id, "error": str(e)})
 
     return result

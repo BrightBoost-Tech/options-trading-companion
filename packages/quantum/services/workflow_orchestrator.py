@@ -6,6 +6,7 @@ import asyncio
 import logging
 import os
 import sys
+import re
 
 logger = logging.getLogger(__name__)
 
@@ -459,7 +460,33 @@ def _emit_integrity_incident_linked(
 # Wave 1.3: Fixed NULL legs_fingerprint handling
 # Wave 1.3.1: Added integrity incident telemetry for missing fingerprint
 # Wave 1.3.2: Added in-memory dedupe and linked incident event
+# Wave 1.4: Robust missing column handling with bounded retry
 # =============================================================================
+
+# Columns that can be safely dropped on insert failure (schema may not have them yet)
+DROPPABLE_SUGGESTION_COLUMNS = {
+    "agent_signals",
+    "agent_summary",
+    "source",
+    "marketdata_quality",
+    "blocked_reason",
+    "blocked_detail",
+    "execution_cost_soft_gate",
+    "execution_cost_soft_penalty",
+    "execution_cost_ev_ratio",
+}
+
+
+def _extract_missing_column(err_msg: str) -> Optional[str]:
+    """
+    Extract missing column name from PostgREST error message.
+
+    PostgREST message looks like:
+    "Could not find the 'source' column of 'trade_suggestions' in the schema cache"
+    """
+    m = re.search(r"could not find the '([^']+)' column", err_msg.lower())
+    return m.group(1) if m else None
+
 
 def insert_or_get_suggestion(
     supabase: Client,
@@ -2649,30 +2676,45 @@ async def run_midday_cycle(supabase: Client, user_id: str):
                         existing_count += 1
 
             except Exception as e:
-                error_str = str(e).lower()
-                # Fallback: remove agent fields if insert failed (likely missing columns)
-                if "agent_signals" in error_str or "agent_summary" in error_str or "column" in error_str:
-                    print(f"[Wave1.2] Insert failed due to agent columns, retrying without them: {e}")
-                    clean_s_fallback = {k: v for k, v in clean_s.items()
-                                        if k not in ("agent_signals", "agent_summary")}
-                    try:
-                        suggestion_id, existing_trace_id, is_new = insert_or_get_suggestion(
-                            supabase, clean_s_fallback, unique_fields
-                        )
-                        if suggestion_id:
-                            inserted_suggestions.append({
-                                "suggestion_id": suggestion_id,
-                                "trace_id": existing_trace_id if not is_new else s.get("trace_id"),
-                                "is_new": is_new,
-                                "original": s
-                            })
-                            if is_new:
-                                inserts_count += 1
-                            else:
-                                existing_count += 1
-                    except Exception as fallback_err:
-                        print(f"[Wave1.2] Fallback insert also failed: {fallback_err}")
-                else:
+                # Bounded retry: strip missing columns one at a time (up to 3 retries)
+                current_payload = clean_s.copy()
+                max_retries = 3
+                success = False
+
+                for retry_num in range(max_retries):
+                    error_str = str(e)
+                    missing_col = _extract_missing_column(error_str)
+
+                    if missing_col and missing_col in DROPPABLE_SUGGESTION_COLUMNS:
+                        print(f"[Wave1.2] Insert failed due to missing column '{missing_col}', "
+                              f"stripping and retrying ({retry_num + 1}/{max_retries}): {e}")
+                        current_payload = {k: v for k, v in current_payload.items() if k != missing_col}
+
+                        try:
+                            suggestion_id, existing_trace_id, is_new = insert_or_get_suggestion(
+                                supabase, current_payload, unique_fields
+                            )
+                            if suggestion_id:
+                                inserted_suggestions.append({
+                                    "suggestion_id": suggestion_id,
+                                    "trace_id": existing_trace_id if not is_new else s.get("trace_id"),
+                                    "is_new": is_new,
+                                    "original": s
+                                })
+                                if is_new:
+                                    inserts_count += 1
+                                else:
+                                    existing_count += 1
+                            success = True
+                            break
+                        except Exception as retry_err:
+                            e = retry_err  # Use new error for next iteration
+                            continue
+                    else:
+                        # Column not droppable or not a column error
+                        break
+
+                if not success:
                     print(f"[Wave1.2] Error inserting midday suggestion {s.get('ticker')}: {e}")
 
         print(f"Midday suggestions: {inserts_count} inserted, {existing_count} existing (unchanged)")

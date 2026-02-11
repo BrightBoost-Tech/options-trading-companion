@@ -1685,6 +1685,30 @@ async def run_morning_cycle(supabase: Client, user_id: str):
             print(f"Error logging morning suggestions: {e}")
 
 
+def _legs_have_valid_nbbo_and_mid(legs: list) -> bool:
+    """
+    Check if all legs have valid NBBO and mid prices.
+    Returns True iff every leg has bid>0, ask>0, ask>=bid, and mid>0.
+    """
+    if not legs:
+        return False
+    for leg in legs:
+        bid = leg.get("bid")
+        ask = leg.get("ask")
+        mid = leg.get("mid")
+        if bid is None or ask is None or mid is None:
+            return False
+        try:
+            bid = float(bid)
+            ask = float(ask)
+            mid = float(mid)
+        except (TypeError, ValueError):
+            return False
+        if bid <= 0 or ask <= 0 or ask < bid or mid <= 0:
+            return False
+    return True
+
+
 async def run_midday_cycle(supabase: Client, user_id: str):
     """
     1. Use CashService.get_deployable_capital.
@@ -1692,6 +1716,10 @@ async def run_midday_cycle(supabase: Client, user_id: str):
     3. For each candidate, call sizing_engine.calculate_sizing.
     4. Insert trade_suggestions with window='midday_entry' and sizing_metadata.
     """
+    # Quality gate configuration
+    quality_gate_mode = os.getenv("MIDDAY_QUALITY_GATE_MODE", "soft").lower()
+    trust_scanner_quotes = os.getenv("MIDDAY_TRUST_SCANNER_QUOTES", "1").lower() in ("1", "true", "yes")
+
     print(f"Running midday cycle for user {user_id}")
     analytics_service = AnalyticsService(supabase)
     print("\n=== MIDDAY DEBUG ===")
@@ -2294,7 +2322,14 @@ async def run_midday_cycle(supabase: Client, user_id: str):
             midday_deferred_gate_payload = None
             midday_deferred_blocked_detail = None
 
-            if midday_leg_symbols:
+            # Check if scanner quotes are sufficient (bypass snapshot gate for condors with valid quotes)
+            scanner_quotes_valid = (
+                trust_scanner_quotes
+                and len(midday_legs) >= 2
+                and _legs_have_valid_nbbo_and_mid(midday_legs)
+            )
+
+            if midday_leg_symbols and not scanner_quotes_valid:
                 from packages.quantum.services.market_data_truth_layer import (
                     check_snapshots_executable,
                     format_quality_gate_result,
@@ -2319,7 +2354,7 @@ async def run_midday_cycle(supabase: Client, user_id: str):
                     midday_policy = get_marketdata_quality_policy()
 
                     if gate_result["has_fatal"]:
-                        # Fatal issues always cause skip
+                        # Fatal issues: hard mode skips, soft mode marks NOT_EXECUTABLE
                         log_payload = {
                             "event": "marketdata.v4.quality_gate",
                             "effective_action": EFFECTIVE_ACTION_SKIP_FATAL,
@@ -2327,17 +2362,31 @@ async def run_midday_cycle(supabase: Client, user_id: str):
                             "strategy": strategy,
                             "leg_symbols": midday_leg_symbols,
                             "policy": midday_policy,
+                            "quality_gate_mode": quality_gate_mode,
                             "min_quality_score": get_marketdata_min_quality_score(),
                             "max_freshness_ms": get_marketdata_max_freshness_ms(),
                             **gate_result,
                         }
-                        logger.warning(
-                            f"Skipping midday candidate {ticker} {strategy}: fatal quality issues",
-                            extra={"quality_gate": log_payload}
-                        )
-                        continue
+                        if quality_gate_mode == "hard":
+                            logger.warning(
+                                f"Skipping midday candidate {ticker} {strategy}: fatal quality issues",
+                                extra={"quality_gate": log_payload}
+                            )
+                            continue
+                        else:
+                            # Soft mode: mark NOT_EXECUTABLE but don't skip
+                            logger.warning(
+                                f"Soft-gating midday candidate {ticker} {strategy}: fatal quality issues (will mark NOT_EXECUTABLE)",
+                                extra={"quality_gate": log_payload}
+                            )
+                            midday_deferred_gate_payload = build_marketdata_block_payload(
+                                gate_result, midday_policy, EFFECTIVE_ACTION_SKIP_FATAL
+                            )
+                            midday_deferred_blocked_detail = format_blocked_detail(gate_result)
+                            midday_deferred_gate_payload["_effective_action"] = EFFECTIVE_ACTION_SKIP_FATAL
+
                     elif midday_policy == "skip":
-                        # Skip policy: treat any warning as skip
+                        # Skip policy: hard mode skips, soft mode marks NOT_EXECUTABLE
                         log_payload = {
                             "event": "marketdata.v4.quality_gate",
                             "effective_action": EFFECTIVE_ACTION_SKIP_POLICY,
@@ -2345,15 +2394,28 @@ async def run_midday_cycle(supabase: Client, user_id: str):
                             "strategy": strategy,
                             "leg_symbols": midday_leg_symbols,
                             "policy": midday_policy,
+                            "quality_gate_mode": quality_gate_mode,
                             "min_quality_score": get_marketdata_min_quality_score(),
                             "max_freshness_ms": get_marketdata_max_freshness_ms(),
                             **gate_result,
                         }
-                        logger.warning(
-                            f"Skipping midday candidate {ticker} {strategy}: quality warning (policy=skip)",
-                            extra={"quality_gate": log_payload}
-                        )
-                        continue
+                        if quality_gate_mode == "hard":
+                            logger.warning(
+                                f"Skipping midday candidate {ticker} {strategy}: quality warning (policy=skip)",
+                                extra={"quality_gate": log_payload}
+                            )
+                            continue
+                        else:
+                            # Soft mode: mark NOT_EXECUTABLE but don't skip
+                            logger.warning(
+                                f"Soft-gating midday candidate {ticker} {strategy}: quality warning (will mark NOT_EXECUTABLE)",
+                                extra={"quality_gate": log_payload}
+                            )
+                            midday_deferred_gate_payload = build_marketdata_block_payload(
+                                gate_result, midday_policy, EFFECTIVE_ACTION_SKIP_POLICY
+                            )
+                            midday_deferred_blocked_detail = format_blocked_detail(gate_result)
+                            midday_deferred_gate_payload["_effective_action"] = EFFECTIVE_ACTION_SKIP_POLICY
                     else:
                         # PR3.2: Defer/downrank policy with effective_action
                         downrank_applied = False
@@ -2513,6 +2575,31 @@ async def run_midday_cycle(supabase: Client, user_id: str):
                 )
 
     print(f"FINAL MIDDAY SUGGESTION COUNT: {len(suggestions)}")
+
+    # Return structured response when no suggestions after filtering
+    if not suggestions:
+        print("[Midday] No suggestions created after quality gates and filtering.")
+        return {
+            "skipped": False,
+            "reason": "no_suggestions_after_gates",
+            "budget": {
+                "deployable_capital": deployable_capital,
+                "cap": max_global,
+                "usage": usage_global,
+                "remaining": remaining_global,
+                "regime": budgets.regime,
+            },
+            "counts": {
+                "candidates": len(candidates),
+                "created": 0,
+            },
+            "debug": {
+                "quality_gate_mode": quality_gate_mode,
+                "trust_scanner_quotes": trust_scanner_quotes,
+                "candidates_count": len(candidates),
+                "rejection_stats": rejection_stats.to_dict() if rejection_stats else None,
+            },
+        }
 
     # Wave 1.2: Insert-idempotent, no upsert of integrity fields
     if suggestions:

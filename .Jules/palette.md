@@ -69,3 +69,7 @@
 ## 2025-06-06 - Accessible Disabled Tooltips
 **Learning:** Browsers disable mouse events on `disabled` buttons, preventing tooltips from appearing. Wrapping the disabled button in a focusable `span` (`tabIndex={0}`) allows the tooltip to trigger on hover and focus.
 **Action:** Always wrap disabled buttons in a `span` with `tabIndex={0}` and an explanatory `aria-label` when tooltips are required.
+
+## 2025-06-07 - Accessible Progress Bars
+**Learning:** Custom progress bars implemented with `div`s and inline styles are completely invisible to screen readers, lacking `role="progressbar"` and value attributes.
+**Action:** Replace custom progress bars with the design system's `Progress` component, using `className="[&>div]:bg-color"` to customize the indicator color while maintaining accessibility and consistent structure.

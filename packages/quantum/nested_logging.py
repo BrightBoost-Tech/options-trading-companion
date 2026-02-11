@@ -78,6 +78,34 @@ def log_inference(
 
     return trace_id
 
+def _ensure_inference_log_exists(supabase: Client, trace_id: uuid.UUID) -> bool:
+    """
+    Ensure an inference_log row exists for the given trace_id.
+    Creates a minimal placeholder if missing.
+    Returns True if successful (or already exists), False on error.
+    """
+    try:
+        data = {
+            "trace_id": str(trace_id),
+            "timestamp": datetime.now().isoformat(),
+            "symbol_universe": [],
+            "inputs_snapshot": {},
+            "predicted_mu": {},
+            "predicted_sigma": {},
+            "optimizer_profile": "auto_placeholder"
+        }
+        supabase.table("inference_log").insert(data).execute()
+        print(f"[nested_logging] Created placeholder inference_log for trace_id={trace_id}")
+        return True
+    except Exception as e:
+        err_str = str(e).lower()
+        # Ignore duplicate/unique constraint violations (already exists)
+        if "duplicate" in err_str or "unique" in err_str or "23505" in err_str:
+            return True
+        print(f"[nested_logging] Failed to create inference_log placeholder: {e}")
+        return False
+
+
 def log_decision(
     trace_id: uuid.UUID,
     user_id: str,
@@ -87,22 +115,39 @@ def log_decision(
     """
     Log the actual decision taken (optimizer weights, sizing, etc.) to decision_logs.
     Returns the trace_id (decision_id) to verify stability.
+
+    If FK constraint fails (inference_log missing), auto-creates a placeholder and retries.
     """
     supabase = _get_supabase_client()
     if not supabase:
         return trace_id
 
+    data = {
+        "trace_id": str(trace_id),
+        "user_id": user_id,
+        "decision_type": decision_type,
+        "content": _json_serialize(content),
+        "created_at": datetime.now().isoformat()
+    }
+
     try:
-        data = {
-            "trace_id": str(trace_id),
-            "user_id": user_id,
-            "decision_type": decision_type,
-            "content": _json_serialize(content),
-            "created_at": datetime.now().isoformat()
-        }
         supabase.table("decision_logs").insert(data).execute()
     except Exception as e:
-        print(f"Logging Error: Failed to write to decision_logs: {e}")
+        err_str = str(e).lower()
+        # Check for FK violation (23503 = foreign_key_violation, or constraint name)
+        if "23503" in err_str or "fk_decision_logs_trace" in err_str or "foreign key" in err_str:
+            print(f"[nested_logging] FK violation on decision_logs, creating inference_log placeholder...")
+            if _ensure_inference_log_exists(supabase, trace_id):
+                # Retry the insert
+                try:
+                    supabase.table("decision_logs").insert(data).execute()
+                    print(f"[nested_logging] Retry succeeded after creating inference_log placeholder")
+                except Exception as retry_err:
+                    print(f"Logging Error: Retry failed for decision_logs: {retry_err}")
+            else:
+                print(f"Logging Error: Could not create inference_log placeholder, decision_logs insert failed")
+        else:
+            print(f"Logging Error: Failed to write to decision_logs: {e}")
 
     return trace_id
 

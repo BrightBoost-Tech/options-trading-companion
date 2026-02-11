@@ -222,12 +222,18 @@ class PaperAutopilotService:
                     suggestion_id_override=sid
                 )
 
-                # Update suggestion status
-                supabase.table(TRADE_SUGGESTIONS_TABLE).update({
-                    "status": "staged"
-                }).eq("id", sid).execute()
+                # Update suggestion status (non-fatal: proceed even if this fails)
+                try:
+                    supabase.table(TRADE_SUGGESTIONS_TABLE).update({
+                        "status": "staged"
+                    }).eq("id", sid).execute()
+                except Exception as status_err:
+                    logger.warning(
+                        f"Failed to update suggestion {sid} status to 'staged', "
+                        f"proceeding with order processing: {status_err}"
+                    )
 
-                # Process order (execute)
+                # Process order (execute) - always proceed even if status update failed
                 _process_orders_for_user(supabase, analytics, user_id, target_order_id=order_id)
 
                 executed.append({"suggestion_id": sid, "order_id": order_id})

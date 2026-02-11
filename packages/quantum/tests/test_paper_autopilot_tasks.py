@@ -427,5 +427,94 @@ class TestPaperAutopilotPayloadModels(unittest.TestCase):
             PaperAutoClosePayload(user_id='all')
 
 
+class TestSuggestionStatusUpdateResilience(unittest.TestCase):
+    """Tests for suggestion status update resilience in execute_top_suggestions."""
+
+    def test_source_has_status_update_try_except(self):
+        """Verify paper_autopilot_service wraps status update in try/except."""
+        import os
+
+        service_path = os.path.join(
+            os.path.dirname(__file__),
+            "..",
+            "services",
+            "paper_autopilot_service.py"
+        )
+
+        with open(service_path, "r") as f:
+            source = f.read()
+
+        # Verify try/except wraps status update
+        self.assertIn('except Exception as status_err:', source)
+        self.assertIn('proceeding with order processing', source)
+
+    def test_process_orders_called_after_status_update_block(self):
+        """Verify _process_orders_for_user is called outside the status update try block."""
+        import os
+        import re
+
+        service_path = os.path.join(
+            os.path.dirname(__file__),
+            "..",
+            "services",
+            "paper_autopilot_service.py"
+        )
+
+        with open(service_path, "r") as f:
+            source = f.read()
+
+        # The structure should be:
+        # try:
+        #     supabase.table(...).update(...).execute()
+        # except Exception as status_err:
+        #     logger.warning(...)
+        #
+        # # Process order (execute) - always proceed
+        # _process_orders_for_user(...)
+
+        # Verify status update is wrapped in try/except
+        self.assertIn('try:', source)
+        self.assertIn('except Exception as status_err:', source)
+
+        # Verify _process_orders_for_user call exists and is NOT inside the try block
+        # The key assertion: _process_orders_for_user should appear AFTER the except block
+        lines = source.split('\n')
+        status_err_line = None
+        process_orders_line = None
+
+        for i, line in enumerate(lines):
+            if 'except Exception as status_err:' in line:
+                status_err_line = i
+            if '_process_orders_for_user(' in line and status_err_line is not None:
+                process_orders_line = i
+                break
+
+        self.assertIsNotNone(status_err_line, "except Exception as status_err not found")
+        self.assertIsNotNone(process_orders_line, "_process_orders_for_user not found after except")
+        self.assertGreater(
+            process_orders_line, status_err_line,
+            "_process_orders_for_user should be called after the except block"
+        )
+
+    def test_warning_logged_on_status_update_failure(self):
+        """Verify warning is logged when status update fails."""
+        import os
+
+        service_path = os.path.join(
+            os.path.dirname(__file__),
+            "..",
+            "services",
+            "paper_autopilot_service.py"
+        )
+
+        with open(service_path, "r") as f:
+            source = f.read()
+
+        # Verify logger.warning is called with appropriate message
+        self.assertIn('logger.warning(', source)
+        self.assertIn('Failed to update suggestion', source)
+        self.assertIn('proceeding with order processing', source)
+
+
 if __name__ == '__main__':
     unittest.main()

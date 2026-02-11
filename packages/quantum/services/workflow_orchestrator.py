@@ -1847,19 +1847,39 @@ async def run_midday_cycle(supabase: Client, user_id: str):
         tier = SmallAccountCompounder.get_tier(deployable_capital)
         print(f"[Midday] Account Tier: {tier.name} (Compounding: {COMPOUNDING_MODE})")
 
-        # Select candidates
-        remaining_global_budget = float(
-            budgets.get("remaining")
-            or budgets.get("remaining_budget")
-            or budgets.get("remaining_dollars")
-            or 0.0
-        )
+        # Select candidates - extract remaining budget from RiskBudgetReport
+        # Preferred: RiskBudgetReport object with global_allocation.remaining
+        remaining_global_budget = None
+        try:
+            if hasattr(budgets, "global_allocation") and budgets.global_allocation:
+                remaining_global_budget = float(budgets.global_allocation.remaining or 0.0)
+        except Exception:
+            remaining_global_budget = None
+
+        # Fallback: dict-like access (backward compatibility)
+        if remaining_global_budget is None:
+            try:
+                ga = budgets.get("global_allocation") if hasattr(budgets, "get") else None
+                if isinstance(ga, dict):
+                    remaining_global_budget = float(ga.get("remaining") or 0.0)
+                else:
+                    remaining_global_budget = 0.0
+            except Exception:
+                remaining_global_budget = 0.0
 
         # Config
         midday_config = SizingConfig(compounding_enabled=COMPOUNDING_MODE)
 
         # Use Global regime state for selection estimation
         current_regime = global_snap.state.value
+
+        # Debug logging for risk_budget extraction
+        print(f"[Midday] rank_and_select inputs: capital={deployable_capital:.2f}, remaining_global_budget={remaining_global_budget:.2f}, scout_results={len(scout_results)}")
+        if remaining_global_budget <= 0:
+            print("[Midday] WARNING: remaining_global_budget resolved to 0. This will produce 0 candidates.")
+            print(f"[Midday] Budget summary: remaining_global={remaining_global:.2f}, usage_global={usage_global:.2f}, max_global={max_global:.2f}")
+            if hasattr(budgets, 'diagnostics'):
+                print(f"[Midday] Budget diagnostics: {budgets.diagnostics}")
 
         candidates = SmallAccountCompounder.rank_and_select(
             candidates=scout_results,

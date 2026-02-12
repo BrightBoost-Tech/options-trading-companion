@@ -720,16 +720,50 @@ def _process_orders_for_user(supabase, analytics, user_id, target_order_id=None)
     orders_res = query.in_("portfolio_id", p_ids).execute()
     orders = orders_res.data or []
 
-    if target_order_id:
-        orders = [o for o in orders if o["id"] == target_order_id]
+    # Fetch orphan filled orders: status='filled' but position_id is NULL and filled_qty > 0
+    # These need repair because previous commits failed (e.g., user_id NOT NULL issues)
+    orphan_query = supabase.table("paper_orders").select("*").eq("status", "filled").is_("position_id", "null")
+    orphan_res = orphan_query.in_("portfolio_id", p_ids).execute()
+    orphan_orders = [o for o in (orphan_res.data or []) if float(o.get("filled_qty") or 0) > 0]
 
-    result["total_orders"] = len(orders)
+    # Merge normal orders with orphan orders (orphans first for priority repair)
+    all_orders = orphan_orders + orders
+
+    if target_order_id:
+        all_orders = [o for o in all_orders if o["id"] == target_order_id]
+
+    result["total_orders"] = len(all_orders)
     poly = PolygonService()
 
-    for order in orders:
+    for order in all_orders:
         order_id = order.get("id", "unknown")
         prior_status = order.get("status", "unknown")
         try:
+            # Check for orphan filled order that needs repair
+            if (order.get("status") == "filled" and
+                order.get("position_id") is None and
+                float(order.get("filled_qty") or 0) > 0):
+                # Repair orphan filled order
+                repair_result = _repair_filled_order_commit(
+                    supabase, analytics, user_id, order, p_map[order["portfolio_id"]]
+                )
+                if repair_result.get("repaired"):
+                    result["processed"] += 1
+                    logger.info(
+                        f"paper_order_repaired: order_id={order_id} "
+                        f"position_id={repair_result.get('position_id')} "
+                        f"ledger_inserted={repair_result.get('ledger_inserted')}"
+                    )
+                    result["diagnostics"].append({
+                        "order_id": order_id,
+                        "symbol": order.get("order_json", {}).get("symbol"),
+                        "fill_status": "repaired",
+                        "quote_present": False,
+                        "last_fill_qty": 0,
+                        "repair_result": repair_result,
+                    })
+                continue
+
             # Fetch fresh quote
             # Extract symbol from order_json
             ticket_data = order.get("order_json", {})
@@ -824,6 +858,179 @@ def _process_orders_for_user(supabase, analytics, user_id, target_order_id=None)
                 f"paper_order_error: order_id={order_id} prior_status={prior_status} error={e}"
             )
             result["errors"].append({"order_id": order_id, "error": str(e)})
+
+    return result
+
+
+def _repair_filled_order_commit(supabase, analytics, user_id, order, portfolio) -> Dict[str, Any]:
+    """
+    Repair an orphan filled order that has no position_id.
+
+    This handles orders that were filled but whose commit failed (e.g., due to
+    user_id NOT NULL constraint issues). Creates the position and ledger entry
+    that should have been created during the original fill.
+
+    Args:
+        supabase: Supabase client
+        analytics: Analytics service
+        user_id: User ID for the order
+        order: The orphan filled order dict
+        portfolio: Portfolio dict with id and cash_balance
+
+    Returns:
+        Dict with repair results:
+        - repaired: bool indicating success
+        - position_id: ID of created/found position
+        - ledger_inserted: bool indicating if ledger row was inserted
+    """
+    result = {"repaired": False, "position_id": None, "ledger_inserted": False}
+
+    try:
+        order_id = order.get("id")
+        ticket = order.get("order_json", {})
+        symbol = ticket.get("symbol")
+        side = order.get("side", "buy")
+
+        filled_qty = float(order.get("filled_qty") or 0)
+        avg_fill_price = float(order.get("avg_fill_price") or 0)
+        fees_usd = float(order.get("fees_usd") or 0)
+
+        if filled_qty <= 0 or avg_fill_price <= 0:
+            logger.warning(f"paper_order_repair_skip: order_id={order_id} invalid filled_qty or avg_fill_price")
+            return result
+
+        # Derive strategy key
+        try:
+            strategy_key = _derive_strategy_key(TradeTicket(**ticket))
+        except Exception as e:
+            logger.warning(f"paper_order_repair_strategy_key_error: order_id={order_id} error={e}")
+            strategy_key = f"{symbol}_custom"
+
+        # Signed quantity: Buy adds (+), Sell subtracts (-)
+        fill_sign = 1.0 if side == "buy" else -1.0
+        signed_qty = filled_qty * fill_sign
+
+        # 1. Create or find position
+        # Try to find existing position by strategy key first
+        pos_res = supabase.table("paper_positions").select("*").eq("portfolio_id", portfolio["id"]).eq("strategy_key", strategy_key).execute()
+        pos = pos_res.data[0] if pos_res.data else None
+
+        if pos:
+            # Position exists - update it with the filled order's data
+            current_qty = float(pos["quantity"])
+            current_avg = float(pos["avg_entry_price"])
+
+            new_qty = current_qty + signed_qty
+
+            # Calculate new average price (weighted average for increasing exposure)
+            new_avg = current_avg
+            if (current_qty >= 0 and signed_qty > 0) or (current_qty <= 0 and signed_qty < 0):
+                total_cost = (abs(current_qty) * current_avg) + (abs(signed_qty) * avg_fill_price)
+                if abs(new_qty) > 0:
+                    new_avg = total_cost / abs(new_qty)
+
+            # Handle flip case
+            if (current_qty > 0 and new_qty < 0) or (current_qty < 0 and new_qty > 0):
+                new_avg = avg_fill_price
+
+            now = datetime.now(timezone.utc).isoformat()
+
+            if new_qty == 0:
+                # Closed completely - delete position
+                supabase.table("paper_positions").delete().eq("id", pos["id"]).execute()
+                result["position_id"] = pos["id"]
+            else:
+                supabase.table("paper_positions").update({
+                    "quantity": new_qty,
+                    "avg_entry_price": new_avg,
+                    "updated_at": now
+                }).eq("id", pos["id"]).execute()
+                result["position_id"] = pos["id"]
+
+            # Update order with position_id
+            supabase.table("paper_orders").update({"position_id": pos["id"]}).eq("id", order_id).execute()
+
+        else:
+            # Create new position
+            pos_payload = {
+                "portfolio_id": portfolio["id"],
+                "user_id": user_id,
+                "strategy_key": strategy_key,
+                "symbol": symbol,
+                "quantity": signed_qty,
+                "avg_entry_price": avg_fill_price,
+                "current_mark": avg_fill_price,
+                "unrealized_pl": 0.0,
+                "trace_id": order.get("trace_id"),
+                "suggestion_id": order.get("suggestion_id")
+            }
+
+            # Enrich with model metadata from suggestion if available
+            if order.get("suggestion_id"):
+                try:
+                    s_res = supabase.table(TRADE_SUGGESTIONS_TABLE).select(
+                        "model_version, features_hash, strategy, window, regime"
+                    ).eq("id", order.get("suggestion_id")).single().execute()
+                    if s_res.data:
+                        pos_payload.update(s_res.data)
+                except Exception as e:
+                    logger.warning(f"paper_order_repair_suggestion_error: order_id={order_id} error={e}")
+
+            new_pos = supabase.table("paper_positions").insert(pos_payload).execute()
+
+            if new_pos.data:
+                new_pos_id = new_pos.data[0]["id"]
+                result["position_id"] = new_pos_id
+                # Update order with position_id
+                supabase.table("paper_orders").update({"position_id": new_pos_id}).eq("id", order_id).execute()
+
+        # 2. Insert ledger entry only if one doesn't exist for this order_id
+        existing_ledger = supabase.table("paper_ledger").select("id").eq("order_id", order_id).execute()
+
+        if not existing_ledger.data:
+            # Calculate cash delta for ledger
+            multiplier = 100.0
+            txn_value = filled_qty * avg_fill_price * multiplier
+
+            if side == "buy":
+                cash_delta = -(txn_value + fees_usd)
+            else:
+                cash_delta = txn_value - fees_usd
+
+            # Get current cash balance for balance_after calculation
+            current_cash = float(portfolio.get("cash_balance") or 0)
+            # Note: For repair, we don't update cash balance since this was already accounted for
+            # We just record the ledger entry for audit purposes
+
+            ledger = PaperLedgerService(supabase)
+            ledger.emit_fill(
+                portfolio_id=portfolio["id"],
+                amount=cash_delta,
+                balance_after=current_cash,  # Current balance (repair doesn't change cash)
+                order_id=order_id,
+                position_id=result["position_id"],
+                trace_id=order.get("trace_id"),
+                user_id=user_id,
+                metadata={
+                    "side": side,
+                    "qty": filled_qty,
+                    "price": avg_fill_price,
+                    "symbol": symbol,
+                    "fees": fees_usd,
+                    "repair": True,  # Mark as repair entry
+                }
+            )
+            result["ledger_inserted"] = True
+
+        result["repaired"] = True
+        logger.info(
+            f"paper_order_repair_success: order_id={order_id} position_id={result['position_id']} "
+            f"ledger_inserted={result['ledger_inserted']}"
+        )
+
+    except Exception as e:
+        logger.error(f"paper_order_repair_error: order_id={order.get('id')} error={e}")
+        result["error"] = str(e)
 
     return result
 

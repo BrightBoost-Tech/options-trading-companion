@@ -167,25 +167,34 @@ class TransactionCostModel:
         side = order.get("side", "buy") # buy/sell
 
         # Parse Quote
+        # IMPORTANT: Always return status="working" for missing/invalid quotes.
+        # Do NOT return the order's current status, as this causes staged orders
+        # to remain stuck forever (fill_status='staged' doesn't trigger transition).
         if not quote or quote.get("status") == "error":
-             # No fill on missing quote in simulation, unless market?
-             # For paper trading robustness, we might assume last price?
-             # Let's return no-op
              return {
-                 "status": order.get("status", "working"),
+                 "status": "working",
                  "filled_qty": filled_qty,
-                 "avg_fill_price": float(order.get("avg_fill_price") or 0.0)
+                 "avg_fill_price": float(order.get("avg_fill_price") or 0.0),
+                 "last_fill_qty": 0,
+                 "reason": "missing_quote"
              }
 
-        bid = quote.get("bid_price", 0.0)
-        ask = quote.get("ask_price", 0.0)
+        bid = quote.get("bid_price") or quote.get("bid") or 0.0
+        ask = quote.get("ask_price") or quote.get("ask") or 0.0
+
+        # Also check 'price' field as fallback for valid quote detection
+        price = quote.get("price") or quote.get("last") or 0.0
 
         if bid <= 0 or ask <= 0:
-             return {
-                 "status": order.get("status", "working"),
-                 "filled_qty": filled_qty,
-                 "avg_fill_price": float(order.get("avg_fill_price") or 0.0)
-             }
+            # If both bid/ask are invalid but we have a valid price, that's still unusable for fills
+            # Return working status so order transitions but doesn't fill
+            return {
+                "status": "working",
+                "filled_qty": filled_qty,
+                "avg_fill_price": float(order.get("avg_fill_price") or 0.0),
+                "last_fill_qty": 0,
+                "reason": "invalid_quote"
+            }
 
         # Logic
         should_fill = False
@@ -262,8 +271,12 @@ class TransactionCostModel:
                 "last_fill_qty": this_fill_qty
             }
 
+        # No fill this tick, but order is actively working
+        # Always return "working" status, never echo back the order's current status
+        # (which could be "staged" and would prevent transition)
         return {
-            "status": order.get("status", "working"),
+            "status": "working",
             "filled_qty": filled_qty,
-            "avg_fill_price": float(order.get("avg_fill_price") or 0.0)
+            "avg_fill_price": float(order.get("avg_fill_price") or 0.0),
+            "last_fill_qty": 0
         }

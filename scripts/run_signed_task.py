@@ -58,6 +58,64 @@ from packages.quantum.security.task_signing_v4 import sign_task_request
 
 
 # =============================================================================
+# Verbose Response Tasks (Paper Pipeline Debugging)
+# =============================================================================
+
+# Tasks that always print full response JSON for debugging paper pipeline.
+# These run synchronously without job_runs rows, so response details are
+# critical for debugging stuck staged orders.
+VERBOSE_RESPONSE_TASKS = {
+    "paper_process_orders",
+    "paper_auto_execute",
+    "paper_auto_close",
+    "paper_safety_close_one",
+}
+
+# Fields that should be redacted if present in response (safety measure)
+REDACT_FIELDS = {"secret", "password", "token", "api_key", "apikey", "credential"}
+
+
+def _should_print_response_json(task_name: str) -> bool:
+    """
+    Check if response JSON should be printed for this task.
+
+    Returns True if:
+    - PRINT_RESPONSE_JSON=1 env var is set, OR
+    - task_name is in VERBOSE_RESPONSE_TASKS set
+    """
+    if os.environ.get("PRINT_RESPONSE_JSON", "").lower() in ("1", "true", "yes"):
+        return True
+    return task_name in VERBOSE_RESPONSE_TASKS
+
+
+def _redact_sensitive_fields(data: dict) -> dict:
+    """
+    Recursively redact any sensitive fields from response data.
+
+    This is a safety measure - response shouldn't contain secrets,
+    but we redact just in case.
+    """
+    if not isinstance(data, dict):
+        return data
+
+    redacted = {}
+    for key, value in data.items():
+        key_lower = key.lower()
+        if any(redact_word in key_lower for redact_word in REDACT_FIELDS):
+            redacted[key] = "[REDACTED]"
+        elif isinstance(value, dict):
+            redacted[key] = _redact_sensitive_fields(value)
+        elif isinstance(value, list):
+            redacted[key] = [
+                _redact_sensitive_fields(item) if isinstance(item, dict) else item
+                for item in value
+            ]
+        else:
+            redacted[key] = value
+    return redacted
+
+
+# =============================================================================
 # Task Definitions
 # =============================================================================
 
@@ -703,6 +761,15 @@ def run_task(
                         print(f"[SUCCESS] Job run ID: {job_run_id}")
                     if result_status:
                         print(f"[SUCCESS] Status: {result_status}")
+
+                # Print full response JSON for verbose tasks (paper pipeline debugging)
+                if _should_print_response_json(task_name):
+                    try:
+                        safe_result = _redact_sensitive_fields(result)
+                        print(f"[RESPONSE-JSON] {task_name} response:")
+                        print(json.dumps(safe_result, indent=2, sort_keys=True))
+                    except Exception as json_err:
+                        print(f"[RESPONSE-JSON] Failed to serialize response: {json_err}")
 
             except Exception:
                 # JSON parsing failed, treat as success (no semantic error detectable)

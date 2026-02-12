@@ -22,12 +22,15 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "..", "sc
 from run_signed_task import (
     TASKS,
     CHICAGO_TZ,
+    VERBOSE_RESPONSE_TASKS,
     is_market_day,
     is_within_time_window,
     check_time_gate,
     get_signing_secret,
     build_payload,
     run_task,
+    _should_print_response_json,
+    _redact_sensitive_fields,
 )
 
 
@@ -489,3 +492,137 @@ class TestErrorHandling:
             assert result == 1
             captured = capsys.readouterr()
             assert "No signing secret" in captured.out
+
+
+# =============================================================================
+# Verbose Response Tests
+# =============================================================================
+
+
+class TestVerboseResponseTasks:
+    """Tests for verbose response JSON printing."""
+
+    def test_verbose_tasks_constant_contains_paper_tasks(self):
+        """VERBOSE_RESPONSE_TASKS should contain all paper pipeline tasks."""
+        expected_tasks = {
+            "paper_process_orders",
+            "paper_auto_execute",
+            "paper_auto_close",
+            "paper_safety_close_one",
+        }
+        assert expected_tasks == VERBOSE_RESPONSE_TASKS
+
+    def test_should_print_for_paper_process_orders(self):
+        """Should return True for paper_process_orders task."""
+        with patch.dict(os.environ, {}, clear=True):
+            assert _should_print_response_json("paper_process_orders") is True
+
+    def test_should_print_for_paper_auto_execute(self):
+        """Should return True for paper_auto_execute task."""
+        with patch.dict(os.environ, {}, clear=True):
+            assert _should_print_response_json("paper_auto_execute") is True
+
+    def test_should_print_for_paper_auto_close(self):
+        """Should return True for paper_auto_close task."""
+        with patch.dict(os.environ, {}, clear=True):
+            assert _should_print_response_json("paper_auto_close") is True
+
+    def test_should_print_for_paper_safety_close_one(self):
+        """Should return True for paper_safety_close_one task."""
+        with patch.dict(os.environ, {}, clear=True):
+            assert _should_print_response_json("paper_safety_close_one") is True
+
+    def test_should_not_print_for_suggestions_open(self):
+        """Should return False for suggestions_open (not a verbose task)."""
+        with patch.dict(os.environ, {}, clear=True):
+            assert _should_print_response_json("suggestions_open") is False
+
+    def test_should_not_print_for_universe_sync(self):
+        """Should return False for universe_sync (not a verbose task)."""
+        with patch.dict(os.environ, {}, clear=True):
+            assert _should_print_response_json("universe_sync") is False
+
+    def test_env_var_overrides_for_any_task(self):
+        """PRINT_RESPONSE_JSON=1 should enable for any task."""
+        with patch.dict(os.environ, {"PRINT_RESPONSE_JSON": "1"}):
+            assert _should_print_response_json("suggestions_open") is True
+            assert _should_print_response_json("universe_sync") is True
+
+    def test_env_var_true_string(self):
+        """PRINT_RESPONSE_JSON=true should also work."""
+        with patch.dict(os.environ, {"PRINT_RESPONSE_JSON": "true"}):
+            assert _should_print_response_json("universe_sync") is True
+
+    def test_env_var_yes_string(self):
+        """PRINT_RESPONSE_JSON=yes should also work."""
+        with patch.dict(os.environ, {"PRINT_RESPONSE_JSON": "yes"}):
+            assert _should_print_response_json("universe_sync") is True
+
+
+class TestRedactSensitiveFields:
+    """Tests for sensitive field redaction."""
+
+    def test_redacts_secret_field(self):
+        """Should redact 'secret' field."""
+        data = {"status": "ok", "secret": "hunter2"}
+        result = _redact_sensitive_fields(data)
+        assert result["secret"] == "[REDACTED]"
+        assert result["status"] == "ok"
+
+    def test_redacts_password_field(self):
+        """Should redact 'password' field."""
+        data = {"user": "admin", "password": "hunter2"}
+        result = _redact_sensitive_fields(data)
+        assert result["password"] == "[REDACTED]"
+        assert result["user"] == "admin"
+
+    def test_redacts_api_key_field(self):
+        """Should redact 'api_key' field."""
+        data = {"api_key": "sk-12345"}
+        result = _redact_sensitive_fields(data)
+        assert result["api_key"] == "[REDACTED]"
+
+    def test_redacts_nested_fields(self):
+        """Should redact sensitive fields in nested dicts."""
+        data = {
+            "outer": {
+                "token": "secret-token",
+                "safe_field": "visible"
+            }
+        }
+        result = _redact_sensitive_fields(data)
+        assert result["outer"]["token"] == "[REDACTED]"
+        assert result["outer"]["safe_field"] == "visible"
+
+    def test_redacts_in_list_of_dicts(self):
+        """Should redact sensitive fields in list of dicts."""
+        data = {
+            "items": [
+                {"name": "item1", "credential": "secret1"},
+                {"name": "item2", "credential": "secret2"}
+            ]
+        }
+        result = _redact_sensitive_fields(data)
+        assert result["items"][0]["credential"] == "[REDACTED]"
+        assert result["items"][1]["credential"] == "[REDACTED]"
+        assert result["items"][0]["name"] == "item1"
+
+    def test_preserves_normal_response(self):
+        """Should preserve normal response without sensitive fields."""
+        data = {
+            "status": "ok",
+            "processed": 3,
+            "errors": None,
+            "processed_summary": {
+                "total_processed": 3,
+                "processing_error_count": 0
+            }
+        }
+        result = _redact_sensitive_fields(data)
+        assert result == data
+
+    def test_handles_non_dict_input(self):
+        """Should return non-dict input unchanged."""
+        assert _redact_sensitive_fields("string") == "string"
+        assert _redact_sensitive_fields(123) == 123
+        assert _redact_sensitive_fields(None) is None

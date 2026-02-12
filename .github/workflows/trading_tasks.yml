@@ -338,6 +338,8 @@ jobs:
           USER_ID: ${{ secrets.USER_ID || secrets.TASK_USER_ID }}
           DRY_RUN: ${{ inputs.dry_run && '1' || '0' }}
           PAYLOAD_JSON: ${{ inputs.payload_json }}
+          # Enable verbose response JSON for paper tasks (debugging stuck orders)
+          PRINT_RESPONSE_JSON: ${{ contains(fromJSON('["paper_process_orders","paper_auto_execute","paper_auto_close","paper_safety_close_one"]'), inputs.task) && '1' || '0' }}
         run: |
           ARGS="${{ inputs.task }}"
           if [ "${{ inputs.skip_time_gate }}" = "true" ]; then

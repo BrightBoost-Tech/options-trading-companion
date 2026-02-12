@@ -649,6 +649,43 @@ def _compute_fill_deltas(order: dict, fill_res: dict) -> dict:
         "fees_delta": fees_delta
     }
 
+def _is_valid_quote(quote: dict) -> bool:
+    """
+    Check if a quote has valid pricing data.
+
+    Returns True if:
+    - bid and ask (or bid_price and ask_price) are both > 0, OR
+    - price > 0
+
+    Invalid quotes (0/0 or None values) should be treated as missing.
+    """
+    if not quote or not isinstance(quote, dict):
+        return False
+
+    # Check bid/ask (common format)
+    bid = quote.get("bid") or quote.get("bid_price") or 0
+    ask = quote.get("ask") or quote.get("ask_price") or 0
+
+    try:
+        bid = float(bid)
+        ask = float(ask)
+        if bid > 0 and ask > 0:
+            return True
+    except (TypeError, ValueError):
+        pass
+
+    # Fallback: check price field
+    price = quote.get("price") or quote.get("last") or 0
+    try:
+        price = float(price)
+        if price > 0:
+            return True
+    except (TypeError, ValueError):
+        pass
+
+    return False
+
+
 def _process_orders_for_user(supabase, analytics, user_id, target_order_id=None):
     """
     Process paper orders for a user, attempting fills and updating state.
@@ -659,8 +696,9 @@ def _process_orders_for_user(supabase, analytics, user_id, target_order_id=None)
     Returns:
         dict with keys:
             - processed: int, number of orders successfully processed
-            - errors: list of dicts with order_id and error message
+            - errors: list of dicts with order_id and error message (never null)
             - total_orders: int, total orders attempted
+            - diagnostics: list of per-order processing details
     """
     # Fetch working orders: staged, working, or partial
     # A1) Replace exact "staged" check with list of in-flight states
@@ -668,7 +706,7 @@ def _process_orders_for_user(supabase, analytics, user_id, target_order_id=None)
     # Simplest is to get user portfolios then filter orders.
     # Or rely on RLS if enabled. Assuming we trust backend:
 
-    result = {"processed": 0, "errors": [], "total_orders": 0}
+    result = {"processed": 0, "errors": [], "total_orders": 0, "diagnostics": []}
 
     # Get user portfolios
     p_res = supabase.table("paper_portfolios").select("id, cash_balance").eq("user_id", user_id).execute()
@@ -699,6 +737,15 @@ def _process_orders_for_user(supabase, analytics, user_id, target_order_id=None)
 
             # v4-L1F: Fetch quote with retry and exponential backoff
             quote = _fetch_quote_with_retry(poly, symbol) if symbol else None
+
+            # Validate quote - treat invalid quotes (0/0) as missing
+            if quote is not None and not _is_valid_quote(quote):
+                logger.warning(
+                    f"paper_order_invalid_quote: order_id={order_id} symbol={symbol} "
+                    f"quote={quote} - treating as missing"
+                )
+                quote = None
+
             quote_present = quote is not None
 
             # Simulate Fill
@@ -712,6 +759,16 @@ def _process_orders_for_user(supabase, analytics, user_id, target_order_id=None)
                 f"symbol={symbol} quote_present={quote_present} fill_status={fill_status} "
                 f"last_fill_qty={last_fill_qty}"
             )
+
+            # Record diagnostic for this order
+            diagnostic = {
+                "order_id": order_id,
+                "symbol": symbol,
+                "fill_status": fill_status,
+                "quote_present": quote_present,
+                "last_fill_qty": last_fill_qty,
+            }
+            result["diagnostics"].append(diagnostic)
 
             # B) Commit only when a NEW fill happened this tick
             should_commit = False
@@ -730,11 +787,37 @@ def _process_orders_for_user(supabase, analytics, user_id, target_order_id=None)
                 )
 
             elif fill_status == "working":
-                # Update last checked?
-                # Optionally update status to 'working' if it was 'staged'
+                # Transition staged -> working
                 if prior_status == "staged":
-                    supabase.table("paper_orders").update({"status": "working"}).eq("id", order["id"]).execute()
+                    now_iso = datetime.now(timezone.utc).isoformat()
+                    supabase.table("paper_orders").update({
+                        "status": "working",
+                        "submitted_at": now_iso,
+                    }).eq("id", order["id"]).execute()
                     logger.info(f"paper_order_transition: order_id={order_id} staged->working")
+
+            else:
+                # Unexpected fill_status (e.g., "unknown", "rejected", etc.)
+                # Don't let orders stall in 'staged' forever - transition to 'working'
+                if prior_status == "staged":
+                    now_iso = datetime.now(timezone.utc).isoformat()
+                    supabase.table("paper_orders").update({
+                        "status": "working",
+                        "submitted_at": now_iso,
+                    }).eq("id", order["id"]).execute()
+                    logger.warning(
+                        f"paper_order_unexpected_status: order_id={order_id} fill_status={fill_status} "
+                        f"quote_present={quote_present} - forcing staged->working"
+                    )
+
+                # Record diagnostic error for unexpected status
+                result["errors"].append({
+                    "order_id": order_id,
+                    "symbol": symbol,
+                    "fill_status": fill_status,
+                    "quote_present": quote_present,
+                    "reason": "unexpected_fill_status",
+                })
 
         except Exception as e:
             logger.error(

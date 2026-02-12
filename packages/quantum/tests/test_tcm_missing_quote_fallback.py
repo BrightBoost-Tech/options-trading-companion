@@ -288,6 +288,10 @@ class TestSimulateFillValidQuoteUnchanged:
 class TestProcessOrdersWithFallback:
     """Integration tests for _process_orders_for_user with fallback fills."""
 
+    @pytest.mark.skipif(
+        not __import__("importlib.util", fromlist=["find_spec"]).find_spec("fastapi"),
+        reason="fastapi not installed"
+    )
     def test_staged_order_transitions_on_missing_quote(self):
         """Staged order should transition to working or filled on missing quote."""
         mock_supabase = MagicMock()
@@ -346,6 +350,10 @@ class TestProcessOrdersWithFallback:
         assert len(result["diagnostics"]) == 1
         assert result["diagnostics"][0]["fill_status"] == "working"
 
+    @pytest.mark.skipif(
+        not __import__("importlib.util", fromlist=["find_spec"]).find_spec("fastapi"),
+        reason="fastapi not installed"
+    )
     def test_fill_commits_position_when_deterministic_fill(self):
         """When deterministic draw results in fill, should commit and create position."""
         mock_supabase = MagicMock()

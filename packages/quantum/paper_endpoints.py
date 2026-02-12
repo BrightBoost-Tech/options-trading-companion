@@ -913,6 +913,7 @@ def _commit_fill(supabase, analytics, user_id, order, fill_res, quote, portfolio
             order_id=order.get("id"),
             position_id=order.get("position_id"),
             trace_id=order.get("trace_id"),
+            user_id=user_id,
             metadata=fill_metadata
         )
     else:
@@ -923,6 +924,7 @@ def _commit_fill(supabase, analytics, user_id, order, fill_res, quote, portfolio
             order_id=order.get("id"),
             position_id=order.get("position_id"),
             trace_id=order.get("trace_id"),
+            user_id=user_id,
             metadata=fill_metadata
         )
 
@@ -1001,6 +1003,7 @@ def _commit_fill(supabase, analytics, user_id, order, fill_res, quote, portfolio
         # signed_incremental_qty is the quantity
         pos_payload = {
             "portfolio_id": portfolio["id"],
+            "user_id": user_id,
             "strategy_key": strategy_key,
             "symbol": symbol,
             "quantity": signed_incremental_qty,

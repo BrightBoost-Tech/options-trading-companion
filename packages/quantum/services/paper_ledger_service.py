@@ -47,6 +47,9 @@ class PaperLedgerEvent(BaseModel):
     balance_after: float
     description: str
 
+    # Required for DB constraint
+    user_id: Optional[str] = None
+
     # Linkage (optional)
     order_id: Optional[str] = None
     position_id: Optional[str] = None
@@ -94,6 +97,7 @@ class PaperLedgerService:
         try:
             payload = {
                 "portfolio_id": event.portfolio_id,
+                "user_id": event.user_id,
                 "event_type": event.event_type,
                 "amount": event.amount,
                 "balance_after": event.balance_after,
@@ -183,6 +187,7 @@ class PaperLedgerService:
         order_id: Optional[str] = None,
         position_id: Optional[str] = None,
         trace_id: Optional[str] = None,
+        user_id: Optional[str] = None,
         description: Optional[str] = None,
         metadata: Optional[Dict[str, Any]] = None
     ) -> Optional[Dict[str, Any]]:
@@ -192,10 +197,12 @@ class PaperLedgerService:
         Args:
             amount: Cash delta (negative for buys, positive for sells)
             balance_after: Cash balance after this fill
+            user_id: User ID (required by DB constraint)
             metadata: Should include {side, qty, price, symbol, fees}
         """
         return self.emit(PaperLedgerEvent(
             portfolio_id=portfolio_id,
+            user_id=user_id,
             event_type=PaperLedgerEventType.FILL,
             amount=amount,
             balance_after=balance_after,
@@ -214,6 +221,7 @@ class PaperLedgerService:
         order_id: Optional[str] = None,
         position_id: Optional[str] = None,
         trace_id: Optional[str] = None,
+        user_id: Optional[str] = None,
         description: Optional[str] = None,
         metadata: Optional[Dict[str, Any]] = None
     ) -> Optional[Dict[str, Any]]:
@@ -223,10 +231,12 @@ class PaperLedgerService:
         Args:
             amount: Cash delta for this partial fill
             balance_after: Cash balance after this partial fill
+            user_id: User ID (required by DB constraint)
             metadata: Should include {side, qty, price, symbol, fees, filled_so_far, total_qty}
         """
         return self.emit(PaperLedgerEvent(
             portfolio_id=portfolio_id,
+            user_id=user_id,
             event_type=PaperLedgerEventType.PARTIAL_FILL,
             amount=amount,
             balance_after=balance_after,

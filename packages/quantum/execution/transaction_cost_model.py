@@ -1,11 +1,37 @@
 from pydantic import BaseModel
 from typing import Optional, Dict, Any, Literal
-from datetime import datetime
+from datetime import datetime, timezone
+import hashlib
 import math
 import random
 
 from packages.quantum.strategy_profiles import CostModelConfig
 from packages.quantum.models import TradeTicket
+
+
+def _compute_deterministic_fill_draw(order_id: str, date_bucket: Optional[str] = None) -> float:
+    """
+    Compute a deterministic uniform random value [0, 1) based on order_id and date bucket.
+
+    This ensures reproducible fill decisions per day:
+    - Same order_id + same day => same draw
+    - Different days => different draw (gives orders multiple chances)
+
+    Args:
+        order_id: Unique order identifier
+        date_bucket: UTC date string (YYYY-MM-DD). If None, uses current UTC date.
+
+    Returns:
+        Float in [0, 1) derived from SHA256 hash
+    """
+    if date_bucket is None:
+        date_bucket = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
+    seed_str = f"{order_id}|{date_bucket}"
+    hash_bytes = hashlib.sha256(seed_str.encode("utf-8")).hexdigest()
+    # Use first 8 hex chars (32 bits) for uniform distribution
+    u = int(hash_bytes[:8], 16) / 0xFFFFFFFF
+    return u
 
 class QuoteSnapshot(BaseModel):
     bid_price: float
@@ -167,17 +193,69 @@ class TransactionCostModel:
         side = order.get("side", "buy") # buy/sell
 
         # Parse Quote
-        # IMPORTANT: Always return status="working" for missing/invalid quotes.
-        # Do NOT return the order's current status, as this causes staged orders
-        # to remain stuck forever (fill_status='staged' doesn't trigger transition).
+        # IMPORTANT: For missing/invalid quotes, use deterministic fill logic based on
+        # TCM precomputed values (fill_probability, expected_fill_price) stored on the order.
+        # This unblocks paper trading when quotes are unavailable while maintaining
+        # reproducible behavior per order per day.
+
+        def _handle_missing_quote_fallback(reason: str) -> Dict[str, Any]:
+            """
+            Handle missing/invalid quote using deterministic fill draw.
+
+            Uses TCM precomputed values from order.tcm:
+            - fill_probability: probability threshold for fill
+            - expected_fill_price: price to use if filled
+
+            Returns status="working" or "filled", NEVER "staged".
+            """
+            order_id = order.get("id", "unknown")
+
+            # Get TCM precomputed values from order
+            tcm_data = order.get("tcm") or {}
+            fill_probability = float(tcm_data.get("fill_probability") or 0.5)
+            expected_fill_price = float(tcm_data.get("expected_fill_price") or 0.0)
+
+            # Fallback: use requested_price or a safe default
+            if expected_fill_price <= 0:
+                expected_fill_price = float(order.get("requested_price") or 0.0)
+            if expected_fill_price <= 0:
+                # Last resort fallback
+                expected_fill_price = 1.0
+
+            # Deterministic draw based on order_id + date
+            u = _compute_deterministic_fill_draw(order_id)
+
+            if u < fill_probability:
+                # FILL the order
+                new_total_qty = requested_qty
+                new_avg_price = expected_fill_price
+
+                return {
+                    "status": "filled",
+                    "filled_qty": new_total_qty,
+                    "avg_fill_price": round(new_avg_price, 4),
+                    "last_fill_price": round(expected_fill_price, 4),
+                    "last_fill_qty": remaining_qty,
+                    "reason": "missing_quote_fallback",
+                    "fallback_source": reason,
+                    "fill_probability_used": fill_probability,
+                    "deterministic_draw": round(u, 4),
+                }
+            else:
+                # Keep working, no fill this cycle
+                return {
+                    "status": "working",
+                    "filled_qty": filled_qty,
+                    "avg_fill_price": float(order.get("avg_fill_price") or 0.0),
+                    "last_fill_qty": 0,
+                    "reason": "missing_quote_fallback",
+                    "fallback_source": reason,
+                    "fill_probability_used": fill_probability,
+                    "deterministic_draw": round(u, 4),
+                }
+
         if not quote or quote.get("status") == "error":
-             return {
-                 "status": "working",
-                 "filled_qty": filled_qty,
-                 "avg_fill_price": float(order.get("avg_fill_price") or 0.0),
-                 "last_fill_qty": 0,
-                 "reason": "missing_quote"
-             }
+            return _handle_missing_quote_fallback("missing_quote")
 
         bid = quote.get("bid_price") or quote.get("bid") or 0.0
         ask = quote.get("ask_price") or quote.get("ask") or 0.0
@@ -186,15 +264,8 @@ class TransactionCostModel:
         price = quote.get("price") or quote.get("last") or 0.0
 
         if bid <= 0 or ask <= 0:
-            # If both bid/ask are invalid but we have a valid price, that's still unusable for fills
-            # Return working status so order transitions but doesn't fill
-            return {
-                "status": "working",
-                "filled_qty": filled_qty,
-                "avg_fill_price": float(order.get("avg_fill_price") or 0.0),
-                "last_fill_qty": 0,
-                "reason": "invalid_quote"
-            }
+            # Invalid quote - use fallback logic
+            return _handle_missing_quote_fallback("invalid_quote")
 
         # Logic
         should_fill = False

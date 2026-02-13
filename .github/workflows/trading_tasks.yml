@@ -114,6 +114,7 @@ on:
           - paper_auto_execute
           - paper_auto_close
           - paper_process_orders
+          - paper_learning_ingest
           - validation_shadow_eval
           - validation_cohort_eval
           - validation_autopromote_cohort

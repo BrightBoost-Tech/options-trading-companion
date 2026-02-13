@@ -33,6 +33,7 @@ from packages.quantum.public_tasks_models import (
     ValidationPreflightPayload,
     ValidationInitWindowPayload,
     PaperSafetyCloseOnePayload,
+    PaperLearningIngestPayload,
     DEFAULT_STRATEGY_NAME,
 )
 
@@ -558,6 +559,48 @@ async def task_learning_ingest(
     return enqueue_job_run(
         job_name=job_name,
         idempotency_key=today,
+        payload=job_payload
+    )
+
+
+@router.post("/paper/learning-ingest", status_code=202)
+@limiter.limit("20/minute")
+async def task_paper_learning_ingest(
+    request: Request,
+    payload: PaperLearningIngestPayload = Body(default_factory=PaperLearningIngestPayload),
+    auth: TaskSignatureResult = Depends(verify_task_signature("tasks:paper_learning_ingest"))
+):
+    """
+    Paper trading outcome ingestion - Maps paper fills to learning_feedback_loops.
+
+    Auth: Requires v4 HMAC signature with scope 'tasks:paper_learning_ingest'.
+
+    This task:
+    1. Reads paper_ledger FILL entries within lookback window
+    2. Builds trade_closed outcome records with is_paper: true
+    3. Inserts into learning_feedback_loops with idempotency via (user_id, order_id)
+    4. Enables validation/streak progression for paper trading
+
+    Payload options:
+    - user_id: Run for specific user only (default: all users)
+    - lookback_days: How far back to look for paper fills (default: 7)
+    """
+    today = datetime.now().strftime("%Y-%m-%d")
+    job_name = "paper_learning_ingest"
+
+    job_payload = {
+        "date": today,
+        "user_id": payload.user_id,
+        "lookback_days": payload.lookback_days,
+    }
+
+    # Idempotency key includes user_id for per-user runs
+    user_part = payload.user_id or "all"
+    idempotency_key = f"{today}-paper-learning-{user_part}"
+
+    return enqueue_job_run(
+        job_name=job_name,
+        idempotency_key=idempotency_key,
         payload=job_payload
     )
 

@@ -201,6 +201,30 @@ class StrategyAutotunePayload(TaskPayloadBase):
     )
 
 
+class PaperLearningIngestPayload(TaskPayloadBase):
+    """
+    Payload for /tasks/paper/learning-ingest.
+
+    Ingests paper trading outcomes into learning_feedback_loops for
+    validation/streak progression.
+
+    This task:
+    1. Reads paper_ledger FILL entries within lookback window
+    2. Builds trade_closed outcome records with is_paper: true
+    3. Inserts into learning_feedback_loops with idempotency via (user_id, order_id)
+    """
+    user_id: Optional[str] = Field(
+        default=None,
+        description="Run for specific user only (default: all users)"
+    )
+    lookback_days: int = Field(
+        default=7,
+        ge=1,
+        le=90,
+        description="How far back to look for paper ledger entries"
+    )
+
+
 # =============================================================================
 # Ops Tasks
 # =============================================================================
@@ -567,6 +591,7 @@ TASK_SCOPES = {
     "/tasks/paper/auto-close": "tasks:paper_auto_close",
     "/tasks/paper/process-orders": "tasks:paper_process_orders",
     "/tasks/paper/safety-close-one": "tasks:paper_safety_close_one",
+    "/tasks/paper/learning-ingest": "tasks:paper_learning_ingest",
 }
 
 

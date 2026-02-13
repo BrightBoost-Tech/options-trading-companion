@@ -33,6 +33,7 @@ Supported Tasks:
     paper_auto_execute             - POST /tasks/paper/auto-execute (requires user_id)
     paper_auto_close               - POST /tasks/paper/auto-close (requires user_id)
     paper_process_orders           - POST /tasks/paper/process-orders (requires user_id)
+    paper_learning_ingest          - POST /tasks/paper/learning-ingest (requires user_id)
     validation_shadow_eval         - POST /tasks/validation/shadow-eval (requires user_id)
     validation_cohort_eval         - POST /tasks/validation/cohort-eval (requires user_id)
     validation_autopromote_cohort  - POST /tasks/validation/autopromote-cohort (requires user_id)
@@ -240,6 +241,12 @@ TASKS = {
         "path": "/tasks/paper/safety-close-one",
         "scope": "tasks:paper_safety_close_one",
         "description": "Safety close one paper position (requires user_id)",
+        "user_id_mode": "require",
+    },
+    "paper_learning_ingest": {
+        "path": "/tasks/paper/learning-ingest",
+        "scope": "tasks:paper_learning_ingest",
+        "description": "Ingest paper outcomes for validation/streak (requires user_id)",
         "user_id_mode": "require",
     },
     "plaid_backfill": {

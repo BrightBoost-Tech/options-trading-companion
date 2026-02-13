@@ -16,8 +16,8 @@ from datetime import datetime, timedelta, timezone
 class TestCreatePaperOutcomeRecord:
     """Tests for _create_paper_outcome_record helper."""
 
-    def test_creates_outcome_with_is_paper_true(self):
-        """Outcome should have is_paper=True."""
+    def test_creates_outcome_with_trade_closed_type(self):
+        """Outcome should have outcome_type='trade_closed' for view compatibility."""
         from packages.quantum.jobs.handlers.paper_learning_ingest import (
             _create_paper_outcome_record
         )
@@ -32,17 +32,41 @@ class TestCreatePaperOutcomeRecord:
             "avg_fill_price": 100.0,
             "requested_price": 99.0,
             "requested_qty": 10,
+            "suggestion_id": "sugg-abc",
             "order_json": {"symbol": "SPY"},
         }
 
         result = _create_paper_outcome_record("user-1", order, "2025-01-15")
 
+        # CRITICAL: Must be 'trade_closed' for learning_trade_outcomes_v3 view
+        assert result["outcome_type"] == "trade_closed"
         assert result["is_paper"] is True
         assert result["user_id"] == "user-1"
         assert result["source_event_id"] == "order-123"
 
-    def test_win_outcome_for_sell_above_requested(self):
-        """Selling above requested price should be a win."""
+    def test_includes_suggestion_id_for_view_join(self):
+        """Outcome should include suggestion_id for view join to trade_suggestions."""
+        from packages.quantum.jobs.handlers.paper_learning_ingest import (
+            _create_paper_outcome_record
+        )
+
+        order = {
+            "id": "order-123",
+            "status": "filled",
+            "side": "sell",
+            "filled_qty": 10,
+            "avg_fill_price": 100.0,
+            "requested_price": 100.0,
+            "suggestion_id": "sugg-xyz-456",
+            "order_json": {"symbol": "SPY"},
+        }
+
+        result = _create_paper_outcome_record("user-1", order, "2025-01-15")
+
+        assert result["suggestion_id"] == "sugg-xyz-456"
+
+    def test_win_pnl_for_sell_above_requested(self):
+        """Selling above requested price should have positive PnL."""
         from packages.quantum.jobs.handlers.paper_learning_ingest import (
             _create_paper_outcome_record
         )
@@ -59,11 +83,13 @@ class TestCreatePaperOutcomeRecord:
 
         result = _create_paper_outcome_record("user-1", order, "2025-01-15")
 
-        assert result["outcome_type"] == "win"
+        # outcome_type is always 'trade_closed', pnl_outcome in details_json
+        assert result["outcome_type"] == "trade_closed"
         assert result["pnl_realized"] == 50.0  # (105 - 100) * 10
+        assert result["details_json"]["pnl_outcome"] == "win"
 
-    def test_loss_outcome_for_sell_below_requested(self):
-        """Selling below requested price should be a loss."""
+    def test_loss_pnl_for_sell_below_requested(self):
+        """Selling below requested price should have negative PnL."""
         from packages.quantum.jobs.handlers.paper_learning_ingest import (
             _create_paper_outcome_record
         )
@@ -80,11 +106,12 @@ class TestCreatePaperOutcomeRecord:
 
         result = _create_paper_outcome_record("user-1", order, "2025-01-15")
 
-        assert result["outcome_type"] == "loss"
+        assert result["outcome_type"] == "trade_closed"
         assert result["pnl_realized"] == -50.0  # (95 - 100) * 10
+        assert result["details_json"]["pnl_outcome"] == "loss"
 
-    def test_win_outcome_for_buy_below_requested(self):
-        """Buying below requested price should be a win."""
+    def test_win_pnl_for_buy_below_requested(self):
+        """Buying below requested price should have positive PnL (saved money)."""
         from packages.quantum.jobs.handlers.paper_learning_ingest import (
             _create_paper_outcome_record
         )
@@ -101,11 +128,12 @@ class TestCreatePaperOutcomeRecord:
 
         result = _create_paper_outcome_record("user-1", order, "2025-01-15")
 
-        assert result["outcome_type"] == "win"
+        assert result["outcome_type"] == "trade_closed"
         assert result["pnl_realized"] == 50.0  # (100 - 95) * 10
+        assert result["details_json"]["pnl_outcome"] == "win"
 
-    def test_loss_outcome_for_buy_above_requested(self):
-        """Buying above requested price should be a loss (slippage)."""
+    def test_loss_pnl_for_buy_above_requested(self):
+        """Buying above requested price should have negative PnL (slippage)."""
         from packages.quantum.jobs.handlers.paper_learning_ingest import (
             _create_paper_outcome_record
         )
@@ -122,11 +150,12 @@ class TestCreatePaperOutcomeRecord:
 
         result = _create_paper_outcome_record("user-1", order, "2025-01-15")
 
-        assert result["outcome_type"] == "loss"
+        assert result["outcome_type"] == "trade_closed"
         assert result["pnl_realized"] == -50.0  # (100 - 105) * 10
+        assert result["details_json"]["pnl_outcome"] == "loss"
 
-    def test_breakeven_outcome(self):
-        """Zero PnL should be breakeven."""
+    def test_breakeven_pnl(self):
+        """Zero PnL should have pnl_outcome='breakeven' in details."""
         from packages.quantum.jobs.handlers.paper_learning_ingest import (
             _create_paper_outcome_record
         )
@@ -143,8 +172,9 @@ class TestCreatePaperOutcomeRecord:
 
         result = _create_paper_outcome_record("user-1", order, "2025-01-15")
 
-        assert result["outcome_type"] == "breakeven"
+        assert result["outcome_type"] == "trade_closed"
         assert result["pnl_realized"] == 0.0
+        assert result["details_json"]["pnl_outcome"] == "breakeven"
 
     def test_includes_tcm_metrics(self):
         """Should include TCM metrics in details_json."""
@@ -213,6 +243,28 @@ class TestCreatePaperOutcomeRecord:
         result = _create_paper_outcome_record("user-1", order, "2025-01-15")
 
         assert result["details_json"]["date_bucket"] == "2025-01-15"
+
+    def test_includes_reason_codes(self):
+        """Should include reason_codes in details_json."""
+        from packages.quantum.jobs.handlers.paper_learning_ingest import (
+            _create_paper_outcome_record
+        )
+
+        order = {
+            "id": "order-reason",
+            "status": "filled",
+            "side": "sell",
+            "filled_qty": 10,
+            "avg_fill_price": 100.0,
+            "requested_price": 100.0,
+            "order_json": {"symbol": "SPY"},
+        }
+
+        result = _create_paper_outcome_record("user-1", order, "2025-01-15")
+
+        assert "reason_codes" in result["details_json"]
+        assert "paper_trade_close" in result["details_json"]["reason_codes"]
+        assert result["details_json"]["is_paper"] is True
 
 
 class TestIngestPaperOutcomesForUser:
@@ -378,6 +430,39 @@ class TestSourceCodeVerification:
         assert "is_paper" in source
         assert "_create_paper_outcome_record" in source
 
+    def test_outcome_type_is_trade_closed(self):
+        """Verify outcome_type='trade_closed' for view compatibility."""
+        import os
+        path = os.path.join(
+            os.path.dirname(__file__),
+            "..",
+            "jobs",
+            "handlers",
+            "paper_learning_ingest.py"
+        )
+        with open(path, "r") as f:
+            source = f.read()
+
+        # CRITICAL: Must use 'trade_closed' for learning_trade_outcomes_v3 view
+        assert '"outcome_type": "trade_closed"' in source
+        assert "learning_trade_outcomes_v3" in source  # Should document this
+
+    def test_suggestion_id_included(self):
+        """Verify suggestion_id is included for view join."""
+        import os
+        path = os.path.join(
+            os.path.dirname(__file__),
+            "..",
+            "jobs",
+            "handlers",
+            "paper_learning_ingest.py"
+        )
+        with open(path, "r") as f:
+            source = f.read()
+
+        assert '"suggestion_id": suggestion_id' in source
+        assert 'suggestion_id = order.get("suggestion_id")' in source
+
     def test_is_paper_flag_set(self):
         """Verify is_paper=True is set in outcome records."""
         import os
@@ -451,6 +536,24 @@ class TestSourceCodeVerification:
             source = f.read()
 
         assert "paper_learning_ingest" in source
+
+    def test_run_signed_task_has_paper_learning_ingest(self):
+        """Verify paper_learning_ingest is registered in run_signed_task.py."""
+        import os
+        path = os.path.join(
+            os.path.dirname(__file__),
+            "..",
+            "..",
+            "..",
+            "scripts",
+            "run_signed_task.py"
+        )
+        with open(path, "r") as f:
+            source = f.read()
+
+        assert '"paper_learning_ingest"' in source
+        assert '"/tasks/paper/learning-ingest"' in source
+        assert '"tasks:paper_learning_ingest"' in source
 
 
 if __name__ == "__main__":

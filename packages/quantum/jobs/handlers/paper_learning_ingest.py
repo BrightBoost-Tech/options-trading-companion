@@ -213,6 +213,10 @@ def _create_paper_outcome_record(user_id: str, order: Dict, target_date: str) ->
     """
     Create a learning_feedback_loops record from a paper order fill.
 
+    IMPORTANT: This creates outcome_type='trade_closed' which is required for
+    the learning_trade_outcomes_v3 view to include the record. The view filters
+    to only outcome_type in ('trade_closed', 'individual_trade').
+
     Args:
         user_id: User ID
         order: Paper order dict with fill details
@@ -236,16 +240,18 @@ def _create_paper_outcome_record(user_id: str, order: Dict, target_date: str) ->
         # Opening or closing short: negative if fill > requested
         pnl_realized = (requested_price - avg_fill_price) * filled_qty
 
-    # Determine outcome type
+    # Determine win/loss for details_json (outcome_type must be 'trade_closed' for view)
     if pnl_realized > 0:
-        outcome_type = "win"
+        pnl_outcome = "win"
     elif pnl_realized < 0:
-        outcome_type = "loss"
+        pnl_outcome = "loss"
     else:
-        outcome_type = "breakeven"
+        pnl_outcome = "breakeven"
 
-    # Extract trace_id from order if present
+    # Extract trace_id and suggestion_id from order
+    # suggestion_id is REQUIRED for the learning_trade_outcomes_v3 view join
     trace_id = order.get("trace_id")
+    suggestion_id = order.get("suggestion_id")
 
     # Get symbol from order_json or direct field
     order_json = order.get("order_json") or {}
@@ -258,9 +264,11 @@ def _create_paper_outcome_record(user_id: str, order: Dict, target_date: str) ->
 
     return {
         "user_id": user_id,
+        "suggestion_id": suggestion_id,  # Required for view join to trade_suggestions
         "trace_id": trace_id,
         "source_event_id": order["id"],
-        "outcome_type": outcome_type,
+        # CRITICAL: Must be 'trade_closed' for learning_trade_outcomes_v3 view
+        "outcome_type": "trade_closed",
         "pnl_realized": pnl_realized,
         "pnl_predicted": tcm.get("expected_slippage"),
         "is_paper": True,
@@ -279,6 +287,9 @@ def _create_paper_outcome_record(user_id: str, order: Dict, target_date: str) ->
             "tcm_fill_probability": fill_probability,
             "tcm_expected_fill_price": predicted_fill_price,
             "date_bucket": target_date,
+            "pnl_outcome": pnl_outcome,  # win/loss/breakeven for analytics
+            "is_paper": True,
+            "reason_codes": ["paper_trade_close"],
         },
         "created_at": datetime.now(timezone.utc).isoformat(),
     }

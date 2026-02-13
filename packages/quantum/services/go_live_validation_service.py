@@ -1093,6 +1093,9 @@ class GoLiveValidationService:
         }
 
         # 8. Handle no outcomes yet
+        # v4-L1H: Outcomes are PRIMARY evidence of activity. If outcomes exist, we ALWAYS
+        # proceed to evaluate pass/miss. The "no_pending_suggestions" skip should ONLY apply
+        # when outcome_count == 0 AND there's no linked order activity.
         if not outcomes:
             # v4-L1G Hardening (Strict): Strict rules for streak reset on "no outcomes"
             # Constraint: "No outcomes" must NEVER reset streak unless we prove a missed opportunity.
@@ -1107,6 +1110,7 @@ class GoLiveValidationService:
 
             # A. Weekend Check (Chicago Time)
             # Skip streak evaluation on weekends (no trading activity expected).
+            # NOTE: Weekend skip does NOT update updated_at (no activity expected)
             if is_weekend_chicago(now):
                 return {
                     **result_base,
@@ -1120,6 +1124,10 @@ class GoLiveValidationService:
             # B. Open Positions Check (via portfolio_id join)
             portfolio_ids = self._get_paper_portfolio_ids(user_id)
             if self._has_open_paper_positions(portfolio_ids):
+                # Update updated_at even on skip (confirms evaluation ran)
+                self.supabase.table("v3_go_live_state").update({
+                    "updated_at": now.isoformat()
+                }).eq("user_id", user_id).execute()
                 return {
                     **result_base,
                     "status": "skipped_no_close_activity",
@@ -1139,6 +1147,10 @@ class GoLiveValidationService:
                     0.0, 0.0, False, "ingestion_lag_detected",
                     {"streak_before": current_streak, "recent_fills_count": recent_fills_count}
                 )
+                # Update updated_at even on error (confirms evaluation ran)
+                self.supabase.table("v3_go_live_state").update({
+                    "updated_at": now.isoformat()
+                }).eq("user_id", user_id).execute()
                 return {
                     **result_base,
                     "status": "error",
@@ -1156,6 +1168,10 @@ class GoLiveValidationService:
             pending_suggestion_ids = self._pending_suggestion_ids(user_id, query_start_utc, query_end_utc)
 
             if not pending_suggestion_ids:
+                # Update updated_at even on skip (confirms evaluation ran)
+                self.supabase.table("v3_go_live_state").update({
+                    "updated_at": now.isoformat()
+                }).eq("user_id", user_id).execute()
                 return {
                     **result_base,
                     "status": "skipped_no_signal_day",
@@ -1169,6 +1185,10 @@ class GoLiveValidationService:
             has_linked_orders = self._has_linked_orders(portfolio_ids, pending_suggestion_ids, query_start_utc, query_end_utc)
 
             if not has_linked_orders:
+                # Update updated_at even on skip (confirms evaluation ran)
+                self.supabase.table("v3_go_live_state").update({
+                    "updated_at": now.isoformat()
+                }).eq("user_id", user_id).execute()
                 return {
                     **result_base,
                     "status": "skipped_no_signal_day",
@@ -1181,6 +1201,10 @@ class GoLiveValidationService:
             # 3. Ambiguous Path: Suggestions and Linked Orders Exist, but No Outcomes/Positions check matched
             # This implies "No Fill" or "Order active but not filled"
             # STRICT RULE: Never reset streak on No Outcomes.
+            # Update updated_at even on skip (confirms evaluation ran)
+            self.supabase.table("v3_go_live_state").update({
+                "updated_at": now.isoformat()
+            }).eq("user_id", user_id).execute()
             return {
                 **result_base,
                 "status": "skipped_no_fill_activity",
@@ -1189,6 +1213,11 @@ class GoLiveValidationService:
                 "streak_before": current_streak,
                 "paper_ready": state.get("paper_ready", False)
             }
+
+        # v4-L1H: If we reach here, outcomes exist (outcome_count > 0).
+        # We proceed directly to fail-fast and pass/miss evaluation.
+        # The presence of outcomes is sufficient evidence of trading activity -
+        # we do NOT check pending_suggestion_ids when outcomes exist.
 
         # 9. Fail-fast checks
         if max_drawdown_pct <= fail_fast_drawdown_pct:

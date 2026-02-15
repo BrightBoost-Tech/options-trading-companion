@@ -69,3 +69,7 @@
 ## 2025-06-06 - Accessible Disabled Tooltips
 **Learning:** Browsers disable mouse events on `disabled` buttons, preventing tooltips from appearing. Wrapping the disabled button in a focusable `span` (`tabIndex={0}`) allows the tooltip to trigger on hover and focus.
 **Action:** Always wrap disabled buttons in a `span` with `tabIndex={0}` and an explanatory `aria-label` when tooltips are required.
+
+## 2025-06-07 - Accessible Hover Actions
+**Learning:** Interactive elements hidden by `opacity-0` and revealed only on `group-hover` are invisible to keyboard users. Adding `group-focus-within:opacity-100` (for containers) or `group-focus:opacity-100` (for focusable groups) ensures these actions are discoverable when tabbing through content.
+**Action:** Always pair `group-hover` visibility classes with `group-focus` or `group-focus-within` to maintain accessibility for keyboard users.

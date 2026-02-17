@@ -69,3 +69,7 @@
 ## 2025-06-06 - Accessible Disabled Tooltips
 **Learning:** Browsers disable mouse events on `disabled` buttons, preventing tooltips from appearing. Wrapping the disabled button in a focusable `span` (`tabIndex={0}`) allows the tooltip to trigger on hover and focus.
 **Action:** Always wrap disabled buttons in a `span` with `tabIndex={0}` and an explanatory `aria-label` when tooltips are required.
+
+## 2025-06-07 - Roving Tabindex for Custom Tabs
+**Learning:** Custom tab components often break standard keyboard navigation (Arrow keys). Implementing the Roving Tabindex pattern manually (using `useRef` to manage focus and `onKeyDown` for navigation) restores expected behavior and ensures full accessibility.
+**Action:** When refactoring custom tab lists, implement Roving Tabindex: set `tabIndex={0}` on the active tab and `{-1}` on others, and manage focus programmatically via `useRef`.

@@ -5,3 +5,7 @@
 ## 2024-05-24 - Standardizing Metrics Visualization
 **Learning:** Replaced text-based percentages with standard `Progress` components in dashboard cards. This not only improves visual scanning but ensures consistent accessibility traits (roles, values) inherited from the design system component.
 **Action:** When finding lists of metric/percentage pairs, propose upgrading them to visual `Progress` bars to enhance the "dashboard" feel and readability.
+
+## 2024-05-25 - Tooltip Infrastructure in Layouts
+**Learning:** Radix UI Tooltips require a `TooltipProvider` context, which was missing from the global `DashboardLayout`. This prevented individual components from using tooltips without wrapping themselves locally.
+**Action:** Always verify if `TooltipProvider` exists in the layout when adding tooltips. If missing, adding it to the Layout component (e.g., `DashboardLayout.tsx`) enables tooltips across the entire view hierarchy and prevents hydration/context errors.

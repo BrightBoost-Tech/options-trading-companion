@@ -426,6 +426,10 @@ app.include_router(historical_router)
 from packages.quantum.validation_endpoints import router as validation_router
 app.include_router(validation_router)
 
+# --- Register Context Endpoints (Task Ranker Integration) ---
+from packages.quantum.context_endpoints import router as context_router
+app.include_router(context_router)
+
 # --- Capabilities Endpoint ---
 from packages.quantum.services.capability_service import CapabilityResolver
 

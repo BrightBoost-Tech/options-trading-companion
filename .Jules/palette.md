@@ -69,3 +69,7 @@
 ## 2025-06-06 - Accessible Disabled Tooltips
 **Learning:** Browsers disable mouse events on `disabled` buttons, preventing tooltips from appearing. Wrapping the disabled button in a focusable `span` (`tabIndex={0}`) allows the tooltip to trigger on hover and focus.
 **Action:** Always wrap disabled buttons in a `span` with `tabIndex={0}` and an explanatory `aria-label` when tooltips are required.
+
+## 2025-06-07 - Playwright & Radix Tooltips
+**Learning:** Radix UI tooltips render in a portal and may duplicate the content in the accessibility tree (aria-label vs tooltip content), causing Playwright's `get_by_text` to fail with strict mode violations.
+**Action:** When verifying tooltips with Playwright, use specific locators like `page.get_by_role("tooltip")` and wait for visibility, rather than generic text locators.

@@ -12,6 +12,12 @@ import { Loader2, RefreshCw, ChevronDown, ChevronUp, AlertCircle, CheckCircle2, 
 import { useToast } from '@/components/ui/use-toast';
 import { QuantumTooltip } from '@/components/ui/QuantumTooltip';
 import { useInboxActions } from '@/hooks/useInboxActions';
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipProvider,
+  TooltipTrigger,
+} from '@/components/ui/tooltip';
 
 // --- Helpers ---
 const displaySymbol = (s: Suggestion | { symbol?: string, ticker?: string }) => s.symbol ?? s.ticker ?? "Symbol";
@@ -605,12 +611,32 @@ export default function TradeInbox() {
                              {visibleQueue.map(item => (
                                  <div key={item.id} className="flex gap-3">
                                      <div className="pt-8">
-                                        <Checkbox
-                                            checked={selectedIds.has(item.id)}
-                                            onChange={() => handleToggleSelect(item)}
-                                            className="checked:bg-purple-600 checked:border-purple-600"
-                                            aria-label={`Select ${displaySymbol(item)} for batch action`}
-                                        />
+                                        {isBlocked(item) ? (
+                                            <TooltipProvider>
+                                                <Tooltip>
+                                                    <TooltipTrigger asChild>
+                                                        <div className="cursor-not-allowed inline-block">
+                                                            <Checkbox
+                                                                checked={false}
+                                                                disabled
+                                                                className="data-[state=checked]:bg-muted data-[state=checked]:text-muted-foreground opacity-50"
+                                                                aria-label={`Blocked: ${item.blocked_reason || 'Quality issue'}`}
+                                                            />
+                                                        </div>
+                                                    </TooltipTrigger>
+                                                    <TooltipContent>
+                                                        <p>Blocked: {item.blocked_reason || "Quality issue"}</p>
+                                                    </TooltipContent>
+                                                </Tooltip>
+                                            </TooltipProvider>
+                                        ) : (
+                                            <Checkbox
+                                                checked={selectedIds.has(item.id)}
+                                                onChange={() => handleToggleSelect(item)}
+                                                className="checked:bg-purple-600 checked:border-purple-600"
+                                                aria-label={`Select ${displaySymbol(item)} for batch action`}
+                                            />
+                                        )}
                                      </div>
                                      <div className="flex-1">
                                          <SuggestionCard

@@ -5,3 +5,7 @@
 ## 2024-05-24 - Standardizing Metrics Visualization
 **Learning:** Replaced text-based percentages with standard `Progress` components in dashboard cards. This not only improves visual scanning but ensures consistent accessibility traits (roles, values) inherited from the design system component.
 **Action:** When finding lists of metric/percentage pairs, propose upgrading them to visual `Progress` bars to enhance the "dashboard" feel and readability.
+
+## 2024-05-25 - Explaining Disabled States
+**Learning:** Simply disabling checkboxes for blocked actions (like in Trade Inbox) is confusing without context. Wrapping them in a Tooltip explains *why* the action is unavailable.
+**Action:** When disabling interactive elements based on complex conditions (e.g., quality gates), always wrap them in a Tooltip with the specific reason, and use `cursor-not-allowed` on the wrapper to ensure the tooltip triggers.

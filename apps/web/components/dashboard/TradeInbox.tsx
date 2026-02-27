@@ -132,8 +132,10 @@ const StagedList = ({ items }: { items: Suggestion[] }) => {
         <div className="mt-6 mb-6">
             <button
                 type="button"
-                className="w-full flex items-center justify-between py-2 hover:bg-muted/50 rounded px-2 transition-colors select-none"
+                className="w-full flex items-center justify-between py-2 hover:bg-muted/50 rounded px-2 transition-colors select-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
                 onClick={() => setExpanded(!expanded)}
+                aria-expanded={expanded}
+                aria-controls="staged-list-content"
             >
                 <h3 className="text-sm font-medium text-green-700 dark:text-green-400 flex items-center gap-2">
                     <FileText className="w-4 h-4" />
@@ -142,7 +144,7 @@ const StagedList = ({ items }: { items: Suggestion[] }) => {
                 {expanded ? <ChevronUp className="w-4 h-4" /> : <ChevronDown className="w-4 h-4" />}
             </button>
             {expanded && (
-                <div className="space-y-2 mt-2 pl-2 border-l-2 border-green-200 dark:border-green-900 ml-2">
+                <div id="staged-list-content" className="space-y-2 mt-2 pl-2 border-l-2 border-green-200 dark:border-green-900 ml-2">
                     {items.map(item => (
                         <SuggestionCard
                             key={item.id}
@@ -172,8 +174,10 @@ const BlockedList = ({ items, onDismiss, dismissedIds }: {
         <div className="mt-6 mb-6">
             <button
                 type="button"
-                className="w-full flex items-center justify-between py-2 hover:bg-muted/50 rounded px-2 transition-colors select-none"
+                className="w-full flex items-center justify-between py-2 hover:bg-muted/50 rounded px-2 transition-colors select-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
                 onClick={() => setExpanded(!expanded)}
+                aria-expanded={expanded}
+                aria-controls="blocked-list-content"
             >
                 <h3 className="text-sm font-medium text-orange-600 dark:text-orange-400 flex items-center gap-2">
                     <ShieldAlert className="w-4 h-4" />
@@ -185,7 +189,7 @@ const BlockedList = ({ items, onDismiss, dismissedIds }: {
                 {expanded ? <ChevronUp className="w-4 h-4" /> : <ChevronDown className="w-4 h-4" />}
             </button>
             {expanded && (
-                <div className="space-y-2 mt-2 pl-2 border-l-2 border-orange-200 dark:border-orange-900 ml-2">
+                <div id="blocked-list-content" className="space-y-2 mt-2 pl-2 border-l-2 border-orange-200 dark:border-orange-900 ml-2">
                     {visibleItems.map(item => (
                         <SuggestionCard
                             key={item.id}
@@ -210,8 +214,10 @@ const CompletedList = ({ items }: { items: Suggestion[] }) => {
         <div className="mt-8">
             <button
                 type="button"
-                className="w-full flex items-center justify-between py-2 hover:bg-muted/50 rounded px-2 transition-colors select-none"
+                className="w-full flex items-center justify-between py-2 hover:bg-muted/50 rounded px-2 transition-colors select-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
                 onClick={() => setExpanded(!expanded)}
+                aria-expanded={expanded}
+                aria-controls="completed-list-content"
             >
                 <h3 className="text-sm font-medium text-muted-foreground flex items-center gap-2">
                     <CheckCircle2 className="w-4 h-4" />
@@ -220,7 +226,7 @@ const CompletedList = ({ items }: { items: Suggestion[] }) => {
                 {expanded ? <ChevronUp className="w-4 h-4" /> : <ChevronDown className="w-4 h-4" />}
             </button>
             {expanded && (
-                <div className="space-y-2 mt-2 opacity-75">
+                <div id="completed-list-content" className="space-y-2 mt-2 opacity-75">
                     {items.map(item => (
                         <SuggestionCard
                             key={item.id}

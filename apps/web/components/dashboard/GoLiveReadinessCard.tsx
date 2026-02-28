@@ -4,6 +4,7 @@ import { useState, useEffect } from 'react';
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { Progress } from "@/components/ui/progress";
 import { fetchWithAuth } from "@/lib/api";
 import { Loader2, CheckCircle, XCircle, Play, History, FileText, AlertTriangle } from 'lucide-react';
 import { QuantumTooltip } from "@/components/ui/QuantumTooltip";
@@ -189,9 +190,11 @@ export function GoLiveReadinessCard() {
                                 <span className="text-muted-foreground">Window ends:</span>
                                 <span className="font-medium">{windowEnd.toLocaleDateString()} ({daysRemaining} days)</span>
                             </div>
-                            <div className="w-full bg-secondary h-2 rounded-full overflow-hidden">
-                                <div className="bg-blue-500 h-full transition-all" style={{ width: `${paperProgress}%` }}></div>
-                            </div>
+                            <Progress
+                                value={paperProgress}
+                                aria-label="Paper Readiness Streak"
+                                className="h-2 [&>div]:bg-blue-500"
+                            />
                             <div className="flex justify-between text-xs text-muted-foreground">
                                 <span>Streak: {paperStreak} / {paperTarget} checkpoints</span>
                                 <span>{paperProgress.toFixed(0)}%</span>

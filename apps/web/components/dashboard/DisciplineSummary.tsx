@@ -2,6 +2,7 @@
 
 import React, { useEffect, useState } from 'react';
 import { Card, CardHeader, CardTitle, CardContent } from '@/components/ui/card';
+import { Progress } from '@/components/ui/progress';
 import { fetchWithAuth } from '@/lib/api';
 import { CheckCircle2, AlertTriangle, AlertOctagon } from 'lucide-react';
 
@@ -65,7 +66,7 @@ export default function DisciplineSummary({ className }: { className?: string })
 
     // Color coding
     const color = disciplinePct >= 80 ? 'text-green-600 dark:text-green-400' : disciplinePct >= 50 ? 'text-yellow-600 dark:text-yellow-400' : 'text-red-600 dark:text-red-400';
-    const progressColor = disciplinePct >= 80 ? 'bg-green-600 dark:bg-green-500' : disciplinePct >= 50 ? 'bg-yellow-600 dark:bg-yellow-500' : 'bg-red-600 dark:bg-red-500';
+    const progressColor = disciplinePct >= 80 ? '[&>div]:bg-green-600 dark:[&>div]:bg-green-500' : disciplinePct >= 50 ? '[&>div]:bg-yellow-600 dark:[&>div]:bg-yellow-500' : '[&>div]:bg-red-600 dark:[&>div]:bg-red-500';
 
     return (
         <Card className={className}>
@@ -86,17 +87,11 @@ export default function DisciplineSummary({ className }: { className?: string })
                     </div>
 
                     {/* Visual Progress Bar with ARIA */}
-                    <div className="w-full bg-secondary rounded-full h-2 overflow-hidden">
-                         <div
-                            className={`h-full transition-all ${progressColor}`}
-                            style={{ width: `${disciplinePct}%` }}
-                            role="progressbar"
-                            aria-valuenow={disciplinePct}
-                            aria-valuemin={0}
-                            aria-valuemax={100}
-                            aria-label="Discipline Score"
-                         />
-                    </div>
+                    <Progress
+                        value={disciplinePct}
+                        aria-label="Discipline Score"
+                        className={`h-2 ${progressColor}`}
+                    />
                 </div>
 
                 <ul className="space-y-2 text-xs text-muted-foreground">

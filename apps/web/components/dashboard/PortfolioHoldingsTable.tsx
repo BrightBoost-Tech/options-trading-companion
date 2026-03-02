@@ -59,7 +59,7 @@ const PositionRow = React.memo(({ position, isCopied, onCopy }: PositionRowProps
                     {isCopied ? (
                         <Check className="w-3 h-3 text-green-500 animate-in fade-in zoom-in" aria-hidden="true" />
                     ) : (
-                        <Copy className="w-3 h-3 text-muted-foreground opacity-0 group-hover:opacity-100 transition-opacity" aria-hidden="true" />
+                        <Copy className="w-3 h-3 text-muted-foreground opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 transition-opacity" aria-hidden="true" />
                     )}
                 </Button>
                 {position.sector && (

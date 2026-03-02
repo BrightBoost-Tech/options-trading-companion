@@ -636,7 +636,7 @@ const SuggestionCard = ({
                                             aria-label={`Copy ${displaySymbol} to clipboard`}
                                         >
                                             <span className="font-bold text-lg text-foreground group-hover:underline decoration-dotted underline-offset-4">{displaySymbol}</span>
-                                            <Copy className="w-3 h-3 text-muted-foreground opacity-0 group-hover:opacity-100 transition-opacity" aria-hidden="true" />
+                                            <Copy className="w-3 h-3 text-muted-foreground opacity-0 group-hover:opacity-100 group-focus:opacity-100 transition-opacity" aria-hidden="true" />
                                         </div>
                                     </TooltipTrigger>
                                     <TooltipContent>

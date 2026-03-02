@@ -330,6 +330,7 @@ def check_time_gate(task_name: str, skip_time_gate: bool = False) -> bool:
         "suggestions_close": (8, 0),   # 8:00 AM Chicago
         "suggestions_open": (11, 0),   # 11:00 AM Chicago
         "learning_ingest": (16, 10),   # 4:10 PM Chicago
+        "paper_auto_close": (8, 0),    # 8:00 AM Chicago (mirrors live close)
     }
 
     if task_name not in TIME_GATES:

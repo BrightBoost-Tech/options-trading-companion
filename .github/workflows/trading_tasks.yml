@@ -52,10 +52,10 @@ on:
     # Schedule at 16:30 UTC to catch CDT
     - cron: '30 16 * * 1-5'
 
-    # Paper Auto-Close - 3:30 PM Chicago (before market close)
-    # CST (winter): 21:30 UTC | CDT (summer): 20:30 UTC
-    # Schedule at 20:30 UTC to catch CDT
-    - cron: '30 20 * * 1-5'
+    # Paper Auto-Close - 8:00 AM Chicago (morning close, mirrors live)
+    # CDT (summer): 13:00 UTC | CST (winter): 14:00 UTC
+    # Shares cron slots with suggestions_close; Python time-gate handles DST
+    # (no new cron lines needed — 0 13 and 0 14 already exist above)
 
     # Shadow Checkpoint Midday - 1:00 PM Chicago (intraday pacing check)
     # CST (winter): 19:00 UTC | CDT (summer): 18:00 UTC
@@ -476,12 +476,12 @@ jobs:
           python scripts/run_signed_task.py paper_auto_execute --skip-time-gate
 
   # ============================================================================
-  # Scheduled: Paper Auto-Close (3:30 PM Chicago)
+  # Scheduled: Paper Auto-Close (8:00 AM Chicago)
   # ============================================================================
   paper-auto-close:
-    name: Paper Auto-Close (3:30 PM Chicago)
+    name: Paper Auto-Close (8:00 AM Chicago)
     runs-on: ubuntu-latest
-    if: github.event_name == 'schedule' && github.event.schedule == '30 20 * * 1-5'
+    if: github.event_name == 'schedule' && (github.event.schedule == '0 13 * * 1-5' || github.event.schedule == '0 14 * * 1-5')
 
     steps:
       - name: Checkout
@@ -511,7 +511,7 @@ jobs:
           BASE_URL: ${{ secrets.QUANTUM_BASE_URL }}
           USER_ID: ${{ secrets.USER_ID || secrets.TASK_USER_ID }}
         run: |
-          python scripts/run_signed_task.py paper_auto_close --skip-time-gate
+          python scripts/run_signed_task.py paper_auto_close
 
   # ============================================================================
   # Scheduled: Shadow Checkpoint Midday (1:00 PM Chicago)

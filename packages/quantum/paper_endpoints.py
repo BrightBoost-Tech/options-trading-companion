@@ -1188,15 +1188,23 @@ def _commit_fill(supabase, analytics, user_id, order, fill_res, quote, portfolio
 
         if new_qty == 0:
             # Closed completely
+            attribution_ok = True
             if pos_id: # Was explicit close
                  # E) Attribution invocation should use UPDATED cumulative order values
                  # Merge update_payload into order to get cumulative values
                  order_updated = {**order, **update_payload}
                  # Pass fees_total (cumulative), not delta
-                 _run_attribution(supabase, user_id, order_updated, pos, new_avg_fill_price, fees_total, side)
+                 try:
+                     _run_attribution(supabase, user_id, order_updated, pos, new_avg_fill_price, fees_total, side)
+                 except Exception as e:
+                     attribution_ok = False
+                     logging.warning(f"Attribution failed for order {order.get('id')}; position preserved for retry: {e}")
 
-            # We delete the position if 0
-            supabase.table("paper_positions").delete().eq("id", pos["id"]).execute()
+            # Only delete position if attribution succeeded (or no attribution needed)
+            if attribution_ok:
+                supabase.table("paper_positions").delete().eq("id", pos["id"]).execute()
+            else:
+                logging.warning(f"Position {pos['id']} retained — will retry close on next auto_close cycle")
         else:
             # Update
             supabase.table("paper_positions").update({
@@ -1356,6 +1364,7 @@ def _run_attribution(supabase, user_id, order, position, exit_fill, fees, side):
 
     except Exception as e:
         logging.error(f"Attribution failed: {e}")
+        raise
 
 @router.post("/paper/reset")
 def reset_paper_portfolio(

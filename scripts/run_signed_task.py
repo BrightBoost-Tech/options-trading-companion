@@ -342,11 +342,11 @@ def check_time_gate(task_name: str, skip_time_gate: bool = False) -> bool:
         return False
 
     target_hour, target_minute = TIME_GATES[task_name]
-    if not is_within_time_window(target_hour, target_minute, window_minutes=30):
+    if not is_within_time_window(target_hour, target_minute, window_minutes=60):
         now_chicago = datetime.now(CHICAGO_TZ)
         print(
             f"[TIME-GATE] Skipping {task_name}: current time {now_chicago.strftime('%H:%M')} "
-            f"not within 30 min of {target_hour:02d}:{target_minute:02d} Chicago"
+            f"not within 60 min of {target_hour:02d}:{target_minute:02d} Chicago"
         )
         return False
 

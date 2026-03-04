@@ -69,6 +69,21 @@ def run(payload: Dict[str, Any], ctx: Any = None) -> Dict[str, Any]:
             f"Errors: {result.get('error_count', 0)}"
         )
 
+        # Check if any positions failed to close (attribution error, quote failure, etc.)
+        # Signal partial failure so the job_run is NOT marked "succeeded" —
+        # this allows force_rerun retries to create a fresh job_run.
+        has_errors = result.get("error_count", 0) > 0
+        has_processing_errors = (
+            result.get("processed_summary", {}).get("processing_error_count", 0) > 0
+        )
+
+        if has_errors or has_processing_errors:
+            return {
+                "ok": False,
+                "users_failed": 1,  # Triggers runner's mark_partial_failure path
+                **result,
+            }
+
         return {
             "ok": result.get("status") == "ok",
             **result,

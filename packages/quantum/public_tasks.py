@@ -692,14 +692,25 @@ async def task_ops_health_check(
 # =============================================================================
 
 
-def _paper_autopilot_idempotency_key(task_type: str, user_id: str) -> str:
+def _paper_autopilot_idempotency_key(
+    task_type: str,
+    user_id: str,
+    force_rerun: bool = False,
+    force_nonce: Optional[str] = None,
+) -> str:
     """
     Generate UTC-based idempotency key for paper autopilot tasks.
 
-    Format: {YYYY-MM-DD}-paper-auto-{task_type}-{user_id}
+    Format: {YYYY-MM-DD}-paper-auto-{task_type}-{user_id}[-force-{nonce}]
     """
     date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    return f"{date}-paper-auto-{task_type}-{user_id}"
+    base_key = f"{date}-paper-auto-{task_type}-{user_id}"
+
+    if force_rerun:
+        nonce = force_nonce if force_nonce else secrets.token_hex(4)
+        return f"{base_key}-force-{nonce}"
+
+    return base_key
 
 
 def _check_paper_autopilot_gates(user_id: str) -> Optional[Dict[str, Any]]:
@@ -823,7 +834,11 @@ async def task_paper_auto_close(
         return gate_error
 
     job_name = "paper_auto_close"
-    idempotency_key = _paper_autopilot_idempotency_key("close", user_id)
+    idempotency_key = _paper_autopilot_idempotency_key(
+        "close", user_id,
+        force_rerun=payload.force_rerun,
+        force_nonce=getattr(payload, 'force_nonce', None),
+    )
 
     job_payload = {
         "user_id": user_id,

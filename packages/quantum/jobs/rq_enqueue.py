@@ -92,7 +92,7 @@ def enqueue_idempotent(
         return {
             "status": "queued",
             "job_name": job_name,
-            "job_id": job.get_id(),
+            "job_id": job.id,
             "enqueued_at": job.enqueued_at.isoformat() if job.enqueued_at else None
         }
 

@@ -267,6 +267,15 @@ class PaperAutoExecutePayload(TaskPayloadBase):
         min_length=32,
         description="Target user UUID (required, cannot be 'all')"
     )
+    force_rerun: bool = Field(
+        default=False,
+        description="Force a new JobRun even if one exists for this day/config"
+    )
+    force_nonce: Optional[str] = Field(
+        default=None,
+        max_length=32,
+        description="Optional nonce for deterministic force_rerun (auto-generated if not provided)"
+    )
 
     @field_validator("user_id")
     @classmethod

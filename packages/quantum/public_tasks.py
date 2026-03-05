@@ -784,7 +784,11 @@ async def task_paper_auto_execute(
         return gate_error
 
     job_name = "paper_auto_execute"
-    idempotency_key = _paper_autopilot_idempotency_key("execute", user_id)
+    idempotency_key = _paper_autopilot_idempotency_key(
+        "execute", user_id,
+        force_rerun=payload.force_rerun,
+        force_nonce=payload.force_nonce,
+    )
 
     job_payload = {
         "user_id": user_id,

@@ -1805,8 +1805,9 @@ async def run_midday_cycle(supabase: Client, user_id: str):
         pass
 
     # === RISK BUDGET ENGINE ===
+    strategy_track = os.environ.get("STRATEGY_TRACK", "balanced")
     risk_engine = RiskBudgetEngine(supabase)
-    budgets = risk_engine.compute(user_id, deployable_capital, global_snap.state.value, positions)
+    budgets = risk_engine.compute(user_id, deployable_capital, global_snap.state.value, positions, risk_profile=strategy_track)
 
     remaining_global = budgets.global_allocation.remaining
     usage_global = budgets.global_allocation.used
@@ -2243,9 +2244,10 @@ async def run_midday_cycle(supabase: Client, user_id: str):
             risk_budget_dollars=risk_budget_dollars,
             risk_multiplier=1.0,   # multiplier already baked into risk_budget_dollars
             max_contracts=max_contracts_limit,
-            profile="aggressive",
+            profile=strategy_track,
         )
 
+        sizing["strategy_track"] = strategy_track
         allowed_risk_dollars = sizing.get("max_dollar_risk", 0.0)
 
         # If contracts == 0, check reasons.

@@ -1317,7 +1317,7 @@ def _run_attribution(supabase, user_id, order, position, exit_fill, fees, side):
         agent_signals_snapshot = {}
         if suggestion_id:
             try:
-                s_res = supabase.table(TRADE_SUGGESTIONS_TABLE).select("ev, model_version, features_hash, strategy, window, regime, agent_signals").eq("id", suggestion_id).single().execute()
+                s_res = supabase.table(TRADE_SUGGESTIONS_TABLE).select("ev, model_version, features_hash, strategy, window, regime, agent_signals, sizing_metadata").eq("id", suggestion_id).single().execute()
                 if s_res.data:
                     data = s_res.data
                     payload["pnl_predicted"] = data.get("ev")
@@ -1327,6 +1327,9 @@ def _run_attribution(supabase, user_id, order, position, exit_fill, fees, side):
                     payload["window"] = data.get("window")
                     payload["regime"] = data.get("regime")
                     agent_signals_snapshot = data.get("agent_signals") or {}
+                    _sm = data.get("sizing_metadata") or {}
+                    if _sm.get("strategy_track"):
+                        payload["details_json"]["strategy_track"] = _sm["strategy_track"]
             except Exception as e:
                 logging.warning(f"Failed to fetch suggestion data for LFL: {e}")
 

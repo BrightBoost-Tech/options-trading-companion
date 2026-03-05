@@ -78,7 +78,7 @@ export default function WeeklyReportList({ reports }: WeeklyReportListProps) {
                 key={report.id}
                 onClick={() => setSelectedReportId(report.id)}
                 aria-current={isSelected ? 'true' : undefined}
-                className={`w-full text-left p-3 rounded-lg border transition-colors ${
+                className={`w-full text-left p-3 rounded-lg border transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500 focus-visible:ring-offset-1 ${
                   isSelected
                     ? 'bg-indigo-50 border-indigo-200 shadow-sm'
                     : 'bg-white border-gray-100 hover:bg-gray-50'
@@ -126,7 +126,7 @@ export default function WeeklyReportList({ reports }: WeeklyReportListProps) {
           </div>
           <button
             onClick={handleDownload}
-            className="text-xs flex items-center gap-1 text-gray-500 hover:text-gray-800"
+            className="text-xs flex items-center gap-1 text-gray-500 hover:text-gray-800 rounded-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500 focus-visible:ring-offset-1"
             aria-label={`Download report for week ending ${new Date(selectedReport.end_date || selectedReport.report_date).toLocaleDateString()}`}
           >
             <Download className="w-3 h-3" aria-hidden="true" />

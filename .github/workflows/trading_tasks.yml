@@ -37,10 +37,10 @@ on:
     # Runs at :00 and :30 from 13:00-22:00 UTC (8 AM - 5 PM Chicago approx)
     - cron: '0,30 13-22 * * 1-5'
 
-    # Validation Eval (Checkpoint) - 6:30 PM Chicago (after market close)
-    # CST (winter): 00:30 UTC next day | CDT (summer): 23:30 UTC
-    # Schedule at 23:30 UTC to catch CDT; time-gate bypassed
-    - cron: '30 23 * * 1-5'
+    # Validation Eval (Checkpoint) - 9:30 AM Chicago (after paper_auto_close)
+    # CST (winter): 15:30 UTC | CDT (summer): 14:30 UTC
+    # Schedule at 15:30 UTC; --skip-time-gate handles ±1hr DST drift
+    - cron: '30 15 * * 1-5'
 
     # Learning Ingest Nightly - 3:30 AM Chicago (deep night, Tue-Sat)
     # CST (winter): 09:30 UTC | CDT (summer): 08:30 UTC
@@ -365,9 +365,9 @@ jobs:
   # Scheduled: Validation Eval / Checkpoint (6:30 PM Chicago, after market close)
   # ============================================================================
   validation-eval:
-    name: Validation Eval (6:30 PM Chicago)
+    name: Validation Eval (9:30 AM Chicago)
     runs-on: ubuntu-latest
-    if: github.event_name == 'schedule' && github.event.schedule == '30 23 * * 1-5'
+    if: github.event_name == 'schedule' && github.event.schedule == '30 15 * * 1-5'
 
     steps:
       - name: Checkout

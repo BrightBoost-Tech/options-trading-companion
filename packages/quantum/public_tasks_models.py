@@ -25,6 +25,16 @@ class TaskPayloadBase(BaseModel):
     """Base model for all task payloads."""
     model_config = ConfigDict(extra="forbid")  # Reject unknown fields
 
+    force_rerun: bool = Field(
+        default=False,
+        description="Force a new JobRun even if one exists for this day/config"
+    )
+    force_nonce: Optional[str] = Field(
+        default=None,
+        max_length=32,
+        description="Optional nonce for deterministic force_rerun (auto-generated if not provided)"
+    )
+
 
 # =============================================================================
 # Simple Date-based Tasks (no payload needed)

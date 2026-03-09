@@ -72,14 +72,16 @@ class TransactionCostModel:
         else:
             bid = quote.get("bid_price", 0.0)
             ask = quote.get("ask_price", 0.0)
-            # Handle malformed quotes (e.g. 0 bid)
+            # Handle malformed quotes (e.g. 0 bid, 0 ask)
             if bid <= 0 or ask <= 0:
+                 missing_quote = True
+                 used_fallback = True
                  if ticket.limit_price:
                      bid = ticket.limit_price * 0.99
                      ask = ticket.limit_price * 1.01
                  else:
                      bid = 0.0
-                     ask = 0.0 # Will result in 0 fill prob likely
+                     ask = 0.0
 
             mid = (bid + ask) / 2.0
             spread = max(0.0, ask - bid)

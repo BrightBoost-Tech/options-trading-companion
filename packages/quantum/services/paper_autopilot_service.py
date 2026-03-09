@@ -164,11 +164,14 @@ class PaperAutopilotService:
         # Get already executed to dedupe
         already_executed = self.get_already_executed_suggestion_ids_today(user_id)
 
-        # Filter by min_score and dedupe
+        # Filter by min_score and dedupe, tracking skip reasons
         candidates = []
+        deduped_count = 0
+        below_min_score_count = 0
         for s in suggestions:
             sid = s.get("id")
             if sid in already_executed:
+                deduped_count += 1
                 continue
 
             score = s.get("score") or s.get("probability_of_profit") or s.get("ev") or 0.0
@@ -179,6 +182,8 @@ class PaperAutopilotService:
 
             if score >= min_score:
                 candidates.append(s)
+            else:
+                below_min_score_count += 1
 
         if not candidates:
             return {
@@ -190,6 +195,13 @@ class PaperAutopilotService:
 
         # Take top N
         to_execute = candidates[:limit]
+
+        logger.info(
+            f"paper_auto_execute_start: user_id={user_id} "
+            f"suggestions_fetched={len(suggestions)} deduped={deduped_count} "
+            f"below_min_score={below_min_score_count} candidates={len(candidates)} "
+            f"to_execute={len(to_execute)}"
+        )
 
         # Execute using internal staging logic
         from packages.quantum.paper_endpoints import (
@@ -208,6 +220,8 @@ class PaperAutopilotService:
 
         for suggestion in to_execute:
             sid = suggestion.get("id")
+            ticker = suggestion.get("ticker", "unknown")
+            logger.info(f"paper_auto_execute_processing: suggestion_id={sid} symbol={ticker}")
             try:
                 # Convert to ticket
                 ticket = _suggestion_to_ticket(suggestion)
@@ -236,6 +250,11 @@ class PaperAutopilotService:
                 # Process order (execute) - always proceed even if status update failed
                 process_result = _process_orders_for_user(supabase, analytics, user_id, target_order_id=order_id)
 
+                logger.info(
+                    f"paper_auto_execute_order_created: suggestion_id={sid} "
+                    f"order_id={order_id} symbol={ticker}"
+                )
+
                 executed.append({
                     "suggestion_id": sid,
                     "order_id": order_id,
@@ -244,8 +263,17 @@ class PaperAutopilotService:
                 })
 
             except Exception as e:
-                logger.error(f"Failed to execute suggestion {sid}: {e}")
+                logger.error(
+                    f"paper_auto_execute_error: suggestion_id={sid} "
+                    f"symbol={ticker} error={e}"
+                )
                 errors.append({"suggestion_id": sid, "error": str(e)})
+
+        logger.info(
+            f"paper_auto_execute_summary: user_id={user_id} "
+            f"orders_created={len(executed)} skipped={len(suggestions) - len(to_execute)} "
+            f"errors={len(errors)}"
+        )
 
         # Compute processing summary: count orders that had processing errors
         processing_error_count = sum(

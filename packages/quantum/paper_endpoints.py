@@ -71,6 +71,60 @@ def _fetch_quote_with_retry(
     return None
 
 
+# Expected leg counts per strategy type — unknown strategies pass through without validation
+STRATEGY_LEG_COUNTS = {
+    "long_call": 1, "long_put": 1, "naked_call": 1, "naked_put": 1,
+    "vertical_spread": 2, "credit_spread": 2, "debit_spread": 2,
+    "vertical_call": 2, "vertical_put": 2,
+    "credit_call_spread": 2, "credit_put_spread": 2,
+    "debit_call_spread": 2, "debit_put_spread": 2,
+    "call_spread": 2, "put_spread": 2,
+    "butterfly": 3,
+    "condor": 4, "iron_condor": 4, "iron_butterfly": 4,
+}
+
+
+def _validate_order_legs(ticket: TradeTicket) -> None:
+    """
+    Validate that all option legs have required fields before order creation.
+
+    Checks:
+    1. Every call/put leg has non-null strike and expiry
+    2. Every call/put leg has an OCC-format symbol
+    3. Leg count matches strategy_type when strategy is known
+
+    Raises ValueError with descriptive message on failure.
+    """
+    # Check strategy-to-leg-count match
+    strategy = ticket.strategy_type
+    if strategy and strategy in STRATEGY_LEG_COUNTS:
+        expected = STRATEGY_LEG_COUNTS[strategy]
+        actual = len(ticket.legs)
+        if actual != expected:
+            raise ValueError(
+                f"Strategy '{strategy}' requires {expected} legs but got {actual}"
+            )
+
+    # Check each option leg has required fields
+    for i, leg in enumerate(ticket.legs):
+        if leg.type in ("call", "put"):
+            if leg.strike is None:
+                raise ValueError(
+                    f"Leg {i} ({leg.symbol}) missing strike — "
+                    f"cannot create order without strike price"
+                )
+            if leg.expiry is None:
+                raise ValueError(
+                    f"Leg {i} ({leg.symbol}) missing expiry — "
+                    f"cannot create order without expiration date"
+                )
+            if not leg.symbol or not (leg.symbol.startswith("O:") or len(leg.symbol) > 10):
+                raise ValueError(
+                    f"Leg {i} has non-OCC symbol '{leg.symbol}' — "
+                    f"options legs require OCC format (e.g., O:META260417C00500000)"
+                )
+
+
 def _resolve_quote_symbol(ticket_data: Dict[str, Any]) -> str:
     """
     Resolve the OCC options contract symbol for quote fetching.
@@ -566,10 +620,22 @@ def _stage_order_internal(supabase, analytics, user_id, ticket: TradeTicket, por
     if not trace_id:
         trace_id = str(uuid.uuid4())
 
+    # Validate legs before proceeding — rejects orders with null strike/expiry
+    # or strategy/leg count mismatch (e.g., condor with 1 leg)
+    _validate_order_legs(ticket)
+
     # Fetch Quote (v4-L1F: with retry and exponential backoff)
     poly = PolygonService()
     quote_symbol = _resolve_quote_symbol(ticket.model_dump(mode="json"))
     quote = _fetch_quote_with_retry(poly, quote_symbol)
+
+    # Validate quote before passing to TCM — treat zero bid/ask as missing
+    if quote is not None and not _is_valid_quote(quote):
+        logger.warning(
+            f"paper_stage_invalid_quote: symbol={quote_symbol} quote={quote} — "
+            f"treating as missing"
+        )
+        quote = None
 
     # TCM Estimate
     tcm_est = TransactionCostModel.estimate(ticket, quote)
@@ -832,7 +898,27 @@ def _process_orders_for_user(supabase, analytics, user_id, target_order_id=None)
             }
             result["diagnostics"].append(diagnostic)
 
-            # B) Commit only when a NEW fill happened this tick
+            # B) Refuse to fill without valid quote (Bug 3 Fix C)
+            # When no valid quote is available, simulate_fill() uses a $1.00
+            # last-resort fallback price. Filling at that price corrupts P&L,
+            # so instead we transition to "working" and wait for a real quote.
+            if not quote_present and fill_status in ("partial", "filled") and last_fill_qty > 0:
+                logger.warning(
+                    f"paper_order_skip_no_quote: order_id={order_id} symbol={symbol} "
+                    f"fill_status={fill_status} last_fill_qty={last_fill_qty} — "
+                    f"refusing to fill without valid quote"
+                )
+                if prior_status == "staged":
+                    now_iso = datetime.now(timezone.utc).isoformat()
+                    supabase.table("paper_orders").update({
+                        "status": "working",
+                        "submitted_at": now_iso,
+                    }).eq("id", order["id"]).execute()
+                    logger.info(f"paper_order_transition: order_id={order_id} staged->working (no-quote skip)")
+                diagnostic["skipped_reason"] = "no_valid_quote"
+                continue
+
+            # Commit only when a NEW fill happened this tick
             should_commit = False
 
             # Must be in a valid fill state AND have new quantity

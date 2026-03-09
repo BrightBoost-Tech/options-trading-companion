@@ -6,10 +6,71 @@ from .risk_manager import RiskBudgetManager, MorningManager
 # --- Configuration Templates ---
 
 DEFAULT_WEIGHT_MATRIX = {
+    'low_vol': {'trend': 0.5, 'value': 0.25, 'volatility': 0.25},
     'normal': {'trend': 0.4, 'value': 0.3, 'volatility': 0.3},
     'high_vol': {'trend': 0.2, 'value': 0.3, 'volatility': 0.5},
     'panic': {'trend': 0.1, 'value': 0.1, 'volatility': 0.8}
 }
+
+# Regime weight multiplier profiles for multi-factor SignalScore.
+# Applied as multipliers to base factor weights, then renormalized.
+REGIME_WEIGHT_PROFILES = {
+    "low_vol": {
+        "iv_rank": 0.8,
+        "trend_momentum": 1.3,
+        "volume_score": 1.0,
+        "atr_compression": 1.4,
+    },
+    "normal": {
+        "iv_rank": 1.0,
+        "trend_momentum": 1.0,
+        "volume_score": 1.0,
+        "atr_compression": 1.0,
+    },
+    "high_vol": {
+        "iv_rank": 1.4,
+        "trend_momentum": 0.7,
+        "volume_score": 1.2,
+        "atr_compression": 0.6,
+    },
+    "panic": {
+        "iv_rank": 1.6,
+        "trend_momentum": 0.4,
+        "volume_score": 1.3,
+        "atr_compression": 0.3,
+    },
+}
+
+
+def compute_regime_adjusted_score(
+    base_weights: Dict[str, float],
+    factor_values: Dict[str, float],
+    regime: str,
+) -> float:
+    """
+    Apply regime multipliers to base weights, renormalize, then compute weighted score.
+
+    Args:
+        base_weights: {factor_name: base_weight} e.g. {"iv_rank": 0.3, "trend_momentum": 0.3, ...}
+        factor_values: {factor_name: normalized_value} e.g. {"iv_rank": 0.8, "trend_momentum": 0.5, ...}
+        regime: Current market regime ("low_vol", "normal", "high_vol", "panic")
+
+    Returns:
+        Regime-adjusted weighted score (float).
+    """
+    profile = REGIME_WEIGHT_PROFILES.get(regime, REGIME_WEIGHT_PROFILES["normal"])
+
+    # Apply regime multipliers to base weights
+    adjusted = {k: base_weights[k] * profile.get(k, 1.0) for k in base_weights}
+
+    # Renormalize so weights sum to 1
+    total = sum(adjusted.values())
+    if total <= 0:
+        return 0.0
+    normalized = {k: v / total for k, v in adjusted.items()}
+
+    # Compute weighted score
+    return sum(normalized[k] * factor_values.get(k, 0.0) for k in normalized)
 
 DEFAULT_CATALYST_PROFILES = {
     'none': {'trend': 1.0, 'value': 1.0, 'volatility': 1.0},
@@ -26,6 +87,12 @@ DEFAULT_LIQUIDITY_SCALAR = {
 }
 
 DEFAULT_REGIME_PROFILES = {
+    'low_vol': {
+        'k': 0.12,
+        'mu': 45.0,
+        'absolute_hard_floor': 25.0,
+        'mu_dynamic_weight': 0.5
+    },
     'normal': {
         'k': 0.1,
         'mu': 50.0,
@@ -61,7 +128,7 @@ def map_market_regime(global_context: Dict[str, Any]) -> str:
     Input fields expected:
       - state: 'bull' | 'bear' | 'crab' | 'shock' (from packages.quantum.nested/backbone)
       - vol_annual: float (optional, overrides if high)
-    Output: 'normal' | 'high_vol' | 'panic'
+    Output: 'low_vol' | 'normal' | 'high_vol' | 'panic'
     """
     state = global_context.get('state', 'normal')
     vol = global_context.get('vol_annual', 0.0)
@@ -75,7 +142,11 @@ def map_market_regime(global_context: Dict[str, Any]) -> str:
     if vol > 0.20:
         return 'high_vol'
 
-    # 3. State Mapping
+    # 3. Low vol detection (vol < 10% in calm market)
+    if vol > 0 and vol < 0.10:
+        return 'low_vol'
+
+    # 4. State Mapping
     if state == 'bear':
         return 'high_vol'
 

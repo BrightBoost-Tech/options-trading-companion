@@ -815,49 +815,51 @@ def _process_orders_for_user(supabase, analytics, user_id, target_order_id=None)
     orders = orders_res.data or []
 
     # Fetch orphan filled orders: status='filled' but position_id is NULL and filled_qty > 0
-    # These need repair because previous commits failed (e.g., user_id NOT NULL issues)
+    # These need repair because previous commits failed (e.g., position creation errors)
     orphan_query = supabase.table("paper_orders").select("*").eq("status", "filled").is_("position_id", "null")
     orphan_res = orphan_query.in_("portfolio_id", p_ids).execute()
     orphan_orders = [o for o in (orphan_res.data or []) if float(o.get("filled_qty") or 0) > 0]
 
-    # Merge normal orders with orphan orders (orphans first for priority repair)
-    all_orders = orphan_orders + orders
+    # Bug 5 fix: Always repair orphans first, regardless of target_order_id.
+    # Previously, orphans were merged with normal orders and then filtered by
+    # target_order_id, causing orphans from prior runs to never get repaired.
+    for order in orphan_orders:
+        order_id = order.get("id", "unknown")
+        try:
+            repair_result = _repair_filled_order_commit(
+                supabase, analytics, user_id, order, p_map[order["portfolio_id"]]
+            )
+            if repair_result.get("repaired"):
+                result["processed"] += 1
+                logger.info(
+                    f"paper_order_repaired: order_id={order_id} "
+                    f"position_id={repair_result.get('position_id')} "
+                    f"ledger_inserted={repair_result.get('ledger_inserted')}"
+                )
+                result["diagnostics"].append({
+                    "order_id": order_id,
+                    "symbol": order.get("order_json", {}).get("symbol"),
+                    "fill_status": "repaired",
+                    "quote_present": False,
+                    "last_fill_qty": 0,
+                    "repair_result": repair_result,
+                })
+        except Exception as e:
+            logger.error(f"paper_order_repair_error: order_id={order_id} error={e}")
+            result["errors"].append({"order_id": order_id, "error": str(e)})
 
+    # Apply target_order_id filter to normal in-flight orders only
+    target_orders = orders
     if target_order_id:
-        all_orders = [o for o in all_orders if o["id"] == target_order_id]
+        target_orders = [o for o in orders if o["id"] == target_order_id]
 
-    result["total_orders"] = len(all_orders)
+    result["total_orders"] = len(orphan_orders) + len(target_orders)
     poly = PolygonService()
 
-    for order in all_orders:
+    for order in target_orders:
         order_id = order.get("id", "unknown")
         prior_status = order.get("status", "unknown")
         try:
-            # Check for orphan filled order that needs repair
-            if (order.get("status") == "filled" and
-                order.get("position_id") is None and
-                float(order.get("filled_qty") or 0) > 0):
-                # Repair orphan filled order
-                repair_result = _repair_filled_order_commit(
-                    supabase, analytics, user_id, order, p_map[order["portfolio_id"]]
-                )
-                if repair_result.get("repaired"):
-                    result["processed"] += 1
-                    logger.info(
-                        f"paper_order_repaired: order_id={order_id} "
-                        f"position_id={repair_result.get('position_id')} "
-                        f"ledger_inserted={repair_result.get('ledger_inserted')}"
-                    )
-                    result["diagnostics"].append({
-                        "order_id": order_id,
-                        "symbol": order.get("order_json", {}).get("symbol"),
-                        "fill_status": "repaired",
-                        "quote_present": False,
-                        "last_fill_qty": 0,
-                        "repair_result": repair_result,
-                    })
-                continue
-
             # Fetch fresh quote
             # Extract OCC symbol from order_json legs (not the underlying ticker)
             ticket_data = order.get("order_json", {})
@@ -1075,6 +1077,7 @@ def _repair_filled_order_commit(supabase, analytics, user_id, order, portfolio) 
                 "avg_entry_price": avg_fill_price,
                 "current_mark": avg_fill_price,
                 "unrealized_pl": 0.0,
+                "legs": ticket.get("legs", []),
                 "trace_id": order.get("trace_id"),
                 "suggestion_id": order.get("suggestion_id")
             }
@@ -1249,116 +1252,150 @@ def _commit_fill(supabase, analytics, user_id, order, fill_res, quote, portfolio
             metadata=fill_metadata
         )
 
-    # Position Logic
+    # Position Logic — wrapped in try/except to prevent orphan filled orders
+    # (Bug 5 fix: if position creation fails, roll back order to 'working')
     pos_id = order.get("position_id")
     ticket = order.get("order_json", {})
     symbol = ticket.get("symbol")
-    strategy_key = _derive_strategy_key(TradeTicket(**ticket)) # reconstruct ticket object
+
+    # Derive strategy key with fallback (matches _repair_filled_order_commit behavior)
+    try:
+        strategy_key = _derive_strategy_key(TradeTicket(**ticket))
+    except Exception as e:
+        logger.warning(
+            f"paper_commit_fill_strategy_key_error: order_id={order.get('id')} error={e} — "
+            f"falling back to {symbol}_custom"
+        )
+        strategy_key = f"{symbol}_custom"
 
     # Signed Quantity logic
     # Buy adds (+), Sell subtracts (-)
     fill_sign = 1.0 if side == "buy" else -1.0
     signed_incremental_qty = this_fill_qty * fill_sign
 
-    # Locate or create position
-    if pos_id:
-        pos_res = supabase.table("paper_positions").select("*").eq("id", pos_id).single().execute()
-        pos = pos_res.data
-    else:
-        # Opening logic fallback: try to find by strategy key
-        pos_res = supabase.table("paper_positions").select("*").eq("portfolio_id", portfolio["id"]).eq("strategy_key", strategy_key).execute()
-        pos = pos_res.data[0] if pos_res.data else None
-
-    if pos:
-        # Update existing
-        current_qty = float(pos["quantity"]) # Signed
-        current_avg = float(pos["avg_entry_price"])
-
-        new_qty = current_qty + signed_incremental_qty
-
-        # Average Price Logic
-        # Only update avg price if we are increasing exposure in the same direction
-        # Or flipping direction.
-
-        new_avg = current_avg
-
-        # Case 1: Increasing exposure (Same sign)
-        if (current_qty >= 0 and signed_incremental_qty > 0) or (current_qty <= 0 and signed_incremental_qty < 0):
-            # Weighted average of OLD total vs NEW incremental
-            total_cost = (abs(current_qty) * current_avg) + (abs(signed_incremental_qty) * this_fill_price)
-            if abs(new_qty) > 0:
-                new_avg = total_cost / abs(new_qty)
-
-        # Case 2: Reducing exposure (Opposite sign, no flip)
-        # Avg price stays same (LIFO/FIFO agnostic for avg cost)
-
-        # Case 3: Flip (Crossed zero)
-        # e.g. +5 to -5.
-        if (current_qty > 0 and new_qty < 0) or (current_qty < 0 and new_qty > 0):
-            # The portion that flipped is new_qty.
-            # The cost basis for that portion is this_fill_price.
-            # Simplified: if we flip, new avg is the fill price of the flip.
-            new_avg = this_fill_price
-
-        if new_qty == 0:
-            # Closed completely
-            attribution_ok = True
-            if pos_id: # Was explicit close
-                 # E) Attribution invocation should use UPDATED cumulative order values
-                 # Merge update_payload into order to get cumulative values
-                 order_updated = {**order, **update_payload}
-                 # Pass fees_total (cumulative), not delta
-                 try:
-                     _run_attribution(supabase, user_id, order_updated, pos, new_avg_fill_price, fees_total, side)
-                 except Exception as e:
-                     attribution_ok = False
-                     logging.warning(f"Attribution failed for order {order.get('id')}; position preserved for retry: {e}")
-
-            # Only delete position if attribution succeeded (or no attribution needed)
-            if attribution_ok:
-                supabase.table("paper_positions").delete().eq("id", pos["id"]).execute()
-            else:
-                logging.warning(f"Position {pos['id']} retained — will retry close on next auto_close cycle")
+    # Bug 5 fix: Wrap position creation in try/except.
+    # If position creation fails AFTER order is already marked 'filled',
+    # roll back order to 'working' so orphan repair or next cycle can retry.
+    try:
+        # Locate or create position
+        if pos_id:
+            pos_res = supabase.table("paper_positions").select("*").eq("id", pos_id).single().execute()
+            pos = pos_res.data
         else:
-            # Update
-            supabase.table("paper_positions").update({
-                "quantity": new_qty,
-                "avg_entry_price": new_avg,
-                "updated_at": now
-            }).eq("id", pos["id"]).execute()
+            # Opening logic fallback: try to find by strategy key
+            pos_res = supabase.table("paper_positions").select("*").eq("portfolio_id", portfolio["id"]).eq("strategy_key", strategy_key).execute()
+            pos = pos_res.data[0] if pos_res.data else None
 
-    else:
-        # Create new
-        # signed_incremental_qty is the quantity
-        pos_payload = {
-            "portfolio_id": portfolio["id"],
-            "user_id": user_id,
-            "strategy_key": strategy_key,
-            "symbol": symbol,
-            "quantity": signed_incremental_qty,
-            "avg_entry_price": this_fill_price,
-            "current_mark": this_fill_price,
-            "unrealized_pl": 0.0,
-            # Linkage
-            "trace_id": order.get("trace_id"),
-            "suggestion_id": order.get("suggestion_id")
-        }
+        if pos:
+            # Update existing
+            current_qty = float(pos["quantity"]) # Signed
+            current_avg = float(pos["avg_entry_price"])
 
-        # Enrich with model metadata from suggestion if available
-        if order.get("suggestion_id"):
-            try:
-                s_res = supabase.table(TRADE_SUGGESTIONS_TABLE).select("model_version, features_hash, strategy, window, regime").eq("id", order.get("suggestion_id")).single().execute()
-                if s_res.data:
-                    pos_payload.update(s_res.data)
-            except Exception as e:
-                logging.warning(f"Failed to fetch suggestion metadata for position: {e}")
+            new_qty = current_qty + signed_incremental_qty
 
-        new_pos = supabase.table("paper_positions").insert(pos_payload).execute()
+            # Average Price Logic
+            # Only update avg price if we are increasing exposure in the same direction
+            # Or flipping direction.
 
-        # Update order with the new position_id
-        if new_pos.data:
-            new_pos_id = new_pos.data[0]["id"]
-            supabase.table("paper_orders").update({"position_id": new_pos_id}).eq("id", order["id"]).execute()
+            new_avg = current_avg
+
+            # Case 1: Increasing exposure (Same sign)
+            if (current_qty >= 0 and signed_incremental_qty > 0) or (current_qty <= 0 and signed_incremental_qty < 0):
+                # Weighted average of OLD total vs NEW incremental
+                total_cost = (abs(current_qty) * current_avg) + (abs(signed_incremental_qty) * this_fill_price)
+                if abs(new_qty) > 0:
+                    new_avg = total_cost / abs(new_qty)
+
+            # Case 2: Reducing exposure (Opposite sign, no flip)
+            # Avg price stays same (LIFO/FIFO agnostic for avg cost)
+
+            # Case 3: Flip (Crossed zero)
+            # e.g. +5 to -5.
+            if (current_qty > 0 and new_qty < 0) or (current_qty < 0 and new_qty > 0):
+                # The portion that flipped is new_qty.
+                # The cost basis for that portion is this_fill_price.
+                # Simplified: if we flip, new avg is the fill price of the flip.
+                new_avg = this_fill_price
+
+            if new_qty == 0:
+                # Closed completely
+                attribution_ok = True
+                if pos_id: # Was explicit close
+                     # E) Attribution invocation should use UPDATED cumulative order values
+                     # Merge update_payload into order to get cumulative values
+                     order_updated = {**order, **update_payload}
+                     # Pass fees_total (cumulative), not delta
+                     try:
+                         _run_attribution(supabase, user_id, order_updated, pos, new_avg_fill_price, fees_total, side)
+                     except Exception as e:
+                         attribution_ok = False
+                         logging.warning(f"Attribution failed for order {order.get('id')}; position preserved for retry: {e}")
+
+                # Only delete position if attribution succeeded (or no attribution needed)
+                if attribution_ok:
+                    supabase.table("paper_positions").delete().eq("id", pos["id"]).execute()
+                else:
+                    logging.warning(f"Position {pos['id']} retained — will retry close on next auto_close cycle")
+            else:
+                # Update
+                supabase.table("paper_positions").update({
+                    "quantity": new_qty,
+                    "avg_entry_price": new_avg,
+                    "updated_at": now
+                }).eq("id", pos["id"]).execute()
+
+        else:
+            # Create new position
+            # signed_incremental_qty is the quantity
+            pos_payload = {
+                "portfolio_id": portfolio["id"],
+                "user_id": user_id,
+                "strategy_key": strategy_key,
+                "symbol": symbol,
+                "quantity": signed_incremental_qty,
+                "avg_entry_price": this_fill_price,
+                "current_mark": this_fill_price,
+                "unrealized_pl": 0.0,
+                "legs": ticket.get("legs", []),
+                # Linkage
+                "trace_id": order.get("trace_id"),
+                "suggestion_id": order.get("suggestion_id")
+            }
+
+            # Enrich with model metadata from suggestion if available
+            if order.get("suggestion_id"):
+                try:
+                    s_res = supabase.table(TRADE_SUGGESTIONS_TABLE).select("model_version, features_hash, strategy, window, regime").eq("id", order.get("suggestion_id")).single().execute()
+                    if s_res.data:
+                        pos_payload.update(s_res.data)
+                except Exception as e:
+                    logging.warning(f"Failed to fetch suggestion metadata for position: {e}")
+
+            new_pos = supabase.table("paper_positions").insert(pos_payload).execute()
+
+            # Update order with the new position_id
+            if new_pos.data:
+                new_pos_id = new_pos.data[0]["id"]
+                supabase.table("paper_orders").update({"position_id": new_pos_id}).eq("id", order["id"]).execute()
+
+    except Exception as pos_err:
+        # Position creation/update failed — roll back order to 'working' so it can be retried
+        logger.error(
+            f"paper_commit_fill_position_failed: order_id={order.get('id')} "
+            f"symbol={symbol} error={pos_err} — rolling back order to 'working'"
+        )
+        try:
+            supabase.table("paper_orders").update({
+                "status": "working",
+                "filled_qty": 0,
+                "avg_fill_price": 0,
+            }).eq("id", order["id"]).execute()
+        except Exception as rollback_err:
+            logger.error(
+                f"paper_commit_fill_rollback_failed: order_id={order.get('id')} "
+                f"error={rollback_err}"
+            )
+        return  # Skip telemetry — fill didn't fully commit
 
     # Telemetry
     emit_trade_event(analytics, user_id, TradeContext(trace_id=order.get("trace_id")), "order_filled", is_paper=True, properties={"order_id": order["id"]})

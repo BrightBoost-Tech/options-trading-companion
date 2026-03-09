@@ -314,7 +314,7 @@ class TestOrphanOrderDetection:
         assert 'is_("position_id", "null")' in source
 
     def test_source_code_includes_repair_check(self):
-        """Verify repair check is in the processing loop."""
+        """Verify repair is called in the processing loop."""
         import os
         path = os.path.join(
             os.path.dirname(__file__),
@@ -324,10 +324,11 @@ class TestOrphanOrderDetection:
         with open(path, "r") as f:
             source = f.read()
 
-        # Should have check for orphan filled orders
+        # Should have orphan repair logic — repair function called,
+        # orphan query detects filled orders with null position_id
         assert '_repair_filled_order_commit' in source
-        assert 'order.get("status") == "filled"' in source
-        assert 'order.get("position_id") is None' in source
+        assert 'for order in orphan_orders:' in source
+        assert 'is_("position_id", "null")' in source
 
     def test_source_code_includes_ledger_dedupe(self):
         """Verify ledger dedupe check is in repair function."""

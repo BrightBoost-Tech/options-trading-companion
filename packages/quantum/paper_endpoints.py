@@ -71,6 +71,33 @@ def _fetch_quote_with_retry(
     return None
 
 
+def _resolve_quote_symbol(ticket_data: Dict[str, Any]) -> str:
+    """
+    Resolve the OCC options contract symbol for quote fetching.
+
+    The ticket's top-level 'symbol' field stores the underlying ticker (e.g., "META").
+    Polygon requires the full OCC symbol (e.g., "O:META260417C00500000") for options quotes.
+    This helper extracts the first leg's symbol when it's an options contract.
+
+    Args:
+        ticket_data: TradeTicket dict or order_json dict with 'symbol' and 'legs' keys
+
+    Returns:
+        OCC symbol if available (e.g., "O:META260417C00500000"), else underlying ticker
+    """
+    legs = ticket_data.get("legs", [])
+    if legs:
+        first_leg_sym = legs[0].get("symbol", "") if isinstance(legs[0], dict) else getattr(legs[0], "symbol", "")
+        if first_leg_sym and (first_leg_sym.startswith("O:") or len(first_leg_sym) > 10):
+            return first_leg_sym
+    underlying = ticket_data.get("symbol", "UNKNOWN")
+    logger.warning(
+        f"No OCC symbol found in legs for {underlying} — falling back to underlying ticker. "
+        f"Quote will be stock NBBO, not options."
+    )
+    return underlying
+
+
 def get_supabase():
     # Lazy import to avoid circular imports; use the canonical backend module path.
     from packages.quantum.api import supabase_admin
@@ -541,7 +568,8 @@ def _stage_order_internal(supabase, analytics, user_id, ticket: TradeTicket, por
 
     # Fetch Quote (v4-L1F: with retry and exponential backoff)
     poly = PolygonService()
-    quote = _fetch_quote_with_retry(poly, ticket.symbol)
+    quote_symbol = _resolve_quote_symbol(ticket.model_dump(mode="json"))
+    quote = _fetch_quote_with_retry(poly, quote_symbol)
 
     # TCM Estimate
     tcm_est = TransactionCostModel.estimate(ticket, quote)
@@ -765,9 +793,9 @@ def _process_orders_for_user(supabase, analytics, user_id, target_order_id=None)
                 continue
 
             # Fetch fresh quote
-            # Extract symbol from order_json
+            # Extract OCC symbol from order_json legs (not the underlying ticker)
             ticket_data = order.get("order_json", {})
-            symbol = ticket_data.get("symbol")
+            symbol = _resolve_quote_symbol(ticket_data)
 
             # v4-L1F: Fetch quote with retry and exponential backoff
             quote = _fetch_quote_with_retry(poly, symbol) if symbol else None

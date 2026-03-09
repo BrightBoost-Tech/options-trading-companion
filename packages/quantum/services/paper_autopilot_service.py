@@ -395,6 +395,30 @@ class PaperAutopilotService:
         for position in to_close:
             pos_id = position.get("id")
             try:
+                # Resolve OCC symbol from the opening order's legs
+                occ_symbol = position["symbol"]  # fallback: underlying
+                try:
+                    open_order = supabase.table("paper_orders") \
+                        .select("order_json") \
+                        .eq("position_id", pos_id) \
+                        .order("created_at", desc=False) \
+                        .limit(1) \
+                        .execute()
+                    if open_order.data:
+                        legs = open_order.data[0].get("order_json", {}).get("legs", [])
+                        if legs:
+                            leg_sym = legs[0].get("symbol", "")
+                            if leg_sym.startswith("O:") or len(leg_sym) > 10:
+                                occ_symbol = leg_sym
+                    if occ_symbol == position["symbol"]:
+                        logger.warning(
+                            f"No OCC symbol found in opening order for position {pos_id} — "
+                            f"falling back to underlying ticker {occ_symbol}. "
+                            f"Quote will be stock NBBO, not options."
+                        )
+                except Exception as e:
+                    logger.warning(f"Failed to resolve OCC symbol for position {pos_id}: {e}")
+
                 # Build closing ticket (same logic as close_paper_position)
                 qty = float(position["quantity"])
                 side = "sell" if qty > 0 else "buy"
@@ -406,7 +430,7 @@ class PaperAutopilotService:
                     strategy_type=position.get("strategy_key", "").split("_")[-1] if position.get("strategy_key") else "custom",
                     source_engine="paper_autopilot",
                     legs=[
-                        {"symbol": position["symbol"], "action": side, "quantity": abs(qty)}
+                        {"symbol": occ_symbol, "action": side, "quantity": abs(qty)}
                     ]
                 )
 

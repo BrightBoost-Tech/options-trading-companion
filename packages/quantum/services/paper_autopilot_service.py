@@ -11,8 +11,8 @@ Runtime Environment Variables:
 - PAPER_AUTOPILOT_ENABLED: "1" to enable (default: "0")
 - PAPER_AUTOPILOT_MAX_TRADES_PER_DAY: Max trades per day (default: "3")
 - PAPER_AUTOPILOT_MIN_SCORE: Minimum score threshold (default: "0.0")
-- PAPER_AUTOPILOT_CLOSE_POLICY: "min_one" (default)
-- PAPER_AUTOPILOT_MAX_CLOSES_PER_DAY: Max closes per day (default: "1")
+- PAPER_AUTOPILOT_CLOSE_POLICY: "close_all" | "min_one" | "ev_rank" (default: "close_all")
+- PAPER_AUTOPILOT_MAX_CLOSES_PER_DAY: Max closes per day (default: "99")
 """
 
 import os
@@ -34,8 +34,8 @@ def _get_config() -> Dict[str, Any]:
         "enabled": os.environ.get("PAPER_AUTOPILOT_ENABLED", "0") == "1",
         "max_trades_per_day": int(os.environ.get("PAPER_AUTOPILOT_MAX_TRADES_PER_DAY", "3")),
         "min_score": float(os.environ.get("PAPER_AUTOPILOT_MIN_SCORE", "0.0")),
-        "close_policy": os.environ.get("PAPER_AUTOPILOT_CLOSE_POLICY", "min_one"),
-        "max_closes_per_day": int(os.environ.get("PAPER_AUTOPILOT_MAX_CLOSES_PER_DAY", "1")),
+        "close_policy": os.environ.get("PAPER_AUTOPILOT_CLOSE_POLICY", "close_all"),
+        "max_closes_per_day": int(os.environ.get("PAPER_AUTOPILOT_MAX_CLOSES_PER_DAY", "99")),
     }
 
 
@@ -359,6 +359,81 @@ class PaperAutopilotService:
 
         return result.count or 0
 
+    @staticmethod
+    def _resolve_occ_symbol(position: Dict[str, Any], supabase) -> str:
+        """
+        Resolve OCC options symbol from position legs or opening order.
+
+        Priority: position.legs → opening order legs → underlying ticker fallback.
+        """
+        pos_id = position.get("id")
+        underlying = position["symbol"]
+
+        # 1. Try position legs (available after Phase 1 / Bug 5 fix)
+        pos_legs = position.get("legs") or []
+        if pos_legs:
+            leg_sym = pos_legs[0].get("symbol", "") if isinstance(pos_legs[0], dict) else ""
+            if leg_sym.startswith("O:") or len(leg_sym) > 10:
+                return leg_sym
+
+        # 2. Fallback: query opening order's legs
+        try:
+            open_order = supabase.table("paper_orders") \
+                .select("order_json") \
+                .eq("position_id", pos_id) \
+                .order("created_at", desc=False) \
+                .limit(1) \
+                .execute()
+            if open_order.data:
+                legs = open_order.data[0].get("order_json", {}).get("legs", [])
+                if legs:
+                    leg_sym = legs[0].get("symbol", "")
+                    if leg_sym.startswith("O:") or len(leg_sym) > 10:
+                        return leg_sym
+        except Exception as e:
+            logger.warning(f"Failed to resolve OCC symbol for position {pos_id}: {e}")
+
+        logger.warning(
+            f"No OCC symbol found for position {pos_id} — "
+            f"falling back to underlying ticker {underlying}. "
+            f"Quote will be stock NBBO, not options."
+        )
+        return underlying
+
+    @staticmethod
+    def _marginal_ev(position: Dict[str, Any]) -> float:
+        """
+        Estimate marginal EV for position ranking.
+
+        Positions with worst unrealized P&L should close first (ascending sort).
+        """
+        return float(position.get("unrealized_pl") or 0.0)
+
+    def _select_positions_to_close(
+        self,
+        positions: List[Dict[str, Any]],
+        remaining_quota: int,
+        policy: str,
+    ) -> List[Dict[str, Any]]:
+        """
+        Select and rank positions for closing based on policy.
+
+        Policies:
+        - "close_all": Close all open positions (ignores quota)
+        - "ev_rank": Close worst marginal EV first, up to quota
+        - "min_one": Close oldest first, up to quota (legacy)
+        """
+        if policy == "close_all":
+            return positions
+
+        if policy == "ev_rank":
+            # Sort by worst unrealized P&L first (ascending)
+            ranked = sorted(positions, key=self._marginal_ev)
+            return ranked[:remaining_quota]
+
+        # Default "min_one": oldest first (already sorted by get_open_positions)
+        return positions[:remaining_quota]
+
     def close_positions(
         self,
         user_id: str,
@@ -371,7 +446,7 @@ class PaperAutopilotService:
         Args:
             user_id: Target user
             max_to_close: Maximum positions to close (default from config)
-            policy: Close policy - "min_one" (default)
+            policy: Close policy - "close_all" | "ev_rank" | "min_one"
 
         Returns:
             Summary dict with closed_count, skipped_reason, etc.
@@ -379,10 +454,10 @@ class PaperAutopilotService:
         max_to_close = max_to_close or self.config["max_closes_per_day"]
         policy = policy or self.config["close_policy"]
 
-        # Check how many already closed today
+        # Check how many already closed today (skip for close_all policy)
         already_closed = self.get_positions_closed_today(user_id)
 
-        if already_closed >= max_to_close:
+        if policy != "close_all" and already_closed >= max_to_close:
             return {
                 "status": "ok",
                 "closed_count": 0,
@@ -403,8 +478,13 @@ class PaperAutopilotService:
             }
 
         # Select positions to close based on policy
-        # "min_one" policy: close at least 1, up to remaining quota
-        to_close = positions[:remaining_quota]
+        to_close = self._select_positions_to_close(positions, remaining_quota, policy)
+
+        logger.info(
+            f"paper_auto_close_selection: user_id={user_id} policy={policy} "
+            f"open_positions={len(positions)} to_close={len(to_close)} "
+            f"already_closed_today={already_closed}"
+        )
 
         # Close using internal logic
         from packages.quantum.paper_endpoints import (
@@ -423,31 +503,10 @@ class PaperAutopilotService:
         for position in to_close:
             pos_id = position.get("id")
             try:
-                # Resolve OCC symbol from the opening order's legs
-                occ_symbol = position["symbol"]  # fallback: underlying
-                try:
-                    open_order = supabase.table("paper_orders") \
-                        .select("order_json") \
-                        .eq("position_id", pos_id) \
-                        .order("created_at", desc=False) \
-                        .limit(1) \
-                        .execute()
-                    if open_order.data:
-                        legs = open_order.data[0].get("order_json", {}).get("legs", [])
-                        if legs:
-                            leg_sym = legs[0].get("symbol", "")
-                            if leg_sym.startswith("O:") or len(leg_sym) > 10:
-                                occ_symbol = leg_sym
-                    if occ_symbol == position["symbol"]:
-                        logger.warning(
-                            f"No OCC symbol found in opening order for position {pos_id} — "
-                            f"falling back to underlying ticker {occ_symbol}. "
-                            f"Quote will be stock NBBO, not options."
-                        )
-                except Exception as e:
-                    logger.warning(f"Failed to resolve OCC symbol for position {pos_id}: {e}")
+                # Resolve OCC symbol from position legs or opening order
+                occ_symbol = self._resolve_occ_symbol(position, supabase)
 
-                # Build closing ticket (same logic as close_paper_position)
+                # Build closing ticket
                 qty = float(position["quantity"])
                 side = "sell" if qty > 0 else "buy"
 

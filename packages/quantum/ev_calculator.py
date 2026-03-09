@@ -4,6 +4,82 @@ import math
 
 UNBOUNDED_GAIN_CAP_MULT = 10.0
 
+
+def calculate_pop(
+    strategy_type: str,
+    legs: Optional[List[Dict[str, Any]]] = None,
+    credit: Optional[float] = None,
+    width: Optional[float] = None,
+    delta: Optional[float] = None,
+) -> float:
+    """
+    Calculate strategy-aware probability of profit (PoP).
+
+    For credit spreads: PoP ≈ max_gain / (max_gain + max_loss)
+    For debit spreads: PoP ≈ delta of the long leg
+    For single legs: PoP ≈ delta (buy) or 1 - delta (sell)
+
+    Args:
+        strategy_type: Strategy name (e.g., "credit_spread", "long_call")
+        legs: List of leg dicts with 'action' and 'delta' keys
+        credit: Net credit received (for credit strategies)
+        width: Strike width (for spreads)
+        delta: Raw delta (fallback for single-leg strategies)
+
+    Returns:
+        Probability of profit between 0.0 and 1.0
+    """
+    legs = legs or []
+
+    # Credit spreads: PoP = max_gain / (max_gain + max_loss)
+    if strategy_type in (
+        "credit_spread", "credit_put_spread", "credit_call_spread",
+        "short_call_spread", "short_put_spread",
+    ):
+        if credit and width and credit > 0 and width > credit:
+            max_gain = credit * 100  # per contract
+            max_loss = (width - credit) * 100
+            return max_gain / (max_gain + max_loss)
+        # Fallback: credit spreads profit when short leg stays OTM → 1 - delta
+        if delta is not None:
+            return 1.0 - abs(float(delta))
+        sell_leg = next((l for l in legs if l.get("action") == "sell"), None)
+        if sell_leg and sell_leg.get("delta"):
+            return 1.0 - abs(float(sell_leg["delta"]))
+
+    # Debit spreads: PoP ≈ delta of the long leg
+    if strategy_type in (
+        "debit_spread", "debit_call_spread", "debit_put_spread",
+        "long_call_spread", "long_put_spread",
+    ):
+        long_leg = next((l for l in legs if l.get("action") == "buy"), None)
+        if long_leg and long_leg.get("delta"):
+            return abs(float(long_leg["delta"]))
+
+    # Short single-leg: PoP = 1 - delta
+    if strategy_type in ("short_call", "short_put", "naked_call", "naked_put"):
+        if delta is not None:
+            return 1.0 - abs(float(delta))
+        if legs:
+            leg_delta = legs[0].get("delta")
+            if leg_delta is not None:
+                return 1.0 - abs(float(leg_delta))
+
+    # Long single-leg: PoP ≈ delta
+    if strategy_type in ("long_call", "long_put"):
+        if delta is not None:
+            return abs(float(delta))
+        if legs:
+            leg_delta = legs[0].get("delta")
+            if leg_delta is not None:
+                return abs(float(leg_delta))
+
+    # Fallback: use raw delta if provided
+    if delta is not None:
+        return abs(float(delta))
+
+    return 0.5  # Unknown — neutral
+
 class EVResult(BaseModel):
     expected_value: float
     win_probability: float
@@ -61,14 +137,23 @@ def calculate_ev(
     strategy: Literal["long_call", "long_put", "short_call", "short_put",
                       "credit_spread", "debit_spread", "iron_condor", "strangle"],
     width: Optional[float] = None,
-    contracts: int = 1
+    contracts: int = 1,
+    legs: Optional[List[Dict[str, Any]]] = None,
 ) -> EVResult:
     """
     Calculates the Expected Value (EV) of an options trade.
+
+    Uses strategy-aware PoP via calculate_pop() instead of raw delta.
     """
-    delta = abs(delta) # Use absolute delta for probability
-    win_prob = delta
-    loss_prob = 1 - delta
+    # Use calibrated PoP instead of raw delta
+    win_prob = calculate_pop(
+        strategy_type=strategy,
+        legs=legs,
+        credit=premium if strategy in ("credit_spread", "short_call", "short_put") else None,
+        width=width,
+        delta=delta,
+    )
+    loss_prob = 1 - win_prob
 
     max_gain = 0
     max_loss = 0
@@ -100,14 +185,14 @@ def calculate_ev(
         max_loss = max_gain * UNBOUNDED_GAIN_CAP_MULT
         capped_trade = True
         trade_cost = -premium * 100 # Negative cost = credit
-        win_prob, loss_prob = loss_prob, win_prob # Invert for short positions
+        # Note: win_prob already inverted by calculate_pop for short strategies
         breakeven = strike + premium
 
     elif strategy == "short_put":
         max_gain = premium * 100
         max_loss = (strike - premium) * 100
         trade_cost = -premium * 100
-        win_prob, loss_prob = loss_prob, win_prob
+        # Note: win_prob already inverted by calculate_pop for short strategies
         breakeven = strike - premium
 
     elif strategy in ["credit_spread", "debit_spread"]:
@@ -118,7 +203,7 @@ def calculate_ev(
             max_gain = premium * 100
             max_loss = (width - premium) * 100
             trade_cost = -premium * 100
-            win_prob, loss_prob = loss_prob, win_prob
+            # Note: win_prob already calibrated by calculate_pop for credit spreads
 
         elif strategy == "debit_spread":
             max_gain = (width - premium) * 100

@@ -4,6 +4,7 @@ import { useState, useEffect } from 'react';
 import { useRouter } from 'next/navigation';
 import DashboardLayout from '@/components/DashboardLayout';
 import SyncHoldingsButton from '@/components/SyncHoldingsButton';
+import { Button } from '@/components/ui/button';
 import { formatOptionDisplay } from '@/lib/formatters';
 import { fetchWithAuthTimeout, ApiError } from '@/lib/api';
 import { RequireAuth } from '@/components/RequireAuth';
@@ -100,12 +101,12 @@ export default function PortfolioPage() {
               <div className="p-12 text-center text-gray-500">
                 <p className="mb-4 text-lg">No positions found.</p>
                 <p className="text-sm">Sync via Plaid or Import CSV in Settings to get started.</p>
-                <button
+                <Button
                     onClick={() => router.push('/settings')}
-                    className="mt-4 px-4 py-2 bg-blue-600 text-white rounded hover:bg-blue-700"
+                    className="mt-4 bg-blue-600 hover:bg-blue-700 text-white"
                 >
                     Go to Settings
-                </button>
+                </Button>
               </div>
             ) : (
               <div className="overflow-x-auto">

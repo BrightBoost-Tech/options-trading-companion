@@ -1,6 +1,7 @@
 'use client';
 
 import { useState } from 'react';
+import { Button } from '@/components/ui/button';
 
 export default function ComposePage() {
   const [symbol, setSymbol] = useState('');
@@ -105,13 +106,13 @@ export default function ComposePage() {
             />
           </div>
 
-          <button
+          <Button
             type="submit"
             disabled={validating}
-            className="w-full py-2 px-4 bg-blue-600 text-white rounded-lg hover:bg-blue-700 font-medium disabled:bg-gray-400"
+            className="w-full bg-blue-600 hover:bg-blue-700 text-white font-medium"
           >
             {validating ? 'Validating with AI...' : 'Validate Trade'}
-          </button>
+          </Button>
         </form>
 
         {result && (

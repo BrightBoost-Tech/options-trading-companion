@@ -682,6 +682,10 @@ class _ResilientAdapter(HTTPAdapter):
     exhaust its budget pulling stale sockets from the pool without ever
     opening a fresh one.  This adapter detects that scenario, discards
     all pooled connections, and retries once with a fresh socket.
+
+    Catches ConnectionError (includes BrokenPipeError), OSError (covers
+    low-level socket errors like EPIPE/ECONNRESET), and requests-level
+    connection failures.
     """
 
     def send(self, request, stream=False, timeout=None, verify=True, cert=None, proxies=None):
@@ -690,7 +694,7 @@ class _ResilientAdapter(HTTPAdapter):
                 request, stream=stream, timeout=timeout,
                 verify=verify, cert=cert, proxies=proxies,
             )
-        except (ConnectionError, requests.exceptions.ConnectionError) as exc:
+        except (ConnectionError, OSError, requests.exceptions.ConnectionError) as exc:
             self.close()
             return super().send(
                 request, stream=stream, timeout=timeout,

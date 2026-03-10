@@ -110,6 +110,78 @@ class TestComputePositionValue:
         )
         assert value is None
 
+    def test_partial_leg_failure_returns_none(self):
+        """If ANY leg in a multi-leg position fails, return None (all-or-nothing)."""
+        from packages.quantum.services.paper_mark_to_market_service import (
+            PaperMarkToMarketService,
+        )
+
+        # Iron condor: 4 legs, but leg 3 (short call) returns no quote.
+        # Without the fix, this would understate the short-call liability
+        # and massively overstate profit.
+        position = {
+            "id": "pos-partial",
+            "symbol": "SPY",
+            "quantity": 1,
+            "legs": [
+                {"symbol": "O:SPY260320P00480000", "action": "sell", "quantity": 1},
+                {"symbol": "O:SPY260320P00470000", "action": "buy", "quantity": 1},
+                {"symbol": "O:SPY260320C00520000", "action": "sell", "quantity": 1},  # This one fails
+                {"symbol": "O:SPY260320C00530000", "action": "buy", "quantity": 1},
+            ],
+        }
+
+        quotes = {
+            "O:SPY260320P00480000": {"bid_price": 1.50, "ask_price": 1.60},
+            "O:SPY260320P00470000": {"bid_price": 0.80, "ask_price": 0.90},
+            # O:SPY260320C00520000 intentionally missing — broken pipe / timeout
+            "O:SPY260320C00530000": {"bid_price": 0.60, "ask_price": 0.70},
+        }
+
+        class MockPoly:
+            def get_recent_quote(self, symbol):
+                return quotes.get(symbol)  # Returns None for missing leg
+
+        value = PaperMarkToMarketService._compute_position_value(
+            position, MockPoly(), lambda q: q is not None
+        )
+        # Must be None — partial pricing of short spreads is dangerous
+        assert value is None
+
+    def test_all_legs_succeed_returns_value(self):
+        """When all legs price successfully, return the total value."""
+        from packages.quantum.services.paper_mark_to_market_service import (
+            PaperMarkToMarketService,
+        )
+
+        position = {
+            "id": "pos-ok",
+            "symbol": "SPY",
+            "quantity": 1,
+            "legs": [
+                {"symbol": "O:SPY260320P00480000", "action": "sell", "quantity": 1},
+                {"symbol": "O:SPY260320P00470000", "action": "buy", "quantity": 1},
+            ],
+        }
+
+        quotes = {
+            "O:SPY260320P00480000": {"bid_price": 1.50, "ask_price": 1.60},
+            "O:SPY260320P00470000": {"bid_price": 0.80, "ask_price": 0.90},
+        }
+
+        class MockPoly:
+            def get_recent_quote(self, symbol):
+                return quotes.get(symbol)
+
+        value = PaperMarkToMarketService._compute_position_value(
+            position, MockPoly(), lambda q: q is not None
+        )
+        # Sell P480: mid=1.55, sell → -155.0
+        # Buy P470: mid=0.85, buy → +85.0
+        # Total = -70.0
+        assert value is not None
+        assert abs(value - (-70.0)) < 0.01
+
     def test_no_legs_falls_back_to_symbol(self):
         """Position with no legs quotes the underlying symbol."""
         from packages.quantum.services.paper_mark_to_market_service import (

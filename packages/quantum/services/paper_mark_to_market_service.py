@@ -40,6 +40,7 @@ class PaperMarkToMarketService:
             return {"status": "ok", "positions_marked": 0, "reason": "no_open_positions"}
 
         marked = 0
+        skipped = 0
         errors = []
 
         for pos in positions:
@@ -47,7 +48,8 @@ class PaperMarkToMarketService:
             try:
                 current_value = self._compute_position_value(pos, poly, _is_valid_quote)
                 if current_value is None:
-                    errors.append({"position_id": pos_id, "error": "no_valid_quotes"})
+                    skipped += 1
+                    errors.append({"position_id": pos_id, "error": "incomplete_quotes_skipped"})
                     continue
 
                 qty = float(pos.get("quantity") or 1)
@@ -75,9 +77,16 @@ class PaperMarkToMarketService:
                 logger.error(f"[MARK_TO_MARKET] Failed to mark position {pos_id}: {e}")
                 errors.append({"position_id": pos_id, "error": str(e)})
 
+        if skipped:
+            logger.info(
+                f"[MARK_TO_MARKET] user={user_id} marked={marked} "
+                f"skipped={skipped} (incomplete quotes) total={len(positions)}"
+            )
+
         return {
             "status": "ok" if not errors else "partial",
             "positions_marked": marked,
+            "positions_skipped": skipped,
             "errors": errors if errors else None,
             "total_positions": len(positions),
         }
@@ -154,7 +163,9 @@ class PaperMarkToMarketService:
         """
         Compute current market value of a position from its legs' mid-prices.
 
-        Returns total value in dollars, or None if no valid quotes obtained.
+        Returns total value in dollars, or None if ANY leg fails to get a
+        valid quote.  Partial pricing of multi-leg positions is dangerous:
+        a missing short-leg quote understates liabilities and overstates profit.
         """
         legs = position.get("legs") or []
         if not legs:
@@ -171,25 +182,32 @@ class PaperMarkToMarketService:
             qty = abs(float(position.get("quantity") or 1))
             return mid * 100 * qty
 
-        total_value = 0.0
-        any_valid = False
+        # First pass: collect mid-prices for ALL legs.  If any leg fails,
+        # abort the entire position — never partially price.
+        leg_values: List[float] = []
+        failed_legs: List[str] = []
+        priceable_legs = 0
 
         for leg in legs:
             if isinstance(leg, str):
-                continue  # Skip malformed legs
+                continue  # Skip malformed leg entries
 
             occ_symbol = leg.get("occ_symbol") or leg.get("symbol", "")
             if not occ_symbol:
                 continue
 
+            priceable_legs += 1
+
             quote = poly_service.get_recent_quote(occ_symbol)
             if not quote or not is_valid_quote_fn(quote):
+                failed_legs.append(occ_symbol)
                 continue
 
             bid = float(quote.get("bid_price") or quote.get("bid") or 0)
             ask = float(quote.get("ask_price") or quote.get("ask") or 0)
             mid = (bid + ask) / 2.0 if (bid and ask) else 0.0
             if mid <= 0:
+                failed_legs.append(occ_symbol)
                 continue
 
             multiplier = 100
@@ -197,7 +215,19 @@ class PaperMarkToMarketService:
             action = leg.get("action", "buy")
             side_mult = 1.0 if action == "buy" else -1.0
 
-            total_value += mid * multiplier * abs(leg_qty) * side_mult
-            any_valid = True
+            leg_values.append(mid * multiplier * abs(leg_qty) * side_mult)
 
-        return total_value if any_valid else None
+        if priceable_legs == 0:
+            return None
+
+        # All-or-nothing: reject partial pricing
+        if failed_legs:
+            pos_id = position.get("id", "?")
+            logger.warning(
+                f"[MARK_TO_MARKET] Skipping position {pos_id}: "
+                f"{len(failed_legs)}/{priceable_legs} legs failed to price "
+                f"({', '.join(failed_legs)}). Keeping previous mark."
+            )
+            return None
+
+        return sum(leg_values)

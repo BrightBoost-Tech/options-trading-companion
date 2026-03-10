@@ -674,6 +674,30 @@ def check_snapshots_executable(
     return (len(issues) == 0, issues)
 
 
+class _ResilientAdapter(HTTPAdapter):
+    """HTTPAdapter that recovers from stale connection pools.
+
+    When a worker idles between jobs (13+ min), Polygon drops the TCP
+    connection.  With pool_maxsize=50, urllib3's Retry(total=3) can
+    exhaust its budget pulling stale sockets from the pool without ever
+    opening a fresh one.  This adapter detects that scenario, discards
+    all pooled connections, and retries once with a fresh socket.
+    """
+
+    def send(self, request, stream=False, timeout=None, verify=True, cert=None, proxies=None):
+        try:
+            return super().send(
+                request, stream=stream, timeout=timeout,
+                verify=verify, cert=cert, proxies=proxies,
+            )
+        except (ConnectionError, requests.exceptions.ConnectionError) as exc:
+            self.close()
+            return super().send(
+                request, stream=stream, timeout=timeout,
+                verify=verify, cert=cert, proxies=proxies,
+            )
+
+
 class MarketDataTruthLayer:
     """
     Truth Layer for Market Data.
@@ -699,14 +723,16 @@ class MarketDataTruthLayer:
         # Configure retry strategy
         retry_strategy = Retry(
             total=3,
+            connect=3,
+            read=2,
             backoff_factor=0.5,
             status_forcelist=[429, 500, 502, 503, 504],
             allowed_methods=["HEAD", "GET", "OPTIONS"]
         )
 
-        # Mount adapter with increased pool size for parallel execution
+        # Mount resilient adapter — auto-recovers from stale connection pools
         # pool_maxsize=50 supports up to 50 concurrent threads without blocking on connection pool
-        adapter = HTTPAdapter(
+        adapter = _ResilientAdapter(
             pool_connections=10,
             pool_maxsize=50,
             max_retries=retry_strategy

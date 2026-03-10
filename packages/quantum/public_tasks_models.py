@@ -594,6 +594,74 @@ class PaperSafetyCloseOnePayload(TaskPayloadBase):
         return v
 
 
+class PaperExitEvaluatePayload(TaskPayloadBase):
+    """
+    Payload for /tasks/paper/exit-evaluate.
+
+    Evaluates open paper positions against condition-based exit rules
+    and closes only those that trigger.
+
+    Exit conditions (checked in order — first match triggers close):
+    1. target_profit: Captured >= 50% of max credit
+    2. stop_loss: Loss exceeds 2x the credit received
+    3. dte_threshold: 7 DTE or less (gamma risk)
+    4. expiration_day: Expires today — must close
+
+    Schedule: 3:00 PM CDT (before mark-to-market at 3:30 PM).
+
+    Requirements:
+    - Requires specific user_id (not "all")
+    - Must be in paper mode (ops_state.mode == "paper")
+    - Respects pause gate
+    """
+    user_id: str = Field(
+        ...,  # Required
+        min_length=32,
+        description="Target user UUID (required, cannot be 'all')"
+    )
+
+    @field_validator("user_id")
+    @classmethod
+    def validate_user_id_not_all(cls, v: str) -> str:
+        """Validate user_id is a specific user, not 'all'."""
+        if v == "all":
+            raise ValueError("user_id must be a specific user UUID, not 'all'")
+        if len(v) < 32:
+            raise ValueError("user_id must be a valid UUID")
+        return v
+
+
+class PaperMarkToMarketPayload(TaskPayloadBase):
+    """
+    Payload for /tasks/paper/mark-to-market.
+
+    Refreshes position marks with live mid-price quotes and saves
+    EOD snapshots for unrealized P&L tracking.
+
+    Schedule: 3:30 PM CDT (after exit evaluator at 3:00 PM).
+
+    Requirements:
+    - Requires specific user_id (not "all")
+    - Must be in paper mode (ops_state.mode == "paper")
+    - Respects pause gate
+    """
+    user_id: str = Field(
+        ...,  # Required
+        min_length=32,
+        description="Target user UUID (required, cannot be 'all')"
+    )
+
+    @field_validator("user_id")
+    @classmethod
+    def validate_user_id_not_all(cls, v: str) -> str:
+        """Validate user_id is a specific user, not 'all'."""
+        if v == "all":
+            raise ValueError("user_id must be a specific user UUID, not 'all'")
+        if len(v) < 32:
+            raise ValueError("user_id must be a valid UUID")
+        return v
+
+
 # =============================================================================
 # Scope Constants
 # =============================================================================
@@ -619,6 +687,8 @@ TASK_SCOPES = {
     "/tasks/paper/auto-close": "tasks:paper_auto_close",
     "/tasks/paper/process-orders": "tasks:paper_process_orders",
     "/tasks/paper/safety-close-one": "tasks:paper_safety_close_one",
+    "/tasks/paper/exit-evaluate": "tasks:paper_exit_evaluate",
+    "/tasks/paper/mark-to-market": "tasks:paper_mark_to_market",
     "/tasks/paper/learning-ingest": "tasks:paper_learning_ingest",
 }
 

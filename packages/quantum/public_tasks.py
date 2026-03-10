@@ -33,6 +33,8 @@ from packages.quantum.public_tasks_models import (
     ValidationPreflightPayload,
     ValidationInitWindowPayload,
     PaperSafetyCloseOnePayload,
+    PaperExitEvaluatePayload,
+    PaperMarkToMarketPayload,
     PaperLearningIngestPayload,
     DEFAULT_STRATEGY_NAME,
 )
@@ -1682,6 +1684,94 @@ async def task_paper_safety_close_one(
             "idempotency_key": idempotency_key,
             "closed": 0
         }
+
+
+@router.post("/paper/exit-evaluate", status_code=202)
+@limiter.limit("20/minute")
+async def task_paper_exit_evaluate(
+    request: Request,
+    payload: PaperExitEvaluatePayload = Body(...),
+    auth: TaskSignatureResult = Depends(verify_task_signature("tasks:paper_exit_evaluate"))
+):
+    """
+    Evaluate exit conditions on open paper positions and close triggered ones.
+
+    Auth: Requires v4 HMAC signature with scope 'tasks:paper_exit_evaluate'.
+
+    Exit conditions (checked in order — first match triggers close):
+    1. target_profit: Captured >= 50% of max credit
+    2. stop_loss: Loss exceeds 2x the credit received
+    3. dte_threshold: 7 DTE or less (gamma risk)
+    4. expiration_day: Expires today — must close
+
+    Schedule: 3:00 PM CDT (before mark-to-market at 3:30 PM).
+
+    Requirements:
+    - Requires specific user_id (not "all")
+    - Must be in paper mode (ops_state.mode == "paper")
+    - Respects pause gate
+    """
+    user_id = payload.user_id
+
+    # Check gates (paper mode, not paused)
+    gate_error = _check_readiness_hardening_gates(user_id)
+    if gate_error:
+        return gate_error
+
+    job_name = "paper_exit_evaluate"
+    idempotency_key = _readiness_hardening_idempotency_key("exit-evaluate", user_id)
+
+    job_payload = {
+        "user_id": user_id,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    }
+
+    return enqueue_job_run(
+        job_name=job_name,
+        idempotency_key=idempotency_key,
+        payload=job_payload
+    )
+
+
+@router.post("/paper/mark-to-market", status_code=202)
+@limiter.limit("20/minute")
+async def task_paper_mark_to_market(
+    request: Request,
+    payload: PaperMarkToMarketPayload = Body(...),
+    auth: TaskSignatureResult = Depends(verify_task_signature("tasks:paper_mark_to_market"))
+):
+    """
+    Refresh position marks and save EOD snapshots.
+
+    Auth: Requires v4 HMAC signature with scope 'tasks:paper_mark_to_market'.
+
+    Schedule: 3:30 PM CDT (after exit evaluator at 3:00 PM).
+
+    Requirements:
+    - Requires specific user_id (not "all")
+    - Must be in paper mode (ops_state.mode == "paper")
+    - Respects pause gate
+    """
+    user_id = payload.user_id
+
+    # Check gates (paper mode, not paused)
+    gate_error = _check_readiness_hardening_gates(user_id)
+    if gate_error:
+        return gate_error
+
+    job_name = "paper_mark_to_market"
+    idempotency_key = _readiness_hardening_idempotency_key("mark-to-market", user_id)
+
+    job_payload = {
+        "user_id": user_id,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    }
+
+    return enqueue_job_run(
+        job_name=job_name,
+        idempotency_key=idempotency_key,
+        payload=job_payload
+    )
 
 
 @router.post("/validation/cohort-eval", status_code=200)

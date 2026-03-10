@@ -891,6 +891,22 @@ class GoLiveValidationService:
             logger.warning(f"Failed to check open positions: {e}")
             return False
 
+    def _get_current_unrealized_total(self, user_id: str) -> float:
+        """Sum unrealized_pl from all open paper positions for mark-to-market checkpoint."""
+        try:
+            portfolio_ids = self._get_paper_portfolio_ids(user_id)
+            if not portfolio_ids:
+                return 0.0
+            res = self.supabase.table("paper_positions") \
+                .select("unrealized_pl") \
+                .in_("portfolio_id", portfolio_ids) \
+                .neq("quantity", 0) \
+                .execute()
+            return sum(float(p.get("unrealized_pl") or 0.0) for p in (res.data or []))
+        except Exception as e:
+            logger.warning(f"Failed to get unrealized total for {user_id}: {e}")
+            return 0.0
+
     def _recent_paper_fills_count(self, portfolio_ids: List[str], since_utc: datetime) -> int:
         """Count recent filled orders (ingestion lag detection)."""
         if not portfolio_ids:
@@ -1068,8 +1084,18 @@ class GoLiveValidationService:
             logger.error(f"Error fetching paper outcomes: {e}")
 
         # 6. Calculate metrics
-        total_pnl = sum(float(o.get("pnl_realized") or 0.0) for o in outcomes)
+        total_realized = sum(float(o.get("pnl_realized") or 0.0) for o in outcomes)
+
+        # v5: Include unrealized P&L from open positions (mark-to-market).
+        # Positions held overnight contribute to total portfolio P&L even
+        # when not yet closed.  Mark-to-market refresh runs at 3:30 PM CDT
+        # to ensure current_mark / unrealized_pl are fresh before checkpoint.
+        current_unrealized = self._get_current_unrealized_total(user_id)
+        total_pnl = total_realized + current_unrealized
+
         total_return_pct = (total_pnl / baseline) if baseline > 0 else 0.0
+        # Drawdown: computed from realized outcomes only — unrealized
+        # fluctuations should not trigger fail-fast on open positions.
         max_drawdown_pct = self._compute_drawdown(outcomes, baseline)
 
         # 7. Calculate progress and pacing target
@@ -1089,28 +1115,21 @@ class GoLiveValidationService:
             "window_end": window_end.isoformat(),
             "bucket": bucket_key,
             "outcome_count": len(outcomes),
-            "pnl_total": total_pnl
+            "pnl_total": total_pnl,
+            "pnl_realized": total_realized,
+            "pnl_unrealized": current_unrealized,
         }
 
         # 8. Handle no outcomes yet
-        # v4-L1H: Outcomes are PRIMARY evidence of activity. If outcomes exist, we ALWAYS
-        # proceed to evaluate pass/miss. The "no_pending_suggestions" skip should ONLY apply
-        # when outcome_count == 0 AND there's no linked order activity.
-        if not outcomes:
-            # v4-L1G Hardening (Strict): Strict rules for streak reset on "no outcomes"
-            # Constraint: "No outcomes" must NEVER reset streak unless we prove a missed opportunity.
-            # In practice, with strict constraints, "no outcomes" almost always results in a SKIP.
+        # v5: "No activity" = no realized outcomes AND no unrealized changes.
+        # If open positions have non-zero unrealized P&L (from mark-to-market),
+        # fall through to pacing evaluation instead of skipping.
+        has_mtm_activity = current_unrealized != 0.0
 
-            # Statuses:
-            # - skipped_non_trading_day: Weekend (Saturday/Sunday in Chicago time)
-            # - skipped_no_close_activity: Open positions exist
-            # - skipped_no_signal_day: No pending suggestions
-            # - skipped_no_signal_day (autopilot_inactive): Suggestions exist but no linked orders
-            # - skipped_no_fill_activity: Orders exist but no fills (Ambiguous)
+        if not outcomes and not has_mtm_activity:
+            # No realized closes AND no unrealized changes — skip evaluation.
 
             # A. Weekend Check (Chicago Time)
-            # Skip streak evaluation on weekends (no trading activity expected).
-            # NOTE: Weekend skip does NOT update updated_at (no activity expected)
             if is_weekend_chicago(now):
                 return {
                     **result_base,
@@ -1124,14 +1143,14 @@ class GoLiveValidationService:
             # B. Open Positions Check (via portfolio_id join)
             portfolio_ids = self._get_paper_portfolio_ids(user_id)
             if self._has_open_paper_positions(portfolio_ids):
-                # Update updated_at even on skip (confirms evaluation ran)
+                # Positions open but unrealized_pl is 0 (marks not yet refreshed)
                 self.supabase.table("v3_go_live_state").update({
                     "updated_at": now.isoformat()
                 }).eq("user_id", user_id).execute()
                 return {
                     **result_base,
                     "status": "skipped_no_close_activity",
-                    "reason": "open_positions_held",
+                    "reason": "open_positions_held_no_marks",
                     "paper_consecutive_passes": current_streak,
                     "streak_before": current_streak,
                     "paper_ready": state.get("paper_ready", False)
@@ -2396,7 +2415,11 @@ class GoLiveValidationService:
                 }
 
             # 6. Calculate metrics
-            total_pnl = sum(float(o.get("pnl_realized") or 0.0) for o in outcomes)
+            total_realized = sum(float(o.get("pnl_realized") or 0.0) for o in outcomes)
+            # v5: Include unrealized P&L from open positions (mark-to-market)
+            current_unrealized = self._get_current_unrealized_total(user_id)
+            total_pnl = total_realized + current_unrealized
+
             total_return_pct = (total_pnl / baseline) if baseline > 0 else 0.0
             max_drawdown_pct = self._compute_drawdown(outcomes, baseline)
 

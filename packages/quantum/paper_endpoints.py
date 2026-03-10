@@ -1347,6 +1347,22 @@ def _commit_fill(supabase, analytics, user_id, order, fill_res, quote, portfolio
         else:
             # Create new position
             # signed_incremental_qty is the quantity
+            # Compute max_credit and nearest_expiry from legs for exit evaluation
+            legs_list = ticket.get("legs", [])
+            max_credit = this_fill_price  # For credit strategies, entry price ≈ credit received
+            nearest_expiry = None
+            try:
+                expiry_dates = []
+                for leg in legs_list:
+                    if isinstance(leg, dict):
+                        exp = leg.get("expiry") or leg.get("expiration")
+                        if exp:
+                            expiry_dates.append(str(exp)[:10])  # YYYY-MM-DD
+                if expiry_dates:
+                    nearest_expiry = min(expiry_dates)
+            except Exception:
+                pass  # Non-critical — exit evaluator can still use DTE from order
+
             pos_payload = {
                 "portfolio_id": portfolio["id"],
                 "user_id": user_id,
@@ -1356,7 +1372,10 @@ def _commit_fill(supabase, analytics, user_id, order, fill_res, quote, portfolio
                 "avg_entry_price": this_fill_price,
                 "current_mark": this_fill_price,
                 "unrealized_pl": 0.0,
-                "legs": ticket.get("legs", []),
+                "legs": legs_list,
+                "max_credit": max_credit,
+                "nearest_expiry": nearest_expiry,
+                "status": "open",
                 # Linkage
                 "trace_id": order.get("trace_id"),
                 "suggestion_id": order.get("suggestion_id")

@@ -1,0 +1,203 @@
+"""
+Paper Mark-to-Market Service
+
+Refreshes current_mark and unrealized_pl on open paper_positions using
+live option quotes, then saves an EOD snapshot for checkpoint evaluation.
+
+Schedule: 3:30 PM CDT (before checkpoint), while quotes are still live.
+"""
+
+import logging
+from datetime import datetime, timezone, date
+from typing import Dict, Any, List, Optional
+
+logger = logging.getLogger(__name__)
+
+
+class PaperMarkToMarketService:
+    """Fetches fresh quotes and marks open paper positions to market."""
+
+    def __init__(self, supabase_client):
+        self.client = supabase_client
+
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
+
+    def refresh_marks(self, user_id: str) -> Dict[str, Any]:
+        """
+        Fetch fresh quotes for all open positions and update current_mark + unrealized_pl.
+
+        Returns summary dict with positions_marked, errors, etc.
+        """
+        from packages.quantum.market_data import PolygonService
+        from packages.quantum.paper_endpoints import _is_valid_quote
+
+        poly = PolygonService()
+        positions = self._get_open_positions(user_id)
+
+        if not positions:
+            return {"status": "ok", "positions_marked": 0, "reason": "no_open_positions"}
+
+        marked = 0
+        errors = []
+
+        for pos in positions:
+            pos_id = pos["id"]
+            try:
+                current_value = self._compute_position_value(pos, poly, _is_valid_quote)
+                if current_value is None:
+                    errors.append({"position_id": pos_id, "error": "no_valid_quotes"})
+                    continue
+
+                qty = float(pos.get("quantity") or 1)
+                multiplier = 100
+                entry_value = float(pos["avg_entry_price"]) * abs(qty) * multiplier
+
+                # For short positions (negative qty), value math is inverted:
+                # entry_value = credit received, current_value = cost to close
+                if qty < 0:
+                    unrealized = entry_value - abs(current_value)
+                else:
+                    unrealized = current_value - entry_value
+
+                per_contract_mark = current_value / (abs(qty) * multiplier) if qty != 0 else 0.0
+
+                self.client.table("paper_positions").update({
+                    "current_mark": per_contract_mark,
+                    "unrealized_pl": unrealized,
+                    "updated_at": datetime.now(timezone.utc).isoformat(),
+                }).eq("id", pos_id).execute()
+
+                marked += 1
+
+            except Exception as e:
+                logger.error(f"[MARK_TO_MARKET] Failed to mark position {pos_id}: {e}")
+                errors.append({"position_id": pos_id, "error": str(e)})
+
+        return {
+            "status": "ok" if not errors else "partial",
+            "positions_marked": marked,
+            "errors": errors if errors else None,
+            "total_positions": len(positions),
+        }
+
+    def save_eod_snapshot(self, user_id: str, snapshot_date: Optional[date] = None) -> Dict[str, Any]:
+        """
+        Save current unrealized_pl for all open positions as an EOD snapshot.
+        Used by checkpoint to compute daily unrealized change.
+        """
+        snapshot_date = snapshot_date or date.today()
+        positions = self._get_open_positions(user_id)
+
+        if not positions:
+            return {"status": "ok", "snapshots_saved": 0}
+
+        saved = 0
+        for pos in positions:
+            try:
+                self.client.table("paper_eod_snapshots").upsert({
+                    "position_id": pos["id"],
+                    "user_id": user_id,
+                    "portfolio_id": pos["portfolio_id"],
+                    "snapshot_date": snapshot_date.isoformat(),
+                    "current_mark": pos.get("current_mark"),
+                    "unrealized_pl": float(pos.get("unrealized_pl") or 0.0),
+                }, on_conflict="position_id,snapshot_date").execute()
+                saved += 1
+            except Exception as e:
+                logger.error(f"[MARK_TO_MARKET] Failed to save snapshot for position {pos['id']}: {e}")
+
+        return {"status": "ok", "snapshots_saved": saved}
+
+    def get_current_unrealized_total(self, user_id: str) -> float:
+        """
+        Sum unrealized_pl across all open paper positions for a user.
+        Used by checkpoint to compute total_pnl = realized + unrealized.
+        """
+        positions = self._get_open_positions(user_id)
+        return sum(float(p.get("unrealized_pl") or 0.0) for p in positions)
+
+    # ------------------------------------------------------------------
+    # Internal helpers
+    # ------------------------------------------------------------------
+
+    def _get_open_positions(self, user_id: str) -> List[Dict[str, Any]]:
+        """Get all open paper positions for a user via portfolio join."""
+        try:
+            port_res = self.client.table("paper_portfolios") \
+                .select("id") \
+                .eq("user_id", user_id) \
+                .execute()
+
+            portfolio_ids = [p["id"] for p in (port_res.data or [])]
+            if not portfolio_ids:
+                return []
+
+            pos_res = self.client.table("paper_positions") \
+                .select("*") \
+                .in_("portfolio_id", portfolio_ids) \
+                .neq("quantity", 0) \
+                .execute()
+
+            return pos_res.data or []
+        except Exception as e:
+            logger.error(f"[MARK_TO_MARKET] Failed to fetch positions for {user_id}: {e}")
+            return []
+
+    @staticmethod
+    def _compute_position_value(
+        position: Dict[str, Any],
+        poly_service,
+        is_valid_quote_fn,
+    ) -> Optional[float]:
+        """
+        Compute current market value of a position from its legs' mid-prices.
+
+        Returns total value in dollars, or None if no valid quotes obtained.
+        """
+        legs = position.get("legs") or []
+        if not legs:
+            # No legs — try to quote the symbol directly
+            symbol = position.get("symbol", "")
+            quote = poly_service.get_recent_quote(symbol)
+            if not quote or not is_valid_quote_fn(quote):
+                return None
+            bid = float(quote.get("bid_price") or quote.get("bid") or 0)
+            ask = float(quote.get("ask_price") or quote.get("ask") or 0)
+            mid = (bid + ask) / 2.0 if (bid and ask) else 0.0
+            if mid <= 0:
+                return None
+            qty = abs(float(position.get("quantity") or 1))
+            return mid * 100 * qty
+
+        total_value = 0.0
+        any_valid = False
+
+        for leg in legs:
+            if isinstance(leg, str):
+                continue  # Skip malformed legs
+
+            occ_symbol = leg.get("occ_symbol") or leg.get("symbol", "")
+            if not occ_symbol:
+                continue
+
+            quote = poly_service.get_recent_quote(occ_symbol)
+            if not quote or not is_valid_quote_fn(quote):
+                continue
+
+            bid = float(quote.get("bid_price") or quote.get("bid") or 0)
+            ask = float(quote.get("ask_price") or quote.get("ask") or 0)
+            mid = (bid + ask) / 2.0 if (bid and ask) else 0.0
+            if mid <= 0:
+                continue
+
+            multiplier = 100
+            leg_qty = float(leg.get("quantity") or position.get("quantity") or 1)
+            action = leg.get("action", "buy")
+            side_mult = 1.0 if action == "buy" else -1.0
+
+            total_value += mid * multiplier * abs(leg_qty) * side_mult
+            any_valid = True
+
+        return total_value if any_valid else None

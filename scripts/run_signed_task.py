@@ -39,7 +39,8 @@ Supported Tasks:
     validation_autopromote_cohort  - POST /tasks/validation/autopromote-cohort (requires user_id)
     validation_preflight           - POST /tasks/validation/preflight (requires user_id)
     validation_init_window         - POST /tasks/validation/init-window (requires user_id)
-    paper_safety_close_one         - POST /tasks/paper/safety-close-one (requires user_id)
+    paper_exit_evaluate            - POST /tasks/paper/exit-evaluate (requires user_id)
+    paper_mark_to_market           - POST /tasks/paper/mark-to-market (requires user_id)
 """
 
 import argparse
@@ -69,7 +70,8 @@ VERBOSE_RESPONSE_TASKS = {
     "paper_process_orders",
     "paper_auto_execute",
     "paper_auto_close",
-    "paper_safety_close_one",
+    "paper_exit_evaluate",
+    "paper_mark_to_market",
 }
 
 # Fields that should be redacted if present in response (safety measure)
@@ -237,10 +239,16 @@ TASKS = {
         "description": "Initialize forward checkpoint window (requires user_id)",
         "user_id_mode": "require",
     },
-    "paper_safety_close_one": {
-        "path": "/tasks/paper/safety-close-one",
-        "scope": "tasks:paper_safety_close_one",
-        "description": "Safety close one paper position (requires user_id)",
+    "paper_exit_evaluate": {
+        "path": "/tasks/paper/exit-evaluate",
+        "scope": "tasks:paper_exit_evaluate",
+        "description": "Evaluate exit conditions on open positions (requires user_id)",
+        "user_id_mode": "require",
+    },
+    "paper_mark_to_market": {
+        "path": "/tasks/paper/mark-to-market",
+        "scope": "tasks:paper_mark_to_market",
+        "description": "Refresh position marks and save EOD snapshots (requires user_id)",
         "user_id_mode": "require",
     },
     "paper_learning_ingest": {
@@ -330,7 +338,7 @@ def check_time_gate(task_name: str, skip_time_gate: bool = False) -> bool:
         "suggestions_close": (8, 0),   # 8:00 AM Chicago
         "suggestions_open": (11, 0),   # 11:00 AM Chicago
         "learning_ingest": (16, 10),   # 4:10 PM Chicago
-        "paper_auto_close": (9, 0),    # 9:00 AM Chicago (after options market open)
+        # paper_auto_close removed: superseded by paper_exit_evaluate
     }
 
     if task_name not in TIME_GATES:

@@ -52,10 +52,10 @@ on:
     # Schedule at 16:30 UTC to catch CDT
     - cron: '30 16 * * 1-5'
 
-    # Paper Auto-Close - 9:00 AM Chicago (after options market open at 8:30 AM)
-    # CDT (summer): 14:00 UTC | CST (winter): 15:00 UTC
-    # CDT slot (0 14) shared with suggestions_close CST; Python time-gate handles DST
-    - cron: '0 15 * * 1-5'
+    # Paper Auto-Close - DISABLED: superseded by paper_exit_evaluate (condition-based exits)
+    # + MTM unrealized P&L in checkpoint. Force-closing healthy positions destroys alpha.
+    # Was: 9:00 AM Chicago (0 15 UTC)
+    # - cron: '0 15 * * 1-5'
 
     # Shadow Checkpoint Midday - 1:00 PM Chicago (intraday pacing check)
     # CST (winter): 19:00 UTC | CDT (summer): 18:00 UTC
@@ -123,6 +123,8 @@ on:
           - ops_health_check
           - paper_auto_execute
           - paper_auto_close
+          - paper_exit_evaluate
+          - paper_mark_to_market
           - paper_process_orders
           - paper_learning_ingest
           - validation_shadow_eval
@@ -130,7 +132,6 @@ on:
           - validation_autopromote_cohort
           - validation_preflight
           - validation_init_window
-          - paper_safety_close_one
       skip_time_gate:
         description: 'Skip time gate check'
         required: false
@@ -486,12 +487,13 @@ jobs:
           python scripts/run_signed_task.py paper_auto_execute --skip-time-gate
 
   # ============================================================================
-  # Scheduled: Paper Auto-Close (9:00 AM Chicago)
+  # DISABLED: Paper Auto-Close — superseded by paper_exit_evaluate + MTM
+  # Kept for manual dispatch only (workflow_dispatch). Cron disabled above.
   # ============================================================================
   paper-auto-close:
-    name: Paper Auto-Close (9:00 AM Chicago)
+    name: Paper Auto-Close (DISABLED - manual only)
     runs-on: ubuntu-latest
-    if: github.event_name == 'schedule' && (github.event.schedule == '0 14 * * 1-5' || github.event.schedule == '0 15 * * 1-5')
+    if: "false"
 
     steps:
       - name: Checkout

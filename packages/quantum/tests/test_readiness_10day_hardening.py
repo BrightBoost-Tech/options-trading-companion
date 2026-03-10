@@ -208,13 +208,6 @@ class TestPayloadModels(unittest.TestCase):
         payload = ValidationInitWindowPayload(user_id="test-user-uuid-12345678901234567890")
         self.assertEqual(payload.user_id, "test-user-uuid-12345678901234567890")
 
-    def test_paper_safety_close_one_payload_valid(self):
-        """PaperSafetyCloseOnePayload should accept valid user_id."""
-        from packages.quantum.public_tasks_models import PaperSafetyCloseOnePayload
-
-        payload = PaperSafetyCloseOnePayload(user_id="test-user-uuid-12345678901234567890")
-        self.assertEqual(payload.user_id, "test-user-uuid-12345678901234567890")
-
     def test_validation_preflight_payload_rejects_short_uuid(self):
         """ValidationPreflightPayload should reject short user_id."""
         from packages.quantum.public_tasks_models import ValidationPreflightPayload
@@ -230,14 +223,6 @@ class TestPayloadModels(unittest.TestCase):
 
         with self.assertRaises(pydantic.ValidationError):
             ValidationInitWindowPayload(user_id="all")
-
-    def test_paper_safety_close_one_payload_rejects_all(self):
-        """PaperSafetyCloseOnePayload should reject user_id='all'."""
-        from packages.quantum.public_tasks_models import PaperSafetyCloseOnePayload
-        import pydantic
-
-        with self.assertRaises(pydantic.ValidationError):
-            PaperSafetyCloseOnePayload(user_id="all")
 
 
 # =============================================================================
@@ -261,51 +246,12 @@ class TestTaskScopes(unittest.TestCase):
         self.assertIn("/tasks/validation/init-window", TASK_SCOPES)
         self.assertEqual(TASK_SCOPES["/tasks/validation/init-window"], "tasks:validation_init_window")
 
-    def test_safety_close_scope_exists(self):
-        """Paper safety-close-one scope should be defined."""
+    def test_exit_evaluate_scope_exists(self):
+        """Paper exit-evaluate scope should be defined."""
         from packages.quantum.public_tasks_models import TASK_SCOPES
 
-        self.assertIn("/tasks/paper/safety-close-one", TASK_SCOPES)
-        self.assertEqual(TASK_SCOPES["/tasks/paper/safety-close-one"], "tasks:paper_safety_close_one")
-
-
-# =============================================================================
-# Tests: Safety Close Logic
-# =============================================================================
-
-class TestSafetyCloseLogic(unittest.TestCase):
-    """Tests for safety close position selection logic."""
-
-    def test_safety_close_no_ops_when_no_positions(self):
-        """Safety close should no-op when there are no open positions."""
-        positions = []
-        self.assertEqual(len(positions), 0)
-
-    def test_safety_close_selects_oldest_position(self):
-        """Safety close should deterministically select oldest position."""
-        positions = create_mock_positions(count=3)
-
-        # Sort by created_at asc, then id asc (deterministic)
-        sorted_positions = sorted(positions, key=lambda p: (p["created_at"], p["id"]))
-
-        # First position should be the oldest
-        oldest = sorted_positions[0]
-        self.assertEqual(oldest["id"], "position-0")
-
-    def test_safety_close_deterministic_with_same_timestamp(self):
-        """Safety close should use position_id as tiebreaker."""
-        now = datetime.now(timezone.utc).isoformat()
-        positions = [
-            {"id": "pos-b", "created_at": now},
-            {"id": "pos-a", "created_at": now},
-            {"id": "pos-c", "created_at": now},
-        ]
-
-        # Sort by created_at asc, then id asc
-        sorted_positions = sorted(positions, key=lambda p: (p["created_at"], p["id"]))
-
-        # First should be pos-a (alphabetically first)
-        self.assertEqual(sorted_positions[0]["id"], "pos-a")
+        self.assertIn("/tasks/paper/exit-evaluate", TASK_SCOPES)
+        self.assertEqual(TASK_SCOPES["/tasks/paper/exit-evaluate"], "tasks:paper_exit_evaluate")
 
 
 # =============================================================================
@@ -443,14 +389,14 @@ class TestRunSignedTaskDefinitions(unittest.TestCase):
         self.assertIn("/tasks/validation/init-window", content)
         self.assertIn("tasks:validation_init_window", content)
 
-    def test_paper_safety_close_one_task_defined(self):
-        """paper_safety_close_one task should be defined."""
+    def test_paper_exit_evaluate_task_defined(self):
+        """paper_exit_evaluate task should be defined."""
         with open(self._get_script_path(), "r", encoding="utf-8") as f:
             content = f.read()
 
-        self.assertIn('"paper_safety_close_one":', content)
-        self.assertIn("/tasks/paper/safety-close-one", content)
-        self.assertIn("tasks:paper_safety_close_one", content)
+        self.assertIn('"paper_exit_evaluate":', content)
+        self.assertIn("/tasks/paper/exit-evaluate", content)
+        self.assertIn("tasks:paper_exit_evaluate", content)
 
 
 # =============================================================================
@@ -484,13 +430,13 @@ class TestWorkflowDefinitions(unittest.TestCase):
         self.assertIn("validation-preflight-midday", content)
         self.assertIn("5 19 * * 1-5", content)
 
-    def test_safety_close_cron_defined(self):
-        """paper-safety-close-one cron job should be defined."""
+    def test_exit_evaluate_cron_defined(self):
+        """paper-exit-evaluate cron job should be defined."""
         with open(self._get_workflow_path(), "r", encoding="utf-8") as f:
             content = f.read()
 
-        self.assertIn("paper-safety-close-one", content)
-        self.assertIn("0 23 * * 1-5", content)
+        self.assertIn("paper-exit-evaluate", content)
+        self.assertIn("0 20 * * 1-5", content)
 
 
 if __name__ == "__main__":

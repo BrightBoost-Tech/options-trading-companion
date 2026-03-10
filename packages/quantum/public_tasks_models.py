@@ -559,41 +559,6 @@ class ValidationInitWindowPayload(TaskPayloadBase):
         return v
 
 
-class PaperSafetyCloseOnePayload(TaskPayloadBase):
-    """
-    Payload for /tasks/paper/safety-close-one.
-
-    v4-L1F: Safety net to guarantee at least one paper close outcome
-    exists before checkpoint time. Prevents "no outcomes = miss" resets.
-
-    Behavior:
-    - If there is at least one open paper position, closes exactly one
-      (deterministically: oldest opened_at, then position_id asc)
-    - If no open positions exist, no-ops without error
-    - Idempotent once per day (UTC bucket)
-
-    Requirements:
-    - Requires specific user_id (not "all")
-    - Must be in paper mode (ops_state.mode == "paper")
-    - Respects pause gate
-    """
-    user_id: str = Field(
-        ...,  # Required
-        min_length=32,
-        description="Target user UUID (required, cannot be 'all')"
-    )
-
-    @field_validator("user_id")
-    @classmethod
-    def validate_user_id_not_all(cls, v: str) -> str:
-        """Validate user_id is a specific user, not 'all'."""
-        if v == "all":
-            raise ValueError("user_id must be a specific user UUID, not 'all'")
-        if len(v) < 32:
-            raise ValueError("user_id must be a valid UUID")
-        return v
-
-
 class PaperExitEvaluatePayload(TaskPayloadBase):
     """
     Payload for /tasks/paper/exit-evaluate.
@@ -686,7 +651,6 @@ TASK_SCOPES = {
     "/tasks/paper/auto-execute": "tasks:paper_auto_execute",
     "/tasks/paper/auto-close": "tasks:paper_auto_close",
     "/tasks/paper/process-orders": "tasks:paper_process_orders",
-    "/tasks/paper/safety-close-one": "tasks:paper_safety_close_one",
     "/tasks/paper/exit-evaluate": "tasks:paper_exit_evaluate",
     "/tasks/paper/mark-to-market": "tasks:paper_mark_to_market",
     "/tasks/paper/learning-ingest": "tasks:paper_learning_ingest",

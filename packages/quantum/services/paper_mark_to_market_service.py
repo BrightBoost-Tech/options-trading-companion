@@ -67,12 +67,14 @@ class PaperMarkToMarketService:
 
                 old_mark = pos.get("current_mark")
                 old_upl = pos.get("unrealized_pl")
-                logger.info(
+                mtm_msg = (
                     f"[MTM_DEBUG] position={pos_id} symbol={pos.get('symbol')} "
                     f"qty={qty} entry_value={entry_value} current_value={current_value} "
                     f"per_contract_mark={per_contract_mark} unrealized={unrealized} "
                     f"old_mark={old_mark} old_upl={old_upl}"
                 )
+                logger.info(mtm_msg)
+                print(mtm_msg, flush=True)
 
                 self.client.table("paper_positions").update({
                     "current_mark": per_contract_mark,

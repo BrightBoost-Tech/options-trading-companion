@@ -281,6 +281,18 @@ def enqueue_job_run(job_name: str, idempotency_key: str, payload: Dict[str, Any]
     # Normal flow: create job run and enqueue
     job_run = store.create_or_get(job_name, idempotency_key, payload)
 
+    # Skip RQ enqueue if job is already in a terminal state (idempotency guard)
+    TERMINAL_STATES = ("succeeded", "dead_lettered", "cancelled")
+    if job_run["status"] in TERMINAL_STATES:
+        return {
+            "job_run_id": job_run["id"],
+            "job_name": job_name,
+            "idempotency_key": idempotency_key,
+            "rq_job_id": None,
+            "status": job_run["status"],
+            "skipped": True,
+        }
+
     result = enqueue_idempotent(
         job_name=job_name,
         idempotency_key=idempotency_key,

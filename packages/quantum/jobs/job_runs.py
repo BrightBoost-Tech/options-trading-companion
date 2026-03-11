@@ -117,10 +117,22 @@ class JobRunStore:
         Marks the job as failed_retryable, but without scheduling an immediate retry.
         This state indicates the job completed but some items failed (e.g. some users).
         """
+        now = datetime.now().isoformat()
+        job = self.get_job(job_run_id)
+        duration_ms = None
+        if job and job.get("started_at"):
+            try:
+                started = datetime.fromisoformat(str(job["started_at"]).replace("Z", "+00:00"))
+                duration_ms = int((datetime.now(started.tzinfo) - started).total_seconds() * 1000)
+            except Exception:
+                pass
+
         self.client.table("job_runs").update({
             "status": "failed_retryable",
             "result": _to_jsonable(result),
-            "completed_at": datetime.now().isoformat(),
+            "finished_at": now,
+            "completed_at": now,
+            "duration_ms": duration_ms,
             "locked_by": None,
             "locked_at": None
         }).eq("id", job_run_id).execute()

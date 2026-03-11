@@ -101,9 +101,45 @@ def evaluate_position_exit(position: Dict[str, Any]) -> Optional[str]:
 
     Returns the name of the first triggered condition, or None if position should hold.
     """
+    pos_id = position.get("id", "?")
+    symbol = position.get("symbol", "?")
+    max_credit = position.get("max_credit")
+    unrealized_pl = position.get("unrealized_pl")
+    nearest_expiry = position.get("nearest_expiry")
+    qty = position.get("quantity")
+    dte = days_to_expiry(position)
+
+    logger.info(
+        f"[EXIT_EVAL_DEBUG] position={pos_id} symbol={symbol} "
+        f"qty={qty} max_credit={max_credit} (type={type(max_credit).__name__}) "
+        f"unrealized_pl={unrealized_pl} (type={type(unrealized_pl).__name__}) "
+        f"nearest_expiry={nearest_expiry} dte={dte}"
+    )
+
+    # Log threshold computations if max_credit is available
+    if max_credit is not None:
+        try:
+            mc = float(max_credit)
+            upl = float(unrealized_pl or 0)
+            tp_threshold = mc * 100 * 0.50
+            sl_threshold = -(mc * 100 * 2.0)
+            logger.info(
+                f"[EXIT_EVAL_DEBUG] position={pos_id} "
+                f"target_profit: {upl} >= {tp_threshold} ? {upl >= tp_threshold} | "
+                f"stop_loss: {upl} <= {sl_threshold} ? {upl <= sl_threshold} | "
+                f"dte_threshold: 0 < {dte} <= 7 ? {0 < dte <= 7} | "
+                f"expiration_day: {dte} <= 0 ? {dte <= 0}"
+            )
+        except (TypeError, ValueError) as e:
+            logger.warning(f"[EXIT_EVAL_DEBUG] position={pos_id} threshold calc error: {e}")
+
     for condition_name, condition in EXIT_CONDITIONS.items():
         try:
-            if condition["check"](position):
+            result = condition["check"](position)
+            logger.info(
+                f"[EXIT_EVAL_DEBUG] position={pos_id} condition={condition_name} result={result}"
+            )
+            if result:
                 return condition_name
         except Exception as e:
             logger.warning(
@@ -131,10 +167,24 @@ class PaperExitEvaluator:
 
         # 1. Refresh marks first so unrealized_pl is current
         mtm = PaperMarkToMarketService(self.client)
-        mtm.refresh_marks(user_id)
+        mtm_result = mtm.refresh_marks(user_id)
+        logger.info(f"[EXIT_EVAL_DEBUG] refresh_marks result: {mtm_result}")
 
         # 2. Get enriched open positions
         positions = self._get_open_positions(user_id)
+        logger.info(
+            f"[EXIT_EVAL_DEBUG] fetched {len(positions)} open positions for user={user_id}"
+        )
+        for p in positions:
+            logger.info(
+                f"[EXIT_EVAL_DEBUG] position_row: id={p.get('id')} "
+                f"symbol={p.get('symbol')} qty={p.get('quantity')} "
+                f"avg_entry={p.get('avg_entry_price')} "
+                f"max_credit={p.get('max_credit')} "
+                f"unrealized_pl={p.get('unrealized_pl')} "
+                f"current_mark={p.get('current_mark')} "
+                f"nearest_expiry={p.get('nearest_expiry')}"
+            )
         if not positions:
             return {
                 "status": "ok",

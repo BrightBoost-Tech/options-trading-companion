@@ -65,6 +65,15 @@ class PaperMarkToMarketService:
 
                 per_contract_mark = current_value / (abs(qty) * multiplier) if qty != 0 else 0.0
 
+                old_mark = pos.get("current_mark")
+                old_upl = pos.get("unrealized_pl")
+                logger.info(
+                    f"[MTM_DEBUG] position={pos_id} symbol={pos.get('symbol')} "
+                    f"qty={qty} entry_value={entry_value} current_value={current_value} "
+                    f"per_contract_mark={per_contract_mark} unrealized={unrealized} "
+                    f"old_mark={old_mark} old_upl={old_upl}"
+                )
+
                 self.client.table("paper_positions").update({
                     "current_mark": per_contract_mark,
                     "unrealized_pl": unrealized,

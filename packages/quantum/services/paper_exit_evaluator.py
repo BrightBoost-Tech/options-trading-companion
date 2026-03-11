@@ -262,11 +262,7 @@ class PaperExitEvaluator:
             symbol=position["symbol"],
             quantity=abs(qty),
             order_type="market",
-            strategy_type=(
-                position.get("strategy_key", "").split("_")[-1]
-                if position.get("strategy_key")
-                else "custom"
-            ),
+            strategy_type="custom",  # Closing order — single market order, not the original multi-leg strategy
             source_engine="paper_exit_evaluator",
             legs=[{"symbol": occ_symbol, "action": side, "quantity": abs(qty)}],
         )

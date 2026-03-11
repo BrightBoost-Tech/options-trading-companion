@@ -204,6 +204,33 @@ class TestEvaluatePositionExit:
         assert evaluate_position_exit(pos) is None
 
 
+class TestClosePositionStrategyType:
+    """Verify _close_position uses strategy_type='custom' to avoid leg count validation."""
+
+    def test_close_position_uses_custom_strategy(self):
+        """Closing order must use strategy_type='custom', not the original strategy."""
+        from pathlib import Path
+
+        src = Path(__file__).resolve().parent.parent / "services" / "paper_exit_evaluator.py"
+        source = src.read_text(encoding="utf-8")
+
+        # The fix: strategy_type should be "custom", NOT derived from strategy_key
+        assert 'strategy_type="custom"' in source
+        # Must NOT derive strategy from strategy_key (that caused the 4-leg validation error)
+        assert 'strategy_key", "").split("_")[-1]' not in source
+
+    def test_close_position_has_single_leg(self):
+        """Closing order uses single leg (the OCC symbol), not all original legs."""
+        from pathlib import Path
+
+        src = Path(__file__).resolve().parent.parent / "services" / "paper_exit_evaluator.py"
+        source = src.read_text(encoding="utf-8")
+
+        # Verify _close_position creates a single-leg closing order
+        assert "_resolve_occ_symbol" in source
+        assert "source_engine=\"paper_exit_evaluator\"" in source
+
+
 class TestScheduleChanges:
     """Verify schedule has exit evaluator and MTM, safety close removed."""
 

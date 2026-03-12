@@ -47,9 +47,9 @@ BEGIN
 END;
 $$;
 
--- Backfill: set completed_at = finished_at for existing terminal records
+-- Backfill: set completed_at = finished_at for ALL terminal records
 UPDATE public.job_runs
 SET completed_at = finished_at
-WHERE status IN ('succeeded', 'dead_lettered')
+WHERE status IN ('succeeded', 'failed', 'failed_retryable', 'dead_lettered', 'cancelled')
   AND finished_at IS NOT NULL
   AND completed_at IS NULL;

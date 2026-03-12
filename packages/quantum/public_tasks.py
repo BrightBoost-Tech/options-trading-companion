@@ -282,7 +282,9 @@ def enqueue_job_run(job_name: str, idempotency_key: str, payload: Dict[str, Any]
     job_run = store.create_or_get(job_name, idempotency_key, payload)
 
     # Skip RQ enqueue if job is already in a terminal state (idempotency guard)
-    TERMINAL_STATES = ("succeeded", "dead_lettered", "cancelled")
+    # Belt-and-suspenders: check status regardless of completed_at, so stale
+    # jobs with completed_at=NULL never block fresh runs from being recognized.
+    TERMINAL_STATES = ("succeeded", "failed", "failed_retryable", "dead_lettered", "cancelled")
     if job_run["status"] in TERMINAL_STATES:
         return {
             "job_run_id": job_run["id"],

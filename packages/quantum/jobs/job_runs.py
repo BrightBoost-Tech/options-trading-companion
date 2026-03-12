@@ -110,7 +110,27 @@ class JobRunStore:
         }).eq("id", job_run_id).execute()
 
     def mark_succeeded(self, job_run_id: str, result: Dict[str, Any]) -> None:
-        complete_job_run(self.client, job_run_id, result)
+        # Direct update instead of RPC so completed_at is always set,
+        # even if the DB migration updating the RPC hasn't been applied.
+        now = datetime.now().isoformat()
+        job = self.get_job(job_run_id)
+        duration_ms = None
+        if job and job.get("started_at"):
+            try:
+                started = datetime.fromisoformat(str(job["started_at"]).replace("Z", "+00:00"))
+                duration_ms = int((datetime.now(started.tzinfo) - started).total_seconds() * 1000)
+            except Exception:
+                pass
+
+        self.client.table("job_runs").update({
+            "status": "succeeded",
+            "result": _to_jsonable(result),
+            "finished_at": now,
+            "completed_at": now,
+            "duration_ms": duration_ms,
+            "locked_by": None,
+            "locked_at": None
+        }).eq("id", job_run_id).execute()
 
     def mark_partial_failure(self, job_run_id: str, result: Dict[str, Any]) -> None:
         """
@@ -141,7 +161,27 @@ class JobRunStore:
         requeue_job_run(self.client, job_run_id, run_after.isoformat(), error)
 
     def mark_dead_letter(self, job_run_id: str, error: Dict[str, Any]) -> None:
-        dead_letter_job_run(self.client, job_run_id, error)
+        # Direct update instead of RPC so completed_at is always set,
+        # even if the DB migration updating the RPC hasn't been applied.
+        now = datetime.now().isoformat()
+        job = self.get_job(job_run_id)
+        duration_ms = None
+        if job and job.get("started_at"):
+            try:
+                started = datetime.fromisoformat(str(job["started_at"]).replace("Z", "+00:00"))
+                duration_ms = int((datetime.now(started.tzinfo) - started).total_seconds() * 1000)
+            except Exception:
+                pass
+
+        self.client.table("job_runs").update({
+            "status": "dead_lettered",
+            "error": _to_jsonable(error),
+            "finished_at": now,
+            "completed_at": now,
+            "duration_ms": duration_ms,
+            "locked_by": None,
+            "locked_at": None
+        }).eq("id", job_run_id).execute()
 
     def create_or_get_cancelled(
         self,

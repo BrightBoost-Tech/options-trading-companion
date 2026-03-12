@@ -212,9 +212,32 @@ def claim_job_run(client: Client, worker_id: str) -> Optional[Dict[str, Any]]:
 
 
 def complete_job_run(client: Client, job_id: str, result_json: Dict[str, Any]) -> None:
+    """Mark job as succeeded with both finished_at and completed_at."""
     payload = _to_jsonable(result_json)
-    # FIX: function signature is complete_job_run(p_job_id uuid, p_result jsonb)
-    client.rpc('complete_job_run', {'p_job_id': job_id, 'p_result': payload}).execute()
+    now = datetime.now().isoformat()
+
+    # Compute duration_ms from started_at
+    duration_ms = None
+    try:
+        row = client.table("job_runs").select("started_at").eq("id", job_id).limit(1).execute()
+        started_str = row.data[0].get("started_at") if row.data else None
+        if started_str:
+            if started_str.endswith("Z"):
+                started_str = started_str.replace("Z", "+00:00")
+            started = datetime.fromisoformat(started_str)
+            duration_ms = int((datetime.now(started.tzinfo) - started).total_seconds() * 1000)
+    except Exception:
+        pass
+
+    client.table("job_runs").update({
+        "status": "succeeded",
+        "result": payload,
+        "finished_at": now,
+        "completed_at": now,
+        "duration_ms": duration_ms,
+        "locked_by": None,
+        "locked_at": None,
+    }).eq("id", job_id).execute()
 
 
 def requeue_job_run(client: Client, job_id: str, run_after: str, error_json: Dict[str, Any]) -> None:
@@ -228,6 +251,29 @@ def requeue_job_run(client: Client, job_id: str, run_after: str, error_json: Dic
 
 
 def dead_letter_job_run(client: Client, job_id: str, error_json: Dict[str, Any]) -> None:
+    """Mark job as dead_lettered with both finished_at and completed_at."""
     payload = _to_jsonable(error_json)
-    # FIX: function signature is dead_letter_job_run(p_job_id uuid, p_error jsonb)
-    client.rpc('dead_letter_job_run', {'p_job_id': job_id, 'p_error': payload}).execute()
+    now = datetime.now().isoformat()
+
+    # Compute duration_ms from started_at
+    duration_ms = None
+    try:
+        row = client.table("job_runs").select("started_at").eq("id", job_id).limit(1).execute()
+        started_str = row.data[0].get("started_at") if row.data else None
+        if started_str:
+            if started_str.endswith("Z"):
+                started_str = started_str.replace("Z", "+00:00")
+            started = datetime.fromisoformat(started_str)
+            duration_ms = int((datetime.now(started.tzinfo) - started).total_seconds() * 1000)
+    except Exception:
+        pass
+
+    client.table("job_runs").update({
+        "status": "dead_lettered",
+        "error": payload,
+        "finished_at": now,
+        "completed_at": now,
+        "duration_ms": duration_ms,
+        "locked_by": None,
+        "locked_at": None,
+    }).eq("id", job_id).execute()

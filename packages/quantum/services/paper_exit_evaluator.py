@@ -323,13 +323,25 @@ class PaperExitEvaluator:
         qty = float(position["quantity"])
         side = "sell" if qty > 0 else "buy"
 
+        # Carry strike/expiry/type from the position's original leg so
+        # order validation doesn't reject the closing order.
+        orig_legs = position.get("legs") or []
+        orig_leg = orig_legs[0] if orig_legs else {}
+
         ticket = TradeTicket(
             symbol=position["symbol"],
             quantity=abs(qty),
             order_type="market",
             strategy_type="custom",  # Closing order — single market order, not the original multi-leg strategy
             source_engine="paper_exit_evaluator",
-            legs=[{"symbol": occ_symbol, "action": side, "quantity": abs(qty)}],
+            legs=[{
+                "symbol": occ_symbol,
+                "action": side,
+                "quantity": abs(qty),
+                "type": orig_leg.get("type", "call"),
+                "strike": orig_leg.get("strike"),
+                "expiry": orig_leg.get("expiry"),
+            }],
         )
 
         if position.get("suggestion_id"):

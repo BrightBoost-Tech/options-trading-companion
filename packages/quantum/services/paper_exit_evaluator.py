@@ -296,15 +296,24 @@ class PaperExitEvaluator:
         position_id: str,
         reason: str,
     ) -> Dict[str, Any]:
-        """Close a single position using the existing paper trading machinery."""
+        """
+        Close a single position using the position's current_mark as exit price.
+
+        Uses current_mark (set by the most recent MTM run during market hours)
+        instead of fetching a live Polygon quote, which would return stale
+        after-hours data and corrupt realized P&L.
+        """
         from packages.quantum.paper_endpoints import (
             _stage_order_internal,
-            _process_orders_for_user,
             get_analytics_service,
         )
         from packages.quantum.models import TradeTicket
         from packages.quantum.services.paper_autopilot_service import (
             PaperAutopilotService,
+        )
+        from packages.quantum.services.paper_ledger_service import (
+            PaperLedgerService,
+            PaperLedgerEventType,
         )
 
         supabase = self.client
@@ -323,6 +332,13 @@ class PaperExitEvaluator:
 
         qty = float(position["quantity"])
         side = "sell" if qty > 0 else "buy"
+        abs_qty = abs(qty)
+        multiplier = 100.0
+
+        # Use current_mark from the most recent MTM run as exit price.
+        # Falls back to avg_entry_price (break-even close) if no mark exists.
+        exit_price = float(position.get("current_mark") or position.get("avg_entry_price") or 0)
+        entry_price = float(position.get("avg_entry_price") or 0)
 
         # Carry strike/expiry/type from the position's original leg so
         # order validation doesn't reject the closing order.
@@ -331,14 +347,14 @@ class PaperExitEvaluator:
 
         ticket = TradeTicket(
             symbol=position["symbol"],
-            quantity=abs(qty),
+            quantity=abs_qty,
             order_type="market",
-            strategy_type="custom",  # Closing order — single market order, not the original multi-leg strategy
+            strategy_type="custom",
             source_engine="paper_exit_evaluator",
             legs=[{
                 "symbol": occ_symbol,
                 "action": side,
-                "quantity": abs(qty),
+                "quantity": abs_qty,
                 "type": orig_leg.get("type", "call"),
                 "strike": orig_leg.get("strike"),
                 "expiry": orig_leg.get("expiry"),
@@ -348,6 +364,7 @@ class PaperExitEvaluator:
         if position.get("suggestion_id"):
             ticket.source_ref_id = position["suggestion_id"]
 
+        # Stage the order for audit trail
         order_id = _stage_order_internal(
             supabase,
             analytics,
@@ -358,17 +375,78 @@ class PaperExitEvaluator:
             trace_id_override=position.get("trace_id"),
         )
 
-        process_result = _process_orders_for_user(
-            supabase, analytics, user_id, target_order_id=order_id
+        now = datetime.now(timezone.utc).isoformat()
+
+        # --- Fill the order directly at current_mark (no Polygon fetch) ---
+
+        # 1. Mark order as filled
+        supabase.table("paper_orders").update({
+            "status": "filled",
+            "filled_qty": abs_qty,
+            "avg_fill_price": exit_price,
+            "fees_usd": 0,
+            "filled_at": now,
+        }).eq("id", order_id).execute()
+
+        # 2. Update portfolio cash
+        #    Buy-to-close (short position): cash -= exit_price * qty * 100
+        #    Sell-to-close (long position): cash += exit_price * qty * 100
+        txn_value = exit_price * abs_qty * multiplier
+        cash_delta = txn_value if side == "sell" else -txn_value
+
+        port_res = supabase.table("paper_portfolios") \
+            .select("cash_balance") \
+            .eq("id", position["portfolio_id"]) \
+            .single() \
+            .execute()
+        current_cash = float(port_res.data["cash_balance"])
+        new_cash = current_cash + cash_delta
+
+        supabase.table("paper_portfolios").update({
+            "cash_balance": new_cash,
+        }).eq("id", position["portfolio_id"]).execute()
+
+        # 3. Emit ledger entry
+        ledger = PaperLedgerService(supabase)
+        ledger.emit_fill(
+            portfolio_id=position["portfolio_id"],
+            amount=cash_delta,
+            balance_after=new_cash,
+            order_id=order_id,
+            position_id=position_id,
+            trace_id=position.get("trace_id"),
+            user_id=user_id,
+            metadata={
+                "side": side,
+                "qty": abs_qty,
+                "price": exit_price,
+                "symbol": position["symbol"],
+                "fees": 0,
+                "source": "exit_evaluator",
+                "reason": reason,
+            },
         )
 
-        # Record close reason on position (_commit_fill sets status='closed'
-        # and realized_pl; we add the exit evaluator's reason here).
+        # 4. Close position with realized P&L
+        #    Short (credit) positions: profit = (entry_credit - close_cost) * qty * 100
+        #    Long (debit) positions:    profit = (exit_price - entry_cost) * qty * 100
+        if qty < 0:
+            # Short position: entry was a credit (sell), exit is a debit (buy)
+            realized_pl = (entry_price - exit_price) * abs_qty * multiplier
+        else:
+            # Long position: entry was a debit (buy), exit is a credit (sell)
+            realized_pl = (exit_price - entry_price) * abs_qty * multiplier
+
         supabase.table("paper_positions").update({
+            "quantity": 0,
+            "status": "closed",
             "close_reason": reason,
+            "closed_at": now,
+            "realized_pl": realized_pl,
+            "updated_at": now,
         }).eq("id", position_id).execute()
 
         return {
             "order_id": order_id,
-            "processed": process_result.get("processed", 0),
+            "processed": 1,
         }

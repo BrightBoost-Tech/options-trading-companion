@@ -253,7 +253,7 @@ class PaperExecutionService:
         strategy = ticket.get("strategy_type", "custom")
         strategy_key = f"{symbol}_{strategy}" # Simplified key
 
-        pos_res = self.supabase.table("paper_positions").select("*").eq("portfolio_id", portfolio_id).eq("strategy_key", strategy_key).execute()
+        pos_res = self.supabase.table("paper_positions").select("*").eq("portfolio_id", portfolio_id).eq("strategy_key", strategy_key).eq("status", "open").execute()
 
         if pos_res.data:
             pos = pos_res.data[0]
@@ -273,7 +273,17 @@ class PaperExecutionService:
                 # Reduce qty (Sell)
                 new_qty = max(0, old_qty - fill.filled_quantity)
                 if new_qty == 0:
-                    self.supabase.table("paper_positions").delete().eq("id", pos["id"]).execute()
+                    # Closed completely — mark closed instead of deleting
+                    from datetime import datetime, timezone
+                    entry_price = float(pos.get("avg_entry_price") or 0)
+                    realized_pl = (entry_price - fill.fill_price) * old_qty * 100.0
+
+                    self.supabase.table("paper_positions").update({
+                        "quantity": 0,
+                        "status": "closed",
+                        "closed_at": datetime.now(timezone.utc).isoformat(),
+                        "realized_pl": realized_pl,
+                    }).eq("id", pos["id"]).execute()
                 else:
                     self.supabase.table("paper_positions").update({"quantity": new_qty}).eq("id", pos["id"]).execute()
         elif side == "buy":

@@ -281,6 +281,7 @@ class PaperExitEvaluator:
             pos_res = self.client.table("paper_positions") \
                 .select("*") \
                 .in_("portfolio_id", portfolio_ids) \
+                .eq("status", "open") \
                 .neq("quantity", 0) \
                 .execute()
 
@@ -361,14 +362,11 @@ class PaperExitEvaluator:
             supabase, analytics, user_id, target_order_id=order_id
         )
 
-        # Record close reason on position (best effort — position may already be deleted)
-        try:
-            supabase.table("paper_positions").update({
-                "close_reason": reason,
-                "closed_at": datetime.now(timezone.utc).isoformat(),
-            }).eq("id", position_id).execute()
-        except Exception:
-            pass  # Position may have been deleted by _commit_fill
+        # Record close reason on position (_commit_fill sets status='closed'
+        # and realized_pl; we add the exit evaluator's reason here).
+        supabase.table("paper_positions").update({
+            "close_reason": reason,
+        }).eq("id", position_id).execute()
 
         return {
             "order_id": order_id,

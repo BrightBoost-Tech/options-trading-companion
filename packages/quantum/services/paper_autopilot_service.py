@@ -323,10 +323,11 @@ class PaperAutopilotService:
 
         portfolio_ids = [p["id"] for p in portfolios]
 
-        # Get positions
+        # Get open positions only (closed positions are preserved for history)
         pos_res = self.client.table("paper_positions") \
             .select("*") \
             .in_("portfolio_id", portfolio_ids) \
+            .eq("status", "open") \
             .execute()
 
         positions = pos_res.data or []

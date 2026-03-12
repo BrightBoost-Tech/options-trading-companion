@@ -1027,8 +1027,8 @@ def _repair_filled_order_commit(supabase, analytics, user_id, order, portfolio) 
         signed_qty = filled_qty * fill_sign
 
         # 1. Create or find position
-        # Try to find existing position by strategy key first
-        pos_res = supabase.table("paper_positions").select("*").eq("portfolio_id", portfolio["id"]).eq("strategy_key", strategy_key).execute()
+        # Try to find existing open position by strategy key first
+        pos_res = supabase.table("paper_positions").select("*").eq("portfolio_id", portfolio["id"]).eq("strategy_key", strategy_key).eq("status", "open").execute()
         pos = pos_res.data[0] if pos_res.data else None
 
         if pos:
@@ -1052,8 +1052,22 @@ def _repair_filled_order_commit(supabase, analytics, user_id, order, portfolio) 
             now = datetime.now(timezone.utc).isoformat()
 
             if new_qty == 0:
-                # Closed completely - delete position
-                supabase.table("paper_positions").delete().eq("id", pos["id"]).execute()
+                # Closed completely — mark closed instead of deleting
+                multiplier = 100.0
+                entry_price = float(pos.get("avg_entry_price") or 0)
+                closed_qty = abs(current_qty)
+                if current_qty > 0:
+                    realized_pl = (avg_fill_price - entry_price) * closed_qty * multiplier
+                else:
+                    realized_pl = (entry_price - avg_fill_price) * closed_qty * multiplier
+
+                supabase.table("paper_positions").update({
+                    "quantity": 0,
+                    "status": "closed",
+                    "closed_at": now,
+                    "realized_pl": realized_pl,
+                    "updated_at": now,
+                }).eq("id", pos["id"]).execute()
                 result["position_id"] = pos["id"]
             else:
                 supabase.table("paper_positions").update({
@@ -1282,8 +1296,8 @@ def _commit_fill(supabase, analytics, user_id, order, fill_res, quote, portfolio
             pos_res = supabase.table("paper_positions").select("*").eq("id", pos_id).single().execute()
             pos = pos_res.data
         else:
-            # Opening logic fallback: try to find by strategy key
-            pos_res = supabase.table("paper_positions").select("*").eq("portfolio_id", portfolio["id"]).eq("strategy_key", strategy_key).execute()
+            # Opening logic fallback: try to find by strategy key (open positions only)
+            pos_res = supabase.table("paper_positions").select("*").eq("portfolio_id", portfolio["id"]).eq("strategy_key", strategy_key).eq("status", "open").execute()
             pos = pos_res.data[0] if pos_res.data else None
 
         if pos:
@@ -1331,9 +1345,26 @@ def _commit_fill(supabase, analytics, user_id, order, fill_res, quote, portfolio
                          attribution_ok = False
                          logging.warning(f"Attribution failed for order {order.get('id')}; position preserved for retry: {e}")
 
-                # Only delete position if attribution succeeded (or no attribution needed)
+                # Mark position closed instead of deleting it.
+                # realized_pl: long positions profit when exit > entry,
+                # short (credit) positions profit when entry > exit.
+                entry_price = float(pos.get("avg_entry_price") or 0)
+                exit_price = this_fill_price
+                closed_qty = abs(current_qty)
+                if current_qty > 0:
+                    realized_pl = (exit_price - entry_price) * closed_qty * multiplier
+                else:
+                    realized_pl = (entry_price - exit_price) * closed_qty * multiplier
+                realized_pl -= fees_delta  # subtract closing fees
+
                 if attribution_ok:
-                    supabase.table("paper_positions").delete().eq("id", pos["id"]).execute()
+                    supabase.table("paper_positions").update({
+                        "quantity": 0,
+                        "status": "closed",
+                        "closed_at": now,
+                        "realized_pl": realized_pl,
+                        "updated_at": now,
+                    }).eq("id", pos["id"]).execute()
                 else:
                     logging.warning(f"Position {pos['id']} retained — will retry close on next auto_close cycle")
             else:
@@ -1606,8 +1637,8 @@ def get_paper_portfolio(
     portfolio = port_res.data[0]
     portfolio_id = portfolio["id"]
 
-    # Fetch positions
-    pos_res = supabase.table("paper_positions").select("*").eq("portfolio_id", portfolio_id).execute()
+    # Fetch open positions only for stats (closed positions are preserved for history)
+    pos_res = supabase.table("paper_positions").select("*").eq("portfolio_id", portfolio_id).eq("status", "open").execute()
     positions = pos_res.data if pos_res.data else []
 
     # Aggregate basic stats

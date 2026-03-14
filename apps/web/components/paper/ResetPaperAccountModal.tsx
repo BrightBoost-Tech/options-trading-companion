@@ -2,6 +2,7 @@
 
 import { Loader2 } from "lucide-react"
 import React from "react"
+import { Button } from "@/components/ui/button"
 
 interface ResetPaperAccountModalProps {
   open: boolean
@@ -47,25 +48,25 @@ export function ResetPaperAccountModal({
         </p>
 
         <div className="mt-6 flex justify-end gap-3">
-          <button
+          <Button
             type="button"
             onClick={onClose}
             disabled={isResetting}
-            className="inline-flex items-center rounded-md border border-gray-300 bg-white px-3 py-1.5 text-sm font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-50"
+            variant="outline"
           >
             Cancel
-          </button>
-          <button
+          </Button>
+          <Button
             type="button"
             onClick={handleConfirm}
             disabled={isResetting}
-            className="inline-flex items-center rounded-md bg-red-600 px-3 py-1.5 text-sm font-medium text-white shadow-sm hover:bg-red-700 disabled:opacity-50"
+            variant="destructive"
           >
             {isResetting && (
               <Loader2 className="mr-2 h-4 w-4 animate-spin" />
             )}
             {isResetting ? "Resetting..." : "Reset Account"}
-          </button>
+          </Button>
         </div>
       </div>
     </div>

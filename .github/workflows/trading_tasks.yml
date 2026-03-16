@@ -34,12 +34,14 @@ on:
     - cron: '10 22 * * 1-5'
 
     # Ops Health Check - Every 30 min during market hours
-    # Runs at :00 and :30 from 13:00-22:00 UTC (8 AM - 5 PM Chicago approx)
-    - cron: '0,30 13-22 * * 1-5'
+    # Runs at :07 and :37 from 13:00-22:00 UTC (8 AM - 5 PM Chicago approx)
+    # Uses :07/:37 to avoid cron collisions with other jobs at :00/:05/:10/:15/:30/:40
+    - cron: '7,37 13-22 * * 1-5'
 
     # Validation Eval (Checkpoint) - 9:30 AM Chicago (after paper_auto_close)
-    # CST (winter): 15:30 UTC | CDT (summer): 14:30 UTC
-    # Schedule at 15:30 UTC; --skip-time-gate handles ±1hr DST drift
+    # CDT (summer): 14:30 UTC | CST (winter): 15:30 UTC
+    # Schedule BOTH; --skip-time-gate allows only the correct local-time run
+    - cron: '30 14 * * 1-5'
     - cron: '30 15 * * 1-5'
 
     # Learning Ingest Nightly - 3:30 AM Chicago (deep night, Tue-Sat)
@@ -58,30 +60,36 @@ on:
     # - cron: '0 15 * * 1-5'
 
     # Shadow Checkpoint Midday - 1:00 PM Chicago (intraday pacing check)
-    # CST (winter): 19:00 UTC | CDT (summer): 18:00 UTC
-    # Schedule at 19:00 UTC to catch both
+    # CDT (summer): 18:00 UTC | CST (winter): 19:00 UTC
+    # Schedule BOTH; --skip-time-gate allows only the correct local-time run
+    - cron: '0 18 * * 1-5'
     - cron: '0 19 * * 1-5'
 
     # Shadow Checkpoint Afternoon - 4:00 PM Chicago (pre-close pacing check)
-    # CST (winter): 22:00 UTC | CDT (summer): 21:00 UTC
-    # Schedule at 22:00 UTC to catch both
+    # CDT (summer): 21:02 UTC | CST (winter): 22:00 UTC
+    # Schedule BOTH; --skip-time-gate allows only the correct local-time run
+    # CDT cron offset to :02 to avoid collision with paper_exit_evaluate CST at '0 21'
+    - cron: '2 21 * * 1-5'
     - cron: '0 22 * * 1-5'
 
     # Cohort Eval Afternoon - 4:05 PM Chicago (multi-threshold analysis)
-    # CST (winter): 22:05 UTC | CDT (summer): 21:05 UTC
-    # Schedule at 22:05 UTC to catch both
+    # CDT (summer): 21:05 UTC | CST (winter): 22:05 UTC
+    # Schedule BOTH; --skip-time-gate allows only the correct local-time run
+    - cron: '5 21 * * 1-5'
     - cron: '5 22 * * 1-5'
 
     # Autopromote Cohort - 4:15 PM Chicago (after cohort eval)
-    # CST (winter): 22:15 UTC | CDT (summer): 21:15 UTC
-    # Schedule at 22:15 UTC to catch both
+    # CDT (summer): 21:15 UTC | CST (winter): 22:15 UTC
+    # Schedule BOTH; --skip-time-gate allows only the correct local-time run
+    - cron: '15 21 * * 1-5'
     - cron: '15 22 * * 1-5'
 
     # v4-L1F: Readiness Hardening Tasks
 
     # Validation Init Window - 8:40 AM Chicago (before suggestions-open)
-    # CST (winter): 14:40 UTC | CDT (summer): 13:40 UTC
-    # Schedule at 14:40 UTC to catch both
+    # CDT (summer): 13:40 UTC | CST (winter): 14:40 UTC
+    # Schedule BOTH; --skip-time-gate allows only the correct local-time run
+    - cron: '40 13 * * 1-5'
     - cron: '40 14 * * 1-5'
 
     # Validation Preflight Midday - 1:00 PM Chicago (intraday pacing check)
@@ -282,7 +290,7 @@ jobs:
   ops-health-check:
     name: Ops Health Check
     runs-on: ubuntu-latest
-    if: github.event_name == 'schedule' && github.event.schedule == '0,30 13-22 * * 1-5'
+    if: github.event_name == 'schedule' && github.event.schedule == '7,37 13-22 * * 1-5'
 
     steps:
       - name: Checkout
@@ -373,12 +381,12 @@ jobs:
           fi
 
   # ============================================================================
-  # Scheduled: Validation Eval / Checkpoint (6:30 PM Chicago, after market close)
+  # Scheduled: Validation Eval / Checkpoint (9:30 AM Chicago)
   # ============================================================================
   validation-eval:
     name: Validation Eval (9:30 AM Chicago)
     runs-on: ubuntu-latest
-    if: github.event_name == 'schedule' && github.event.schedule == '30 15 * * 1-5'
+    if: github.event_name == 'schedule' && (github.event.schedule == '30 14 * * 1-5' || github.event.schedule == '30 15 * * 1-5')
 
     steps:
       - name: Checkout
@@ -531,7 +539,7 @@ jobs:
   validation-shadow-midday:
     name: Shadow Checkpoint Midday (1:00 PM Chicago)
     runs-on: ubuntu-latest
-    if: github.event_name == 'schedule' && github.event.schedule == '0 19 * * 1-5'
+    if: github.event_name == 'schedule' && (github.event.schedule == '0 18 * * 1-5' || github.event.schedule == '0 19 * * 1-5')
 
     steps:
       - name: Checkout
@@ -569,7 +577,7 @@ jobs:
   validation-shadow-afternoon:
     name: Shadow Checkpoint Afternoon (4:00 PM Chicago)
     runs-on: ubuntu-latest
-    if: github.event_name == 'schedule' && github.event.schedule == '0 22 * * 1-5'
+    if: github.event_name == 'schedule' && (github.event.schedule == '2 21 * * 1-5' || github.event.schedule == '0 22 * * 1-5')
 
     steps:
       - name: Checkout
@@ -607,7 +615,7 @@ jobs:
   validation-cohort-afternoon:
     name: Cohort Eval Afternoon (4:05 PM Chicago)
     runs-on: ubuntu-latest
-    if: github.event_name == 'schedule' && github.event.schedule == '5 22 * * 1-5'
+    if: github.event_name == 'schedule' && (github.event.schedule == '5 21 * * 1-5' || github.event.schedule == '5 22 * * 1-5')
 
     steps:
       - name: Checkout
@@ -645,7 +653,7 @@ jobs:
   validation-autopromote-cohort:
     name: Autopromote Cohort (4:15 PM Chicago)
     runs-on: ubuntu-latest
-    if: github.event_name == 'schedule' && github.event.schedule == '15 22 * * 1-5'
+    if: github.event_name == 'schedule' && (github.event.schedule == '15 21 * * 1-5' || github.event.schedule == '15 22 * * 1-5')
 
     steps:
       - name: Checkout
@@ -687,7 +695,7 @@ jobs:
   validation-init-window:
     name: Validation Init Window (8:40 AM Chicago)
     runs-on: ubuntu-latest
-    if: github.event_name == 'schedule' && github.event.schedule == '40 14 * * 1-5'
+    if: github.event_name == 'schedule' && (github.event.schedule == '40 13 * * 1-5' || github.event.schedule == '40 14 * * 1-5')
 
     steps:
       - name: Checkout

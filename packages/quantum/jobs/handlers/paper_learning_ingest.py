@@ -131,6 +131,9 @@ async def _ingest_paper_outcomes_for_user(
     cutoff_date = datetime.now(timezone.utc) - timedelta(days=lookback_days)
     cutoff_iso = cutoff_date.isoformat()
 
+    print(f"[INGEST_DEBUG] Starting ingest for user {user_id[:12]}...")
+    print(f"[INGEST_DEBUG] lookback_days={lookback_days}, cutoff_iso={cutoff_iso}")
+
     # 1. Start from paper_positions — the source of truth for closed trades.
     #    Previous code started from paper_ledger, but paper_ledger lacks a
     #    user_id column, so that query always failed silently.
@@ -142,12 +145,37 @@ async def _ingest_paper_outcomes_for_user(
         .execute()
 
     closed_positions = pos_result.data or []
+    print(f"[INGEST_DEBUG] Found {len(closed_positions)} closed positions within lookback")
 
     if not closed_positions:
+        # Debug: also check without the date filter to see if positions exist at all
+        all_closed = supabase.table("paper_positions") \
+            .select("id, status, closed_at, user_id") \
+            .eq("user_id", user_id) \
+            .eq("status", "closed") \
+            .execute()
+        all_closed_data = all_closed.data or []
+        print(f"[INGEST_DEBUG] Total closed positions (no date filter): {len(all_closed_data)}")
+        for p in all_closed_data[:10]:
+            print(f"[INGEST_DEBUG]   pos={p.get('id', '?')[:8]} closed_at={p.get('closed_at')} user_id={str(p.get('user_id', '?'))[:8]}")
+
+        # Also check: any positions at all for this user?
+        any_pos = supabase.table("paper_positions") \
+            .select("id, status, user_id", count="exact") \
+            .eq("user_id", user_id) \
+            .execute()
+        print(f"[INGEST_DEBUG] Any positions for this user: {len(any_pos.data or [])} rows")
+
         return {"closed_positions": 0, "outcomes_created": 0, "skipped_duplicate": 0}
 
+    for p in closed_positions:
+        print(
+            f"[INGEST_DEBUG]   pos={p['id'][:8]} symbol={p.get('symbol')} "
+            f"suggestion_id={str(p.get('suggestion_id', 'NULL'))[:8]} "
+            f"closed_at={p.get('closed_at')} realized_pl={p.get('realized_pl')}"
+        )
+
     position_ids = [p["id"] for p in closed_positions]
-    positions_by_id = {p["id"]: p for p in closed_positions}
 
     # 2. Fetch closing orders linked to these positions (for metadata and dedup key).
     orders_result = supabase.table("paper_orders") \
@@ -156,15 +184,19 @@ async def _ingest_paper_outcomes_for_user(
         .eq("status", "filled") \
         .execute()
 
+    all_orders = orders_result.data or []
+    print(f"[INGEST_DEBUG] Found {len(all_orders)} filled orders for {len(position_ids)} positions")
+
     # Build map: position_id → closing order (use latest if multiple)
     orders_by_position: Dict[str, Dict] = {}
-    for o in (orders_result.data or []):
+    for o in all_orders:
         pid = o.get("position_id")
         if pid:
-            # If multiple filled orders for same position, keep the latest
             existing = orders_by_position.get(pid)
             if not existing or (o.get("filled_at") or "") > (existing.get("filled_at") or ""):
                 orders_by_position[pid] = o
+
+    print(f"[INGEST_DEBUG] Mapped {len(orders_by_position)} positions to closing orders")
 
     # 3. Collect order_ids for dedup check against existing learning records.
     order_ids = [o["id"] for o in orders_by_position.values()]
@@ -176,32 +208,52 @@ async def _ingest_paper_outcomes_for_user(
             .in_("source_event_id", order_ids) \
             .execute()
         existing_order_ids = {r["source_event_id"] for r in (existing_result.data or [])}
+        print(f"[INGEST_DEBUG] Dedup check: {len(existing_order_ids)} of {len(order_ids)} orders already have LFL records")
+    else:
+        print("[INGEST_DEBUG] No order_ids to dedup — all positions lack closing orders")
 
     # 4. Create outcomes for each closed position that has a closing order.
     outcomes_created = 0
     skipped_duplicate = 0
+    skipped_no_order = 0
 
     for position in closed_positions:
+        pos_id_short = position["id"][:8]
+        symbol = position.get("symbol", "?")
+
         order = orders_by_position.get(position["id"])
         if not order:
-            # No closing order found — position may have been closed by a
-            # direct DB update or migration. Skip silently.
+            skipped_no_order += 1
+            print(f"[INGEST_DEBUG] SKIP {symbol} (pos={pos_id_short}): no closing order found")
             continue
 
         if order["id"] in existing_order_ids:
             skipped_duplicate += 1
+            print(f"[INGEST_DEBUG] SKIP {symbol} (pos={pos_id_short}): dedup — order {order['id'][:8]} already in LFL")
             continue
 
         outcome = _create_paper_outcome_record(user_id, order, target_date, position)
+        print(
+            f"[INGEST_DEBUG] INSERT {symbol} (pos={pos_id_short}): "
+            f"pnl={outcome['pnl_realized']} suggestion={str(outcome.get('suggestion_id', 'NULL'))[:8]}"
+        )
 
         try:
             supabase.table("learning_feedback_loops").insert(outcome).execute()
             outcomes_created += 1
+            print(f"[INGEST_DEBUG]   -> OK")
         except Exception as e:
             if "duplicate" in str(e).lower() or "unique" in str(e).lower():
                 skipped_duplicate += 1
+                print(f"[INGEST_DEBUG]   -> DUPLICATE (DB constraint)")
             else:
+                print(f"[INGEST_DEBUG]   -> ERROR: {e}")
                 raise
+
+    print(
+        f"[INGEST_DEBUG] Done: {outcomes_created} created, "
+        f"{skipped_duplicate} deduped, {skipped_no_order} no order"
+    )
 
     return {
         "closed_positions": len(closed_positions),

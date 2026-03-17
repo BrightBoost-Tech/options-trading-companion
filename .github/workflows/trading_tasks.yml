@@ -206,7 +206,7 @@ jobs:
           BASE_URL: ${{ secrets.QUANTUM_BASE_URL }}
           USER_ID: ${{ secrets.USER_ID || secrets.TASK_USER_ID }}
         run: |
-          python scripts/run_signed_task.py suggestions_close
+          python scripts/run_signed_task.py suggestions_close --skip-time-gate
 
   # ============================================================================
   # Scheduled: Suggestions Open (11 AM Chicago)
@@ -282,7 +282,7 @@ jobs:
           BASE_URL: ${{ secrets.QUANTUM_BASE_URL }}
           USER_ID: ${{ secrets.USER_ID || secrets.TASK_USER_ID }}
         run: |
-          python scripts/run_signed_task.py learning_ingest
+          python scripts/run_signed_task.py learning_ingest --skip-time-gate
 
   # ============================================================================
   # Scheduled: Ops Health Check (every 30 min)

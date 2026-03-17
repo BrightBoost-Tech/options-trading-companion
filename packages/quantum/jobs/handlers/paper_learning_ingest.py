@@ -164,6 +164,22 @@ async def _ingest_paper_outcomes_for_user(
 
     orders = {o["id"]: o for o in (orders_result.data or [])}
 
+    # Fetch linked paper_positions to get authoritative realized_pl.
+    # The exit evaluator writes correct trade P&L to paper_positions.realized_pl;
+    # we copy it here instead of recomputing from order fields.
+    position_ids = list(set(
+        o["position_id"] for o in orders.values()
+        if o.get("position_id")
+    ))
+    positions = {}
+    if position_ids:
+        pos_result = supabase.table("paper_positions") \
+            .select("id, realized_pl, status, closed_at") \
+            .in_("id", position_ids) \
+            .eq("status", "closed") \
+            .execute()
+        positions = {p["id"]: p for p in (pos_result.data or [])}
+
     # Check existing outcomes to avoid duplicates
     existing_result = supabase.table("learning_feedback_loops") \
         .select("source_event_id") \
@@ -190,7 +206,15 @@ async def _ingest_paper_outcomes_for_user(
         if order.get("status") not in ("filled", "partial"):
             continue
 
-        outcome = _create_paper_outcome_record(user_id, order, target_date)
+        # Look up the linked closed position for authoritative realized_pl
+        position = positions.get(order.get("position_id")) if order.get("position_id") else None
+
+        # Skip orders without a linked closed position (opening orders
+        # don't have meaningful trade P&L for validation)
+        if not position:
+            continue
+
+        outcome = _create_paper_outcome_record(user_id, order, target_date, position)
 
         try:
             supabase.table("learning_feedback_loops").insert(outcome).execute()
@@ -209,7 +233,9 @@ async def _ingest_paper_outcomes_for_user(
     }
 
 
-def _create_paper_outcome_record(user_id: str, order: Dict, target_date: str) -> Dict:
+def _create_paper_outcome_record(
+    user_id: str, order: Dict, target_date: str, position: Dict,
+) -> Dict:
     """
     Create a learning_feedback_loops record from a paper order fill.
 
@@ -221,6 +247,7 @@ def _create_paper_outcome_record(user_id: str, order: Dict, target_date: str) ->
         user_id: User ID
         order: Paper order dict with fill details
         target_date: Date bucket for idempotency
+        position: Linked paper_positions row with authoritative realized_pl
 
     Returns:
         Dict ready for insertion into learning_feedback_loops
@@ -230,15 +257,11 @@ def _create_paper_outcome_record(user_id: str, order: Dict, target_date: str) ->
     requested_price = float(order.get("requested_price") or 0)
     side = order.get("side", "buy")
 
-    # Calculate PnL for closing orders
-    # For paper trading, we compute slippage as the difference between
-    # requested price and fill price
-    if side in ("sell", "sell_to_close"):
-        # Closing a long: positive if fill > requested
-        pnl_realized = (avg_fill_price - requested_price) * filled_qty
-    else:
-        # Opening or closing short: negative if fill > requested
-        pnl_realized = (requested_price - avg_fill_price) * filled_qty
+    # Use realized_pl from the linked paper_positions row.
+    # This is the authoritative trade P&L computed by the exit evaluator:
+    #   (exit_price - entry_price) * abs(qty) * 100  for long positions
+    #   (entry_price - exit_price) * abs(qty) * 100  for short positions
+    pnl_realized = float(position.get("realized_pl") or 0.0)
 
     # Determine win/loss for details_json (outcome_type must be 'trade_closed' for view)
     if pnl_realized > 0:
@@ -291,5 +314,8 @@ def _create_paper_outcome_record(user_id: str, order: Dict, target_date: str) ->
             "is_paper": True,
             "reason_codes": ["paper_trade_close"],
         },
+        # Use position's closed_at so the view's COALESCE(updated_at, created_at)
+        # reflects the actual close time, not the ingestion time.
+        "updated_at": position.get("closed_at"),
         "created_at": datetime.now(timezone.utc).isoformat(),
     }

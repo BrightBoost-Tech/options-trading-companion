@@ -5,12 +5,35 @@ Verifies:
 1. Outcome records created from paper_ledger FILL entries
 2. Idempotency via (user_id, order_id) deduplication
 3. is_paper flag set to True on all outcomes
-4. Correct PnL calculation based on side
+4. pnl_realized sourced from paper_positions.realized_pl (not computed from order slippage)
 """
 
 import pytest
 from unittest.mock import MagicMock, patch, AsyncMock
 from datetime import datetime, timedelta, timezone
+
+
+# Shared fixtures for position-based tests
+_SAMPLE_ORDER = {
+    "id": "order-123",
+    "portfolio_id": "port-1",
+    "status": "filled",
+    "side": "sell",
+    "order_type": "limit",
+    "filled_qty": 10,
+    "avg_fill_price": 1.50,
+    "requested_price": 1.55,
+    "requested_qty": 10,
+    "suggestion_id": "sugg-abc",
+    "order_json": {"symbol": "SPY"},
+}
+
+_SAMPLE_POSITION = {
+    "id": "pos-1",
+    "realized_pl": 500.0,
+    "status": "closed",
+    "closed_at": "2025-01-15T16:00:00+00:00",
+}
 
 
 class TestCreatePaperOutcomeRecord:
@@ -22,21 +45,9 @@ class TestCreatePaperOutcomeRecord:
             _create_paper_outcome_record
         )
 
-        order = {
-            "id": "order-123",
-            "portfolio_id": "port-1",
-            "status": "filled",
-            "side": "buy",
-            "order_type": "limit",
-            "filled_qty": 10,
-            "avg_fill_price": 100.0,
-            "requested_price": 99.0,
-            "requested_qty": 10,
-            "suggestion_id": "sugg-abc",
-            "order_json": {"symbol": "SPY"},
-        }
-
-        result = _create_paper_outcome_record("user-1", order, "2025-01-15")
+        result = _create_paper_outcome_record(
+            "user-1", _SAMPLE_ORDER, "2025-01-15", _SAMPLE_POSITION
+        )
 
         # CRITICAL: Must be 'trade_closed' for learning_trade_outcomes_v3 view
         assert result["outcome_type"] == "trade_closed"
@@ -50,131 +61,78 @@ class TestCreatePaperOutcomeRecord:
             _create_paper_outcome_record
         )
 
-        order = {
-            "id": "order-123",
-            "status": "filled",
-            "side": "sell",
-            "filled_qty": 10,
-            "avg_fill_price": 100.0,
-            "requested_price": 100.0,
-            "suggestion_id": "sugg-xyz-456",
-            "order_json": {"symbol": "SPY"},
-        }
+        result = _create_paper_outcome_record(
+            "user-1", _SAMPLE_ORDER, "2025-01-15", _SAMPLE_POSITION
+        )
 
-        result = _create_paper_outcome_record("user-1", order, "2025-01-15")
+        assert result["suggestion_id"] == "sugg-abc"
 
-        assert result["suggestion_id"] == "sugg-xyz-456"
-
-    def test_win_pnl_for_sell_above_requested(self):
-        """Selling above requested price should have positive PnL."""
+    def test_pnl_from_position_realized_pl(self):
+        """pnl_realized should come from paper_positions.realized_pl, not slippage."""
         from packages.quantum.jobs.handlers.paper_learning_ingest import (
             _create_paper_outcome_record
         )
 
-        order = {
-            "id": "order-sell-win",
-            "status": "filled",
-            "side": "sell",
-            "filled_qty": 10,
-            "avg_fill_price": 105.0,  # Sold higher
-            "requested_price": 100.0,
-            "order_json": {"symbol": "SPY"},
-        }
+        position = {**_SAMPLE_POSITION, "realized_pl": 1234.56}
+        result = _create_paper_outcome_record(
+            "user-1", _SAMPLE_ORDER, "2025-01-15", position
+        )
 
-        result = _create_paper_outcome_record("user-1", order, "2025-01-15")
-
-        # outcome_type is always 'trade_closed', pnl_outcome in details_json
-        assert result["outcome_type"] == "trade_closed"
-        assert result["pnl_realized"] == 50.0  # (105 - 100) * 10
+        assert result["pnl_realized"] == 1234.56
         assert result["details_json"]["pnl_outcome"] == "win"
 
-    def test_loss_pnl_for_sell_below_requested(self):
-        """Selling below requested price should have negative PnL."""
+    def test_negative_pnl_from_position(self):
+        """Negative realized_pl should produce loss outcome."""
         from packages.quantum.jobs.handlers.paper_learning_ingest import (
             _create_paper_outcome_record
         )
 
-        order = {
-            "id": "order-sell-loss",
-            "status": "filled",
-            "side": "sell",
-            "filled_qty": 10,
-            "avg_fill_price": 95.0,  # Sold lower
-            "requested_price": 100.0,
-            "order_json": {"symbol": "SPY"},
-        }
+        position = {**_SAMPLE_POSITION, "realized_pl": -300.0}
+        result = _create_paper_outcome_record(
+            "user-1", _SAMPLE_ORDER, "2025-01-15", position
+        )
 
-        result = _create_paper_outcome_record("user-1", order, "2025-01-15")
-
-        assert result["outcome_type"] == "trade_closed"
-        assert result["pnl_realized"] == -50.0  # (95 - 100) * 10
+        assert result["pnl_realized"] == -300.0
         assert result["details_json"]["pnl_outcome"] == "loss"
 
-    def test_win_pnl_for_buy_below_requested(self):
-        """Buying below requested price should have positive PnL (saved money)."""
+    def test_zero_pnl_breakeven(self):
+        """Zero realized_pl should produce breakeven outcome."""
         from packages.quantum.jobs.handlers.paper_learning_ingest import (
             _create_paper_outcome_record
         )
 
-        order = {
-            "id": "order-buy-win",
-            "status": "filled",
-            "side": "buy",
-            "filled_qty": 10,
-            "avg_fill_price": 95.0,  # Bought lower
-            "requested_price": 100.0,
-            "order_json": {"symbol": "SPY"},
-        }
-
-        result = _create_paper_outcome_record("user-1", order, "2025-01-15")
-
-        assert result["outcome_type"] == "trade_closed"
-        assert result["pnl_realized"] == 50.0  # (100 - 95) * 10
-        assert result["details_json"]["pnl_outcome"] == "win"
-
-    def test_loss_pnl_for_buy_above_requested(self):
-        """Buying above requested price should have negative PnL (slippage)."""
-        from packages.quantum.jobs.handlers.paper_learning_ingest import (
-            _create_paper_outcome_record
+        position = {**_SAMPLE_POSITION, "realized_pl": 0.0}
+        result = _create_paper_outcome_record(
+            "user-1", _SAMPLE_ORDER, "2025-01-15", position
         )
 
-        order = {
-            "id": "order-buy-loss",
-            "status": "filled",
-            "side": "buy",
-            "filled_qty": 10,
-            "avg_fill_price": 105.0,  # Bought higher (slippage)
-            "requested_price": 100.0,
-            "order_json": {"symbol": "SPY"},
-        }
-
-        result = _create_paper_outcome_record("user-1", order, "2025-01-15")
-
-        assert result["outcome_type"] == "trade_closed"
-        assert result["pnl_realized"] == -50.0  # (100 - 105) * 10
-        assert result["details_json"]["pnl_outcome"] == "loss"
-
-    def test_breakeven_pnl(self):
-        """Zero PnL should have pnl_outcome='breakeven' in details."""
-        from packages.quantum.jobs.handlers.paper_learning_ingest import (
-            _create_paper_outcome_record
-        )
-
-        order = {
-            "id": "order-even",
-            "status": "filled",
-            "side": "buy",
-            "filled_qty": 10,
-            "avg_fill_price": 100.0,
-            "requested_price": 100.0,
-            "order_json": {"symbol": "SPY"},
-        }
-
-        result = _create_paper_outcome_record("user-1", order, "2025-01-15")
-
-        assert result["outcome_type"] == "trade_closed"
         assert result["pnl_realized"] == 0.0
         assert result["details_json"]["pnl_outcome"] == "breakeven"
+
+    def test_null_realized_pl_defaults_to_zero(self):
+        """Missing realized_pl on position should default to 0."""
+        from packages.quantum.jobs.handlers.paper_learning_ingest import (
+            _create_paper_outcome_record
+        )
+
+        position = {**_SAMPLE_POSITION, "realized_pl": None}
+        result = _create_paper_outcome_record(
+            "user-1", _SAMPLE_ORDER, "2025-01-15", position
+        )
+
+        assert result["pnl_realized"] == 0.0
+
+    def test_updated_at_uses_position_closed_at(self):
+        """updated_at should use position's closed_at for correct view timestamps."""
+        from packages.quantum.jobs.handlers.paper_learning_ingest import (
+            _create_paper_outcome_record
+        )
+
+        result = _create_paper_outcome_record(
+            "user-1", _SAMPLE_ORDER, "2025-01-15", _SAMPLE_POSITION
+        )
+
+        assert result["updated_at"] == "2025-01-15T16:00:00+00:00"
 
     def test_includes_tcm_metrics(self):
         """Should include TCM metrics in details_json."""
@@ -183,13 +141,8 @@ class TestCreatePaperOutcomeRecord:
         )
 
         order = {
+            **_SAMPLE_ORDER,
             "id": "order-tcm",
-            "status": "filled",
-            "side": "buy",
-            "filled_qty": 10,
-            "avg_fill_price": 99.50,
-            "requested_price": 100.0,
-            "order_json": {"symbol": "SPY"},
             "tcm": {
                 "fill_probability": 0.85,
                 "expected_fill_price": 99.75,
@@ -197,7 +150,9 @@ class TestCreatePaperOutcomeRecord:
             },
         }
 
-        result = _create_paper_outcome_record("user-1", order, "2025-01-15")
+        result = _create_paper_outcome_record(
+            "user-1", order, "2025-01-15", _SAMPLE_POSITION
+        )
 
         assert result["details_json"]["tcm_fill_probability"] == 0.85
         assert result["details_json"]["tcm_expected_fill_price"] == 99.75
@@ -209,18 +164,10 @@ class TestCreatePaperOutcomeRecord:
             _create_paper_outcome_record
         )
 
-        order = {
-            "id": "order-trace",
-            "status": "filled",
-            "side": "buy",
-            "filled_qty": 10,
-            "avg_fill_price": 100.0,
-            "requested_price": 100.0,
-            "trace_id": "trace-abc-123",
-            "order_json": {"symbol": "SPY"},
-        }
-
-        result = _create_paper_outcome_record("user-1", order, "2025-01-15")
+        order = {**_SAMPLE_ORDER, "id": "order-trace", "trace_id": "trace-abc-123"}
+        result = _create_paper_outcome_record(
+            "user-1", order, "2025-01-15", _SAMPLE_POSITION
+        )
 
         assert result["trace_id"] == "trace-abc-123"
 
@@ -230,17 +177,9 @@ class TestCreatePaperOutcomeRecord:
             _create_paper_outcome_record
         )
 
-        order = {
-            "id": "order-date",
-            "status": "filled",
-            "side": "buy",
-            "filled_qty": 10,
-            "avg_fill_price": 100.0,
-            "requested_price": 100.0,
-            "order_json": {"symbol": "SPY"},
-        }
-
-        result = _create_paper_outcome_record("user-1", order, "2025-01-15")
+        result = _create_paper_outcome_record(
+            "user-1", _SAMPLE_ORDER, "2025-01-15", _SAMPLE_POSITION
+        )
 
         assert result["details_json"]["date_bucket"] == "2025-01-15"
 
@@ -250,17 +189,9 @@ class TestCreatePaperOutcomeRecord:
             _create_paper_outcome_record
         )
 
-        order = {
-            "id": "order-reason",
-            "status": "filled",
-            "side": "sell",
-            "filled_qty": 10,
-            "avg_fill_price": 100.0,
-            "requested_price": 100.0,
-            "order_json": {"symbol": "SPY"},
-        }
-
-        result = _create_paper_outcome_record("user-1", order, "2025-01-15")
+        result = _create_paper_outcome_record(
+            "user-1", _SAMPLE_ORDER, "2025-01-15", _SAMPLE_POSITION
+        )
 
         assert "reason_codes" in result["details_json"]
         assert "paper_trade_close" in result["details_json"]["reason_codes"]
@@ -279,14 +210,6 @@ class TestIngestPaperOutcomesForUser:
 
         mock_supabase = MagicMock()
 
-        # Mock ledger entries
-        mock_supabase.table.return_value.select.return_value.eq.return_value.in_.return_value.gte.return_value.execute.return_value = MagicMock(
-            data=[
-                {"id": "ledger-1", "order_id": "order-existing", "event_type": "FILL"},
-                {"id": "ledger-2", "order_id": "order-new", "event_type": "FILL"},
-            ]
-        )
-
         def table_side_effect(table_name):
             mock_table = MagicMock()
             if table_name == "paper_ledger":
@@ -302,30 +225,36 @@ class TestIngestPaperOutcomesForUser:
                         {
                             "id": "order-existing",
                             "status": "filled",
-                            "side": "buy",
+                            "side": "sell",
                             "filled_qty": 10,
-                            "avg_fill_price": 100.0,
-                            "requested_price": 100.0,
+                            "avg_fill_price": 1.50,
+                            "requested_price": 1.55,
+                            "position_id": "pos-1",
                             "order_json": {"symbol": "SPY"},
                         },
                         {
                             "id": "order-new",
                             "status": "filled",
-                            "side": "buy",
+                            "side": "sell",
                             "filled_qty": 5,
-                            "avg_fill_price": 50.0,
-                            "requested_price": 50.0,
+                            "avg_fill_price": 0.80,
+                            "requested_price": 0.85,
+                            "position_id": "pos-2",
                             "order_json": {"symbol": "AAPL"},
                         },
                     ]
                 )
+            elif table_name == "paper_positions":
+                mock_table.select.return_value.in_.return_value.eq.return_value.execute.return_value = MagicMock(
+                    data=[
+                        {"id": "pos-1", "realized_pl": 500.0, "status": "closed", "closed_at": "2025-01-15T16:00:00+00:00"},
+                        {"id": "pos-2", "realized_pl": 250.0, "status": "closed", "closed_at": "2025-01-15T16:00:00+00:00"},
+                    ]
+                )
             elif table_name == "learning_feedback_loops":
-                # First call: check existing
                 if hasattr(mock_table, '_select_called'):
-                    # Insert call
                     mock_table.insert.return_value.execute.return_value = MagicMock()
                 else:
-                    # Select call - order-existing already has outcome
                     mock_table.select.return_value.eq.return_value.in_.return_value.execute.return_value = MagicMock(
                         data=[{"source_event_id": "order-existing"}]
                     )
@@ -548,7 +477,7 @@ class TestSourceCodeVerification:
             "scripts",
             "run_signed_task.py"
         )
-        with open(path, "r") as f:
+        with open(path, "r", encoding="utf-8") as f:
             source = f.read()
 
         assert '"paper_learning_ingest"' in source

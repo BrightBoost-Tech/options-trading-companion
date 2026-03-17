@@ -162,7 +162,10 @@ def _suggestions_idempotency_key(
     return base_key
 
 
-def enqueue_job_run(job_name: str, idempotency_key: str, payload: Dict[str, Any], queue_name: str = "otc") -> Dict[str, Any]:
+def enqueue_job_run(
+    job_name: str, idempotency_key: str, payload: Dict[str, Any],
+    queue_name: str = "otc", force_rerun: bool = False,
+) -> Dict[str, Any]:
     """
     Helper to create a JobRun and enqueue the runner.
 
@@ -282,18 +285,25 @@ def enqueue_job_run(job_name: str, idempotency_key: str, payload: Dict[str, Any]
     # Force rerun: append nonce to idempotency_key to bypass all dedup layers
     # (DB unique constraint, terminal state check, and RQ job_id hash).
     # Triggered by --force or --force-rerun from run_signed_task.py.
-    if payload.get("force_rerun"):
-        nonce = payload.get("_force_nonce") or str(uuid_mod.uuid4())
+    _force = force_rerun or payload.get("force_rerun")
+    print(f"[DISPATCH_DEBUG] {job_name}: force_rerun_param={force_rerun}, payload_force={payload.get('force_rerun')}, resolved={_force}")
+    if _force:
+        nonce = payload.get("_force_nonce") or payload.get("force_nonce") or str(uuid_mod.uuid4())
         idempotency_key = f"{idempotency_key}-force-{nonce}"
+        print(f"[DISPATCH_DEBUG] {job_name}: force nonce applied, new key={idempotency_key}")
+
+    print(f"[DISPATCH_DEBUG] {job_name}: idempotency_key={idempotency_key}")
 
     # Normal flow: create job run and enqueue
     job_run = store.create_or_get(job_name, idempotency_key, payload)
+    print(f"[DISPATCH_DEBUG] {job_name}: create_or_get returned id={job_run.get('id', '?')[:12]} status={job_run.get('status')}")
 
     # Skip RQ enqueue if job is already in a terminal state (idempotency guard)
     # Belt-and-suspenders: check status regardless of completed_at, so stale
     # jobs with completed_at=NULL never block fresh runs from being recognized.
     TERMINAL_STATES = ("succeeded", "failed", "failed_retryable", "dead_lettered", "cancelled")
     if job_run["status"] in TERMINAL_STATES:
+        print(f"[DISPATCH_DEBUG] {job_name}: SKIPPED — terminal status={job_run['status']}")
         return {
             "job_run_id": job_run["id"],
             "job_name": job_name,
@@ -310,6 +320,7 @@ def enqueue_job_run(job_name: str, idempotency_key: str, payload: Dict[str, Any]
         handler_path="packages.quantum.jobs.runner.run_job_run",  # New runner path
         queue_name=queue_name
     )
+    print(f"[DISPATCH_DEBUG] {job_name}: RQ enqueue result={result}")
 
     return {
         "job_run_id": job_run["id"],
@@ -338,7 +349,8 @@ async def task_universe_sync(
     return enqueue_job_run(
         job_name=job_name,
         idempotency_key=today,
-        payload={"date": today}
+        payload={"date": today},
+        force_rerun=payload.force_rerun,
     )
 
 @router.post("/morning-brief", status_code=202)
@@ -359,7 +371,8 @@ async def task_morning_brief(
     return enqueue_job_run(
         job_name=job_name,
         idempotency_key=today,
-        payload={"date": today}
+        payload={"date": today},
+        force_rerun=payload.force_rerun,
     )
 
 @router.post("/midday-scan", status_code=202)
@@ -380,7 +393,8 @@ async def task_midday_scan(
     return enqueue_job_run(
         job_name=job_name,
         idempotency_key=today,
-        payload={"date": today}
+        payload={"date": today},
+        force_rerun=payload.force_rerun,
     )
 
 @router.post("/weekly-report", status_code=202)
@@ -402,7 +416,8 @@ async def task_weekly_report(
     return enqueue_job_run(
         job_name=job_name,
         idempotency_key=week,
-        payload={"week": week}
+        payload={"week": week},
+        force_rerun=payload.force_rerun,
     )
 
 @router.post("/validation/eval", status_code=202)
@@ -439,7 +454,8 @@ async def task_validation_eval(
     return enqueue_job_run(
         job_name=job_name,
         idempotency_key=key,
-        payload=job_payload
+        payload=job_payload,
+        force_rerun=payload.force_rerun,
     )
 
 
@@ -494,7 +510,8 @@ async def task_suggestions_close(
     return enqueue_job_run(
         job_name=job_name,
         idempotency_key=idempotency_key,
-        payload=job_payload
+        payload=job_payload,
+        force_rerun=payload.force_rerun,
     )
 
 
@@ -544,7 +561,8 @@ async def task_suggestions_open(
     return enqueue_job_run(
         job_name=job_name,
         idempotency_key=idempotency_key,
-        payload=job_payload
+        payload=job_payload,
+        force_rerun=payload.force_rerun,
     )
 
 
@@ -582,7 +600,8 @@ async def task_learning_ingest(
     return enqueue_job_run(
         job_name=job_name,
         idempotency_key=today,
-        payload=job_payload
+        payload=job_payload,
+        force_rerun=payload.force_rerun,
     )
 
 
@@ -624,7 +643,8 @@ async def task_paper_learning_ingest(
     return enqueue_job_run(
         job_name=job_name,
         idempotency_key=idempotency_key,
-        payload=job_payload
+        payload=job_payload,
+        force_rerun=payload.force_rerun,
     )
 
 
@@ -664,7 +684,8 @@ async def task_strategy_autotune(
     return enqueue_job_run(
         job_name=job_name,
         idempotency_key=f"{week}-autotune",
-        payload=job_payload
+        payload=job_payload,
+        force_rerun=payload.force_rerun,
     )
 
 
@@ -706,7 +727,8 @@ async def task_ops_health_check(
     return enqueue_job_run(
         job_name=job_name,
         idempotency_key=idempotency_key,
-        payload=job_payload
+        payload=job_payload,
+        force_rerun=payload.force_rerun,
     )
 
 
@@ -822,7 +844,8 @@ async def task_paper_auto_execute(
     return enqueue_job_run(
         job_name=job_name,
         idempotency_key=idempotency_key,
-        payload=job_payload
+        payload=job_payload,
+        force_rerun=payload.force_rerun,
     )
 
 
@@ -876,7 +899,8 @@ async def task_paper_auto_close(
     return enqueue_job_run(
         job_name=job_name,
         idempotency_key=idempotency_key,
-        payload=job_payload
+        payload=job_payload,
+        force_rerun=payload.force_rerun,
     )
 
 
@@ -1576,7 +1600,8 @@ async def task_paper_exit_evaluate(
     return enqueue_job_run(
         job_name=job_name,
         idempotency_key=idempotency_key,
-        payload=job_payload
+        payload=job_payload,
+        force_rerun=payload.force_rerun,
     )
 
 
@@ -1617,7 +1642,8 @@ async def task_paper_mark_to_market(
     return enqueue_job_run(
         job_name=job_name,
         idempotency_key=idempotency_key,
-        payload=job_payload
+        payload=job_payload,
+        force_rerun=payload.force_rerun,
     )
 
 

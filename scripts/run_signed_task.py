@@ -634,7 +634,7 @@ def build_payload(
 
     # 4b. --force: add a UUID nonce so the server-side idempotency key is unique
     if force:
-        payload["_force_nonce"] = str(uuid.uuid4())
+        payload["force_nonce"] = str(uuid.uuid4())
 
     # 5. Merge payload_json (overrides all above)
     # Treat None, empty string, and whitespace-only as "not provided"

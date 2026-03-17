@@ -203,7 +203,7 @@ class TestIngestPaperOutcomesForUser:
 
     @pytest.mark.asyncio
     async def test_skips_existing_outcomes(self):
-        """Should skip orders that already have outcomes (idempotency)."""
+        """Should skip positions whose closing orders already have outcomes."""
         from packages.quantum.jobs.handlers.paper_learning_ingest import (
             _ingest_paper_outcomes_for_user
         )
@@ -212,43 +212,30 @@ class TestIngestPaperOutcomesForUser:
 
         def table_side_effect(table_name):
             mock_table = MagicMock()
-            if table_name == "paper_ledger":
-                mock_table.select.return_value.eq.return_value.in_.return_value.gte.return_value.execute.return_value = MagicMock(
+            if table_name == "paper_positions":
+                # Step 1: query closed positions
+                mock_table.select.return_value.eq.return_value.eq.return_value.gte.return_value.execute.return_value = MagicMock(
                     data=[
-                        {"id": "ledger-1", "order_id": "order-existing", "event_type": "FILL"},
-                        {"id": "ledger-2", "order_id": "order-new", "event_type": "FILL"},
+                        {"id": "pos-1", "realized_pl": 500.0, "status": "closed",
+                         "closed_at": "2025-01-15T16:00:00+00:00",
+                         "suggestion_id": "sugg-1", "trace_id": "t-1", "symbol": "SPY"},
+                        {"id": "pos-2", "realized_pl": 250.0, "status": "closed",
+                         "closed_at": "2025-01-15T16:00:00+00:00",
+                         "suggestion_id": "sugg-2", "trace_id": "t-2", "symbol": "AAPL"},
                     ]
                 )
             elif table_name == "paper_orders":
-                mock_table.select.return_value.in_.return_value.execute.return_value = MagicMock(
-                    data=[
-                        {
-                            "id": "order-existing",
-                            "status": "filled",
-                            "side": "sell",
-                            "filled_qty": 10,
-                            "avg_fill_price": 1.50,
-                            "requested_price": 1.55,
-                            "position_id": "pos-1",
-                            "order_json": {"symbol": "SPY"},
-                        },
-                        {
-                            "id": "order-new",
-                            "status": "filled",
-                            "side": "sell",
-                            "filled_qty": 5,
-                            "avg_fill_price": 0.80,
-                            "requested_price": 0.85,
-                            "position_id": "pos-2",
-                            "order_json": {"symbol": "AAPL"},
-                        },
-                    ]
-                )
-            elif table_name == "paper_positions":
+                # Step 2: query closing orders
                 mock_table.select.return_value.in_.return_value.eq.return_value.execute.return_value = MagicMock(
                     data=[
-                        {"id": "pos-1", "realized_pl": 500.0, "status": "closed", "closed_at": "2025-01-15T16:00:00+00:00"},
-                        {"id": "pos-2", "realized_pl": 250.0, "status": "closed", "closed_at": "2025-01-15T16:00:00+00:00"},
+                        {"id": "order-existing", "status": "filled", "side": "sell",
+                         "filled_qty": 10, "avg_fill_price": 1.50, "requested_price": 1.55,
+                         "position_id": "pos-1", "order_json": {"symbol": "SPY"},
+                         "filled_at": "2025-01-15T16:00:00+00:00"},
+                        {"id": "order-new", "status": "filled", "side": "sell",
+                         "filled_qty": 5, "avg_fill_price": 0.80, "requested_price": 0.85,
+                         "position_id": "pos-2", "order_json": {"symbol": "AAPL"},
+                         "filled_at": "2025-01-15T16:00:00+00:00"},
                     ]
                 )
             elif table_name == "learning_feedback_loops":
@@ -267,19 +254,19 @@ class TestIngestPaperOutcomesForUser:
             "user-1", mock_supabase, 7, "2025-01-15"
         )
 
-        assert result["ledger_entries"] == 2
+        assert result["closed_positions"] == 2
         assert result["skipped_duplicate"] == 1
         assert result["outcomes_created"] == 1
 
     @pytest.mark.asyncio
-    async def test_returns_zero_counts_when_no_ledger_entries(self):
-        """Should return zero counts when no ledger entries found."""
+    async def test_returns_zero_counts_when_no_closed_positions(self):
+        """Should return zero counts when no closed positions found."""
         from packages.quantum.jobs.handlers.paper_learning_ingest import (
             _ingest_paper_outcomes_for_user
         )
 
         mock_supabase = MagicMock()
-        mock_supabase.table.return_value.select.return_value.eq.return_value.in_.return_value.gte.return_value.execute.return_value = MagicMock(
+        mock_supabase.table.return_value.select.return_value.eq.return_value.eq.return_value.gte.return_value.execute.return_value = MagicMock(
             data=[]
         )
 
@@ -287,7 +274,7 @@ class TestIngestPaperOutcomesForUser:
             "user-1", mock_supabase, 7, "2025-01-15"
         )
 
-        assert result["ledger_entries"] == 0
+        assert result["closed_positions"] == 0
         assert result["outcomes_created"] == 0
         assert result["skipped_duplicate"] == 0
 
@@ -311,7 +298,7 @@ class TestRunJobHandler:
 
             assert result["ok"] is True
             assert result["counts"]["users_processed"] == 1
-            assert result["counts"]["ledger_entries_found"] == 5
+            assert result["counts"]["closed_positions_found"] == 5
             assert result["counts"]["outcomes_created"] == 3
             assert result["counts"]["outcomes_skipped_duplicate"] == 2
             assert result["lookback_days"] == 7

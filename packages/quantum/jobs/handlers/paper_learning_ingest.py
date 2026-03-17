@@ -4,9 +4,10 @@ Paper Learning Ingest Job Handler
 Ingests paper trading outcomes into learning_feedback_loops for validation/streak.
 
 This handler:
-1. Reads paper_ledger rows within lookback window
-2. Builds trade_closed outcome records with is_paper: true
-3. Inserts into learning_feedback_loops with idempotency via (user_id, order_id)
+1. Reads closed paper_positions within lookback window
+2. Fetches closing paper_orders for order metadata and dedup key
+3. Builds trade_closed outcome records with is_paper: true
+4. Inserts into learning_feedback_loops with idempotency via (user_id, order_id)
 """
 
 import time
@@ -32,7 +33,7 @@ def run(payload: Dict[str, Any], ctx: Any = None) -> Dict[str, Any]:
     notes = []
     counts = {
         "users_processed": 0,
-        "ledger_entries_found": 0,
+        "closed_positions_found": 0,
         "outcomes_created": 0,
         "outcomes_skipped_duplicate": 0,
         "errors": 0,
@@ -64,7 +65,7 @@ def run(payload: Dict[str, Any], ctx: Any = None) -> Dict[str, Any]:
                         uid, client, lookback_days, target_date
                     )
                     users_processed += 1
-                    total_entries += result.get("ledger_entries", 0)
+                    total_entries += result.get("closed_positions", 0)
                     total_outcomes += result.get("outcomes_created", 0)
                     total_skipped += result.get("skipped_duplicate", 0)
 
@@ -88,7 +89,7 @@ def run(payload: Dict[str, Any], ctx: Any = None) -> Dict[str, Any]:
         ) = run_async(process_users())
 
         counts["users_processed"] = users_processed
-        counts["ledger_entries_found"] = entries
+        counts["closed_positions_found"] = entries
         counts["outcomes_created"] = outcomes
         counts["outcomes_skipped_duplicate"] = skipped
         counts["errors"] = errors
@@ -119,99 +120,76 @@ async def _ingest_paper_outcomes_for_user(
     """
     Ingest paper trading outcomes for a single user.
 
-    Reads paper_ledger entries of type FILL within lookback window,
-    joins with paper_orders to get order details, and creates
-    learning_feedback_loops records.
+    Starts from paper_positions (the source of truth for closed trades),
+    fetches closing orders for metadata, and creates learning_feedback_loops
+    records with the position's authoritative realized_pl.
 
     Returns:
-        Dict with counts: {ledger_entries: int, outcomes_created: int, skipped_duplicate: int}
+        Dict with counts: {closed_positions: int, outcomes_created: int, skipped_duplicate: int}
     """
     # Compute lookback cutoff
     cutoff_date = datetime.now(timezone.utc) - timedelta(days=lookback_days)
     cutoff_iso = cutoff_date.isoformat()
 
-    # Fetch paper_ledger entries of type FILL for this user
-    ledger_result = supabase.table("paper_ledger") \
-        .select("*") \
+    # 1. Start from paper_positions — the source of truth for closed trades.
+    #    Previous code started from paper_ledger, but paper_ledger lacks a
+    #    user_id column, so that query always failed silently.
+    pos_result = supabase.table("paper_positions") \
+        .select("id, realized_pl, status, closed_at, suggestion_id, trace_id, symbol") \
         .eq("user_id", user_id) \
-        .in_("event_type", ["fill", "FILL", "partial_fill", "PARTIAL_FILL"]) \
-        .gte("created_at", cutoff_iso) \
+        .eq("status", "closed") \
+        .gte("closed_at", cutoff_iso) \
         .execute()
 
-    ledger_entries = ledger_result.data or []
+    closed_positions = pos_result.data or []
 
-    if not ledger_entries:
-        return {"ledger_entries": 0, "outcomes_created": 0, "skipped_duplicate": 0}
+    if not closed_positions:
+        return {"closed_positions": 0, "outcomes_created": 0, "skipped_duplicate": 0}
 
-    # Extract order_ids from ledger entries
-    order_ids = []
-    for entry in ledger_entries:
-        order_id = entry.get("order_id")
-        if order_id:
-            order_ids.append(order_id)
+    position_ids = [p["id"] for p in closed_positions]
+    positions_by_id = {p["id"]: p for p in closed_positions}
 
-    # Dedupe order_ids
-    order_ids = list(set(order_ids))
-
-    if not order_ids:
-        return {"ledger_entries": len(ledger_entries), "outcomes_created": 0, "skipped_duplicate": 0}
-
-    # Fetch corresponding paper_orders
+    # 2. Fetch closing orders linked to these positions (for metadata and dedup key).
     orders_result = supabase.table("paper_orders") \
         .select("*") \
-        .in_("id", order_ids) \
+        .in_("position_id", position_ids) \
+        .eq("status", "filled") \
         .execute()
 
-    orders = {o["id"]: o for o in (orders_result.data or [])}
+    # Build map: position_id → closing order (use latest if multiple)
+    orders_by_position: Dict[str, Dict] = {}
+    for o in (orders_result.data or []):
+        pid = o.get("position_id")
+        if pid:
+            # If multiple filled orders for same position, keep the latest
+            existing = orders_by_position.get(pid)
+            if not existing or (o.get("filled_at") or "") > (existing.get("filled_at") or ""):
+                orders_by_position[pid] = o
 
-    # Fetch linked paper_positions to get authoritative realized_pl.
-    # The exit evaluator writes correct trade P&L to paper_positions.realized_pl;
-    # we copy it here instead of recomputing from order fields.
-    position_ids = list(set(
-        o["position_id"] for o in orders.values()
-        if o.get("position_id")
-    ))
-    positions = {}
-    if position_ids:
-        pos_result = supabase.table("paper_positions") \
-            .select("id, realized_pl, status, closed_at") \
-            .in_("id", position_ids) \
-            .eq("status", "closed") \
+    # 3. Collect order_ids for dedup check against existing learning records.
+    order_ids = [o["id"] for o in orders_by_position.values()]
+    existing_order_ids: set = set()
+    if order_ids:
+        existing_result = supabase.table("learning_feedback_loops") \
+            .select("source_event_id") \
+            .eq("user_id", user_id) \
+            .in_("source_event_id", order_ids) \
             .execute()
-        positions = {p["id"]: p for p in (pos_result.data or [])}
+        existing_order_ids = {r["source_event_id"] for r in (existing_result.data or [])}
 
-    # Check existing outcomes to avoid duplicates
-    existing_result = supabase.table("learning_feedback_loops") \
-        .select("source_event_id") \
-        .eq("user_id", user_id) \
-        .in_("source_event_id", order_ids) \
-        .execute()
-
-    existing_order_ids = {r["source_event_id"] for r in (existing_result.data or [])}
-
-    # Create outcomes
+    # 4. Create outcomes for each closed position that has a closing order.
     outcomes_created = 0
     skipped_duplicate = 0
 
-    for order_id in order_ids:
-        if order_id in existing_order_ids:
-            skipped_duplicate += 1
-            continue
-
-        order = orders.get(order_id)
+    for position in closed_positions:
+        order = orders_by_position.get(position["id"])
         if not order:
+            # No closing order found — position may have been closed by a
+            # direct DB update or migration. Skip silently.
             continue
 
-        # Only process filled orders
-        if order.get("status") not in ("filled", "partial"):
-            continue
-
-        # Look up the linked closed position for authoritative realized_pl
-        position = positions.get(order.get("position_id")) if order.get("position_id") else None
-
-        # Skip orders without a linked closed position (opening orders
-        # don't have meaningful trade P&L for validation)
-        if not position:
+        if order["id"] in existing_order_ids:
+            skipped_duplicate += 1
             continue
 
         outcome = _create_paper_outcome_record(user_id, order, target_date, position)
@@ -220,14 +198,13 @@ async def _ingest_paper_outcomes_for_user(
             supabase.table("learning_feedback_loops").insert(outcome).execute()
             outcomes_created += 1
         except Exception as e:
-            # Check if it's a duplicate key error (idempotency)
             if "duplicate" in str(e).lower() or "unique" in str(e).lower():
                 skipped_duplicate += 1
             else:
                 raise
 
     return {
-        "ledger_entries": len(ledger_entries),
+        "closed_positions": len(closed_positions),
         "outcomes_created": outcomes_created,
         "skipped_duplicate": skipped_duplicate,
     }

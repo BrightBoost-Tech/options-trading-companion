@@ -69,3 +69,7 @@
 ## 2025-06-06 - Accessible Disabled Tooltips
 **Learning:** Browsers disable mouse events on `disabled` buttons, preventing tooltips from appearing. Wrapping the disabled button in a focusable `span` (`tabIndex={0}`) allows the tooltip to trigger on hover and focus.
 **Action:** Always wrap disabled buttons in a `span` with `tabIndex={0}` and an explanatory `aria-label` when tooltips are required.
+
+## 2025-06-07 - Dynamic State Tooltips
+**Learning:** Icon-only toggle buttons (like ThemeToggle) often use static `aria-label` and tooltips (e.g., "Toggle theme"). This is ambiguous for screen reader users and visual users alike, as it doesn't describe the *result* of the action.
+**Action:** Always dynamically update the `aria-label` and tooltip content of toggle buttons to reflect the *pending* action (e.g., "Switch to light mode") rather than the current state or a generic description.

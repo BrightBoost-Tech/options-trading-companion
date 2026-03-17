@@ -3,6 +3,7 @@ from typing import Optional, Dict, Any
 import os
 import secrets
 import logging
+import uuid as uuid_mod
 from datetime import datetime, timedelta, timezone
 
 logger = logging.getLogger(__name__)
@@ -277,6 +278,13 @@ def enqueue_job_run(job_name: str, idempotency_key: str, payload: Dict[str, Any]
                 "cancelled_reason": "manual_approval_required",
                 "cancelled_detail": decision.reason
             }
+
+    # Force rerun: append nonce to idempotency_key to bypass all dedup layers
+    # (DB unique constraint, terminal state check, and RQ job_id hash).
+    # Triggered by --force or --force-rerun from run_signed_task.py.
+    if payload.get("force_rerun"):
+        nonce = payload.get("_force_nonce") or str(uuid_mod.uuid4())
+        idempotency_key = f"{idempotency_key}-force-{nonce}"
 
     # Normal flow: create job run and enqueue
     job_run = store.create_or_get(job_name, idempotency_key, payload)

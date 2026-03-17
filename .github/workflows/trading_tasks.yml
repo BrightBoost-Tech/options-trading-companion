@@ -56,9 +56,10 @@ on:
     - cron: '30 08 * * 2-6'
 
     # Paper Auto-Execute - 11:30 AM Chicago (after suggestions/open)
-    # CST (winter): 17:30 UTC | CDT (summer): 16:30 UTC
-    # Schedule at 16:30 UTC to catch CDT
+    # CDT (summer): 16:30 UTC | CST (winter): 17:30 UTC
+    # Schedule BOTH; --skip-time-gate allows only the correct local-time run
     - cron: '30 16 * * 1-5'
+    - cron: '30 17 * * 1-5'
 
     # Paper Auto-Close - DISABLED: superseded by paper_exit_evaluate (condition-based exits)
     # + MTM unrealized P&L in checkpoint. Force-closing healthy positions destroys alpha.
@@ -98,9 +99,10 @@ on:
     - cron: '40 13 * * 1-5'
     - cron: '40 14 * * 1-5'
 
-    # Validation Preflight Midday - 1:00 PM Chicago (intraday pacing check)
-    # CST (winter): 19:00 UTC | CDT (summer): 18:00 UTC
-    # Schedule at 19:00 UTC (overlaps with shadow midday, runs after)
+    # Validation Preflight Midday - 1:05 PM Chicago (intraday pacing check)
+    # CDT (summer): 18:05 UTC | CST (winter): 19:05 UTC
+    # Schedule BOTH; --skip-time-gate allows only the correct local-time run
+    - cron: '5 18 * * 1-5'
     - cron: '5 19 * * 1-5'
 
     # Paper Exit Evaluator - 3:00 PM Chicago (condition-based exits before MTM)
@@ -183,6 +185,9 @@ jobs:
     name: Suggestions Close (8 AM Chicago)
     runs-on: ubuntu-latest
     if: github.event_name == 'schedule' && (github.event.schedule == '0 13 * * 1-5' || github.event.schedule == '0 14 * * 1-5')
+    concurrency:
+      group: trading-suggestions-close-${{ github.ref }}
+      cancel-in-progress: false
 
     steps:
       - name: Checkout
@@ -221,6 +226,9 @@ jobs:
     name: Suggestions Open (11 AM Chicago)
     runs-on: ubuntu-latest
     if: github.event_name == 'schedule' && (github.event.schedule == '0 16 * * 1-5' || github.event.schedule == '0 17 * * 1-5')
+    concurrency:
+      group: trading-suggestions-open-${{ github.ref }}
+      cancel-in-progress: false
 
     steps:
       - name: Checkout
@@ -259,6 +267,9 @@ jobs:
     name: Learning Ingest (4:10 PM Chicago)
     runs-on: ubuntu-latest
     if: github.event_name == 'schedule' && (github.event.schedule == '10 21 * * 1-5' || github.event.schedule == '10 22 * * 1-5')
+    concurrency:
+      group: trading-learning-ingest-${{ github.ref }}
+      cancel-in-progress: false
 
     steps:
       - name: Checkout
@@ -297,6 +308,9 @@ jobs:
     name: Ops Health Check
     runs-on: ubuntu-latest
     if: github.event_name == 'schedule' && github.event.schedule == '7,37 13-22 * * 1-5'
+    concurrency:
+      group: trading-ops-health-check-${{ github.ref }}
+      cancel-in-progress: false
 
     steps:
       - name: Checkout
@@ -393,6 +407,9 @@ jobs:
     name: Validation Eval (9:30 AM Chicago)
     runs-on: ubuntu-latest
     if: github.event_name == 'schedule' && (github.event.schedule == '30 14 * * 1-5' || github.event.schedule == '30 15 * * 1-5')
+    concurrency:
+      group: trading-validation-eval-${{ github.ref }}
+      cancel-in-progress: false
 
     steps:
       - name: Checkout
@@ -431,6 +448,9 @@ jobs:
     name: Learning Ingest Nightly (3:30 AM Chicago)
     runs-on: ubuntu-latest
     if: github.event_name == 'schedule' && github.event.schedule == '30 08 * * 2-6'
+    concurrency:
+      group: trading-learning-ingest-nightly-${{ github.ref }}
+      cancel-in-progress: false
 
     steps:
       - name: Checkout
@@ -469,6 +489,9 @@ jobs:
     name: Paper Learning Ingest (4:20 PM Chicago)
     runs-on: ubuntu-latest
     if: github.event_name == 'schedule' && (github.event.schedule == '20 21 * * 1-5' || github.event.schedule == '20 22 * * 1-5')
+    concurrency:
+      group: trading-paper-learning-ingest-${{ github.ref }}
+      cancel-in-progress: false
 
     steps:
       - name: Checkout
@@ -506,7 +529,10 @@ jobs:
   paper-auto-execute:
     name: Paper Auto-Execute (11:30 AM Chicago)
     runs-on: ubuntu-latest
-    if: github.event_name == 'schedule' && github.event.schedule == '30 16 * * 1-5'
+    if: github.event_name == 'schedule' && (github.event.schedule == '30 16 * * 1-5' || github.event.schedule == '30 17 * * 1-5')
+    concurrency:
+      group: trading-paper-auto-execute-${{ github.ref }}
+      cancel-in-progress: false
 
     steps:
       - name: Checkout
@@ -584,6 +610,9 @@ jobs:
     name: Shadow Checkpoint Midday (1:00 PM Chicago)
     runs-on: ubuntu-latest
     if: github.event_name == 'schedule' && (github.event.schedule == '0 18 * * 1-5' || github.event.schedule == '0 19 * * 1-5')
+    concurrency:
+      group: trading-shadow-midday-${{ github.ref }}
+      cancel-in-progress: false
 
     steps:
       - name: Checkout
@@ -622,6 +651,9 @@ jobs:
     name: Shadow Checkpoint Afternoon (4:00 PM Chicago)
     runs-on: ubuntu-latest
     if: github.event_name == 'schedule' && (github.event.schedule == '2 21 * * 1-5' || github.event.schedule == '0 22 * * 1-5')
+    concurrency:
+      group: trading-shadow-afternoon-${{ github.ref }}
+      cancel-in-progress: false
 
     steps:
       - name: Checkout
@@ -660,6 +692,9 @@ jobs:
     name: Cohort Eval Afternoon (4:05 PM Chicago)
     runs-on: ubuntu-latest
     if: github.event_name == 'schedule' && (github.event.schedule == '5 21 * * 1-5' || github.event.schedule == '5 22 * * 1-5')
+    concurrency:
+      group: trading-cohort-afternoon-${{ github.ref }}
+      cancel-in-progress: false
 
     steps:
       - name: Checkout
@@ -698,6 +733,9 @@ jobs:
     name: Autopromote Cohort (4:15 PM Chicago)
     runs-on: ubuntu-latest
     if: github.event_name == 'schedule' && (github.event.schedule == '15 21 * * 1-5' || github.event.schedule == '15 22 * * 1-5')
+    concurrency:
+      group: trading-autopromote-cohort-${{ github.ref }}
+      cancel-in-progress: false
 
     steps:
       - name: Checkout
@@ -740,6 +778,9 @@ jobs:
     name: Validation Init Window (8:40 AM Chicago)
     runs-on: ubuntu-latest
     if: github.event_name == 'schedule' && (github.event.schedule == '40 13 * * 1-5' || github.event.schedule == '40 14 * * 1-5')
+    concurrency:
+      group: trading-validation-init-window-${{ github.ref }}
+      cancel-in-progress: false
 
     steps:
       - name: Checkout
@@ -777,7 +818,10 @@ jobs:
   validation-preflight-midday:
     name: Validation Preflight Midday (1:05 PM Chicago)
     runs-on: ubuntu-latest
-    if: github.event_name == 'schedule' && github.event.schedule == '5 19 * * 1-5'
+    if: github.event_name == 'schedule' && (github.event.schedule == '5 18 * * 1-5' || github.event.schedule == '5 19 * * 1-5')
+    concurrency:
+      group: trading-validation-preflight-${{ github.ref }}
+      cancel-in-progress: false
 
     steps:
       - name: Checkout
@@ -817,6 +861,9 @@ jobs:
     name: Paper Exit Evaluator (3:00 PM Chicago)
     runs-on: ubuntu-latest
     if: github.event_name == 'schedule' && (github.event.schedule == '0 20 * * 1-5' || github.event.schedule == '0 21 * * 1-5')
+    concurrency:
+      group: trading-paper-exit-evaluate-${{ github.ref }}
+      cancel-in-progress: false
 
     steps:
       - name: Checkout
@@ -856,6 +903,9 @@ jobs:
     name: Paper Mark-to-Market (3:30 PM Chicago)
     runs-on: ubuntu-latest
     if: github.event_name == 'schedule' && (github.event.schedule == '30 20 * * 1-5' || github.event.schedule == '30 21 * * 1-5')
+    concurrency:
+      group: trading-paper-mark-to-market-${{ github.ref }}
+      cancel-in-progress: false
 
     steps:
       - name: Checkout

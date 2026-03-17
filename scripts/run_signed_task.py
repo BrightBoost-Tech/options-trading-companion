@@ -47,6 +47,7 @@ import argparse
 import json
 import os
 import sys
+import uuid
 from datetime import datetime
 from typing import Optional
 from zoneinfo import ZoneInfo
@@ -574,6 +575,7 @@ def build_payload(
     payload_json: Optional[str] = None,
     skip_sync: bool = False,
     force_rerun: bool = False,
+    force: bool = False,
 ) -> dict:
     """
     Build the request payload for a task.
@@ -582,7 +584,7 @@ def build_payload(
     1. Task-specific defaults (e.g., strategy_name)
     2. user_id from environment/CLI (only if task allows it)
     3. skip_sync flag
-    4. force_rerun flag
+    4. force_rerun flag (or implied by --force)
     5. payload_json (if provided, merges and overrides all above)
 
     Args:
@@ -626,9 +628,13 @@ def build_payload(
     if skip_sync:
         payload["skip_sync"] = True
 
-    # 4. Add force_rerun if specified
-    if force_rerun:
+    # 4. Add force_rerun if specified (--force implies --force-rerun)
+    if force_rerun or force:
         payload["force_rerun"] = True
+
+    # 4b. --force: add a UUID nonce so the server-side idempotency key is unique
+    if force:
+        payload["_force_nonce"] = str(uuid.uuid4())
 
     # 5. Merge payload_json (overrides all above)
     # Treat None, empty string, and whitespace-only as "not provided"
@@ -657,6 +663,7 @@ def run_task(
     payload_json: Optional[str] = None,
     skip_sync: bool = False,
     force_rerun: bool = False,
+    force: bool = False,
 ) -> int:
     """
     Run a signed task request.
@@ -705,7 +712,7 @@ def run_task(
     path = task["path"]
     scope = task["scope"]
     try:
-        payload = build_payload(task_name, user_id, payload_json, skip_sync, force_rerun)
+        payload = build_payload(task_name, user_id, payload_json, skip_sync, force_rerun, force)
     except ValueError as e:
         print(f"[ERROR] {e}")
         write_step_summary(
@@ -851,6 +858,7 @@ Examples:
     python scripts/run_signed_task.py suggestions_open --payload-json '{"skip_sync":true}'
     python scripts/run_signed_task.py suggestions_open --payload-json '{"user_id":"<uuid>","skip_sync":true}'
     python scripts/run_signed_task.py suggestions_open --force-rerun
+    python scripts/run_signed_task.py paper_learning_ingest --force
     DRY_RUN=1 python scripts/run_signed_task.py learning_ingest
     python scripts/run_signed_task.py suggestions_close --skip-time-gate
 
@@ -907,6 +915,11 @@ Environment Variables:
         help="Force new JobRun even if one exists for this day/config",
     )
     parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Bypass idempotency entirely: implies --force-rerun and adds a UUID nonce to the payload",
+    )
+    parser.add_argument(
         "--list",
         action="store_true",
         dest="list_tasks",
@@ -932,6 +945,7 @@ Environment Variables:
         payload_json=args.payload_json,
         skip_sync=args.skip_sync,
         force_rerun=args.force_rerun,
+        force=args.force,
     )
 
 

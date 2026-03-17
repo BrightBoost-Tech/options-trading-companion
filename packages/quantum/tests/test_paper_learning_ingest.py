@@ -2,12 +2,17 @@
 Tests for paper_learning_ingest job handler.
 
 Verifies:
-1. Outcome records created from paper_ledger FILL entries
+1. Outcome records created with outcome_type='trade_closed' for view compatibility
 2. Idempotency via (user_id, order_id) deduplication
 3. is_paper flag set to True on all outcomes
-4. pnl_realized sourced from paper_positions.realized_pl (not computed from order slippage)
+4. pnl_realized sourced from paper_positions.realized_pl
+5. pnl_predicted sourced from suggestion EV (matching live ingest semantics)
+6. details_json.pnl_outcome correctly classifies win/loss/breakeven
+7. Execution drag (TCM slippage) stored in details_json.expected_slippage, not pnl_predicted
+8. Structured logger used instead of debug prints
 """
 
+import logging
 import pytest
 from unittest.mock import MagicMock, patch, AsyncMock
 from datetime import datetime, timedelta, timezone
@@ -134,15 +139,64 @@ class TestCreatePaperOutcomeRecord:
 
         assert result["updated_at"] == "2025-01-15T16:00:00+00:00"
 
-    def test_includes_tcm_metrics(self):
-        """Should include TCM metrics in details_json."""
+    def test_pnl_predicted_uses_suggestion_ev(self):
+        """pnl_predicted should come from suggestion EV, matching live ingest."""
+        from packages.quantum.jobs.handlers.paper_learning_ingest import (
+            _create_paper_outcome_record
+        )
+
+        result = _create_paper_outcome_record(
+            "user-1", _SAMPLE_ORDER, "2025-01-15", _SAMPLE_POSITION,
+            suggestion_ev=42.50,
+        )
+
+        assert result["pnl_predicted"] == 42.50
+
+    def test_pnl_predicted_none_when_no_suggestion_ev(self):
+        """pnl_predicted should be None when no suggestion EV is available."""
+        from packages.quantum.jobs.handlers.paper_learning_ingest import (
+            _create_paper_outcome_record
+        )
+
+        result = _create_paper_outcome_record(
+            "user-1", _SAMPLE_ORDER, "2025-01-15", _SAMPLE_POSITION,
+        )
+
+        assert result["pnl_predicted"] is None
+
+    def test_slippage_not_in_pnl_predicted(self):
+        """TCM expected_slippage must NOT end up in pnl_predicted."""
         from packages.quantum.jobs.handlers.paper_learning_ingest import (
             _create_paper_outcome_record
         )
 
         order = {
             **_SAMPLE_ORDER,
-            "id": "order-tcm",
+            "id": "order-slip",
+            "tcm": {
+                "fill_probability": 0.85,
+                "expected_fill_price": 99.75,
+                "expected_slippage": -0.25,
+            },
+        }
+
+        # No suggestion_ev provided — pnl_predicted must NOT fall back to slippage
+        result = _create_paper_outcome_record(
+            "user-1", order, "2025-01-15", _SAMPLE_POSITION,
+        )
+
+        assert result["pnl_predicted"] is None
+        assert result["pnl_predicted"] != -0.25
+
+    def test_slippage_stored_in_details_json(self):
+        """TCM expected_slippage should be in details_json.expected_slippage."""
+        from packages.quantum.jobs.handlers.paper_learning_ingest import (
+            _create_paper_outcome_record
+        )
+
+        order = {
+            **_SAMPLE_ORDER,
+            "id": "order-drag",
             "tcm": {
                 "fill_probability": 0.85,
                 "expected_fill_price": 99.75,
@@ -151,12 +205,16 @@ class TestCreatePaperOutcomeRecord:
         }
 
         result = _create_paper_outcome_record(
-            "user-1", order, "2025-01-15", _SAMPLE_POSITION
+            "user-1", order, "2025-01-15", _SAMPLE_POSITION,
+            suggestion_ev=42.50,
         )
 
+        # pnl_predicted is suggestion EV, not slippage
+        assert result["pnl_predicted"] == 42.50
+        # Slippage preserved in details_json
+        assert result["details_json"]["expected_slippage"] == -0.25
         assert result["details_json"]["tcm_fill_probability"] == 0.85
         assert result["details_json"]["tcm_expected_fill_price"] == 99.75
-        assert result["pnl_predicted"] == -0.25
 
     def test_includes_trace_id(self):
         """Should include trace_id from order."""
@@ -231,11 +289,21 @@ class TestIngestPaperOutcomesForUser:
                         {"id": "order-existing", "status": "filled", "side": "sell",
                          "filled_qty": 10, "avg_fill_price": 1.50, "requested_price": 1.55,
                          "position_id": "pos-1", "order_json": {"symbol": "SPY"},
+                         "suggestion_id": "sugg-1",
                          "filled_at": "2025-01-15T16:00:00+00:00"},
                         {"id": "order-new", "status": "filled", "side": "sell",
                          "filled_qty": 5, "avg_fill_price": 0.80, "requested_price": 0.85,
                          "position_id": "pos-2", "order_json": {"symbol": "AAPL"},
+                         "suggestion_id": "sugg-2",
                          "filled_at": "2025-01-15T16:00:00+00:00"},
+                    ]
+                )
+            elif table_name == "trade_suggestions":
+                # Step 2b: fetch suggestion EVs
+                mock_table.select.return_value.in_.return_value.execute.return_value = MagicMock(
+                    data=[
+                        {"id": "sugg-1", "ev": 15.0},
+                        {"id": "sugg-2", "ev": 8.5},
                     ]
                 )
             elif table_name == "learning_feedback_loops":
@@ -323,6 +391,42 @@ class TestRunJobHandler:
             # Should not call get_active_user_ids when user_id is provided
             mock_users.assert_not_called()
             assert result["ok"] is True
+
+
+class TestLoggerUsage:
+    """Verify structured logging replaced debug prints."""
+
+    def test_no_print_statements_in_source(self):
+        """Source should not contain [INGEST_DEBUG] print statements."""
+        import os
+        path = os.path.join(
+            os.path.dirname(__file__),
+            "..",
+            "jobs",
+            "handlers",
+            "paper_learning_ingest.py"
+        )
+        with open(path, "r") as f:
+            source = f.read()
+
+        assert "[INGEST_DEBUG]" not in source
+        assert "print(f\"[INGEST_DEBUG]" not in source
+
+    def test_logger_is_configured(self):
+        """Module should use logging.getLogger(__name__)."""
+        import os
+        path = os.path.join(
+            os.path.dirname(__file__),
+            "..",
+            "jobs",
+            "handlers",
+            "paper_learning_ingest.py"
+        )
+        with open(path, "r") as f:
+            source = f.read()
+
+        assert "import logging" in source
+        assert "logger = logging.getLogger(__name__)" in source
 
 
 class TestSourceCodeVerification:

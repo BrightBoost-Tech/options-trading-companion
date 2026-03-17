@@ -57,7 +57,7 @@ on:
 
     # Paper Auto-Execute - 11:30 AM Chicago (after suggestions/open)
     # CDT (summer): 16:30 UTC | CST (winter): 17:30 UTC
-    # Schedule BOTH; --skip-time-gate allows only the correct local-time run
+    # Schedule BOTH; Python time-gate allows only the correct local-time run
     - cron: '30 16 * * 1-5'
     - cron: '30 17 * * 1-5'
 
@@ -101,7 +101,7 @@ on:
 
     # Validation Preflight Midday - 1:05 PM Chicago (intraday pacing check)
     # CDT (summer): 18:05 UTC | CST (winter): 19:05 UTC
-    # Schedule BOTH; --skip-time-gate allows only the correct local-time run
+    # Schedule BOTH; Python time-gate allows only the correct local-time run
     - cron: '5 18 * * 1-5'
     - cron: '5 19 * * 1-5'
 
@@ -562,7 +562,7 @@ jobs:
           BASE_URL: ${{ secrets.QUANTUM_BASE_URL }}
           USER_ID: ${{ secrets.USER_ID || secrets.TASK_USER_ID }}
         run: |
-          python scripts/run_signed_task.py paper_auto_execute --skip-time-gate
+          python scripts/run_signed_task.py paper_auto_execute
 
   # ============================================================================
   # DISABLED: Paper Auto-Close — superseded by paper_exit_evaluate + MTM
@@ -851,7 +851,7 @@ jobs:
           BASE_URL: ${{ secrets.QUANTUM_BASE_URL }}
           USER_ID: ${{ secrets.USER_ID || secrets.TASK_USER_ID }}
         run: |
-          python scripts/run_signed_task.py validation_preflight --skip-time-gate
+          python scripts/run_signed_task.py validation_preflight
 
   # ============================================================================
   # Scheduled: Paper Exit Evaluator (3:00 PM Chicago)

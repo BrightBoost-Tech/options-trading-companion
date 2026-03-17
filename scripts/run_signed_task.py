@@ -334,11 +334,15 @@ def check_time_gate(task_name: str, skip_time_gate: bool = False) -> bool:
     if skip_time_gate:
         return True
 
-    # Define time windows for scheduled tasks
+    # Define time windows for scheduled tasks (Chicago local time).
+    # Each entry gates the task to a 60-minute window starting at the
+    # target time, so the wrong-offset dual UTC cron is rejected.
     TIME_GATES = {
-        "suggestions_close": (8, 0),   # 8:00 AM Chicago
-        "suggestions_open": (11, 0),   # 11:00 AM Chicago
-        "learning_ingest": (16, 10),   # 4:10 PM Chicago
+        "suggestions_close": (8, 0),        # 8:00 AM Chicago
+        "suggestions_open": (11, 0),        # 11:00 AM Chicago
+        "paper_auto_execute": (11, 30),     # 11:30 AM Chicago
+        "validation_preflight": (13, 5),    # 1:05 PM Chicago
+        "learning_ingest": (16, 10),        # 4:10 PM Chicago
         # paper_auto_close removed: superseded by paper_exit_evaluate
     }
 

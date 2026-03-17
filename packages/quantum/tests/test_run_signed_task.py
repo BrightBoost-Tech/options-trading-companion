@@ -157,6 +157,64 @@ class TestCheckTimeGate:
                 with patch("run_signed_task.is_within_time_window", return_value=True):
                     assert check_time_gate("suggestions_close", skip_time_gate=False) is True
 
+    # --- DST dual-cron dedup tests for paper_auto_execute ---
+
+    def test_paper_auto_execute_passes_at_1130_chicago(self):
+        """paper_auto_execute should pass at 11:30 AM Chicago (the intended time)."""
+        mock_now = datetime(2025, 7, 14, 11, 30, tzinfo=CHICAGO_TZ)  # Monday 11:30 CDT
+        with patch("run_signed_task.datetime") as mock_dt:
+            mock_dt.now.return_value = mock_now
+            assert check_time_gate("paper_auto_execute", skip_time_gate=False) is True
+
+    def test_paper_auto_execute_blocked_at_1030_chicago(self, capsys):
+        """CST wrong-offset cron at 10:30 AM Chicago should be rejected."""
+        # 16:30 UTC during CST = 10:30 AM Chicago (1 hour too early)
+        mock_now = datetime(2025, 1, 13, 10, 30, tzinfo=CHICAGO_TZ)  # Monday 10:30 CST
+        with patch("run_signed_task.datetime") as mock_dt:
+            mock_dt.now.return_value = mock_now
+            assert check_time_gate("paper_auto_execute", skip_time_gate=False) is False
+            captured = capsys.readouterr()
+            assert "not within" in captured.out
+
+    def test_paper_auto_execute_blocked_at_1230_chicago(self, capsys):
+        """CDT wrong-offset cron at 12:30 PM Chicago should be rejected."""
+        # 17:30 UTC during CDT = 12:30 PM Chicago (1 hour too late)
+        mock_now = datetime(2025, 7, 14, 12, 30, tzinfo=CHICAGO_TZ)  # Monday 12:30 CDT
+        with patch("run_signed_task.datetime") as mock_dt:
+            mock_dt.now.return_value = mock_now
+            assert check_time_gate("paper_auto_execute", skip_time_gate=False) is False
+            captured = capsys.readouterr()
+            assert "not within" in captured.out
+
+    # --- DST dual-cron dedup tests for validation_preflight ---
+
+    def test_validation_preflight_passes_at_1305_chicago(self):
+        """validation_preflight should pass at 1:05 PM Chicago (the intended time)."""
+        mock_now = datetime(2025, 7, 14, 13, 5, tzinfo=CHICAGO_TZ)  # Monday 1:05 PM CDT
+        with patch("run_signed_task.datetime") as mock_dt:
+            mock_dt.now.return_value = mock_now
+            assert check_time_gate("validation_preflight", skip_time_gate=False) is True
+
+    def test_validation_preflight_blocked_at_1205_chicago(self, capsys):
+        """CST wrong-offset cron at 12:05 PM Chicago should be rejected."""
+        # 18:05 UTC during CST = 12:05 PM Chicago (1 hour too early)
+        mock_now = datetime(2025, 1, 13, 12, 5, tzinfo=CHICAGO_TZ)  # Monday 12:05 CST
+        with patch("run_signed_task.datetime") as mock_dt:
+            mock_dt.now.return_value = mock_now
+            assert check_time_gate("validation_preflight", skip_time_gate=False) is False
+            captured = capsys.readouterr()
+            assert "not within" in captured.out
+
+    def test_validation_preflight_blocked_at_1405_chicago(self, capsys):
+        """CDT wrong-offset cron at 2:05 PM Chicago should be rejected."""
+        # 19:05 UTC during CDT = 2:05 PM Chicago (1 hour too late)
+        mock_now = datetime(2025, 7, 14, 14, 5, tzinfo=CHICAGO_TZ)  # Monday 2:05 PM CDT
+        with patch("run_signed_task.datetime") as mock_dt:
+            mock_dt.now.return_value = mock_now
+            assert check_time_gate("validation_preflight", skip_time_gate=False) is False
+            captured = capsys.readouterr()
+            assert "not within" in captured.out
+
 
 # =============================================================================
 # Signing Secret Tests

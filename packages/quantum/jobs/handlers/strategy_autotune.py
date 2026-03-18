@@ -1,22 +1,37 @@
 """
 Strategy Autotune Job Handler
 
-Weekly strategy auto-tuning based on live outcomes.
+Weekly strategy auto-tuning based on trade outcomes.
 
 This handler:
 1. Reads learning_feedback_loops for past 30 days
-2. Computes win_rate, avg_pnl per strategy
-3. If performance below threshold, mutates strategy config
-4. Persists new version to strategy_configs table
+2. Uses normalized outcome classification (win/loss/breakeven) that handles
+   both live outcomes and paper outcomes with outcome_type="trade_closed"
+3. Computes win_rate, avg_pnl per strategy
+4. If performance below threshold, mutates strategy config
+5. Persists new version to strategy_configs table
+
+Paper-autotune guard:
+  When ENABLE_PAPER_AUTOTUNE=false:
+  - Paper-only datasets: mutation is blocked entirely
+  - Mixed live+paper datasets: only live rows are used for mutation eligibility
+  - Live-only datasets: normal behavior
+  When ENABLE_PAPER_AUTOTUNE=true:
+  - All rows (paper + live) are used for mutation eligibility
 """
 
+import logging
 import time
 from typing import Any, Dict, List, Optional
 from datetime import datetime, timedelta, timezone
 
 from packages.quantum.jobs.handlers.utils import get_admin_client, get_active_user_ids, run_async
 from packages.quantum.jobs.handlers.exceptions import RetryableJobError, PermanentJobError
+from packages.quantum.jobs.handlers.outcome_normalizer import classify_outcome
 from packages.quantum.services.strategy_loader import load_strategy_config
+from packages.quantum.config import ENABLE_PAPER_AUTOTUNE
+
+logger = logging.getLogger(__name__)
 
 JOB_NAME = "strategy_autotune"
 
@@ -27,7 +42,7 @@ MIN_AVG_PNL = 0.0    # Below this, consider mutation
 
 def run(payload: Dict[str, Any], ctx: Any = None) -> Dict[str, Any]:
     """
-    Auto-tune strategy configs based on live outcomes.
+    Auto-tune strategy configs based on trade outcomes.
 
     Payload:
         - week: str - Week identifier for idempotency
@@ -99,6 +114,60 @@ def run(payload: Dict[str, Any], ctx: Any = None) -> Dict[str, Any]:
         raise RetryableJobError(f"Strategy autotune job failed: {e}")
 
 
+def _compute_metrics(outcomes_with_pnl: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """
+    Compute win_rate, avg_pnl, and paper/live breakdown from outcomes
+    using normalized outcome classification.
+
+    Returns dict with: wins, losses, breakevens, win_rate, avg_pnl,
+    paper_count, live_count, samples.
+    """
+    wins = 0
+    losses = 0
+    breakevens = 0
+    paper_count = 0
+    live_count = 0
+
+    for o in outcomes_with_pnl:
+        classification = classify_outcome(o)
+        if classification == "win":
+            wins += 1
+        elif classification == "loss":
+            losses += 1
+        else:
+            breakevens += 1
+
+        if _is_paper(o):
+            paper_count += 1
+        else:
+            live_count += 1
+
+    total = len(outcomes_with_pnl)
+    win_rate = wins / total if total > 0 else 0.0
+
+    pnl_values = [float(o.get("pnl_realized", 0)) for o in outcomes_with_pnl]
+    avg_pnl = sum(pnl_values) / len(pnl_values) if pnl_values else 0.0
+
+    return {
+        "wins": wins,
+        "losses": losses,
+        "breakevens": breakevens,
+        "win_rate": win_rate,
+        "avg_pnl": avg_pnl,
+        "paper_count": paper_count,
+        "live_count": live_count,
+        "samples": total,
+    }
+
+
+def _is_paper(record: Dict[str, Any]) -> bool:
+    """Check if an outcome record is from a paper trade."""
+    if record.get("is_paper"):
+        return True
+    details = record.get("details_json") or {}
+    return bool(details.get("is_paper"))
+
+
 async def _evaluate_and_update(
     user_id: str,
     strategy_name: str,
@@ -116,14 +185,16 @@ async def _evaluate_and_update(
             new_version: int,
             win_rate: float,
             avg_pnl: float,
-            samples: int
+            samples: int,
+            paper_guard_blocked: bool,
+            mutation_basis: str
         }
     """
     # 1. Fetch recent outcomes
     cutoff = (datetime.now(timezone.utc) - timedelta(days=30)).isoformat()
 
     result = supabase.table("learning_feedback_loops") \
-        .select("pnl_realized, pnl_predicted, outcome_type, details_json") \
+        .select("pnl_realized, pnl_predicted, outcome_type, details_json, is_paper") \
         .eq("user_id", user_id) \
         .gte("created_at", cutoff) \
         .execute()
@@ -140,12 +211,12 @@ async def _evaluate_and_update(
             "samples": len(outcomes_with_pnl),
         }
 
-    # 2. Compute metrics
-    wins = sum(1 for o in outcomes_with_pnl if o.get("outcome_type") == "win")
-    win_rate = wins / len(outcomes_with_pnl) if outcomes_with_pnl else 0
-
-    pnl_values = [float(o.get("pnl_realized", 0)) for o in outcomes_with_pnl]
-    avg_pnl = sum(pnl_values) / len(pnl_values) if pnl_values else 0
+    # 2. Compute metrics using normalized classification
+    metrics = _compute_metrics(outcomes_with_pnl)
+    win_rate = metrics["win_rate"]
+    avg_pnl = metrics["avg_pnl"]
+    paper_count = metrics["paper_count"]
+    live_count = metrics["live_count"]
 
     # 3. Check if mutation needed
     needs_mutation = win_rate < MIN_WIN_RATE or avg_pnl < MIN_AVG_PNL
@@ -154,12 +225,75 @@ async def _evaluate_and_update(
         return {
             "skipped": False,
             "updated": False,
+            "mutation_basis": "all",
             "win_rate": win_rate,
             "avg_pnl": avg_pnl,
-            "samples": len(outcomes_with_pnl),
+            "samples": metrics["samples"],
+            "paper_count": paper_count,
+            "live_count": live_count,
         }
 
-    # 4. Load current config and mutate
+    # 4. Paper-autotune guard
+    has_paper = paper_count > 0
+    paper_only = has_paper and live_count == 0
+
+    if has_paper:
+        logger.info(
+            f"[strategy_autotune] Paper outcomes observed for {user_id[:8]}...: "
+            f"paper={paper_count}, live={live_count}"
+        )
+
+    mutation_basis = "all"
+
+    if has_paper and not ENABLE_PAPER_AUTOTUNE:
+        if paper_only:
+            # Paper-only dataset: block mutation entirely
+            logger.info(
+                f"[strategy_autotune] Mutation blocked for {user_id[:8]}...: "
+                f"paper-only dataset and ENABLE_PAPER_AUTOTUNE=false"
+            )
+            return {
+                "skipped": False,
+                "updated": False,
+                "paper_guard_blocked": True,
+                "mutation_basis": "blocked_paper_only",
+                "win_rate": win_rate,
+                "avg_pnl": avg_pnl,
+                "samples": metrics["samples"],
+                "paper_count": paper_count,
+                "live_count": live_count,
+            }
+        else:
+            # Mixed dataset: recompute metrics using live-only rows
+            live_only = [o for o in outcomes_with_pnl if not _is_paper(o)]
+            live_metrics = _compute_metrics(live_only)
+            win_rate = live_metrics["win_rate"]
+            avg_pnl = live_metrics["avg_pnl"]
+            needs_mutation = win_rate < MIN_WIN_RATE or avg_pnl < MIN_AVG_PNL
+            mutation_basis = "live_only"
+
+            logger.info(
+                f"[strategy_autotune] Mixed dataset for {user_id[:8]}...: "
+                f"using live-only basis ({live_count} rows), "
+                f"live_win_rate={win_rate:.1%}, live_avg_pnl=${avg_pnl:.2f}"
+            )
+
+            if not needs_mutation:
+                return {
+                    "skipped": False,
+                    "updated": False,
+                    "mutation_basis": "live_only",
+                    "win_rate": win_rate,
+                    "avg_pnl": avg_pnl,
+                    "samples": metrics["samples"],
+                    "paper_count": paper_count,
+                    "live_count": live_count,
+                }
+    else:
+        # Either no paper rows, or ENABLE_PAPER_AUTOTUNE=true
+        pass
+
+    # 5. Load current config and mutate
     current_config = load_strategy_config(user_id, strategy_name, supabase)
     current_version = current_config.get("version", 1)
 
@@ -171,7 +305,7 @@ async def _evaluate_and_update(
 
     mutated_params = _mutate_params(current_config, fail_reason)
 
-    # 5. Persist new version
+    # 6. Persist new version
     new_version = current_version + 1
     _persist_strategy_config(
         supabase,
@@ -186,10 +320,13 @@ async def _evaluate_and_update(
         "skipped": False,
         "updated": True,
         "new_version": new_version,
+        "mutation_basis": mutation_basis,
         "win_rate": win_rate,
         "avg_pnl": avg_pnl,
-        "samples": len(outcomes_with_pnl),
+        "samples": metrics["samples"],
         "mutation_reason": fail_reason,
+        "paper_count": paper_count,
+        "live_count": live_count,
     }
 
 
@@ -254,8 +391,8 @@ def _persist_strategy_config(
         }
 
         supabase.table("strategy_configs").insert(config_data).execute()
-        print(f"[strategy_autotune] Persisted {name} v{version} for user {user_id[:8]}...")
+        logger.info(f"[strategy_autotune] Persisted {name} v{version} for user {user_id[:8]}...")
 
     except Exception as e:
-        print(f"[strategy_autotune] Error persisting config: {e}")
+        logger.error(f"[strategy_autotune] Error persisting config: {e}")
         raise

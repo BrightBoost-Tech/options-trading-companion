@@ -2,6 +2,8 @@
 
 import { useState, useEffect, useCallback } from 'react';
 import { API_URL } from '@/lib/constants';
+import { Progress } from '@/components/ui/progress';
+import { Button } from '@/components/ui/button';
 
 interface EVMetrics {
   expected_value: number;
@@ -90,19 +92,19 @@ export const useTradeScore = ({
 // --- Helper Functions ---
 const getScoreAndColor = (ev: number, maxLoss: number) => {
   if (maxLoss <= 0) { // Positive EV on risk-free trade is great
-    return { score: 95, color: 'bg-green-500', label: 'Excellent' };
+    return { score: 95, color: 'bg-green-500', indicatorColor: '[&>div]:bg-green-500', label: 'Excellent' };
   }
 
   const evToRiskRatio = (ev / maxLoss) * 100;
 
   if (evToRiskRatio >= 25) {
-    return { score: 90, color: 'bg-green-500', label: 'Excellent' };
+    return { score: 90, color: 'bg-green-500', indicatorColor: '[&>div]:bg-green-500', label: 'Excellent' };
   } else if (evToRiskRatio >= 15) {
-    return { score: 75, color: 'bg-yellow-500', label: 'Good' };
+    return { score: 75, color: 'bg-yellow-500', indicatorColor: '[&>div]:bg-yellow-500', label: 'Good' };
   } else if (evToRiskRatio >= 5) {
-    return { score: 60, color: 'bg-yellow-400', label: 'Fair' };
+    return { score: 60, color: 'bg-yellow-400', indicatorColor: '[&>div]:bg-yellow-400', label: 'Fair' };
   } else {
-    return { score: 40, color: 'bg-red-500', label: 'Poor' };
+    return { score: 40, color: 'bg-red-500', indicatorColor: '[&>div]:bg-red-500', label: 'Poor' };
   }
 };
 
@@ -131,7 +133,7 @@ export const TradeScoreCard = ({
     position_sizing,
   } = metrics;
 
-  const { score, color, label } = getScoreAndColor(expected_value, max_loss);
+  const { score, color, indicatorColor, label } = getScoreAndColor(expected_value, max_loss);
 
   return (
     <div className="bg-white rounded-lg shadow-md border border-gray-200 p-4 w-full">
@@ -150,19 +152,11 @@ export const TradeScoreCard = ({
 
       {/* Score Meter */}
       <div className="mb-4">
-          <div
-            className="w-full bg-gray-200 rounded-full h-2.5"
-            role="progressbar"
-            aria-valuenow={score}
-            aria-valuemin={0}
-            aria-valuemax={100}
+          <Progress
+            value={score}
             aria-label="Trade Score Confidence"
-          >
-            <div
-              className={`${color} h-2.5 rounded-full`}
-              style={{ width: `${score}%` }}
-            />
-          </div>
+            className={`h-2.5 w-full ${indicatorColor}`}
+          />
           <p className="text-xs text-center mt-1 text-gray-600" aria-hidden="true">
             Trade Score: {score}/100
           </p>
@@ -182,20 +176,20 @@ export const TradeScoreCard = ({
 
       {/* Action Buttons */}
       <div className="flex gap-3">
-        <button
+        <Button
           onClick={onExecute}
           aria-label={`Execute trade for ${symbol}`}
           className="flex-1 bg-blue-600 text-white font-semibold py-2 px-4 rounded-lg hover:bg-blue-700 transition focus-visible:ring-2 focus-visible:ring-offset-2 focus-visible:ring-blue-600 outline-none"
         >
           Execute
-        </button>
-        <button
+        </Button>
+        <Button
           onClick={onAddToWatchlist}
           aria-label={`Add ${symbol} to watchlist`}
           className="flex-1 bg-gray-200 text-gray-800 font-semibold py-2 px-4 rounded-lg hover:bg-gray-300 transition focus-visible:ring-2 focus-visible:ring-offset-2 focus-visible:ring-gray-400 outline-none"
         >
           Watchlist
-        </button>
+        </Button>
       </div>
     </div>
   );

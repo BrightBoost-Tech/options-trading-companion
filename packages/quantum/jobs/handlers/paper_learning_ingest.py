@@ -6,16 +6,26 @@ Ingests paper trading outcomes into learning_feedback_loops for validation/strea
 This handler:
 1. Reads closed paper_positions within lookback window
 2. Fetches closing paper_orders for order metadata and dedup key
-3. Builds trade_closed outcome records with is_paper: true
-4. Inserts into learning_feedback_loops with idempotency via (user_id, order_id)
+3. Fetches linked trade_suggestions for EV (pnl_predicted)
+4. Builds trade_closed outcome records with is_paper: true
+5. Inserts into learning_feedback_loops with idempotency via (user_id, order_id)
+
+pnl_predicted semantics (normalized to match live ingest):
+  - Stores the matched suggestion's EV (expected value) when available,
+    mirroring what live ingest records as pnl_predicted.
+  - Execution drag (expected slippage from TCM) is stored separately
+    in details_json.expected_slippage.
 """
 
+import logging
 import time
 from typing import Any, Dict, List, Optional
 from datetime import datetime, timedelta, timezone
 
 from packages.quantum.jobs.handlers.utils import get_admin_client, get_active_user_ids, run_async
 from packages.quantum.jobs.handlers.exceptions import RetryableJobError, PermanentJobError
+
+logger = logging.getLogger(__name__)
 
 JOB_NAME = "paper_learning_ingest"
 
@@ -42,6 +52,8 @@ def run(payload: Dict[str, Any], ctx: Any = None) -> Dict[str, Any]:
     target_user_id = payload.get("user_id")
     lookback_days = payload.get("lookback_days", 7)
     target_date = payload.get("date", datetime.now(timezone.utc).strftime("%Y-%m-%d"))
+
+    logger.info(f"[paper_learning_ingest] Processing user {str(target_user_id or 'all')[:8]}..., lookback={lookback_days}d, target_date={target_date}")
 
     try:
         client = get_admin_client()
@@ -96,6 +108,8 @@ def run(payload: Dict[str, Any], ctx: Any = None) -> Dict[str, Any]:
 
         timing_ms = (time.time() - start_time) * 1000
 
+        logger.info(f"[paper_learning_ingest] Completed: {counts}")
+
         return {
             "ok": True,
             "counts": counts,
@@ -131,8 +145,8 @@ async def _ingest_paper_outcomes_for_user(
     cutoff_date = datetime.now(timezone.utc) - timedelta(days=lookback_days)
     cutoff_iso = cutoff_date.isoformat()
 
-    print(f"[INGEST_DEBUG] Starting ingest for user {user_id[:12]}...")
-    print(f"[INGEST_DEBUG] lookback_days={lookback_days}, cutoff_iso={cutoff_iso}")
+    logger.debug("Starting paper ingest for user %s, lookback_days=%d, cutoff=%s",
+                 user_id[:12], lookback_days, cutoff_iso)
 
     # 1. Start from paper_positions — the source of truth for closed trades.
     #    Previous code started from paper_ledger, but paper_ledger lacks a
@@ -145,35 +159,17 @@ async def _ingest_paper_outcomes_for_user(
         .execute()
 
     closed_positions = pos_result.data or []
-    print(f"[INGEST_DEBUG] Found {len(closed_positions)} closed positions within lookback")
+    logger.debug("Found %d closed positions within lookback", len(closed_positions))
 
     if not closed_positions:
-        # Debug: also check without the date filter to see if positions exist at all
-        all_closed = supabase.table("paper_positions") \
-            .select("id, status, closed_at, user_id") \
-            .eq("user_id", user_id) \
-            .eq("status", "closed") \
-            .execute()
-        all_closed_data = all_closed.data or []
-        print(f"[INGEST_DEBUG] Total closed positions (no date filter): {len(all_closed_data)}")
-        for p in all_closed_data[:10]:
-            print(f"[INGEST_DEBUG]   pos={p.get('id', '?')[:8]} closed_at={p.get('closed_at')} user_id={str(p.get('user_id', '?'))[:8]}")
-
-        # Also check: any positions at all for this user?
-        any_pos = supabase.table("paper_positions") \
-            .select("id, status, user_id", count="exact") \
-            .eq("user_id", user_id) \
-            .execute()
-        print(f"[INGEST_DEBUG] Any positions for this user: {len(any_pos.data or [])} rows")
-
         return {"closed_positions": 0, "outcomes_created": 0, "skipped_duplicate": 0}
 
-    for p in closed_positions:
-        print(
-            f"[INGEST_DEBUG]   pos={p['id'][:8]} symbol={p.get('symbol')} "
-            f"suggestion_id={str(p.get('suggestion_id', 'NULL'))[:8]} "
-            f"closed_at={p.get('closed_at')} realized_pl={p.get('realized_pl')}"
-        )
+    if logger.isEnabledFor(logging.DEBUG):
+        for p in closed_positions:
+            logger.debug("  pos=%s symbol=%s suggestion_id=%s closed_at=%s realized_pl=%s",
+                         p["id"][:8], p.get("symbol"),
+                         str(p.get("suggestion_id", "NULL"))[:8],
+                         p.get("closed_at"), p.get("realized_pl"))
 
     position_ids = [p["id"] for p in closed_positions]
 
@@ -185,7 +181,7 @@ async def _ingest_paper_outcomes_for_user(
         .execute()
 
     all_orders = orders_result.data or []
-    print(f"[INGEST_DEBUG] Found {len(all_orders)} filled orders for {len(position_ids)} positions")
+    logger.debug("Found %d filled orders for %d positions", len(all_orders), len(position_ids))
 
     # Build map: position_id → closing order (use latest if multiple)
     orders_by_position: Dict[str, Dict] = {}
@@ -196,7 +192,30 @@ async def _ingest_paper_outcomes_for_user(
             if not existing or (o.get("filled_at") or "") > (existing.get("filled_at") or ""):
                 orders_by_position[pid] = o
 
-    print(f"[INGEST_DEBUG] Mapped {len(orders_by_position)} positions to closing orders")
+    logger.debug("Mapped %d positions to closing orders", len(orders_by_position))
+
+    # 2b. Fetch suggestion EVs for pnl_predicted (mirrors live ingest semantics).
+    #     Collect suggestion_ids from orders (preferred) and positions (fallback).
+    suggestion_ids = set()
+    for o in orders_by_position.values():
+        sid = o.get("suggestion_id")
+        if sid:
+            suggestion_ids.add(sid)
+    for p in closed_positions:
+        sid = p.get("suggestion_id")
+        if sid:
+            suggestion_ids.add(sid)
+
+    suggestion_ev_map: Dict[str, float] = {}
+    if suggestion_ids:
+        sugg_result = supabase.table("trade_suggestions") \
+            .select("id, ev") \
+            .in_("id", list(suggestion_ids)) \
+            .execute()
+        for s in (sugg_result.data or []):
+            if s.get("ev") is not None:
+                suggestion_ev_map[s["id"]] = float(s["ev"])
+        logger.debug("Fetched EV for %d/%d suggestions", len(suggestion_ev_map), len(suggestion_ids))
 
     # 3. Collect order_ids for dedup check against existing learning records.
     order_ids = [o["id"] for o in orders_by_position.values()]
@@ -208,9 +227,10 @@ async def _ingest_paper_outcomes_for_user(
             .in_("source_event_id", order_ids) \
             .execute()
         existing_order_ids = {r["source_event_id"] for r in (existing_result.data or [])}
-        print(f"[INGEST_DEBUG] Dedup check: {len(existing_order_ids)} of {len(order_ids)} orders already have LFL records")
+        logger.debug("Dedup: %d of %d orders already have LFL records",
+                     len(existing_order_ids), len(order_ids))
     else:
-        print("[INGEST_DEBUG] No order_ids to dedup — all positions lack closing orders")
+        logger.debug("No order_ids to dedup — all positions lack closing orders")
 
     # 4. Create outcomes for each closed position that has a closing order.
     outcomes_created = 0
@@ -224,36 +244,40 @@ async def _ingest_paper_outcomes_for_user(
         order = orders_by_position.get(position["id"])
         if not order:
             skipped_no_order += 1
-            print(f"[INGEST_DEBUG] SKIP {symbol} (pos={pos_id_short}): no closing order found")
+            logger.debug("SKIP %s (pos=%s): no closing order", symbol, pos_id_short)
             continue
 
         if order["id"] in existing_order_ids:
             skipped_duplicate += 1
-            print(f"[INGEST_DEBUG] SKIP {symbol} (pos={pos_id_short}): dedup — order {order['id'][:8]} already in LFL")
+            logger.debug("SKIP %s (pos=%s): dedup — order %s already in LFL",
+                         symbol, pos_id_short, order["id"][:8])
             continue
 
-        outcome = _create_paper_outcome_record(user_id, order, target_date, position)
-        print(
-            f"[INGEST_DEBUG] INSERT {symbol} (pos={pos_id_short}): "
-            f"pnl={outcome['pnl_realized']} suggestion={str(outcome.get('suggestion_id', 'NULL'))[:8]}"
+        # Resolve suggestion EV: prefer order's suggestion_id, fallback to position's
+        suggestion_id = order.get("suggestion_id") or position.get("suggestion_id")
+        suggestion_ev = suggestion_ev_map.get(suggestion_id) if suggestion_id else None
+
+        outcome = _create_paper_outcome_record(
+            user_id, order, target_date, position, suggestion_ev=suggestion_ev,
         )
+        logger.info("INSERT %s (pos=%s): pnl_realized=%s pnl_predicted=%s suggestion=%s",
+                     symbol, pos_id_short, outcome["pnl_realized"],
+                     outcome.get("pnl_predicted"), str(suggestion_id or "NULL")[:8])
 
         try:
             supabase.table("learning_feedback_loops").insert(outcome).execute()
             outcomes_created += 1
-            print(f"[INGEST_DEBUG]   -> OK")
         except Exception as e:
             if "duplicate" in str(e).lower() or "unique" in str(e).lower():
                 skipped_duplicate += 1
-                print(f"[INGEST_DEBUG]   -> DUPLICATE (DB constraint)")
+                logger.debug("SKIP %s (pos=%s): DB duplicate constraint", symbol, pos_id_short)
             else:
-                print(f"[INGEST_DEBUG]   -> ERROR: {e}")
+                logger.error("Failed to insert outcome for %s (pos=%s): %s",
+                             symbol, pos_id_short, e)
                 raise
 
-    print(
-        f"[INGEST_DEBUG] Done: {outcomes_created} created, "
-        f"{skipped_duplicate} deduped, {skipped_no_order} no order"
-    )
+    logger.info("Paper ingest done for user %s: %d created, %d deduped, %d no order",
+                user_id[:8], outcomes_created, skipped_duplicate, skipped_no_order)
 
     return {
         "closed_positions": len(closed_positions),
@@ -263,7 +287,12 @@ async def _ingest_paper_outcomes_for_user(
 
 
 def _create_paper_outcome_record(
-    user_id: str, order: Dict, target_date: str, position: Dict,
+    user_id: str,
+    order: Dict,
+    target_date: str,
+    position: Dict,
+    *,
+    suggestion_ev: Optional[float] = None,
 ) -> Dict:
     """
     Create a learning_feedback_loops record from a paper order fill.
@@ -272,11 +301,15 @@ def _create_paper_outcome_record(
     the learning_trade_outcomes_v3 view to include the record. The view filters
     to only outcome_type in ('trade_closed', 'individual_trade').
 
+    pnl_predicted: sourced from suggestion EV (matching live ingest semantics).
+    Execution drag / TCM slippage is stored in details_json.expected_slippage.
+
     Args:
         user_id: User ID
         order: Paper order dict with fill details
         target_date: Date bucket for idempotency
         position: Linked paper_positions row with authoritative realized_pl
+        suggestion_ev: EV from the matched trade_suggestion (if available)
 
     Returns:
         Dict ready for insertion into learning_feedback_loops
@@ -313,6 +346,7 @@ def _create_paper_outcome_record(
     tcm = order.get("tcm") or {}
     predicted_fill_price = tcm.get("expected_fill_price")
     fill_probability = tcm.get("fill_probability")
+    expected_slippage = tcm.get("expected_slippage")
 
     return {
         "user_id": user_id,
@@ -322,7 +356,9 @@ def _create_paper_outcome_record(
         # CRITICAL: Must be 'trade_closed' for learning_trade_outcomes_v3 view
         "outcome_type": "trade_closed",
         "pnl_realized": pnl_realized,
-        "pnl_predicted": tcm.get("expected_slippage"),
+        # pnl_predicted: suggestion EV, matching live ingest semantics.
+        # Previously this stored tcm.expected_slippage (execution drag, not prediction).
+        "pnl_predicted": suggestion_ev,
         "is_paper": True,
         "details_json": {
             "order_id": order["id"],
@@ -338,6 +374,8 @@ def _create_paper_outcome_record(
             "filled_at": order.get("filled_at"),
             "tcm_fill_probability": fill_probability,
             "tcm_expected_fill_price": predicted_fill_price,
+            # Execution drag from TCM — semantically separate from pnl_predicted.
+            "expected_slippage": expected_slippage,
             "date_bucket": target_date,
             "pnl_outcome": pnl_outcome,  # win/loss/breakeven for analytics
             "is_paper": True,

@@ -279,6 +279,7 @@ class TestPaperAutotuneGuard:
 
         assert result["paper_guard_blocked"] is True
         assert result["updated"] is False
+        assert result["mutation_basis"] == "blocked_paper_only"
         # Metrics should still be computed
         assert result["win_rate"] == 0.0
         assert result["samples"] == 12
@@ -305,17 +306,25 @@ class TestPaperAutotuneGuard:
         assert result["new_version"] == 4
 
     @patch("packages.quantum.jobs.handlers.strategy_autotune.ENABLE_PAPER_AUTOTUNE", False)
-    def test_mixed_paper_and_live_blocked(self):
-        """Even a single paper outcome blocks mutation when guard is active."""
+    @patch("packages.quantum.jobs.handlers.strategy_autotune.load_strategy_config")
+    def test_mixed_paper_and_live_uses_live_basis(self, mock_load_config):
+        """Mixed dataset should use live-only rows for mutation decision."""
         from packages.quantum.jobs.handlers.strategy_autotune import _evaluate_and_update
 
+        mock_load_config.return_value = {
+            "version": 5,
+            "conviction_floor": 0.40,
+            "stop_loss_pct": 0.05,
+        }
+
         outcomes = [_LIVE_LOSS] * 11 + [_PAPER_LOSS]
-        client, config = _make_supabase(outcomes)
+        client, _ = _make_supabase(outcomes)
 
         result = asyncio.run(_evaluate_and_update("user-1234-abcd", "spy_opt_autolearn_v6", client, 10))
 
-        assert result["paper_guard_blocked"] is True
-        assert result["updated"] is False
+        # Live-only basis: 0/11 win rate -> triggers mutation
+        assert result["updated"] is True
+        assert result.get("mutation_basis") == "live_only"
 
     @patch("packages.quantum.jobs.handlers.strategy_autotune.ENABLE_PAPER_AUTOTUNE", False)
     @patch("packages.quantum.jobs.handlers.strategy_autotune.load_strategy_config")
@@ -340,7 +349,7 @@ class TestPaperAutotuneGuard:
 
     @patch("packages.quantum.jobs.handlers.strategy_autotune.ENABLE_PAPER_AUTOTUNE", False)
     def test_guard_does_not_block_when_no_mutation_needed(self):
-        """High win rate → no mutation → guard irrelevant."""
+        """High win rate -> no mutation -> guard irrelevant."""
         from packages.quantum.jobs.handlers.strategy_autotune import _evaluate_and_update
 
         outcomes = [_PAPER_WIN] * 10 + [_PAPER_LOSS] * 2
@@ -348,9 +357,48 @@ class TestPaperAutotuneGuard:
 
         result = asyncio.run(_evaluate_and_update("user-1234-abcd", "spy_opt_autolearn_v6", client, 10))
 
-        # win_rate = 10/12 ≈ 83% → no mutation needed, guard never fires
+        # win_rate = 10/12 ~ 83% -> no mutation needed, guard never fires
         assert result["updated"] is False
         assert result.get("paper_guard_blocked") is None
+
+    @patch("packages.quantum.jobs.handlers.strategy_autotune.ENABLE_PAPER_AUTOTUNE", False)
+    @patch("packages.quantum.jobs.handlers.strategy_autotune.load_strategy_config")
+    def test_mixed_dataset_live_driven_mutation(self, mock_load_config):
+        """Mixed dataset with poor live metrics should mutate using live-only basis."""
+        from packages.quantum.jobs.handlers.strategy_autotune import _evaluate_and_update
+
+        mock_load_config.return_value = {
+            "version": 2,
+            "conviction_floor": 0.40,
+            "stop_loss_pct": 0.05,
+        }
+
+        # 10 live losses + 5 paper wins -- live metrics are bad, paper looks good
+        outcomes = [_LIVE_LOSS] * 10 + [_PAPER_WIN] * 5
+        client, _ = _make_supabase(outcomes)
+
+        result = asyncio.run(_evaluate_and_update("user-1234-abcd", "spy_opt_autolearn_v6", client, 10))
+
+        assert result["updated"] is True
+        assert result.get("mutation_basis") == "live_only"
+
+    @patch("packages.quantum.jobs.handlers.strategy_autotune.ENABLE_PAPER_AUTOTUNE", False)
+    def test_mixed_dataset_paper_weakness_only(self):
+        """Mixed dataset where paper weakness triggers combined mutation check,
+        but live-only metrics are healthy so no mutation occurs."""
+        from packages.quantum.jobs.handlers.strategy_autotune import _evaluate_and_update
+
+        # 5 live wins + 7 paper losses
+        # Combined: 5/12 = 41.7% win rate (< 45%) -> needs_mutation=True
+        # Live-only: 5/5 = 100% win rate, avg_pnl=$200 -> needs_mutation=False
+        # Guard recomputes with live-only -> no mutation
+        outcomes = [_LIVE_WIN] * 5 + [_PAPER_LOSS] * 7
+        client, _ = _make_supabase(outcomes)
+
+        result = asyncio.run(_evaluate_and_update("user-1234-abcd", "spy_opt_autolearn_v6", client, 10))
+
+        assert result["updated"] is False
+        assert result.get("mutation_basis") == "live_only"
 
 
 # ===========================================================================
@@ -475,7 +523,7 @@ class TestWinRateBeforeAfterNormalization:
 
     def test_new_logic_counts_paper_wins_correctly(self):
         """
-        After: normalized classification → paper wins counted.
+        After: normalized classification -> paper wins counted.
         """
         from packages.quantum.jobs.handlers.strategy_autotune import _compute_metrics
 
@@ -485,3 +533,21 @@ class TestWinRateBeforeAfterNormalization:
         # Paper wins + live win = 3 wins out of 5
         assert metrics["wins"] == 3
         assert metrics["win_rate"] == pytest.approx(0.6)
+
+
+# ===========================================================================
+# Tests: no print statements
+# ===========================================================================
+
+class TestNoPrintStatements:
+    """Verify print-based logging has been removed."""
+
+    def test_no_print_calls_in_strategy_autotune(self):
+        import inspect
+        from packages.quantum.jobs.handlers import strategy_autotune
+        source = inspect.getsource(strategy_autotune)
+        # Allow print in __name__ == "__main__" blocks but not in function bodies
+        lines = source.split('\n')
+        print_lines = [i+1 for i, line in enumerate(lines)
+                       if 'print(' in line and '__name__' not in line and '# ' not in line.split('print(')[0]]
+        assert print_lines == [], f"print() calls found on lines: {print_lines}"

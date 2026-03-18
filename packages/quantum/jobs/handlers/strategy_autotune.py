@@ -12,11 +12,15 @@ This handler:
 5. Persists new version to strategy_configs table
 
 Paper-autotune guard:
-  Paper outcomes are always included in metric computation, but parameter
-  mutations sourced from paper outcomes are blocked unless
-  ENABLE_PAPER_AUTOTUNE=true.
+  When ENABLE_PAPER_AUTOTUNE=false:
+  - Paper-only datasets: mutation is blocked entirely
+  - Mixed live+paper datasets: only live rows are used for mutation eligibility
+  - Live-only datasets: normal behavior
+  When ENABLE_PAPER_AUTOTUNE=true:
+  - All rows (paper + live) are used for mutation eligibility
 """
 
+import logging
 import time
 from typing import Any, Dict, List, Optional
 from datetime import datetime, timedelta, timezone
@@ -26,6 +30,8 @@ from packages.quantum.jobs.handlers.exceptions import RetryableJobError, Permane
 from packages.quantum.jobs.handlers.outcome_normalizer import classify_outcome
 from packages.quantum.services.strategy_loader import load_strategy_config
 from packages.quantum.config import ENABLE_PAPER_AUTOTUNE
+
+logger = logging.getLogger(__name__)
 
 JOB_NAME = "strategy_autotune"
 
@@ -180,7 +186,8 @@ async def _evaluate_and_update(
             win_rate: float,
             avg_pnl: float,
             samples: int,
-            paper_guard_blocked: bool
+            paper_guard_blocked: bool,
+            mutation_basis: str
         }
     """
     # 1. Fetch recent outcomes
@@ -218,6 +225,7 @@ async def _evaluate_and_update(
         return {
             "skipped": False,
             "updated": False,
+            "mutation_basis": "all",
             "win_rate": win_rate,
             "avg_pnl": avg_pnl,
             "samples": metrics["samples"],
@@ -230,26 +238,60 @@ async def _evaluate_and_update(
     paper_only = has_paper and live_count == 0
 
     if has_paper:
-        print(
+        logger.info(
             f"[strategy_autotune] Paper outcomes observed for {user_id[:8]}...: "
             f"paper={paper_count}, live={live_count}"
         )
 
+    mutation_basis = "all"
+
     if has_paper and not ENABLE_PAPER_AUTOTUNE:
-        print(
-            f"[strategy_autotune] Mutation skipped for {user_id[:8]}...: "
-            f"paper outcomes present and ENABLE_PAPER_AUTOTUNE=false"
-        )
-        return {
-            "skipped": False,
-            "updated": False,
-            "paper_guard_blocked": True,
-            "win_rate": win_rate,
-            "avg_pnl": avg_pnl,
-            "samples": metrics["samples"],
-            "paper_count": paper_count,
-            "live_count": live_count,
-        }
+        if paper_only:
+            # Paper-only dataset: block mutation entirely
+            logger.info(
+                f"[strategy_autotune] Mutation blocked for {user_id[:8]}...: "
+                f"paper-only dataset and ENABLE_PAPER_AUTOTUNE=false"
+            )
+            return {
+                "skipped": False,
+                "updated": False,
+                "paper_guard_blocked": True,
+                "mutation_basis": "blocked_paper_only",
+                "win_rate": win_rate,
+                "avg_pnl": avg_pnl,
+                "samples": metrics["samples"],
+                "paper_count": paper_count,
+                "live_count": live_count,
+            }
+        else:
+            # Mixed dataset: recompute metrics using live-only rows
+            live_only = [o for o in outcomes_with_pnl if not _is_paper(o)]
+            live_metrics = _compute_metrics(live_only)
+            win_rate = live_metrics["win_rate"]
+            avg_pnl = live_metrics["avg_pnl"]
+            needs_mutation = win_rate < MIN_WIN_RATE or avg_pnl < MIN_AVG_PNL
+            mutation_basis = "live_only"
+
+            logger.info(
+                f"[strategy_autotune] Mixed dataset for {user_id[:8]}...: "
+                f"using live-only basis ({live_count} rows), "
+                f"live_win_rate={win_rate:.1%}, live_avg_pnl=${avg_pnl:.2f}"
+            )
+
+            if not needs_mutation:
+                return {
+                    "skipped": False,
+                    "updated": False,
+                    "mutation_basis": "live_only",
+                    "win_rate": win_rate,
+                    "avg_pnl": avg_pnl,
+                    "samples": metrics["samples"],
+                    "paper_count": paper_count,
+                    "live_count": live_count,
+                }
+    else:
+        # Either no paper rows, or ENABLE_PAPER_AUTOTUNE=true
+        pass
 
     # 5. Load current config and mutate
     current_config = load_strategy_config(user_id, strategy_name, supabase)
@@ -278,6 +320,7 @@ async def _evaluate_and_update(
         "skipped": False,
         "updated": True,
         "new_version": new_version,
+        "mutation_basis": mutation_basis,
         "win_rate": win_rate,
         "avg_pnl": avg_pnl,
         "samples": metrics["samples"],
@@ -348,8 +391,8 @@ def _persist_strategy_config(
         }
 
         supabase.table("strategy_configs").insert(config_data).execute()
-        print(f"[strategy_autotune] Persisted {name} v{version} for user {user_id[:8]}...")
+        logger.info(f"[strategy_autotune] Persisted {name} v{version} for user {user_id[:8]}...")
 
     except Exception as e:
-        print(f"[strategy_autotune] Error persisting config: {e}")
+        logger.error(f"[strategy_autotune] Error persisting config: {e}")
         raise

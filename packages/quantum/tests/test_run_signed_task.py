@@ -10,6 +10,7 @@ Tests:
 
 import os
 import sys
+import unittest
 from datetime import datetime
 from unittest.mock import patch, MagicMock
 from zoneinfo import ZoneInfo
@@ -684,3 +685,75 @@ class TestRedactSensitiveFields:
         assert _redact_sensitive_fields("string") == "string"
         assert _redact_sensitive_fields(123) == 123
         assert _redact_sensitive_fields(None) is None
+
+
+class TestScheduledLocalTimeGate(unittest.TestCase):
+    """Tests for --scheduled-local-time generic gate mechanism."""
+
+    @patch("run_signed_task.is_market_day", return_value=True)
+    def test_scheduled_local_time_gates_correctly(self, _):
+        """--scheduled-local-time 11:30 should gate to 11:30 Chicago."""
+        with patch("run_signed_task.datetime") as mock_dt:
+            mock_dt.now.return_value = datetime(2024, 1, 15, 11, 35, tzinfo=CHICAGO_TZ)
+            mock_dt.side_effect = lambda *a, **kw: datetime(*a, **kw)
+            self.assertTrue(check_time_gate("paper_auto_execute", scheduled_local_time="11:30"))
+
+    @patch("run_signed_task.is_market_day", return_value=True)
+    def test_scheduled_local_time_rejects_wrong_offset(self, _):
+        """Wrong-offset cron for 11:30 should be rejected (e.g. 10:30 Chicago)."""
+        with patch("run_signed_task.datetime") as mock_dt:
+            mock_dt.now.return_value = datetime(2024, 1, 15, 10, 30, tzinfo=CHICAGO_TZ)
+            mock_dt.side_effect = lambda *a, **kw: datetime(*a, **kw)
+            self.assertFalse(check_time_gate("paper_auto_execute", scheduled_local_time="11:30"))
+
+    @patch("run_signed_task.is_market_day", return_value=True)
+    def test_validation_preflight_wrong_offset(self, _):
+        """Wrong-offset cron for 13:05 should be rejected (e.g. 12:05 Chicago)."""
+        with patch("run_signed_task.datetime") as mock_dt:
+            mock_dt.now.return_value = datetime(2024, 1, 15, 12, 5, tzinfo=CHICAGO_TZ)
+            mock_dt.side_effect = lambda *a, **kw: datetime(*a, **kw)
+            self.assertFalse(check_time_gate("validation_preflight", scheduled_local_time="13:05"))
+
+    @patch("run_signed_task.is_market_day", return_value=True)
+    def test_shadow_eval_midday_vs_afternoon(self, _):
+        """Same task validation_shadow_eval at 13:00 should reject 16:00 slot."""
+        with patch("run_signed_task.datetime") as mock_dt:
+            mock_dt.now.return_value = datetime(2024, 1, 15, 13, 10, tzinfo=CHICAGO_TZ)
+            mock_dt.side_effect = lambda *a, **kw: datetime(*a, **kw)
+            # Midday slot: 13:00 — should pass
+            self.assertTrue(check_time_gate("validation_shadow_eval", scheduled_local_time="13:00"))
+            # Afternoon slot: 16:00 — should fail at 13:10
+            self.assertFalse(check_time_gate("validation_shadow_eval", scheduled_local_time="16:00"))
+
+    @patch("run_signed_task.is_market_day", return_value=True)
+    def test_learning_ingest_nightly_wrong_offset(self, _):
+        """Wrong-offset cron for 03:30 should be rejected (e.g. 02:30 Chicago)."""
+        with patch("run_signed_task.datetime") as mock_dt:
+            mock_dt.now.return_value = datetime(2024, 1, 16, 2, 30, tzinfo=CHICAGO_TZ)
+            mock_dt.side_effect = lambda *a, **kw: datetime(*a, **kw)
+            self.assertFalse(check_time_gate("learning_ingest", scheduled_local_time="03:30"))
+
+    @patch("run_signed_task.is_market_day", return_value=True)
+    def test_learning_ingest_nightly_correct_offset(self, _):
+        """Correct cron for 03:30 should pass."""
+        with patch("run_signed_task.datetime") as mock_dt:
+            mock_dt.now.return_value = datetime(2024, 1, 16, 3, 35, tzinfo=CHICAGO_TZ)
+            mock_dt.side_effect = lambda *a, **kw: datetime(*a, **kw)
+            self.assertTrue(check_time_gate("learning_ingest", scheduled_local_time="03:30"))
+
+    def test_skip_time_gate_overrides_scheduled_local_time(self):
+        """--skip-time-gate should override --scheduled-local-time."""
+        self.assertTrue(check_time_gate("any_task", skip_time_gate=True, scheduled_local_time="11:30"))
+
+    @patch("run_signed_task.is_market_day", return_value=True)
+    def test_scheduled_local_time_overrides_time_gates(self, _):
+        """--scheduled-local-time should override TIME_GATES default for the task."""
+        with patch("run_signed_task.datetime") as mock_dt:
+            # learning_ingest has TIME_GATES default of 16:10
+            # But we pass --scheduled-local-time 03:30 (nightly)
+            mock_dt.now.return_value = datetime(2024, 1, 16, 3, 35, tzinfo=CHICAGO_TZ)
+            mock_dt.side_effect = lambda *a, **kw: datetime(*a, **kw)
+            # With --scheduled-local-time 03:30, at 03:35 should pass
+            self.assertTrue(check_time_gate("learning_ingest", scheduled_local_time="03:30"))
+            # Without it, would use TIME_GATES (16:10) and fail
+            self.assertFalse(check_time_gate("learning_ingest"))

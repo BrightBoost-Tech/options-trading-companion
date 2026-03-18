@@ -48,7 +48,7 @@ import json
 import os
 import sys
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional
 from zoneinfo import ZoneInfo
 
@@ -320,15 +320,76 @@ def is_within_time_window(
     return 0 <= diff < window_minutes
 
 
+def _is_correct_season_cron(scheduled_local_time: str) -> bool:
+    """
+    Check whether the triggering UTC cron matches the current DST season.
+
+    Uses GITHUB_EVENT_SCHEDULE (set by GitHub Actions for scheduled runs)
+    to extract the UTC hour of the triggering cron, then compares it to the
+    expected UTC hour for the given Chicago local time under the CURRENT
+    DST offset.
+
+    Returns True if:
+      - Not a GitHub Actions scheduled run (no env var)
+      - The triggering cron's UTC hour matches the expected UTC hour (±0)
+    Returns False if the cron belongs to the wrong season.
+    """
+    cron_str = os.environ.get("GITHUB_EVENT_SCHEDULE", "")
+    if not cron_str:
+        # Not a scheduled run or env var not set — allow
+        return True
+
+    try:
+        parts = scheduled_local_time.split(":")
+        local_hour = int(parts[0])
+        local_minute = int(parts[1])
+    except (ValueError, IndexError):
+        return True  # Can't parse, allow
+
+    # Compute expected UTC hour for this Chicago local time today
+    now_chicago = datetime.now(CHICAGO_TZ)
+    target_chicago = now_chicago.replace(hour=local_hour, minute=local_minute, second=0, microsecond=0)
+    expected_utc_hour = target_chicago.astimezone(timezone.utc).hour
+
+    # Extract the triggering cron's UTC hour
+    # Cron format: "minute hour day month weekday"
+    cron_parts = cron_str.strip().split()
+    if len(cron_parts) < 2:
+        return True  # Can't parse, allow
+
+    try:
+        cron_utc_hour = int(cron_parts[1])
+    except ValueError:
+        return True  # Can't parse, allow
+
+    if cron_utc_hour != expected_utc_hour:
+        print(
+            f"[TIME-GATE] Wrong-season cron: schedule='{cron_str}' "
+            f"(UTC hour {cron_utc_hour}) but current DST offset expects "
+            f"UTC hour {expected_utc_hour} for {scheduled_local_time} Chicago"
+        )
+        return False
+
+    return True
+
+
 def check_time_gate(task_name: str, skip_time_gate: bool = False, scheduled_local_time: str = None) -> bool:
     """
     Check if task should run based on time gate.
 
     Precedence:
-      1. skip_time_gate=True  -> always run
-      2. scheduled_local_time -> gate to that exact Chicago local time
-      3. task in TIME_GATES   -> gate to task default
-      4. else                 -> no gate, always run
+      1. skip_time_gate=True  → always run
+      2. scheduled_local_time → verify correct-season cron + market day
+      3. task in TIME_GATES   → gate to task default (legacy, 60-min window)
+      4. else                 → no gate, always run
+
+    For --scheduled-local-time jobs, the gate validates that the triggering
+    cron matches the current DST season (via GITHUB_EVENT_SCHEDULE) and
+    that today is a market day. It does NOT enforce a wall-clock time window
+    because GitHub Actions can delay runs by 60+ minutes.
+
+    For legacy TIME_GATES tasks (without --scheduled-local-time), the old
+    60-minute window behavior is preserved.
 
     Args:
         task_name: Name of the task to run
@@ -341,9 +402,18 @@ def check_time_gate(task_name: str, skip_time_gate: bool = False, scheduled_loca
     if skip_time_gate:
         return True
 
-    # Define time windows for scheduled tasks (Chicago local time).
-    # Each entry gates the task to a 60-minute window starting at the
-    # target time, so the wrong-offset dual UTC cron is rejected.
+    # --scheduled-local-time: season-based gating (tolerates GitHub delays)
+    if scheduled_local_time:
+        if not is_market_day():
+            print(f"[TIME-GATE] Skipping {task_name}: not a market day")
+            return False
+
+        if not _is_correct_season_cron(scheduled_local_time):
+            return False
+
+        return True
+
+    # Legacy TIME_GATES: 60-minute wall-clock window
     TIME_GATES = {
         "suggestions_close": (8, 0),        # 8:00 AM Chicago
         "suggestions_open": (11, 0),        # 11:00 AM Chicago
@@ -352,28 +422,14 @@ def check_time_gate(task_name: str, skip_time_gate: bool = False, scheduled_loca
         "learning_ingest": (16, 10),        # 4:10 PM Chicago
     }
 
-    # Determine target time: --scheduled-local-time takes precedence
-    target_hour = None
-    target_minute = None
-
-    if scheduled_local_time:
-        try:
-            parts = scheduled_local_time.split(":")
-            target_hour = int(parts[0])
-            target_minute = int(parts[1])
-        except (ValueError, IndexError):
-            print(f"[TIME-GATE] Invalid --scheduled-local-time format: {scheduled_local_time!r}, expected HH:MM")
-            return False
-    elif task_name in TIME_GATES:
-        target_hour, target_minute = TIME_GATES[task_name]
-    else:
-        # No gate applies
+    if task_name not in TIME_GATES:
         return True
 
     if not is_market_day():
         print(f"[TIME-GATE] Skipping {task_name}: not a market day")
         return False
 
+    target_hour, target_minute = TIME_GATES[task_name]
     if not is_within_time_window(target_hour, target_minute, window_minutes=60):
         now_chicago = datetime.now(CHICAGO_TZ)
         print(

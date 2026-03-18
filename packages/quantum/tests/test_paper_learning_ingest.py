@@ -256,6 +256,40 @@ class TestCreatePaperOutcomeRecord:
         assert result["details_json"]["is_paper"] is True
 
 
+class TestPnlPredictedSemantics:
+    """Verify pnl_predicted matches live semantics."""
+
+    def test_pnl_predicted_is_null_not_slippage(self):
+        """pnl_predicted should be None, not expected_slippage."""
+        from packages.quantum.jobs.handlers.paper_learning_ingest import (
+            _create_paper_outcome_record
+        )
+        order = {**_SAMPLE_ORDER, "tcm": {"expected_slippage": 0.05, "fill_probability": 0.9, "expected_fill_price": 1.48}}
+        result = _create_paper_outcome_record("user-1", order, "2025-01-15", _SAMPLE_POSITION)
+        assert result["pnl_predicted"] is None
+
+    def test_expected_slippage_in_details_json(self):
+        """Expected slippage should be in details_json, not pnl_predicted."""
+        from packages.quantum.jobs.handlers.paper_learning_ingest import (
+            _create_paper_outcome_record
+        )
+        order = {**_SAMPLE_ORDER, "tcm": {"expected_slippage": 0.05}}
+        result = _create_paper_outcome_record("user-1", order, "2025-01-15", _SAMPLE_POSITION)
+        assert result["details_json"]["expected_slippage"] == 0.05
+
+
+class TestNoDebugPrints:
+    """Verify debug prints have been removed."""
+
+    def test_no_ingest_debug_prints(self):
+        """No [INGEST_DEBUG] print statements should remain."""
+        import inspect
+        from packages.quantum.jobs.handlers import paper_learning_ingest
+        source = inspect.getsource(paper_learning_ingest)
+        assert "INGEST_DEBUG" not in source
+        assert 'print(f"[' not in source or "INGEST_DEBUG" not in source
+
+
 class TestIngestPaperOutcomesForUser:
     """Tests for _ingest_paper_outcomes_for_user."""
 

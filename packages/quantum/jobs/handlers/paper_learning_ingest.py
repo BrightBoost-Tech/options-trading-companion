@@ -53,6 +53,8 @@ def run(payload: Dict[str, Any], ctx: Any = None) -> Dict[str, Any]:
     lookback_days = payload.get("lookback_days", 7)
     target_date = payload.get("date", datetime.now(timezone.utc).strftime("%Y-%m-%d"))
 
+    logger.info(f"[paper_learning_ingest] Processing user {str(target_user_id or 'all')[:8]}..., lookback={lookback_days}d, target_date={target_date}")
+
     try:
         client = get_admin_client()
 
@@ -105,6 +107,8 @@ def run(payload: Dict[str, Any], ctx: Any = None) -> Dict[str, Any]:
         counts["errors"] = errors
 
         timing_ms = (time.time() - start_time) * 1000
+
+        logger.info(f"[paper_learning_ingest] Completed: {counts}")
 
         return {
             "ok": True,

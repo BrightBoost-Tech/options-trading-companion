@@ -320,13 +320,20 @@ def is_within_time_window(
     return 0 <= diff < window_minutes
 
 
-def check_time_gate(task_name: str, skip_time_gate: bool = False) -> bool:
+def check_time_gate(task_name: str, skip_time_gate: bool = False, scheduled_local_time: str = None) -> bool:
     """
     Check if task should run based on time gate.
+
+    Precedence:
+      1. skip_time_gate=True  -> always run
+      2. scheduled_local_time -> gate to that exact Chicago local time
+      3. task in TIME_GATES   -> gate to task default
+      4. else                 -> no gate, always run
 
     Args:
         task_name: Name of the task to run
         skip_time_gate: If True, skip time gate check
+        scheduled_local_time: Expected Chicago local time "HH:MM" (from --scheduled-local-time)
 
     Returns:
         True if task should run, False if time-gated out
@@ -334,23 +341,39 @@ def check_time_gate(task_name: str, skip_time_gate: bool = False) -> bool:
     if skip_time_gate:
         return True
 
-    # Define time windows for scheduled tasks
+    # Define time windows for scheduled tasks (Chicago local time).
+    # Each entry gates the task to a 60-minute window starting at the
+    # target time, so the wrong-offset dual UTC cron is rejected.
     TIME_GATES = {
-        "suggestions_close": (8, 0),   # 8:00 AM Chicago
-        "suggestions_open": (11, 0),   # 11:00 AM Chicago
-        "learning_ingest": (16, 10),   # 4:10 PM Chicago
-        # paper_auto_close removed: superseded by paper_exit_evaluate
+        "suggestions_close": (8, 0),        # 8:00 AM Chicago
+        "suggestions_open": (11, 0),        # 11:00 AM Chicago
+        "paper_auto_execute": (11, 30),     # 11:30 AM Chicago
+        "validation_preflight": (13, 5),    # 1:05 PM Chicago
+        "learning_ingest": (16, 10),        # 4:10 PM Chicago
     }
 
-    if task_name not in TIME_GATES:
-        # No time gate for this task
+    # Determine target time: --scheduled-local-time takes precedence
+    target_hour = None
+    target_minute = None
+
+    if scheduled_local_time:
+        try:
+            parts = scheduled_local_time.split(":")
+            target_hour = int(parts[0])
+            target_minute = int(parts[1])
+        except (ValueError, IndexError):
+            print(f"[TIME-GATE] Invalid --scheduled-local-time format: {scheduled_local_time!r}, expected HH:MM")
+            return False
+    elif task_name in TIME_GATES:
+        target_hour, target_minute = TIME_GATES[task_name]
+    else:
+        # No gate applies
         return True
 
     if not is_market_day():
         print(f"[TIME-GATE] Skipping {task_name}: not a market day")
         return False
 
-    target_hour, target_minute = TIME_GATES[task_name]
     if not is_within_time_window(target_hour, target_minute, window_minutes=60):
         now_chicago = datetime.now(CHICAGO_TZ)
         print(
@@ -664,6 +687,7 @@ def run_task(
     skip_sync: bool = False,
     force_rerun: bool = False,
     force: bool = False,
+    scheduled_local_time: Optional[str] = None,
 ) -> int:
     """
     Run a signed task request.
@@ -690,7 +714,7 @@ def run_task(
     task = TASKS[task_name]
 
     # Check time gate
-    if not check_time_gate(task_name, skip_time_gate):
+    if not check_time_gate(task_name, skip_time_gate, scheduled_local_time):
         write_step_summary(task_name, skipped=True, skip_reason="Time gate")
         return 0  # Not an error, just skipped
 
@@ -920,6 +944,13 @@ Environment Variables:
         help="Bypass idempotency entirely: implies --force-rerun and adds a UUID nonce to the payload",
     )
     parser.add_argument(
+        "--scheduled-local-time",
+        type=str,
+        default=None,
+        metavar="HH:MM",
+        help="Expected Chicago local time for this run (e.g. 11:30). Rejects the wrong-offset dual-UTC cron.",
+    )
+    parser.add_argument(
         "--list",
         action="store_true",
         dest="list_tasks",
@@ -946,6 +977,7 @@ Environment Variables:
         skip_sync=args.skip_sync,
         force_rerun=args.force_rerun,
         force=args.force,
+        scheduled_local_time=args.scheduled_local_time,
     )
 
 

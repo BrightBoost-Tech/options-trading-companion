@@ -35,7 +35,7 @@ on:
 
     # Paper Learning Ingest - 4:20 PM Chicago (after exit evaluator + MTM + learning_ingest)
     # CDT (summer): 21:20 UTC | CST (winter): 22:20 UTC
-    # Schedule BOTH; --skip-time-gate allows only the correct local-time run
+    # Schedule BOTH; Python time-gate allows only the correct local-time run
     - cron: '20 21 * * 1-5'
     - cron: '20 22 * * 1-5'
 
@@ -46,19 +46,21 @@ on:
 
     # Validation Eval (Checkpoint) - 9:30 AM Chicago (after paper_auto_close)
     # CDT (summer): 14:30 UTC | CST (winter): 15:30 UTC
-    # Schedule BOTH; --skip-time-gate allows only the correct local-time run
+    # Schedule BOTH; Python time-gate allows only the correct local-time run
     - cron: '30 14 * * 1-5'
     - cron: '30 15 * * 1-5'
 
     # Learning Ingest Nightly - 3:30 AM Chicago (deep night, Tue-Sat)
-    # CST (winter): 09:30 UTC | CDT (summer): 08:30 UTC
-    # Schedule at 08:30 UTC; runs Tue-Sat to process Mon-Fri data
+    # CDT (summer): 08:30 UTC | CST (winter): 09:30 UTC
+    # Schedule BOTH; Python time-gate allows only the correct local-time run
     - cron: '30 08 * * 2-6'
+    - cron: '30 09 * * 2-6'
 
     # Paper Auto-Execute - 11:30 AM Chicago (after suggestions/open)
-    # CST (winter): 17:30 UTC | CDT (summer): 16:30 UTC
-    # Schedule at 16:30 UTC to catch CDT
+    # CDT (summer): 16:30 UTC | CST (winter): 17:30 UTC
+    # Schedule BOTH; Python time-gate allows only the correct local-time run
     - cron: '30 16 * * 1-5'
+    - cron: '30 17 * * 1-5'
 
     # Paper Auto-Close - DISABLED: superseded by paper_exit_evaluate (condition-based exits)
     # + MTM unrealized P&L in checkpoint. Force-closing healthy positions destroys alpha.
@@ -67,26 +69,26 @@ on:
 
     # Shadow Checkpoint Midday - 1:00 PM Chicago (intraday pacing check)
     # CDT (summer): 18:00 UTC | CST (winter): 19:00 UTC
-    # Schedule BOTH; --skip-time-gate allows only the correct local-time run
+    # Schedule BOTH; Python time-gate allows only the correct local-time run
     - cron: '0 18 * * 1-5'
     - cron: '0 19 * * 1-5'
 
     # Shadow Checkpoint Afternoon - 4:00 PM Chicago (pre-close pacing check)
     # CDT (summer): 21:02 UTC | CST (winter): 22:00 UTC
-    # Schedule BOTH; --skip-time-gate allows only the correct local-time run
+    # Schedule BOTH; Python time-gate allows only the correct local-time run
     # CDT cron offset to :02 to avoid collision with paper_exit_evaluate CST at '0 21'
     - cron: '2 21 * * 1-5'
     - cron: '0 22 * * 1-5'
 
     # Cohort Eval Afternoon - 4:05 PM Chicago (multi-threshold analysis)
     # CDT (summer): 21:05 UTC | CST (winter): 22:05 UTC
-    # Schedule BOTH; --skip-time-gate allows only the correct local-time run
+    # Schedule BOTH; Python time-gate allows only the correct local-time run
     - cron: '5 21 * * 1-5'
     - cron: '5 22 * * 1-5'
 
     # Autopromote Cohort - 4:15 PM Chicago (after cohort eval)
     # CDT (summer): 21:15 UTC | CST (winter): 22:15 UTC
-    # Schedule BOTH; --skip-time-gate allows only the correct local-time run
+    # Schedule BOTH; Python time-gate allows only the correct local-time run
     - cron: '15 21 * * 1-5'
     - cron: '15 22 * * 1-5'
 
@@ -94,13 +96,14 @@ on:
 
     # Validation Init Window - 8:40 AM Chicago (before suggestions-open)
     # CDT (summer): 13:40 UTC | CST (winter): 14:40 UTC
-    # Schedule BOTH; --skip-time-gate allows only the correct local-time run
+    # Schedule BOTH; Python time-gate allows only the correct local-time run
     - cron: '40 13 * * 1-5'
     - cron: '40 14 * * 1-5'
 
-    # Validation Preflight Midday - 1:00 PM Chicago (intraday pacing check)
-    # CST (winter): 19:00 UTC | CDT (summer): 18:00 UTC
-    # Schedule at 19:00 UTC (overlaps with shadow midday, runs after)
+    # Validation Preflight Midday - 1:05 PM Chicago (intraday pacing check)
+    # CDT (summer): 18:05 UTC | CST (winter): 19:05 UTC
+    # Schedule BOTH; Python time-gate allows only the correct local-time run
+    - cron: '5 18 * * 1-5'
     - cron: '5 19 * * 1-5'
 
     # Paper Exit Evaluator - 3:00 PM Chicago (condition-based exits before MTM)
@@ -183,6 +186,9 @@ jobs:
     name: Suggestions Close (8 AM Chicago)
     runs-on: ubuntu-latest
     if: github.event_name == 'schedule' && (github.event.schedule == '0 13 * * 1-5' || github.event.schedule == '0 14 * * 1-5')
+    concurrency:
+      group: trading-suggestions-close-${{ github.ref }}
+      cancel-in-progress: false
 
     steps:
       - name: Checkout
@@ -212,7 +218,7 @@ jobs:
           BASE_URL: ${{ secrets.QUANTUM_BASE_URL }}
           USER_ID: ${{ secrets.USER_ID || secrets.TASK_USER_ID }}
         run: |
-          python scripts/run_signed_task.py suggestions_close --skip-time-gate
+          python scripts/run_signed_task.py suggestions_close --scheduled-local-time 08:00
 
   # ============================================================================
   # Scheduled: Suggestions Open (11 AM Chicago)
@@ -221,6 +227,9 @@ jobs:
     name: Suggestions Open (11 AM Chicago)
     runs-on: ubuntu-latest
     if: github.event_name == 'schedule' && (github.event.schedule == '0 16 * * 1-5' || github.event.schedule == '0 17 * * 1-5')
+    concurrency:
+      group: trading-suggestions-open-${{ github.ref }}
+      cancel-in-progress: false
 
     steps:
       - name: Checkout
@@ -250,7 +259,7 @@ jobs:
           BASE_URL: ${{ secrets.QUANTUM_BASE_URL }}
           USER_ID: ${{ secrets.USER_ID || secrets.TASK_USER_ID }}
         run: |
-          python scripts/run_signed_task.py suggestions_open --skip-time-gate
+          python scripts/run_signed_task.py suggestions_open --scheduled-local-time 11:00
 
   # ============================================================================
   # Scheduled: Learning Ingest (4:10 PM Chicago)
@@ -259,6 +268,9 @@ jobs:
     name: Learning Ingest (4:10 PM Chicago)
     runs-on: ubuntu-latest
     if: github.event_name == 'schedule' && (github.event.schedule == '10 21 * * 1-5' || github.event.schedule == '10 22 * * 1-5')
+    concurrency:
+      group: trading-learning-ingest-${{ github.ref }}
+      cancel-in-progress: false
 
     steps:
       - name: Checkout
@@ -288,7 +300,7 @@ jobs:
           BASE_URL: ${{ secrets.QUANTUM_BASE_URL }}
           USER_ID: ${{ secrets.USER_ID || secrets.TASK_USER_ID }}
         run: |
-          python scripts/run_signed_task.py learning_ingest --skip-time-gate
+          python scripts/run_signed_task.py learning_ingest --scheduled-local-time 16:10
 
   # ============================================================================
   # Scheduled: Ops Health Check (every 30 min)
@@ -297,6 +309,9 @@ jobs:
     name: Ops Health Check
     runs-on: ubuntu-latest
     if: github.event_name == 'schedule' && github.event.schedule == '7,37 13-22 * * 1-5'
+    concurrency:
+      group: trading-ops-health-check-${{ github.ref }}
+      cancel-in-progress: false
 
     steps:
       - name: Checkout
@@ -393,6 +408,9 @@ jobs:
     name: Validation Eval (9:30 AM Chicago)
     runs-on: ubuntu-latest
     if: github.event_name == 'schedule' && (github.event.schedule == '30 14 * * 1-5' || github.event.schedule == '30 15 * * 1-5')
+    concurrency:
+      group: trading-validation-eval-${{ github.ref }}
+      cancel-in-progress: false
 
     steps:
       - name: Checkout
@@ -422,7 +440,7 @@ jobs:
           BASE_URL: ${{ secrets.QUANTUM_BASE_URL }}
           USER_ID: ${{ secrets.USER_ID || secrets.TASK_USER_ID }}
         run: |
-          python scripts/run_signed_task.py validation_eval --skip-time-gate
+          python scripts/run_signed_task.py validation_eval --scheduled-local-time 09:30
 
   # ============================================================================
   # Scheduled: Learning Ingest Nightly (3:30 AM Chicago, Tue-Sat)
@@ -430,7 +448,10 @@ jobs:
   learning-ingest-nightly:
     name: Learning Ingest Nightly (3:30 AM Chicago)
     runs-on: ubuntu-latest
-    if: github.event_name == 'schedule' && github.event.schedule == '30 08 * * 2-6'
+    if: github.event_name == 'schedule' && (github.event.schedule == '30 08 * * 2-6' || github.event.schedule == '30 09 * * 2-6')
+    concurrency:
+      group: trading-learning-ingest-nightly-${{ github.ref }}
+      cancel-in-progress: false
 
     steps:
       - name: Checkout
@@ -460,7 +481,7 @@ jobs:
           BASE_URL: ${{ secrets.QUANTUM_BASE_URL }}
           USER_ID: ${{ secrets.USER_ID || secrets.TASK_USER_ID }}
         run: |
-          python scripts/run_signed_task.py learning_ingest --skip-time-gate
+          python scripts/run_signed_task.py learning_ingest --scheduled-local-time 03:30
 
   # ============================================================================
   # Scheduled: Paper Learning Ingest (4:20 PM Chicago)
@@ -469,6 +490,9 @@ jobs:
     name: Paper Learning Ingest (4:20 PM Chicago)
     runs-on: ubuntu-latest
     if: github.event_name == 'schedule' && (github.event.schedule == '20 21 * * 1-5' || github.event.schedule == '20 22 * * 1-5')
+    concurrency:
+      group: trading-paper-learning-ingest-${{ github.ref }}
+      cancel-in-progress: false
 
     steps:
       - name: Checkout
@@ -498,7 +522,7 @@ jobs:
           BASE_URL: ${{ secrets.QUANTUM_BASE_URL }}
           USER_ID: ${{ secrets.USER_ID || secrets.TASK_USER_ID }}
         run: |
-          python scripts/run_signed_task.py paper_learning_ingest --skip-time-gate
+          python scripts/run_signed_task.py paper_learning_ingest --scheduled-local-time 16:20
 
   # ============================================================================
   # Scheduled: Paper Auto-Execute (11:30 AM Chicago)
@@ -506,7 +530,10 @@ jobs:
   paper-auto-execute:
     name: Paper Auto-Execute (11:30 AM Chicago)
     runs-on: ubuntu-latest
-    if: github.event_name == 'schedule' && github.event.schedule == '30 16 * * 1-5'
+    if: github.event_name == 'schedule' && (github.event.schedule == '30 16 * * 1-5' || github.event.schedule == '30 17 * * 1-5')
+    concurrency:
+      group: trading-paper-auto-execute-${{ github.ref }}
+      cancel-in-progress: false
 
     steps:
       - name: Checkout
@@ -536,7 +563,7 @@ jobs:
           BASE_URL: ${{ secrets.QUANTUM_BASE_URL }}
           USER_ID: ${{ secrets.USER_ID || secrets.TASK_USER_ID }}
         run: |
-          python scripts/run_signed_task.py paper_auto_execute --skip-time-gate
+          python scripts/run_signed_task.py paper_auto_execute --scheduled-local-time 11:30
 
   # ============================================================================
   # DISABLED: Paper Auto-Close — superseded by paper_exit_evaluate + MTM
@@ -584,6 +611,9 @@ jobs:
     name: Shadow Checkpoint Midday (1:00 PM Chicago)
     runs-on: ubuntu-latest
     if: github.event_name == 'schedule' && (github.event.schedule == '0 18 * * 1-5' || github.event.schedule == '0 19 * * 1-5')
+    concurrency:
+      group: trading-shadow-midday-${{ github.ref }}
+      cancel-in-progress: false
 
     steps:
       - name: Checkout
@@ -613,7 +643,7 @@ jobs:
           BASE_URL: ${{ secrets.QUANTUM_BASE_URL }}
           USER_ID: ${{ secrets.USER_ID || secrets.TASK_USER_ID }}
         run: |
-          python scripts/run_signed_task.py validation_shadow_eval --skip-time-gate
+          python scripts/run_signed_task.py validation_shadow_eval --scheduled-local-time 13:00
 
   # ============================================================================
   # Scheduled: Shadow Checkpoint Afternoon (4:00 PM Chicago)
@@ -622,6 +652,9 @@ jobs:
     name: Shadow Checkpoint Afternoon (4:00 PM Chicago)
     runs-on: ubuntu-latest
     if: github.event_name == 'schedule' && (github.event.schedule == '2 21 * * 1-5' || github.event.schedule == '0 22 * * 1-5')
+    concurrency:
+      group: trading-shadow-afternoon-${{ github.ref }}
+      cancel-in-progress: false
 
     steps:
       - name: Checkout
@@ -651,7 +684,7 @@ jobs:
           BASE_URL: ${{ secrets.QUANTUM_BASE_URL }}
           USER_ID: ${{ secrets.USER_ID || secrets.TASK_USER_ID }}
         run: |
-          python scripts/run_signed_task.py validation_shadow_eval --skip-time-gate
+          python scripts/run_signed_task.py validation_shadow_eval --scheduled-local-time 16:00
 
   # ============================================================================
   # Scheduled: Cohort Eval Afternoon (4:05 PM Chicago)
@@ -660,6 +693,9 @@ jobs:
     name: Cohort Eval Afternoon (4:05 PM Chicago)
     runs-on: ubuntu-latest
     if: github.event_name == 'schedule' && (github.event.schedule == '5 21 * * 1-5' || github.event.schedule == '5 22 * * 1-5')
+    concurrency:
+      group: trading-cohort-afternoon-${{ github.ref }}
+      cancel-in-progress: false
 
     steps:
       - name: Checkout
@@ -689,7 +725,7 @@ jobs:
           BASE_URL: ${{ secrets.QUANTUM_BASE_URL }}
           USER_ID: ${{ secrets.USER_ID || secrets.TASK_USER_ID }}
         run: |
-          python scripts/run_signed_task.py validation_cohort_eval --skip-time-gate
+          python scripts/run_signed_task.py validation_cohort_eval --scheduled-local-time 16:05
 
   # ============================================================================
   # Scheduled: Autopromote Cohort (4:15 PM Chicago)
@@ -698,6 +734,9 @@ jobs:
     name: Autopromote Cohort (4:15 PM Chicago)
     runs-on: ubuntu-latest
     if: github.event_name == 'schedule' && (github.event.schedule == '15 21 * * 1-5' || github.event.schedule == '15 22 * * 1-5')
+    concurrency:
+      group: trading-autopromote-cohort-${{ github.ref }}
+      cancel-in-progress: false
 
     steps:
       - name: Checkout
@@ -727,7 +766,7 @@ jobs:
           BASE_URL: ${{ secrets.QUANTUM_BASE_URL }}
           USER_ID: ${{ secrets.USER_ID || secrets.TASK_USER_ID }}
         run: |
-          python scripts/run_signed_task.py validation_autopromote_cohort --skip-time-gate
+          python scripts/run_signed_task.py validation_autopromote_cohort --scheduled-local-time 16:15
 
   # ============================================================================
   # v4-L1F: Readiness Hardening Tasks
@@ -740,6 +779,9 @@ jobs:
     name: Validation Init Window (8:40 AM Chicago)
     runs-on: ubuntu-latest
     if: github.event_name == 'schedule' && (github.event.schedule == '40 13 * * 1-5' || github.event.schedule == '40 14 * * 1-5')
+    concurrency:
+      group: trading-validation-init-window-${{ github.ref }}
+      cancel-in-progress: false
 
     steps:
       - name: Checkout
@@ -769,7 +811,7 @@ jobs:
           BASE_URL: ${{ secrets.QUANTUM_BASE_URL }}
           USER_ID: ${{ secrets.USER_ID || secrets.TASK_USER_ID }}
         run: |
-          python scripts/run_signed_task.py validation_init_window --skip-time-gate
+          python scripts/run_signed_task.py validation_init_window --scheduled-local-time 08:40
 
   # ============================================================================
   # Scheduled: Validation Preflight Midday (1:05 PM Chicago)
@@ -777,7 +819,10 @@ jobs:
   validation-preflight-midday:
     name: Validation Preflight Midday (1:05 PM Chicago)
     runs-on: ubuntu-latest
-    if: github.event_name == 'schedule' && github.event.schedule == '5 19 * * 1-5'
+    if: github.event_name == 'schedule' && (github.event.schedule == '5 18 * * 1-5' || github.event.schedule == '5 19 * * 1-5')
+    concurrency:
+      group: trading-validation-preflight-${{ github.ref }}
+      cancel-in-progress: false
 
     steps:
       - name: Checkout
@@ -807,7 +852,7 @@ jobs:
           BASE_URL: ${{ secrets.QUANTUM_BASE_URL }}
           USER_ID: ${{ secrets.USER_ID || secrets.TASK_USER_ID }}
         run: |
-          python scripts/run_signed_task.py validation_preflight --skip-time-gate
+          python scripts/run_signed_task.py validation_preflight --scheduled-local-time 13:05
 
   # ============================================================================
   # Scheduled: Paper Exit Evaluator (3:00 PM Chicago)
@@ -817,6 +862,9 @@ jobs:
     name: Paper Exit Evaluator (3:00 PM Chicago)
     runs-on: ubuntu-latest
     if: github.event_name == 'schedule' && (github.event.schedule == '0 20 * * 1-5' || github.event.schedule == '0 21 * * 1-5')
+    concurrency:
+      group: trading-paper-exit-evaluate-${{ github.ref }}
+      cancel-in-progress: false
 
     steps:
       - name: Checkout
@@ -846,7 +894,7 @@ jobs:
           BASE_URL: ${{ secrets.QUANTUM_BASE_URL }}
           USER_ID: ${{ secrets.USER_ID || secrets.TASK_USER_ID }}
         run: |
-          python scripts/run_signed_task.py paper_exit_evaluate --skip-time-gate
+          python scripts/run_signed_task.py paper_exit_evaluate --scheduled-local-time 15:00
 
   # ============================================================================
   # Scheduled: Paper Mark-to-Market (3:30 PM Chicago)
@@ -856,6 +904,9 @@ jobs:
     name: Paper Mark-to-Market (3:30 PM Chicago)
     runs-on: ubuntu-latest
     if: github.event_name == 'schedule' && (github.event.schedule == '30 20 * * 1-5' || github.event.schedule == '30 21 * * 1-5')
+    concurrency:
+      group: trading-paper-mark-to-market-${{ github.ref }}
+      cancel-in-progress: false
 
     steps:
       - name: Checkout
@@ -885,4 +936,4 @@ jobs:
           BASE_URL: ${{ secrets.QUANTUM_BASE_URL }}
           USER_ID: ${{ secrets.USER_ID || secrets.TASK_USER_ID }}
         run: |
-          python scripts/run_signed_task.py paper_mark_to_market --skip-time-gate
+          python scripts/run_signed_task.py paper_mark_to_market --scheduled-local-time 15:30

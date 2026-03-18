@@ -10,6 +10,7 @@ Tests:
 
 import os
 import sys
+import unittest
 from datetime import datetime
 from unittest.mock import patch, MagicMock
 from zoneinfo import ZoneInfo
@@ -156,6 +157,64 @@ class TestCheckTimeGate:
             with patch("run_signed_task.is_market_day", return_value=True):
                 with patch("run_signed_task.is_within_time_window", return_value=True):
                     assert check_time_gate("suggestions_close", skip_time_gate=False) is True
+
+    # --- DST dual-cron dedup tests for paper_auto_execute ---
+
+    def test_paper_auto_execute_passes_at_1130_chicago(self):
+        """paper_auto_execute should pass at 11:30 AM Chicago (the intended time)."""
+        mock_now = datetime(2025, 7, 14, 11, 30, tzinfo=CHICAGO_TZ)  # Monday 11:30 CDT
+        with patch("run_signed_task.datetime") as mock_dt:
+            mock_dt.now.return_value = mock_now
+            assert check_time_gate("paper_auto_execute", skip_time_gate=False) is True
+
+    def test_paper_auto_execute_blocked_at_1030_chicago(self, capsys):
+        """CST wrong-offset cron at 10:30 AM Chicago should be rejected."""
+        # 16:30 UTC during CST = 10:30 AM Chicago (1 hour too early)
+        mock_now = datetime(2025, 1, 13, 10, 30, tzinfo=CHICAGO_TZ)  # Monday 10:30 CST
+        with patch("run_signed_task.datetime") as mock_dt:
+            mock_dt.now.return_value = mock_now
+            assert check_time_gate("paper_auto_execute", skip_time_gate=False) is False
+            captured = capsys.readouterr()
+            assert "not within" in captured.out
+
+    def test_paper_auto_execute_blocked_at_1230_chicago(self, capsys):
+        """CDT wrong-offset cron at 12:30 PM Chicago should be rejected."""
+        # 17:30 UTC during CDT = 12:30 PM Chicago (1 hour too late)
+        mock_now = datetime(2025, 7, 14, 12, 30, tzinfo=CHICAGO_TZ)  # Monday 12:30 CDT
+        with patch("run_signed_task.datetime") as mock_dt:
+            mock_dt.now.return_value = mock_now
+            assert check_time_gate("paper_auto_execute", skip_time_gate=False) is False
+            captured = capsys.readouterr()
+            assert "not within" in captured.out
+
+    # --- DST dual-cron dedup tests for validation_preflight ---
+
+    def test_validation_preflight_passes_at_1305_chicago(self):
+        """validation_preflight should pass at 1:05 PM Chicago (the intended time)."""
+        mock_now = datetime(2025, 7, 14, 13, 5, tzinfo=CHICAGO_TZ)  # Monday 1:05 PM CDT
+        with patch("run_signed_task.datetime") as mock_dt:
+            mock_dt.now.return_value = mock_now
+            assert check_time_gate("validation_preflight", skip_time_gate=False) is True
+
+    def test_validation_preflight_blocked_at_1205_chicago(self, capsys):
+        """CST wrong-offset cron at 12:05 PM Chicago should be rejected."""
+        # 18:05 UTC during CST = 12:05 PM Chicago (1 hour too early)
+        mock_now = datetime(2025, 1, 13, 12, 5, tzinfo=CHICAGO_TZ)  # Monday 12:05 CST
+        with patch("run_signed_task.datetime") as mock_dt:
+            mock_dt.now.return_value = mock_now
+            assert check_time_gate("validation_preflight", skip_time_gate=False) is False
+            captured = capsys.readouterr()
+            assert "not within" in captured.out
+
+    def test_validation_preflight_blocked_at_1405_chicago(self, capsys):
+        """CDT wrong-offset cron at 2:05 PM Chicago should be rejected."""
+        # 19:05 UTC during CDT = 2:05 PM Chicago (1 hour too late)
+        mock_now = datetime(2025, 7, 14, 14, 5, tzinfo=CHICAGO_TZ)  # Monday 2:05 PM CDT
+        with patch("run_signed_task.datetime") as mock_dt:
+            mock_dt.now.return_value = mock_now
+            assert check_time_gate("validation_preflight", skip_time_gate=False) is False
+            captured = capsys.readouterr()
+            assert "not within" in captured.out
 
 
 # =============================================================================
@@ -626,3 +685,75 @@ class TestRedactSensitiveFields:
         assert _redact_sensitive_fields("string") == "string"
         assert _redact_sensitive_fields(123) == 123
         assert _redact_sensitive_fields(None) is None
+
+
+class TestScheduledLocalTimeGate(unittest.TestCase):
+    """Tests for --scheduled-local-time generic gate mechanism."""
+
+    @patch("run_signed_task.is_market_day", return_value=True)
+    def test_scheduled_local_time_gates_correctly(self, _):
+        """--scheduled-local-time 11:30 should gate to 11:30 Chicago."""
+        with patch("run_signed_task.datetime") as mock_dt:
+            mock_dt.now.return_value = datetime(2024, 1, 15, 11, 35, tzinfo=CHICAGO_TZ)
+            mock_dt.side_effect = lambda *a, **kw: datetime(*a, **kw)
+            self.assertTrue(check_time_gate("paper_auto_execute", scheduled_local_time="11:30"))
+
+    @patch("run_signed_task.is_market_day", return_value=True)
+    def test_scheduled_local_time_rejects_wrong_offset(self, _):
+        """Wrong-offset cron for 11:30 should be rejected (e.g. 10:30 Chicago)."""
+        with patch("run_signed_task.datetime") as mock_dt:
+            mock_dt.now.return_value = datetime(2024, 1, 15, 10, 30, tzinfo=CHICAGO_TZ)
+            mock_dt.side_effect = lambda *a, **kw: datetime(*a, **kw)
+            self.assertFalse(check_time_gate("paper_auto_execute", scheduled_local_time="11:30"))
+
+    @patch("run_signed_task.is_market_day", return_value=True)
+    def test_validation_preflight_wrong_offset(self, _):
+        """Wrong-offset cron for 13:05 should be rejected (e.g. 12:05 Chicago)."""
+        with patch("run_signed_task.datetime") as mock_dt:
+            mock_dt.now.return_value = datetime(2024, 1, 15, 12, 5, tzinfo=CHICAGO_TZ)
+            mock_dt.side_effect = lambda *a, **kw: datetime(*a, **kw)
+            self.assertFalse(check_time_gate("validation_preflight", scheduled_local_time="13:05"))
+
+    @patch("run_signed_task.is_market_day", return_value=True)
+    def test_shadow_eval_midday_vs_afternoon(self, _):
+        """Same task validation_shadow_eval at 13:00 should reject 16:00 slot."""
+        with patch("run_signed_task.datetime") as mock_dt:
+            mock_dt.now.return_value = datetime(2024, 1, 15, 13, 10, tzinfo=CHICAGO_TZ)
+            mock_dt.side_effect = lambda *a, **kw: datetime(*a, **kw)
+            # Midday slot: 13:00 — should pass
+            self.assertTrue(check_time_gate("validation_shadow_eval", scheduled_local_time="13:00"))
+            # Afternoon slot: 16:00 — should fail at 13:10
+            self.assertFalse(check_time_gate("validation_shadow_eval", scheduled_local_time="16:00"))
+
+    @patch("run_signed_task.is_market_day", return_value=True)
+    def test_learning_ingest_nightly_wrong_offset(self, _):
+        """Wrong-offset cron for 03:30 should be rejected (e.g. 02:30 Chicago)."""
+        with patch("run_signed_task.datetime") as mock_dt:
+            mock_dt.now.return_value = datetime(2024, 1, 16, 2, 30, tzinfo=CHICAGO_TZ)
+            mock_dt.side_effect = lambda *a, **kw: datetime(*a, **kw)
+            self.assertFalse(check_time_gate("learning_ingest", scheduled_local_time="03:30"))
+
+    @patch("run_signed_task.is_market_day", return_value=True)
+    def test_learning_ingest_nightly_correct_offset(self, _):
+        """Correct cron for 03:30 should pass."""
+        with patch("run_signed_task.datetime") as mock_dt:
+            mock_dt.now.return_value = datetime(2024, 1, 16, 3, 35, tzinfo=CHICAGO_TZ)
+            mock_dt.side_effect = lambda *a, **kw: datetime(*a, **kw)
+            self.assertTrue(check_time_gate("learning_ingest", scheduled_local_time="03:30"))
+
+    def test_skip_time_gate_overrides_scheduled_local_time(self):
+        """--skip-time-gate should override --scheduled-local-time."""
+        self.assertTrue(check_time_gate("any_task", skip_time_gate=True, scheduled_local_time="11:30"))
+
+    @patch("run_signed_task.is_market_day", return_value=True)
+    def test_scheduled_local_time_overrides_time_gates(self, _):
+        """--scheduled-local-time should override TIME_GATES default for the task."""
+        with patch("run_signed_task.datetime") as mock_dt:
+            # learning_ingest has TIME_GATES default of 16:10
+            # But we pass --scheduled-local-time 03:30 (nightly)
+            mock_dt.now.return_value = datetime(2024, 1, 16, 3, 35, tzinfo=CHICAGO_TZ)
+            mock_dt.side_effect = lambda *a, **kw: datetime(*a, **kw)
+            # With --scheduled-local-time 03:30, at 03:35 should pass
+            self.assertTrue(check_time_gate("learning_ingest", scheduled_local_time="03:30"))
+            # Without it, would use TIME_GATES (16:10) and fail
+            self.assertFalse(check_time_gate("learning_ingest"))

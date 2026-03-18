@@ -52,27 +52,39 @@ def _eval_green_day_safe(service: GoLiveValidationService, user_id: str) -> Dict
 
 def _build_paper_result(checkpoint: Dict[str, Any], green_day: Dict[str, Any]) -> Dict[str, Any]:
     """
-    Merge checkpoint result and green-day result into a single audit-friendly payload.
+    Merge checkpoint result and green-day result into an audit-friendly payload.
+
+    Includes:
+    - Flat backward-compatible fields for existing consumers
+    - Nested `checkpoint` and `green_day` objects with full raw data
     """
     return {
-        # Readiness checkpoint fields (pass-through)
+        # Flat backward-compatible fields
         "checkpoint_status": checkpoint.get("status"),
         "paper_consecutive_passes": checkpoint.get("paper_consecutive_passes"),
         "paper_ready": checkpoint.get("paper_ready"),
+        "reason": checkpoint.get("reason"),
         "return_pct": checkpoint.get("return_pct"),
         "pnl_realized": checkpoint.get("pnl_realized"),
         "pnl_unrealized": checkpoint.get("pnl_unrealized"),
+        "target_return_now": checkpoint.get("target_return_now"),
+        "progress": checkpoint.get("progress"),
         "max_drawdown_pct": checkpoint.get("max_drawdown_pct"),
+        "bucket": checkpoint.get("bucket"),
+        "streak_before": checkpoint.get("streak_before"),
         "window_start": checkpoint.get("window_start"),
         "window_end": checkpoint.get("window_end"),
         "outcome_count": checkpoint.get("outcome_count"),
-        # Green-day fields
+        # Green-day flat fields
         "evaluated_trading_date": green_day.get("evaluated_trading_date"),
         "daily_realized_pnl": green_day.get("daily_realized_pnl"),
         "green_day": green_day.get("green_day"),
         "paper_green_days": green_day.get("paper_green_days"),
         "paper_last_green_day_date": green_day.get("paper_last_green_day_date"),
         "green_day_available": green_day.get("green_day_available", False),
+        # Full nested objects for complete audit context
+        "checkpoint": checkpoint,
+        "green_day_detail": green_day,
     }
 
 

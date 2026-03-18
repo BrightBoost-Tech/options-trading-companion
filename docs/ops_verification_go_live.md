@@ -90,3 +90,39 @@ SELECT
 FROM v3_go_live_state
 WHERE paper_last_green_day_evaluated_at = '2026-03-18';
 ```
+
+## validation_eval Response Shape (Paper Mode)
+
+After the handler runs, the result payload contains:
+
+```json
+{
+  "status": "completed",
+  "timing_ms": 142.5,
+  "result": {
+    "checkpoint_status": "pass",
+    "paper_consecutive_passes": 6,
+    "paper_ready": false,
+    "reason": null,
+    "return_pct": 3.2,
+    "pnl_realized": 3000.0,
+    "pnl_unrealized": 200.0,
+    "target_return_now": 2.5,
+    "progress": 0.45,
+    "max_drawdown_pct": -0.5,
+    "bucket": "2024-01-10",
+    "streak_before": 5,
+    "window_start": "2024-01-01T06:00:00+00:00",
+    "window_end": "2024-01-22T06:00:00+00:00",
+    "outcome_count": 7,
+    "evaluated_trading_date": "2024-01-10",
+    "daily_realized_pnl": 150.0,
+    "green_day": true,
+    "paper_green_days": 4,
+    "paper_last_green_day_date": "2024-01-10",
+    "green_day_available": true,
+    "checkpoint": { "...full checkpoint result..." },
+    "green_day_detail": { "...full green-day result..." }
+  }
+}
+```

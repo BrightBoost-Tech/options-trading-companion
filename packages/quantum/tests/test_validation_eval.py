@@ -43,6 +43,7 @@ _CHECKPOINT_PASS = {
     "pnl_total": 3200.0,
     "pnl_realized": 3000.0,
     "pnl_unrealized": 200.0,
+    "reason": None,
 }
 
 _GREEN_DAY_RESULT = {
@@ -161,10 +162,15 @@ class TestBuildPaperResult(unittest.TestCase):
             "checkpoint_status",
             "paper_consecutive_passes",
             "paper_ready",
+            "reason",
             "return_pct",
             "pnl_realized",
             "pnl_unrealized",
+            "target_return_now",
+            "progress",
             "max_drawdown_pct",
+            "bucket",
+            "streak_before",
             "window_start",
             "window_end",
             "outcome_count",
@@ -174,8 +180,54 @@ class TestBuildPaperResult(unittest.TestCase):
             "paper_green_days",
             "paper_last_green_day_date",
             "green_day_available",
+            "checkpoint",
+            "green_day_detail",
         }
         self.assertEqual(required_keys, set(result.keys()))
+
+
+# ===========================================================================
+# Tests: nested objects in _build_paper_result
+# ===========================================================================
+
+class TestNestedObjects(unittest.TestCase):
+    """Verify nested checkpoint and green_day objects appear."""
+
+    def test_checkpoint_nested_object_present(self):
+        """Nested checkpoint should contain full raw checkpoint data."""
+        result = _build_paper_result(_CHECKPOINT_PASS, _GREEN_DAY_DEFAULTS)
+        self.assertIn("checkpoint", result)
+        self.assertEqual(result["checkpoint"]["status"], "pass")
+        self.assertEqual(result["checkpoint"]["paper_consecutive_passes"], 6)
+
+    def test_green_day_nested_object_present(self):
+        """Nested green_day_detail should contain full raw green-day data."""
+        gd = {
+            "evaluated_trading_date": "2024-01-10",
+            "daily_realized_pnl": 150.0,
+            "green_day": True,
+            "paper_green_days": 4,
+            "paper_last_green_day_date": "2024-01-10",
+            "green_day_available": True,
+        }
+        result = _build_paper_result(_CHECKPOINT_PASS, gd)
+        self.assertIn("green_day_detail", result)
+        self.assertEqual(result["green_day_detail"]["daily_realized_pnl"], 150.0)
+
+    def test_nested_and_flat_fields_consistent(self):
+        """Flat fields should match nested object values."""
+        gd = {
+            "evaluated_trading_date": "2024-01-10",
+            "daily_realized_pnl": 150.0,
+            "green_day": True,
+            "paper_green_days": 4,
+            "paper_last_green_day_date": "2024-01-10",
+            "green_day_available": True,
+        }
+        result = _build_paper_result(_CHECKPOINT_PASS, gd)
+        # Flat and nested should agree
+        self.assertEqual(result["checkpoint_status"], result["checkpoint"]["status"])
+        self.assertEqual(result["paper_green_days"], result["green_day_detail"]["paper_green_days"])
 
 
 # ===========================================================================

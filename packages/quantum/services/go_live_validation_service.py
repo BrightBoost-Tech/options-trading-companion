@@ -2767,3 +2767,147 @@ class GoLiveValidationService:
                 "error": str(e),
                 "user_id": user_id
             }
+
+    # =========================================================================
+    # Paper Green Day Evaluation
+    # =========================================================================
+
+    def eval_paper_green_day(
+        self,
+        user_id: str,
+        now: Optional[datetime] = None,
+    ) -> Dict[str, Any]:
+        """
+        Evaluate whether today is a paper "green day" (positive realized P&L)
+        and persist the result idempotently.
+
+        Uses realized P&L only from learning_trade_outcomes_v3 (is_paper=true).
+        Does NOT include unrealized/MTM values.
+        Uses Chicago trading-day boundaries.
+
+        Idempotency: Re-running for the same Chicago trading date is a no-op;
+        the counter is never incremented twice for the same date.
+
+        This method is independent of paper_consecutive_passes and does not
+        affect the existing readiness checkpoint path.
+
+        Args:
+            user_id: User ID
+            now: Override timestamp for testing (UTC, timezone-aware)
+
+        Returns:
+            Dict with:
+            - evaluated_trading_date: str (YYYY-MM-DD Chicago date)
+            - daily_realized_pnl: float
+            - green_day: bool
+            - paper_green_days: int (cumulative count after this evaluation)
+            - paper_last_green_day_date: str|None (most recent green day date)
+            - already_evaluated: bool (True if this was a duplicate run)
+        """
+        if now is None:
+            now = datetime.now(timezone.utc)
+        if now.tzinfo is None:
+            now = now.replace(tzinfo=timezone.utc)
+
+        # 1. Determine Chicago trading date and day window
+        day_start_utc, day_end_utc = chicago_day_window_utc(now)
+        trading_date = self._chicago_trading_date(now)
+
+        # 2. Load current state
+        state = self.get_or_create_state(user_id)
+
+        # 3. Idempotency check: skip if this trading date was already evaluated
+        last_evaluated = state.get("paper_last_green_day_evaluated_at")
+        current_green_days = state.get("paper_green_days") or 0
+        current_last_green = state.get("paper_last_green_day_date")
+
+        if last_evaluated == trading_date:
+            logger.info(
+                f"[green_day] Already evaluated {trading_date} for {user_id[:8]}..., skipping"
+            )
+            return {
+                "evaluated_trading_date": trading_date,
+                "daily_realized_pnl": float(state.get("paper_last_daily_realized_pnl") or 0.0),
+                "green_day": current_last_green == trading_date,
+                "paper_green_days": current_green_days,
+                "paper_last_green_day_date": current_last_green,
+                "already_evaluated": True,
+            }
+
+        # 4. Fetch paper realized outcomes for this Chicago day
+        daily_realized_pnl = self._fetch_paper_daily_realized_pnl(
+            user_id, day_start_utc, day_end_utc
+        )
+
+        # 5. Classify day
+        is_green = daily_realized_pnl > 0
+
+        # 6. Compute new state
+        new_green_days = current_green_days + (1 if is_green else 0)
+        new_last_green = trading_date if is_green else current_last_green
+
+        # 7. Persist state update
+        update_fields = {
+            "paper_green_days": new_green_days,
+            "paper_last_daily_realized_pnl": daily_realized_pnl,
+            "paper_last_green_day_evaluated_at": trading_date,
+            "updated_at": now.isoformat(),
+        }
+        if is_green:
+            update_fields["paper_last_green_day_date"] = trading_date
+
+        self.supabase.table("v3_go_live_state") \
+            .update(update_fields) \
+            .eq("user_id", user_id) \
+            .execute()
+
+        logger.info(
+            f"[green_day] user={user_id[:8]}... date={trading_date} "
+            f"pnl={daily_realized_pnl:.2f} green={is_green} "
+            f"total_green_days={new_green_days}"
+        )
+
+        return {
+            "evaluated_trading_date": trading_date,
+            "daily_realized_pnl": daily_realized_pnl,
+            "green_day": is_green,
+            "paper_green_days": new_green_days,
+            "paper_last_green_day_date": new_last_green,
+            "already_evaluated": False,
+        }
+
+    def _chicago_trading_date(self, now_utc: datetime) -> str:
+        """Return the Chicago-local date as YYYY-MM-DD string."""
+        try:
+            from zoneinfo import ZoneInfo
+            chicago_tz = ZoneInfo("America/Chicago")
+            return now_utc.astimezone(chicago_tz).date().isoformat()
+        except Exception:
+            chicago_offset = timedelta(hours=-6)
+            return (now_utc + chicago_offset).date().isoformat()
+
+    def _fetch_paper_daily_realized_pnl(
+        self,
+        user_id: str,
+        day_start_utc: datetime,
+        day_end_utc: datetime,
+    ) -> float:
+        """
+        Sum realized P&L for paper trades closed within the given UTC window.
+
+        Queries learning_trade_outcomes_v3 with is_paper=true.
+        Does NOT include unrealized/MTM values.
+        """
+        try:
+            res = self.supabase.table("learning_trade_outcomes_v3") \
+                .select("pnl_realized") \
+                .eq("user_id", user_id) \
+                .eq("is_paper", True) \
+                .gte("closed_at", day_start_utc.isoformat()) \
+                .lt("closed_at", day_end_utc.isoformat()) \
+                .execute()
+            rows = res.data or []
+            return sum(float(r.get("pnl_realized") or 0.0) for r in rows)
+        except Exception as e:
+            logger.error(f"[green_day] Failed to fetch daily realized PnL: {e}")
+            return 0.0

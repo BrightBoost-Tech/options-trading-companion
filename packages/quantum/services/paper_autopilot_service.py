@@ -269,17 +269,39 @@ class PaperAutopilotService:
                 )
                 errors.append({"suggestion_id": sid, "error": str(e)})
 
+        # Sweep: retry ALL remaining working/partial orders for this user.
+        # This catches orders stuck from earlier runs (e.g., Polygon was down)
+        # and orders from THIS run that transitioned to "working" above.
+        sweep_processed = 0
+        try:
+            sweep_result = _process_orders_for_user(supabase, analytics, user_id)
+            sweep_processed = sweep_result.get("processed", 0)
+            if sweep_processed > 0:
+                logger.info(
+                    f"paper_auto_execute_sweep: user_id={user_id} "
+                    f"sweep_processed={sweep_processed} "
+                    f"total_orders={sweep_result.get('total_orders', 0)}"
+                )
+            sweep_errors = sweep_result.get("errors") or []
+            if sweep_errors:
+                logger.warning(
+                    f"paper_auto_execute_sweep_errors: user_id={user_id} "
+                    f"errors={sweep_errors}"
+                )
+        except Exception as sweep_err:
+            logger.warning(f"paper_auto_execute_sweep_error: user_id={user_id} error={sweep_err}")
+
         logger.info(
             f"paper_auto_execute_summary: user_id={user_id} "
             f"orders_created={len(executed)} skipped={len(suggestions) - len(to_execute)} "
-            f"errors={len(errors)}"
+            f"errors={len(errors)} sweep_processed={sweep_processed}"
         )
 
         # Compute processing summary: count orders that had processing errors
         processing_error_count = sum(
             1 for e in executed if e.get("processing_errors")
         )
-        total_processed = sum(e.get("processed", 0) for e in executed)
+        total_processed = sum(e.get("processed", 0) for e in executed) + sweep_processed
 
         # Status: "partial" if staging or processing errors, else "ok"
         has_staging_errors = len(errors) > 0
@@ -301,6 +323,7 @@ class PaperAutopilotService:
             "processed_summary": {
                 "total_processed": total_processed,
                 "processing_error_count": processing_error_count,
+                "sweep_processed": sweep_processed,
             },
         }
 

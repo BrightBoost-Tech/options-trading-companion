@@ -848,10 +848,44 @@ def _process_orders_for_user(supabase, analytics, user_id, target_order_id=None)
             logger.error(f"paper_order_repair_error: order_id={order_id} error={e}")
             result["errors"].append({"order_id": order_id, "error": str(e)})
 
+    # Cancel stale working orders (stuck > 2 hours with no fills).
+    # These are unrecoverable — the market has moved on. Cancel and log.
+    STALE_WORKING_MINUTES = 120
+    now_utc = datetime.now(timezone.utc)
+    live_orders = []
+    for order in orders:
+        oid = order.get("id", "unknown")
+        status = order.get("status")
+        filled = float(order.get("filled_qty") or 0)
+        submitted = order.get("submitted_at") or order.get("created_at")
+        if status == "working" and filled == 0 and submitted:
+            try:
+                sub_dt = datetime.fromisoformat(submitted.replace("Z", "+00:00"))
+                age_min = (now_utc - sub_dt).total_seconds() / 60
+                if age_min > STALE_WORKING_MINUTES:
+                    supabase.table("paper_orders").update({
+                        "status": "cancelled",
+                        "cancelled_reason": f"stale_working_{int(age_min)}m",
+                    }).eq("id", oid).execute()
+                    logger.warning(
+                        f"paper_order_stale_cancel: order_id={oid} "
+                        f"age_min={int(age_min)} — cancelled (stuck > {STALE_WORKING_MINUTES}m)"
+                    )
+                    result["diagnostics"].append({
+                        "order_id": oid,
+                        "symbol": order.get("order_json", {}).get("symbol"),
+                        "fill_status": "cancelled_stale",
+                        "age_minutes": int(age_min),
+                    })
+                    continue
+            except (ValueError, TypeError):
+                pass
+        live_orders.append(order)
+
     # Apply target_order_id filter to normal in-flight orders only
-    target_orders = orders
+    target_orders = live_orders
     if target_order_id:
-        target_orders = [o for o in orders if o["id"] == target_order_id]
+        target_orders = [o for o in live_orders if o["id"] == target_order_id]
 
     result["total_orders"] = len(orphan_orders) + len(target_orders)
     poly = PolygonService()
@@ -900,25 +934,41 @@ def _process_orders_for_user(supabase, analytics, user_id, target_order_id=None)
             }
             result["diagnostics"].append(diagnostic)
 
-            # B) Refuse to fill without valid quote (Bug 3 Fix C)
-            # When no valid quote is available, simulate_fill() uses a $1.00
-            # last-resort fallback price. Filling at that price corrupts P&L,
-            # so instead we transition to "working" and wait for a real quote.
+            # B) Handle no-quote fills:
+            # When no live quote is available, simulate_fill() uses TCM
+            # precomputed values (fill_probability + expected_fill_price from
+            # the staging quote). Allow these fills when the price is reasonable
+            # (came from staging quote or limit price). Block only the $1.00
+            # last-resort fallback that would corrupt P&L.
             if not quote_present and fill_status in ("partial", "filled") and last_fill_qty > 0:
-                logger.warning(
-                    f"paper_order_skip_no_quote: order_id={order_id} symbol={symbol} "
-                    f"fill_status={fill_status} last_fill_qty={last_fill_qty} — "
-                    f"refusing to fill without valid quote"
-                )
-                if prior_status == "staged":
-                    now_iso = datetime.now(timezone.utc).isoformat()
-                    supabase.table("paper_orders").update({
-                        "status": "working",
-                        "submitted_at": now_iso,
-                    }).eq("id", order["id"]).execute()
-                    logger.info(f"paper_order_transition: order_id={order_id} staged->working (no-quote skip)")
-                diagnostic["skipped_reason"] = "no_valid_quote"
-                continue
+                fill_price = float(fill_res.get("last_fill_price") or 0)
+                is_tcm_fallback = fill_res.get("reason") == "missing_quote_fallback"
+
+                if is_tcm_fallback and fill_price > 1.01:
+                    # TCM price from staging quote or limit price — safe to fill
+                    logger.info(
+                        f"paper_order_fill_tcm_fallback: order_id={order_id} symbol={symbol} "
+                        f"fill_price={fill_price} source={fill_res.get('fallback_source')} — "
+                        f"no live quote, using TCM precomputed price"
+                    )
+                    diagnostic["fill_source"] = "tcm_fallback"
+                    # Fall through to normal commit below
+                else:
+                    # $1.00 last-resort or unknown source — refuse and wait
+                    logger.warning(
+                        f"paper_order_skip_no_quote: order_id={order_id} symbol={symbol} "
+                        f"fill_price={fill_price} fill_status={fill_status} — "
+                        f"refusing to fill without valid quote or reasonable TCM price"
+                    )
+                    if prior_status == "staged":
+                        now_iso = datetime.now(timezone.utc).isoformat()
+                        supabase.table("paper_orders").update({
+                            "status": "working",
+                            "submitted_at": now_iso,
+                        }).eq("id", order["id"]).execute()
+                        logger.info(f"paper_order_transition: order_id={order_id} staged->working (no-quote skip)")
+                    diagnostic["skipped_reason"] = "no_valid_quote_or_tcm"
+                    continue
 
             # Commit only when a NEW fill happened this tick
             should_commit = False

@@ -1082,6 +1082,21 @@ def _repair_filled_order_commit(supabase, analytics, user_id, order, portfolio) 
 
         else:
             # Create new position
+            legs_list = ticket.get("legs", [])
+            max_credit = avg_fill_price
+            nearest_expiry = None
+            try:
+                expiry_dates = []
+                for leg in legs_list:
+                    if isinstance(leg, dict):
+                        exp = leg.get("expiry") or leg.get("expiration")
+                        if exp:
+                            expiry_dates.append(str(exp)[:10])
+                if expiry_dates:
+                    nearest_expiry = min(expiry_dates)
+            except Exception:
+                pass
+
             pos_payload = {
                 "portfolio_id": portfolio["id"],
                 "user_id": user_id,
@@ -1091,7 +1106,10 @@ def _repair_filled_order_commit(supabase, analytics, user_id, order, portfolio) 
                 "avg_entry_price": avg_fill_price,
                 "current_mark": avg_fill_price,
                 "unrealized_pl": 0.0,
-                "legs": ticket.get("legs", []),
+                "legs": legs_list,
+                "max_credit": max_credit,
+                "nearest_expiry": nearest_expiry,
+                "status": "open",
                 "trace_id": order.get("trace_id"),
                 "suggestion_id": order.get("suggestion_id")
             }

@@ -6,7 +6,7 @@ v4-L1C: Automatically closes paper positions before checkpoint.
 Part of Phase-3 streak automation:
 - Fetches open paper positions for user
 - Checks positions already closed today (deduplication)
-- Closes up to PAPER_AUTOPILOT_MAX_CLOSES_PER_DAY (default 1)
+- Closes up to PAPER_AUTOPILOT_MAX_CLOSES_PER_DAY (default 99)
 - Uses oldest-first ordering for determinism
 - Creates learning outcomes for checkpoint validation
 

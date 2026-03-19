@@ -225,7 +225,7 @@ jobs:
           fi
           python scripts/run_signed_task.py suggestions_close \
             --scheduled-local-time 08:00 \
-            --expected-chicago-offset "$OFFSET" \
+            --expected-chicago-offset="$OFFSET" \
             --window-minutes 90
 
   # ============================================================================
@@ -274,7 +274,7 @@ jobs:
           fi
           python scripts/run_signed_task.py suggestions_open \
             --scheduled-local-time 11:00 \
-            --expected-chicago-offset "$OFFSET" \
+            --expected-chicago-offset="$OFFSET" \
             --window-minutes 90
 
   # ============================================================================
@@ -323,7 +323,7 @@ jobs:
           fi
           python scripts/run_signed_task.py learning_ingest \
             --scheduled-local-time 16:10 \
-            --expected-chicago-offset "$OFFSET" \
+            --expected-chicago-offset="$OFFSET" \
             --window-minutes 90
 
   # ============================================================================
@@ -471,7 +471,7 @@ jobs:
           fi
           python scripts/run_signed_task.py validation_eval \
             --scheduled-local-time 09:30 \
-            --expected-chicago-offset "$OFFSET" \
+            --expected-chicago-offset="$OFFSET" \
             --window-minutes 90
 
   # ============================================================================
@@ -520,7 +520,7 @@ jobs:
           fi
           python scripts/run_signed_task.py learning_ingest \
             --scheduled-local-time 03:30 \
-            --expected-chicago-offset "$OFFSET" \
+            --expected-chicago-offset="$OFFSET" \
             --window-minutes 90
 
   # ============================================================================
@@ -569,7 +569,7 @@ jobs:
           fi
           python scripts/run_signed_task.py paper_learning_ingest \
             --scheduled-local-time 16:20 \
-            --expected-chicago-offset "$OFFSET" \
+            --expected-chicago-offset="$OFFSET" \
             --window-minutes 90
 
   # ============================================================================
@@ -618,7 +618,7 @@ jobs:
           fi
           python scripts/run_signed_task.py paper_auto_execute \
             --scheduled-local-time 11:30 \
-            --expected-chicago-offset "$OFFSET" \
+            --expected-chicago-offset="$OFFSET" \
             --window-minutes 90
 
   # ============================================================================
@@ -706,7 +706,7 @@ jobs:
           fi
           python scripts/run_signed_task.py validation_shadow_eval \
             --scheduled-local-time 13:00 \
-            --expected-chicago-offset "$OFFSET" \
+            --expected-chicago-offset="$OFFSET" \
             --window-minutes 90
 
   # ============================================================================
@@ -755,7 +755,7 @@ jobs:
           fi
           python scripts/run_signed_task.py validation_shadow_eval \
             --scheduled-local-time 16:00 \
-            --expected-chicago-offset "$OFFSET" \
+            --expected-chicago-offset="$OFFSET" \
             --window-minutes 90
 
   # ============================================================================
@@ -804,7 +804,7 @@ jobs:
           fi
           python scripts/run_signed_task.py validation_cohort_eval \
             --scheduled-local-time 16:05 \
-            --expected-chicago-offset "$OFFSET" \
+            --expected-chicago-offset="$OFFSET" \
             --window-minutes 90
 
   # ============================================================================
@@ -853,7 +853,7 @@ jobs:
           fi
           python scripts/run_signed_task.py validation_autopromote_cohort \
             --scheduled-local-time 16:15 \
-            --expected-chicago-offset "$OFFSET" \
+            --expected-chicago-offset="$OFFSET" \
             --window-minutes 90
 
   # ============================================================================
@@ -906,7 +906,7 @@ jobs:
           fi
           python scripts/run_signed_task.py validation_init_window \
             --scheduled-local-time 08:40 \
-            --expected-chicago-offset "$OFFSET" \
+            --expected-chicago-offset="$OFFSET" \
             --window-minutes 90
 
   # ============================================================================
@@ -955,7 +955,7 @@ jobs:
           fi
           python scripts/run_signed_task.py validation_preflight \
             --scheduled-local-time 13:05 \
-            --expected-chicago-offset "$OFFSET" \
+            --expected-chicago-offset="$OFFSET" \
             --window-minutes 90
 
   # ============================================================================
@@ -1005,7 +1005,7 @@ jobs:
           fi
           python scripts/run_signed_task.py paper_exit_evaluate \
             --scheduled-local-time 15:00 \
-            --expected-chicago-offset "$OFFSET" \
+            --expected-chicago-offset="$OFFSET" \
             --window-minutes 90
 
   # ============================================================================
@@ -1055,5 +1055,5 @@ jobs:
           fi
           python scripts/run_signed_task.py paper_mark_to_market \
             --scheduled-local-time 15:30 \
-            --expected-chicago-offset "$OFFSET" \
+            --expected-chicago-offset="$OFFSET" \
             --window-minutes 90

@@ -48,7 +48,7 @@ import json
 import os
 import sys
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional
 from zoneinfo import ZoneInfo
 
@@ -320,39 +320,124 @@ def is_within_time_window(
     return 0 <= diff < window_minutes
 
 
-def check_time_gate(task_name: str, skip_time_gate: bool = False, scheduled_local_time: str = None) -> bool:
+def _is_correct_season_cron(scheduled_local_time: str) -> bool:
+    """
+    Check whether the triggering UTC cron matches the current DST season.
+
+    Uses GITHUB_EVENT_SCHEDULE (set by GitHub Actions for scheduled runs)
+    to extract the UTC hour of the triggering cron, then compares it to the
+    expected UTC hour for the given Chicago local time under the CURRENT
+    DST offset.
+
+    Returns True if:
+      - Not a GitHub Actions scheduled run (no env var)
+      - The triggering cron's UTC hour matches the expected UTC hour (±0)
+    Returns False if the cron belongs to the wrong season.
+    """
+    cron_str = os.environ.get("GITHUB_EVENT_SCHEDULE", "")
+    if not cron_str:
+        # Not a scheduled run or env var not set — allow
+        return True
+
+    try:
+        parts = scheduled_local_time.split(":")
+        local_hour = int(parts[0])
+        local_minute = int(parts[1])
+    except (ValueError, IndexError):
+        return True  # Can't parse, allow
+
+    # Compute expected UTC hour for this Chicago local time today
+    now_chicago = datetime.now(CHICAGO_TZ)
+    target_chicago = now_chicago.replace(hour=local_hour, minute=local_minute, second=0, microsecond=0)
+    expected_utc_hour = target_chicago.astimezone(timezone.utc).hour
+
+    # Extract the triggering cron's UTC hour
+    # Cron format: "minute hour day month weekday"
+    cron_parts = cron_str.strip().split()
+    if len(cron_parts) < 2:
+        return True  # Can't parse, allow
+
+    try:
+        cron_utc_hour = int(cron_parts[1])
+    except ValueError:
+        return True  # Can't parse, allow
+
+    if cron_utc_hour != expected_utc_hour:
+        print(
+            f"[TIME-GATE] Wrong-season cron: schedule='{cron_str}' "
+            f"(UTC hour {cron_utc_hour}) but current DST offset expects "
+            f"UTC hour {expected_utc_hour} for {scheduled_local_time} Chicago"
+        )
+        return False
+
+    return True
+
+
+def get_current_chicago_offset() -> str:
+    """
+    Get the current Chicago UTC offset as a string.
+
+    Returns:
+        Offset string like "-05:00" (CDT) or "-06:00" (CST)
+    """
+    offset = datetime.now(CHICAGO_TZ).utcoffset()
+    total_seconds = int(offset.total_seconds())
+    sign = "+" if total_seconds >= 0 else "-"
+    total_seconds = abs(total_seconds)
+    hours = total_seconds // 3600
+    minutes = (total_seconds % 3600) // 60
+    return f"{sign}{hours:02d}:{minutes:02d}"
+
+
+def check_time_gate(
+    task_name: str,
+    skip_time_gate: bool = False,
+    scheduled_local_time: str = None,
+    expected_chicago_offset: str = None,
+    window_minutes: int = None,
+) -> Optional[str]:
     """
     Check if task should run based on time gate.
 
-    Precedence:
-      1. skip_time_gate=True  -> always run
-      2. scheduled_local_time -> gate to that exact Chicago local time
-      3. task in TIME_GATES   -> gate to task default
-      4. else                 -> no gate, always run
-
-    Args:
-        task_name: Name of the task to run
-        skip_time_gate: If True, skip time gate check
-        scheduled_local_time: Expected Chicago local time "HH:MM" (from --scheduled-local-time)
-
     Returns:
-        True if task should run, False if time-gated out
+        None if task should run, or a skip reason string.
+
+    Precedence:
+      1. skip_time_gate=True         → always run (None)
+      2. expected_chicago_offset      → season mismatch → skip
+      3. scheduled_local_time or TIME_GATES → market day + time window
+      4. window_minutes or default (60)
+
+    When --expected-chicago-offset is provided, the seasonal check happens
+    BEFORE the time-window check. This lets us safely widen the window
+    (e.g. --window-minutes 90) without letting the wrong-season cron through.
     """
     if skip_time_gate:
-        return True
+        return None
 
-    # Define time windows for scheduled tasks (Chicago local time).
-    # Each entry gates the task to a 60-minute window starting at the
-    # target time, so the wrong-offset dual UTC cron is rejected.
-    TIME_GATES = {
-        "suggestions_close": (8, 0),        # 8:00 AM Chicago
-        "suggestions_open": (11, 0),        # 11:00 AM Chicago
-        "paper_auto_execute": (11, 30),     # 11:30 AM Chicago
-        "validation_preflight": (13, 5),    # 1:05 PM Chicago
-        "learning_ingest": (16, 10),        # 4:10 PM Chicago
-    }
+    # --- 1. Season offset check (explicit, preferred) ---
+    if expected_chicago_offset is not None:
+        current_offset = get_current_chicago_offset()
+        if current_offset != expected_chicago_offset:
+            reason = (
+                f"Season mismatch: current offset {current_offset}, "
+                f"expected {expected_chicago_offset}"
+            )
+            print(f"[TIME-GATE] Skipping {task_name}: {reason}")
+            return reason
 
-    # Determine target time: --scheduled-local-time takes precedence
+    # --- 2. --scheduled-local-time without explicit offset (backward compat) ---
+    if scheduled_local_time and expected_chicago_offset is None:
+        if not is_market_day():
+            reason = "Not a market day"
+            print(f"[TIME-GATE] Skipping {task_name}: {reason}")
+            return reason
+        if not _is_correct_season_cron(scheduled_local_time):
+            return "Season mismatch"
+        # Old behavior: no time-window check when no explicit offset
+        return None
+
+    # --- 3. Determine target local time ---
     target_hour = None
     target_minute = None
 
@@ -362,27 +447,41 @@ def check_time_gate(task_name: str, skip_time_gate: bool = False, scheduled_loca
             target_hour = int(parts[0])
             target_minute = int(parts[1])
         except (ValueError, IndexError):
-            print(f"[TIME-GATE] Invalid --scheduled-local-time format: {scheduled_local_time!r}, expected HH:MM")
-            return False
-    elif task_name in TIME_GATES:
-        target_hour, target_minute = TIME_GATES[task_name]
-    else:
-        # No gate applies
-        return True
+            return None  # Can't parse, allow
 
+    # Legacy TIME_GATES fallback
+    TIME_GATES = {
+        "suggestions_close": (8, 0),        # 8:00 AM Chicago
+        "suggestions_open": (11, 0),        # 11:00 AM Chicago
+        "paper_auto_execute": (11, 30),     # 11:30 AM Chicago
+        "validation_preflight": (13, 5),    # 1:05 PM Chicago
+        "learning_ingest": (16, 10),        # 4:10 PM Chicago
+    }
+
+    if target_hour is None:
+        if task_name in TIME_GATES:
+            target_hour, target_minute = TIME_GATES[task_name]
+        else:
+            return None  # No gate for this task
+
+    # --- 4. Market day check ---
     if not is_market_day():
-        print(f"[TIME-GATE] Skipping {task_name}: not a market day")
-        return False
+        reason = "Not a market day"
+        print(f"[TIME-GATE] Skipping {task_name}: {reason}")
+        return reason
 
-    if not is_within_time_window(target_hour, target_minute, window_minutes=60):
+    # --- 5. Time window check ---
+    effective_window = window_minutes if window_minutes is not None else 60
+    if not is_within_time_window(target_hour, target_minute, window_minutes=effective_window):
         now_chicago = datetime.now(CHICAGO_TZ)
-        print(
-            f"[TIME-GATE] Skipping {task_name}: current time {now_chicago.strftime('%H:%M')} "
-            f"not within 60 min of {target_hour:02d}:{target_minute:02d} Chicago"
+        reason = (
+            f"Time gate window missed: current time {now_chicago.strftime('%H:%M')} "
+            f"not within {effective_window} min of {target_hour:02d}:{target_minute:02d} Chicago"
         )
-        return False
+        print(f"[TIME-GATE] Skipping {task_name}: {reason}")
+        return reason
 
-    return True
+    return None
 
 
 # =============================================================================
@@ -688,6 +787,8 @@ def run_task(
     force_rerun: bool = False,
     force: bool = False,
     scheduled_local_time: Optional[str] = None,
+    expected_chicago_offset: Optional[str] = None,
+    window_minutes: Optional[int] = None,
 ) -> int:
     """
     Run a signed task request.
@@ -701,6 +802,8 @@ def run_task(
         payload_json: Optional JSON string to merge into payload
         skip_sync: If True, adds skip_sync=true to payload
         force_rerun: If True, adds force_rerun=true to payload
+        expected_chicago_offset: Expected Chicago UTC offset (e.g. "-05:00")
+        window_minutes: Time gate window in minutes
 
     Returns:
         0 on success, 1 on failure
@@ -714,8 +817,12 @@ def run_task(
     task = TASKS[task_name]
 
     # Check time gate
-    if not check_time_gate(task_name, skip_time_gate, scheduled_local_time):
-        write_step_summary(task_name, skipped=True, skip_reason="Time gate")
+    skip_reason = check_time_gate(
+        task_name, skip_time_gate, scheduled_local_time,
+        expected_chicago_offset, window_minutes,
+    )
+    if skip_reason is not None:
+        write_step_summary(task_name, skipped=True, skip_reason=skip_reason)
         return 0  # Not an error, just skipped
 
     # Get base URL
@@ -951,6 +1058,20 @@ Environment Variables:
         help="Expected Chicago local time for this run (e.g. 11:30). Rejects the wrong-offset dual-UTC cron.",
     )
     parser.add_argument(
+        "--expected-chicago-offset",
+        type=str,
+        default=None,
+        metavar="OFFSET",
+        help="Expected Chicago UTC offset for this cron (e.g. -05:00 or -06:00). Rejects season-mismatched runs.",
+    )
+    parser.add_argument(
+        "--window-minutes",
+        type=int,
+        default=None,
+        metavar="MINUTES",
+        help="Time gate window in minutes (default: 60 for legacy gates).",
+    )
+    parser.add_argument(
         "--list",
         action="store_true",
         dest="list_tasks",
@@ -978,6 +1099,8 @@ Environment Variables:
         force_rerun=args.force_rerun,
         force=args.force,
         scheduled_local_time=args.scheduled_local_time,
+        expected_chicago_offset=args.expected_chicago_offset,
+        window_minutes=args.window_minutes,
     )
 
 

@@ -288,11 +288,29 @@ class PaperExecutionService:
                     self.supabase.table("paper_positions").update({"quantity": new_qty}).eq("id", pos["id"]).execute()
         elif side == "buy":
             # New Position
+            legs_list = ticket.get("legs", [])
+            nearest_expiry = None
+            try:
+                expiry_dates = []
+                for leg in legs_list:
+                    if isinstance(leg, dict):
+                        exp = leg.get("expiry") or leg.get("expiration")
+                        if exp:
+                            expiry_dates.append(str(exp)[:10])
+                if expiry_dates:
+                    nearest_expiry = min(expiry_dates)
+            except Exception:
+                pass
+
             self.supabase.table("paper_positions").insert({
                 "portfolio_id": portfolio_id,
                 "strategy_key": strategy_key,
                 "symbol": symbol,
                 "quantity": fill.filled_quantity,
                 "avg_entry_price": fill.fill_price,
-                "current_mark": fill.fill_price
+                "current_mark": fill.fill_price,
+                "legs": legs_list,
+                "max_credit": fill.fill_price,
+                "nearest_expiry": nearest_expiry,
+                "status": "open",
             }).execute()

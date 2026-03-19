@@ -618,7 +618,7 @@ async def task_paper_learning_ingest(
     Auth: Requires v4 HMAC signature with scope 'tasks:paper_learning_ingest'.
 
     This task:
-    1. Reads paper_ledger FILL entries within lookback window
+    1. Reads closed paper_positions within lookback window
     2. Builds trade_closed outcome records with is_paper: true
     3. Inserts into learning_feedback_loops with idempotency via (user_id, order_id)
     4. Enables validation/streak progression for paper trading
@@ -872,7 +872,7 @@ async def task_paper_auto_close(
     Behavior:
     1. Fetches open paper positions
     2. Checks positions already closed today (for deduplication)
-    3. Closes up to PAPER_AUTOPILOT_MAX_CLOSES_PER_DAY (default 1)
+    3. Closes up to PAPER_AUTOPILOT_MAX_CLOSES_PER_DAY (default 99)
     4. Uses oldest-first ordering for determinism
     5. Creates learning outcomes for checkpoint validation
     """

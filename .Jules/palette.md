@@ -69,3 +69,6 @@
 ## 2025-06-06 - Accessible Disabled Tooltips
 **Learning:** Browsers disable mouse events on `disabled` buttons, preventing tooltips from appearing. Wrapping the disabled button in a focusable `span` (`tabIndex={0}`) allows the tooltip to trigger on hover and focus.
 **Action:** Always wrap disabled buttons in a `span` with `tabIndex={0}` and an explanatory `aria-label` when tooltips are required.
+## 2024-03-19 - Consistent Tooltips over Native Titles
+**Learning:** Native `title` attributes on interactive elements (like copy buttons) cause inconsistent styling and can trigger double tooltips for screen readers when combined with custom tooltip components elsewhere. Additionally, users miss feedback on action success when relying solely on icon changes.
+**Action:** Replace `title` attributes with Radix UI `Tooltip` components across list views and tables, and dynamically update the tooltip text (e.g. "Copy symbol" -> "Copied!") to provide explicit feedback for state changes.

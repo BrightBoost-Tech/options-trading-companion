@@ -218,7 +218,15 @@ jobs:
           BASE_URL: ${{ secrets.QUANTUM_BASE_URL }}
           USER_ID: ${{ secrets.USER_ID || secrets.TASK_USER_ID }}
         run: |
-          python scripts/run_signed_task.py suggestions_close --scheduled-local-time 08:00
+          if [ "${{ github.event.schedule }}" = "0 13 * * 1-5" ]; then
+            OFFSET="-05:00"
+          else
+            OFFSET="-06:00"
+          fi
+          python scripts/run_signed_task.py suggestions_close \
+            --scheduled-local-time 08:00 \
+            --expected-chicago-offset "$OFFSET" \
+            --window-minutes 90
 
   # ============================================================================
   # Scheduled: Suggestions Open (11 AM Chicago)
@@ -259,7 +267,15 @@ jobs:
           BASE_URL: ${{ secrets.QUANTUM_BASE_URL }}
           USER_ID: ${{ secrets.USER_ID || secrets.TASK_USER_ID }}
         run: |
-          python scripts/run_signed_task.py suggestions_open --scheduled-local-time 11:00
+          if [ "${{ github.event.schedule }}" = "0 16 * * 1-5" ]; then
+            OFFSET="-05:00"
+          else
+            OFFSET="-06:00"
+          fi
+          python scripts/run_signed_task.py suggestions_open \
+            --scheduled-local-time 11:00 \
+            --expected-chicago-offset "$OFFSET" \
+            --window-minutes 90
 
   # ============================================================================
   # Scheduled: Learning Ingest (4:10 PM Chicago)
@@ -300,7 +316,15 @@ jobs:
           BASE_URL: ${{ secrets.QUANTUM_BASE_URL }}
           USER_ID: ${{ secrets.USER_ID || secrets.TASK_USER_ID }}
         run: |
-          python scripts/run_signed_task.py learning_ingest --scheduled-local-time 16:10
+          if [ "${{ github.event.schedule }}" = "10 21 * * 1-5" ]; then
+            OFFSET="-05:00"
+          else
+            OFFSET="-06:00"
+          fi
+          python scripts/run_signed_task.py learning_ingest \
+            --scheduled-local-time 16:10 \
+            --expected-chicago-offset "$OFFSET" \
+            --window-minutes 90
 
   # ============================================================================
   # Scheduled: Ops Health Check (every 30 min)
@@ -440,7 +464,15 @@ jobs:
           BASE_URL: ${{ secrets.QUANTUM_BASE_URL }}
           USER_ID: ${{ secrets.USER_ID || secrets.TASK_USER_ID }}
         run: |
-          python scripts/run_signed_task.py validation_eval --scheduled-local-time 09:30
+          if [ "${{ github.event.schedule }}" = "30 14 * * 1-5" ]; then
+            OFFSET="-05:00"
+          else
+            OFFSET="-06:00"
+          fi
+          python scripts/run_signed_task.py validation_eval \
+            --scheduled-local-time 09:30 \
+            --expected-chicago-offset "$OFFSET" \
+            --window-minutes 90
 
   # ============================================================================
   # Scheduled: Learning Ingest Nightly (3:30 AM Chicago, Tue-Sat)
@@ -481,7 +513,15 @@ jobs:
           BASE_URL: ${{ secrets.QUANTUM_BASE_URL }}
           USER_ID: ${{ secrets.USER_ID || secrets.TASK_USER_ID }}
         run: |
-          python scripts/run_signed_task.py learning_ingest --scheduled-local-time 03:30
+          if [ "${{ github.event.schedule }}" = "30 08 * * 2-6" ]; then
+            OFFSET="-05:00"
+          else
+            OFFSET="-06:00"
+          fi
+          python scripts/run_signed_task.py learning_ingest \
+            --scheduled-local-time 03:30 \
+            --expected-chicago-offset "$OFFSET" \
+            --window-minutes 90
 
   # ============================================================================
   # Scheduled: Paper Learning Ingest (4:20 PM Chicago)
@@ -522,7 +562,15 @@ jobs:
           BASE_URL: ${{ secrets.QUANTUM_BASE_URL }}
           USER_ID: ${{ secrets.USER_ID || secrets.TASK_USER_ID }}
         run: |
-          python scripts/run_signed_task.py paper_learning_ingest --scheduled-local-time 16:20
+          if [ "${{ github.event.schedule }}" = "20 21 * * 1-5" ]; then
+            OFFSET="-05:00"
+          else
+            OFFSET="-06:00"
+          fi
+          python scripts/run_signed_task.py paper_learning_ingest \
+            --scheduled-local-time 16:20 \
+            --expected-chicago-offset "$OFFSET" \
+            --window-minutes 90
 
   # ============================================================================
   # Scheduled: Paper Auto-Execute (11:30 AM Chicago)
@@ -563,7 +611,15 @@ jobs:
           BASE_URL: ${{ secrets.QUANTUM_BASE_URL }}
           USER_ID: ${{ secrets.USER_ID || secrets.TASK_USER_ID }}
         run: |
-          python scripts/run_signed_task.py paper_auto_execute --scheduled-local-time 11:30
+          if [ "${{ github.event.schedule }}" = "30 16 * * 1-5" ]; then
+            OFFSET="-05:00"
+          else
+            OFFSET="-06:00"
+          fi
+          python scripts/run_signed_task.py paper_auto_execute \
+            --scheduled-local-time 11:30 \
+            --expected-chicago-offset "$OFFSET" \
+            --window-minutes 90
 
   # ============================================================================
   # DISABLED: Paper Auto-Close — superseded by paper_exit_evaluate + MTM
@@ -643,7 +699,15 @@ jobs:
           BASE_URL: ${{ secrets.QUANTUM_BASE_URL }}
           USER_ID: ${{ secrets.USER_ID || secrets.TASK_USER_ID }}
         run: |
-          python scripts/run_signed_task.py validation_shadow_eval --scheduled-local-time 13:00
+          if [ "${{ github.event.schedule }}" = "0 18 * * 1-5" ]; then
+            OFFSET="-05:00"
+          else
+            OFFSET="-06:00"
+          fi
+          python scripts/run_signed_task.py validation_shadow_eval \
+            --scheduled-local-time 13:00 \
+            --expected-chicago-offset "$OFFSET" \
+            --window-minutes 90
 
   # ============================================================================
   # Scheduled: Shadow Checkpoint Afternoon (4:00 PM Chicago)
@@ -684,7 +748,15 @@ jobs:
           BASE_URL: ${{ secrets.QUANTUM_BASE_URL }}
           USER_ID: ${{ secrets.USER_ID || secrets.TASK_USER_ID }}
         run: |
-          python scripts/run_signed_task.py validation_shadow_eval --scheduled-local-time 16:00
+          if [ "${{ github.event.schedule }}" = "2 21 * * 1-5" ]; then
+            OFFSET="-05:00"
+          else
+            OFFSET="-06:00"
+          fi
+          python scripts/run_signed_task.py validation_shadow_eval \
+            --scheduled-local-time 16:00 \
+            --expected-chicago-offset "$OFFSET" \
+            --window-minutes 90
 
   # ============================================================================
   # Scheduled: Cohort Eval Afternoon (4:05 PM Chicago)
@@ -725,7 +797,15 @@ jobs:
           BASE_URL: ${{ secrets.QUANTUM_BASE_URL }}
           USER_ID: ${{ secrets.USER_ID || secrets.TASK_USER_ID }}
         run: |
-          python scripts/run_signed_task.py validation_cohort_eval --scheduled-local-time 16:05
+          if [ "${{ github.event.schedule }}" = "5 21 * * 1-5" ]; then
+            OFFSET="-05:00"
+          else
+            OFFSET="-06:00"
+          fi
+          python scripts/run_signed_task.py validation_cohort_eval \
+            --scheduled-local-time 16:05 \
+            --expected-chicago-offset "$OFFSET" \
+            --window-minutes 90
 
   # ============================================================================
   # Scheduled: Autopromote Cohort (4:15 PM Chicago)
@@ -766,7 +846,15 @@ jobs:
           BASE_URL: ${{ secrets.QUANTUM_BASE_URL }}
           USER_ID: ${{ secrets.USER_ID || secrets.TASK_USER_ID }}
         run: |
-          python scripts/run_signed_task.py validation_autopromote_cohort --scheduled-local-time 16:15
+          if [ "${{ github.event.schedule }}" = "15 21 * * 1-5" ]; then
+            OFFSET="-05:00"
+          else
+            OFFSET="-06:00"
+          fi
+          python scripts/run_signed_task.py validation_autopromote_cohort \
+            --scheduled-local-time 16:15 \
+            --expected-chicago-offset "$OFFSET" \
+            --window-minutes 90
 
   # ============================================================================
   # v4-L1F: Readiness Hardening Tasks
@@ -811,7 +899,15 @@ jobs:
           BASE_URL: ${{ secrets.QUANTUM_BASE_URL }}
           USER_ID: ${{ secrets.USER_ID || secrets.TASK_USER_ID }}
         run: |
-          python scripts/run_signed_task.py validation_init_window --scheduled-local-time 08:40
+          if [ "${{ github.event.schedule }}" = "40 13 * * 1-5" ]; then
+            OFFSET="-05:00"
+          else
+            OFFSET="-06:00"
+          fi
+          python scripts/run_signed_task.py validation_init_window \
+            --scheduled-local-time 08:40 \
+            --expected-chicago-offset "$OFFSET" \
+            --window-minutes 90
 
   # ============================================================================
   # Scheduled: Validation Preflight Midday (1:05 PM Chicago)
@@ -852,7 +948,15 @@ jobs:
           BASE_URL: ${{ secrets.QUANTUM_BASE_URL }}
           USER_ID: ${{ secrets.USER_ID || secrets.TASK_USER_ID }}
         run: |
-          python scripts/run_signed_task.py validation_preflight --scheduled-local-time 13:05
+          if [ "${{ github.event.schedule }}" = "5 18 * * 1-5" ]; then
+            OFFSET="-05:00"
+          else
+            OFFSET="-06:00"
+          fi
+          python scripts/run_signed_task.py validation_preflight \
+            --scheduled-local-time 13:05 \
+            --expected-chicago-offset "$OFFSET" \
+            --window-minutes 90
 
   # ============================================================================
   # Scheduled: Paper Exit Evaluator (3:00 PM Chicago)
@@ -894,7 +998,15 @@ jobs:
           BASE_URL: ${{ secrets.QUANTUM_BASE_URL }}
           USER_ID: ${{ secrets.USER_ID || secrets.TASK_USER_ID }}
         run: |
-          python scripts/run_signed_task.py paper_exit_evaluate --scheduled-local-time 15:00
+          if [ "${{ github.event.schedule }}" = "0 20 * * 1-5" ]; then
+            OFFSET="-05:00"
+          else
+            OFFSET="-06:00"
+          fi
+          python scripts/run_signed_task.py paper_exit_evaluate \
+            --scheduled-local-time 15:00 \
+            --expected-chicago-offset "$OFFSET" \
+            --window-minutes 90
 
   # ============================================================================
   # Scheduled: Paper Mark-to-Market (3:30 PM Chicago)
@@ -936,4 +1048,12 @@ jobs:
           BASE_URL: ${{ secrets.QUANTUM_BASE_URL }}
           USER_ID: ${{ secrets.USER_ID || secrets.TASK_USER_ID }}
         run: |
-          python scripts/run_signed_task.py paper_mark_to_market --scheduled-local-time 15:30
+          if [ "${{ github.event.schedule }}" = "30 20 * * 1-5" ]; then
+            OFFSET="-05:00"
+          else
+            OFFSET="-06:00"
+          fi
+          python scripts/run_signed_task.py paper_mark_to_market \
+            --scheduled-local-time 15:30 \
+            --expected-chicago-offset "$OFFSET" \
+            --window-minutes 90

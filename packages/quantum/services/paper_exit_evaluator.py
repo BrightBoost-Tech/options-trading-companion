@@ -95,12 +95,57 @@ EXIT_CONDITIONS: Dict[str, Dict[str, Any]] = {
 }
 
 
-def evaluate_position_exit(position: Dict[str, Any]) -> Optional[str]:
+def build_exit_conditions(
+    target_profit_pct: float = 0.50,
+    stop_loss_pct: float = 2.0,
+    min_dte_to_exit: int = 7,
+) -> Dict[str, Dict[str, Any]]:
+    """Build exit conditions with configurable thresholds (used by Policy Lab)."""
+    return {
+        "target_profit": {
+            "description": f"Position has reached {target_profit_pct:.0%} target profit",
+            "check": lambda pos, tp=target_profit_pct: (
+                pos.get("max_credit") is not None
+                and pos["max_credit"] > 0
+                and float(pos.get("unrealized_pl") or 0) >= float(pos["max_credit"]) * 100 * tp
+            ),
+        },
+        "stop_loss": {
+            "description": f"Position has exceeded {stop_loss_pct}x max loss",
+            "check": lambda pos, sl=stop_loss_pct: (
+                pos.get("max_credit") is not None
+                and pos["max_credit"] > 0
+                and float(pos.get("unrealized_pl") or 0) <= -(float(pos["max_credit"]) * 100 * sl)
+            ),
+        },
+        "dte_threshold": {
+            "description": f"Position is within {min_dte_to_exit} DTE (gamma risk)",
+            "check": lambda pos, dte_min=min_dte_to_exit: 0 < days_to_expiry(pos) <= dte_min,
+        },
+        "expiration_day": {
+            "description": "Position expires today — must close",
+            "check": lambda pos: days_to_expiry(pos) <= 0,
+        },
+    }
+
+
+def evaluate_position_exit(
+    position: Dict[str, Any],
+    conditions: Optional[Dict[str, Dict[str, Any]]] = None,
+) -> Optional[str]:
     """
-    Check a single position against all exit conditions.
+    Check a single position against exit conditions.
+
+    Args:
+        position: Position dict with max_credit, unrealized_pl, etc.
+        conditions: Override exit conditions (for Policy Lab cohorts).
+                    Defaults to global EXIT_CONDITIONS.
 
     Returns the name of the first triggered condition, or None if position should hold.
     """
+    if conditions is None:
+        conditions = EXIT_CONDITIONS
+
     pos_id = position.get("id", "?")
     symbol = position.get("symbol", "?")
     max_credit = position.get("max_credit")
@@ -140,7 +185,7 @@ def evaluate_position_exit(position: Dict[str, Any]) -> Optional[str]:
     else:
         print(f"[EXIT_EVAL_DEBUG] position={pos_id} max_credit is None — skipping P&L conditions", flush=True)
 
-    for condition_name, condition in EXIT_CONDITIONS.items():
+    for condition_name, condition in conditions.items():
         try:
             result = condition["check"](position)
             logger.info(
@@ -210,18 +255,40 @@ class PaperExitEvaluator:
                 "close_reasons": {},
             }
 
-        # 3. Evaluate each position
+        # 3. Evaluate each position (with per-cohort exit params when Policy Lab is on)
         closes: List[Dict[str, Any]] = []
         holds: List[Dict[str, Any]] = []
 
+        # Build cohort → exit conditions map for Policy Lab
+        cohort_conditions_cache: Dict[str, Dict] = {}
+        from packages.quantum.policy_lab.config import is_policy_lab_enabled
+        policy_lab_on = is_policy_lab_enabled()
+        if policy_lab_on:
+            from packages.quantum.policy_lab.config import load_cohort_configs
+            cohort_cfgs = load_cohort_configs(user_id, self.client)
+            for cname, cfg in cohort_cfgs.items():
+                cohort_conditions_cache[cname] = build_exit_conditions(
+                    target_profit_pct=cfg.target_profit_pct,
+                    stop_loss_pct=cfg.stop_loss_pct,
+                    min_dte_to_exit=cfg.min_dte_to_exit,
+                )
+
         for position in positions:
-            triggered = evaluate_position_exit(position)
+            # Resolve cohort-specific exit conditions
+            pos_conditions = None
+            if policy_lab_on:
+                cohort = self._resolve_position_cohort(position)
+                if cohort and cohort in cohort_conditions_cache:
+                    pos_conditions = cohort_conditions_cache[cohort]
+
+            triggered = evaluate_position_exit(position, conditions=pos_conditions)
+            active_conditions = pos_conditions or EXIT_CONDITIONS
             if triggered:
                 closes.append({
                     "position_id": position["id"],
                     "symbol": position.get("symbol"),
                     "reason": triggered,
-                    "description": EXIT_CONDITIONS[triggered]["description"],
+                    "description": active_conditions[triggered]["description"],
                     "unrealized_pl": float(position.get("unrealized_pl") or 0),
                     "max_credit": float(position.get("max_credit") or 0),
                     "dte": days_to_expiry(position),
@@ -289,6 +356,23 @@ class PaperExitEvaluator:
         except Exception as e:
             logger.error(f"Failed to fetch positions for exit eval: {e}")
             return []
+
+    def _resolve_position_cohort(self, position: Dict[str, Any]) -> Optional[str]:
+        """Resolve which cohort a position belongs to via its portfolio_id."""
+        portfolio_id = position.get("portfolio_id")
+        if not portfolio_id:
+            return None
+        try:
+            res = self.client.table("policy_lab_cohorts") \
+                .select("cohort_name") \
+                .eq("portfolio_id", portfolio_id) \
+                .limit(1) \
+                .execute()
+            if res.data:
+                return res.data[0]["cohort_name"]
+        except Exception:
+            pass
+        return None
 
     def _close_position(
         self,

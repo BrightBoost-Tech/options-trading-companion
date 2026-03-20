@@ -147,6 +147,11 @@ class PaperAutopilotService:
         Returns:
             Summary dict with executed_count, skipped_count, errors, etc.
         """
+        # Policy Lab: execute per-cohort with cohort-specific filtering
+        from packages.quantum.policy_lab.config import is_policy_lab_enabled
+        if is_policy_lab_enabled():
+            return self._execute_per_cohort(user_id)
+
         limit = limit or self.config["max_trades_per_day"]
         min_score = min_score if min_score is not None else self.config["min_score"]
 
@@ -323,6 +328,109 @@ class PaperAutopilotService:
             "processed_summary": {
                 "total_processed": total_processed,
                 "processing_error_count": processing_error_count,
+                "sweep_processed": sweep_processed,
+            },
+        }
+
+    def _execute_per_cohort(self, user_id: str) -> Dict[str, Any]:
+        """
+        Policy Lab path: execute suggestions grouped by cohort.
+
+        Each cohort's suggestions (tagged with cohort_name) are executed
+        against the cohort's portfolio using the cohort's PolicyConfig
+        for filtering limits.
+        """
+        from packages.quantum.policy_lab.config import load_cohort_configs
+        from packages.quantum.policy_lab.fork import _get_cohort_portfolios
+        from packages.quantum.paper_endpoints import (
+            _suggestion_to_ticket,
+            _stage_order_internal,
+            _process_orders_for_user,
+            get_analytics_service,
+        )
+
+        supabase = self.client
+        analytics = get_analytics_service()
+        configs = load_cohort_configs(user_id, supabase)
+        portfolios = _get_cohort_portfolios(user_id, supabase)
+
+        today_start, tomorrow_start = _compute_today_window()
+        all_executed = []
+        all_errors = []
+        total_processed = 0
+
+        for cohort_name, config in configs.items():
+            portfolio_id = portfolios.get(cohort_name)
+            if not portfolio_id:
+                logger.warning(f"policy_lab_execute: no portfolio for cohort={cohort_name}")
+                continue
+
+            # Fetch this cohort's pending suggestions
+            res = supabase.table(TRADE_SUGGESTIONS_TABLE) \
+                .select("*") \
+                .eq("user_id", user_id) \
+                .eq("cohort_name", cohort_name) \
+                .eq("status", "pending") \
+                .gte("created_at", today_start) \
+                .lt("created_at", tomorrow_start) \
+                .order("score", desc=True) \
+                .limit(config.max_suggestions_per_day) \
+                .execute()
+            suggestions = res.data or []
+
+            # Deduplicate
+            already = self.get_already_executed_suggestion_ids_today(user_id)
+
+            for s in suggestions:
+                sid = s.get("id")
+                if sid in already:
+                    continue
+                ticker = s.get("ticker") or s.get("symbol") or "?"
+                try:
+                    ticket = _suggestion_to_ticket(s)
+                    order_id = _stage_order_internal(
+                        supabase, analytics, user_id, ticket, s,
+                        portfolio_id=portfolio_id,
+                    )
+                    if not order_id:
+                        continue
+
+                    proc = _process_orders_for_user(
+                        supabase, analytics, user_id, target_order_id=order_id,
+                    )
+                    all_executed.append({
+                        "cohort": cohort_name,
+                        "suggestion_id": sid,
+                        "order_id": order_id,
+                        "processed": proc.get("processed", 0),
+                    })
+                    total_processed += proc.get("processed", 0)
+                except Exception as e:
+                    logger.error(f"policy_lab_execute_error: cohort={cohort_name} ticker={ticker} error={e}")
+                    all_errors.append({"cohort": cohort_name, "suggestion_id": sid, "error": str(e)})
+
+        # Sweep all working orders across all portfolios
+        sweep_processed = 0
+        try:
+            sweep = _process_orders_for_user(supabase, analytics, user_id)
+            sweep_processed = sweep.get("processed", 0)
+        except Exception as e:
+            logger.warning(f"policy_lab_sweep_error: {e}")
+
+        logger.info(
+            f"policy_lab_execute_summary: user_id={user_id} "
+            f"executed={len(all_executed)} errors={len(all_errors)} "
+            f"processed={total_processed} sweep={sweep_processed}"
+        )
+
+        return {
+            "status": "partial" if all_errors else "ok",
+            "executed_count": len(all_executed),
+            "error_count": len(all_errors),
+            "executed": all_executed,
+            "errors": all_errors or None,
+            "processed_summary": {
+                "total_processed": total_processed + sweep_processed,
                 "sweep_processed": sweep_processed,
             },
         }

@@ -2,6 +2,7 @@
 
 import { useState, useEffect, useCallback } from 'react';
 import { API_URL } from '@/lib/constants';
+import { Button } from '@/components/ui/button';
 
 interface EVMetrics {
   expected_value: number;
@@ -182,20 +183,21 @@ export const TradeScoreCard = ({
 
       {/* Action Buttons */}
       <div className="flex gap-3">
-        <button
+        <Button
           onClick={onExecute}
           aria-label={`Execute trade for ${symbol}`}
-          className="flex-1 bg-blue-600 text-white font-semibold py-2 px-4 rounded-lg hover:bg-blue-700 transition focus-visible:ring-2 focus-visible:ring-offset-2 focus-visible:ring-blue-600 outline-none"
+          className="flex-1 bg-blue-600 text-white font-semibold py-2 px-4 rounded-lg hover:bg-blue-700 transition"
         >
           Execute
-        </button>
-        <button
+        </Button>
+        <Button
           onClick={onAddToWatchlist}
           aria-label={`Add ${symbol} to watchlist`}
-          className="flex-1 bg-gray-200 text-gray-800 font-semibold py-2 px-4 rounded-lg hover:bg-gray-300 transition focus-visible:ring-2 focus-visible:ring-offset-2 focus-visible:ring-gray-400 outline-none"
+          variant="secondary"
+          className="flex-1 font-semibold py-2 px-4 rounded-lg transition"
         >
           Watchlist
-        </button>
+        </Button>
       </div>
     </div>
   );

@@ -147,12 +147,13 @@ export default function PlaidLink({ userId, onSuccess, onExit }: PlaidLinkProps)
       <div className="bg-red-50 border border-red-200 rounded-lg p-4">
         <p className="text-sm font-medium text-red-800">Connection Failed</p>
         <p className="text-xs text-red-600 mt-1">{error}</p>
-        <button 
+        <Button
+          variant="link"
           onClick={() => { setError(''); setLinkToken(null); }}
-          className="mt-2 text-xs text-red-700 underline"
+          className="mt-2 h-auto p-0 text-xs text-red-700"
         >
           Try Again
-        </button>
+        </Button>
       </div>
     );
   }

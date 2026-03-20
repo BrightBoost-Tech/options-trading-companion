@@ -136,7 +136,6 @@ def get_version():
     git_sha = (
         os.getenv("GIT_SHA")
         or os.getenv("RAILWAY_GIT_COMMIT_SHA")
-        or os.getenv("VERCEL_GIT_COMMIT_SHA")
         or "unknown"
     )
     return {

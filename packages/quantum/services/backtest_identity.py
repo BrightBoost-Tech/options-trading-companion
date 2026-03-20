@@ -153,8 +153,7 @@ class BacktestIdentity:
         Checks (in order):
         1. GIT_SHA (explicit)
         2. RAILWAY_GIT_COMMIT_SHA (Railway deployment)
-        3. VERCEL_GIT_COMMIT_SHA (Vercel deployment)
-        4. "unknown" (fallback)
+        3. "unknown" (fallback)
 
         Returns:
             Git commit SHA or "unknown"
@@ -162,7 +161,6 @@ class BacktestIdentity:
         return (
             os.getenv("GIT_SHA")
             or os.getenv("RAILWAY_GIT_COMMIT_SHA")
-            or os.getenv("VERCEL_GIT_COMMIT_SHA")
             or "unknown"
         )
 

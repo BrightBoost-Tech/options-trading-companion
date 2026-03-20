@@ -605,6 +605,44 @@ async def task_learning_ingest(
     )
 
 
+@router.post("/policy-lab/eval", status_code=200)
+@limiter.limit("10/minute")
+async def task_policy_lab_eval(
+    request: Request,
+    payload: PaperLearningIngestPayload = Body(default_factory=PaperLearningIngestPayload),
+    auth: TaskSignatureResult = Depends(verify_task_signature("tasks:policy_lab_eval")),
+):
+    """
+    Policy Lab daily evaluation — compare cohort performance and check promotions.
+
+    Auth: Requires v4 HMAC signature with scope 'tasks:policy_lab_eval'.
+    Gated behind POLICY_LAB_ENABLED.
+    """
+    import os
+    if not os.environ.get("POLICY_LAB_ENABLED", "").lower() in ("1", "true"):
+        return {"status": "disabled", "reason": "POLICY_LAB_ENABLED is not set"}
+
+    user_id = payload.user_id
+    if not user_id:
+        user_id = os.environ.get("USER_ID")
+    if not user_id:
+        return {"status": "error", "reason": "user_id required"}
+
+    from packages.quantum.policy_lab.evaluator import evaluate_cohorts, check_promotion
+    from packages.quantum.security.supabase_config import get_admin_client
+    from datetime import date
+
+    supabase = get_admin_client()
+    eval_result = evaluate_cohorts(user_id, date.today(), supabase)
+    promo_result = check_promotion(user_id, supabase)
+
+    return {
+        "status": "ok",
+        "evaluation": eval_result,
+        "promotion": promo_result,
+    }
+
+
 @router.post("/paper/learning-ingest", status_code=202)
 @limiter.limit("20/minute")
 async def task_paper_learning_ingest(

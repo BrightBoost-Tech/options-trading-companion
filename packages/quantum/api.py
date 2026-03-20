@@ -429,6 +429,10 @@ app.include_router(validation_router)
 from packages.quantum.context_endpoints import router as context_router
 app.include_router(context_router)
 
+# --- Register Policy Lab Endpoints ---
+from packages.quantum.policy_lab.endpoints import router as policy_lab_router
+app.include_router(policy_lab_router)
+
 # --- Capabilities Endpoint ---
 from packages.quantum.services.capability_service import CapabilityResolver
 

@@ -258,6 +258,12 @@ TASKS = {
         "description": "Ingest paper outcomes for validation/streak (requires user_id)",
         "user_id_mode": "require",
     },
+    "policy_lab_eval": {
+        "path": "/tasks/policy-lab/eval",
+        "scope": "tasks:policy_lab_eval",
+        "description": "Evaluate Policy Lab cohorts and check promotions (requires user_id)",
+        "user_id_mode": "require",
+    },
     "plaid_backfill": {
         "path": "/internal/tasks/plaid/backfill-history",
         "scope": "tasks:plaid_backfill",

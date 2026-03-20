@@ -39,6 +39,12 @@ on:
     - cron: '20 21 * * 1-5'
     - cron: '20 22 * * 1-5'
 
+    # Policy Lab Eval - 4:30 PM Chicago (after paper_learning_ingest at 4:20)
+    # CDT (summer): 21:30 UTC | CST (winter): 22:30 UTC
+    # Schedule BOTH; Python time-gate allows only the correct local-time run
+    - cron: '30 21 * * 1-5'
+    - cron: '30 22 * * 1-5'
+
     # Ops Health Check - Every 30 min during market hours
     # Runs at :07 and :37 from 13:00-22:00 UTC (8 AM - 5 PM Chicago approx)
     # Uses :07/:37 to avoid cron collisions with other jobs at :00/:05/:10/:15/:30/:40
@@ -149,6 +155,7 @@ on:
           - validation_autopromote_cohort
           - validation_preflight
           - validation_init_window
+          - policy_lab_eval
       skip_time_gate:
         description: 'Skip time gate check'
         required: false
@@ -569,6 +576,55 @@ jobs:
           fi
           python scripts/run_signed_task.py paper_learning_ingest \
             --scheduled-local-time 16:20 \
+            --expected-chicago-offset="$OFFSET" \
+            --window-minutes 90
+
+  # ============================================================================
+  # Scheduled: Policy Lab Eval (4:30 PM Chicago)
+  # ============================================================================
+  policy-lab-eval:
+    name: Policy Lab Eval (4:30 PM Chicago)
+    runs-on: ubuntu-latest
+    if: github.event_name == 'schedule' && (github.event.schedule == '30 21 * * 1-5' || github.event.schedule == '30 22 * * 1-5')
+    concurrency:
+      group: trading-policy-lab-eval-${{ github.ref }}
+      cancel-in-progress: false
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Cache pip dependencies
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('packages/quantum/requirements.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r packages/quantum/requirements.txt
+
+      - name: Run Policy Lab Eval
+        env:
+          TASK_SIGNING_KEYS: ${{ secrets.TASK_SIGNING_KEYS }}
+          BASE_URL: ${{ secrets.QUANTUM_BASE_URL }}
+          USER_ID: ${{ secrets.USER_ID || secrets.TASK_USER_ID }}
+        run: |
+          if [ "${{ github.event.schedule }}" = "30 21 * * 1-5" ]; then
+            OFFSET="-05:00"
+          else
+            OFFSET="-06:00"
+          fi
+          python scripts/run_signed_task.py policy_lab_eval \
+            --scheduled-local-time 16:30 \
             --expected-chicago-offset="$OFFSET" \
             --window-minutes 90
 

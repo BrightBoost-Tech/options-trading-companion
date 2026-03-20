@@ -114,6 +114,17 @@ def run(payload: Dict[str, Any], ctx: Any = None) -> Dict[str, Any]:
                     else:
                         cycle_result = await run_midday_cycle(client, uid)
 
+                    # Policy Lab: fork scored suggestions into cohort variants
+                    try:
+                        from packages.quantum.policy_lab.config import is_policy_lab_enabled
+                        if is_policy_lab_enabled():
+                            from packages.quantum.policy_lab.fork import fork_suggestions_for_cohorts
+                            fork_result = fork_suggestions_for_cohorts(uid, client)
+                            if fork_result.get("status") == "ok":
+                                notes.append(f"Policy Lab fork: {fork_result.get('created', {})}")
+                    except Exception as fork_err:
+                        notes.append(f"Policy Lab fork error: {fork_err}")
+
                     # Capture cycle result for observability
                     if cycle_result:
                         cycle_results.append({"user_id": uid[:8], **cycle_result})

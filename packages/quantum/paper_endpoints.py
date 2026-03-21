@@ -1515,6 +1515,29 @@ def _commit_fill(supabase, analytics, user_id, order, fill_res, quote, portfolio
             )
         return  # Skip telemetry — fill didn't fully commit
 
+    # Defensive: ensure the order record is definitively marked filled after
+    # successful position commit. The initial update_payload (line above) already
+    # sets status from fill_res, but if any intermediate update (e.g., position_id
+    # write) partially failed or a race condition occurred, this ensures consistency.
+    try:
+        supabase.table("paper_orders").update({
+            "status": "filled",
+            "avg_fill_price": new_avg_fill_price,
+            "filled_qty": new_total_filled_qty,
+            "filled_at": now,
+        }).eq("id", order["id"]).execute()
+    except Exception as status_err:
+        logger.error(
+            f"paper_commit_fill_status_update_failed: order_id={order.get('id')} "
+            f"error={status_err} — order may be stuck in prior status"
+        )
+
+    fill_source = "live_quote" if quote else "tcm_fallback"
+    logger.info(
+        f"paper_order_filled: order_id={order.get('id')} fill_price={new_avg_fill_price} "
+        f"filled_qty={new_total_filled_qty} source={fill_source}"
+    )
+
     # Telemetry
     emit_trade_event(analytics, user_id, TradeContext(trace_id=order.get("trace_id")), "order_filled", is_paper=True, properties={"order_id": order["id"]})
 

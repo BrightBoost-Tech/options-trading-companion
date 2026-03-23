@@ -1807,3 +1807,50 @@ def get_paper_portfolio(
             "zero_strategy_return_pct": round(zero_strategy_return_pct, 4)
         }
     }
+
+
+@router.get("/pdt/status")
+def pdt_status_endpoint(
+    user_id: str = Depends(get_current_user),
+):
+    """
+    Current PDT (Pattern Day Trader) day trade status.
+
+    Returns day trades used/remaining in the rolling 5-business-day window,
+    and count of same-day positions currently open.
+    """
+    from packages.quantum.services.pdt_guard_service import (
+        is_pdt_enabled, get_pdt_status, is_same_day_close, _chicago_today,
+    )
+
+    supabase = get_supabase()
+    if not supabase:
+        raise HTTPException(status_code=503, detail="Database not available")
+
+    pdt_on = is_pdt_enabled()
+    status = get_pdt_status(supabase, user_id)
+
+    # Count same-day positions currently open
+    same_day_count = 0
+    today_chicago = _chicago_today()
+    try:
+        port_res = supabase.table("paper_portfolios").select("id").eq("user_id", user_id).execute()
+        p_ids = [p["id"] for p in (port_res.data or [])]
+        if p_ids:
+            pos_res = supabase.table("paper_positions").select("id, created_at") \
+                .in_("portfolio_id", p_ids).eq("status", "open").execute()
+            for p in (pos_res.data or []):
+                if is_same_day_close(p, today_chicago):
+                    same_day_count += 1
+    except Exception as e:
+        logger.warning(f"pdt_status_positions_error: {e}")
+
+    return {
+        "enabled": pdt_on,
+        "day_trades_used": status["day_trades_used"],
+        "day_trades_remaining": status["day_trades_remaining"],
+        "max_day_trades": status["max_day_trades"],
+        "window": status["window_dates"],
+        "same_day_positions_open": same_day_count,
+        "at_limit": status["at_limit"],
+    }

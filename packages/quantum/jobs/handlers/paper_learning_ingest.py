@@ -267,6 +267,12 @@ async def _ingest_paper_outcomes_for_user(
         try:
             supabase.table("learning_feedback_loops").insert(outcome).execute()
             outcomes_created += 1
+
+            # Backfill realized_outcome on policy_decisions if suggestion linked
+            if suggestion_id:
+                _backfill_policy_decision_outcome(
+                    supabase, suggestion_id, position, order,
+                )
         except Exception as e:
             if "duplicate" in str(e).lower() or "unique" in str(e).lower():
                 skipped_duplicate += 1
@@ -386,3 +392,60 @@ def _create_paper_outcome_record(
         "updated_at": position.get("closed_at"),
         "created_at": datetime.now(timezone.utc).isoformat(),
     }
+
+
+def _backfill_policy_decision_outcome(
+    supabase,
+    suggestion_id: str,
+    position: Dict,
+    order: Dict,
+) -> None:
+    """
+    Backfill realized_outcome on policy_decisions rows linked to this suggestion.
+
+    Called after a closed position is ingested into learning_feedback_loops.
+    Updates ALL cohort decision rows for this suggestion (there's one per cohort).
+    """
+    from packages.quantum.policy_lab.config import is_policy_lab_enabled
+
+    if not is_policy_lab_enabled():
+        return
+
+    realized_pl = float(position.get("realized_pl") or 0)
+    opened_at = position.get("created_at")
+    closed_at = position.get("closed_at")
+    close_reason = position.get("close_reason", "")
+
+    # Compute hold_time in hours
+    hold_time_hours = None
+    if opened_at and closed_at:
+        try:
+            t_open = datetime.fromisoformat(str(opened_at).replace("Z", "+00:00"))
+            t_close = datetime.fromisoformat(str(closed_at).replace("Z", "+00:00"))
+            hold_time_hours = round((t_close - t_open).total_seconds() / 3600, 1)
+        except (ValueError, TypeError):
+            pass
+
+    outcome_payload = {
+        "pnl_realized": realized_pl,
+        "hold_time_hours": hold_time_hours,
+        "exit_reason": close_reason,
+        "closed_at": closed_at,
+        "symbol": position.get("symbol"),
+    }
+
+    try:
+        supabase.table("policy_decisions").update({
+            "realized_outcome": outcome_payload,
+        }).eq("suggestion_id", suggestion_id).execute()
+
+        logger.info(
+            f"policy_decision_outcome_backfill: suggestion_id={str(suggestion_id)[:8]}... "
+            f"pnl={realized_pl} hold_hours={hold_time_hours} exit={close_reason}"
+        )
+    except Exception as e:
+        # Non-fatal — don't block the learning ingest pipeline
+        logger.warning(
+            f"policy_decision_outcome_backfill_error: suggestion_id={str(suggestion_id)[:8]}... "
+            f"error={e}"
+        )

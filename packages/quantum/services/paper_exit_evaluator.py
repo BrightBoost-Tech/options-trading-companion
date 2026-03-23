@@ -14,8 +14,11 @@ Schedule: 3:00 PM CDT (before mark-to-market at 3:30 PM).
 """
 
 import logging
+import os
 from datetime import date, datetime, timezone
 from typing import Dict, Any, List, Tuple, Optional, Callable
+
+PDT_MAX_DAY_TRADES = int(os.environ.get("PDT_MAX_DAY_TRADES", "3"))
 
 logger = logging.getLogger(__name__)
 
@@ -296,7 +299,104 @@ class PaperExitEvaluator:
             else:
                 holds.append(position)
 
-        # 4. Close triggered positions
+        # 4. PDT Guard — separate same-day vs overnight exits
+        from packages.quantum.services.pdt_guard_service import (
+            is_pdt_enabled, get_pdt_status, is_same_day_close,
+            is_emergency_stop, record_day_trade, _chicago_today,
+        )
+
+        pdt_on = is_pdt_enabled()
+        pdt_summary = {
+            "enabled": pdt_on,
+            "day_trades_used": 0,
+            "day_trades_remaining": PDT_MAX_DAY_TRADES,
+            "same_day_exits_requested": 0,
+            "same_day_exits_allowed": 0,
+            "same_day_exits_blocked": 0,
+            "emergency_overrides": 0,
+        }
+
+        # Build a position lookup so we can access full position data for PDT checks
+        pos_by_id = {p["id"]: p for p in positions}
+
+        if pdt_on:
+            pdt_status = get_pdt_status(self.client, user_id)
+            pdt_summary["day_trades_used"] = pdt_status["day_trades_used"]
+            pdt_summary["day_trades_remaining"] = pdt_status["day_trades_remaining"]
+
+            today_chicago = _chicago_today()
+            remaining_day_trades = pdt_status["day_trades_remaining"]
+
+            logger.info(
+                f"[PDT] Status: {pdt_status['day_trades_used']}/{PDT_MAX_DAY_TRADES} "
+                f"day trades used ({remaining_day_trades} remaining)"
+            )
+
+            # Partition closes into same-day and overnight
+            same_day_closes = []
+            overnight_closes = []
+
+            for close_item in closes:
+                pos = pos_by_id.get(close_item["position_id"], {})
+                if is_same_day_close(pos, today_chicago):
+                    same_day_closes.append(close_item)
+                else:
+                    overnight_closes.append(close_item)
+
+            pdt_summary["same_day_exits_requested"] = len(same_day_closes)
+
+            # Overnight exits: always allowed (no PDT concern)
+            allowed_closes = list(overnight_closes)
+
+            # Same-day exits: apply PDT limit with smart allocation
+            if same_day_closes:
+                # Separate emergency stops from normal exits
+                emergency_closes = []
+                normal_same_day = []
+
+                for c in same_day_closes:
+                    pos = pos_by_id.get(c["position_id"], {})
+                    if is_emergency_stop(pos):
+                        emergency_closes.append(c)
+                    else:
+                        normal_same_day.append(c)
+
+                # Emergency stops always close regardless of PDT
+                for c in emergency_closes:
+                    allowed_closes.append(c)
+                    pdt_summary["emergency_overrides"] += 1
+                    logger.critical(
+                        f"[PDT] EMERGENCY: {c['symbol']} unrealized_pl={c['unrealized_pl']:.0f} "
+                        f"— closing despite PDT limit (capital protection)"
+                    )
+
+                # Normal same-day exits: rank by realized P&L descending, allow up to remaining
+                normal_same_day.sort(key=lambda c: c.get("unrealized_pl", 0), reverse=True)
+
+                for c in normal_same_day:
+                    if remaining_day_trades > 0:
+                        allowed_closes.append(c)
+                        remaining_day_trades -= 1
+                        pdt_summary["same_day_exits_allowed"] += 1
+                        logger.info(
+                            f"[PDT] CLOSE: {c['symbol']} "
+                            f"${c.get('unrealized_pl', 0):+,.0f} — "
+                            f"using day trade {PDT_MAX_DAY_TRADES - remaining_day_trades}/{PDT_MAX_DAY_TRADES}"
+                        )
+                    else:
+                        # Blocked — force overnight hold
+                        holds.append(pos_by_id.get(c["position_id"], {}))
+                        pdt_summary["same_day_exits_blocked"] += 1
+                        logger.info(
+                            f"[PDT] HOLD: {c['symbol']} "
+                            f"${c.get('unrealized_pl', 0):+,.0f} — "
+                            f"PDT limit reached, forcing overnight hold"
+                        )
+
+            closes = allowed_closes
+        # else: pdt_on is False — close everything as before (no filtering)
+
+        # 5. Close triggered positions
         closed_results = []
         for close_item in closes:
             try:
@@ -306,13 +406,30 @@ class PaperExitEvaluator:
                     close_item["reason"],
                 )
                 closed_results.append({**close_item, **result})
+
+                # Record day trade if PDT enabled and this was a same-day close
+                if pdt_on:
+                    pos = pos_by_id.get(close_item["position_id"], {})
+                    today_chicago = _chicago_today()
+                    if is_same_day_close(pos, today_chicago):
+                        record_day_trade(
+                            supabase=self.client,
+                            user_id=user_id,
+                            position_id=close_item["position_id"],
+                            symbol=close_item.get("symbol", ""),
+                            opened_at=pos.get("created_at", ""),
+                            closed_at=datetime.now(timezone.utc).isoformat(),
+                            trade_date=today_chicago,
+                            realized_pl=close_item.get("unrealized_pl", 0),
+                            close_reason=close_item.get("reason", ""),
+                        )
             except Exception as e:
                 logger.error(
                     f"Failed to close position {close_item['position_id']}: {e}"
                 )
                 closed_results.append({**close_item, "error": str(e)})
 
-        # 5. Build reason summary
+        # 6. Build reason summary
         close_reasons: Dict[str, int] = {}
         for c in closes:
             reason = c["reason"]
@@ -321,7 +438,8 @@ class PaperExitEvaluator:
         logger.info(
             f"exit_evaluation_summary: user_id={user_id} "
             f"total_open={len(positions)} closing={len(closes)} "
-            f"holding={len(holds)} reasons={close_reasons}"
+            f"holding={len(holds)} reasons={close_reasons} "
+            f"pdt={pdt_summary}"
         )
 
         return {
@@ -331,6 +449,7 @@ class PaperExitEvaluator:
             "holding": len(holds),
             "closes": closed_results,
             "close_reasons": close_reasons,
+            "pdt_status": pdt_summary,
         }
 
     def _get_open_positions(self, user_id: str) -> List[Dict[str, Any]]:

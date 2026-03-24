@@ -224,37 +224,24 @@ class TransactionCostModel:
                 # Last resort fallback
                 expected_fill_price = 1.0
 
-            # Deterministic draw based on order_id + date
-            u = _compute_deterministic_fill_draw(order_id)
+            # Internal paper trading: always fill at the expected price.
+            # The deterministic draw was causing orders to stay stuck in
+            # "working" when the draw exceeded fill_probability — but
+            # probabilistic rejection is meaningless for paper trading
+            # where there's no real counterparty or liquidity concern.
+            new_total_qty = requested_qty
+            new_avg_price = expected_fill_price
 
-            if u < fill_probability:
-                # FILL the order
-                new_total_qty = requested_qty
-                new_avg_price = expected_fill_price
-
-                return {
-                    "status": "filled",
-                    "filled_qty": new_total_qty,
-                    "avg_fill_price": round(new_avg_price, 4),
-                    "last_fill_price": round(expected_fill_price, 4),
-                    "last_fill_qty": remaining_qty,
-                    "reason": "missing_quote_fallback",
-                    "fallback_source": reason,
-                    "fill_probability_used": fill_probability,
-                    "deterministic_draw": round(u, 4),
-                }
-            else:
-                # Keep working, no fill this cycle
-                return {
-                    "status": "working",
-                    "filled_qty": filled_qty,
-                    "avg_fill_price": float(order.get("avg_fill_price") or 0.0),
-                    "last_fill_qty": 0,
-                    "reason": "missing_quote_fallback",
-                    "fallback_source": reason,
-                    "fill_probability_used": fill_probability,
-                    "deterministic_draw": round(u, 4),
-                }
+            return {
+                "status": "filled",
+                "filled_qty": new_total_qty,
+                "avg_fill_price": round(new_avg_price, 4),
+                "last_fill_price": round(expected_fill_price, 4),
+                "last_fill_qty": remaining_qty,
+                "reason": "missing_quote_fallback",
+                "fallback_source": reason,
+                "fill_probability_used": fill_probability,
+            }
 
         if not quote or quote.get("status") == "error":
             return _handle_missing_quote_fallback("missing_quote")

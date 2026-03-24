@@ -1,18 +1,57 @@
 """
-Daily cohort evaluator — compares performance across Policy Lab cohorts
-and checks promotion eligibility.
+Daily cohort evaluator — computes utility scores, compares cohorts, and
+checks promotion eligibility using Bayesian posterior probability.
+
+Champion/challenger design:
+- One cohort is "default" (promoted_at is not null = champion)
+- Other cohorts are challengers
+- All three run in paper simultaneously
+
+Promotion rules (ALL must be true):
+1. At least MIN_TRADING_DAYS of data
+2. At least MIN_TRADE_COUNT closed trades
+3. No hard risk breaches (drawdown > HARD_DRAWDOWN_LIMIT)
+4. Challenger utility > default utility by UTILITY_MARGIN (15%)
+5. Posterior probability challenger is better > POSTERIOR_THRESHOLD (70%)
+6. Challenger max drawdown not worse than default
+7. Cooldown period since last promotion elapsed
 """
 
 import logging
 import os
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 from typing import Dict, Any, List, Optional
+from collections import defaultdict
+
+from packages.quantum.policy_lab.scoring import (
+    CohortDailyMetrics,
+    CohortScore,
+    score_cohort_window,
+    posterior_probability_better,
+)
 
 logger = logging.getLogger(__name__)
 
-PROMOTION_WINDOW = int(os.environ.get("POLICY_LAB_PROMOTION_WINDOW", "5"))
-AUTO_PROMOTE = os.environ.get("POLICY_LAB_AUTO_PROMOTE", "").lower() in ("1", "true")
+# ---------------------------------------------------------------------------
+# Configuration
+# ---------------------------------------------------------------------------
 
+PROMOTION_WINDOW = int(os.environ.get("POLICY_LAB_PROMOTION_WINDOW", "7"))
+AUTO_PROMOTE = os.environ.get("POLICY_LAB_AUTOPROMOTE", "").lower() in ("1", "true")
+
+# Promotion gates
+MIN_TRADING_DAYS = 3
+MIN_TRADE_COUNT = 10
+UTILITY_MARGIN = 0.15          # challenger must be 15% better
+POSTERIOR_THRESHOLD = 0.70     # P(challenger > default) must exceed this
+HARD_DRAWDOWN_LIMIT = -0.20   # -20% max drawdown = hard breach
+COOLDOWN_DAYS = 2              # days between promotions
+ROLLBACK_HOURS = 24            # rollback window for new champion
+
+
+# ---------------------------------------------------------------------------
+# Daily evaluation (unchanged — computes metrics and upserts)
+# ---------------------------------------------------------------------------
 
 def evaluate_cohorts(
     user_id: str,
@@ -21,11 +60,10 @@ def evaluate_cohorts(
 ) -> Dict[str, Any]:
     """
     Compute daily performance metrics for each active cohort and upsert
-    into policy_lab_daily_results.
+    into policy_lab_daily_results + policy_daily_scores.
 
     Returns comparison summary dict.
     """
-    # Fetch active cohorts
     cohorts_res = supabase.table("policy_lab_cohorts") \
         .select("id, cohort_name, portfolio_id, policy_config") \
         .eq("user_id", user_id) \
@@ -49,7 +87,7 @@ def evaluate_cohorts(
                 supabase, portfolio_id, eval_date_str,
             )
 
-            # Upsert daily result
+            # Upsert into legacy daily_results table
             row = {
                 "cohort_id": cohort_id,
                 "eval_date": eval_date_str,
@@ -59,16 +97,55 @@ def evaluate_cohorts(
                 .upsert(row, on_conflict="cohort_id,eval_date") \
                 .execute()
 
+            # Also upsert into policy_daily_scores with utility
+            daily_m = CohortDailyMetrics(
+                cohort_id=cohort_id,
+                cohort_name=cohort_name,
+                trade_date=eval_date_str,
+                realized_pnl=metrics["realized_pl"],
+                unrealized_pnl=metrics["unrealized_pl"],
+                max_drawdown_pct=metrics.get("max_drawdown", 0),
+                trade_count=metrics["positions_closed"],
+                win_rate=metrics.get("win_rate"),
+                avg_winner=metrics.get("avg_winner", 0),
+                avg_loser=metrics.get("avg_loser", 0),
+            )
+
+            from packages.quantum.policy_lab.scoring import compute_daily_utility
+            utility = compute_daily_utility(daily_m)
+
+            scores_row = {
+                "cohort_id": cohort_id,
+                "trade_date": eval_date_str,
+                "utility_score": round(utility, 2),
+                "realized_pnl": metrics["realized_pl"],
+                "unrealized_pnl": metrics["unrealized_pl"],
+                "max_drawdown_pct": metrics.get("max_drawdown", 0),
+                "trade_count": metrics["positions_closed"],
+                "win_rate": metrics.get("win_rate"),
+                "avg_winner": metrics.get("avg_winner"),
+                "avg_loser": metrics.get("avg_loser"),
+                "symbols_traded": metrics.get("symbols_traded", []),
+            }
+            try:
+                supabase.table("policy_daily_scores") \
+                    .upsert(scores_row, on_conflict="cohort_id,trade_date") \
+                    .execute()
+            except Exception as e:
+                logger.warning(f"policy_daily_scores_upsert_error: {e}")
+
             results.append({
                 "cohort_name": cohort_name,
                 "cohort_id": cohort_id,
+                "utility": round(utility, 2),
                 **metrics,
             })
 
             logger.info(
                 f"policy_lab_eval: cohort={cohort_name} date={eval_date_str} "
-                f"realized={metrics['realized_pl']:.2f} unrealized={metrics['unrealized_pl']:.2f} "
-                f"total={metrics['total_pl']:.2f} win_rate={metrics.get('win_rate')}"
+                f"utility={utility:.2f} realized={metrics['realized_pl']:.2f} "
+                f"unrealized={metrics['unrealized_pl']:.2f} "
+                f"win_rate={metrics.get('win_rate')}"
             )
 
         except Exception as e:
@@ -87,7 +164,7 @@ def _compute_cohort_metrics(
 
     # Positions closed today
     closed_res = supabase.table("paper_positions") \
-        .select("realized_pl") \
+        .select("realized_pl, symbol") \
         .eq("portfolio_id", portfolio_id) \
         .eq("status", "closed") \
         .gte("closed_at", f"{eval_date_str}T00:00:00") \
@@ -98,8 +175,12 @@ def _compute_cohort_metrics(
     realized_pls = [float(p.get("realized_pl") or 0) for p in closed]
     realized_pl = sum(realized_pls)
     positions_closed = len(closed)
-    wins = sum(1 for pl in realized_pls if pl > 0)
-    win_rate = (wins / positions_closed) if positions_closed > 0 else None
+    wins = [pl for pl in realized_pls if pl > 0]
+    losses = [pl for pl in realized_pls if pl < 0]
+    win_rate = (len(wins) / positions_closed) if positions_closed > 0 else None
+    avg_winner = (sum(wins) / len(wins)) if wins else 0.0
+    avg_loser = (sum(losses) / len(losses)) if losses else 0.0
+    symbols_traded = list(set(p.get("symbol", "") for p in closed if p.get("symbol")))
 
     # Open positions (unrealized P&L)
     open_res = supabase.table("paper_positions") \
@@ -120,7 +201,7 @@ def _compute_cohort_metrics(
         .execute()
     positions_opened = opened_res.count or 0
 
-    # Portfolio capital for budget utilization
+    # Portfolio capital
     port_res = supabase.table("paper_portfolios") \
         .select("cash_balance, net_liq") \
         .eq("id", portfolio_id) \
@@ -133,6 +214,11 @@ def _compute_cohort_metrics(
 
     total_pl = realized_pl + unrealized_pl
 
+    # Max drawdown approximation: worst single-day loss as fraction of net_liq
+    max_drawdown = 0.0
+    if net_liq > 0 and total_pl < 0:
+        max_drawdown = total_pl / net_liq
+
     return {
         "positions_opened": positions_opened,
         "positions_closed": positions_closed,
@@ -140,25 +226,31 @@ def _compute_cohort_metrics(
         "unrealized_pl": round(unrealized_pl, 2),
         "total_pl": round(total_pl, 2),
         "win_rate": round(win_rate, 4) if win_rate is not None else None,
+        "avg_winner": round(avg_winner, 2),
+        "avg_loser": round(avg_loser, 2),
         "capital_deployed": round(capital_deployed, 2),
         "risk_budget_used": round(capital_deployed / net_liq, 4) if net_liq > 0 else 0,
+        "max_drawdown": round(max_drawdown, 4),
+        "symbols_traded": symbols_traded,
     }
 
+
+# ---------------------------------------------------------------------------
+# Promotion check (utility-based with Bayesian confidence)
+# ---------------------------------------------------------------------------
 
 def check_promotion(
     user_id: str,
     supabase,
 ) -> Dict[str, Any]:
     """
-    Check if any cohort qualifies for promotion.
+    Check if any challenger cohort qualifies for promotion over the current
+    default using utility-based scoring with Bayesian posterior confidence.
 
-    A cohort must rank #1 on total_pl AND win_rate for PROMOTION_WINDOW
-    consecutive days to be promoted.
-
-    Returns promotion decision dict.
+    Returns promotion decision dict with full metrics snapshot.
     """
     cohorts_res = supabase.table("policy_lab_cohorts") \
-        .select("id, cohort_name") \
+        .select("id, cohort_name, promoted_at") \
         .eq("user_id", user_id) \
         .eq("is_active", True) \
         .execute()
@@ -167,75 +259,248 @@ def check_promotion(
     if len(cohorts) < 2:
         return {"status": "insufficient_cohorts"}
 
-    # Fetch last N days of results
-    window_start = (date.today() - timedelta(days=PROMOTION_WINDOW)).isoformat()
-    cohort_ids = [c["id"] for c in cohorts]
+    # Identify current champion (most recently promoted, or first if none)
+    champion = None
+    challengers = []
+    for c in cohorts:
+        if c.get("promoted_at"):
+            if champion is None or (c["promoted_at"] > champion["promoted_at"]):
+                champion = c
+        # All are potential challengers initially
+    if champion is None:
+        # No promoted cohort — pick neutral as default champion
+        champion = next((c for c in cohorts if c["cohort_name"] == "neutral"), cohorts[0])
+
+    challengers = [c for c in cohorts if c["id"] != champion["id"]]
     id_to_name = {c["id"]: c["cohort_name"] for c in cohorts}
 
-    results_res = supabase.table("policy_lab_daily_results") \
-        .select("cohort_id, eval_date, total_pl, win_rate") \
+    # Fetch trailing window of daily scores
+    window_start = (date.today() - timedelta(days=PROMOTION_WINDOW)).isoformat()
+    cohort_ids = [c["id"] for c in cohorts]
+
+    scores_res = supabase.table("policy_daily_scores") \
+        .select("*") \
         .in_("cohort_id", cohort_ids) \
-        .gte("eval_date", window_start) \
-        .order("eval_date", desc=True) \
+        .gte("trade_date", window_start) \
+        .order("trade_date", desc=False) \
         .execute()
-    rows = results_res.data or []
+    rows = scores_res.data or []
 
     if not rows:
-        return {"status": "no_results"}
+        return {"status": "no_scores_data"}
 
-    # Group by date and find daily winner
-    from collections import defaultdict
-    by_date: Dict[str, List[Dict]] = defaultdict(list)
+    # Group rows by cohort_id
+    by_cohort: Dict[str, List[Dict]] = defaultdict(list)
     for r in rows:
-        by_date[r["eval_date"]].append(r)
+        by_cohort[r["cohort_id"]].append(r)
 
-    # Count consecutive days each cohort was #1 on total_pl
-    sorted_dates = sorted(by_date.keys(), reverse=True)
-    streak: Dict[str, int] = {c["id"]: 0 for c in cohorts}
-    leader_id = None
+    # Build CohortScore for each
+    scored: Dict[str, CohortScore] = {}
+    for cid, daily_rows in by_cohort.items():
+        metrics = [
+            CohortDailyMetrics(
+                cohort_id=cid,
+                cohort_name=id_to_name.get(cid, "?"),
+                trade_date=r["trade_date"],
+                realized_pnl=float(r.get("realized_pnl") or 0),
+                unrealized_pnl=float(r.get("unrealized_pnl") or 0),
+                max_drawdown_pct=float(r.get("max_drawdown_pct") or 0),
+                expected_shortfall=float(r.get("expected_shortfall") or 0),
+                execution_quality=float(r.get("execution_quality") or 0),
+                calibration_quality=float(r.get("calibration_quality") or 0),
+                trade_count=int(r.get("trade_count") or 0),
+                win_rate=float(r["win_rate"]) if r.get("win_rate") is not None else None,
+                avg_winner=float(r.get("avg_winner") or 0),
+                avg_loser=float(r.get("avg_loser") or 0),
+                regime_at_close=r.get("regime_at_close") or "",
+            )
+            for r in daily_rows
+        ]
+        cs = score_cohort_window(metrics)
+        if cs:
+            scored[cid] = cs
 
-    for d in sorted_dates[:PROMOTION_WINDOW]:
-        day_rows = by_date[d]
-        if not day_rows:
-            break
-        # Rank by total_pl
-        best = max(day_rows, key=lambda r: float(r.get("total_pl") or 0))
-        best_id = best["cohort_id"]
+    champion_score = scored.get(champion["id"])
+    if not champion_score:
+        return {"status": "champion_no_data", "champion": champion["cohort_name"]}
 
-        if leader_id is None:
-            leader_id = best_id
-        if best_id == leader_id:
-            streak[best_id] = streak.get(best_id, 0) + 1
+    # Evaluate each challenger
+    best_challenger = None
+    best_posterior = 0.0
+    evaluations = []
+
+    for ch in challengers:
+        ch_score = scored.get(ch["id"])
+        if not ch_score:
+            evaluations.append({
+                "cohort": ch["cohort_name"],
+                "verdict": "no_data",
+            })
+            continue
+
+        # Gate 1: Minimum trading days
+        if ch_score.trading_days < MIN_TRADING_DAYS:
+            evaluations.append({
+                "cohort": ch["cohort_name"],
+                "verdict": "insufficient_days",
+                "trading_days": ch_score.trading_days,
+                "required": MIN_TRADING_DAYS,
+            })
+            continue
+
+        # Gate 2: Minimum trade count
+        if ch_score.trade_count < MIN_TRADE_COUNT:
+            evaluations.append({
+                "cohort": ch["cohort_name"],
+                "verdict": "insufficient_trades",
+                "trade_count": ch_score.trade_count,
+                "required": MIN_TRADE_COUNT,
+            })
+            continue
+
+        # Gate 3: No hard risk breach
+        if ch_score.max_drawdown_pct < HARD_DRAWDOWN_LIMIT:
+            evaluations.append({
+                "cohort": ch["cohort_name"],
+                "verdict": "hard_risk_breach",
+                "max_drawdown": ch_score.max_drawdown_pct,
+                "limit": HARD_DRAWDOWN_LIMIT,
+            })
+            continue
+
+        # Gate 4: Utility margin
+        if champion_score.utility != 0:
+            margin = (ch_score.utility - champion_score.utility) / abs(champion_score.utility)
         else:
-            break  # Streak broken
+            margin = 1.0 if ch_score.utility > 0 else 0.0
 
-    # Check if any cohort has a full-window streak
-    winner_id = None
-    for cid, count in streak.items():
-        if count >= PROMOTION_WINDOW:
-            winner_id = cid
-            break
+        if margin < UTILITY_MARGIN:
+            evaluations.append({
+                "cohort": ch["cohort_name"],
+                "verdict": "insufficient_margin",
+                "challenger_utility": ch_score.utility,
+                "champion_utility": champion_score.utility,
+                "margin": round(margin, 4),
+                "required": UTILITY_MARGIN,
+            })
+            continue
 
-    if not winner_id:
+        # Gate 5: Posterior probability
+        posterior = posterior_probability_better(
+            ch_score.daily_utilities,
+            champion_score.daily_utilities,
+        )
+
+        if posterior < POSTERIOR_THRESHOLD:
+            evaluations.append({
+                "cohort": ch["cohort_name"],
+                "verdict": "insufficient_confidence",
+                "posterior": round(posterior, 4),
+                "required": POSTERIOR_THRESHOLD,
+                "margin": round(margin, 4),
+            })
+            continue
+
+        # Gate 6: Drawdown not worse than champion
+        if ch_score.max_drawdown_pct < champion_score.max_drawdown_pct:
+            evaluations.append({
+                "cohort": ch["cohort_name"],
+                "verdict": "worse_drawdown",
+                "challenger_dd": ch_score.max_drawdown_pct,
+                "champion_dd": champion_score.max_drawdown_pct,
+            })
+            continue
+
+        # All gates passed
+        evaluations.append({
+            "cohort": ch["cohort_name"],
+            "verdict": "eligible",
+            "utility": ch_score.utility,
+            "margin": round(margin, 4),
+            "posterior": round(posterior, 4),
+        })
+
+        if posterior > best_posterior:
+            best_posterior = posterior
+            best_challenger = ch
+
+    # No eligible challenger
+    if not best_challenger:
+        logger.info(
+            f"policy_lab_promotion_check: user={user_id} champion={champion['cohort_name']} "
+            f"no_challenger_eligible evaluations={evaluations}"
+        )
         return {
-            "status": "no_consensus",
-            "streaks": {id_to_name.get(cid, cid): cnt for cid, cnt in streak.items()},
-            "window": PROMOTION_WINDOW,
+            "status": "no_promotion",
+            "champion": champion["cohort_name"],
+            "evaluations": evaluations,
         }
 
-    winner_name = id_to_name.get(winner_id, "unknown")
+    winner_name = best_challenger["cohort_name"]
+    winner_score = scored[best_challenger["id"]]
 
-    # Build metrics snapshot
+    # Check cooldown
+    last_promo_res = supabase.table("policy_lab_promotions") \
+        .select("created_at") \
+        .eq("user_id", user_id) \
+        .order("created_at", desc=True) \
+        .limit(1) \
+        .execute()
+    if last_promo_res.data:
+        last_promo_time = datetime.fromisoformat(
+            last_promo_res.data[0]["created_at"].replace("Z", "+00:00")
+        )
+        cooldown_until = last_promo_time + timedelta(days=COOLDOWN_DAYS)
+        if datetime.now(timezone.utc) < cooldown_until:
+            logger.info(
+                f"policy_lab_promotion_cooldown: user={user_id} "
+                f"winner={winner_name} cooldown_until={cooldown_until.isoformat()}"
+            )
+            return {
+                "status": "cooldown",
+                "champion": champion["cohort_name"],
+                "eligible_challenger": winner_name,
+                "cooldown_until": cooldown_until.isoformat(),
+            }
+
+    # Build full metrics snapshot
     metrics_snapshot = {
-        "streaks": {id_to_name.get(cid, cid): cnt for cid, cnt in streak.items()},
-        "window": PROMOTION_WINDOW,
-        "latest_results": rows[:len(cohorts)],
+        "champion": {
+            "name": champion["cohort_name"],
+            "utility": champion_score.utility,
+            "realized_pnl": champion_score.realized_pnl,
+            "max_drawdown": champion_score.max_drawdown_pct,
+            "trade_count": champion_score.trade_count,
+            "trading_days": champion_score.trading_days,
+        },
+        "challenger": {
+            "name": winner_name,
+            "utility": winner_score.utility,
+            "realized_pnl": winner_score.realized_pnl,
+            "max_drawdown": winner_score.max_drawdown_pct,
+            "trade_count": winner_score.trade_count,
+            "trading_days": winner_score.trading_days,
+            "posterior": round(best_posterior, 4),
+        },
+        "evaluations": evaluations,
+        "window_days": PROMOTION_WINDOW,
+        "gates": {
+            "min_trading_days": MIN_TRADING_DAYS,
+            "min_trade_count": MIN_TRADE_COUNT,
+            "utility_margin": UTILITY_MARGIN,
+            "posterior_threshold": POSTERIOR_THRESHOLD,
+            "hard_drawdown_limit": HARD_DRAWDOWN_LIMIT,
+        },
     }
 
     promotion_row = {
         "user_id": user_id,
         "promoted_cohort": winner_name,
-        "reason": f"Ranked #1 on total_pl for {PROMOTION_WINDOW} consecutive days",
+        "demoted_cohort": champion["cohort_name"],
+        "reason": (
+            f"Utility {winner_score.utility:.0f} vs {champion_score.utility:.0f} "
+            f"(+{best_posterior:.0%} confidence)"
+        ),
         "metrics_snapshot": metrics_snapshot,
         "auto_promoted": AUTO_PROMOTE,
         "confirmed_by": "auto" if AUTO_PROMOTE else None,
@@ -244,19 +509,136 @@ def check_promotion(
     supabase.table("policy_lab_promotions").insert(promotion_row).execute()
 
     if AUTO_PROMOTE:
+        now_iso = datetime.now(timezone.utc).isoformat()
+        # Promote challenger
         supabase.table("policy_lab_cohorts") \
-            .update({"promoted_at": date.today().isoformat()}) \
-            .eq("id", winner_id) \
+            .update({"promoted_at": now_iso}) \
+            .eq("id", best_challenger["id"]) \
+            .execute()
+        # Clear champion's promoted_at (demote to challenger)
+        supabase.table("policy_lab_cohorts") \
+            .update({"promoted_at": None}) \
+            .eq("id", champion["id"]) \
             .execute()
 
     logger.info(
-        f"policy_lab_promotion: user={user_id} winner={winner_name} "
-        f"auto_promoted={AUTO_PROMOTE} streak={streak.get(winner_id, 0)}"
+        f"policy_lab_promotion: user={user_id} "
+        f"champion={champion['cohort_name']}→{winner_name} "
+        f"utility={winner_score.utility:.0f} vs {champion_score.utility:.0f} "
+        f"posterior={best_posterior:.2%} auto={AUTO_PROMOTE}"
     )
 
     return {
         "status": "promoted" if AUTO_PROMOTE else "recommended",
         "winner": winner_name,
+        "demoted": champion["cohort_name"],
         "auto_promoted": AUTO_PROMOTE,
+        "posterior": round(best_posterior, 4),
         "metrics_snapshot": metrics_snapshot,
     }
+
+
+# ---------------------------------------------------------------------------
+# Rollback check (runs ~24h after promotion)
+# ---------------------------------------------------------------------------
+
+def check_rollback(
+    user_id: str,
+    supabase,
+) -> Dict[str, Any]:
+    """
+    Check if a recently promoted champion should be rolled back.
+
+    If the new champion breaches hard drawdown or loss limits within
+    ROLLBACK_HOURS of promotion, revert to the previous champion.
+    """
+    cohorts_res = supabase.table("policy_lab_cohorts") \
+        .select("id, cohort_name, promoted_at") \
+        .eq("user_id", user_id) \
+        .eq("is_active", True) \
+        .execute()
+    cohorts = cohorts_res.data or []
+
+    current_champion = None
+    for c in cohorts:
+        if c.get("promoted_at"):
+            if current_champion is None or c["promoted_at"] > current_champion["promoted_at"]:
+                current_champion = c
+
+    if not current_champion or not current_champion.get("promoted_at"):
+        return {"status": "no_champion"}
+
+    # Check if within rollback window
+    promoted_at = datetime.fromisoformat(
+        current_champion["promoted_at"].replace("Z", "+00:00")
+    )
+    rollback_deadline = promoted_at + timedelta(hours=ROLLBACK_HOURS)
+
+    if datetime.now(timezone.utc) > rollback_deadline:
+        return {"status": "past_rollback_window"}
+
+    # Check if champion has breached since promotion
+    promoted_date_str = promoted_at.date().isoformat()
+    scores_res = supabase.table("policy_daily_scores") \
+        .select("utility_score, max_drawdown_pct, realized_pnl") \
+        .eq("cohort_id", current_champion["id"]) \
+        .gte("trade_date", promoted_date_str) \
+        .execute()
+    scores = scores_res.data or []
+
+    for s in scores:
+        dd = float(s.get("max_drawdown_pct") or 0)
+        if dd < HARD_DRAWDOWN_LIMIT:
+            # Breach — rollback
+            logger.critical(
+                f"policy_lab_rollback: user={user_id} "
+                f"champion={current_champion['cohort_name']} "
+                f"drawdown={dd} limit={HARD_DRAWDOWN_LIMIT} — "
+                f"rolling back"
+            )
+
+            # Find previous champion from last promotion
+            last_promo_res = supabase.table("policy_lab_promotions") \
+                .select("demoted_cohort") \
+                .eq("user_id", user_id) \
+                .order("created_at", desc=True) \
+                .limit(1) \
+                .execute()
+
+            old_champion_name = None
+            if last_promo_res.data:
+                old_champion_name = last_promo_res.data[0].get("demoted_cohort")
+
+            if old_champion_name:
+                # Re-promote old champion
+                now_iso = datetime.now(timezone.utc).isoformat()
+                supabase.table("policy_lab_cohorts") \
+                    .update({"promoted_at": now_iso}) \
+                    .eq("user_id", user_id) \
+                    .eq("cohort_name", old_champion_name) \
+                    .execute()
+                # Demote current
+                supabase.table("policy_lab_cohorts") \
+                    .update({"promoted_at": None}) \
+                    .eq("id", current_champion["id"]) \
+                    .execute()
+
+                # Log rollback as promotion
+                supabase.table("policy_lab_promotions").insert({
+                    "user_id": user_id,
+                    "promoted_cohort": old_champion_name,
+                    "demoted_cohort": current_champion["cohort_name"],
+                    "reason": f"ROLLBACK: drawdown {dd:.2%} breached {HARD_DRAWDOWN_LIMIT:.0%} limit within {ROLLBACK_HOURS}h",
+                    "metrics_snapshot": {"trigger": "rollback", "drawdown": dd},
+                    "auto_promoted": True,
+                    "confirmed_by": "auto_rollback",
+                }).execute()
+
+            return {
+                "status": "rolled_back",
+                "demoted": current_champion["cohort_name"],
+                "restored": old_champion_name,
+                "trigger_drawdown": dd,
+            }
+
+    return {"status": "ok", "champion": current_champion["cohort_name"]}

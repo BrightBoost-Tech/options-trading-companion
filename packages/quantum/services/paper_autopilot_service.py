@@ -155,6 +155,37 @@ class PaperAutopilotService:
         limit = limit or self.config["max_trades_per_day"]
         min_score = min_score if min_score is not None else self.config["min_score"]
 
+        # Sweep FIRST: retry all working/partial orders from prior runs,
+        # regardless of whether there are new suggestions to stage.
+        from packages.quantum.paper_endpoints import (
+            _suggestion_to_ticket,
+            _stage_order_internal,
+            _process_orders_for_user,
+            get_supabase,
+            get_analytics_service,
+        )
+        supabase = self.client
+        analytics = get_analytics_service()
+
+        sweep_processed = 0
+        try:
+            sweep_result = _process_orders_for_user(supabase, analytics, user_id)
+            sweep_processed = sweep_result.get("processed", 0)
+            if sweep_processed > 0:
+                logger.info(
+                    f"paper_auto_execute_sweep: user_id={user_id} "
+                    f"sweep_processed={sweep_processed} "
+                    f"total_orders={sweep_result.get('total_orders', 0)}"
+                )
+            sweep_errors = sweep_result.get("errors") or []
+            if sweep_errors:
+                logger.warning(
+                    f"paper_auto_execute_sweep_errors: user_id={user_id} "
+                    f"errors={sweep_errors}"
+                )
+        except Exception as sweep_err:
+            logger.warning(f"paper_auto_execute_sweep_error: user_id={user_id} error={sweep_err}")
+
         # Get executable suggestions
         suggestions = self.get_executable_suggestions(user_id, include_backlog=False)
 
@@ -164,6 +195,10 @@ class PaperAutopilotService:
                 "executed_count": 0,
                 "skipped_count": 0,
                 "reason": "no_candidates",
+                "processed_summary": {
+                    "total_processed": sweep_processed,
+                    "sweep_processed": sweep_processed,
+                },
             }
 
         # Get already executed to dedupe
@@ -196,6 +231,10 @@ class PaperAutopilotService:
                 "executed_count": 0,
                 "skipped_count": len(suggestions),
                 "reason": "no_qualifying_candidates",
+                "processed_summary": {
+                    "total_processed": sweep_processed,
+                    "sweep_processed": sweep_processed,
+                },
             }
 
         # Take top N
@@ -207,18 +246,6 @@ class PaperAutopilotService:
             f"below_min_score={below_min_score_count} candidates={len(candidates)} "
             f"to_execute={len(to_execute)}"
         )
-
-        # Execute using internal staging logic
-        from packages.quantum.paper_endpoints import (
-            _suggestion_to_ticket,
-            _stage_order_internal,
-            _process_orders_for_user,
-            get_supabase,
-            get_analytics_service,
-        )
-
-        supabase = self.client
-        analytics = get_analytics_service()
 
         executed = []
         errors = []
@@ -273,28 +300,6 @@ class PaperAutopilotService:
                     f"symbol={ticker} error={e}"
                 )
                 errors.append({"suggestion_id": sid, "error": str(e)})
-
-        # Sweep: retry ALL remaining working/partial orders for this user.
-        # This catches orders stuck from earlier runs (e.g., Polygon was down)
-        # and orders from THIS run that transitioned to "working" above.
-        sweep_processed = 0
-        try:
-            sweep_result = _process_orders_for_user(supabase, analytics, user_id)
-            sweep_processed = sweep_result.get("processed", 0)
-            if sweep_processed > 0:
-                logger.info(
-                    f"paper_auto_execute_sweep: user_id={user_id} "
-                    f"sweep_processed={sweep_processed} "
-                    f"total_orders={sweep_result.get('total_orders', 0)}"
-                )
-            sweep_errors = sweep_result.get("errors") or []
-            if sweep_errors:
-                logger.warning(
-                    f"paper_auto_execute_sweep_errors: user_id={user_id} "
-                    f"errors={sweep_errors}"
-                )
-        except Exception as sweep_err:
-            logger.warning(f"paper_auto_execute_sweep_error: user_id={user_id} error={sweep_err}")
 
         logger.info(
             f"paper_auto_execute_summary: user_id={user_id} "

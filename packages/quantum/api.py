@@ -433,6 +433,10 @@ app.include_router(context_router)
 from packages.quantum.policy_lab.endpoints import router as policy_lab_router
 app.include_router(policy_lab_router)
 
+# --- Register Broker/Alpaca Endpoints ---
+from packages.quantum.brokers.alpaca_endpoints import router as broker_router
+app.include_router(broker_router)
+
 # --- Capabilities Endpoint ---
 from packages.quantum.services.capability_service import CapabilityResolver
 

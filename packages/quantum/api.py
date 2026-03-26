@@ -54,9 +54,6 @@ validate_trading_config()  # v4-L1F: Validate trading env vars at startup
 from packages.quantum.models import Holding, SyncResponse, PortfolioSnapshot, Spread, SpreadPosition, RiskDashboardResponse, UnifiedPosition, OptimizationRationale
 from packages.quantum.config import ENABLE_REBALANCE_CONVICTION, ENABLE_REBALANCE_CONVICTION_SHADOW
 from packages.quantum.analytics.conviction_service import ConvictionService, PositionDescriptor
-from packages.quantum import plaid_service
-from packages.quantum import plaid_endpoints
-
 # Import functionalities
 from packages.quantum.options_scanner import scan_for_opportunities
 from packages.quantum.services.journal_service import JournalService
@@ -67,7 +64,6 @@ from packages.quantum.market_data import calculate_portfolio_inputs, PolygonServ
 # New Services for Cash-Aware Workflow
 from packages.quantum.services.workflow_orchestrator import run_morning_cycle, run_midday_cycle, run_weekly_report
 from packages.quantum.services.market_data_truth_layer import MarketDataTruthLayer
-from packages.quantum.services.plaid_history_service import PlaidHistoryService
 from packages.quantum.services.rebalance_engine import RebalanceEngine
 from packages.quantum.services.risk_budget_engine import RiskBudgetEngine
 from packages.quantum.services.execution_service import ExecutionService
@@ -363,16 +359,6 @@ secrets_provider = SecretsProvider()
 analytics_service = AnalyticsService(supabase_admin)
 app.state.analytics_service = analytics_service
 app.state.supabase = supabase_admin
-
-# --- Register Plaid Endpoints ---
-plaid_endpoints.register_plaid_endpoints(
-    app,
-    plaid_service,
-    supabase_admin,
-    analytics_service,
-    get_supabase_user_client,
-    limiter
-)
 
 # --- Register Optimizer Endpoints ---
 app.include_router(optimizer_router)

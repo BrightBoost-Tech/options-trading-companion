@@ -163,37 +163,6 @@ async def universe_sync_task(
         "status": "queued"
     }
 
-@router.post("/plaid/backfill-history", status_code=202)
-async def backfill_history(
-    start_date: str = Body(..., embed=True),
-    end_date: str = Body(..., embed=True),
-    client: Client = Depends(get_admin_client),
-    auth: TaskSignatureResult = Depends(verify_task_signature("tasks:plaid_backfill"))
-):
-    today = datetime.now().strftime("%Y-%m-%d")
-    job_name = "plaid-backfill-history"
-    key = f"{job_name}-{start_date}-{end_date}-{today}"
-
-    job_id = enqueue_idempotent(
-        client=client,
-        job_name=job_name,
-        idempotency_key=key,
-        payload={
-            "app_version": APP_VERSION,
-            "trigger_ts": datetime.now().isoformat(),
-            "task_name": job_name,
-            "start_date": start_date,
-            "end_date": end_date
-        }
-    )
-
-    return {
-        "job_run_id": str(job_id),
-        "job_name": job_name,
-        "idempotency_key": key,
-        "status": "queued"
-    }
-
 # Keep remaining endpoints unchanged as they were not in the target list
 @router.post("/iv/daily-refresh", status_code=202)
 async def iv_daily_refresh_task(

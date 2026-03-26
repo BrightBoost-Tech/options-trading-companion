@@ -130,23 +130,6 @@ SECRET_REGISTRY: Dict[str, SecretDefinition] = {
         example_format="<api-key>",
         used_in=["market_data.py"]
     ),
-    "PLAID_CLIENT_ID": SecretDefinition(
-        name="PLAID_CLIENT_ID",
-        description="Plaid client ID for brokerage integration",
-        category="external",
-        required=False,
-        example_format="<client-id>",
-        used_in=["plaid_service.py"]
-    ),
-    "PLAID_SECRET": SecretDefinition(
-        name="PLAID_SECRET",
-        description="Plaid secret for brokerage integration",
-        category="external",
-        required=False,
-        example_format="<secret>",
-        used_in=["plaid_service.py"]
-    ),
-
     # OpenAI
     "OPENAI_API_KEY": SecretDefinition(
         name="OPENAI_API_KEY",

@@ -2,11 +2,6 @@ from pydantic import BaseModel
 from typing import Optional
 import os
 
-class PlaidSecrets(BaseModel):
-    client_id: Optional[str]
-    secret: Optional[str]
-    env: str  # 'sandbox' | 'development' | 'production'
-
 class SupabaseSecrets(BaseModel):
     url: Optional[str]
     service_role_key: Optional[str]
@@ -24,19 +19,9 @@ class SecretsProvider:
     Central access point for backend-wide secrets.
     """
     def __init__(self):
-        self._plaid: Optional[PlaidSecrets] = None
         self._supabase: Optional[SupabaseSecrets] = None
         self._polygon: Optional[PolygonSecrets] = None
         self._qci: Optional[QciSecrets] = None
-
-    def get_plaid_secrets(self) -> PlaidSecrets:
-        if self._plaid is None:
-            self._plaid = PlaidSecrets(
-                client_id=os.getenv("PLAID_CLIENT_ID"),
-                secret=os.getenv("PLAID_SECRET"),
-                env=os.getenv("PLAID_ENV", "sandbox"),
-            )
-        return self._plaid
 
     def get_supabase_secrets(self) -> SupabaseSecrets:
         if self._supabase is None:

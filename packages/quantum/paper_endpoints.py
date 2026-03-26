@@ -640,6 +640,10 @@ def _stage_order_internal(supabase, analytics, user_id, ticket: TradeTicket, por
     # TCM Estimate
     tcm_est = TransactionCostModel.estimate(ticket, quote)
 
+    # Determine execution mode upfront so it's set on insert (not patched after)
+    from packages.quantum.brokers.execution_router import get_execution_mode, ExecutionMode
+    exec_mode = get_execution_mode()
+
     # Prepare Order
     side = ticket.legs[0].action if ticket.legs else "buy"
 
@@ -647,6 +651,7 @@ def _stage_order_internal(supabase, analytics, user_id, ticket: TradeTicket, por
         "user_id": user_id,
         "portfolio_id": portfolio_id,
         "status": "staged",
+        "execution_mode": exec_mode.value,
         "staged_at": datetime.now(timezone.utc).isoformat(),
         "trace_id": trace_id,
         "suggestion_id": suggestion_id,
@@ -694,20 +699,24 @@ def _stage_order_internal(supabase, analytics, user_id, ticket: TradeTicket, por
     )
     emit_trade_event(analytics, user_id, ctx, "order_staged", is_paper=True, properties={"order_id": order_id})
 
-    # Route through execution backend when not using internal paper simulation.
-    # For alpaca_paper/alpaca_live the router submits to Alpaca and updates the
-    # paper_orders row with alpaca_order_id, execution_mode, and status='submitted'
-    # so that _process_orders_for_user (TCM sim) does not also attempt to fill it.
-    from packages.quantum.brokers.execution_router import get_execution_mode, ExecutionMode
-    mode = get_execution_mode()
-    if mode != ExecutionMode.INTERNAL_PAPER:
-        from packages.quantum.brokers.execution_router import ExecutionRouter
-        router = ExecutionRouter(supabase=supabase)
-        router.execute_order(
-            order_request=ticket.model_dump(mode="json"),
-            user_id=user_id,
-            internal_order_id=order_id,
-        )
+    # Submit to Alpaca when execution mode requires a broker call.
+    # Uses build_alpaca_order_request which translates leg fields
+    # (action→side, quantity→qty, Polygon→Alpaca OCC symbols).
+    if exec_mode in (ExecutionMode.ALPACA_PAPER, ExecutionMode.ALPACA_LIVE):
+        try:
+            from packages.quantum.brokers.alpaca_order_handler import submit_and_track
+            from packages.quantum.brokers.alpaca_client import get_alpaca_client
+            alpaca = get_alpaca_client()
+            order_row = res.data[0]
+            submit_and_track(alpaca, supabase, order_row, user_id)
+        except Exception as e:
+            # Log but don't prevent order_id from returning — the order
+            # stays staged with execution_mode already set so it can be
+            # retried by the sweep or a manual re-submission.
+            logger.error(
+                f"alpaca_submit_failed: order_id={order_id} "
+                f"trace_id={trace_id} error={e}"
+            )
 
     return order_id
 

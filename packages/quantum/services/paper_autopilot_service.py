@@ -120,9 +120,11 @@ class PaperAutopilotService:
         """
         today_start, tomorrow_start = _compute_today_window()
 
-        # Query paper_orders for today's orders linked to suggestions
+        # Query paper_orders for today's active orders linked to suggestions.
+        # Cancelled orders are excluded so their suggestions can be retried.
         result = self.client.table("paper_orders") \
             .select("suggestion_id") \
+            .in_("status", ["staged", "working", "partial", "submitted", "filled"]) \
             .gte("created_at", today_start) \
             .lt("created_at", tomorrow_start) \
             .execute()

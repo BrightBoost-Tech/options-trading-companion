@@ -40,11 +40,19 @@ def build_alpaca_order_request(order: Dict[str, Any]) -> Dict[str, Any]:
             "qty": int(leg.get("qty") or leg.get("ratio_qty") or qty),
         })
 
+    # Options must always be limit orders — Alpaca rejects market orders
+    # outside market hours. If no limit_price, the order cannot be submitted.
+    if not limit_price or limit_price <= 0:
+        raise ValueError(
+            f"Cannot submit options order without limit_price "
+            f"(got {limit_price}). Order ID: {order.get('id')}"
+        )
+
     return {
         "symbol": order_json.get("symbol") or order.get("symbol"),
         "legs": alpaca_legs,
-        "order_type": "limit" if limit_price > 0 else "market",
-        "limit_price": limit_price if limit_price > 0 else None,
+        "order_type": "limit",
+        "limit_price": limit_price,
         "time_in_force": "day",
     }
 

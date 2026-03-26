@@ -165,7 +165,6 @@ class AlpacaClient:
         from alpaca.trading.requests import (
             OptionLegRequest,
             LimitOrderRequest,
-            MarketOrderRequest,
         )
         from alpaca.trading.enums import (
             OrderSide,
@@ -198,7 +197,12 @@ class AlpacaClient:
         # For single-leg, qty = contract count from that leg.
         qty = float(alpaca_legs[0].ratio_qty or 1)
         is_multi = len(legs) >= 2
-        is_limit = limit_price is not None and limit_price > 0
+        # Options must always be limit orders — Alpaca rejects market orders
+        # outside market hours.
+        if not limit_price or limit_price <= 0:
+            raise AlpacaOrderError(
+                f"Cannot submit options order without limit_price (got {limit_price})"
+            )
 
         common = dict(
             legs=alpaca_legs,
@@ -209,17 +213,11 @@ class AlpacaClient:
             side=alpaca_legs[0].side if not is_multi else None,
         )
 
-        if is_limit:
-            req = LimitOrderRequest(
-                type=OrderType.LIMIT,
-                limit_price=limit_price,
-                **common,
-            )
-        else:
-            req = MarketOrderRequest(
-                type=OrderType.MARKET,
-                **common,
-            )
+        req = LimitOrderRequest(
+            type=OrderType.LIMIT,
+            limit_price=limit_price,
+            **common,
+        )
 
         logger.info(
             f"[ALPACA] Submitting order: {len(legs)} legs, "

@@ -99,7 +99,7 @@ export default function PortfolioPage() {
             {holdings.length === 0 ? (
               <div className="p-12 text-center text-gray-500">
                 <p className="mb-4 text-lg">No positions found.</p>
-                <p className="text-sm">Sync via Plaid or Import CSV in Settings to get started.</p>
+                <p className="text-sm">Positions sync automatically from Alpaca. Check Settings to verify your connection.</p>
                 <button
                     onClick={() => router.push('/settings')}
                     className="mt-4 px-4 py-2 bg-blue-600 text-white rounded hover:bg-blue-700"

@@ -201,7 +201,7 @@ export default function PortfolioHoldingsTable({ holdings, onSync, onGenerateSug
                             <div className="space-y-1">
                                 <h3 className="text-lg font-medium">No Holdings Found</h3>
                                 <p className="text-sm text-muted-foreground max-w-[300px] mx-auto">
-                                    Sync your brokerage account via Plaid or import a CSV to get started.
+                                    Positions sync automatically from Alpaca. Check Settings to verify your connection.
                                 </p>
                             </div>
                             <div className="pt-2">

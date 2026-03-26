@@ -3,7 +3,6 @@
 import { useState, useEffect } from 'react';
 import { useRouter } from 'next/navigation';
 import DashboardLayout from '@/components/DashboardLayout';
-import SyncHoldingsButton from '@/components/SyncHoldingsButton';
 import { formatOptionDisplay } from '@/lib/formatters';
 import { fetchWithAuthTimeout, ApiError } from '@/lib/api';
 import { RequireAuth } from '@/components/RequireAuth';
@@ -67,7 +66,6 @@ export default function PortfolioPage() {
         <div className="flex justify-between items-center mb-6">
           <h1 className="text-3xl font-bold">My Portfolio</h1>
           <div className="flex gap-3">
-             <SyncHoldingsButton onSyncComplete={loadSnapshot} />
           </div>
         </div>
 

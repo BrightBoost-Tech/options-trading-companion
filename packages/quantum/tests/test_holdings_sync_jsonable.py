@@ -234,33 +234,5 @@ class TestMockJobResult:
         assert isinstance(parsed["cycle_results"][0]["budget"]["computed_at"], str)
 
 
-class TestHoldingsSyncServiceReturns:
-    """Test that holdings_sync_service returns JSON-safe values."""
-
-    def test_ensure_holdings_fresh_return_types(self):
-        """Verify ensure_holdings_fresh return values don't contain datetime."""
-        # Check the source file for return statements
-        file_path = os.path.join(
-            os.path.dirname(__file__),
-            "..",
-            "services",
-            "holdings_sync_service.py"
-        )
-
-        with open(file_path, "r", encoding="utf-8") as f:
-            content = f.read()
-
-        # The function should not return datetime objects in the result dict
-        # It uses datetime internally for comparison but returns bools/strings/ints
-        assert "def ensure_holdings_fresh" in content
-
-        # Verify the return dict keys are expected types
-        # The function returns: synced (bool), stale (bool), has_plaid (bool),
-        # holdings_count (int), error (str|None)
-        assert '"synced":' in content or "'synced':" in content
-        assert '"stale":' in content or "'stale':" in content
-        assert '"error":' in content or "'error':" in content
-
-
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

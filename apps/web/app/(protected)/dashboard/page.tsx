@@ -6,7 +6,6 @@ import DashboardOnboarding from '@/components/dashboard/DashboardOnboarding';
 import { CapabilityPanel } from '@/components/dashboard/CapabilityPanel';
 import { SystemEvolutionPanel } from '@/components/dashboard/SystemEvolutionPanel';
 import { SystemHealthPanel } from '@/components/dashboard/SystemHealthPanel';
-import SyncHoldingsButton from '@/components/SyncHoldingsButton';
 import PortfolioOptimizer from '@/components/dashboard/PortfolioOptimizer';
 import { WeeklyProgressCard } from '@/components/dashboard/WeeklyProgressCard';
 import SuggestionTabs from '@/components/dashboard/SuggestionTabs';
@@ -331,7 +330,6 @@ export default function DashboardPage() {
               <div className="px-6 py-4 border-b border-border flex justify-between items-center">
                 <h2 className="text-xl font-semibold text-foreground">Positions</h2>
                 <div className="flex gap-2">
-                  <SyncHoldingsButton onSyncComplete={loadSnapshot} />
                   <a href="/paper" className="text-xs px-3 py-1 flex items-center rounded bg-blue-50 text-blue-700 hover:bg-blue-100 border border-blue-200 dark:bg-blue-900/30 dark:text-blue-400 dark:border-blue-800">
                      <Wallet className="w-3 h-3 mr-1" /> Paper Portfolio
                   </a>

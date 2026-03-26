@@ -82,7 +82,7 @@ class PaperAutopilotService:
         Fetch executable (pending) suggestions for a user.
 
         Uses same logic as inbox: pending status, optionally bounded to today.
-        Returns list sorted deterministically by (score desc, created_at asc, id asc).
+        Returns list sorted deterministically by (ev desc, created_at asc, id asc).
         """
         today_start, tomorrow_start = _compute_today_window()
 
@@ -99,9 +99,9 @@ class PaperAutopilotService:
         result = query.execute()
         suggestions = result.data or []
 
-        # Deterministic sorting: score desc, created_at asc, id asc
+        # Deterministic sorting: ev desc, created_at asc, id asc
         def sort_key(s):
-            score = s.get("score") or s.get("probability_of_profit") or s.get("ev") or 0.0
+            score = s.get("ev") or 0.0
             try:
                 score = float(score)
             except (TypeError, ValueError):
@@ -214,7 +214,7 @@ class PaperAutopilotService:
                 deduped_count += 1
                 continue
 
-            score = s.get("score") or s.get("probability_of_profit") or s.get("ev") or 0.0
+            score = s.get("ev") or 0.0
             try:
                 score = float(score)
             except (TypeError, ValueError):
@@ -378,7 +378,7 @@ class PaperAutopilotService:
                 .eq("status", "pending") \
                 .gte("created_at", today_start) \
                 .lt("created_at", tomorrow_start) \
-                .order("score", desc=True) \
+                .order("ev", desc=True) \
                 .limit(config.max_suggestions_per_day) \
                 .execute()
             suggestions = res.data or []

@@ -51,7 +51,7 @@ def fork_suggestions_for_cohorts(
         .eq("cycle_date", today_str) \
         .is_("cohort_name", "null") \
         .in_("status", ["pending", "staged"]) \
-        .order("score", desc=True) \
+        .order("ev", desc=True) \
         .execute()
 
     source_suggestions = source_res.data or []
@@ -160,8 +160,8 @@ def _filter_for_cohort(
     for s in suggestions:
         if len(filtered) >= max_new:
             break
-        score = float(s.get("score") or 0)
-        if score < config.min_score_threshold:
+        ev = float(s.get("ev") or 0)
+        if ev < config.min_score_threshold:
             continue
         filtered.append(s)
 
@@ -224,7 +224,7 @@ def _clone_suggestion_for_cohort(
         "strategy": source.get("strategy"),
         "direction": source.get("direction"),
         "status": "pending",
-        "score": source.get("score"),
+        "ev": source.get("ev"),
         "order_json": cloned_order,
         "sizing_metadata": cloned_sizing,
         "cohort_name": cohort_name,
@@ -271,7 +271,6 @@ def _get_cohort_ids(user_id: str, supabase) -> Dict[str, str]:
 def _build_features_snapshot(suggestion: Dict) -> Dict:
     """Extract a features snapshot from a suggestion for decision logging."""
     return {
-        "score": suggestion.get("score"),
         "ev": suggestion.get("ev"),
         "probability_of_profit": suggestion.get("probability_of_profit"),
         "regime": suggestion.get("regime"),
@@ -326,7 +325,7 @@ def _log_cohort_decisions(
 
     for rank, s in enumerate(all_suggestions, start=1):
         sid = s.get("id")
-        score = float(s.get("score") or 0)
+        ev = float(s.get("ev") or 0)
 
         # Determine decision and reasons
         if sid in accepted_ids:
@@ -336,8 +335,8 @@ def _log_cohort_decisions(
         else:
             # Figure out WHY it was rejected
             reason_codes = []
-            if score < config.min_score_threshold:
-                reason_codes.append("score_below_min")
+            if ev < config.min_score_threshold:
+                reason_codes.append("ev_below_min")
             if accepted_so_far >= max_new:
                 if open_positions >= config.max_positions_open:
                     reason_codes.append("max_positions_reached")

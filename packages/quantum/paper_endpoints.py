@@ -694,6 +694,21 @@ def _stage_order_internal(supabase, analytics, user_id, ticket: TradeTicket, por
     )
     emit_trade_event(analytics, user_id, ctx, "order_staged", is_paper=True, properties={"order_id": order_id})
 
+    # Route through execution backend when not using internal paper simulation.
+    # For alpaca_paper/alpaca_live the router submits to Alpaca and updates the
+    # paper_orders row with alpaca_order_id, execution_mode, and status='submitted'
+    # so that _process_orders_for_user (TCM sim) does not also attempt to fill it.
+    from packages.quantum.brokers.execution_router import get_execution_mode, ExecutionMode
+    mode = get_execution_mode()
+    if mode != ExecutionMode.INTERNAL_PAPER:
+        from packages.quantum.brokers.execution_router import ExecutionRouter
+        router = ExecutionRouter(supabase=supabase)
+        router.execute_order(
+            order_request=ticket.model_dump(mode="json"),
+            user_id=user_id,
+            internal_order_id=order_id,
+        )
+
     return order_id
 
 def _compute_fill_deltas(order: dict, fill_res: dict) -> dict:

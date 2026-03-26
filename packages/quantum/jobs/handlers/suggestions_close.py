@@ -4,10 +4,9 @@ Suggestions Close Job Handler
 8:00 AM Chicago - Generate CLOSE/manage existing positions suggestions.
 
 This handler:
-1. Ensures holdings are up to date (syncs Plaid if connected)
-2. Loads strategy config by name
-3. Generates exit suggestions for existing positions
-4. Persists suggestions to trade_suggestions table with window='morning_limit'
+1. Loads strategy config by name
+2. Generates exit suggestions for existing positions
+3. Persists suggestions to trade_suggestions table with window='morning_limit'
 """
 
 import os
@@ -16,7 +15,6 @@ from datetime import datetime, timezone
 from typing import Any, Dict
 
 from packages.quantum.services.workflow_orchestrator import run_morning_cycle
-from packages.quantum.services.holdings_sync_service import ensure_holdings_fresh
 from packages.quantum.services.strategy_loader import load_strategy_config, ensure_default_strategy_exists
 from packages.quantum.jobs.handlers.utils import get_admin_client, get_active_user_ids, run_async
 from packages.quantum.jobs.handlers.exceptions import RetryableJobError, PermanentJobError
@@ -73,16 +71,7 @@ def run(payload: Dict[str, Any], ctx: Any = None) -> Dict[str, Any]:
 
             for uid in active_users:
                 try:
-                    # 1. Ensure holdings are fresh
-                    if not skip_sync:
-                        sync_result = await ensure_holdings_fresh(uid, client)
-                        if sync_result.get("synced"):
-                            synced += 1
-                            notes.append(f"Synced {sync_result.get('holdings_count', 0)} holdings for {uid[:8]}...")
-                        elif sync_result.get("error"):
-                            notes.append(f"Sync skipped for {uid[:8]}...: {sync_result.get('error')}")
-
-                    # 2. Ensure default strategy exists
+                    # 1. Ensure default strategy exists
                     ensure_default_strategy_exists(uid, strategy_name, client)
 
                     # 3. Load strategy config (for logging/tracing)

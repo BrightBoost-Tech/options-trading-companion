@@ -90,7 +90,7 @@ async def broker_positions(
     request: Request,
     source: str = Query(default="auto"),
 ):
-    """Get positions from configured source (auto, alpaca, plaid, internal)."""
+    """Get positions from configured source (auto, alpaca, internal)."""
     user_id = request.state.user_id
     supabase = request.app.state.supabase
 

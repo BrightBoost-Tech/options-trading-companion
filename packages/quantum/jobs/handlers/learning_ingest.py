@@ -4,10 +4,13 @@ Learning Ingest Job Handler
 Daily outcome ingestion - Maps executed trades to suggestions for learning.
 
 This handler:
-1. Reads Plaid investment transactions since last run
+1. Reads executed trades from paper_orders / Alpaca fills
 2. Matches transactions to trade_suggestions by symbol/direction/time
 3. Inserts outcomes into learning_feedback_loops table
 4. Computes win/loss, slippage proxy, holding time
+
+NOTE: Plaid transaction source was removed. This handler currently
+operates as a no-op until wired to Alpaca fill history.
 """
 
 import time
@@ -16,7 +19,6 @@ from datetime import datetime, timedelta, timezone
 
 from packages.quantum.jobs.handlers.utils import get_admin_client, get_active_user_ids, run_async
 from packages.quantum.jobs.handlers.exceptions import RetryableJobError, PermanentJobError
-from packages.quantum.services.token_store import PlaidTokenStore
 
 JOB_NAME = "learning_ingest"
 
@@ -95,107 +97,13 @@ async def _ingest_for_user(user_id: str, supabase, lookback_days: int) -> Dict[s
     """
     Ingest transactions for a single user.
 
+    TODO: Wire to Alpaca fill history instead of Plaid transactions.
+
     Returns:
         Dict with counts: {transactions: int, outcomes: int, orphans: int}
     """
-    # Check for Plaid connection
-    token_store = PlaidTokenStore(supabase)
-    access_token = token_store.get_access_token(user_id)
-
-    if not access_token:
-        # No Plaid connection - try CSV fallback (future)
-        return {"transactions": 0, "outcomes": 0, "orphans": 0, "error": "No Plaid connection"}
-
-    # Fetch transactions from Plaid
-    transactions = await _fetch_plaid_transactions(access_token, lookback_days)
-
-    if not transactions:
-        return {"transactions": 0, "outcomes": 0, "orphans": 0}
-
-    # Get recent suggestions for matching
-    cutoff = (datetime.now(timezone.utc) - timedelta(days=lookback_days + 7)).isoformat()
-    suggestions_result = supabase.table("trade_suggestions") \
-        .select("id, trace_id, ticker, symbol, direction, ev, created_at, status") \
-        .eq("user_id", user_id) \
-        .gte("created_at", cutoff) \
-        .execute()
-
-    suggestions = suggestions_result.data or []
-
-    # Match transactions to suggestions
-    outcomes_created = 0
-    orphans = 0
-
-    for tx in transactions:
-        matched = _match_transaction_to_suggestion(tx, suggestions)
-
-        if matched:
-            outcome = _create_outcome_record(user_id, tx, matched)
-            _insert_outcome(supabase, outcome)
-            outcomes_created += 1
-        else:
-            # Log orphan transaction (no matching suggestion)
-            orphans += 1
-
-    return {
-        "transactions": len(transactions),
-        "outcomes": outcomes_created,
-        "orphans": orphans,
-    }
-
-
-async def _fetch_plaid_transactions(access_token: str, lookback_days: int) -> List[Dict]:
-    """
-    Fetch investment transactions from Plaid.
-
-    Note: This requires the Investments product to be enabled for the Plaid item.
-    Some brokers (like Robinhood) may not support transaction history via Plaid.
-    """
-    try:
-        from packages.quantum import plaid_service
-
-        from plaid.model.investments_transactions_get_request import InvestmentsTransactionsGetRequest
-        from plaid.model.investments_transactions_get_request_options import InvestmentsTransactionsGetRequestOptions
-
-        end_date = datetime.now(timezone.utc).date()
-        start_date = end_date - timedelta(days=lookback_days)
-
-        request = InvestmentsTransactionsGetRequest(
-            access_token=access_token,
-            start_date=start_date,
-            end_date=end_date,
-            options=InvestmentsTransactionsGetRequestOptions(offset=0)
-        )
-
-        response = plaid_service.client.investments_transactions_get(request)
-        transactions = response.get("investment_transactions", [])
-
-        # Map security_id to symbol
-        securities = {s["security_id"]: s for s in response.get("securities", [])}
-
-        enriched = []
-        for tx in transactions:
-            sec = securities.get(tx.get("security_id"), {})
-            enriched.append({
-                "id": tx.get("investment_transaction_id"),
-                "date": tx.get("date"),
-                "type": tx.get("type"),  # buy, sell, transfer, etc.
-                "subtype": tx.get("subtype"),
-                "symbol": sec.get("ticker_symbol") or sec.get("name") or "UNKNOWN",
-                "quantity": tx.get("quantity", 0),
-                "price": tx.get("price", 0),
-                "amount": tx.get("amount", 0),  # Total cost (negative for buy, positive for sell)
-                "fees": tx.get("fees", 0),
-            })
-
-        return enriched
-
-    except ImportError:
-        print("[learning_ingest] Plaid models not available")
-        return []
-    except Exception as e:
-        print(f"[learning_ingest] Error fetching Plaid transactions: {e}")
-        return []
+    # Plaid transaction source removed — return no-op until Alpaca fills are wired
+    return {"transactions": 0, "outcomes": 0, "orphans": 0}
 
 
 def _match_transaction_to_suggestion(tx: Dict, suggestions: List[Dict]) -> Optional[Dict]:

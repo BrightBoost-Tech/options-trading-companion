@@ -1,10 +1,5 @@
 """
 Position Sync Service — syncs positions from Alpaca and reconciles with internal state.
-
-Gradual transition path from Plaid → Alpaca:
-  POSITION_SOURCE=plaid     — Plaid only (current default)
-  POSITION_SOURCE=hybrid    — Alpaca for automated, Plaid for manual
-  POSITION_SOURCE=alpaca    — Alpaca only, Plaid disabled
 """
 
 import logging
@@ -16,13 +11,12 @@ logger = logging.getLogger(__name__)
 
 def get_position_source() -> str:
     """Get configured position source."""
-    return os.environ.get("POSITION_SOURCE", "plaid").lower()
+    return os.environ.get("POSITION_SOURCE", "alpaca").lower()
 
 
 class PositionSyncService:
     """
     Syncs positions from Alpaca and reconciles with internal state.
-    Eventually replaces Plaid holdings sync.
     """
 
     def __init__(self, supabase, alpaca_client=None):
@@ -55,19 +49,6 @@ class PositionSyncService:
             logger.error(f"[POS_SYNC] Alpaca sync failed: {e}")
             return {"status": "error", "error": str(e)}
 
-    def reconcile_plaid_vs_alpaca(self, user_id: str) -> Dict[str, Any]:
-        """
-        Compare Plaid holdings vs Alpaca positions.
-        During transition, Plaid is source of truth for non-automated
-        positions, Alpaca for automated ones.
-        """
-        from packages.quantum.brokers.alpaca_order_handler import reconcile_positions
-
-        if not self.alpaca:
-            return {"status": "no_alpaca_client"}
-
-        return reconcile_positions(self.alpaca, self.supabase, user_id)
-
     def get_positions(
         self,
         user_id: str,
@@ -78,7 +59,6 @@ class PositionSyncService:
 
         source="auto": use POSITION_SOURCE env var
         source="alpaca": Alpaca only
-        source="plaid": Plaid/internal only (legacy)
         source="internal": paper_positions table only
         """
         effective_source = source or self.source

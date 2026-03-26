@@ -12,7 +12,7 @@
 #   3:30 AM  — learning_ingest (nightly catch-up, Tue-Sat)
 #
 # MORNING
-#   8:00 AM  — suggestions_close (exit suggestions from Plaid holdings)
+#   8:00 AM  — suggestions_close (exit suggestions for existing positions)
 #   8:15 AM  — paper_exit_evaluate (overnight gap protection)
 #   8:40 AM  — validation_init_window (forward checkpoint window)
 #
@@ -34,7 +34,7 @@
 # END OF DAY
 #   4:00 PM  — validation_shadow_eval (afternoon pacing, read-only)
 #   4:05 PM  — validation_cohort_eval (multi-threshold analysis)
-#   4:10 PM  — learning_ingest (Plaid real trades → learning)
+#   4:10 PM  — learning_ingest (executed trades → learning)
 #   4:15 PM  — validation_autopromote_cohort (auto-promote best cohort)
 #   4:20 PM  — paper_learning_ingest (paper outcomes → learning)
 #   4:30 PM  — policy_lab_eval (cohort comparison) [POLICY_LAB_ENABLED]

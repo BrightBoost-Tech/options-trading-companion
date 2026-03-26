@@ -394,8 +394,9 @@ class PaperAutopilotService:
                 try:
                     ticket = _suggestion_to_ticket(s)
                     order_id = _stage_order_internal(
-                        supabase, analytics, user_id, ticket, s,
-                        portfolio_id=portfolio_id,
+                        supabase, analytics, user_id, ticket,
+                        portfolio_id_arg=portfolio_id,
+                        suggestion_id_override=sid,
                     )
                     if not order_id:
                         continue

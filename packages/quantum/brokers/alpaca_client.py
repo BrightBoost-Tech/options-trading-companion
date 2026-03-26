@@ -164,8 +164,8 @@ class AlpacaClient:
         """
         from alpaca.trading.requests import (
             OptionLegRequest,
-            MultiLegOrderRequest,
             LimitOrderRequest,
+            MarketOrderRequest,
         )
         from alpaca.trading.enums import (
             OrderSide,
@@ -179,42 +179,47 @@ class AlpacaClient:
         tif_str = order_request.get("time_in_force", "day").upper()
         tif = TimeInForce.DAY if tif_str == "DAY" else TimeInForce.GTC
 
-        if len(legs) >= 2:
-            # Multi-leg order
-            alpaca_legs = []
-            for leg in legs:
-                leg_symbol = polygon_to_alpaca(leg["symbol"])
-                side = OrderSide.BUY if leg["side"].lower() in ("buy", "buy_to_open") else OrderSide.SELL
-                alpaca_legs.append(OptionLegRequest(
-                    symbol=leg_symbol,
-                    side=side,
-                    ratio_qty=int(leg.get("qty", 1)),
-                ))
+        if not legs:
+            raise AlpacaOrderError("Order must have at least one leg")
 
-            req = MultiLegOrderRequest(
-                legs=alpaca_legs,
-                type=OrderType.LIMIT if limit_price else OrderType.MARKET,
-                limit_price=limit_price,
-                time_in_force=tif,
-                order_class=OrderClass.MULTILEG,
-            )
-        elif len(legs) == 1:
-            # Single-leg option order
-            leg = legs[0]
+        # Build typed leg requests
+        alpaca_legs = []
+        for leg in legs:
             leg_symbol = polygon_to_alpaca(leg["symbol"])
             side = OrderSide.BUY if leg["side"].lower() in ("buy", "buy_to_open") else OrderSide.SELL
-            qty = int(leg.get("qty", 1))
-
-            req = LimitOrderRequest(
+            alpaca_legs.append(OptionLegRequest(
                 symbol=leg_symbol,
-                qty=qty,
                 side=side,
-                type=OrderType.LIMIT if limit_price else OrderType.MARKET,
+                ratio_qty=int(leg.get("qty", 1)),
+            ))
+
+        # Build request — qty is always required by the SDK validator.
+        # For multi-leg spreads qty = number of spreads (leg ratio_qty).
+        # For single-leg, qty = contract count from that leg.
+        qty = float(alpaca_legs[0].ratio_qty or 1)
+        is_multi = len(legs) >= 2
+        is_limit = limit_price is not None and limit_price > 0
+
+        common = dict(
+            legs=alpaca_legs,
+            qty=qty,
+            time_in_force=tif,
+            order_class=OrderClass.MLEG if is_multi else None,
+            symbol=alpaca_legs[0].symbol if not is_multi else None,
+            side=alpaca_legs[0].side if not is_multi else None,
+        )
+
+        if is_limit:
+            req = LimitOrderRequest(
+                type=OrderType.LIMIT,
                 limit_price=limit_price,
-                time_in_force=tif,
+                **common,
             )
         else:
-            raise AlpacaOrderError("Order must have at least one leg")
+            req = MarketOrderRequest(
+                type=OrderType.MARKET,
+                **common,
+            )
 
         logger.info(
             f"[ALPACA] Submitting order: {len(legs)} legs, "

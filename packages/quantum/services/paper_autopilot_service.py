@@ -359,7 +359,7 @@ class PaperAutopilotService:
         configs = load_cohort_configs(user_id, supabase)
         portfolios = _get_cohort_portfolios(user_id, supabase)
 
-        today_start, tomorrow_start = _compute_today_window()
+        today_str = datetime.now(timezone.utc).date().isoformat()
         all_executed = []
         all_errors = []
         total_processed = 0
@@ -376,8 +376,7 @@ class PaperAutopilotService:
                 .eq("user_id", user_id) \
                 .eq("cohort_name", cohort_name) \
                 .eq("status", "pending") \
-                .gte("created_at", today_start) \
-                .lt("created_at", tomorrow_start) \
+                .eq("cycle_date", today_str) \
                 .order("ev", desc=True) \
                 .limit(config.max_suggestions_per_day) \
                 .execute()

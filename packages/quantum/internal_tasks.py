@@ -163,6 +163,34 @@ async def universe_sync_task(
         "status": "queued"
     }
 
+@router.post("/alpaca/order-sync", status_code=202)
+async def alpaca_order_sync_task(
+    client: Client = Depends(get_admin_client),
+    auth: TaskSignatureResult = Depends(verify_task_signature("tasks:alpaca_order_sync"))
+):
+    job_name = "alpaca-order-sync"
+    now = datetime.now()
+    key = f"{job_name}-{now.strftime('%Y-%m-%d-%H%M')}"
+
+    job_id = enqueue_idempotent(
+        client=client,
+        job_name=job_name,
+        idempotency_key=key,
+        payload={
+            "app_version": APP_VERSION,
+            "trigger_ts": now.isoformat(),
+            "task_name": job_name,
+        }
+    )
+
+    return {
+        "job_run_id": str(job_id),
+        "job_name": job_name,
+        "idempotency_key": key,
+        "status": "queued"
+    }
+
+
 @router.post("/progression/daily-eval", status_code=202)
 async def daily_progression_eval_task(
     client: Client = Depends(get_admin_client),

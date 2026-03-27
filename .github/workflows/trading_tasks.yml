@@ -42,6 +42,7 @@
 #   4:30 PM  — policy_lab_eval (cohort comparison) [POLICY_LAB_ENABLED]
 #
 # CONTINUOUS
+#   */5      — alpaca_order_sync (every 5 min, poll Alpaca for fills)
 #   :07/:37  — ops_health_check (every 30 min, 8 AM–5 PM)
 # ═══════════════════════════════════════════════════════════════════
 #
@@ -91,6 +92,12 @@ on:
     # Runs at :07 and :37 from 13:00-22:00 UTC (8 AM - 5 PM Chicago approx)
     # Uses :07/:37 to avoid cron collisions with other jobs at :00/:05/:10/:15/:30/:40
     - cron: '7,37 13-22 * * 1-5'
+
+    # Alpaca Order Sync - Every 5 min during market hours
+    # 9:30 AM - 4:15 PM Chicago (14:30-21:15 UTC CDT / 15:30-22:15 UTC CST)
+    # Picks up fills, cancellations, rejections from Alpaca
+    - cron: '*/5 14-21 * * 1-5'
+    - cron: '*/5 15-22 * * 1-5'
 
     # Validation Eval (Checkpoint) - 9:30 AM Chicago (after paper_auto_close)
     # CDT (summer): 14:30 UTC | CST (winter): 15:30 UTC
@@ -190,6 +197,7 @@ on:
           - weekly_report
           - validation_eval
           - daily_progression_eval
+          - alpaca_order_sync
           - strategy_autotune
           - walk_forward_autotune
           - ops_health_check

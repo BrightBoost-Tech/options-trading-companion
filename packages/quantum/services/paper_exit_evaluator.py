@@ -717,7 +717,45 @@ class PaperExitEvaluator:
 
         now = datetime.now(timezone.utc).isoformat()
 
-        # --- Fill the order directly at current_mark (no Polygon fetch) ---
+        # --- Route exit through Alpaca when in broker mode ---
+        from packages.quantum.brokers.execution_router import get_execution_mode, ExecutionMode
+        exec_mode = get_execution_mode()
+        dry_run = os.environ.get("ALPACA_DRY_RUN", "0") == "1"
+
+        if exec_mode in (ExecutionMode.ALPACA_PAPER, ExecutionMode.ALPACA_LIVE) and not dry_run:
+            try:
+                from packages.quantum.brokers.alpaca_order_handler import submit_and_track
+                from packages.quantum.brokers.alpaca_client import get_alpaca_client
+                alpaca = get_alpaca_client()
+
+                # Fetch the staged order row for submit_and_track
+                order_row = supabase.table("paper_orders") \
+                    .select("*").eq("id", order_id).single().execute().data
+
+                submit_and_track(alpaca, supabase, order_row, user_id)
+
+                logger.info(
+                    f"[EXIT_EVAL] Submitted close to Alpaca: order_id={order_id} "
+                    f"symbol={position['symbol']} side={side} qty={abs_qty}"
+                )
+
+                # Don't fill or close position here — alpaca_order_sync will
+                # pick up the fill and _commit_fill / _process_orders_for_user
+                # handles position updates.
+                return {
+                    "order_id": order_id,
+                    "processed": 0,
+                    "routed_to": "alpaca",
+                    "note": "Fill pending — will be synced by alpaca_order_sync",
+                }
+            except Exception as e:
+                logger.error(
+                    f"[EXIT_EVAL] Alpaca submit failed for close order {order_id}: {e}. "
+                    f"Falling back to internal fill."
+                )
+                # Fall through to internal fill below
+
+        # --- Internal fill at current_mark (internal_paper or Alpaca fallback) ---
 
         # 1. Mark order as filled
         supabase.table("paper_orders").update({

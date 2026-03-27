@@ -702,21 +702,34 @@ def _stage_order_internal(supabase, analytics, user_id, ticket: TradeTicket, por
     # Submit to Alpaca when execution mode requires a broker call.
     # Uses build_alpaca_order_request which translates leg fields
     # (action→side, quantity→qty, Polygon→Alpaca OCC symbols).
+    dry_run = os.environ.get("ALPACA_DRY_RUN", "0") == "1"
     if exec_mode in (ExecutionMode.ALPACA_PAPER, ExecutionMode.ALPACA_LIVE):
-        try:
-            from packages.quantum.brokers.alpaca_order_handler import submit_and_track
-            from packages.quantum.brokers.alpaca_client import get_alpaca_client
-            alpaca = get_alpaca_client()
-            order_row = res.data[0]
-            submit_and_track(alpaca, supabase, order_row, user_id)
-        except Exception as e:
-            # Log but don't prevent order_id from returning — the order
-            # stays staged with execution_mode already set so it can be
-            # retried by the sweep or a manual re-submission.
-            logger.error(
-                f"alpaca_submit_failed: order_id={order_id} "
-                f"trace_id={trace_id} error={e}"
-            )
+        if dry_run:
+            # Log what we WOULD submit, but don't call Alpaca
+            from packages.quantum.brokers.alpaca_order_handler import build_alpaca_order_request
+            try:
+                order_row = res.data[0]
+                req = build_alpaca_order_request(order_row)
+                logger.info(
+                    f"[ALPACA_DRY_RUN] Would submit order_id={order_id}: {req}"
+                )
+            except Exception as e:
+                logger.warning(f"[ALPACA_DRY_RUN] Build failed: {e}")
+        else:
+            try:
+                from packages.quantum.brokers.alpaca_order_handler import submit_and_track
+                from packages.quantum.brokers.alpaca_client import get_alpaca_client
+                alpaca = get_alpaca_client()
+                order_row = res.data[0]
+                submit_and_track(alpaca, supabase, order_row, user_id)
+            except Exception as e:
+                # Log but don't prevent order_id from returning — the order
+                # stays staged with execution_mode already set so it can be
+                # retried by the sweep or a manual re-submission.
+                logger.error(
+                    f"alpaca_submit_failed: order_id={order_id} "
+                    f"trace_id={trace_id} error={e}"
+                )
 
     return order_id
 

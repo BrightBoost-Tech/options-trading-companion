@@ -99,9 +99,12 @@ class PaperAutopilotService:
         result = query.execute()
         suggestions = result.data or []
 
-        # Deterministic sorting: ev desc, created_at asc, id asc
+        # Deterministic sorting: risk_adjusted_ev desc, created_at asc, id asc
+        # Falls back to ev when risk_adjusted_ev is not yet populated
         def sort_key(s):
-            score = s.get("ev") or 0.0
+            score = s.get("risk_adjusted_ev")
+            if score is None:
+                score = s.get("ev") or 0.0
             try:
                 score = float(score)
             except (TypeError, ValueError):
@@ -216,7 +219,9 @@ class PaperAutopilotService:
                 deduped_count += 1
                 continue
 
-            score = s.get("ev") or 0.0
+            score = s.get("risk_adjusted_ev")
+            if score is None:
+                score = s.get("ev") or 0.0
             try:
                 score = float(score)
             except (TypeError, ValueError):
@@ -379,6 +384,7 @@ class PaperAutopilotService:
                 .eq("cohort_name", cohort_name) \
                 .eq("status", "pending") \
                 .eq("cycle_date", today_str) \
+                .order("risk_adjusted_ev", desc=True) \
                 .order("ev", desc=True) \
                 .limit(config.max_suggestions_per_day) \
                 .execute()

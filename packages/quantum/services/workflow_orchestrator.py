@@ -1528,6 +1528,13 @@ async def run_morning_cycle(supabase: Client, user_id: str):
                         }}
                     )
 
+            # Stamp canonical ranking metric
+            from packages.quantum.analytics.canonical_ranker import compute_risk_adjusted_ev
+            suggestion["risk_adjusted_ev"] = round(
+                compute_risk_adjusted_ev(suggestion, existing_positions or [], remaining_global),
+                6,
+            )
+
             suggestions.append(suggestion)
 
             # Note: emit_trade_event moved to post-insert to ensure suggestion_id exists first (v4 ordering)
@@ -2583,6 +2590,13 @@ async def run_midday_cycle(supabase: Client, user_id: str):
                     suggestion["status"] = "NOT_EXECUTABLE"
                     suggestion["blocked_reason"] = "marketdata_quality_gate"
                     suggestion["blocked_detail"] = midday_deferred_blocked_detail
+
+            # Stamp canonical ranking metric
+            from packages.quantum.analytics.canonical_ranker import compute_risk_adjusted_ev
+            suggestion["risk_adjusted_ev"] = round(
+                compute_risk_adjusted_ev(suggestion, existing_positions or [], remaining_global),
+                6,
+            )
 
             suggestions.append(suggestion)
 

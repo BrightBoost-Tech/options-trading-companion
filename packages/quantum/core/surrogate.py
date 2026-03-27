@@ -156,7 +156,17 @@ def optimize_for_compounding(
             "volatility_drag_coefficient": variance / denom,
         })
 
-    # Sort by geo_growth descending
-    suggestions.sort(key=lambda x: x["metrics"].get("geometric_growth_contribution", 0), reverse=True)
+    # Sort by risk_adjusted_ev when available, fall back to geometric_growth
+    from packages.quantum.analytics.canonical_ranker import CANONICAL_RANKING_ENABLED
+    if CANONICAL_RANKING_ENABLED:
+        suggestions.sort(
+            key=lambda x: float(x.get("risk_adjusted_ev") or x["metrics"].get("geometric_growth_contribution", 0)),
+            reverse=True,
+        )
+    else:
+        suggestions.sort(
+            key=lambda x: x["metrics"].get("geometric_growth_contribution", 0),
+            reverse=True,
+        )
 
     return suggestions

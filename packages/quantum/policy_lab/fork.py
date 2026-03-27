@@ -51,6 +51,7 @@ def fork_suggestions_for_cohorts(
         .eq("cycle_date", today_str) \
         .is_("cohort_name", "null") \
         .in_("status", ["pending", "staged"]) \
+        .order("risk_adjusted_ev", desc=True) \
         .order("ev", desc=True) \
         .execute()
 
@@ -160,8 +161,13 @@ def _filter_for_cohort(
     for s in suggestions:
         if len(filtered) >= max_new:
             break
-        ev = float(s.get("ev") or 0)
-        if ev < config.min_score_threshold:
+        # Use risk_adjusted_ev when available, fall back to ev
+        rank_value = s.get("risk_adjusted_ev")
+        if rank_value is None:
+            rank_value = float(s.get("ev") or 0)
+        else:
+            rank_value = float(rank_value)
+        if rank_value < config.min_score_threshold:
             continue
         filtered.append(s)
 
@@ -225,6 +231,7 @@ def _clone_suggestion_for_cohort(
         "direction": source.get("direction"),
         "status": "pending",
         "ev": source.get("ev"),
+        "risk_adjusted_ev": source.get("risk_adjusted_ev"),
         "order_json": cloned_order,
         "sizing_metadata": cloned_sizing,
         "cohort_name": cohort_name,

@@ -294,6 +294,13 @@ class SmallAccountCompounder:
             trade['compound_score'] = score
             filtered.append(trade)
 
-        # Sort descending by score
-        filtered.sort(key=lambda x: x.get('compound_score', 0), reverse=True)
+        # Sort by risk_adjusted_ev when available, fall back to compound_score
+        from packages.quantum.analytics.canonical_ranker import CANONICAL_RANKING_ENABLED
+        if CANONICAL_RANKING_ENABLED:
+            filtered.sort(
+                key=lambda x: float(x.get('risk_adjusted_ev') or x.get('compound_score', 0)),
+                reverse=True,
+            )
+        else:
+            filtered.sort(key=lambda x: x.get('compound_score', 0), reverse=True)
         return filtered

@@ -644,6 +644,19 @@ def _stage_order_internal(supabase, analytics, user_id, ticket: TradeTicket, por
     from packages.quantum.brokers.execution_router import get_execution_mode, ExecutionMode
     exec_mode = get_execution_mode()
 
+    # Ensure limit_price is set for Alpaca modes (options require limit orders).
+    # Fallback chain: ticket.limit_price → TCM expected fill → quote midpoint
+    if exec_mode in (ExecutionMode.ALPACA_PAPER, ExecutionMode.ALPACA_LIVE):
+        if not ticket.limit_price or ticket.limit_price <= 0:
+            tcm_price = (tcm_est or {}).get("expected_fill_price")
+            if tcm_price and float(tcm_price) > 0:
+                ticket.limit_price = float(tcm_price)
+            elif quote:
+                bid = float(quote.get("bid") or 0)
+                ask = float(quote.get("ask") or 0)
+                if bid > 0 and ask > 0:
+                    ticket.limit_price = round((bid + ask) / 2, 2)
+
     # Prepare Order
     side = ticket.legs[0].action if ticket.legs else "buy"
 
@@ -705,7 +718,7 @@ def _stage_order_internal(supabase, analytics, user_id, ticket: TradeTicket, por
     dry_run = os.environ.get("ALPACA_DRY_RUN", "0") == "1"
     if exec_mode in (ExecutionMode.ALPACA_PAPER, ExecutionMode.ALPACA_LIVE):
         if dry_run:
-            # Log what we WOULD submit, but don't call Alpaca
+            # Log what we WOULD submit — order stays staged, not filled
             from packages.quantum.brokers.alpaca_order_handler import build_alpaca_order_request
             try:
                 order_row = res.data[0]
@@ -715,6 +728,10 @@ def _stage_order_internal(supabase, analytics, user_id, ticket: TradeTicket, por
                 )
             except Exception as e:
                 logger.warning(f"[ALPACA_DRY_RUN] Build failed: {e}")
+            # Return early — do NOT fall through to internal fill.
+            # Order stays staged with execution_mode set for retry
+            # when dry_run is turned off.
+            return order_id
         else:
             try:
                 from packages.quantum.brokers.alpaca_order_handler import submit_and_track

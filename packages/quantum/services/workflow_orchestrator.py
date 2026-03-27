@@ -1530,10 +1530,16 @@ async def run_morning_cycle(supabase: Client, user_id: str):
 
             # Stamp canonical ranking metric
             from packages.quantum.analytics.canonical_ranker import compute_risk_adjusted_ev
-            suggestion["risk_adjusted_ev"] = round(
+            raev = round(
                 compute_risk_adjusted_ev(suggestion, existing_positions or [], remaining_global),
                 6,
             )
+            suggestion["risk_adjusted_ev"] = raev
+
+            # Block suggestions where fees eat the expected profit
+            if raev <= -999:
+                suggestion["status"] = "NOT_EXECUTABLE"
+                suggestion["blocked_reason"] = "edge_below_minimum"
 
             suggestions.append(suggestion)
 
@@ -2609,10 +2615,16 @@ async def run_midday_cycle(supabase: Client, user_id: str):
 
             # Stamp canonical ranking metric
             from packages.quantum.analytics.canonical_ranker import compute_risk_adjusted_ev
-            suggestion["risk_adjusted_ev"] = round(
+            raev = round(
                 compute_risk_adjusted_ev(suggestion, existing_positions or [], remaining_global),
                 6,
             )
+            suggestion["risk_adjusted_ev"] = raev
+
+            # Block suggestions where fees eat the expected profit
+            if raev <= -999:
+                suggestion["status"] = "NOT_EXECUTABLE"
+                suggestion["blocked_reason"] = "edge_below_minimum"
 
             suggestions.append(suggestion)
 

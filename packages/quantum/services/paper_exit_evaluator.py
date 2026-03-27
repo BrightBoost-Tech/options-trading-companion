@@ -688,7 +688,8 @@ class PaperExitEvaluator:
         ticket = TradeTicket(
             symbol=position["symbol"],
             quantity=abs_qty,
-            order_type="market",
+            order_type="limit",
+            limit_price=exit_price,  # current_mark — required for Alpaca options
             strategy_type="custom",
             source_engine="paper_exit_evaluator",
             legs=[{

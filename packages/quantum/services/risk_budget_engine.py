@@ -473,11 +473,12 @@ class RiskBudgetEngine:
 
         max_risk_trade = total_equity * per_trade_pct
 
-        # Small Account Logic
-        # If max_risk_trade is tiny (< $50), but we have some capital, allow a floor?
-        # Say, if equity > 500, allow at least $50 risk (enough for a cheap spread).
-        if max_risk_trade < 50.0 and total_equity > 500.0:
-            max_risk_trade = 50.0
+        # Small Account Logic — smooth ramp instead of $50 cliff.
+        # Floor = 2% of equity (minimum $5) — scales proportionally:
+        #   $500 → $10,  $1000 → $20,  $2500 → $50
+        small_account_floor = max(total_equity * 0.02, 5.0)
+        if max_risk_trade < small_account_floor and total_equity > 0:
+            max_risk_trade = small_account_floor
             diagnostics.append("small_account_floor_active")
 
         # 6. Global Remaining Check

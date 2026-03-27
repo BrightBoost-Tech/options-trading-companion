@@ -20,6 +20,7 @@ from datetime import date, datetime, timezone
 from typing import Dict, Any, List, Tuple, Optional, Callable
 
 PDT_MAX_DAY_TRADES = int(os.environ.get("PDT_MAX_DAY_TRADES", "3"))
+EXIT_RANKING_ENABLED = os.environ.get("EXIT_RANKING_ENABLED", "1") == "1"
 
 logger = logging.getLogger(__name__)
 
@@ -129,6 +130,83 @@ def _check_stop_loss(pos: Dict, sl_pct: float = 2.0) -> bool:
     else:
         # Credit spread: stop loss at sl_pct × credit received
         return mc > 0 and upl <= -(entry_cost * sl_pct)
+
+
+# Exit condition definitions
+# ---------------------------------------------------------------------------
+# Exit ranking — orders triggered exits by priority
+# ---------------------------------------------------------------------------
+
+def rank_triggered_exits(close_candidates: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """
+    Rank positions that already triggered exit conditions.
+
+    Does NOT create new exit triggers — only orders the execution.
+
+    Priority:
+    1. Emergency stops (loss > 80% of entry) — always first
+    2. Stop losses — worst loss first
+    3. DTE exits — nearest expiry first
+    4. Target profits — biggest winner first (lock in most profit)
+
+    Within stop_loss and target_profit, secondary sort by marginal_value:
+      marginal_value = unrealized_pl / (time_remaining_pct * entry_value)
+      Lower = worse risk/reward = close first for stops.
+    """
+    emergency: List[Dict] = []
+    stops: List[Dict] = []
+    targets: List[Dict] = []
+    dte_exits: List[Dict] = []
+
+    for c in close_candidates:
+        reason = c.get("reason", "")
+        unrealized = float(c.get("unrealized_pl") or 0)
+        mc = float(c.get("max_credit") or 0)
+        qty = abs(float(c.get("quantity") or 1))
+        entry_value = abs(mc) * qty * 100
+        dte = c.get("dte", 30)
+
+        # Marginal value: P&L per unit of remaining time × capital
+        time_remaining_pct = max(dte / 30.0, 0.01)
+        c["marginal_value"] = round(
+            unrealized / max(entry_value * time_remaining_pct, 1.0), 4
+        )
+
+        # Emergency: loss exceeds 80% of entry value
+        if entry_value > 0 and unrealized <= -(entry_value * 0.80):
+            emergency.append(c)
+        elif reason == "stop_loss":
+            stops.append(c)
+        elif reason in ("dte_threshold", "expiration_day"):
+            dte_exits.append(c)
+        elif reason == "target_profit":
+            targets.append(c)
+        else:
+            dte_exits.append(c)  # unknown reasons treated as dte
+
+    # Sort within categories
+    emergency.sort(key=lambda p: p["marginal_value"])               # worst first
+    stops.sort(key=lambda p: p["marginal_value"])                    # worst first
+    dte_exits.sort(key=lambda p: p.get("dte", 999))                  # nearest expiry first
+    targets.sort(key=lambda p: p["marginal_value"], reverse=True)    # biggest win first
+
+    ranked = emergency + stops + dte_exits + targets
+
+    # Log ranking
+    if ranked:
+        lines = [f"[EXIT_RANK] {len(ranked)} positions triggered exits:"]
+        for i, c in enumerate(ranked, 1):
+            lines.append(
+                f"  #{i} {c.get('symbol','?')} {c.get('reason','?')}  "
+                f"marginal={c['marginal_value']:+.2f}  "
+                f"unrealized=${c.get('unrealized_pl', 0):+,.0f}  "
+                f"dte={c.get('dte', '?')}"
+            )
+        msg = "\n".join(lines)
+        logger.info(msg)
+        print(msg, flush=True)
+
+    return ranked
 
 
 # Exit condition definitions
@@ -350,12 +428,17 @@ class PaperExitEvaluator:
                     "description": active_conditions[triggered]["description"],
                     "unrealized_pl": float(position.get("unrealized_pl") or 0),
                     "max_credit": float(position.get("max_credit") or 0),
+                    "quantity": float(position.get("quantity") or 1),
                     "dte": days_to_expiry(position),
                 })
             else:
                 holds.append(position)
 
-        # 4. PDT Guard — separate same-day vs overnight exits
+        # 4. Rank triggered exits by marginal value (if enabled)
+        if EXIT_RANKING_ENABLED and closes:
+            closes = rank_triggered_exits(closes)
+
+        # 5. PDT Guard — separate same-day vs overnight exits
         from packages.quantum.services.pdt_guard_service import (
             is_pdt_enabled, get_pdt_status, is_same_day_close,
             is_emergency_stop, record_day_trade, _chicago_today,
@@ -388,7 +471,7 @@ class PaperExitEvaluator:
                 f"day trades used ({remaining_day_trades} remaining)"
             )
 
-            # Partition closes into same-day and overnight
+            # Partition closes into same-day and overnight (preserving ranked order)
             same_day_closes = []
             overnight_closes = []
 
@@ -404,55 +487,43 @@ class PaperExitEvaluator:
             # Overnight exits: always allowed (no PDT concern)
             allowed_closes = list(overnight_closes)
 
-            # Same-day exits: apply PDT limit with smart allocation
+            # Same-day exits: apply PDT limit using ranked order
             if same_day_closes:
-                # Separate emergency stops from normal exits
-                emergency_closes = []
-                normal_same_day = []
-
                 for c in same_day_closes:
                     pos = pos_by_id.get(c["position_id"], {})
+
+                    # Emergency stops always close regardless of PDT
                     if is_emergency_stop(pos):
-                        emergency_closes.append(c)
-                    else:
-                        normal_same_day.append(c)
+                        allowed_closes.append(c)
+                        pdt_summary["emergency_overrides"] += 1
+                        logger.critical(
+                            f"[PDT] EMERGENCY: {c['symbol']} unrealized_pl={c['unrealized_pl']:.0f} "
+                            f"— closing despite PDT limit (capital protection)"
+                        )
+                        continue
 
-                # Emergency stops always close regardless of PDT
-                for c in emergency_closes:
-                    allowed_closes.append(c)
-                    pdt_summary["emergency_overrides"] += 1
-                    logger.critical(
-                        f"[PDT] EMERGENCY: {c['symbol']} unrealized_pl={c['unrealized_pl']:.0f} "
-                        f"— closing despite PDT limit (capital protection)"
-                    )
-
-                # Normal same-day exits: rank by realized P&L descending, allow up to remaining
-                normal_same_day.sort(key=lambda c: c.get("unrealized_pl", 0), reverse=True)
-
-                for c in normal_same_day:
                     if remaining_day_trades > 0:
                         allowed_closes.append(c)
                         remaining_day_trades -= 1
                         pdt_summary["same_day_exits_allowed"] += 1
-                        logger.info(
-                            f"[PDT] CLOSE: {c['symbol']} "
-                            f"${c.get('unrealized_pl', 0):+,.0f} — "
-                            f"using day trade {PDT_MAX_DAY_TRADES - remaining_day_trades}/{PDT_MAX_DAY_TRADES}"
-                        )
+                        action = "CLOSE"
                     else:
-                        # Blocked — force overnight hold
                         holds.append(pos_by_id.get(c["position_id"], {}))
                         pdt_summary["same_day_exits_blocked"] += 1
-                        logger.info(
-                            f"[PDT] HOLD: {c['symbol']} "
-                            f"${c.get('unrealized_pl', 0):+,.0f} — "
-                            f"PDT limit reached, forcing overnight hold"
-                        )
+                        action = "HOLD"
+
+                    logger.info(
+                        f"[EXIT_RANK] {action}: {c['symbol']} {c.get('reason','?')} "
+                        f"marginal={c.get('marginal_value', 0):+.2f} "
+                        f"${c.get('unrealized_pl', 0):+,.0f}"
+                        + (f" — day trade {PDT_MAX_DAY_TRADES - remaining_day_trades}/{PDT_MAX_DAY_TRADES}"
+                           if action == "CLOSE" else " — PDT limit, overnight hold")
+                    )
 
             closes = allowed_closes
         # else: pdt_on is False — close everything as before (no filtering)
 
-        # 5. Close triggered positions
+        # 6. Close triggered positions
         closed_results = []
         for close_item in closes:
             try:
@@ -485,7 +556,7 @@ class PaperExitEvaluator:
                 )
                 closed_results.append({**close_item, "error": str(e)})
 
-        # 6. Build reason summary
+        # 7. Build reason summary
         close_reasons: Dict[str, int] = {}
         for c in closes:
             reason = c["reason"]

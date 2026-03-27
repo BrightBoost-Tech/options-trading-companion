@@ -206,16 +206,19 @@ async def _ingest_paper_outcomes_for_user(
         if sid:
             suggestion_ids.add(sid)
 
-    suggestion_ev_map: Dict[str, float] = {}
+    suggestion_meta_map: Dict[str, Dict] = {}
     if suggestion_ids:
         sugg_result = supabase.table("trade_suggestions") \
-            .select("id, ev") \
+            .select("id, ev, probability_of_profit, regime, strategy, risk_adjusted_ev, sizing_metadata") \
             .in_("id", list(suggestion_ids)) \
             .execute()
         for s in (sugg_result.data or []):
-            if s.get("ev") is not None:
-                suggestion_ev_map[s["id"]] = float(s["ev"])
-        logger.debug("Fetched EV for %d/%d suggestions", len(suggestion_ev_map), len(suggestion_ids))
+            suggestion_meta_map[s["id"]] = s
+        logger.debug("Fetched metadata for %d/%d suggestions", len(suggestion_meta_map), len(suggestion_ids))
+    # Backwards-compat alias used below
+    suggestion_ev_map: Dict[str, float] = {
+        sid: float(meta["ev"]) for sid, meta in suggestion_meta_map.items() if meta.get("ev") is not None
+    }
 
     # 3. Collect order_ids for dedup check against existing learning records.
     order_ids = [o["id"] for o in orders_by_position.values()]
@@ -253,12 +256,15 @@ async def _ingest_paper_outcomes_for_user(
                          symbol, pos_id_short, order["id"][:8])
             continue
 
-        # Resolve suggestion EV: prefer order's suggestion_id, fallback to position's
+        # Resolve suggestion metadata: prefer order's suggestion_id, fallback to position's
         suggestion_id = order.get("suggestion_id") or position.get("suggestion_id")
         suggestion_ev = suggestion_ev_map.get(suggestion_id) if suggestion_id else None
+        suggestion_meta = suggestion_meta_map.get(suggestion_id) if suggestion_id else None
 
         outcome = _create_paper_outcome_record(
-            user_id, order, target_date, position, suggestion_ev=suggestion_ev,
+            user_id, order, target_date, position,
+            suggestion_ev=suggestion_ev,
+            suggestion_meta=suggestion_meta,
         )
         logger.info("INSERT %s (pos=%s): pnl_realized=%s pnl_predicted=%s suggestion=%s",
                      symbol, pos_id_short, outcome["pnl_realized"],
@@ -299,6 +305,7 @@ def _create_paper_outcome_record(
     position: Dict,
     *,
     suggestion_ev: Optional[float] = None,
+    suggestion_meta: Optional[Dict] = None,
 ) -> Dict:
     """
     Create a learning_feedback_loops record from a paper order fill.
@@ -386,6 +393,12 @@ def _create_paper_outcome_record(
             "pnl_outcome": pnl_outcome,  # win/loss/breakeven for analytics
             "is_paper": True,
             "reason_codes": ["paper_trade_close"],
+            # Calibration fields — prediction-time snapshot for calibration_service
+            "predicted_ev": suggestion_ev,
+            "predicted_pop": (suggestion_meta or {}).get("probability_of_profit"),
+            "predicted_risk_adjusted_ev": (suggestion_meta or {}).get("risk_adjusted_ev"),
+            "regime_at_entry": (suggestion_meta or {}).get("regime"),
+            "strategy_at_entry": (suggestion_meta or {}).get("strategy"),
         },
         # Use position's closed_at so the view's COALESCE(updated_at, created_at)
         # reflects the actual close time, not the ingestion time.

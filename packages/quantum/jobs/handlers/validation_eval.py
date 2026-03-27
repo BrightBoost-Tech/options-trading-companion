@@ -90,12 +90,19 @@ def _build_paper_result(checkpoint: Dict[str, Any], green_day: Dict[str, Any]) -
 
 def run(payload: Dict[str, Any], ctx=None) -> Dict[str, Any]:
     """
-    Job handler for Go-Live Validation evaluation.
-    Payload:
-      - mode: "paper" | "historical"
-      - user_id: str (optional, but usually required)
-      - config: dict (for historical)
+    DEPRECATED: Replaced by daily_progression_eval.
+    Kept as a no-op so existing schedule entries don't crash.
     """
+    logger.info("validation_eval: DEPRECATED — replaced by daily_progression_eval. Exiting as no-op.")
+    return {
+        "ok": True,
+        "status": "deprecated",
+        "message": "Replaced by daily_progression_eval. This handler is a no-op.",
+    }
+
+
+def _run_legacy(payload: Dict[str, Any], ctx=None) -> Dict[str, Any]:
+    """Original implementation, retained for reference. Not called."""
     logger.info(f"Starting validation_eval job with payload: {payload}")
     start_time = time.time()
 

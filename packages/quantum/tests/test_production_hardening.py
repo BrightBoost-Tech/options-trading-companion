@@ -274,3 +274,54 @@ class TestSecurityIntegration:
 
             # Should not raise any exception
             config.validate_security_config()
+
+
+class TestAuditProductionSecurity:
+    """Tests for audit_production_security()."""
+
+    def test_no_warnings_when_secure(self, capsys):
+        """All flags set to secure values should produce no warnings."""
+        with patch.dict("os.environ", {
+            "APP_ENV": "production",
+            "TASK_NONCE_PROTECTION": "1",
+            "TASK_NONCE_FAIL_CLOSED_IN_PROD": "1",
+            "ALLOW_LEGACY_CRON_SECRET": "0",
+        }, clear=False):
+            from packages.quantum.security import config
+            config.audit_production_security()
+            output = capsys.readouterr().out
+            assert "[SECURITY]" not in output
+
+    def test_warns_when_nonce_protection_disabled(self, capsys):
+        """TASK_NONCE_PROTECTION=0 in production should warn."""
+        with patch.dict("os.environ", {
+            "APP_ENV": "production",
+            "TASK_NONCE_PROTECTION": "0",
+        }, clear=False):
+            from packages.quantum.security import config
+            config.audit_production_security()
+            output = capsys.readouterr().out
+            assert "TASK_NONCE_PROTECTION is disabled" in output
+
+    def test_warns_when_legacy_cron_enabled(self, capsys):
+        """ALLOW_LEGACY_CRON_SECRET=1 in production should warn."""
+        with patch.dict("os.environ", {
+            "APP_ENV": "production",
+            "ALLOW_LEGACY_CRON_SECRET": "1",
+        }, clear=False):
+            from packages.quantum.security import config
+            config.audit_production_security()
+            output = capsys.readouterr().out
+            assert "ALLOW_LEGACY_CRON_SECRET is enabled" in output
+
+    def test_skips_in_development(self, capsys):
+        """Should not emit warnings in non-production environments."""
+        with patch.dict("os.environ", {
+            "APP_ENV": "development",
+            "TASK_NONCE_PROTECTION": "0",
+            "ALLOW_LEGACY_CRON_SECRET": "1",
+        }, clear=False):
+            from packages.quantum.security import config
+            config.audit_production_security()
+            output = capsys.readouterr().out
+            assert "[SECURITY]" not in output

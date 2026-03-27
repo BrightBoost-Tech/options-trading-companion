@@ -28,6 +28,7 @@ from packages.quantum.security import encrypt_token, decrypt_token, get_current_
 from packages.quantum.security.config import (
     validate_security_config,
     validate_trading_config,
+    audit_production_security,
     SecurityConfigError,
     TradingConfigError,
     is_production_env,
@@ -49,6 +50,7 @@ else:
     print("🔒 DEV AUTH BYPASS DISABLED (expected for prod)")
 validate_security_config()
 validate_trading_config()  # v4-L1F: Validate trading env vars at startup
+audit_production_security()  # Log warnings for soft misconfigurations
 
 # Import models and services
 from packages.quantum.models import Holding, SyncResponse, PortfolioSnapshot, Spread, SpreadPosition, RiskDashboardResponse, UnifiedPosition, OptimizationRationale

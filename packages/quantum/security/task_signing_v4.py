@@ -49,7 +49,7 @@ ALLOW_LEGACY_CRON_SECRET = os.getenv("ALLOW_LEGACY_CRON_SECRET", "0") == "1"
 CRON_SECRET = os.getenv("CRON_SECRET")
 
 # Nonce replay protection (requires Supabase)
-TASK_NONCE_PROTECTION = os.getenv("TASK_NONCE_PROTECTION", "0") == "1"
+TASK_NONCE_PROTECTION = os.getenv("TASK_NONCE_PROTECTION", "1") == "1"
 
 # Fail-closed mode for production: reject requests if nonce store unavailable
 # Default "1" in production for safety

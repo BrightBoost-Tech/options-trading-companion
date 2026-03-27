@@ -111,6 +111,48 @@ def validate_security_config():
         )
 
 
+def audit_production_security():
+    """
+    Log warnings for insecure flag combinations in production.
+
+    Called once during startup. Does not abort — validate_security_config()
+    handles hard failures. This catches "soft" misconfigurations that
+    degrade security without being outright dangerous.
+    """
+    if not is_production_env():
+        return
+
+    warnings: List[str] = []
+
+    if os.getenv("TASK_NONCE_PROTECTION", "1") != "1":
+        warnings.append(
+            "TASK_NONCE_PROTECTION is disabled — task replay attacks are not blocked"
+        )
+
+    if os.getenv("TASK_NONCE_FAIL_CLOSED_IN_PROD", "1") != "1":
+        warnings.append(
+            "TASK_NONCE_FAIL_CLOSED_IN_PROD is disabled — nonce store failures will silently allow requests"
+        )
+
+    if os.getenv("ALLOW_LEGACY_CRON_SECRET", "0") != "0":
+        warnings.append(
+            "ALLOW_LEGACY_CRON_SECRET is enabled — legacy auth bypass is active, migrate to v4 signing"
+        )
+
+    if os.getenv("ENABLE_DEV_AUTH_BYPASS", "") == "1":
+        # Should not reach here (validate_security_config aborts first),
+        # but included as defense-in-depth.
+        warnings.append(
+            "CRITICAL: ENABLE_DEV_AUTH_BYPASS is enabled in production!"
+        )
+
+    for w in warnings:
+        print(f"[SECURITY] ⚠️  {w}")
+
+    if warnings:
+        print(f"[SECURITY] {len(warnings)} security warning(s) on startup")
+
+
 class TradingConfigError(Exception):
     """Raised when trading configuration is invalid."""
     pass

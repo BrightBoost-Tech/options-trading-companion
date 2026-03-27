@@ -163,6 +163,36 @@ async def universe_sync_task(
         "status": "queued"
     }
 
+@router.post("/calibration/update", status_code=202)
+async def calibration_update_task(
+    window_days: int = Body(30, embed=True),
+    client: Client = Depends(get_admin_client),
+    auth: TaskSignatureResult = Depends(verify_task_signature("tasks:calibration_update"))
+):
+    today = datetime.now().strftime("%Y-%m-%d")
+    job_name = "calibration-update"
+    key = f"{job_name}-{today}"
+
+    job_id = enqueue_idempotent(
+        client=client,
+        job_name=job_name,
+        idempotency_key=key,
+        payload={
+            "app_version": APP_VERSION,
+            "trigger_ts": datetime.now().isoformat(),
+            "task_name": job_name,
+            "window_days": window_days,
+        }
+    )
+
+    return {
+        "job_run_id": str(job_id),
+        "job_name": job_name,
+        "idempotency_key": key,
+        "status": "queued"
+    }
+
+
 # Keep remaining endpoints unchanged as they were not in the target list
 @router.post("/iv/daily-refresh", status_code=202)
 async def iv_daily_refresh_task(

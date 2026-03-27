@@ -457,6 +457,40 @@ def scout_weekly(request: Request, user_id: str = Depends(get_current_user)):
         print(f"Scout weekly error: {sanitize_exception(e)}")
         raise HTTPException(status_code=500, detail="Failed to generate scout picks")
 
+# --- Calibration Endpoints ---
+
+@app.get("/calibration/report")
+@limiter.limit("10/minute")
+async def calibration_report(
+    request: Request,
+    days: int = 30,
+    supabase: Client = Depends(get_supabase_user_client)
+):
+    """Compare predicted EV/PoP vs realized outcomes, segmented by strategy and regime."""
+    if not supabase:
+        raise HTTPException(status_code=503, detail="Database not available")
+    user_id = request.state.user_id
+    from packages.quantum.analytics.calibration_service import CalibrationService
+    svc = CalibrationService(supabase)
+    return svc.compute_calibration_report(user_id, window_days=days)
+
+
+@app.get("/calibration/adjustments")
+@limiter.limit("10/minute")
+async def calibration_adjustments(
+    request: Request,
+    days: int = 30,
+    supabase: Client = Depends(get_supabase_user_client)
+):
+    """Get current calibration multipliers for EV/PoP by strategy and regime."""
+    if not supabase:
+        raise HTTPException(status_code=503, detail="Database not available")
+    user_id = request.state.user_id
+    from packages.quantum.analytics.calibration_service import CalibrationService
+    svc = CalibrationService(supabase)
+    return svc.compute_calibration_adjustments(user_id, window_days=days)
+
+
 # --- IV & Market Context Endpoints ---
 
 @app.get("/market/iv-context")

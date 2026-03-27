@@ -10,6 +10,7 @@
 # ═══════════════════════════════════════════════════════════════════
 # OVERNIGHT
 #   3:30 AM  — learning_ingest (nightly catch-up, Tue-Sat)
+#   5:00 AM  — calibration_update (recompute EV/PoP adjustments)
 #
 # MORNING
 #   8:00 AM  — suggestions_close (exit suggestions for existing positions)
@@ -101,6 +102,11 @@ on:
     # Schedule BOTH; Python time-gate allows only the correct local-time run
     - cron: '30 08 * * 2-6'
     - cron: '30 09 * * 2-6'
+
+    # Calibration Update - 5:00 AM Chicago (before market, Tue-Sat)
+    # CDT (summer): 10:00 UTC | CST (winter): 11:00 UTC
+    - cron: '0 10 * * 2-6'
+    - cron: '0 11 * * 2-6'
 
     # Paper Auto-Execute - 11:30 AM Chicago (after suggestions/open)
     # CDT (summer): 16:30 UTC | CST (winter): 17:30 UTC
@@ -562,6 +568,55 @@ jobs:
           fi
           python scripts/run_signed_task.py learning_ingest \
             --scheduled-local-time 03:30 \
+            --expected-chicago-offset="$OFFSET" \
+            --window-minutes 90
+
+  # ============================================================================
+  # Scheduled: Calibration Update (5:00 AM Chicago, Tue-Sat)
+  # ============================================================================
+  calibration-update:
+    name: Calibration Update (5:00 AM Chicago)
+    runs-on: ubuntu-latest
+    if: github.event_name == 'schedule' && (github.event.schedule == '0 10 * * 2-6' || github.event.schedule == '0 11 * * 2-6')
+    concurrency:
+      group: trading-calibration-update-${{ github.ref }}
+      cancel-in-progress: false
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Cache pip dependencies
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('packages/quantum/requirements.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r packages/quantum/requirements.txt
+
+      - name: Run Calibration Update
+        env:
+          TASK_SIGNING_KEYS: ${{ secrets.TASK_SIGNING_KEYS }}
+          BASE_URL: ${{ secrets.QUANTUM_BASE_URL }}
+          USER_ID: ${{ secrets.USER_ID || secrets.TASK_USER_ID }}
+        run: |
+          if [ "${{ github.event.schedule }}" = "0 10 * * 2-6" ]; then
+            OFFSET="-05:00"
+          else
+            OFFSET="-06:00"
+          fi
+          python scripts/run_signed_task.py calibration_update \
+            --scheduled-local-time 05:00 \
             --expected-chicago-offset="$OFFSET" \
             --window-minutes 90
 

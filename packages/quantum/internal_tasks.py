@@ -193,6 +193,38 @@ async def calibration_update_task(
     }
 
 
+@router.post("/autotune/walk-forward", status_code=202)
+async def walk_forward_autotune_task(
+    lookback_days: int = Body(60, embed=True),
+    cohort_name: str = Body(None, embed=True),
+    client: Client = Depends(get_admin_client),
+    auth: TaskSignatureResult = Depends(verify_task_signature("tasks:walk_forward_autotune"))
+):
+    today = datetime.now().strftime("%Y-%m-%d")
+    job_name = "walk-forward-autotune"
+    key = f"{job_name}-{today}"
+
+    job_id = enqueue_idempotent(
+        client=client,
+        job_name=job_name,
+        idempotency_key=key,
+        payload={
+            "app_version": APP_VERSION,
+            "trigger_ts": datetime.now().isoformat(),
+            "task_name": job_name,
+            "lookback_days": lookback_days,
+            "cohort_name": cohort_name,
+        }
+    )
+
+    return {
+        "job_run_id": str(job_id),
+        "job_name": job_name,
+        "idempotency_key": key,
+        "status": "queued"
+    }
+
+
 # Keep remaining endpoints unchanged as they were not in the target list
 @router.post("/iv/daily-refresh", status_code=202)
 async def iv_daily_refresh_task(

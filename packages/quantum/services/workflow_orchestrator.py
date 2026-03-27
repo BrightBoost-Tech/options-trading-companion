@@ -2534,6 +2534,22 @@ async def run_midday_cycle(supabase: Client, user_id: str):
             lineage_dict = lineage.build()
             sig_result = LineageSigner.sign(lineage_dict)
 
+            # Apply calibration adjustments if enabled
+            raw_ev, raw_pop = ev, pop
+            from packages.quantum.analytics.calibration_service import (
+                CALIBRATION_ENABLED as _CAL_ENABLED,
+                apply_calibration,
+                get_calibration_adjustments,
+            )
+            if _CAL_ENABLED:
+                try:
+                    cal_adj = get_calibration_adjustments(user_id, supabase)
+                    if cal_adj:
+                        regime_str = ctx.regime or ""
+                        ev, pop = apply_calibration(ev, pop, strategy, regime_str, cal_adj)
+                except Exception as cal_err:
+                    logger.warning(f"[CALIBRATION] Failed to apply adjustments: {cal_err}")
+
             suggestion = {
                 "user_id": user_id,
                 "created_at": datetime.now(timezone.utc).isoformat(),

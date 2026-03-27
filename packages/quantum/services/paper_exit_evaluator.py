@@ -5,8 +5,9 @@ Replaces the blanket EOD force-close with condition-based exits.
 Checks open positions against exit conditions and closes only those that trigger.
 
 Exit conditions (checked in order — first match triggers close):
-1. target_profit: Captured >= 50% of max credit
-2. stop_loss: Loss exceeds 2x the credit received
+1. target_profit: Captured >= 50% of max credit (credit spreads)
+   or unrealized P&L >= 50% of entry cost (debit spreads)
+2. stop_loss: Loss exceeds 2x credit (credit) or 50% of entry cost (debit)
 3. dte_threshold: 7 DTE or less (gamma risk)
 4. expiration_day: Expires today — must close
 
@@ -67,25 +68,80 @@ def days_to_expiry(position: Dict[str, Any]) -> int:
 
 
 # ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# Strategy type detection
+# ---------------------------------------------------------------------------
+
+def _is_debit_spread(position: Dict[str, Any]) -> bool:
+    """
+    Detect whether a position is a debit spread (long entry).
+
+    Debit spreads: you PAY to enter, profit when spread widens.
+    Credit spreads: you RECEIVE premium, profit when spread narrows.
+
+    Detection priority:
+    1. Strategy name contains LONG_ or DEBIT
+    2. Quantity > 0 (long position)
+    """
+    strategy = (position.get("strategy_key") or position.get("strategy") or "").upper()
+    if "LONG_" in strategy or "DEBIT" in strategy:
+        return True
+    qty = float(position.get("quantity") or 0)
+    return qty > 0
+
+
+def _check_target_profit(pos: Dict, tp_pct: float = 0.50) -> bool:
+    """Check if position has reached target profit (debit-aware)."""
+    mc = pos.get("max_credit")
+    if mc is None:
+        return False
+    mc = float(mc)
+    if mc == 0:
+        return False
+    upl = float(pos.get("unrealized_pl") or 0)
+    entry_cost = abs(mc) * 100
+
+    if _is_debit_spread(pos):
+        # Debit spread: profit target = tp_pct of what we paid
+        return upl >= entry_cost * tp_pct
+    else:
+        # Credit spread: profit target = tp_pct of credit received
+        return mc > 0 and upl >= entry_cost * tp_pct
+
+
+def _check_stop_loss(pos: Dict, sl_pct: float = 2.0) -> bool:
+    """Check if position has exceeded stop loss (debit-aware)."""
+    mc = pos.get("max_credit")
+    if mc is None:
+        return False
+    mc = float(mc)
+    if mc == 0:
+        return False
+    upl = float(pos.get("unrealized_pl") or 0)
+    entry_cost = abs(mc) * 100
+
+    if _is_debit_spread(pos):
+        # Debit spread: stop loss at sl_pct of entry cost (0.5 = lose half)
+        # For debit spreads sl_pct is reinterpreted as fraction of entry cost
+        # (default 2.0 → clamp to 1.0 since you can't lose more than you paid)
+        effective_sl = min(sl_pct, 1.0) if sl_pct > 1.0 else sl_pct
+        return upl <= -(entry_cost * effective_sl)
+    else:
+        # Credit spread: stop loss at sl_pct × credit received
+        return mc > 0 and upl <= -(entry_cost * sl_pct)
+
+
 # Exit condition definitions
 # ---------------------------------------------------------------------------
 
 EXIT_CONDITIONS: Dict[str, Dict[str, Any]] = {
     "target_profit": {
         "description": "Position has reached target profit percentage",
-        "check": lambda pos: (
-            pos.get("max_credit") is not None
-            and pos["max_credit"] > 0
-            and float(pos.get("unrealized_pl") or 0) >= float(pos["max_credit"]) * 100 * 0.50
-        ),
+        "check": lambda pos: _check_target_profit(pos, 0.50),
     },
     "stop_loss": {
         "description": "Position has exceeded maximum acceptable loss",
-        "check": lambda pos: (
-            pos.get("max_credit") is not None
-            and pos["max_credit"] > 0
-            and float(pos.get("unrealized_pl") or 0) <= -(float(pos["max_credit"]) * 100 * 2.0)
-        ),
+        "check": lambda pos: _check_stop_loss(pos, 2.0),
     },
     "dte_threshold": {
         "description": "Position is too close to expiration (gamma risk)",
@@ -107,19 +163,11 @@ def build_exit_conditions(
     return {
         "target_profit": {
             "description": f"Position has reached {target_profit_pct:.0%} target profit",
-            "check": lambda pos, tp=target_profit_pct: (
-                pos.get("max_credit") is not None
-                and pos["max_credit"] > 0
-                and float(pos.get("unrealized_pl") or 0) >= float(pos["max_credit"]) * 100 * tp
-            ),
+            "check": lambda pos, tp=target_profit_pct: _check_target_profit(pos, tp),
         },
         "stop_loss": {
             "description": f"Position has exceeded {stop_loss_pct}x max loss",
-            "check": lambda pos, sl=stop_loss_pct: (
-                pos.get("max_credit") is not None
-                and pos["max_credit"] > 0
-                and float(pos.get("unrealized_pl") or 0) <= -(float(pos["max_credit"]) * 100 * sl)
-            ),
+            "check": lambda pos, sl=stop_loss_pct: _check_stop_loss(pos, sl),
         },
         "dte_threshold": {
             "description": f"Position is within {min_dte_to_exit} DTE (gamma risk)",
@@ -167,14 +215,22 @@ def evaluate_position_exit(
     print(fields_msg, flush=True)
 
     # Log threshold computations if max_credit is available
+    is_debit = _is_debit_spread(position)
     if max_credit is not None:
         try:
             mc = float(max_credit)
             upl = float(unrealized_pl or 0)
-            tp_threshold = mc * 100 * 0.50
-            sl_threshold = -(mc * 100 * 2.0)
+            entry_cost = abs(mc) * 100
+            if is_debit:
+                tp_threshold = entry_cost * 0.50
+                sl_threshold = -(entry_cost * 1.0)  # Can't lose more than paid
+                spread_type = "DEBIT"
+            else:
+                tp_threshold = entry_cost * 0.50
+                sl_threshold = -(entry_cost * 2.0)
+                spread_type = "CREDIT"
             thresh_msg = (
-                f"[EXIT_EVAL_DEBUG] position={pos_id} "
+                f"[EXIT_EVAL_DEBUG] position={pos_id} type={spread_type} "
                 f"target_profit: {upl} >= {tp_threshold} ? {upl >= tp_threshold} | "
                 f"stop_loss: {upl} <= {sl_threshold} ? {upl <= sl_threshold} | "
                 f"dte_threshold: 0 < {dte} <= 7 ? {0 < dte <= 7} | "

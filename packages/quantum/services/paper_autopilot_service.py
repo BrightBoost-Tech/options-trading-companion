@@ -81,8 +81,10 @@ class PaperAutopilotService:
         """
         Fetch executable (pending) suggestions for a user.
 
-        Uses same logic as inbox: pending status, optionally bounded to today.
-        Returns list sorted deterministically by (ev desc, created_at asc, id asc).
+        When CANONICAL_RANKING_ENABLED: recomputes risk_adjusted_ev with
+        live position context so ranking reflects current portfolio state.
+        Returns list sorted deterministically by (risk_adjusted_ev desc,
+        created_at asc, id asc).
         """
         today_start, tomorrow_start = _compute_today_window()
 
@@ -99,8 +101,20 @@ class PaperAutopilotService:
         result = query.execute()
         suggestions = result.data or []
 
+        # Live recomputation of risk_adjusted_ev with current positions
+        from packages.quantum.analytics.canonical_ranker import (
+            CANONICAL_RANKING_ENABLED,
+            compute_risk_adjusted_ev,
+        )
+        if CANONICAL_RANKING_ENABLED and suggestions:
+            positions = self.get_open_positions(user_id)
+            budget = self._get_portfolio_budget(user_id)
+            for s in suggestions:
+                s["risk_adjusted_ev"] = round(
+                    compute_risk_adjusted_ev(s, positions, budget), 6
+                )
+
         # Deterministic sorting: risk_adjusted_ev desc, created_at asc, id asc
-        # Falls back to ev when risk_adjusted_ev is not yet populated
         def sort_key(s):
             score = s.get("risk_adjusted_ev")
             if score is None:
@@ -209,7 +223,12 @@ class PaperAutopilotService:
         # Get already executed to dedupe
         already_executed = self.get_already_executed_suggestion_ids_today(user_id)
 
-        # Filter by min_score and dedupe, tracking skip reasons
+        # Min-edge filter: reject suggestions where fees eat the profit
+        from packages.quantum.analytics.canonical_ranker import MIN_EDGE_AFTER_COSTS
+        edge_filtered_count = 0
+        fee_per_contract = 0.65
+
+        # Filter by min_score, min_edge, and dedupe
         candidates = []
         deduped_count = 0
         below_min_score_count = 0
@@ -217,6 +236,20 @@ class PaperAutopilotService:
             sid = s.get("id")
             if sid in already_executed:
                 deduped_count += 1
+                continue
+
+            # Min-edge check (catches legacy suggestions without risk_adjusted_ev)
+            sizing = s.get("sizing_metadata") or {}
+            contracts = int(sizing.get("contracts") or 1)
+            fees = fee_per_contract * contracts * 2
+            slippage = float(sizing.get("expected_slippage") or 0)
+            net_edge = float(s.get("ev") or 0) - fees - slippage
+            if net_edge < MIN_EDGE_AFTER_COSTS:
+                edge_filtered_count += 1
+                logger.info(
+                    f"[FILTER] Rejected {s.get('ticker')}: "
+                    f"net_edge=${net_edge:.2f} < ${MIN_EDGE_AFTER_COSTS:.0f}"
+                )
                 continue
 
             score = s.get("risk_adjusted_ev")
@@ -250,7 +283,8 @@ class PaperAutopilotService:
         logger.info(
             f"paper_auto_execute_start: user_id={user_id} "
             f"suggestions_fetched={len(suggestions)} deduped={deduped_count} "
-            f"below_min_score={below_min_score_count} candidates={len(candidates)} "
+            f"below_min_score={below_min_score_count} edge_filtered={edge_filtered_count} "
+            f"candidates={len(candidates)} "
             f"to_execute={len(to_execute)}"
         )
 
@@ -484,6 +518,21 @@ class PaperAutopilotService:
 
         positions.sort(key=sort_key)
         return positions
+
+    def _get_portfolio_budget(self, user_id: str) -> float:
+        """Get deployable capital (net_liq or cash_balance) for risk-adjusted ranking."""
+        try:
+            res = self.client.table("paper_portfolios") \
+                .select("net_liq, cash_balance") \
+                .eq("user_id", user_id) \
+                .limit(1) \
+                .execute()
+            if res.data:
+                row = res.data[0]
+                return float(row.get("net_liq") or row.get("cash_balance") or 100_000)
+        except Exception:
+            pass
+        return 100_000  # Safe default
 
     def get_positions_closed_today(self, user_id: str) -> int:
         """

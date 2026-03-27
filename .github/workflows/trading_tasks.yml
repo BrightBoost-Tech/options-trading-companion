@@ -16,10 +16,10 @@
 # MORNING
 #   8:00 AM  — suggestions_close (exit suggestions for existing positions)
 #   8:15 AM  — paper_exit_evaluate (overnight gap protection)
-#   8:40 AM  — validation_init_window (forward checkpoint window)
+#   8:40 AM  — validation_init_window (DEPRECATED)
 #
 # MID-MORNING
-#   9:30 AM  — validation_eval (streak checkpoint pass/fail)
+#   9:30 AM  — validation_eval (DEPRECATED — replaced by daily_progression_eval)
 #
 # MIDDAY
 #  11:00 AM  — suggestions_open (midday entry generation)
@@ -27,7 +27,7 @@
 #
 # EARLY AFTERNOON
 #   1:00 PM  — validation_shadow_eval (midday pacing, read-only)
-#   1:05 PM  — validation_preflight (readiness report)
+#   1:05 PM  — validation_preflight (DEPRECATED)
 #
 # CLOSE
 #   3:00 PM  — paper_exit_evaluate (condition-based exits)
@@ -145,19 +145,19 @@ on:
     - cron: '15 21 * * 1-5'
     - cron: '15 22 * * 1-5'
 
-    # v4-L1F: Readiness Hardening Tasks
+    # DEPRECATED: Old validation jobs replaced by daily_progression_eval
+    # Validation Init Window - disabled
+    # - cron: '40 13 * * 1-5'
+    # - cron: '40 14 * * 1-5'
 
-    # Validation Init Window - 8:40 AM Chicago (before suggestions-open)
-    # CDT (summer): 13:40 UTC | CST (winter): 14:40 UTC
-    # Schedule BOTH; Python time-gate allows only the correct local-time run
-    - cron: '40 13 * * 1-5'
-    - cron: '40 14 * * 1-5'
+    # Validation Preflight Midday - disabled
+    # - cron: '5 18 * * 1-5'
+    # - cron: '5 19 * * 1-5'
 
-    # Validation Preflight Midday - 1:05 PM Chicago (intraday pacing check)
-    # CDT (summer): 18:05 UTC | CST (winter): 19:05 UTC
-    # Schedule BOTH; Python time-gate allows only the correct local-time run
-    - cron: '5 18 * * 1-5'
-    - cron: '5 19 * * 1-5'
+    # Daily Progression Eval - 4:00 PM Chicago (after market close)
+    # CDT (summer): 21:00 UTC | CST (winter): 22:00 UTC
+    - cron: '0 21 * * 1-5'
+    - cron: '0 22 * * 1-5'
 
     # Paper Exit Evaluator Morning - 8:15 AM Chicago (overnight gap protection)
     # CDT (summer): 13:15 UTC | CST (winter): 14:15 UTC
@@ -189,6 +189,7 @@ on:
           - midday_scan
           - weekly_report
           - validation_eval
+          - daily_progression_eval
           - strategy_autotune
           - walk_forward_autotune
           - ops_health_check

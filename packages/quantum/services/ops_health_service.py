@@ -48,7 +48,7 @@ EXPECTED_JOBS = [
     ("suggestions_close", "daily"),
     ("suggestions_open", "daily"),
     ("learning_ingest", "daily"),
-    ("strategy_autotune", "weekly"),
+    ("daily_progression_eval", "daily"),
 ]
 
 

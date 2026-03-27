@@ -358,6 +358,16 @@ class PaperExitEvaluator:
 
         print(f"[EXIT_EVAL_DEBUG] evaluate_exits called for user={user_id}", flush=True)
 
+        # 0. Ops control: check if trading is paused
+        try:
+            from packages.quantum.ops_endpoints import is_trading_paused
+            paused, reason = is_trading_paused()
+            if paused:
+                logger.info(f"exit_eval_paused: reason={reason}")
+                return {"status": "paused", "reason": reason, "closes": [], "holds": []}
+        except Exception:
+            pass  # If ops_control unavailable, continue
+
         # 1. Refresh marks first so unrealized_pl is current
         mtm = PaperMarkToMarketService(self.client)
         mtm_result = mtm.refresh_marks(user_id)

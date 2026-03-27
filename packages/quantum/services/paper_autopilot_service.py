@@ -166,6 +166,16 @@ class PaperAutopilotService:
         Returns:
             Summary dict with executed_count, skipped_count, errors, etc.
         """
+        # Ops control: check if trading is paused
+        try:
+            from packages.quantum.ops_endpoints import is_trading_paused
+            paused, reason = is_trading_paused()
+            if paused:
+                logger.info(f"paper_auto_execute_paused: reason={reason}")
+                return {"status": "paused", "reason": reason, "executed_count": 0}
+        except Exception:
+            pass  # If ops_control unavailable, continue (fail-open)
+
         # Policy Lab: execute per-cohort with cohort-specific filtering
         from packages.quantum.policy_lab.config import is_policy_lab_enabled
         if is_policy_lab_enabled():

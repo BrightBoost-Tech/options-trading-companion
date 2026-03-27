@@ -548,10 +548,15 @@ class PaperAutopilotService:
     @staticmethod
     def _marginal_ev(position: Dict[str, Any]) -> float:
         """
-        Estimate marginal EV for position ranking.
+        Canonical marginal EV for position close ranking.
 
-        Positions with worst unrealized P&L should close first (ascending sort).
+        Uses risk_adjusted_ev when available (stamped at suggestion
+        creation), falls back to unrealized_pl.  Lower = worse position
+        = should close first (ascending sort).
         """
+        raev = position.get("risk_adjusted_ev")
+        if raev is not None:
+            return float(raev)
         return float(position.get("unrealized_pl") or 0.0)
 
     def _select_positions_to_close(
@@ -565,19 +570,22 @@ class PaperAutopilotService:
 
         Policies:
         - "close_all": Close all open positions (ignores quota)
-        - "ev_rank": Close worst marginal EV first, up to quota
-        - "min_one": Close oldest first, up to quota (legacy)
+        - "ev_rank": Close worst risk-adjusted EV first, up to quota
+
+        The legacy "min_one" policy (forced close regardless of exit
+        conditions) has been removed — positions should only close
+        when exit conditions trigger.
         """
         if policy == "close_all":
             return positions
 
         if policy == "ev_rank":
-            # Sort by worst unrealized P&L first (ascending)
             ranked = sorted(positions, key=self._marginal_ev)
             return ranked[:remaining_quota]
 
-        # Default "min_one": oldest first (already sorted by get_open_positions)
-        return positions[:remaining_quota]
+        # Default: ev_rank (min_one removed)
+        ranked = sorted(positions, key=self._marginal_ev)
+        return ranked[:remaining_quota]
 
     def close_positions(
         self,
@@ -591,7 +599,7 @@ class PaperAutopilotService:
         Args:
             user_id: Target user
             max_to_close: Maximum positions to close (default from config)
-            policy: Close policy - "close_all" | "ev_rank" | "min_one"
+            policy: Close policy - "close_all" | "ev_rank"
 
         Returns:
             Summary dict with closed_count, skipped_reason, etc.
@@ -642,12 +650,37 @@ class PaperAutopilotService:
         supabase = self.client
         analytics = get_analytics_service()
 
+        # PDT guard: check day-trade budget before closing same-day positions
+        from packages.quantum.services.pdt_guard_service import (
+            is_pdt_enabled, get_pdt_status, is_same_day_close,
+        )
+        pdt_on = is_pdt_enabled()
+        remaining_day_trades = 999
+        if pdt_on:
+            pdt_status = get_pdt_status(supabase, user_id)
+            remaining_day_trades = pdt_status["day_trades_remaining"]
+            logger.info(
+                f"paper_auto_close_pdt: user_id={user_id} "
+                f"day_trades_remaining={remaining_day_trades}"
+            )
+
         closed = []
         errors = []
+        pdt_blocked = 0
 
         for position in to_close:
             pos_id = position.get("id")
             try:
+                # PDT check: skip same-day closes if day-trade limit reached
+                if pdt_on and remaining_day_trades <= 0:
+                    if is_same_day_close(position):
+                        pdt_blocked += 1
+                        logger.info(
+                            f"paper_auto_close_pdt_blocked: pos={pos_id} "
+                            f"symbol={position.get('symbol')} — holding overnight"
+                        )
+                        continue
+
                 # Resolve OCC symbol from position legs or opening order
                 occ_symbol = self._resolve_occ_symbol(position, supabase)
 
@@ -691,6 +724,10 @@ class PaperAutopilotService:
                     "processing_errors": process_result.get("errors") or None,
                 })
 
+                # Decrement day-trade budget for same-day closes
+                if pdt_on and is_same_day_close(position):
+                    remaining_day_trades -= 1
+
             except Exception as e:
                 logger.error(f"Failed to close position {pos_id}: {e}")
                 errors.append({"position_id": pos_id, "error": str(e)})
@@ -715,6 +752,7 @@ class PaperAutopilotService:
             "status": status,
             "closed_count": len(closed),
             "error_count": len(errors),
+            "pdt_blocked": pdt_blocked,
             "closed": closed,
             "errors": errors if errors else None,
             "processed_summary": {

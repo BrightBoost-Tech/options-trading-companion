@@ -282,6 +282,30 @@ TASKS = {
         "description": "Train learned nesting v3",
         "user_id_mode": "none",
     },
+    "daily_progression_eval": {
+        "path": "/internal/tasks/progression/daily-eval",
+        "scope": "tasks:daily_progression_eval",
+        "description": "Daily green-day evaluation (4 PM Chicago)",
+        "user_id_mode": "none",
+    },
+    "alpaca_order_sync": {
+        "path": "/internal/tasks/alpaca/order-sync",
+        "scope": "tasks:alpaca_order_sync",
+        "description": "Sync Alpaca order fills (every 5 min)",
+        "user_id_mode": "none",
+    },
+    "calibration_update": {
+        "path": "/internal/tasks/calibration/update",
+        "scope": "tasks:calibration_update",
+        "description": "Recompute EV/PoP calibration adjustments (5 AM Chicago)",
+        "user_id_mode": "none",
+    },
+    "walk_forward_autotune": {
+        "path": "/internal/tasks/autotune/walk-forward",
+        "scope": "tasks:walk_forward_autotune",
+        "description": "Weekly walk-forward parameter optimization (Mon 5:30 AM)",
+        "user_id_mode": "none",
+    },
 }
 
 

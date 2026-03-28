@@ -7,8 +7,9 @@ from datetime import datetime, timedelta
 import os
 
 # Job Enqueue Dependencies
-from packages.quantum.jobs.enqueue import enqueue_idempotent
+from packages.quantum.jobs.enqueue import enqueue_idempotent  # DB-only (legacy)
 from packages.quantum.jobs.http_models import EnqueueResponse
+from packages.quantum.public_tasks import enqueue_job_run  # DB + RQ (correct path)
 
 # Keep imports that might be needed for other endpoints not being converted
 # (e.g. IV daily refresh which was NOT in the target list, and train-learning-v3)
@@ -165,120 +166,68 @@ async def universe_sync_task(
 
 @router.post("/alpaca/order-sync", status_code=202)
 async def alpaca_order_sync_task(
-    client: Client = Depends(get_admin_client),
     auth: TaskSignatureResult = Depends(verify_task_signature("tasks:alpaca_order_sync"))
 ):
-    job_name = "alpaca-order-sync"
     now = datetime.now()
-    key = f"{job_name}-{now.strftime('%Y-%m-%d-%H%M')}"
-
-    job_id = enqueue_idempotent(
-        client=client,
-        job_name=job_name,
-        idempotency_key=key,
+    return enqueue_job_run(
+        job_name="alpaca_order_sync",
+        idempotency_key=f"alpaca_order_sync-{now.strftime('%Y-%m-%d-%H%M')}",
         payload={
             "app_version": APP_VERSION,
             "trigger_ts": now.isoformat(),
-            "task_name": job_name,
-        }
+        },
     )
-
-    return {
-        "job_run_id": str(job_id),
-        "job_name": job_name,
-        "idempotency_key": key,
-        "status": "queued"
-    }
 
 
 @router.post("/progression/daily-eval", status_code=202)
 async def daily_progression_eval_task(
-    client: Client = Depends(get_admin_client),
     auth: TaskSignatureResult = Depends(verify_task_signature("tasks:daily_progression_eval"))
 ):
     today = datetime.now().strftime("%Y-%m-%d")
-    job_name = "daily-progression-eval"
-    key = f"{job_name}-{today}"
-
-    job_id = enqueue_idempotent(
-        client=client,
-        job_name=job_name,
-        idempotency_key=key,
+    return enqueue_job_run(
+        job_name="daily_progression_eval",
+        idempotency_key=f"daily_progression_eval-{today}",
         payload={
             "app_version": APP_VERSION,
             "trigger_ts": datetime.now().isoformat(),
-            "task_name": job_name,
-        }
+        },
     )
-
-    return {
-        "job_run_id": str(job_id),
-        "job_name": job_name,
-        "idempotency_key": key,
-        "status": "queued"
-    }
 
 
 @router.post("/calibration/update", status_code=202)
 async def calibration_update_task(
     window_days: int = Body(30, embed=True),
-    client: Client = Depends(get_admin_client),
     auth: TaskSignatureResult = Depends(verify_task_signature("tasks:calibration_update"))
 ):
     today = datetime.now().strftime("%Y-%m-%d")
-    job_name = "calibration-update"
-    key = f"{job_name}-{today}"
-
-    job_id = enqueue_idempotent(
-        client=client,
-        job_name=job_name,
-        idempotency_key=key,
+    return enqueue_job_run(
+        job_name="calibration_update",
+        idempotency_key=f"calibration_update-{today}",
         payload={
             "app_version": APP_VERSION,
             "trigger_ts": datetime.now().isoformat(),
-            "task_name": job_name,
             "window_days": window_days,
-        }
+        },
     )
-
-    return {
-        "job_run_id": str(job_id),
-        "job_name": job_name,
-        "idempotency_key": key,
-        "status": "queued"
-    }
 
 
 @router.post("/autotune/walk-forward", status_code=202)
 async def walk_forward_autotune_task(
     lookback_days: int = Body(60, embed=True),
     cohort_name: str = Body(None, embed=True),
-    client: Client = Depends(get_admin_client),
     auth: TaskSignatureResult = Depends(verify_task_signature("tasks:walk_forward_autotune"))
 ):
     today = datetime.now().strftime("%Y-%m-%d")
-    job_name = "walk-forward-autotune"
-    key = f"{job_name}-{today}"
-
-    job_id = enqueue_idempotent(
-        client=client,
-        job_name=job_name,
-        idempotency_key=key,
+    return enqueue_job_run(
+        job_name="walk_forward_autotune",
+        idempotency_key=f"walk_forward_autotune-{today}",
         payload={
             "app_version": APP_VERSION,
             "trigger_ts": datetime.now().isoformat(),
-            "task_name": job_name,
             "lookback_days": lookback_days,
             "cohort_name": cohort_name,
-        }
+        },
     )
-
-    return {
-        "job_run_id": str(job_id),
-        "job_name": job_name,
-        "idempotency_key": key,
-        "status": "queued"
-    }
 
 
 # Keep remaining endpoints unchanged as they were not in the target list

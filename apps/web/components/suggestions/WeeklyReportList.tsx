@@ -1,6 +1,7 @@
 import React from 'react';
 import { FileText, TrendingUp, TrendingDown, Crosshair, Download } from 'lucide-react';
 import { Badge } from '@/components/ui/badge';
+import { Button } from '@/components/ui/button';
 import { EmptyState } from '@/components/ui/empty-state';
 
 interface WeeklyReport {
@@ -74,17 +75,18 @@ export default function WeeklyReportList({ reports }: WeeklyReportListProps) {
           {reports.map((report) => {
             const isSelected = selectedReportId === report.id;
             return (
-              <button
+              <Button
                 key={report.id}
+                variant="ghost"
                 onClick={() => setSelectedReportId(report.id)}
                 aria-current={isSelected ? 'true' : undefined}
-                className={`w-full text-left p-3 rounded-lg border transition-colors ${
+                className={`w-full flex-col items-start text-left h-auto p-3 rounded-lg border transition-colors ${
                   isSelected
-                    ? 'bg-indigo-50 border-indigo-200 shadow-sm'
+                    ? 'bg-indigo-50 border-indigo-200 shadow-sm hover:bg-indigo-100'
                     : 'bg-white border-gray-100 hover:bg-gray-50'
                 }`}
               >
-                <div className="flex justify-between items-center mb-1">
+                <div className="flex w-full justify-between items-center mb-1">
                   <span className="font-semibold text-gray-800 text-sm">
                     Week End {new Date(report.end_date || report.report_date).toLocaleDateString()}
                   </span>
@@ -94,16 +96,16 @@ export default function WeeklyReportList({ reports }: WeeklyReportListProps) {
                     <TrendingDown className="w-3 h-3 text-red-500" aria-hidden="true" />
                   )}
                 </div>
-                <div className="flex gap-2 text-xs text-gray-500">
+                <div className="flex gap-2 text-xs text-gray-500 font-normal w-full justify-start">
                   <span>{report.trade_count} Trades</span>
                   <span>•</span>
                   <span>{Math.round(normalizeWinRateRatio(report.win_rate) * 100)}% WR</span>
                   <span>•</span>
-                  <span className={report.total_pnl >= 0 ? 'text-green-600' : 'text-red-600'}>
+                  <span className={report.total_pnl >= 0 ? 'text-green-600 font-medium' : 'text-red-600 font-medium'}>
                     ${report.total_pnl.toFixed(0)}
                   </span>
                 </div>
-              </button>
+              </Button>
             );
           })}
         </div>
@@ -124,14 +126,16 @@ export default function WeeklyReportList({ reports }: WeeklyReportListProps) {
               {new Date(selectedReport.end_date || selectedReport.report_date).toLocaleDateString()}
             </p>
           </div>
-          <button
+          <Button
+            variant="ghost"
+            size="sm"
             onClick={handleDownload}
-            className="text-xs flex items-center gap-1 text-gray-500 hover:text-gray-800"
+            className="text-xs flex items-center gap-1 h-7 px-2 text-gray-500 hover:text-gray-800"
             aria-label={`Download report for week ending ${new Date(selectedReport.end_date || selectedReport.report_date).toLocaleDateString()}`}
           >
             <Download className="w-3 h-3" aria-hidden="true" />
             Download
-          </button>
+          </Button>
         </div>
 
         {/* Top Metrics Cards */}

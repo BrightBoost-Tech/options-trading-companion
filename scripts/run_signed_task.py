@@ -149,6 +149,7 @@ TASKS = {
         "scope": "tasks:learning_ingest",
         "description": "Ingest learning outcomes (4:10 PM Chicago)",
         "user_id_mode": "allow",
+        "skip_time_gate": True,
     },
     "universe_sync": {
         "path": "/tasks/universe/sync",
@@ -198,6 +199,7 @@ TASKS = {
         "scope": "tasks:paper_auto_execute",
         "description": "Auto-execute top paper suggestions (requires user_id)",
         "user_id_mode": "require",
+        "skip_time_gate": True,
     },
     "paper_auto_close": {
         "path": "/tasks/paper/auto-close",
@@ -260,6 +262,7 @@ TASKS = {
         "scope": "tasks:paper_learning_ingest",
         "description": "Ingest paper outcomes for validation/streak (requires user_id)",
         "user_id_mode": "require",
+        "skip_time_gate": True,
     },
     "policy_lab_eval": {
         "path": "/tasks/policy-lab/eval",
@@ -506,7 +509,7 @@ def check_time_gate(
         return reason
 
     # --- 5. Time window check ---
-    effective_window = window_minutes if window_minutes is not None else 60
+    effective_window = window_minutes if window_minutes is not None else 150
     if not is_within_time_window(target_hour, target_minute, window_minutes=effective_window):
         now_chicago = datetime.now(CHICAGO_TZ)
         reason = (
@@ -1107,7 +1110,7 @@ Environment Variables:
         type=int,
         default=None,
         metavar="MINUTES",
-        help="Time gate window in minutes (default: 60 for legacy gates).",
+        help="Time gate window in minutes (default: 150).",
     )
     parser.add_argument(
         "--list",

@@ -2166,11 +2166,16 @@ def scan_for_opportunities(
 
             # B. Check Liquidity (Deferred)
             # We calculate threshold here but apply it later using Option Spread Pct
-            threshold = 0.10 # Default
-            if global_snapshot.state == RegimeState.SUPPRESSED:
-                    threshold = 0.20
-            elif global_snapshot.state == RegimeState.SHOCK:
-                    threshold = 0.15
+            # Regime-aware: wider spreads tolerated in higher-vol environments
+            _SPREAD_THRESHOLDS = {
+                RegimeState.NORMAL: 0.10,
+                RegimeState.CHOP: 0.10,
+                RegimeState.ELEVATED: 0.15,
+                RegimeState.SHOCK: 0.15,
+                RegimeState.SUPPRESSED: 0.20,
+                RegimeState.REBOUND: 0.12,
+            }
+            threshold = _SPREAD_THRESHOLDS.get(global_snapshot.state, 0.10)
 
             # Note: We NO LONGER reject here based on underlying spread.
 
@@ -2661,14 +2666,22 @@ def scan_for_opportunities(
 
                 if option_spread_pct > effective_threshold:
                     # REJECT: Illiquid Options - attach debug info
+                    regime_name = global_snapshot.state.value if global_snapshot else "unknown"
                     debug_spread = {
                         "option_spread_pct": round(option_spread_pct, 4),
                         "max_leg_spread_pct": None,
                         "combo_width_share": round(combo_width_share, 4),
                         "entry_cost_share": round(entry_cost_share, 4),
                         "threshold": round(effective_threshold, 4),
+                        "regime": regime_name,
                         "is_condor": False,
                     }
+                    print(
+                        f"[SCANNER] spread_too_wide: {symbol} {strategy_key} "
+                        f"spread={option_spread_pct:.1%} > threshold={effective_threshold:.0%} "
+                        f"regime={regime_name}",
+                        flush=True,
+                    )
                     if hasattr(rej_stats, 'record_with_sample'):
                         sample = {
                             "symbol": symbol,
@@ -2720,10 +2733,17 @@ def scan_for_opportunities(
             # Retrieve final execution cost (contract dollars) from UnifiedScore
             final_execution_cost = unified_score.execution_cost_dollars
 
-            # Execution cost gate: reject or badge based on configuration
-            # When EXECUTION_COST_HARD_REJECT=1 (default): hard reject if cost >= EV
-            # When EXECUTION_COST_HARD_REJECT=0: soft mode - badge + penalty instead
+            # Execution cost gate: reject or badge based on configuration + regime
+            # EXECUTION_COST_HARD_REJECT=1 (default): hard reject if cost >= EV
+            # EXECUTION_COST_HARD_REJECT=0 OR ELEVATED/SHOCK regime: soft mode
             execution_cost_soft_gate_triggered = False
+
+            # In elevated/shock regimes, wider spreads inflate execution cost.
+            # Use soft mode (penalty instead of rejection) to avoid filtering
+            # everything when the market is naturally wide.
+            _regime_forces_soft = global_snapshot.state in (
+                RegimeState.ELEVATED, RegimeState.SHOCK,
+            )
 
             if expected_execution_cost >= total_ev:
                 # Build diagnostic sample (always recorded)
@@ -2740,6 +2760,8 @@ def scan_for_opportunities(
                     "sum_leg_spreads_share": round(sum_leg_spreads, 4) if sum_leg_spreads is not None else None,
                     "max_leg_spread_pct": round(max_leg_spread_pct, 4) if max_leg_spread_pct is not None else None,
                     "is_limit_order": is_limit_order,
+                    "regime": global_snapshot.state.value,
+                    "regime_forced_soft": _regime_forces_soft,
                     "thresholds": {
                         "condor_max_leg_spread_pct": CONDOR_MAX_LEG_SPREAD_PCT,
                         "spread_take_frac": cost_details.get("spread_take_frac"),
@@ -2751,13 +2773,12 @@ def scan_for_opportunities(
                 }
                 rej_stats.record_with_sample("execution_cost_exceeds_ev", exec_sample)
 
-                if EXECUTION_COST_HARD_REJECT:
-                    # Hard reject mode (default)
+                if EXECUTION_COST_HARD_REJECT and not _regime_forces_soft:
+                    # Hard reject in NORMAL/CHOP/SUPPRESSED (default)
                     return None
 
-                # Soft mode: check if cost is extremely high (still reject)
+                # Soft mode (explicit config or regime-forced): still reject if extreme
                 if total_ev > 0 and expected_execution_cost >= (total_ev * EXECUTION_COST_MAX_MULT):
-                    # Cost is way too high even for soft mode
                     return None
 
                 # Soft mode: allow candidate but with badge + penalty

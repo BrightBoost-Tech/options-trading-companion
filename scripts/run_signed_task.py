@@ -191,6 +191,7 @@ TASKS = {
         "scope": "tasks:ops_health_check",
         "description": "Run ops health check (every 30 min)",
         "user_id_mode": "none",
+        "skip_time_gate": True,
     },
     "paper_auto_execute": {
         "path": "/tasks/paper/auto-execute",
@@ -245,12 +246,14 @@ TASKS = {
         "scope": "tasks:paper_exit_evaluate",
         "description": "Evaluate exit conditions on open positions (requires user_id)",
         "user_id_mode": "require",
+        "skip_time_gate": True,
     },
     "paper_mark_to_market": {
         "path": "/tasks/paper/mark-to-market",
         "scope": "tasks:paper_mark_to_market",
         "description": "Refresh position marks and save EOD snapshots (requires user_id)",
         "user_id_mode": "require",
+        "skip_time_gate": True,
     },
     "paper_learning_ingest": {
         "path": "/tasks/paper/learning-ingest",
@@ -287,12 +290,14 @@ TASKS = {
         "scope": "tasks:daily_progression_eval",
         "description": "Daily green-day evaluation (4 PM Chicago)",
         "user_id_mode": "none",
+        "skip_time_gate": True,
     },
     "alpaca_order_sync": {
         "path": "/internal/tasks/alpaca/order-sync",
         "scope": "tasks:alpaca_order_sync",
         "description": "Sync Alpaca order fills (every 5 min)",
         "user_id_mode": "none",
+        "skip_time_gate": True,
     },
     "calibration_update": {
         "path": "/internal/tasks/calibration/update",
@@ -846,9 +851,12 @@ def run_task(
 
     task = TASKS[task_name]
 
+    # Per-task skip_time_gate: some jobs are safe to run regardless of timing
+    effective_skip = skip_time_gate or task.get("skip_time_gate", False)
+
     # Check time gate
     skip_reason = check_time_gate(
-        task_name, skip_time_gate, scheduled_local_time,
+        task_name, effective_skip, scheduled_local_time,
         expected_chicago_offset, window_minutes,
     )
     if skip_reason is not None:

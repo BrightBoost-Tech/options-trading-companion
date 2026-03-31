@@ -1531,7 +1531,7 @@ async def run_morning_cycle(supabase: Client, user_id: str):
             # Stamp canonical ranking metric
             from packages.quantum.analytics.canonical_ranker import compute_risk_adjusted_ev
             raev = round(
-                compute_risk_adjusted_ev(suggestion, existing_positions or [], remaining_global),
+                compute_risk_adjusted_ev(suggestion, [], remaining_global),
                 6,
             )
             suggestion["risk_adjusted_ev"] = raev
@@ -2616,7 +2616,7 @@ async def run_midday_cycle(supabase: Client, user_id: str):
             # Stamp canonical ranking metric
             from packages.quantum.analytics.canonical_ranker import compute_risk_adjusted_ev
             raev = round(
-                compute_risk_adjusted_ev(suggestion, existing_positions or [], remaining_global),
+                compute_risk_adjusted_ev(suggestion, [], remaining_global),
                 6,
             )
             suggestion["risk_adjusted_ev"] = raev

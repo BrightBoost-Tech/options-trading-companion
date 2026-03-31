@@ -238,6 +238,155 @@ class StrategySelector:
 
         return suggestion
 
+    def get_candidates(
+        self,
+        ticker: str,
+        sentiment: str,
+        current_price: float,
+        iv_rank: float,
+        days_to_expiry: int = 45,
+        effective_regime: Optional[Union[RegimeState, str]] = None,
+        banned_strategies: Optional[List[str]] = None,
+    ) -> List[dict]:
+        """
+        Return ordered list of candidate strategies to evaluate.
+
+        Regime informs the candidate POOL, not the winner.
+        EV after costs picks the winner downstream.
+
+        Returns list of dicts, each with:
+          strategy, legs, rationale (same shape as determine_strategy output)
+        Max 3 candidates per symbol.
+        """
+        s = (sentiment or "NEUTRAL").upper().strip()
+        if s not in {"BULLISH", "BEARISH", "NEUTRAL", "EARNINGS"}:
+            s = "NEUTRAL"
+
+        policy = StrategyPolicy(banned_strategies)
+        regime_state = self._coerce_regime(effective_regime, iv_rank)
+
+        is_low_vol = (iv_rank is not None and iv_rank < 30) or regime_state == RegimeState.SUPPRESSED
+        is_high_vol = (iv_rank is not None and iv_rank > 50) or regime_state in {
+            RegimeState.ELEVATED, RegimeState.SHOCK, RegimeState.REBOUND,
+        }
+
+        # SHOCK → no trades
+        if regime_state == RegimeState.SHOCK and s != "EARNINGS":
+            return []
+
+        # Build candidate pool based on sentiment + vol
+        pool: List[tuple] = []  # (strategy_name, rationale, legs)
+
+        if s == "BULLISH":
+            if is_high_vol:
+                pool.append((
+                    "SHORT_PUT_CREDIT_SPREAD",
+                    "Bullish + elevated IV. Sell put premium.",
+                    [{"side": "sell", "type": "put", "delta_target": -0.30},
+                     {"side": "buy", "type": "put", "delta_target": -0.15}],
+                ))
+                pool.append((
+                    "LONG_CALL_DEBIT_SPREAD",
+                    "Bullish fallback. Debit spread if credit spreads too wide.",
+                    [{"side": "buy", "type": "call", "delta_target": 0.65},
+                     {"side": "sell", "type": "call", "delta_target": 0.30}],
+                ))
+            elif is_low_vol:
+                pool.append((
+                    "LONG_CALL_DEBIT_SPREAD",
+                    "Bullish + low IV. Buy cheap premium.",
+                    [{"side": "buy", "type": "call", "delta_target": 0.65},
+                     {"side": "sell", "type": "call", "delta_target": 0.30}],
+                ))
+            else:
+                pool.append((
+                    "LONG_CALL_DEBIT_SPREAD",
+                    "Bullish + normal IV. Debit vertical.",
+                    [{"side": "buy", "type": "call", "delta_target": 0.60},
+                     {"side": "sell", "type": "call", "delta_target": 0.30}],
+                ))
+                pool.append((
+                    "SHORT_PUT_CREDIT_SPREAD",
+                    "Bullish alternative. Credit spread for premium.",
+                    [{"side": "sell", "type": "put", "delta_target": -0.30},
+                     {"side": "buy", "type": "put", "delta_target": -0.15}],
+                ))
+
+        elif s == "BEARISH":
+            if is_high_vol:
+                pool.append((
+                    "SHORT_CALL_CREDIT_SPREAD",
+                    "Bearish + elevated IV. Sell call premium.",
+                    [{"side": "sell", "type": "call", "delta_target": 0.30},
+                     {"side": "buy", "type": "call", "delta_target": 0.15}],
+                ))
+                pool.append((
+                    "LONG_PUT_DEBIT_SPREAD",
+                    "Bearish fallback. Debit spread if credit spreads too wide.",
+                    [{"side": "buy", "type": "put", "delta_target": -0.65},
+                     {"side": "sell", "type": "put", "delta_target": -0.30}],
+                ))
+            elif is_low_vol:
+                pool.append((
+                    "LONG_PUT_DEBIT_SPREAD",
+                    "Bearish + low IV. Buy cheap premium.",
+                    [{"side": "buy", "type": "put", "delta_target": -0.65},
+                     {"side": "sell", "type": "put", "delta_target": -0.30}],
+                ))
+            else:
+                pool.append((
+                    "LONG_PUT_DEBIT_SPREAD",
+                    "Bearish + normal IV. Debit vertical.",
+                    [{"side": "buy", "type": "put", "delta_target": -0.60},
+                     {"side": "sell", "type": "put", "delta_target": -0.30}],
+                ))
+                pool.append((
+                    "SHORT_CALL_CREDIT_SPREAD",
+                    "Bearish alternative. Credit spread for premium.",
+                    [{"side": "sell", "type": "call", "delta_target": 0.30},
+                     {"side": "buy", "type": "call", "delta_target": 0.15}],
+                ))
+
+        elif s == "NEUTRAL" or regime_state == RegimeState.CHOP:
+            if is_high_vol or regime_state == RegimeState.CHOP:
+                pool.append((
+                    "IRON_CONDOR",
+                    "Neutral + elevated IV. Defined-risk premium sale.",
+                    [{"side": "sell", "type": "put", "delta_target": -0.20},
+                     {"side": "buy", "type": "put", "delta_target": -0.10},
+                     {"side": "sell", "type": "call", "delta_target": 0.20},
+                     {"side": "buy", "type": "call", "delta_target": 0.10}],
+                ))
+
+        elif s == "EARNINGS":
+            if is_high_vol:
+                pool.append((
+                    "IRON_CONDOR",
+                    "Earnings + rich IV. Defined-risk premium sale.",
+                    [{"side": "sell", "type": "put", "delta_target": -0.20},
+                     {"side": "buy", "type": "put", "delta_target": -0.10},
+                     {"side": "sell", "type": "call", "delta_target": 0.20},
+                     {"side": "buy", "type": "call", "delta_target": 0.10}],
+                ))
+
+        # Filter by policy and cap at 3
+        candidates = []
+        for strat, rationale, legs in pool:
+            if policy.is_allowed(strat) and len(candidates) < 3:
+                candidates.append({
+                    "ticker": ticker,
+                    "strategy": strat,
+                    "legs": legs,
+                    "rationale": rationale,
+                    "meta": {
+                        "sentiment": s,
+                        "iv_rank": iv_rank,
+                        "effective_regime": regime_state.value,
+                    },
+                })
+
+        return candidates
+
     @staticmethod
     def _coerce_regime(
         effective_regime: Optional[Union[RegimeState, str]],

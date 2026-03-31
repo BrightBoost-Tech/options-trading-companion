@@ -650,7 +650,7 @@ def _stage_order_internal(supabase, analytics, user_id, ticket: TradeTicket, por
         if not ticket.limit_price or ticket.limit_price <= 0:
             tcm_price = (tcm_est or {}).get("expected_fill_price")
             if tcm_price and float(tcm_price) > 0:
-                ticket.limit_price = float(tcm_price)
+                ticket.limit_price = round(float(tcm_price), 2)
             elif quote:
                 bid = float(quote.get("bid") or 0)
                 ask = float(quote.get("ask") or 0)
@@ -740,13 +740,14 @@ def _stage_order_internal(supabase, analytics, user_id, ticket: TradeTicket, por
                 order_row = res.data[0]
                 submit_and_track(alpaca, supabase, order_row, user_id)
             except Exception as e:
-                # Log but don't prevent order_id from returning — the order
-                # stays staged with execution_mode already set so it can be
-                # retried by the sweep or a manual re-submission.
                 logger.error(
                     f"alpaca_submit_failed: order_id={order_id} "
                     f"trace_id={trace_id} error={e}"
                 )
+            # Return early — do NOT fall through to internal fill.
+            # If submission succeeded, alpaca_order_sync picks up the fill.
+            # If submission failed, the order stays staged for retry.
+            return order_id
 
     return order_id
 

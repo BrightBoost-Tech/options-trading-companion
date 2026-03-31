@@ -197,8 +197,12 @@ class PaperAutopilotService:
         analytics = get_analytics_service()
 
         sweep_processed = 0
+        from packages.quantum.brokers.execution_router import get_execution_mode as _get_exec_mode, ExecutionMode as _EM
         try:
-            sweep_result = _process_orders_for_user(supabase, analytics, user_id)
+            if _get_exec_mode() == _EM.INTERNAL_PAPER:
+                sweep_result = _process_orders_for_user(supabase, analytics, user_id)
+            else:
+                sweep_result = {"processed": 0}
             sweep_processed = sweep_result.get("processed", 0)
             if sweep_processed > 0:
                 logger.info(
@@ -330,12 +334,18 @@ class PaperAutopilotService:
                         f"proceeding with order processing: {status_err}"
                     )
 
-                # Process order (execute) - always proceed even if status update failed
-                process_result = _process_orders_for_user(supabase, analytics, user_id, target_order_id=order_id)
+                # Process order via internal fill ONLY for internal_paper mode.
+                # For Alpaca modes, alpaca_order_sync handles fills.
+                from packages.quantum.brokers.execution_router import get_execution_mode, ExecutionMode
+                _exec_mode = get_execution_mode()
+                if _exec_mode == ExecutionMode.INTERNAL_PAPER:
+                    process_result = _process_orders_for_user(supabase, analytics, user_id, target_order_id=order_id)
+                else:
+                    process_result = {"processed": 0, "note": "alpaca_routed"}
 
                 logger.info(
                     f"paper_auto_execute_order_created: suggestion_id={sid} "
-                    f"order_id={order_id} symbol={ticker}"
+                    f"order_id={order_id} symbol={ticker} mode={_exec_mode.value}"
                 )
 
                 executed.append({
@@ -452,9 +462,14 @@ class PaperAutopilotService:
                     if not order_id:
                         continue
 
-                    proc = _process_orders_for_user(
-                        supabase, analytics, user_id, target_order_id=order_id,
-                    )
+                    from packages.quantum.brokers.execution_router import get_execution_mode, ExecutionMode
+                    _exec_mode = get_execution_mode()
+                    if _exec_mode == ExecutionMode.INTERNAL_PAPER:
+                        proc = _process_orders_for_user(
+                            supabase, analytics, user_id, target_order_id=order_id,
+                        )
+                    else:
+                        proc = {"processed": 0, "note": "alpaca_routed"}
                     all_executed.append({
                         "cohort": cohort_name,
                         "suggestion_id": sid,
@@ -466,10 +481,14 @@ class PaperAutopilotService:
                     logger.error(f"policy_lab_execute_error: cohort={cohort_name} ticker={ticker} error={e}")
                     all_errors.append({"cohort": cohort_name, "suggestion_id": sid, "error": str(e)})
 
-        # Sweep all working orders across all portfolios
+        # Sweep all working orders across all portfolios (internal_paper only)
         sweep_processed = 0
         try:
-            sweep = _process_orders_for_user(supabase, analytics, user_id)
+            from packages.quantum.brokers.execution_router import get_execution_mode, ExecutionMode
+            if get_execution_mode() == ExecutionMode.INTERNAL_PAPER:
+                sweep = _process_orders_for_user(supabase, analytics, user_id)
+            else:
+                sweep = {"processed": 0}
             sweep_processed = sweep.get("processed", 0)
         except Exception as e:
             logger.warning(f"policy_lab_sweep_error: {e}")
@@ -773,8 +792,13 @@ class PaperAutopilotService:
                     trace_id_override=position.get("trace_id")
                 )
 
-                # Process order
-                process_result = _process_orders_for_user(supabase, analytics, user_id, target_order_id=order_id)
+                # Process order via internal fill ONLY for internal_paper mode.
+                from packages.quantum.brokers.execution_router import get_execution_mode, ExecutionMode
+                _exec_mode = get_execution_mode()
+                if _exec_mode == ExecutionMode.INTERNAL_PAPER:
+                    process_result = _process_orders_for_user(supabase, analytics, user_id, target_order_id=order_id)
+                else:
+                    process_result = {"processed": 0, "note": "alpaca_routed"}
 
                 closed.append({
                     "position_id": pos_id,

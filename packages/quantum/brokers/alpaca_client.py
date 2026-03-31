@@ -174,7 +174,7 @@ class AlpacaClient:
         )
 
         legs = order_request.get("legs", [])
-        limit_price = order_request.get("limit_price")
+        limit_price = round(float(order_request.get("limit_price") or 0), 2) or None
         tif_str = order_request.get("time_in_force", "day").upper()
         tif = TimeInForce.DAY if tif_str == "DAY" else TimeInForce.GTC
 

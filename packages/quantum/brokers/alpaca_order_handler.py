@@ -27,7 +27,7 @@ def build_alpaca_order_request(order: Dict[str, Any]) -> Dict[str, Any]:
     order_json = order.get("order_json") or {}
     legs_data = order_json.get("legs") or []
     side = order.get("side") or order_json.get("side") or "buy"
-    limit_price = float(order.get("requested_price") or order_json.get("limit_price") or 0)
+    limit_price = round(float(order.get("requested_price") or order_json.get("limit_price") or 0), 2)
     qty = int(order.get("requested_qty") or order_json.get("contracts") or 1)
 
     alpaca_legs = []

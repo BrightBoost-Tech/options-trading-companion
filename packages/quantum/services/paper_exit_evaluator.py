@@ -689,7 +689,7 @@ class PaperExitEvaluator:
             symbol=position["symbol"],
             quantity=abs_qty,
             order_type="limit",
-            limit_price=exit_price,  # current_mark — required for Alpaca options
+            limit_price=round(exit_price, 2),  # current_mark — rounded for Alpaca
             strategy_type="custom",
             source_engine="paper_exit_evaluator",
             legs=[{

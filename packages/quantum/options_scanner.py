@@ -2125,6 +2125,9 @@ def scan_for_opportunities(
     ta_end_date = now_dt
     ta_start_date = ta_end_date - timedelta(days=90)
 
+    # Shared storage for multi-strategy candidate lists (keyed by symbol)
+    _multi_strategy_candidates: Dict[str, List] = {}
+
     def process_symbol(symbol: str, drag_map: Dict[str, Any], quotes_map: Dict[str, Any], earnings_map: Dict[str, Any], iv_context: Dict[str, Any], rej_stats: RejectionStats, strategy_override: Optional[Dict] = None) -> Optional[Dict[str, Any]]:
         """Process a single symbol and return a candidate dict or None."""
         rej_stats.increment_processed()
@@ -2261,6 +2264,7 @@ def scan_for_opportunities(
                 if not candidates:
                     rej_stats.record("strategy_hold")
                     return None
+                _multi_strategy_candidates[symbol] = candidates
                 suggestion = candidates[0]
             else:
                 suggestion = strategy_selector.determine_strategy(
@@ -3006,31 +3010,27 @@ def scan_for_opportunities(
         fallback candidates via strategy_override. TruthLayer caches
         chain data so fallback retries don't make extra API calls.
         """
+        print(f"[SCANNER_MULTI] {sym}: entering multi-strategy eval (MULTI_STRATEGY_EVAL={MULTI_STRATEGY_EVAL})", flush=True)
+
         result = process_symbol(sym, drag_map, quotes_map, earnings_map, iv_ctx_map, rej_stats)
         if result is not None or not MULTI_STRATEGY_EVAL:
             return result
 
-        # Primary strategy failed — get the full candidate list and try fallbacks
-        try:
-            _sel = StrategySelector()
-            cands = _sel.get_candidates(
-                ticker=sym, sentiment="NEUTRAL",
-                current_price=0, iv_rank=50,
-                effective_regime=global_snapshot.state.value if global_snapshot else "normal",
-                banned_strategies=banned_strategies,
-            )
-        except Exception:
-            return None
+        # Primary strategy failed — use the candidates list stashed by process_symbol
+        cands = _multi_strategy_candidates.get(sym, [])
+        if len(cands) <= 1:
+            return None  # No fallbacks available
 
-        fallback_cands = cands[1:] if len(cands) > 1 else []
-        eval_log = []
+        fallback_cands = cands[1:]
+        print(
+            f"[SCANNER_MULTI] {sym}: primary {cands[0]['strategy']} failed, "
+            f"{len(fallback_cands)} fallback(s) available: "
+            f"{[c['strategy'] for c in fallback_cands]}",
+            flush=True,
+        )
 
         for fb_idx, fb_cand in enumerate(fallback_cands):
             fb_strat = fb_cand["strategy"]
-            print(
-                f"[SCANNER] {sym}: primary failed, trying fallback #{fb_idx+1}: {fb_strat}",
-                flush=True,
-            )
             fb_result = process_symbol(
                 sym, drag_map, quotes_map, earnings_map, iv_ctx_map, rej_stats,
                 strategy_override=fb_cand,
@@ -3043,17 +3043,16 @@ def scan_for_opportunities(
                     "candidate_index": fb_idx + 1,
                     "selection_mode": "multi_strategy",
                 }
-                print(f"[SCANNER] {sym}: fallback {fb_strat} succeeded", flush=True)
+                print(f"[SCANNER_MULTI] {sym}: fallback {fb_strat} PASSED", flush=True)
                 return fb_result
-            eval_log.append(fb_strat)
+            print(f"[SCANNER_MULTI] {sym}: fallback {fb_strat} failed", flush=True)
 
-        if len(cands) > 1:
-            print(
-                f"[SCANNER] {sym}: all {len(cands)} strategies rejected: "
-                f"{[c['strategy'] for c in cands]}",
-                flush=True,
-            )
-            rej_stats.record("all_strategies_rejected")
+        print(
+            f"[SCANNER_MULTI] {sym}: all {len(cands)} strategies rejected: "
+            f"{[c['strategy'] for c in cands]}",
+            flush=True,
+        )
+        rej_stats.record("all_strategies_rejected")
         return None
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=batch_size) as executor:

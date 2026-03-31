@@ -49,17 +49,33 @@ def run(payload: Dict[str, Any], ctx: Any = None) -> Dict[str, Any]:
         async def sync_orders():
             from packages.quantum.brokers.alpaca_order_handler import poll_pending_orders
 
-            result = poll_pending_orders(alpaca, client)
+            # Find all users with pending Alpaca orders
+            pending_res = client.table("paper_orders") \
+                .select("user_id") \
+                .in_("status", ["submitted", "working", "partial"]) \
+                .not_.is_("alpaca_order_id", "null") \
+                .execute()
+            user_ids = list({r["user_id"] for r in (pending_res.data or [])})
+
+            if not user_ids:
+                return {"total_polled": 0, "users": 0}
+
+            totals = {"total_polled": 0, "fills": 0, "partials": 0, "cancels": 0, "unchanged": 0, "users": len(user_ids)}
+            for uid in user_ids:
+                result = poll_pending_orders(alpaca, client, uid)
+                for key in ("total_polled", "fills", "partials", "cancels", "unchanged"):
+                    totals[key] += result.get(key, 0)
 
             logger.info(
-                f"[ALPACA_SYNC] Polled {result.get('total_polled', 0)} orders: "
-                f"fills={result.get('fills', 0)} "
-                f"partials={result.get('partials', 0)} "
-                f"cancels={result.get('cancels', 0)} "
-                f"unchanged={result.get('unchanged', 0)}"
+                f"[ALPACA_SYNC] {totals['users']} user(s), "
+                f"polled={totals['total_polled']} "
+                f"fills={totals['fills']} "
+                f"partials={totals['partials']} "
+                f"cancels={totals['cancels']} "
+                f"unchanged={totals['unchanged']}"
             )
 
-            return result
+            return totals
 
         sync_result = run_async(sync_orders())
 

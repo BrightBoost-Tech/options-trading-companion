@@ -82,13 +82,17 @@ def calculate_sizing(
         reason_prefix = f"Sized for {effective_risk_pct*100:.1f}% risk (x{risk_multiplier})"
 
     # 3. Calculate Contracts by Risk
+    #    Tolerance: allow 1 contract if budget covers >= 95% of the risk.
+    #    Without this, a $1,873 budget vs $1,925 risk = 0 contracts (2.7% shortfall).
+    SINGLE_CONTRACT_TOLERANCE = 0.95
     if max_loss_per_contract <= 0:
-        # If max loss is zero/negative (undefined risk), we can't size by risk strictly.
-        # Fallback: treat as if risk is infinite or handle gracefully?
-        # User prompt says: "If max_loss_per_contract is <= 0 or inf => contracts_by_risk = 0"
         contracts_by_risk = 0
     else:
-        contracts_by_risk = math.floor(max_dollar_risk / max_loss_per_contract)
+        ratio = max_dollar_risk / max_loss_per_contract
+        if ratio >= SINGLE_CONTRACT_TOLERANCE and ratio < 1.0:
+            contracts_by_risk = 1  # Close enough for a single contract
+        else:
+            contracts_by_risk = math.floor(ratio)
 
     # 4. Calculate Contracts by Collateral (Buying Power)
     if collateral_required_per_contract <= 0:

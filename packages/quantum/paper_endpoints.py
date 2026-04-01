@@ -733,21 +733,31 @@ def _stage_order_internal(supabase, analytics, user_id, ticket: TradeTicket, por
             # when dry_run is turned off.
             return order_id
         else:
+            _alpaca_result = None
             try:
                 from packages.quantum.brokers.alpaca_order_handler import submit_and_track
                 from packages.quantum.brokers.alpaca_client import get_alpaca_client
                 alpaca = get_alpaca_client()
                 order_row = res.data[0]
-                submit_and_track(alpaca, supabase, order_row, user_id)
+                _alpaca_result = submit_and_track(alpaca, supabase, order_row, user_id)
             except Exception as e:
                 logger.error(
                     f"alpaca_submit_failed: order_id={order_id} "
                     f"trace_id={trace_id} error={e}"
                 )
-            # Return early — do NOT fall through to internal fill.
-            # If submission succeeded, alpaca_order_sync picks up the fill.
-            # If submission failed, the order stays staged for retry.
-            return order_id
+            # If Alpaca marked it unsupported (e.g. 4-leg iron condor), fall
+            # through to internal fill instead of leaving it stuck.
+            if _alpaca_result and _alpaca_result.get("status") == "unsupported_strategy":
+                logger.info(
+                    f"alpaca_unsupported_fallback: order_id={order_id} "
+                    f"falling back to internal fill"
+                )
+                # Fall through to internal fill at line below
+            else:
+                # Normal Alpaca path — return early.
+                # If submission succeeded, alpaca_order_sync picks up the fill.
+                # If submission failed, the order stays staged for retry.
+                return order_id
 
     return order_id
 

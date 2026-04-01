@@ -224,7 +224,17 @@ class AlpacaClient:
             f"type={order_request.get('order_type')}, limit={limit_price}"
         )
 
-        order = self._call_with_retry(self._client.submit_order, req)
+        try:
+            order = self._call_with_retry(self._client.submit_order, req)
+        except Exception as e:
+            err_str = str(e)
+            # Log the full Alpaca error for debugging
+            logger.error(
+                f"[ALPACA] Submission rejected: {len(legs)} legs, "
+                f"limit={limit_price}, error={err_str}"
+            )
+            raise
+
         result = self._serialize_order(order)
         logger.info(f"[ALPACA] Order submitted: id={result['alpaca_order_id']} status={result['status']}")
         return result

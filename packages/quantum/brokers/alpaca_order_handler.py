@@ -75,6 +75,12 @@ def submit_and_track(
 
     try:
         req = build_alpaca_order_request(order)
+
+        # Check for iron condor (4+ legs) — Alpaca paper may reject these.
+        # If submission fails on a 4-leg order, mark as unsupported rather
+        # than generic submission_failed so the system doesn't keep retrying.
+        num_legs = len(req.get("legs", []))
+
         result = alpaca.submit_option_order(req)
 
         supabase.table("paper_orders").update({
@@ -88,17 +94,36 @@ def submit_and_track(
 
         logger.info(
             f"[ALPACA_HANDLER] Order submitted: internal={order_id} "
-            f"alpaca={result.get('alpaca_order_id')} status={result.get('status')}"
+            f"alpaca={result.get('alpaca_order_id')} legs={num_legs} "
+            f"status={result.get('status')}"
         )
         return {"status": "submitted", **result}
 
     except Exception as e:
-        logger.error(f"[ALPACA_HANDLER] Submit failed: order={order_id} error={e}")
+        error_str = str(e)
+        num_legs = len((order.get("order_json") or {}).get("legs", []))
+
+        if num_legs >= 4:
+            # Iron condor / 4-leg orders may not be supported on Alpaca paper.
+            # Mark as unsupported_strategy instead of submission_failed so the
+            # system doesn't keep retrying and the order falls back to internal fill.
+            logger.warning(
+                f"[ALPACA_HANDLER] {num_legs}-leg order rejected: order={order_id} "
+                f"error={error_str}. Marking as unsupported — will use internal fill."
+            )
+            supabase.table("paper_orders").update({
+                "broker_status": "unsupported_strategy",
+                "broker_response": {"error": error_str, "legs": num_legs},
+                "execution_mode": "internal_paper",  # Revert to internal fill
+            }).eq("id", order_id).execute()
+            return {"status": "unsupported_strategy", "error": error_str, "legs": num_legs}
+
+        logger.error(f"[ALPACA_HANDLER] Submit failed: order={order_id} error={error_str}")
         supabase.table("paper_orders").update({
             "broker_status": "submission_failed",
-            "broker_response": {"error": str(e)},
+            "broker_response": {"error": error_str},
         }).eq("id", order_id).execute()
-        return {"status": "submission_failed", "error": str(e)}
+        return {"status": "submission_failed", "error": error_str}
 
 
 def poll_pending_orders(

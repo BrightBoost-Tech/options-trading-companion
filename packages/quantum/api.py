@@ -97,6 +97,21 @@ app = FastAPI(
     version="2.0.0",
 )
 
+
+@app.on_event("startup")
+def _on_startup():
+    """Start background scheduler for precise job timing."""
+    from packages.quantum.scheduler import start_scheduler
+    start_scheduler()
+
+
+@app.on_event("shutdown")
+def _on_shutdown():
+    """Stop background scheduler."""
+    from packages.quantum.scheduler import stop_scheduler
+    stop_scheduler()
+
+
 # Diagnostic endpoint to confirm backend is running correctly
 @app.get("/__whoami")
 def __whoami():

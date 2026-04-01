@@ -28,9 +28,6 @@ CHICAGO_TZ = "America/Chicago"
 # Self-referencing base URL (the scheduler calls our own API)
 _BASE_URL = os.environ.get("SCHEDULER_BASE_URL", "http://127.0.0.1:8000")
 
-# Signing configuration
-_SIGNING_SECRET = os.environ.get("TASK_SIGNING_SECRET", "")
-
 _scheduler: BackgroundScheduler = None
 
 
@@ -68,46 +65,37 @@ def _fire_task(endpoint: str, scope: str, job_id: str, user_id: str = None):
     """
     Fire a signed HTTP request to the given task endpoint.
 
-    This runs inside APScheduler's thread pool, so it must be
-    synchronous (httpx sync client, not async).
+    Uses the same sign_task_request() function as run_signed_task.py
+    so the HMAC signature matches exactly.
     """
     import json
-    import time
-    import hashlib
-    import hmac
-    import uuid
 
     base_url = _BASE_URL.rstrip("/")
     url = f"{base_url}{endpoint}"
 
-    # Build payload
+    # Build payload — same serialization as run_signed_task.py
     payload = {}
     if user_id:
         payload["user_id"] = user_id
+    body = json.dumps(payload).encode("utf-8") if payload else b"{}"
 
-    # Sign the request (v4 HMAC)
-    timestamp = int(time.time())
-    nonce = str(uuid.uuid4())
-    body_bytes = json.dumps(payload, separators=(",", ":")).encode()
-    body_hash = hashlib.sha256(body_bytes).hexdigest()
+    # Sign using the canonical signing function (handles TASK_SIGNING_KEYS + key_id)
+    from packages.quantum.security.task_signing_v4 import sign_task_request
+    try:
+        headers = sign_task_request(
+            method="POST",
+            path=endpoint,
+            body=body,
+            scope=scope,
+        )
+    except ValueError as e:
+        logger.error(f"[SCHEDULER] {job_id} signing failed: {e}")
+        return
 
-    sig_payload = f"v4:{timestamp}:{nonce}:POST:{endpoint}:{body_hash}:{scope}"
-    signature = hmac.new(
-        _SIGNING_SECRET.encode(),
-        sig_payload.encode(),
-        hashlib.sha256,
-    ).hexdigest()
-
-    headers = {
-        "Content-Type": "application/json",
-        "X-Task-Ts": str(timestamp),
-        "X-Task-Nonce": nonce,
-        "X-Task-Scope": scope,
-        "X-Task-Signature": signature,
-    }
+    headers["Content-Type"] = "application/json"
 
     try:
-        resp = httpx.post(url, content=body_bytes, headers=headers, timeout=30.0)
+        resp = httpx.post(url, content=body, headers=headers, timeout=30.0)
         logger.info(
             f"[SCHEDULER] {job_id} → {endpoint} "
             f"status={resp.status_code} "
@@ -135,9 +123,6 @@ def start_scheduler():
     if not SCHEDULER_ENABLED:
         logger.info("[SCHEDULER] Disabled (SCHEDULER_ENABLED != 1)")
         return
-
-    if not _SIGNING_SECRET:
-        logger.warning("[SCHEDULER] No TASK_SIGNING_SECRET — jobs will fail auth")
 
     _scheduler = BackgroundScheduler(daemon=True)
 

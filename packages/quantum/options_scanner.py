@@ -2718,7 +2718,7 @@ def scan_for_opportunities(
             # H. Unified Scoring
             trade_dict = {
                 "ev": total_ev,
-                "suggested_entry": abs(total_cost),
+                "suggested_entry": round(abs(total_cost), 2),
                 "bid_ask_spread": combo_width_share,  # Uses explicit width
                 "strategy": raw_strategy,
                 "strategy_key": strategy_key,
@@ -2884,7 +2884,7 @@ def scan_for_opportunities(
                 "type": suggestion["strategy"],
                 "strategy": suggestion["strategy"],
                 "strategy_key": strategy_key,
-                "suggested_entry": abs(total_cost),
+                "suggested_entry": round(abs(total_cost), 2),
                 "ev": total_ev,
                 "score": round(unified_score.score, 1),
                 "unified_score_details": unified_score.components.model_dump(),

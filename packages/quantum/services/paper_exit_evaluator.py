@@ -785,7 +785,7 @@ class PaperExitEvaluator:
         supabase.table("paper_orders").update({
             "status": "filled",
             "filled_qty": abs_qty,
-            "avg_fill_price": exit_price,
+            "avg_fill_price": round(exit_price, 2),
             "fees_usd": 0,
             "filled_at": now,
         }).eq("id", order_id).execute()

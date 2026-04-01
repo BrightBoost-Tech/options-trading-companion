@@ -911,7 +911,7 @@ def build_midday_order_json(
 
     # Default order type
     order_type = "multi_leg" if len(leg_orders) > 1 else "single_leg"
-    limit_price = float(cand.get("suggested_entry") or 0.0)
+    limit_price = round(float(cand.get("suggested_entry") or 0.0), 2)
 
     # PR3.1: Short-circuit if candidate is already blocked by upstream quality gate
     if cand.get("blocked_reason") == "marketdata_quality_gate":

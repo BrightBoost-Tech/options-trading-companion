@@ -530,7 +530,7 @@ def _suggestion_to_ticket(suggestion: Dict[str, Any]) -> TradeTicket:
     limit_price = order_json.get("limit_price")
     order_type = "limit" if limit_price else "market"
     if limit_price:
-        limit_price = float(limit_price)
+        limit_price = round(float(limit_price), 2)
 
     ticket = TradeTicket(
         source_engine=suggestion.get("window", "manual"), # use window as engine proxy
@@ -672,7 +672,7 @@ def _stage_order_internal(supabase, analytics, user_id, ticket: TradeTicket, por
 
         # V3 Fields
         "requested_qty": ticket.quantity,
-        "requested_price": ticket.limit_price,
+        "requested_price": round(ticket.limit_price, 2) if ticket.limit_price else None,
         "side": side,
         "order_type": ticket.order_type,
         "quote_at_stage": quote,
@@ -1309,8 +1309,8 @@ def _commit_fill(supabase, analytics, user_id, order, fill_res, quote, portfolio
     update_payload = {
         "status": fill_res["status"],
         "filled_qty": new_total_filled_qty,
-        "avg_fill_price": new_avg_fill_price,
-        "fees_usd": fees_total,
+        "avg_fill_price": round(new_avg_fill_price, 2),
+        "fees_usd": round(fees_total, 2),
         "filled_at": now,
         "quote_at_fill": quote
     }

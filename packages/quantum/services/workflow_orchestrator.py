@@ -913,6 +913,50 @@ def build_midday_order_json(
     order_type = "multi_leg" if len(leg_orders) > 1 else "single_leg"
     limit_price = round(float(cand.get("suggested_entry") or 0.0), 2)
 
+    # Adjust limit price toward the natural (fill-friendly) side.
+    # suggested_entry is at the midpoint — rarely fills in illiquid options.
+    # aggression=0.0 → midpoint, 0.25 → 25% toward natural, 1.0 → at natural
+    aggression = float(os.environ.get("LIMIT_PRICE_AGGRESSION", "0.25"))
+    if aggression > 0 and legs:
+        # Compute combo bid and ask from individual legs
+        combo_bid = 0.0  # best price if we sell the whole spread
+        combo_ask = 0.0  # worst price if we buy the whole spread
+        has_quotes = True
+        for leg in legs:
+            leg_bid = float(leg.get("bid") or 0)
+            leg_ask = float(leg.get("ask") or 0)
+            if leg_bid <= 0 or leg_ask <= 0:
+                has_quotes = False
+                break
+            if leg.get("side") == "buy":
+                combo_ask += leg_ask   # buying at ask
+                combo_bid += leg_bid   # could buy at bid
+            else:
+                combo_ask -= leg_bid   # selling at bid (worst for us)
+                combo_bid -= leg_ask   # selling at ask (best for us)
+
+        if has_quotes:
+            combo_mid = limit_price  # already the midpoint
+            is_debit = combo_ask > 0  # positive = we pay (debit)
+
+            if is_debit:
+                # Debit spread: we're buying. Move toward ask to fill faster.
+                natural_price = abs(combo_ask)
+                adjusted = combo_mid + aggression * (natural_price - combo_mid)
+            else:
+                # Credit spread: we're selling. Move toward bid to fill faster.
+                natural_price = abs(combo_bid)
+                adjusted = combo_mid - aggression * (combo_mid - natural_price)
+
+            adjusted = round(max(adjusted, 0.01), 2)
+            if adjusted != limit_price:
+                print(
+                    f"[PRICING] {cand.get('symbol')}: limit {limit_price:.2f} → {adjusted:.2f} "
+                    f"(aggression={aggression}, {'debit' if is_debit else 'credit'})",
+                    flush=True,
+                )
+                limit_price = adjusted
+
     # PR3.1: Short-circuit if candidate is already blocked by upstream quality gate
     if cand.get("blocked_reason") == "marketdata_quality_gate":
         blocked_detail = cand.get("blocked_detail", "marketdata_quality_issues")

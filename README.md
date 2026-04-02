@@ -186,6 +186,10 @@ Generate encryption key: `python -c "from cryptography.fernet import Fernet; pri
 | `EXECUTION_MODE` | `"internal_paper"` | Order routing: `internal_paper`, `alpaca_paper`, `alpaca_live` |
 | `LIVE_ENABLED` | `""` | Must be `"true"` for `alpaca_live` mode |
 
+**Alpaca Options Level Requirements:**
+- **Paper account**: Level 3 enabled by default (supports spreads, iron condors, all multi-leg)
+- **Live account**: Must apply for Level 3 options approval before micro_live phase. Without Level 3, multi-leg orders (spreads, condors) will be rejected. Apply at: Alpaca Dashboard → Account → Options Trading Level
+
 ### Security
 
 | Variable | Default | Purpose |

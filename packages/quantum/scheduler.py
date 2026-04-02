@@ -52,6 +52,7 @@ SCHEDULES = [
     ("daily_progression_eval",      dict(hour=16, minute=0),  "/internal/tasks/progression/daily-eval", "tasks:daily_progression_eval", "Green day evaluation"),
     ("learning_ingest_eod",         dict(hour=16, minute=10), "/tasks/learning/ingest",            "tasks:learning_ingest",          "EOD learning ingest"),
     ("paper_learning_ingest",       dict(hour=16, minute=20), "/tasks/paper/learning-ingest",      "tasks:paper_learning_ingest",    "Paper outcomes → learning"),
+    ("policy_lab_eval",             dict(hour=16, minute=30), "/tasks/policy-lab/eval",             "tasks:policy_lab_eval",          "Evaluate cohort performance"),
 
     # Frequent
     ("alpaca_order_sync",           dict(minute="*/5", hour="9-16"), "/internal/tasks/alpaca/order-sync", "tasks:alpaca_order_sync", "Poll Alpaca for fills"),

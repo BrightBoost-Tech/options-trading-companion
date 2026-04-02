@@ -43,46 +43,51 @@ class PolicyConfig:
 
 # ── Default cohort configs ────────────────────────────────────────────
 
+# Small-account defaults ($500 baseline).
+# Tighter targets for faster capital rotation.
+# stop_loss_pct: fraction of entry cost (0.15 = -15%)
+# target_profit_pct: fraction of entry cost (0.25 = +25%)
+
 CONSERVATIVE = PolicyConfig(
     max_risk_pct_per_trade=0.015,
     risk_multiplier=0.8,
-    sizing_method="half_kelly",
+    sizing_method="budget_proportional",
     budget_cap_pct=0.25,
     max_suggestions_per_day=2,
-    min_score_threshold=80.0,
-    max_positions_open=6,
-    stop_loss_pct=1.5,
-    target_profit_pct=0.40,
+    min_score_threshold=70.0,
+    max_positions_open=2,
+    stop_loss_pct=0.15,
+    target_profit_pct=0.25,
+    max_dte_to_enter=45,
+    min_dte_to_exit=14,
+)
+
+NEUTRAL = PolicyConfig(
+    max_risk_pct_per_trade=0.025,
+    risk_multiplier=1.0,
+    sizing_method="budget_proportional",
+    budget_cap_pct=0.30,
+    max_suggestions_per_day=3,
+    min_score_threshold=50.0,
+    max_positions_open=3,
+    stop_loss_pct=0.20,
+    target_profit_pct=0.35,
     max_dte_to_enter=45,
     min_dte_to_exit=10,
 )
 
-NEUTRAL = PolicyConfig(
-    max_risk_pct_per_trade=0.03,
-    risk_multiplier=1.0,
-    sizing_method="budget_proportional",
-    budget_cap_pct=0.35,
-    max_suggestions_per_day=3,
-    min_score_threshold=60.0,
-    max_positions_open=8,
-    stop_loss_pct=2.0,
-    target_profit_pct=0.50,
-    max_dte_to_enter=60,
-    min_dte_to_exit=7,
-)
-
 AGGRESSIVE = PolicyConfig(
-    max_risk_pct_per_trade=0.05,
+    max_risk_pct_per_trade=0.035,
     risk_multiplier=1.2,
     sizing_method="budget_proportional",
-    budget_cap_pct=0.45,
-    max_suggestions_per_day=5,
-    min_score_threshold=40.0,
-    max_positions_open=12,
-    stop_loss_pct=2.5,
-    target_profit_pct=0.60,
-    max_dte_to_enter=60,
-    min_dte_to_exit=5,
+    budget_cap_pct=0.35,
+    max_suggestions_per_day=4,
+    min_score_threshold=30.0,
+    max_positions_open=4,
+    stop_loss_pct=0.30,
+    target_profit_pct=0.50,
+    max_dte_to_enter=45,
+    min_dte_to_exit=7,
 )
 
 DEFAULT_CONFIGS: Dict[str, PolicyConfig] = {

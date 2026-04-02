@@ -313,13 +313,16 @@ class PaperAutopilotService:
                 # Convert to ticket
                 ticket = _suggestion_to_ticket(suggestion)
 
+                # Use champion cohort portfolio if available, else default
+                champion_portfolio = self._get_champion_portfolio(user_id)
+
                 # Stage order
                 order_id = _stage_order_internal(
                     supabase,
                     analytics,
                     user_id,
                     ticket,
-                    portfolio_id_arg=None,
+                    portfolio_id_arg=champion_portfolio,
                     suggestion_id_override=sid
                 )
 
@@ -547,6 +550,22 @@ class PaperAutopilotService:
 
         positions.sort(key=sort_key)
         return positions
+
+    def _get_champion_portfolio(self, user_id: str) -> Optional[str]:
+        """Get portfolio_id of the champion cohort, or None for default."""
+        try:
+            res = self.client.table("policy_lab_cohorts") \
+                .select("portfolio_id") \
+                .eq("user_id", user_id) \
+                .eq("is_champion", True) \
+                .eq("is_active", True) \
+                .limit(1) \
+                .execute()
+            if res.data and res.data[0].get("portfolio_id"):
+                return res.data[0]["portfolio_id"]
+        except Exception:
+            pass
+        return None
 
     def _get_portfolio_budget(self, user_id: str) -> float:
         """Get deployable capital (net_liq or cash_balance) for risk-adjusted ranking."""

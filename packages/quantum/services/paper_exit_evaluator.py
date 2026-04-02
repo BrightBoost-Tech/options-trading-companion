@@ -614,20 +614,45 @@ class PaperExitEvaluator:
             return []
 
     def _resolve_position_cohort(self, position: Dict[str, Any]) -> Optional[str]:
-        """Resolve which cohort a position belongs to via its portfolio_id."""
+        """
+        Resolve which cohort a position belongs to.
+
+        Priority:
+        1. Direct portfolio_id → policy_lab_cohorts lookup
+        2. If no match, use the champion cohort (positions on default portfolio
+           should still use the active policy, not hardcoded defaults)
+        """
         portfolio_id = position.get("portfolio_id")
-        if not portfolio_id:
-            return None
-        try:
-            res = self.client.table("policy_lab_cohorts") \
-                .select("cohort_name") \
-                .eq("portfolio_id", portfolio_id) \
-                .limit(1) \
-                .execute()
-            if res.data:
-                return res.data[0]["cohort_name"]
-        except Exception:
-            pass
+        user_id = position.get("user_id")
+
+        # Try direct portfolio match first
+        if portfolio_id:
+            try:
+                res = self.client.table("policy_lab_cohorts") \
+                    .select("cohort_name") \
+                    .eq("portfolio_id", portfolio_id) \
+                    .limit(1) \
+                    .execute()
+                if res.data:
+                    return res.data[0]["cohort_name"]
+            except Exception:
+                pass
+
+        # Fallback: use champion cohort for positions on the default portfolio
+        if user_id:
+            try:
+                res = self.client.table("policy_lab_cohorts") \
+                    .select("cohort_name") \
+                    .eq("user_id", user_id) \
+                    .eq("is_champion", True) \
+                    .eq("is_active", True) \
+                    .limit(1) \
+                    .execute()
+                if res.data:
+                    return res.data[0]["cohort_name"]
+            except Exception:
+                pass
+
         return None
 
     def _close_position(

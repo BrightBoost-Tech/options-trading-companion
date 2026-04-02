@@ -157,6 +157,10 @@ def poll_pending_orders(
     orders = orders_res.data or []
 
     synced = 0
+    fills = 0
+    partials = 0
+    cancels = 0
+    unchanged = 0
     errors = []
 
     for order in orders:
@@ -193,6 +197,36 @@ def poll_pending_orders(
             supabase.table("paper_orders").update(update).eq("id", order_id).execute()
             synced += 1
 
+            # When order transitions to filled, trigger position creation
+            # via the orphan repair path in _process_orders_for_user.
+            if internal_status == "filled" and filled_qty > 0:
+                try:
+                    from packages.quantum.paper_endpoints import (
+                        _process_orders_for_user,
+                    )
+                    from packages.quantum.services.analytics_service import AnalyticsService
+
+                    analytics = AnalyticsService(supabase)
+                    repair_result = _process_orders_for_user(
+                        supabase, analytics, user_id
+                    )
+                    logger.info(
+                        f"[ALPACA_HANDLER] Fill committed: order={order_id} "
+                        f"repair_processed={repair_result.get('processed', 0)}"
+                    )
+                    fills += 1
+                except Exception as repair_err:
+                    logger.error(
+                        f"[ALPACA_HANDLER] Fill commit failed: order={order_id} "
+                        f"error={repair_err}"
+                    )
+            elif internal_status == "partial":
+                partials += 1
+            elif internal_status == "cancelled":
+                cancels += 1
+            else:
+                unchanged += 1
+
             logger.info(
                 f"[ALPACA_HANDLER] Synced: internal={order_id} "
                 f"alpaca_status={alpaca_status} → {internal_status} "
@@ -203,7 +237,12 @@ def poll_pending_orders(
             logger.error(f"[ALPACA_HANDLER] Poll failed: order={order_id} error={e}")
             errors.append({"order_id": order_id, "error": str(e)})
 
-    return {"synced": synced, "total": len(orders), "errors": errors}
+    return {
+        "synced": synced, "total_polled": len(orders),
+        "fills": fills, "partials": partials,
+        "cancels": cancels, "unchanged": unchanged,
+        "errors": errors,
+    }
 
 
 def reconcile_positions(

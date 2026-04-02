@@ -56,16 +56,34 @@ def run(payload: Dict[str, Any], ctx: Any = None) -> Dict[str, Any]:
 
             for uid in active_users:
                 try:
-                    # Sum realized PnL from positions closed today
+                    # Sum realized PnL from Alpaca-routed positions closed today.
+                    # Only count positions whose ENTRY order went through Alpaca
+                    # (execution_mode='alpaca_paper' AND alpaca_order_id IS NOT NULL).
+                    # Internal paper fills are excluded from green day calculation.
                     res = client.table("paper_positions") \
-                        .select("realized_pl") \
+                        .select("id, realized_pl") \
                         .eq("user_id", uid) \
                         .eq("status", "closed") \
                         .gte("closed_at", today_start) \
                         .lte("closed_at", today_end) \
                         .execute()
 
-                    closed_positions = res.data or []
+                    all_closed = res.data or []
+
+                    # Filter to Alpaca-only: check the entry order for each position
+                    alpaca_positions = []
+                    if all_closed:
+                        pos_ids = [p["id"] for p in all_closed]
+                        orders_res = client.table("paper_orders") \
+                            .select("position_id, execution_mode, alpaca_order_id") \
+                            .in_("position_id", pos_ids) \
+                            .eq("execution_mode", "alpaca_paper") \
+                            .not_.is_("alpaca_order_id", "null") \
+                            .execute()
+                        alpaca_pos_ids = {o["position_id"] for o in (orders_res.data or [])}
+                        alpaca_positions = [p for p in all_closed if p["id"] in alpaca_pos_ids]
+
+                    closed_positions = alpaca_positions
                     if not closed_positions:
                         results.append({
                             "user_id": uid[:8],
@@ -88,7 +106,9 @@ def run(payload: Dict[str, Any], ctx: Any = None) -> Dict[str, Any]:
                         "user_id": uid[:8],
                         "status": "green" if realized_pnl > 0 else "red",
                         "realized_pnl": round(realized_pnl, 2),
-                        "closed_positions": len(closed_positions),
+                        "alpaca_positions": len(closed_positions),
+                        "total_closed": len(all_closed),
+                        "internal_excluded": len(all_closed) - len(closed_positions),
                         "promoted": promoted,
                         "green_days": result["state"].get("alpaca_paper_green_days"),
                     })

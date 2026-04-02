@@ -102,26 +102,13 @@ def submit_and_track(
     except Exception as e:
         error_str = str(e)
         num_legs = len((order.get("order_json") or {}).get("legs", []))
-
-        if num_legs >= 4:
-            # Iron condor / 4-leg orders may not be supported on Alpaca paper.
-            # Mark as unsupported_strategy instead of submission_failed so the
-            # system doesn't keep retrying and the order falls back to internal fill.
-            logger.warning(
-                f"[ALPACA_HANDLER] {num_legs}-leg order rejected: order={order_id} "
-                f"error={error_str}. Marking as unsupported — will use internal fill."
-            )
-            supabase.table("paper_orders").update({
-                "broker_status": "unsupported_strategy",
-                "broker_response": {"error": error_str, "legs": num_legs},
-                "execution_mode": "internal_paper",  # Revert to internal fill
-            }).eq("id", order_id).execute()
-            return {"status": "unsupported_strategy", "error": error_str, "legs": num_legs}
-
-        logger.error(f"[ALPACA_HANDLER] Submit failed: order={order_id} error={error_str}")
+        logger.error(
+            f"[ALPACA_HANDLER] Submit failed: order={order_id} "
+            f"legs={num_legs} error={error_str}"
+        )
         supabase.table("paper_orders").update({
             "broker_status": "submission_failed",
-            "broker_response": {"error": error_str},
+            "broker_response": {"error": error_str, "legs": num_legs},
         }).eq("id", order_id).execute()
         return {"status": "submission_failed", "error": error_str}
 

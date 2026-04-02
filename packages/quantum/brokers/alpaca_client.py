@@ -171,6 +171,7 @@ class AlpacaClient:
             TimeInForce,
             OrderType,
             OrderClass,
+            PositionIntent,
         )
 
         legs = order_request.get("legs", [])
@@ -181,15 +182,18 @@ class AlpacaClient:
         if not legs:
             raise AlpacaOrderError("Order must have at least one leg")
 
-        # Build typed leg requests
+        # Build typed leg requests with position_intent (required for mleg)
         alpaca_legs = []
         for leg in legs:
             leg_symbol = polygon_to_alpaca(leg["symbol"])
-            side = OrderSide.BUY if leg["side"].lower() in ("buy", "buy_to_open") else OrderSide.SELL
+            is_buy = leg["side"].lower() in ("buy", "buy_to_open")
+            side = OrderSide.BUY if is_buy else OrderSide.SELL
+            intent = PositionIntent.BUY_TO_OPEN if is_buy else PositionIntent.SELL_TO_OPEN
             alpaca_legs.append(OptionLegRequest(
                 symbol=leg_symbol,
                 side=side,
                 ratio_qty=int(leg.get("qty", 1)),
+                position_intent=intent,
             ))
 
         # Build request — qty is always required by the SDK validator.

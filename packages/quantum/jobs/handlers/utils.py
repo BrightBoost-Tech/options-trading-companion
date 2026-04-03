@@ -16,7 +16,20 @@ def get_admin_client() -> Client:
     return create_client(url, key)
 
 def get_active_user_ids(client: Client) -> List[str]:
-    """Helper to get list of active user IDs."""
+    """
+    Get list of active user IDs, restricted by TRADING_USER_IDS when set.
+
+    TRADING_USER_IDS: comma-separated list of user UUIDs that are allowed
+    to trade. When set, only these users are returned regardless of what's
+    in user_settings. This prevents other users from consuming resources.
+    """
+    import os
+    allowed = os.environ.get("TRADING_USER_IDS", "").strip()
+    if allowed:
+        user_ids = [uid.strip() for uid in allowed.split(",") if uid.strip()]
+        if user_ids:
+            return user_ids
+
     try:
         res = client.table("user_settings").select("user_id").execute()
         return [r["user_id"] for r in res.data or []]

@@ -532,6 +532,13 @@ class PaperAutopilotService:
         except Exception as e:
             logger.warning(f"policy_lab_sweep_error: {e}")
 
+        print(
+            f"[AUTO_EXEC] SUMMARY: user={user_id[:8]} "
+            f"pending_total={len(all_pending)} "
+            f"executed={len(all_executed)} errors={len(all_errors)} "
+            f"processed={total_processed} sweep={sweep_processed}",
+            flush=True,
+        )
         logger.info(
             f"policy_lab_execute_summary: user_id={user_id} "
             f"executed={len(all_executed)} errors={len(all_errors)} "

@@ -71,6 +71,21 @@ def run(payload: Dict[str, Any], ctx: Any = None) -> Dict[str, Any]:
 
             for uid in active_users:
                 try:
+                    # 0. Dismiss stale pending suggestions from previous days
+                    today_str = datetime.now(timezone.utc).date().isoformat()
+                    try:
+                        stale_res = client.table("trade_suggestions") \
+                            .update({"status": "dismissed"}) \
+                            .eq("user_id", uid) \
+                            .eq("status", "pending") \
+                            .lt("cycle_date", today_str) \
+                            .execute()
+                        dismissed = len(stale_res.data or [])
+                        if dismissed > 0:
+                            notes.append(f"Dismissed {dismissed} stale suggestions for {uid[:8]}...")
+                    except Exception as e:
+                        notes.append(f"Stale cleanup error for {uid[:8]}: {e}")
+
                     # 1. Ensure default strategy exists
                     ensure_default_strategy_exists(uid, strategy_name, client)
 

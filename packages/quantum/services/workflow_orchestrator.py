@@ -1806,7 +1806,16 @@ async def run_midday_cycle(supabase: Client, user_id: str):
     quality_gate_mode = os.getenv("MIDDAY_QUALITY_GATE_MODE", "soft").lower()
     trust_scanner_quotes = os.getenv("MIDDAY_TRUST_SCANNER_QUOTES", "1").lower() in ("1", "true", "yes")
 
-    print(f"Running midday cycle for user {user_id}")
+    # Set progression phase so strategy selector can exclude phase-inappropriate strategies
+    try:
+        from packages.quantum.services.progression_service import ProgressionService
+        _prog = ProgressionService(supabase)
+        _state = _prog.get_state(user_id)
+        os.environ["CURRENT_PROGRESSION_PHASE"] = _state.get("current_phase", "alpaca_paper")
+    except Exception:
+        os.environ.setdefault("CURRENT_PROGRESSION_PHASE", "alpaca_paper")
+
+    print(f"Running midday cycle for user {user_id} (phase={os.environ.get('CURRENT_PROGRESSION_PHASE')})")
     analytics_service = AnalyticsService(supabase)
     print("\n=== MIDDAY DEBUG ===")
 

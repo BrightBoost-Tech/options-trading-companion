@@ -369,9 +369,22 @@ class StrategySelector:
                      {"side": "buy", "type": "call", "delta_target": 0.10}],
                 ))
 
-        # Filter by policy and cap at 3
+        # Phase-aware strategy exclusion
+        import os
+        import logging
+        _phase = os.environ.get("CURRENT_PROGRESSION_PHASE", "alpaca_paper")
+        _phase_excluded = set()
+        if _phase == "alpaca_paper":
+            _phase_excluded.add("IRON_CONDOR")
+
+        # Filter by policy, phase, and cap at 3
         candidates = []
         for strat, rationale, legs in pool:
+            if strat in _phase_excluded:
+                logging.getLogger(__name__).info(
+                    f"[SCANNER_MULTI] {strat} excluded (phase={_phase})"
+                )
+                continue
             if policy.is_allowed(strat) and len(candidates) < 3:
                 candidates.append({
                     "ticker": ticker,

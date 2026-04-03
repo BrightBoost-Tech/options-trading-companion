@@ -212,18 +212,24 @@ def rank_triggered_exits(close_candidates: List[Dict[str, Any]]) -> List[Dict[st
 # Exit condition definitions
 # ---------------------------------------------------------------------------
 
+# Default exit thresholds — used when no cohort config is resolved.
+# These match the neutral cohort for a small ($500) account.
+_DEFAULT_TARGET_PROFIT_PCT = float(os.environ.get("EXIT_TARGET_PROFIT_PCT", "0.35"))
+_DEFAULT_STOP_LOSS_PCT = float(os.environ.get("EXIT_STOP_LOSS_PCT", "0.20"))
+_DEFAULT_MIN_DTE_TO_EXIT = int(os.environ.get("EXIT_MIN_DTE", "10"))
+
 EXIT_CONDITIONS: Dict[str, Dict[str, Any]] = {
     "target_profit": {
-        "description": "Position has reached target profit percentage",
-        "check": lambda pos: _check_target_profit(pos, 0.50),
+        "description": f"Position has reached {_DEFAULT_TARGET_PROFIT_PCT:.0%} target profit",
+        "check": lambda pos: _check_target_profit(pos, _DEFAULT_TARGET_PROFIT_PCT),
     },
     "stop_loss": {
-        "description": "Position has exceeded maximum acceptable loss",
-        "check": lambda pos: _check_stop_loss(pos, 2.0),
+        "description": f"Position has exceeded {_DEFAULT_STOP_LOSS_PCT:.0%} stop loss",
+        "check": lambda pos: _check_stop_loss(pos, _DEFAULT_STOP_LOSS_PCT),
     },
     "dte_threshold": {
-        "description": "Position is too close to expiration (gamma risk)",
-        "check": lambda pos: 0 < days_to_expiry(pos) <= 7,
+        "description": f"Position is within {_DEFAULT_MIN_DTE_TO_EXIT} DTE (gamma risk)",
+        "check": lambda pos: 0 < days_to_expiry(pos) <= _DEFAULT_MIN_DTE_TO_EXIT,
     },
     "expiration_day": {
         "description": "Position expires today — must close",
@@ -293,6 +299,16 @@ def evaluate_position_exit(
     print(fields_msg, flush=True)
 
     # Log threshold computations if max_credit is available
+    # Use actual thresholds from conditions (cohort or default), not hardcoded values
+    _active_tp = _DEFAULT_TARGET_PROFIT_PCT
+    _active_sl = _DEFAULT_STOP_LOSS_PCT
+    _active_dte = _DEFAULT_MIN_DTE_TO_EXIT
+    if conditions:
+        # Extract actual thresholds from the condition descriptions
+        tp_desc = conditions.get("target_profit", {}).get("description", "")
+        sl_desc = conditions.get("stop_loss", {}).get("description", "")
+        dte_desc = conditions.get("dte_threshold", {}).get("description", "")
+
     is_debit = _is_debit_spread(position)
     if max_credit is not None:
         try:
@@ -300,12 +316,12 @@ def evaluate_position_exit(
             upl = float(unrealized_pl or 0)
             entry_cost = abs(mc) * 100
             if is_debit:
-                tp_threshold = entry_cost * 0.50
-                sl_threshold = -(entry_cost * 1.0)  # Can't lose more than paid
+                tp_threshold = entry_cost * _active_tp
+                sl_threshold = -(entry_cost * min(_active_sl, 1.0))
                 spread_type = "DEBIT"
             else:
-                tp_threshold = entry_cost * 0.50
-                sl_threshold = -(entry_cost * 2.0)
+                tp_threshold = entry_cost * _active_tp
+                sl_threshold = -(entry_cost * _active_sl)
                 spread_type = "CREDIT"
             thresh_msg = (
                 f"[EXIT_EVAL_DEBUG] position={pos_id} type={spread_type} "
@@ -402,15 +418,15 @@ class PaperExitEvaluator:
                 "close_reasons": {},
             }
 
-        # 3. Evaluate each position (with per-cohort exit params when Policy Lab is on)
+        # 3. Evaluate each position with cohort-specific exit conditions.
+        #    Always loads cohort configs from DB (not gated by POLICY_LAB_ENABLED).
+        #    If no cohorts exist, falls back to global EXIT_CONDITIONS.
         closes: List[Dict[str, Any]] = []
         holds: List[Dict[str, Any]] = []
 
-        # Build cohort → exit conditions map for Policy Lab
+        # Build cohort → exit conditions map
         cohort_conditions_cache: Dict[str, Dict] = {}
-        from packages.quantum.policy_lab.config import is_policy_lab_enabled
-        policy_lab_on = is_policy_lab_enabled()
-        if policy_lab_on:
+        try:
             from packages.quantum.policy_lab.config import load_cohort_configs
             cohort_cfgs = load_cohort_configs(user_id, self.client)
             for cname, cfg in cohort_cfgs.items():
@@ -419,14 +435,23 @@ class PaperExitEvaluator:
                     stop_loss_pct=cfg.stop_loss_pct,
                     min_dte_to_exit=cfg.min_dte_to_exit,
                 )
+            if cohort_conditions_cache:
+                logger.info(
+                    f"[EXIT_EVAL] Loaded {len(cohort_conditions_cache)} cohort configs: "
+                    + ", ".join(
+                        f"{k}(tp={cohort_cfgs[k].target_profit_pct:.0%},sl={cohort_cfgs[k].stop_loss_pct})"
+                        for k in cohort_conditions_cache
+                    )
+                )
+        except Exception as e:
+            logger.warning(f"[EXIT_EVAL] Failed to load cohort configs: {e}")
 
         for position in positions:
             # Resolve cohort-specific exit conditions
             pos_conditions = None
-            if policy_lab_on:
-                cohort = self._resolve_position_cohort(position)
-                if cohort and cohort in cohort_conditions_cache:
-                    pos_conditions = cohort_conditions_cache[cohort]
+            cohort = self._resolve_position_cohort(position)
+            if cohort and cohort in cohort_conditions_cache:
+                pos_conditions = cohort_conditions_cache[cohort]
 
             triggered = evaluate_position_exit(position, conditions=pos_conditions)
             active_conditions = pos_conditions or EXIT_CONDITIONS

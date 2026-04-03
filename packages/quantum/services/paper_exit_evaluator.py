@@ -768,12 +768,34 @@ class PaperExitEvaluator:
 
         now = datetime.now(timezone.utc).isoformat()
 
-        # --- Route exit through Alpaca when in broker mode ---
+        # --- Route exit based on how the position was OPENED ---
+        # If entry went through Alpaca → close through Alpaca
+        # If entry was internal fill → close through internal fill
+        # This prevents sending close orders to Alpaca for positions it doesn't know about
         from packages.quantum.brokers.execution_router import get_execution_mode, ExecutionMode
         exec_mode = get_execution_mode()
         dry_run = os.environ.get("ALPACA_DRY_RUN", "0") == "1"
 
+        position_is_alpaca = False
         if exec_mode in (ExecutionMode.ALPACA_PAPER, ExecutionMode.ALPACA_LIVE):
+            try:
+                entry_order = supabase.table("paper_orders") \
+                    .select("alpaca_order_id, execution_mode") \
+                    .eq("position_id", position_id) \
+                    .not_.is_("alpaca_order_id", "null") \
+                    .limit(1) \
+                    .execute()
+                position_is_alpaca = bool(entry_order.data)
+            except Exception:
+                position_is_alpaca = False
+
+            if not position_is_alpaca:
+                logger.info(
+                    f"[EXIT_EVAL] Internal position {position_id[:8]} "
+                    f"({position['symbol']}) — routing close through internal fill"
+                )
+
+        if position_is_alpaca:
             if dry_run:
                 # Log what we WOULD submit, but hold the position open
                 from packages.quantum.brokers.alpaca_order_handler import build_alpaca_order_request

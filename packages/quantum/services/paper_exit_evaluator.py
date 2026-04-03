@@ -688,10 +688,6 @@ class PaperExitEvaluator:
     ) -> Dict[str, Any]:
         """
         Close a single position using the position's current_mark as exit price.
-
-        Uses current_mark (set by the most recent MTM run during market hours)
-        instead of fetching a live Polygon quote, which would return stale
-        after-hours data and corrupt realized P&L.
         """
         from packages.quantum.paper_endpoints import (
             _stage_order_internal,
@@ -709,7 +705,39 @@ class PaperExitEvaluator:
         supabase = self.client
         analytics = get_analytics_service()
 
-        # Fetch position
+        # ── HARD ROUTING CHECK (cannot be bypassed) ──────────────────
+        # Determine how the position was opened BEFORE doing anything else.
+        # This decision controls ALL downstream routing.
+        position_is_alpaca = False
+        entry_order_id = "none"
+        try:
+            entry_res = supabase.table("paper_orders") \
+                .select("id, alpaca_order_id") \
+                .eq("position_id", position_id) \
+                .order("created_at", desc=False) \
+                .limit(1) \
+                .execute()
+            if entry_res.data:
+                entry_order_id = entry_res.data[0]["id"][:8]
+                position_is_alpaca = entry_res.data[0].get("alpaca_order_id") is not None
+        except Exception as e:
+            entry_order_id = f"error:{e}"
+
+        print(
+            f"[EXIT_ROUTING] position={position_id[:8]} "
+            f"entry_order={entry_order_id} "
+            f"has_alpaca_entry={position_is_alpaca} "
+            f"→ {'ALPACA' if position_is_alpaca else 'INTERNAL'}",
+            flush=True,
+        )
+        logger.info(
+            f"[EXIT_ROUTING] position={position_id[:8]} "
+            f"entry_order={entry_order_id} "
+            f"has_alpaca_entry={position_is_alpaca} "
+            f"→ {'ALPACA' if position_is_alpaca else 'INTERNAL'}"
+        )
+
+        # ── Fetch position ───────────────────────────────────────────
         pos_res = supabase.table("paper_positions") \
             .select("*") \
             .eq("id", position_id) \
@@ -717,83 +745,66 @@ class PaperExitEvaluator:
             .execute()
         position = pos_res.data
 
-        # Resolve OCC symbol
-        occ_symbol = PaperAutopilotService._resolve_occ_symbol(position, supabase)
-
         qty = float(position["quantity"])
         side = "sell" if qty > 0 else "buy"
         abs_qty = abs(qty)
         multiplier = 100.0
 
-        # Use current_mark from the most recent MTM run as exit price.
-        # Falls back to avg_entry_price (break-even close) if no mark exists.
         exit_price = float(position.get("current_mark") or position.get("avg_entry_price") or 0)
         entry_price = float(position.get("avg_entry_price") or 0)
 
-        # Carry strike/expiry/type from the position's original leg so
-        # order validation doesn't reject the closing order.
+        # ── Build close ticket with ALL legs ─────────────────────────
         orig_legs = position.get("legs") or []
-        orig_leg = orig_legs[0] if orig_legs else {}
 
-        ticket = TradeTicket(
-            symbol=position["symbol"],
-            quantity=abs_qty,
-            order_type="limit",
-            limit_price=round(exit_price, 2),  # current_mark — rounded for Alpaca
-            strategy_type="custom",
-            source_engine="paper_exit_evaluator",
-            legs=[{
+        if len(orig_legs) >= 2:
+            # Multi-leg: build close legs from all original legs (invert sides)
+            close_legs = []
+            for leg in orig_legs:
+                leg_side = "sell" if leg.get("side") == "buy" else "buy"
+                close_legs.append({
+                    "symbol": leg.get("symbol") or leg.get("occ_symbol") or "",
+                    "action": leg_side,
+                    "quantity": abs_qty,
+                    "type": leg.get("type", "call"),
+                    "strike": leg.get("strike"),
+                    "expiry": leg.get("expiry"),
+                })
+        else:
+            # Single-leg or no legs: use OCC symbol resolution
+            occ_symbol = PaperAutopilotService._resolve_occ_symbol(position, supabase)
+            orig_leg = orig_legs[0] if orig_legs else {}
+            close_legs = [{
                 "symbol": occ_symbol,
                 "action": side,
                 "quantity": abs_qty,
                 "type": orig_leg.get("type", "call"),
                 "strike": orig_leg.get("strike"),
                 "expiry": orig_leg.get("expiry"),
-            }],
+            }]
+
+        ticket = TradeTicket(
+            symbol=position["symbol"],
+            quantity=abs_qty,
+            order_type="limit",
+            limit_price=round(exit_price, 2),
+            strategy_type="custom",
+            source_engine="paper_exit_evaluator",
+            legs=close_legs,
         )
 
         if position.get("suggestion_id"):
             ticket.source_ref_id = position["suggestion_id"]
 
-        # --- Determine routing BEFORE staging ---
-        # Check if the position was opened through Alpaca by looking at entry orders.
-        # _stage_order_internal submits to Alpaca based on global EXECUTION_MODE,
-        # but we must NOT send close orders to Alpaca for internally-filled positions.
-        from packages.quantum.brokers.execution_router import get_execution_mode, ExecutionMode
-        exec_mode = get_execution_mode()
+        # ── Stage and route ──────────────────────────────────────────
+        # For internal positions: force internal_paper mode during staging
+        # so _stage_order_internal does NOT submit to Alpaca.
         dry_run = os.environ.get("ALPACA_DRY_RUN", "0") == "1"
+        _saved_mode = os.environ.get("EXECUTION_MODE", "")
 
-        position_is_alpaca = False
-        entry_id = "n/a"
-        if exec_mode in (ExecutionMode.ALPACA_PAPER, ExecutionMode.ALPACA_LIVE):
-            try:
-                entry_order_res = supabase.table("paper_orders") \
-                    .select("id, alpaca_order_id, execution_mode") \
-                    .eq("position_id", position_id) \
-                    .not_.is_("alpaca_order_id", "null") \
-                    .limit(1) \
-                    .execute()
-                position_is_alpaca = bool(entry_order_res.data)
-                entry_id = entry_order_res.data[0]["id"][:8] if entry_order_res.data else "none"
-            except Exception as lookup_err:
-                position_is_alpaca = False
-                entry_id = f"error:{lookup_err}"
-
-        logger.info(
-            f"[EXIT_ROUTING] position={position_id[:8]} symbol={position['symbol']} "
-            f"has_alpaca_entry={position_is_alpaca} entry_order={entry_id} "
-            f"→ routing to {'alpaca' if position_is_alpaca else 'internal'}"
-        )
-
-        # Override EXECUTION_MODE for internal positions so _stage_order_internal
-        # does NOT submit to Alpaca. We temporarily set the env var.
-        _original_exec_mode = None
-        if not position_is_alpaca and exec_mode in (ExecutionMode.ALPACA_PAPER, ExecutionMode.ALPACA_LIVE):
-            _original_exec_mode = os.environ.get("EXECUTION_MODE")
+        if not position_is_alpaca:
             os.environ["EXECUTION_MODE"] = "internal_paper"
 
         try:
-            # Stage the order
             order_id = _stage_order_internal(
                 supabase,
                 analytics,
@@ -804,9 +815,7 @@ class PaperExitEvaluator:
                 trace_id_override=position.get("trace_id"),
             )
         finally:
-            # Restore original EXECUTION_MODE
-            if _original_exec_mode is not None:
-                os.environ["EXECUTION_MODE"] = _original_exec_mode
+            os.environ["EXECUTION_MODE"] = _saved_mode
 
         now = datetime.now(timezone.utc).isoformat()
 

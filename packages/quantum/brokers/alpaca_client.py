@@ -183,6 +183,8 @@ class AlpacaClient:
             raise AlpacaOrderError("Order must have at least one leg")
 
         # Build typed leg requests with position_intent (required for mleg)
+        # ratio_qty is always 1 per leg — contract count goes on parent qty.
+        # Alpaca requires leg ratios to be relatively prime (GCD must be 1).
         alpaca_legs = []
         for leg in legs:
             leg_symbol = polygon_to_alpaca(leg["symbol"])
@@ -192,14 +194,12 @@ class AlpacaClient:
             alpaca_legs.append(OptionLegRequest(
                 symbol=leg_symbol,
                 side=side,
-                ratio_qty=int(leg.get("qty", 1)),
+                ratio_qty=1,
                 position_intent=intent,
             ))
 
-        # Build request — qty is always required by the SDK validator.
-        # For multi-leg spreads qty = number of spreads (leg ratio_qty).
-        # For single-leg, qty = contract count from that leg.
-        qty = float(alpaca_legs[0].ratio_qty or 1)
+        # Parent qty = number of contracts (spreads). Leg ratio_qty is always 1.
+        qty = float(order_request.get("qty") or order_request.get("quantity") or legs[0].get("qty", 1))
         is_multi = len(legs) >= 2
         # Options must always be limit orders — Alpaca rejects market orders
         # outside market hours.

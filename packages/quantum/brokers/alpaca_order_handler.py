@@ -37,7 +37,7 @@ def build_alpaca_order_request(order: Dict[str, Any]) -> Dict[str, Any]:
         alpaca_legs.append({
             "symbol": polygon_to_alpaca(leg_symbol),
             "side": leg_side,
-            "qty": int(leg.get("qty") or leg.get("ratio_qty") or qty),
+            "qty": 1,  # Always 1 — contract count goes on parent order qty
         })
 
     # Options must always be limit orders — Alpaca rejects market orders
@@ -51,6 +51,7 @@ def build_alpaca_order_request(order: Dict[str, Any]) -> Dict[str, Any]:
     return {
         "symbol": order_json.get("symbol") or order.get("symbol"),
         "legs": alpaca_legs,
+        "qty": qty,  # Contract count on parent order, not on legs
         "order_type": "limit",
         "limit_price": limit_price,
         "time_in_force": "day",

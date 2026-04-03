@@ -940,12 +940,14 @@ def build_midday_order_json(
             is_debit = combo_ask > 0  # positive = we pay (debit)
 
             if is_debit:
-                # Debit spread: we're buying. Move toward ask to fill faster.
+                # Debit spread: we're buying. Pay more to fill faster.
+                # combo_ask = worst case (most we'd pay). Move mid toward it.
                 natural_price = abs(combo_ask)
                 adjusted = combo_mid + aggression * (natural_price - combo_mid)
             else:
-                # Credit spread: we're selling. Move toward bid to fill faster.
-                natural_price = abs(combo_bid)
+                # Credit spread: we're selling. Accept less credit to fill faster.
+                # combo_ask = worst case (least credit we'd receive). Move mid toward it.
+                natural_price = abs(combo_ask)
                 adjusted = combo_mid - aggression * (combo_mid - natural_price)
 
             adjusted = round(max(adjusted, 0.01), 2)

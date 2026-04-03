@@ -755,45 +755,60 @@ class PaperExitEvaluator:
         if position.get("suggestion_id"):
             ticket.source_ref_id = position["suggestion_id"]
 
-        # Stage the order for audit trail
-        order_id = _stage_order_internal(
-            supabase,
-            analytics,
-            user_id,
-            ticket,
-            position["portfolio_id"],
-            position_id=position_id,
-            trace_id_override=position.get("trace_id"),
-        )
-
-        now = datetime.now(timezone.utc).isoformat()
-
-        # --- Route exit based on how the position was OPENED ---
-        # If entry went through Alpaca → close through Alpaca
-        # If entry was internal fill → close through internal fill
-        # This prevents sending close orders to Alpaca for positions it doesn't know about
+        # --- Determine routing BEFORE staging ---
+        # Check if the position was opened through Alpaca by looking at entry orders.
+        # _stage_order_internal submits to Alpaca based on global EXECUTION_MODE,
+        # but we must NOT send close orders to Alpaca for internally-filled positions.
         from packages.quantum.brokers.execution_router import get_execution_mode, ExecutionMode
         exec_mode = get_execution_mode()
         dry_run = os.environ.get("ALPACA_DRY_RUN", "0") == "1"
 
         position_is_alpaca = False
+        entry_id = "n/a"
         if exec_mode in (ExecutionMode.ALPACA_PAPER, ExecutionMode.ALPACA_LIVE):
             try:
-                entry_order = supabase.table("paper_orders") \
-                    .select("alpaca_order_id, execution_mode") \
+                entry_order_res = supabase.table("paper_orders") \
+                    .select("id, alpaca_order_id, execution_mode") \
                     .eq("position_id", position_id) \
                     .not_.is_("alpaca_order_id", "null") \
                     .limit(1) \
                     .execute()
-                position_is_alpaca = bool(entry_order.data)
-            except Exception:
+                position_is_alpaca = bool(entry_order_res.data)
+                entry_id = entry_order_res.data[0]["id"][:8] if entry_order_res.data else "none"
+            except Exception as lookup_err:
                 position_is_alpaca = False
+                entry_id = f"error:{lookup_err}"
 
-            if not position_is_alpaca:
-                logger.info(
-                    f"[EXIT_EVAL] Internal position {position_id[:8]} "
-                    f"({position['symbol']}) — routing close through internal fill"
-                )
+        logger.info(
+            f"[EXIT_ROUTING] position={position_id[:8]} symbol={position['symbol']} "
+            f"has_alpaca_entry={position_is_alpaca} entry_order={entry_id} "
+            f"→ routing to {'alpaca' if position_is_alpaca else 'internal'}"
+        )
+
+        # Override EXECUTION_MODE for internal positions so _stage_order_internal
+        # does NOT submit to Alpaca. We temporarily set the env var.
+        _original_exec_mode = None
+        if not position_is_alpaca and exec_mode in (ExecutionMode.ALPACA_PAPER, ExecutionMode.ALPACA_LIVE):
+            _original_exec_mode = os.environ.get("EXECUTION_MODE")
+            os.environ["EXECUTION_MODE"] = "internal_paper"
+
+        try:
+            # Stage the order
+            order_id = _stage_order_internal(
+                supabase,
+                analytics,
+                user_id,
+                ticket,
+                position["portfolio_id"],
+                position_id=position_id,
+                trace_id_override=position.get("trace_id"),
+            )
+        finally:
+            # Restore original EXECUTION_MODE
+            if _original_exec_mode is not None:
+                os.environ["EXECUTION_MODE"] = _original_exec_mode
+
+        now = datetime.now(timezone.utc).isoformat()
 
         if position_is_alpaca:
             if dry_run:

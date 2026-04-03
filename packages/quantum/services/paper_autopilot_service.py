@@ -428,10 +428,38 @@ class PaperAutopilotService:
         all_errors = []
         total_processed = 0
 
+        # Debug: also query ALL pending suggestions regardless of cohort to see what exists
+        all_pending_res = supabase.table(TRADE_SUGGESTIONS_TABLE) \
+            .select("id, ticker, cohort_name, cycle_date, status, ev") \
+            .eq("user_id", user_id) \
+            .eq("status", "pending") \
+            .execute()
+        all_pending = all_pending_res.data or []
+        print(
+            f"[AUTO_EXEC] All pending suggestions: {len(all_pending)} total, "
+            f"cycle_dates={set(s.get('cycle_date') for s in all_pending)}, "
+            f"cohorts={set(s.get('cohort_name') for s in all_pending)}, "
+            f"today_str={today_str}",
+            flush=True,
+        )
+        for s in all_pending[:10]:
+            print(
+                f"[AUTO_EXEC]   id={s['id'][:8]} ticker={s.get('ticker')} "
+                f"cohort={s.get('cohort_name')} cycle_date={s.get('cycle_date')} "
+                f"ev={s.get('ev')}",
+                flush=True,
+            )
+
+        print(
+            f"[AUTO_EXEC] Cohort configs: {list(configs.keys())}, "
+            f"portfolios: {list(portfolios.keys())}",
+            flush=True,
+        )
+
         for cohort_name, config in configs.items():
             portfolio_id = portfolios.get(cohort_name)
             if not portfolio_id:
-                logger.warning(f"policy_lab_execute: no portfolio for cohort={cohort_name}")
+                print(f"[AUTO_EXEC] SKIP cohort={cohort_name}: no portfolio", flush=True)
                 continue
 
             # Fetch this cohort's pending suggestions
@@ -447,14 +475,22 @@ class PaperAutopilotService:
                 .execute()
             suggestions = res.data or []
 
+            print(
+                f"[AUTO_EXEC] cohort={cohort_name}: query returned {len(suggestions)} "
+                f"(filter: cohort_name={cohort_name}, cycle_date={today_str}, status=pending)",
+                flush=True,
+            )
+
             # Deduplicate
             already = self.get_already_executed_suggestion_ids_today(user_id)
 
             for s in suggestions:
                 sid = s.get("id")
                 if sid in already:
+                    print(f"[AUTO_EXEC] SKIP {s.get('ticker')}/{sid[:8]}: already executed today", flush=True)
                     continue
                 ticker = s.get("ticker") or s.get("symbol") or "?"
+                print(f"[AUTO_EXEC] EXECUTING {ticker}/{sid[:8]} cohort={cohort_name}", flush=True)
                 try:
                     ticket = _suggestion_to_ticket(s)
                     order_id = _stage_order_internal(

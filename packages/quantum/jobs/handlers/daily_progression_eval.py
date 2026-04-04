@@ -70,18 +70,32 @@ def run(payload: Dict[str, Any], ctx: Any = None) -> Dict[str, Any]:
 
                     all_closed = res.data or []
 
-                    # Filter to Alpaca-only: check the entry order for each position
+                    # Filter to Alpaca-only: check the ENTRY (earliest) order per position.
+                    # Exit orders also have position_id and may have execution_mode='alpaca_paper'
+                    # from the global env var, even when the entry was internal.
                     alpaca_positions = []
                     if all_closed:
-                        pos_ids = [p["id"] for p in all_closed]
-                        orders_res = client.table("paper_orders") \
-                            .select("position_id, execution_mode, alpaca_order_id") \
-                            .in_("position_id", pos_ids) \
-                            .eq("execution_mode", "alpaca_paper") \
-                            .not_.is_("alpaca_order_id", "null") \
-                            .execute()
-                        alpaca_pos_ids = {o["position_id"] for o in (orders_res.data or [])}
+                        alpaca_pos_ids = set()
+                        for pos in all_closed:
+                            try:
+                                entry_res = client.table("paper_orders") \
+                                    .select("alpaca_order_id") \
+                                    .eq("position_id", pos["id"]) \
+                                    .order("created_at", desc=False) \
+                                    .limit(1) \
+                                    .execute()
+                                if entry_res.data and entry_res.data[0].get("alpaca_order_id"):
+                                    alpaca_pos_ids.add(pos["id"])
+                            except Exception:
+                                pass
                         alpaca_positions = [p for p in all_closed if p["id"] in alpaca_pos_ids]
+
+                    print(
+                        f"[PROGRESSION] user={uid[:8]}: "
+                        f"total_closed={len(all_closed)} alpaca_entries={len(alpaca_positions)} "
+                        f"internal_excluded={len(all_closed) - len(alpaca_positions)}",
+                        flush=True,
+                    )
 
                     closed_positions = alpaca_positions
                     if not closed_positions:

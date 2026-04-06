@@ -1,4 +1,4 @@
-# Options Trading Companion — Project Context
+﻿# Options Trading Companion â€” Project Context
 # Loaded by Claude Code on EVERY turn. Keep this current.
 
 ---
@@ -7,17 +7,17 @@
 
 - **Repo:** BrightBoost-Tech/options-trading-companion
 - **Owner User ID:** 75ee12ad-b119-4f32-aeea-19b4ef55d587
-- **Stack:** Python/FastAPI backend (`packages/quantum`) · Next.js frontend · Supabase Postgres · Railway deploy · GitHub Actions cron · Polygon.io market data · Alpaca broker API
+- **Stack:** Python/FastAPI backend (`packages/quantum`) Â· Next.js frontend Â· Supabase Postgres Â· Railway deploy Â· GitHub Actions cron Â· Polygon.io market data Â· Alpaca broker API
 
 ---
 
 ## Current Phase
 
 - **Trading mode:** `alpaca_paper`
-- **Promotion target:** 4 consecutive green days through Alpaca → advances to `micro_live`
+- **Promotion target:** 4 consecutive green days through Alpaca â†’ advances to `micro_live`
 - **Green days so far:** Reset to 0 on 2026-04-04 (internal fills were miscounted; audit trail logged)
 - **Iron condors:** DISABLED in current phase. Debit spreads only.
-- **Calibration job:** Currently skipping with exit code 2 (insufficient data — expected until more paper trades accumulate)
+- **Calibration job:** Currently skipping with exit code 2 (insufficient data â€” expected until more paper trades accumulate)
 
 ---
 
@@ -31,15 +31,15 @@
 | GitHub Actions | Cron scheduler for all automated jobs |
 
 ### Key Environment Variables (Railway backend)
-- `TRADING_MODE` — `paper` / `micro_live` / `live`
-- `TASK_NONCE_PROTECTION=1` ← must be set in prod
-- `TASK_NONCE_FAIL_CLOSED_IN_PROD=1` ← must be set in prod
-- `ALLOW_LEGACY_CRON_SECRET=0` ← must be set in prod
-- `PLAID_ENV` — remove/ignore; Plaid is no longer relevant
+- `TRADING_MODE` â€” `paper` / `micro_live` / `live`
+- `TASK_NONCE_PROTECTION=1` â† must be set in prod
+- `TASK_NONCE_FAIL_CLOSED_IN_PROD=1` â† must be set in prod
+- `ALLOW_LEGACY_CRON_SECRET=0` â† must be set in prod
+- `PLAID_ENV` â€” remove/ignore; Plaid is no longer relevant
 
 ---
 
-## Architecture (v4 — 16 Layers)
+## Architecture (v4 â€” 16 Layers)
 
 1. Market Data (Polygon.io)
 2. Backtesting
@@ -63,8 +63,8 @@
 ## Daily Cron Pipeline (GitHub Actions)
 
 ```
-suggestions_open → paper_auto_execute → paper_exit_evaluator
-→ paper_mark_to_market → paper_learning_ingest → validation_eval
+suggestions_open â†’ paper_auto_execute â†’ paper_exit_evaluator
+â†’ paper_mark_to_market â†’ paper_learning_ingest â†’ validation_eval
 ```
 
 - `paper_learning_ingest` MUST run after exits close each day or the learning view stalls
@@ -109,18 +109,18 @@ WHERE created_at::date = CURRENT_DATE GROUP BY cohort_id, decision;
 
 ## 5 Open Code Gaps (implement in this order)
 
-- **GAP 1** — Canonical ranking metric: expected PnL after slippage/fees ÷ marginal risk, adjusted for correlation/concentration. Replace ALL other ranking objectives.
-- **GAP 2** — EV-aware exit ranking: close worst marginal-EV positions first (replace `min_one` logic).
-- **GAP 3** — Score/PoP/EV calibration against realized outcomes by strategy, regime, DTE, liquidity, earnings context. ← needs more data first.
-- **GAP 4** — Autotune: replace threshold mutation with walk-forward validation + promotion/demotion rules.
-- **GAP 5** — Production security flags (set in Railway env, not code).
+- **GAP 1** â€” Canonical ranking metric: expected PnL after slippage/fees Ã· marginal risk, adjusted for correlation/concentration. Replace ALL other ranking objectives.
+- **GAP 2** â€” EV-aware exit ranking: close worst marginal-EV positions first (replace `min_one` logic).
+- **GAP 3** â€” Score/PoP/EV calibration against realized outcomes by strategy, regime, DTE, liquidity, earnings context. â† needs more data first.
+- **GAP 4** â€” Autotune: replace threshold mutation with walk-forward validation + promotion/demotion rules.
+- **GAP 5** â€” Production security flags (set in Railway env, not code).
 
 ---
 
 ## Promotion Path
 
 ```
-paper → micro_live ($500–$1K, Alpaca, 5 days) → live ($2.5–$5K, 30 days) → full automation
+paper â†’ micro_live ($500â€“$1K, Alpaca, 5 days) â†’ live ($2.5â€“$5K, 30 days) â†’ full automation
 ```
 
 Gate to `micro_live`: 4 consecutive Alpaca paper green days (not internal fills).
@@ -129,11 +129,11 @@ Gate to `micro_live`: 4 consecutive Alpaca paper green days (not internal fills)
 
 ## NEVER DO
 
-- Count `internal_paper` execution_mode fills as green days — Alpaca fills only
+- Count `internal_paper` execution_mode fills as green days â€” Alpaca fills only
 - Enable iron condors during `alpaca_paper` phase
 - Rebuild entire system prompt on every AI call (split static/dynamic)
 - Start a new Claude Code session without `--continue` on this project
-- Use ChatGPT mid-build — all architecture decisions live here; mixing tools creates drift
+- Use ChatGPT mid-build â€” all architecture decisions live here; mixing tools creates drift
 - Deploy without verifying `TASK_NONCE_PROTECTION=1` in Railway
 
 ---
@@ -142,7 +142,7 @@ Gate to `micro_live`: 4 consecutive Alpaca paper green days (not internal fills)
 
 - All-or-nothing leg pricing on MTM (if any leg fails to quote, skip entire position mark)
 - `nearest_expiry` backfill required for exit conditions to work
-- `paper_learning_ingest` must be in cron — not just manual trigger
+- `paper_learning_ingest` must be in cron â€” not just manual trigger
 - OCC symbol format for Alpaca order submission
 - Internal fills miscounted as Alpaca fills in green day logic (fixed + reset 2026-04-04)
 
@@ -153,17 +153,33 @@ Gate to `micro_live`: 4 consecutive Alpaca paper green days (not internal fills)
 - [x] 10-day paper test complete
 - [x] Policy Lab (3 cohorts active)
 - [x] Alpaca paper execution live
-- [ ] GAP 1–2 implementation
+- [x] Parallel reads via asyncio.gather() in suggestion pipeline
+- [x] Fast-path weekend/no-user checks on startup
+- [x] Alpaca retry: 10 retries, exponential backoff with jitter, 90s watchdog, needs_manual_review fallback
+- [x] Option chain cache TTL extended to 300s (env-configurable)
+- [x] Directional bid/ask pricing on spread legs (sell@bid, buy@ask) + 5% slippage floor in canonical ranker
+- [x] Calibration enabled by default, threshold lowered to 8 trades, added to scheduler, applied to morning window
+- [x] Promotion check job: detects stuck phase transitions, logs CRITICAL alerts for go_live_gate cancellations
+- [x] Risk envelope wired into pre-entry and MTM (warn-only mode — log violations, no blocking)
+- [ ] Risk envelope: switch from warn-only to block mode after 1 week observation
+- [ ] GAP 1â€”2 implementation
 - [ ] Micro-live test ($500 cap, separate portfolio)
-- [ ] GAP 3–4 after data accumulates
+- [ ] GAP 3â€”4 after data accumulates
 - [ ] Full live automation
 
 ---
 
 ## Working Style
 
-- Respond with exact SQL, exact Railway commands, exact file paths — no placeholders
+- Respond with exact SQL, exact Railway commands, exact file paths â€” no placeholders
 - When fixing bugs: show the broken code, explain why it's wrong, show the fix
 - When adding features: check GAP priority order before building new things
 - Prefer minimal diffs over full rewrites
 - Always check `job_runs` table before assuming a cron ran successfully
+
+## Live State (auto-updated)
+- **Phase:** alpaca_paper
+- **Green days:** 0
+- **Last green:** 
+- **Open positions:** 2
+- **Last updated:** 2026-04-06 01:08

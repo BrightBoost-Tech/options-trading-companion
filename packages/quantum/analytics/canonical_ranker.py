@@ -80,7 +80,12 @@ def _estimate_slippage(suggestion: Dict[str, Any]) -> float:
 
     # Prefer TCM estimate, fall back to sizing metadata
     slippage = tcm.get("expected_slippage") or sizing.get("expected_slippage") or 0
-    return float(slippage)
+    slippage = float(slippage)
+    if slippage == 0:
+        # Floor: 5% of EV covers residual bid-ask drag beyond directional pricing
+        ev = float(suggestion.get("ev") or 0)
+        slippage = abs(ev) * 0.05 if ev != 0 else 0
+    return slippage
 
 
 def _compute_correlation_factor(

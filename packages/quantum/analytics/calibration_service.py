@@ -20,8 +20,8 @@ from supabase import Client
 
 logger = logging.getLogger(__name__)
 
-CALIBRATION_ENABLED = os.environ.get("CALIBRATION_ENABLED", "0") == "1"
-MIN_CALIBRATION_TRADES = int(os.environ.get("MIN_CALIBRATION_TRADES", "20"))
+CALIBRATION_ENABLED = os.environ.get("CALIBRATION_ENABLED", "1") == "1"
+MIN_CALIBRATION_TRADES = int(os.environ.get("MIN_CALIBRATION_TRADES", "8"))
 
 # DTE buckets for segmentation
 DTE_BUCKETS = {

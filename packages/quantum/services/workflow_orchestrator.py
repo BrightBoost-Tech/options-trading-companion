@@ -1628,6 +1628,27 @@ async def run_morning_cycle(supabase: Client, user_id: str):
 
     # 4. Insert suggestions (Wave 1.2: insert-idempotent, no upsert of integrity fields)
     if suggestions:
+        # Apply calibration to morning exit suggestions (mirrors midday logic at line ~2659)
+        from packages.quantum.analytics.calibration_service import (
+            CALIBRATION_ENABLED as _CAL_ENABLED_MORNING,
+            apply_calibration as _apply_cal_morning,
+            get_calibration_adjustments as _get_cal_morning,
+        )
+        if _CAL_ENABLED_MORNING:
+            try:
+                cal_adj = _get_cal_morning(user_id, supabase)
+                if cal_adj:
+                    for s in suggestions:
+                        ev_raw = s.get("ev", 0)
+                        pop_raw = s.get("probability_of_profit", 0.5)
+                        regime_str = s.get("regime") or ""
+                        strategy_str = s.get("strategy") or ""
+                        s["ev"], s["probability_of_profit"] = _apply_cal_morning(
+                            ev_raw, pop_raw, strategy_str, regime_str, cal_adj
+                        )
+            except Exception as cal_err:
+                logger.warning(f"[CALIBRATION] Morning window failed: {cal_err}")
+
         cycle_date = datetime.now(timezone.utc).date().isoformat()
         inserts_count = 0
         existing_count = 0
@@ -2108,6 +2129,29 @@ async def run_midday_cycle(supabase: Client, user_id: str):
         }
 
     suggestions = []
+
+    # === RISK ENVELOPE CHECK (warn-only — log violations, do not block) ===
+    try:
+        from packages.quantum.risk.risk_envelope import check_all_envelopes, EnvelopeConfig
+        _envelope_config = EnvelopeConfig.from_env()
+        _envelope_result = check_all_envelopes(
+            positions=positions,
+            equity=deployable_capital,
+            config=_envelope_config,
+        )
+        if _envelope_result.violations:
+            for v in _envelope_result.violations:
+                logger.warning(
+                    f"[RISK_ENVELOPE] {v.severity.upper()}: {v.message} "
+                    f"(envelope={v.envelope}, limit={v.limit:.4f}, actual={v.actual:.4f})"
+                )
+            logger.warning(
+                f"[RISK_ENVELOPE] Pre-entry summary: {len(_envelope_result.violations)} violations, "
+                f"sizing_multiplier={_envelope_result.sizing_multiplier:.2f}, "
+                f"passed={_envelope_result.passed}"
+            )
+    except Exception as _env_err:
+        logger.warning(f"[RISK_ENVELOPE] Pre-entry check failed (non-fatal): {_env_err}")
 
     # 3. Size and Prepare Suggestions
     for cand in candidates:

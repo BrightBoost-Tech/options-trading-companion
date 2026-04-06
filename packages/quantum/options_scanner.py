@@ -998,17 +998,20 @@ def _select_legs_from_chain(
         bid = _bid(best_contract)
         ask = _ask(best_contract)
         mid = None
-        # Only compute mid if we have valid NBBO (bid > 0, ask > 0, ask >= bid)
+        directional_premium = None
+        # Directional pricing: sell at bid, buy at ask (reflects real execution)
         if _is_valid_nbbo(bid, ask):
             mid = (float(bid) + float(ask)) / 2.0
+            directional_premium = float(bid) if side == "sell" else float(ask)
 
+        leg_price = directional_premium if directional_premium is not None else premium
         legs.append({
             "symbol": _ticker(best_contract),
             "strike": best_contract['strike'],
             "expiry": _expiry(best_contract),
             "type": op_type,
             "side": side,
-            "premium": premium,
+            "premium": leg_price,
             "delta": _delta(best_contract) or target_delta,
             "gamma": _gamma(best_contract) or 0.0,
             "vega": _vega(best_contract) or 0.0,
@@ -1019,9 +1022,9 @@ def _select_legs_from_chain(
         })
 
         if side == "buy":
-            total_cost += premium
+            total_cost += leg_price
         else:
-            total_cost -= premium
+            total_cost -= leg_price
 
     return legs, total_cost
 
@@ -1117,15 +1120,16 @@ def _select_iron_condor_legs(
     ]
 
     for contract, side, type_hint in selected_contracts:
-        # Use mid from bid/ask if available, otherwise 'price'/'close'
+        # Directional pricing: sell at bid, buy at ask (reflects real execution)
         bid = _bid(contract)
         ask = _ask(contract)
         mid_calc = None
-        # Only compute mid if we have valid NBBO (bid > 0, ask > 0, ask >= bid)
+        directional_premium = None
         if _is_valid_nbbo(bid, ask):
             mid_calc = (float(bid) + float(ask)) / 2.0
+            directional_premium = float(bid) if side == "sell" else float(ask)
 
-        premium = mid_calc if mid_calc is not None else (_premium(contract) or 0.0)
+        premium = directional_premium if directional_premium is not None else (_premium(contract) or 0.0)
 
         leg = {
             "symbol": _ticker(contract),
@@ -1216,6 +1220,8 @@ def _select_iron_condor_legs_param(
         mid = _mid_from_nbbo(bid, ask)
         if mid is None or mid <= 0:
             return [], 0.0
+        # Directional pricing: sell at bid, buy at ask (reflects real execution)
+        directional_price = float(bid) if side == "sell" else float(ask)
 
         leg = {
             "symbol": _ticker(contract),
@@ -1223,7 +1229,7 @@ def _select_iron_condor_legs_param(
             "expiry": _expiry(contract),
             "type": contract.get('type') or contract.get('right') or type_hint,
             "side": side,
-            "premium": mid,
+            "premium": directional_price,
             "delta": _delta(contract) or 0.0,
             "gamma": _gamma(contract) or 0.0,
             "vega": _vega(contract) or 0.0,
@@ -1235,9 +1241,9 @@ def _select_iron_condor_legs_param(
         legs.append(leg)
 
         if side == "buy":
-            total_cost += mid
+            total_cost += directional_price
         else:
-            total_cost -= mid
+            total_cost -= directional_price
 
     return legs, total_cost
 

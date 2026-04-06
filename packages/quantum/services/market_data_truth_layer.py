@@ -746,7 +746,7 @@ class MarketDataTruthLayer:
 
         # Caching TTLs (in seconds)
         self.ttl_snapshot = 10
-        self.ttl_option_chain = 60
+        self.ttl_option_chain = int(os.environ.get("OPTION_CHAIN_CACHE_TTL", "300"))
         self.ttl_daily_bars = 43200  # 12 hours
 
     def _get_headers(self):

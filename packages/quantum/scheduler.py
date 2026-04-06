@@ -54,11 +54,17 @@ SCHEDULES = [
     ("paper_learning_ingest",       dict(hour=16, minute=20), "/tasks/paper/learning-ingest",      "tasks:paper_learning_ingest",    "Paper outcomes → learning"),
     ("policy_lab_eval",             dict(hour=16, minute=30), "/tasks/policy-lab/eval",             "tasks:policy_lab_eval",          "Evaluate cohort performance"),
 
+    # Pre-dawn calibration
+    ("calibration_update",          dict(hour=5,  minute=0),  "/internal/tasks/calibration/update", "tasks:calibration_update",       "Compute calibration adjustments"),
+
     # Frequent
     ("alpaca_order_sync",           dict(minute="*/5", hour="9-16"), "/internal/tasks/alpaca/order-sync", "tasks:alpaca_order_sync", "Poll Alpaca for fills"),
 
     # Health
     ("ops_health_check",            dict(minute="7,37", hour="8-17"), "/tasks/ops/health_check",  "tasks:ops_health_check",         "System health monitoring"),
+
+    # Promotion readiness (after market close, after progression eval)
+    ("promotion_check",             dict(hour=17, minute=0),  "/internal/tasks/promotion/check",  "tasks:promotion_check",          "Check for stuck phase transitions"),
 ]
 
 

@@ -211,6 +211,21 @@ async def calibration_update_task(
     )
 
 
+@router.post("/promotion/check", status_code=202)
+async def promotion_check_task(
+    auth: TaskSignatureResult = Depends(verify_task_signature("tasks:promotion_check"))
+):
+    today = datetime.now().strftime("%Y-%m-%d")
+    return enqueue_job_run(
+        job_name="promotion_check",
+        idempotency_key=f"promotion_check-{today}",
+        payload={
+            "app_version": APP_VERSION,
+            "trigger_ts": datetime.now().isoformat(),
+        },
+    )
+
+
 @router.post("/autotune/walk-forward", status_code=202)
 async def walk_forward_autotune_task(
     lookback_days: int = Body(60, embed=True),

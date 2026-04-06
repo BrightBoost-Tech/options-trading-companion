@@ -7,6 +7,7 @@ import logging
 import os
 import sys
 import re
+import time
 
 logger = logging.getLogger(__name__)
 
@@ -1060,35 +1061,63 @@ async def run_morning_cycle(supabase: Client, user_id: str):
     3. Generate EV-based profit-taking suggestions (and skip stop-loss).
     4. Insert records into trade_suggestions table with window='morning_limit'.
     """
+    t_cycle_start = time.monotonic()
     print(f"Running morning cycle for user {user_id}")
     analytics_service = AnalyticsService(supabase)
 
-    # 1. Fetch current positions
-    try:
-        res = supabase.table("positions").select("*").eq("user_id", user_id).execute()
-        positions = res.data or []
-    except Exception as e:
-        print(f"Error fetching positions for morning cycle: {e}")
-        return
-
-    # 2. Group into Spreads
-    spreads = group_spread_positions(positions)
-
-    # Initialize Market Data Truth Layer
+    # Initialize objects (fast, no I/O)
     truth_layer = MarketDataTruthLayer()
-
-    # V3: Compute Global Regime Snapshot ONCE
     iv_repo = IVRepository(supabase)
     iv_point_service = IVPointService(supabase)
-
     regime_engine = RegimeEngineV3(
         supabase_client=supabase,
         market_data=truth_layer,
         iv_repository=iv_repo,
         iv_point_service=iv_point_service,
     )
+    cash_service = CashService(supabase)
 
-    global_snap = regime_engine.compute_global_snapshot(datetime.now())
+    # === PARALLEL READS: positions + regime + capital ===
+    t_reads = time.monotonic()
+
+    async def _fetch_positions():
+        try:
+            res = await asyncio.to_thread(
+                lambda: supabase.table("positions").select("*").eq("user_id", user_id).execute()
+            )
+            return res.data or []
+        except Exception as e:
+            print(f"Error fetching positions for morning cycle: {e}")
+            return None
+
+    async def _compute_regime():
+        return await asyncio.to_thread(
+            lambda: regime_engine.compute_global_snapshot(datetime.now())
+        )
+
+    async def _fetch_capital():
+        try:
+            return await cash_service.get_deployable_capital(user_id)
+        except Exception:
+            return 0.0
+
+    positions, global_snap, deployable_capital = await asyncio.gather(
+        _fetch_positions(),
+        _compute_regime(),
+        _fetch_capital(),
+    )
+    t_reads_done = time.monotonic()
+    logger.info(
+        f"[PERF] Morning parallel reads: {(t_reads_done - t_reads)*1000:.0f}ms "
+        f"(positions={len(positions) if positions else 0}, "
+        f"regime={global_snap.state.value}, capital=${deployable_capital:.2f})"
+    )
+
+    if positions is None:
+        return
+
+    # 2. Group into Spreads
+    spreads = group_spread_positions(positions)
 
     # Record regime features to decision context (for replay feature store)
     _record_regime_features(global_snap)
@@ -1096,23 +1125,14 @@ async def run_morning_cycle(supabase: Client, user_id: str):
     # Record rates/divs for deterministic replay (Patch 2.1)
     truth_layer.rates_divs("SPY", as_of=datetime.now(timezone.utc))
 
-    # Try to persist global snapshot
+    # Try to persist global snapshot (non-critical write)
     try:
         supabase.table("regime_snapshots").insert(global_snap.to_dict()).execute()
     except Exception:
         pass
 
-    # === RISK BUDGET CHECK ===
+    # === RISK BUDGET CHECK (serial — depends on regime + capital + positions) ===
     risk_engine = RiskBudgetEngine(supabase)
-    # Get deployable capital approx for equity calc inside engine
-    # We can fetch real cash or assume 0 if morning cycle doesn't fetch it,
-    # but accurate equity is needed. Let's fetch cash quickly.
-    try:
-        cash_service = CashService(supabase)
-        deployable_capital = await cash_service.get_deployable_capital(user_id)
-    except:
-        deployable_capital = 0.0
-
     budgets = risk_engine.compute(user_id, deployable_capital, global_snap.state.value, positions)
 
     # Updated to access keys from Pydantic model
@@ -1770,6 +1790,12 @@ async def run_morning_cycle(supabase: Client, user_id: str):
         except Exception as e:
             print(f"Error logging morning suggestions: {e}")
 
+    t_cycle_end = time.monotonic()
+    logger.info(
+        f"[PERF] Morning cycle total: {(t_cycle_end - t_cycle_start)*1000:.0f}ms "
+        f"(user={user_id[:8]}, spreads={len(spreads)}, suggestions={len(suggestions)})"
+    )
+
 
 def _legs_have_valid_nbbo_and_mid(legs: list) -> bool:
     """
@@ -1802,34 +1828,76 @@ async def run_midday_cycle(supabase: Client, user_id: str):
     3. For each candidate, call sizing_engine.calculate_sizing.
     4. Insert trade_suggestions with window='midday_entry' and sizing_metadata.
     """
+    t_cycle_start = time.monotonic()
+
     # Quality gate configuration
     quality_gate_mode = os.getenv("MIDDAY_QUALITY_GATE_MODE", "soft").lower()
     trust_scanner_quotes = os.getenv("MIDDAY_TRUST_SCANNER_QUOTES", "1").lower() in ("1", "true", "yes")
 
-    # Set progression phase so strategy selector can exclude phase-inappropriate strategies
-    try:
-        from packages.quantum.services.progression_service import ProgressionService
-        _prog = ProgressionService(supabase)
-        _state = _prog.get_state(user_id)
-        os.environ["CURRENT_PROGRESSION_PHASE"] = _state.get("current_phase", "alpaca_paper")
-    except Exception:
+    # Initialize objects (fast, no I/O)
+    truth_layer = MarketDataTruthLayer()
+    iv_repo = IVRepository(supabase)
+    iv_point_service = IVPointService(supabase)
+    regime_engine = RegimeEngineV3(
+        supabase_client=supabase,
+        market_data=truth_layer,
+        iv_repository=iv_repo,
+        iv_point_service=iv_point_service,
+    )
+    cash_service = CashService(supabase)
+
+    # === PARALLEL READS: progression + capital + positions + regime ===
+    t_reads = time.monotonic()
+
+    async def _fetch_progression():
+        try:
+            from packages.quantum.services.progression_service import ProgressionService
+            _prog = ProgressionService(supabase)
+            return await asyncio.to_thread(lambda: _prog.get_state(user_id))
+        except Exception:
+            return None
+
+    async def _fetch_capital():
+        return await cash_service.get_deployable_capital(user_id)
+
+    async def _fetch_positions():
+        try:
+            res = await asyncio.to_thread(
+                lambda: supabase.table("positions").select("*").eq("user_id", user_id).execute()
+            )
+            return res.data or []
+        except Exception as e:
+            print(f"Error fetching positions for midday risk check: {e}")
+            return []
+
+    async def _compute_regime():
+        return await asyncio.to_thread(
+            lambda: regime_engine.compute_global_snapshot(datetime.now())
+        )
+
+    prog_state, deployable_capital, positions, global_snap = await asyncio.gather(
+        _fetch_progression(),
+        _fetch_capital(),
+        _fetch_positions(),
+        _compute_regime(),
+    )
+    t_reads_done = time.monotonic()
+    logger.info(
+        f"[PERF] Midday parallel reads: {(t_reads_done - t_reads)*1000:.0f}ms "
+        f"(positions={len(positions)}, regime={global_snap.state.value}, "
+        f"capital=${deployable_capital:.2f})"
+    )
+
+    # Set progression phase from parallel result
+    if prog_state:
+        os.environ["CURRENT_PROGRESSION_PHASE"] = prog_state.get("current_phase", "alpaca_paper")
+    else:
         os.environ.setdefault("CURRENT_PROGRESSION_PHASE", "alpaca_paper")
 
     print(f"Running midday cycle for user {user_id} (phase={os.environ.get('CURRENT_PROGRESSION_PHASE')})")
     analytics_service = AnalyticsService(supabase)
     print("\n=== MIDDAY DEBUG ===")
-
-    cash_service = CashService(supabase)
-    deployable_capital = await cash_service.get_deployable_capital(user_id)
     print(f"Deployable capital: {deployable_capital}")
-
-    # Fetch positions for RiskBudgetEngine
-    try:
-        res = supabase.table("positions").select("*").eq("user_id", user_id).execute()
-        positions = res.data or []
-    except Exception as e:
-        print(f"Error fetching positions for midday risk check: {e}")
-        positions = []
 
     can_scan, scan_reason = CapitalScanPolicy.can_scan(deployable_capital)
     if not can_scan:
@@ -1846,33 +1914,19 @@ async def run_midday_cycle(supabase: Client, user_id: str):
             "counts": {"candidates": 0, "created": 0},
         }
 
-    # V3: Compute Global Regime Snapshot ONCE
-    truth_layer = MarketDataTruthLayer()
-    iv_repo = IVRepository(supabase)
-    iv_point_service = IVPointService(supabase)
-
-    regime_engine = RegimeEngineV3(
-        supabase_client=supabase,
-        market_data=truth_layer,
-        iv_repository=iv_repo,
-        iv_point_service=iv_point_service,
-    )
-
-    global_snap = regime_engine.compute_global_snapshot(datetime.now())
-
     # Record regime features to decision context (for replay feature store)
     _record_regime_features(global_snap)
 
     # Record rates/divs for deterministic replay (Patch 2.1)
     truth_layer.rates_divs("SPY", as_of=datetime.now(timezone.utc))
 
-    # Try to persist global snapshot
+    # Try to persist global snapshot (non-critical write)
     try:
         supabase.table("regime_snapshots").insert(global_snap.to_dict()).execute()
     except Exception:
         pass
 
-    # === RISK BUDGET ENGINE ===
+    # === RISK BUDGET ENGINE (serial — depends on regime + capital + positions) ===
     strategy_track = os.environ.get("STRATEGY_TRACK", "balanced")
     risk_engine = RiskBudgetEngine(supabase)
     budgets = risk_engine.compute(user_id, deployable_capital, global_snap.state.value, positions, risk_profile=strategy_track)
@@ -2915,6 +2969,12 @@ async def run_midday_cycle(supabase: Client, user_id: str):
                 print(f"Logged {len(logs)} midday suggestions to ledger.")
         except Exception as e:
             print(f"Error logging midday suggestions: {e}")
+
+        t_cycle_end = time.monotonic()
+        logger.info(
+            f"[PERF] Midday cycle total: {(t_cycle_end - t_cycle_start)*1000:.0f}ms "
+            f"(user={user_id[:8]}, candidates={len(candidates)}, created={inserts_count})"
+        )
 
         return {
             "skipped": False,

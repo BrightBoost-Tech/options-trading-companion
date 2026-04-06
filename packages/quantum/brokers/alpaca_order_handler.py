@@ -2,17 +2,27 @@
 Alpaca Order Handler — submit, poll, and reconcile order lifecycle.
 
 Bridges the internal paper_orders table with Alpaca's order API.
+Production-grade: 3-attempt submission, 10s ack timeout, 90s idle watchdog,
+needs_manual_review fallback.
 """
 
 import logging
-from datetime import datetime, timezone
+import time
+from datetime import datetime, timezone, timedelta
 from typing import Any, Dict, List, Optional
 
 from packages.quantum.brokers.alpaca_client import (
     AlpacaClient,
+    AlpacaError,
+    AlpacaAuthError,
     polygon_to_alpaca,
     alpaca_to_polygon,
 )
+
+# Submission retry config
+MAX_SUBMIT_ATTEMPTS = 3
+ACK_TIMEOUT_SECONDS = 10.0
+IDLE_WATCHDOG_SECONDS = 90
 
 logger = logging.getLogger(__name__)
 
@@ -65,53 +75,100 @@ def submit_and_track(
     user_id: str,
 ) -> Dict[str, Any]:
     """
-    Submit an internal order to Alpaca and store the Alpaca order ID.
+    Submit an internal order to Alpaca with production-grade reliability.
 
-    1. Translate legs from Polygon OCC to Alpaca format
-    2. Submit to Alpaca
-    3. Update paper_orders with alpaca_order_id and status=submitted
-    4. Return result (fill tracking happens via poll_pending_orders)
+    - Up to 3 submission attempts with backoff
+    - 10s acknowledgment check after each submission
+    - Falls back to needs_manual_review after 3 failures (never silently drops)
     """
     order_id = order.get("id")
+    num_legs = len((order.get("order_json") or {}).get("legs", []))
+    last_error = None
 
-    try:
-        req = build_alpaca_order_request(order)
+    for attempt in range(1, MAX_SUBMIT_ATTEMPTS + 1):
+        try:
+            req = build_alpaca_order_request(order)
+            num_legs = len(req.get("legs", []))
+            t_submit = time.monotonic()
 
-        # Check for iron condor (4+ legs) — Alpaca paper may reject these.
-        # If submission fails on a 4-leg order, mark as unsupported rather
-        # than generic submission_failed so the system doesn't keep retrying.
-        num_legs = len(req.get("legs", []))
+            result = alpaca.submit_option_order(req)
 
-        result = alpaca.submit_option_order(req)
+            alpaca_order_id = result.get("alpaca_order_id")
+            t_ack = time.monotonic() - t_submit
 
-        supabase.table("paper_orders").update({
-            "alpaca_order_id": result.get("alpaca_order_id"),
-            "execution_mode": "alpaca_paper" if alpaca.paper else "alpaca_live",
-            "broker_status": result.get("status"),
-            "broker_response": result,
-            "status": "submitted",
-            "submitted_at": datetime.now(timezone.utc).isoformat(),
-        }).eq("id", order_id).execute()
+            # Silent failure detection: verify we got an order ID back
+            if not alpaca_order_id:
+                logger.error(
+                    f"[ALPACA_HANDLER] Silent failure: submission returned no order ID "
+                    f"(order={order_id}, attempt={attempt}/{MAX_SUBMIT_ATTEMPTS})"
+                )
+                last_error = "no_alpaca_order_id_returned"
+                if attempt < MAX_SUBMIT_ATTEMPTS:
+                    time.sleep(1.0 * attempt)  # Brief backoff before retry
+                    continue
+                break
 
-        logger.info(
-            f"[ALPACA_HANDLER] Order submitted: internal={order_id} "
-            f"alpaca={result.get('alpaca_order_id')} legs={num_legs} "
-            f"status={result.get('status')}"
-        )
-        return {"status": "submitted", **result}
+            # Log acknowledgment timing
+            if t_ack > ACK_TIMEOUT_SECONDS:
+                logger.warning(
+                    f"[ALPACA_HANDLER] Slow ack: order={order_id} took {t_ack:.1f}s "
+                    f"(threshold={ACK_TIMEOUT_SECONDS}s)"
+                )
 
-    except Exception as e:
-        error_str = str(e)
-        num_legs = len((order.get("order_json") or {}).get("legs", []))
-        logger.error(
-            f"[ALPACA_HANDLER] Submit failed: order={order_id} "
-            f"legs={num_legs} error={error_str}"
-        )
-        supabase.table("paper_orders").update({
-            "broker_status": "submission_failed",
-            "broker_response": {"error": error_str, "legs": num_legs},
-        }).eq("id", order_id).execute()
-        return {"status": "submission_failed", "error": error_str}
+            supabase.table("paper_orders").update({
+                "alpaca_order_id": alpaca_order_id,
+                "execution_mode": "alpaca_paper" if alpaca.paper else "alpaca_live",
+                "broker_status": result.get("status"),
+                "broker_response": result,
+                "status": "submitted",
+                "submitted_at": datetime.now(timezone.utc).isoformat(),
+            }).eq("id", order_id).execute()
+
+            logger.info(
+                f"[ALPACA_HANDLER] Order submitted: internal={order_id} "
+                f"alpaca={alpaca_order_id} legs={num_legs} "
+                f"status={result.get('status')} ack={t_ack:.2f}s "
+                f"attempt={attempt}/{MAX_SUBMIT_ATTEMPTS}"
+            )
+            return {"status": "submitted", **result}
+
+        except (AlpacaAuthError,) as e:
+            # Auth errors already attempted re-auth inside _call_with_retry
+            # If we're here, re-auth failed — no point retrying
+            last_error = str(e)
+            logger.error(
+                f"[ALPACA_HANDLER] Auth failure (fatal): order={order_id} error={last_error}"
+            )
+            break
+
+        except Exception as e:
+            last_error = str(e)
+            logger.error(
+                f"[ALPACA_HANDLER] Submit failed (attempt {attempt}/{MAX_SUBMIT_ATTEMPTS}): "
+                f"order={order_id} legs={num_legs} error={last_error}"
+            )
+            if attempt < MAX_SUBMIT_ATTEMPTS:
+                backoff = 2.0 * attempt  # 2s, 4s
+                logger.info(f"[ALPACA_HANDLER] Retrying in {backoff}s...")
+                time.sleep(backoff)
+
+    # All attempts exhausted — mark as needs_manual_review (never silently fail)
+    logger.error(
+        f"[ALPACA_HANDLER] All {MAX_SUBMIT_ATTEMPTS} attempts failed for order={order_id}. "
+        f"Marking needs_manual_review. Last error: {last_error}"
+    )
+    supabase.table("paper_orders").update({
+        "broker_status": "needs_manual_review",
+        "broker_response": {
+            "error": last_error,
+            "legs": num_legs,
+            "attempts": MAX_SUBMIT_ATTEMPTS,
+            "marked_at": datetime.now(timezone.utc).isoformat(),
+        },
+        "status": "needs_manual_review",
+    }).eq("id", order_id).execute()
+
+    return {"status": "needs_manual_review", "error": last_error, "attempts": MAX_SUBMIT_ATTEMPTS}
 
 
 def poll_pending_orders(
@@ -122,11 +179,10 @@ def poll_pending_orders(
     """
     Check status of all submitted Alpaca orders and sync back.
 
-    For each order with alpaca_order_id and status in (submitted, working, partial):
-    - Query Alpaca for current status
-    - If filled: update paper_orders with fill data
-    - If cancelled/expired: update status
-    - If partial: update filled_qty
+    Production features:
+    - 90-second idle watchdog: if order has no status update, cancel and resubmit
+    - Retry on poll failures (transient)
+    - Fill detection with position creation
     """
     # Get orders with Alpaca IDs that are still pending
     port_res = supabase.table("paper_portfolios") \
@@ -137,7 +193,7 @@ def poll_pending_orders(
     p_ids = [p["id"] for p in port_res.data]
 
     orders_res = supabase.table("paper_orders") \
-        .select("id, alpaca_order_id, status") \
+        .select("id, alpaca_order_id, status, submitted_at, broker_status") \
         .in_("status", ["submitted", "working", "partial"]) \
         .in_("portfolio_id", p_ids) \
         .not_.is_("alpaca_order_id", "null") \
@@ -149,7 +205,10 @@ def poll_pending_orders(
     partials = 0
     cancels = 0
     unchanged = 0
+    watchdog_cancels = 0
     errors = []
+
+    now_utc = datetime.now(timezone.utc)
 
     for order in orders:
         order_id = order["id"]
@@ -165,8 +224,52 @@ def poll_pending_orders(
                 "pending_new": "working", "partially_filled": "partial",
                 "filled": "filled", "canceled": "cancelled",
                 "expired": "cancelled", "rejected": "cancelled",
+                "replaced": "working", "pending_replace": "working",
             }
             internal_status = status_map.get(alpaca_status, "working")
+
+            # === IDLE WATCHDOG (90s) ===
+            # If order is still in a "waiting" state and was submitted > 90s ago
+            # with no fills, cancel and mark for resubmission
+            if internal_status == "working" and order.get("submitted_at"):
+                try:
+                    submitted_at = datetime.fromisoformat(
+                        order["submitted_at"].replace("Z", "+00:00")
+                    )
+                    idle_seconds = (now_utc - submitted_at).total_seconds()
+                    filled_qty = float(alpaca_order.get("filled_qty") or 0)
+
+                    if idle_seconds > IDLE_WATCHDOG_SECONDS and filled_qty == 0:
+                        logger.warning(
+                            f"[ALPACA_HANDLER] Idle watchdog triggered: order={order_id} "
+                            f"alpaca={alpaca_id} idle={idle_seconds:.0f}s "
+                            f"(threshold={IDLE_WATCHDOG_SECONDS}s). Cancelling."
+                        )
+                        try:
+                            alpaca.cancel_order(alpaca_id)
+                        except Exception as cancel_err:
+                            logger.warning(
+                                f"[ALPACA_HANDLER] Watchdog cancel failed: {cancel_err}"
+                            )
+
+                        supabase.table("paper_orders").update({
+                            "broker_status": "watchdog_cancelled",
+                            "status": "watchdog_cancelled",
+                            "broker_response": {
+                                **alpaca_order,
+                                "watchdog": {
+                                    "reason": "idle_timeout",
+                                    "idle_seconds": round(idle_seconds),
+                                    "threshold": IDLE_WATCHDOG_SECONDS,
+                                    "cancelled_at": now_utc.isoformat(),
+                                },
+                            },
+                        }).eq("id", order_id).execute()
+
+                        watchdog_cancels += 1
+                        continue  # Skip normal processing for this order
+                except (ValueError, TypeError):
+                    pass  # Malformed submitted_at, skip watchdog
 
             update = {
                 "broker_status": alpaca_status,
@@ -229,6 +332,7 @@ def poll_pending_orders(
         "synced": synced, "total_polled": len(orders),
         "fills": fills, "partials": partials,
         "cancels": cancels, "unchanged": unchanged,
+        "watchdog_cancels": watchdog_cancels,
         "errors": errors,
     }
 

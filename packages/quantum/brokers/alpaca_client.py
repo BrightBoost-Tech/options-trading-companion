@@ -12,6 +12,7 @@ Environment variables:
 
 import logging
 import os
+import random
 import time
 from enum import Enum
 from typing import Any, Dict, List, Optional
@@ -59,11 +60,26 @@ class AlpacaClient:
     Wrapper around alpaca-py TradingClient.
 
     Provides typed methods for account, order, and position operations
-    with retry logic, logging, and OCC symbol translation.
+    with production-grade retry logic, logging, and OCC symbol translation.
     """
 
-    MAX_RETRIES = 3
-    BASE_DELAY = 0.5  # seconds
+    # Retry config: exponential backoff with jitter
+    MAX_RETRIES = 10
+    BASE_DELAY = 0.5   # seconds
+    MAX_DELAY = 60.0    # seconds — cap for exponential backoff
+    JITTER_RANGE = 0.25 # ±25% jitter on each delay
+
+    # Transient error keywords (checked case-insensitively in error strings)
+    _TRANSIENT_KEYWORDS = (
+        "429", "500", "502", "503", "504",
+        "timeout", "timed out", "connection reset",
+        "connection refused", "connection aborted",
+        "temporary failure", "name resolution",
+        "broken pipe", "eof occurred",
+    )
+
+    # Auth error keywords — trigger re-auth instead of immediate failure
+    _AUTH_KEYWORDS = ("401", "403", "unauthorized", "forbidden")
 
     def __init__(
         self,
@@ -82,6 +98,12 @@ class AlpacaClient:
                 "ALPACA_API_KEY and ALPACA_SECRET_KEY must be set"
             )
 
+        self._init_trading_client()
+        mode_label = "PAPER" if self.paper else "LIVE"
+        logger.info(f"[ALPACA] Client initialized in {mode_label} mode")
+
+    def _init_trading_client(self):
+        """(Re-)initialize the underlying alpaca-py TradingClient."""
         from alpaca.trading.client import TradingClient
         self._client = TradingClient(
             api_key=self.api_key,
@@ -89,14 +111,35 @@ class AlpacaClient:
             paper=self.paper,
         )
 
-        mode_label = "PAPER" if self.paper else "LIVE"
-        logger.info(f"[ALPACA] Client initialized in {mode_label} mode")
+    def _refresh_auth(self) -> bool:
+        """
+        Re-initialize the trading client to refresh auth state.
+        Returns True if re-auth succeeded, False otherwise.
+        """
+        try:
+            logger.warning("[ALPACA] Refreshing auth — re-initializing client")
+            self._init_trading_client()
+            # Validate by fetching account
+            self._client.get_account()
+            logger.info("[ALPACA] Auth refresh succeeded")
+            return True
+        except Exception as e:
+            logger.error(f"[ALPACA] Auth refresh failed: {e}")
+            return False
 
     # ── Retry helper ──────────────────────────────────────────────────
 
     def _call_with_retry(self, fn, *args, **kwargs) -> Any:
-        """Call fn with exponential backoff on transient errors."""
+        """
+        Call fn with exponential backoff + jitter on transient errors.
+
+        - Base 500ms, max 60s, up to 10 retries
+        - Auto re-auth on 401/403 (once per call chain)
+        - Broad transient detection: 429, 5xx, timeout, connection errors
+        """
         last_err = None
+        auth_refreshed = False  # Only attempt re-auth once per call chain
+
         for attempt in range(self.MAX_RETRIES):
             try:
                 result = fn(*args, **kwargs)
@@ -104,17 +147,43 @@ class AlpacaClient:
             except Exception as e:
                 last_err = e
                 err_str = str(e).lower()
-                is_transient = any(k in err_str for k in ("429", "500", "502", "503", "timeout"))
-                if is_transient and attempt < self.MAX_RETRIES - 1:
-                    delay = self.BASE_DELAY * (2 ** attempt)
+
+                # Check for auth errors first — try re-auth once
+                is_auth_error = any(k in err_str for k in self._AUTH_KEYWORDS)
+                if is_auth_error and not auth_refreshed:
+                    auth_refreshed = True
                     logger.warning(
-                        f"[ALPACA] Transient error (attempt {attempt + 1}): {e}. "
-                        f"Retrying in {delay}s..."
+                        f"[ALPACA] Auth error (attempt {attempt + 1}/{self.MAX_RETRIES}): {e}. "
+                        f"Attempting re-auth..."
+                    )
+                    if self._refresh_auth():
+                        # Re-auth succeeded, retry immediately (no backoff)
+                        continue
+                    else:
+                        # Re-auth failed — this is fatal
+                        raise AlpacaAuthError(
+                            f"Auth error and re-auth failed: {last_err}"
+                        )
+
+                # Check for transient errors
+                is_transient = any(k in err_str for k in self._TRANSIENT_KEYWORDS)
+                if is_transient and attempt < self.MAX_RETRIES - 1:
+                    # Exponential backoff with jitter, capped at MAX_DELAY
+                    base = min(self.BASE_DELAY * (2 ** attempt), self.MAX_DELAY)
+                    jitter = base * random.uniform(-self.JITTER_RANGE, self.JITTER_RANGE)
+                    delay = max(0.1, base + jitter)
+                    logger.warning(
+                        f"[ALPACA] Transient error (attempt {attempt + 1}/{self.MAX_RETRIES}): {e}. "
+                        f"Retrying in {delay:.2f}s..."
                     )
                     time.sleep(delay)
                 else:
+                    # Non-transient, non-auth error — fail immediately
                     break
-        raise AlpacaError(f"Alpaca API call failed after {self.MAX_RETRIES} attempts: {last_err}")
+
+        raise AlpacaError(
+            f"Alpaca API call failed after {self.MAX_RETRIES} attempts: {last_err}"
+        )
 
     # ── Account ───────────────────────────────────────────────────────
 

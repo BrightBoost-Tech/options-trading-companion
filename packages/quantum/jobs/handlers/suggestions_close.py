@@ -16,7 +16,7 @@ from typing import Any, Dict
 
 from packages.quantum.services.workflow_orchestrator import run_morning_cycle
 from packages.quantum.services.strategy_loader import load_strategy_config, ensure_default_strategy_exists
-from packages.quantum.jobs.handlers.utils import get_admin_client, get_active_user_ids, run_async
+from packages.quantum.jobs.handlers.utils import get_admin_client, get_active_user_ids, run_async, is_market_day
 from packages.quantum.jobs.handlers.exceptions import RetryableJobError, PermanentJobError
 from packages.quantum.jobs.db import _to_jsonable
 
@@ -50,6 +50,12 @@ def run(payload: Dict[str, Any], ctx: Any = None) -> Dict[str, Any]:
     notes = []
     counts = {"processed": 0, "failed": 0, "synced": 0, "skipped": 0}
 
+    # === FAST PATH: skip on weekends ===
+    is_trading, market_reason = is_market_day()
+    if not is_trading:
+        return {"ok": True, "fast_path": True, "reason": market_reason,
+                "counts": counts, "timing_ms": 0}
+
     strategy_name = payload.get("strategy_name", "spy_opt_autolearn_v6")
     target_user_id = payload.get("user_id")
     skip_sync = payload.get("skip_sync", False)
@@ -62,6 +68,11 @@ def run(payload: Dict[str, Any], ctx: Any = None) -> Dict[str, Any]:
             active_users = [target_user_id]
         else:
             active_users = get_active_user_ids(client)
+
+        # === FAST PATH: no active users ===
+        if not active_users:
+            return {"ok": True, "fast_path": True, "reason": "no_active_users",
+                    "counts": counts, "timing_ms": (time.time() - start_time) * 1000}
 
         async def process_users():
             processed = 0

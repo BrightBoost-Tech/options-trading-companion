@@ -1,7 +1,11 @@
 import asyncio
-from typing import List, Any
+import logging
+from datetime import datetime
+from typing import List, Any, Tuple
 from supabase import create_client, Client
 from packages.quantum.security.secrets_provider import SecretsProvider
+
+logger = logging.getLogger(__name__)
 
 def get_admin_client() -> Client:
     """Initializes and returns a Supabase admin client."""
@@ -36,6 +40,29 @@ def get_active_user_ids(client: Client) -> List[str]:
     except Exception as e:
         print(f"Error fetching active users: {e}")
         return []
+
+def is_market_day() -> Tuple[bool, str]:
+    """
+    Fast check: is today a US equity trading day?
+    Returns (is_open, reason).
+
+    Checks weekday only (no holiday calendar — scheduler already handles this).
+    For jobs that should only run on trading days, call this before doing any work.
+    """
+    try:
+        from zoneinfo import ZoneInfo
+    except ImportError:
+        from backports.zoneinfo import ZoneInfo
+
+    now = datetime.now(ZoneInfo("America/Chicago"))
+    weekday = now.weekday()
+
+    if weekday >= 5:
+        day_name = "Saturday" if weekday == 5 else "Sunday"
+        return False, f"weekend ({day_name})"
+
+    return True, f"trading_day (Chicago {now.strftime('%H:%M')})"
+
 
 def run_async(coro: Any) -> Any:
     """Helper to run an async coroutine synchronously."""

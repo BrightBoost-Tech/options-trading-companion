@@ -2134,7 +2134,7 @@ def scan_for_opportunities(
     # Shared storage for multi-strategy candidate lists (keyed by symbol)
     _multi_strategy_candidates: Dict[str, List] = {}
 
-    def process_symbol(symbol: str, drag_map: Dict[str, Any], quotes_map: Dict[str, Any], earnings_map: Dict[str, Any], iv_context: Dict[str, Any], rej_stats: RejectionStats, strategy_override: Optional[Dict] = None) -> Optional[Dict[str, Any]]:
+    def process_symbol(symbol: str, drag_map: Dict[str, Any], quotes_map: Dict[str, Any], earnings_map: Dict[str, Any], iv_context: Dict[str, Any], rej_stats: RejectionStats, strategy_override: Optional[Dict] = None, _cached_data: Optional[Dict] = None) -> Optional[Dict[str, Any]]:
         """Process a single symbol and return a candidate dict or None."""
         rej_stats.increment_processed()
         try:
@@ -2201,31 +2201,41 @@ def scan_for_opportunities(
             # Optimization: Use truth_layer which caches, and reuse bars for regime engine
             # Bolt Optimization: Use hoisted dates (ta_start_date, ta_end_date)
 
-            # Fetch using Truth Layer (caches!)
-            bars = truth_layer.daily_bars(symbol, ta_start_date, ta_end_date)
+            # Reuse cached bars/closes from prior strategy attempt on same symbol
+            if _cached_data is not None and "bars" in _cached_data:
+                bars = _cached_data["bars"]
+                closes = _cached_data["closes"]
+            else:
+                # Fetch using Truth Layer (caches!)
+                bars = truth_layer.daily_bars(symbol, ta_start_date, ta_end_date)
 
-            # History handling: tolerate list of objects or dict with 'prices'
-            closes = []
-            if isinstance(bars, dict):
-                closes = bars.get("prices") or []
-            elif isinstance(bars, list):
-                closes = [b.get("close") for b in bars if b.get("close") is not None]
+                # History handling: tolerate list of objects or dict with 'prices'
+                closes = []
+                if isinstance(bars, dict):
+                    closes = bars.get("prices") or []
+                elif isinstance(bars, list):
+                    closes = [b.get("close") for b in bars if b.get("close") is not None]
 
-            # Fallback to PolygonService if TruthLayer failed or returned insufficient data
-            if not closes or len(closes) < 50:
-                try:
-                    hist_data = market_data.get_historical_prices(symbol, days=90)
-                    if hist_data and "prices" in hist_data:
-                        closes = hist_data["prices"]
-                        # Convert to list of dicts for RegimeEngine compatibility if needed
-                        # bars = [{"close": p} for p in closes]
-                        # Note: We rely on 'closes' list for SMA calc below.
-                        # RegimeEngine below uses 'existing_bars=bars'. If 'bars' is from TruthLayer (empty),
-                        # RegimeEngine might re-fetch or fail.
-                        # Ideally we update 'bars' to match TruthLayer format for RegimeEngine reuse.
-                        bars = [{"close": p} for p in closes]
-                except Exception:
-                    pass
+                # Fallback to PolygonService if TruthLayer failed or returned insufficient data
+                if not closes or len(closes) < 50:
+                    try:
+                        hist_data = market_data.get_historical_prices(symbol, days=90)
+                        if hist_data and "prices" in hist_data:
+                            closes = hist_data["prices"]
+                            # Convert to list of dicts for RegimeEngine compatibility if needed
+                            # bars = [{"close": p} for p in closes]
+                            # Note: We rely on 'closes' list for SMA calc below.
+                            # RegimeEngine below uses 'existing_bars=bars'. If 'bars' is from TruthLayer (empty),
+                            # RegimeEngine might re-fetch or fail.
+                            # Ideally we update 'bars' to match TruthLayer format for RegimeEngine reuse.
+                            bars = [{"close": p} for p in closes]
+                    except Exception:
+                        pass
+
+                # Cache for reuse in multi-strategy retries
+                if _cached_data is not None:
+                    _cached_data["bars"] = bars
+                    _cached_data["closes"] = closes
 
             # Ensure we have enough data (need at least 50 for SMA50)
             if not closes or len(closes) < 50:
@@ -2236,8 +2246,21 @@ def scan_for_opportunities(
             # Pass existing bars to avoid redundant network call
             # Use pre-fetched IV context (Bolt Optimization)
             iv_context = iv_context_map.get(symbol) if iv_context_map else None
-            symbol_snapshot = regime_engine.compute_symbol_snapshot(symbol, global_snapshot, existing_bars=bars, iv_context=iv_context)
-            effective_regime_state = regime_engine.get_effective_regime(symbol_snapshot, global_snapshot)
+
+            # Reuse cached regime from prior strategy attempt on same symbol
+            if _cached_data is not None and "symbol_snapshot" in _cached_data:
+                symbol_snapshot = _cached_data["symbol_snapshot"]
+            else:
+                symbol_snapshot = regime_engine.compute_symbol_snapshot(symbol, global_snapshot, existing_bars=bars, iv_context=iv_context)
+                if _cached_data is not None:
+                    _cached_data["symbol_snapshot"] = symbol_snapshot
+
+            if _cached_data is not None and "effective_regime" in _cached_data:
+                effective_regime_state = _cached_data["effective_regime"]
+            else:
+                effective_regime_state = regime_engine.get_effective_regime(symbol_snapshot, global_snapshot)
+                if _cached_data is not None:
+                    _cached_data["effective_regime"] = effective_regime_state
 
             iv_rank = symbol_snapshot.iv_rank or 50.0
 
@@ -2316,28 +2339,38 @@ def scan_for_opportunities(
                 return None
 
             # F. Construct Contract & Calculate EV
-            # Prefer TruthLayer (cached)
-            chain = []
-            chain_objects = None
-
-            try:
-                # OPTIMIZATION: Use hoisted min/max expiry to reduce overhead inside loop
-                chain_objects = truth_layer.option_chain(symbol, min_expiry=min_expiry, max_expiry=max_expiry)
-            except Exception:
-                chain_objects = None
-
-            if chain_objects:
-                # Bolt Optimization:
-                # Pass chain_objects directly to selector. We defer flattening until we select the best expiry.
-                # This reduces dictionary creation/copying from ~5000 (all contracts) to ~200 (one expiry).
-                chain = chain_objects
-                rej_stats.increment_chains_loaded()
-
-            # Fallback if empty
-            if not chain:
-                chain = market_data.get_option_chain(symbol, min_dte=SCANNER_MIN_DTE, max_dte=SCANNER_MAX_DTE)
+            # Reuse cached chain from prior strategy attempt on same symbol
+            if _cached_data is not None and "chain" in _cached_data:
+                chain = _cached_data["chain"]
                 if chain:
                     rej_stats.increment_chains_loaded()
+            else:
+                # Prefer TruthLayer (cached)
+                chain = []
+                chain_objects = None
+
+                try:
+                    # OPTIMIZATION: Use hoisted min/max expiry to reduce overhead inside loop
+                    chain_objects = truth_layer.option_chain(symbol, min_expiry=min_expiry, max_expiry=max_expiry)
+                except Exception:
+                    chain_objects = None
+
+                if chain_objects:
+                    # Bolt Optimization:
+                    # Pass chain_objects directly to selector. We defer flattening until we select the best expiry.
+                    # This reduces dictionary creation/copying from ~5000 (all contracts) to ~200 (one expiry).
+                    chain = chain_objects
+                    rej_stats.increment_chains_loaded()
+
+                # Fallback if empty
+                if not chain:
+                    chain = market_data.get_option_chain(symbol, min_dte=SCANNER_MIN_DTE, max_dte=SCANNER_MAX_DTE)
+                    if chain:
+                        rej_stats.increment_chains_loaded()
+
+                # Cache for reuse in multi-strategy retries
+                if _cached_data is not None:
+                    _cached_data["chain"] = chain
 
             if not chain:
                 rej_stats.increment_chains_empty()
@@ -3013,12 +3046,16 @@ def scan_for_opportunities(
     def _process_symbol_multi(sym, drag_map, quotes_map, earnings_map, iv_ctx_map, rej_stats):
         """
         Multi-strategy wrapper: if primary strategy fails, retry with
-        fallback candidates via strategy_override. TruthLayer caches
-        chain data so fallback retries don't make extra API calls.
+        fallback candidates via strategy_override. Shared cache ensures
+        bars, regime, and chain are fetched only once per symbol.
         """
         print(f"[SCANNER_MULTI] {sym}: entering multi-strategy eval (MULTI_STRATEGY_EVAL={MULTI_STRATEGY_EVAL})", flush=True)
 
-        result = process_symbol(sym, drag_map, quotes_map, earnings_map, iv_ctx_map, rej_stats)
+        # Shared cache: bars, closes, regime, and chain are computed once
+        # and reused across all strategy attempts for this symbol.
+        shared_cache: Dict[str, Any] = {}
+
+        result = process_symbol(sym, drag_map, quotes_map, earnings_map, iv_ctx_map, rej_stats, _cached_data=shared_cache)
         if result is not None or not MULTI_STRATEGY_EVAL:
             return result
 
@@ -3040,6 +3077,7 @@ def scan_for_opportunities(
             fb_result = process_symbol(
                 sym, drag_map, quotes_map, earnings_map, iv_ctx_map, rej_stats,
                 strategy_override=fb_cand,
+                _cached_data=shared_cache,
             )
             if fb_result is not None:
                 fb_result["multi_strategy"] = {

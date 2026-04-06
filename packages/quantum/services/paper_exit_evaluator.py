@@ -215,7 +215,7 @@ def rank_triggered_exits(close_candidates: List[Dict[str, Any]]) -> List[Dict[st
 # Default exit thresholds — used when no cohort config is resolved.
 # These match the neutral cohort for a small ($500) account.
 _DEFAULT_TARGET_PROFIT_PCT = float(os.environ.get("EXIT_TARGET_PROFIT_PCT", "0.35"))
-_DEFAULT_STOP_LOSS_PCT = float(os.environ.get("EXIT_STOP_LOSS_PCT", "0.20"))
+_DEFAULT_STOP_LOSS_PCT = float(os.environ.get("EXIT_STOP_LOSS_PCT", "0.50"))
 _DEFAULT_MIN_DTE_TO_EXIT = int(os.environ.get("EXIT_MIN_DTE", "10"))
 
 EXIT_CONDITIONS: Dict[str, Dict[str, Any]] = {

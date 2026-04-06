@@ -65,6 +65,9 @@ SCHEDULES = [
 
     # Promotion readiness (after market close, after progression eval)
     ("promotion_check",             dict(hour=17, minute=0),  "/internal/tasks/promotion/check",  "tasks:promotion_check",          "Check for stuck phase transitions"),
+
+    # Scheduler liveness heartbeat — creates a job_run so ops_health_check can detect scheduler death
+    ("scheduler_heartbeat",         dict(minute="*/30", hour="8-17"), "/internal/tasks/heartbeat", "tasks:heartbeat", "Scheduler liveness heartbeat"),
 ]
 
 

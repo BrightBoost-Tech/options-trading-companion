@@ -226,6 +226,21 @@ async def promotion_check_task(
     )
 
 
+@router.post("/heartbeat", status_code=202)
+async def heartbeat_task(
+    auth: TaskSignatureResult = Depends(verify_task_signature("tasks:heartbeat"))
+):
+    """Scheduler liveness heartbeat — proves the scheduler is firing jobs."""
+    now = datetime.now()
+    return enqueue_job_run(
+        job_name="scheduler_heartbeat",
+        idempotency_key=f"heartbeat-{now.strftime('%Y-%m-%d-%H%M')}",
+        payload={
+            "trigger_ts": now.isoformat(),
+        },
+    )
+
+
 @router.post("/autotune/walk-forward", status_code=202)
 async def walk_forward_autotune_task(
     lookback_days: int = Body(60, embed=True),

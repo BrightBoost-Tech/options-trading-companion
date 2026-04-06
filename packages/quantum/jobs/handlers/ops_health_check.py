@@ -175,6 +175,34 @@ def run(payload: Dict[str, Any], ctx: Any = None) -> Dict[str, Any]:
 
             elif job.status == "never_run":
                 issues_found.append(f"Job never run: {job.name}")
+
+                fingerprint = get_alert_fingerprint("job_never_run", {"job_name": job.name})
+                suppressed, last_sent = should_suppress_alert(client, fingerprint, cooldown_minutes)
+
+                if not suppressed:
+                    alert_result = send_ops_alert_v2(
+                        "job_never_run",
+                        f"Job `{job.name}` ({job.cadence}) has NEVER run. "
+                        f"Scheduler may be down or misconfigured.",
+                        details={"job_name": job.name, "cadence": job.cadence},
+                        severity="critical",
+                        min_severity=min_severity,
+                    )
+                    if alert_result["sent"]:
+                        alerts_sent.append(f"job_never_run:{job.name}")
+                        alert_fingerprints.append(fingerprint)
+                    elif alert_result.get("suppressed_reason"):
+                        alerts_suppressed.append({
+                            "type": f"job_never_run:{job.name}",
+                            "reason": alert_result["suppressed_reason"],
+                        })
+                else:
+                    alerts_suppressed.append({
+                        "type": f"job_never_run:{job.name}",
+                        "reason": "cooldown",
+                        "last_sent": last_sent,
+                    })
+
             elif job.status == "error":
                 issues_found.append(f"Job check error: {job.name}")
 

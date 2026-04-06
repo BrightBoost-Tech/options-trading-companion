@@ -176,6 +176,37 @@ class PaperAutopilotService:
         except Exception:
             pass  # If ops_control unavailable, continue (fail-open)
 
+        # Circuit breaker: block new entries if risk envelope is breached
+        try:
+            from packages.quantum.risk.risk_envelope import check_all_envelopes, EnvelopeConfig
+            cb_positions = self._get_open_positions_for_risk_check(user_id)
+            if cb_positions:
+                cb_equity = self._estimate_equity(user_id, cb_positions)
+                cb_daily_pnl = sum(float(p.get("unrealized_pl") or 0) for p in cb_positions)
+                cb_config = EnvelopeConfig.from_env()
+                cb_result = check_all_envelopes(
+                    positions=cb_positions,
+                    equity=cb_equity,
+                    daily_pnl=cb_daily_pnl,
+                    config=cb_config,
+                )
+                if not cb_result.passed:
+                    logger.critical(
+                        f"[CIRCUIT_BREAKER] Blocking new entries: "
+                        f"{len(cb_result.violations)} envelope violations, "
+                        f"sizing_mult={cb_result.sizing_multiplier:.2f}, "
+                        f"force_close_ids={cb_result.force_close_ids}"
+                    )
+                    return {
+                        "status": "blocked",
+                        "reason": "risk_envelope_breach",
+                        "violations": len(cb_result.violations),
+                        "force_close_ids": cb_result.force_close_ids,
+                        "executed_count": 0,
+                    }
+        except Exception as cb_err:
+            logger.warning(f"[CIRCUIT_BREAKER] Check failed (non-fatal): {cb_err}")
+
         # Policy Lab: execute per-cohort with cohort-specific filtering
         from packages.quantum.policy_lab.config import is_policy_lab_enabled
         if is_policy_lab_enabled():
@@ -593,6 +624,45 @@ class PaperAutopilotService:
 
         positions.sort(key=sort_key)
         return positions
+
+    def _get_open_positions_for_risk_check(self, user_id: str) -> List[Dict[str, Any]]:
+        """Fetch open positions with fields needed for risk envelope check."""
+        try:
+            port_res = self.client.table("paper_portfolios") \
+                .select("id") \
+                .eq("user_id", user_id) \
+                .execute()
+            portfolio_ids = [p["id"] for p in (port_res.data or [])]
+            if not portfolio_ids:
+                return []
+
+            pos_res = self.client.table("paper_positions") \
+                .select("id, symbol, quantity, unrealized_pl, avg_entry_price, max_credit, nearest_expiry, sector, status") \
+                .in_("portfolio_id", portfolio_ids) \
+                .eq("status", "open") \
+                .execute()
+            return pos_res.data or []
+        except Exception as e:
+            logger.warning(f"[CIRCUIT_BREAKER] Failed to fetch positions: {e}")
+            return []
+
+    def _estimate_equity(self, user_id: str, positions: List[Dict[str, Any]]) -> float:
+        """Estimate account equity for risk envelope check."""
+        try:
+            from packages.quantum.services.cash_service import CashService
+            import asyncio
+            cash_svc = CashService(self.client)
+            loop = asyncio.new_event_loop()
+            try:
+                return loop.run_until_complete(cash_svc.get_deployable_capital(user_id))
+            finally:
+                loop.close()
+        except Exception:
+            # Fallback: sum of absolute entry values
+            return sum(
+                abs(float(p.get("avg_entry_price") or 0)) * abs(float(p.get("quantity") or 0)) * 100
+                for p in positions
+            )
 
     def _get_champion_portfolio(self, user_id: str) -> Optional[str]:
         """Get portfolio_id of the champion cohort, or None for default."""

@@ -79,10 +79,14 @@ class CalibrationService:
         """
         Compute EV/PoP multipliers based on historical calibration error.
 
-        Returns nested dict: {strategy: {regime: {ev_multiplier, pop_multiplier}}}
+        Returns nested dict: {strategy: {regime: {dte_bucket: {ev_multiplier, pop_multiplier}}}}
 
-        If IRON_CONDOR EV is consistently 20% too high in CHOP regime,
-        returns {"IRON_CONDOR": {"CHOP": {"ev_multiplier": 0.80, ...}}}
+        DTE-segmented calibration allows the system to learn that e.g.
+        short-DTE debit spreads have different realized returns than
+        long-DTE ones, even in the same regime.
+
+        Falls back gracefully: callers that don't pass dte_bucket to
+        apply_calibration() will get the "_all" bucket (aggregate).
         """
         outcomes = self._fetch_outcomes(user_id, window_days)
 
@@ -93,21 +97,26 @@ class CalibrationService:
                 "minimum_required": MIN_CALIBRATION_TRADES,
             }
 
-        adjustments: Dict[str, Dict[str, Dict[str, float]]] = {}
+        adjustments: Dict[str, Dict[str, Dict[str, Any]]] = {}
 
-        # Group by (strategy, regime)
+        # Group by (strategy, regime, dte_bucket)
         groups: Dict[str, List[Dict]] = {}
         for o in outcomes:
             strategy = o.get("strategy") or "unknown"
             regime = o.get("regime") or "unknown"
-            key = f"{strategy}|{regime}"
+            dte_bucket = self._classify_dte(o)
+            key = f"{strategy}|{regime}|{dte_bucket}"
             groups.setdefault(key, []).append(o)
 
+            # Also accumulate into "_all" bucket for backward compatibility
+            all_key = f"{strategy}|{regime}|_all"
+            groups.setdefault(all_key, []).append(o)
+
         for key, group in groups.items():
-            if len(group) < max(5, MIN_CALIBRATION_TRADES // 4):
+            if len(group) < max(3, MIN_CALIBRATION_TRADES // 4):
                 continue
 
-            strategy, regime = key.split("|", 1)
+            strategy, regime, dte_bucket = key.split("|", 2)
             metrics = self._compute_segment_metrics(group)
 
             ev_mult = self._compute_ev_multiplier(metrics)
@@ -115,13 +124,15 @@ class CalibrationService:
 
             # Only include non-trivial adjustments (>5% deviation)
             if abs(1.0 - ev_mult) > 0.05 or abs(1.0 - pop_mult) > 0.05:
-                adjustments.setdefault(strategy, {})[regime] = {
-                    "ev_multiplier": round(ev_mult, 4),
-                    "pop_multiplier": round(pop_mult, 4),
-                    "sample_size": metrics["sample_size"],
-                    "ev_calibration_error": metrics["ev_calibration_error"],
-                    "pop_calibration_error": metrics.get("pop_calibration_error"),
-                }
+                adjustments \
+                    .setdefault(strategy, {}) \
+                    .setdefault(regime, {})[dte_bucket] = {
+                        "ev_multiplier": round(ev_mult, 4),
+                        "pop_multiplier": round(pop_mult, 4),
+                        "sample_size": metrics["sample_size"],
+                        "ev_calibration_error": metrics["ev_calibration_error"],
+                        "pop_calibration_error": metrics.get("pop_calibration_error"),
+                    }
 
         return {
             "status": "ok",
@@ -129,6 +140,23 @@ class CalibrationService:
             "total_outcomes": len(outcomes),
             "computed_at": datetime.now(timezone.utc).isoformat(),
         }
+
+    @staticmethod
+    def _classify_dte(outcome: Dict[str, Any]) -> str:
+        """Classify an outcome into a DTE bucket based on entry DTE."""
+        # Try details_json first, then top-level fields
+        details = outcome.get("details_json") or {}
+        dte = details.get("dte_at_entry") or outcome.get("dte_at_entry") or outcome.get("days_to_expiry")
+        if dte is None:
+            return "unknown"
+        try:
+            dte = int(float(dte))
+        except (TypeError, ValueError):
+            return "unknown"
+        for label, (lo, hi) in DTE_BUCKETS.items():
+            if lo <= dte < hi:
+                return label
+        return "60+" if dte >= 60 else "unknown"
 
     # ── Data fetching ───────────────────────────────────────────────
 
@@ -309,9 +337,15 @@ def apply_calibration(
     strategy: str,
     regime: str,
     adjustments: Dict[str, Dict[str, Dict[str, float]]],
+    dte_bucket: Optional[str] = None,
 ) -> tuple:
     """
     Apply calibration multipliers to raw EV and PoP.
+
+    Lookup order:
+    1. (strategy, regime, dte_bucket) — most specific
+    2. (strategy, regime, "_all") — aggregate for that strategy/regime
+    3. 1.0 — no adjustment
 
     Returns (adjusted_ev, adjusted_pop).
     Logs adjustment when applied.
@@ -319,15 +353,30 @@ def apply_calibration(
     strat_adj = adjustments.get(strategy, {})
     regime_adj = strat_adj.get(regime, {})
 
-    ev_mult = regime_adj.get("ev_multiplier", 1.0)
-    pop_mult = regime_adj.get("pop_multiplier", 1.0)
+    # New format: regime_adj is {dte_bucket: {ev_multiplier, pop_multiplier}}
+    # Old format: regime_adj is {ev_multiplier, pop_multiplier} directly
+    # Detect format by checking if ev_multiplier exists at top level (old format)
+    if "ev_multiplier" in regime_adj:
+        # Old format (backward compatibility with cached rows)
+        bucket_adj = regime_adj
+    else:
+        # New format: try specific DTE bucket, fall back to _all
+        bucket_adj = {}
+        if dte_bucket:
+            bucket_adj = regime_adj.get(dte_bucket, {})
+        if not bucket_adj:
+            bucket_adj = regime_adj.get("_all", {})
+
+    ev_mult = bucket_adj.get("ev_multiplier", 1.0)
+    pop_mult = bucket_adj.get("pop_multiplier", 1.0)
 
     adj_ev = ev * ev_mult
     adj_pop = pop * pop_mult
 
     if ev_mult != 1.0 or pop_mult != 1.0:
+        bucket_label = dte_bucket or "_all"
         logger.info(
-            f"[CALIBRATION] Adjusted {strategy}/{regime}: "
+            f"[CALIBRATION] Adjusted {strategy}/{regime}/{bucket_label}: "
             f"EV {ev:.2f}→{adj_ev:.2f} (×{ev_mult:.3f}), "
             f"PoP {pop:.3f}→{adj_pop:.3f} (×{pop_mult:.3f})"
         )

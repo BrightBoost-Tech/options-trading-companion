@@ -161,7 +161,12 @@ Gate to `micro_live`: 4 consecutive Alpaca paper green days (not internal fills)
 - [x] Calibration enabled by default, threshold lowered to 8 trades, added to scheduler, applied to morning window
 - [x] Promotion check job: detects stuck phase transitions, logs CRITICAL alerts for go_live_gate cancellations
 - [x] Risk envelope wired into pre-entry and MTM (warn-only mode — log violations, no blocking)
-- [ ] Risk envelope: switch from warn-only to block mode after 1 week observation
+- [x] Multi-strategy scan caching: bars, regime, chain fetched once per symbol, reused across strategy retries
+- [x] Debit spread stop loss widened from 20% to 50% (was triggering on normal bid-ask noise with 25-45 DTE)
+- [x] Scheduler heartbeat job + never_run alert escalation (ops_health_check now alerts on dead scheduler)
+- [x] Calibration DTE-bucket segmentation: adjustments now computed per (strategy, regime, dte_bucket)
+- [x] Risk envelope circuit breaker: auto-execute blocks new entries when envelope is breached (force-close still warn-only)
+- [ ] Risk envelope: switch force-close from warn-only to block mode after 1 week observation
 - [ ] GAP 1â€”2 implementation
 - [ ] Micro-live test ($500 cap, separate portfolio)
 - [ ] GAP 3â€”4 after data accumulates
@@ -181,5 +186,5 @@ Gate to `micro_live`: 4 consecutive Alpaca paper green days (not internal fills)
 - **Phase:** alpaca_paper
 - **Green days:** 0
 - **Last green:** 
-- **Open positions:** 2
-- **Last updated:** 2026-04-06 01:08
+- **Open positions:** 4
+- **Last updated:** 2026-04-06 12:37

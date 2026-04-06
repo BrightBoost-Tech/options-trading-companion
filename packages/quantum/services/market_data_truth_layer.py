@@ -752,34 +752,88 @@ class MarketDataTruthLayer:
     def _get_headers(self):
         return {"Authorization": f"Bearer {self.api_key}"} if self.api_key else {}
 
+    # Application-level retry config (on top of urllib3 adapter retries)
+    _APP_MAX_RETRIES = 5
+    _APP_BASE_DELAY = 0.5   # seconds
+    _APP_MAX_DELAY = 30.0   # seconds
+    _APP_JITTER = 0.25      # ±25%
+    _TRANSIENT_STATUS_CODES = {429, 500, 502, 503, 504}
+
     def _make_request(self, endpoint: str, params: Dict = None, retries: int = 2) -> Any:
-        """Helper to make requests with retry logic."""
+        """
+        Make HTTP request with exponential backoff + jitter on transient errors.
+
+        The urllib3 adapter handles low-level retries, but during sustained
+        volatility (e.g., Polygon 502 storms) adapter retries exhaust quickly.
+        This application-level retry catches those and applies jitter to avoid
+        thundering herd on recovery.
+        """
+        import random
+
         url = f"{self.base_url}{endpoint}"
         params = params or {}
         if self.api_key and "apiKey" not in params:
              params["apiKey"] = self.api_key
 
-        # Use session for connection pooling
-        try:
-            start_ts = time.time()
-            response = self.session.get(url, params=params, timeout=5)
-            elapsed_ms = (time.time() - start_ts) * 1000
+        last_status = None
+        last_error = None
 
-            if response.status_code == 200:
-                logger.info(f"OK {endpoint} {response.status_code} {elapsed_ms:.1f}ms")
-                return response.json()
-            elif response.status_code == 429:
-                # Retry logic handled by adapter, but if we are here it failed retries or manual handling needed?
-                # Actually Adapter handles retries on status codes. If we get 429 here, it means retries exhausted.
-                logger.warning(f"Rate limited on {endpoint} (Retries exhausted).")
-                return None
-            else:
+        for attempt in range(self._APP_MAX_RETRIES):
+            try:
+                start_ts = time.time()
+                response = self.session.get(url, params=params, timeout=10)
+                elapsed_ms = (time.time() - start_ts) * 1000
+                last_status = response.status_code
+
+                if response.status_code == 200:
+                    if attempt > 0:
+                        logger.info(
+                            f"OK {endpoint} {response.status_code} {elapsed_ms:.1f}ms "
+                            f"(recovered after {attempt} retries)"
+                        )
+                    else:
+                        logger.info(f"OK {endpoint} {response.status_code} {elapsed_ms:.1f}ms")
+                    return response.json()
+
+                if response.status_code in self._TRANSIENT_STATUS_CODES:
+                    if attempt < self._APP_MAX_RETRIES - 1:
+                        base = min(self._APP_BASE_DELAY * (2 ** attempt), self._APP_MAX_DELAY)
+                        jitter = base * random.uniform(-self._APP_JITTER, self._APP_JITTER)
+                        delay = max(0.1, base + jitter)
+                        logger.warning(
+                            f"[POLYGON] {response.status_code} on {endpoint} "
+                            f"(attempt {attempt + 1}/{self._APP_MAX_RETRIES}). "
+                            f"Retrying in {delay:.2f}s..."
+                        )
+                        time.sleep(delay)
+                        continue
+
+                # Non-transient error — fail immediately
                 logger.error(f"Error {endpoint}: {response.status_code} {response.text}")
                 return None
 
-        except requests.exceptions.RequestException as e:
-            logger.error(f"Request failed {endpoint}: {e}")
-            return None
+            except requests.exceptions.RequestException as e:
+                last_error = e
+                if attempt < self._APP_MAX_RETRIES - 1:
+                    base = min(self._APP_BASE_DELAY * (2 ** attempt), self._APP_MAX_DELAY)
+                    jitter = base * random.uniform(-self._APP_JITTER, self._APP_JITTER)
+                    delay = max(0.1, base + jitter)
+                    logger.warning(
+                        f"[POLYGON] Request error on {endpoint} "
+                        f"(attempt {attempt + 1}/{self._APP_MAX_RETRIES}): {e}. "
+                        f"Retrying in {delay:.2f}s..."
+                    )
+                    time.sleep(delay)
+                    continue
+
+                logger.error(f"Request failed {endpoint} after {self._APP_MAX_RETRIES} attempts: {e}")
+                return None
+
+        logger.error(
+            f"[POLYGON] {endpoint} failed after {self._APP_MAX_RETRIES} attempts "
+            f"(last_status={last_status}, last_error={last_error})"
+        )
+        return None
 
     # ... rest of the class methods ...
     def snapshot_many(self, tickers: List[str]) -> Dict[str, Dict]:

@@ -28,16 +28,34 @@ class PaperMarkToMarketService:
         """
         Fetch fresh quotes for all open positions and update current_mark + unrealized_pl.
 
+        Uses the MarketDataTruthLayer's /v3/snapshot endpoint (works for options
+        on all Polygon plans) instead of /v3/quotes (requires Options add-on).
+
         Returns summary dict with positions_marked, errors, etc.
         """
-        from packages.quantum.market_data import PolygonService
-        from packages.quantum.paper_endpoints import _is_valid_quote
+        from packages.quantum.services.market_data_truth_layer import MarketDataTruthLayer
 
-        poly = PolygonService()
+        truth_layer = MarketDataTruthLayer()
         positions = self._get_open_positions(user_id)
 
         if not positions:
             return {"status": "ok", "positions_marked": 0, "reason": "no_open_positions"}
+
+        # Batch-fetch all leg symbols in one API call via truth layer
+        all_leg_symbols = []
+        for pos in positions:
+            legs = pos.get("legs") or []
+            for leg in legs:
+                if isinstance(leg, dict):
+                    sym = leg.get("occ_symbol") or leg.get("symbol", "")
+                    if sym:
+                        all_leg_symbols.append(sym)
+            # Fallback: position-level symbol if no legs
+            if not legs and pos.get("symbol"):
+                all_leg_symbols.append(pos["symbol"])
+
+        # Single batched snapshot call (uses /v3/snapshot with ticker.any_of)
+        snapshots = truth_layer.snapshot_many(all_leg_symbols) if all_leg_symbols else {}
 
         marked = 0
         skipped = 0
@@ -46,7 +64,7 @@ class PaperMarkToMarketService:
         for pos in positions:
             pos_id = pos["id"]
             try:
-                current_value = self._compute_position_value(pos, poly, _is_valid_quote)
+                current_value = self._compute_position_value_from_snapshots(pos, snapshots)
                 if current_value is None:
                     skipped += 1
                     errors.append({"position_id": pos_id, "error": "incomplete_quotes_skipped"})
@@ -232,6 +250,79 @@ class PaperMarkToMarketService:
             return None
 
         # All-or-nothing: reject partial pricing
+        if failed_legs:
+            pos_id = position.get("id", "?")
+            logger.warning(
+                f"[MARK_TO_MARKET] Skipping position {pos_id}: "
+                f"{len(failed_legs)}/{priceable_legs} legs failed to price "
+                f"({', '.join(failed_legs)}). Keeping previous mark."
+            )
+            return None
+
+        return sum(leg_values)
+
+    @staticmethod
+    def _compute_position_value_from_snapshots(
+        position: Dict[str, Any],
+        snapshots: Dict[str, Dict],
+    ) -> Optional[float]:
+        """
+        Compute current market value from pre-fetched truth layer snapshots.
+
+        Same all-or-nothing logic as _compute_position_value, but reads from
+        the snapshot dict (keyed by normalized symbol) instead of making
+        per-leg API calls. Uses /v3/snapshot which works for options on all
+        Polygon plans (unlike /v3/quotes which requires Options add-on).
+        """
+        from packages.quantum.services.cache_key_builder import normalize_symbol
+
+        legs = position.get("legs") or []
+        if not legs:
+            symbol = position.get("symbol", "")
+            norm = normalize_symbol(symbol)
+            snap = snapshots.get(norm, {})
+            bid = float(snap.get("bid") or 0)
+            ask = float(snap.get("ask") or 0)
+            mid = (bid + ask) / 2.0 if (bid > 0 and ask > 0) else 0.0
+            if mid <= 0:
+                return None
+            qty = abs(float(position.get("quantity") or 1))
+            return mid * 100 * qty
+
+        leg_values: List[float] = []
+        failed_legs: List[str] = []
+        priceable_legs = 0
+
+        for leg in legs:
+            if isinstance(leg, str):
+                continue
+
+            occ_symbol = leg.get("occ_symbol") or leg.get("symbol", "")
+            if not occ_symbol:
+                continue
+
+            priceable_legs += 1
+            norm = normalize_symbol(occ_symbol)
+            snap = snapshots.get(norm, {})
+
+            bid = float(snap.get("bid") or 0)
+            ask = float(snap.get("ask") or 0)
+            mid = (bid + ask) / 2.0 if (bid > 0 and ask > 0) else 0.0
+
+            if mid <= 0:
+                failed_legs.append(occ_symbol)
+                continue
+
+            multiplier = 100
+            leg_qty = float(leg.get("quantity") or position.get("quantity") or 1)
+            action = leg.get("action", "buy")
+            side_mult = 1.0 if action == "buy" else -1.0
+
+            leg_values.append(mid * multiplier * abs(leg_qty) * side_mult)
+
+        if priceable_legs == 0:
+            return None
+
         if failed_legs:
             pos_id = position.get("id", "?")
             logger.warning(

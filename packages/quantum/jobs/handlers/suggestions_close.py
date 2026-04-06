@@ -128,6 +128,17 @@ def run(payload: Dict[str, Any], ctx: Any = None) -> Dict[str, Any]:
                     else:
                         await run_morning_cycle(client, uid)
 
+                    # 5. Execute exits immediately (don't wait for separate paper_exit_evaluate job)
+                    try:
+                        from packages.quantum.services.paper_exit_evaluator import PaperExitEvaluator
+                        evaluator = PaperExitEvaluator(client)
+                        exit_result = evaluator.evaluate_exits(uid)
+                        closing = exit_result.get("closing", 0)
+                        if closing > 0:
+                            notes.append(f"Closed {closing} positions for {uid[:8]}")
+                    except Exception as exit_err:
+                        notes.append(f"Exit eval error for {uid[:8]}: {exit_err}")
+
                     processed += 1
 
                 except Exception as e:

@@ -135,6 +135,7 @@ Gate to `micro_live`: 4 consecutive Alpaca paper green days (not internal fills)
 - Start a new Claude Code session without `--continue` on this project
 - Use ChatGPT mid-build â€” all architecture decisions live here; mixing tools creates drift
 - Deploy without verifying `TASK_NONCE_PROTECTION=1` in Railway
+- Risk envelope force_close is still warn-only in paper_mark_to_market.py — switch to block mode after 2026-04-13 (one week from deploy)
 
 ---
 

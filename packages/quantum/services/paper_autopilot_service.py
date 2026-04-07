@@ -176,6 +176,21 @@ class PaperAutopilotService:
         except Exception:
             pass  # If ops_control unavailable, continue (fail-open)
 
+        # Staleness gate: block new entries if market data is stale
+        try:
+            from packages.quantum.risk.staleness_gate import check_staleness_gate
+            stale = check_staleness_gate()
+            if stale.blocked:
+                return {
+                    "status": "blocked",
+                    "reason": f"staleness_gate: {stale.reason}",
+                    "age_seconds": stale.age_seconds,
+                    "stale_symbols": stale.stale_symbols,
+                    "executed_count": 0,
+                }
+        except Exception as sg_err:
+            logger.warning(f"[STALENESS_GATE] Check failed (non-fatal): {sg_err}")
+
         # Circuit breaker: block new entries if risk envelope is breached
         try:
             from packages.quantum.risk.risk_envelope import check_all_envelopes, EnvelopeConfig

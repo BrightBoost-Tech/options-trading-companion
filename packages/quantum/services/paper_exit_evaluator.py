@@ -643,14 +643,28 @@ class PaperExitEvaluator:
         Resolve which cohort a position belongs to.
 
         Priority:
-        1. Direct portfolio_id → policy_lab_cohorts lookup
-        2. If no match, use the champion cohort (positions on default portfolio
-           should still use the active policy, not hardcoded defaults)
+        1. Direct cohort_id on paper_positions (set at creation time)
+        2. Fallback: portfolio_id → policy_lab_cohorts lookup
+        3. Fallback: champion cohort for positions on the default portfolio
         """
+        # Fast path: direct cohort_id (new positions have this set)
+        cohort_id = position.get("cohort_id")
+        if cohort_id:
+            try:
+                res = self.client.table("policy_lab_cohorts") \
+                    .select("cohort_name") \
+                    .eq("id", cohort_id) \
+                    .limit(1) \
+                    .execute()
+                if res.data:
+                    return res.data[0]["cohort_name"]
+            except Exception:
+                pass
+
         portfolio_id = position.get("portfolio_id")
         user_id = position.get("user_id")
 
-        # Try direct portfolio match first
+        # Fallback: portfolio_id → cohort lookup
         if portfolio_id:
             try:
                 res = self.client.table("policy_lab_cohorts") \
@@ -663,7 +677,7 @@ class PaperExitEvaluator:
             except Exception:
                 pass
 
-        # Fallback: use champion cohort for positions on the default portfolio
+        # Fallback: champion cohort for positions on the default portfolio
         if user_id:
             try:
                 res = self.client.table("policy_lab_cohorts") \

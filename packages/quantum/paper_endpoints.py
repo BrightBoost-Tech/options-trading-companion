@@ -1083,6 +1083,26 @@ def _process_orders_for_user(supabase, analytics, user_id, target_order_id=None)
     return result
 
 
+def _resolve_cohort_id_for_portfolio(supabase, portfolio_id: str) -> Optional[str]:
+    """
+    Resolve the policy_lab_cohorts.id for a given portfolio_id.
+    Returns None if no cohort is mapped to this portfolio.
+    """
+    if not portfolio_id:
+        return None
+    try:
+        res = supabase.table("policy_lab_cohorts") \
+            .select("id") \
+            .eq("portfolio_id", portfolio_id) \
+            .limit(1) \
+            .execute()
+        if res.data:
+            return res.data[0]["id"]
+    except Exception:
+        pass
+    return None
+
+
 def _repair_filled_order_commit(supabase, analytics, user_id, order, portfolio) -> Dict[str, Any]:
     """
     Repair an orphan filled order that has no position_id.
@@ -1216,7 +1236,8 @@ def _repair_filled_order_commit(supabase, analytics, user_id, order, portfolio) 
                 "nearest_expiry": nearest_expiry,
                 "status": "open",
                 "trace_id": order.get("trace_id"),
-                "suggestion_id": order.get("suggestion_id")
+                "suggestion_id": order.get("suggestion_id"),
+                "cohort_id": _resolve_cohort_id_for_portfolio(supabase, portfolio["id"]),
             }
 
             # Enrich with model metadata from suggestion if available
@@ -1532,7 +1553,8 @@ def _commit_fill(supabase, analytics, user_id, order, fill_res, quote, portfolio
                 "status": "open",
                 # Linkage
                 "trace_id": order.get("trace_id"),
-                "suggestion_id": order.get("suggestion_id")
+                "suggestion_id": order.get("suggestion_id"),
+                "cohort_id": _resolve_cohort_id_for_portfolio(supabase, portfolio["id"]),
             }
 
             # Enrich with model metadata from suggestion if available

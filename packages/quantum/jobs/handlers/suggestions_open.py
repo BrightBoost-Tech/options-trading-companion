@@ -74,6 +74,24 @@ def run(payload: Dict[str, Any], ctx: Any = None) -> Dict[str, Any]:
             return {"ok": True, "fast_path": True, "reason": "no_active_users",
                     "counts": counts, "timing_ms": (time.time() - start_time) * 1000}
 
+        # Staleness gate: block suggestion generation if market data is stale
+        try:
+            from packages.quantum.risk.staleness_gate import check_staleness_gate
+            stale = check_staleness_gate()
+            if stale.blocked:
+                return {
+                    "ok": True,
+                    "fast_path": True,
+                    "reason": f"staleness_gate: {stale.reason}",
+                    "age_seconds": stale.age_seconds,
+                    "stale_symbols": stale.stale_symbols,
+                    "counts": counts,
+                    "timing_ms": (time.time() - start_time) * 1000,
+                }
+        except Exception as sg_err:
+            import logging as _lg
+            _lg.getLogger(__name__).warning(f"[STALENESS_GATE] Check failed (non-fatal): {sg_err}")
+
         async def process_users():
             processed = 0
             failed = 0

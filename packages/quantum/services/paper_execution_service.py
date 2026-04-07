@@ -302,6 +302,16 @@ class PaperExecutionService:
             except Exception:
                 pass
 
+            # Resolve cohort from portfolio
+            _cohort_id = None
+            try:
+                _cohort_res = self.supabase.table("policy_lab_cohorts") \
+                    .select("id").eq("portfolio_id", portfolio_id).limit(1).execute()
+                if _cohort_res.data:
+                    _cohort_id = _cohort_res.data[0]["id"]
+            except Exception:
+                pass
+
             self.supabase.table("paper_positions").insert({
                 "portfolio_id": portfolio_id,
                 "strategy_key": strategy_key,
@@ -313,4 +323,5 @@ class PaperExecutionService:
                 "max_credit": fill.fill_price,
                 "nearest_expiry": nearest_expiry,
                 "status": "open",
+                "cohort_id": _cohort_id,
             }).execute()

@@ -232,6 +232,8 @@ class JobRunStore:
                 "payload": payload_with_meta,
                 "status": "cancelled",
                 "completed_at": datetime.now().isoformat(),  # Mark as immediately completed
+                "cancelled_reason": cancelled_reason,
+                "cancelled_detail": cancelled_detail,
             }
 
             # upsert with ignore_duplicates=True will do nothing if conflict

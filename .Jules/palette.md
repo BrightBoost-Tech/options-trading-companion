@@ -69,3 +69,7 @@
 ## 2025-06-06 - Accessible Disabled Tooltips
 **Learning:** Browsers disable mouse events on `disabled` buttons, preventing tooltips from appearing. Wrapping the disabled button in a focusable `span` (`tabIndex={0}`) allows the tooltip to trigger on hover and focus.
 **Action:** Always wrap disabled buttons in a `span` with `tabIndex={0}` and an explanatory `aria-label` when tooltips are required.
+
+## 2026-03-23 - Accessible Collapsible Sections
+**Learning:** Collapsible sections and accordions built with native `<button>` tags often miss the WAI-ARIA disclosure pattern, breaking context for screen readers. Furthermore, if they do not include `focus-visible` styles, keyboard users cannot determine which section is currently focused.
+**Action:** When implementing collapsible sections with native tags, always include `aria-expanded`, an `aria-controls` pointing to the content ID, and explicit `focus-visible` utility classes for keyboard accessibility.

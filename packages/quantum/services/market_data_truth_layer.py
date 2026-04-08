@@ -1245,11 +1245,18 @@ class MarketDataTruthLayer:
 
         Returns dict keyed by O:-prefixed OCC symbol in our canonical format.
         """
+        logger.info(
+            f"[MTM] _fetch_alpaca_options_snapshots called with "
+            f"{len(occ_symbols)} symbol(s): {occ_symbols[:5]}"
+        )
+
         alpaca_key = os.getenv("ALPACA_API_KEY", "")
         alpaca_secret = os.getenv("ALPACA_SECRET_KEY", "")
         if not alpaca_key or not alpaca_secret:
             logger.warning("[MTM] Alpaca options skipped — ALPACA_API_KEY/ALPACA_SECRET_KEY not set")
             return {}
+
+        logger.info(f"[MTM] Alpaca keys present, key_id={alpaca_key[:8]}...")
 
         # Alpaca wants bare OCC symbols without the O: prefix
         # e.g. "ADBE260515P00255000" not "O:ADBE260515P00255000"
@@ -1284,6 +1291,11 @@ class MarketDataTruthLayer:
 
                 data = resp.json()
                 snapshots = data.get("snapshots", data)  # top-level may be the dict itself
+                logger.info(
+                    f"[MTM] Alpaca response: status={resp.status_code}, "
+                    f"symbols_returned={len(snapshots)}, "
+                    f"keys={list(snapshots.keys())[:5]}"
+                )
 
                 for bare_sym, snap in snapshots.items():
                     original_key = stripped.get(bare_sym)

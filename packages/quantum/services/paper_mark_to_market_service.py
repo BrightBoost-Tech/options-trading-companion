@@ -282,9 +282,10 @@ class PaperMarkToMarketService:
             symbol = position.get("symbol", "")
             norm = normalize_symbol(symbol)
             snap = snapshots.get(norm, {})
-            bid = float(snap.get("bid") or 0)
-            ask = float(snap.get("ask") or 0)
-            mid = (bid + ask) / 2.0 if (bid > 0 and ask > 0) else 0.0
+            q = snap.get("quote", snap)  # try nested "quote" dict, fall back to flat
+            bid = float(q.get("bid") or 0)
+            ask = float(q.get("ask") or 0)
+            mid = float(q.get("mid") or 0) if not (bid > 0 and ask > 0) else (bid + ask) / 2.0
             if mid <= 0:
                 return None
             qty = abs(float(position.get("quantity") or 1))
@@ -305,10 +306,11 @@ class PaperMarkToMarketService:
             priceable_legs += 1
             norm = normalize_symbol(occ_symbol)
             snap = snapshots.get(norm, {})
+            q = snap.get("quote", snap)  # try nested "quote" dict, fall back to flat
 
-            bid = float(snap.get("bid") or 0)
-            ask = float(snap.get("ask") or 0)
-            mid = (bid + ask) / 2.0 if (bid > 0 and ask > 0) else 0.0
+            bid = float(q.get("bid") or 0)
+            ask = float(q.get("ask") or 0)
+            mid = float(q.get("mid") or 0) if not (bid > 0 and ask > 0) else (bid + ask) / 2.0
 
             if mid <= 0:
                 failed_legs.append(occ_symbol)

@@ -28,8 +28,9 @@ class PaperMarkToMarketService:
         """
         Fetch fresh quotes for all open positions and update current_mark + unrealized_pl.
 
-        Uses the MarketDataTruthLayer's /v3/snapshot endpoint (works for options
-        on all Polygon plans) instead of /v3/quotes (requires Options add-on).
+        Uses the MarketDataTruthLayer's /v3/snapshot endpoint for Polygon,
+        with automatic fallback to Alpaca's indicative options feed when
+        Polygon returns empty bid/ask (plan doesn't include options quotes).
 
         Returns summary dict with positions_marked, errors, etc.
         """

@@ -840,14 +840,15 @@ class MarketDataTruthLayer:
         """
         Fetches snapshots for multiple tickers (up to 250).
         Returns a dict keyed by ticker.
+
+        Routing: option tickers (O: prefix) → Alpaca primary, Polygon fallback.
+        Equity tickers → Polygon primary.
         """
         if not tickers:
             return {}
 
         # 1. Normalize tickers and filter valid ones
-        # Use centralized normalization (Sentinel: Input Sanitization)
         normalized_tickers = [self.normalize_symbol(t) for t in tickers]
-        # Remove duplicates
         unique_tickers = list(set(normalized_tickers))
 
         # 2. Check Cache
@@ -864,27 +865,55 @@ class MarketDataTruthLayer:
         if not missing_tickers:
             return results
 
-        # 3. Batch Fetch from Polygon
-        # Polygon allows comma-separated list in ticker.any_of
-        # Max chunk size logic if list is huge (Polygon limit is ~250 usually for URL length?
-        # Actually universal snapshot takes `ticker.any_of` which can be long.
-        # But let's be safe and chunk at 50 to avoid massive URLs or limits.)
-        chunk_size = 50
+        # 3. Split into options vs equities
+        missing_options = [t for t in missing_tickers if t.startswith("O:")]
+        missing_equities = [t for t in missing_tickers if not t.startswith("O:")]
 
-        # Bolt Optimization: Parallelize batch fetching
-        # If we have multiple chunks, fetch them concurrently
-        # 4 chunks of 50 = 200 tickers
-        # Sequential: ~2.0s
-        # Parallel: ~0.5s
+        # 4a. Options → Alpaca primary
+        if missing_options:
+            logger.info(f"[SNAPSHOT] Fetching {len(missing_options)} option(s) via Alpaca primary")
+            alpaca_snaps = self._fetch_alpaca_options_snapshots(missing_options)
+            for ticker, snap in alpaca_snaps.items():
+                self.cache.set("snapshot_many", ticker, snap, self.ttl_snapshot)
+                results[ticker] = snap
+
+            # Fallback: options that Alpaca missed → try Polygon
+            alpaca_misses = [t for t in missing_options if t not in results]
+            if alpaca_misses:
+                logger.info(
+                    f"[SNAPSHOT] Alpaca missed {len(alpaca_misses)} option(s), "
+                    f"falling back to Polygon: {alpaca_misses}"
+                )
+                polygon_snaps = self._fetch_polygon_snapshots(alpaca_misses)
+                for ticker, snap in polygon_snaps.items():
+                    q = snap.get("quote", {})
+                    if (q.get("bid") or 0) > 0 or (q.get("ask") or 0) > 0:
+                        self.cache.set("snapshot_many", ticker, snap, self.ttl_snapshot)
+                        results[ticker] = snap
+
+        # 4b. Equities → Polygon primary (unchanged)
+        if missing_equities:
+            polygon_snaps = self._fetch_polygon_snapshots(missing_equities)
+            for ticker, snap in polygon_snaps.items():
+                self.cache.set("snapshot_many", ticker, snap, self.ttl_snapshot)
+                results[ticker] = snap
+
+        return results
+
+    def _fetch_polygon_snapshots(self, tickers: List[str]) -> Dict[str, Dict]:
+        """
+        Batch-fetch snapshots from Polygon /v3/snapshot.
+        Extracted so snapshot_many can route options vs equities to different providers.
+        """
+        results: Dict[str, Dict] = {}
+        chunk_size = 50
 
         def fetch_chunk(chunk):
             tickers_str = ",".join(chunk)
             return self._make_request("/v3/snapshot", params={"ticker.any_of": tickers_str})
 
-        chunks = [missing_tickers[i:i + chunk_size] for i in range(0, len(missing_tickers), chunk_size)]
+        chunks = [tickers[i:i + chunk_size] for i in range(0, len(tickers), chunk_size)]
 
-        # Use max_workers=10 to allow sufficient concurrency without overwhelming the API rate limits (if any)
-        # Connection pool is sized at 50, so this is safe.
         with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
             future_to_chunk = {executor.submit(fetch_chunk, chunk): chunk for chunk in chunks}
 
@@ -896,17 +925,12 @@ class MarketDataTruthLayer:
                             ticker = item.get("ticker")
                             if not ticker:
                                 continue
-
-                            canonical = self._parse_snapshot_item(item)
-
-                            # Cache it
-                            self.cache.set("snapshot_many", ticker, canonical, self.ttl_snapshot)
-                            results[ticker] = canonical
+                            results[ticker] = self._parse_snapshot_item(item)
                     else:
                         chunk = future_to_chunk[future]
-                        logger.warning(f"No results for snapshot batch: {chunk}")
+                        logger.warning(f"No results for Polygon snapshot batch: {chunk}")
                 except Exception as e:
-                    logger.error(f"Error fetching snapshot chunk: {e}")
+                    logger.error(f"Error fetching Polygon snapshot chunk: {e}")
 
         return results
 
@@ -971,8 +995,12 @@ class MarketDataTruthLayer:
             # Compute quality
             quality = compute_quote_quality(quote, freshness_ms)
 
-            # Build source metadata
-            source = TruthSourceV4(provider="polygon", endpoint="/v3/snapshot")
+            # Build source metadata — reflect actual provider
+            raw_source = raw.get("source", "polygon")
+            source = TruthSourceV4(
+                provider=raw_source,
+                endpoint="/v1beta1/options/snapshots" if raw_source == "alpaca" else "/v3/snapshot"
+            )
 
             v4_results[ticker] = TruthSnapshotV4(
                 symbol_canonical=ticker,
@@ -1207,6 +1235,127 @@ class MarketDataTruthLayer:
         except (ValueError, TypeError):
             return None
 
+    def _fetch_alpaca_options_snapshots(self, occ_symbols: List[str]) -> Dict[str, Dict]:
+        """
+        Fetch option snapshots from Alpaca's indicative options feed.
+        Primary source for options pricing (Phase 1).
+
+        Endpoint: GET https://data.alpaca.markets/v1beta1/options/snapshots
+        Auth: ALPACA_API_KEY + ALPACA_SECRET_KEY headers
+
+        Returns dict keyed by O:-prefixed OCC symbol in our canonical format.
+        """
+        alpaca_key = os.getenv("ALPACA_API_KEY", "")
+        alpaca_secret = os.getenv("ALPACA_SECRET_KEY", "")
+        if not alpaca_key or not alpaca_secret:
+            logger.warning("[MTM] Alpaca options skipped — ALPACA_API_KEY/ALPACA_SECRET_KEY not set")
+            return {}
+
+        # Alpaca wants bare OCC symbols without the O: prefix
+        # e.g. "ADBE260515P00255000" not "O:ADBE260515P00255000"
+        stripped = {sym.removeprefix("O:"): sym for sym in occ_symbols}
+
+        results: Dict[str, Dict] = {}
+        # Alpaca allows up to 100 symbols per request
+        chunk_size = 100
+        symbol_list = list(stripped.keys())
+
+        for i in range(0, len(symbol_list), chunk_size):
+            chunk = symbol_list[i:i + chunk_size]
+            params = {"symbols": ",".join(chunk)}
+            headers = {
+                "APCA-API-KEY-ID": alpaca_key,
+                "APCA-API-SECRET-KEY": alpaca_secret,
+            }
+
+            try:
+                resp = self.session.get(
+                    "https://data.alpaca.markets/v1beta1/options/snapshots",
+                    params=params,
+                    headers=headers,
+                    timeout=10,
+                )
+                if resp.status_code != 200:
+                    logger.warning(
+                        f"[MTM] Alpaca options snapshot returned {resp.status_code}: "
+                        f"{resp.text[:200]}"
+                    )
+                    continue
+
+                data = resp.json()
+                snapshots = data.get("snapshots", data)  # top-level may be the dict itself
+
+                for bare_sym, snap in snapshots.items():
+                    original_key = stripped.get(bare_sym)
+                    if not original_key:
+                        continue
+
+                    # Parse Alpaca snapshot into our canonical format
+                    quote = snap.get("latestQuote", {})
+                    trade = snap.get("latestTrade", {})
+                    greeks = snap.get("greeks", {})
+
+                    bid = None
+                    ask = None
+                    try:
+                        bid = float(quote.get("bp", 0) or 0)
+                        ask = float(quote.get("ap", 0) or 0)
+                    except (TypeError, ValueError):
+                        pass
+
+                    mid = None
+                    if bid and ask and bid > 0 and ask > 0 and ask >= bid:
+                        mid = (bid + ask) / 2.0
+
+                    last_price = None
+                    try:
+                        last_price = float(trade.get("p", 0) or 0) or None
+                    except (TypeError, ValueError):
+                        pass
+
+                    if mid is None and last_price is None:
+                        logger.warning(f"[MTM] Alpaca returned empty data for {original_key}")
+                        continue
+
+                    logger.info(f"[MTM] Alpaca options snapshot OK for {original_key}")
+
+                    results[original_key] = {
+                        "ticker": original_key,
+                        "asset_type": "O",
+                        "quote": {
+                            "bid": bid if bid and bid > 0 else None,
+                            "ask": ask if ask and ask > 0 else None,
+                            "mid": mid,
+                            "last": last_price,
+                            "quote_ts": None,
+                            "bid_size": None,
+                            "ask_size": None,
+                        },
+                        "day": {
+                            "o": None, "h": None, "l": None,
+                            "c": snap.get("dailyBar", {}).get("c"),
+                            "v": snap.get("dailyBar", {}).get("v"),
+                            "vwap": None,
+                        },
+                        "greeks": {
+                            "delta": greeks.get("delta"),
+                            "gamma": greeks.get("gamma"),
+                            "theta": greeks.get("theta"),
+                            "vega": greeks.get("vega"),
+                        },
+                        "iv": snap.get("impliedVolatility"),
+                        "source": "alpaca",
+                        "retrieved_ts": datetime.utcnow().isoformat(),
+                        "provider_ts": None,
+                        "staleness_ms": None,
+                        "parser_version": "v2",
+                    }
+
+            except requests.exceptions.RequestException as e:
+                logger.error(f"[MTM] Alpaca options snapshot request failed: {e}")
+
+        return results
+
     def option_chain(self, underlying: str, *,
                      expiration_date: Optional[str] = None,
                      min_expiry: Optional[str] = None,
@@ -1233,71 +1382,225 @@ class MarketDataTruthLayer:
             quote = snap.get("quote", {})
             spot_for_filter = quote.get("mid") or quote.get("last")
 
-        # 3. Fetch from Polygon
-        # Endpoint: /v3/snapshot/options/{underlyingAsset}
+        # 3. Try Alpaca first for option chain
+        all_contracts = self._fetch_alpaca_option_chain(
+            underlying, spot_for_filter, expiration_date, min_expiry, max_expiry,
+            strike_range, right
+        )
 
-        params = {"limit": 250}
+        # 4. Fallback to Polygon if Alpaca returned nothing
+        if not all_contracts:
+            logger.info(f"[CHAIN] Alpaca returned no contracts for {underlying}, falling back to Polygon")
+            all_contracts = self._fetch_polygon_option_chain(
+                underlying, spot_for_filter, expiration_date, min_expiry, max_expiry,
+                strike_range, right
+            )
 
-        # Apply strike range filter if spot is available
-        if strike_range is not None and spot_for_filter and spot_for_filter > 0:
-            strike_low = spot_for_filter * (1 - strike_range)
-            strike_high = spot_for_filter * (1 + strike_range)
-            params["strike_price.gte"] = strike_low
-            params["strike_price.lte"] = strike_high
+        # Record to DecisionContext if active (for replay feature store)
+        _record_option_chain_to_context(underlying, expiration_date, all_contracts)
+
+        self.cache.set("option_chain", cache_key, all_contracts, self.ttl_option_chain)
+        return all_contracts
+
+    def _fetch_alpaca_option_chain(
+        self, underlying: str, spot: Optional[float],
+        expiration_date: Optional[str], min_expiry: Optional[str],
+        max_expiry: Optional[str], strike_range: Optional[float],
+        right: Optional[str],
+    ) -> List[Dict]:
+        """
+        Fetch option chain from Alpaca /v1beta1/options/snapshots/{underlying}.
+        Returns list of canonical contract dicts matching option_chain() format.
+        """
+        alpaca_key = os.getenv("ALPACA_API_KEY", "")
+        alpaca_secret = os.getenv("ALPACA_SECRET_KEY", "")
+        if not alpaca_key or not alpaca_secret:
+            logger.warning("[CHAIN] Alpaca skipped — keys not set")
+            return []
+
+        headers = {
+            "APCA-API-KEY-ID": alpaca_key,
+            "APCA-API-SECRET-KEY": alpaca_secret,
+        }
+
+        all_contracts: List[Dict] = []
+        page_token: Optional[str] = None
+        page_limit = 100
+
+        while True:
+            params: Dict[str, Any] = {"limit": page_limit}
+
+            if expiration_date:
+                params["expiration_date"] = expiration_date
+            else:
+                if min_expiry:
+                    params["expiration_date_gte"] = min_expiry
+                if max_expiry:
+                    params["expiration_date_lte"] = max_expiry
+
+            if right:
+                params["type"] = right.lower()  # "call" or "put"
+
+            if strike_range is not None and spot and spot > 0:
+                params["strike_price_gte"] = str(round(spot * (1 - strike_range), 2))
+                params["strike_price_lte"] = str(round(spot * (1 + strike_range), 2))
+
+            if page_token:
+                params["page_token"] = page_token
+
+            try:
+                resp = self.session.get(
+                    f"https://data.alpaca.markets/v1beta1/options/snapshots/{underlying}",
+                    params=params,
+                    headers=headers,
+                    timeout=15,
+                )
+                if resp.status_code != 200:
+                    logger.warning(
+                        f"[CHAIN] Alpaca option chain returned {resp.status_code}: "
+                        f"{resp.text[:200]}"
+                    )
+                    break
+
+                data = resp.json()
+                snapshots = data.get("snapshots", {})
+
+                for occ_symbol, snap in snapshots.items():
+                    contract = self._parse_alpaca_chain_item(occ_symbol, underlying, snap)
+                    if contract:
+                        all_contracts.append(contract)
+
+                # Pagination
+                page_token = data.get("next_page_token")
+                if not page_token:
+                    break
+
+            except requests.exceptions.RequestException as e:
+                logger.error(f"[CHAIN] Alpaca option chain request failed: {e}")
+                break
+
+        if all_contracts:
+            logger.info(
+                f"[CHAIN] Alpaca returned {len(all_contracts)} contracts for {underlying}"
+            )
+
+        return all_contracts
+
+    def _parse_alpaca_chain_item(self, occ_symbol: str, underlying: str, snap: Dict) -> Optional[Dict]:
+        """Parse a single Alpaca option snapshot into the canonical chain contract format."""
+        from packages.quantum.services.options_utils import parse_option_symbol
+
+        parsed = parse_option_symbol(occ_symbol)
+        if not parsed:
+            return None
+
+        quote = snap.get("latestQuote", {})
+        trade = snap.get("latestTrade", {})
+        greeks = snap.get("greeks", {})
+
+        bid = None
+        ask = None
+        try:
+            bid = float(quote.get("bp", 0) or 0) or None
+            ask = float(quote.get("ap", 0) or 0) or None
+        except (TypeError, ValueError):
+            pass
+
+        mid = None
+        if bid and ask and bid > 0 and ask > 0:
+            mid = (bid + ask) / 2.0
+
+        last_price = None
+        try:
+            last_price = float(trade.get("p", 0) or 0) or None
+        except (TypeError, ValueError):
+            pass
+
+        # Map parsed type (C/P) to canonical right (call/put)
+        opt_type = parsed.get("type", "")
+        right_val = "call" if opt_type == "C" else "put" if opt_type == "P" else opt_type.lower()
+
+        return {
+            "contract": f"O:{occ_symbol}",
+            "underlying": underlying,
+            "strike": parsed.get("strike"),
+            "expiry": parsed.get("expiry"),
+            "right": right_val,
+            "quote": {
+                "bid": bid,
+                "ask": ask,
+                "mid": mid,
+                "last": last_price,
+            },
+            "iv": snap.get("impliedVolatility"),
+            "greeks": {
+                "delta": greeks.get("delta"),
+                "gamma": greeks.get("gamma"),
+                "theta": greeks.get("theta"),
+                "vega": greeks.get("vega"),
+            },
+            "oi": snap.get("openInterest"),
+            "volume": snap.get("dailyBar", {}).get("v"),
+            "retrieved_ts": datetime.utcnow().isoformat(),
+            "provider_ts": None,
+            "source": "alpaca",
+        }
+
+    def _fetch_polygon_option_chain(
+        self, underlying: str, spot: Optional[float],
+        expiration_date: Optional[str], min_expiry: Optional[str],
+        max_expiry: Optional[str], strike_range: Optional[float],
+        right: Optional[str],
+    ) -> List[Dict]:
+        """
+        Fetch option chain from Polygon /v3/snapshot/options/{underlying}.
+        Fallback when Alpaca returns no data.
+        """
+        params: Dict[str, Any] = {"limit": 250}
+
+        if strike_range is not None and spot and spot > 0:
+            params["strike_price.gte"] = spot * (1 - strike_range)
+            params["strike_price.lte"] = spot * (1 + strike_range)
 
         if expiration_date:
             params["expiration_date"] = expiration_date
         elif min_expiry or max_expiry:
-             if min_expiry:
-                 params["expiration_date.gte"] = min_expiry
-             if max_expiry:
-                 params["expiration_date.lte"] = max_expiry
+            if min_expiry:
+                params["expiration_date.gte"] = min_expiry
+            if max_expiry:
+                params["expiration_date.lte"] = max_expiry
 
         if right:
-            # right should be 'call' or 'put'
             params["contract_type"] = right.lower()
 
-        all_contracts = []
-        url = f"/v3/snapshot/options/{underlying}"
+        all_contracts: List[Dict] = []
+        url: Optional[str] = f"/v3/snapshot/options/{underlying}"
 
-        # Loop for pagination
         while url:
             data = self._make_request(url, params=params)
             if not data:
                 break
 
-            results = data.get("results", [])
-            for item in results:
-                # Client-side filtering for complex ranges if needed,
-                # but let's trust server params for expiry/right.
-
+            for item in data.get("results", []):
                 details = item.get("details", {})
 
-                # Extract quote/trade fields using robust multi-key extractors
                 last_quote = item.get("last_quote")
                 last_trade = item.get("last_trade")
                 bid, ask, quote_ts, bid_size, ask_size = self._extract_last_quote_fields(last_quote)
                 last_price, trade_ts = self._extract_last_trade_fields(last_trade)
 
-                # Compute mid if both bid and ask available
                 mid = None
                 if bid is not None and ask is not None:
                     mid = (bid + ask) / 2.0
 
-                # Compute provider_ts from available timestamps
-                provider_ts = None
-                for ts in [quote_ts, trade_ts]:
-                    if ts is not None:
-                        provider_ts = ts
-                        break
+                provider_ts = quote_ts or trade_ts
 
-                # Parse
-                contract = {
+                all_contracts.append({
                     "contract": details.get("ticker"),
                     "underlying": underlying,
                     "strike": details.get("strike_price"),
                     "expiry": details.get("expiration_date"),
-                    "right": details.get("contract_type"), # 'call' or 'put'
+                    "right": details.get("contract_type"),
                     "quote": {
                         "bid": bid,
                         "ask": ask,
@@ -1316,28 +1619,15 @@ class MarketDataTruthLayer:
                     "retrieved_ts": datetime.utcnow().isoformat(),
                     "provider_ts": provider_ts,
                     "source": "polygon"
-                }
+                })
 
-                all_contracts.append(contract)
-
-            # Pagination
-            # URL for next page is usually in data['next_url']
-            # But wait, `_make_request` takes endpoint. `next_url` is full URL.
-            # We need to handle this.
             next_url = data.get("next_url")
             if next_url:
-                # Extract path and params from next_url or just use requests directly?
-                # next_url already has params encoded.
-                # Let's simple check: if next_url starts with https://api.polygon.io, strip base.
                 url = next_url.replace(self.base_url, "")
-                params = {} # Params are in the URL now
+                params = {}
             else:
                 url = None
 
-        # Record to DecisionContext if active (for replay feature store)
-        _record_option_chain_to_context(underlying, expiration_date, all_contracts)
-
-        self.cache.set("option_chain", cache_key, all_contracts, self.ttl_option_chain)
         return all_contracts
 
     def daily_bars(self, ticker: str, start_date: datetime, end_date: datetime) -> List[Dict]:

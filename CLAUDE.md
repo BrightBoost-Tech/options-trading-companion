@@ -201,6 +201,10 @@ Gate to `micro_live`: 4 consecutive Alpaca paper green days (not internal fills)
 - 11 broker endpoints + 6 policy lab endpoints missing explicit `Depends(get_current_user)` — fixed 2026-04-09
 - Deprecated `POST /tasks/iv/daily-refresh` stub accepting legacy X-Cron-Secret — removed 2026-04-09
 - `calculate_portfolio_inputs()` was synchronous inside async optimizer endpoint — wrapped in run_in_executor 2026-04-10
+- Close orders missing `position_intent` — Alpaca inferred `buy_to_open` instead of `buy_to_close`, rejecting ADBE/AVGO exits. Fixed: set `buy_to_close`/`sell_to_close` per leg when `position_id` is set (2026-04-10)
+- Close orders on near-worthless spreads had negative `limit_price` (AMD: -1.53). Alpaca rejects limit ≤ 0. Fixed: clamp to 0.01 for close orders (2026-04-10)
+- `paper_exit_evaluate` 3 PM run never fired — idempotency key `{date}-exit-evaluate-{user_id}` was same for 8:15 AM and 3:00 PM. Morning's `succeeded` record blocked afternoon. Fixed: key now includes UTC hour (2026-04-10)
+- `LIVE_MANUAL_APPROVAL=true` is NOT wired into paper submission path — `safety_checks.py` defines it but `paper_endpoints.py` and `paper_exit_evaluator.py` never call `stage_for_approval()`. Paper orders go directly to `submit_and_track()`. No fix needed.
 
 ---
 
@@ -229,6 +233,7 @@ Gate to `micro_live`: 4 consecutive Alpaca paper green days (not internal fills)
 - [x] Profit Optimization Agent: dynamic weight loading from learned calibrations (2026-04-10)
 - [x] Day Orchestrator Agent: boot check, missed job detection, chain status (2026-04-10)
 - [x] Efficiency: async optimizer, V4 quality cache, condor EV memoization (2026-04-10)
+- [x] Alpaca close order fixes: position_intent + negative limit_price clamp + exit-evaluate idempotency (2026-04-10)
 - [ ] Risk envelope: switch force-close from warn-only to block mode (RISK_ENVELOPE_ENFORCE=1 after 2026-04-13)
 - [ ] Enable PROFIT_AGENT_RANKING=1 after 5 days of learning data
 - [ ] Enable ORCHESTRATOR_ENABLED=1 after individual agent testing

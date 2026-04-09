@@ -957,6 +957,20 @@ class MarketDataTruthLayer:
         if raw_snapshots is None:
             raw_snapshots = self.snapshot_many(tickers)
 
+        # V4 quality cache — within the same minute, quality scores don't change
+        if not hasattr(self, '_v4_quality_cache'):
+            self._v4_quality_cache = {}
+            self._v4_quality_cache_minute = None
+        current_minute = datetime.utcnow().strftime('%Y%m%d%H%M')
+        if self._v4_quality_cache_minute != current_minute:
+            self._v4_quality_cache = {}
+            self._v4_quality_cache_minute = current_minute
+
+        # Check cache for exact ticker set
+        cache_key = frozenset(raw_snapshots.keys())
+        if cache_key in self._v4_quality_cache:
+            return self._v4_quality_cache[cache_key]
+
         v4_results: Dict[str, TruthSnapshotV4] = {}
         received_ts = int(time.time() * 1000)
 
@@ -1017,6 +1031,7 @@ class MarketDataTruthLayer:
             # Record to DecisionContext if active (for replay feature store)
             _record_snapshot_to_context(ticker, raw, v4_results[ticker])
 
+        self._v4_quality_cache[cache_key] = v4_results
         return v4_results
 
     def _normalize_timestamp_to_ms(self, ts: Optional[Union[int, float]]) -> Optional[int]:

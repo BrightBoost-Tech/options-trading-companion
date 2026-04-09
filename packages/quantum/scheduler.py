@@ -53,9 +53,11 @@ SCHEDULES = [
     ("learning_ingest_eod",         dict(hour=16, minute=10), "/tasks/learning/ingest",            "tasks:learning_ingest",          "EOD learning ingest"),
     ("paper_learning_ingest",       dict(hour=16, minute=20), "/tasks/paper/learning-ingest",      "tasks:paper_learning_ingest",    "Paper outcomes → learning"),
     ("policy_lab_eval",             dict(hour=16, minute=30), "/tasks/policy-lab/eval",             "tasks:policy_lab_eval",          "Evaluate cohort performance"),
+    ("post_trade_learning",         dict(hour=16, minute=45), "/internal/tasks/learning/post-trade", "tasks:post_trade_learning",     "Post-trade learning agent"),
 
-    # Pre-dawn calibration
+    # Pre-dawn calibration + orchestrator
     ("calibration_update",          dict(hour=5,  minute=0),  "/internal/tasks/calibration/update", "tasks:calibration_update",       "Compute calibration adjustments"),
+    ("day_orchestrator",            dict(hour=7,  minute=30), "/internal/tasks/orchestrator/start-day", "tasks:day_orchestrator",    "Day orchestrator boot check"),
 
     # Frequent
     ("alpaca_order_sync",           dict(minute="*/5", hour="9-16"), "/internal/tasks/alpaca/order-sync", "tasks:alpaca_order_sync", "Poll Alpaca for fills"),

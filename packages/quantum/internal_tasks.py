@@ -196,6 +196,43 @@ async def intraday_risk_monitor_task(
     )
 
 
+@router.post("/learning/post-trade", status_code=202)
+async def post_trade_learning_task(
+    auth: TaskSignatureResult = Depends(verify_task_signature("tasks:post_trade_learning")),
+    trade_ids: list = Body(None, embed=True),
+):
+    today = datetime.now().strftime("%Y-%m-%d")
+    payload = {
+        "app_version": APP_VERSION,
+        "trigger_ts": datetime.now().isoformat(),
+    }
+    if trade_ids:
+        payload["trade_ids"] = trade_ids
+    user_id = os.environ.get("USER_ID") or os.environ.get("TASK_USER_ID")
+    if user_id:
+        payload["user_id"] = user_id
+    return enqueue_job_run(
+        job_name="post_trade_learning",
+        idempotency_key=f"post_trade_learning-{today}",
+        payload=payload,
+    )
+
+
+@router.post("/orchestrator/start-day", status_code=202)
+async def day_orchestrator_task(
+    auth: TaskSignatureResult = Depends(verify_task_signature("tasks:day_orchestrator"))
+):
+    today = datetime.now().strftime("%Y-%m-%d")
+    return enqueue_job_run(
+        job_name="day_orchestrator",
+        idempotency_key=f"day_orchestrator-{today}",
+        payload={
+            "app_version": APP_VERSION,
+            "trigger_ts": datetime.now().isoformat(),
+        },
+    )
+
+
 @router.post("/progression/daily-eval", status_code=202)
 async def daily_progression_eval_task(
     auth: TaskSignatureResult = Depends(verify_task_signature("tasks:daily_progression_eval"))

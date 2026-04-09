@@ -2,6 +2,7 @@ from fastapi import APIRouter, HTTPException, Depends
 from pydantic import BaseModel
 from typing import List, Dict, Optional, Any, Union
 from datetime import datetime
+import asyncio
 import numpy as np
 import pandas as pd
 import os
@@ -448,7 +449,9 @@ async def optimize_portfolio(req: OptimizationRequest, request: Request, user_id
             unique_underlyings = list(set([u for u in underlying_tickers if u and "USD" not in u and "CASH" not in u]))
             if not unique_underlyings: raise ValueError("No valid underlyings")
 
-            base_inputs = calculate_portfolio_inputs(unique_underlyings)
+            base_inputs = await asyncio.get_event_loop().run_in_executor(
+                None, calculate_portfolio_inputs, unique_underlyings
+            )
             base_idx_map = {u: i for i, u in enumerate(unique_underlyings)}
             n = len(tickers)
             sigma = np.zeros((n, n))

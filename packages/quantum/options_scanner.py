@@ -1324,6 +1324,7 @@ def _select_best_iron_condor_ev_aware(
     combos_ev_errors = 0
     ev_error_first = None
     best_credit_seen = 0.0
+    _ev_memo: Dict[tuple, Any] = {}  # Memoize EV by (credit, widths, deltas)
 
     for target_delta in CONDOR_TARGET_DELTAS:
         for width in CONDOR_WIDTHS:
@@ -1384,9 +1385,15 @@ def _select_best_iron_condor_ev_aware(
             long_call_delta = abs(long_call.get("delta") or 0)
             long_put_delta = abs(long_put.get("delta") or 0)
 
-            # Compute EV using configured model
+            # Compute EV using configured model (memoized by leg params)
+            _memo_key = (
+                round(credit_share, 4), round(width_put, 2), round(width_call, 2),
+                round(short_put_delta, 4), round(short_call_delta, 4),
+            )
             try:
-                if CONDOR_EV_MODEL == "tail":
+                if _memo_key in _ev_memo:
+                    ev_obj = _ev_memo[_memo_key]
+                elif CONDOR_EV_MODEL == "tail":
                     ev_obj = calculate_condor_ev_tail(
                         credit=credit_share,
                         width_put=width_put,
@@ -1398,6 +1405,7 @@ def _select_best_iron_condor_ev_aware(
                         tail_loss_severity=CONDOR_TAIL_LOSS_SEVERITY,
                         tail_prob_mult=CONDOR_TAIL_PROB_MULT
                     )
+                    _ev_memo[_memo_key] = ev_obj
                 else:
                     # Default: strict model
                     ev_obj = calculate_condor_ev(
@@ -1407,6 +1415,7 @@ def _select_best_iron_condor_ev_aware(
                         delta_short_put=short_put_delta,
                         delta_short_call=short_call_delta
                     )
+                    _ev_memo[_memo_key] = ev_obj
                 total_ev = ev_obj.expected_value
             except Exception as e:
                 combos_ev_errors += 1
@@ -1907,6 +1916,7 @@ def _sum_leg_spreads_share(legs: List[Dict[str, Any]]) -> Optional[float]:
 def _condor_pop_from_legs(legs: List[Dict[str, Any]]) -> Optional[float]:
     """
     Estimate PoP for condor as 1 - (|delta_short_put| + |delta_short_call|).
+    NOTE: Condor-specific fallback. Canonical PoP: use ev_calculator.calculate_pop()
     Clamped to [0.01, 0.99]. Returns None if required legs not found.
     """
     try:

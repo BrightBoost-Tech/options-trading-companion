@@ -33,6 +33,10 @@ def build_alpaca_order_request(order: Dict[str, Any]) -> Dict[str, Any]:
 
     Reads order_json for legs, limit_price, side, and converts
     Polygon OCC symbols to Alpaca format.
+
+    Close orders (position_id set): sets position_intent per leg
+    (buy_to_close / sell_to_close) and clamps limit_price >= 0.01
+    for near-worthless spreads.
     """
     order_json = order.get("order_json") or {}
     legs_data = order_json.get("legs") or []
@@ -40,15 +44,36 @@ def build_alpaca_order_request(order: Dict[str, Any]) -> Dict[str, Any]:
     limit_price = round(float(order.get("requested_price") or order_json.get("limit_price") or 0), 2)
     qty = int(order.get("requested_qty") or order_json.get("contracts") or 1)
 
+    # Detect close orders: position_id is set when closing an existing position
+    is_close_order = bool(order.get("position_id"))
+
     alpaca_legs = []
     for leg in legs_data:
         leg_symbol = leg.get("symbol") or leg.get("occ_symbol") or ""
         leg_side = leg.get("side") or leg.get("action") or side
-        alpaca_legs.append({
+        alpaca_leg = {
             "symbol": polygon_to_alpaca(leg_symbol),
             "side": leg_side,
             "qty": 1,  # Always 1 — contract count goes on parent order qty
-        })
+        }
+
+        # Set position_intent for close orders so Alpaca doesn't infer buy_to_open
+        if is_close_order:
+            if leg_side == "buy":
+                alpaca_leg["position_intent"] = "buy_to_close"
+            else:
+                alpaca_leg["position_intent"] = "sell_to_close"
+
+        alpaca_legs.append(alpaca_leg)
+
+    # Close orders on near-worthless spreads can have negative or zero mark.
+    # Clamp to 0.01 so Alpaca accepts the order (you're paying a penny to close).
+    if is_close_order and limit_price <= 0:
+        logger.warning(
+            f"[ALPACA_HANDLER] Close order limit_price={limit_price} <= 0 "
+            f"(order={order.get('id')}). Clamping to 0.01."
+        )
+        limit_price = 0.01
 
     # Options must always be limit orders — Alpaca rejects market orders
     # outside market hours. If no limit_price, the order cannot be submitted.

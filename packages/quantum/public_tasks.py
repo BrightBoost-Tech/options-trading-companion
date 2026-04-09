@@ -1474,10 +1474,13 @@ def _readiness_hardening_idempotency_key(task_type: str, user_id: str) -> str:
     """
     Generate UTC-based idempotency key for readiness hardening tasks.
 
-    Format: {YYYY-MM-DD}-{task_type}-{user_id}
+    Format: {YYYY-MM-DD}-{HH}-{task_type}-{user_id}
+
+    Includes hour so the same task (e.g. exit-evaluate) can run at both
+    8:15 AM and 3:00 PM without the morning run's key blocking the afternoon.
     """
-    date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    return f"{date}-{task_type}-{user_id}"
+    now = datetime.now(timezone.utc)
+    return f"{now.strftime('%Y-%m-%d-%H')}-{task_type}-{user_id}"
 
 
 @router.post("/validation/preflight", status_code=200)

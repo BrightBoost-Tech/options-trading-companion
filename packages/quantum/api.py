@@ -527,11 +527,9 @@ async def get_iv_context(
         # SECURITY: Do not leak exception details
         raise HTTPException(status_code=500, detail="Internal Server Error")
 
-@app.post("/tasks/iv/daily-refresh", deprecated=True)
-def iv_daily_refresh_task_deprecated(
-    x_cron_secret: str = Header(None, alias="X-Cron-Secret")
-):
-    raise HTTPException(status_code=410, detail="Endpoint moved to /internal/tasks/...")
+    # REMOVED: POST /tasks/iv/daily-refresh (deprecated 410 stub)
+    # Migrated to /internal/tasks/iv/daily-refresh with v4 task signing.
+    # Legacy endpoint accepted X-Cron-Secret and was a security risk. Removed 2026-04-09.
 
 # --- Rebalance Engine Endpoints (Step 3) ---
 

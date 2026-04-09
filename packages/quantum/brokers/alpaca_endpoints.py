@@ -9,6 +9,7 @@ import logging
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Body, Request
+from packages.quantum.security import get_current_user
 
 logger = logging.getLogger(__name__)
 
@@ -27,16 +28,15 @@ def _get_alpaca():
 # ── Account ───────────────────────────────────────────────────────────
 
 @router.get("/account")
-async def broker_account(request: Request):
+async def broker_account(user_id: str = Depends(get_current_user)):
     """Account summary: balance, buying power, equity, PDT status."""
     alpaca = _get_alpaca()
     return alpaca.get_account()
 
 
 @router.get("/pdt-status")
-async def broker_pdt_status(request: Request):
+async def broker_pdt_status(request: Request, user_id: str = Depends(get_current_user)):
     """PDT status from both our tracker and Alpaca."""
-    user_id = request.state.user_id
     alpaca = _get_alpaca()
 
     alpaca_pdt = {
@@ -60,7 +60,7 @@ async def broker_pdt_status(request: Request):
 
 @router.get("/orders")
 async def broker_orders(
-    request: Request,
+    user_id: str = Depends(get_current_user),
     status: str = Query(default="open"),
     limit: int = Query(default=50, le=200),
 ):
@@ -70,14 +70,14 @@ async def broker_orders(
 
 
 @router.get("/orders/{order_id}")
-async def broker_order_detail(request: Request, order_id: str):
+async def broker_order_detail(order_id: str, user_id: str = Depends(get_current_user)):
     """Get Alpaca order detail and sync to internal state."""
     alpaca = _get_alpaca()
     return alpaca.get_order(order_id)
 
 
 @router.post("/orders/{order_id}/cancel")
-async def broker_cancel_order(request: Request, order_id: str):
+async def broker_cancel_order(order_id: str, user_id: str = Depends(get_current_user)):
     """Cancel an open Alpaca order."""
     alpaca = _get_alpaca()
     return alpaca.cancel_order(order_id)
@@ -88,10 +88,10 @@ async def broker_cancel_order(request: Request, order_id: str):
 @router.get("/positions")
 async def broker_positions(
     request: Request,
+    user_id: str = Depends(get_current_user),
     source: str = Query(default="auto"),
 ):
     """Get positions from configured source (auto, alpaca, internal)."""
-    user_id = request.state.user_id
     supabase = request.app.state.supabase
 
     from packages.quantum.brokers.position_sync import PositionSyncService
@@ -102,9 +102,8 @@ async def broker_positions(
 
 
 @router.get("/reconcile")
-async def broker_reconcile(request: Request):
+async def broker_reconcile(request: Request, user_id: str = Depends(get_current_user)):
     """Compare internal vs Alpaca positions."""
-    user_id = request.state.user_id
     supabase = request.app.state.supabase
 
     from packages.quantum.brokers.alpaca_order_handler import reconcile_positions
@@ -120,9 +119,8 @@ async def broker_reconcile(request: Request):
 # ── Approvals (micro-live) ───────────────────────────────────────────
 
 @router.get("/approvals")
-async def broker_approvals(request: Request):
+async def broker_approvals(request: Request, user_id: str = Depends(get_current_user)):
     """Pending approval queue."""
-    user_id = request.state.user_id
     supabase = request.app.state.supabase
 
     res = supabase.table("live_approval_queue") \
@@ -137,9 +135,8 @@ async def broker_approvals(request: Request):
 
 
 @router.post("/approvals/{approval_id}/approve")
-async def broker_approve(request: Request, approval_id: str):
+async def broker_approve(request: Request, approval_id: str, user_id: str = Depends(get_current_user)):
     """Approve a pending live order."""
-    user_id = request.state.user_id
     supabase = request.app.state.supabase
     alpaca = _get_alpaca()
 
@@ -152,9 +149,9 @@ async def broker_reject(
     request: Request,
     approval_id: str,
     reason: str = Body(..., embed=True),
+    user_id: str = Depends(get_current_user),
 ):
     """Reject a pending live order."""
-    user_id = request.state.user_id
     supabase = request.app.state.supabase
 
     from packages.quantum.brokers.safety_checks import reject_order
@@ -164,7 +161,7 @@ async def broker_reject(
 # ── Mode ──────────────────────────────────────────────────────────────
 
 @router.get("/mode")
-async def broker_mode(request: Request):
+async def broker_mode(user_id: str = Depends(get_current_user)):
     """Current execution mode."""
     from packages.quantum.brokers.execution_router import get_execution_mode
     mode = get_execution_mode()

@@ -7,6 +7,7 @@ from datetime import date, timedelta
 from typing import Optional
 
 from fastapi import APIRouter, Depends, Query, Body, HTTPException, Request
+from packages.quantum.security import get_current_user
 
 from packages.quantum.policy_lab.config import (
     PolicyConfig,
@@ -24,11 +25,10 @@ def _require_enabled():
 
 
 @router.get("/cohorts")
-async def list_cohorts(request: Request):
+async def list_cohorts(request: Request, user_id: str = Depends(get_current_user)):
     """List active cohorts with current config."""
     _require_enabled()
     supabase = request.app.state.supabase
-    user_id = request.state.user_id
 
     res = supabase.table("policy_lab_cohorts") \
         .select("id, cohort_name, portfolio_id, policy_config, is_active, promoted_at, created_at") \
@@ -42,12 +42,12 @@ async def list_cohorts(request: Request):
 @router.get("/results")
 async def get_results(
     request: Request,
+    user_id: str = Depends(get_current_user),
     days: int = Query(default=7, ge=1, le=90),
 ):
     """Daily results comparison table."""
     _require_enabled()
     supabase = request.app.state.supabase
-    user_id = request.state.user_id
 
     # Get cohort IDs for this user
     cohorts_res = supabase.table("policy_lab_cohorts") \
@@ -76,11 +76,10 @@ async def get_results(
 
 
 @router.get("/promotions")
-async def get_promotions(request: Request):
+async def get_promotions(request: Request, user_id: str = Depends(get_current_user)):
     """Promotion history."""
     _require_enabled()
     supabase = request.app.state.supabase
-    user_id = request.state.user_id
 
     res = supabase.table("policy_lab_promotions") \
         .select("*") \
@@ -96,11 +95,11 @@ async def get_promotions(request: Request):
 async def promote_cohort(
     request: Request,
     cohort_name: str = Body(..., embed=True),
+    user_id: str = Depends(get_current_user),
 ):
     """Manually promote a cohort's policy."""
     _require_enabled()
     supabase = request.app.state.supabase
-    user_id = request.state.user_id
 
     # Find the cohort
     res = supabase.table("policy_lab_cohorts") \
@@ -137,11 +136,11 @@ async def update_cohort_config(
     request: Request,
     cohort_name: str,
     config: dict = Body(...),
+    user_id: str = Depends(get_current_user),
 ):
     """Update a cohort's policy config."""
     _require_enabled()
     supabase = request.app.state.supabase
-    user_id = request.state.user_id
 
     # Validate config fields
     try:
@@ -172,14 +171,13 @@ async def update_cohort_config(
 
 
 @router.post("/init")
-async def init_policy_lab(request: Request):
+async def init_policy_lab(request: Request, user_id: str = Depends(get_current_user)):
     """
     One-time initialization: create cohort portfolios and config rows.
     Idempotent — safe to call multiple times.
     """
     _require_enabled()
     supabase = request.app.state.supabase
-    user_id = request.state.user_id
 
     from packages.quantum.policy_lab.init_lab import initialize_policy_lab
     result = initialize_policy_lab(user_id, supabase)

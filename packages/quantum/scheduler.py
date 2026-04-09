@@ -59,6 +59,7 @@ SCHEDULES = [
 
     # Frequent
     ("alpaca_order_sync",           dict(minute="*/5", hour="9-16"), "/internal/tasks/alpaca/order-sync", "tasks:alpaca_order_sync", "Poll Alpaca for fills"),
+    ("intraday_risk_monitor",       dict(minute="*/15", hour="9-16"), "/internal/tasks/risk/intraday-monitor", "tasks:intraday_risk_monitor", "Intraday risk envelope monitor"),
 
     # Health
     ("ops_health_check",            dict(minute="7,37", hour="8-17"), "/tasks/ops/health_check",  "tasks:ops_health_check",         "System health monitoring"),

@@ -179,6 +179,23 @@ async def alpaca_order_sync_task(
     )
 
 
+@router.post("/risk/intraday-monitor", status_code=202)
+async def intraday_risk_monitor_task(
+    auth: TaskSignatureResult = Depends(verify_task_signature("tasks:intraday_risk_monitor"))
+):
+    now = datetime.now()
+    # 15-min block key: e.g. intraday_risk_monitor-2026-04-09-10-30
+    minute_block = (now.minute // 15) * 15
+    return enqueue_job_run(
+        job_name="intraday_risk_monitor",
+        idempotency_key=f"intraday_risk_monitor-{now.strftime('%Y-%m-%d-%H')}-{minute_block:02d}",
+        payload={
+            "app_version": APP_VERSION,
+            "trigger_ts": now.isoformat(),
+        },
+    )
+
+
 @router.post("/progression/daily-eval", status_code=202)
 async def daily_progression_eval_task(
     auth: TaskSignatureResult = Depends(verify_task_signature("tasks:daily_progression_eval"))

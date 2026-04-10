@@ -891,12 +891,24 @@ class MarketDataTruthLayer:
                         self.cache.set("snapshot_many", ticker, snap, self.ttl_snapshot)
                         results[ticker] = snap
 
-        # 4b. Equities → Polygon primary (unchanged)
+        # 4b. Equities → Alpaca primary, Polygon fallback
         if missing_equities:
-            polygon_snaps = self._fetch_polygon_snapshots(missing_equities)
-            for ticker, snap in polygon_snaps.items():
+            alpaca_eq_snaps = self._fetch_alpaca_equity_snapshots(missing_equities)
+            for ticker, snap in alpaca_eq_snaps.items():
                 self.cache.set("snapshot_many", ticker, snap, self.ttl_snapshot)
                 results[ticker] = snap
+
+            # Fallback: equities that Alpaca missed → try Polygon
+            eq_misses = [t for t in missing_equities if t not in results]
+            if eq_misses:
+                logger.info(
+                    f"[SNAPSHOT] Alpaca missed {len(eq_misses)} equity(ies), "
+                    f"falling back to Polygon: {eq_misses}"
+                )
+                polygon_snaps = self._fetch_polygon_snapshots(eq_misses)
+                for ticker, snap in polygon_snaps.items():
+                    self.cache.set("snapshot_many", ticker, snap, self.ttl_snapshot)
+                    results[ticker] = snap
 
         return results
 
@@ -933,6 +945,25 @@ class MarketDataTruthLayer:
                     logger.error(f"Error fetching Polygon snapshot chunk: {e}")
 
         return results
+
+    def _fetch_alpaca_equity_snapshots(self, tickers: List[str]) -> Dict[str, Dict]:
+        """
+        Batch-fetch equity snapshots from Alpaca /v2/stocks/snapshots.
+        Returns canonical snapshot dicts keyed by ticker.
+        """
+        try:
+            from packages.quantum.brokers.alpaca_client import get_alpaca_client
+            alpaca = get_alpaca_client()
+            if not alpaca:
+                logger.warning("[SNAPSHOT] No Alpaca client — cannot fetch equity snapshots")
+                return {}
+
+            raw = alpaca.get_stock_snapshots(tickers)
+            logger.info(f"[SNAPSHOT] Alpaca returned {len(raw)}/{len(tickers)} equity snapshot(s)")
+            return raw
+        except Exception as e:
+            logger.error(f"[SNAPSHOT] Alpaca equity snapshot failed: {e}")
+            return {}
 
     def snapshot_many_v4(
         self,
@@ -1660,7 +1691,7 @@ class MarketDataTruthLayer:
     def daily_bars(self, ticker: str, start_date: datetime, end_date: datetime) -> List[Dict]:
         """
         Fetches daily bars (adjusted).
-        Wraps /v2/aggs/ticker/{ticker}/range/1/day/...
+        Primary: Alpaca /v2/stocks/bars.  Fallback: Polygon /v2/aggs.
         """
         # Normalize
         symbol = self.normalize_symbol(ticker)
@@ -1672,37 +1703,44 @@ class MarketDataTruthLayer:
 
         cached = self.cache.get("daily_bars", cache_key)
         if cached:
-            # Record to DecisionContext if active (for replay feature store)
             _record_daily_bars_to_context(symbol, s_str, e_str, cached)
             return cached
 
-        # Fetch
-        endpoint = f"/v2/aggs/ticker/{symbol}/range/1/day/{s_str}/{e_str}"
-        params = {"adjusted": "true", "sort": "asc", "limit": 50000}
+        # --- Alpaca primary (equity bars only, not option symbols) ---
+        bars = []
+        if not symbol.startswith("O:"):
+            try:
+                from packages.quantum.brokers.alpaca_client import get_alpaca_client
+                alpaca = get_alpaca_client()
+                if alpaca:
+                    bars = alpaca.get_stock_bars(symbol, start_date, end_date)
+                    if bars:
+                        logger.info(f"[DAILY_BARS] Alpaca returned {len(bars)} bars for {symbol}")
+            except Exception as e:
+                logger.warning(f"[DAILY_BARS] Alpaca bars failed for {symbol}: {e}")
 
-        data = self._make_request(endpoint, params)
-        if not data or "results" not in data:
+        # --- Polygon fallback ---
+        if not bars:
+            endpoint = f"/v2/aggs/ticker/{symbol}/range/1/day/{s_str}/{e_str}"
+            params = {"adjusted": "true", "sort": "asc", "limit": 50000}
+            data = self._make_request(endpoint, params)
+            if data and "results" in data:
+                for r in data["results"]:
+                    dt = datetime.fromtimestamp(r["t"] / 1000.0)
+                    bars.append({
+                        "date": dt.strftime("%Y-%m-%d"),
+                        "open": r.get("o"),
+                        "high": r.get("h"),
+                        "low": r.get("l"),
+                        "close": r.get("c"),
+                        "volume": r.get("v"),
+                        "vwap": r.get("vw")
+                    })
+
+        if not bars:
             return []
 
-        # Parse
-        bars = []
-        for r in data["results"]:
-            # r keys: c, h, l, o, v, vw, t
-            dt = datetime.fromtimestamp(r["t"] / 1000.0)
-            bars.append({
-                "date": dt.strftime("%Y-%m-%d"),
-                "open": r.get("o"),
-                "high": r.get("h"),
-                "low": r.get("l"),
-                "close": r.get("c"),
-                "volume": r.get("v"),
-                "vwap": r.get("vw")
-            })
-
-        # Record to DecisionContext if active (for replay feature store)
         _record_daily_bars_to_context(symbol, s_str, e_str, bars)
-
-        # Cache
         self.cache.set("daily_bars", cache_key, bars, self.ttl_daily_bars)
         return bars
 

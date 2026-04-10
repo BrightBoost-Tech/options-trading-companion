@@ -99,6 +99,7 @@ class AlpacaClient:
             )
 
         self._init_trading_client()
+        self._init_data_client()
         mode_label = "PAPER" if self.paper else "LIVE"
         logger.info(f"[ALPACA] Client initialized in {mode_label} mode")
 
@@ -111,6 +112,14 @@ class AlpacaClient:
             paper=self.paper,
         )
 
+    def _init_data_client(self):
+        """Initialize the alpaca-py StockHistoricalDataClient for equity market data."""
+        from alpaca.data.historical import StockHistoricalDataClient
+        self._data_client = StockHistoricalDataClient(
+            api_key=self.api_key,
+            secret_key=self.secret_key,
+        )
+
     def _refresh_auth(self) -> bool:
         """
         Re-initialize the trading client to refresh auth state.
@@ -119,6 +128,7 @@ class AlpacaClient:
         try:
             logger.warning("[ALPACA] Refreshing auth — re-initializing client")
             self._init_trading_client()
+            self._init_data_client()
             # Validate by fetching account
             self._client.get_account()
             logger.info("[ALPACA] Auth refresh succeeded")
@@ -366,6 +376,132 @@ class AlpacaClient:
         """Filter to option positions only (symbol length > 10 heuristic)."""
         all_pos = self.get_positions()
         return [p for p in all_pos if len(p.get("symbol", "")) > 10]
+
+    # ── Equity Market Data ─────────────────────────────────────────
+
+    def get_stock_snapshots(self, symbols: List[str]) -> Dict[str, Dict[str, Any]]:
+        """
+        Batch equity snapshots via Alpaca Data API.
+
+        Returns dict keyed by symbol, each containing:
+          quote: {bid, ask, mid, last, bid_size, ask_size, quote_ts}
+          day:   {o, h, l, c, v, vwap}
+          prev_day: {o, h, l, c, v, vwap}  (previous daily bar)
+        """
+        from alpaca.data.requests import StockSnapshotRequest
+
+        if not symbols:
+            return {}
+
+        req = StockSnapshotRequest(symbol_or_symbols=symbols)
+        raw = self._call_with_retry(self._data_client.get_stock_snapshot, req)
+
+        results = {}
+        for sym, snap in raw.items():
+            quote = snap.latest_quote
+            trade = snap.latest_trade
+            bar = snap.daily_bar
+            prev = snap.previous_daily_bar
+
+            bid = float(quote.bid_price) if quote and quote.bid_price else None
+            ask = float(quote.ask_price) if quote and quote.ask_price else None
+            mid = (bid + ask) / 2.0 if bid and ask and bid > 0 and ask > 0 else None
+
+            results[sym] = {
+                "ticker": sym,
+                "asset_type": "CS",
+                "quote": {
+                    "bid": bid,
+                    "ask": ask,
+                    "mid": mid,
+                    "last": float(trade.price) if trade and trade.price else None,
+                    "quote_ts": int(quote.timestamp.timestamp() * 1000) if quote and quote.timestamp else None,
+                    "bid_size": float(quote.bid_size) if quote and quote.bid_size else None,
+                    "ask_size": float(quote.ask_size) if quote and quote.ask_size else None,
+                },
+                "day": {
+                    "o": float(bar.open) if bar else None,
+                    "h": float(bar.high) if bar else None,
+                    "l": float(bar.low) if bar else None,
+                    "c": float(bar.close) if bar else None,
+                    "v": float(bar.volume) if bar else None,
+                    "vwap": float(bar.vwap) if bar and bar.vwap else None,
+                },
+                "prev_day": {
+                    "o": float(prev.open) if prev else None,
+                    "h": float(prev.high) if prev else None,
+                    "l": float(prev.low) if prev else None,
+                    "c": float(prev.close) if prev else None,
+                    "v": float(prev.volume) if prev else None,
+                    "vwap": float(prev.vwap) if prev and prev.vwap else None,
+                } if prev else {},
+            }
+
+        return results
+
+    def get_stock_bars(
+        self, symbol: str, start: "datetime", end: "datetime"
+    ) -> List[Dict[str, Any]]:
+        """
+        Daily bars for an equity via Alpaca Data API.
+
+        Returns list of dicts with: date, open, high, low, close, volume, vwap.
+        """
+        from alpaca.data.requests import StockBarsRequest
+        from alpaca.data.timeframe import TimeFrame
+
+        req = StockBarsRequest(
+            symbol_or_symbols=symbol,
+            timeframe=TimeFrame.Day,
+            start=start,
+            end=end,
+            adjustment="all",
+        )
+        raw = self._call_with_retry(self._data_client.get_stock_bars, req)
+        bar_set = raw.get(symbol) or raw.get(symbol.upper()) or []
+
+        bars = []
+        for bar in bar_set:
+            bars.append({
+                "date": bar.timestamp.strftime("%Y-%m-%d"),
+                "open": float(bar.open),
+                "high": float(bar.high),
+                "low": float(bar.low),
+                "close": float(bar.close),
+                "volume": float(bar.volume),
+                "vwap": float(bar.vwap) if bar.vwap else None,
+            })
+        return bars
+
+    def get_stock_latest_quotes(self, symbols: List[str]) -> Dict[str, Dict[str, Any]]:
+        """
+        Latest NBBO quotes for equities via Alpaca Data API.
+
+        Returns dict keyed by symbol with: bid, ask, bid_price, ask_price, price (mid).
+        """
+        from alpaca.data.requests import StockLatestQuoteRequest
+
+        if not symbols:
+            return {}
+
+        req = StockLatestQuoteRequest(symbol_or_symbols=symbols)
+        raw = self._call_with_retry(self._data_client.get_stock_latest_quote, req)
+
+        results = {}
+        for sym, quote in raw.items():
+            bid = float(quote.bid_price) if quote.bid_price else 0.0
+            ask = float(quote.ask_price) if quote.ask_price else 0.0
+            mid = (bid + ask) / 2.0 if bid > 0 and ask > 0 else None
+            results[sym] = {
+                "bid": bid,
+                "ask": ask,
+                "bid_price": bid,
+                "ask_price": ask,
+                "price": mid,
+                "bid_size": float(quote.bid_size) if quote.bid_size else 0,
+                "ask_size": float(quote.ask_size) if quote.ask_size else 0,
+            }
+        return results
 
     def close_position(self, symbol_or_id: str, qty: Optional[int] = None) -> Dict[str, Any]:
         """Close a position (full or partial)."""

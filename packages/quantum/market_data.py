@@ -1,4 +1,5 @@
 """Market data integration with caching"""
+import logging
 import os
 import requests
 from requests.adapters import HTTPAdapter
@@ -17,6 +18,8 @@ from packages.quantum.services.market_data_cache import get_market_data_cache, T
 from packages.quantum.services.cache_key_builder import make_cache_key_parts, normalize_symbol as normalize_option_symbol
 from packages.quantum.services.provider_guardrails import guardrail
 from packages.quantum.analytics.factors import calculate_trend, calculate_iv_rank
+
+logger = logging.getLogger(__name__)
 
 def extract_underlying_symbol(symbol: str) -> str:
     """
@@ -439,12 +442,21 @@ class PolygonService:
                     "price": mid
                 }
         else:
-            # Stocks: Use v2 NBBO (Last Quote)
+            # Stocks: Alpaca primary, Polygon NBBO fallback
+            try:
+                from packages.quantum.brokers.alpaca_client import get_alpaca_client
+                alpaca = get_alpaca_client()
+                if alpaca:
+                    quotes = alpaca.get_stock_latest_quotes([search_symbol])
+                    if search_symbol in quotes:
+                        return quotes[search_symbol]
+            except Exception:
+                pass  # Fall through to Polygon
+
             url = f"{self.base_url}/v2/last/nbbo/{search_symbol}"
             params = {'apiKey': self.api_key}
             response = self.session.get(url, params=params, timeout=5)
 
-            # NBBO endpoint might return 404 if no data, or 200 with empty results
             if response.status_code != 200:
                 return {"bid": 0.0, "ask": 0.0, "bid_price": 0.0, "ask_price": 0.0, "price": None}
 
@@ -452,7 +464,6 @@ class PolygonService:
 
             if 'results' in data:
                 res = data['results']
-                # Polygon v2/last/nbbo: p = bid price, P = ask price
                 bid = float(res.get('p', 0.0))
                 ask = float(res.get('P', 0.0))
                 mid = (bid + ask) / 2.0 if (bid > 0 and ask > 0) else None
@@ -492,8 +503,24 @@ class PolygonService:
             search_symbol = normalize_option_symbol(symbol)
             is_option = search_symbol.startswith('O:')
 
+            # --- Stocks: try Alpaca first ---
+            if not is_option:
+                try:
+                    from packages.quantum.brokers.alpaca_client import get_alpaca_client
+                    alpaca = get_alpaca_client()
+                    if alpaca:
+                        quotes = alpaca.get_stock_latest_quotes([search_symbol])
+                        if search_symbol in quotes:
+                            q = quotes[search_symbol]
+                            meta["status_code"] = 200
+                            meta["results_len"] = 1
+                            meta["error_type"] = "ok"
+                            return (q, meta)
+                except Exception as alpaca_err:
+                    logger.debug(f"Alpaca quote failed for {search_symbol}, falling back to Polygon: {alpaca_err}")
+
+            # --- Polygon path (options always, stocks as fallback) ---
             if is_option:
-                # URL-encode the option ticker to handle O: prefix safely
                 safe_ticker = urlquote(search_symbol, safe="")
                 url = f"{self.base_url}/v3/quotes/{safe_ticker}"
                 params = {
@@ -510,7 +537,6 @@ class PolygonService:
             meta["status_code"] = response.status_code
 
             if response.status_code != 200:
-                # Map status code to error_type
                 code = response.status_code
                 if code == 403:
                     meta["error_type"] = "http_403"
@@ -525,9 +551,7 @@ class PolygonService:
                 else:
                     meta["error_type"] = f"http_{code}"
 
-                # Capture snippet of response (strip apiKey for safety)
                 snippet = response.text[:120] if response.text else ""
-                # Remove any apiKey that might be echoed back
                 if self.api_key and self.api_key in snippet:
                     snippet = snippet.replace(self.api_key, "[REDACTED]")
                 meta["msg_snippet"] = snippet
@@ -557,7 +581,7 @@ class PolygonService:
                     meta["error_type"] = "no_results"
                     return (empty_quote, meta)
             else:
-                # Stock NBBO
+                # Stock NBBO (Polygon fallback)
                 if 'results' in data:
                     meta["results_len"] = 1
                     res = data['results']
@@ -940,22 +964,36 @@ class PolygonService:
 
 
 def get_polygon_price(symbol: str) -> float:
-    # FIX 1: Handle Cash Manually
+    """Get latest price for a symbol. Alpaca primary, Polygon fallback."""
     if symbol == 'CUR:USD':
         return 1.0
 
-    # FIX 2: Format Options for Polygon (Prepend 'O:')
-    # Plaid sends "AMZN251219...", Polygon needs "O:AMZN251219..."
     search_symbol = normalize_option_symbol(symbol)
 
+    # --- Alpaca primary (equities only) ---
+    if not search_symbol.startswith('O:'):
+        try:
+            from packages.quantum.brokers.alpaca_client import get_alpaca_client
+            alpaca = get_alpaca_client()
+            if alpaca:
+                snaps = alpaca.get_stock_snapshots([search_symbol])
+                if search_symbol in snaps:
+                    snap = snaps[search_symbol]
+                    # Use daily bar close, or latest trade price
+                    price = (snap.get("day", {}).get("c")
+                             or snap.get("quote", {}).get("last")
+                             or 0.0)
+                    if price and price > 0:
+                        return float(price)
+        except Exception:
+            pass  # Fall through to Polygon
+
+    # --- Polygon fallback ---
     try:
-        # Use existing service to reuse API key logic
         service = PolygonService()
         if not service.api_key:
              return 0.0
 
-        # We use get_previous_close_agg for fast latest price
-        # URL: /v2/aggs/ticker/{stocksTicker}/prev
         url = f"{service.base_url}/v2/aggs/ticker/{search_symbol}/prev"
         params = {
             'adjusted': 'true',
@@ -971,8 +1009,8 @@ def get_polygon_price(symbol: str) -> float:
 
         return 0.0
     except Exception as e:
-        print(f"⚠️ Error fetching {search_symbol}: {e}")
-        return 0.0 # Fallback
+        print(f"Error fetching {search_symbol}: {e}")
+        return 0.0
 
 def _nearest_psd(A):
     """Find the nearest positive-semi-definite matrix to input A."""

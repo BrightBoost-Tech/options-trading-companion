@@ -407,15 +407,19 @@ class AlpacaClient:
             ask = float(quote.ask_price) if quote and quote.ask_price else None
             mid = (bid + ask) / 2.0 if bid and ask and bid > 0 and ask > 0 else None
 
+            quote_ts = int(quote.timestamp.timestamp() * 1000) if quote and quote.timestamp else None
+
             results[sym] = {
                 "ticker": sym,
                 "asset_type": "CS",
+                "source": "alpaca",
+                "provider_ts": quote_ts,
                 "quote": {
                     "bid": bid,
                     "ask": ask,
                     "mid": mid,
                     "last": float(trade.price) if trade and trade.price else None,
-                    "quote_ts": int(quote.timestamp.timestamp() * 1000) if quote and quote.timestamp else None,
+                    "quote_ts": quote_ts,
                     "bid_size": float(quote.bid_size) if quote and quote.bid_size else None,
                     "ask_size": float(quote.ask_size) if quote and quote.ask_size else None,
                 },

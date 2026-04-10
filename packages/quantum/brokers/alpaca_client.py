@@ -257,9 +257,20 @@ class AlpacaClient:
         alpaca_legs = []
         for leg in legs:
             leg_symbol = polygon_to_alpaca(leg["symbol"])
-            is_buy = leg["side"].lower() in ("buy", "buy_to_open")
+            is_buy = leg["side"].lower() in ("buy", "buy_to_open", "buy_to_close")
             side = OrderSide.BUY if is_buy else OrderSide.SELL
-            intent = PositionIntent.BUY_TO_OPEN if is_buy else PositionIntent.SELL_TO_OPEN
+
+            # Use position_intent from leg if provided (close orders set this),
+            # otherwise default to open intent
+            leg_intent = leg.get("position_intent", "").lower()
+            intent_map = {
+                "buy_to_open": PositionIntent.BUY_TO_OPEN,
+                "buy_to_close": PositionIntent.BUY_TO_CLOSE,
+                "sell_to_open": PositionIntent.SELL_TO_OPEN,
+                "sell_to_close": PositionIntent.SELL_TO_CLOSE,
+            }
+            intent = intent_map.get(leg_intent,
+                                    PositionIntent.BUY_TO_OPEN if is_buy else PositionIntent.SELL_TO_OPEN)
             alpaca_legs.append(OptionLegRequest(
                 symbol=leg_symbol,
                 side=side,

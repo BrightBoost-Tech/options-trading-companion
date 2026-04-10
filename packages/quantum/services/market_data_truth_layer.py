@@ -867,7 +867,7 @@ class MarketDataTruthLayer:
 
         # 3. Split into options vs equities
         missing_options = [t for t in missing_tickers if t.startswith("O:")]
-        missing_equities = [t for t in missing_tickers if not t.startswith("O:") and not t.startswith("CUR:")]
+        missing_equities = [t for t in missing_tickers if not t.startswith("O:") and not t.startswith("CUR:") and not re.search(r"\d{4}-\d{2}-\d{2}", t)]
 
         # 4a. Options → Alpaca primary
         if missing_options:

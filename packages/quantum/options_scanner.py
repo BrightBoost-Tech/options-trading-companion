@@ -2119,6 +2119,16 @@ def scan_for_opportunities(
         except Exception as e:
             print(f"[Scanner] Failed to batch fetch IV context: {e}")
 
+    # Batch Fetch Sector Data (for risk envelope concentration checks)
+    sector_map: Dict[str, str] = {}
+    try:
+        for sym in symbols:
+            details = market_data.get_ticker_details(sym)
+            if details:
+                sector_map[sym] = details.get("sic_description") or details.get("sector") or "unknown"
+    except Exception as e:
+        logger.warning(f"[Scanner] Failed to batch fetch sector data: {e}")
+
     # 3. Parallel Processing
     batch_size = 20 # Increased from 5 to 20 to improve I/O throughput (Bolt Optimization)
 
@@ -2361,7 +2371,8 @@ def scan_for_opportunities(
 
                 try:
                     # OPTIMIZATION: Use hoisted min/max expiry to reduce overhead inside loop
-                    chain_objects = truth_layer.option_chain(symbol, min_expiry=min_expiry, max_expiry=max_expiry)
+                    _spot = quote.get("price") or quote.get("bid")
+                    chain_objects = truth_layer.option_chain(symbol, min_expiry=min_expiry, max_expiry=max_expiry, spot=_spot)
                 except Exception:
                     chain_objects = None
 
@@ -2964,6 +2975,8 @@ def scan_for_opportunities(
                 "option_spread_pct": option_spread_pct,
                 # Surface V4 (optional, only populated when SURFACE_V4_ENABLE=1)
                 "surface_v4": surface_v4_summary,
+                # Sector (for risk envelope concentration checks)
+                "sector": sector_map.get(symbol, "unknown"),
             }
 
             # Add soft execution cost gate fields if triggered

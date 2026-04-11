@@ -1641,6 +1641,8 @@ async def run_morning_cycle(supabase: Client, user_id: str):
                     for s in suggestions:
                         ev_raw = s.get("ev", 0)
                         pop_raw = s.get("probability_of_profit", 0.5)
+                        s["ev_raw"] = ev_raw
+                        s["pop_raw"] = pop_raw
                         regime_str = s.get("regime") or ""
                         strategy_str = s.get("strategy") or ""
                         s["ev"], s["probability_of_profit"] = _apply_cal_morning(
@@ -2735,7 +2737,10 @@ async def run_midday_cycle(supabase: Client, user_id: str):
                 "lineage_sig": sig_result.signature,
                 "lineage_version": sig_result.version,
                 "code_sha": get_code_sha(),
-                "data_hash": ctx.features_hash  # For now, same as features_hash
+                "data_hash": ctx.features_hash,  # For now, same as features_hash
+                "sector": cand.get("sector", "unknown"),
+                "ev_raw": raw_ev,
+                "pop_raw": raw_pop,
             }
 
             # --- AGENT FIELDS ---

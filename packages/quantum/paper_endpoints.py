@@ -1222,6 +1222,16 @@ def _repair_filled_order_commit(supabase, analytics, user_id, order, portfolio) 
             except Exception:
                 pass
 
+            # Compute entry DTE for time-scaled exit targets
+            _entry_dte = None
+            if nearest_expiry:
+                try:
+                    from datetime import date as _date_type
+                    _exp = datetime.strptime(nearest_expiry[:10], "%Y-%m-%d").date() if isinstance(nearest_expiry, str) else nearest_expiry
+                    _entry_dte = (_exp - _date_type.today()).days
+                except Exception:
+                    pass
+
             pos_payload = {
                 "portfolio_id": portfolio["id"],
                 "user_id": user_id,
@@ -1234,6 +1244,7 @@ def _repair_filled_order_commit(supabase, analytics, user_id, order, portfolio) 
                 "legs": legs_list,
                 "max_credit": max_credit,
                 "nearest_expiry": nearest_expiry,
+                "entry_dte": _entry_dte,
                 "status": "open",
                 "trace_id": order.get("trace_id"),
                 "suggestion_id": order.get("suggestion_id"),
@@ -1244,7 +1255,7 @@ def _repair_filled_order_commit(supabase, analytics, user_id, order, portfolio) 
             if order.get("suggestion_id"):
                 try:
                     s_res = supabase.table(TRADE_SUGGESTIONS_TABLE).select(
-                        "model_version, features_hash, strategy, window, regime"
+                        "model_version, features_hash, strategy, window, regime, sector"
                     ).eq("id", order.get("suggestion_id")).single().execute()
                     if s_res.data:
                         pos_payload.update(s_res.data)
@@ -1538,6 +1549,16 @@ def _commit_fill(supabase, analytics, user_id, order, fill_res, quote, portfolio
             except Exception:
                 pass  # Non-critical — exit evaluator can still use DTE from order
 
+            # Compute entry DTE for time-scaled exit targets
+            _entry_dte2 = None
+            if nearest_expiry:
+                try:
+                    from datetime import date as _date_type
+                    _exp2 = datetime.strptime(nearest_expiry[:10], "%Y-%m-%d").date() if isinstance(nearest_expiry, str) else nearest_expiry
+                    _entry_dte2 = (_exp2 - _date_type.today()).days
+                except Exception:
+                    pass
+
             pos_payload = {
                 "portfolio_id": portfolio["id"],
                 "user_id": user_id,
@@ -1550,6 +1571,7 @@ def _commit_fill(supabase, analytics, user_id, order, fill_res, quote, portfolio
                 "legs": legs_list,
                 "max_credit": max_credit,
                 "nearest_expiry": nearest_expiry,
+                "entry_dte": _entry_dte2,
                 "status": "open",
                 # Linkage
                 "trace_id": order.get("trace_id"),
@@ -1560,7 +1582,7 @@ def _commit_fill(supabase, analytics, user_id, order, fill_res, quote, portfolio
             # Enrich with model metadata from suggestion if available
             if order.get("suggestion_id"):
                 try:
-                    s_res = supabase.table(TRADE_SUGGESTIONS_TABLE).select("model_version, features_hash, strategy, window, regime").eq("id", order.get("suggestion_id")).single().execute()
+                    s_res = supabase.table(TRADE_SUGGESTIONS_TABLE).select("model_version, features_hash, strategy, window, regime, sector").eq("id", order.get("suggestion_id")).single().execute()
                     if s_res.data:
                         pos_payload.update(s_res.data)
                 except Exception as e:

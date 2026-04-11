@@ -172,8 +172,73 @@ def start_scheduler():
 
         logger.info(f"[SCHEDULER] Registered: {job_id} ({description})")
 
+    # Auto-retry job: scans for failed_retryable jobs and re-enqueues (max 1 retry)
+    _scheduler.add_job(
+        _retry_failed_jobs,
+        trigger=CronTrigger(
+            timezone=CHICAGO_TZ,
+            day_of_week="mon-fri",
+            minute="*/10",
+            hour="8-17",
+        ),
+        id="auto_retry_failed",
+        name="Auto-retry failed jobs",
+        replace_existing=True,
+        misfire_grace_time=300,
+    )
+
     _scheduler.start()
-    logger.info(f"[SCHEDULER] Started with {len(SCHEDULES)} jobs (Chicago timezone)")
+    logger.info(f"[SCHEDULER] Started with {len(SCHEDULES) + 1} jobs (Chicago timezone)")
+
+
+def _retry_failed_jobs():
+    """
+    Scan for failed_retryable jobs from the last 4 hours and re-enqueue
+    them via the admin retry endpoint. Max 1 retry (attempt < 2) to
+    prevent infinite loops. Idempotency keys in handlers prevent
+    double-execution.
+    """
+    from datetime import timezone, timedelta
+
+    try:
+        from packages.quantum.database import get_supabase_client
+        client = get_supabase_client()
+
+        cutoff = (datetime.now(timezone.utc) - timedelta(hours=4)).isoformat()
+        rows = (
+            client.table("job_runs")
+            .select("id, job_name, attempt")
+            .eq("status", "failed_retryable")
+            .gte("finished_at", cutoff)
+            .lt("attempt", 2)
+            .limit(5)
+            .execute()
+        ).data or []
+
+        if not rows:
+            return
+
+        base_url = _BASE_URL.rstrip("/")
+        for row in rows:
+            job_id = row["id"]
+            try:
+                # Use internal retry: reset status to queued and re-fire
+                client.table("job_runs").update({
+                    "status": "queued",
+                    "attempt": (row.get("attempt") or 0) + 1,
+                    "locked_by": None,
+                    "locked_at": None,
+                }).eq("id", job_id).execute()
+
+                logger.info(
+                    f"[AUTO_RETRY] Re-queued {row['job_name']} "
+                    f"run={job_id} attempt={row.get('attempt', 0) + 1}"
+                )
+            except Exception as e:
+                logger.error(f"[AUTO_RETRY] Failed to re-queue {job_id}: {e}")
+
+    except Exception as e:
+        logger.error(f"[AUTO_RETRY] Scan failed: {e}")
 
 
 def stop_scheduler():

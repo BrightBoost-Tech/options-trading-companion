@@ -15,7 +15,11 @@
 
 - **Trading mode:** `alpaca_paper`
 - **Promotion target:** 4 consecutive green days through Alpaca â†’ advances to `micro_live`
-- **Green days so far:** Reset to 0 on 2026-04-04 (internal fills were miscounted; audit trail logged)
+- **Green days so far:** 0 â€” missed 2026-04-10 by $54.50
+- **Open positions:** 4 â€” AMD, ADBE, MSFT, NFLX (all entered 2026-04-10)
+- **Net unrealized:** -$54.50 at EOD 2026-04-10
+- **Pipeline status:** Full end-to-end pipeline validated 2026-04-10 (first successful run)
+- **daily_progression_eval:** Confirmed running at 21:00 UTC
 - **Iron condors:** DISABLED in current phase. Debit spreads only.
 - **Calibration job:** Currently skipping with exit code 2 (insufficient data â€” expected until more paper trades accumulate)
 - **RISK_MAX_SYMBOL_PCT=0.40** (paper phase â€” tighten to 0.30 at micro_live, 0.25 at live)
@@ -237,6 +241,11 @@ Gate to `micro_live`: 4 consecutive Alpaca paper green days (not internal fills)
 - [x] Efficiency: async optimizer, V4 quality cache, condor EV memoization (2026-04-10)
 - [x] Alpaca close order fixes: position_intent + negative limit_price clamp + exit-evaluate idempotency (2026-04-10)
 - [x] Alpaca primary for equity data: snapshots, bars, quotes, prev close — Polygon fallback only (2026-04-10)
+- [x] Time-scaled profit targets: 50% early → 25% late, replaces flat 35% (2026-04-11)
+- [x] Sector field wired to positions for risk envelope concentration checks (2026-04-11)
+- [x] Raw EV stored alongside calibrated EV — fixes self-referential calibration loop (2026-04-11)
+- [x] Auto-retry failed_retryable jobs every 10min during market hours (2026-04-11)
+- [x] Pass spot price to option_chain() — eliminates ~35 redundant API calls/scan (2026-04-11)
 - [ ] Risk envelope: switch force-close from warn-only to block mode (RISK_ENVELOPE_ENFORCE=1 after 2026-04-13)
 - [ ] Enable PROFIT_AGENT_RANKING=1 after 5 days of learning data
 - [ ] Enable ORCHESTRATOR_ENABLED=1 after individual agent testing
@@ -258,6 +267,7 @@ Gate to `micro_live`: 4 consecutive Alpaca paper green days (not internal fills)
 ## Live State (auto-updated)
 - **Phase:** alpaca_paper
 - **Green days:** 0
-- **Last green:** 
-- **Open positions:** 4
-- **Last updated:** 2026-04-10 08:59
+- **Last green:** â€"
+- **Open positions:** 4 (AMD, ADBE, MSFT, NFLX)
+- **Net unrealized:** -$54.50
+- **Last updated:** 2026-04-10 EOD

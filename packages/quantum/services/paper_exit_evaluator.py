@@ -91,6 +91,27 @@ def _is_debit_spread(position: Dict[str, Any]) -> bool:
     return qty > 0
 
 
+def _time_scaled_target_profit_pct(pos: Dict, base_pct: float = 0.35) -> float:
+    """
+    Scale profit target by time remaining in the trade.
+
+    Early (>20 DTE remaining): higher target (let winners run → 50%)
+    Late (<10 DTE remaining): lower target (grab profit before theta plateau → 25%)
+
+    Falls back to base_pct if DTE data is missing.
+    """
+    dte = days_to_expiry(pos)
+    entry_dte = pos.get("entry_dte") or 35  # scanner default
+
+    if entry_dte <= 0 or dte <= 0:
+        return base_pct
+
+    time_elapsed_pct = 1.0 - (dte / entry_dte)  # 0.0 at entry → 1.0 at expiry
+    # Linear scale: 50% target early → 25% target late
+    target = 0.50 - (0.25 * time_elapsed_pct)
+    return max(base_pct * 0.7, min(0.55, target))
+
+
 def _check_target_profit(pos: Dict, tp_pct: float = 0.50) -> bool:
     """Check if position has reached target profit (debit-aware)."""
     mc = pos.get("max_credit")
@@ -220,8 +241,8 @@ _DEFAULT_MIN_DTE_TO_EXIT = int(os.environ.get("EXIT_MIN_DTE", "10"))
 
 EXIT_CONDITIONS: Dict[str, Dict[str, Any]] = {
     "target_profit": {
-        "description": f"Position has reached {_DEFAULT_TARGET_PROFIT_PCT:.0%} target profit",
-        "check": lambda pos: _check_target_profit(pos, _DEFAULT_TARGET_PROFIT_PCT),
+        "description": "Position has reached time-scaled target profit",
+        "check": lambda pos: _check_target_profit(pos, _time_scaled_target_profit_pct(pos, _DEFAULT_TARGET_PROFIT_PCT)),
     },
     "stop_loss": {
         "description": f"Position has exceeded {_DEFAULT_STOP_LOSS_PCT:.0%} stop loss",

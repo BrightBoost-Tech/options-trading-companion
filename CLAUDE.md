@@ -22,6 +22,7 @@
 - **daily_progression_eval:** Confirmed running at 21:00 UTC
 - **Iron condors:** DISABLED in current phase. Debit spreads only.
 - **Calibration job:** Currently skipping with exit code 2 (insufficient data â€” expected until more paper trades accumulate)
+- **Risk profile:** 70/100 — aggressive paper growth (8% base risk, compounding ON, 4 max trades)
 - **RISK_MAX_SYMBOL_PCT=0.40** (paper phase â€” tighten to 0.30 at micro_live, 0.25 at live)
 
 ---
@@ -41,6 +42,9 @@
 - `TASK_NONCE_FAIL_CLOSED_IN_PROD=1` â† must be set in prod
 - `ALLOW_LEGACY_CRON_SECRET=0` â† must be set in prod
 - `SCHEDULER_ENABLED=1` â† enables APScheduler (primary scheduler)
+- `COMPOUNDING_MODE=true` — enables 8% base risk + 1.2x boost for micro tier
+- `RISK_MAX_SYMBOL_PCT=0.40` — paper phase allows 40% in single name
+- `RISK_MAX_DAILY_LOSS=0.08` — 8% daily loss cap ($40 on $500)
 - `RISK_ENVELOPE_ENFORCE=0` â† set to 1 after 2026-04-13 to enable force-close
 - `PROFIT_AGENT_RANKING=0` â† set to 1 after 5 days of learning data
 - `ORCHESTRATOR_ENABLED=0` â† set to 1 after all agents tested individually

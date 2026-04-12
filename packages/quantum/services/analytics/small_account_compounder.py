@@ -26,8 +26,8 @@ class SmallAccountCompounder:
             name="micro",
             min_cap=0,
             max_cap=1000,
-            base_risk_pct=0.05,  # 5% risk for <$1k
-            max_trades=3,        # Allow up to 3 trades to spread risk
+            base_risk_pct=0.08,  # 8% risk for <$1k (aggressive paper growth)
+            max_trades=4,        # Allow up to 4 trades to deploy more capital
             selection_logic="rank_select_compound"
         ),
         CapitalTier(
@@ -154,7 +154,7 @@ class SmallAccountCompounder:
 
             # Basic checks
             score = cand.get("score", 0)
-            if score < 50: # Minimum quality floor
+            if score < 40: # Minimum quality floor (lowered for paper growth)
                 continue
 
             # Estimate risk for this candidate

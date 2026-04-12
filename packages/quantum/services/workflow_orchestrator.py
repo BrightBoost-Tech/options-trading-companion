@@ -171,7 +171,7 @@ def _record_surface_snapshot(symbol: str, sym_snap) -> None:
 
 # 1. Add MIDDAY_TEST_MODE flag
 MIDDAY_TEST_MODE = os.getenv("MIDDAY_TEST_MODE", "false").lower() == "true"
-COMPOUNDING_MODE = os.getenv("COMPOUNDING_MODE", "false").lower() == "true"
+COMPOUNDING_MODE = os.getenv("COMPOUNDING_MODE", "true").lower() == "true"
 APP_VERSION = os.getenv("APP_VERSION", "v2-dev")
 
 # Exit Mode Router Guardrails

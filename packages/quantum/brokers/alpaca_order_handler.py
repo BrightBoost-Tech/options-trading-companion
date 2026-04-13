@@ -116,6 +116,23 @@ def submit_and_track(
     num_legs = len((order.get("order_json") or {}).get("legs", []))
     last_error = None
 
+    # Pre-cancel: if this is a close order, cancel any open Alpaca orders
+    # for the same contract symbols to avoid held_for_orders rejection.
+    is_close_order = bool(order.get("position_id"))
+    if is_close_order:
+        leg_symbols = [
+            leg.get("symbol") or leg.get("occ_symbol") or ""
+            for leg in ((order.get("order_json") or {}).get("legs") or [])
+            if leg.get("symbol") or leg.get("occ_symbol")
+        ]
+        if leg_symbols:
+            cancelled = alpaca.cancel_open_orders_for_symbols(leg_symbols)
+            if cancelled:
+                logger.info(
+                    f"[ALPACA_HANDLER] Pre-cancel for close order={order_id}: "
+                    f"cancelled {len(cancelled)} conflicting orders: {cancelled}"
+                )
+
     for attempt in range(1, MAX_SUBMIT_ATTEMPTS + 1):
         try:
             req = build_alpaca_order_request(order)

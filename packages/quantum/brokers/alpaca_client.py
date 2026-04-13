@@ -370,6 +370,50 @@ class AlpacaClient:
         self._call_with_retry(self._client.cancel_order_by_id, order_id)
         return {"status": "cancelled", "alpaca_order_id": order_id}
 
+    def cancel_open_orders_for_symbols(self, symbols: List[str]) -> List[str]:
+        """
+        Cancel all open orders that involve any of the given contract symbols.
+
+        Used before submitting close orders to avoid Alpaca's held_for_orders
+        rejection when an existing open order locks the contract.
+
+        Returns list of cancelled Alpaca order IDs.
+        """
+        from alpaca.trading.requests import GetOrdersRequest
+        from alpaca.trading.enums import QueryOrderStatus
+
+        if not symbols:
+            return []
+
+        # Alpaca GetOrdersRequest.symbols filters by these exact symbols
+        alpaca_symbols = [polygon_to_alpaca(s) for s in symbols]
+        req = GetOrdersRequest(
+            status=QueryOrderStatus.OPEN,
+            symbols=alpaca_symbols,
+        )
+
+        try:
+            open_orders = self._call_with_retry(self._client.get_orders, req)
+        except Exception as e:
+            logger.warning(f"[ALPACA] Failed to fetch open orders for cancel: {e}")
+            return []
+
+        cancelled = []
+        for order in open_orders:
+            oid = str(order.id)
+            try:
+                self._call_with_retry(self._client.cancel_order_by_id, oid)
+                cancelled.append(oid)
+                logger.info(f"[ALPACA] Cancelled conflicting order {oid} for close submission")
+            except Exception as e:
+                logger.warning(f"[ALPACA] Failed to cancel order {oid}: {e}")
+
+        if cancelled:
+            # Brief pause for Alpaca to process cancellations
+            time.sleep(0.5)
+
+        return cancelled
+
     # ── Positions ─────────────────────────────────────────────────────
 
     def get_positions(self) -> List[Dict[str, Any]]:

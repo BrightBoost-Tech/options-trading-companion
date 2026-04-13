@@ -222,6 +222,7 @@ Gate to `micro_live`: 4 consecutive Alpaca paper green days (not internal fills)
 - Intraday stop_loss=True was gated behind `RISK_ENVELOPE_ENFORCE` — position-level exits (stop_loss, expiration_day) were warn-only when the flag was 0. Fixed: position-level exits in `intraday_risk_monitor.py` section 5a now always execute; envelope flag only gates portfolio-level force-close (section 5b) (2026-04-13)
 - `paper_auto_execute` had no symbol-level dedup — if the scanner generated a new suggestion for an already-held symbol, auto-execute would stage and fill it, doubling the position qty. Fixed: both non-cohort and per-cohort paths now reject suggestions for symbols with open positions (2026-04-13)
 - `_close_position` multi-leg inversion read `leg.get("side")` but stored legs use `action` (from OptionLeg model). `side` returned None, so ALL close legs got `action: "buy"`, meaning both legs sent `buy_to_close`. Alpaca rejected: long leg needs `sell_to_close`. Fixed: read `leg.get("action") or leg.get("side")` then invert (2026-04-13)
+- Close orders rejected with `held_for_orders` when a prior pending order locked the same contracts. Fixed: `submit_and_track` now cancels all open Alpaca orders for the close leg symbols before submitting. Idempotency check in `_execute_force_close` now includes `staged` status and logs which status blocked it (2026-04-13)
 
 ---
 
@@ -264,6 +265,7 @@ Gate to `micro_live`: 4 consecutive Alpaca paper green days (not internal fills)
 - [x] MTM batch updates: position marks + EOD snapshots batched into single queries (2026-04-12)
 - [x] Intraday stop loss fix: position-level exits decoupled from RISK_ENVELOPE_ENFORCE gate (2026-04-13)
 - [x] Symbol-level dedup in paper_auto_execute: reject suggestions for already-held symbols (2026-04-13)
+- [x] Pre-cancel conflicting Alpaca orders before close submission + idempotency fix (2026-04-13)
 - [ ] Risk envelope: switch force-close from warn-only to block mode (RISK_ENVELOPE_ENFORCE=1 after 2026-04-13)
 - [ ] Enable PROFIT_AGENT_RANKING=1 after 5 days of learning data
 - [ ] Enable ORCHESTRATOR_ENABLED=1 after individual agent testing

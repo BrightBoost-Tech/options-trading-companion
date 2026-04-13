@@ -24,6 +24,8 @@
 - **Calibration job:** Currently skipping with exit code 2 (insufficient data â€” expected until more paper trades accumulate)
 - **Risk profile:** 70/100 — aggressive paper growth (8% base risk, compounding ON, 4 max trades)
 - **RISK_MAX_SYMBOL_PCT=0.40** (paper phase â€” tighten to 0.30 at micro_live, 0.25 at live)
+- **Alpaca live account:** Approved for Level 3 options trading (spreads, multi-leg)
+- **Live trading:** Ready pending 4 consecutive green days in alpaca_paper phase
 
 ---
 
@@ -217,6 +219,8 @@ Gate to `micro_live`: 4 consecutive Alpaca paper green days (not internal fills)
 - `LIVE_MANUAL_APPROVAL=true` is NOT wired into paper submission path
 - Debit spread PoP used raw long-leg delta (0.60-0.65) instead of breakeven-adjusted delta (~0.45). Inflated EV by ~30%, causing negative-EV trades to appear positive. Fixed: interpolate between long/short deltas weighted by premium/width (2026-04-12)
 - Intraday risk monitor only checked portfolio-level envelopes, not position-level stop losses. 7-hour gap between exit evaluations (8:15 AM to 3:00 PM) left positions unprotected. Fixed: evaluate_position_exit() now called every 15min in intraday monitor (2026-04-12) â€” `safety_checks.py` defines it but `paper_endpoints.py` and `paper_exit_evaluator.py` never call `stage_for_approval()`. Paper orders go directly to `submit_and_track()`. No fix needed.
+- Intraday stop_loss=True was gated behind `RISK_ENVELOPE_ENFORCE` — position-level exits (stop_loss, expiration_day) were warn-only when the flag was 0. Fixed: position-level exits in `intraday_risk_monitor.py` section 5a now always execute; envelope flag only gates portfolio-level force-close (section 5b) (2026-04-13)
+- `paper_auto_execute` had no symbol-level dedup — if the scanner generated a new suggestion for an already-held symbol, auto-execute would stage and fill it, doubling the position qty. Fixed: both non-cohort and per-cohort paths now reject suggestions for symbols with open positions (2026-04-13)
 
 ---
 
@@ -257,6 +261,8 @@ Gate to `micro_live`: 4 consecutive Alpaca paper green days (not internal fills)
 - [x] Cohort decision accuracy: policy_decisions now read + compared in policy_lab_eval (2026-04-12)
 - [x] Baseline capital synced to actual Alpaca balance at micro_live promotion (2026-04-12)
 - [x] MTM batch updates: position marks + EOD snapshots batched into single queries (2026-04-12)
+- [x] Intraday stop loss fix: position-level exits decoupled from RISK_ENVELOPE_ENFORCE gate (2026-04-13)
+- [x] Symbol-level dedup in paper_auto_execute: reject suggestions for already-held symbols (2026-04-13)
 - [ ] Risk envelope: switch force-close from warn-only to block mode (RISK_ENVELOPE_ENFORCE=1 after 2026-04-13)
 - [ ] Enable PROFIT_AGENT_RANKING=1 after 5 days of learning data
 - [ ] Enable ORCHESTRATOR_ENABLED=1 after individual agent testing
@@ -278,7 +284,6 @@ Gate to `micro_live`: 4 consecutive Alpaca paper green days (not internal fills)
 ## Live State (auto-updated)
 - **Phase:** alpaca_paper
 - **Green days:** 0
-- **Last green:** â€"
-- **Open positions:** 4 (AMD, ADBE, MSFT, NFLX)
-- **Net unrealized:** -$54.50
-- **Last updated:** 2026-04-10 EOD
+- **Last green:** 
+- **Open positions:** 4
+- **Last updated:** 2026-04-13 06:22

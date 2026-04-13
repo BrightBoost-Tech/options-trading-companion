@@ -149,25 +149,16 @@ class IntradayRiskMonitor:
         force_closes_submitted = 0
         warnings_logged = 0
 
-        # 5a. Position-level exit triggers
+        # 5a. Position-level exit triggers — ALWAYS execute.
+        #      Stop losses and expiration-day exits are safety-critical and must
+        #      not be gated behind RISK_ENVELOPE_ENFORCE (which controls only
+        #      portfolio-level force-close behavior).
         for pos, reason in exit_triggered:
-            if _ENFORCE_FORCE_CLOSE:
-                success = self._execute_force_close(
-                    pos, f"intraday_{reason}", user_id
-                )
-                if success:
-                    force_closes_submitted += 1
-            else:
-                self._log_alert(
-                    user_id=user_id,
-                    alert_type=f"intraday_{reason}",
-                    severity="critical",
-                    message=f"[WARN-ONLY] {pos.get('symbol')} hit {reason} intraday",
-                    position_id=pos.get("id"),
-                    symbol=pos.get("symbol"),
-                    metadata={"reason": reason, "unrealized_pl": pos.get("unrealized_pl")},
-                )
-                warnings_logged += 1
+            success = self._execute_force_close(
+                pos, f"intraday_{reason}", user_id
+            )
+            if success:
+                force_closes_submitted += 1
 
         # 5b. Envelope violations
         for violation in result.violations:

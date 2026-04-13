@@ -283,10 +283,17 @@ class PaperAutopilotService:
         # Get already executed to dedupe
         already_executed = self.get_already_executed_suggestion_ids_today(user_id)
 
+        # Symbol-level dedup: reject suggestions for symbols with open positions
+        open_positions = self.get_open_positions(user_id)
+        held_symbols = {
+            p.get("symbol") for p in open_positions if p.get("symbol")
+        }
+
         # Min-edge filter: reject suggestions where fees eat the profit
         from packages.quantum.analytics.canonical_ranker import MIN_EDGE_AFTER_COSTS
         edge_filtered_count = 0
         fee_per_contract = 0.65
+        symbol_dedup_count = 0
 
         # Filter by min_score, min_edge, and dedupe
         candidates = []
@@ -296,6 +303,15 @@ class PaperAutopilotService:
             sid = s.get("id")
             if sid in already_executed:
                 deduped_count += 1
+                continue
+
+            # Block entries for symbols already held
+            ticker = s.get("ticker") or s.get("symbol")
+            if ticker and ticker in held_symbols:
+                symbol_dedup_count += 1
+                logger.info(
+                    f"[DEDUP] Rejected {ticker}: already have open position"
+                )
                 continue
 
             # Min-edge check (catches legacy suggestions without risk_adjusted_ev)
@@ -343,6 +359,7 @@ class PaperAutopilotService:
         logger.info(
             f"paper_auto_execute_start: user_id={user_id} "
             f"suggestions_fetched={len(suggestions)} deduped={deduped_count} "
+            f"symbol_dedup={symbol_dedup_count} "
             f"below_min_score={below_min_score_count} edge_filtered={edge_filtered_count} "
             f"candidates={len(candidates)} "
             f"to_execute={len(to_execute)}"
@@ -530,12 +547,21 @@ class PaperAutopilotService:
             # Deduplicate
             already = self.get_already_executed_suggestion_ids_today(user_id)
 
+            # Symbol-level dedup: reject suggestions for symbols with open positions
+            cohort_open = self.get_open_positions(user_id)
+            cohort_held = {
+                p.get("symbol") for p in cohort_open if p.get("symbol")
+            }
+
             for s in suggestions:
                 sid = s.get("id")
                 if sid in already:
                     print(f"[AUTO_EXEC] SKIP {s.get('ticker')}/{sid[:8]}: already executed today", flush=True)
                     continue
                 ticker = s.get("ticker") or s.get("symbol") or "?"
+                if ticker in cohort_held:
+                    print(f"[AUTO_EXEC] SKIP {ticker}/{sid[:8]}: already have open position", flush=True)
+                    continue
                 print(f"[AUTO_EXEC] EXECUTING {ticker}/{sid[:8]} cohort={cohort_name}", flush=True)
                 try:
                     ticket = _suggestion_to_ticket(s)

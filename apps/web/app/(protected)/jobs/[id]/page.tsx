@@ -7,6 +7,7 @@ import { fetchWithAuth } from '@/lib/api';
 import { JobStatusBadge } from '@/components/jobs/JobStatusBadge';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip';
 import { ArrowLeft, RefreshCw } from 'lucide-react';
 
 export default function JobDetailsPage() {
@@ -82,9 +83,18 @@ export default function JobDetailsPage() {
     <div className="space-y-6">
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-4">
-          <Button variant="ghost" size="icon" onClick={() => router.back()}>
-            <ArrowLeft className="h-4 w-4" />
-          </Button>
+          <TooltipProvider>
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <Button variant="ghost" size="icon" onClick={() => router.back()} aria-label="Go back">
+                  <ArrowLeft className="h-4 w-4" />
+                </Button>
+              </TooltipTrigger>
+              <TooltipContent className="whitespace-nowrap">
+                Go back
+              </TooltipContent>
+            </Tooltip>
+          </TooltipProvider>
           <div>
             <h2 className="text-2xl font-bold tracking-tight">{job.job_name}</h2>
             <p className="text-sm text-muted-foreground font-mono">{job.id}</p>

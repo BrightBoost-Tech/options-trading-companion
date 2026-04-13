@@ -115,14 +115,15 @@ class CashService:
 
     def _paper_baseline_fallback(self, user_id: str, current_buying_power: float) -> float:
         """
-        Paper-mode capital consistency: ensures deployable capital is at least
-        paper_baseline_capital when in paper mode.
+        Paper-mode capital consistency.
 
-        This prevents a mismatch where positions sized for a 100k baseline are
-        checked against a tiny budget cap when buying_power shows a stale value.
+        - alpaca_paper phase: baseline = Alpaca paper balance (~$100k).
+          Use max(buying_power, baseline) to handle stale snapshots.
+        - micro_live / live phases: baseline should be synced to actual
+          account balance at promotion time. Trust buying_power directly
+          if baseline hasn't been updated from the $100k default.
 
-        Returns max(current_buying_power, paper_baseline_capital) in paper mode.
-        Returns current_buying_power unchanged if not in paper mode or on error.
+        Returns adjusted buying_power based on current phase and baseline.
         """
         try:
             from packages.quantum.ops_endpoints import get_global_ops_control
@@ -133,6 +134,7 @@ class CashService:
             return current_buying_power
 
         baseline = 100_000.0
+        current_phase = "alpaca_paper"
         try:
             res = (
                 self.supabase.table("v3_go_live_state")
@@ -143,18 +145,36 @@ class CashService:
             )
             if res.data and res.data[0].get("paper_baseline_capital"):
                 baseline = float(res.data[0]["paper_baseline_capital"])
-        except Exception as e:
-            logger.warning("[CAPITAL] Failed to read paper_baseline_capital, using default: %s", e)
 
-        # Use max to ensure consistency: if positions were sized for baseline,
-        # budget calculations should use at least baseline
-        result = max(current_buying_power, baseline)
-        if result > current_buying_power:
-            logger.info(
-                "[CAPITAL] paper mode: using baseline=%s over buying_power=%s user_id=%s",
-                baseline, current_buying_power, user_id,
+            # Check current phase from go_live_progression
+            phase_res = (
+                self.supabase.table("go_live_progression")
+                .select("current_phase")
+                .eq("user_id", user_id)
+                .limit(1)
+                .execute()
             )
-        return result
+            if phase_res.data and phase_res.data[0].get("current_phase"):
+                current_phase = phase_res.data[0]["current_phase"]
+        except Exception as e:
+            logger.warning("[CAPITAL] Failed to read baseline/phase: %s", e)
+
+        # In alpaca_paper, use max(buying_power, baseline) for stale snapshot protection
+        if current_phase == "alpaca_paper":
+            result = max(current_buying_power, baseline)
+            if result > current_buying_power:
+                logger.info(
+                    "[CAPITAL] alpaca_paper: baseline=%s over buying_power=%s",
+                    baseline, current_buying_power,
+                )
+            return result
+
+        # In micro_live/live: if baseline was explicitly set (not default $100k),
+        # use it as floor. Otherwise trust buying_power directly.
+        if baseline != 100_000.0:
+            return max(current_buying_power, baseline)
+
+        return current_buying_power
 
     def check_capital_guardrail(self, cost_basis: float, deployable: float) -> bool:
         """Return True if this trade fits within deployable capital."""

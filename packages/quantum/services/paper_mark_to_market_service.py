@@ -61,6 +61,7 @@ class PaperMarkToMarketService:
         marked = 0
         skipped = 0
         errors = []
+        batch_updates = []
 
         for pos in positions:
             pos_id = pos["id"]
@@ -95,17 +96,31 @@ class PaperMarkToMarketService:
                 logger.info(mtm_msg)
                 print(mtm_msg, flush=True)
 
-                self.client.table("paper_positions").update({
+                batch_updates.append({
+                    "id": pos_id,
                     "current_mark": per_contract_mark,
                     "unrealized_pl": unrealized,
                     "updated_at": datetime.now(timezone.utc).isoformat(),
-                }).eq("id", pos_id).execute()
-
+                })
                 marked += 1
 
             except Exception as e:
-                logger.error(f"[MARK_TO_MARKET] Failed to mark position {pos_id}: {e}")
+                logger.error(f"[MARK_TO_MARKET] Failed to compute mark for {pos_id}: {e}")
                 errors.append({"position_id": pos_id, "error": str(e)})
+
+        # Single batch update instead of N individual queries
+        if batch_updates:
+            try:
+                self.client.table("paper_positions").upsert(batch_updates).execute()
+            except Exception as e:
+                logger.error(f"[MARK_TO_MARKET] Batch update failed, falling back to individual: {e}")
+                for upd in batch_updates:
+                    try:
+                        self.client.table("paper_positions").update({
+                            k: v for k, v in upd.items() if k != "id"
+                        }).eq("id", upd["id"]).execute()
+                    except Exception as e2:
+                        errors.append({"position_id": upd["id"], "error": str(e2)})
 
         if skipped:
             logger.info(
@@ -132,20 +147,35 @@ class PaperMarkToMarketService:
         if not positions:
             return {"status": "ok", "snapshots_saved": 0}
 
-        saved = 0
+        # Batch all snapshots into a single upsert
+        snapshot_rows = []
         for pos in positions:
+            snapshot_rows.append({
+                "position_id": pos["id"],
+                "user_id": user_id,
+                "portfolio_id": pos["portfolio_id"],
+                "snapshot_date": snapshot_date.isoformat(),
+                "current_mark": pos.get("current_mark"),
+                "unrealized_pl": float(pos.get("unrealized_pl") or 0.0),
+            })
+
+        saved = 0
+        if snapshot_rows:
             try:
-                self.client.table("paper_eod_snapshots").upsert({
-                    "position_id": pos["id"],
-                    "user_id": user_id,
-                    "portfolio_id": pos["portfolio_id"],
-                    "snapshot_date": snapshot_date.isoformat(),
-                    "current_mark": pos.get("current_mark"),
-                    "unrealized_pl": float(pos.get("unrealized_pl") or 0.0),
-                }, on_conflict="position_id,snapshot_date").execute()
-                saved += 1
+                self.client.table("paper_eod_snapshots").upsert(
+                    snapshot_rows, on_conflict="position_id,snapshot_date"
+                ).execute()
+                saved = len(snapshot_rows)
             except Exception as e:
-                logger.error(f"[MARK_TO_MARKET] Failed to save snapshot for position {pos['id']}: {e}")
+                logger.error(f"[MARK_TO_MARKET] Batch EOD snapshot failed, falling back: {e}")
+                for row in snapshot_rows:
+                    try:
+                        self.client.table("paper_eod_snapshots").upsert(
+                            row, on_conflict="position_id,snapshot_date"
+                        ).execute()
+                        saved += 1
+                    except Exception as e2:
+                        logger.error(f"[MARK_TO_MARKET] Snapshot failed for {row['position_id']}: {e2}")
 
         return {"status": "ok", "snapshots_saved": saved}
 

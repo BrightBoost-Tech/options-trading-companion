@@ -131,10 +131,45 @@ class IntradayRiskMonitor:
             config=config,
         )
 
+        # 4b. Check position-level exit conditions (stop loss, expiration)
+        #     The envelope check above handles portfolio-level limits.
+        #     This catches individual positions that hit their own stop/expiry
+        #     between the scheduled 8:15 AM / 3:00 PM exit evaluations.
+        from packages.quantum.services.paper_exit_evaluator import (
+            evaluate_position_exit,
+            EXIT_CONDITIONS,
+        )
+        exit_triggered = []
+        for pos in positions:
+            reason = evaluate_position_exit(pos, conditions=EXIT_CONDITIONS)
+            if reason and reason in ("stop_loss", "expiration_day"):
+                exit_triggered.append((pos, reason))
+
         # 5. Process violations
         force_closes_submitted = 0
         warnings_logged = 0
 
+        # 5a. Position-level exit triggers
+        for pos, reason in exit_triggered:
+            if _ENFORCE_FORCE_CLOSE:
+                success = self._execute_force_close(
+                    pos, f"intraday_{reason}", user_id
+                )
+                if success:
+                    force_closes_submitted += 1
+            else:
+                self._log_alert(
+                    user_id=user_id,
+                    alert_type=f"intraday_{reason}",
+                    severity="critical",
+                    message=f"[WARN-ONLY] {pos.get('symbol')} hit {reason} intraday",
+                    position_id=pos.get("id"),
+                    symbol=pos.get("symbol"),
+                    metadata={"reason": reason, "unrealized_pl": pos.get("unrealized_pl")},
+                )
+                warnings_logged += 1
+
+        # 5b. Envelope violations
         for violation in result.violations:
             if violation.severity == "force_close":
                 if _ENFORCE_FORCE_CLOSE:

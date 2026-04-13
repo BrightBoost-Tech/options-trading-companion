@@ -47,14 +47,27 @@ def calculate_pop(
         if sell_leg and sell_leg.get("delta"):
             return 1.0 - abs(float(sell_leg["delta"]))
 
-    # Debit spreads: PoP ≈ delta of the long leg
+    # Debit spreads: PoP = probability of exceeding breakeven
+    # breakeven = long_strike + net_debit, so PoP < delta of long leg.
+    # Approximate by interpolating delta between long and short legs,
+    # weighted by how much of the width the premium consumes.
     if strategy_type in (
         "debit_spread", "debit_call_spread", "debit_put_spread",
         "long_call_spread", "long_put_spread",
     ):
         long_leg = next((l for l in legs if l.get("action") == "buy"), None)
+        short_leg = next((l for l in legs if l.get("action") == "sell"), None)
         if long_leg and long_leg.get("delta"):
-            return abs(float(long_leg["delta"]))
+            long_delta = abs(float(long_leg["delta"]))
+            short_delta = abs(float(short_leg["delta"])) if short_leg and short_leg.get("delta") else 0.0
+            # If credit/width available, interpolate to breakeven delta
+            if credit is not None and width is not None and width > 0:
+                premium_fraction = abs(credit) / width  # 0=free, 1=full width
+                return long_delta - (long_delta - short_delta) * premium_fraction
+            # Fallback: midpoint of long and short deltas
+            if short_delta > 0:
+                return (long_delta + short_delta) / 2.0
+            return long_delta
 
     # Short single-leg: PoP = 1 - delta
     if strategy_type in ("short_call", "short_put", "naked_call", "naked_put"):

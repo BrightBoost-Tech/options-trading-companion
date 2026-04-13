@@ -147,6 +147,29 @@ class ProgressionService:
                 "trigger": "auto_gate",
             })
 
+            # Sync paper_baseline_capital to the micro_live starting balance.
+            # This ensures CashService uses the correct capital base post-promotion.
+            try:
+                from packages.quantum.brokers.alpaca_client import get_alpaca_client
+                alpaca = get_alpaca_client()
+                if alpaca:
+                    acct = alpaca.get_account()
+                    micro_live_capital = acct.get("equity", 500.0)
+                else:
+                    micro_live_capital = 500.0  # Default micro_live cap from promotion path
+
+                self.client.table("v3_go_live_state") \
+                    .update({"paper_baseline_capital": micro_live_capital}) \
+                    .eq("user_id", user_id) \
+                    .execute()
+
+                logger.info(
+                    f"[PROGRESSION] Synced paper_baseline_capital={micro_live_capital} "
+                    f"for micro_live transition user={user_id[:8]}"
+                )
+            except Exception as e:
+                logger.error(f"[PROGRESSION] Failed to sync baseline capital: {e}")
+
             logger.info(
                 f"[PROGRESSION] PROMOTION: {user_id[:8]} "
                 f"alpaca_paper → micro_live ({green_days} green days)"

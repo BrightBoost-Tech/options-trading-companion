@@ -214,7 +214,9 @@ Gate to `micro_live`: 4 consecutive Alpaca paper green days (not internal fills)
 - Close orders missing `position_intent` â€” Alpaca inferred `buy_to_open` instead of `buy_to_close`, rejecting ADBE/AVGO exits. Fixed: set `buy_to_close`/`sell_to_close` per leg when `position_id` is set (2026-04-10)
 - Close orders on near-worthless spreads had negative `limit_price` (AMD: -1.53). Alpaca rejects limit â‰¤ 0. Fixed: clamp to 0.01 for close orders (2026-04-10)
 - `paper_exit_evaluate` 3 PM run never fired â€” idempotency key `{date}-exit-evaluate-{user_id}` was same for 8:15 AM and 3:00 PM. Morning's `succeeded` record blocked afternoon. Fixed: key now includes UTC hour (2026-04-10)
-- `LIVE_MANUAL_APPROVAL=true` is NOT wired into paper submission path â€” `safety_checks.py` defines it but `paper_endpoints.py` and `paper_exit_evaluator.py` never call `stage_for_approval()`. Paper orders go directly to `submit_and_track()`. No fix needed.
+- `LIVE_MANUAL_APPROVAL=true` is NOT wired into paper submission path
+- Debit spread PoP used raw long-leg delta (0.60-0.65) instead of breakeven-adjusted delta (~0.45). Inflated EV by ~30%, causing negative-EV trades to appear positive. Fixed: interpolate between long/short deltas weighted by premium/width (2026-04-12)
+- Intraday risk monitor only checked portfolio-level envelopes, not position-level stop losses. 7-hour gap between exit evaluations (8:15 AM to 3:00 PM) left positions unprotected. Fixed: evaluate_position_exit() now called every 15min in intraday monitor (2026-04-12) â€” `safety_checks.py` defines it but `paper_endpoints.py` and `paper_exit_evaluator.py` never call `stage_for_approval()`. Paper orders go directly to `submit_and_track()`. No fix needed.
 
 ---
 
@@ -250,6 +252,11 @@ Gate to `micro_live`: 4 consecutive Alpaca paper green days (not internal fills)
 - [x] Raw EV stored alongside calibrated EV — fixes self-referential calibration loop (2026-04-11)
 - [x] Auto-retry failed_retryable jobs every 10min during market hours (2026-04-11)
 - [x] Pass spot price to option_chain() — eliminates ~35 redundant API calls/scan (2026-04-11)
+- [x] PoP fix: debit spread PoP now uses breakeven-adjusted delta, not raw long delta (2026-04-12)
+- [x] Intraday stop losses: monitor now checks position-level exits every 15min (2026-04-12)
+- [x] Cohort decision accuracy: policy_decisions now read + compared in policy_lab_eval (2026-04-12)
+- [x] Baseline capital synced to actual Alpaca balance at micro_live promotion (2026-04-12)
+- [x] MTM batch updates: position marks + EOD snapshots batched into single queries (2026-04-12)
 - [ ] Risk envelope: switch force-close from warn-only to block mode (RISK_ENVELOPE_ENFORCE=1 after 2026-04-13)
 - [ ] Enable PROFIT_AGENT_RANKING=1 after 5 days of learning data
 - [ ] Enable ORCHESTRATOR_ENABLED=1 after individual agent testing

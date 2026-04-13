@@ -642,3 +642,84 @@ def check_rollback(
             }
 
     return {"status": "ok", "champion": current_champion["cohort_name"]}
+
+
+# ---------------------------------------------------------------------------
+# Cohort decision accuracy — reads policy_decisions to measure which
+# cohort's accept/reject decisions produce the best outcomes.
+# ---------------------------------------------------------------------------
+
+def compute_decision_accuracy(
+    supabase,
+    user_id: str,
+    lookback_days: int = 30,
+) -> Dict[str, Any]:
+    """
+    Compare cohort decision quality using realized outcomes from policy_decisions.
+
+    For each cohort, computes:
+      - accepted_win_rate: % of accepted trades that were profitable
+      - rejection_accuracy: % of rejected trades that would have lost money
+      - sample_size: total decisions with realized outcomes
+
+    Returns dict keyed by cohort_id.
+    """
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=lookback_days)).isoformat()
+
+    try:
+        rows = (
+            supabase.table("policy_decisions")
+            .select("cohort_id, decision, realized_outcome")
+            .eq("user_id", user_id)
+            .gte("created_at", cutoff)
+            .not_.is_("realized_outcome", "null")
+            .limit(500)
+            .execute()
+        ).data or []
+    except Exception as e:
+        logger.warning(f"compute_decision_accuracy failed: {e}")
+        return {}
+
+    if not rows:
+        return {}
+
+    stats: Dict[str, Dict[str, int]] = defaultdict(
+        lambda: {"accepted_wins": 0, "accepted_losses": 0,
+                 "rejected_wins": 0, "rejected_losses": 0}
+    )
+
+    for row in rows:
+        cid = row.get("cohort_id")
+        if not cid:
+            continue
+        outcome = row.get("realized_outcome") or {}
+        pnl = float(outcome.get("pnl_realized", 0))
+        if row["decision"] == "accepted":
+            if pnl > 0:
+                stats[cid]["accepted_wins"] += 1
+            else:
+                stats[cid]["accepted_losses"] += 1
+        else:
+            if pnl > 0:
+                stats[cid]["rejected_wins"] += 1
+            else:
+                stats[cid]["rejected_losses"] += 1
+
+    results = {}
+    for cid, s in stats.items():
+        total_accepted = s["accepted_wins"] + s["accepted_losses"]
+        total_rejected = s["rejected_wins"] + s["rejected_losses"]
+        results[cid] = {
+            "accepted_win_rate": round(s["accepted_wins"] / total_accepted, 3) if total_accepted else None,
+            "rejection_accuracy": round(s["rejected_losses"] / total_rejected, 3) if total_rejected else None,
+            "sample_size": total_accepted + total_rejected,
+        }
+
+    logger.info(f"[DECISION_ACCURACY] user={user_id[:8]} cohorts={len(results)} lookback={lookback_days}d")
+    for cid, r in results.items():
+        logger.info(
+            f"  cohort={cid[:8]} accepted_wr={r['accepted_win_rate']} "
+            f"reject_acc={r['rejection_accuracy']} n={r['sample_size']}"
+        )
+
+    return results

@@ -49,19 +49,26 @@ def run(payload: Dict[str, Any], ctx: Any = None) -> Dict[str, Any]:
 
 def _evaluate_user(user_id: str, supabase) -> Dict[str, Any]:
 
-    from packages.quantum.policy_lab.evaluator import evaluate_cohorts, check_promotion
+    from packages.quantum.policy_lab.evaluator import (
+        evaluate_cohorts,
+        check_promotion,
+        compute_decision_accuracy,
+    )
 
     eval_date = date.today()
     eval_result = evaluate_cohorts(user_id, eval_date, supabase)
     promo_result = check_promotion(user_id, supabase)
+    accuracy_result = compute_decision_accuracy(supabase, user_id, lookback_days=30)
 
     logger.info(
         f"policy_lab_eval_complete: user={user_id} date={eval_date} "
-        f"eval_status={eval_result.get('status')} promo_status={promo_result.get('status')}"
+        f"eval_status={eval_result.get('status')} promo_status={promo_result.get('status')} "
+        f"decision_accuracy_cohorts={len(accuracy_result)}"
     )
 
     return {
         "status": "ok",
         "evaluation": eval_result,
         "promotion": promo_result,
+        "decision_accuracy": accuracy_result,
     }

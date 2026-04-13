@@ -792,13 +792,20 @@ class PaperExitEvaluator:
         orig_legs = position.get("legs") or []
 
         if len(orig_legs) >= 2:
-            # Multi-leg: build close legs from all original legs (invert sides)
+            # Multi-leg: build close legs from all original legs (invert sides).
+            # Stored legs use "action" (from OptionLeg model), not "side".
             close_legs = []
-            for leg in orig_legs:
-                leg_side = "sell" if leg.get("side") == "buy" else "buy"
+            for i, leg in enumerate(orig_legs):
+                orig_action = leg.get("action") or leg.get("side") or "buy"
+                inverted = "sell" if orig_action == "buy" else "buy"
+                logger.info(
+                    f"[CLOSE_LEG_BUILD] leg[{i}] symbol={leg.get('symbol', '?')[:20]} "
+                    f"raw_action={leg.get('action')!r} raw_side={leg.get('side')!r} "
+                    f"→ orig_action={orig_action!r} → inverted={inverted!r}"
+                )
                 close_legs.append({
                     "symbol": leg.get("symbol") or leg.get("occ_symbol") or "",
-                    "action": leg_side,
+                    "action": inverted,
                     "quantity": abs_qty,
                     "type": leg.get("type", "call"),
                     "strike": leg.get("strike"),

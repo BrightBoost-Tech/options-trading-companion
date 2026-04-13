@@ -221,6 +221,7 @@ Gate to `micro_live`: 4 consecutive Alpaca paper green days (not internal fills)
 - Intraday risk monitor only checked portfolio-level envelopes, not position-level stop losses. 7-hour gap between exit evaluations (8:15 AM to 3:00 PM) left positions unprotected. Fixed: evaluate_position_exit() now called every 15min in intraday monitor (2026-04-12) â€” `safety_checks.py` defines it but `paper_endpoints.py` and `paper_exit_evaluator.py` never call `stage_for_approval()`. Paper orders go directly to `submit_and_track()`. No fix needed.
 - Intraday stop_loss=True was gated behind `RISK_ENVELOPE_ENFORCE` — position-level exits (stop_loss, expiration_day) were warn-only when the flag was 0. Fixed: position-level exits in `intraday_risk_monitor.py` section 5a now always execute; envelope flag only gates portfolio-level force-close (section 5b) (2026-04-13)
 - `paper_auto_execute` had no symbol-level dedup — if the scanner generated a new suggestion for an already-held symbol, auto-execute would stage and fill it, doubling the position qty. Fixed: both non-cohort and per-cohort paths now reject suggestions for symbols with open positions (2026-04-13)
+- `_close_position` multi-leg inversion read `leg.get("side")` but stored legs use `action` (from OptionLeg model). `side` returned None, so ALL close legs got `action: "buy"`, meaning both legs sent `buy_to_close`. Alpaca rejected: long leg needs `sell_to_close`. Fixed: read `leg.get("action") or leg.get("side")` then invert (2026-04-13)
 
 ---
 

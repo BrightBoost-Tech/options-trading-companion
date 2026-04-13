@@ -48,7 +48,7 @@ def build_alpaca_order_request(order: Dict[str, Any]) -> Dict[str, Any]:
     is_close_order = bool(order.get("position_id"))
 
     alpaca_legs = []
-    for leg in legs_data:
+    for i, leg in enumerate(legs_data):
         leg_symbol = leg.get("symbol") or leg.get("occ_symbol") or ""
         leg_side = leg.get("side") or leg.get("action") or side
         alpaca_leg = {
@@ -64,6 +64,12 @@ def build_alpaca_order_request(order: Dict[str, Any]) -> Dict[str, Any]:
             else:
                 alpaca_leg["position_intent"] = "sell_to_close"
 
+        logger.info(
+            f"[BUILD_ALPACA_REQ] leg[{i}] raw_side={leg.get('side')!r} "
+            f"raw_action={leg.get('action')!r} fallback_side={side!r} "
+            f"→ leg_side={leg_side!r} is_close={is_close_order} "
+            f"intent={alpaca_leg.get('position_intent', 'NONE')}"
+        )
         alpaca_legs.append(alpaca_leg)
 
     # Close orders on near-worthless spreads can have negative or zero mark.

@@ -265,7 +265,7 @@ class AlpacaClient:
         # ratio_qty is always 1 per leg — contract count goes on parent qty.
         # Alpaca requires leg ratios to be relatively prime (GCD must be 1).
         alpaca_legs = []
-        for leg in legs:
+        for i, leg in enumerate(legs):
             leg_symbol = polygon_to_alpaca(leg["symbol"])
             is_buy = leg["side"].lower() in ("buy", "buy_to_open", "buy_to_close")
             side = OrderSide.BUY if is_buy else OrderSide.SELL
@@ -281,6 +281,11 @@ class AlpacaClient:
             }
             intent = intent_map.get(leg_intent,
                                     PositionIntent.BUY_TO_OPEN if is_buy else PositionIntent.SELL_TO_OPEN)
+            logger.info(
+                f"[ALPACA_SUBMIT] leg[{i}] symbol={leg_symbol[:20]} "
+                f"side_raw={leg['side']!r} → OrderSide={side.value} "
+                f"intent_raw={leg.get('position_intent')!r} → PositionIntent={intent.value}"
+            )
             alpaca_legs.append(OptionLegRequest(
                 symbol=leg_symbol,
                 side=side,

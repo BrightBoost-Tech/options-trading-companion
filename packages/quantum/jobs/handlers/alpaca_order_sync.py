@@ -99,9 +99,62 @@ def run(payload: Dict[str, Any], ctx: Any = None) -> Dict[str, Any]:
                     except Exception as e:
                         logger.error(f"[ALPACA_SYNC] Orphan repair failed for {uid[:8]}: {e}")
 
+            # ── Step 3: Reconcile stuck-open positions ──────────────────
+            # Catch positions that are 'open' but have a filled close order.
+            # This is a safety net for the primary close path in poll_pending_orders.
+            stuck_open_closed = 0
+            try:
+                from packages.quantum.brokers.alpaca_order_handler import _close_position_on_fill
+
+                # Find filled close orders whose positions are still open
+                stuck_res = client.table("paper_orders") \
+                    .select("id, position_id, side, alpaca_order_id, filled_qty, avg_fill_price, filled_at, broker_response") \
+                    .eq("status", "filled") \
+                    .not_.is_("position_id", "null") \
+                    .gt("filled_qty", 0) \
+                    .execute()
+
+                for filled_order in (stuck_res.data or []):
+                    pid = filled_order.get("position_id")
+                    if not pid:
+                        continue
+                    # Check if position is still open
+                    pos_check = client.table("paper_positions") \
+                        .select("id, status") \
+                        .eq("id", pid) \
+                        .eq("status", "open") \
+                        .execute()
+                    if not pos_check.data:
+                        continue  # Already closed
+
+                    # Build a minimal alpaca_order dict from stored data
+                    alpaca_data = filled_order.get("broker_response") or {}
+                    alpaca_data.setdefault("filled_avg_price", filled_order.get("avg_fill_price"))
+                    alpaca_data.setdefault("filled_qty", filled_order.get("filled_qty"))
+                    alpaca_data.setdefault("filled_at", filled_order.get("filled_at"))
+
+                    try:
+                        _close_position_on_fill(
+                            client, pid, filled_order, alpaca_data,
+                        )
+                        stuck_open_closed += 1
+                        logger.warning(
+                            f"[ALPACA_SYNC] Reconciled stuck-open position {pid[:8]} "
+                            f"via filled close order {filled_order['id'][:8]}"
+                        )
+                    except Exception as recon_err:
+                        logger.error(
+                            f"[ALPACA_SYNC] Reconcile failed for position {pid[:8]}: {recon_err}"
+                        )
+            except Exception as recon_outer_err:
+                logger.error(f"[ALPACA_SYNC] Reconciliation step failed: {recon_outer_err}")
+
+            totals["stuck_open_closed"] = stuck_open_closed
+
             logger.info(
                 f"[ALPACA_SYNC] polled={totals['total_polled']} "
                 f"fills={totals['fills']} orphans_repaired={totals['orphans_repaired']} "
+                f"stuck_open_closed={stuck_open_closed} "
                 f"partials={totals['partials']} cancels={totals['cancels']}"
             )
 

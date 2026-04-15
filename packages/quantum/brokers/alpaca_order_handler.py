@@ -219,6 +219,78 @@ def submit_and_track(
     return {"status": "needs_manual_review", "error": last_error, "attempts": MAX_SUBMIT_ATTEMPTS}
 
 
+def _close_position_on_fill(
+    supabase,
+    position_id: str,
+    order: Dict[str, Any],
+    alpaca_order: Dict[str, Any],
+) -> None:
+    """
+    Close a paper_position when its Alpaca close order fills.
+
+    This is the critical missing piece: poll_pending_orders detects the fill
+    and updates paper_orders, but nothing was updating paper_positions.
+    Follows the same pattern as paper_exit_evaluator._close_position lines
+    956-1028 (internal fill path).
+    """
+    fill_price = float(alpaca_order.get("filled_avg_price") or 0)
+    fill_qty = float(alpaca_order.get("filled_qty") or 0)
+    filled_at = alpaca_order.get("filled_at") or datetime.now(timezone.utc).isoformat()
+
+    # Fetch position
+    pos_res = supabase.table("paper_positions") \
+        .select("*") \
+        .eq("id", position_id) \
+        .single() \
+        .execute()
+
+    if not pos_res.data:
+        logger.warning(
+            f"[CLOSE_ON_FILL] Position {position_id[:8]} not found — "
+            f"may already be closed"
+        )
+        return
+
+    position = pos_res.data
+
+    if position.get("status") == "closed":
+        logger.info(
+            f"[CLOSE_ON_FILL] Position {position_id[:8]} already closed, skipping"
+        )
+        return
+
+    qty = float(position.get("quantity") or 0)
+    entry_price = float(position.get("avg_entry_price") or 0)
+    multiplier = 100.0
+
+    # Compute realized P&L
+    abs_qty = abs(qty)
+    if qty > 0:
+        # Long position: profit = (exit - entry) × qty × 100
+        realized_pl = (fill_price - entry_price) * abs_qty * multiplier
+    else:
+        # Short position: profit = (entry - exit) × qty × 100
+        realized_pl = (entry_price - fill_price) * abs_qty * multiplier
+
+    now = datetime.now(timezone.utc).isoformat()
+
+    # Close position
+    supabase.table("paper_positions").update({
+        "quantity": 0,
+        "status": "closed",
+        "close_reason": "alpaca_fill",
+        "closed_at": filled_at,
+        "realized_pl": round(realized_pl, 2),
+        "updated_at": now,
+    }).eq("id", position_id).execute()
+
+    logger.info(
+        f"[CLOSE_ON_FILL] Position closed: id={position_id[:8]} "
+        f"symbol={position.get('symbol')} fill_price={fill_price} "
+        f"realized_pl=${realized_pl:.2f}"
+    )
+
+
 def poll_pending_orders(
     alpaca: AlpacaClient,
     supabase,
@@ -241,7 +313,7 @@ def poll_pending_orders(
     p_ids = [p["id"] for p in port_res.data]
 
     orders_res = supabase.table("paper_orders") \
-        .select("id, alpaca_order_id, status, submitted_at, broker_status") \
+        .select("id, alpaca_order_id, status, submitted_at, broker_status, position_id, side, order_json") \
         .in_("status", ["submitted", "working", "partial"]) \
         .in_("portfolio_id", p_ids) \
         .not_.is_("alpaca_order_id", "null") \
@@ -336,28 +408,44 @@ def poll_pending_orders(
             supabase.table("paper_orders").update(update).eq("id", order_id).execute()
             synced += 1
 
-            # When order transitions to filled, trigger position creation
-            # via the orphan repair path in _process_orders_for_user.
+            # When order transitions to filled, handle position updates.
             if internal_status == "filled" and filled_qty > 0:
+                pos_id = order.get("position_id")
                 try:
-                    from packages.quantum.paper_endpoints import (
-                        _process_orders_for_user,
-                    )
-                    from packages.quantum.services.analytics_service import AnalyticsService
+                    if pos_id:
+                        # ── CLOSE ORDER FILL: close the position ─────────
+                        # This is the critical path that was missing — close
+                        # orders have position_id set, but _process_orders_for_user
+                        # and _commit_fill never touched paper_positions.
+                        _close_position_on_fill(
+                            supabase, pos_id, order, alpaca_order,
+                        )
+                        logger.info(
+                            f"[ALPACA_HANDLER] Position closed on fill: "
+                            f"order={order_id} position={pos_id[:8]} "
+                            f"filled_qty={filled_qty} "
+                            f"avg_price={alpaca_order.get('filled_avg_price')}"
+                        )
+                    else:
+                        # ── OPEN ORDER FILL: create/update position ──────
+                        from packages.quantum.paper_endpoints import (
+                            _process_orders_for_user,
+                        )
+                        from packages.quantum.services.analytics_service import AnalyticsService
 
-                    analytics = AnalyticsService(supabase)
-                    repair_result = _process_orders_for_user(
-                        supabase, analytics, user_id
-                    )
-                    logger.info(
-                        f"[ALPACA_HANDLER] Fill committed: order={order_id} "
-                        f"repair_processed={repair_result.get('processed', 0)}"
-                    )
+                        analytics = AnalyticsService(supabase)
+                        repair_result = _process_orders_for_user(
+                            supabase, analytics, user_id
+                        )
+                        logger.info(
+                            f"[ALPACA_HANDLER] Open fill committed: order={order_id} "
+                            f"repair_processed={repair_result.get('processed', 0)}"
+                        )
                     fills += 1
-                except Exception as repair_err:
+                except Exception as fill_err:
                     logger.error(
                         f"[ALPACA_HANDLER] Fill commit failed: order={order_id} "
-                        f"error={repair_err}"
+                        f"position_id={pos_id} error={fill_err}"
                     )
             elif internal_status == "partial":
                 partials += 1

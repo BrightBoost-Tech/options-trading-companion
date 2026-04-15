@@ -772,6 +772,42 @@ class PaperExitEvaluator:
             f"→ {'ALPACA' if position_is_alpaca else 'INTERNAL'}"
         )
 
+        # ── Idempotency: block if a close order already exists ──────
+        # Check ALL non-terminal statuses including needs_manual_review.
+        # Without this, every caller (_execute_force_close, evaluate_exits)
+        # creates a new staged order on each invocation, causing 100+ orders
+        # to pile up when submission repeatedly fails (e.g. held_for_orders).
+        try:
+            existing_close = supabase.table("paper_orders") \
+                .select("id, status, created_at") \
+                .eq("position_id", position_id) \
+                .in_("status", [
+                    "staged", "submitted", "working", "partial", "pending",
+                    "needs_manual_review",
+                ]) \
+                .order("created_at", desc=True) \
+                .limit(1) \
+                .execute()
+            if existing_close.data:
+                existing = existing_close.data[0]
+                logger.info(
+                    f"[CLOSE_POSITION] Skipping — close order already exists "
+                    f"for position={position_id[:8]}: "
+                    f"order={existing['id'][:8]} status={existing['status']}"
+                )
+                return {
+                    "order_id": existing["id"],
+                    "processed": 0,
+                    "routed_to": "skipped_duplicate",
+                    "note": f"Existing close order {existing['id'][:8]} "
+                            f"status={existing['status']}",
+                }
+        except Exception as e:
+            logger.warning(
+                f"[CLOSE_POSITION] Idempotency check failed for "
+                f"position={position_id[:8]}: {e}"
+            )
+
         # ── Fetch position ───────────────────────────────────────────
         pos_res = supabase.table("paper_positions") \
             .select("*") \

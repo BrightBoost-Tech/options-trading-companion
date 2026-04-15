@@ -377,6 +377,10 @@ class AlpacaClient:
         Used before submitting close orders to avoid Alpaca's held_for_orders
         rejection when an existing open order locks the contract.
 
+        MLEG orders have symbol=None on the parent — the symbols filter on
+        GetOrdersRequest only matches the parent, not leg symbols.  So we
+        fetch ALL open orders and inspect legs to find matches.
+
         Returns list of cancelled Alpaca order IDs.
         """
         from alpaca.trading.requests import GetOrdersRequest
@@ -385,13 +389,11 @@ class AlpacaClient:
         if not symbols:
             return []
 
-        # Alpaca GetOrdersRequest.symbols filters by these exact symbols
-        alpaca_symbols = [polygon_to_alpaca(s) for s in symbols]
-        req = GetOrdersRequest(
-            status=QueryOrderStatus.OPEN,
-            symbols=alpaca_symbols,
-        )
+        target_symbols = {polygon_to_alpaca(s) for s in symbols}
 
+        # Fetch ALL open orders — MLEG parents have symbol=None so
+        # a symbols filter would miss them entirely.
+        req = GetOrdersRequest(status=QueryOrderStatus.OPEN, nested=True)
         try:
             open_orders = self._call_with_retry(self._client.get_orders, req)
         except Exception as e:
@@ -400,13 +402,36 @@ class AlpacaClient:
 
         cancelled = []
         for order in open_orders:
+            # Check parent symbol
+            order_symbol = str(order.symbol) if order.symbol else ""
+            match = order_symbol in target_symbols
+
+            # Check leg symbols (for MLEG orders)
+            if not match and order.legs:
+                for leg in order.legs:
+                    leg_sym = str(leg.symbol) if leg.symbol else ""
+                    if leg_sym in target_symbols:
+                        match = True
+                        break
+
+            if not match:
+                continue
+
             oid = str(order.id)
             try:
                 self._call_with_retry(self._client.cancel_order_by_id, oid)
                 cancelled.append(oid)
-                logger.info(f"[ALPACA] Cancelled conflicting order {oid} for close submission")
+                logger.info(
+                    f"[ALPACA] Cancelled conflicting order {oid} "
+                    f"(symbol={order_symbol or 'MLEG'}) for close submission"
+                )
             except Exception as e:
-                logger.warning(f"[ALPACA] Failed to cancel order {oid}: {e}")
+                # Order may have already been filled/cancelled between fetch and cancel
+                err_str = str(e).lower()
+                if "not found" in err_str or "not cancelable" in err_str:
+                    logger.info(f"[ALPACA] Order {oid} already terminal, skipping")
+                else:
+                    logger.warning(f"[ALPACA] Failed to cancel order {oid}: {e}")
 
         if cancelled:
             # Brief pause for Alpaca to process cancellations

@@ -387,19 +387,23 @@ class IntradayRiskMonitor:
         pos_id = position.get("id", "unknown")
         symbol = position.get("symbol", "?")
 
-        # Idempotency: check if a close order is already in-flight.
-        # "staged" is included because _close_position stages before submitting.
-        # Stale terminal states (needs_manual_review, watchdog_cancelled, cancelled)
-        # do NOT block — those failed and a fresh attempt should proceed.
+        # Idempotency: check if a close order already exists.
+        # Includes needs_manual_review to prevent the order-spam loop where
+        # each cycle creates a new order that immediately fails. The deeper
+        # guard in _close_position is the true gate, but this avoids the
+        # overhead of the routing check + staging attempt.
         try:
             existing = self.supabase.table("paper_orders") \
                 .select("id, status") \
                 .eq("position_id", pos_id) \
-                .in_("status", ["staged", "submitted", "working", "partial", "pending"]) \
+                .in_("status", [
+                    "staged", "submitted", "working", "partial", "pending",
+                    "needs_manual_review",
+                ]) \
                 .execute()
             if existing.data:
                 logger.info(
-                    f"[RISK_MONITOR] Skipping {symbol} — close order already in-flight "
+                    f"[RISK_MONITOR] Skipping {symbol} — close order already exists "
                     f"(order_id={existing.data[0]['id'][:8]} "
                     f"status={existing.data[0]['status']})"
                 )

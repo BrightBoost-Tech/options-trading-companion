@@ -100,15 +100,23 @@ def run(payload: Dict[str, Any], ctx: Any = None) -> Dict[str, Any]:
                         logger.error(f"[ALPACA_SYNC] Orphan repair failed for {uid[:8]}: {e}")
 
             # ── Step 3: Reconcile stuck-open positions ──────────────────
-            # Catch positions that are 'open' but have a filled close order.
+            # Catch positions that are 'open' but have a filled CLOSE order.
             # This is a safety net for the primary close path in poll_pending_orders.
+            #
+            # CRITICAL: Only process CLOSE orders, not entry orders.
+            # Entry orders also have position_id (backfilled by _process_orders_for_user),
+            # so we must check order_json.source_engine to distinguish.
+            # Close orders: source_engine in (paper_exit_evaluator, manual_close, paper_autopilot)
+            #   where paper_autopilot is used for autopilot close path
+            # Entry orders: source_engine in (midday_entry, morning_limit, etc.)
+            CLOSE_SOURCE_ENGINES = {"paper_exit_evaluator", "manual_close"}
             stuck_open_closed = 0
             try:
                 from packages.quantum.brokers.alpaca_order_handler import _close_position_on_fill
 
-                # Find filled close orders whose positions are still open
+                # Find filled orders with position_id set
                 stuck_res = client.table("paper_orders") \
-                    .select("id, position_id, side, alpaca_order_id, filled_qty, avg_fill_price, filled_at, broker_response") \
+                    .select("id, position_id, side, alpaca_order_id, filled_qty, avg_fill_price, filled_at, broker_response, order_json") \
                     .eq("status", "filled") \
                     .not_.is_("position_id", "null") \
                     .gt("filled_qty", 0) \
@@ -118,6 +126,13 @@ def run(payload: Dict[str, Any], ctx: Any = None) -> Dict[str, Any]:
                     pid = filled_order.get("position_id")
                     if not pid:
                         continue
+
+                    # ── Filter: only close orders ──────────────────────
+                    order_json = filled_order.get("order_json") or {}
+                    source_engine = order_json.get("source_engine") or ""
+                    if source_engine not in CLOSE_SOURCE_ENGINES:
+                        continue  # Entry order — do NOT close the position
+
                     # Check if position is still open
                     pos_check = client.table("paper_positions") \
                         .select("id, status") \
@@ -140,7 +155,8 @@ def run(payload: Dict[str, Any], ctx: Any = None) -> Dict[str, Any]:
                         stuck_open_closed += 1
                         logger.warning(
                             f"[ALPACA_SYNC] Reconciled stuck-open position {pid[:8]} "
-                            f"via filled close order {filled_order['id'][:8]}"
+                            f"via filled close order {filled_order['id'][:8]} "
+                            f"(source_engine={source_engine})"
                         )
                     except Exception as recon_err:
                         logger.error(

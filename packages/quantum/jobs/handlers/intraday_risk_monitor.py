@@ -23,7 +23,7 @@ import logging
 import os
 import time
 from datetime import date, datetime, timedelta, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 from zoneinfo import ZoneInfo
 
 from packages.quantum.jobs.handlers.utils import get_admin_client
@@ -36,6 +36,29 @@ CHICAGO_TZ = ZoneInfo("America/Chicago")
 
 # Force-close enforcement: warn-only until RISK_ENVELOPE_ENFORCE=1
 _ENFORCE_FORCE_CLOSE = os.environ.get("RISK_ENVELOPE_ENFORCE", "0") == "1"
+
+# Equity/weekly-pnl source. Default "alpaca" (authoritative). "legacy" falls
+# back to the pre-2026-04-16 snapshot-sum math as a 72h rip-cord; that path
+# is known-broken (produced -190% weekly readings on a ~-1% real week by
+# summing MTM snapshots of long-closed positions) and will be removed in a
+# follow-up PR once the Alpaca path is proven stable.
+_EQUITY_SOURCE = os.environ.get("RISK_EQUITY_SOURCE", "alpaca").lower()
+
+# ── Alpaca state cache ──────────────────────────────────────────────
+# Per-process cache, keyed by user_id, so bursts within a single monitor
+# cycle hit Alpaca at most once per endpoint.
+#
+# Cache-key safety across phase transitions (paper → micro_live → live):
+# get_alpaca_client() returns a singleton bound at process start to either
+# paper or live via the ALPACA_PAPER env var. Phase promotion requires a
+# Railway redeploy (env-var swap), which restarts the process and wipes
+# this cache. We therefore never serve stale paper equity to a freshly
+# promoted live account. If that invariant ever changes (e.g. hot-reload
+# of ALPACA_PAPER without restart), extend the cache key with
+# `:paper` / `:live` — not needed today.
+_ALPACA_EQUITY_CACHE: Dict[str, Tuple[float, float]] = {}      # user_id → (ts, equity)
+_ALPACA_WEEKLY_PNL_CACHE: Dict[str, Tuple[float, float]] = {}  # user_id → (ts, weekly_pnl)
+_ALPACA_STATE_TTL_SECONDS = 60
 
 
 def run(payload: Dict[str, Any], ctx: Any = None) -> Dict[str, Any]:
@@ -120,6 +143,28 @@ class IntradayRiskMonitor:
         equity = self._estimate_equity(user_id, positions)
         daily_pnl = sum(float(p.get("unrealized_pl") or 0) for p in positions)
         weekly_pnl = self._compute_weekly_pnl(user_id, daily_pnl)
+
+        # Alpaca-unavailable fallbacks. Do NOT fabricate equity or weekly P&L
+        # from local estimates — that was the 2026-04-16 failure mode
+        # (fabricated $8,982 equity + $17K summed-snapshot "weekly loss"
+        # triggered force-close at -190% on a ~-1% real week).
+        if equity is None:
+            logger.warning(
+                f"[RISK_MONITOR] user={user_id[:8]}: Alpaca equity unavailable — "
+                f"skipping weekly + daily loss envelopes. Greeks, concentration, "
+                f"stress, and position-level stop/expiry exits still run."
+            )
+            # check_loss_envelopes short-circuits at equity <= 0, so passing 0.0
+            # cleanly skips both daily and weekly envelopes. Stress also skips.
+            equity = 0.0
+        if weekly_pnl is None:
+            logger.warning(
+                f"[RISK_MONITOR] user={user_id[:8]}: Alpaca weekly P&L unavailable — "
+                f"skipping weekly envelope only. Daily loss envelope continues "
+                f"on local daily_pnl against real Alpaca equity."
+            )
+            # 0 is benign: 0 / equity = 0, no weekly breach. Daily still runs.
+            weekly_pnl = 0.0
 
         # 4. Run envelope check
         config = EnvelopeConfig.from_env()
@@ -339,11 +384,50 @@ class IntradayRiskMonitor:
 
     # ── Equity estimation ─────────────────────────────────────────────
 
-    def _estimate_equity(self, user_id: str, positions: List[Dict]) -> float:
+    def _estimate_equity(self, user_id: str, positions: List[Dict]) -> Optional[float]:
         """
-        Estimate portfolio equity from deployable capital config or position values.
+        Return authoritative account equity from Alpaca.
+
+        Returns None when Alpaca is unavailable; the caller MUST skip loss
+        envelopes rather than guess — a fabricated equity denominator was
+        the mechanism behind the 2026-04-16 false force-close incident.
+
+        The legacy path (RISK_EQUITY_SOURCE=legacy) is retained 72h as a
+        rip-cord; it reads a nonexistent `go_live_progression.deployable_capital`
+        column, silently falls through to `max(notional * 2, 500)`, and
+        produces an equity two orders of magnitude below the real Alpaca
+        equity. Scheduled for removal in a follow-up PR.
         """
-        # Try go_live_progression for capital
+        if _EQUITY_SOURCE == "legacy":
+            return self._estimate_equity_legacy(user_id, positions)
+        return self._fetch_alpaca_equity(user_id)
+
+    def _fetch_alpaca_equity(self, user_id: str) -> Optional[float]:
+        now = time.monotonic()
+        cached = _ALPACA_EQUITY_CACHE.get(user_id)
+        if cached and (now - cached[0]) < _ALPACA_STATE_TTL_SECONDS:
+            return cached[1]
+        try:
+            from packages.quantum.brokers.alpaca_client import get_alpaca_client
+            alpaca = get_alpaca_client()
+            if not alpaca:
+                return None
+            acct = alpaca.get_account()
+            equity = float(acct.get("equity") or 0)
+            if equity <= 0:
+                return None
+            _ALPACA_EQUITY_CACHE[user_id] = (now, equity)
+            return equity
+        except Exception as e:
+            logger.warning(
+                f"[RISK_MONITOR] Alpaca equity fetch failed for {user_id[:8]}: {e}"
+            )
+            return None
+
+    def _estimate_equity_legacy(
+        self, user_id: str, positions: List[Dict]
+    ) -> float:
+        """Pre-fix equity — known-broken, retained 72h as rip-cord."""
         try:
             res = self.supabase.table("go_live_progression") \
                 .select("deployable_capital") \
@@ -355,20 +439,66 @@ class IntradayRiskMonitor:
         except Exception:
             pass
 
-        # Fallback: sum of entry values
         total = sum(
             abs(float(p.get("avg_entry_price") or 0))
             * abs(float(p.get("quantity") or 1))
             * 100
             for p in positions
         )
-        return max(total * 2, 500.0)  # Rough 2x estimate, floor $500
+        return max(total * 2, 500.0)
 
-    def _compute_weekly_pnl(self, user_id: str, daily_pnl: float) -> float:
+    def _compute_weekly_pnl(
+        self, user_id: str, daily_pnl: float
+    ) -> Optional[float]:
         """
-        Compute this week's cumulative P&L from EOD snapshots.
-        Falls back to daily_pnl if no history available.
+        Week-to-date P&L from Alpaca portfolio history.
+
+        Formula: equity_series[-1] − equity_series[0] over the 1W/1D
+        series — i.e. current equity minus Monday's open equity.
+
+        Returns None when Alpaca history is unavailable; the caller MUST
+        skip the weekly envelope rather than substitute local data.
         """
+        if _EQUITY_SOURCE == "legacy":
+            return self._compute_weekly_pnl_legacy(user_id, daily_pnl)
+        return self._fetch_alpaca_weekly_pnl(user_id)
+
+    def _fetch_alpaca_weekly_pnl(self, user_id: str) -> Optional[float]:
+        now = time.monotonic()
+        cached = _ALPACA_WEEKLY_PNL_CACHE.get(user_id)
+        if cached and (now - cached[0]) < _ALPACA_STATE_TTL_SECONDS:
+            return cached[1]
+        try:
+            from packages.quantum.brokers.alpaca_client import get_alpaca_client
+            alpaca = get_alpaca_client()
+            if not alpaca:
+                return None
+            from alpaca.trading.requests import GetPortfolioHistoryRequest
+            req = GetPortfolioHistoryRequest(period="1W", timeframe="1D")
+            hist = alpaca._call_with_retry(
+                alpaca._client.get_portfolio_history, req,
+            )
+            eq_series = list(getattr(hist, "equity", None) or [])
+            if len(eq_series) >= 2:
+                weekly_pnl = float(eq_series[-1]) - float(eq_series[0])
+            elif len(eq_series) == 1:
+                # Single data point (e.g. Monday before first close): no
+                # prior equity to compare. Treat as flat week.
+                weekly_pnl = 0.0
+            else:
+                return None
+            _ALPACA_WEEKLY_PNL_CACHE[user_id] = (now, weekly_pnl)
+            return weekly_pnl
+        except Exception as e:
+            logger.warning(
+                f"[RISK_MONITOR] Alpaca weekly P&L fetch failed for {user_id[:8]}: {e}"
+            )
+            return None
+
+    def _compute_weekly_pnl_legacy(
+        self, user_id: str, daily_pnl: float
+    ) -> float:
+        """Pre-fix weekly P&L — known-broken, retained 72h as rip-cord."""
         try:
             monday = date.today() - timedelta(days=date.today().weekday())
             res = self.supabase.table("paper_eod_snapshots") \

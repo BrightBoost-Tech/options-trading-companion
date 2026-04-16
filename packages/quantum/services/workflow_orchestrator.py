@@ -2172,6 +2172,25 @@ async def run_midday_cycle(supabase: Client, user_id: str):
         except Exception as _cal_prefetch_err:
             logger.warning(f"[CALIBRATION] Failed to pre-fetch adjustments: {_cal_prefetch_err}")
 
+    # ── Pre-fetch open positions for portfolio-aware ranking ──
+    # canonical_ranker uses these for correlation_factor (×2 if same symbol held)
+    # and concentration_penalty (existing exposure / budget). With an empty list
+    # the ranker is portfolio-blind and will rank a 4th AMD spread the same as a
+    # fresh symbol. Gated by RANKER_PORTFOLIO_AWARE for safe rollout.
+    _ranker_positions = []
+    if os.environ.get("RANKER_PORTFOLIO_AWARE", "0") == "1":
+        try:
+            _pos_res = (
+                supabase.table("paper_positions")
+                .select("symbol,quantity,max_credit,max_loss,sector")
+                .eq("user_id", user_id)
+                .eq("status", "open")
+                .execute()
+            )
+            _ranker_positions = _pos_res.data or []
+        except Exception as _pos_err:
+            logger.warning(f"[RANKER] Failed to fetch open positions: {_pos_err}")
+
     # 3. Size and Prepare Suggestions
     for cand in candidates:
         # Initialize Lineage Builder for this candidate
@@ -2783,10 +2802,15 @@ async def run_midday_cycle(supabase: Client, user_id: str):
                     suggestion["blocked_reason"] = "marketdata_quality_gate"
                     suggestion["blocked_detail"] = midday_deferred_blocked_detail
 
-            # Stamp canonical ranking metric
+            # Stamp canonical ranking metric.
+            # Pass _ranker_positions (open paper positions) so canonical_ranker can
+            # apply correlation_factor (2x for same-symbol re-entry) and the
+            # concentration_penalty. Empty list = portfolio-blind ranking, which
+            # was the prior behavior and led to repeat entries on losing names.
+            # Gated by RANKER_PORTFOLIO_AWARE env flag (set above).
             from packages.quantum.analytics.canonical_ranker import compute_risk_adjusted_ev
             raev = round(
-                compute_risk_adjusted_ev(suggestion, [], remaining_global),
+                compute_risk_adjusted_ev(suggestion, _ranker_positions, remaining_global),
                 6,
             )
             suggestion["risk_adjusted_ev"] = raev

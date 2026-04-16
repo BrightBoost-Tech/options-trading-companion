@@ -23,12 +23,16 @@ logger = logging.getLogger(__name__)
 CALIBRATION_ENABLED = os.environ.get("CALIBRATION_ENABLED", "1") == "1"
 MIN_CALIBRATION_TRADES = int(os.environ.get("MIN_CALIBRATION_TRADES", "8"))
 
-# DTE buckets for segmentation
+# DTE buckets for segmentation.
+# Aligned with post_trade_learning.py (the writer of signal_weight_history) so
+# segment keys produced by the learning loop match the keys looked up here at
+# suggestions_open. Prior buckets (0-7, 7-14, 14-30, 30-60) never matched the
+# learning-side buckets, leaving the calibration feedback loop open-circuit.
 DTE_BUCKETS = {
-    "0-7": (0, 7),
-    "7-14": (7, 14),
-    "14-30": (14, 30),
-    "30-60": (30, 60),
+    "0-21":  (0, 22),
+    "21-35": (22, 36),
+    "35-45": (36, 46),
+    "45+":   (46, 9999),
 }
 
 
@@ -143,8 +147,11 @@ class CalibrationService:
 
     @staticmethod
     def _classify_dte(outcome: Dict[str, Any]) -> str:
-        """Classify an outcome into a DTE bucket based on entry DTE."""
-        # Try details_json first, then top-level fields
+        """Classify an outcome into a DTE bucket based on entry DTE.
+
+        Matches post_trade_learning._compute_segment_key bucket boundaries so the
+        learning-side writes and calibration-side reads share segment keys.
+        """
         details = outcome.get("details_json") or {}
         dte = details.get("dte_at_entry") or outcome.get("dte_at_entry") or outcome.get("days_to_expiry")
         if dte is None:
@@ -153,10 +160,13 @@ class CalibrationService:
             dte = int(float(dte))
         except (TypeError, ValueError):
             return "unknown"
-        for label, (lo, hi) in DTE_BUCKETS.items():
-            if lo <= dte < hi:
-                return label
-        return "60+" if dte >= 60 else "unknown"
+        if dte <= 21:
+            return "0-21"
+        if dte <= 35:
+            return "21-35"
+        if dte <= 45:
+            return "35-45"
+        return "45+"
 
     # ── Data fetching ───────────────────────────────────────────────
 

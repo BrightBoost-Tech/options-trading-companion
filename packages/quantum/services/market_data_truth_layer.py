@@ -744,8 +744,12 @@ class MarketDataTruthLayer:
         self.session.mount("https://", adapter)
         self.session.mount("http://", adapter)
 
-        # Caching TTLs (in seconds)
-        self.ttl_snapshot = 10
+        # Caching TTLs (in seconds).
+        # ttl_snapshot was hardcoded at 10s, which expired between every
+        # intraday_risk_monitor cycle (15min) and forced a fresh provider call
+        # for the same OCC symbols 26x/day. Bumped default to 60s and made
+        # env-configurable. Stale-by-60s is still safe for risk monitoring.
+        self.ttl_snapshot = int(os.environ.get("SNAPSHOT_CACHE_TTL", "60"))
         self.ttl_option_chain = int(os.environ.get("OPTION_CHAIN_CACHE_TTL", "300"))
         self.ttl_daily_bars = 43200  # 12 hours
 

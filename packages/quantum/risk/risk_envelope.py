@@ -253,10 +253,16 @@ def check_concentration(
     by_expiry: Dict[str, float] = {}
     earnings_count = 0
 
+    from packages.quantum.risk.sector_mapping import canonical_sector
+
     for pos in positions:
         risk = _pos_risk(pos)
         symbol = _pos_field(pos, "symbol", "UNKNOWN")
-        sector = _pos_field(pos, "sector", "unknown")
+        # Map raw SIC industry string to canonical GICS sector so a tech basket
+        # (semis + software) aggregates to one bucket instead of fragmenting
+        # across "SEMICONDUCTORS & RELATED DEVICES" / "SERVICES-PREPACKAGED
+        # SOFTWARE" / etc. and evading the sector cap.
+        sector = canonical_sector(_pos_field(pos, "sector", None))
         expiry = _pos_field(pos, "nearest_expiry", "")
 
         by_symbol[symbol] = by_symbol.get(symbol, 0) + risk

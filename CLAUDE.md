@@ -47,9 +47,9 @@
 - `COMPOUNDING_MODE=true` — enables 8% base risk + 1.2x boost for micro tier
 - `RISK_MAX_SYMBOL_PCT=0.40` — paper phase allows 40% in single name
 - `RISK_MAX_DAILY_LOSS=0.08` — 8% daily loss cap ($40 on $500)
-- `RISK_ENVELOPE_ENFORCE=0` â† set to 1 after 2026-04-13 to enable force-close
-- `PROFIT_AGENT_RANKING=0` â† set to 1 after 5 days of learning data
-- `ORCHESTRATOR_ENABLED=0` â† set to 1 after all agents tested individually
+- `RISK_ENVELOPE_ENFORCE=1` (enabled 2026-04-16 — force-close blocking mode)
+- `PROFIT_AGENT_RANKING=1` (enabled 2026-04-16 — dynamic weights applied during suggestions_open)
+- `ORCHESTRATOR_ENABLED=1` (enabled 2026-04-16 — autonomous 7:30 AM CT boot check)
 
 ---
 
@@ -267,9 +267,9 @@ Gate to `micro_live`: 4 consecutive Alpaca paper green days (not internal fills)
 - [x] Intraday stop loss fix: position-level exits decoupled from RISK_ENVELOPE_ENFORCE gate (2026-04-13)
 - [x] Symbol-level dedup in paper_auto_execute: reject suggestions for already-held symbols (2026-04-13)
 - [x] Pre-cancel conflicting Alpaca orders before close submission + idempotency fix (2026-04-13)
-- [ ] Risk envelope: switch force-close from warn-only to block mode (RISK_ENVELOPE_ENFORCE=1 after 2026-04-13)
-- [ ] Enable PROFIT_AGENT_RANKING=1 after 5 days of learning data
-- [ ] Enable ORCHESTRATOR_ENABLED=1 after individual agent testing
+- [x] Risk envelope: switch force-close from warn-only to block mode (RISK_ENVELOPE_ENFORCE=1, 2026-04-16)
+- [x] Enable PROFIT_AGENT_RANKING=1 — dynamic weight loading active (2026-04-16)
+- [x] Enable ORCHESTRATOR_ENABLED=1 — autonomous Day Orchestrator (2026-04-16)
 - [ ] GAP 1â€“2 implementation
 - [ ] Micro-live test ($500 cap, separate portfolio)
 - [ ] GAP 3â€“4 after data accumulates
@@ -287,7 +287,7 @@ Gate to `micro_live`: 4 consecutive Alpaca paper green days (not internal fills)
 
 ## Live State (auto-updated)
 - **Phase:** alpaca_paper
-- **Green days:** 0
-- **Last green:** 
-- **Open positions:** 4
-- **Last updated:** 2026-04-13 06:22
+- **Green days:** 0 (of 4 required) — 2026-04-15 was a red day (-$2,217 realized)
+- **Last green:** 2026-04-03 (then reset 2026-04-04 due to internal-fill miscount)
+- **Open positions:** 3 (AMD, AMZN, NFLX — all LONG_CALL_DEBIT_SPREAD, aggressive cohort, entered 2026-04-16 16:35 UTC)
+- **Last updated:** 2026-04-16 17:00

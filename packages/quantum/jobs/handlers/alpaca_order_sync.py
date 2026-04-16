@@ -9,6 +9,7 @@ cancellations, and rejections back to paper_orders.
 Uses the existing poll_pending_orders() from alpaca_order_handler.py.
 """
 
+import os
 import time
 import logging
 from datetime import datetime, timezone
@@ -167,10 +168,38 @@ def run(payload: Dict[str, Any], ctx: Any = None) -> Dict[str, Any]:
 
             totals["stuck_open_closed"] = stuck_open_closed
 
+            # ── Step 4: Ghost-position sweep (gated) ────────────────────
+            # Leg-level comparison of DB open positions vs Alpaca positions.
+            # Catches desync cases where DB says open but Alpaca has no
+            # matching OCC legs. Writes severity=warn risk_alerts.
+            # Gated by RECONCILE_POSITIONS_ENABLED (default 0) for 48h
+            # observation before flipping on.
+            ghost_total = 0
+            if os.environ.get("RECONCILE_POSITIONS_ENABLED", "0") == "1":
+                try:
+                    from packages.quantum.brokers.alpaca_order_handler import ghost_position_sweep
+
+                    # Only sweep users who actually have open DB positions
+                    open_pos_res = client.table("paper_positions") \
+                        .select("user_id") \
+                        .eq("status", "open") \
+                        .execute()
+                    sweep_user_ids = list({r["user_id"] for r in (open_pos_res.data or [])})
+                    for uid in sweep_user_ids:
+                        try:
+                            sweep = ghost_position_sweep(alpaca, client, uid)
+                            ghost_total += sweep.get("ghost_count", 0)
+                        except Exception as sweep_err:
+                            logger.error(f"[ALPACA_SYNC] Ghost sweep failed for {uid[:8]}: {sweep_err}")
+                except Exception as sweep_outer_err:
+                    logger.error(f"[ALPACA_SYNC] Ghost sweep step failed: {sweep_outer_err}")
+            totals["ghost_positions"] = ghost_total
+
             logger.info(
                 f"[ALPACA_SYNC] polled={totals['total_polled']} "
                 f"fills={totals['fills']} orphans_repaired={totals['orphans_repaired']} "
                 f"stuck_open_closed={stuck_open_closed} "
+                f"ghost_positions={ghost_total} "
                 f"partials={totals['partials']} cancels={totals['cancels']}"
             )
 

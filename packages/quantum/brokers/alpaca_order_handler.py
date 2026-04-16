@@ -195,6 +195,18 @@ def submit_and_track(
                 f"[ALPACA_HANDLER] Submit failed (attempt {attempt}/{MAX_SUBMIT_ATTEMPTS}): "
                 f"order={order_id} legs={num_legs} error={last_error}"
             )
+            # Alpaca 42210000 "position intent mismatch" on a close order means
+            # a prior submission already filled and closed the position. Retrying
+            # produces phantom duplicates — break out, let poll_pending_orders
+            # pick up the original fill via alpaca_order_id.
+            err_lower = last_error.lower()
+            if "42210000" in err_lower or "position intent mismatch" in err_lower:
+                logger.warning(
+                    f"[ALPACA_HANDLER] Position-intent-mismatch on order={order_id} — "
+                    f"prior submission likely already filled. Skipping remaining retries; "
+                    f"poll_pending_orders will reconcile via alpaca_order_id."
+                )
+                break
             if attempt < MAX_SUBMIT_ATTEMPTS:
                 backoff = 2.0 * attempt  # 2s, 4s
                 logger.info(f"[ALPACA_HANDLER] Retrying in {backoff}s...")
@@ -312,9 +324,12 @@ def poll_pending_orders(
 
     p_ids = [p["id"] for p in port_res.data]
 
+    # Include needs_manual_review: the outer retry can exhaust while Alpaca
+    # actually filled on a prior attempt. If alpaca_order_id is set, Alpaca's
+    # record is authoritative and polling will reconcile the fill.
     orders_res = supabase.table("paper_orders") \
         .select("id, alpaca_order_id, status, submitted_at, broker_status, position_id, side, order_json") \
-        .in_("status", ["submitted", "working", "partial"]) \
+        .in_("status", ["submitted", "working", "partial", "needs_manual_review"]) \
         .in_("portfolio_id", p_ids) \
         .not_.is_("alpaca_order_id", "null") \
         .execute()
@@ -470,6 +485,107 @@ def poll_pending_orders(
         "cancels": cancels, "unchanged": unchanged,
         "watchdog_cancels": watchdog_cancels,
         "errors": errors,
+    }
+
+
+def ghost_position_sweep(
+    alpaca: AlpacaClient,
+    supabase,
+    user_id: str,
+    min_age_seconds: int = 600,
+) -> Dict[str, Any]:
+    """
+    Leg-level drift sweep: find DB open positions whose OCC legs are not
+    present on Alpaca. Writes a severity=warn risk_alert per ghost position.
+
+    Gated by the caller (RECONCILE_POSITIONS_ENABLED env var). `min_age_seconds`
+    protects entries that just filled on Alpaca but whose position row is still
+    catching up (default 10 minutes).
+
+    Returns {ghost_count, positions_checked, alpaca_leg_count, ghosts: [...]}.
+    """
+    from datetime import datetime, timezone, timedelta
+
+    try:
+        alpaca_positions = alpaca.get_option_positions()
+    except Exception as e:
+        return {"status": "error", "error": str(e), "ghost_count": 0}
+
+    alpaca_legs = {p.get("symbol", "") for p in alpaca_positions if p.get("symbol")}
+
+    port_res = supabase.table("paper_portfolios") \
+        .select("id").eq("user_id", user_id).execute()
+    if not port_res.data:
+        return {"status": "no_portfolios", "ghost_count": 0}
+
+    p_ids = [p["id"] for p in port_res.data]
+    cutoff = (datetime.now(timezone.utc) - timedelta(seconds=min_age_seconds)).isoformat()
+
+    open_res = supabase.table("paper_positions") \
+        .select("id, symbol, legs, created_at, quantity") \
+        .in_("portfolio_id", p_ids) \
+        .eq("status", "open") \
+        .neq("quantity", 0) \
+        .lt("created_at", cutoff) \
+        .execute()
+    open_positions = open_res.data or []
+
+    ghosts: List[Dict[str, Any]] = []
+    for pos in open_positions:
+        legs = pos.get("legs") or []
+        if not legs:
+            continue
+        # Strip Polygon "O:" prefix to match Alpaca's OCC format
+        expected_occs = {
+            (leg.get("symbol") or "").lstrip("O:")
+            for leg in legs
+            if leg.get("symbol")
+        }
+        if not expected_occs:
+            continue
+        # If NONE of the expected legs are on Alpaca, the position is a ghost
+        if not (expected_occs & alpaca_legs):
+            ghosts.append({
+                "position_id": pos["id"],
+                "symbol": pos.get("symbol"),
+                "expected_legs": sorted(expected_occs),
+                "created_at": pos.get("created_at"),
+            })
+
+    for g in ghosts:
+        try:
+            supabase.table("risk_alerts").insert({
+                "user_id": user_id,
+                "alert_type": "ghost_position",
+                "severity": "warn",
+                "position_id": g["position_id"],
+                "symbol": g["symbol"],
+                "message": (
+                    f"Ghost position detected: {g['symbol']} (id={g['position_id'][:8]}) "
+                    f"open in DB but no matching legs on Alpaca"
+                ),
+                "metadata": {
+                    "expected_legs": g["expected_legs"],
+                    "created_at": g["created_at"],
+                    "detector": "ghost_position_sweep",
+                },
+            }).execute()
+        except Exception as alert_err:
+            logger.error(
+                f"[GHOST_SWEEP] Failed to write risk_alert for {g['position_id'][:8]}: {alert_err}"
+            )
+
+    logger.info(
+        f"[GHOST_SWEEP] user={user_id[:8]} checked={len(open_positions)} "
+        f"alpaca_legs={len(alpaca_legs)} ghosts={len(ghosts)}"
+    )
+
+    return {
+        "status": "ok",
+        "ghost_count": len(ghosts),
+        "positions_checked": len(open_positions),
+        "alpaca_leg_count": len(alpaca_legs),
+        "ghosts": ghosts,
     }
 
 

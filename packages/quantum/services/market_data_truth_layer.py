@@ -1692,7 +1692,11 @@ class MarketDataTruthLayer:
     def daily_bars(self, ticker: str, start_date: datetime, end_date: datetime) -> List[Dict]:
         """
         Fetches daily bars (adjusted).
-        Primary: Alpaca /v2/stocks/bars.  Fallback: Polygon /v2/aggs.
+        Primary: Polygon /v2/aggs.  Fallback: Alpaca /v2/stocks/bars.
+
+        Polygon is primary because Alpaca paper accounts lack SIP data
+        access, causing 'subscription does not permit querying recent SIP
+        data' errors on equity bars.
         """
         # Normalize
         symbol = self.normalize_symbol(ticker)
@@ -1707,23 +1711,11 @@ class MarketDataTruthLayer:
             _record_daily_bars_to_context(symbol, s_str, e_str, cached)
             return cached
 
-        # --- Alpaca primary (equity bars only, not option symbols) ---
+        # --- Polygon primary ---
         bars = []
-        if not symbol.startswith("O:"):
-            try:
-                from packages.quantum.brokers.alpaca_client import get_alpaca_client
-                alpaca = get_alpaca_client()
-                if alpaca:
-                    bars = alpaca.get_stock_bars(symbol, start_date, end_date)
-                    if bars:
-                        logger.info(f"[DAILY_BARS] Alpaca returned {len(bars)} bars for {symbol}")
-            except Exception as e:
-                logger.warning(f"[DAILY_BARS] Alpaca bars failed for {symbol}: {e}")
-
-        # --- Polygon fallback ---
-        if not bars:
-            endpoint = f"/v2/aggs/ticker/{symbol}/range/1/day/{s_str}/{e_str}"
-            params = {"adjusted": "true", "sort": "asc", "limit": 50000}
+        endpoint = f"/v2/aggs/ticker/{symbol}/range/1/day/{s_str}/{e_str}"
+        params = {"adjusted": "true", "sort": "asc", "limit": 50000}
+        try:
             data = self._make_request(endpoint, params)
             if data and "results" in data:
                 for r in data["results"]:
@@ -1737,6 +1729,22 @@ class MarketDataTruthLayer:
                         "volume": r.get("v"),
                         "vwap": r.get("vw")
                     })
+                if bars:
+                    logger.info(f"[DAILY_BARS] Polygon returned {len(bars)} bars for {symbol}")
+        except Exception as e:
+            logger.warning(f"[DAILY_BARS] Polygon bars failed for {symbol}: {e}")
+
+        # --- Alpaca fallback (equity bars only, not option symbols) ---
+        if not bars and not symbol.startswith("O:"):
+            try:
+                from packages.quantum.brokers.alpaca_client import get_alpaca_client
+                alpaca = get_alpaca_client()
+                if alpaca:
+                    bars = alpaca.get_stock_bars(symbol, start_date, end_date)
+                    if bars:
+                        logger.info(f"[DAILY_BARS] Alpaca fallback returned {len(bars)} bars for {symbol}")
+            except Exception as e:
+                logger.warning(f"[DAILY_BARS] Alpaca bars fallback also failed for {symbol}: {e}")
 
         if not bars:
             return []

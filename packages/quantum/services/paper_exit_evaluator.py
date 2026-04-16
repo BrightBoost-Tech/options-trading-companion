@@ -93,10 +93,15 @@ def _is_debit_spread(position: Dict[str, Any]) -> bool:
 
 def _time_scaled_target_profit_pct(pos: Dict, base_pct: float = 0.35) -> float:
     """
-    Scale profit target by time remaining in the trade.
+    Scale profit target by time remaining in the trade using sqrt-decay.
 
-    Early (>20 DTE remaining): higher target (let winners run → 50%)
-    Late (<10 DTE remaining): lower target (grab profit before theta plateau → 25%)
+    Theta decay on debit spreads is exponential (accelerates in the final
+    10-15 days). A sqrt-decay target curve drops faster as DTE shrinks,
+    matching theta's acceleration and locking in profits before erosion.
+
+    At entry (dte/entry_dte=1.0): target = 50%
+    At 50% elapsed:               target ≈ 35%
+    At 5 DTE / 35 entry:          target ≈ 19%
 
     Falls back to base_pct if DTE data is missing.
     """
@@ -106,9 +111,9 @@ def _time_scaled_target_profit_pct(pos: Dict, base_pct: float = 0.35) -> float:
     if entry_dte <= 0 or dte <= 0:
         return base_pct
 
-    time_elapsed_pct = 1.0 - (dte / entry_dte)  # 0.0 at entry → 1.0 at expiry
-    # Linear scale: 50% target early → 25% target late
-    target = 0.50 - (0.25 * time_elapsed_pct)
+    # Sqrt-decay: drops faster as DTE shrinks, matching theta acceleration
+    dte_ratio = max(dte / entry_dte, 0.0)
+    target = 0.50 * (dte_ratio ** 0.5)
     return max(base_pct * 0.7, min(0.55, target))
 
 

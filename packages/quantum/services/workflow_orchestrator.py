@@ -1633,6 +1633,7 @@ async def run_morning_cycle(supabase: Client, user_id: str):
             CALIBRATION_ENABLED as _CAL_ENABLED_MORNING,
             apply_calibration as _apply_cal_morning,
             get_calibration_adjustments as _get_cal_morning,
+            CalibrationService as _CalSvc_Morning,
         )
         if _CAL_ENABLED_MORNING:
             try:
@@ -1645,8 +1646,10 @@ async def run_morning_cycle(supabase: Client, user_id: str):
                         s["pop_raw"] = pop_raw
                         regime_str = s.get("regime") or ""
                         strategy_str = s.get("strategy") or ""
+                        s_dte = s.get("dte") or (s.get("order_json") or {}).get("dte") or 30
+                        s_dte_bucket = _CalSvc_Morning._classify_dte({"dte_at_entry": s_dte})
                         s["ev"], s["probability_of_profit"] = _apply_cal_morning(
-                            ev_raw, pop_raw, strategy_str, regime_str, cal_adj
+                            ev_raw, pop_raw, strategy_str, regime_str, cal_adj, dte_bucket=s_dte_bucket
                         )
             except Exception as cal_err:
                 logger.warning(f"[CALIBRATION] Morning window failed: {cal_err}")
@@ -2154,6 +2157,20 @@ async def run_midday_cycle(supabase: Client, user_id: str):
             )
     except Exception as _env_err:
         logger.warning(f"[RISK_ENVELOPE] Pre-entry check failed (non-fatal): {_env_err}")
+
+    # ── Pre-fetch calibration adjustments (once, not per-candidate) ──
+    _cal_adj_cache = None
+    from packages.quantum.analytics.calibration_service import (
+        CALIBRATION_ENABLED as _CAL_ENABLED,
+        apply_calibration,
+        get_calibration_adjustments,
+        CalibrationService,
+    )
+    if _CAL_ENABLED:
+        try:
+            _cal_adj_cache = get_calibration_adjustments(user_id, supabase)
+        except Exception as _cal_prefetch_err:
+            logger.warning(f"[CALIBRATION] Failed to pre-fetch adjustments: {_cal_prefetch_err}")
 
     # 3. Size and Prepare Suggestions
     for cand in candidates:
@@ -2695,19 +2712,14 @@ async def run_midday_cycle(supabase: Client, user_id: str):
             lineage_dict = lineage.build()
             sig_result = LineageSigner.sign(lineage_dict)
 
-            # Apply calibration adjustments if enabled
+            # Apply calibration adjustments if enabled (using pre-fetched cache)
             raw_ev, raw_pop = ev, pop
-            from packages.quantum.analytics.calibration_service import (
-                CALIBRATION_ENABLED as _CAL_ENABLED,
-                apply_calibration,
-                get_calibration_adjustments,
-            )
-            if _CAL_ENABLED:
+            if _CAL_ENABLED and _cal_adj_cache:
                 try:
-                    cal_adj = get_calibration_adjustments(user_id, supabase)
-                    if cal_adj:
-                        regime_str = ctx.regime or ""
-                        ev, pop = apply_calibration(ev, pop, strategy, regime_str, cal_adj)
+                    regime_str = ctx.regime or ""
+                    cand_dte = cand.get("dte") or 30
+                    dte_bucket = CalibrationService._classify_dte({"dte_at_entry": cand_dte})
+                    ev, pop = apply_calibration(ev, pop, strategy, regime_str, _cal_adj_cache, dte_bucket=dte_bucket)
                 except Exception as cal_err:
                     logger.warning(f"[CALIBRATION] Failed to apply adjustments: {cal_err}")
 

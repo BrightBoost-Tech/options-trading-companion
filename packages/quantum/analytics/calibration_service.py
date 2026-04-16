@@ -174,7 +174,7 @@ class CalibrationService:
                 .select(
                     "ev_predicted, pop_predicted, pnl_realized, pnl_predicted, "
                     "pnl_alpha, strategy, regime, window, ticker, closed_at, "
-                    "model_version, is_paper"
+                    "model_version, is_paper, details_json"
                 )
                 .eq("user_id", user_id)
                 .gte("closed_at", cutoff)

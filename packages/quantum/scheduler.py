@@ -193,10 +193,9 @@ def start_scheduler():
 
 def _retry_failed_jobs():
     """
-    Scan for failed_retryable jobs from the last 4 hours and re-enqueue
-    them via the admin retry endpoint. Max 1 retry (attempt < 2) to
-    prevent infinite loops. Idempotency keys in handlers prevent
-    double-execution.
+    Scan for failed_retryable jobs and either retry or dead-letter them.
+    - attempt < 2: re-queue for retry
+    - attempt >= 2: promote to dead_lettered + create risk_alert
     """
     from datetime import timezone, timedelta
 
@@ -205,6 +204,8 @@ def _retry_failed_jobs():
         client = get_supabase_client()
 
         cutoff = (datetime.now(timezone.utc) - timedelta(hours=4)).isoformat()
+
+        # --- Retry eligible jobs (attempt < 2) ---
         rows = (
             client.table("job_runs")
             .select("id, job_name, attempt")
@@ -215,14 +216,9 @@ def _retry_failed_jobs():
             .execute()
         ).data or []
 
-        if not rows:
-            return
-
-        base_url = _BASE_URL.rstrip("/")
         for row in rows:
             job_id = row["id"]
             try:
-                # Use internal retry: reset status to queued and re-fire
                 client.table("job_runs").update({
                     "status": "queued",
                     "attempt": (row.get("attempt") or 0) + 1,
@@ -236,6 +232,50 @@ def _retry_failed_jobs():
                 )
             except Exception as e:
                 logger.error(f"[AUTO_RETRY] Failed to re-queue {job_id}: {e}")
+
+        # --- Dead-letter exhausted jobs (attempt >= 2, still failed_retryable) ---
+        exhausted = (
+            client.table("job_runs")
+            .select("id, job_name, attempt, result, finished_at")
+            .eq("status", "failed_retryable")
+            .gte("attempt", 2)
+            .limit(10)
+            .execute()
+        ).data or []
+
+        for row in exhausted:
+            job_id = row["id"]
+            job_name = row.get("job_name", "unknown")
+            try:
+                client.table("job_runs").update({
+                    "status": "dead_lettered",
+                }).eq("id", job_id).execute()
+
+                # Create risk alert for visibility
+                client.table("risk_alerts").insert({
+                    "user_id": "00000000-0000-0000-0000-000000000000",
+                    "alert_type": "job_dead_lettered",
+                    "severity": "critical",
+                    "symbol": None,
+                    "message": (
+                        f"Job '{job_name}' exhausted retries (attempt={row.get('attempt')}) "
+                        f"and was dead-lettered. Last failure: "
+                        f"{str(row.get('result', {}))[:200]}"
+                    ),
+                    "metadata": {
+                        "job_run_id": job_id,
+                        "job_name": job_name,
+                        "attempt": row.get("attempt"),
+                        "finished_at": row.get("finished_at"),
+                    },
+                }).execute()
+
+                logger.critical(
+                    f"[DEAD_LETTER] {job_name} run={job_id} "
+                    f"attempt={row.get('attempt')} → dead_lettered + alert created"
+                )
+            except Exception as e:
+                logger.error(f"[DEAD_LETTER] Failed to process {job_id}: {e}")
 
     except Exception as e:
         logger.error(f"[AUTO_RETRY] Scan failed: {e}")

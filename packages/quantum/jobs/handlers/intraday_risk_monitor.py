@@ -161,9 +161,16 @@ class IntradayRiskMonitor:
                 force_closes_submitted += 1
 
         # 5b. Envelope violations
+        #     Daily/weekly/per-symbol loss limits are safety-critical — always
+        #     execute force-close regardless of RISK_ENVELOPE_ENFORCE.
+        #     Concentration and stress violations remain gated behind the flag.
+        #     This mirrors the pattern established for position-level exits in 5a.
         for violation in result.violations:
             if violation.severity == "force_close":
-                if _ENFORCE_FORCE_CLOSE:
+                is_loss_envelope = violation.envelope.startswith("loss_")
+                should_execute = is_loss_envelope or _ENFORCE_FORCE_CLOSE
+
+                if should_execute:
                     # Find positions to close
                     for pos_id in result.force_close_ids:
                         pos = next((p for p in positions if p.get("id") == pos_id), None)
@@ -174,7 +181,7 @@ class IntradayRiskMonitor:
                             if success:
                                 force_closes_submitted += 1
                 else:
-                    # Warn-only mode (pre April 13)
+                    # Warn-only mode for non-loss envelopes
                     self._log_alert(
                         user_id=user_id,
                         alert_type="force_close",

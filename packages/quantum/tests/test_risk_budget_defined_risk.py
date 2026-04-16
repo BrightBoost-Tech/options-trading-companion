@@ -1,5 +1,5 @@
 import pytest
-from packages.quantum.services.risk_budget_engine import _risk_usage_usd, RiskBudgetEngine
+from packages.quantum.services.risk_budget_engine import _estimate_risk_usage_usd, RiskBudgetEngine
 
 def test_credit_spread_risk():
     """
@@ -10,7 +10,7 @@ def test_credit_spread_risk():
       "max_loss_per_contract": 375.0,
       "cost_basis": -1.25
     }
-    Expect _risk_usage_usd(pos) == 750.0
+    Expect _estimate_risk_usage_usd(pos) == 750.0
     """
     pos = {
       "instrument_type": "option",
@@ -18,7 +18,7 @@ def test_credit_spread_risk():
       "max_loss_per_contract": 375.0,
       "cost_basis": -1.25
     }
-    usage = _risk_usage_usd(pos)
+    usage = _estimate_risk_usage_usd(pos)
     assert usage == 750.0, f"Expected 750.0, got {usage}"
 
 def test_long_option_risk():
@@ -28,7 +28,7 @@ def test_long_option_risk():
     Expect usage == 1.50*100*3 == 450
     """
     pos = {"instrument_type": "option", "quantity": 3, "cost_basis": 1.50}
-    usage = _risk_usage_usd(pos)
+    usage = _estimate_risk_usage_usd(pos)
     # Note: user example says 1.50*100*3 = 450.
     # float math might be slightly off, but 450.0 should be exact for these numbers.
     assert usage == 450.0, f"Expected 450.0, got {usage}"
@@ -40,7 +40,7 @@ def test_collateral_fallback():
     Expect usage == 500
     """
     pos = {"instrument_type": "option", "quantity": 1, "collateral_required_per_contract": 500.0}
-    usage = _risk_usage_usd(pos)
+    usage = _estimate_risk_usage_usd(pos)
     assert usage == 500.0, f"Expected 500.0, got {usage}"
 
 def test_risk_budget_engine_compute():

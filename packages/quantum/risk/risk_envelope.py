@@ -355,6 +355,17 @@ def check_loss_envelopes(
     if equity <= 0:
         return violations, force_close_ids, loss_status
 
+    # Helper: portfolio-wide breach closes all open positions. Daily and weekly
+    # loss envelopes are aggregate signals — they don't identify a single bad
+    # position, so the appropriate response is to close the book. Without this,
+    # a severity=force_close violation with an empty force_close_ids list is
+    # alert-only and intraday_risk_monitor has nothing to iterate.
+    def _mark_all_positions_for_close():
+        for pos in positions:
+            pid = _pos_field(pos, "id", None)
+            if pid and pid not in force_close_ids:
+                force_close_ids.append(pid)
+
     # Daily loss
     daily_pct = daily_pnl / equity
     loss_status["daily_pnl_pct"] = daily_pct
@@ -366,8 +377,13 @@ def check_loss_envelopes(
             severity="force_close",
             message=f"Daily loss {daily_pct:.1%} breaches {-config.max_daily_loss_pct:.1%} limit",
         ))
+        _mark_all_positions_for_close()
 
-    # Weekly loss
+    # Weekly loss — catastrophic signal (was severity=warn, which was a bug:
+    # at -190% weekly loss the message literally said "sizing reduced" while
+    # the account was 1.9× underwater). Upgraded to force_close so the loss
+    # envelope actually enforces. The sizing_multiplier ramp in
+    # check_all_envelopes still handles the soft range (50-99% of limit).
     weekly_pct = weekly_pnl / equity
     loss_status["weekly_pnl_pct"] = weekly_pct
     if weekly_pct < -config.max_weekly_loss_pct:
@@ -375,9 +391,10 @@ def check_loss_envelopes(
             envelope="loss_weekly",
             limit=config.max_weekly_loss_pct,
             actual=abs(weekly_pct),
-            severity="warn",
-            message=f"Weekly loss {weekly_pct:.1%} breaches {-config.max_weekly_loss_pct:.1%} limit — sizing reduced",
+            severity="force_close",
+            message=f"Weekly loss {weekly_pct:.1%} breaches {-config.max_weekly_loss_pct:.1%} limit",
         ))
+        _mark_all_positions_for_close()
 
     # Per-symbol loss
     symbol_max_loss = equity * config.max_per_symbol_loss_pct

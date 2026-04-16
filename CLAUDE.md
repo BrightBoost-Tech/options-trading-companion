@@ -48,8 +48,10 @@
 - `RISK_MAX_SYMBOL_PCT=0.40` — paper phase allows 40% in single name
 - `RISK_MAX_DAILY_LOSS=0.08` — 8% daily loss cap ($40 on $500)
 - `RISK_ENVELOPE_ENFORCE=1` (enabled 2026-04-16 — force-close blocking mode)
-- `PROFIT_AGENT_RANKING=1` (enabled 2026-04-16 — dynamic weights applied during suggestions_open)
-- `ORCHESTRATOR_ENABLED=1` (enabled 2026-04-16 — autonomous 7:30 AM CT boot check)
+- `CALIBRATION_ENABLED=1` (master switch for calibrated EV/PoP; default on)
+- `RANKER_PORTFOLIO_AWARE=1` (enabled 2026-04-16 — canonical ranker sees open positions; set in Railway)
+- `SNAPSHOT_CACHE_TTL=60` (seconds; raised from hardcoded 10s on 2026-04-16)
+- `ORCHESTRATOR_ENABLED=1` (MUST verify in Railway — scheduler job still reports "!= 1" as of 2026-04-16 18:00 UTC)
 
 ---
 
@@ -77,7 +79,7 @@
 |---|---|---|---|
 | Loss Minimization | Every 15 min (9:30-4 CT) | Intraday risk envelope monitoring + force-close | `RISK_ENVELOPE_ENFORCE` |
 | Self-Learning | 4:45 PM CT daily | Post-trade calibration, drift detection, strategy health | Always on |
-| Profit Optimization | Applied during suggestions_open | Dynamic weight loading from learned calibrations | `PROFIT_AGENT_RANKING` |
+| Profit Optimization | Applied during suggestions_open | Calibrated EV/PoP from learned adjustments (apply_calibration) | `CALIBRATION_ENABLED` (always on) |
 | Day Orchestrator | 7:30 AM CT daily | Boot check, missed job detection, chain status | `ORCHESTRATOR_ENABLED` |
 
 ---
@@ -224,6 +226,13 @@ Gate to `micro_live`: 4 consecutive Alpaca paper green days (not internal fills)
 - `_close_position` multi-leg inversion read `leg.get("side")` but stored legs use `action` (from OptionLeg model). `side` returned None, so ALL close legs got `action: "buy"`, meaning both legs sent `buy_to_close`. Alpaca rejected: long leg needs `sell_to_close`. Fixed: read `leg.get("action") or leg.get("side")` then invert (2026-04-13)
 - Close orders rejected with `held_for_orders` when a prior pending order locked the same contracts. Initial fix (symbols filter) missed MLEG orders because parent has symbol=None. Fixed: fetch ALL open orders and check leg symbols. Also: `_close_position` had no idempotency guard — every call created a new staged order, causing 100+ `needs_manual_review` orders when submission kept failing. Fixed: added idempotency check in `_close_position` itself (the canonical close path), checking for any non-terminal order including `needs_manual_review` (2026-04-15)
 - Alpaca close orders filled successfully but paper_positions never marked as closed. `_commit_fill` only updated paper_orders and portfolio cash — never touched paper_positions. `_process_orders_for_user` also missed close fills because they had `position_id` set (not orphans) and were already status=filled (not in staged/working/partial query). Fixed: `poll_pending_orders` now detects close fills (position_id set) and calls `_close_position_on_fill()` which updates position to closed with realized P&L. Added reconciliation step to `alpaca_order_sync` as safety net. (2026-04-15)
+- Calibration DTE_BUCKETS (0-7, 7-14, 14-30, 30-60) never matched post_trade_learning buckets (0-21, 21-35, 35-45, 45+), so learned weights never reached `apply_calibration` lookups — silent open-circuit feedback loop. Fixed: aligned `calibration_service.DTE_BUCKETS` + `_classify_dte()` to post_trade_learning's scheme. Legacy adjustments fall through the existing "_all" bucket until next `calibration_update` repopulates (2026-04-16)
+- `compute_risk_adjusted_ev` was called with `existing_positions=[]` in `workflow_orchestrator.run_midday_cycle`, so correlation_factor (×2 same-symbol) and concentration_penalty collapsed to identity — the ranker couldn't penalize repeated entries into already-held losing names (e.g., 3 AMD spreads on 2026-04-16 before any existed on 2026-04-15 close). Fixed: fetch open paper_positions once per cycle; gated by `RANKER_PORTFOLIO_AWARE=1` for rollout (2026-04-16)
+- Sector concentration check used raw SIC industry strings, so AMD ("SEMICONDUCTORS & RELATED DEVICES") / MSFT+ADBE ("SERVICES-PREPACKAGED SOFTWARE") / AVGO all hashed to different "sectors" and evaded the 40% cap. Fixed: `risk/sector_mapping.canonical_sector()` maps SIC → GICS; wired into `risk_envelope.check_concentration`. Read-side only, no migration. (2026-04-16)
+- `ttl_snapshot` was hardcoded at 10s inside MarketDataTruthLayer, forcing fresh provider fetches every intraday_risk_monitor cycle (15 min). Fixed: env-configurable via `SNAPSHOT_CACHE_TTL` (default 60s). (2026-04-16)
+- `apply_calibration` multiplied PoP by the bucket's `pop_multiplier` (clamped to [0.5, 1.5]) without clamping the OUTPUT, so raw PoP 0.7 × 1.5 = 1.05 leaked into downstream EV math. Today's suggestions showed PoP=1.0275/1.0614/1.0621 — probability > 1 is mathematically invalid. Fixed: `adj_pop = max(0.0, min(1.0, pop * pop_mult))` (2026-04-16)
+- `loss_weekly` envelope emitted `severity=warn` (not `force_close`) even at -190% weekly loss — message literally said "sizing reduced" while the account was 1.9× underwater. Also, neither `loss_daily` nor `loss_weekly` populated `force_close_ids`, so on portfolio-wide breach the intraday_risk_monitor's force-close loop had nothing to iterate. Fixed: upgraded `loss_weekly` to `severity=force_close`; both envelopes now mark every open position for close on breach. (2026-04-16)
+- `PROFIT_AGENT_RANKING` env flag gated `DynamicWeightService.apply_to_score()`, but that method has no call sites anywhere in the pipeline — it was a "kill switch that was actually dead." Retired the flag; documented `CALIBRATION_ENABLED` as the real master switch for the live calibration path. (2026-04-16)
 
 ---
 

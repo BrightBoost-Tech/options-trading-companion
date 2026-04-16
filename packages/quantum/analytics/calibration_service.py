@@ -381,7 +381,11 @@ def apply_calibration(
     pop_mult = bucket_adj.get("pop_multiplier", 1.0)
 
     adj_ev = ev * ev_mult
-    adj_pop = pop * pop_mult
+    # Probability of profit is a probability — it must live in [0, 1]. The
+    # calibration multiplier is clamped to [0.5, 1.5], so without an explicit
+    # clamp on the output, a raw PoP of 0.7 × 1.5 = 1.05 leaks into downstream
+    # EV math as if the trade wins >100% of the time.
+    adj_pop = max(0.0, min(1.0, pop * pop_mult))
 
     if ev_mult != 1.0 or pop_mult != 1.0:
         bucket_label = dte_bucket or "_all"

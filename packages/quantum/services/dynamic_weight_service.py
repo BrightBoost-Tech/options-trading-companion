@@ -6,13 +6,15 @@ Called once at the start of suggestions_open, cached for the session.
 """
 
 import logging
-import os
 from typing import Dict, Optional
 
 logger = logging.getLogger(__name__)
 
-# Feature flag — dynamic weights only applied when enabled
-PROFIT_AGENT_RANKING = os.environ.get("PROFIT_AGENT_RANKING", "0") == "1"
+# Note: PROFIT_AGENT_RANKING flag was retired 2026-04-16. It previously gated
+# apply_to_score(), but that method has no call sites — the flag was a
+# "kill switch that was actually dead." The production calibration path runs
+# via analytics.calibration_service.apply_calibration (gated by
+# CALIBRATION_ENABLED, default "1"), which is the real master switch.
 
 
 class DynamicWeightService:
@@ -92,9 +94,6 @@ class DynamicWeightService:
         Looks up segment_key, then strategy-level override.
         Returns adjusted score clamped to [0, 100].
         """
-        if not PROFIT_AGENT_RANKING:
-            return base_score
-
         if self._segment_cache is None:
             return base_score
 

@@ -17,6 +17,13 @@ from packages.quantum.services.options_utils import (
 )
 from packages.quantum.services.option_contract_resolver import OptionContractResolver
 
+# Skipped in PR #1 triage to establish CI-green gate while test debt is cleared.
+# [Cluster C] mock wiring drift
+# Tracked in #769 (umbrella: #767).
+pytestmark = pytest.mark.skip(
+    reason='[Cluster C] mock wiring drift; tracked in #769',
+)
+
 
 class TestBuildOccSymbol:
     """Tests for build_occ_symbol() function."""

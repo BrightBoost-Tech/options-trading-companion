@@ -1,0 +1,19 @@
+[run]
+source = packages/quantum
+branch = True
+omit =
+    packages/quantum/.venv/*
+    packages/quantum/venv/*
+    packages/quantum/tests/*
+    packages/quantum/discrete/benchmarks/*
+    packages/quantum/scripts/*
+    packages/quantum/tools/*
+
+[report]
+exclude_lines =
+    pragma: no cover
+    raise NotImplementedError
+    if __name__ == .__main__.:
+    if TYPE_CHECKING:
+show_missing = True
+skip_covered = False

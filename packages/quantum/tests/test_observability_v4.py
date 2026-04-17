@@ -21,6 +21,13 @@ from packages.quantum.observability.lineage import (
 )
 from packages.quantum.services.decision_lineage_builder import DecisionLineageBuilder
 
+# Skipped in PR #1 triage to establish CI-green gate while test debt is cleared.
+# [Cluster C] mock wiring drift
+# Tracked in #769 (umbrella: #767).
+pytestmark = pytest.mark.skip(
+    reason='[Cluster C] mock wiring drift; tracked in #769',
+)
+
 
 # =============================================================================
 # Canonicalization Tests

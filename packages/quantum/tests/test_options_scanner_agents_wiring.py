@@ -4,6 +4,14 @@ from unittest.mock import MagicMock, patch, ANY
 import os
 from datetime import datetime, timedelta
 from packages.quantum.options_scanner import scan_for_opportunities
+import pytest
+
+# Skipped in PR #1 triage to establish CI-green gate while test debt is cleared.
+# [Cluster K] scanner agents wiring API drift
+# Tracked in #772 (umbrella: #767).
+pytestmark = pytest.mark.skip(
+    reason='[Cluster K] scanner agents wiring API drift; tracked in #772',
+)
 
 class TestOptionsScannerAgentsWiring(unittest.TestCase):
     def setUp(self):

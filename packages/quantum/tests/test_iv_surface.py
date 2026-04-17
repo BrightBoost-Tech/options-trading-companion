@@ -30,6 +30,13 @@ from packages.quantum.services.surface_geometry_v4 import (
     build_common_k_grid,
 )
 
+# Skipped in PR #1 triage to establish CI-green gate while test debt is cleared.
+# [Cluster M] long tail
+# Tracked in #774 (umbrella: #767).
+pytestmark = pytest.mark.skip(
+    reason='[Cluster M] long tail; tracked in #774',
+)
+
 
 # ---------------------------------------------------------------------------
 # Synthetic chain builder

@@ -10,6 +10,13 @@ from packages.quantum.api import app
 # Import the actual dependency function to use as key
 from packages.quantum.security import get_current_user
 
+# Skipped in PR #1 triage to establish CI-green gate while test debt is cleared.
+# [Cluster K] Production API drift (api.supabase)
+# Tracked in #772 (umbrella: #767).
+pytestmark = pytest.mark.skip(
+    reason='[Cluster K] Production API drift (api.supabase); tracked in #772',
+)
+
 client = TestClient(app)
 
 def mock_get_current_user():

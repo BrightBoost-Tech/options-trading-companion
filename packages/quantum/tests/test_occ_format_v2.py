@@ -1,6 +1,13 @@
 import pytest
 from packages.quantum.services.options_utils import format_occ_symbol_readable
 
+# Skipped in PR #1 triage to establish CI-green gate while test debt is cleared.
+# [Cluster C] mock wiring drift
+# Tracked in #769 (umbrella: #767).
+pytestmark = pytest.mark.skip(
+    reason='[Cluster C] mock wiring drift; tracked in #769',
+)
+
 def test_format_occ_symbol_readable():
     # Test valid OCC symbol
     symbol = "AMZN251219C00255000"

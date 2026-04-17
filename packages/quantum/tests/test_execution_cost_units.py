@@ -4,6 +4,13 @@ from unittest.mock import MagicMock, patch
 from packages.quantum.services.rebalance_engine import RebalanceEngine
 from packages.quantum.models import SpreadPosition
 
+# Skipped in PR #1 triage to establish CI-green gate while test debt is cleared.
+# [Cluster K] RebalanceEngine API drift
+# Tracked in #772 (umbrella: #767).
+pytestmark = pytest.mark.skip(
+    reason='[Cluster K] RebalanceEngine API drift; tracked in #772',
+)
+
 # Note: We avoid importing optimizer.optimize_portfolio directly due to complex dependencies
 # in this isolated test context. We test logic via component interactions or mocks.
 

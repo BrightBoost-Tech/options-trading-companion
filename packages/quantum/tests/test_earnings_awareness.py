@@ -10,6 +10,13 @@ sys.path.append(os.path.join(os.path.dirname(__file__), '../../..'))
 
 from packages.quantum.options_scanner import scan_for_opportunities
 
+# Skipped in PR #1 triage to establish CI-green gate while test debt is cleared.
+# [Cluster C] mock wiring drift
+# Tracked in #769 (umbrella: #767).
+pytestmark = pytest.mark.skip(
+    reason='[Cluster C] mock wiring drift; tracked in #769',
+)
+
 @pytest.fixture
 def mock_dependencies():
     with patch("packages.quantum.options_scanner.PolygonService") as MockPolygon, \

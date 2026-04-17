@@ -36,7 +36,6 @@ from packages.quantum.models import Spread, SpreadLeg, SpreadPosition
 from packages.quantum.services.options_utils import group_spread_positions
 from packages.quantum.services.analytics_service import AnalyticsService
 from packages.quantum.services.execution_service import ExecutionService
-from packages.quantum.services.risk_engine import RiskEngine
 from packages.quantum.services.risk_budget_engine import RiskBudgetEngine
 from packages.quantum.discrete.models import DiscreteSolveRequest, DiscreteSolveResponse
 from packages.quantum.discrete.solvers.hybrid import HybridDiscreteSolver
@@ -112,7 +111,6 @@ def _compute_portfolio_weights(
     liquidity: float,
     force_baseline: bool = False,
     external_regime_snapshot: Optional[GlobalRegimeSnapshot] = None,
-    guardrail_policy: Optional[Dict[str, Any]] = None
 ):
     """
     Internal helper to run the optimization logic once.
@@ -233,28 +231,11 @@ def _compute_portfolio_weights(
         "turnover_penalty": 0.01
     }
 
-    # Apply Adaptive Caps if Policy Exists
-    if guardrail_policy:
-        from packages.quantum.services.risk_engine import RiskEngine
-        constraints = RiskEngine.apply_adaptive_caps(guardrail_policy, constraints)
-        diagnostics_nested["adaptive_caps_applied"] = True
-        diagnostics_nested["policy_source"] = guardrail_policy.get("source", "unknown")
-
-        # B2: Enforce banned_strategies by zeroing bounds in optimizer after policy is applied.
-        banned = [str(x).lower() for x in constraints.get("banned_strategies", []) if x]
-        if banned and "bounds" in constraints:
-            new_bounds = []
-            banned_assets = []
-            for i, asset in enumerate(investable_assets):
-                st = str(getattr(asset, "spread_type", "") or getattr(asset, "strategy", "") or "").lower()
-                lo, hi = constraints["bounds"][i]
-                if st and any((b in st) or (st in b) for b in banned):
-                    new_bounds.append((0.0, 0.0))
-                    banned_assets.append(tickers[i])
-                else:
-                    new_bounds.append((float(lo), float(hi)))
-            constraints["bounds"] = new_bounds
-            diagnostics_nested["banned_assets"] = banned_assets
+    # Adaptive-caps block retired in PR #4 of the audit plan. The
+    # guardrail_policy feedback loop had been silent since 2026-01-05
+    # (no writer since then). RiskEngine.apply_adaptive_caps + the
+    # dependent banned_strategies enforcement moved with it; agent
+    # constraints below (B3) still enforce bans independently.
 
     # B3: Apply Agent Banned Strategies & Defined Risk
     agent_banned = set(agent_con["banned_strategies"])
@@ -589,18 +570,12 @@ async def optimize_portfolio(req: OptimizationRequest, request: Request, user_id
         deployable_capital = liquidity
         force_main_baseline = req.nested_shadow
 
-        # --- ADAPTIVE CAPS: Fetch Policy ---
-        # Fetch latest guardrail policy for user to potentially tighten constraints
-        # We need the client. `analytics` has it?
-        active_policy = None
-        if analytics and analytics.supabase:
-            active_policy = RiskEngine.get_active_policy(user_id, analytics.supabase)
-
+        # Adaptive-caps policy fetch removed in PR #4 of the audit plan.
+        # See services/risk_engine.py header for rationale.
         target_weights, diagnostics_nested, solver_type, trace_id, final_profile, weights_array, metrics_mu, metrics_sigma = _compute_portfolio_weights(
             mu, sigma, coskew, tickers, investable_assets, req, user_id,
             total_portfolio_value, liquidity, force_baseline=force_main_baseline,
             external_regime_snapshot=global_snapshot,
-            guardrail_policy=active_policy
         )
 
         # Formatting Targets

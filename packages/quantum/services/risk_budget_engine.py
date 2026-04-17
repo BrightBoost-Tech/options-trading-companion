@@ -6,7 +6,6 @@ from datetime import datetime
 from packages.quantum.common_enums import RegimeState
 from packages.quantum.models import SpreadPosition
 from packages.quantum.services.market_data_truth_layer import MarketDataTruthLayer
-from packages.quantum.services.risk_engine import RiskEngine
 from packages.quantum.analytics.regime_engine_v3 import GlobalRegimeSnapshot
 
 # --- Types ---
@@ -382,26 +381,12 @@ class RiskBudgetEngine:
         if risk_profile == "aggressive": profile_mult = 1.25
         elif risk_profile == "conservative": profile_mult = 0.75
 
-        # 3. Apply Policy Overrides (LossMinimizer)
-        policy = RiskEngine.get_active_policy(user_id, self.supabase, regime)
+        # 3. Adaptive-caps policy retired in PR #4 (audit plan). The block
+        # here read a policy that had been no-op since 2026-01-05 and
+        # applied it via pass-only branches; nothing propagated downstream
+        # except the `policy_applied` flag in the RiskBudgetReport, which
+        # is now always False.
         policy_applied = False
-
-        if policy:
-            policy_max = policy.get("max_position_pct")
-            if policy_max is not None:
-                # This usually applies to per-position, but could imply global tightening
-                # Let's respect it for global if it's very low, or just per-trade.
-                # Policy usually returns 'max_position_pct' (per trade).
-                pass
-
-            # Banned structures?
-            banned = policy.get("ban_structures", [])
-            for b in banned:
-                # If user holds banned strategy, flag it?
-                # We won't force close here, but we can set remaining budget for that strategy to 0.
-                pass
-
-            policy_applied = True
 
         # 4. Construct Allocations
 
@@ -467,9 +452,7 @@ class RiskBudgetEngine:
         else:
             per_trade_pct = 0.03
 
-        # Policy override
-        if policy and policy.get("max_position_pct"):
-            per_trade_pct = min(per_trade_pct, policy.get("max_position_pct"))
+        # Policy override removed with the adaptive-caps stack (PR #4).
 
         max_risk_trade = total_equity * per_trade_pct
 

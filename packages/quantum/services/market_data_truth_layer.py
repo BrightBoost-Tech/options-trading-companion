@@ -845,8 +845,9 @@ class MarketDataTruthLayer:
         Fetches snapshots for multiple tickers (up to 250).
         Returns a dict keyed by ticker.
 
-        Routing: option tickers (O: prefix) → Alpaca primary, Polygon fallback.
-        Equity tickers → Polygon primary.
+        Routing (post-2026-04-10):
+        - Option tickers (O: prefix) → Alpaca primary, Polygon fallback
+        - Equity tickers → Alpaca primary, Polygon fallback
         """
         if not tickers:
             return {}

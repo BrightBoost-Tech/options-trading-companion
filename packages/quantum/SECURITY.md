@@ -48,7 +48,9 @@ The security model follows the principle of least privilege with multiple layers
 - Internal endpoints for scheduled jobs
 - Require v4 HMAC signature with specific scope
 - Example scopes: `tasks:suggestions_open`, `tasks:validation_eval`
-- Legacy `CRON_SECRET` support during migration (gated by `ALLOW_LEGACY_CRON_SECRET=1`)
+- Legacy `CRON_SECRET` endpoint was removed 2026-04-09. The
+  `ALLOW_LEGACY_CRON_SECRET` env var is vestigial and scheduled for
+  deletion from Railway.
 
 ### Admin Endpoints (`/jobs/*`)
 - Require admin access (JWT role or allowlist)
@@ -92,12 +94,10 @@ The security model follows the principle of least privilege with multiple layers
 | `APP_ENV` | Environment: `development`, `test`, or `production` |
 | `ENABLE_DEV_AUTH_BYPASS` | Dev mode: `1` or `0` (hard failure if `1` in production) |
 | `ENABLE_DEBUG_ROUTES` | Register debug routes: `1` or `0` |
-| `ALLOW_LEGACY_CRON_SECRET` | Allow legacy auth during migration: `1` or `0` |
 
-### Legacy (Migration Period)
-| Variable | Purpose |
-|----------|---------|
-| `CRON_SECRET` | Legacy task authentication (deprecated) |
+### Legacy (removed)
+- `CRON_SECRET` and `ALLOW_LEGACY_CRON_SECRET` — removed 2026-04-09.
+  No longer read by production code; scheduled for removal from Railway.
 
 ---
 
@@ -185,7 +185,6 @@ TASK_SIGNING_KEYS=new:new-secret-key
 - [ ] All required env vars set
 - [ ] `ENABLE_DEV_AUTH_BYPASS` is NOT `1`
 - [ ] `ENABLE_DEBUG_ROUTES` is NOT `1` (unless needed)
-- [ ] `ALLOW_LEGACY_CRON_SECRET` is `0` (after migration)
 - [ ] `ADMIN_USER_IDS` contains only trusted users
 - [ ] CORS origins are properly configured
 
@@ -316,39 +315,12 @@ python -c "import secrets; print(secrets.token_hex(32))"
 
 ---
 
-## Migration Cutover Checklist
+## Migration Cutover (completed 2026-04-09)
 
-### Phase 1: Deploy v4 (Keep Legacy)
-
-```bash
-# Production env
-ALLOW_LEGACY_CRON_SECRET=1    # Keep legacy working
-TASK_SIGNING_KEYS=primary:new-secret-here
-```
-
-1. [ ] Deploy backend with v4 signing support
-2. [ ] Add `TASK_SIGNING_KEYS` secret to GitHub
-3. [ ] Deploy new `trading_tasks.yml` workflow
-4. [ ] Run smoke test workflow to validate signing
-
-### Phase 2: Monitor (24-48 hours)
-
-1. [ ] Watch for `[V4_AUTH]` logs (new signing)
-2. [ ] Watch for `[LEGACY_AUTH]` logs (old CRON_SECRET)
-3. [ ] Confirm scheduled tasks are running successfully
-
-### Phase 3: Disable Legacy
-
-```bash
-# Production env
-ALLOW_LEGACY_CRON_SECRET=0    # Disable legacy
-# Optionally remove CRON_SECRET entirely
-```
-
-1. [ ] Set `ALLOW_LEGACY_CRON_SECRET=0` in production
-2. [ ] Delete old `schedule_tasks.yml` workflow (if exists)
-3. [ ] Monitor for 403 errors (any missed callers)
-4. [ ] Remove `CRON_SECRET` from secrets
+The legacy `CRON_SECRET` endpoint and `ALLOW_LEGACY_CRON_SECRET` gate were
+both removed on 2026-04-09. All `/tasks/*` and `/internal/tasks/*`
+endpoints require v4 HMAC signatures. Historical cutover plan preserved
+in git history (commits before 2026-04-09).
 
 ---
 

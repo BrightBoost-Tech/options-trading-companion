@@ -6,7 +6,8 @@ The **Market Data Truth Layer** (`MarketDataTruthLayer`) is the centralized sour
 
 - **Unified Fetching**: Single entry point for snapshots, option chains, and daily bars.
 - **Auto-Normalization**: Automatically handles `O:` prefixes for options and parses responses into canonical dictionaries.
-- **Smart Caching**: In-memory TTL cache with specific durations for different data types (snapshots: 10s, chains: 60s, history: 12h).
+- **Smart Caching**: In-memory TTL cache with specific durations for different data types (snapshots: `SNAPSHOT_CACHE_TTL`, default 120s; chains: `OPTION_CHAIN_CACHE_TTL`, default 300s; daily bars: 12h).
+- **Provider Routing (post-2026-04-10)**: Options primary = Alpaca, fallback = Polygon. Equities primary = Alpaca, fallback = Polygon. See `docs/data_providers_overview.md` for the full routing table.
 - **IV Context**: Provides IV Rank and Regime derived from historical volatility proxy (HV Rank) or Implied Volatility (future).
 - **Resilience**: Built-in retries, backoff, and robust error handling.
 
@@ -17,7 +18,7 @@ The **Market Data Truth Layer** (`MarketDataTruthLayer`) is the centralized sour
 ```python
 from packages.quantum.services.market_data_truth_layer import MarketDataTruthLayer
 
-# Automatically reads MARKETDATA_API_KEY or POLYGON_API_KEY from env
+# Reads POLYGON_API_KEY, ALPACA_API_KEY, ALPACA_SECRET_KEY from env.
 layer = MarketDataTruthLayer()
 ```
 
@@ -26,7 +27,7 @@ layer = MarketDataTruthLayer()
 Efficiently fetch data for up to 250 tickers in one call.
 
 ```python
-tickers = ["AAPL", "SPY", "O:SPY231215C00450000"]
+tickers = ["AAPL", "SPY", "O:SPY260515C00450000"]
 snapshots = layer.snapshot_many(tickers)
 
 for ticker, data in snapshots.items():
@@ -38,7 +39,7 @@ for ticker, data in snapshots.items():
 Fetch all options for an underlying.
 
 ```python
-chain = layer.option_chain("SPY", expiration_date="2023-12-15", right="call")
+chain = layer.option_chain("SPY", expiration_date="2026-05-15", right="call")
 for contract in chain:
     print(f"{contract['strike']} Call: {contract['quote']['mid']}")
 ```
@@ -64,5 +65,9 @@ trend = layer.get_trend("SPY") # "UP", "DOWN", or "NEUTRAL"
 
 ## Configuration
 
-- `MARKETDATA_API_KEY`: Primary API key (Polygon.io).
-- `POLYGON_API_KEY`: Fallback API key.
+- `ALPACA_API_KEY`, `ALPACA_SECRET_KEY`: Primary data provider for options
+  snapshots, option chains, equity snapshots, daily bars, and NBBO quotes.
+- `POLYGON_API_KEY`: Fallback for the above, plus primary for earnings
+  dates and historical option contract reference data (no Alpaca equivalent).
+- `SNAPSHOT_CACHE_TTL` (default 120): seconds for snapshot cache.
+- `OPTION_CHAIN_CACHE_TTL` (default 300): seconds for chain cache.

@@ -40,13 +40,17 @@ class TestCorruptedPnlFloor:
         assert CORRUPTED_PNL_FLOOR >= "2026-04-13"
 
     def test_short_window_uses_window_cutoff(self):
-        """When window_days is short, the rolling cutoff wins over the floor."""
+        """When window_days is short, the rolling cutoff wins over the floor.
+
+        Contract: effective_cutoff = max(now - window_days, floor).
+        When window is short (and current date is past the floor), the
+        rolling cutoff is more recent than the floor, so max() selects
+        the rolling cutoff. We don't pin exact equality — service-side
+        `datetime.now()` and test-side `datetime.now()` differ by
+        microseconds, which flaked the first attempt.
+        """
         client, query = _make_supabase_spy()
         service = CalibrationService(client)
-
-        # window_days=1 → cutoff ~ now - 1 day, which is > 2026-04-13
-        # in the relevant time frame. The .gte() argument should be the
-        # RECENT timestamp, not the floor.
         service._fetch_outcomes(user_id="test-user", window_days=1)
 
         query.gte.assert_called_once()
@@ -54,11 +58,20 @@ class TestCorruptedPnlFloor:
         assert call_args.args[0] == "closed_at"
         effective = call_args.args[1]
 
-        # The effective cutoff should be a recent date, not the floor.
-        # (If 'now' is past 2026-04-14, a 1-day window cutoff > floor.)
+        # Semantic contract: rolling cutoff wins when it's more recent.
+        assert effective > CORRUPTED_PNL_FLOOR, (
+            f"Short-window cutoff {effective!r} should be strictly > "
+            f"floor {CORRUPTED_PNL_FLOOR!r}"
+        )
+        # Sanity: the cutoff should be within 10 seconds of now-1-day
+        # (accounting for test-vs-service clock skew).
         now = datetime.now(timezone.utc)
-        one_day_ago = (now - timedelta(days=1)).isoformat()
-        assert effective == max(one_day_ago, CORRUPTED_PNL_FLOOR)
+        one_day_ago_dt = now - timedelta(days=1)
+        effective_dt = datetime.fromisoformat(effective)
+        skew_seconds = abs((effective_dt - one_day_ago_dt).total_seconds())
+        assert skew_seconds < 10, (
+            f"Expected cutoff within 10s of now-1day; got skew={skew_seconds}s"
+        )
 
     def test_long_window_clamps_to_floor(self):
         """When window_days is large enough to reach pre-floor era, floor wins."""

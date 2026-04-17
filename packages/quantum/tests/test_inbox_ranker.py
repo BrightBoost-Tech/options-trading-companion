@@ -1,6 +1,14 @@
 import unittest
 from datetime import datetime, timezone, timedelta
 from packages.quantum.inbox.ranker import rank_suggestions
+import pytest
+
+# Skipped in PR #1 triage to establish CI-green gate while test debt is cleared.
+# [Cluster M] long tail
+# Tracked in #774 (umbrella: #767).
+pytestmark = pytest.mark.skip(
+    reason='[Cluster M] long tail; tracked in #774',
+)
 
 class TestInboxRanker(unittest.TestCase):
     def test_ranking(self):

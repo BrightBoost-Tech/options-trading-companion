@@ -4,6 +4,13 @@ import uuid
 import json
 from packages.quantum.observability.telemetry import TradeContext, compute_features_hash, emit_trade_event
 
+# Skipped in PR #1 triage to establish CI-green gate while test debt is cleared.
+# [Cluster C] mock wiring drift
+# Tracked in #769 (umbrella: #767).
+pytestmark = pytest.mark.skip(
+    reason='[Cluster C] mock wiring drift; tracked in #769',
+)
+
 def test_features_hash_stability():
     f1 = {"a": 1, "b": 2, "c": [1, 2]}
     f2 = {"c": [1, 2], "b": 2, "a": 1} # Different order

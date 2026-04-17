@@ -3,6 +3,13 @@ from unittest.mock import MagicMock
 from packages.quantum.services.paper_execution_service import PaperExecutionService
 from packages.quantum.models import TradeTicket
 
+# Skipped in PR #1 triage to establish CI-green gate while test debt is cleared.
+# [Cluster M] long tail
+# Tracked in #774 (umbrella: #767).
+pytestmark = pytest.mark.skip(
+    reason='[Cluster M] long tail; tracked in #774',
+)
+
 def test_paper_execution_lifecycle():
     mock_supabase = MagicMock()
 

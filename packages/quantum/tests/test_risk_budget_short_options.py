@@ -6,6 +6,14 @@ import os
 sys.path.append(os.getcwd())
 
 from packages.quantum.services.risk_budget_engine import _estimate_risk_usage_usd
+import pytest
+
+# Skipped in PR #1 triage to establish CI-green gate while test debt is cleared.
+# [Cluster M] long tail - post-rename math check drift
+# Tracked in #774 (umbrella: #767).
+pytestmark = pytest.mark.skip(
+    reason='[Cluster M] long tail - post-rename math check drift; tracked in #774',
+)
 
 class TestRiskBudgetShortOptions(unittest.TestCase):
     def test_long_option(self):

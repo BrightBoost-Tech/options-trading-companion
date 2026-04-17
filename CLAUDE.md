@@ -391,8 +391,8 @@ Full chronology lives in git history; search commits from 2026-03 and earlier.
 ### In flight / up next
 - [x] PR #1 (#765): CI workflow — merged 2026-04-17 as `f884077`
 - [x] PR #776: NEVER DO skip-discipline rule — merged 2026-04-17 as `355e565`
-- [ ] PR #777: calibration pnl_realized date-cutoff filter (P1, in review)
-- [ ] PR #778: docs rewrite (this PR, in flight — supersedes #776 inline)
+- [x] PR #777: calibration `pnl_realized` date-cutoff filter (P1) — merged 2026-04-17 as `230f0a1`
+- [ ] PR #778: docs rewrite (this PR, in flight)
 - [ ] P1 before micro_live: remove dead adaptive-caps stack (RiskEngine.get_active_policy,
       apply_adaptive_caps) — outcome_type='guardrail_policy' last written 2026-01-05
 - [ ] P1 before micro_live: consolidate `_estimate_equity` / `_compute_weekly_pnl` into

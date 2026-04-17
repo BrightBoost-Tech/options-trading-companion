@@ -452,9 +452,7 @@ class RiskBudgetEngine:
         else:
             per_trade_pct = 0.03
 
-        # Policy override
-        if policy and policy.get("max_position_pct"):
-            per_trade_pct = min(per_trade_pct, policy.get("max_position_pct"))
+        # Policy override removed with the adaptive-caps stack (PR #4).
 
         max_risk_trade = total_equity * per_trade_pct
 

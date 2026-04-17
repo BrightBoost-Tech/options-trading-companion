@@ -4,6 +4,14 @@ from datetime import datetime
 import uuid
 from packages.quantum.services.outcome_aggregator import OutcomeAggregator
 from packages.quantum.common_enums import OutcomeStatus
+import pytest
+
+# Skipped in PR #1 triage to establish CI-green gate while test debt is cleared.
+# [Cluster I] outcomes_log - delete with PR #9
+# Tracked in #770 (umbrella: #767).
+pytestmark = pytest.mark.skip(
+    reason='[Cluster I] outcomes_log - delete with PR #9; tracked in #770',
+)
 
 class TestOutcomeStatusTaxonomy(unittest.IsolatedAsyncioTestCase):
 

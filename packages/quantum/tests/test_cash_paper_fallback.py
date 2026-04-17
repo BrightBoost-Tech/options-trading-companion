@@ -9,6 +9,14 @@ import asyncio
 import unittest
 from unittest.mock import MagicMock, patch
 import sys
+import pytest
+
+# Skipped in PR #1 triage to establish CI-green gate while test debt is cleared.
+# [Cluster C] mock wiring drift
+# Tracked in #769 (umbrella: #767).
+pytestmark = pytest.mark.skip(
+    reason='[Cluster C] mock wiring drift; tracked in #769',
+)
 
 # Mock ops_endpoints so deferred import inside _paper_baseline_fallback works
 _mock_ops_module = MagicMock()

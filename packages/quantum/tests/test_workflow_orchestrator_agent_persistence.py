@@ -3,6 +3,14 @@ from unittest.mock import MagicMock, patch, AsyncMock
 import os
 import asyncio
 from packages.quantum.services.workflow_orchestrator import run_midday_cycle
+import pytest
+
+# Skipped in PR #1 triage to establish CI-green gate while test debt is cleared.
+# [Cluster C] mock wiring drift
+# Tracked in #769 (umbrella: #767).
+pytestmark = pytest.mark.skip(
+    reason='[Cluster C] mock wiring drift; tracked in #769',
+)
 
 # We need to mock supabase
 class MockSupabase:

@@ -23,6 +23,21 @@ logger = logging.getLogger(__name__)
 CALIBRATION_ENABLED = os.environ.get("CALIBRATION_ENABLED", "1") == "1"
 MIN_CALIBRATION_TRADES = int(os.environ.get("MIN_CALIBRATION_TRADES", "8"))
 
+# Hard floor excluding pre-2026-04-13 outcome rows whose `pnl_realized` values
+# are corrupted. Root cause: internal-paper-era and early Alpaca-paper era
+# contained bugs (internal-fill reset 2026-04-04, close-order fixes 2026-04-10
+# through 2026-04-15 — see CLAUDE.md Bugs Fixed) that produced P&L values
+# orders of magnitude off from reality. Diagnostic on 2026-04-16 confirmed
+# 34 outlier rows summing to +$95,408 vs Alpaca lifetime -$2,724.
+#
+# Filter is query-time only; source rows in learning_feedback_loops are
+# preserved for lineage. The floor supplements the rolling window_days
+# cutoff via `max(window_cutoff, CORRUPTED_PNL_FLOOR)` so calibration
+# converges on clean data as the floor ages out of the rolling window.
+CORRUPTED_PNL_FLOOR = os.environ.get(
+    "CALIBRATION_PNL_FLOOR", "2026-04-13T00:00:00+00:00"
+)
+
 # DTE buckets for segmentation.
 # Aligned with post_trade_learning.py (the writer of signal_weight_history) so
 # segment keys produced by the learning loop match the keys looked up here at
@@ -173,10 +188,19 @@ class CalibrationService:
     def _fetch_outcomes(
         self, user_id: str, window_days: int
     ) -> List[Dict[str, Any]]:
-        """Fetch predicted vs realized from learning_trade_outcomes_v3 view."""
-        cutoff = (
+        """Fetch predicted vs realized from learning_trade_outcomes_v3 view.
+
+        Applies two floors:
+        1. Rolling window cutoff = now - window_days
+        2. Hard CORRUPTED_PNL_FLOOR that excludes pre-2026-04-13 rows with
+           corrupted pnl_realized values (see module-level constant for full
+           rationale). The effective cutoff is max of the two so calibration
+           never regresses onto bad data even if window_days is large.
+        """
+        window_cutoff = (
             datetime.now(timezone.utc) - timedelta(days=window_days)
         ).isoformat()
+        effective_cutoff = max(window_cutoff, CORRUPTED_PNL_FLOOR)
 
         try:
             result = (
@@ -187,7 +211,7 @@ class CalibrationService:
                     "model_version, is_paper"
                 )
                 .eq("user_id", user_id)
-                .gte("closed_at", cutoff)
+                .gte("closed_at", effective_cutoff)
                 .execute()
             )
             return result.data or []

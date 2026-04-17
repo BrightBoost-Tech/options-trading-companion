@@ -5,24 +5,22 @@ daily checkpoint (typically 6:30 PM Chicago / after `validation_eval` runs).
 
 ## Current State for a User
 
+The canonical phase/green-day source is `go_live_progression`.
+`v3_go_live_state` is a legacy readiness table still written by
+`validation_shadow_eval` for shadow checkpoints; queries below use the
+current table for phase + green-day state.
+
 ```sql
 SELECT
   user_id,
-  -- Readiness checkpoint
-  paper_consecutive_passes,
-  paper_ready,
-  paper_checkpoint_last_run_at,
-  paper_fail_fast_triggered,
-  -- Green day tracking
-  paper_green_days,
-  paper_last_green_day_date,
-  paper_last_daily_realized_pnl,
-  paper_last_green_day_evaluated_at,
-  -- Window
-  paper_window_start,
-  paper_window_end,
+  current_phase,
+  alpaca_paper_green_days,
+  alpaca_paper_green_days_required,
+  alpaca_paper_last_green_date,
+  alpaca_paper_started_at,
+  alpaca_paper_completed_at,
   updated_at
-FROM v3_go_live_state
+FROM go_live_progression
 WHERE user_id = '<USER_ID>';
 ```
 

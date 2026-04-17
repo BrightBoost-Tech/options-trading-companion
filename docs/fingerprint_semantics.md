@@ -8,7 +8,7 @@ The `legs_fingerprint` is a deterministic hash of the **structural composition**
 
 ### Included Fields
 - **Underlying Symbol** (e.g., `SPY`)
-- **Expiry Date** (e.g., `2023-12-15`)
+- **Expiry Date** (e.g., `2026-05-15`)
 - **Option Type** (`C` or `P`)
 - **Strike Price** (e.g., `450.0`)
 - **Side** (`buy` or `sell`)

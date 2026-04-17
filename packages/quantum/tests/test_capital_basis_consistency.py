@@ -145,16 +145,14 @@ class TestCapitalBasisConsistency(unittest.TestCase):
 class TestRiskBudgetGuardrail(unittest.TestCase):
     """Tests for the risk budget engine capital mismatch guardrail."""
 
-    @patch("packages.quantum.services.risk_budget_engine.RiskEngine")
-    def test_diagnostics_flags_capital_mismatch(self, mock_risk_engine_class):
+    def test_diagnostics_flags_capital_mismatch(self):
         """
         When usage >> deployable, diagnostics should include capital_mismatch.
         """
         # Import here to avoid complex mocking at module level
         from packages.quantum.services.risk_budget_engine import RiskBudgetEngine
 
-        # Mock RiskEngine.get_active_policy to return None (no policy)
-        mock_risk_engine_class.get_active_policy.return_value = None
+        # RiskEngine.get_active_policy was retired in PR #4 — no mock needed.
 
         # Mock supabase for RiskBudgetEngine
         mock_sb = MagicMock()

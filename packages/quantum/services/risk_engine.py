@@ -1,89 +1,17 @@
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any
 from packages.quantum.models import UnifiedPosition, Holding
 from packages.quantum.services.options_utils import parse_option_symbol
-from packages.quantum.analytics.loss_minimizer import GuardrailPolicy
+
 
 class RiskEngine:
-    @staticmethod
-    def get_active_policy(user_id: str, supabase: Any, regime_state: Any = None) -> Optional[GuardrailPolicy]:
-        """
-        Fetches the latest active guardrail policy for the user.
-        """
-        try:
-            # V3 Correction: Read from details_json using outcome_type
-            res = supabase.table("learning_feedback_loops")\
-                .select("details_json, created_at")\
-                .eq("user_id", user_id)\
-                .eq("outcome_type", "guardrail_policy")\
-                .order("created_at", desc=True)\
-                .limit(50)\
-                .execute()
-
-            rows = res.data or []
-
-            # Pick the most recent matching regime_state (if requested)
-            if regime_state is not None:
-                target_regime = str(regime_state) if isinstance(regime_state, str) else getattr(regime_state, "value", str(regime_state))
-                for r in rows:
-                    dj = r.get("details_json") or {}
-                    stored_regime = dj.get("regime_state")
-                    if stored_regime == target_regime:
-                        return dj.get("policy")
-
-            # Fallback: Newest policy overall
-            if rows:
-                return (rows[0].get("details_json") or {}).get("policy")
-
-            return None
-        except Exception as e:
-            # print(f"Error fetching guardrail policy: {e}")
-            return None
-
-    @staticmethod
-    def apply_adaptive_caps(
-        policy: Optional[GuardrailPolicy],
-        base_constraints: Dict[str, Any]
-    ) -> Dict[str, Any]:
-        """
-        Applies adaptive caps from LossMinimizer policy to optimizer constraints.
-        Returns modified constraints dictionary.
-        """
-        if not policy:
-            return base_constraints
-
-        adjusted = base_constraints.copy()
-
-        # 1. Cap Max Position Size
-        policy_max = policy.get("max_position_pct")
-        current_max = adjusted.get("max_position_pct", 1.0)
-
-        if policy_max is not None:
-             new_max = min(current_max, policy_max)
-             adjusted["max_position_pct"] = new_max
-
-             # B1) Clamp per-asset bounds when apply_adaptive_caps() tightens max_position_pct.
-             if "bounds" in adjusted and adjusted.get("max_position_pct") is not None:
-                 max_w = float(new_max)
-                 # Reconstruct bounds list clamping hi to max_w
-                 new_bounds = []
-                 for (lo, hi) in adjusted["bounds"]:
-                     lo_f = float(lo)
-                     hi_f = float(hi)
-                     hi2 = min(hi_f, max_w)
-                     if hi2 < lo_f:
-                         # If policy max makes bound invalid, force zero allocation
-                         new_bounds.append((0.0, 0.0))
-                     else:
-                         new_bounds.append((lo_f, hi2))
-                 adjusted["bounds"] = new_bounds
-
-        # 2. Banned Structures
-        banned = policy.get("ban_structures", [])
-        if banned:
-            current_banned = adjusted.get("banned_strategies", [])
-            adjusted["banned_strategies"] = list(set(current_banned + banned))
-
-        return adjusted
+    # Note: get_active_policy + apply_adaptive_caps were retired in PR #4 of
+    # the audit plan. The adaptive-caps feedback loop had been silent since
+    # 2026-01-05 (last guardrail_policy row written) — no writer existed,
+    # so get_active_policy always returned None and apply_adaptive_caps was
+    # a permanent no-op. The 4 stale `outcome_type='guardrail_policy'` rows
+    # in learning_feedback_loops are preserved for lineage per the audit-plan
+    # rule. If adaptive caps become useful at the live phase, rebuild fresh
+    # (same playbook as v4 accounting retirement).
 
     @staticmethod
     def build_unified_positions(holdings: List[Dict[str, Any]]) -> List[UnifiedPosition]:

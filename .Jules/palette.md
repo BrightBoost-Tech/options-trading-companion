@@ -69,3 +69,7 @@
 ## 2025-06-06 - Accessible Disabled Tooltips
 **Learning:** Browsers disable mouse events on `disabled` buttons, preventing tooltips from appearing. Wrapping the disabled button in a focusable `span` (`tabIndex={0}`) allows the tooltip to trigger on hover and focus.
 **Action:** Always wrap disabled buttons in a `span` with `tabIndex={0}` and an explanatory `aria-label` when tooltips are required.
+
+## 2024-05-24 - Dynamic ARIA Labels and Tooltips for Icon-Only Buttons
+**Learning:** Icon-only buttons (like ThemeToggle) often have static `aria-label`s that describe the component rather than the pending action (e.g., "Toggle theme" instead of "Switch to dark mode"). When applying tooltips to these buttons, it is a significant accessibility and UX improvement to dynamically update both the tooltip text and the `aria-label` based on state. Furthermore, when dealing with Next.js client components that rely on DOM or localStorage state (like theme toggles), a `mounted` state check is required to prevent server/client hydration mismatches when generating the dynamic text.
+**Action:** When adding tooltips to interactive elements, evaluate if the `aria-label` can be made more descriptive of the *pending action*. For Next.js projects, always implement a `mounted` check when the descriptive text relies on client-side state to avoid React hydration errors.

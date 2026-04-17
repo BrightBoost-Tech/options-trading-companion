@@ -190,6 +190,7 @@ Gate to `micro_live`: 4 consecutive Alpaca paper green days (not internal fills)
 
 ## NEVER DO
 
+- Never add a new `@pytest.mark.skip` without: (a) opening a tracking issue with unskip criteria, (b) including the issue number in the reason string, (c) reviewer approval that the skip is justified. Skip count must trend down over time, not up.
 - Count `internal_paper` execution_mode fills as green days â€” Alpaca fills only
 - Enable iron condors during `alpaca_paper` phase
 - Rebuild entire system prompt on every AI call (split static/dynamic)

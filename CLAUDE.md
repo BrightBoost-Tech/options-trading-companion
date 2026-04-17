@@ -21,8 +21,8 @@ For AI session context, this file is loaded every turn.
 
 - **Trading mode:** `alpaca_paper` (EXECUTION_MODE env)
 - **Promotion target:** 4 consecutive green days through Alpaca → `micro_live`
-- **Green days so far:** 0
-- **Last green day:** 2026-04-03 (reset 2026-04-04 due to internal-fill miscount)
+- **Green days so far:** 1 of 4 required
+- **Last green day:** 2026-04-16 (counted after ghost-position reconcile + weekly_pnl math fix)
 - **Open positions:** 0 (reconciled 2026-04-16 ~20:00Z)
 - **Pipeline status:** Full end-to-end pipeline validated 2026-04-10
 - **daily_progression_eval:** Running at 16:00 CT (21:00 UTC standard / 20:00 UTC DST)
@@ -389,8 +389,10 @@ Full chronology lives in git history; search commits from 2026-03 and earlier.
 - [x] CI workflow with pytest + coverage (PR #1, 2026-04-17)
 
 ### In flight / up next
-- [x] PR #1: CI workflow (merged)
-- [ ] P1 before micro_live: calibration pnl_realized date-cutoff filter (PR #3)
+- [x] PR #1 (#765): CI workflow — merged 2026-04-17 as `f884077`
+- [x] PR #776: NEVER DO skip-discipline rule — merged 2026-04-17 as `355e565`
+- [ ] PR #777: calibration pnl_realized date-cutoff filter (P1, in review)
+- [ ] PR #778: docs rewrite (this PR, in flight — supersedes #776 inline)
 - [ ] P1 before micro_live: remove dead adaptive-caps stack (RiskEngine.get_active_policy,
       apply_adaptive_caps) — outcome_type='guardrail_policy' last written 2026-01-05
 - [ ] P1 before micro_live: consolidate `_estimate_equity` / `_compute_weekly_pnl` into
@@ -420,6 +422,8 @@ Full chronology lives in git history; search commits from 2026-03 and earlier.
 
 ## Live State (auto-updated)
 - **Phase:** alpaca_paper
-- **Green days:** 0 of 4 required
-- **Open positions:** 0 (as of 2026-04-16 20:00Z)
-- **Last updated:** 2026-04-17 00:30
+- **Green days:** 1 of 4 required
+- **Last green day:** 2026-04-16
+- **Open positions:** 0 (matches Alpaca `get_all_positions()` → [])
+- **Alpaca equity:** $97,276.32 (last_equity $97,711.88 close of 4/15)
+- **Last updated:** 2026-04-17 01:05

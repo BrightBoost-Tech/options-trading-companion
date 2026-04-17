@@ -35,7 +35,7 @@ MIN_CALIBRATION_TRADES = int(os.environ.get("MIN_CALIBRATION_TRADES", "8"))
 # cutoff via `max(window_cutoff, CORRUPTED_PNL_FLOOR)` so calibration
 # converges on clean data as the floor ages out of the rolling window.
 CORRUPTED_PNL_FLOOR = os.environ.get(
-    "CALIBRATION_PNL_FLOOR", "2026-04-13T00:00:00+00:00"
+    "CALIBRATION_PNL_FLOOR_DATE", "2026-04-13T00:00:00+00:00"
 )
 
 # DTE buckets for segmentation.
@@ -203,6 +203,17 @@ class CalibrationService:
         effective_cutoff = max(window_cutoff, CORRUPTED_PNL_FLOOR)
 
         try:
+            # SQL equivalent:
+            #   SELECT ev_predicted, pop_predicted, pnl_realized, ...
+            #   FROM learning_trade_outcomes_v3
+            #   WHERE user_id = :user_id
+            #     AND closed_at >= :effective_cutoff   -- hard floor +
+            #                                            rolling window
+            #
+            # The closed_at floor excludes pre-2026-04-13 rows whose
+            # pnl_realized is corrupted by the internal-fill reset
+            # (2026-04-04) and close-order bug fixes (2026-04-10,
+            # 2026-04-13, 2026-04-15). See CLAUDE.md Bugs Fixed.
             result = (
                 self.client.table("learning_trade_outcomes_v3")
                 .select(

@@ -120,10 +120,26 @@ class PostTradeLearningAgent:
     # ── Trade fetching ────────────────────────────────────────────────
 
     def _get_unprocessed_trades(self, user_id: str, trade_ids: list = None) -> List[Dict]:
-        """Fetch closed trades not yet processed by the learning agent."""
+        """Fetch closed trades not yet processed by the learning agent.
+
+        Uses a two-query Python join on `suggestion_id` instead of the
+        PostgREST embed `.select("*, trade_suggestions(*)")` that
+        `dbc0564` shipped. `learning_feedback_loops` has a
+        `suggestion_id` column but NO declared FK to `trade_suggestions`
+        in the schema, so the embed raised "Could not find a
+        relationship" on every call — the try/except swallowed it and
+        the job silently processed 0 trades for 9+ days before Issue 3A
+        diagnosis.
+
+        The secondary suggestion lookup is treated as advisory: if it
+        fails, trades still flow through with `trade_suggestions=None`.
+        `_build_segment_key` already reads the suggestion as a fallback
+        only when `trade.strategy`/`regime` are missing, so degraded
+        lookups just reduce coverage, not correctness.
+        """
         try:
             query = self.supabase.table("learning_feedback_loops") \
-                .select("*, trade_suggestions(*)") \
+                .select("*") \
                 .eq("user_id", user_id) \
                 .in_("outcome_type", ["trade_closed", "individual_trade"]) \
                 .eq("learning_processed", False)
@@ -136,10 +152,49 @@ class PostTradeLearningAgent:
                 query = query.gte("created_at", cutoff)
 
             res = query.order("created_at", desc=False).limit(100).execute()
-            return res.data or []
+            trades = res.data or []
         except Exception as e:
             logger.error(f"[LEARNING] Failed to fetch unprocessed trades: {e}")
             return []
+
+        self._attach_trade_suggestions(trades)
+        return trades
+
+    def _attach_trade_suggestions(self, trades: List[Dict]) -> None:
+        """Attach each trade's linked trade_suggestions row in-place.
+
+        Mirrors what the old PostgREST embed produced so
+        `_build_segment_key` can keep reading `trade["trade_suggestions"]`
+        as a dict. Only trades with a non-null `suggestion_id` get a
+        lookup; others receive `None`. If the bulk lookup raises, all
+        trades get `None` — the caller tolerates missing suggestions.
+        """
+        suggestion_ids = sorted({
+            t["suggestion_id"] for t in trades
+            if t.get("suggestion_id")
+        })
+        suggestion_map: Dict[str, Dict[str, Any]] = {}
+        if suggestion_ids:
+            try:
+                sugg_res = self.supabase.table("trade_suggestions") \
+                    .select("*") \
+                    .in_("id", suggestion_ids) \
+                    .execute()
+                for row in (sugg_res.data or []):
+                    sid = row.get("id")
+                    if sid:
+                        suggestion_map[sid] = row
+            except Exception as e:
+                logger.warning(
+                    f"[LEARNING] Suggestion lookup failed "
+                    f"(n_ids={len(suggestion_ids)}): {e}. "
+                    f"Proceeding with trades that have direct "
+                    f"strategy/regime fields; others will skip segment update."
+                )
+
+        for t in trades:
+            sid = t.get("suggestion_id")
+            t["trade_suggestions"] = suggestion_map.get(sid) if sid else None
 
     # ── Alpha computation ─────────────────────────────────────────────
 

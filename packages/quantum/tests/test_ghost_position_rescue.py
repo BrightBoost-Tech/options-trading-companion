@@ -333,6 +333,89 @@ class TestFixC_GhostPositionSweep(unittest.TestCase):
         self.assertEqual(result["ghost_count"], 0)
 
 
+class TestFixA_OuterCallerIncludesManualReview(unittest.TestCase):
+    """
+    Corrective counterpart to PR #764 Fix A: the outer caller in
+    alpaca_order_sync.py must also include `needs_manual_review` in the
+    status filter used to build `poll_user_ids`. Fix A expanded the
+    *inner* query inside `poll_pending_orders`, but if the *outer*
+    caller filters only {submitted, working, partial}, a user whose
+    only in-flight order is `needs_manual_review` will never be put
+    into `poll_user_ids` — and poll_pending_orders (with Fix A's
+    expanded filter) will never be called for that user.
+
+    Motivating incident: PYPL cfe69b28 on 2026-04-17. Alpaca filled
+    the close 48ms after the client reported failure. Submit_and_track
+    marked `needs_manual_review`. 66 successful alpaca_order_sync
+    cycles ran over the next 4+ hours without ever polling this user,
+    because their only non-terminal order was `needs_manual_review`.
+    DB stayed `status='open'`, realized P&L ≈ −$204 unrecorded.
+    """
+
+    def test_user_select_query_includes_needs_manual_review(self):
+        captured_in_calls = []
+
+        def make_chain(name):
+            chain = MagicMock()
+            chain.execute.return_value = MagicMock(data=[])
+
+            def capture_in(col, values):
+                captured_in_calls.append((name, col, tuple(values)))
+                return chain
+
+            chain.in_.side_effect = capture_in
+            for method in (
+                "select", "eq", "neq", "gte", "lt", "gt", "limit", "order",
+            ):
+                getattr(chain, method).return_value = chain
+            chain.is_.return_value = chain
+            chain.not_ = MagicMock()
+            chain.not_.is_.return_value = chain
+            return chain
+
+        supabase = MagicMock()
+        supabase.table.side_effect = lambda name: make_chain(name)
+
+        alpaca = MagicMock()
+
+        # Patch the handler's dependencies and invoke the entry point.
+        from packages.quantum.jobs.handlers import alpaca_order_sync
+
+        with patch.object(
+            alpaca_order_sync, "get_admin_client", return_value=supabase,
+        ), patch(
+            "packages.quantum.brokers.alpaca_client.get_alpaca_client",
+            return_value=alpaca,
+        ):
+            alpaca_order_sync.run(payload={}, ctx=None)
+
+        # The user-select query on paper_orders at line 62 is the one we
+        # care about. Multiple .in_() calls happen across the handler
+        # (Step 1 user-select, poll_pending_orders internal, etc.), so
+        # filter to only the status filter on paper_orders.
+        status_filters = [
+            values for (name, col, values) in captured_in_calls
+            if name == "paper_orders" and col == "status"
+        ]
+        self.assertTrue(
+            status_filters,
+            "Expected a status .in_(...) filter on paper_orders",
+        )
+        # The user-select query is the FIRST status filter on paper_orders.
+        outer_status_filter = status_filters[0]
+        self.assertIn(
+            "needs_manual_review", outer_status_filter,
+            "alpaca_order_sync Step 1 user-select query must include "
+            "needs_manual_review so that users whose only in-flight "
+            "orders are in that state still get polled. Without this, "
+            "PR #764 Fix A's inner-query expansion is unreachable for "
+            "such users — reproducing the PYPL 2026-04-17 ghost-fill.",
+        )
+        # And the original in-flight statuses must still be present.
+        for expected in ("submitted", "working", "partial"):
+            self.assertIn(expected, outer_status_filter)
+
+
 class TestFixD_GhostSweepIsGated(unittest.TestCase):
     """
     Fix D: ghost_position_sweep is not called from alpaca_order_sync

@@ -2180,9 +2180,14 @@ async def run_midday_cycle(supabase: Client, user_id: str):
     _ranker_positions = []
     if os.environ.get("RANKER_PORTFOLIO_AWARE", "0") == "1":
         try:
+            # paper_positions has no `max_loss` column (the schema has
+            # `max_credit` only). canonical_ranker's marginal-risk math
+            # falls back to `max_credit` when max_loss is absent —
+            # but the SELECT itself was raising on the missing column
+            # and degrading the ranker to portfolio-blind since d12f69b.
             _pos_res = (
                 supabase.table("paper_positions")
-                .select("symbol,quantity,max_credit,max_loss,sector")
+                .select("symbol,quantity,max_credit,sector")
                 .eq("user_id", user_id)
                 .eq("status", "open")
                 .execute()

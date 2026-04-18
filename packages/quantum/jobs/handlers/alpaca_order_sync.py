@@ -57,9 +57,15 @@ def run(payload: Dict[str, Any], ctx: Any = None) -> Dict[str, Any]:
             }
 
             # ── Step 1: Poll Alpaca for pending orders ──────────────────
+            # Include needs_manual_review so users whose only in-flight
+            # orders are stuck in that terminal-looking state still get
+            # polled. Corrective counterpart to PR #764 Fix A, which
+            # expanded the inner poll_pending_orders query but left this
+            # outer caller narrower. See PYPL cfe69b28 (2026-04-17) for
+            # the motivating ghost-fill incident.
             pending_res = client.table("paper_orders") \
                 .select("user_id") \
-                .in_("status", ["submitted", "working", "partial"]) \
+                .in_("status", ["submitted", "working", "partial", "needs_manual_review"]) \
                 .not_.is_("alpaca_order_id", "null") \
                 .execute()
             poll_user_ids = list({r["user_id"] for r in (pending_res.data or [])})

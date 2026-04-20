@@ -69,3 +69,6 @@
 ## 2025-06-06 - Accessible Disabled Tooltips
 **Learning:** Browsers disable mouse events on `disabled` buttons, preventing tooltips from appearing. Wrapping the disabled button in a focusable `span` (`tabIndex={0}`) allows the tooltip to trigger on hover and focus.
 **Action:** Always wrap disabled buttons in a `span` with `tabIndex={0}` and an explanatory `aria-label` when tooltips are required.
+## 2024-05-15 - Dynamic Toggle Buttons & Tooltips
+**Learning:** When adding dynamic `aria-labels` and tooltips to client-side toggle buttons that read state from the DOM or local storage (like dark mode), it can cause React hydration mismatches between SSR and client. Also, tooltip content can inappropriately wrap depending on its parent boundaries.
+**Action:** Always use a `mounted` state to render a static fallback string during SSR before applying the dynamic pending action label, and apply `whitespace-nowrap` to the `TooltipContent` to prevent unwanted text wrapping.

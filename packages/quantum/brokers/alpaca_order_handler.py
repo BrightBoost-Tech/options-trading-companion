@@ -275,13 +275,30 @@ def _close_position_on_fill(
     entry_price = float(position.get("avg_entry_price") or 0)
     multiplier = 100.0
 
-    # Compute realized P&L
+    # Alpaca multi-leg (mleg) orders use a net-cash-flow sign on the
+    # parent order's `filled_avg_price`: positive = net DEBIT paid,
+    # negative = net CREDIT received. Single-leg option orders use
+    # `filled_avg_price` as the per-contract price directly.
+    #
+    # For a long spread CLOSE we receive credit, so an mleg fill comes
+    # back with a negative `filled_avg_price`. We must flip the sign
+    # before differencing against the positive `entry_price`; otherwise
+    # the math double-counts the credit as loss (e.g. PYPL cfe69b28 on
+    # 2026-04-17 recorded -$3,324 realized when the actual loss was
+    # -$204: entry 2.94 - close credit 2.60 = -$0.34 × 6 × 100).
+    #
+    # For a short spread CLOSE we pay debit — `filled_avg_price` is
+    # positive for both mleg (net debit paid) and single-leg
+    # (buy-to-close price). Both produce the same formula, so no
+    # translation needed.
+    is_mleg = str(alpaca_order.get("order_class") or "").lower() == "mleg"
     abs_qty = abs(qty)
     if qty > 0:
-        # Long position: profit = (exit - entry) × qty × 100
-        realized_pl = (fill_price - entry_price) * abs_qty * multiplier
+        # Long position close. Sold out → received credit.
+        exit_per_contract = -fill_price if is_mleg else fill_price
+        realized_pl = (exit_per_contract - entry_price) * abs_qty * multiplier
     else:
-        # Short position: profit = (entry - exit) × qty × 100
+        # Short position close. Bought back → paid debit.
         realized_pl = (entry_price - fill_price) * abs_qty * multiplier
 
     now = datetime.now(timezone.utc).isoformat()

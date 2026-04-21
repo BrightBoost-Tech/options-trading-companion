@@ -5,6 +5,12 @@ import { usePathname } from 'next/navigation';
 import { Button, buttonVariants } from '@/components/ui/button';
 import { Bell } from 'lucide-react';
 import { cn } from '@/lib/utils';
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipProvider,
+  TooltipTrigger,
+} from '@/components/ui/tooltip';
 
 interface DashboardLayoutProps {
   children: React.ReactNode;
@@ -41,15 +47,24 @@ export default function DashboardLayout({ children, mockAlerts = [] }: Dashboard
           <div className="flex items-center gap-4">
             {isDashboard && (
               <div className="relative">
-                <Button
-                  variant="ghost"
-                  size="icon"
-                  aria-label="Notifications"
-                  className="rounded-full"
-                >
-                  <Bell className="w-6 h-6" />
-                </Button>
-                <span className="absolute -top-1 -right-1 bg-red-500 text-white text-xs rounded-full w-5 h-5 flex items-center justify-center">
+                <TooltipProvider>
+                  <Tooltip>
+                    <TooltipTrigger asChild>
+                      <Button
+                        variant="ghost"
+                        size="icon"
+                        aria-label="Notifications"
+                        className="rounded-full"
+                      >
+                        <Bell className="w-6 h-6" />
+                      </Button>
+                    </TooltipTrigger>
+                    <TooltipContent className="whitespace-nowrap">
+                      <p>Notifications</p>
+                    </TooltipContent>
+                  </Tooltip>
+                </TooltipProvider>
+                <span className="absolute -top-1 -right-1 bg-red-500 text-white text-xs rounded-full w-5 h-5 flex items-center justify-center pointer-events-none">
                   {mockAlerts.length}
                 </span>
               </div>

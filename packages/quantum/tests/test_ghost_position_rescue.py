@@ -249,7 +249,16 @@ class TestFixC_GhostPositionSweep(unittest.TestCase):
         return alpaca, supabase
 
     def test_detects_position_with_no_matching_legs(self):
-        alpaca_positions = [{"symbol": "OTHER260417C00100000"}]
+        """
+        Genuine ghost detection: DB has a position Alpaca doesn't.
+        Uses realistic `_serialize_position` output shape — both sides
+        arrive at the sweep with "O:" prefix, because
+        `alpaca.get_option_positions()` returns serialized positions
+        where `symbol` has been round-tripped through `alpaca_to_polygon`.
+        The sweep must strip "O:" from both sides before comparing.
+        """
+        # Alpaca-side: serialized via alpaca_to_polygon, so "O:"-prefixed
+        alpaca_positions = [{"symbol": "O:OTHER260417C00100000"}]
         old_ts = (
             datetime.now(timezone.utc) - timedelta(hours=1)
         ).isoformat()
@@ -279,8 +288,8 @@ class TestFixC_GhostPositionSweep(unittest.TestCase):
         self.assertEqual(alerts[0]["alert_type"], "ghost_position")
         self.assertEqual(alerts[0]["severity"], "warn")
         self.assertEqual(alerts[0]["position_id"], "position-ghost")
-        # The O: prefix must be stripped in the alert metadata so it
-        # matches Alpaca's OCC convention rather than Polygon's.
+        # The O: prefix is stripped in the alert metadata so it matches
+        # raw OCC convention rather than Polygon's prefixed form.
         self.assertIn(
             "AMD260417P00100000",
             alerts[0]["metadata"]["expected_legs"],
@@ -289,10 +298,10 @@ class TestFixC_GhostPositionSweep(unittest.TestCase):
     def test_skips_position_with_matching_alpaca_leg(self):
         """
         If ANY expected OCC leg is present on Alpaca, position is not
-        a ghost. (The real fix uses intersection, not subset — partial
-        overlap is enough.)
+        a ghost. Uses realistic `_serialize_position` output shape
+        (Alpaca-side also has "O:" prefix).
         """
-        alpaca_positions = [{"symbol": "AMD260417P00100000"}]
+        alpaca_positions = [{"symbol": "O:AMD260417P00100000"}]
         old_ts = (
             datetime.now(timezone.utc) - timedelta(hours=1)
         ).isoformat()
@@ -317,6 +326,105 @@ class TestFixC_GhostPositionSweep(unittest.TestCase):
         self.assertEqual(
             len([p for (t, p) in insert_sink if t == "risk_alerts"]), 0,
         )
+
+    def test_sweep_does_not_flag_matching_o_prefix_legs(self):
+        """
+        Regression for 2026-04-21 AMZN false-positive incident.
+
+        Both DB legs and Alpaca legs arrive at the sweep with "O:" prefix
+        (Alpaca's `_serialize_position` re-prefixes via `alpaca_to_polygon`).
+        Before the fix, the sweep stripped "O:" from DB-side only and
+        compared against Alpaca's prefixed symbols — intersection was
+        always empty → every legitimate open position flagged as ghost.
+
+        Live symptom: 56 false ghost_position alerts for AMZN a0f05755
+        between 2026-04-20 23:09Z and 2026-04-21 18:37Z, despite both
+        legs being open on both sides.
+
+        After the fix, strip "O:" from both sides → intersection
+        matches → zero ghosts.
+        """
+        # Exact AMZN incident shape — both legs present on both sides.
+        alpaca_positions = [
+            {"symbol": "O:AMZN260515C00240000"},
+            {"symbol": "O:AMZN260515C00265000"},
+        ]
+        old_ts = (
+            datetime.now(timezone.utc) - timedelta(hours=1)
+        ).isoformat()
+        db_positions = [{
+            "id": "position-amzn-legit",
+            "symbol": "AMZN",
+            "quantity": 1,
+            "created_at": old_ts,
+            "legs": [
+                {"symbol": "O:AMZN260515C00240000"},
+                {"symbol": "O:AMZN260515C00265000"},
+            ],
+        }]
+        insert_sink = []
+        alpaca, supabase = self._setup_positions(
+            alpaca_positions, db_positions, insert_sink=insert_sink,
+        )
+
+        result = alpaca_order_handler.ghost_position_sweep(
+            alpaca, supabase, USER_ID,
+        )
+        self.assertEqual(
+            result["ghost_count"], 0,
+            "Legitimate open position with matching O:-prefixed legs on "
+            "both sides must NOT be flagged as ghost. This was the "
+            "2026-04-21 AMZN incident: 56 false positives fired.",
+        )
+        self.assertEqual(result["positions_checked"], 1)
+        self.assertEqual(
+            len([p for (t, p) in insert_sink if t == "risk_alerts"]), 0,
+            "Zero risk_alerts should be written when DB matches Alpaca.",
+        )
+
+    def test_sweep_flags_mismatch_when_prefix_agrees(self):
+        """
+        Defensive: the prefix-normalization fix must NOT silently hide
+        genuine ghosts. When both sides use "O:" prefix consistently but
+        the symbols themselves don't match, the sweep must still flag.
+
+        Mock DB with O:AMZN legs, Alpaca with O:TSLA legs — mismatch at
+        symbol level despite prefix agreement.
+        """
+        alpaca_positions = [
+            {"symbol": "O:TSLA260515C00300000"},
+            {"symbol": "O:TSLA260515C00310000"},
+        ]
+        old_ts = (
+            datetime.now(timezone.utc) - timedelta(hours=1)
+        ).isoformat()
+        db_positions = [{
+            "id": "position-amzn-ghost",
+            "symbol": "AMZN",
+            "quantity": 1,
+            "created_at": old_ts,
+            "legs": [
+                {"symbol": "O:AMZN260515C00240000"},
+                {"symbol": "O:AMZN260515C00265000"},
+            ],
+        }]
+        insert_sink = []
+        alpaca, supabase = self._setup_positions(
+            alpaca_positions, db_positions, insert_sink=insert_sink,
+        )
+
+        result = alpaca_order_handler.ghost_position_sweep(
+            alpaca, supabase, USER_ID,
+        )
+        self.assertEqual(
+            result["ghost_count"], 1,
+            "AMZN DB position has no matching legs on Alpaca (only TSLA "
+            "legs present). Sweep must still flag this as ghost after "
+            "the prefix-normalization fix.",
+        )
+        alerts = [p for (t, p) in insert_sink if t == "risk_alerts"]
+        self.assertEqual(len(alerts), 1)
+        self.assertEqual(alerts[0]["position_id"], "position-amzn-ghost")
 
     def test_alpaca_failure_returns_error_not_raise(self):
         """

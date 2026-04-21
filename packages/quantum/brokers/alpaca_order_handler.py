@@ -528,7 +528,20 @@ def ghost_position_sweep(
     except Exception as e:
         return {"status": "error", "error": str(e), "ghost_count": 0}
 
-    alpaca_legs = {p.get("symbol", "") for p in alpaca_positions if p.get("symbol")}
+    # Normalize Alpaca-side symbols to raw OCC (strip "O:" prefix) to
+    # match the DB-side normalization below. `alpaca.get_option_positions()`
+    # returns symbols via `_serialize_position` which converts Alpaca's
+    # raw OCC back to Polygon's "O:"-prefixed format via
+    # `alpaca_to_polygon`, so both sides arrive here with the prefix and
+    # we strip from both. Without this, every DB-Alpaca match falsely
+    # flags as a ghost (see 2026-04-21 RECONCILE observation window —
+    # 56 false positives on AMZN a0f05755 despite the position being
+    # legitimately open on both sides).
+    alpaca_legs = {
+        (p.get("symbol", "") or "").lstrip("O:")
+        for p in alpaca_positions
+        if p.get("symbol")
+    }
 
     port_res = supabase.table("paper_portfolios") \
         .select("id").eq("user_id", user_id).execute()

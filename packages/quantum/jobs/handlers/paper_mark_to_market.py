@@ -60,20 +60,38 @@ def run(payload: Dict[str, Any], ctx: Any = None) -> Dict[str, Any]:
                 .execute()
             open_positions = pos_res.data or []
 
-            if open_positions:
+            # Equity source — Alpaca-authoritative via the shared
+            # equity_state module (PR #780 follow-up). The prior
+            # inline approach used an event-loop bridge into
+            # CashService that always raised inside RQ worker context,
+            # then fell through to a notional-of-open-positions sum.
+            # That produced absurdly tight per-symbol envelope limits
+            # on small paper portfolios (e.g. AMZN $1,310 notional →
+            # $39 per-symbol loss limit at 3%).
+            #
+            # get_alpaca_equity returns None on Alpaca failure; MUST
+            # NOT fabricate a substitute denominator. Matches the
+            # contract intraday_risk_monitor has used since 83872db —
+            # fabricated equity was the mechanism behind the
+            # 2026-04-16 false force-close incident.
+            from packages.quantum.services import equity_state
+            equity = (
+                equity_state.get_alpaca_equity(user_id)
+                if open_positions else None
+            )
+
+            if not open_positions:
+                pass  # No positions → no envelope to check
+            elif equity is None:
+                logger.warning(
+                    f"[RISK_ENVELOPE] MTM: Alpaca equity unavailable "
+                    f"for user={user_id[:8]} — skipping envelope check. "
+                    f"Greeks/concentration/stress envelopes unaffected; "
+                    f"loss envelopes will be re-evaluated next cycle."
+                )
+            else:
                 # Sum unrealized P&L as daily proxy (marks just refreshed)
                 daily_pnl = sum(float(p.get("unrealized_pl") or 0) for p in open_positions)
-
-                # Estimate equity from positions + marks
-                from packages.quantum.services.cash_service import CashService
-                import asyncio
-                cash_svc = CashService(client)
-                try:
-                    equity = asyncio.get_event_loop().run_until_complete(
-                        cash_svc.get_deployable_capital(user_id)
-                    )
-                except RuntimeError:
-                    equity = sum(abs(float(p.get("avg_entry_price") or 0)) * abs(float(p.get("quantity") or 0)) * 100 for p in open_positions)
 
                 config = EnvelopeConfig.from_env()
                 envelope_result = check_all_envelopes(

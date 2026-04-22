@@ -108,19 +108,31 @@ class PaperMarkToMarketService:
                 logger.error(f"[MARK_TO_MARKET] Failed to compute mark for {pos_id}: {e}")
                 errors.append({"position_id": pos_id, "error": str(e)})
 
-        # Single batch update instead of N individual queries
+        # Per-row UPDATE is the only supported write path here. The
+        # prior implementation used a batch INSERT-ON-CONFLICT which
+        # always failed on Postgres 23502 because the INSERT side
+        # provides only {id, current_mark, unrealized_pl, updated_at};
+        # every other NOT NULL column on paper_positions (user_id,
+        # portfolio_id, symbol, strategy_key) defaulted to NULL. That
+        # error fired once per position per cycle and was handled via
+        # a try/except fallback that ran the same per-row UPDATE we
+        # now use primarily. Promoted fallback to primary to eliminate
+        # the spurious 23502 log noise and the error-path-as-control-
+        # flow pattern (Issue 1 correction, audit note 2026-04-20 —
+        # live AMZN a0f05755 occurrences at 20:00:11Z and 20:30:02Z
+        # triggered the re-diagnosis).
         if batch_updates:
-            try:
-                self.client.table("paper_positions").upsert(batch_updates).execute()
-            except Exception as e:
-                logger.error(f"[MARK_TO_MARKET] Batch update failed, falling back to individual: {e}")
-                for upd in batch_updates:
-                    try:
-                        self.client.table("paper_positions").update({
-                            k: v for k, v in upd.items() if k != "id"
-                        }).eq("id", upd["id"]).execute()
-                    except Exception as e2:
-                        errors.append({"position_id": upd["id"], "error": str(e2)})
+            for upd in batch_updates:
+                try:
+                    self.client.table("paper_positions").update({
+                        k: v for k, v in upd.items() if k != "id"
+                    }).eq("id", upd["id"]).execute()
+                except Exception as upd_err:
+                    logger.error(
+                        f"[MARK_TO_MARKET] Update failed for "
+                        f"position={upd['id']}: {upd_err}"
+                    )
+                    errors.append({"position_id": upd["id"], "error": str(upd_err)})
 
         if skipped:
             logger.info(

@@ -195,8 +195,22 @@ class PaperAutopilotService:
         try:
             from packages.quantum.risk.risk_envelope import check_all_envelopes, EnvelopeConfig
             cb_positions = self._get_open_positions_for_risk_check(user_id)
-            if cb_positions:
-                cb_equity = self._estimate_equity(user_id, cb_positions)
+            cb_equity = (
+                self._estimate_equity(user_id, cb_positions)
+                if cb_positions else None
+            )
+            if cb_positions and cb_equity is None:
+                # Alpaca unavailable — skip the circuit-breaker check
+                # rather than fabricating a denominator. The autopilot
+                # run continues; intraday_risk_monitor (15-min cadence)
+                # is the authoritative guard and uses the same Alpaca-
+                # authoritative equity source.
+                logger.warning(
+                    f"[CIRCUIT_BREAKER] Alpaca equity unavailable for "
+                    f"user={user_id[:8]} — skipping envelope check this "
+                    f"autopilot run. Entry-gate not enforced this cycle."
+                )
+            elif cb_positions:
                 cb_daily_pnl = sum(float(p.get("unrealized_pl") or 0) for p in cb_positions)
                 cb_config = EnvelopeConfig.from_env()
                 cb_result = check_all_envelopes(
@@ -687,23 +701,22 @@ class PaperAutopilotService:
             logger.warning(f"[CIRCUIT_BREAKER] Failed to fetch positions: {e}")
             return []
 
-    def _estimate_equity(self, user_id: str, positions: List[Dict[str, Any]]) -> float:
-        """Estimate account equity for risk envelope check."""
-        try:
-            from packages.quantum.services.cash_service import CashService
-            import asyncio
-            cash_svc = CashService(self.client)
-            loop = asyncio.new_event_loop()
-            try:
-                return loop.run_until_complete(cash_svc.get_deployable_capital(user_id))
-            finally:
-                loop.close()
-        except Exception:
-            # Fallback: sum of absolute entry values
-            return sum(
-                abs(float(p.get("avg_entry_price") or 0)) * abs(float(p.get("quantity") or 0)) * 100
-                for p in positions
-            )
+    def _estimate_equity(
+        self, user_id: str, positions: List[Dict[str, Any]],
+    ) -> Optional[float]:
+        """Alpaca-authoritative account equity for risk envelope check.
+
+        Returns None when Alpaca is unavailable; callers MUST skip the
+        envelope check rather than fabricate a denominator. Using a
+        notional-sum fallback (prior behavior) produced absurdly tight
+        envelope limits on small paper portfolios — the mechanism behind
+        the 2026-04-16 false force-close incident that 83872db originally
+        addressed for intraday_risk_monitor. PR #780 extracted the
+        Alpaca-authoritative helpers to a shared module; this is the
+        corresponding follow-up for paper_autopilot_service.
+        """
+        from packages.quantum.services import equity_state
+        return equity_state.get_alpaca_equity(user_id)
 
     def _get_champion_portfolio(self, user_id: str) -> Optional[str]:
         """Get portfolio_id of the champion cohort, or None for default."""

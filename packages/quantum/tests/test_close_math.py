@@ -24,6 +24,8 @@ from decimal import Decimal
 from packages.quantum.services.close_math import (
     compute_realized_pl,
     PartialFillDetected,
+    MalformedFillData,
+    extract_close_legs,
 )
 
 
@@ -462,6 +464,277 @@ class TestDefensiveInputs(unittest.TestCase):
         # If coercion went through Decimal(float), we'd see
         # 19.99999... or similar.
         self.assertEqual(result, Decimal("20.00"))
+
+
+class TestExtractCloseLegs(unittest.TestCase):
+    """extract_close_legs normalizes Alpaca-shape fill data into the
+    LegFill list that compute_realized_pl consumes.
+
+    Shared across all 4 close handlers (reconciler, exit_evaluator,
+    paper_endpoints orphan repair, manual endpoint). Input shape is
+    either a live Alpaca get_order() response OR a paper_orders.
+    broker_response dict — both have identical structure (verified
+    2026-04-22)."""
+
+    def test_multi_leg_pypl_fixture_yields_two_legfills(self):
+        """PYPL cfe69b28 close order shape. Extractor preserves leg
+        data verbatim — no re-normalization of symbols or prices."""
+        alpaca_order = {
+            "alpaca_order_id": "da0b9146-59f7-46a8-a292-86c0325aaca9",
+            "status": "filled",
+            "symbol": None,  # mleg parent has no symbol
+            "qty": 6.0,
+            "filled_qty": 6.0,
+            "filled_avg_price": -2.6,  # mleg net-cash-flow sign
+            "legs": [
+                {
+                    "symbol": "O:PYPL260515C00047500",
+                    "side": "sell",
+                    "qty": 6.0,
+                    "filled_qty": 6.0,
+                    "filled_avg_price": 5.05,
+                },
+                {
+                    "symbol": "O:PYPL260515C00052500",
+                    "side": "buy",
+                    "qty": 6.0,
+                    "filled_qty": 6.0,
+                    "filled_avg_price": 2.45,
+                },
+            ],
+        }
+        legs = extract_close_legs(alpaca_order)
+        self.assertEqual(len(legs), 2)
+        # First leg: sell side, O: prefix preserved
+        self.assertEqual(legs[0]["symbol"], "O:PYPL260515C00047500")
+        self.assertEqual(legs[0]["action"], "sell")
+        self.assertEqual(legs[0]["filled_qty"], 6.0)
+        self.assertEqual(legs[0]["filled_avg_price"], 5.05)
+        # Second leg: buy side
+        self.assertEqual(legs[1]["symbol"], "O:PYPL260515C00052500")
+        self.assertEqual(legs[1]["action"], "buy")
+        self.assertEqual(legs[1]["filled_qty"], 6.0)
+        self.assertEqual(legs[1]["filled_avg_price"], 2.45)
+
+        # End-to-end: extractor output feeds compute_realized_pl and
+        # produces the correct PYPL regression value.
+        result = compute_realized_pl(
+            close_legs=legs,
+            entry_price=Decimal("2.94"),
+            qty=6,
+            spread_type="debit",
+        )
+        self.assertEqual(result, Decimal("-204.00"))
+
+    def test_multi_leg_mismatched_leg_filled_qty_raises_partial(self):
+        """Two legs with different filled_qty = partial package fill."""
+        alpaca_order = {
+            "filled_qty": 6,
+            "legs": [
+                {
+                    "symbol": "O:PYPL260515C00047500",
+                    "side": "sell",
+                    "filled_qty": 6,
+                    "filled_avg_price": 5.05,
+                },
+                {
+                    "symbol": "O:PYPL260515C00052500",
+                    "side": "buy",
+                    "filled_qty": 4,  # mismatch!
+                    "filled_avg_price": 2.45,
+                },
+            ],
+        }
+        with self.assertRaises(PartialFillDetected) as cm:
+            extract_close_legs(alpaca_order)
+        self.assertIn("differ", str(cm.exception))
+
+    def test_multi_leg_leg_qty_below_parent_qty_raises_partial(self):
+        """All legs match each other but below parent filled_qty.
+        Signals package-level partial fill."""
+        alpaca_order = {
+            "filled_qty": 6,
+            "legs": [
+                {
+                    "symbol": "O:PYPL260515C00047500",
+                    "side": "sell",
+                    "filled_qty": 4,
+                    "filled_avg_price": 5.05,
+                },
+                {
+                    "symbol": "O:PYPL260515C00052500",
+                    "side": "buy",
+                    "filled_qty": 4,
+                    "filled_avg_price": 2.45,
+                },
+            ],
+        }
+        with self.assertRaises(PartialFillDetected) as cm:
+            extract_close_legs(alpaca_order)
+        self.assertIn("parent filled_qty", str(cm.exception))
+
+    def test_single_leg_with_populated_legs_list_uses_legs(self):
+        """Single-leg close where Alpaca populates legs anyway. Rule:
+        prefer legs over parent when legs is non-empty. Guards against
+        callers accidentally double-reading."""
+        alpaca_order = {
+            "symbol": "O:AAPL260515C00200000",
+            "side": "sell",  # parent side
+            "qty": 1.0,
+            "filled_qty": 1.0,
+            "filled_avg_price": 99.99,  # parent has DIFFERENT value than leg
+            "legs": [
+                {
+                    "symbol": "O:AAPL260515C00200000",
+                    "side": "sell",
+                    "filled_qty": 1,
+                    "filled_avg_price": 6.00,  # leg is the truth
+                },
+            ],
+        }
+        legs = extract_close_legs(alpaca_order)
+        self.assertEqual(len(legs), 1)
+        # Extractor used the leg's filled_avg_price (6.00), NOT the
+        # parent's 99.99.
+        self.assertEqual(legs[0]["filled_avg_price"], 6.00)
+
+    def test_single_leg_with_empty_legs_synthesizes(self):
+        """Single-leg simple option order. Alpaca emits legs=[] and
+        puts fill data at parent level. Extractor synthesizes a
+        one-entry LegFill list from parent fields."""
+        alpaca_order = {
+            "symbol": "O:AAPL260515C00200000",
+            "side": "sell",
+            "qty": 1.0,
+            "filled_qty": 1.0,
+            "filled_avg_price": 6.00,
+            "legs": [],
+        }
+        legs = extract_close_legs(alpaca_order)
+        self.assertEqual(len(legs), 1)
+        self.assertEqual(legs[0]["symbol"], "O:AAPL260515C00200000")
+        self.assertEqual(legs[0]["action"], "sell")
+        self.assertEqual(legs[0]["filled_qty"], 1.0)
+        self.assertEqual(legs[0]["filled_avg_price"], 6.00)
+
+    def test_single_leg_synthesis_partial_fill_raises(self):
+        """Single-leg: parent qty=5, filled_qty=3 → partial fill."""
+        alpaca_order = {
+            "symbol": "O:AAPL260515C00200000",
+            "side": "sell",
+            "qty": 5,
+            "filled_qty": 3,
+            "filled_avg_price": 6.00,
+            "legs": [],
+        }
+        with self.assertRaises(PartialFillDetected) as cm:
+            extract_close_legs(alpaca_order)
+        self.assertIn("single-leg partial fill", str(cm.exception))
+
+    def test_no_legs_no_parent_fill_data_raises_malformed(self):
+        """No legs + no parent symbol/side = cannot synthesize."""
+        alpaca_order = {
+            "status": "filled",
+            "filled_qty": 1,
+            "legs": [],
+            # No symbol, no side — can't synthesize
+        }
+        with self.assertRaises(MalformedFillData) as cm:
+            extract_close_legs(alpaca_order)
+        self.assertIn("symbol", str(cm.exception).lower())
+
+    def test_broker_response_shape_equivalent_to_alpaca_live(self):
+        """paper_orders.broker_response has identical shape to
+        AlpacaClient._serialize_order output. Extractor treats both
+        sources uniformly."""
+        # Modeled on actual broker_response row from production
+        # (ADBE debit put spread, alpaca_paper execution_mode).
+        broker_response = {
+            "status": "filled",
+            "filled_qty": 1,
+            "filled_avg_price": 14.05,
+            "legs": [
+                {
+                    "qty": 1,
+                    "side": "buy",
+                    "symbol": "O:ADBE260515P00255000",
+                    "filled_qty": 1,
+                    "filled_avg_price": 20,
+                },
+                {
+                    "qty": 1,
+                    "side": "sell",
+                    "symbol": "O:ADBE260515P00225000",
+                    "filled_qty": 1,
+                    "filled_avg_price": 5.95,
+                },
+            ],
+        }
+        legs = extract_close_legs(broker_response)
+        self.assertEqual(len(legs), 2)
+        self.assertEqual(legs[0]["symbol"], "O:ADBE260515P00255000")
+        self.assertEqual(legs[0]["action"], "buy")
+        self.assertEqual(legs[1]["action"], "sell")
+
+    def test_extract_does_not_reapply_symbol_normalization(self):
+        """Symbols arrive O:-prefixed from _serialize_order's call to
+        alpaca_to_polygon. Extractor MUST NOT re-apply normalization.
+
+        alpaca_to_polygon is idempotent (returns input unchanged if
+        already prefixed), so a mistaken double-call doesn't corrupt
+        strings visibly — but it duplicates work AND, more
+        importantly, would mask the invariant that this layer trusts
+        upstream serialization. If the upstream convention ever
+        changed (e.g., dropped the O: prefix or switched to a
+        different normalizer), silent re-application here would
+        either hide the upstream change or reintroduce the PR #792
+        prefix-asymmetry class of bug.
+
+        This test asserts the output symbol EQUALS the input symbol
+        byte-for-byte. No transformation, no normalization."""
+        alpaca_order = {
+            "symbol": "O:AAPL260515C00200000",
+            "side": "sell",
+            "qty": 1.0,
+            "filled_qty": 1.0,
+            "filled_avg_price": 6.00,
+            "legs": [
+                {
+                    "symbol": "O:AAPL260515C00200000",
+                    "side": "sell",
+                    "filled_qty": 1,
+                    "filled_avg_price": 6.00,
+                },
+            ],
+        }
+        legs = extract_close_legs(alpaca_order)
+        # Byte-for-byte equality — no re-prefix, no strip, no case change.
+        self.assertEqual(legs[0]["symbol"], "O:AAPL260515C00200000")
+
+    def test_leg_with_zero_filled_qty_raises_partial(self):
+        """A leg with filled_qty=0 means the order didn't fully fill.
+        Extractor surfaces this as PartialFillDetected rather than
+        silently returning a zero-qty LegFill."""
+        alpaca_order = {
+            "filled_qty": 0,
+            "legs": [
+                {
+                    "symbol": "O:AVGO260501P00330000",
+                    "side": "buy",
+                    "filled_qty": 0,
+                    "filled_avg_price": None,
+                },
+                {
+                    "symbol": "O:AVGO260501P00295000",
+                    "side": "sell",
+                    "filled_qty": 0,
+                    "filled_avg_price": None,
+                },
+            ],
+        }
+        with self.assertRaises(PartialFillDetected) as cm:
+            extract_close_legs(alpaca_order)
+        self.assertIn("filled_qty=0", str(cm.exception))
 
 
 if __name__ == "__main__":

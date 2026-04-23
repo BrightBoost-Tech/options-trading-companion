@@ -106,7 +106,7 @@ UPDATE paper_positions SET close_reason = 'stop_loss_hit'
 UPDATE paper_positions SET close_reason = 'alpaca_fill_reconciler_standard'
     WHERE close_reason = 'alpaca_fill_reconciled_2026_04_16';
 
-UPDATE paper_positions SET close_reason = 'manual_endpoint'
+UPDATE paper_positions SET close_reason = 'manual_close_user_initiated'
     WHERE close_reason IN ('manual_internal_fill', 'alpaca_fill_manual');
 
 -- Step 5. CHECK constraint on close_reason — PERMISSIVE (14 values).

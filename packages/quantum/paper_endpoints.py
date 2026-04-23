@@ -30,7 +30,6 @@ from packages.quantum.services.options_utils import parse_option_symbol
 # Execution V3
 from packages.quantum.execution.transaction_cost_model import TransactionCostModel
 from packages.quantum.execution.pnl_attribution import PnlAttribution
-from packages.quantum.services.paper_execution_service import PaperExecutionService
 from packages.quantum.services.paper_ledger_service import PaperLedgerService, PaperLedgerEventType
 
 # v3 Observability

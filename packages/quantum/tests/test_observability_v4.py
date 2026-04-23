@@ -827,25 +827,12 @@ class TestWave12InsertOrGetSuggestion:
 
 
 # =============================================================================
-# Wave 1.2 Tests: Paper Execution Stage Analytics
+# Wave 1.2: PaperExecutionService tests removed with the class itself
+# in PR #6 Commit 8a. The class was dead code (imported but never
+# instantiated in production) with a latent sign-convention bug at
+# services/paper_execution_service.py:279. Production close paths
+# now route exclusively through close_position_shared.
 # =============================================================================
-
-class TestWave12PaperStageAnalytics:
-    """Wave 1.2: Test that stage_order emits analytics events."""
-
-    def test_paper_execution_service_imports_analytics(self):
-        """Verify PaperExecutionService has access to AnalyticsService."""
-        from packages.quantum.services.paper_execution_service import PaperExecutionService, AnalyticsService
-
-        # If import succeeds, AnalyticsService is available
-        assert AnalyticsService is not None
-
-    def test_paper_execution_service_has_stage_order(self):
-        """Verify stage_order method exists."""
-        from packages.quantum.services.paper_execution_service import PaperExecutionService
-
-        assert hasattr(PaperExecutionService, 'stage_order')
-        assert callable(getattr(PaperExecutionService, 'stage_order'))
 
 
 # =============================================================================

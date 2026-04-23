@@ -2,10 +2,22 @@ from fastapi import APIRouter, HTTPException, Depends, BackgroundTasks
 from pydantic import BaseModel
 from typing import Optional, Dict, Any, List, Literal
 from datetime import datetime, timezone, timedelta
+from decimal import Decimal
 import logging
 import uuid
 import os
 import time
+
+from packages.quantum.services.close_math import (
+    compute_realized_pl,
+    extract_close_legs,
+    PartialFillDetected,
+    MalformedFillData,
+)
+from packages.quantum.services.close_helper import (
+    close_position_shared,
+    PositionAlreadyClosed,
+)
 
 from packages.quantum.security import get_current_user
 from packages.quantum.models import TradeTicket, OptionLeg
@@ -18,7 +30,6 @@ from packages.quantum.services.options_utils import parse_option_symbol
 # Execution V3
 from packages.quantum.execution.transaction_cost_model import TransactionCostModel
 from packages.quantum.execution.pnl_attribution import PnlAttribution
-from packages.quantum.services.paper_execution_service import PaperExecutionService
 from packages.quantum.services.paper_ledger_service import PaperLedgerService, PaperLedgerEventType
 
 # v3 Observability
@@ -1103,6 +1114,96 @@ def _resolve_cohort_id_for_portfolio(supabase, portfolio_id: str) -> Optional[st
     return None
 
 
+def _write_orphan_repair_critical_alert(
+    supabase,
+    order: Dict[str, Any],
+    position: Dict[str, Any],
+    user_id: str,
+    stage: str,
+    reason: str,
+    extra_metadata: Optional[Dict[str, Any]] = None,
+) -> None:
+    """Write a severity='critical' risk_alert when the orphan-repair
+    close pipeline aborts (mleg missing legs, partial fill,
+    PositionAlreadyClosed, malformed broker_response).
+
+    Swallows its own exceptions — an alert-write failure must not
+    cascade to a repair-loop crash."""
+    try:
+        metadata = {
+            "detector": "orphan_fill_repair",
+            "stage": stage,
+            "reason": reason,
+            "order_id": order.get("id"),
+            "order_class": (order.get("broker_response") or {}).get("order_class"),
+        }
+        if extra_metadata:
+            metadata.update(extra_metadata)
+        supabase.table("risk_alerts").insert({
+            "user_id": user_id or position.get("user_id"),
+            "alert_type": "close_path_anomaly",
+            "severity": "critical",
+            "position_id": position.get("id"),
+            "symbol": position.get("symbol") or order.get("symbol"),
+            "message": (
+                f"Orphan-repair close aborted at {stage}: {reason[:200]}"
+            ),
+            "metadata": metadata,
+        }).execute()
+    except Exception as alert_err:
+        logger.error(
+            f"paper_order_repair_alert_error: order_id={order.get('id')} "
+            f"stage={stage} error={alert_err}"
+        )
+
+
+def _write_commit_fill_critical_alert(
+    supabase,
+    order: Dict[str, Any],
+    position: Dict[str, Any],
+    user_id: str,
+    stage: str,
+    reason: str,
+    extra_metadata: Optional[Dict[str, Any]] = None,
+) -> None:
+    """Write a severity='critical' risk_alert when the _commit_fill
+    close pipeline aborts (unknown source_engine, partial fill anomaly,
+    PositionAlreadyClosed race).
+
+    The manual-close / paper-autopilot close path routes through
+    _commit_fill; this helper is the critical-alert analog of the
+    ones in alpaca_order_handler (reconciler) and
+    paper_exit_evaluator (internal-fill). Same contract: swallow
+    own exceptions, log on failure."""
+    try:
+        ticket = order.get("order_json") or {}
+        metadata = {
+            "detector": "commit_fill",
+            "stage": stage,
+            "reason": reason,
+            "order_id": order.get("id"),
+            "source_engine": ticket.get("source_engine"),
+        }
+        if extra_metadata:
+            metadata.update(extra_metadata)
+        supabase.table("risk_alerts").insert({
+            "user_id": user_id or position.get("user_id"),
+            "alert_type": "close_path_anomaly",
+            "severity": "critical",
+            "position_id": position.get("id"),
+            "symbol": position.get("symbol") or ticket.get("symbol"),
+            "message": (
+                f"commit_fill close aborted at {stage}: {reason[:200]}"
+            ),
+            "metadata": metadata,
+        }).execute()
+    except Exception as alert_err:
+        logger.error(
+            f"paper_commit_fill_alert_error: order_id={order.get('id')} "
+            f"stage={stage} error={alert_err}"
+        )
+
+
 def _repair_filled_order_commit(supabase, analytics, user_id, order, portfolio) -> Dict[str, Any]:
     """
     Repair an orphan filled order that has no position_id.
@@ -1136,7 +1237,18 @@ def _repair_filled_order_commit(supabase, analytics, user_id, order, portfolio) 
         avg_fill_price = float(order.get("avg_fill_price") or 0)
         fees_usd = float(order.get("fees_usd") or 0)
 
-        if filled_qty <= 0 or avg_fill_price <= 0:
+        # Relaxed from `avg_fill_price <= 0` (PR #6 Commit 6). The
+        # previous guard rejected any order with non-positive
+        # avg_fill_price, which pre-PR-#6 had the side-effect of
+        # hiding the latent mleg sign bug by never running the close
+        # branch on Alpaca multi-leg close orders (whose parent
+        # `avg_fill_price` is negative when the spread closes at a
+        # net credit). Now that the close branch routes through the
+        # shared leg-level pipeline, negative avg_fill_price is a
+        # valid signal (net credit received) and must pass this gate.
+        # Zero is still rejected — an option filled at exactly $0.00
+        # is a broker anomaly, not a tradeable outcome.
+        if filled_qty <= 0 or avg_fill_price == 0:
             logger.warning(f"paper_order_repair_skip: order_id={order_id} invalid filled_qty or avg_fill_price")
             return result
 
@@ -1177,22 +1289,106 @@ def _repair_filled_order_commit(supabase, analytics, user_id, order, portfolio) 
             now = datetime.now(timezone.utc).isoformat()
 
             if new_qty == 0:
-                # Closed completely — mark closed instead of deleting
-                multiplier = 100.0
-                entry_price = float(pos.get("avg_entry_price") or 0)
-                closed_qty = abs(current_qty)
-                if current_qty > 0:
-                    realized_pl = (avg_fill_price - entry_price) * closed_qty * multiplier
-                else:
-                    realized_pl = (entry_price - avg_fill_price) * closed_qty * multiplier
+                # Closed completely — route through the shared close
+                # pipeline (PR #6 Commit 6).
+                #
+                # Pre-PR-#6 this branch used inline parent-level math:
+                #     current_qty > 0:  (avg_fill_price - entry) × qty × 100
+                #     current_qty < 0:  (entry - avg_fill_price) × qty × 100
+                # That works for single-leg orders where avg_fill_price
+                # is a per-contract price, but it has a LATENT sign bug
+                # for Alpaca mleg orders: paper_orders.avg_fill_price
+                # on an mleg parent stores Alpaca's net-cash-flow sign
+                # (positive = net debit, negative = net credit) — same
+                # shape as the PYPL cfe69b28 2026-04-17 incident that
+                # hit the reconciler. No production row has tripped it
+                # (2026-04-22 active-orphan count: 0) but the latent
+                # path was fixable in-line with this migration.
+                #
+                # Leg-level math via compute_realized_pl is robust to
+                # Alpaca's parent-sign convention: if broker_response
+                # has legs, extract them; otherwise synthesize a single
+                # LegFill from parent-level side/filled_qty/filled_avg_
+                # price. For mleg orders the legs MUST be present —
+                # parent-level synthesis on an mleg source would
+                # recreate the latent bug, so we abort + alert instead.
+                broker_response = order.get("broker_response") or {}
+                order_class = str(broker_response.get("order_class") or "").lower()
+                legs_on_response = broker_response.get("legs") or []
 
-                supabase.table("paper_positions").update({
-                    "quantity": 0,
-                    "status": "closed",
-                    "closed_at": now,
-                    "realized_pl": realized_pl,
-                    "updated_at": now,
-                }).eq("id", pos["id"]).execute()
+                if order_class == "mleg" and not legs_on_response:
+                    _write_orphan_repair_critical_alert(
+                        supabase, order, pos, user_id,
+                        stage="extract_close_legs",
+                        reason=(
+                            "mleg orphan order missing legs on broker_response; "
+                            "cannot reconstruct signed fill safely. Manual review."
+                        ),
+                    )
+                    return result
+
+                if legs_on_response:
+                    source_for_extract = broker_response
+                else:
+                    source_for_extract = {
+                        "symbol": symbol,
+                        "side": side,
+                        "filled_qty": filled_qty,
+                        "filled_avg_price": avg_fill_price,
+                        "qty": filled_qty,
+                    }
+
+                try:
+                    close_legs = extract_close_legs(source_for_extract)
+                except (PartialFillDetected, MalformedFillData) as exc:
+                    _write_orphan_repair_critical_alert(
+                        supabase, order, pos, user_id,
+                        stage="extract_close_legs",
+                        reason=str(exc),
+                    )
+                    return result
+
+                entry_price_dec = Decimal(str(pos.get("avg_entry_price") or 0))
+                closed_qty_abs = abs(int(current_qty))
+                spread_type = "debit" if current_qty > 0 else "credit"
+
+                try:
+                    realized_pl_dec = compute_realized_pl(
+                        close_legs=close_legs,
+                        entry_price=entry_price_dec,
+                        qty=closed_qty_abs,
+                        spread_type=spread_type,
+                    )
+                except PartialFillDetected as exc:
+                    _write_orphan_repair_critical_alert(
+                        supabase, order, pos, user_id,
+                        stage="compute_realized_pl",
+                        reason=str(exc),
+                    )
+                    return result
+
+                try:
+                    close_position_shared(
+                        supabase=supabase,
+                        position_id=pos["id"],
+                        realized_pl=realized_pl_dec,
+                        close_reason="orphan_fill_repair",
+                        fill_source="orphan_fill_repair",
+                        closed_at=datetime.now(timezone.utc),
+                    )
+                except PositionAlreadyClosed as exc:
+                    _write_orphan_repair_critical_alert(
+                        supabase, order, pos, user_id,
+                        stage="close_position_shared",
+                        reason=str(exc),
+                        extra_metadata={
+                            "existing_close_reason": exc.existing_close_reason,
+                            "existing_fill_source": exc.existing_fill_source,
+                            "existing_closed_at": exc.existing_closed_at,
+                        },
+                    )
+                    return result
+
                 result["position_id"] = pos["id"]
             else:
                 supabase.table("paper_positions").update({
@@ -1487,7 +1683,22 @@ def _commit_fill(supabase, analytics, user_id, order, fill_res, quote, portfolio
                 new_avg = this_fill_price
 
             if new_qty == 0:
-                # Closed completely
+                # Closed completely — route through shared pipeline
+                # (PR #6 Commit 7). This _commit_fill close branch
+                # is the 4th and final close handler to migrate. It
+                # serves two source_engines that both stage internal-
+                # paper close orders through _process_orders_for_user:
+                #
+                #   source_engine='manual_close'     — POST /paper/close
+                #   source_engine='paper_autopilot'  — PaperAutopilotService.close_positions
+                #
+                # Both map to close_reason='manual_close_user_initiated'
+                # in the 9-value enum: autopilot closes are user-
+                # configured automation (PAPER_AUTOPILOT_CLOSE_POLICY),
+                # not system force-closes. paper_exit_evaluator has
+                # its own close path (Commit 5) and does not route
+                # through here, so its reason strings
+                # ('target_profit' etc.) are never seen at this site.
                 attribution_ok = True
                 if pos_id: # Was explicit close
                      # E) Attribution invocation should use UPDATED cumulative order values
@@ -1500,28 +1711,85 @@ def _commit_fill(supabase, analytics, user_id, order, fill_res, quote, portfolio
                          attribution_ok = False
                          logging.warning(f"Attribution failed for order {order.get('id')}; position preserved for retry: {e}")
 
-                # Mark position closed instead of deleting it.
-                # realized_pl: long positions profit when exit > entry,
-                # short (credit) positions profit when entry > exit.
-                entry_price = float(pos.get("avg_entry_price") or 0)
-                exit_price = this_fill_price
-                closed_qty = abs(current_qty)
-                if current_qty > 0:
-                    realized_pl = (exit_price - entry_price) * closed_qty * multiplier
-                else:
-                    realized_pl = (entry_price - exit_price) * closed_qty * multiplier
-                realized_pl -= fees_delta  # subtract closing fees
-
-                if attribution_ok:
-                    supabase.table("paper_positions").update({
-                        "quantity": 0,
-                        "status": "closed",
-                        "closed_at": now,
-                        "realized_pl": realized_pl,
-                        "updated_at": now,
-                    }).eq("id", pos["id"]).execute()
-                else:
+                if not attribution_ok:
                     logging.warning(f"Position {pos['id']} retained — will retry close on next auto_close cycle")
+                else:
+                    # Map source_engine to close_reason enum.
+                    source_engine = str(ticket.get("source_engine") or "").strip()
+                    if source_engine in ("manual_close", "paper_autopilot"):
+                        mapped_close_reason = "manual_close_user_initiated"
+                    else:
+                        _write_commit_fill_critical_alert(
+                            supabase, order, pos, user_id,
+                            stage="map_close_reason",
+                            reason=(
+                                f"_commit_fill close path reached with "
+                                f"unexpected source_engine={source_engine!r}. "
+                                f"Only manual_close and paper_autopilot are "
+                                f"valid close sources through this handler."
+                            ),
+                        )
+                        return  # preserve position, no close write
+
+                    # Synthesize a single LegFill from the internal-
+                    # paper fill. this_fill_price is the per-contract/
+                    # per-spread simulated fill price (positive); side
+                    # is the close-order direction. compute_realized_pl
+                    # sign-handles it via spread_type + leg action.
+                    synth_action = "sell" if current_qty > 0 else "buy"
+                    spread_type = "debit" if current_qty > 0 else "credit"
+                    synth_legs = [{
+                        "symbol": pos.get("symbol"),
+                        "action": synth_action,
+                        "filled_qty": abs(current_qty),
+                        "filled_avg_price": this_fill_price,
+                    }]
+                    entry_price_dec = Decimal(str(pos.get("avg_entry_price") or 0))
+
+                    try:
+                        realized_pl_dec = compute_realized_pl(
+                            close_legs=synth_legs,
+                            entry_price=entry_price_dec,
+                            qty=abs(int(current_qty)),
+                            spread_type=spread_type,
+                        )
+                    except PartialFillDetected as exc:
+                        _write_commit_fill_critical_alert(
+                            supabase, order, pos, user_id,
+                            stage="compute_realized_pl",
+                            reason=str(exc),
+                        )
+                        return
+
+                    # Preserve pre-PR-#6 fee semantics: subtract
+                    # closing-side incremental fees from realized_pl.
+                    # (Entry fees were captured separately; compute_
+                    # realized_pl treats entry_price as the unsigned
+                    # per-contract cost, fees layer on top.)
+                    realized_pl_dec -= Decimal(str(fees_delta))
+                    realized_pl_dec = realized_pl_dec.quantize(Decimal("0.01"))
+
+                    try:
+                        close_position_shared(
+                            supabase=supabase,
+                            position_id=pos["id"],
+                            realized_pl=realized_pl_dec,
+                            close_reason=mapped_close_reason,
+                            fill_source="manual_endpoint",
+                            closed_at=datetime.now(timezone.utc),
+                        )
+                    except PositionAlreadyClosed as exc:
+                        _write_commit_fill_critical_alert(
+                            supabase, order, pos, user_id,
+                            stage="close_position_shared",
+                            reason=str(exc),
+                            extra_metadata={
+                                "existing_close_reason": exc.existing_close_reason,
+                                "existing_fill_source": exc.existing_fill_source,
+                                "existing_closed_at": exc.existing_closed_at,
+                            },
+                        )
+                        return
             else:
                 # Update
                 supabase.table("paper_positions").update({

@@ -9,6 +9,7 @@ needs_manual_review fallback.
 import logging
 import time
 from datetime import datetime, timezone, timedelta
+from decimal import Decimal
 from typing import Any, Dict, List, Optional
 
 from packages.quantum.brokers.alpaca_client import (
@@ -17,6 +18,16 @@ from packages.quantum.brokers.alpaca_client import (
     AlpacaAuthError,
     polygon_to_alpaca,
     alpaca_to_polygon,
+)
+from packages.quantum.services.close_math import (
+    compute_realized_pl,
+    extract_close_legs,
+    PartialFillDetected,
+    MalformedFillData,
+)
+from packages.quantum.services.close_helper import (
+    close_position_shared,
+    PositionAlreadyClosed,
 )
 
 # Submission retry config
@@ -240,16 +251,31 @@ def _close_position_on_fill(
     """
     Close a paper_position when its Alpaca close order fills.
 
-    This is the critical missing piece: poll_pending_orders detects the fill
-    and updates paper_orders, but nothing was updating paper_positions.
-    Follows the same pattern as paper_exit_evaluator._close_position lines
-    956-1028 (internal fill path).
-    """
-    fill_price = float(alpaca_order.get("filled_avg_price") or 0)
-    fill_qty = float(alpaca_order.get("filled_qty") or 0)
-    filled_at = alpaca_order.get("filled_at") or datetime.now(timezone.utc).isoformat()
+    PR #6 refactor. Delegates to the shared close-path pipeline:
+        1. extract_close_legs (close_math.py) — normalize Alpaca shape
+           to LegFill list. Raises PartialFillDetected / MalformedFillData
+           on anomalies.
+        2. compute_realized_pl (close_math.py) — canonical leg-level
+           P&L. Sign-convention-safe without needing parent-level
+           mleg flag. Same function 3 other handlers use.
+        3. close_position_shared (close_helper.py) — atomic write to
+           paper_positions with close_reason + fill_source + realized_pl
+           + closed_at + quantity=0. Raises PositionAlreadyClosed on
+           duplicate attempts (loud, not silent).
 
-    # Fetch position
+    Any exception from the pipeline results in a severity='critical'
+    risk_alert + early return. No close action on anomalies. Caller
+    (poll_pending_orders) continues processing other orders normally.
+
+    Downstream side effects (paper_orders update, etc.) remain in
+    poll_pending_orders' existing code — this helper only touches
+    paper_positions per the Gap D decision.
+    """
+    filled_at_iso = (
+        alpaca_order.get("filled_at") or datetime.now(timezone.utc).isoformat()
+    )
+
+    # Fetch position (unchanged from pre-PR-#6).
     pos_res = supabase.table("paper_positions") \
         .select("*") \
         .eq("id", position_id) \
@@ -265,59 +291,145 @@ def _close_position_on_fill(
 
     position = pos_res.data
 
+    # Fast-path early return if already closed. close_position_shared
+    # would also raise PositionAlreadyClosed here, but the fast path
+    # skips the extract/compute work for the no-op case.
     if position.get("status") == "closed":
         logger.info(
             f"[CLOSE_ON_FILL] Position {position_id[:8]} already closed, skipping"
         )
         return
 
-    qty = float(position.get("quantity") or 0)
-    entry_price = float(position.get("avg_entry_price") or 0)
-    multiplier = 100.0
+    raw_qty = float(position.get("quantity") or 0)
+    if raw_qty == 0:
+        logger.warning(
+            f"[CLOSE_ON_FILL] Position {position_id[:8]} has quantity=0 "
+            f"but status!='closed'; cannot derive spread_type. "
+            f"Skipping close; manual review required."
+        )
+        _write_close_path_critical_alert(
+            supabase, position, "derive_inputs",
+            f"quantity=0 with status={position.get('status')!r}",
+        )
+        return
 
-    # Alpaca multi-leg (mleg) orders use a net-cash-flow sign on the
-    # parent order's `filled_avg_price`: positive = net DEBIT paid,
-    # negative = net CREDIT received. Single-leg option orders use
-    # `filled_avg_price` as the per-contract price directly.
+    qty_abs = abs(int(raw_qty))
+    spread_type = "debit" if raw_qty > 0 else "credit"
+    entry_price = Decimal(str(position.get("avg_entry_price") or 0))
+
+    # Step 1: extract legs from Alpaca fill data.
+    try:
+        close_legs = extract_close_legs(alpaca_order)
+    except (PartialFillDetected, MalformedFillData) as exc:
+        _write_close_path_critical_alert(
+            supabase, position, "extract_close_legs", str(exc),
+        )
+        return
+
+    # Step 2: compute realized_pl via canonical leg-level math.
+    try:
+        realized_pl = compute_realized_pl(
+            close_legs=close_legs,
+            entry_price=entry_price,
+            qty=qty_abs,
+            spread_type=spread_type,
+        )
+    except PartialFillDetected as exc:
+        _write_close_path_critical_alert(
+            supabase, position, "compute_realized_pl", str(exc),
+        )
+        return
+
+    # Step 3: atomic close via shared helper.
     #
-    # For a long spread CLOSE we receive credit, so an mleg fill comes
-    # back with a negative `filled_avg_price`. We must flip the sign
-    # before differencing against the positive `entry_price`; otherwise
-    # the math double-counts the credit as loss (e.g. PYPL cfe69b28 on
-    # 2026-04-17 recorded -$3,324 realized when the actual loss was
-    # -$204: entry 2.94 - close credit 2.60 = -$0.34 × 6 × 100).
-    #
-    # For a short spread CLOSE we pay debit — `filled_avg_price` is
-    # positive for both mleg (net debit paid) and single-leg
-    # (buy-to-close price). Both produce the same formula, so no
-    # translation needed.
-    is_mleg = str(alpaca_order.get("order_class") or "").lower() == "mleg"
-    abs_qty = abs(qty)
-    if qty > 0:
-        # Long position close. Sold out → received credit.
-        exit_per_contract = -fill_price if is_mleg else fill_price
-        realized_pl = (exit_per_contract - entry_price) * abs_qty * multiplier
-    else:
-        # Short position close. Bought back → paid debit.
-        realized_pl = (entry_price - fill_price) * abs_qty * multiplier
-
-    now = datetime.now(timezone.utc).isoformat()
-
-    # Close position
-    supabase.table("paper_positions").update({
-        "quantity": 0,
-        "status": "closed",
-        "close_reason": "alpaca_fill",
-        "closed_at": filled_at,
-        "realized_pl": round(realized_pl, 2),
-        "updated_at": now,
-    }).eq("id", position_id).execute()
+    # close_reason='alpaca_fill_reconciler_standard' for all new
+    # reconciler closes. The historical value
+    # 'alpaca_fill_reconciler_sign_corrected' is preserved in the
+    # enum for the one existing row (PYPL cfe69b28, manual UPDATE
+    # 2026-04-20) but not written here — compute_realized_pl
+    # handles sign conventions automatically post-PR #790.
+    try:
+        closed_at_dt = _parse_iso_timestamp(filled_at_iso)
+        close_position_shared(
+            supabase=supabase,
+            position_id=position_id,
+            realized_pl=realized_pl,
+            close_reason="alpaca_fill_reconciler_standard",
+            fill_source="alpaca_fill_reconciler",
+            closed_at=closed_at_dt,
+        )
+    except PositionAlreadyClosed as exc:
+        _write_close_path_critical_alert(
+            supabase, position, "close_position_shared", str(exc),
+            extra_metadata={
+                "existing_close_reason": exc.existing_close_reason,
+                "existing_fill_source": exc.existing_fill_source,
+                "existing_closed_at": exc.existing_closed_at,
+            },
+        )
+        return
 
     logger.info(
         f"[CLOSE_ON_FILL] Position closed: id={position_id[:8]} "
-        f"symbol={position.get('symbol')} fill_price={fill_price} "
-        f"realized_pl=${realized_pl:.2f}"
+        f"symbol={position.get('symbol')} "
+        f"realized_pl=${realized_pl}"
     )
+
+
+def _write_close_path_critical_alert(
+    supabase,
+    position: Dict[str, Any],
+    stage: str,
+    reason: str,
+    extra_metadata: Optional[Dict[str, Any]] = None,
+) -> None:
+    """Write a severity='critical' risk_alert when a close-path
+    anomaly aborts the reconciler's close attempt.
+
+    Anomalies covered: PartialFillDetected, MalformedFillData,
+    PositionAlreadyClosed, or any other pre-condition failure.
+    Caller returns early after writing; no close action taken.
+
+    Swallows its own exceptions — a failed risk_alert write must
+    not cascade to a handler crash. Logs via logger.error instead.
+    """
+    try:
+        metadata = {
+            "detector": "alpaca_fill_reconciler",
+            "stage": stage,
+            "reason": reason,
+        }
+        if extra_metadata:
+            metadata.update(extra_metadata)
+        supabase.table("risk_alerts").insert({
+            "user_id": position.get("user_id"),
+            "alert_type": "close_path_anomaly",
+            "severity": "critical",
+            "position_id": position.get("id"),
+            "symbol": position.get("symbol"),
+            "message": (
+                f"Reconciler close aborted at {stage}: {reason[:200]}"
+            ),
+            "metadata": metadata,
+        }).execute()
+    except Exception as alert_err:
+        logger.error(
+            f"[CLOSE_ON_FILL] Failed to write critical risk_alert for "
+            f"position {position.get('id', '?')[:8]}: {alert_err}. "
+            f"Original anomaly at {stage}: {reason[:200]}"
+        )
+
+
+def _parse_iso_timestamp(ts: str) -> datetime:
+    """Parse an ISO-8601 timestamp (with either 'Z' or '+00:00'
+    suffix) to a timezone-aware datetime. Returns utcnow() as
+    fallback on parse failure rather than raising — caller has
+    already completed the fill-math work at this point."""
+    try:
+        normalized = ts.replace("Z", "+00:00") if ts.endswith("Z") else ts
+        return datetime.fromisoformat(normalized)
+    except (ValueError, AttributeError, TypeError):
+        return datetime.now(timezone.utc)
 
 
 def poll_pending_orders(

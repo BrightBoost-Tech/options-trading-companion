@@ -17,12 +17,97 @@ Schedule: 3:00 PM CDT (before mark-to-market at 3:30 PM).
 import logging
 import os
 from datetime import date, datetime, timezone
+from decimal import Decimal
 from typing import Dict, Any, List, Tuple, Optional, Callable
+
+from packages.quantum.services.close_math import (
+    compute_realized_pl,
+    PartialFillDetected,
+)
+from packages.quantum.services.close_helper import (
+    close_position_shared,
+    PositionAlreadyClosed,
+)
 
 PDT_MAX_DAY_TRADES = int(os.environ.get("PDT_MAX_DAY_TRADES", "3"))
 EXIT_RANKING_ENABLED = os.environ.get("EXIT_RANKING_ENABLED", "1") == "1"
 
 logger = logging.getLogger(__name__)
+
+
+# Mapping from exit-evaluator reason strings (emitted by EXIT_CONDITIONS
+# and by intraday_risk_monitor) to the 9-value close_reason enum that
+# close_position_shared accepts. The exit-evaluator side still emits
+# legacy-style reasons ('target_profit', 'stop_loss') because that's
+# the API the conditions dict and the intraday caller use; the mapping
+# translates them at the close-write boundary so only the 9 canonical
+# values reach the DB. Phase 2 of the enum migration drops the legacy
+# values entirely; this mapping is the last place they exist post-PR-#6.
+_REASON_MAP = {
+    "target_profit": "target_profit_hit",
+    "target_profit_hit": "target_profit_hit",
+    "stop_loss": "stop_loss_hit",
+    "stop_loss_hit": "stop_loss_hit",
+    "dte_threshold": "dte_threshold",
+    "expiration_day": "expiration_day",
+}
+
+
+def _map_close_reason(raw_reason: str) -> Optional[str]:
+    """Translate an exit-evaluator reason string to a canonical
+    close_reason enum value. Returns None on unknown reasons — caller
+    writes a severity='critical' risk_alert and skips the close rather
+    than guessing. The `risk_envelope:*` prefix (from intraday monitor)
+    maps to 'envelope_force_close'."""
+    if raw_reason is None:
+        return None
+    s = str(raw_reason).strip()
+    if not s:
+        return None
+    if s.startswith("risk_envelope:"):
+        return "envelope_force_close"
+    return _REASON_MAP.get(s)
+
+
+def _write_exit_eval_critical_alert(
+    supabase,
+    position: Dict[str, Any],
+    user_id: str,
+    stage: str,
+    reason: str,
+    extra_metadata: Optional[Dict[str, Any]] = None,
+) -> None:
+    """Write a severity='critical' risk_alert when the exit-evaluator
+    close pipeline aborts (partial-fill anomaly, unknown reason,
+    PositionAlreadyClosed race).
+
+    Swallows its own exceptions — an alert-write failure must not
+    cascade to a handler crash."""
+    try:
+        metadata = {
+            "detector": "paper_exit_evaluator",
+            "stage": stage,
+            "reason": reason,
+        }
+        if extra_metadata:
+            metadata.update(extra_metadata)
+        supabase.table("risk_alerts").insert({
+            "user_id": user_id or position.get("user_id"),
+            "alert_type": "close_path_anomaly",
+            "severity": "critical",
+            "position_id": position.get("id"),
+            "symbol": position.get("symbol"),
+            "message": (
+                f"Exit-evaluator close aborted at {stage}: {reason[:200]}"
+            ),
+            "metadata": metadata,
+        }).execute()
+    except Exception as alert_err:
+        logger.error(
+            f"[EXIT_EVAL] Failed to write critical risk_alert for "
+            f"position {(position.get('id') or '?')[:8]}: {alert_err}. "
+            f"Original anomaly at {stage}: {reason[:200]}"
+        )
 
 
 def days_to_expiry(position: Dict[str, Any]) -> int:
@@ -1008,24 +1093,90 @@ class PaperExitEvaluator:
             },
         )
 
-        # 4. Close position with realized P&L
-        #    Short (credit) positions: profit = (entry_credit - close_cost) * qty * 100
-        #    Long (debit) positions:    profit = (exit_price - entry_cost) * qty * 100
-        if qty < 0:
-            # Short position: entry was a credit (sell), exit is a debit (buy)
-            realized_pl = (entry_price - exit_price) * abs_qty * multiplier
-        else:
-            # Long position: entry was a debit (buy), exit is a credit (sell)
-            realized_pl = (exit_price - entry_price) * abs_qty * multiplier
+        # 4. Close position via shared pipeline.
+        #
+        # PR #6 refactor. Route the internal-fill close through the
+        # canonical close_math + close_helper stack so all 4 handlers
+        # produce bit-identical realized_pl for equivalent inputs.
+        #
+        # Internal simulation vs real broker fill: the reconciler path
+        # extracts close_legs from Alpaca fill data (actual per-leg
+        # prices). The internal-fill path has only a per-spread
+        # current_mark, so we synthesize a single LegFill from it.
+        # This is the legitimate architectural difference between real
+        # leg-level reconciliation and internal MTM simulation — both
+        # flow through the same compute_realized_pl contract.
+        synth_action = "sell" if qty > 0 else "buy"
+        spread_type = "debit" if qty > 0 else "credit"
+        synth_legs = [{
+            "symbol": position.get("symbol"),
+            "action": synth_action,
+            "filled_qty": abs_qty,
+            "filled_avg_price": exit_price,
+        }]
 
-        supabase.table("paper_positions").update({
-            "quantity": 0,
-            "status": "closed",
-            "close_reason": reason,
-            "closed_at": now,
-            "realized_pl": realized_pl,
-            "updated_at": now,
-        }).eq("id", position_id).execute()
+        try:
+            realized_pl_dec = compute_realized_pl(
+                close_legs=synth_legs,
+                entry_price=Decimal(str(entry_price)),
+                qty=int(abs_qty),
+                spread_type=spread_type,
+            )
+        except PartialFillDetected as exc:
+            # Internal synthesis should never trip this; if it does,
+            # something is wrong with abs_qty/exit_price inputs.
+            _write_exit_eval_critical_alert(
+                supabase, position, user_id,
+                stage="compute_realized_pl",
+                reason=str(exc),
+            )
+            return {
+                "order_id": order_id,
+                "processed": 0,
+                "routed_to": "internal_aborted",
+                "note": f"compute_realized_pl failed: {str(exc)[:120]}",
+            }
+
+        mapped_reason = _map_close_reason(reason)
+        if mapped_reason is None:
+            _write_exit_eval_critical_alert(
+                supabase, position, user_id,
+                stage="map_close_reason",
+                reason=f"Unknown exit reason {reason!r}; close aborted.",
+            )
+            return {
+                "order_id": order_id,
+                "processed": 0,
+                "routed_to": "internal_aborted",
+                "note": f"Unknown reason {reason!r}",
+            }
+
+        try:
+            close_position_shared(
+                supabase=supabase,
+                position_id=position_id,
+                realized_pl=realized_pl_dec,
+                close_reason=mapped_reason,
+                fill_source="exit_evaluator",
+                closed_at=datetime.now(timezone.utc),
+            )
+        except PositionAlreadyClosed as exc:
+            _write_exit_eval_critical_alert(
+                supabase, position, user_id,
+                stage="close_position_shared",
+                reason=str(exc),
+                extra_metadata={
+                    "existing_close_reason": exc.existing_close_reason,
+                    "existing_fill_source": exc.existing_fill_source,
+                    "existing_closed_at": exc.existing_closed_at,
+                },
+            )
+            return {
+                "order_id": order_id,
+                "processed": 0,
+                "routed_to": "internal_aborted",
+                "note": "PositionAlreadyClosed — race with another close handler",
+            }
 
         return {
             "order_id": order_id,

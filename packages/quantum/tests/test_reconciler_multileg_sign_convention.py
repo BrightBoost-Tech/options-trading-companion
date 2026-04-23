@@ -1,37 +1,29 @@
 """
-Regression tests for multi-leg sign-convention handling in
-`_close_position_on_fill` (alpaca_order_handler).
+Integration tests for `alpaca_order_handler._close_position_on_fill` —
+the Alpaca-fill reconciler's close path.
 
-Motivating incident: PYPL cfe69b28 on 2026-04-17. Alpaca filled a
-long-debit-spread CLOSE at net credit 2.60/spread (the parent mleg
-order reported `filled_avg_price = -2.60` because Alpaca's multi-leg
-convention is: positive = net debit paid, negative = net credit
-received). The reconciler read −2.60 literally as an "exit price" and
-computed `realized_pl = (-2.60 − 2.94) × 6 × 100 = -$3,324` when the
-actual loss was just -$204 ( entry 2.94 paid - close 2.60 received =
--$0.34/spread × 6 × 100 ).
+PR #6 refactor (Commit 4b) migrated this function from inline
+parent-level sign-flip math to the shared 3-stage pipeline
+(extract_close_legs → compute_realized_pl → close_position_shared).
+This file covers the integration surface: the handler as glue code
+between Alpaca order shape and paper_positions close write. Pure
+math invariants live in test_close_math.py; helper invariants live
+in test_close_helper.py.
 
-The bug is sibling to two earlier close-path findings that also ship
-as standalone P0s paying down PR #6's scope:
-  - PR #784: `alpaca_order_sync` didn't invoke `poll_pending_orders`
-    for users whose only non-terminal orders were `needs_manual_review`
-    (outer-caller gap). That let the PYPL fill stay unreconciled for
-    4+ hours. See 2026-04-17 diagnosis notes.
-  - NFLX 846bc787 $138 overcount (2026-04-16): `manual_internal_fill`
-    path wrote `unrealized_pl` into `realized_pl`. Different mechanism,
-    same class: a specific close-path caller recording realized P&L
-    incorrectly. PR #6's shared helper (with required `realized_pl` +
-    `fill_source` parameters) structurally eliminates the class.
+Motivating incident (PYPL cfe69b28, 2026-04-17): Alpaca filled a
+long-debit-spread CLOSE at net credit 2.60/spread. Pre-PR #790 the
+reconciler read −2.60 literally and computed realized_pl = -$3,324
+when the actual loss was -$204. Pre-PR #790 also allowed any
+close-path caller to write `realized_pl` inconsistently (e.g. the
+NFLX 846bc787 $138 overcount 2026-04-16: the internal-fill path
+wrote `unrealized_pl` into `realized_pl`). The shared pipeline
+structurally eliminates both classes by routing all 4 close
+handlers through a single pure math function + a single atomic
+writer.
 
-This PR fixes the reconciler's sign convention in-place. The cleaner
-canonical math lands with PR #6's shared close helper.
-
-Single call site. `paper_exit_evaluator._close_position` uses a
-different math pattern (`exit_price = position.current_mark` — a
-per-contract price from MTM, not a cash-flow-signed value) so is not
-in scope here. Its Alpaca-path route short-circuits to the reconciler
-at line 905-953 anyway, so fixing the reconciler fixes the Alpaca-
-routed close end to end.
+The PYPL regression headline test below now asserts the canonical
+leg-level inputs produce realized_pl = -204.00 through the whole
+reconciler path — not just through the pure math function.
 """
 
 import sys
@@ -39,8 +31,8 @@ import types
 import unittest
 from unittest.mock import MagicMock
 
-# Stub alpaca-py surface so `from packages.quantum.brokers ...` imports
-# cleanly when alpaca-py isn't installed in the test venv.
+# Stub alpaca-py surface so `from packages.quantum.brokers ...`
+# imports cleanly when alpaca-py isn't installed in the test venv.
 _alpaca_pkg = types.ModuleType("alpaca")
 _alpaca_trading = types.ModuleType("alpaca.trading")
 _alpaca_trading_requests = types.ModuleType("alpaca.trading.requests")
@@ -51,45 +43,77 @@ sys.modules.setdefault("alpaca.trading.requests", _alpaca_trading_requests)
 from packages.quantum.brokers import alpaca_order_handler  # noqa: E402
 
 
-def _make_supabase(position_row):
-    """Supabase mock that returns `position_row` for the position
-    fetch, captures the paper_positions UPDATE payload in a list."""
-    updates = []
+def _make_supabase(position_row, update_rows=None):
+    """Build a Supabase-client mock for the reconciler path.
+
+    `position_row` is returned from the initial
+    paper_positions.select(*).eq(id).single().execute() fetch.
+
+    `update_rows` controls the result of the conditional update
+    inside close_position_shared: default [{"id": "pos-1"}] = 1 row
+    affected (happy path). Pass [] to simulate a 0-rows-affected
+    update and exercise the diagnostic SELECT branch.
+    """
+    if update_rows is None:
+        update_rows = [{"id": (position_row or {}).get("id", "pos-1")}]
+
+    captured_updates = []
+    captured_inserts = []
     supabase = MagicMock()
 
     def table_side_effect(name):
         chain = MagicMock()
+
         if name == "paper_positions":
-            # Two phases: (1) .select(...).single().execute() returns
-            # the fetch; (2) .update(payload).eq(...).execute() is the
-            # close-write.
+            # Initial fetch chain: .select(*).eq().single().execute()
+            # returns the position row.
             select_chain = MagicMock()
             select_chain.execute.return_value = MagicMock(data=position_row)
-            for m in ("select", "eq", "single", "neq"):
-                getattr(select_chain, m).return_value = select_chain
+            for method_name in ("select", "eq", "single", "limit"):
+                getattr(select_chain, method_name).return_value = select_chain
             chain.select.return_value = select_chain
 
+            # Update chain:
+            # .update(payload).eq("id", pid).neq("status", "closed")
+            #     .execute() → data=[{...}]  (1 row on happy path)
             def capture_update(payload):
-                updates.append(payload)
-                return chain
+                captured_updates.append(payload)
+                update_chain = MagicMock()
+                update_chain.eq.return_value = update_chain
+                update_chain.neq.return_value = update_chain
+                update_chain.execute.return_value = MagicMock(data=update_rows)
+                return update_chain
 
             chain.update.side_effect = capture_update
-            chain.eq.return_value = chain
-            chain.execute.return_value = MagicMock(data=None)
+
+        elif name == "risk_alerts":
+            # _write_close_path_critical_alert inserts a row here on
+            # any anomaly. We capture to let tests assert what fired.
+            def capture_insert(payload):
+                captured_inserts.append(payload)
+                insert_chain = MagicMock()
+                insert_chain.execute.return_value = MagicMock(data=None)
+                return insert_chain
+
+            chain.insert.side_effect = capture_insert
+
         else:
-            for m in ("select", "eq", "in_", "single", "limit"):
-                getattr(chain, m).return_value = chain
+            # Fallback passthrough for any other table access.
+            for method_name in ("select", "eq", "in_", "single", "limit"):
+                getattr(chain, method_name).return_value = chain
             chain.execute.return_value = MagicMock(data=[])
+
         return chain
 
     supabase.table.side_effect = table_side_effect
-    return supabase, updates
+    return supabase, captured_updates, captured_inserts
 
 
-def _position(qty, entry_price, symbol="PYPL"):
+def _position(qty, entry_price, symbol="PYPL", user_id="user-1"):
     """Build a minimal paper_positions row."""
     return {
         "id": "pos-1",
+        "user_id": user_id,
         "symbol": symbol,
         "quantity": qty,
         "avg_entry_price": entry_price,
@@ -100,188 +124,258 @@ def _position(qty, entry_price, symbol="PYPL"):
 
 
 class TestMultilegSignConvention(unittest.TestCase):
-    """
-    The heart of the regression: Alpaca mleg parent filled_avg_price
-    uses net-cash-flow sign. The reconciler must translate it to a
-    position-side-correct per-contract exit value before differencing
-    against entry_price.
+    """The PR #790 sign-convention invariants, re-expressed against
+    the PR #6 leg-level pipeline. Parent-level filled_avg_price sign
+    is no longer a concern — the new pipeline consumes legs directly,
+    so Alpaca's mleg parent sign convention is structurally irrelevant.
     """
 
     def test_pypl_incident_reproduction_long_close_at_credit(self):
-        """
-        Exact PYPL cfe69b28 numbers — the live 2026-04-17 incident.
-        entry 2.94 debit, close via net credit 2.60, qty 6. Expected
-        realized_pl = -$204; the buggy code recorded -$3,324.
+        """Canonical PYPL cfe69b28 regression.
+
+        entry 2.94 debit, qty 6. Close legs: sell 5.05 + buy 2.45.
+        Expected realized_pl = (-2.94 + 5.05 - 2.45) × 6 × 100 = -$204.
         """
         position = _position(qty=6.0, entry_price=2.94)
-        supabase, updates = _make_supabase(position)
+        supabase, updates, inserts = _make_supabase(position)
         alpaca_order = {
             "order_class": "mleg",
-            "filled_avg_price": -2.60,  # mleg: negative = credit received
             "filled_qty": 6,
             "filled_at": "2026-04-17T17:15:11.251325Z",
+            "legs": [
+                {"symbol": "PYPL-LONG",  "side": "sell",
+                 "filled_qty": 6, "filled_avg_price": 5.05},
+                {"symbol": "PYPL-SHORT", "side": "buy",
+                 "filled_qty": 6, "filled_avg_price": 2.45},
+            ],
         }
 
         alpaca_order_handler._close_position_on_fill(
             supabase, "pos-1", order={}, alpaca_order=alpaca_order,
         )
 
-        self.assertEqual(len(updates), 1)
+        self.assertEqual(len(updates), 1, f"Expected 1 close-write; inserts={inserts}")
         upd = updates[0]
         self.assertEqual(upd["status"], "closed")
         self.assertEqual(upd["quantity"], 0)
-        # The critical assertion: realized_pl matches real P&L, not
-        # the sign-convention-broken −$3,324.
-        self.assertAlmostEqual(upd["realized_pl"], -204.00, places=2)
+        # realized_pl is stored as string (Decimal → str for PostgREST).
+        self.assertEqual(str(upd["realized_pl"]), "-204.00")
+        self.assertEqual(upd["close_reason"], "alpaca_fill_reconciler_standard")
+        self.assertEqual(upd["fill_source"], "alpaca_fill_reconciler")
+        self.assertEqual(inserts, [])  # no risk_alerts on happy path
 
-    def test_mleg_long_close_at_profit_credit_greater_than_debit(self):
-        """
-        Long debit spread closed at profit: entry 2.94, close credit 4.00.
-        Expected realized_pl = (4.00 − 2.94) × 6 × 100 = +$636.
+    def test_mleg_long_close_at_profit(self):
+        """Long debit spread closed at profit: entry 2.94,
+        close legs sell 7.00 + buy 3.00 = net 4.00 credit.
+        Expected realized_pl = (-2.94 + 7.00 - 3.00) × 6 × 100 = +$636.
         """
         position = _position(qty=6.0, entry_price=2.94)
-        supabase, updates = _make_supabase(position)
+        supabase, updates, _ = _make_supabase(position)
         alpaca_order = {
             "order_class": "mleg",
-            "filled_avg_price": -4.00,
             "filled_qty": 6,
             "filled_at": "2026-04-20T14:00:00Z",
+            "legs": [
+                {"symbol": "X-LONG",  "side": "sell",
+                 "filled_qty": 6, "filled_avg_price": 7.00},
+                {"symbol": "X-SHORT", "side": "buy",
+                 "filled_qty": 6, "filled_avg_price": 3.00},
+            ],
         }
 
         alpaca_order_handler._close_position_on_fill(
             supabase, "pos-1", order={}, alpaca_order=alpaca_order,
         )
 
-        self.assertAlmostEqual(updates[0]["realized_pl"], 636.00, places=2)
+        self.assertEqual(str(updates[0]["realized_pl"]), "636.00")
 
-    def test_mleg_short_close_uses_direct_debit_sign(self):
-        """
-        Short credit spread closed for a debit: entry 4.20 credit, qty -3,
-        close debit 1.00. Expected realized = (4.20 − 1.00) × 3 × 100 = +$960.
-        Short branch formula unchanged.
+    def test_mleg_short_close_at_profit(self):
+        """Short credit spread: entry 4.20 credit (qty -3), closed via
+        buy-back at 1.00 debit net. Close legs: buy 2.00 + sell 1.00.
+        Expected realized = (+4.20 - 2.00 + 1.00) × 3 × 100 = +$960.
         """
         position = _position(qty=-3.0, entry_price=4.20, symbol="GOOGL")
-        supabase, updates = _make_supabase(position)
+        supabase, updates, _ = _make_supabase(position)
         alpaca_order = {
             "order_class": "mleg",
-            "filled_avg_price": 1.00,  # mleg short close: positive = net debit paid
             "filled_qty": 3,
             "filled_at": "2026-04-20T14:00:00Z",
+            "legs": [
+                {"symbol": "GOOGL-LONG",  "side": "buy",
+                 "filled_qty": 3, "filled_avg_price": 2.00},
+                {"symbol": "GOOGL-SHORT", "side": "sell",
+                 "filled_qty": 3, "filled_avg_price": 1.00},
+            ],
         }
 
         alpaca_order_handler._close_position_on_fill(
             supabase, "pos-1", order={}, alpaca_order=alpaca_order,
         )
 
-        self.assertAlmostEqual(updates[0]["realized_pl"], 960.00, places=2)
+        self.assertEqual(str(updates[0]["realized_pl"]), "960.00")
 
     def test_mleg_short_close_at_loss(self):
-        """
-        Short credit spread that moved against us — closing for more
-        debit than we received in credit. entry 1.50 credit, close
-        debit 2.75, qty -4. Expected realized = (1.50 − 2.75) × 4 × 100 = -$500.
+        """Short credit spread moved against us: entry 1.50 credit
+        (qty -4), closed at 2.75 debit. Legs: buy 3.50 + sell 0.75.
+        Expected realized = (+1.50 - 3.50 + 0.75) × 4 × 100 = -$500.
         """
         position = _position(qty=-4.0, entry_price=1.50, symbol="AMD")
-        supabase, updates = _make_supabase(position)
+        supabase, updates, _ = _make_supabase(position)
         alpaca_order = {
             "order_class": "mleg",
-            "filled_avg_price": 2.75,
             "filled_qty": 4,
             "filled_at": "2026-04-20T14:00:00Z",
+            "legs": [
+                {"symbol": "AMD-LONG",  "side": "buy",
+                 "filled_qty": 4, "filled_avg_price": 3.50},
+                {"symbol": "AMD-SHORT", "side": "sell",
+                 "filled_qty": 4, "filled_avg_price": 0.75},
+            ],
         }
 
         alpaca_order_handler._close_position_on_fill(
             supabase, "pos-1", order={}, alpaca_order=alpaca_order,
         )
 
-        self.assertAlmostEqual(updates[0]["realized_pl"], -500.00, places=2)
+        self.assertEqual(str(updates[0]["realized_pl"]), "-500.00")
 
-    def test_single_leg_long_close_does_not_flip_sign(self):
-        """
-        Single-leg option close — `filled_avg_price` is the per-contract
-        sale price directly, NO sign translation. A long call bought
-        at 5.00 and sold at 6.00 must record +$100 profit, not -$1,100.
+    def test_single_leg_long_close(self):
+        """Single-leg long call: entry 5.00, close sale at 6.00,
+        qty 1. _synthesize_single_leg constructs the LegFill from
+        parent-level fields. Expected realized = +$100.
         """
         position = _position(qty=1.0, entry_price=5.00, symbol="AAPL")
-        supabase, updates = _make_supabase(position)
-        alpaca_order = {
-            "order_class": "simple",  # single-leg
-            "filled_avg_price": 6.00,
-            "filled_qty": 1,
-            "filled_at": "2026-04-20T14:00:00Z",
-        }
-
-        alpaca_order_handler._close_position_on_fill(
-            supabase, "pos-1", order={}, alpaca_order=alpaca_order,
-        )
-
-        self.assertAlmostEqual(updates[0]["realized_pl"], 100.00, places=2)
-
-    def test_single_leg_short_close_unchanged(self):
-        """
-        Single-leg short call bought back: entry credit 3.00, close
-        debit 1.50, qty -1. Expected realized = (3.00 − 1.50) × 1 × 100 = $150.
-        Short branch formula works for single-leg just as for mleg.
-        """
-        position = _position(qty=-1.0, entry_price=3.00, symbol="TSLA")
-        supabase, updates = _make_supabase(position)
+        supabase, updates, _ = _make_supabase(position)
         alpaca_order = {
             "order_class": "simple",
-            "filled_avg_price": 1.50,
+            "symbol": "O:AAPL250117C00150000",
+            "side": "sell",
             "filled_qty": 1,
-            "filled_at": "2026-04-20T14:00:00Z",
-        }
-
-        alpaca_order_handler._close_position_on_fill(
-            supabase, "pos-1", order={}, alpaca_order=alpaca_order,
-        )
-
-        self.assertAlmostEqual(updates[0]["realized_pl"], 150.00, places=2)
-
-    def test_order_class_missing_treated_as_single_leg(self):
-        """
-        Defensive guard: if Alpaca's response lacks `order_class` for
-        any reason, default to single-leg semantics (no sign flip).
-        Otherwise a missing field would silently inflate realized_pl
-        on long closes — same failure mode in the opposite direction.
-        """
-        position = _position(qty=1.0, entry_price=5.00, symbol="AAPL")
-        supabase, updates = _make_supabase(position)
-        alpaca_order = {
-            # no order_class
             "filled_avg_price": 6.00,
-            "filled_qty": 1,
             "filled_at": "2026-04-20T14:00:00Z",
         }
+
         alpaca_order_handler._close_position_on_fill(
             supabase, "pos-1", order={}, alpaca_order=alpaca_order,
         )
-        # Should compute as single-leg: (6 - 5) × 1 × 100 = 100.
-        self.assertAlmostEqual(updates[0]["realized_pl"], 100.00, places=2)
+
+        self.assertEqual(str(updates[0]["realized_pl"]), "100.00")
+
+    def test_single_leg_short_close(self):
+        """Single-leg short call bought back: entry 3.00 credit
+        (qty -1), close buy at 1.50. Expected = (+3.00 - 1.50) × 1
+        × 100 = +$150.
+        """
+        position = _position(qty=-1.0, entry_price=3.00, symbol="TSLA")
+        supabase, updates, _ = _make_supabase(position)
+        alpaca_order = {
+            "order_class": "simple",
+            "symbol": "O:TSLA250117C00200000",
+            "side": "buy",
+            "filled_qty": 1,
+            "filled_avg_price": 1.50,
+            "filled_at": "2026-04-20T14:00:00Z",
+        }
+
+        alpaca_order_handler._close_position_on_fill(
+            supabase, "pos-1", order={}, alpaca_order=alpaca_order,
+        )
+
+        self.assertEqual(str(updates[0]["realized_pl"]), "150.00")
 
 
 class TestPositionSkipPaths(unittest.TestCase):
-    """Sanity: existing skip conditions unchanged by this fix."""
+    """Fast-path guards: no pipeline invocation, no updates, no
+    alerts. Unchanged behavior from pre-PR-#6.
+    """
 
     def test_position_already_closed_is_skipped(self):
         position = _position(qty=6.0, entry_price=2.94)
         position["status"] = "closed"
-        supabase, updates = _make_supabase(position)
-        alpaca_order = {"order_class": "mleg", "filled_avg_price": -2.60, "filled_qty": 6}
+        supabase, updates, inserts = _make_supabase(position)
+        alpaca_order = {
+            "order_class": "mleg",
+            "filled_qty": 6,
+            "legs": [
+                {"side": "sell", "filled_qty": 6, "filled_avg_price": 5.05},
+                {"side": "buy",  "filled_qty": 6, "filled_avg_price": 2.45},
+            ],
+        }
 
         alpaca_order_handler._close_position_on_fill(
             supabase, "pos-1", order={}, alpaca_order=alpaca_order,
         )
-        # No update attempted — existing guard honoured.
         self.assertEqual(updates, [])
+        self.assertEqual(inserts, [])
 
     def test_position_not_found_is_skipped(self):
-        supabase, updates = _make_supabase(position_row=None)
-        alpaca_order = {"order_class": "mleg", "filled_avg_price": -2.60, "filled_qty": 6}
+        supabase, updates, inserts = _make_supabase(position_row=None)
+        alpaca_order = {
+            "order_class": "mleg",
+            "filled_qty": 6,
+            "legs": [
+                {"side": "sell", "filled_qty": 6, "filled_avg_price": 5.05},
+                {"side": "buy",  "filled_qty": 6, "filled_avg_price": 2.45},
+            ],
+        }
         alpaca_order_handler._close_position_on_fill(
             supabase, "missing", order={}, alpaca_order=alpaca_order,
         )
         self.assertEqual(updates, [])
+        self.assertEqual(inserts, [])
+
+
+class TestAnomalyAlerts(unittest.TestCase):
+    """Pipeline exceptions must fire a severity='critical' risk_alert
+    and abort the close — no paper_positions write."""
+
+    def test_partial_fill_on_legs_aborts_and_alerts(self):
+        """Alpaca returned filled_qty=5 but position has qty=6 — not
+        an all-or-nothing close. extract_close_legs raises
+        PartialFillDetected; handler writes critical alert and returns.
+        """
+        position = _position(qty=6.0, entry_price=2.94)
+        supabase, updates, inserts = _make_supabase(position)
+        alpaca_order = {
+            "order_class": "mleg",
+            "filled_qty": 5,
+            "legs": [
+                {"side": "sell", "filled_qty": 5, "filled_avg_price": 5.05},
+                {"side": "buy",  "filled_qty": 5, "filled_avg_price": 2.45},
+            ],
+        }
+
+        alpaca_order_handler._close_position_on_fill(
+            supabase, "pos-1", order={}, alpaca_order=alpaca_order,
+        )
+
+        self.assertEqual(updates, [])  # no close-write
+        self.assertEqual(len(inserts), 1)
+        alert = inserts[0]
+        self.assertEqual(alert["severity"], "critical")
+        self.assertEqual(alert["alert_type"], "close_path_anomaly")
+        self.assertEqual(alert["metadata"]["stage"], "compute_realized_pl")
+
+    def test_malformed_fill_aborts_and_alerts(self):
+        """No legs, no parent fill data → extract_close_legs raises
+        MalformedFillData. Handler writes critical alert and returns.
+        """
+        position = _position(qty=1.0, entry_price=5.00, symbol="AAPL")
+        supabase, updates, inserts = _make_supabase(position)
+        alpaca_order = {
+            "order_class": "simple",
+            # missing: symbol, side, filled_qty, filled_avg_price
+            "filled_at": "2026-04-20T14:00:00Z",
+        }
+
+        alpaca_order_handler._close_position_on_fill(
+            supabase, "pos-1", order={}, alpaca_order=alpaca_order,
+        )
+
+        self.assertEqual(updates, [])
+        self.assertEqual(len(inserts), 1)
+        self.assertEqual(inserts[0]["severity"], "critical")
+        self.assertEqual(inserts[0]["metadata"]["stage"], "extract_close_legs")
 
 
 if __name__ == "__main__":

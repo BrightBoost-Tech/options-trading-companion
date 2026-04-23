@@ -169,6 +169,15 @@ class TestNoLegacyCloseReasonLiterals(unittest.TestCase):
     _ALLOWED_FILES_WITH_LEGACY_MENTIONS = {
         "services/paper_exit_evaluator.py",  # _REASON_MAP keys (not values)
         "services/close_helper.py",           # docstring mentions only
+        # phase2_precheck handler uses the legacy strings as Q1 query
+        # INPUTS (.in_('close_reason', _LEGACY_REASONS)) to detect
+        # rows that shouldn't exist post-migration. It never writes
+        # these values — only searches for them. Same semantic
+        # category as _REASON_MAP keys above. Follow-up work could
+        # consolidate the legacy set into a shared module
+        # (close_helper exports it, handler imports); for now,
+        # allowlist is the minimal-diff path.
+        "jobs/handlers/phase2_precheck.py",  # _LEGACY_REASONS query-input
     }
 
     def test_no_legacy_close_reason_written_by_production_code(self):

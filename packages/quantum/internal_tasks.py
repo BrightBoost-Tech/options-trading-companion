@@ -295,6 +295,26 @@ async def heartbeat_task(
     )
 
 
+@router.post("/phase2-precheck", status_code=202)
+async def phase2_precheck_task(
+    auth: TaskSignatureResult = Depends(verify_task_signature("tasks:phase2_precheck"))
+):
+    """PR #6 Phase 2 observation-window verification.
+
+    Runs every 6 hours for 48h post-deploy. Self-expires when
+    PR6_DEPLOY_TIMESTAMP + 48h is past. See
+    docs/pr6_close_path_consolidation.md §5 for the 4 verification
+    queries this exercises."""
+    now = datetime.now()
+    return enqueue_job_run(
+        job_name="phase2_precheck",
+        idempotency_key=f"phase2-precheck-{now.strftime('%Y-%m-%d-%H%M')}",
+        payload={
+            "trigger_ts": now.isoformat(),
+        },
+    )
+
+
 @router.post("/autotune/walk-forward", status_code=202)
 async def walk_forward_autotune_task(
     lookback_days: int = Body(60, embed=True),

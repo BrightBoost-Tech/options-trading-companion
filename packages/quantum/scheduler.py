@@ -71,6 +71,14 @@ SCHEDULES = [
 
     # Scheduler liveness heartbeat — creates a job_run so ops_health_check can detect scheduler death
     ("scheduler_heartbeat",         dict(minute="*/30", hour="8-17"), "/internal/tasks/heartbeat", "tasks:heartbeat", "Scheduler liveness heartbeat"),
+
+    # PR #6 Phase 2 observation-window verification. Runs every 6 hours
+    # for 48 hours post-deploy; self-expires after the window. Reads
+    # PR6_DEPLOY_TIMESTAMP env var (set on deploy) to bound the
+    # verification query search. See docs/pr6_close_path_consolidation.md
+    # §5. Leaving this entry in place after Phase 2 ships is harmless —
+    # the handler returns no-op once hours_since_deploy > 48.
+    ("phase2_precheck",             dict(minute=0, hour="*/6"), "/internal/tasks/phase2-precheck", "tasks:phase2_precheck", "PR #6 Phase 2 precheck verification"),
 ]
 
 

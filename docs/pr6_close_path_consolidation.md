@@ -150,6 +150,70 @@ PHASE 2 (~24h later, separate PR / migration file)
 `GRANDFATHER_CUTOFF = '2026-04-26 00:00:00+00'` — historical rows
 closed before this timestamp are exempt from `close_path_required`.
 
+### 3.1 Deploy Checklist — required env vars
+
+Immediately after PR #6 deploy completes on Railway, verify both
+of the following env vars are set on the **worker** service:
+
+```
+PR6_DEPLOY_TIMESTAMP=<ISO 8601 UTC timestamp of deploy completion>
+USER_ID=<trading account owner UUID>
+```
+
+Example: `PR6_DEPLOY_TIMESTAMP=2026-04-23T01:03:41Z`.
+`USER_ID` is typically already set on the worker for other
+user-scoped jobs (`TRADING_USER_IDS`); confirm it's present.
+
+**PR6_DEPLOY_TIMESTAMP** bounds the `phase2_precheck` cron
+handler's verification queries to rows closed AFTER the PR #6
+deploy. If unset, the handler fires every 6h and writes a
+`severity='warning'` risk_alert with `metadata.status='config_missing'`
+until the env var is populated — loud failure, not silent.
+
+Accepted formats: ISO 8601 with explicit UTC offset (`Z` or `+00:00`).
+Naive timestamps without timezone are rejected.
+
+**USER_ID** is required because `risk_alerts` has a FK to
+`users(id)` — the handler cannot write a row without a valid
+user UUID. If unset or empty, the handler logs a stderr warning
+(`[PHASE2_PRECHECK] USER_ID env var is unset or empty`) and
+returns without writing. Discovered 2026-04-23 during the manual
+T+0 baseline write: a placeholder UUID (`00000000-...`) fails
+`risk_alerts_user_id_fkey`; the handler pivots to the env-var
+value to avoid the crash.
+
+### 3.2 phase2_precheck cron
+
+Defined in `packages/quantum/scheduler.py` as the `phase2_precheck`
+schedule: fires every 6 hours, every hour where `hour mod 6 == 0`.
+Handler: `packages/quantum/jobs/handlers/phase2_precheck.py`.
+
+Each run:
+1. Reads `PR6_DEPLOY_TIMESTAMP` env var. Missing → warning alert, exit.
+2. If `now - deploy_timestamp > 48h` → no-op, no alert.
+3. Otherwise runs all 4 §5 verification queries against the DB.
+4. Writes one `risk_alerts` row with `alert_type='phase2_precheck'`.
+   - `severity='info'` if Q1/Q2/Q3 all zero (all-clean)
+   - `severity='warning'` if Q4 alerts present but Q1/Q2/Q3 clean
+     (informational — operator reviews underlying anomalies)
+   - `severity='critical'` if any of Q1/Q2/Q3 non-zero
+     (hard-gate failure — Phase 2 must NOT apply)
+5. Full query results captured in `metadata.query_results` for
+   Phase 2 PR evidence.
+
+The Phase 2 PR description references a specific row ID from this
+cron sequence (e.g. `SELECT id FROM risk_alerts WHERE alert_type =
+'phase2_precheck' AND severity = 'info' ORDER BY created_at DESC
+LIMIT 1`) as green-light evidence. Not a screenshot, not operator
+memory — the row ID.
+
+**T+0 baseline row** (manual, pre-cron): `81f10e34-61d8-40d5-9d92-
+948a17ceaeb7`, written 2026-04-23T11:44:56Z after the Phase 1
+migration-repair incident. `metadata.verification_type=
+'phase2_precheck_manual_t0_after_migration_repair'`, all checks
+passed. The cron sequence continues from this baseline — the
+first automated run writes the second row in the sequence.
+
 ---
 
 ## 4. Runbook — `close_path_anomaly` risk_alert

@@ -99,6 +99,25 @@ Env var discipline:
 - Rollback: Railway's deployment history → click a previous deploy →
   Redeploy. Takes ~90s.
 
+### Supabase migrations
+
+Supabase schema changes do NOT auto-apply on Railway deploy. A human
+operator must apply each migration manually after the code merges
+to `main`. Detailed procedure: **CLAUDE.md → "Migration Apply
+Procedure"**.
+
+In brief:
+1. After merge, re-inspect the SQL file on `main`.
+2. Apply via `mcp__supabase__apply_migration` (canonical) or
+   Supabase Dashboard SQL editor.
+3. Verify via constraint/column query.
+4. Log the apply as a `risk_alerts` row with
+   `alert_type='migration_apply'`.
+
+Auto-apply wiring and drift reconciliation (329 divergent columns
+vs migration history) are planned work — backlog #62. Not available
+as of 2026-04-23.
+
 ## Daily Operations
 
 Full cron pipeline lives in `packages/quantum/scheduler.py`. Key times

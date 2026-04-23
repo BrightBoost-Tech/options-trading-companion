@@ -214,6 +214,66 @@ migration-repair incident. `metadata.verification_type=
 passed. The cron sequence continues from this baseline — the
 first automated run writes the second row in the sequence.
 
+### 3.3 Pre-Phase-2 apply checklist
+
+**Phase 2 PR opens when BOTH:**
+
+(a) The observation window has closed: T+48h elapsed from the
+    PR #6 merge at 2026-04-23T01:03:41Z, i.e. the earliest valid
+    open timestamp is 2026-04-25T01:03:41Z.
+
+(b) The most-recent `phase2_precheck` risk_alert has
+    `metadata.all_checks_passed = true` AND the total count of
+    successful cron fires (excluding the manual T+0 baseline) is
+    ≥ 7. The expected count is 8 (one per 6h interval over 48h);
+    one missed fire is absorbed without blocking Phase 2, to
+    allow for Railway restart or scheduler glitch at a boundary.
+
+    ```sql
+    SELECT COUNT(*)
+    FROM risk_alerts
+    WHERE alert_type = 'phase2_precheck'
+      AND severity = 'info'
+      AND (metadata->>'all_checks_passed')::boolean = true
+      AND metadata->>'verification_type' = 'phase2_precheck';
+    -- Excludes the manual T+0 baseline (verification_type =
+    -- 'phase2_precheck_manual_t0_after_migration_repair'). Must
+    -- return ≥ 7.
+    ```
+
+If condition (b) fails, investigate the specific check that
+failed before opening the Phase 2 PR. Do NOT merge Phase 2 with
+any failed precheck unresolved in the sequence.
+
+**On open** — the Phase 2 PR description spells out the full apply
+procedure inline. Do not delegate to this doc.
+
+**On Phase 2 apply** (after merge):
+
+1. **Green-light reference row.** Include the specific
+   `phase2_precheck` row ID in the Phase 2 PR description:
+
+   ```sql
+   SELECT id, created_at
+   FROM risk_alerts
+   WHERE alert_type = 'phase2_precheck'
+     AND severity = 'info'
+     AND (metadata->>'all_checks_passed')::boolean = true
+     AND metadata->>'verification_type' = 'phase2_precheck'
+   ORDER BY created_at DESC
+   LIMIT 1;
+   ```
+
+2. **Apply Phase 2 migration.** Follow CLAUDE.md → "Migration
+   Apply Procedure" exactly. No deviation.
+
+3. **Post-apply verification**: re-run §5 queries. All 4 must
+   return zero rows.
+
+4. **Log the apply as `alert_type='migration_apply'`** per the
+   general procedure. Include `metadata.cross_reference` pointing
+   at the green-light `phase2_precheck` row ID from step 1.
+
 ---
 
 ## 4. Runbook — `close_path_anomaly` risk_alert

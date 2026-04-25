@@ -18,7 +18,11 @@ class UniverseService:
         "AAPL", "MSFT", "AMZN", "GOOGL", "GOOG", "META", "TSLA", "NVDA", "AMD",
         "NFLX", "INTC", "CSCO", "CMCSA", "PEP", "AVGO", "TXN", "ADBE", "QCOM",
         "COST", "TMUS", "AMGN", "CHTR", "SBUX", "PYPL", "INTU", "GILD", "FISV",
-        "BKNG", "ADP", "ISRG", "MDLZ", "REGN", "VRTX", "CSX", "MU", "AMAT"
+        "BKNG", "ADP", "ISRG", "MDLZ", "REGN", "VRTX", "CSX", "MU", "AMAT",
+        # micro_live $500 capital additions — cheap-options names with deep ATM OI.
+        # Liquidity evidence + rejection rationale for GE/PLTR/NIO in
+        # docs/micro_live_config.md.
+        "F", "BAC", "SOFI", "T", "KO", "VZ",
     ]
 
     def __init__(self, supabase: Client, polygon_service: PolygonService = None):

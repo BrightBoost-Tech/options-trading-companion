@@ -31,6 +31,7 @@ For AI session context, this file is loaded every turn.
 - **Risk profile:** 70/100 — aggressive paper growth (8% base risk, compounding ON, 4 max trades)
 - **Alpaca live account:** Approved Level 3 options trading (spreads, multi-leg)
 - **Live trading:** Ready pending 4 consecutive green days in alpaca_paper phase
+- **micro_live target capital:** $500 (set on `v3_go_live_state.paper_baseline_capital` at Monday-morning apply; full runbook in `docs/micro_live_config.md`)
 
 ---
 

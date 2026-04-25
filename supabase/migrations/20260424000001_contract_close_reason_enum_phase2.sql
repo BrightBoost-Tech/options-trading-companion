@@ -1,19 +1,33 @@
 -- =============================================================================
 -- Phase 2 of the close-path enum expand-and-contract migration (PR #6).
 --
--- Drops 5 legacy close_reason values from the CHECK and adds the
--- close_path_required combined CHECK (fill_source + close_reason +
--- realized_pl all NOT NULL for closed rows past the grandfather cutoff).
+-- SCOPE: ONLY the check_close_reason_enum 14→9 contraction. Drops the
+-- 5 legacy close_reason values from the CHECK, leaving the strict
+-- canonical 9-value set.
+--
+-- close_path_required was added in Phase 1 Step 7 with a more
+-- defensive definition (uses 'status IS DISTINCT FROM closed' for
+-- the open-row gate, strict '<' for the cutoff comparison). Phase 2
+-- deliberately leaves it untouched.
+--
+-- HISTORY: An earlier draft of this file (merged as PR #802) included
+-- a DROP IF EXISTS + ADD of close_path_required with a slightly
+-- weaker definition ('closed_at IS NULL' open-row gate, '<=' cutoff
+-- comparison). That draft was caught at pre-apply re-verification
+-- per CLAUDE.md §Migration Apply Procedure step 2 (re-derive from
+-- upstream sources, not from artifact under review) and never
+-- applied to production. The correction shipped via the fix PR that
+-- contains this revised file.
 --
 -- Phase 1 file (reference):
 --   supabase/migrations/20260423000001_expand_close_reason_enum_phase1.sql
 --
--- Grandfather cutoff:
+-- Grandfather cutoff (referenced for context only — no longer
+-- modified by Phase 2):
 --   GRANDFATHER_CUTOFF = '2026-04-26 00:00:00+00'
 --   Historical paper_positions rows closed before this timestamp are
---   exempt from close_path_required. The cutoff is the same value
---   referenced in Phase 1's documentation and chosen to sit ~48h after
---   PR #6 merges, after the 24h observation window closes.
+--   exempt from close_path_required (the Phase 1 constraint). Phase 2
+--   does not re-issue the constraint, so this cutoff is informational.
 --
 -- Operator reference:
 --   docs/pr6_close_path_consolidation.md
@@ -64,7 +78,7 @@
 
 BEGIN;
 
--- Step 1. Drop-and-replace the close_reason CHECK.
+-- Step 1 (sole step). Drop-and-replace the close_reason CHECK.
 -- Contracts the Phase-1 14-value permissive set to the strict
 -- 9-value canonical set. Legacy rows (closed_at < GRANDFATHER_CUTOFF)
 -- are unaffected by the CHECK change because DROP + ADD with IS NULL
@@ -93,29 +107,8 @@ ALTER TABLE paper_positions
         )
     );
 
--- Step 2. Combined close_path_required CHECK.
--- Enforces the PR #6 contract: every post-PR-#6 close row has ALL
--- of (fill_source, close_reason, realized_pl) populated. Historical
--- rows closed before GRANDFATHER_CUTOFF are exempt (many have NULL
--- fill_source from pre-migration era).
---
--- The CHECK uses closed_at as the grandfather gate. Rows still open
--- (status != 'closed') are not subject to the check because closed_at
--- is NULL on open rows — the CHECK's closed_at > cutoff clause is
--- only TRUE on close writes past the cutoff.
-ALTER TABLE paper_positions
-    DROP CONSTRAINT IF EXISTS close_path_required;
-ALTER TABLE paper_positions
-    ADD CONSTRAINT close_path_required
-    CHECK (
-        closed_at IS NULL
-        OR closed_at <= '2026-04-26 00:00:00+00'::timestamptz
-        OR (
-            fill_source IS NOT NULL
-            AND close_reason IS NOT NULL
-            AND realized_pl IS NOT NULL
-        )
-    );
+-- (close_path_required intentionally NOT touched here — Phase 1
+-- Step 7 owns it. See header HISTORY note.)
 
 COMMIT;
 
@@ -144,8 +137,13 @@ COMMIT;
 --           'manual_internal_fill', 'alpaca_fill_manual'
 --         )
 --       );
---     ALTER TABLE paper_positions DROP CONSTRAINT close_path_required;
 --   COMMIT;
+--
+-- Rollback scope note:
+--   close_path_required is NOT touched by rollback. Phase 1 owns
+--   that constraint and Phase 2 never modified it; the rollback
+--   only needs to undo Phase 2's check_close_reason_enum
+--   contraction.
 --
 -- Rollback semantics:
 --   Accepting legacy close_reason values TEMPORARILY is strictly

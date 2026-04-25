@@ -52,3 +52,7 @@ htmlcov/
 
 # Supabase Temp
 supabase/.temp/
+
+# Local MCP and Claude Code config (may contain tokens)
+.mcp.json
+.claude/

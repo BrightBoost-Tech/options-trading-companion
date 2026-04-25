@@ -19,19 +19,19 @@ For AI session context, this file is loaded every turn.
 
 ## Current Phase
 
-- **Trading mode:** `alpaca_paper` (EXECUTION_MODE env)
-- **Promotion target:** 4 consecutive green days through Alpaca → `micro_live`
-- **Green days so far:** 1 of 4 required
-- **Last green day:** 2026-04-16 (counted after ghost-position reconcile + weekly_pnl math fix)
-- **Open positions:** 0 (reconciled 2026-04-16 ~20:00Z)
+- **Trading mode:** `micro_live` (EXECUTION_MODE env, flipped 2026-04-25 17:10:36Z)
+- **Promotion type:** manual operator-initiated. Green-day gate (1/4) bypassed; continuous-growth model adopted. Audit `risk_alerts.id = 82f1c294-19a4-4c66-8a68-0b0811ef5b24`.
+- **Account:** live Alpaca `211900084`, options Level 3
+- **Starting capital:** $500 on `v3_go_live_state.paper_baseline_capital` (set 2026-04-25 15:38:04Z, audit `c9d87caf-24db-4f7f-842a-748620a5c84f`)
+- **Open positions:** 0 (AMZN closed 2026-04-25 15:56:36Z with realized_pl +$325.50, audit `b6229d5e-1543-4304-9ab1-6f37e0e869c8`)
+- **Settlement:** `options_buying_power = $0` as of 2026-04-25 (ACH settlement pending; expected to clear Mon–Tue)
+- **Universe:** 62 symbols. PR #804 added F, BAC, SOFI, T, KO, VZ; sync triggered 2026-04-25 17:17Z (job_run `25eec261-d3e3-4b4a-aefe-2865770b001d`).
 - **Pipeline status:** Full end-to-end pipeline validated 2026-04-10
-- **daily_progression_eval:** Running at 16:00 CT (21:00 UTC standard / 20:00 UTC DST)
+- **daily_progression_eval:** Running at 16:00 CT. The alpaca_paper → micro_live promotion gate has been bypassed (operator-initiated promotion). Future phase transitions are a deferred decision under the continuous-growth model.
 - **Iron condors:** DISABLED in current phase. Debit spreads only.
 - **Calibration job:** Running daily at 05:00 CT; writes to `calibration_adjustments`.
-- **Risk profile:** 70/100 — aggressive paper growth (8% base risk, compounding ON, 4 max trades)
-- **Alpaca live account:** Approved Level 3 options trading (spreads, multi-leg)
-- **Live trading:** Ready pending 4 consecutive green days in alpaca_paper phase
-- **micro_live target capital:** $500 (set on `v3_go_live_state.paper_baseline_capital` at Monday-morning apply; full runbook in `docs/micro_live_config.md`)
+- **Risk profile:** micro-tier — 8% base risk per trade × score/regime/compounding multipliers (see "Risk per trade math"). Effective per-trade risk typically 8–12% of capital.
+- **Phase 2 contract:** enforced — `check_close_reason_enum` (9 values), `check_fill_source_enum`, `close_path_required` constraints intact
 
 ---
 
@@ -66,6 +66,34 @@ For AI session context, this file is loaded every turn.
 | TASK_NONCE_PROTECTION | `1` | Security v4 nonce replay protection |
 | TASK_NONCE_FAIL_CLOSED_IN_PROD | `1` | Fail closed if nonce store unavailable |
 | TASK_SIGNING_KEYS | set | HMAC keys for /tasks/ endpoint signing |
+
+### Critical env var: paper-vs-live mode
+
+There are TWO env vars with similar names that control different layers:
+
+- **`ALPACA_PAPER`** (Railway BE/worker): read by application code in
+  `packages/quantum/brokers/`. Controls whether the trading service routes
+  orders to paper or live Alpaca. Currently `false` post-promotion.
+- **`ALPACA_PAPER_TRADE`** (alpaca-mcp-server, `.claude.json` env block):
+  read by the alpaca-mcp-server library to choose endpoint URL
+  (`paper-api.alpaca.markets` vs `api.alpaca.markets`). Defaults to
+  `"true"` if unset.
+
+**BOTH must be set to `false` for live trading.** Setting only one
+produces a partial-state where one layer talks paper and another talks
+live. Verified 2026-04-25 by reading alpaca-mcp-server source — the lib
+reads `ALPACA_PAPER_TRADE` specifically; Railway-side application code
+reads `ALPACA_PAPER`.
+
+### Alpaca live key prefix gotcha
+
+Alpaca live Trading API keys for this account use the **AK** prefix.
+Public Alpaca docs reference `PK` as the typical format, but live keys
+for some accounts use `AK`. Confirmed live and working as of 2026-04-25.
+
+Paper keys consistently use `PKPR2` prefix. Distinguishing rule:
+- Endpoint `https://api.alpaca.markets` = live (key prefix may be `AK` or `PK`)
+- Endpoint `https://paper-api.alpaca.markets` = paper (key prefix `PKPR…`)
 
 ### Flags in use — single source of truth
 
@@ -358,6 +386,140 @@ ORDER BY created_at DESC LIMIT 5;
 
 ---
 
+## Cohort architecture (current state, 2026-04-25)
+
+The system has three cohorts (conservative / neutral / aggressive) in
+`policy_lab_cohorts` per user. **Original design:** champion/challenger
+evaluation with `promoted_at` field selecting the live cohort.
+
+**Actual implementation:**
+
+- Live trade routing is **hardcoded to "aggressive"** at
+  `packages/quantum/policy_lab/fork.py:67`. Source suggestions emerge
+  from the orchestrator's `SmallAccountCompounder.rank_and_select` call
+  at `packages/quantum/services/workflow_orchestrator.py:2049-2094` and
+  are tagged `cohort_name = "aggressive"` regardless of `promoted_at`.
+- Decision-logging path (`policy_decisions` table) is **live**: 189
+  decisions in last 30 days across all 3 cohorts, 45 outcomes backfilled.
+  Latest decision 2026-04-24 16:00Z.
+- Daily-scoring path (`policy_lab_daily_results`, `policy_daily_scores`)
+  is **silent**: both tables empty for 30+ days.
+- `policy_lab_eval` scheduled job (16:30 CT daily, registered at
+  `scheduler.py:55`) has fired **0 times in the last 7 days** while peer
+  scheduled jobs ran 5 times each.
+- `check_promotion` runs daily but returns `no_scores_data` due to empty
+  score tables; **no promotions are possible** in current state.
+
+**Sizing duality (documented intent, not bug):**
+
+- **Layer 1 — live aggressive trades:** sized via `SmallAccountCompounder`
+  (micro tier, 8% base × multipliers). See "Risk per trade math".
+- **Layer 2 — shadow cohort clones (conservative + neutral portfolios):**
+  sized via `cohort.policy_config.max_risk_pct_per_trade × risk_multiplier`
+  in `fork.py:196-201`. These trades execute against separate
+  `paper_portfolio_id`s for shadow comparison.
+
+These are **intentionally separate** sizing layers. Layer 1 drives live
+execution. Layer 2 drives shadow comparison data. Reconciliation deferred
+until 30+ days of `policy_lab_daily_scores` accumulate to inform which
+layer's math correlates with better outcomes.
+
+**Roadmap:** backlog #65 covers reviving `policy_lab_eval`. Without
+revival, the system runs single-strategy (aggressive only) with no
+learning loop on cohort comparisons.
+
+---
+
+## Risk per trade math
+
+Live trades are sized by
+`SmallAccountCompounder.calculate_variable_sizing` at
+`packages/quantum/services/analytics/small_account_compounder.py:62-115`.
+
+```
+final_risk_pct = base_risk_pct × score_mult × regime_mult × compounding_mult
+risk_budget    = capital × final_risk_pct
+```
+
+**Components:**
+
+- `base_risk_pct` from `CapitalTier`:
+  - micro (cap < $1k) → **0.08 (8%)**
+  - small ($1k–$5k) → 0.03
+  - standard (≥ $5k) → 0.02
+- `score_mult = clamp(0.8 + (score − 50)/50 × 0.4, 0.8, 1.2)`.
+  Examples: score 50→0.80, 75→1.00, **85→1.08**, 100→1.20.
+- `regime_mult`: 1.0 normal · 0.9 suppressed · 0.8 elevated · 0.5 shock.
+- `compounding_mult`: 1.2 if `COMPOUNDING_MODE=true` AND tier ∈ {micro, small}
+  AND score ≥ 80; else 1.0.
+
+**Defensive cap:** when `COMPOUNDING_MODE=false` AND tier ∈ {micro, small},
+`base_risk_pct` is overridden to **0.02 (2%)** regardless of tier default
+(`small_account_compounder.py:76-77`).
+
+**Worked example** at $500 + score 85 + normal regime + `COMPOUNDING_MODE=true`:
+
+```
+risk_pct    = 0.08 × 1.08 × 1.0 × 1.2 = 0.10368  (~10.4%)
+risk_budget = $500 × 0.10368 ≈ $52 per trade
+```
+
+**The "1.08 risk_multiplier observed in logs" is the score multiplier
+in `SmallAccountCompounder` for a candidate scoring 85, NOT the cohort
+`risk_multiplier`** (1.08 / 1.0 / 1.2 in `policy_lab_cohorts.policy_config`,
+which sizes shadow clones at `fork.py:196-201`, not live trades).
+
+---
+
+## Polygon dependency status (2026-04-25)
+
+**Current state:**
+- 63 production Polygon API calls across 23 files
+- 11 services with direct Polygon dependency: `options_scanner`,
+  `paper_mark_to_market_service`, `paper_endpoints`, `dashboard_endpoints`,
+  `option_contract_resolver`, `outcome_aggregator`, `universe_service`,
+  `earnings_calendar_service`, `iv_daily_refresh`, `event_engine`,
+  `nested/backbone`.
+- `MarketDataTruthLayer` provides Alpaca-first failover **for snapshot
+  paths only**. Most heavy callers bypass it.
+- **Failure mode: silent degradation.** The `@guardrail` decorator in
+  `services/provider_guardrails.py` returns typed empty values
+  (`None`, `{}`, `[]`) on Polygon errors. No `risk_alerts` written. No
+  `job_run.error` populated. Saturday 2026-04-25's `update_metrics`
+  429s left zero database trace.
+
+**Phase-out plan (committed):**
+
+**Tier 1 — within 2 weeks (safety-critical):**
+- Delete dead code: `packages/quantum/polygon_client.py` (zero non-test
+  callers) and `market_data.py:_get_option_snapshot_api` (deprecated).
+- Harden `outcome_aggregator._calculate_execution_pnl`: replace the
+  silent-`None` pattern with explicit `logger.error` + `risk_alerts`
+  insert on bar-fetch failure. The current pattern silently corrupts
+  realized-P&L attribution feeding the calibration loop.
+
+**Tier 2 — within 6 weeks (high-frequency-failure paths):**
+- Migrate `universe_service` to Alpaca for `get_historical_prices` and
+  `get_iv_rank`. Eliminates the Saturday 429 root cause.
+- Migrate `market_data.py` base layer (`get_historical_prices`,
+  `get_recent_quote`, `get_option_chain_snapshot`) to Alpaca.
+  Subsequent service migrations (paper_mtm, dashboard, options_scanner)
+  flow from this base.
+
+**Tier 3 — deferred indefinitely (acceptable residual):**
+- `get_ticker_details` (sector, market_cap) — no Alpaca equivalent.
+  Implement Supabase-cache pattern with weekly manual refresh.
+- `get_last_financials_date` (earnings ±90d estimation) — no Alpaca
+  equivalent. Same Supabase-cache pattern.
+- `I:VIX` historical bars — no Alpaca equivalent for index symbols.
+  Single symbol, low call volume; keep Polygon for this.
+- Backtest paths (`historical_simulation`, `option_contract_resolver`
+  backtest paths) — non-production; defer.
+
+**Backlog tracking:** items #65–#70 below.
+
+---
+
 ## 5 Open Code Gaps (priority order)
 
 - **GAP 1** — Canonical ranking metric: expected PnL after slippage/fees ÷
@@ -539,10 +701,45 @@ Full chronology lives in git history; search commits from 2026-03 and earlier.
 - Prefer minimal diffs over full rewrites
 - Always check `job_runs` table before assuming a cron ran successfully
 
+## Backlog (post-promotion)
+
+**#65 — Revive `policy_lab_eval`** (HIGH)
+Diagnose why the scheduler-registered job hasn't fired in 7+ days
+despite `scheduler.py:55` defining it. Restore daily scoring rollup to
+populate `policy_lab_daily_results` and `policy_daily_scores`. Without
+revival, champion/challenger learning is non-functional and
+`check_promotion` returns `no_scores_data` indefinitely.
+
+**#66 — Polygon Tier 1: dead-code deletion** (LOW)
+Remove `packages/quantum/polygon_client.py` (zero non-test callers) and
+`market_data.py:_get_option_snapshot_api` (deprecated). Single PR, no
+functional change.
+
+**#67 — Polygon Tier 1: outcome_aggregator hardening** (HIGH)
+Replace silent-`None` pattern in `_calculate_execution_pnl` with
+loud-error logging + `risk_alerts` insert. Currently corrupts the
+calibration loop invisibly when Polygon bar fetches fail.
+
+**#68 — Polygon Tier 2: universe_service migration** (MEDIUM)
+Replace `get_historical_prices` and `get_iv_rank` with Alpaca
+equivalents. Eliminates the 429 root cause from Saturday 2026-04-25.
+
+**#69 — Polygon Tier 2: market_data.py base-layer migration** (MEDIUM)
+Foundational PR for stock bars and quotes via Alpaca. Enables
+downstream service migrations (paper_mtm, dashboard, options_scanner).
+
+**#70 — Polygon Tier 3: HARD_TO_REPLACE strategy** (LOW)
+Implement Supabase-cache pattern for `get_ticker_details` and
+`get_last_financials_date`. Document `I:VIX` as accepted residual
+Polygon dependency. Defer until #66–#69 complete.
+
+---
+
 ## Live State (auto-updated)
-- **Phase:** alpaca_paper
-- **Green days:** 1 of 4 required
-- **Last green day:** 2026-04-16
-- **Open positions:** 0 (matches Alpaca `get_all_positions()` → [])
-- **Alpaca equity:** $97,276.32 (last_equity $97,711.88 close of 4/15)
-- **Last updated:** 2026-04-17 01:05
+- **Phase:** micro_live (since 2026-04-25 17:10:36Z)
+- **Promotion gate:** bypassed; continuous-growth model
+- **Open positions:** 0 (AMZN closed 2026-04-25 15:56Z, realized_pl +$325.50)
+- **Alpaca live equity:** $500.00 (account 211900084)
+- **Alpaca options BP:** $0.00 (ACH settlement pending)
+- **Universe:** 62 symbols (refreshed 2026-04-25 17:17Z)
+- **Last updated:** 2026-04-25

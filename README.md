@@ -8,13 +8,57 @@ and closes the learning loop via calibrated EV/PoP multipliers.
 
 | Metric | Value |
 |---|---|
-| Phase | `alpaca_paper` |
-| Gate to next phase | 4 consecutive Alpaca-paper green days |
-| Next milestone | `micro_live` ($500–$1K cap) |
-| Source of truth | `go_live_progression` table + Alpaca account |
+| Phase | `micro_live` (since 2026-04-25 17:10:36Z, audit `82f1c294-19a4-4c66-8a68-0b0811ef5b24`) |
+| Account | live Alpaca `211900084` |
+| Starting capital | $500 (`v3_go_live_state.paper_baseline_capital`, audit `c9d87caf-24db-4f7f-842a-748620a5c84f`) |
+| Open positions | 0 (AMZN closed 2026-04-25 15:56Z with realized_pl +$325.50, audit `b6229d5e-1543-4304-9ab1-6f37e0e869c8`) |
+| Universe | 62 symbols (PR #804 added F, BAC, SOFI, T, KO, VZ on 2026-04-25) |
+| Phase 2 contract | enforced — canonical 9-value `close_reason` enum + `close_path_required` CHECK |
+| Source of truth | `go_live_progression` + `v3_go_live_state` + Alpaca `get_account()` |
 
 For AI-session context, see `CLAUDE.md`. For day-to-day ops SQL and
 queries, see the Observability section below.
+
+## Operational Docs
+
+| Doc | Purpose |
+|---|---|
+| [`docs/micro_live_config.md`](docs/micro_live_config.md) | $500 micro_live runbook, capital scaling rule, Steps A–G apply procedure |
+| [`docs/pr6_observation_queries.md`](docs/pr6_observation_queries.md) | Q-CF, Q-CP, Q-Jobs queries — 48h Phase 2 observation window |
+| [`docs/pr6_close_path_consolidation.md`](docs/pr6_close_path_consolidation.md) | Close-path rollback procedure if Phase 2 contract breaks |
+| [`docs/data_providers_overview.md`](docs/data_providers_overview.md) | Alpaca/Polygon routing reference |
+| [`docs/ops_verification_go_live.md`](docs/ops_verification_go_live.md) | Pre-flip verification checklist |
+
+## Risk Profile
+
+Live trades are sized by `SmallAccountCompounder` at
+`packages/quantum/services/analytics/small_account_compounder.py:62-115`,
+not by cohort `policy_config`. At $500 capital the account sits in the
+**micro tier** (capital < $1k):
+
+| Component | Value |
+|---|---|
+| Tier | micro (capital < $1k) |
+| `base_risk_pct` | 0.08 (8%) |
+| `score_mult` | 0.8 + (score − 50)/50 × 0.4, clamped [0.8, 1.2]. Score 50→0.80, 75→1.00, 85→1.08, 100→1.20 |
+| `regime_mult` | 1.0 normal · 0.9 suppressed · 0.8 elevated · 0.5 shock |
+| `compounding_mult` | 1.2 if `COMPOUNDING_MODE=true` AND tier ∈ {micro, small} AND score ≥ 80; else 1.0 |
+| Defensive cap | when `COMPOUNDING_MODE=false` AND tier ∈ {micro, small}, `base_risk_pct` is overridden to 0.02 |
+| Concentration limit | `RISK_MAX_SYMBOL_PCT=0.40` (Railway BE env) |
+| Hard cap per trade | ~$50–60 at $500 capital, score 75–90, normal regime, compounding ON |
+
+Effective risk per trade typically **8–12% of capital**. Worked example
+at $500 + score 85 + normal + compounding ON:
+
+```
+final_risk_pct = 0.08 × 1.08 × 1.0 × 1.2 = 0.10368  (~10.4%)
+risk_budget    = $500 × 0.10368 ≈ $52
+```
+
+Cohort `risk_multiplier` (1.08, 1.0, 1.2 in `policy_lab_cohorts`) is a
+**separate parameter** that sizes shadow clones at
+`packages/quantum/policy_lab/fork.py:196-201`, not live trades. See
+CLAUDE.md → "Cohort architecture" for the two-layer split.
 
 ## Architecture
 
@@ -38,7 +82,7 @@ scripts/                   Signed task runner, one-off tools
 | Database | Supabase (managed Postgres) |
 | Scheduling | APScheduler in-process (primary); GHA fallback |
 | Broker | Alpaca (paper + live; Level 3 options) |
-| Market Data | Alpaca primary; Polygon fallback |
+| Market Data | Hybrid — Alpaca primary for snapshot paths via `MarketDataTruthLayer`; Polygon direct (no fallback) for ~63 other call sites pending tiered phase-out (CLAUDE.md → "Polygon dependency status") |
 | Frontend | Next.js 14, Shadcn UI |
 | Deploy | Railway (BE, FE, worker, Redis) |
 
@@ -70,7 +114,11 @@ pip install -r requirements.txt
 # Env (copy + fill in)
 cp .env.example .env
 # Required for local dev: SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY,
-# ALPACA_API_KEY, ALPACA_SECRET_KEY, POLYGON_API_KEY, TASK_SIGNING_KEYS
+# ALPACA_API_KEY, ALPACA_SECRET_KEY, ALPACA_PAPER, POLYGON_API_KEY,
+# TASK_SIGNING_KEYS
+# Note: ALPACA_PAPER (BE/worker code) and ALPACA_PAPER_TRADE
+# (alpaca-mcp-server) are different vars — both must agree.
+# See CLAUDE.md → "Critical env var: paper-vs-live mode".
 
 # Run API (from repo root)
 cd ../..

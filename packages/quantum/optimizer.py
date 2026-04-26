@@ -26,7 +26,7 @@ from packages.quantum.market_data import PolygonService, calculate_portfolio_inp
 from packages.quantum.ev_calculator import calculate_ev, calculate_kelly_sizing
 from packages.quantum.nested_logging import log_inference, log_decision
 from packages.quantum.nested.adapters import load_symbol_adapters, apply_biases
-from packages.quantum.nested.backbone import compute_macro_features, infer_global_context, log_global_context
+from packages.quantum.nested.backbone import compute_macro_features, infer_global_context
 from packages.quantum.nested.session import load_session_state, refresh_session_from_db, get_session_sigma_scale
 from packages.quantum.security import get_current_user_id, is_localhost
 from packages.quantum.security.config import is_debug_routes_enabled

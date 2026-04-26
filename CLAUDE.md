@@ -686,12 +686,21 @@ OBSERVABILITY (surfaces other bugs faster) → CORRECTNESS → CLEANUP.
 - [ ] **#65 final verification:** Verify scheduler-fired run Monday
       2026-04-27 16:30 CT. Expected: 3 rows with `trade_date=2026-04-27`
       in `policy_daily_scores` within 10 minutes of fire time, no
-      `policy_lab_eval_cohort_failure` alerts. This is the final
-      acceptance criterion for #65 closure.
-- [ ] **#67 Polygon Tier 1 — `outcome_aggregator` loud-error hardening.**
-      SAFETY. Silent-`None` corrupts the calibration loop today.
+      `policy_lab_eval_cohort_failure` alerts. Passive observation only.
+      This is the final acceptance criterion for #65 closure.
 - [ ] **P1: consolidate `_estimate_equity` / `_compute_weekly_pnl`**
-      into shared module (72h follow-up from 83872db).
+      into shared module (72h follow-up from 83872db). SAFETY/correctness.
+- [ ] **#62a schema drift audit — kickoff.** Read-only diagnostic
+      sweep; can run in parallel with the consolidation above. Soak
+      through next week. See #62a backlog entry for scope. Justified
+      by 3 instances in 1 week.
+
+(Note: #67 was on this list as a SAFETY item but was demoted to
+dead-code cleanup on 2026-04-26 after diagnostic verification — see
+"Notable findings 2026-04-26" below. The Priority 1 SAFETY slot is
+filled by `_estimate_equity` consolidation, not by close-path
+consolidation, which was already completed by PR #796 + PR #802 and
+is in the Completed list above.)
 
 **Priority 2 — This Month**
 - [ ] **#72 Loud-error doctrine audit** — establish doctrine + first
@@ -701,12 +710,11 @@ OBSERVABILITY (surfaces other bugs faster) → CORRECTNESS → CLEANUP.
       `enqueue_job_run` pattern.
 - [ ] **Agent sessions observability** — shared `agent_session_context`
       helper so Loss Min / Self-Learning / Profit Optimization write rows.
-- [ ] **#62a — Schema drift audit** (preparation for #62). Catalog all
-      `(table, column)` pairs where code writes columns that don't exist
-      in current schema OR reads columns that were dropped. Output:
-      prioritized list of subsystems needing reconciliation. ~1 week.
-      Justified by: today's #65 incident was one instance of this exact
-      failure class; #62's 329 cols + 12 tables have similar latent risk.
+- [ ] **#62a — Schema drift audit (continued)** — kickoff is in
+      Priority 1; soak/cataloging completes here. Three confirmed
+      instances of the failure class this week (PR #6 enum, #65
+      `policy_lab_daily_results` columns, `outcomes_log` columns).
+      See full scope in the #62a backlog entry below.
 - [ ] **#68 Polygon Tier 2 — `universe_service` Alpaca migration**
       (eliminates Saturday 2026-04-25 429 root cause).
 - [ ] **#69 Polygon Tier 2 — `market_data.py` base-layer Alpaca
@@ -742,6 +750,42 @@ OBSERVABILITY (surfaces other bugs faster) → CORRECTNESS → CLEANUP.
       schedule blocks). APScheduler is primary; pure hygiene.
 - [ ] **Full live automation** — final, after GAPs 1-4.
 
+### Notable findings 2026-04-26 (Sunday)
+
+#67 was queued as Priority 1 SAFETY work based on Saturday's
+Diagnostic B premise that `outcome_aggregator` was corrupting the
+calibration loop. Sunday's pre-fix diagnostic showed the premise
+was wrong:
+
+- `outcome_aggregator.py` has never run in production.
+- `outcomes_log` table is empty for all time (zero rows ever).
+- Calibration reads `learning_feedback_loops`, not `outcomes_log`.
+- Six test files were already marked dead (Cluster I, PR #9 / #770).
+
+The error in Saturday's analysis was inferring the consumption chain
+from code structure rather than verifying through DB state and a
+caller search. Pattern lesson: when claiming a path is "live and
+hot," verify with `COUNT(*)` on the destination table and grep for
+scheduler bindings.
+
+Outcome: #67 demoted to dead-code cleanup. The Priority 1 SAFETY
+slot is filled by `_estimate_equity` / `_compute_weekly_pnl`
+consolidation plus the #62a schema drift audit kickoff — **not** by
+close-path consolidation, which was already completed by PR #796 +
+PR #802 and lives in the Completed list. #62a was elevated to
+Priority 2 (with kickoff in Priority 1) due to a third confirmed
+instance of the schema-drift pattern in one week.
+
+**Pattern check applied 2026-04-26:** even immediately after
+documenting this lesson, the operator's first revision of the
+backlog update attempted to re-add close-path consolidation to
+Priority 1 (which was completed by PR #796 / PR #802) and reference
+a "Sequence" section that exists only in chat history, not in
+CLAUDE.md. Both errors caught pre-apply via verification against
+current file state. The lesson generalizes: verify the file state
+before making edits to it, not just the consumption chain before
+claiming behavior.
+
 ---
 
 ## Working Style
@@ -766,10 +810,35 @@ Remove `packages/quantum/polygon_client.py` (zero non-test callers) and
 `market_data.py:_get_option_snapshot_api` (deprecated). Single PR, no
 functional change.
 
-**#67 — Polygon Tier 1: outcome_aggregator hardening** (HIGH)
-Replace silent-`None` pattern in `_calculate_execution_pnl` with
-loud-error logging + `risk_alerts` insert. Currently corrupts the
-calibration loop invisibly when Polygon bar fetches fail.
+**#67 — outcome_aggregator dead-code removal** (LOW)
+
+CORRECTED 2026-04-26: `outcome_aggregator.py` is dead code. Verified:
+- `outcomes_log` table empty for all time (zero rows ever).
+- No scheduler entry, no GHA workflow, no FastAPI endpoint.
+- Only caller is CLI script `scripts/update_outcomes.py` (never run
+  in production).
+- `calibration_service` reads `learning_feedback_loops`, NOT
+  `outcomes_log`.
+- 6 test files already marked `@pytest.mark.skip` with reference to
+  Cluster I deletion (PR #9 / issue #770).
+
+Saturday 2026-04-25's Diagnostic B premise that this corrupts the
+calibration loop was wrong. Hardening was unnecessary.
+
+Action: fold into the dead-code removal sweep already in Priority 3
+("Dead-code sweep: v4 accounting ledger, outcomes_log chain, ...").
+
+Cleanup scope:
+- Delete `packages/quantum/services/outcome_aggregator.py`
+- Delete `packages/quantum/scripts/update_outcomes.py`
+- Delete `log_outcome()` from `packages/quantum/nested_logging.py`
+- Update `system_health_service.py:95` and `capability_service.py:34`
+  to use `learning_feedback_loops` or remove the checks
+- Drop `outcomes_log` table via migration (already in Priority 3
+  drop-unused-tables list)
+- Delete the 6 already-skipped test files
+
+Keep priority LOW. This is hygiene, not safety.
 
 **#68 — Polygon Tier 2: universe_service migration** (MEDIUM)
 Replace `get_historical_prices` and `get_iv_rank` with Alpaca
@@ -811,15 +880,35 @@ callers (verified in `apps/web/`). Delete the route, drop the table
 via migration, scrub references in CLAUDE.md. Gated on #65 fully
 closed (Monday 2026-04-27 verification). Effort: ~1 hour.
 
-**#62a — Schema drift audit** (MEDIUM)
-Preparation for #62 (full drift reconciliation of 329 cols + 12 tables).
-Catalog all `(table, column)` pairs where code writes columns that
-don't exist in current schema OR reads columns that were dropped.
-Output: prioritized list of subsystems needing reconciliation.
-Justified by: today's #65 incident was one instance of this exact
-failure class — code wrote to a `policy_lab_daily_results` shape that
-schema had drifted away from. Effort: ~1 week. The catalog informs
-which #62 fixes ship in which order.
+**#62a — Schema drift audit** (MEDIUM) — Priority 2 (this month)
+
+ELEVATED 2026-04-26: third confirmed instance of schema drift this
+week. Pattern: code references columns/values not in current
+production schema, fails silently due to error swallowing.
+
+Confirmed instances:
+1. PR #6 (Saturday 2026-04-25): `manual_endpoint` close_reason value
+   not in legacy enum (`close_path_required` CHECK constraint
+   violation).
+2. #65 (Sunday 2026-04-26): `avg_winner`, `avg_loser`,
+   `symbols_traded` columns not in `policy_lab_daily_results`
+   (PGRST204).
+3. `outcome_aggregator` (Sunday 2026-04-26): `status`,
+   `reason_codes`, `counterfactual_*` columns added by 20251222
+   migrations but not in prod `outcomes_log` schema (table is dead
+   but illustrates pattern).
+
+Audit scope:
+- Catalog all `(table, column)` pairs where code writes to columns
+  that don't exist in current schema.
+- Catalog all `(table, column)` pairs where code reads from columns
+  that were dropped.
+- Output: prioritized list of subsystems needing schema
+  reconciliation.
+
+Effort: ~1 week of grep + DB queries. Cheap relative to the
+information produced. The catalog informs which #62 fixes ship in
+which order.
 
 ---
 

@@ -629,17 +629,68 @@ async def task_policy_lab_eval(
         return {"status": "error", "reason": "user_id required"}
 
     from packages.quantum.policy_lab.evaluator import evaluate_cohorts, check_promotion
-    from packages.quantum.security.supabase_config import get_admin_client
+    from packages.quantum.internal_tasks import get_admin_client
     from datetime import date
 
     supabase = get_admin_client()
-    eval_result = evaluate_cohorts(user_id, date.today(), supabase)
-    promo_result = check_promotion(user_id, supabase)
+
+    eval_result = None
+    promo_result = None
+
+    try:
+        eval_result = evaluate_cohorts(user_id, date.today(), supabase)
+    except Exception as e:
+        logger.exception(
+            "policy_lab_eval: evaluate_cohorts raised",
+            extra={"user_id": user_id},
+        )
+        try:
+            supabase.table("risk_alerts").insert({
+                "user_id": user_id,
+                "alert_type": "policy_lab_eval_failure",
+                "severity": "warning",
+                "message": f"evaluate_cohorts raised in task_policy_lab_eval: {type(e).__name__}",
+                "metadata": {
+                    "exception_type": type(e).__name__,
+                    "exception_str": str(e)[:500],
+                    "endpoint": "/tasks/policy-lab/eval",
+                    "stage": "evaluate_cohorts",
+                },
+            }).execute()
+        except Exception:
+            logger.exception("policy_lab_eval: failed to write risk_alert for evaluate_cohorts failure")
+
+    try:
+        promo_result = check_promotion(user_id, supabase)
+    except Exception as e:
+        logger.exception(
+            "policy_lab_eval: check_promotion raised",
+            extra={"user_id": user_id},
+        )
+        try:
+            supabase.table("risk_alerts").insert({
+                "user_id": user_id,
+                "alert_type": "policy_lab_eval_failure",
+                "severity": "warning",
+                "message": f"check_promotion raised in task_policy_lab_eval: {type(e).__name__}",
+                "metadata": {
+                    "exception_type": type(e).__name__,
+                    "exception_str": str(e)[:500],
+                    "endpoint": "/tasks/policy-lab/eval",
+                    "stage": "check_promotion",
+                },
+            }).execute()
+        except Exception:
+            logger.exception("policy_lab_eval: failed to write risk_alert for check_promotion failure")
 
     return {
         "status": "ok",
         "evaluation": eval_result,
         "promotion": promo_result,
+        "errors": {
+            "evaluate_cohorts": "failed" if eval_result is None else "succeeded",
+            "check_promotion": "failed" if promo_result is None else "succeeded",
+        },
     }
 
 

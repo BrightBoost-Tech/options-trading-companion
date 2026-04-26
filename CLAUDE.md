@@ -402,13 +402,16 @@ evaluation with `promoted_at` field selecting the live cohort.
 - Decision-logging path (`policy_decisions` table) is **live**: 189
   decisions in last 30 days across all 3 cohorts, 45 outcomes backfilled.
   Latest decision 2026-04-24 16:00Z.
-- Daily-scoring path (`policy_lab_daily_results`, `policy_daily_scores`)
-  is **silent**: both tables empty for 30+ days.
-- `policy_lab_eval` scheduled job (16:30 CT daily, registered at
-  `scheduler.py:55`) has fired **0 times in the last 7 days** while peer
-  scheduled jobs ran 5 times each.
-- `check_promotion` runs daily but returns `no_scores_data` due to empty
-  score tables; **no promotions are possible** in current state.
+- Daily-scoring path (`policy_daily_scores`) is **functional as of
+  2026-04-26 06:19Z**: PR #807 fixed the ImportError that prevented the
+  endpoint from running, PR #808 fixed the schema drift that prevented
+  writes. First successful canary at 2026-04-26 06:19Z populated
+  `policy_daily_scores` with 3 rows. Awaiting Monday 2026-04-27 16:30 CT
+  scheduler fire as final end-to-end verification.
+- Legacy `policy_lab_daily_results` table has zero writers and zero
+  consumers post-PR-#808; cleanup tracked as backlog #73.
+- `check_promotion` runs daily; promotion eligibility resumes once
+  `policy_daily_scores` accumulates a meaningful window of cohort data.
 
 **Sizing duality (documented intent, not bug):**
 
@@ -668,28 +671,76 @@ Full chronology lives in git history; search commits from 2026-03 and earlier.
 - [x] Ghost-position rescue + reconcile sweep (PR #764, 2026-04-16)
 - [x] Alpaca-authoritative weekly P&L math (83872db, 2026-04-16)
 - [x] CI workflow with pytest + coverage (PR #1, 2026-04-17)
+- [x] Close-path consolidation: 5 violators → single `close_helper.close_position_shared`,
+      Phase 1 enum expand (PR #796, 2026-04-23) + Phase 2 enum contract (PR #802)
+- [x] Micro-live promotion ($500 cap, Alpaca live) — operator-initiated 2026-04-25
+- [x] Policy lab eval ImportError fix (PR #807, 2026-04-25)
+- [x] Policy lab eval schema-drift fix + per-cohort observability (PR #808, 2026-04-26 06:15Z)
 
-### In flight / up next
-- [x] PR #1 (#765): CI workflow — merged 2026-04-17 as `f884077`
-- [x] PR #776: NEVER DO skip-discipline rule — merged 2026-04-17 as `355e565`
-- [x] PR #777: calibration `pnl_realized` date-cutoff filter (P1) — merged 2026-04-17 as `230f0a1`
-- [ ] PR #778: docs rewrite (this PR, in flight)
-- [ ] P1 before micro_live: remove dead adaptive-caps stack (RiskEngine.get_active_policy,
-      apply_adaptive_caps) — outcome_type='guardrail_policy' last written 2026-01-05
-- [ ] P1 before micro_live: consolidate `_estimate_equity` / `_compute_weekly_pnl` into
-      shared module (72h follow-up from 83872db)
-- [ ] P1 before micro_live: close-path consolidation (3 violators + shared helper)
-- [ ] Dead-code removal: v4 accounting ledger, outcomes_log chain,
-      strategy_backtest v3 endpoints, polygon_client.py (pending PR)
-- [ ] Migration to drop `outcomes_log`, `risk_budget_policies`, `risk_state`,
-      `signal_weight_history`, `strategy_adjustments`, `v4 accounting ledger` tables,
-      `strategy_backtest_folds/trades/events`
-- [ ] Agent sessions observability (shared agent_session_context helper)
-- [ ] GHA `trading_tasks.yml` unreachable schedule blocks cleanup (~1000 LOC removal)
-- [ ] Micro-live test ($500 cap, separate portfolio)
-- [ ] Evaluate Replay subsystem after micro_live is stable — wire up or remove
-- [ ] GAP 3–4 after data accumulates
-- [ ] Full live automation
+### Prioritized Roadmap (post-2026-04-26)
+
+Bucketing criteria, in order: SAFETY (live trades / P&L / execution) →
+OBSERVABILITY (surfaces other bugs faster) → CORRECTNESS → CLEANUP.
+
+**Priority 1 — This Week**
+- [ ] **#65 final verification:** Verify scheduler-fired run Monday
+      2026-04-27 16:30 CT. Expected: 3 rows with `trade_date=2026-04-27`
+      in `policy_daily_scores` within 10 minutes of fire time, no
+      `policy_lab_eval_cohort_failure` alerts. This is the final
+      acceptance criterion for #65 closure.
+- [ ] **#67 Polygon Tier 1 — `outcome_aggregator` loud-error hardening.**
+      SAFETY. Silent-`None` corrupts the calibration loop today.
+- [ ] **P1: consolidate `_estimate_equity` / `_compute_weekly_pnl`**
+      into shared module (72h follow-up from 83872db).
+
+**Priority 2 — This Month**
+- [ ] **#72 Loud-error doctrine audit** — establish doctrine + first
+      wave. Informs review criteria for #71/#68/#69.
+- [ ] **#71 RQ dispatch audit** — sweep `public_tasks.py` /
+      `internal_tasks.py` for synchronous handlers; migrate to
+      `enqueue_job_run` pattern.
+- [ ] **Agent sessions observability** — shared `agent_session_context`
+      helper so Loss Min / Self-Learning / Profit Optimization write rows.
+- [ ] **#62a — Schema drift audit** (preparation for #62). Catalog all
+      `(table, column)` pairs where code writes columns that don't exist
+      in current schema OR reads columns that were dropped. Output:
+      prioritized list of subsystems needing reconciliation. ~1 week.
+      Justified by: today's #65 incident was one instance of this exact
+      failure class; #62's 329 cols + 12 tables have similar latent risk.
+- [ ] **#68 Polygon Tier 2 — `universe_service` Alpaca migration**
+      (eliminates Saturday 2026-04-25 429 root cause).
+- [ ] **#69 Polygon Tier 2 — `market_data.py` base-layer Alpaca
+      migration** (foundational; unlocks downstream cutovers).
+
+**Priority 3 — Next Quarter**
+- [ ] **GAP 1** — Canonical ranking metric (PnL ÷ marginal risk,
+      correlation-adjusted). Hold until P2 observability ships.
+- [ ] **GAP 2** — EV-aware exit ranking. Depends on GAP 1.
+- [ ] **GAP 3** — Calibration deepening (segment by strategy / regime /
+      DTE / liquidity). Gated on ≥30d micro_live data.
+- [ ] **GAP 4** — Autotune walk-forward replacement. After GAP 3.
+- [ ] **#62 — Migration drift reconciliation** (329 cols + 12 tables).
+      Multi-PR effort, sequenced from #62a catalog.
+- [ ] **#73 — Remove dead `GET /policy-lab/results` endpoint and
+      `policy_lab_daily_results` table.** Gated on #65 fully closed.
+- [ ] **#66 Polygon Tier 1 — dead-code deletion** (`polygon_client.py`,
+      `_get_option_snapshot_api`). Wait until #69 lands so callers gone.
+- [ ] **Dead-code sweep:** v4 accounting ledger, outcomes_log chain,
+      strategy_backtest v3 endpoints, adaptive-caps stack
+      (`RiskEngine.get_active_policy`, `apply_adaptive_caps`).
+- [ ] **Drop-unused-tables migration:** `outcomes_log`,
+      `risk_budget_policies`, `risk_state`, `signal_weight_history`,
+      `strategy_adjustments`, v4 accounting ledger,
+      `strategy_backtest_folds/trades/events`.
+
+**Priority 4 — Deferred (no plan to do)**
+- [ ] **#70 Polygon Tier 3** (HARD_TO_REPLACE Supabase-cache strategy).
+      Acceptable residual; only revisit if Polygon billing changes.
+- [ ] **Replay subsystem evaluation** — gated on micro_live stable for
+      30+ days. Wire up or remove.
+- [ ] **GHA `trading_tasks.yml` cleanup** (~1000 LOC unreachable
+      schedule blocks). APScheduler is primary; pure hygiene.
+- [ ] **Full live automation** — final, after GAPs 1-4.
 
 ---
 
@@ -703,12 +754,12 @@ Full chronology lives in git history; search commits from 2026-03 and earlier.
 
 ## Backlog (post-promotion)
 
-**#65 — Revive `policy_lab_eval`** (HIGH)
-Diagnose why the scheduler-registered job hasn't fired in 7+ days
-despite `scheduler.py:55` defining it. Restore daily scoring rollup to
-populate `policy_lab_daily_results` and `policy_daily_scores`. Without
-revival, champion/challenger learning is non-functional and
-`check_promotion` returns `no_scores_data` indefinitely.
+**#65 — Revive `policy_lab_eval`** (HIGH) — **CLOSED 2026-04-26**
+Resolved by PR #807 (ImportError fix) + PR #808 (schema-drift fix +
+per-cohort observability), merged 2026-04-26 06:15:54Z. First
+successful canary populated `policy_daily_scores` with 3 rows at
+2026-04-26 06:19Z. Final end-to-end verification pending Monday
+2026-04-27 16:30 CT scheduler fire.
 
 **#66 — Polygon Tier 1: dead-code deletion** (LOW)
 Remove `packages/quantum/polygon_client.py` (zero non-test callers) and
@@ -732,6 +783,43 @@ downstream service migrations (paper_mtm, dashboard, options_scanner).
 Implement Supabase-cache pattern for `get_ticker_details` and
 `get_last_financials_date`. Document `I:VIX` as accepted residual
 Polygon dependency. Defer until #66–#69 complete.
+
+**#71 — RQ dispatch migration for synchronous task endpoints** (MEDIUM)
+Audit `packages/quantum/public_tasks.py` and `internal_tasks.py` for
+handlers that run work synchronously instead of dispatching to RQ.
+Pattern surfaced from `policy_lab_eval` diagnostic 2026-04-26: the
+endpoint ran synchronously, didn't `enqueue_job_run`, produced no
+observability trace. Migrate affected handlers to the `enqueue_job_run`
+pattern matching reliable peers. Effort: medium (audit + 1 PR per
+affected endpoint). Source: 2026-04-26 morning diagnostic.
+
+**#72 — Loud-error doctrine audit** (MEDIUM)
+Catalog all error-handling that swallows exceptions without writing
+`risk_alerts`. Establish doctrine: every production exception must
+produce a `risk_alert` at minimum severity=info OR fail loudly to the
+caller. Multi-PR effort — sequenced as doctrine first, then waves of
+fixes. Source patterns identified 2026-04-26:
+- `ALPACA_PAPER` vs `ALPACA_PAPER_TRADE` env mismatch (Saturday)
+- Polygon `@guardrail` decorator returns empty values silently
+- `policy_lab_eval` ImportError + scheduler-logs-warning-then-continues
+- per-cohort exception swallow at `evaluator.py:151-153`
+
+**#73 — Remove dead `GET /policy-lab/results` endpoint and table** (LOW)
+After PR #808 (closes #65), `policy_lab_daily_results` has zero
+writers. Reader at `policy_lab/endpoints.py:42-75` has zero frontend
+callers (verified in `apps/web/`). Delete the route, drop the table
+via migration, scrub references in CLAUDE.md. Gated on #65 fully
+closed (Monday 2026-04-27 verification). Effort: ~1 hour.
+
+**#62a — Schema drift audit** (MEDIUM)
+Preparation for #62 (full drift reconciliation of 329 cols + 12 tables).
+Catalog all `(table, column)` pairs where code writes columns that
+don't exist in current schema OR reads columns that were dropped.
+Output: prioritized list of subsystems needing reconciliation.
+Justified by: today's #65 incident was one instance of this exact
+failure class — code wrote to a `policy_lab_daily_results` shape that
+schema had drifted away from. Effort: ~1 week. The catalog informs
+which #62 fixes ship in which order.
 
 ---
 

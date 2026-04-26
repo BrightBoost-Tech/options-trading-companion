@@ -60,7 +60,9 @@ def evaluate_cohorts(
 ) -> Dict[str, Any]:
     """
     Compute daily performance metrics for each active cohort and upsert
-    into policy_lab_daily_results + policy_daily_scores.
+    into policy_daily_scores. (Legacy policy_lab_daily_results write
+    removed 2026-04-26 — schema drift caused PGRST204; zero readers in
+    apps/web/. Reader endpoint cleanup tracked as backlog #73.)
 
     Returns comparison summary dict.
     """
@@ -87,17 +89,7 @@ def evaluate_cohorts(
                 supabase, portfolio_id, eval_date_str,
             )
 
-            # Upsert into legacy daily_results table
-            row = {
-                "cohort_id": cohort_id,
-                "eval_date": eval_date_str,
-                **metrics,
-            }
-            supabase.table("policy_lab_daily_results") \
-                .upsert(row, on_conflict="cohort_id,eval_date") \
-                .execute()
-
-            # Also upsert into policy_daily_scores with utility
+            # Upsert into policy_daily_scores with utility
             daily_m = CohortDailyMetrics(
                 cohort_id=cohort_id,
                 cohort_name=cohort_name,
@@ -149,7 +141,38 @@ def evaluate_cohorts(
             )
 
         except Exception as e:
-            logger.error(f"policy_lab_eval_error: cohort={cohort_name} error={e}")
+            logger.exception(
+                "policy_lab_eval_error: cohort=%s",
+                cohort_name,
+                extra={
+                    "cohort_id": str(cohort_id) if cohort_id else None,
+                    "user_id": user_id,
+                },
+            )
+            # Surface per-cohort failures via risk_alerts. Without this,
+            # errors here were silently swallowed — the pattern that
+            # hid the ImportError fixed in PR #807 and the schema drift
+            # fixed in this PR.
+            try:
+                supabase.table("risk_alerts").insert({
+                    "user_id": user_id,
+                    "alert_type": "policy_lab_eval_cohort_failure",
+                    "severity": "warning",
+                    "message": f"evaluate_cohorts failed for cohort '{cohort_name}': {type(e).__name__}",
+                    "metadata": {
+                        "cohort_name": cohort_name,
+                        "cohort_id": str(cohort_id) if cohort_id else None,
+                        "exception_type": type(e).__name__,
+                        "exception_str": str(e)[:500],
+                        "function": "evaluate_cohorts",
+                        "stage": "per_cohort_processing",
+                    },
+                }).execute()
+            except Exception:
+                logger.exception(
+                    "policy_lab: failed to write risk_alert for cohort failure",
+                    extra={"original_error": str(e)[:200]},
+                )
             results.append({"cohort_name": cohort_name, "error": str(e)})
 
     return {"status": "ok", "eval_date": eval_date_str, "results": results}

@@ -702,9 +702,11 @@ slot in here alongside the Monday verification:
       within 10 minutes of fire time, no
       `policy_lab_eval_cohort_failure` alerts. Final acceptance
       criterion for #65 closure.
-- [ ] **#62a-D4 — cohort clone `symbol` drop** (~1 hour, low risk).
-      One-line removal; restores conservative/neutral shadow eval
-      data flow. See #62a-D4 in backlog below.
+- [ ] **#62a-D4-PR1 — `routing_mode` column migration** (~30 min, LOW
+      risk). Data-only migration on `paper_portfolios`; backfill
+      cohort portfolios with `'shadow_only'`/`'live_eligible'`. PR2
+      (dispatch enforcement) and PR3 (symbol drop) move to Priority 2.
+      See #62a-D4 in backlog below for full 3-PR sequence.
 
 **Priority 2 — This Month**
 - [ ] **#72 Loud-error doctrine audit** — establish doctrine + first
@@ -721,6 +723,13 @@ slot in here alongside the Monday verification:
       apply migration vs delete writes. See #62a-D3 below.
 - [ ] **#62a-D5 — `execution_cost_*` silently dropped.** Decision
       needed: are signals load-bearing? See #62a-D5 below.
+- [ ] **#62a-D4-PR2 — routing dispatch enforcement** (~1 day, MEDIUM
+      risk). Broker dispatch checks `portfolio.routing_mode`;
+      `_simulate_fill` path for `shadow_only`. Tests assert
+      shadow_only portfolios never reach Alpaca regardless of
+      `EXECUTION_MODE`. Sequenced after PR1.
+- [ ] **#62a-D4-PR3 — symbol drop fix** (~5 min code + 30 min verify).
+      Original one-line drop. Sequenced last; LOW risk after PR1+PR2.
 - [ ] **#68 Polygon Tier 2 — `universe_service` Alpaca migration**
       (eliminates Saturday 2026-04-25 429 root cause).
 - [ ] **#69 Polygon Tier 2 — `market_data.py` base-layer Alpaca
@@ -832,6 +841,25 @@ Pattern check: the diagnostic discipline lessons documented today
 state before editing it") apply equally to backlog state. Verify
 backlog-tracked work is actually outstanding before scheduling work
 against it.
+
+### #62a-D4 fix scope correction (2026-04-26)
+
+Audit catalog flagged D4 as a 1-hour fix (one-line drop). Diagnostic
+revealed a routing safety question that wasn't visible from static
+analysis. Fix scope correctly expanded from 1 PR to 3 PRs after
+understanding the architectural intent (shadow cohorts are
+paper-only learning channels, must be enforced regardless of
+`EXECUTION_MODE`).
+
+Pattern: audit catalogs surface candidate symptoms. Architectural
+intent (the "why") often determines the right fix shape, and intent
+isn't always visible from code alone — sometimes requires operator
+clarification.
+
+This is the 5th time this weekend that diagnostic-first discipline
+caught something audit-surface analysis missed. The discipline is
+robust enough to formalize as protocol: every backlog fix begins
+with diagnosis, then design conversation, then implementation.
 
 ---
 
@@ -1040,21 +1068,71 @@ needed for backtest/replay).
 
 Effort: ~1 day if applying migration, ~1 hour if deleting writes.
 
-#### #62a-D4 — Cohort clone writes invalid `symbol` column (HOT, HIGH)
+#### #62a-D4 — Cohort fan-out routing safety + symbol drop fix
 
-File: `packages/quantum/policy_lab/fork.py:225-249`. Schema column
-is `ticker`, not `symbol`.
+Status: HIGH — multi-PR architectural work, **NOT one-line fix.**
 
-Verified: **0 conservative/neutral shadow clones in 7 days** vs 11
-aggressive. Shadow eval data collection is broken at the source.
-The "189 cohort decisions" stat referenced in CLAUDE.md cohort
-architecture section is from `policy_decisions`, NOT actual shadow
-trades.
+Original audit finding: clone path writes `symbol` key to
+`trade_suggestions` but column is `ticker`. Single-key drop appears
+trivial.
 
-Fix: remove invalid `"symbol": source.get("symbol")` key from clone
-dict (one line).
+Verification finding 2026-04-26: applying the drop in current
+`micro_live` mode could route conservative/neutral cohort orders to
+the live broker, violating the design intent that shadow cohorts
+are paper-only learning channels (operator clarification 2026-04-26:
+fan-out is meant to amplify *learning* per trade — one cohort
+trades real capital, others produce shadow observations that must
+NEVER reach the live broker).
 
-Effort: ~1 hour including post-fix verification.
+Current implementation conflates routing: `EXECUTION_MODE` is
+global; no portfolio-level safety. Restoring shadow data flow
+without routing enforcement is unsafe.
+
+**Required sequence (3 PRs):**
+
+**PR 1 — Add `routing_mode` column to `paper_portfolios`**
+- Migration: `ALTER TABLE paper_portfolios ADD COLUMN routing_mode
+  text NOT NULL DEFAULT 'live_eligible'
+  CHECK (routing_mode IN ('live_eligible', 'shadow_only'))`
+- UPDATE existing cohort portfolios:
+  - Conservative Cohort, Neutral Cohort → `'shadow_only'`
+  - Aggressive Cohort → `'live_eligible'` (current champion path)
+  - Main Paper → `'live_eligible'`
+- Effort: ~30 min.
+- Risk: LOW (data-only change, no code change yet).
+
+**PR 2 — Routing dispatch enforcement**
+- Modify broker dispatch to check `portfolio.routing_mode` before
+  live submission.
+- Implement `_simulate_fill` for shadow_only portfolios (decide
+  between mid-price simulation, mirror-champion, or paper_mtm
+  reuse).
+- Tests: assert shadow_only portfolios never reach Alpaca
+  regardless of `EXECUTION_MODE`.
+- Effort: ~1 day.
+- Risk: MEDIUM (architectural change, needs careful testing).
+
+**PR 3 — Apply original #62a-D4 single-line symbol fix**
+- Drop `"symbol": source.get("symbol")` from clone dict at
+  `packages/quantum/policy_lab/fork.py:229`.
+- Verification: shadow trades start appearing in `trade_suggestions`;
+  `paper_orders` for shadow_only portfolios show simulated fills.
+- Effort: 5 min code + 30 min verification.
+- Risk: LOW after PRs 1 and 2 land.
+
+Total effort: **~2 days across 3 PRs.**
+
+Architectural principle: each portfolio's intent (live-capable vs
+shadow-only) becomes explicit data, not implicit code-path
+knowledge. Safe by default — new portfolios default to
+`live_eligible`; shadow status must be intentionally set.
+
+Verified production state (still true as of 2026-04-26):
+**0 conservative/neutral shadow clones in 30 days** vs 58
+aggressive. Shadow eval data collection has been broken at the
+source for the entire month. The "189 cohort decisions" stat
+referenced in CLAUDE.md cohort architecture section is from
+`policy_decisions`, NOT actual shadow trades.
 
 #### #62a-D5 — `execution_cost_*` columns silently dropped (HOT, HIGH)
 

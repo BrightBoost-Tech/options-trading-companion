@@ -684,6 +684,7 @@ Full chronology lives in git history; search commits from 2026-03 and earlier.
 - [x] Micro-live promotion ($500 cap, Alpaca live) — operator-initiated 2026-04-25
 - [x] Policy lab eval ImportError fix (PR #807, 2026-04-25)
 - [x] Policy lab eval schema-drift fix + per-cohort observability (PR #808, 2026-04-26 06:15Z)
+- [x] #62a-D2 nested_regimes write-only orphan deleted (2026-04-26) — 0 rows ever, 0 readers; deleted `log_global_context` rather than fix; table drop tracked as #75
 
 ### Prioritized Roadmap (post-2026-04-26)
 
@@ -701,9 +702,6 @@ slot in here alongside the Monday verification:
       within 10 minutes of fire time, no
       `policy_lab_eval_cohort_failure` alerts. Final acceptance
       criterion for #65 closure.
-- [ ] **#62a-D2 — `nested_regimes` writer fix** (~30 min, low risk).
-      Rename 3 dict keys; restores regime-context persistence (0 rows
-      in 7 days currently). See #62a-D2 in backlog below.
 - [ ] **#62a-D4 — cohort clone `symbol` drop** (~1 hour, low risk).
       One-line removal; restores conservative/neutral shadow eval
       data flow. See #62a-D4 in backlog below.
@@ -929,6 +927,23 @@ callers (verified in `apps/web/`). Delete the route, drop the table
 via migration, scrub references in CLAUDE.md. Gated on #65 fully
 closed (Monday 2026-04-27 verification). Effort: ~1 hour.
 
+**#75 — Drop `nested_regimes` table (orphan after #62a-D2)** (LOW)
+
+Source: #62a-D2 fix on 2026-04-26 deleted `log_global_context`, the
+only writer to `nested_regimes`. Table now has zero writers and
+zero readers (verified during D2 diagnostic — no Python code reads
+the table; no scheduler entry; no FastAPI route).
+
+Cleanup scope:
+- Migration to `DROP TABLE nested_regimes`.
+- Remove the original creation migration if appropriate (or keep
+  as a historical artifact).
+
+Effort: ~30 min, single PR. Bundle with the existing "drop unused
+tables" Priority 3 batch.
+
+Priority: LOW — orphan table costs nothing, just noise.
+
 **#74 — Remove `RISK_EQUITY_SOURCE=legacy` rip-cord from `equity_state.py`** (LOW)
 
 Source: 83872db (2026-04-16) committed *"Kept 72h for safety;
@@ -1000,19 +1015,18 @@ Fix scope after intent resolution:
 
 Effort: ~2-4 hours after intent resolution.
 
-#### #62a-D2 — `nested_regimes` wrong column names (HOT, HIGH)
+#### #62a-D2 — `nested_regimes` writer deleted (CLOSED 2026-04-26)
 
-File: `packages/quantum/nested/backbone.py:137-143`. Writes
-`regime` / `volatility_state` / `risk_scaler`; schema has
-`global_regime` / `market_volatility_state` and no `risk_scaler`.
+Originally classified as HOT-HIGH "rename keys in writer". Diagnostic
+revealed three layered failures: wrong column names, missing required
+`timestamp` field, silent try/except. Plus zero readers anywhere
+(no code, no scheduler, no FastAPI route) and zero rows ever written.
 
-Verified: **0 rows in `nested_regimes` over 7 days.** Every regime
-context log fails silently (try/except swallow).
-
-Fix: rename dict keys in writer; decide whether `risk_scaler` needs
-adding via migration or can be dropped.
-
-Effort: ~30 min if droppable, ~2 hours with migration.
+Resolution: **deleted `log_global_context`** rather than fix —
+empty-table writes don't fit the loud-error doctrine emerging from
+#62a/#67. Also removed dead `_get_supabase_client` helper, dead
+`supabase` import in `backbone.py`, dead import in `optimizer.py`,
+and three unused test mocks. Table-level cleanup tracked as #75.
 
 #### #62a-D3 — `regime_snapshots` table missing (HOT, HIGH)
 

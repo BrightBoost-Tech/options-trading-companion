@@ -1,18 +1,6 @@
 from dataclasses import dataclass, asdict
-from typing import Dict, Any, Optional
+from typing import Dict, Any
 import os
-from supabase import create_client, Client
-
-# Use shared sanitization to prevent DNS failures from env whitespace
-def _get_supabase_client() -> Optional[Client]:
-    from packages.quantum.supabase_env import get_sanitized_supabase_env
-    url, key = get_sanitized_supabase_env()
-    if not url or not key:
-        return None
-    try:
-        return create_client(url, key)
-    except Exception:
-        return None
 
 @dataclass
 class GlobalContext:
@@ -124,22 +112,3 @@ def infer_global_context(features: Dict[str, Any]) -> GlobalContext:
         market_volatility_state=vol_state,
         global_risk_scaler=scaler
     )
-
-def log_global_context(ctx: GlobalContext) -> None:
-    """
-    Insert a row into nested_regimes.
-    """
-    supabase = _get_supabase_client()
-    if not supabase:
-        return
-
-    try:
-        data = {
-            "regime": ctx.global_regime,
-            "volatility_state": ctx.market_volatility_state,
-            "risk_scaler": ctx.global_risk_scaler
-            # created_at is usually auto-generated
-        }
-        supabase.table("nested_regimes").insert(data).execute()
-    except Exception as e:
-        print(f"L2 Backbone: Failed to log context: {e}")

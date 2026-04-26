@@ -47,7 +47,6 @@ def mock_nested_components():
          patch("packages.quantum.optimizer.refresh_session_from_db") as mock_session, \
          patch("packages.quantum.optimizer.get_session_sigma_scale") as mock_scale, \
          patch("packages.quantum.optimizer.log_inference") as mock_log, \
-         patch("packages.quantum.optimizer.log_global_context") as mock_log_ctx, \
          patch("packages.quantum.optimizer.StrategySelector") as mock_ss, \
          patch("packages.quantum.optimizer.OptionsAnalytics") as mock_oa, \
          patch("packages.quantum.optimizer.SmallAccountCompounder") as mock_sac, \

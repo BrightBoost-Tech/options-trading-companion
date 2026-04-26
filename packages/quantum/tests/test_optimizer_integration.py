@@ -18,7 +18,6 @@ class TestOptimizerIntegration(unittest.IsolatedAsyncioTestCase):
     @patch("optimizer.calculate_portfolio_inputs")
     @patch("optimizer.load_symbol_adapters")
     @patch("optimizer.apply_biases")
-    @patch("optimizer.log_global_context")
     @patch("optimizer.compute_macro_features")
     @patch("optimizer.infer_global_context")
     @patch("optimizer.refresh_session_from_db")
@@ -28,7 +27,6 @@ class TestOptimizerIntegration(unittest.IsolatedAsyncioTestCase):
                                       mock_refresh_session,
                                       mock_infer_context,
                                       mock_compute_macro,
-                                      mock_log_context,
                                       mock_apply_biases,
                                       mock_load_adapters,
                                       mock_calculate_inputs,

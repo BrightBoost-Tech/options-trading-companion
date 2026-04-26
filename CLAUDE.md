@@ -673,6 +673,14 @@ Full chronology lives in git history; search commits from 2026-03 and earlier.
 - [x] CI workflow with pytest + coverage (PR #1, 2026-04-17)
 - [x] Close-path consolidation: 5 violators → single `close_helper.close_position_shared`,
       Phase 1 enum expand (PR #796, 2026-04-23) + Phase 2 enum contract (PR #802)
+- [x] `_estimate_equity` / `_compute_weekly_pnl` consolidation: canonical
+      `services/equity_state.py` module + shim delegations from
+      `intraday_risk_monitor`, `paper_mark_to_market`, `paper_autopilot_service`.
+      PR #780 (2026-04-19) extracted to `services/equity_state.py` + migrated
+      `intraday_risk_monitor`. PR #795 (2026-04-22) migrated `paper_mark_to_market`
+      and `paper_autopilot_service`. Zero false `loss_weekly` events since
+      83872db patch on 2026-04-16. Tests in `test_equity_state_*.py` defend
+      the invariant.
 - [x] Micro-live promotion ($500 cap, Alpaca live) — operator-initiated 2026-04-25
 - [x] Policy lab eval ImportError fix (PR #807, 2026-04-25)
 - [x] Policy lab eval schema-drift fix + per-cohort observability (PR #808, 2026-04-26 06:15Z)
@@ -682,25 +690,23 @@ Full chronology lives in git history; search commits from 2026-03 and earlier.
 Bucketing criteria, in order: SAFETY (live trades / P&L / execution) →
 OBSERVABILITY (surfaces other bugs faster) → CORRECTNESS → CLEANUP.
 
-**Priority 1 — This Week**
-- [ ] **#65 final verification:** Verify scheduler-fired run Monday
-      2026-04-27 16:30 CT. Expected: 3 rows with `trade_date=2026-04-27`
-      in `policy_daily_scores` within 10 minutes of fire time, no
-      `policy_lab_eval_cohort_failure` alerts. Passive observation only.
-      This is the final acceptance criterion for #65 closure.
-- [ ] **P1: consolidate `_estimate_equity` / `_compute_weekly_pnl`**
-      into shared module (72h follow-up from 83872db). SAFETY/correctness.
-- [ ] **#62a schema drift audit — kickoff.** Read-only diagnostic
-      sweep; can run in parallel with the consolidation above. Soak
-      through next week. See #62a backlog entry for scope. Justified
-      by 3 instances in 1 week.
+**Priority 1 — Do This Week**
 
-(Note: #67 was on this list as a SAFETY item but was demoted to
-dead-code cleanup on 2026-04-26 after diagnostic verification — see
-"Notable findings 2026-04-26" below. The Priority 1 SAFETY slot is
-filled by `_estimate_equity` consolidation, not by close-path
-consolidation, which was already completed by PR #796 + PR #802 and
-is in the Completed list above.)
+After the 2026-04-26 backlog correction (#67 demoted, equity/pnl
+consolidation marked done, close-path verified done), Priority 1
+this week is light:
+
+- [ ] **#65 final verification** (Monday 2026-04-27 16:30 CT scheduler
+      fire — passive observation only, ~5 min check). Expected: 3
+      rows with `trade_date=2026-04-27` in `policy_daily_scores`
+      within 10 minutes of fire time, no
+      `policy_lab_eval_cohort_failure` alerts. This is the final
+      acceptance criterion for #65 closure.
+- [ ] **#62a schema drift audit** (kickoff this week, soak through
+      next week — read-only diagnostic work). Catalog `(table, column)`
+      pairs where code writes columns missing from prod schema or
+      reads dropped columns. Justified by 3 instances of the failure
+      class in 1 week.
 
 **Priority 2 — This Month**
 - [ ] **#72 Loud-error doctrine audit** — establish doctrine + first
@@ -785,6 +791,33 @@ CLAUDE.md. Both errors caught pre-apply via verification against
 current file state. The lesson generalizes: verify the file state
 before making edits to it, not just the consumption chain before
 claiming behavior.
+
+### Backlog/PR closure discipline gap (2026-04-26)
+
+Two Priority 1 items in two consecutive sessions were found to be
+already completed by earlier PRs:
+
+- **Close-path consolidation:** completed by PR #796 + PR #802, but
+  item remained in Priority 1 until 2026-04-26 backlog correction.
+- **`_estimate_equity` / `_compute_weekly_pnl` consolidation:**
+  completed by PR #780 (2026-04-19) + PR #795 (2026-04-22), but item
+  remained in Priority 1 until 2026-04-26 (this session).
+
+Root cause: the backlog tracked deferral commitments but PRs
+fulfilling them did not close those entries back into CLAUDE.md.
+Result: operator energy spent investigating what's already done.
+
+Process fix: every PR that fulfills a backlog item should include a
+CLAUDE.md edit marking the item DONE in the same PR. The PR
+description should reference the specific backlog line being closed.
+Future backlog audits should expect Priority 1 items to be small and
+active, not commitment shadows from weeks-old commits.
+
+Pattern check: the diagnostic discipline lessons documented today
+("verify consumption chain before claiming behavior" + "verify file
+state before editing it") apply equally to backlog state. Verify
+backlog-tracked work is actually outstanding before scheduling work
+against it.
 
 ---
 
@@ -879,6 +912,22 @@ writers. Reader at `policy_lab/endpoints.py:42-75` has zero frontend
 callers (verified in `apps/web/`). Delete the route, drop the table
 via migration, scrub references in CLAUDE.md. Gated on #65 fully
 closed (Monday 2026-04-27 verification). Effort: ~1 hour.
+
+**#74 — Remove `RISK_EQUITY_SOURCE=legacy` rip-cord from `equity_state.py`** (LOW)
+
+Source: 83872db (2026-04-16) committed *"Kept 72h for safety;
+scheduled for removal in a follow-up PR."* Now 10 days stable.
+
+Cleanup scope:
+- Remove `_estimate_equity_legacy` and `_compute_weekly_pnl_legacy`
+  from `equity_state.py`.
+- Remove `RISK_EQUITY_SOURCE` env-based switching logic.
+- Update `.github/workflows/ci-tests.yml:24` (currently sets
+  `RISK_EQUITY_SOURCE=legacy`).
+- Prune legacy-branch tests in `test_equity_state_helpers.py`.
+
+Effort: ~1-2 hours, single PR, no functional change in production
+(rip-cord is unset in Railway env, defaults to `alpaca`).
 
 **#62a — Schema drift audit** (MEDIUM) — Priority 2 (this month)
 

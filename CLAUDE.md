@@ -702,11 +702,12 @@ slot in here alongside the Monday verification:
       within 10 minutes of fire time, no
       `policy_lab_eval_cohort_failure` alerts. Final acceptance
       criterion for #65 closure.
-- [ ] **#62a-D4-PR1 — `routing_mode` column migration** (~30 min, LOW
-      risk). Data-only migration on `paper_portfolios`; backfill
-      cohort portfolios with `'shadow_only'`/`'live_eligible'`. PR2
-      (dispatch enforcement) and PR3 (symbol drop) move to Priority 2.
-      See #62a-D4 in backlog below for full 3-PR sequence.
+- [ ] **#62a-D4-PR1 — `routing_mode` column migration** (PR open;
+      awaits operator-approved manual apply per the migration
+      procedure). Migration file
+      `supabase/migrations/20260426000000_add_routing_mode_to_paper_portfolios.sql`.
+      Data-only; backfills Conservative + Neutral cohort portfolios
+      → `shadow_only`; everything else defaults to `live_eligible`.
 
 **Priority 2 — This Month**
 - [ ] **#72 Loud-error doctrine audit** — establish doctrine + first

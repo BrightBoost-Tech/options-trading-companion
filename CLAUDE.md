@@ -981,6 +981,17 @@ Doctrine document: `docs/loud_error_doctrine.md` (v1.0).
       Sites: `scheduler.py:113,125,129`. Pattern: P2 + P4-adjacent.
       Effort: ~2h. Would have caught the `policy_lab_eval` 7-day silence
       root cause directly (#65). Coordinate with #71 (RQ dispatch audit).
+- [ ] **#72-H2a — Diagnose and fix `_retry_failed_jobs` ImportError.**
+      Out-of-scope finding from #72-H2 diagnostic (2026-04-27).
+      `scheduler.py:211` imports `get_supabase_client` from
+      `packages.quantum.database` — module doesn't exist; function
+      raises `ImportError` on every invocation, swallowed by the
+      outer `try/except` at `scheduler.py:288`. Required diagnostic
+      before fix: confirm caller graph (is `_retry_failed_jobs` ever
+      invoked?). If dead → delete; if live → swap to `get_admin_client`
+      from `packages/quantum/jobs/handlers/utils.py`. Priority: MEDIUM
+      (silent failure, function may be unused). Effort: ~30 min
+      diagnostic + ~15 min fix-or-delete.
 - [ ] **#72-H3 — `@guardrail` decorator + 8 `market_data.py` callers
       write `risk_alerts` on fallback.** Pattern: P3. Effort: ~half day.
       Coordinate with Polygon Tier 1/2 PRs (#67–#69) since scope overlaps.

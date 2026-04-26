@@ -25,6 +25,8 @@ import time
 from datetime import date, timedelta
 from typing import Any, Dict, Iterable, Optional, Tuple
 
+from packages.quantum.observability.alerts import alert
+
 logger = logging.getLogger(__name__)
 
 # ── Configuration ──────────────────────────────────────────────────
@@ -62,7 +64,7 @@ def get_alpaca_equity(
     """
     if EQUITY_SOURCE == "legacy":
         return _estimate_equity_legacy(supabase, positions or [])
-    return _fetch_alpaca_equity(user_id)
+    return _fetch_alpaca_equity(user_id, supabase=supabase)
 
 
 def get_alpaca_weekly_pnl(
@@ -81,12 +83,12 @@ def get_alpaca_weekly_pnl(
     """
     if EQUITY_SOURCE == "legacy":
         return _compute_weekly_pnl_legacy(supabase)
-    return _fetch_alpaca_weekly_pnl(user_id)
+    return _fetch_alpaca_weekly_pnl(user_id, supabase=supabase)
 
 
 # ── Alpaca-authoritative internals ─────────────────────────────────
 
-def _fetch_alpaca_equity(user_id: str) -> Optional[float]:
+def _fetch_alpaca_equity(user_id: str, supabase: Any = None) -> Optional[float]:
     now = time.monotonic()
     cached = _ALPACA_EQUITY_CACHE.get(user_id)
     if cached and (now - cached[0]) < _ALPACA_STATE_TTL_SECONDS:
@@ -106,10 +108,23 @@ def _fetch_alpaca_equity(user_id: str) -> Optional[float]:
         logger.warning(
             f"[EQUITY_STATE] Alpaca equity fetch failed for {user_id[:8]}: {e}"
         )
+        alert(
+            supabase,
+            alert_type="equity_state_alpaca_account_failed",
+            severity="warning",
+            message=f"Alpaca get_account() failed: {e}",
+            user_id=user_id,
+            metadata={
+                "error_class": type(e).__name__,
+                "error_message": str(e)[:200],
+                "call_site": "_fetch_alpaca_equity",
+                "source": "alpaca",
+            },
+        )
         return None
 
 
-def _fetch_alpaca_weekly_pnl(user_id: str) -> Optional[float]:
+def _fetch_alpaca_weekly_pnl(user_id: str, supabase: Any = None) -> Optional[float]:
     now = time.monotonic()
     cached = _ALPACA_WEEKLY_PNL_CACHE.get(user_id)
     if cached and (now - cached[0]) < _ALPACA_STATE_TTL_SECONDS:
@@ -138,6 +153,19 @@ def _fetch_alpaca_weekly_pnl(user_id: str) -> Optional[float]:
     except Exception as e:
         logger.warning(
             f"[EQUITY_STATE] Alpaca weekly P&L fetch failed for {user_id[:8]}: {e}"
+        )
+        alert(
+            supabase,
+            alert_type="equity_state_alpaca_portfolio_history_failed",
+            severity="warning",
+            message=f"Alpaca get_portfolio_history(1W/1D) failed: {e}",
+            user_id=user_id,
+            metadata={
+                "error_class": type(e).__name__,
+                "error_message": str(e)[:200],
+                "call_site": "_fetch_alpaca_weekly_pnl",
+                "source": "alpaca",
+            },
         )
         return None
 

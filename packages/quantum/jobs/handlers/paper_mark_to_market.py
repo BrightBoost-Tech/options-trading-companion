@@ -76,7 +76,7 @@ def run(payload: Dict[str, Any], ctx: Any = None) -> Dict[str, Any]:
             # 2026-04-16 false force-close incident.
             from packages.quantum.services import equity_state
             equity = (
-                equity_state.get_alpaca_equity(user_id)
+                equity_state.get_alpaca_equity(user_id, supabase=client)
                 if open_positions else None
             )
 

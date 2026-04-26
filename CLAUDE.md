@@ -692,21 +692,21 @@ OBSERVABILITY (surfaces other bugs faster) → CORRECTNESS → CLEANUP.
 
 **Priority 1 — Do This Week**
 
-After the 2026-04-26 backlog correction (#67 demoted, equity/pnl
-consolidation marked done, close-path verified done), Priority 1
-this week is light:
+#62a audit complete (2026-04-26). Two small high-value drift fixes
+slot in here alongside the Monday verification:
 
 - [ ] **#65 final verification** (Monday 2026-04-27 16:30 CT scheduler
       fire — passive observation only, ~5 min check). Expected: 3
       rows with `trade_date=2026-04-27` in `policy_daily_scores`
       within 10 minutes of fire time, no
-      `policy_lab_eval_cohort_failure` alerts. This is the final
-      acceptance criterion for #65 closure.
-- [ ] **#62a schema drift audit** (kickoff this week, soak through
-      next week — read-only diagnostic work). Catalog `(table, column)`
-      pairs where code writes columns missing from prod schema or
-      reads dropped columns. Justified by 3 instances of the failure
-      class in 1 week.
+      `policy_lab_eval_cohort_failure` alerts. Final acceptance
+      criterion for #65 closure.
+- [ ] **#62a-D2 — `nested_regimes` writer fix** (~30 min, low risk).
+      Rename 3 dict keys; restores regime-context persistence (0 rows
+      in 7 days currently). See #62a-D2 in backlog below.
+- [ ] **#62a-D4 — cohort clone `symbol` drop** (~1 hour, low risk).
+      One-line removal; restores conservative/neutral shadow eval
+      data flow. See #62a-D4 in backlog below.
 
 **Priority 2 — This Month**
 - [ ] **#72 Loud-error doctrine audit** — establish doctrine + first
@@ -716,11 +716,13 @@ this week is light:
       `enqueue_job_run` pattern.
 - [ ] **Agent sessions observability** — shared `agent_session_context`
       helper so Loss Min / Self-Learning / Profit Optimization write rows.
-- [ ] **#62a — Schema drift audit (continued)** — kickoff is in
-      Priority 1; soak/cataloging completes here. Three confirmed
-      instances of the failure class this week (PR #6 enum, #65
-      `policy_lab_daily_results` columns, `outcomes_log` columns).
-      See full scope in the #62a backlog entry below.
+- [ ] **#62a-D1 — `is_champion` column missing** (LATENT-HIGH).
+      Prerequisite: resolve `'neutral'` vs `'aggressive'` intent
+      disagreement between migration and code. See #62a-D1 below.
+- [ ] **#62a-D3 — `regime_snapshots` table missing.** Decision needed:
+      apply migration vs delete writes. See #62a-D3 below.
+- [ ] **#62a-D5 — `execution_cost_*` silently dropped.** Decision
+      needed: are signals load-bearing? See #62a-D5 below.
 - [ ] **#68 Polygon Tier 2 — `universe_service` Alpaca migration**
       (eliminates Saturday 2026-04-25 429 root cause).
 - [ ] **#69 Polygon Tier 2 — `market_data.py` base-layer Alpaca
@@ -735,6 +737,14 @@ this week is light:
 - [ ] **GAP 4** — Autotune walk-forward replacement. After GAP 3.
 - [ ] **#62 — Migration drift reconciliation** (329 cols + 12 tables).
       Multi-PR effort, sequenced from #62a catalog.
+- [ ] **#62a-D6 — `model_governance_states` table missing.** Apply
+      table-creation portion of `20251215000000_learned_nesting_v3.sql`,
+      OR delete writes if v3 is dormant.
+- [ ] **#62a-D7 — `shadow_cohort_daily` table missing.** Consumer
+      feature is permanently off; recommend remove writer rather
+      than apply migration.
+- [ ] **#62a-D8 — `trade_executions` 8 wrong columns.** Investigation
+      first: is `register_execution` still on any active path?
 - [ ] **#73 — Remove dead `GET /policy-lab/results` endpoint and
       `policy_lab_daily_results` table.** Gated on #65 fully closed.
 - [ ] **#66 Polygon Tier 1 — dead-code deletion** (`polygon_client.py`,
@@ -754,6 +764,12 @@ this week is light:
       30+ days. Wire up or remove.
 - [ ] **GHA `trading_tasks.yml` cleanup** (~1000 LOC unreachable
       schedule blocks). APScheduler is primary; pure hygiene.
+- [ ] **#62a-D9 — `trade_suggestions` rebalance flow extra cols.**
+      Cleanup batch (verify cold then fix or remove endpoint).
+- [ ] **#62a-D11 — `symbol_regime_snapshots`** — note only, no active
+      writer.
+- [ ] **#62a-D12 — Out-of-band tables** — acknowledge, do not rebuild
+      migration history.
 - [ ] **Full live automation** — final, after GAPs 1-4.
 
 ### Notable findings 2026-04-26 (Sunday)
@@ -929,35 +945,202 @@ Cleanup scope:
 Effort: ~1-2 hours, single PR, no functional change in production
 (rip-cord is unset in Railway env, defaults to `alpaca`).
 
-**#62a — Schema drift audit** (MEDIUM) — Priority 2 (this month)
+### #62a — Schema drift audit COMPLETE 2026-04-26
 
-ELEVATED 2026-04-26: third confirmed instance of schema drift this
-week. Pattern: code references columns/values not in current
-production schema, fails silently due to error swallowing.
+Audit catalog: **12 drift instances** found across 70 tables, ~1,100
+columns, ~60 production write sites, 85 migrations.
 
-Confirmed instances:
-1. PR #6 (Saturday 2026-04-25): `manual_endpoint` close_reason value
-   not in legacy enum (`close_path_required` CHECK constraint
-   violation).
-2. #65 (Sunday 2026-04-26): `avg_winner`, `avg_loser`,
-   `symbols_traded` columns not in `policy_lab_daily_results`
-   (PGRST204).
-3. `outcome_aggregator` (Sunday 2026-04-26): `status`,
-   `reason_codes`, `counterfactual_*` columns added by 20251222
-   migrations but not in prod `outcomes_log` schema (table is dead
-   but illustrates pattern).
+The initial Saturday/Sunday findings (3 instances — PR #6 enum, #65
+`policy_lab_daily_results`, `outcomes_log` cols) captured a fraction
+of actual drift. The audit revealed 9 additional instances including
+1 latent live-trade-routing issue and 4 broken data-collection paths
+(regime persistence dead, cohort fan-out broken, execution-cost
+gating dropped silently, regime_snapshots table missing).
 
-Audit scope:
-- Catalog all `(table, column)` pairs where code writes to columns
-  that don't exist in current schema.
-- Catalog all `(table, column)` pairs where code reads from columns
-  that were dropped.
-- Output: prioritized list of subsystems needing schema
-  reconciliation.
+Method limitations documented (8 false-negative classes — see
+"#62a audit method limitations" below). Confidence: **HIGH on 10
+actionable findings, MEDIUM on completeness.**
 
-Effort: ~1 week of grep + DB queries. Cheap relative to the
-information produced. The catalog informs which #62 fixes ship in
-which order.
+Catalog summary:
+- **1 CRITICAL** in audit (verified DOWNGRADED to HIGH-LATENT
+  after deep-dive — see #62a-D1).
+- **4 HIGH** (cohort fan-out broken, regime persistence dead,
+  execution-cost gating silently dropped, regime_snapshots table
+  missing).
+- **3 MEDIUM** (governance state, shadow_cohort_daily, legacy
+  execution_service).
+- **4 LOW** (rebalance flow, outcomes_log dead-code,
+  symbol_regime_snapshots, OOB tables).
+
+Status: AUDIT COMPLETE. Catalog forms the work plan for #62 proper.
+Sub-items #62a-D1 through #62a-D12 below.
+
+#### #62a-D1 — `is_champion` column missing (LATENT, HIGH)
+
+Verified 2026-04-26: column missing from `policy_lab_cohorts`, but
+autopilot has produced zero orders in 8+ days, and live routing
+goes through `fork.py:67` cohort_name tag path — not through
+`_get_champion_portfolio`. Not Monday-blocking.
+
+Compounding issue: migration `20260402000000_small_account_cohorts.sql`
+intends `'neutral'` as champion; live code (`fork.py:67`) hardcodes
+`'aggressive'`. The two designs disagree.
+
+**Prerequisite before fix:** resolve `'neutral'` vs `'aggressive'`
+intent disagreement.
+
+Fix scope after intent resolution:
+- `ALTER TABLE policy_lab_cohorts ADD COLUMN is_champion boolean DEFAULT false`
+- `UPDATE` to set `is_champion=true` on the resolved cohort.
+- Decide whether `_get_champion_portfolio` should actually be
+  reachable, or be deleted (the live routing stays in fork.py's
+  tag-based path).
+- Optional: clean up 3 orphan $500 "Main Paper" portfolios from
+  2026-04-02.
+
+Effort: ~2-4 hours after intent resolution.
+
+#### #62a-D2 — `nested_regimes` wrong column names (HOT, HIGH)
+
+File: `packages/quantum/nested/backbone.py:137-143`. Writes
+`regime` / `volatility_state` / `risk_scaler`; schema has
+`global_regime` / `market_volatility_state` and no `risk_scaler`.
+
+Verified: **0 rows in `nested_regimes` over 7 days.** Every regime
+context log fails silently (try/except swallow).
+
+Fix: rename dict keys in writer; decide whether `risk_scaler` needs
+adding via migration or can be dropped.
+
+Effort: ~30 min if droppable, ~2 hours with migration.
+
+#### #62a-D3 — `regime_snapshots` table missing (HOT, HIGH)
+
+Files: `api.py:627`, `workflow_orchestrator.py:1130`, `:1951`.
+Migration `20251213000000_regime_snapshots.sql` exists but never
+applied. Daily morning + midday cycles attempt persistence and
+fail silently.
+
+Fix: apply migration, OR delete the writes (decide if snapshot is
+needed for backtest/replay).
+
+Effort: ~1 day if applying migration, ~1 hour if deleting writes.
+
+#### #62a-D4 — Cohort clone writes invalid `symbol` column (HOT, HIGH)
+
+File: `packages/quantum/policy_lab/fork.py:225-249`. Schema column
+is `ticker`, not `symbol`.
+
+Verified: **0 conservative/neutral shadow clones in 7 days** vs 11
+aggressive. Shadow eval data collection is broken at the source.
+The "189 cohort decisions" stat referenced in CLAUDE.md cohort
+architecture section is from `policy_decisions`, NOT actual shadow
+trades.
+
+Fix: remove invalid `"symbol": source.get("symbol")` key from clone
+dict (one line).
+
+Effort: ~1 hour including post-fix verification.
+
+#### #62a-D5 — `execution_cost_*` columns silently dropped (HOT, HIGH)
+
+File: `packages/quantum/services/workflow_orchestrator.py:468-478`.
+3 columns (`execution_cost_soft_gate`, `execution_cost_soft_penalty`,
+`execution_cost_ev_ratio`) dropped via `DROPPABLE_SUGGESTION_COLUMNS`
+retry shim on every suggestion write. Verified absent from
+`trade_suggestions` schema.
+
+**Decision needed:** are these signals load-bearing for execution
+gates? If yes, add columns via migration. If no, remove the
+computation and the shim entirely.
+
+Effort: ~2 hours after decision.
+
+#### #62a-D6 — `model_governance_states` table missing (MEDIUM)
+
+Migration `20251215000000_learned_nesting_v3.sql` partially applied
+— ALTER statements landed but `CREATE TABLE model_governance_states`
+did not. Learned Nesting v3 governance writes fail silently.
+
+Fix: apply table-creation portion, OR delete the writes if Learned
+Nesting v3 is dormant.
+
+Effort: ~1 day.
+
+#### #62a-D7 — `shadow_cohort_daily` table missing (MEDIUM)
+
+File: `packages/quantum/public_tasks.py:1861`. Migration
+`20260122100000_shadow_cohort_daily.sql` not applied. Autopromote
+v4-L1E feature broken silently. Note: `POLICY_LAB_AUTOPROMOTE=false`
+permanently, so the consumer feature is off anyway.
+
+Fix: apply migration OR remove writer (deletion is the lower-risk
+choice given the consumer is off).
+
+Effort: ~1 hour to remove writer, ~2 hours to apply + verify.
+
+#### #62a-D8 — `trade_executions` 8 wrong columns (MEDIUM)
+
+File: `packages/quantum/services/execution_service.py:215-254`.
+Writes `mid_price_at_submission`, `order_json`, `trace_id`,
+`window`, `strategy`, `model_version`, `features_hash`, `regime`
+— none in legacy `trade_executions` schema. Canonical execution
+path is `paper_orders` + `position_legs`.
+
+**Prerequisite:** trace whether `register_execution` is on any
+active path. If dead → delete the legacy `ExecutionService`. If
+alive → drop-cols-or-add-cols decision.
+
+Effort: ~half day investigation + ~1-2 hours fix.
+
+#### #62a-D9 — `trade_suggestions` rebalance flow extra cols (LOW)
+
+File: `packages/quantum/api.py:869-885,898`. Writes `symbol`,
+`confidence_score`, `notes` — none in schema. Rebalance flow likely
+unused; insert 400s if exercised.
+
+Effort: ~1 hour (verify cold, then either fix or remove endpoint).
+
+#### #62a-D10 — `outcomes_log` 5 cols (LOW) — TRACKED UNDER #67
+
+5 cols (`status`, `reason_codes`, `counterfactual_pl_1d`,
+`counterfactual_available`, `counterfactual_reason`) absent. Already
+folded into the dead-code sweep via backlog #67.
+
+#### #62a-D11 — `symbol_regime_snapshots` table missing (LOW)
+
+Created by migration `20251213000000_regime_snapshots.sql` (same as
+D3) but no active write site found in code. Note only — no fix
+needed unless a writer is reintroduced.
+
+#### #62a-D12 — Out-of-band tables (LOW) — ACKNOWLEDGE, NO ACTION
+
+7 tables exist in prod with no creator migration: `audit_logs`,
+`profiles`, `portfolios`, `option_positions`, `weekly_trade_reports`,
+`user_settings`, `plaid_items`. Pre-migration-tracking artifacts.
+Don't rebuild migration history; just acknowledge.
+
+### #62a audit method limitations
+
+The audit catches static patterns: dict-literal upserts,
+enum-constraint writes, migration-vs-prod schema diff. It does
+NOT catch:
+
+1. `**kwargs` / variadic dict expansion in writes.
+2. Dicts built across functions (9 sites flagged opaque).
+3. `SELECT *` reads on schema-drifted tables.
+4. JSONB metadata field shape conventions.
+5. Joins / RLS / FK referencing dropped columns.
+6. Views drifting from base tables.
+7. Migrations rolled back via dashboard.
+8. **Migration intent vs runtime code disagreement** (the
+   `'neutral'` vs `'aggressive'` issue under D1 was caught only
+   by manual review of the migration file, not by any automated
+   step).
+
+Confidence: HIGH on 10 actionable findings, MEDIUM on completeness.
+Future drift is expected; this audit method catches the bulk but
+not all.
 
 ---
 

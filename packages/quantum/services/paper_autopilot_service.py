@@ -716,7 +716,7 @@ class PaperAutopilotService:
         corresponding follow-up for paper_autopilot_service.
         """
         from packages.quantum.services import equity_state
-        return equity_state.get_alpaca_equity(user_id)
+        return equity_state.get_alpaca_equity(user_id, supabase=self.client)
 
     def _get_champion_portfolio(self, user_id: str) -> Optional[str]:
         """Get portfolio_id of the champion cohort, or None for default."""

@@ -418,8 +418,9 @@ This helper SHOULD be the standard way to write `risk_alerts` in code
 affected by this doctrine. Anti-pattern fixes should reference this
 function rather than re-implementing the insert+fallback pattern.
 
-**Suggested location for the helper:**
-`packages/quantum/services/observability.py`
+**Location:** `packages/quantum/observability/alerts.py`
+(matches existing `packages/quantum/observability/` package
+convention).
 
 Phase 2 PR `#72-H1` (`equity_state` envelope-skip) is the natural
 place to introduce this helper, since it's the first

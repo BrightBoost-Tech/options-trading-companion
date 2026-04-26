@@ -89,7 +89,9 @@ class TestPaperAutopilotEstimateEquity(unittest.TestCase):
             result = svc._estimate_equity("user-x", positions=[{"id": "p1"}])
 
         self.assertEqual(result, 97276.32)
-        mock_eq.assert_called_once_with("user-x")
+        # Per #72-H1: autopilot now forwards its supabase client so
+        # equity_state can write risk_alerts on Alpaca failure.
+        mock_eq.assert_called_once_with("user-x", supabase=svc.client)
 
     def test_returns_none_on_alpaca_unavailable(self):
         """Hard contract: None on Alpaca failure, never the notional
@@ -168,9 +170,14 @@ class TestPaperMtmEnvelopeUsesEquityState(unittest.TestCase):
             "from packages.quantum.services import equity_state", src,
             "MTM handler must import equity_state module",
         )
+        # Per #72-H1: MTM handler now forwards its supabase client so
+        # equity_state can write risk_alerts on Alpaca failure. Use a
+        # shape-tolerant substring match (any kwargs after user_id are
+        # acceptable; what matters is that the canonical entrypoint is
+        # called with user_id as the first positional arg).
         self.assertIn(
-            "equity_state.get_alpaca_equity(user_id)", src,
-            "MTM handler must call get_alpaca_equity",
+            "equity_state.get_alpaca_equity(user_id", src,
+            "MTM handler must call get_alpaca_equity with user_id",
         )
 
     def test_mtm_handler_no_longer_uses_event_loop_cash_svc_antipattern(self):

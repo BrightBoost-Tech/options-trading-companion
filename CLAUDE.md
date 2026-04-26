@@ -710,8 +710,14 @@ slot in here alongside the Monday verification:
       → `shadow_only`; everything else defaults to `live_eligible`.
 
 **Priority 2 — This Month**
-- [ ] **#72 Loud-error doctrine audit** — establish doctrine + first
-      wave. Informs review criteria for #71/#68/#69.
+- [ ] **#72 Loud-error doctrine — Phase 2 HOT fixes.** Doctrine
+      ratified 2026-04-27 (see `docs/loud_error_doctrine.md`). Catalog
+      of ~242 sites in backlog below. Phase 2 ships ~5 PRs:
+      `#72-H1` (`equity_state` envelope-skip + `alert()` helper),
+      `#72-H2` (`scheduler._fire_task` HTTP alerting), `#72-H3`
+      (`@guardrail` + market_data callers), `#72-H4`
+      (workflow_orchestrator HOT swallows), `#72-H5` (paper_exit /
+      paper_autopilot HOT swallows).
 - [ ] **#71 RQ dispatch audit** — sweep `public_tasks.py` /
       `internal_tasks.py` for synchronous handlers; migrate to
       `enqueue_job_run` pattern.
@@ -938,16 +944,120 @@ observability trace. Migrate affected handlers to the `enqueue_job_run`
 pattern matching reliable peers. Effort: medium (audit + 1 PR per
 affected endpoint). Source: 2026-04-26 morning diagnostic.
 
-**#72 — Loud-error doctrine audit** (MEDIUM)
-Catalog all error-handling that swallows exceptions without writing
-`risk_alerts`. Establish doctrine: every production exception must
-produce a `risk_alert` at minimum severity=info OR fail loudly to the
-caller. Multi-PR effort — sequenced as doctrine first, then waves of
-fixes. Source patterns identified 2026-04-26:
-- `ALPACA_PAPER` vs `ALPACA_PAPER_TRADE` env mismatch (Saturday)
-- Polygon `@guardrail` decorator returns empty values silently
-- `policy_lab_eval` ImportError + scheduler-logs-warning-then-continues
-- per-cohort exception swallow at `evaluator.py:151-153`
+### #72 — Loud-error doctrine + silent-failure catalog
+
+**Phase 1 (doctrine + catalog) complete 2026-04-27.**
+
+Doctrine document: `docs/loud_error_doctrine.md` (v1.0).
+
+**Audit summary:** ~242 silent-failure sites in production
+(`packages/quantum/`).
+
+| Pattern | Count |
+|---|---:|
+| P1 (`try/except: pass`) | ~38 |
+| P2 (log-only swallow) | ~165 |
+| P3 (`@guardrail`) | 9 |
+| P4 (endpoint silent) | ~14 |
+| P5 (env-var branch) | ~7 |
+| P6 (bare `except`) | ~9 |
+
+| Path heat | Count |
+|---|---:|
+| HOT (every-trade / every-scan) | ~95 |
+| WARM (daily/weekly scheduler) | ~85 |
+| COLD (manual / on-demand UI) | ~50 |
+| DEAD (gated off; fold into existing dead-code sweeps) | ~12 |
+
+#### #72-Phase 2 — HOT fixes (next 2-4 weeks, ~5 PRs)
+
+- [ ] **#72-H1 — `equity_state.py` envelope-skip alert + introduce
+      `alert()` helper.** Sites: `services/equity_state.py:105,138,162,
+      188`. Pattern: P2 (returns None to caller; envelope silently
+      skipped). Effort: ~1h. Highest-leverage single fix; first
+      doctrine-application PR; introduces shared `alert()` helper at
+      `services/observability.py` per doctrine reference implementation.
+- [ ] **#72-H2 — `scheduler.py:_fire_task` HTTP error alerting.**
+      Sites: `scheduler.py:113,125,129`. Pattern: P2 + P4-adjacent.
+      Effort: ~2h. Would have caught the `policy_lab_eval` 7-day silence
+      root cause directly (#65). Coordinate with #71 (RQ dispatch audit).
+- [ ] **#72-H3 — `@guardrail` decorator + 8 `market_data.py` callers
+      write `risk_alerts` on fallback.** Pattern: P3. Effort: ~half day.
+      Coordinate with Polygon Tier 1/2 PRs (#67–#69) since scope overlaps.
+- [ ] **#72-H4 — `workflow_orchestrator.py` HOT swallows.** ~25 sites
+      across the suggestion pipeline (lines 99, 128, 169, 1131, 1326,
+      1411, 1654, 1727, 1794, 1843, 1883, 1952, 2060, 2071, 2158, 2172,
+      2196, 2747, 3031). Pattern: P1/P2. Highest priority subset:
+      `2158` (envelope check downgrade) and `2060,2071` (calibration
+      prefetch). Effort: ~1 day.
+- [ ] **#72-H5 — `paper_exit_evaluator.py` + `paper_autopilot_service.py`
+      HOT swallows.** ~25 sites. Pattern: P1/P2. Per-position swallow
+      patterns drop exit conditions silently. Effort: ~1 day.
+
+#### #72-Phase 3 — WARM fixes (this month, shared-helper approach)
+
+- [ ] **#72-W1 — Shared `notes_to_risk_alerts` helper for
+      `jobs/handlers/*`.** ~15 sites across `daily_progression_eval`,
+      `learning_ingest`, `paper_learning_ingest`, `iv_daily_refresh`,
+      `intraday_risk_monitor`, `promotion_check`,
+      `reconcile_positions_v4`, `seed_ledger_v4`,
+      `refresh_ledger_marks_v4`, `report_seed_review_v4`,
+      `run_market_hours_ops_v4`, `strategy_autotune`,
+      `suggestions_close`, `suggestions_open`, `validation_eval`.
+      Pattern: P2 (notes-list anti-pattern). Effort: ~4h for the helper
+      + each handler migration.
+- [ ] **#72-W2 — `paper_endpoints.py` post-fill swallow audit.**
+      Sites in `_run_attribution` and `_paper_commit_fill` family.
+      Pattern: P1/P2. Effort: ~half day.
+- [ ] **#72-W3 — `execution_service.py` ledger-record alert.**
+      Sites: `services/execution_service.py:182, 193, 256, 271, 349,
+      600, 648, 661, 728`. Pattern: P1/P2. Execution-vs-ledger drift
+      currently invisible. Effort: ~half day.
+- [ ] **#72-W4 — `brokers/alpaca_*` watchdog alerts.** ~12 sites
+      across `alpaca_order_handler.py`, `alpaca_client.py`,
+      `alpaca_endpoints.py`. Pattern: P2. Effort: ~half day.
+
+#### #72-Phase 4 — COLD touch-ups (eventual; on-touch only)
+
+- [ ] **#72-C1 — `dashboard_endpoints.py` user-visible failures.**
+      ~19 sites of P4 (HTTP 200 + empty payload). Effort: opportunistic;
+      patch on-touch.
+- [ ] **#72-C2 — Optimizer / agent / regime sub-step fallbacks.**
+      Across `optimizer.py`, `analytics/regime_engine_v3.py`,
+      `analytics/regime_engine_v4.py`, `agents/runner.py`. Pattern: P2.
+      Touch on-modify only.
+
+#### #72-Phase 4 — DEAD-code overlaps (no remediation; fold into existing sweeps)
+
+- `outcome_aggregator.py` (5 sites) — already in #67.
+- `nested_logging.py` (6 sites) — already in #67 (log_outcome chain).
+- `services/replay/decision_context.py`, `services/replay/blob_store.py`
+  (~10 sites) — gated off via `REPLAY_ENABLE=0`; fold into Replay
+  evaluation backlog item.
+- `analytics/walk_forward_autotune.py`, `services/walkforward_runner.py`
+  (~8 sites) — `AUTOTUNE_ENABLED=false` permanently; fold into
+  adaptive-caps stack removal item.
+- `polygon_client.py` — already in #66.
+
+#### #72 audit method limitations
+
+The audit catches static patterns: `try/except`, decorator-based
+swallow, endpoint-silent. It does NOT catch:
+
+1. Methods that raise typed exceptions to a caller that itself
+   swallows (the swallow shifts up one frame).
+2. Async paths where the exception is captured in a Future and
+   never awaited.
+3. Errors that propagate cleanly but produce wrong values
+   downstream (e.g., a `0` from a defaulted division leaks into
+   a sizing calc — the *swallow* is correct, but the *consequence*
+   is silent corruption).
+4. Operations that "succeed" with a corrupted state (e.g., insert
+   succeeds with NULL where downstream expects a value).
+
+Confidence: HIGH on the ~95 HOT site list, MEDIUM on completeness
+for COLD/DEAD where greppability degrades. Future drift is expected;
+this catalog is a starting point, not a complete enumeration.
 
 **#73 — Remove dead `GET /policy-lab/results` endpoint and table** (LOW)
 After PR #808 (closes #65), `policy_lab_daily_results` has zero

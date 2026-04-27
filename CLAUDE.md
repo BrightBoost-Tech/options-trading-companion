@@ -715,9 +715,10 @@ slot in here alongside the Monday verification:
       of ~242 sites in backlog below. Phase 2 ships ~5 PRs:
       `#72-H1` (`equity_state` envelope-skip + `alert()` helper),
       `#72-H2` (`scheduler._fire_task` HTTP alerting), `#72-H3`
-      (`@guardrail` + market_data callers), `#72-H4`
-      (workflow_orchestrator HOT swallows), `#72-H5` (paper_exit /
-      paper_autopilot HOT swallows).
+      (`@guardrail` + market_data callers), `#72-H4a/b/c`
+      (workflow_orchestrator HOT swallows — split into safety,
+      calibration, observability sub-PRs after diagnostic), `#72-H5`
+      (paper_exit / paper_autopilot HOT swallows).
 - [ ] **#71 RQ dispatch audit** — sweep `public_tasks.py` /
       `internal_tasks.py` for synchronous handlers; migrate to
       `enqueue_job_run` pattern.
@@ -868,6 +869,39 @@ caught something audit-surface analysis missed. The discipline is
 robust enough to formalize as protocol: every backlog fix begins
 with diagnosis, then design conversation, then implementation.
 
+### #72-H4 audit-vs-actual scope correction (2026-04-27)
+
+Audit catalog flagged ~25 sites in `workflow_orchestrator.py` as
+P1/P2 violations and estimated ~1 day of work. Diagnostic-first
+review reduced scope to **11 actionable sites**:
+
+- 3 sites are VALID under doctrine (input parsing fallback, typed
+  coercion with sentinel return, multi-source fallback intermediate).
+- 3 sites are DEAD-leaning (Replay subsystem gated off via
+  `REPLAY_ENABLE=0`).
+- 2 sites OVERLAP with `#62a-D3` (writing to non-existent
+  `regime_snapshots` table).
+- 11 sites are genuine HOT silent failures, naturally grouped into
+  trade-decision safety (2), calibration data integrity (4), and
+  audit/ancillary (5).
+
+The 11 actionable sites were split into three sub-PRs (`#72-H4a`,
+`#72-H4b`, `#72-H4c`) matching the H1-H3 cadence rather than one
+"~1 day" PR.
+
+This is the **third** time this weekend an audit's apparent scope
+reduced significantly under investigation:
+
+- **#62a schema drift audit:** ~25 instances → ~12 actionable
+- **#67 outcome_aggregator hardening:** 5 sites → all dead
+- **#72-H4 workflow_orchestrator HOT swallows:** ~25 sites → 11 actionable
+
+The diagnostic discipline reliably distinguishes "audit-flagged"
+from "actually-broken." Worth continuing to apply, especially when
+catalog estimates feel unrelatedly large (e.g., a "~1 day" item that
+doesn't match the file's logical structure usually has hidden
+VALID/DEAD/OVERLAP entries).
+
 ---
 
 ## Working Style
@@ -1016,12 +1050,40 @@ Doctrine document: `docs/loud_error_doctrine.md` (v1.0).
       `scheduler.py` away from its local singleton — future modules
       adopting the doctrine pattern import from
       `observability.alerts` rather than reinventing.
-- [ ] **#72-H4 — `workflow_orchestrator.py` HOT swallows.** ~25 sites
-      across the suggestion pipeline (lines 99, 128, 169, 1131, 1326,
-      1411, 1654, 1727, 1794, 1843, 1883, 1952, 2060, 2071, 2158, 2172,
-      2196, 2747, 3031). Pattern: P1/P2. Highest priority subset:
-      `2158` (envelope check downgrade) and `2060,2071` (calibration
-      prefetch). Effort: ~1 day.
+- [ ] **#72-H4a — `workflow_orchestrator.py` trade-decision safety.**
+      Group A from H4 diagnostic (2026-04-27). Sites: `2158` (envelope
+      check downgrade — canonical anti-pattern from 2026-04-25 envelope
+      skip), `2196` (ranker positions fetch — 3-AMD-class bug surface).
+      Pattern: P2. Effort: ~3 hours including tests. Ships first.
+- [ ] **#72-H4b — `workflow_orchestrator.py` calibration data
+      integrity.** Group B from H4 diagnostic. Sites: `1654` (morning
+      cal apply), `2071` (budget extraction final fallback), `2172`
+      (midday cal prefetch), `2747` (per-candidate cal apply — needs
+      tight-loop aggregation per doctrine). Pattern: P2. Effort:
+      ~half day. First exercise of the doctrine's tight-loop
+      aggregation guidance.
+- [ ] **#72-H4c — `workflow_orchestrator.py` audit + ancillary.**
+      Groups C+D from H4 diagnostic. Sites: `1326` (exit market-data
+      fetch), `1727` (per-suggestion insert failure morning), `1794`
+      (morning v4 post-insert observability), `1883` (progression
+      service fetch midday), `3031` (midday v4 post-insert
+      observability). Pattern: P1/P2. Effort: ~half day. Ships after
+      H4a + H4b.
+
+**Deferred from #72-H4 diagnostic (not in scope for any sub-PR):**
+
+- 3 sites (lines `99`, `128`, `169`) — Replay decision-context
+  recording. Replay subsystem is gated off via `REPLAY_ENABLE=0`.
+  Defers to the Replay wire-up-or-remove decision queued for after
+  micro_live stabilizes.
+- 2 sites (lines `1131`, `1952`) — `regime_snapshots.insert(...)`.
+  Defers to `#62a-D3` (table missing in production). Either the
+  migration adds the table or the writes get removed; alerts here
+  would be noise until that decision resolves.
+- 3 sites (lines `1411`, `1843`, `2060`) — VALID patterns under
+  Loud-Error Doctrine v1.0 (input parsing fallback, typed coercion
+  with sentinel return, multi-source fallback chain intermediate).
+  Documented as compliant for future audits. No fix needed.
 - [ ] **#72-H5 — `paper_exit_evaluator.py` + `paper_autopilot_service.py`
       HOT swallows.** ~25 sites. Pattern: P1/P2. Per-position swallow
       patterns drop exit conditions silently. Effort: ~1 day.

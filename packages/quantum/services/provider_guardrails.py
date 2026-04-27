@@ -103,6 +103,15 @@ def _repr_args_for_alert(func, args, kwargs, per_arg_cap=200, total_cap=500):
     - Per-arg repr capped at per_arg_cap chars
     - Joined string capped at total_cap chars
     - If func is a method (has '.' in __qualname__), skips args[0] (self)
+
+    Heuristic caveat: ``'.' in func.__qualname__`` also matches nested
+    functions (e.g. ``outer.<locals>.inner`` has a ``.``), so this
+    heuristic would incorrectly skip ``args[0]`` for a nested function
+    that happens to receive a positional first argument. Acceptable
+    today because ``@guardrail`` is applied to module-level functions
+    or class methods in practice — never to nested functions. If
+    nested-function usage becomes common, switch to
+    ``inspect.ismethod`` / ``inspect.isfunction`` detection.
     """
     is_method = "." in (getattr(func, "__qualname__", "") or "")
     positional = args[1:] if (is_method and args) else args

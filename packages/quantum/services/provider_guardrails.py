@@ -102,18 +102,27 @@ def _repr_args_for_alert(func, args, kwargs, per_arg_cap=200, total_cap=500):
 
     - Per-arg repr capped at per_arg_cap chars
     - Joined string capped at total_cap chars
-    - If func is a method (has '.' in __qualname__), skips args[0] (self)
+    - If func is a class method, skips args[0] (self)
 
-    Heuristic caveat: ``'.' in func.__qualname__`` also matches nested
-    functions (e.g. ``outer.<locals>.inner`` has a ``.``), so this
-    heuristic would incorrectly skip ``args[0]`` for a nested function
-    that happens to receive a positional first argument. Acceptable
-    today because ``@guardrail`` is applied to module-level functions
-    or class methods in practice — never to nested functions. If
-    nested-function usage becomes common, switch to
-    ``inspect.ismethod`` / ``inspect.isfunction`` detection.
+    Method-detection heuristic: Python sets ``__qualname__`` to
+    ``Class.method`` for class methods and to
+    ``outer.<locals>.inner`` for nested functions. Both contain
+    ``.``, so a naive ``'.' in __qualname__`` check would
+    false-positive on nested functions. We additionally require
+    ``<locals>`` to be ABSENT, which correctly distinguishes:
+
+    - Module-level function ``fn`` → no ``.`` → not a method
+    - Class method ``Class.method`` → has ``.``, no ``<locals>`` → method
+    - Nested function ``outer.<locals>.inner`` → has ``.`` AND
+      ``<locals>`` → not a method
+
+    The heuristic still misses one edge case: classes defined inside
+    a function (``outer.<locals>.Class.method``). If that pattern
+    starts appearing under ``@guardrail``, switch to
+    ``inspect.signature(func).parameters`` first-name == 'self'.
     """
-    is_method = "." in (getattr(func, "__qualname__", "") or "")
+    qualname = getattr(func, "__qualname__", "") or ""
+    is_method = "." in qualname and "<locals>" not in qualname
     positional = args[1:] if (is_method and args) else args
     parts: list = []
     for a in positional:

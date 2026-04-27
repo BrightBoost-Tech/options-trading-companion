@@ -49,6 +49,11 @@ import uuid
 from packages.quantum.observability.lineage import LineageSigner, get_code_sha
 from packages.quantum.observability.audit_log_service import AuditLogService, build_attribution_from_lineage
 
+# Loud-Error Doctrine v1.0: alert() helper for risk_alerts writes
+# from workflow_orchestrator's silent-failure paths. See
+# docs/loud_error_doctrine.md.
+from packages.quantum.observability.alerts import alert, _get_admin_supabase
+
 # Constants for table names
 TRADE_SUGGESTIONS_TABLE = "trade_suggestions"
 WEEKLY_REPORTS_TABLE = "weekly_trade_reports"
@@ -2157,6 +2162,21 @@ async def run_midday_cycle(supabase: Client, user_id: str):
             )
     except Exception as _env_err:
         logger.warning(f"[RISK_ENVELOPE] Pre-entry check failed (non-fatal): {_env_err}")
+        alert(
+            _get_admin_supabase(),
+            alert_type="workflow_envelope_check_failed",
+            severity="warning",
+            message=f"Pre-entry envelope check failed: {_env_err}",
+            user_id=user_id,
+            metadata={
+                "function_name": "run_midday_cycle",
+                "error_class": type(_env_err).__name__,
+                "error_message": str(_env_err)[:500],
+                "deployable_capital": float(deployable_capital),
+                "open_position_count": len(positions),
+                "consequence": "envelope safety gate removed for this cycle",
+            },
+        )
 
     # ── Pre-fetch calibration adjustments (once, not per-candidate) ──
     _cal_adj_cache = None
@@ -2195,6 +2215,19 @@ async def run_midday_cycle(supabase: Client, user_id: str):
             _ranker_positions = _pos_res.data or []
         except Exception as _pos_err:
             logger.warning(f"[RANKER] Failed to fetch open positions: {_pos_err}")
+            alert(
+                _get_admin_supabase(),
+                alert_type="workflow_ranker_positions_fetch_failed",
+                severity="warning",
+                message=f"Portfolio positions fetch failed for ranker: {_pos_err}",
+                user_id=user_id,
+                metadata={
+                    "function_name": "run_midday_cycle",
+                    "error_class": type(_pos_err).__name__,
+                    "error_message": str(_pos_err)[:500],
+                    "consequence": "ranker proceeding portfolio-blind (3-AMD-class concentration risk)",
+                },
+            )
 
     # 3. Size and Prepare Suggestions
     for cand in candidates:

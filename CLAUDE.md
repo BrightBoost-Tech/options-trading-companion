@@ -1050,11 +1050,18 @@ Doctrine document: `docs/loud_error_doctrine.md` (v1.0).
       `scheduler.py` away from its local singleton — future modules
       adopting the doctrine pattern import from
       `observability.alerts` rather than reinventing.
-- [ ] **#72-H4a — `workflow_orchestrator.py` trade-decision safety.**
-      Group A from H4 diagnostic (2026-04-27). Sites: `2158` (envelope
-      check downgrade — canonical anti-pattern from 2026-04-25 envelope
-      skip), `2196` (ranker positions fetch — 3-AMD-class bug surface).
-      Pattern: P2. Effort: ~3 hours including tests. Ships first.
+- [x] **#72-H4a — `workflow_orchestrator.py` trade-decision safety.**
+      **CLOSED 2026-04-27 by PR (this commit).** Group A from H4
+      diagnostic. Sites `2158` (envelope check) and `2196` (ranker
+      positions fetch) now write `risk_alerts` on failure. New
+      `alert_type`s: `workflow_envelope_check_failed`,
+      `workflow_ranker_positions_fetch_failed`. Establishes the
+      `consequence` metadata field convention for `workflow_*`-class
+      alerts (which continue silently after the catch, so the
+      consequence isn't obvious from `alert_type` alone). Tests use
+      source-level structural assertions + `ast.parse` syntax
+      validation rather than runtime imports (avoids heavy
+      dependency tree).
 - [ ] **#72-H4b — `workflow_orchestrator.py` calibration data
       integrity.** Group B from H4 diagnostic. Sites: `1654` (morning
       cal apply), `2071` (budget extraction final fallback), `2172`

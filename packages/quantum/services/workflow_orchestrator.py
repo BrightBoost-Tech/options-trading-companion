@@ -1087,8 +1087,16 @@ async def run_morning_cycle(supabase: Client, user_id: str):
 
     async def _fetch_positions():
         try:
+            # NOTE: paper_positions has a different schema than the `positions`
+            # table that _estimate_risk_usage_usd was originally written for
+            # (paper uses max_credit/max_loss for option spreads; positions uses
+            # cost_basis/quantity for equity holdings). The risk_usage computed
+            # here is an approximation. A native paper-aware variant of the
+            # risk engine is captured as backlog item #80. The current
+            # approximation under-counts slightly, which is a safer failure
+            # mode than the prior over-counting from stale `positions` data.
             res = await asyncio.to_thread(
-                lambda: supabase.table("positions").select("*").eq("user_id", user_id).execute()
+                lambda: supabase.table("paper_positions").select("*").eq("user_id", user_id).eq("status", "open").execute()
             )
             return res.data or []
         except Exception as e:
@@ -1907,8 +1915,16 @@ async def run_midday_cycle(supabase: Client, user_id: str):
 
     async def _fetch_positions():
         try:
+            # NOTE: paper_positions has a different schema than the `positions`
+            # table that _estimate_risk_usage_usd was originally written for
+            # (paper uses max_credit/max_loss for option spreads; positions uses
+            # cost_basis/quantity for equity holdings). The risk_usage computed
+            # here is an approximation. A native paper-aware variant of the
+            # risk engine is captured as backlog item #80. The current
+            # approximation under-counts slightly, which is a safer failure
+            # mode than the prior over-counting from stale `positions` data.
             res = await asyncio.to_thread(
-                lambda: supabase.table("positions").select("*").eq("user_id", user_id).execute()
+                lambda: supabase.table("paper_positions").select("*").eq("user_id", user_id).eq("status", "open").execute()
             )
             return res.data or []
         except Exception as e:

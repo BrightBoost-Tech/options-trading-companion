@@ -1,20 +1,27 @@
 """
-Source-level structural assertions for #72-H4a: workflow_orchestrator
-trade-decision-safety alerts.
+Source-level structural assertions for #72-H4 doctrine application
+in workflow_orchestrator.
 
-Per Loud-Error Doctrine v1.0. Two sites in run_midday_cycle now write
-risk_alerts when their underlying operations fail:
+Test classes organized by sub-PR:
+  H4a — Trade-decision safety:
+    - TestEnvelopeCheckAlert (site 2158)
+    - TestRankerPositionsAlert (site 2196)
 
-- Site 2158: envelope check (canonical 2026-04-25 silent-skip anti-pattern)
-- Site 2196: ranker positions fetch (3-AMD-class concentration risk)
+  H4b — Calibration data integrity:
+    - TestMorningCalApplyAlert (site 1654)
+    - TestMiddayBudgetFallbackAlert (site 2076)
+    - TestMiddayCalPrefetchAlert (site 2172)
+    - TestPerCandidateCalAggregation (site 2780, loop aggregation)
 
-These tests use source-level structural assertions because
-workflow_orchestrator.py is too large to runtime-test the relevant
-except blocks without ~30 LOC of dependency stubbing (alpaca-py +
-many other heavy imports). Same pattern as
-test_workflow_orchestrator_ranker_positions.py — but no alpaca stubs
-are needed here because no test imports the module; we only read its
-source and parse it via ``ast``.
+  H4c — Audit + ancillary (TBD):
+    - [tests added with H4c PR]
+
+Plus shared helpers:
+  - TestModuleSyntaxValid (ast.parse check)
+  - TestAlertImportPresent (module-level imports)
+
+All tests are source-level structural assertions because
+workflow_orchestrator.py is too large to runtime-test cleanly.
 """
 
 import os
@@ -139,6 +146,266 @@ class TestRankerPositionsAlert(unittest.TestCase):
             "Ranker-positions alert consequence should reference the "
             "3-AMD-class concentration risk (the operational bug "
             "shape this alert exists to catch).",
+        )
+
+
+class TestMorningCalApplyAlert(unittest.TestCase):
+    """Site 1654: morning calibration apply failure must write a
+    workflow_morning_cal_apply_failed alert."""
+
+    def setUp(self):
+        self.src = _load_orchestrator_source()
+        # _extract_except_block returns the FIRST `except Exception as
+        # cal_err:` match — line 1659 in run_morning_cycle. The midday
+        # candidate-loop except (line ~2820) shares the same variable
+        # name; TestPerCandidateCalAggregation anchors past the
+        # candidate loop start to scope to that one.
+        self.block = _extract_except_block(
+            self.src, "except Exception as cal_err:"
+        )
+
+    def test_morning_cal_except_block_present(self):
+        self.assertGreater(
+            len(self.block), 0,
+            "Could not locate the morning cal-apply except block — "
+            "expected `except Exception as cal_err:` in run_morning_cycle.",
+        )
+
+    def test_morning_cal_alert_present(self):
+        self.assertIn(
+            "alert(", self.block,
+            "Morning cal-apply except must call alert() per "
+            "Loud-Error Doctrine v1.0 (#72-H4b).",
+        )
+
+    def test_morning_cal_alert_type_correct(self):
+        self.assertIn(
+            'alert_type="workflow_morning_cal_apply_failed"', self.block,
+            "Morning cal-apply alert must use alert_type="
+            "'workflow_morning_cal_apply_failed'.",
+        )
+
+    def test_morning_cal_uses_admin_supabase(self):
+        self.assertIn(
+            "_get_admin_supabase()", self.block,
+            "Morning cal-apply alert must call _get_admin_supabase().",
+        )
+
+    def test_morning_cal_includes_consequence_metadata(self):
+        self.assertIn(
+            '"consequence"', self.block,
+            "workflow_*-class alerts must include `consequence` field.",
+        )
+
+
+class TestMiddayBudgetFallbackAlert(unittest.TestCase):
+    """Site 2076: budget extraction fallback final-failure must write a
+    workflow_budget_extraction_failed alert."""
+
+    def setUp(self):
+        self.src = _load_orchestrator_source()
+        self.block = _extract_except_block(
+            self.src, "except Exception as _budget_fallback_err:"
+        )
+
+    def test_budget_fallback_except_block_present(self):
+        self.assertGreater(
+            len(self.block), 0,
+            "Could not locate the budget-fallback except block — "
+            "expected `except Exception as _budget_fallback_err:` "
+            "in run_midday_cycle (renamed from bare `except` per H4b).",
+        )
+
+    def test_budget_fallback_alert_present(self):
+        self.assertIn(
+            "alert(", self.block,
+            "Budget-fallback except must call alert().",
+        )
+
+    def test_budget_fallback_alert_type_correct(self):
+        self.assertIn(
+            'alert_type="workflow_budget_extraction_failed"', self.block,
+            "Budget-fallback alert must use alert_type="
+            "'workflow_budget_extraction_failed'.",
+        )
+
+    def test_budget_fallback_uses_admin_supabase(self):
+        self.assertIn(
+            "_get_admin_supabase()", self.block,
+            "Budget-fallback alert must call _get_admin_supabase().",
+        )
+
+    def test_budget_fallback_includes_consequence_metadata(self):
+        self.assertIn(
+            '"consequence"', self.block,
+            "Budget-fallback alert must include `consequence` field.",
+        )
+
+
+class TestMiddayCalPrefetchAlert(unittest.TestCase):
+    """Site 2172: midday calibration prefetch failure must write a
+    workflow_midday_cal_prefetch_failed alert."""
+
+    def setUp(self):
+        self.src = _load_orchestrator_source()
+        self.block = _extract_except_block(
+            self.src, "except Exception as _cal_prefetch_err:"
+        )
+
+    def test_cal_prefetch_except_block_present(self):
+        self.assertGreater(
+            len(self.block), 0,
+            "Could not locate the cal-prefetch except block — "
+            "expected `except Exception as _cal_prefetch_err:` "
+            "in run_midday_cycle.",
+        )
+
+    def test_cal_prefetch_alert_present(self):
+        self.assertIn(
+            "alert(", self.block,
+            "Cal-prefetch except must call alert().",
+        )
+
+    def test_cal_prefetch_alert_type_correct(self):
+        self.assertIn(
+            'alert_type="workflow_midday_cal_prefetch_failed"', self.block,
+            "Cal-prefetch alert must use alert_type="
+            "'workflow_midday_cal_prefetch_failed'.",
+        )
+
+    def test_cal_prefetch_uses_admin_supabase(self):
+        self.assertIn(
+            "_get_admin_supabase()", self.block,
+            "Cal-prefetch alert must call _get_admin_supabase().",
+        )
+
+    def test_cal_prefetch_includes_consequence_metadata(self):
+        self.assertIn(
+            '"consequence"', self.block,
+            "Cal-prefetch alert must include `consequence` field.",
+        )
+
+
+class TestPerCandidateCalAggregation(unittest.TestCase):
+    """Site 2780 area: per-candidate calibration apply uses the
+    Loud-Error Doctrine's tight-loop aggregation pattern. Failures
+    collected during the candidate loop, alerted once after."""
+
+    def setUp(self):
+        self.src = _load_orchestrator_source()
+        # NOTE: The candidate loop's cal_err except has the same variable
+        # name as the morning cal_err except (line 1654).
+        # _extract_except_block would return the first match (morning).
+        # Tests below anchor on `for cand in candidates:` to scope
+        # assertions to the midday loop.
+
+    def test_pre_loop_failures_list_init_present(self):
+        """Pre-loop init `_cal_apply_failures = []` must exist before
+        the `for cand in candidates:` loop."""
+        candidates_loop_pos = self.src.find("for cand in candidates:")
+        self.assertGreater(
+            candidates_loop_pos, 0,
+            "Could not locate `for cand in candidates:` loop",
+        )
+        # Init must appear within the 500 chars BEFORE the loop.
+        pre_loop_window = self.src[max(0, candidates_loop_pos - 500):candidates_loop_pos]
+        self.assertIn(
+            "_cal_apply_failures = []", pre_loop_window,
+            "Aggregation pattern requires `_cal_apply_failures = []` "
+            "init in the 500 chars before the candidate loop.",
+        )
+
+    def test_in_loop_append_present(self):
+        """Inside the cal-apply except (which catches `cal_err`), the
+        failure must be appended to `_cal_apply_failures`."""
+        loop_pos = self.src.find("for cand in candidates:")
+        # Search after the loop start for the cal_err except.
+        after_loop = self.src[loop_pos:]
+        cal_err_pos = after_loop.find("except Exception as cal_err:")
+        self.assertGreater(
+            cal_err_pos, 0,
+            "Could not locate cal_err except inside candidate loop",
+        )
+        block = after_loop[cal_err_pos:cal_err_pos + 800]
+        self.assertIn(
+            "_cal_apply_failures.append(", block,
+            "Per-candidate cal except must append failure to "
+            "_cal_apply_failures (aggregation pattern, #72-H4b).",
+        )
+
+    def test_post_loop_conditional_present(self):
+        """After the loop ends, a conditional `if _cal_apply_failures:`
+        must guard the summary alert."""
+        # Use the 'FINAL MIDDAY SUGGESTION COUNT' print as the
+        # "after-loop" anchor — the summary alert lives just before it.
+        anchor_pos = self.src.find("FINAL MIDDAY SUGGESTION COUNT")
+        self.assertGreater(
+            anchor_pos, 0,
+            "Could not locate post-loop anchor",
+        )
+        pre_anchor = self.src[max(0, anchor_pos - 1500):anchor_pos]
+        self.assertIn(
+            "if _cal_apply_failures:", pre_anchor,
+            "Post-loop alert must be guarded by "
+            "`if _cal_apply_failures:` conditional.",
+        )
+
+    def test_post_loop_alert_call_present(self):
+        """The post-loop conditional must contain an alert() call."""
+        anchor_pos = self.src.find("FINAL MIDDAY SUGGESTION COUNT")
+        pre_anchor = self.src[max(0, anchor_pos - 1500):anchor_pos]
+        if_pos = pre_anchor.find("if _cal_apply_failures:")
+        self.assertGreater(if_pos, 0)
+        block = pre_anchor[if_pos:]
+        self.assertIn(
+            "alert(", block,
+            "Post-loop conditional must call alert().",
+        )
+
+    def test_post_loop_alert_type_correct(self):
+        anchor_pos = self.src.find("FINAL MIDDAY SUGGESTION COUNT")
+        pre_anchor = self.src[max(0, anchor_pos - 1500):anchor_pos]
+        if_pos = pre_anchor.find("if _cal_apply_failures:")
+        block = pre_anchor[if_pos:]
+        self.assertIn(
+            'alert_type="workflow_per_candidate_cal_apply_failed"', block,
+            "Post-loop alert must use alert_type="
+            "'workflow_per_candidate_cal_apply_failed'.",
+        )
+
+    def test_post_loop_uses_admin_supabase(self):
+        anchor_pos = self.src.find("FINAL MIDDAY SUGGESTION COUNT")
+        pre_anchor = self.src[max(0, anchor_pos - 1500):anchor_pos]
+        if_pos = pre_anchor.find("if _cal_apply_failures:")
+        block = pre_anchor[if_pos:]
+        self.assertIn(
+            "_get_admin_supabase()", block,
+            "Post-loop alert must call _get_admin_supabase().",
+        )
+
+    def test_post_loop_metadata_has_failed_count_and_symbols(self):
+        anchor_pos = self.src.find("FINAL MIDDAY SUGGESTION COUNT")
+        pre_anchor = self.src[max(0, anchor_pos - 1500):anchor_pos]
+        if_pos = pre_anchor.find("if _cal_apply_failures:")
+        block = pre_anchor[if_pos:]
+        self.assertIn(
+            '"failed_count"', block,
+            "Aggregation metadata must include failed_count.",
+        )
+        self.assertIn(
+            '"failed_symbols"', block,
+            "Aggregation metadata must include failed_symbols.",
+        )
+
+    def test_post_loop_includes_consequence(self):
+        anchor_pos = self.src.find("FINAL MIDDAY SUGGESTION COUNT")
+        pre_anchor = self.src[max(0, anchor_pos - 1500):anchor_pos]
+        if_pos = pre_anchor.find("if _cal_apply_failures:")
+        block = pre_anchor[if_pos:]
+        self.assertIn(
+            '"consequence"', block,
+            "Aggregation alert must include `consequence` field "
+            "(workflow_*-class convention).",
         )
 
 

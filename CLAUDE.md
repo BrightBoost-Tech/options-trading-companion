@@ -1062,13 +1062,18 @@ Doctrine document: `docs/loud_error_doctrine.md` (v1.0).
       source-level structural assertions + `ast.parse` syntax
       validation rather than runtime imports (avoids heavy
       dependency tree).
-- [ ] **#72-H4b — `workflow_orchestrator.py` calibration data
-      integrity.** Group B from H4 diagnostic. Sites: `1654` (morning
-      cal apply), `2071` (budget extraction final fallback), `2172`
-      (midday cal prefetch), `2747` (per-candidate cal apply — needs
-      tight-loop aggregation per doctrine). Pattern: P2. Effort:
-      ~half day. First exercise of the doctrine's tight-loop
-      aggregation guidance.
+- [x] **#72-H4b — `workflow_orchestrator.py` calibration data
+      integrity.** **CLOSED 2026-04-27 by PR (this commit).** Group B
+      from H4 diagnostic. 4 sites covered with new alert_types:
+      `workflow_morning_cal_apply_failed` (site 1654, single-fire),
+      `workflow_budget_extraction_failed` (site 2076, single-fire,
+      bare-except renamed), `workflow_midday_cal_prefetch_failed`
+      (site 2172, single-fire), `workflow_per_candidate_cal_apply_failed`
+      (site ~2820, **first production use of doctrine's tight-loop
+      aggregation pattern**: per-candidate failures collected during
+      candidate loop, single summary alert fires after loop with
+      `failed_count` + `failed_symbols` (capped at 20) +
+      `distinct_error_classes`). Trade-off documented in code comment.
 - [ ] **#72-H4c — `workflow_orchestrator.py` audit + ancillary.**
       Groups C+D from H4 diagnostic. Sites: `1326` (exit market-data
       fetch), `1727` (per-suggestion insert failure morning), `1794`

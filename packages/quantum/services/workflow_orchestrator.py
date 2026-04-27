@@ -1658,6 +1658,20 @@ async def run_morning_cycle(supabase: Client, user_id: str):
                         )
             except Exception as cal_err:
                 logger.warning(f"[CALIBRATION] Morning window failed: {cal_err}")
+                alert(
+                    _get_admin_supabase(),
+                    alert_type="workflow_morning_cal_apply_failed",
+                    severity="warning",
+                    message=f"Morning calibration apply failed: {cal_err}",
+                    user_id=user_id,
+                    metadata={
+                        "function_name": "run_morning_cycle",
+                        "error_class": type(cal_err).__name__,
+                        "error_message": str(cal_err)[:500],
+                        "suggestion_count": len(suggestions),
+                        "consequence": "all morning suggestions ship with uncalibrated EV/PoP",
+                    },
+                )
 
         cycle_date = datetime.now(timezone.utc).date().isoformat()
         inserts_count = 0
@@ -2073,8 +2087,21 @@ async def run_midday_cycle(supabase: Client, user_id: str):
                     remaining_global_budget = float(ga.get("remaining") or 0.0)
                 else:
                     remaining_global_budget = 0.0
-            except Exception:
+            except Exception as _budget_fallback_err:
                 remaining_global_budget = 0.0
+                alert(
+                    _get_admin_supabase(),
+                    alert_type="workflow_budget_extraction_failed",
+                    severity="warning",
+                    message=f"Budget extraction fallback failed: {_budget_fallback_err}",
+                    user_id=user_id,
+                    metadata={
+                        "function_name": "run_midday_cycle",
+                        "error_class": type(_budget_fallback_err).__name__,
+                        "error_message": str(_budget_fallback_err)[:500],
+                        "consequence": "remaining_global_budget=0.0; rank_and_select will return 0 candidates; midday cycle skipped",
+                    },
+                )
 
         # Config
         midday_config = SizingConfig(compounding_enabled=COMPOUNDING_MODE)
@@ -2191,6 +2218,19 @@ async def run_midday_cycle(supabase: Client, user_id: str):
             _cal_adj_cache = get_calibration_adjustments(user_id, supabase)
         except Exception as _cal_prefetch_err:
             logger.warning(f"[CALIBRATION] Failed to pre-fetch adjustments: {_cal_prefetch_err}")
+            alert(
+                _get_admin_supabase(),
+                alert_type="workflow_midday_cal_prefetch_failed",
+                severity="warning",
+                message=f"Midday calibration prefetch failed: {_cal_prefetch_err}",
+                user_id=user_id,
+                metadata={
+                    "function_name": "run_midday_cycle",
+                    "error_class": type(_cal_prefetch_err).__name__,
+                    "error_message": str(_cal_prefetch_err)[:500],
+                    "consequence": "_cal_adj_cache=None; entire midday cycle ranks/sizes with uncalibrated EV/PoP",
+                },
+            )
 
     # ── Pre-fetch open positions for portfolio-aware ranking ──
     # canonical_ranker uses these for correlation_factor (×2 if same symbol held)
@@ -2228,6 +2268,11 @@ async def run_midday_cycle(supabase: Client, user_id: str):
                     "consequence": "ranker proceeding portfolio-blind (3-AMD-class concentration risk)",
                 },
             )
+
+    # Loud-Error Doctrine tight-loop aggregation: per-candidate
+    # calibration failures collected during the loop, alerted once
+    # after. See post-loop check below.
+    _cal_apply_failures = []
 
     # 3. Size and Prepare Suggestions
     for cand in candidates:
@@ -2779,6 +2824,12 @@ async def run_midday_cycle(supabase: Client, user_id: str):
                     ev, pop = apply_calibration(ev, pop, strategy, regime_str, _cal_adj_cache, dte_bucket=dte_bucket)
                 except Exception as cal_err:
                     logger.warning(f"[CALIBRATION] Failed to apply adjustments: {cal_err}")
+                    _cal_apply_failures.append({
+                        "ticker": ticker,
+                        "strategy": strategy,
+                        "error_class": type(cal_err).__name__,
+                        "error_message": str(cal_err)[:200],
+                    })
 
             suggestion = {
                 "user_id": user_id,
@@ -2876,6 +2927,33 @@ async def run_midday_cycle(supabase: Client, user_id: str):
                         "score": cand.get("score")
                     }
                 )
+
+    # Aggregation pattern: per-candidate failures collected during
+    # loop, alerted once after. If the cycle exits abnormally before
+    # reaching this check (rare; would indicate cycle-level failure
+    # that other alerts catch), the aggregation is lost. Acceptable
+    # trade-off for tight-loop alert volume management per Loud-Error
+    # Doctrine v1.0.
+    if _cal_apply_failures:
+        alert(
+            _get_admin_supabase(),
+            alert_type="workflow_per_candidate_cal_apply_failed",
+            severity="warning",
+            message=(
+                f"Per-candidate calibration apply failed for "
+                f"{len(_cal_apply_failures)}/{len(candidates)} candidates"
+            ),
+            user_id=user_id,
+            metadata={
+                "function_name": "run_midday_cycle",
+                "total_candidates": len(candidates),
+                "failed_count": len(_cal_apply_failures),
+                "failed_symbols": [f["ticker"] for f in _cal_apply_failures[:20]],
+                "distinct_error_classes": sorted({f["error_class"] for f in _cal_apply_failures}),
+                "first_failure_message": _cal_apply_failures[0]["error_message"] if _cal_apply_failures else None,
+                "consequence": "candidates ranked/sized with uncalibrated EV/PoP",
+            },
+        )
 
     print(f"FINAL MIDDAY SUGGESTION COUNT: {len(suggestions)}")
 

@@ -13,7 +13,7 @@ For AI session context, this file is loaded every turn.
 - **Stack:** Python 3.11 / FastAPI backend (`packages/quantum`) · Next.js
   frontend (`apps/web`) · Supabase Postgres · Railway deploy · APScheduler
   (primary) · GitHub Actions (fallback) · Alpaca broker + market data (primary) ·
-  Polygon.io (fallback + reference data)
+  Polygon.io (Stocks Starter + Options Developer, $108/mo, primary path for snapshots/bars where Alpaca paper account lacks SIP entitlement)
 
 ---
 
@@ -118,7 +118,7 @@ Paper keys consistently use `PKPR2` prefix. Distinguishing rule:
 
 ## Architecture (v4 — 16 Layers + 4 Managed Agents)
 
-1. Market Data (Alpaca primary for options + equities, Polygon fallback)
+1. Market Data (Alpaca primary by design; Polygon Starter + Options Developer is de facto primary for paper-account paths since Alpaca paper lacks SIP)
 2. Backtesting
 3. Observability
 4. Security
@@ -170,6 +170,15 @@ either wire up or remove using the v4-accounting playbook.
 | Historical contracts | Polygon `/v3/reference/options/contracts` | — |
 | Account equity | Alpaca `get_account()` | — (no fallback; skip loss envelopes) |
 | Weekly P&L | Alpaca `get_portfolio_history(1W/1D)` | — (no fallback; skip weekly envelope) |
+
+**Runtime note (2026-04-27):** the Primary/Fallback ordering above
+reflects design intent. In practice, Alpaca paper accounts lack
+SIP entitlement (`subscription does not permit querying recent
+SIP data` errors on equity bars), so many calls fall through to
+Polygon despite the table's "Alpaca primary" labeling. Polygon
+plan upgrade ($108/mo, see *Polygon dependency status*) makes
+this de facto path durable. Resolution of the SIP gap depends on
+live Alpaca account entitlements (backlog #88).
 
 ---
 
@@ -547,52 +556,59 @@ defends against that mistake.
 
 ---
 
-## Polygon dependency status (2026-04-25)
+## Polygon dependency status (2026-04-27)
 
 **Current state:**
-- 63 production Polygon API calls across 23 files
+- 63 production Polygon API calls across 23 files.
 - 11 services with direct Polygon dependency: `options_scanner`,
-  `paper_mark_to_market_service`, `paper_endpoints`, `dashboard_endpoints`,
-  `option_contract_resolver`, `outcome_aggregator`, `universe_service`,
+  `paper_mark_to_market_service`, `paper_endpoints`,
+  `dashboard_endpoints`, `option_contract_resolver`,
+  `outcome_aggregator`, `universe_service`,
   `earnings_calendar_service`, `iv_daily_refresh`, `event_engine`,
   `nested/backbone`.
-- `MarketDataTruthLayer` provides Alpaca-first failover **for snapshot
-  paths only**. Most heavy callers bypass it.
-- **Failure mode: silent degradation.** The `@guardrail` decorator in
-  `services/provider_guardrails.py` returns typed empty values
-  (`None`, `{}`, `[]`) on Polygon errors. No `risk_alerts` written. No
-  `job_run.error` populated. Saturday 2026-04-25's `update_metrics`
-  429s left zero database trace.
+- `MarketDataTruthLayer` provides Alpaca-first failover for snapshot
+  paths only. Most heavy callers bypass it. Alpaca paper accounts
+  lack SIP entitlement, so equity-bars fallback fails today; this
+  may resolve under the live Alpaca account (#88 verification
+  pending).
+- **Failure observability:** PR #823's H3 doctrine alerts wrap
+  `@guardrail`-protected callers — Polygon failures now write
+  `polygon_circuit_open` and `polygon_retries_exhausted` rows to
+  `risk_alerts`. The previous "silent degradation" framing is
+  obsolete (alerts surfaced #87 within hours of deploy).
 
-**Phase-out plan (committed):**
+**2026-04-27 plan upgrade:** Stocks Basic ($0) → Stocks Starter
+($29/mo); Options Basic ($0) → Options Developer ($79/mo). Total
+$108/mo recurring. Resolved #87 (chronic 429 + entitlement gap).
+Polygon is now a durable paid provider for the foreseeable future.
 
-**Tier 1 — within 2 weeks (safety-critical):**
-- Delete dead code: `packages/quantum/polygon_client.py` (zero non-test
-  callers) and `market_data.py:_get_option_snapshot_api` (deprecated).
-- Harden `outcome_aggregator._calculate_execution_pnl`: replace the
-  silent-`None` pattern with explicit `logger.error` + `risk_alerts`
-  insert on bar-fetch failure. The current pattern silently corrupts
-  realized-P&L attribution feeding the calibration loop.
+**Phase-out status (post-upgrade):**
 
-**Tier 2 — within 6 weeks (high-frequency-failure paths):**
-- Migrate `universe_service` to Alpaca for `get_historical_prices` and
-  `get_iv_rank`. Eliminates the Saturday 429 root cause.
-- Migrate `market_data.py` base layer (`get_historical_prices`,
-  `get_recent_quote`, `get_option_chain_snapshot`) to Alpaca.
-  Subsequent service migrations (paper_mtm, dashboard, options_scanner)
-  flow from this base.
+The original Tier 1/2/3 phase-out plan was motivated by treating
+429s as a structural Polygon problem. With #87 resolved at the
+plan-tier level, the phase-out is no longer urgent. Items below
+remain in the backlog as **provider redundancy / lock-in
+mitigation**, not safety:
 
-**Tier 3 — deferred indefinitely (acceptable residual):**
-- `get_ticker_details` (sector, market_cap) — no Alpaca equivalent.
-  Implement Supabase-cache pattern with weekly manual refresh.
-- `get_last_financials_date` (earnings ±90d estimation) — no Alpaca
-  equivalent. Same Supabase-cache pattern.
-- `I:VIX` historical bars — no Alpaca equivalent for index symbols.
-  Single symbol, low call volume; keep Polygon for this.
-- Backtest paths (`historical_simulation`, `option_contract_resolver`
-  backtest paths) — non-production; defer.
+- **Tier 1 (LOW, P3): #66 dead-code deletion** — independent of
+  plan tier; pure hygiene.
+- **Tier 2 (LOW, P4 deferred): #68 / #69 Alpaca migrations** —
+  reactivate if Polygon billing changes materially, if a future
+  Polygon outage proves prolonged, or if live Alpaca account
+  unlocks SIP making the fallback path actually work.
+- **Tier 3 (P4 deferred): #70 HARD_TO_REPLACE** — Polygon-only
+  forever for `get_ticker_details`, `get_last_financials_date`,
+  `I:VIX` bars. The plan upgrade reinforces this — these calls
+  are correctly classified.
 
-**Backlog tracking:** items #65–#70 below.
+**Cost contingency:** $108/mo is the new monthly recurring cost.
+If Polygon raises Starter or Options Developer pricing materially,
+or if the live Alpaca account unlocks options + SIP entitlements
+making redundancy free, revisit #68/#69 as the cost-driven
+fallback path. Track Polygon billing changes as a soft signal
+(no automated trigger).
+
+**Backlog tracking:** items #65–#70, #87a/b, #88, #91 below.
 
 ---
 
@@ -852,10 +868,9 @@ slot in here alongside the Monday verification:
       `EXECUTION_MODE`. Sequenced after PR1.
 - [ ] **#62a-D4-PR3 — symbol drop fix** (~5 min code + 30 min verify).
       Original one-line drop. Sequenced last; LOW risk after PR1+PR2.
-- [ ] **#68 Polygon Tier 2 — `universe_service` Alpaca migration**
-      (eliminates Saturday 2026-04-25 429 root cause).
-- [ ] **#69 Polygon Tier 2 — `market_data.py` base-layer Alpaca
-      migration** (foundational; unlocks downstream cutovers).
+(#68 and #69 demoted from Priority 2 to Priority 4 on 2026-04-27
+after the Polygon plan upgrade resolved #87 — see *Polygon
+dependency status* and the entries below.)
 
 **Priority 3 — Next Quarter**
 - [ ] **GAP 1** — Canonical ranking metric (PnL ÷ marginal risk,
@@ -887,8 +902,18 @@ slot in here alongside the Monday verification:
       `strategy_backtest_folds/trades/events`.
 
 **Priority 4 — Deferred (no plan to do)**
+- [ ] **#68 Polygon Tier 2 — `universe_service` Alpaca migration.**
+      Original 429-elimination motivation resolved by 2026-04-27
+      Polygon plan upgrade. Reactivate if Polygon billing changes
+      or live Alpaca account unlocks SIP. Provider-redundancy value
+      remains.
+- [ ] **#69 Polygon Tier 2 — `market_data.py` base-layer migration.**
+      Same status as #68. Foundational refactor for Alpaca-primary
+      future; not urgent post-upgrade.
 - [ ] **#70 Polygon Tier 3** (HARD_TO_REPLACE Supabase-cache strategy).
-      Acceptable residual; only revisit if Polygon billing changes.
+      Permanent residual post-upgrade. `get_ticker_details` /
+      `get_last_financials_date` cacheable subset overlaps with
+      #87b; `I:VIX` is forever-Polygon by necessity.
 - [ ] **Replay subsystem evaluation** — gated on micro_live stable for
       30+ days. Wire up or remove.
 - [ ] **GHA `trading_tasks.yml` cleanup** (~1000 LOC unreachable
@@ -1016,6 +1041,33 @@ catalog estimates feel unrelatedly large (e.g., a "~1 day" item that
 doesn't match the file's logical structure usually has hidden
 VALID/DEAD/OVERLAP entries).
 
+### #87 diagnostic-vs-actual root cause (2026-04-27)
+
+The #87 diagnostic correctly identified contributing factors
+(deploy-induced cold cache, retry amplification, missing
+`scanner_universe` metadata) but **underweighted the actual root
+cause**: Polygon Basic-tier rate limit (5/min/product) plus
+missing entitlements for snapshot/Greeks/IV/OI endpoints. The
+`403 NOT_AUTHORIZED` errors visible in worker logs were the
+clearest signal pointing at plan-tier, but the diagnostic
+narrative leaned on the 429 patterns instead.
+
+Lesson: when a web search returns "paid plans are unlimited" and
+the production data shows persistent 429s plus 403s, verify the
+actual plan tier first (5-min operator dashboard check) before
+building cold-cache or rate-limiter theories. The cheap operator
+action shifts diagnostic weight in minutes — and is the kind of
+verification step that diagnose-first protocol benefits from
+adding alongside its existing "audit-surface vs actually-broken"
+filter.
+
+Pattern observed this weekend across #62a, #67, #72-H4, and #87:
+diagnose-first correctly distinguishes audit surface from working
+truth, but cheap external state checks (plan tiers, env vars,
+dashboard settings, billing pages) deserve equal weight. Adding
+"check the cheapest external thing first" as a parallel discipline
+would have shifted multiple diagnostics from hours to minutes.
+
 ---
 
 ## Working Style
@@ -1070,18 +1122,38 @@ Cleanup scope:
 
 Keep priority LOW. This is hygiene, not safety.
 
-**#68 — Polygon Tier 2: universe_service migration** (MEDIUM)
+**#68 — Polygon Tier 2: universe_service migration** (LOW —
+post-upgrade)
+
 Replace `get_historical_prices` and `get_iv_rank` with Alpaca
-equivalents. Eliminates the 429 root cause from Saturday 2026-04-25.
+equivalents. Original 429-elimination justification resolved by
+2026-04-27 Polygon plan upgrade — `universe_service` calls are
+no longer rate-limited or 403-blocked. Remaining value is
+provider redundancy (vendor lock-in mitigation) and SIP-fallback
+viability if live Alpaca account unlocks SIP entitlement (#88).
+Reactivate if Polygon billing changes materially or if live
+Alpaca SIP becomes available. Effort: ~half day. Priority: LOW —
+defer.
 
-**#69 — Polygon Tier 2: market_data.py base-layer migration** (MEDIUM)
-Foundational PR for stock bars and quotes via Alpaca. Enables
-downstream service migrations (paper_mtm, dashboard, options_scanner).
+**#69 — Polygon Tier 2: market_data.py base-layer migration**
+(LOW — post-upgrade)
 
-**#70 — Polygon Tier 3: HARD_TO_REPLACE strategy** (LOW)
-Implement Supabase-cache pattern for `get_ticker_details` and
-`get_last_financials_date`. Document `I:VIX` as accepted residual
-Polygon dependency. Defer until #66–#69 complete.
+Foundational refactor for stock bars and quotes via Alpaca.
+Original "unlocks downstream cutovers" motivation now optional
+post-2026-04-27 Polygon plan upgrade. Remaining value is
+provider redundancy. Reactivate as a prerequisite if #68 is
+reactivated. Effort: ~1 day. Priority: LOW — defer.
+
+**#70 — Polygon Tier 3: HARD_TO_REPLACE strategy** (LOW —
+permanent residual post-upgrade)
+
+`get_ticker_details` (sector, market_cap), `get_last_financials_date`
+(earnings ±90d), and `I:VIX` historical bars have no Alpaca
+equivalent. Plan upgrade (2026-04-27) makes the Polygon dependency
+durable; Supabase-cache patterns for the first two are still
+worthwhile to reduce per-cycle Polygon calls (overlaps with
+#87b). The `I:VIX` dependency is permanent; document and accept.
+Effort: rolled into #87b for the cacheable subset. Priority: LOW.
 
 **#71 — RQ dispatch migration for synchronous task endpoints** (MEDIUM)
 Audit `packages/quantum/public_tasks.py` and `internal_tasks.py` for

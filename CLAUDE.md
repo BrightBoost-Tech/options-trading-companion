@@ -648,6 +648,21 @@ Gate to `micro_live`: 4 consecutive Alpaca paper green days (not internal fills)
 
 ### Last 30 days (verbatim)
 
+- **2026-04-27 Polygon plan upgrade (#87 RESOLVED):** Stocks Basic
+  ($0) → Stocks Starter ($29/mo); Options Basic ($0) → Options
+  Developer ($79/mo). Total $108/mo recurring. Today's "chronic 429
+  storm" was actually two stacked failures on Basic tier:
+  (a) hard 5 calls/min/product cap, and (b) Basic tier lacked
+  entitlements for the snapshot, Greeks, IV, and Open Interest
+  endpoints used by the scanner — surfaced as `403 NOT_AUTHORIZED`
+  on `/v3/snapshot` for KURA/AMZN options in worker logs. PR #823's
+  H3 doctrine alerts (`polygon_circuit_open` × 46,
+  `polygon_retries_exhausted` × 18 in 24h) gave us the diagnostic
+  signal; the diagnostic narrative initially attributed it to
+  cold-cache cycling but the underlying root cause was plan-tier
+  insufficient + entitlements missing. No code change required —
+  same API key, new entitlements propagate automatically. Tomorrow's
+  16:00 UTC scheduled cycle is the validation window.
 - **2026-04-27 universe-price filter for micro tier:** with the
   sizing fix landed (PR feat/micro-tier-90pct-single-position),
   the 19:16 UTC manual rerun proved the budget gate worked but
@@ -1343,25 +1358,80 @@ will. **Don't manual-trigger after 1:00 PM CT for testing
 purposes.** Priority: LOW — informational. Tomorrow's normal
 schedule is in the right window.
 
-**#87 — Polygon 429 storm chronic** (HIGH)
+**#87 — Polygon 429 storm chronic** (HIGH — RESOLVED 2026-04-27)
 
-Source: 2026-04-27 cycles, 4× confirmed (13:00 UTC cron, 16:00 UTC
-cron, 17:10 UTC manual, 19:16 UTC manual). Same shape every cycle:
-universe-wide bars 429s across 20-30 symbols, circuit breaker
-trips. Pattern duration suggests Polygon plan rate limit
-insufficient or service degradation, not transient.
+Resolved by Polygon plan upgrade: Stocks Basic ($0) → Stocks
+Starter ($29/mo) and Options Basic ($0) → Options Developer
+($79/mo), total $108/mo recurring. Diagnostic-first
+investigation initially framed the storm as deploy-induced cold
+cache + retry amplification, but operator's plan check revealed
+the true root cause: Basic tier hard-capped at 5 calls/min/product
+*and* lacked entitlements for snapshot / Greeks / IV / Open
+Interest endpoints (the `403 NOT_AUTHORIZED` errors on
+`/v3/snapshot` for option contracts in worker logs were the
+clearest signal, but my diagnostic underweighted them).
 
-Effort: investigate plan tier (~15 min), then either upgrade or
-reduce universe call width. The H3 doctrine alerts (PR #823) are
-surfacing this loudly now (~7 alerts per cycle), so the visibility
-is good — but visibility isn't fix. Priority: HIGH — degrades
-scanner data quality even when other layers work.
+Lesson: when web-search returns "paid plans are unlimited" and
+the data shows persistent 429s, the actual plan tier (free vs
+paid) is the first thing to verify, not the second. The
+operator's dashboard check would have shifted the diagnostic
+weight in 5 minutes.
 
-May overlap with prior #84 (universe_service Alpaca migration
-captured under Tier 2 Polygon phase-out plan). Verify and
-consolidate when this gets picked up.
+**#87a — Polygon rate limiter** (LOW — deprioritized)
 
-**#88 — Regime-scaled universe price filter** (LOW)
+Source: deferred from #87 (2026-04-27). My #87 diagnostic
+proposed a client-side token-bucket rate limiter (~30 min
+implementation) as a tactical guard. After plan upgrade, the
+underlying need is gone — the Starter/Developer tier no longer
+caps at 5/min, so bursts are safe. Consider during a future
+defensive-engineering pass (belt-and-suspenders against future
+plan downgrades or unexpected provider throttling), but not
+urgent.
+
+**#87b — `scanner_universe` metadata backfill** (MEDIUM)
+
+Source: deferred from #87 (2026-04-27). Diagnostic showed
+`scanner_universe.market_cap` populated for 36/62 symbols and
+`sector` shows `"Unknown"` for 60/62 — forces per-cycle
+`_get_ticker_details_api` calls (~30/cycle) that bypass the
+existing `scanner_universe` row entirely. Independent of plan
+tier: fewer API calls is better even on unlimited plans, and a
+warm `scanner_universe` table makes the system more resilient
+to future provider issues.
+
+Scope: (1) one-shot backfill script populating `market_cap`,
+`sector`, and ideally `iv_rank` for all 62 active symbols;
+(2) update `universe_sync` job to refresh weekly; (3) modify
+`options_scanner.py:2188` sector-map loop to read from
+`scanner_universe` first, only fall back to Polygon for nulls.
+
+Effort: ~half day. Priority: MEDIUM. Not urgent.
+
+**#88 — Verify Alpaca options data access** (LOW)
+
+Source: 2026-04-27 Polygon plan upgrade follow-up (#87
+resolution). Today the Alpaca SIP fallback failed for live cycles
+(`subscription does not permit querying recent SIP data` errors
+on equity bars). Worth understanding what the live Alpaca account
+provides as a backup data source — equity SIP, options snapshots,
+options Greeks, etc. — but no longer urgent with the Polygon plan
+upgrade covering the primary path. Verify on the Alpaca dashboard
+whether the live account is entitled to SIP data and options
+snapshots; document findings in this entry, then decide whether
+to wire `MarketDataTruthLayer` Alpaca-fallback paths that
+currently dead-end.
+
+Effort: ~30 min Alpaca dashboard check + ~half day to wire
+fallbacks if entitled. Priority: LOW — Polygon primary now
+covers the path.
+
+**#91 — Regime-scaled universe price filter** (LOW)
+
+(Renumbered from #88 on 2026-04-27 to honor operator's explicit
+numbering of the new #88 — Alpaca options data verify entry
+above. Original PR feat/85-micro-tier-universe-price-filter
+commit message references "#88" — refers to this entry
+pre-renumbering.)
 
 Source: deferred from #85 design (2026-04-27). #85 ships with a
 static $50 threshold. In shock-regime cycles, the $450 normal

@@ -34,11 +34,17 @@ class _FireTaskTestBase(unittest.TestCase):
 
     def setUp(self):
         from packages.quantum import scheduler
+        from packages.quantum.observability import alerts
         importlib.reload(scheduler)
         self.scheduler = scheduler
+        self.alerts = alerts
         self._supabase_mock = MagicMock()
-        self.scheduler._SUPABASE_FOR_ALERTS = self._supabase_mock
-        self.scheduler._SUPABASE_INIT_ATTEMPTED = True
+        # Per #72-H3: the singleton lives in observability.alerts now,
+        # not in scheduler. Both modules import _get_admin_supabase
+        # from alerts, so patching alerts._ADMIN_SUPABASE controls
+        # the value scheduler sees.
+        alerts._ADMIN_SUPABASE = self._supabase_mock
+        alerts._ADMIN_INIT_ATTEMPTED = True
 
     def _last_alert_record(self):
         """Helper: extract the dict passed to risk_alerts.insert()."""
@@ -165,10 +171,14 @@ class TestSupabaseSingletonFailureFailsSoft(unittest.TestCase):
 
     def setUp(self):
         from packages.quantum import scheduler
+        from packages.quantum.observability import alerts
         importlib.reload(scheduler)
+        importlib.reload(alerts)
         self.scheduler = scheduler
-        self.scheduler._SUPABASE_FOR_ALERTS = None
-        self.scheduler._SUPABASE_INIT_ATTEMPTED = False
+        self.alerts = alerts
+        # Singleton lives in alerts now; reset to fresh state.
+        alerts._ADMIN_SUPABASE = None
+        alerts._ADMIN_INIT_ATTEMPTED = False
 
     def test_singleton_failure_does_not_crash_fire_task(self):
         with patch(
@@ -183,8 +193,8 @@ class TestSupabaseSingletonFailureFailsSoft(unittest.TestCase):
                 endpoint="/tasks/foo", scope="tasks:foo", job_id="foo_job"
             )
         # Singleton stayed None; sentinel flipped to True.
-        self.assertIsNone(self.scheduler._SUPABASE_FOR_ALERTS)
-        self.assertTrue(self.scheduler._SUPABASE_INIT_ATTEMPTED)
+        self.assertIsNone(self.alerts._ADMIN_SUPABASE)
+        self.assertTrue(self.alerts._ADMIN_INIT_ATTEMPTED)
 
     def test_sentinel_prevents_retry_after_init_failure(self):
         """After first init attempt fails, subsequent calls must NOT

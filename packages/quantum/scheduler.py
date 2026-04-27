@@ -22,50 +22,11 @@ from apscheduler.triggers.cron import CronTrigger
 
 logger = logging.getLogger(__name__)
 
-# Loud-Error Doctrine v1.0: alert() helper for risk_alerts writes
-# from scheduler-side error paths (signing failures, HTTP errors).
+# Loud-Error Doctrine v1.0: alert() helper + shared admin Supabase
+# singleton for risk_alerts writes from scheduler-side error paths
+# (signing failures, HTTP errors, retry-scan errors).
 # See docs/loud_error_doctrine.md.
-from packages.quantum.observability.alerts import alert
-
-# Lazy module-level Supabase client used only for risk_alerts inserts
-# from this module. The sentinel (_SUPABASE_INIT_ATTEMPTED) prevents
-# re-attempting client creation on every alert call after a failure
-# — see _get_supabase_for_alerts docstring for the state machine.
-_SUPABASE_FOR_ALERTS = None
-_SUPABASE_INIT_ATTEMPTED = False
-
-
-def _get_supabase_for_alerts():
-    """Return the lazy admin client for scheduler-side risk_alerts writes.
-
-    State machine:
-      - Initial: ``_SUPABASE_FOR_ALERTS=None``,
-        ``_SUPABASE_INIT_ATTEMPTED=False``
-      - After successful init: ``_SUPABASE_FOR_ALERTS=Client``,
-        ``_SUPABASE_INIT_ATTEMPTED=True``
-      - After failed init: ``_SUPABASE_FOR_ALERTS=None``,
-        ``_SUPABASE_INIT_ATTEMPTED=True``
-
-    Once init is attempted (success or failure), no further attempts
-    happen until process restart. This prevents log spam during
-    sustained Supabase outages and matches the doctrine's edge-case
-    guidance for alert-write recursion prevention.
-
-    Returns:
-        Optional[Client]: Supabase admin client, or None if creation
-        failed (``alert()`` will fall back to ``logger.exception``).
-    """
-    global _SUPABASE_FOR_ALERTS, _SUPABASE_INIT_ATTEMPTED
-    if not _SUPABASE_INIT_ATTEMPTED:
-        _SUPABASE_INIT_ATTEMPTED = True
-        try:
-            from packages.quantum.jobs.handlers.utils import get_admin_client
-            _SUPABASE_FOR_ALERTS = get_admin_client()
-        except Exception:
-            logger.exception(
-                "scheduler: failed to obtain supabase client for risk_alerts"
-            )
-    return _SUPABASE_FOR_ALERTS
+from packages.quantum.observability.alerts import alert, _get_admin_supabase
 
 
 SCHEDULER_ENABLED = os.environ.get("SCHEDULER_ENABLED", "0") == "1"
@@ -158,7 +119,7 @@ def _fire_task(endpoint: str, scope: str, job_id: str, user_id: str = None):
     except ValueError as e:
         logger.error(f"[SCHEDULER] {job_id} signing failed: {e}")
         alert(
-            _get_supabase_for_alerts(),
+            _get_admin_supabase(),
             alert_type="scheduler_task_signing_failed",
             severity="warning",
             message=f"HMAC signing failed for {job_id}: {e}",
@@ -186,7 +147,7 @@ def _fire_task(endpoint: str, scope: str, job_id: str, user_id: str = None):
                 f"[SCHEDULER] {job_id} failed: {resp.status_code} {resp.text[:200]}"
             )
             alert(
-                _get_supabase_for_alerts(),
+                _get_admin_supabase(),
                 alert_type="scheduler_task_http_status_error",
                 severity="warning",
                 message=f"{job_id} returned HTTP {resp.status_code}",
@@ -201,7 +162,7 @@ def _fire_task(endpoint: str, scope: str, job_id: str, user_id: str = None):
     except Exception as e:
         logger.error(f"[SCHEDULER] {job_id} error: {e}")
         alert(
-            _get_supabase_for_alerts(),
+            _get_admin_supabase(),
             alert_type="scheduler_task_http_error",
             severity="warning",
             message=f"HTTP request failed for {job_id}: {e}",
@@ -373,7 +334,7 @@ def _retry_failed_jobs():
     except Exception as e:
         logger.error(f"[AUTO_RETRY] Scan failed: {e}")
         alert(
-            _get_supabase_for_alerts(),
+            _get_admin_supabase(),
             alert_type="auto_retry_scan_failed",
             severity="warning",
             message=f"_retry_failed_jobs scan failed: {e}",

@@ -35,11 +35,15 @@ class _RetryFailedJobsTestBase(unittest.TestCase):
 
     def setUp(self):
         from packages.quantum import scheduler
+        from packages.quantum.observability import alerts
         importlib.reload(scheduler)
         self.scheduler = scheduler
+        self.alerts = alerts
         self._alert_supabase_mock = MagicMock()
-        self.scheduler._SUPABASE_FOR_ALERTS = self._alert_supabase_mock
-        self.scheduler._SUPABASE_INIT_ATTEMPTED = True
+        # Per #72-H3: singleton lives in observability.alerts, not
+        # scheduler. Patch there so _get_admin_supabase() returns mock.
+        alerts._ADMIN_SUPABASE = self._alert_supabase_mock
+        alerts._ADMIN_INIT_ATTEMPTED = True
 
 
 class TestRetryBranch(_RetryFailedJobsTestBase):

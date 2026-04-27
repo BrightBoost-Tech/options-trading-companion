@@ -992,9 +992,18 @@ Doctrine document: `docs/loud_error_doctrine.md` (v1.0).
       from `packages/quantum/jobs/handlers/utils.py`. Priority: MEDIUM
       (silent failure, function may be unused). Effort: ~30 min
       diagnostic + ~15 min fix-or-delete.
-- [ ] **#72-H3 — `@guardrail` decorator + 8 `market_data.py` callers
-      write `risk_alerts` on fallback.** Pattern: P3. Effort: ~half day.
-      Coordinate with Polygon Tier 1/2 PRs (#67–#69) since scope overlaps.
+- [x] **#72-H3 — `@guardrail` decorator alerts + shared admin
+      singleton.** **CLOSED 2026-04-27 by PR (this commit).**
+      Decorator-level fix: both fallback paths now write alerts.
+      Path A (circuit OPEN) → `{provider}_circuit_open`; Path B
+      (retries exhausted) → `{provider}_retries_exhausted`. Metadata
+      captures `provider`, `function_name`, args (repr-truncated,
+      self-skipped via qualname heuristic), plus path-specific
+      fields. Bonus scope: extracted shared `_get_admin_supabase()`
+      helper into `observability/alerts.py` and migrated
+      `scheduler.py` away from its local singleton — future modules
+      adopting the doctrine pattern import from
+      `observability.alerts` rather than reinventing.
 - [ ] **#72-H4 — `workflow_orchestrator.py` HOT swallows.** ~25 sites
       across the suggestion pipeline (lines 99, 128, 169, 1131, 1326,
       1411, 1654, 1727, 1794, 1843, 1883, 1952, 2060, 2071, 2158, 2172,

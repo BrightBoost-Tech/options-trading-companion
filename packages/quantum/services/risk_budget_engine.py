@@ -365,6 +365,15 @@ class RiskBudgetEngine:
                 f"capital_mismatch:usage={current_risk_usage:.2f},deployable={deployable_capital:.2f}"
             )
 
+        # --- Tier resolution (drives per-trade and global allocation) ---
+        # Function-scope import to avoid a circular import at module load
+        # (risk_budget_engine and small_account_compounder are siblings
+        # in the analytics layer).
+        from packages.quantum.services.analytics.small_account_compounder import (
+            SmallAccountCompounder,
+        )
+        tier = SmallAccountCompounder.get_tier(deployable_capital)
+
         # 2. Determine Global Caps (Regime Based)
         global_caps_map = {
             RegimeState.SUPPRESSED: 0.50,
@@ -375,6 +384,20 @@ class RiskBudgetEngine:
             RegimeState.SHOCK: 0.05
         }
         global_cap_pct = global_caps_map.get(regime, 0.40)
+
+        # Note: this map mirrors regime semantics in
+        # SmallAccountCompounder.calculate_variable_sizing. CHOP and REBOUND
+        # default to 1.0 in the compounder via fall-through; explicit here
+        # for clarity. If new regime states are added, both files need
+        # updates to stay synchronized.
+        regime_mult_for_micro = {
+            RegimeState.NORMAL: 1.0,
+            RegimeState.SUPPRESSED: 0.9,
+            RegimeState.ELEVATED: 0.8,
+            RegimeState.CHOP: 1.0,
+            RegimeState.REBOUND: 1.0,
+            RegimeState.SHOCK: 0.5,
+        }.get(regime, 1.0)
 
         # Risk Profile Adjustments for Granular Limits
         profile_mult = 1.0
@@ -391,7 +414,13 @@ class RiskBudgetEngine:
         # 4. Construct Allocations
 
         # Global
-        global_max = total_equity * global_cap_pct
+        if tier.name == "micro":
+            # Single-position tier: global allocation == per-trade budget.
+            # One position consumes the entire slot under operator spec.
+            global_max = deployable_capital * 0.90 * regime_mult_for_micro
+            diagnostics.append("micro_tier_global_alloc")
+        else:
+            global_max = total_equity * global_cap_pct
         global_alloc = RiskAllocations(
             used=current_risk_usage,
             max_limit=global_max,
@@ -443,30 +472,44 @@ class RiskBudgetEngine:
             vega=RiskAllocations(used=vega_usage, max_limit=vega_cap, remaining=vega_cap-vega_usage, pct_used=vega_usage/vega_cap if vega_cap>0 else 0)
         )
 
-        # 5. Max Risk Per Trade (Sizing)
-        # Based on profile and total equity
-        if risk_profile == "aggressive":
-            per_trade_pct = 0.05
-        elif risk_profile == "conservative":
-            per_trade_pct = 0.02
+        # 5. Max Risk Per Trade (Sizing) — tier-aware as of 2026-04-27.
+        # Mirrors SmallAccountCompounder.calculate_variable_sizing for
+        # micro tier so per-trade budget and global allocation agree.
+        if tier.name == "micro":
+            # Operator spec: one trade at a time, 90% × regime_mult.
+            max_risk_trade = deployable_capital * 0.90 * regime_mult_for_micro
+            diagnostics.append("micro_tier_active")
         else:
-            per_trade_pct = 0.03
+            # Existing risk_profile-based logic for small/standard tiers.
+            if risk_profile == "aggressive":
+                per_trade_pct = 0.05
+            elif risk_profile == "conservative":
+                per_trade_pct = 0.02
+            else:
+                per_trade_pct = 0.03
 
-        # Policy override removed with the adaptive-caps stack (PR #4).
+            # Policy override removed with the adaptive-caps stack (PR #4).
 
-        max_risk_trade = total_equity * per_trade_pct
+            max_risk_trade = total_equity * per_trade_pct
 
-        # Small Account Logic — smooth ramp instead of $50 cliff.
-        # Floor = 2% of equity (minimum $5) — scales proportionally:
-        #   $500 → $10,  $1000 → $20,  $2500 → $50
-        small_account_floor = max(total_equity * 0.02, 5.0)
-        if max_risk_trade < small_account_floor and total_equity > 0:
-            max_risk_trade = small_account_floor
-            diagnostics.append("small_account_floor_active")
+            # Small Account Logic — smooth ramp instead of $50 cliff.
+            # Floor = 2% of equity (minimum $5) — scales proportionally:
+            #   $1000 → $20,  $2500 → $50,  $5000 → $100
+            # Micro tier (<$1000) handled separately above.
+            small_account_floor = max(total_equity * 0.02, 5.0)
+            if max_risk_trade < small_account_floor and total_equity > 0:
+                max_risk_trade = small_account_floor
+                diagnostics.append("small_account_floor_active")
 
         # 6. Global Remaining Check
-        # If global remaining is 0, then per_trade should be 0 (unless small account override?)
-        if global_alloc.remaining <= 10.0 and "small_account_floor_active" not in diagnostics:
+        # If global remaining is 0, then per_trade should be 0 unless a
+        # tier-specific override is active (small_account_floor or
+        # micro_tier).
+        skip_zero_clamp = (
+            "small_account_floor_active" in diagnostics
+            or "micro_tier_active" in diagnostics
+        )
+        if global_alloc.remaining <= 10.0 and not skip_zero_clamp:
              max_risk_trade = 0.0
              diagnostics.append("global_cap_reached")
         else:

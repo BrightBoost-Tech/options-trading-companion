@@ -26,8 +26,9 @@ class SmallAccountCompounder:
             name="micro",
             min_cap=0,
             max_cap=1000,
-            base_risk_pct=0.08,  # 8% risk for <$1k (aggressive paper growth)
-            max_trades=4,        # Allow up to 4 trades to deploy more capital
+            base_risk_pct=0.90,  # 90% per-trade — operator design intent
+                                 # for <$1000 (one-trade-at-a-time compound mode)
+            max_trades=1,        # One position at a time — no concurrent trades
             selection_logic="rank_select_compound"
         ),
         CapitalTier(
@@ -65,41 +66,51 @@ class SmallAccountCompounder:
     ) -> Dict[str, Any]:
         """
         Calculates risk % and budget based on score, regime, and tier.
+
+        Micro tier ($0-$1000): operator spec — 90% × regime_mult only.
+        Score and compounding multipliers bypassed; regime_mult preserved
+        for shock/elevated safety. One position at a time per
+        tier.max_trades=1 (concurrency gate enforced in
+        workflow_orchestrator.run_midday_cycle).
+
+        Small tier ($1000-$5000) and standard tier ($5000+): full
+        multiplier stack (base_risk_pct × score × regime × compounding).
         """
         score = candidate.get("score", 50)
 
-        # Base Risk from Tier
-        risk_pct = tier.base_risk_pct
-
-        # If compounding is OFF, and account is small/micro, reduce risk to safer levels
-        # Standard safety is 2% (0.02)
-        if not compounding and tier.name in ["micro", "small"]:
-            risk_pct = 0.02 # Force standard risk behavior
-
-        # Score Multiplier:
-        # Score 50 -> 0.8x
-        # Score 75 -> 1.0x
-        # Score 90 -> 1.2x
-        score_mult = 0.8 + ((score - 50) / 50.0) * 0.4
-        score_mult = max(0.8, min(1.2, score_mult))
-
-        # Regime Multiplier
+        # Regime Multiplier (applies to all tiers).
         regime_mult = 1.0
         if regime == "suppressed":
             regime_mult = 0.9
         elif regime == "elevated":
-            regime_mult = 0.8 # Reduce size in high vol due to whippiness
+            regime_mult = 0.8  # Reduce size in high vol due to whippiness
         elif regime == "shock":
-            regime_mult = 0.5 # Halve size in crash
+            regime_mult = 0.5  # Halve size in crash
 
-        # Compounding Boost (if enabled and small account)
-        compounding_mult = 1.0
-        if compounding and tier.name in ["micro", "small"]:
-            # Boost logic: If score is high (>80), allow slightly more risk (1.2x)
-            if score >= 80:
+        if tier.name == "micro":
+            # Operator spec: flat base × regime_mult, no score/compounding
+            # multipliers. score_mult and compounding_mult set to 1.0 in
+            # the return dict for downstream-consumer schema consistency.
+            score_mult = 1.0
+            compounding_mult = 1.0
+            final_risk_pct = tier.base_risk_pct * regime_mult
+        else:
+            # Score Multiplier: 50→0.8x, 75→1.0x, 90→1.2x.
+            score_mult = 0.8 + ((score - 50) / 50.0) * 0.4
+            score_mult = max(0.8, min(1.2, score_mult))
+
+            # Compounding Boost (small tier only post-2026-04-27;
+            # micro tier bypasses the multiplier stack above).
+            compounding_mult = 1.0
+            if compounding and tier.name == "small" and score >= 80:
                 compounding_mult = 1.2
 
-        final_risk_pct = risk_pct * score_mult * regime_mult * compounding_mult
+            risk_pct = tier.base_risk_pct
+            # Compounding-off safety override (small tier only).
+            if not compounding and tier.name == "small":
+                risk_pct = 0.02
+
+            final_risk_pct = risk_pct * score_mult * regime_mult * compounding_mult
 
         # Calculate Dollar Budget
         risk_budget = capital * final_risk_pct

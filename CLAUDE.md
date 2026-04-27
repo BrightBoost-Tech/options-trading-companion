@@ -30,7 +30,7 @@ For AI session context, this file is loaded every turn.
 - **daily_progression_eval:** Running at 16:00 CT. The alpaca_paper → micro_live promotion gate has been bypassed (operator-initiated promotion). Future phase transitions are a deferred decision under the continuous-growth model.
 - **Iron condors:** DISABLED in current phase. Debit spreads only.
 - **Calibration job:** Running daily at 05:00 CT; writes to `calibration_adjustments`.
-- **Risk profile:** micro-tier — 8% base risk per trade × score/regime/compounding multipliers (see "Risk per trade math"). Effective per-trade risk typically 8–12% of capital.
+- **Risk profile:** micro-tier — 90% per trade × regime_mult, one position at a time (see "Risk per trade math"). Hard cutoff at $1000 (standard tier behavior above). Operator spec 2026-04-27.
 - **Phase 2 contract:** enforced — `check_close_reason_enum` (9 values), `check_fill_source_enum`, `close_path_required` constraints intact
 
 ---
@@ -416,7 +416,8 @@ evaluation with `promoted_at` field selecting the live cohort.
 **Sizing duality (documented intent, not bug):**
 
 - **Layer 1 — live aggressive trades:** sized via `SmallAccountCompounder`
-  (micro tier, 8% base × multipliers). See "Risk per trade math".
+  + `RiskBudgetEngine` (micro tier post-2026-04-27: 90% × regime_mult,
+  one trade at a time). See "Risk per trade math".
 - **Layer 2 — shadow cohort clones (conservative + neutral portfolios):**
   sized via `cohort.policy_config.max_risk_pct_per_trade × risk_multiplier`
   in `fork.py:196-201`. These trades execute against separate
@@ -435,42 +436,89 @@ learning loop on cohort comparisons.
 
 ## Risk per trade math
 
-Live trades are sized by
-`SmallAccountCompounder.calculate_variable_sizing` at
-`packages/quantum/services/analytics/small_account_compounder.py:62-115`.
+Per-trade sizing is tier-aware. Single producer of `max_risk_per_trade`:
+`RiskBudgetEngine.compute_budgets()`, mirroring
+`SmallAccountCompounder.calculate_variable_sizing` for consistency.
+The two layers are kept in sync — if you change one, change the other.
 
-```
-final_risk_pct = base_risk_pct × score_mult × regime_mult × compounding_mult
-risk_budget    = capital × final_risk_pct
-```
+### Tier definitions
 
-**Components:**
+| Tier | Capital | Per-trade base | Multipliers | max_trades |
+|---|---|---|---|---|
+| micro | $0–$1000 | **90%** | regime only | **1 (one at a time)** |
+| small | $1k–$5k | 3% | full stack (score × regime × compounding) | 4 |
+| standard | $5k+ | 2% | full stack | 5 |
 
-- `base_risk_pct` from `CapitalTier`:
-  - micro (cap < $1k) → **0.08 (8%)**
-  - small ($1k–$5k) → 0.03
-  - standard (≥ $5k) → 0.02
+**Hard cutoff at $1000** — no smooth interpolation.
+
+### Multiplier behavior
+
+`regime_mult`: 1.0 normal · 0.9 suppressed · 0.8 elevated · 0.5 shock
+· 1.0 chop · 1.0 rebound.
+
+For **micro tier**: `final_risk_pct = 0.90 × regime_mult`. Score and
+compounding multipliers are intentionally bypassed (operator spec
+2026-04-27). `STRATEGY_TRACK` env value has no effect at micro tier —
+the engine takes the tier-aware branch before the risk_profile switch.
+
+For **small/standard tiers**: full stack:
+`final_risk_pct = base_risk_pct × score_mult × regime_mult × compounding_mult`.
+
 - `score_mult = clamp(0.8 + (score − 50)/50 × 0.4, 0.8, 1.2)`.
-  Examples: score 50→0.80, 75→1.00, **85→1.08**, 100→1.20.
-- `regime_mult`: 1.0 normal · 0.9 suppressed · 0.8 elevated · 0.5 shock.
-- `compounding_mult`: 1.2 if `COMPOUNDING_MODE=true` AND tier ∈ {micro, small}
-  AND score ≥ 80; else 1.0.
+  Examples: score 50→0.80, 75→1.00, 85→1.08, 100→1.20.
+- `compounding_mult`: 1.2 if `COMPOUNDING_MODE=true` AND tier=small
+  AND score ≥ 80; else 1.0. (Standard tier never gets the boost.)
 
-**Defensive cap:** when `COMPOUNDING_MODE=false` AND tier ∈ {micro, small},
-`base_risk_pct` is overridden to **0.02 (2%)** regardless of tier default
-(`small_account_compounder.py:76-77`).
+**Compounding-off safety override** (small tier only post-2026-04-27):
+when `COMPOUNDING_MODE=false`, small-tier `base_risk_pct` is overridden
+to **0.02 (2%)**. Micro tier ignores the compounding flag entirely.
 
-**Worked example** at $500 + score 85 + normal regime + `COMPOUNDING_MODE=true`:
+### Worked examples ($500 capital, micro tier, NORMAL regime)
 
-```
-risk_pct    = 0.08 × 1.08 × 1.0 × 1.2 = 0.10368  (~10.4%)
-risk_budget = $500 × 0.10368 ≈ $52 per trade
-```
+| Score | Regime | risk_budget |
+|---:|---|---:|
+| any | normal | $450 |
+| any | suppressed | $405 |
+| any | elevated | $360 |
+| any | shock | $225 |
 
-**The "1.08 risk_multiplier observed in logs" is the score multiplier
-in `SmallAccountCompounder` for a candidate scoring 85, NOT the cohort
-`risk_multiplier`** (1.08 / 1.0 / 1.2 in `policy_lab_cohorts.policy_config`,
-which sizes shadow clones at `fork.py:196-201`, not live trades).
+For $500 capital + score 85 + normal regime + `COMPOUNDING_MODE=true`:
+`risk_pct = 0.90 × 1.0 = 0.90`, `risk_budget = $500 × 0.90 = $450`.
+
+### Global allocation (micro tier)
+
+`global_alloc.max = deployable_capital × 0.90 × regime_mult_for_micro`.
+Mirrors per-trade for one-at-a-time tiers (one position consumes the
+entire slot). Standard/small tiers retain
+`global_alloc.max = total_equity × global_cap_pct` (regime-based 5–50%).
+
+### Concurrency policy (micro tier)
+
+Asymmetric by design:
+
+- **Midday cycle (entries)**: blocks new entries when any position is
+  open. Returns `skipped=True, reason='micro_tier_position_open'`.
+- **Morning cycle (exits)**: continues normally with a tier observation
+  log line (`[Morning] tier=micro, open_positions=N, exits_continuing`).
+  Gating it would prevent exit suggestion generation for open
+  positions and dead-lock the account.
+
+The "one trade at a time" rule applies to position acquisition, not
+position management. A future PR that "fixes" the apparent asymmetry
+by adding a gate to morning cycle would break exit auto-generation —
+`test_workflow_orchestrator_micro_concurrency.TestMorningCycleNoConcurrencyGate`
+defends against that mistake.
+
+### History
+
+- Pre-2026-04-27: `RiskBudgetEngine` used flat 3% balanced default,
+  silently overriding `SmallAccountCompounder`'s tier math via
+  `min()` at `workflow_orchestrator.py:2347`. The compounder layer
+  was documented but never wired through to per-trade sizing.
+- 2026-04-27: tier-aware engine landed. Both layers now agree.
+  Discovered during PR #827 fix validation when all 3 candidates
+  (BAC at $286, AMZN at $1248, AAPL at $1274 single-contract risk)
+  were vetoed at sizing because `max_risk_per_trade=$15` (3% of $500).
 
 ---
 
@@ -575,6 +623,16 @@ Gate to `micro_live`: 4 consecutive Alpaca paper green days (not internal fills)
 
 ### Last 30 days (verbatim)
 
+- **2026-04-27 sizing-layer override:** `RiskBudgetEngine` flat 3%
+  balanced default silently shadowed `SmallAccountCompounder` tier
+  math via `min()` at `workflow_orchestrator.py:2347`. With $500
+  micro-tier capital, all 3 candidates (BAC/AMZN/AAPL) were vetoed
+  at sizing because `max_risk_per_trade=$15` < single-contract risk
+  ($286/$1248/$1274). Engine + compounder rewired tier-aware:
+  micro = 90% × regime, one trade at a time; small/standard
+  unchanged. `STRATEGY_TRACK` env now no-op for micro tier. Asymmetric
+  concurrency gate (entries blocked when position open; exits continue).
+  PR feat/micro-tier-90pct-single-position.
 - `paper_learning_ingest` must be in cron — not just manual trigger
 - OCC symbol format for Alpaca order submission
 - Internal fills miscounted as Alpaca fills in green day logic (fixed + reset 2026-04-04)
@@ -685,6 +743,7 @@ Full chronology lives in git history; search commits from 2026-03 and earlier.
 - [x] Policy lab eval ImportError fix (PR #807, 2026-04-25)
 - [x] Policy lab eval schema-drift fix + per-cohort observability (PR #808, 2026-04-26 06:15Z)
 - [x] #62a-D2 nested_regimes write-only orphan deleted (2026-04-26) — 0 rows ever, 0 readers; deleted `log_global_context` rather than fix; table drop tracked as #75
+- [x] Tier-aware sizing: micro tier 90% one-at-a-time + standard tier 2-3% multi-position. Closes the compounder-vs-engine `min()` disagreement at `workflow_orchestrator.py:2347` (2026-04-27, PR feat/micro-tier-90pct-single-position). Asymmetric concurrency gate: midday blocks new entries when position open; morning continues exit generation. Backlog #85 (tier-aware envelope) and #86 (`STRATEGY_TRACK` cleanup) deferred.
 
 ### Prioritized Roadmap (post-2026-04-26)
 
@@ -1212,6 +1271,31 @@ Cleanup scope:
 
 Effort: ~1-2 hours, single PR, no functional change in production
 (rip-cord is unset in Railway env, defaults to `alpaca`).
+
+**#85 — Tier-aware `RISK_MAX_SYMBOL_PCT` envelope cap** (LOW)
+
+Source: micro tier sizing fix (2026-04-27). The risk envelope at
+`packages/quantum/risk/risk_envelope.py` enforces `RISK_MAX_SYMBOL_PCT=0.4`
+(40% per-symbol cap) regardless of tier. Under micro tier with 90%
+per-trade sizing, BAC at $286 = 57% of $500 capital VIOLATES the
+envelope cap. Currently warn-only at the pre-entry check site
+(`workflow_orchestrator.py:2186-2222`), so it logs warnings but
+doesn't block. Future cleanup: tier-aware envelope cap (e.g., 1.0
+for micro tier, 0.4 for standard). Effort: ~1 hour, single PR, plus
+matching test in `risk_envelope` test suite. Priority: LOW —
+warn-only path means no operational impact today.
+
+**#86 — `STRATEGY_TRACK` env var cleanup** (LOW)
+
+Source: micro tier sizing fix (2026-04-27). With tier-aware
+`RiskBudgetEngine`, `STRATEGY_TRACK` is now no-op for micro tier
+(engine takes the tier branch before the risk_profile switch). Only
+affects small/standard tier `per_trade_pct`. Currently set to
+`balanced` on both BE and worker services in Railway. Cleanup:
+remove the env from Railway (defaults to `balanced` if unset),
+simplify the engine code to drop the unused branch (or keep for
+small-tier conservative/aggressive override flexibility). Effort:
+~30 minutes. Priority: LOW — cosmetic.
 
 ### #62a — Schema drift audit COMPLETE 2026-04-26
 

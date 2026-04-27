@@ -971,27 +971,39 @@ Doctrine document: `docs/loud_error_doctrine.md` (v1.0).
 
 #### #72-Phase 2 — HOT fixes (next 2-4 weeks, ~5 PRs)
 
-- [ ] **#72-H1 — `equity_state.py` envelope-skip alert + introduce
-      `alert()` helper.** Sites: `services/equity_state.py:105,138,162,
-      188`. Pattern: P2 (returns None to caller; envelope silently
-      skipped). Effort: ~1h. Highest-leverage single fix; first
-      doctrine-application PR; introduces shared `alert()` helper at
-      `services/observability.py` per doctrine reference implementation.
-- [ ] **#72-H2 — `scheduler.py:_fire_task` HTTP error alerting.**
-      Sites: `scheduler.py:113,125,129`. Pattern: P2 + P4-adjacent.
-      Effort: ~2h. Would have caught the `policy_lab_eval` 7-day silence
-      root cause directly (#65). Coordinate with #71 (RQ dispatch audit).
-- [ ] **#72-H2a — Diagnose and fix `_retry_failed_jobs` ImportError.**
-      Out-of-scope finding from #72-H2 diagnostic (2026-04-27).
-      `scheduler.py:211` imports `get_supabase_client` from
-      `packages.quantum.database` — module doesn't exist; function
-      raises `ImportError` on every invocation, swallowed by the
-      outer `try/except` at `scheduler.py:288`. Required diagnostic
-      before fix: confirm caller graph (is `_retry_failed_jobs` ever
-      invoked?). If dead → delete; if live → swap to `get_admin_client`
-      from `packages/quantum/jobs/handlers/utils.py`. Priority: MEDIUM
-      (silent failure, function may be unused). Effort: ~30 min
-      diagnostic + ~15 min fix-or-delete.
+- [x] **#72-H1 — `equity_state.py` envelope-skip alert + introduce
+      `alert()` helper.** **CLOSED 2026-04-26 by PR #817.** Helper
+      shipped at `packages/quantum/observability/alerts.py` (canonical
+      location, not `services/observability.py` as originally drafted —
+      matched existing `observability/` package convention). Sites
+      `services/equity_state.py:_fetch_alpaca_equity` and
+      `_fetch_alpaca_weekly_pnl` now write `risk_alerts` on Alpaca
+      failure with `alert_type='equity_state_alpaca_account_failed'` /
+      `'equity_state_alpaca_portfolio_history_failed'`.
+- [x] **#72-H2 — `scheduler.py:_fire_task` HTTP error alerting.**
+      **CLOSED 2026-04-26 by PR #818.** Three sites alert: signing
+      failure (`scheduler_task_signing_failed`), httpx exception
+      (`scheduler_task_http_error`), HTTP 4xx/5xx response
+      (`scheduler_task_http_status_error` with response body capped at
+      2000 chars). Lazy-singleton supabase client with sentinel
+      (`_SUPABASE_INIT_ATTEMPTED`) prevents log spam during sustained
+      Supabase outages. (Sentinel later relocated to
+      `observability/alerts.py` as `_ADMIN_INIT_ATTEMPTED` per #72-H3.)
+- [x] **#72-H2a — `_retry_failed_jobs` ImportError fix + doctrine alert.**
+      **CLOSED 2026-04-27 by PR #821.** Function had been silently
+      broken since at least 2026-01-10 (3.5+ months) due to
+      non-existent `packages.quantum.database` import. Fix swapped to
+      canonical `get_admin_client` from
+      `packages/quantum/jobs/handlers/utils.py`. Outer except now writes
+      `auto_retry_scan_failed` alert per Loud-Error Doctrine v1.0.
+      Post-deploy expectation: 5 stuck `failed_retryable` rows will
+      progress to `dead_lettered` within ~24h, producing 5
+      `job_dead_lettered` `risk_alerts`. Each surfaces a separate
+      pre-existing root cause (alpaca_order_sync pytz, alpaca_order_sync
+      missing user_id arg, paper_auto_execute trade_suggestions.score
+      schema drift, validation_eval StrategyConfig JSON serialization
+      ×2). Diagnosis of each underlying issue queued as #76–#79 once
+      the dead-letter alerts confirm the failures still reproduce.
 - [x] **#72-H3 — `@guardrail` decorator alerts + shared admin
       singleton.** **CLOSED 2026-04-27 by PR (this commit).**
       Decorator-level fix: both fallback paths now write alerts.
@@ -1036,6 +1048,14 @@ Doctrine document: `docs/loud_error_doctrine.md` (v1.0).
 - [ ] **#72-W4 — `brokers/alpaca_*` watchdog alerts.** ~12 sites
       across `alpaca_order_handler.py`, `alpaca_client.py`,
       `alpaca_endpoints.py`. Pattern: P2. Effort: ~half day.
+- [ ] **#72-Phase3-A — Migrate `_retry_failed_jobs` inline
+      `job_dead_lettered` writes to doctrine `alert()` helper.**
+      Source: deferred from #72-H2a (PR #821) — 3 inline
+      `client.table("risk_alerts").insert(...)` calls in
+      `scheduler._retry_failed_jobs` predate the doctrine. Migrate to
+      `alert(_get_supabase_for_alerts(), alert_type='job_dead_lettered',
+      severity='critical', ...)`. Stylistic refactor; no behavior
+      change. Priority: LOW. Effort: ~15 min.
 
 #### #72-Phase 4 — COLD touch-ups (eventual; on-touch only)
 

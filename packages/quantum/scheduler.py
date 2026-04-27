@@ -293,8 +293,8 @@ def _retry_failed_jobs():
     from datetime import timezone, timedelta
 
     try:
-        from packages.quantum.database import get_supabase_client
-        client = get_supabase_client()
+        from packages.quantum.jobs.handlers.utils import get_admin_client
+        client = get_admin_client()
 
         cutoff = (datetime.now(timezone.utc) - timedelta(hours=4)).isoformat()
 
@@ -372,6 +372,17 @@ def _retry_failed_jobs():
 
     except Exception as e:
         logger.error(f"[AUTO_RETRY] Scan failed: {e}")
+        alert(
+            _get_supabase_for_alerts(),
+            alert_type="auto_retry_scan_failed",
+            severity="warning",
+            message=f"_retry_failed_jobs scan failed: {e}",
+            metadata={
+                "error_class": type(e).__name__,
+                "error_message": str(e)[:500],
+                "function": "_retry_failed_jobs",
+            },
+        )
 
 
 def stop_scheduler():

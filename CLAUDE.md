@@ -492,6 +492,31 @@ Mirrors per-trade for one-at-a-time tiers (one position consumes the
 entire slot). Standard/small tiers retain
 `global_alloc.max = total_equity × global_cap_pct` (regime-based 5–50%).
 
+### Universe price filter (micro tier)
+
+For micro-tier accounts, the scanner pre-filters the 62-symbol
+universe at `options_scanner._apply_tier_price_filter` (called
+immediately after the batch quote fetch, before per-symbol Polygon
+option-chain calls) to drop symbols whose underlying price exceeds
+$50 (configurable via `MICRO_TIER_MAX_UNDERLYING` env var).
+
+The threshold aligns with existing scanner spread-width logic at
+`options_scanner.py:~1084`: spreads default to 2.5-wide for sub-$50
+underlyings and 5-wide above. Sub-threshold names produce
+~$200-$250 max_loss/contract that fits the micro $450 budget;
+above-threshold names produce ~$300-$500+ that often exceeds it.
+
+Without this filter, ~80% of the universe (FAANG + high-priced
+ETFs) produces uneconomic candidates that pass scanner gates only
+to be vetoed at sizing — wasting Polygon API calls and producing
+zero suggestions. Tonight's 19:16 UTC manual cycle was the
+forcing example: 30 symbols → scanner → 1 candidate (AMZN $1247
+underlying, $1223 max_loss) → 0 suggestions.
+
+For small/standard tiers, no filter is applied; the full universe
+is scanned per existing behavior. Hard cutoff matches the sizing
+fix's tier transition.
+
 ### Concurrency policy (micro tier)
 
 Asymmetric by design:
@@ -623,6 +648,20 @@ Gate to `micro_live`: 4 consecutive Alpaca paper green days (not internal fills)
 
 ### Last 30 days (verbatim)
 
+- **2026-04-27 universe-price filter for micro tier:** with the
+  sizing fix landed (PR feat/micro-tier-90pct-single-position),
+  the 19:16 UTC manual rerun proved the budget gate worked but
+  produced 0 suggestions — only AMZN passed the scanner ($1247
+  underlying, $1223 max_loss/contract), and $1223 > $450 micro
+  budget. Root cause: ~80% of the 62-symbol universe is FAANG +
+  high-priced ETFs whose contracts run $300-$1500; only sub-$50
+  underlyings produce contracts that fit micro tier. Fix:
+  `options_scanner._apply_tier_price_filter` drops symbols with
+  underlying > $50 (configurable via `MICRO_TIER_MAX_UNDERLYING`
+  env) for micro tier only. Inserted after the batch quote
+  fetch, before per-symbol option-chain calls — saves Polygon
+  API calls too. PR feat/85-micro-tier-universe-price-filter.
+  Closes #85.
 - **2026-04-27 sizing-layer override:** `RiskBudgetEngine` flat 3%
   balanced default silently shadowed `SmallAccountCompounder` tier
   math via `min()` at `workflow_orchestrator.py:2347`. With $500
@@ -743,7 +782,8 @@ Full chronology lives in git history; search commits from 2026-03 and earlier.
 - [x] Policy lab eval ImportError fix (PR #807, 2026-04-25)
 - [x] Policy lab eval schema-drift fix + per-cohort observability (PR #808, 2026-04-26 06:15Z)
 - [x] #62a-D2 nested_regimes write-only orphan deleted (2026-04-26) — 0 rows ever, 0 readers; deleted `log_global_context` rather than fix; table drop tracked as #75
-- [x] Tier-aware sizing: micro tier 90% one-at-a-time + standard tier 2-3% multi-position. Closes the compounder-vs-engine `min()` disagreement at `workflow_orchestrator.py:2347` (2026-04-27, PR feat/micro-tier-90pct-single-position). Asymmetric concurrency gate: midday blocks new entries when position open; morning continues exit generation. Backlog #85 (tier-aware envelope) and #86 (`STRATEGY_TRACK` cleanup) deferred.
+- [x] Tier-aware sizing: micro tier 90% one-at-a-time + standard tier 2-3% multi-position. Closes the compounder-vs-engine `min()` disagreement at `workflow_orchestrator.py:2347` (2026-04-27, PR feat/micro-tier-90pct-single-position). Asymmetric concurrency gate: midday blocks new entries when position open; morning continues exit generation. Backlog #89 (tier-aware envelope) and #90 (`STRATEGY_TRACK` cleanup) deferred.
+- [x] Micro-tier universe price filter: drops symbols with underlying > $50 from scanner for micro tier only, configurable via `MICRO_TIER_MAX_UNDERLYING` env (2026-04-27, PR feat/85-micro-tier-universe-price-filter). Closes #85. Composes with PR feat/micro-tier-90pct-single-position.
 
 ### Prioritized Roadmap (post-2026-04-26)
 
@@ -1272,7 +1312,74 @@ Cleanup scope:
 Effort: ~1-2 hours, single PR, no functional change in production
 (rip-cord is unset in Railway env, defaults to `alpaca`).
 
-**#85 — Tier-aware `RISK_MAX_SYMBOL_PCT` envelope cap** (LOW)
+**#85 — Universe price filter for micro tier** (HIGH — RESOLVED 2026-04-27)
+
+Source: 2026-04-27 19:16 UTC manual rerun (validating PR
+feat/micro-tier-90pct-single-position). With $500 capital and the
+new $450 per-trade budget computing correctly, the cycle still
+produced 0 suggestions because the only viable scanner output was
+AMZN at $1247 underlying / $1223 max_loss/contract — which exceeds
+$450 budget. ~80% of the 62-symbol universe (FAANG + high-priced
+ETFs) produces uneconomic candidates.
+
+Resolved by PR feat/85-micro-tier-universe-price-filter:
+`options_scanner._apply_tier_price_filter` drops symbols with
+underlying > $50 (configurable via `MICRO_TIER_MAX_UNDERLYING` env)
+for micro tier only. Inserted after the batch quote fetch, before
+per-symbol option-chain calls (saves Polygon API calls too).
+Threshold aligns with existing 2.5-vs-5 spread-width split.
+
+**#86 — Late-day liquidity degradation in scanner** (LOW —
+informational)
+
+Source: 2026-04-27 19:16 UTC manual rerun. BAC went from
+"score=100, tradeable" at 17:10 UTC to "spread_too_wide=14.2%" at
+19:16 UTC (2:16 PM CT, ~45 min pre-close). Same underlying, same
+chain, same scanner — just 2 hours later in the trading day.
+
+Operational implication: scheduled 16:00 UTC cycles (11:00 AM CT)
+should not have this problem. Manual reruns close to market close
+will. **Don't manual-trigger after 1:00 PM CT for testing
+purposes.** Priority: LOW — informational. Tomorrow's normal
+schedule is in the right window.
+
+**#87 — Polygon 429 storm chronic** (HIGH)
+
+Source: 2026-04-27 cycles, 4× confirmed (13:00 UTC cron, 16:00 UTC
+cron, 17:10 UTC manual, 19:16 UTC manual). Same shape every cycle:
+universe-wide bars 429s across 20-30 symbols, circuit breaker
+trips. Pattern duration suggests Polygon plan rate limit
+insufficient or service degradation, not transient.
+
+Effort: investigate plan tier (~15 min), then either upgrade or
+reduce universe call width. The H3 doctrine alerts (PR #823) are
+surfacing this loudly now (~7 alerts per cycle), so the visibility
+is good — but visibility isn't fix. Priority: HIGH — degrades
+scanner data quality even when other layers work.
+
+May overlap with prior #84 (universe_service Alpaca migration
+captured under Tier 2 Polygon phase-out plan). Verify and
+consolidate when this gets picked up.
+
+**#88 — Regime-scaled universe price filter** (LOW)
+
+Source: deferred from #85 design (2026-04-27). #85 ships with a
+static $50 threshold. In shock-regime cycles, the $450 normal
+budget collapses to $225 — but the static $50 filter still allows
+BAC ($286 max_loss) through, only to be sizing-vetoed downstream.
+Promote to dynamic when shock-regime cycles repeatedly produce
+sizing-veto rejections of micro-tier candidates.
+
+Implementation sketch: `threshold = 50.0 × regime_mult_for_micro`
+(so $40 elevated, $25 shock). Effort: ~1 hour. Priority: LOW —
+defer until evidence demands it.
+
+**#89 — Tier-aware `RISK_MAX_SYMBOL_PCT` envelope cap** (LOW)
+
+(Renumbered from #85 on 2026-04-27 to honor operator's explicit
+numbering of universe-filter / late-day / 429 entries above.
+Original PR feat/micro-tier-90pct-single-position commit message
+references "#85" — refers to this entry pre-renumbering.)
 
 Source: micro tier sizing fix (2026-04-27). The risk envelope at
 `packages/quantum/risk/risk_envelope.py` enforces `RISK_MAX_SYMBOL_PCT=0.4`
@@ -1285,7 +1392,9 @@ for micro tier, 0.4 for standard). Effort: ~1 hour, single PR, plus
 matching test in `risk_envelope` test suite. Priority: LOW —
 warn-only path means no operational impact today.
 
-**#86 — `STRATEGY_TRACK` env var cleanup** (LOW)
+**#90 — `STRATEGY_TRACK` env var cleanup** (LOW)
+
+(Renumbered from #86 on 2026-04-27 — same reason as #89.)
 
 Source: micro tier sizing fix (2026-04-27). With tier-aware
 `RiskBudgetEngine`, `STRATEGY_TRACK` is now no-op for micro tier

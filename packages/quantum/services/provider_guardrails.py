@@ -3,6 +3,7 @@ Provider Guardrails Service
 Implements Circuit Breaker, Retries, and Rate Limit handling for external providers.
 """
 import time
+import inspect
 import logging
 import functools
 from typing import Callable, Any, Dict, Optional
@@ -102,27 +103,36 @@ def _repr_args_for_alert(func, args, kwargs, per_arg_cap=200, total_cap=500):
 
     - Per-arg repr capped at per_arg_cap chars
     - Joined string capped at total_cap chars
-    - If func is a class method, skips args[0] (self)
+    - If func is a class method, skips args[0] (self/cls)
 
-    Method-detection heuristic: Python sets ``__qualname__`` to
-    ``Class.method`` for class methods and to
-    ``outer.<locals>.inner`` for nested functions. Both contain
-    ``.``, so a naive ``'.' in __qualname__`` check would
-    false-positive on nested functions. We additionally require
-    ``<locals>`` to be ABSENT, which correctly distinguishes:
+    Method-detection: inspect the first parameter name of ``func``.
+    If it's ``self`` or ``cls``, treat as a class method and skip
+    ``args[0]``. Otherwise include all positional args.
 
-    - Module-level function ``fn`` → no ``.`` → not a method
-    - Class method ``Class.method`` → has ``.``, no ``<locals>`` → method
-    - Nested function ``outer.<locals>.inner`` → has ``.`` AND
-      ``<locals>`` → not a method
+    This correctly handles all the cases qualname-based heuristics
+    struggled with:
 
-    The heuristic still misses one edge case: classes defined inside
-    a function (``outer.<locals>.Class.method``). If that pattern
-    starts appearing under ``@guardrail``, switch to
-    ``inspect.signature(func).parameters`` first-name == 'self'.
+    - Module-level function ``def fn(symbol)`` → first param is
+      ``symbol`` → not a method (include args[0])
+    - Class method ``def fetch(self, symbol)`` → first param is
+      ``self`` → method (skip args[0])
+    - Nested class method (``outer.<locals>.Class.method``) → first
+      param is ``self`` → method (skip args[0])
+    - Static method ``def fn(symbol)`` defined in a class → first
+      param is ``symbol`` → not a method (include args[0]) — correct
+      because @staticmethod-decorated funcs receive no implicit
+      first arg
+    - Callables without a discoverable signature → fall back to
+      treating as not-a-method (include all args)
     """
-    qualname = getattr(func, "__qualname__", "") or ""
-    is_method = "." in qualname and "<locals>" not in qualname
+    is_method = False
+    try:
+        first = next(iter(inspect.signature(func).parameters.values()), None)
+        is_method = first is not None and first.name in ("self", "cls")
+    except (TypeError, ValueError):
+        # Builtins / partials / weird callables may not have a
+        # discoverable signature. Fall back to non-method treatment.
+        is_method = False
     positional = args[1:] if (is_method and args) else args
     parts: list = []
     for a in positional:

@@ -1129,6 +1129,18 @@ async def run_morning_cycle(supabase: Client, user_id: str):
     if positions is None:
         return
 
+    # ── Tier observation (morning cycle) ─────────────────────────────
+    # Morning cycle is exits-only. Concurrency gate intentionally NOT
+    # applied here — exit suggestions must continue to flow regardless
+    # of how many positions are open. The "one trade at a time" rule
+    # applies to entries (midday cycle), not position management.
+    # See CLAUDE.md "Concurrency policy (micro tier)" section.
+    _morning_tier = SmallAccountCompounder.get_tier(deployable_capital)
+    print(
+        f"[Morning] tier={_morning_tier.name}, open_positions={len(positions)}, "
+        f"exits_continuing"
+    )
+
     # 2. Group into Spreads
     spreads = group_spread_positions(positions)
 
@@ -1956,6 +1968,28 @@ async def run_midday_cycle(supabase: Client, user_id: str):
         os.environ.setdefault("CURRENT_PROGRESSION_PHASE", "alpaca_paper")
 
     print(f"Running midday cycle for user {user_id} (phase={os.environ.get('CURRENT_PROGRESSION_PHASE')})")
+
+    # ── Micro-tier concurrency gate (entry cycle only) ───────────────
+    # Operator spec (2026-04-27): when capital < $1000 (micro tier),
+    # only one open position at a time. Skip new entries when a
+    # position is already open. Exits continue normally via the morning
+    # cycle (which intentionally has NO gate). Asymmetry by design —
+    # see CLAUDE.md "Concurrency policy (micro tier)" section.
+    _midday_tier = SmallAccountCompounder.get_tier(deployable_capital)
+    if _midday_tier.max_trades == 1 and len(positions) >= 1:
+        print(
+            f"[Midday] Skipped: micro tier with {len(positions)} "
+            f"open position(s); one-at-a-time policy"
+        )
+        return {
+            "skipped": True,
+            "reason": "micro_tier_position_open",
+            "tier": _midday_tier.name,
+            "open_positions": len(positions),
+            "deployable_capital": deployable_capital,
+            "counts": {"candidates": 0, "created": 0},
+        }
+
     analytics_service = AnalyticsService(supabase)
     print("\n=== MIDDAY DEBUG ===")
     print(f"Deployable capital: {deployable_capital}")

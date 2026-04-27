@@ -176,5 +176,45 @@ class TestSupabaseNoneFailSoft(unittest.TestCase):
         )
 
 
+class TestGetAdminSupabase(unittest.TestCase):
+    """Per #72-H3: shared lazy admin singleton with sentinel
+    semantics, extracted from scheduler.py."""
+
+    def setUp(self):
+        # Reset module state per test
+        import importlib
+        from packages.quantum.observability import alerts
+        importlib.reload(alerts)
+        self.alerts = alerts
+
+    def test_caches_after_first_call(self):
+        from unittest.mock import patch
+        client_mock = MagicMock()
+        with patch(
+            "packages.quantum.jobs.handlers.utils.get_admin_client",
+            return_value=client_mock,
+        ) as factory:
+            r1 = self.alerts._get_admin_supabase()
+            r2 = self.alerts._get_admin_supabase()
+        self.assertIs(r1, client_mock)
+        self.assertIs(r2, client_mock)
+        factory.assert_called_once()
+
+    def test_does_not_retry_after_init_failure(self):
+        from unittest.mock import patch
+        factory = MagicMock(side_effect=RuntimeError("supabase down"))
+        with patch(
+            "packages.quantum.jobs.handlers.utils.get_admin_client",
+            factory,
+        ):
+            r1 = self.alerts._get_admin_supabase()
+            r2 = self.alerts._get_admin_supabase()
+        self.assertIsNone(r1)
+        self.assertIsNone(r2)
+        # Sentinel must prevent retry.
+        self.assertEqual(factory.call_count, 1)
+        self.assertTrue(self.alerts._ADMIN_INIT_ATTEMPTED)
+
+
 if __name__ == "__main__":
     unittest.main()

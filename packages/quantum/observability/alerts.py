@@ -92,3 +92,51 @@ def alert(
                 "intended_message": message[:200],
             },
         )
+
+
+# ── Shared admin Supabase singleton ───────────────────────────────
+# Used by modules that need to write risk_alerts but don't carry
+# a Supabase client through their call signatures (e.g., scheduler-
+# side cron handlers, decorator-wrapped functions). Modules that
+# DO have a client in scope should pass it directly to alert(...)
+# rather than reaching for this helper.
+
+_ADMIN_SUPABASE: Any = None
+_ADMIN_INIT_ATTEMPTED = False
+
+
+def _get_admin_supabase():
+    """Return a lazy admin Supabase client suitable for risk_alerts writes.
+
+    State machine:
+      - Initial: ``_ADMIN_SUPABASE=None``,
+        ``_ADMIN_INIT_ATTEMPTED=False``
+      - After successful init: ``_ADMIN_SUPABASE=Client``,
+        ``_ADMIN_INIT_ATTEMPTED=True``
+      - After failed init: ``_ADMIN_SUPABASE=None``,
+        ``_ADMIN_INIT_ATTEMPTED=True``
+
+    Once init is attempted (success or failure), no further attempts
+    happen until process restart. This prevents log spam during
+    sustained Supabase outages and keeps cost low on the alert hot
+    path.
+
+    The ``alert()`` helper fails-soft on ``supabase=None``, so a
+    persistent ``None`` here degrades alerts to ``logger.exception``
+    rather than crashing callers.
+
+    Returns:
+        Optional[Client]: Supabase admin client, or None if creation
+        failed.
+    """
+    global _ADMIN_SUPABASE, _ADMIN_INIT_ATTEMPTED
+    if not _ADMIN_INIT_ATTEMPTED:
+        _ADMIN_INIT_ATTEMPTED = True
+        try:
+            from packages.quantum.jobs.handlers.utils import get_admin_client
+            _ADMIN_SUPABASE = get_admin_client()
+        except Exception:
+            logger.exception(
+                "alerts: failed to obtain admin supabase client"
+            )
+    return _ADMIN_SUPABASE

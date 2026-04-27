@@ -987,7 +987,8 @@ Doctrine document: `docs/loud_error_doctrine.md` (v1.0).
       (`scheduler_task_http_status_error` with response body capped at
       2000 chars). Lazy-singleton supabase client with sentinel
       (`_SUPABASE_INIT_ATTEMPTED`) prevents log spam during sustained
-      Supabase outages.
+      Supabase outages. (Sentinel later relocated to
+      `observability/alerts.py` as `_ADMIN_INIT_ATTEMPTED` per #72-H3.)
 - [x] **#72-H2a — `_retry_failed_jobs` ImportError fix + doctrine alert.**
       **CLOSED 2026-04-27 by PR #821.** Function had been silently
       broken since at least 2026-01-10 (3.5+ months) due to
@@ -1003,9 +1004,18 @@ Doctrine document: `docs/loud_error_doctrine.md` (v1.0).
       schema drift, validation_eval StrategyConfig JSON serialization
       ×2). Diagnosis of each underlying issue queued as #76–#79 once
       the dead-letter alerts confirm the failures still reproduce.
-- [ ] **#72-H3 — `@guardrail` decorator + 8 `market_data.py` callers
-      write `risk_alerts` on fallback.** Pattern: P3. Effort: ~half day.
-      Coordinate with Polygon Tier 1/2 PRs (#67–#69) since scope overlaps.
+- [x] **#72-H3 — `@guardrail` decorator alerts + shared admin
+      singleton.** **CLOSED 2026-04-27 by PR (this commit).**
+      Decorator-level fix: both fallback paths now write alerts.
+      Path A (circuit OPEN) → `{provider}_circuit_open`; Path B
+      (retries exhausted) → `{provider}_retries_exhausted`. Metadata
+      captures `provider`, `function_name`, args (repr-truncated,
+      self-skipped via qualname heuristic), plus path-specific
+      fields. Bonus scope: extracted shared `_get_admin_supabase()`
+      helper into `observability/alerts.py` and migrated
+      `scheduler.py` away from its local singleton — future modules
+      adopting the doctrine pattern import from
+      `observability.alerts` rather than reinventing.
 - [ ] **#72-H4 — `workflow_orchestrator.py` HOT swallows.** ~25 sites
       across the suggestion pipeline (lines 99, 128, 169, 1131, 1326,
       1411, 1654, 1727, 1794, 1843, 1883, 1952, 2060, 2071, 2158, 2172,

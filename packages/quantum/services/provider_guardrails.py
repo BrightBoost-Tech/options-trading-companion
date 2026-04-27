@@ -3,11 +3,18 @@ Provider Guardrails Service
 Implements Circuit Breaker, Retries, and Rate Limit handling for external providers.
 """
 import time
+import inspect
 import logging
 import functools
 from typing import Callable, Any, Dict, Optional
 from enum import Enum
 from datetime import datetime, timedelta
+
+# Loud-Error Doctrine v1.0: alerts on circuit-open and retry-exhausted
+# paths so silent fallbacks become queryable. See
+# docs/loud_error_doctrine.md anti-pattern 2 (log-only swallow with
+# default return).
+from packages.quantum.observability.alerts import alert, _get_admin_supabase
 
 logger = logging.getLogger(__name__)
 
@@ -90,6 +97,57 @@ class GuardrailException(Exception):
         super().__init__(message)
         self.reason_code = reason_code
 
+
+def _repr_args_for_alert(func, args, kwargs, per_arg_cap=200, total_cap=500):
+    """Stringify call arguments for risk_alerts metadata.
+
+    - Per-arg repr capped at per_arg_cap chars
+    - Joined string capped at total_cap chars
+    - If func is a class method, skips args[0] (self/cls)
+
+    Method-detection: inspect the first parameter name of ``func``.
+    If it's ``self`` or ``cls``, treat as a class method and skip
+    ``args[0]``. Otherwise include all positional args.
+
+    This correctly handles all the cases qualname-based heuristics
+    struggled with:
+
+    - Module-level function ``def fn(symbol)`` → first param is
+      ``symbol`` → not a method (include args[0])
+    - Class method ``def fetch(self, symbol)`` → first param is
+      ``self`` → method (skip args[0])
+    - Nested class method (``outer.<locals>.Class.method``) → first
+      param is ``self`` → method (skip args[0])
+    - Static method ``def fn(symbol)`` defined in a class → first
+      param is ``symbol`` → not a method (include args[0]) — correct
+      because @staticmethod-decorated funcs receive no implicit
+      first arg
+    - Callables without a discoverable signature → fall back to
+      treating as not-a-method (include all args)
+    """
+    is_method = False
+    try:
+        first = next(iter(inspect.signature(func).parameters.values()), None)
+        is_method = first is not None and first.name in ("self", "cls")
+    except (TypeError, ValueError):
+        # Builtins / partials / weird callables may not have a
+        # discoverable signature. Fall back to non-method treatment.
+        is_method = False
+    positional = args[1:] if (is_method and args) else args
+    parts: list = []
+    for a in positional:
+        try:
+            parts.append(repr(a)[:per_arg_cap])
+        except Exception:
+            parts.append("<unrepr-able>")
+    for k, v in kwargs.items():
+        try:
+            parts.append(f"{k}={repr(v)[:per_arg_cap]}")
+        except Exception:
+            parts.append(f"{k}=<unrepr-able>")
+    return ", ".join(parts)[:total_cap]
+
+
 def guardrail(provider: str, max_retries: int = 2, backoff_base: float = 1.0, fallback: Any = None):
     """
     Decorator to wrap provider calls with circuit breaker and retries.
@@ -109,6 +167,18 @@ def guardrail(provider: str, max_retries: int = 2, backoff_base: float = 1.0, fa
             if not breaker.allow_request():
                 # Circuit Open -> Fail Fast
                 logger.warning(f"Circuit OPEN for {provider}, using fallback.")
+                alert(
+                    _get_admin_supabase(),
+                    alert_type=f"{provider}_circuit_open",
+                    severity="warning",
+                    message=f"Circuit OPEN for {provider}, returning fallback for {func.__qualname__}",
+                    metadata={
+                        "provider": provider,
+                        "function_name": func.__qualname__,
+                        "circuit_state": breaker.state.value,
+                        "args": _repr_args_for_alert(func, args, kwargs),
+                    },
+                )
                 return fallback
 
             # 2. Try Execution with Retries
@@ -151,6 +221,21 @@ def guardrail(provider: str, max_retries: int = 2, backoff_base: float = 1.0, fa
 
             # 3. Final Failure
             logger.error(f"Provider {provider} failed after retries: {last_exception}")
+            alert(
+                _get_admin_supabase(),
+                alert_type=f"{provider}_retries_exhausted",
+                severity="warning",
+                message=f"Provider {provider} failed after retries for {func.__qualname__}: {last_exception}",
+                metadata={
+                    "provider": provider,
+                    "function_name": func.__qualname__,
+                    "max_retries": max_retries,
+                    "is_rate_limit": is_rate_limit,
+                    "error_class": type(last_exception).__name__ if last_exception else None,
+                    "error_message": str(last_exception)[:500] if last_exception else None,
+                    "args": _repr_args_for_alert(func, args, kwargs),
+                },
+            )
             return fallback
 
         return wrapper

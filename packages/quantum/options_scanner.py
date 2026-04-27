@@ -38,6 +38,18 @@ def _get_surface_v4_policy() -> str:
     """Get Surface V4 policy: 'off', 'observe', or 'skip'."""
     return os.getenv("SURFACE_V4_POLICY", "observe").lower()
 
+
+def _get_micro_tier_max_underlying() -> float:
+    """Read at call time so tests can patch MICRO_TIER_MAX_UNDERLYING via
+    os.environ. Defaults to $50, which aligns with the existing
+    spread-width split at line ~1084 (2.5-wide for sub-$50 underlyings,
+    5-wide above) so sub-threshold names produce contracts that fit the
+    micro-tier $450 budget."""
+    try:
+        return float(os.getenv("MICRO_TIER_MAX_UNDERLYING", "50.0"))
+    except (TypeError, ValueError):
+        return 50.0
+
 def _get_surface_v4_strike_range() -> float:
     """Get Surface V4 strike range as fraction of spot (default 0.20 = ±20%)."""
     return float(os.getenv("SURFACE_V4_STRIKE_RANGE", "0.20"))
@@ -1993,13 +2005,63 @@ def _determine_execution_cost(
         "proxy_cost_contract": proxy_cost_contract,
     }
 
+def _apply_tier_price_filter(
+    symbols: List[str],
+    quotes_map: Dict[str, Any],
+    account_tier: Optional[str],
+    rejection_stats: "RejectionStats",
+) -> List[str]:
+    """Drop symbols whose underlying price exceeds the micro-tier
+    threshold before per-symbol Polygon option-chain calls.
+
+    Threshold sourced from MICRO_TIER_MAX_UNDERLYING env (default $50).
+    Aligns with existing spread-width split at line ~1084: sub-$50
+    underlyings get 2.5-wide spreads (~$200-$250 max_loss/contract,
+    fits micro $450 budget); $50+ get 5-wide spreads (~$300-$500+,
+    often exceeds budget under operator's 90% one-at-a-time spec).
+
+    No-op for non-micro tiers and when account_tier is None.
+    Symbols with missing/unparseable quotes pass through to the
+    downstream missing_quotes rejection so we don't accidentally
+    drop on transient data errors.
+    """
+    if account_tier != "micro":
+        return symbols
+
+    threshold = _get_micro_tier_max_underlying()
+    kept: List[str] = []
+    for s in symbols:
+        snap = quotes_map.get(s)
+        if not snap:
+            kept.append(s)  # let downstream handle missing quotes
+            continue
+        q = snap.get("quote", {}) or {}
+        price = q.get("last") or q.get("mid")
+        if price is None:
+            bid = q.get("bid")
+            ask = q.get("ask")
+            if bid and ask and float(bid) > 0 and float(ask) > 0:
+                price = (float(bid) + float(ask)) / 2.0
+        if price is None or float(price) <= threshold:
+            kept.append(s)
+        else:
+            rejection_stats.record("micro_tier_underlying_too_high")
+
+    print(
+        f"[Scanner] Micro-tier price filter: kept "
+        f"{len(kept)}/{len(symbols)} symbols (threshold=${threshold:.2f})"
+    )
+    return kept
+
+
 def scan_for_opportunities(
     symbols: List[str] = None,
     supabase_client: Client = None,
     user_id: str = None,
     global_snapshot: GlobalRegimeSnapshot = None,
     banned_strategies: List[str] = None,
-    portfolio_cash: float = None
+    portfolio_cash: float = None,
+    account_tier: Optional[str] = None,
 ) -> Tuple[List[Dict[str, Any]], RejectionStats]:
     """
     Scans the provided symbols (or universe) for option trade opportunities.
@@ -2137,6 +2199,13 @@ def scan_for_opportunities(
     # truth_layer.snapshot_many handles batching automatically
     logger.info(f"[Scanner] Batch fetching quotes for {len(symbols)} symbols...")
     quotes_map = truth_layer.snapshot_many(symbols)
+
+    # Tier-aware universe pre-filter (saves Polygon option-chain calls
+    # for symbols whose underlying price would produce contracts
+    # exceeding tier budget). No-op for small/standard tiers.
+    symbols = _apply_tier_price_filter(
+        symbols, quotes_map, account_tier, rejection_stats
+    )
 
     # Bolt Optimization: Hoist invariant calculations out of the inner loop
     now_dt = datetime.now()

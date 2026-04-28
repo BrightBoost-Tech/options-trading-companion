@@ -23,6 +23,12 @@ class UniverseService:
         # Liquidity evidence + rejection rationale for GE/PLTR/NIO in
         # docs/micro_live_config.md.
         "F", "BAC", "SOFI", "T", "KO", "VZ",
+        # 2026-04-28 sub-$50 expansion to broaden scanner reach for micro tier.
+        # Selected for established options markets and sub-$50 underlyings;
+        # mid-cap mix avoids the FXI-style penny-premium spread blowout (>$15
+        # each). Travel pair (AAL+CCL) intentionally limited to two names to
+        # cap concentration. Backlog #87b.
+        "PFE", "WBD", "AAL", "CCL", "KMI", "DKNG", "EWZ", "LYFT",
     ]
 
     def __init__(self, supabase: Client, polygon_service: PolygonService = None):

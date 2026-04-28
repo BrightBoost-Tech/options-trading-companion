@@ -2109,7 +2109,12 @@ def scan_for_opportunities(
     if not symbols:
         if universe_service:
             try:
-                universe = universe_service.get_scan_candidates(limit=30)
+                # Raised to 50 (was 30) post-#87b backfill. With liquidity_score
+                # populated for all symbols, mega-caps occupy ~19 of the top
+                # slots, pushing sub-$50 ETFs (XLU, XLB, sector ETFs) out of the
+                # top-30 cut. limit=50 keeps the cheap-ETF candidates reachable
+                # for micro-tier filtering without expanding scan cost much.
+                universe = universe_service.get_scan_candidates(limit=50)
                 symbols = [u['symbol'] for u in universe]
                 # Prefill from Universe if available
                 earnings_map = {u["symbol"]: u.get("earnings_date") for u in universe}

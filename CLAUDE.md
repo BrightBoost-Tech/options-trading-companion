@@ -327,6 +327,26 @@ then, follow the procedure below for every PR that touches
    ORDER BY created_at DESC;
    ```
 
+8. **Update backlog tracker.** After successful apply, search
+   CLAUDE.md for the migration's backlog item by file name or
+   item number. If found in any *Priority X* or *pending*
+   section, move it to *Roadmap → Completed* (or *Bugs Fixed
+   (last 30 days)* if the migration also resolves a runtime bug)
+   with the apply date and audit reference (`risk_alerts.id` or
+   the `migration_apply` row's `applied_at`). If the apply and
+   the backlog edit can't happen in the same operator turn, add
+   the backlog edit to the next session's first action so it
+   doesn't drift.
+
+   The same step should be applied to *PR Merge Procedure* when
+   one is formalized — merged PRs that resolve backlog items
+   should close those items in CLAUDE.md within the same
+   operator turn. This step exists because three closure-
+   discipline gaps surfaced this weekend (see *Backlog hygiene
+   check 2026-04-27 evening* in the Notable findings section)
+   and the underlying pattern is documentation drift, not
+   operator error.
+
 ### When NOT to apply on merge
 
 If the migration's PR description explicitly states observation-
@@ -813,6 +833,7 @@ Full chronology lives in git history; search commits from 2026-03 and earlier.
 - [x] Policy lab eval ImportError fix (PR #807, 2026-04-25)
 - [x] Policy lab eval schema-drift fix + per-cohort observability (PR #808, 2026-04-26 06:15Z)
 - [x] #62a-D2 nested_regimes write-only orphan deleted (2026-04-26) — 0 rows ever, 0 readers; deleted `log_global_context` rather than fix; table drop tracked as #75
+- [x] **#62a-D4-PR1** — `routing_mode` column migration applied 2026-04-26 16:41Z via `mcp__supabase__apply_migration` (PR #815). Backfilled Conservative + Neutral cohort portfolios to `shadow_only` per design intent; Aggressive Cohort + Main Paper rows defaulted to `live_eligible`. First of 3-PR D4 sequence. PR2 (dispatch enforcement) and PR3 (symbol drop) remain pending. Audit-trail row in `risk_alerts` (alert_type=`migration_apply`).
 - [x] Tier-aware sizing: micro tier 90% one-at-a-time + standard tier 2-3% multi-position. Closes the compounder-vs-engine `min()` disagreement at `workflow_orchestrator.py:2347` (2026-04-27, PR feat/micro-tier-90pct-single-position). Asymmetric concurrency gate: midday blocks new entries when position open; morning continues exit generation. Backlog #89 (tier-aware envelope) and #90 (`STRATEGY_TRACK` cleanup) deferred.
 - [x] Micro-tier universe price filter: drops symbols with underlying > $50 from scanner for micro tier only, configurable via `MICRO_TIER_MAX_UNDERLYING` env (2026-04-27, PR feat/85-micro-tier-universe-price-filter). Closes #85. Composes with PR feat/micro-tier-90pct-single-position.
 
@@ -832,12 +853,21 @@ slot in here alongside the Monday verification:
       within 10 minutes of fire time, no
       `policy_lab_eval_cohort_failure` alerts. Final acceptance
       criterion for #65 closure.
-- [ ] **#62a-D4-PR1 — `routing_mode` column migration** (PR open;
-      awaits operator-approved manual apply per the migration
-      procedure). Migration file
-      `supabase/migrations/20260426000000_add_routing_mode_to_paper_portfolios.sql`.
-      Data-only; backfills Conservative + Neutral cohort portfolios
-      → `shadow_only`; everything else defaults to `live_eligible`.
+**Priority 1 status as of 2026-04-27 evening:** drained.
+- #65 verification: ✅ confirmed via natural Monday 16:30 CT
+  scheduler fire (3 rows in `policy_daily_scores` for
+  `trade_date=2026-04-27` written at 21:30:02Z).
+- #62a-D4-PR1: ✅ applied 2026-04-26 16:41Z (see Roadmap →
+  Completed and migration_apply audit row).
+
+**Active focus (next 3, drawn from Priority 2):**
+1. **#72-H4c** — workflow_orchestrator audit + ancillary doctrine
+   sites (~half day).
+2. **#87b** — `scanner_universe` metadata backfill (~half day,
+   reduces per-cycle Polygon calls).
+3. **#62a-D4-PR2** — routing dispatch enforcement (~1 day; builds
+   on D4-PR1 to make conservative/neutral cohorts actually skip
+   live dispatch).
 
 **Priority 2 — This Month**
 - [ ] **#72 Loud-error doctrine — Phase 2 HOT fixes.** Doctrine
@@ -1067,6 +1097,24 @@ truth, but cheap external state checks (plan tiers, env vars,
 dashboard settings, billing pages) deserve equal weight. Adding
 "check the cheapest external thing first" as a parallel discipline
 would have shifted multiple diagnostics from hours to minutes.
+
+### Backlog hygiene check (2026-04-27 evening)
+
+`#62a-D4-PR1` was listed as Priority 1 *pending manual apply*
+despite being applied 24h prior (2026-04-26 16:41Z, audit row in
+`risk_alerts.alert_type='migration_apply'`). This is the third
+closure-discipline gap surfaced this weekend (Saturday's commit
+messages referencing closed items, today's PR #828/#829
+prioritization re-adding completed items, tonight's D4-PR1
+phantom-pending). Pattern is documentation drift, not operator
+error — applied migrations and merged PRs don't have an
+automatic step that updates the backlog tracker.
+
+Procedure fix: *Migration Apply Procedure* gains step 8 below —
+"Update backlog tracker" — to make backlog closure part of the
+apply workflow rather than a separate hygiene pass. Same step
+should be folded into the PR Merge Procedure when one is
+formalized.
 
 ---
 

@@ -134,7 +134,7 @@ class TestScannerUsesUniverseService(unittest.TestCase):
         MockUniverseService.assert_called()
 
         # Verify get_scan_candidates was called (the key fix!)
-        mock_universe_instance.get_scan_candidates.assert_called_with(limit=30)
+        mock_universe_instance.get_scan_candidates.assert_called_with(limit=50)
 
         # Verify we didn't use fallback
         # If fallback was used, we'd see SPY, QQQ etc. here instead of ZZZ

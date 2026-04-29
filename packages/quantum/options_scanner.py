@@ -50,6 +50,16 @@ def _get_micro_tier_max_underlying() -> float:
     except (TypeError, ValueError):
         return 50.0
 
+def _get_micro_tier_spread_threshold() -> float:
+    """Read at call time so tests can patch MICRO_TIER_SPREAD_THRESHOLD
+    via env. Default 0.30 (30%) matches the analysis in #92 — BAC-class
+    liquid mid-caps produce 13-15% combo bid-ask ratios; sub-$30 names
+    produce 200%+ which we still want to reject."""
+    try:
+        return float(os.getenv("MICRO_TIER_SPREAD_THRESHOLD", "0.30"))
+    except (TypeError, ValueError):
+        return 0.30
+
 def _get_surface_v4_strike_range() -> float:
     """Get Surface V4 strike range as fraction of spot (default 0.20 = ±20%)."""
     return float(os.getenv("SURFACE_V4_STRIKE_RANGE", "0.20"))
@@ -2284,6 +2294,16 @@ def scan_for_opportunities(
                 RegimeState.REBOUND: 0.12,
             }
             threshold = _SPREAD_THRESHOLDS.get(global_snapshot.state, 0.10)
+            # For micro tier, sub-$60 underlyings produce structurally wider
+            # combo bid-ask ratios because per-leg bid-ask is fixed in dollars
+            # while premiums scale with underlying price. The regime-keyed
+            # threshold (10-20%) is calibrated for mega-caps; cheap names need
+            # ~30% to capture liquid candidates like BAC at 13.6% without
+            # opening to truly thin markets at 50%+.
+            # Uses max() to preserve regime loosening: if SUPPRESSED gives 20%
+            # and micro override gives 30%, micro stays at 30%.
+            if account_tier == "micro":
+                threshold = max(threshold, _get_micro_tier_spread_threshold())
 
             # Note: We NO LONGER reject here based on underlying spread.
 

@@ -1348,8 +1348,22 @@ async def run_morning_cycle(supabase: Client, user_id: str):
                     "bid": first_snap.get("bid"),
                     "ask": first_snap.get("ask")
                 }
-        except Exception:
-            pass
+        except Exception as _exit_md_err:
+            alert(
+                _get_admin_supabase(),
+                alert_type="workflow_exit_marketdata_fetch_failed",
+                severity="warning",
+                message=f"Exit market-data fetch failed for {ref_symbol}: {_exit_md_err}",
+                user_id=user_id,
+                symbol=ref_symbol,
+                metadata={
+                    "function_name": "run_morning_cycle",
+                    "symbol": ref_symbol,
+                    "error_class": type(_exit_md_err).__name__,
+                    "error_message": str(_exit_md_err)[:500],
+                    "consequence": "exit price computed without bid/ask context — falls back to mid-price approximation",
+                },
+            )
 
         exit_mode_result = compute_exit_mode(unit_price, unit_cost, exit_market_data)
         exit_mode = exit_mode_result["mode"]
@@ -1708,6 +1722,8 @@ async def run_morning_cycle(supabase: Client, user_id: str):
 
         # Map to track suggestion_id by original trace_id (for post-insert events)
         inserted_suggestions = []
+        # #72-H4c: aggregation list for per-suggestion insert failures
+        _morning_insert_failures = []
 
         for s in final_suggestion_list:
             s["cycle_date"] = cycle_date
@@ -1765,8 +1781,32 @@ async def run_morning_cycle(supabase: Client, user_id: str):
 
             except Exception as e:
                 print(f"[Wave1.2] Error inserting morning suggestion {s.get('ticker')}: {e}")
+                _morning_insert_failures.append({
+                    "symbol": s.get("ticker"),
+                    "error_class": type(e).__name__,
+                    "error_message": str(e)[:200],
+                })
 
         print(f"Morning suggestions: {inserts_count} inserted, {existing_count} existing (unchanged)")
+
+        # #72-H4c: aggregated alert for morning per-suggestion insert failures
+        if _morning_insert_failures:
+            _failed_symbols = [f["symbol"] for f in _morning_insert_failures][:20]
+            _distinct_error_classes = sorted(set(f["error_class"] for f in _morning_insert_failures))
+            alert(
+                _get_admin_supabase(),
+                alert_type="workflow_morning_suggestion_insert_failed",
+                severity="warning",
+                message=f"{len(_morning_insert_failures)} morning suggestion inserts failed",
+                user_id=user_id,
+                metadata={
+                    "function_name": "run_morning_cycle",
+                    "failed_count": len(_morning_insert_failures),
+                    "failed_symbols": _failed_symbols,
+                    "distinct_error_classes": _distinct_error_classes,
+                    "consequence": f"{len(_morning_insert_failures)} morning suggestions lost from this cycle",
+                },
+            )
 
         # === v4 OBSERVABILITY: Post-insert event emission ===
         try:
@@ -1831,6 +1871,20 @@ async def run_morning_cycle(supabase: Client, user_id: str):
             print(f"[v4] Emitted events and wrote audit/attribution for {len(inserted_suggestions)} morning suggestions")
 
         except Exception as e:
+            alert(
+                _get_admin_supabase(),
+                alert_type="workflow_morning_post_insert_observability_failed",
+                severity="warning",
+                message=f"Morning post-insert observability failed: {type(e).__name__}",
+                user_id=user_id,
+                metadata={
+                    "function_name": "run_morning_cycle",
+                    "error_class": type(e).__name__,
+                    "error_message": str(e)[:500],
+                    "inserted_suggestions_count": len(inserted_suggestions),
+                    "consequence": f"no audit/attribution/analytics events written for {len(inserted_suggestions)} morning suggestions — observability gap for this cycle",
+                },
+            )
             print(f"[v4] Error in morning post-insert observability: {e}")
 
         # 5. Log suggestions
@@ -1919,7 +1973,20 @@ async def run_midday_cycle(supabase: Client, user_id: str):
             from packages.quantum.services.progression_service import ProgressionService
             _prog = ProgressionService(supabase)
             return await asyncio.to_thread(lambda: _prog.get_state(user_id))
-        except Exception:
+        except Exception as _prog_err:
+            alert(
+                _get_admin_supabase(),
+                alert_type="workflow_midday_progression_fetch_failed",
+                severity="warning",
+                message=f"Progression service fetch failed: {type(_prog_err).__name__}",
+                user_id=user_id,
+                metadata={
+                    "function_name": "run_midday_cycle._fetch_progression",
+                    "error_class": type(_prog_err).__name__,
+                    "error_message": str(_prog_err)[:500],
+                    "consequence": "midday cycle continues with prog_state=None — tier/regime computations use defaults",
+                },
+            )
             return None
 
     async def _fetch_capital():
@@ -3041,6 +3108,10 @@ async def run_midday_cycle(supabase: Client, user_id: str):
 
         # Map to track suggestion_id by original trace_id (for post-insert events)
         inserted_suggestions = []
+        # #72-H4c: aggregation list for midday per-suggestion insert failures
+        # (retry-exhausted only; transient failures absorbed by the bounded
+        # retry shim below are not collected.)
+        _midday_insert_failures = []
 
         for s in suggestions:
             s["cycle_date"] = cycle_date
@@ -3121,8 +3192,32 @@ async def run_midday_cycle(supabase: Client, user_id: str):
 
                 if not success:
                     print(f"[Wave1.2] Error inserting midday suggestion {s.get('ticker')}: {e}")
+                    _midday_insert_failures.append({
+                        "symbol": s.get("ticker"),
+                        "error_class": type(e).__name__,
+                        "error_message": str(e)[:200],
+                    })
 
         print(f"Midday suggestions: {inserts_count} inserted, {existing_count} existing (unchanged)")
+
+        # #72-H4c: aggregated alert for midday per-suggestion insert failures
+        if _midday_insert_failures:
+            _failed_symbols = [f["symbol"] for f in _midday_insert_failures][:20]
+            _distinct_error_classes = sorted(set(f["error_class"] for f in _midday_insert_failures))
+            alert(
+                _get_admin_supabase(),
+                alert_type="workflow_midday_suggestion_insert_failed",
+                severity="warning",
+                message=f"{len(_midday_insert_failures)} midday suggestion inserts failed (retry exhausted)",
+                user_id=user_id,
+                metadata={
+                    "function_name": "run_midday_cycle",
+                    "failed_count": len(_midday_insert_failures),
+                    "failed_symbols": _failed_symbols,
+                    "distinct_error_classes": _distinct_error_classes,
+                    "consequence": f"{len(_midday_insert_failures)} midday suggestions lost from this cycle (retry shim exhausted)",
+                },
+            )
 
         # === v4 OBSERVABILITY: Post-insert event emission ===
         try:
@@ -3191,6 +3286,20 @@ async def run_midday_cycle(supabase: Client, user_id: str):
             print(f"[v4] Emitted events and wrote audit/attribution for {len(inserted_suggestions)} midday suggestions")
 
         except Exception as e:
+            alert(
+                _get_admin_supabase(),
+                alert_type="workflow_midday_post_insert_observability_failed",
+                severity="warning",
+                message=f"Midday post-insert observability failed: {type(e).__name__}",
+                user_id=user_id,
+                metadata={
+                    "function_name": "run_midday_cycle",
+                    "error_class": type(e).__name__,
+                    "error_message": str(e)[:500],
+                    "inserted_suggestions_count": len(inserted_suggestions),
+                    "consequence": f"no audit/attribution/analytics events written for {len(inserted_suggestions)} midday suggestions — observability gap for this cycle",
+                },
+            )
             print(f"[v4] Error in midday post-insert observability: {e}")
 
         try:

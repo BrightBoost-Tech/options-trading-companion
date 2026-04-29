@@ -13,8 +13,13 @@ Test classes organized by sub-PR:
     - TestMiddayCalPrefetchAlert (site 2172)
     - TestPerCandidateCalAggregation (site 2780, loop aggregation)
 
-  H4c — Audit + ancillary (TBD):
-    - [tests added with H4c PR]
+  H4c — Audit + ancillary:
+    - TestExitMarketdataAlert (site 1351, single-fire)
+    - TestMorningSuggestionInsertAggregation (site 1766, loop)
+    - TestMorningPostInsertObservabilityAlert (site 1833, single-fire)
+    - TestMiddayProgressionFetchAlert (site 1922, single-fire, async)
+    - TestMiddayPostInsertObservabilityAlert (site 3193, single-fire)
+    - TestMiddaySuggestionInsertAggregation (site 3083, loop)
 
 Plus shared helpers:
   - TestModuleSyntaxValid (ast.parse check)
@@ -406,6 +411,326 @@ class TestPerCandidateCalAggregation(unittest.TestCase):
             '"consequence"', block,
             "Aggregation alert must include `consequence` field "
             "(workflow_*-class convention).",
+        )
+
+
+class TestExitMarketdataAlert(unittest.TestCase):
+    """Site 1351: exit market-data fetch failure must write a
+    workflow_exit_marketdata_fetch_failed alert (#72-H4c)."""
+
+    def setUp(self):
+        self.src = _load_orchestrator_source()
+        self.block = _extract_except_block(
+            self.src, "except Exception as _exit_md_err:"
+        )
+
+    def test_exit_md_except_block_present(self):
+        self.assertGreater(
+            len(self.block), 0,
+            "Could not locate the exit-marketdata except block — "
+            "expected `except Exception as _exit_md_err:` in run_morning_cycle.",
+        )
+
+    def test_exit_md_alert_present(self):
+        self.assertIn(
+            "alert(", self.block,
+            "Exit-marketdata except must call alert() per "
+            "Loud-Error Doctrine v1.0 (#72-H4c).",
+        )
+
+    def test_exit_md_alert_type_correct(self):
+        self.assertIn(
+            'alert_type="workflow_exit_marketdata_fetch_failed"', self.block,
+            "Exit-marketdata alert must use alert_type="
+            "'workflow_exit_marketdata_fetch_failed'.",
+        )
+
+    def test_exit_md_uses_admin_supabase(self):
+        self.assertIn(
+            "_get_admin_supabase()", self.block,
+            "Exit-marketdata alert must call _get_admin_supabase().",
+        )
+
+    def test_exit_md_includes_consequence_metadata(self):
+        self.assertIn(
+            '"consequence"', self.block,
+            "workflow_*-class alerts must include `consequence` field.",
+        )
+
+
+class TestMorningSuggestionInsertAggregation(unittest.TestCase):
+    """Site 1766: morning per-suggestion insert failures aggregated
+    into one summary alert (workflow_morning_suggestion_insert_failed,
+    #72-H4c). Mirrors H4b's TestPerCandidateCalAggregation pattern."""
+
+    def setUp(self):
+        self.src = _load_orchestrator_source()
+
+    def test_pre_loop_failures_list_init_present(self):
+        """Pre-loop init `_morning_insert_failures = []` must exist."""
+        self.assertIn(
+            "_morning_insert_failures = []", self.src,
+            "Aggregation pattern requires `_morning_insert_failures = []` "
+            "init before the morning insert loop.",
+        )
+
+    def test_in_loop_append_present(self):
+        """Inside the morning insert except, append to the failures list."""
+        self.assertIn(
+            "_morning_insert_failures.append(", self.src,
+            "Per-suggestion morning except must append failure to "
+            "_morning_insert_failures (aggregation pattern, #72-H4c).",
+        )
+
+    def test_post_loop_conditional_present(self):
+        """A conditional `if _morning_insert_failures:` must guard the alert."""
+        self.assertIn(
+            "if _morning_insert_failures:", self.src,
+            "Post-loop alert must be guarded by "
+            "`if _morning_insert_failures:` conditional.",
+        )
+
+    def test_post_loop_alert_type_correct(self):
+        anchor = self.src.find("if _morning_insert_failures:")
+        self.assertGreater(anchor, 0)
+        block = self.src[anchor:anchor + 1500]
+        self.assertIn(
+            'alert_type="workflow_morning_suggestion_insert_failed"', block,
+            "Post-loop alert must use alert_type="
+            "'workflow_morning_suggestion_insert_failed'.",
+        )
+
+    def test_post_loop_uses_admin_supabase(self):
+        anchor = self.src.find("if _morning_insert_failures:")
+        block = self.src[anchor:anchor + 1500]
+        self.assertIn(
+            "_get_admin_supabase()", block,
+            "Post-loop alert must call _get_admin_supabase().",
+        )
+
+    def test_post_loop_metadata_has_failed_count_and_symbols(self):
+        anchor = self.src.find("if _morning_insert_failures:")
+        block = self.src[anchor:anchor + 1500]
+        self.assertIn('"failed_count"', block,
+                      "Aggregation metadata must include failed_count.")
+        self.assertIn('"failed_symbols"', block,
+                      "Aggregation metadata must include failed_symbols.")
+
+    def test_post_loop_includes_consequence(self):
+        anchor = self.src.find("if _morning_insert_failures:")
+        block = self.src[anchor:anchor + 1500]
+        self.assertIn(
+            '"consequence"', block,
+            "Aggregation alert must include `consequence` field.",
+        )
+
+
+class TestMorningPostInsertObservabilityAlert(unittest.TestCase):
+    """Site 1833: morning v4 post-insert observability failure must
+    write a workflow_morning_post_insert_observability_failed alert
+    (#72-H4c). Anchors on the unique 'morning suggestions' print line
+    above the except (since `except Exception as e:` is not unique)."""
+
+    PRINT_ANCHOR = (
+        '[v4] Emitted events and wrote audit/attribution for '
+        '{len(inserted_suggestions)} morning suggestions'
+    )
+
+    def setUp(self):
+        self.src = _load_orchestrator_source()
+        anchor = self.src.find(self.PRINT_ANCHOR)
+        self.block = self.src[anchor:anchor + 1500] if anchor >= 0 else ""
+
+    def test_morning_observability_anchor_present(self):
+        self.assertGreater(
+            len(self.block), 0,
+            "Could not locate morning observability print anchor.",
+        )
+
+    def test_morning_observability_alert_present(self):
+        self.assertIn(
+            "alert(", self.block,
+            "Morning post-insert observability except must call alert().",
+        )
+
+    def test_morning_observability_alert_type_correct(self):
+        self.assertIn(
+            'alert_type="workflow_morning_post_insert_observability_failed"',
+            self.block,
+            "Alert must use alert_type="
+            "'workflow_morning_post_insert_observability_failed'.",
+        )
+
+    def test_morning_observability_uses_admin_supabase(self):
+        self.assertIn(
+            "_get_admin_supabase()", self.block,
+            "Alert must call _get_admin_supabase().",
+        )
+
+    def test_morning_observability_includes_consequence(self):
+        self.assertIn(
+            '"consequence"', self.block,
+            "Alert must include `consequence` field.",
+        )
+
+
+class TestMiddayProgressionFetchAlert(unittest.TestCase):
+    """Site 1922: midday progression service fetch failure must write
+    a workflow_midday_progression_fetch_failed alert (#72-H4c).
+    Inside async helper _fetch_progression."""
+
+    def setUp(self):
+        self.src = _load_orchestrator_source()
+        self.block = _extract_except_block(
+            self.src, "except Exception as _prog_err:"
+        )
+
+    def test_progression_except_block_present(self):
+        self.assertGreater(
+            len(self.block), 0,
+            "Could not locate progression-fetch except block — "
+            "expected `except Exception as _prog_err:` in "
+            "run_midday_cycle._fetch_progression.",
+        )
+
+    def test_progression_alert_present(self):
+        self.assertIn(
+            "alert(", self.block,
+            "Progression-fetch except must call alert().",
+        )
+
+    def test_progression_alert_type_correct(self):
+        self.assertIn(
+            'alert_type="workflow_midday_progression_fetch_failed"',
+            self.block,
+            "Alert must use alert_type="
+            "'workflow_midday_progression_fetch_failed'.",
+        )
+
+    def test_progression_uses_admin_supabase(self):
+        self.assertIn(
+            "_get_admin_supabase()", self.block,
+            "Alert must call _get_admin_supabase().",
+        )
+
+    def test_progression_includes_consequence(self):
+        self.assertIn(
+            '"consequence"', self.block,
+            "Alert must include `consequence` field.",
+        )
+
+
+class TestMiddayPostInsertObservabilityAlert(unittest.TestCase):
+    """Site 3193: midday v4 post-insert observability failure must
+    write a workflow_midday_post_insert_observability_failed alert
+    (#72-H4c). Mirrors morning version (Site 1833) for midday cycle."""
+
+    PRINT_ANCHOR = (
+        '[v4] Emitted events and wrote audit/attribution for '
+        '{len(inserted_suggestions)} midday suggestions'
+    )
+
+    def setUp(self):
+        self.src = _load_orchestrator_source()
+        anchor = self.src.find(self.PRINT_ANCHOR)
+        self.block = self.src[anchor:anchor + 1500] if anchor >= 0 else ""
+
+    def test_midday_observability_anchor_present(self):
+        self.assertGreater(
+            len(self.block), 0,
+            "Could not locate midday observability print anchor.",
+        )
+
+    def test_midday_observability_alert_present(self):
+        self.assertIn(
+            "alert(", self.block,
+            "Midday post-insert observability except must call alert().",
+        )
+
+    def test_midday_observability_alert_type_correct(self):
+        self.assertIn(
+            'alert_type="workflow_midday_post_insert_observability_failed"',
+            self.block,
+            "Alert must use alert_type="
+            "'workflow_midday_post_insert_observability_failed'.",
+        )
+
+    def test_midday_observability_uses_admin_supabase(self):
+        self.assertIn(
+            "_get_admin_supabase()", self.block,
+            "Alert must call _get_admin_supabase().",
+        )
+
+    def test_midday_observability_includes_consequence(self):
+        self.assertIn(
+            '"consequence"', self.block,
+            "Alert must include `consequence` field.",
+        )
+
+
+class TestMiddaySuggestionInsertAggregation(unittest.TestCase):
+    """Site 3083: midday per-suggestion insert failures (retry-exhausted
+    only) aggregated into one summary alert
+    (workflow_midday_suggestion_insert_failed, #72-H4c). BONUS site
+    not in original H4 catalog — discovered during H4c diagnostic.
+    Mirrors morning aggregation (Site 1766) for midday cycle."""
+
+    def setUp(self):
+        self.src = _load_orchestrator_source()
+
+    def test_pre_loop_failures_list_init_present(self):
+        self.assertIn(
+            "_midday_insert_failures = []", self.src,
+            "Aggregation pattern requires `_midday_insert_failures = []` "
+            "init before the midday insert loop.",
+        )
+
+    def test_in_loop_append_present(self):
+        self.assertIn(
+            "_midday_insert_failures.append(", self.src,
+            "Retry-exhausted midday insert failure must append to "
+            "_midday_insert_failures (aggregation pattern, #72-H4c).",
+        )
+
+    def test_post_loop_conditional_present(self):
+        self.assertIn(
+            "if _midday_insert_failures:", self.src,
+            "Post-loop alert must be guarded by "
+            "`if _midday_insert_failures:` conditional.",
+        )
+
+    def test_post_loop_alert_type_correct(self):
+        anchor = self.src.find("if _midday_insert_failures:")
+        self.assertGreater(anchor, 0)
+        block = self.src[anchor:anchor + 1500]
+        self.assertIn(
+            'alert_type="workflow_midday_suggestion_insert_failed"', block,
+            "Post-loop alert must use alert_type="
+            "'workflow_midday_suggestion_insert_failed'.",
+        )
+
+    def test_post_loop_uses_admin_supabase(self):
+        anchor = self.src.find("if _midday_insert_failures:")
+        block = self.src[anchor:anchor + 1500]
+        self.assertIn(
+            "_get_admin_supabase()", block,
+            "Post-loop alert must call _get_admin_supabase().",
+        )
+
+    def test_post_loop_metadata_has_failed_count_and_symbols(self):
+        anchor = self.src.find("if _midday_insert_failures:")
+        block = self.src[anchor:anchor + 1500]
+        self.assertIn('"failed_count"', block,
+                      "Aggregation metadata must include failed_count.")
+        self.assertIn('"failed_symbols"', block,
+                      "Aggregation metadata must include failed_symbols.")
+
+    def test_post_loop_includes_consequence(self):
+        anchor = self.src.find("if _midday_insert_failures:")
+        block = self.src[anchor:anchor + 1500]
+        self.assertIn(
+            '"consequence"', block,
+            "Aggregation alert must include `consequence` field.",
         )
 
 

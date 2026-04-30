@@ -188,13 +188,17 @@ Doctrine document: `docs/loud_error_doctrine.md` (v1.0).
       candidate loop, single summary alert fires after loop with
       `failed_count` + `failed_symbols` (capped at 20) +
       `distinct_error_classes`). Trade-off documented in code comment.
-- [ ] **#72-H4c — `workflow_orchestrator.py` audit + ancillary.**
-      Groups C+D from H4 diagnostic. Sites: `1326` (exit market-data
-      fetch), `1727` (per-suggestion insert failure morning), `1794`
-      (morning v4 post-insert observability), `1883` (progression
-      service fetch midday), `3031` (midday v4 post-insert
-      observability). Pattern: P1/P2. Effort: ~half day. Ships after
-      H4a + H4b.
+- [x] **#72-H4c — `workflow_orchestrator.py` audit + ancillary.**
+      **CLOSED 2026-04-29 by PR #835.** Groups C+D from H4 diagnostic.
+      6 sites covered (5 from original + 1 bonus mirror discovered
+      during diagnostic): `paper_exit_marketdata_fetch_failed` (line
+      1351, single-fire), `workflow_morning_suggestion_insert_failed`
+      (1766, loop), `workflow_morning_post_insert_observability_failed`
+      (1833, single-fire), `workflow_midday_progression_fetch_failed`
+      (1922, single-fire async), `workflow_midday_post_insert_observability_failed`
+      (3193, single-fire), `workflow_midday_suggestion_insert_failed`
+      (3083, loop — bonus site outside original H4 catalog).
+      34 new structural tests in `test_workflow_orchestrator_alerts.py`.
 
 **Deferred from #72-H4 diagnostic (not in scope for any sub-PR):**
 
@@ -210,9 +214,21 @@ Doctrine document: `docs/loud_error_doctrine.md` (v1.0).
   Loud-Error Doctrine v1.0 (input parsing fallback, typed coercion
   with sentinel return, multi-source fallback chain intermediate).
   Documented as compliant for future audits. No fix needed.
-- [ ] **#72-H5 — `paper_exit_evaluator.py` + `paper_autopilot_service.py`
-      HOT swallows.** ~25 sites. Pattern: P1/P2. Per-position swallow
-      patterns drop exit conditions silently. Effort: ~1 day.
+- [x] **#72-H5a — `paper_exit_evaluator.py` HOT swallows.**
+      **CLOSED 2026-04-30 by PR #838.** First half of #72-H5. 9 alert
+      sites covered: per-condition eval (loop), cohort configs load,
+      close-loop (loop), open positions fetch (safety), cohort resolve
+      exhausted (collapsed 3 paths → 1 alert when all fail), routing
+      query (safety), idempotency check (safety), Alpaca DRY_RUN build,
+      Alpaca submit fallback to internal (CRITICAL — 2026-04-16
+      ghost-position bug shape). **New convention introduced:**
+      `operator_action_required` metadata field on critical-severity
+      alerts; provides explicit operator runbook text. 57 structural
+      tests in new `test_paper_exit_evaluator_alerts.py`.
+- [ ] **#72-H5b — `paper_autopilot_service.py` HOT swallows.**
+      Second half of #72-H5. ~10 alert sites including 1 SAFETY-CRITICAL
+      site (circuit breaker silent failure). Same pattern as H5a.
+      Closes #72-Phase 2 entirely once shipped. Effort: ~half day.
 
 #### #72-Phase 3 — WARM fixes (this month, shared-helper approach)
 
@@ -388,24 +404,26 @@ defensive-engineering pass (belt-and-suspenders against future
 plan downgrades or unexpected provider throttling), but not
 urgent.
 
-**#87b — `scanner_universe` metadata backfill** (MEDIUM)
+**#87b — `scanner_universe` metadata backfill** (MEDIUM — RESOLVED 2026-04-28)
 
-Source: deferred from #87 (2026-04-27). Diagnostic showed
-`scanner_universe.market_cap` populated for 36/62 symbols and
-`sector` shows `"Unknown"` for 60/62 — forces per-cycle
-`_get_ticker_details_api` calls (~30/cycle) that bypass the
-existing `scanner_universe` row entirely. Independent of plan
-tier: fewer API calls is better even on unlimited plans, and a
-warm `scanner_universe` table makes the system more resilient
-to future provider issues.
+**RESOLVED via operational fix — no code change required.**
+Universe_sync trigger run on 2026-04-28 (post-Polygon-upgrade)
+populated metadata for all 62 symbols. Pre-state: 9/62 scored.
+Post-state: 62/62 scored, 62/62 with avg_volume_30d, 62/62 with
+iv_rank. Sync ran in 26s vs 145s pre-upgrade (6× speedup
+confirmed Polygon plan upgrade unblocked the helper calls).
 
-Scope: (1) one-shot backfill script populating `market_cap`,
-`sector`, and ideally `iv_rank` for all 62 active symbols;
-(2) update `universe_sync` job to refresh weekly; (3) modify
-`options_scanner.py:2188` sector-map loop to read from
-`scanner_universe` first, only fall back to Polygon for nulls.
+Underlying issue: pre-upgrade Polygon Basic-tier rate limits
+caused per-symbol metric-fetch failures to cascade silently
+through the sync loop (each symbol's exception caught + skipped).
+Post-#87 plan upgrade removed the rate cap; a manual sync trigger
+populated everything. Audit-trail row in
+`risk_alerts.alert_type='universe_sync_backfill'` (id
+`6b9430d1-215e-4539-81dc-2497f029a7ed`).
 
-Effort: ~half day. Priority: MEDIUM. Not urgent.
+Code-shape concerns (originally listed as part of #87b — sync
+schedule cadence, on-failure alerts) deferred to #72-W phase or
+follow-up. Operational state is now correct.
 
 **#88 — Verify Alpaca options data access** (LOW)
 

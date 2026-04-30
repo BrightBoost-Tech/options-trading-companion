@@ -60,6 +60,11 @@ Last migrated from CLAUDE.md: 2026-04-28.
 - [x] **#62a-D4-PR1** — `routing_mode` column migration applied 2026-04-26 16:41Z via `mcp__supabase__apply_migration` (PR #815). Backfilled Conservative + Neutral cohort portfolios to `shadow_only` per design intent; Aggressive Cohort + Main Paper rows defaulted to `live_eligible`. First of 3-PR D4 sequence. PR2 (dispatch enforcement) and PR3 (symbol drop) remain pending. Audit-trail row in `risk_alerts` (alert_type=`migration_apply`).
 - [x] Tier-aware sizing: micro tier 90% one-at-a-time + standard tier 2-3% multi-position. Closes the compounder-vs-engine `min()` disagreement at `workflow_orchestrator.py:2347` (2026-04-27, PR feat/micro-tier-90pct-single-position). Asymmetric concurrency gate: midday blocks new entries when position open; morning continues exit generation. Backlog #89 (tier-aware envelope) and #90 (`STRATEGY_TRACK` cleanup) deferred.
 - [x] Micro-tier universe price filter: drops symbols with underlying > $50 from scanner for micro tier only, configurable via `MICRO_TIER_MAX_UNDERLYING` env (2026-04-27, PR feat/85-micro-tier-universe-price-filter). Closes #85. Composes with PR feat/micro-tier-90pct-single-position.
+- [x] **Universe expansion + scanner limit raise** (PR #834, 2026-04-29). Added 8 sub-$50 tickers to BASE_UNIVERSE (PFE, WBD, AAL, CCL, KMI, DKNG, EWZ, LYFT — 62 → 70 symbols) and raised scanner candidate limit from 30 → 50 in `options_scanner.py:2112`. Selected for established options markets, mid-cap range (>$15 underlying to avoid FXI-style penny-premium spread blowout). Standard/small tiers unaffected. Bundles with operator post-merge action (universe_sync trigger to populate metadata for new tickers — see #87b retirement).
+- [x] **#87b — `scanner_universe` metadata backfill** (RETIRED 2026-04-28). **Operational closure — no code change required.** Universe_sync trigger run post-Polygon-upgrade populated all 62 symbols' metadata (pre: 9/62 scored; post: 62/62). Sync ran in 26s vs 145s pre-upgrade. Underlying issue was pre-upgrade Polygon Basic-tier rate limits causing silent per-symbol metric-fetch failures inside the sync loop; the post-#87 plan upgrade removed the cap and a trigger achieved the desired state. Audit-trail row in `risk_alerts.alert_type='universe_sync_backfill'` (id `6b9430d1-215e-4539-81dc-2497f029a7ed`).
+- [x] **#72-H4c — workflow_orchestrator audit + ancillary** (PR #835, 2026-04-29). Closes Group C+D of #72-H4 sequence. 6 alert sites covered (5 from original H4 catalog + 1 bonus mirror site discovered during diagnostic): exit market-data fetch, morning per-suggestion insert (loop), morning v4 post-insert observability, midday progression fetch (async helper), midday v4 post-insert observability, midday per-suggestion insert (loop, bonus). 34 new structural tests in `test_workflow_orchestrator_alerts.py`. Closes #72-H4 entirely; only #72-H5 remains in #72-Phase 2.
+- [x] **#92 — Tier-aware spread threshold for micro tier** (PR #837, 2026-04-30). New helper `_get_micro_tier_spread_threshold()` reads `MICRO_TIER_SPREAD_THRESHOLD` env (default 0.30 = 30%). Dispatch at `options_scanner.py:2286` uses `max(regime_default, micro_override)` so micro tier gets at least 30% while regime loosening (SUPPRESSED 20%) still applies. Standard/small tiers unchanged. Catches BAC-class liquid mid-caps (~14% spread ratio) without opening the gate to truly thin markets. Future operators tune via env, no code change. 11 structural tests in new `test_scanner_micro_tier_spread_threshold.py`.
+- [x] **#72-H5a — paper_exit_evaluator loud errors** (PR #838, 2026-04-30). First half of #72-H5. 9 alert sites in `paper_exit_evaluator.py`: per-condition eval (loop), cohort configs load, close-loop (loop), open positions fetch (safety), cohort resolve exhausted (collapsed 3 paths into 1 alert when all fail), routing query (safety), idempotency check (safety), Alpaca DRY_RUN build, Alpaca submit fallback to internal (CRITICAL — 2026-04-16 ghost-position bug shape). **New convention introduced:** `operator_action_required` metadata field on critical-severity alerts; provides explicit operator runbook text without lookup. Future critical alerts in H5b and beyond can adopt. 57 structural tests in new `test_paper_exit_evaluator_alerts.py`.
 
 ### Prioritized Roadmap (post-2026-04-26)
 
@@ -85,13 +90,23 @@ slot in here alongside the Monday verification:
   Completed and migration_apply audit row).
 
 **Active focus (next 3, drawn from Priority 2):**
-1. **#72-H4c** — workflow_orchestrator audit + ancillary doctrine
-   sites (~half day).
-2. **#87b** — `scanner_universe` metadata backfill (~half day,
-   reduces per-cycle Polygon calls).
-3. **#62a-D4-PR2** — routing dispatch enforcement (~1 day; builds
-   on D4-PR1 to make conservative/neutral cohorts actually skip
-   live dispatch).
+Updated 2026-04-30 (backlog hygiene pass) — #72-H4c, #87b, and
+intermediate items #834/#835/#837/#838 closed. #72-H5b is in
+review (PR #839); when it merges, #72-Phase 2 closes entirely.
+
+1. **#62a-D4-PR2** — routing dispatch enforcement (~1 day, MEDIUM
+   risk). Builds on D4-PR1 (`routing_mode` column applied
+   2026-04-26) to make conservative/neutral cohorts actually skip
+   live dispatch. Closes a real safety gap: shadow-cohort fan-out
+   has been broken for ~30 days.
+2. **#71** — RQ dispatch audit (~medium). Sweep `public_tasks.py`
+   / `internal_tasks.py` for synchronous handlers; migrate to
+   `enqueue_job_run` pattern. Same shape as the policy_lab_eval
+   diagnostic that surfaced the 2026-04-26 ImportError.
+3. **Agent sessions observability** (~medium). Shared
+   `agent_session_context` helper so Loss Min / Self-Learning /
+   Profit Optimization Agents write `agent_sessions` rows (only
+   Day Orchestrator currently does).
 
 **Priority 2 — This Month**
 - [ ] **#72 Loud-error doctrine — Phase 2 HOT fixes.** Doctrine

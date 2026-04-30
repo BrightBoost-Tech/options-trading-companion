@@ -28,6 +28,7 @@ from packages.quantum.services.close_helper import (
     close_position_shared,
     PositionAlreadyClosed,
 )
+from packages.quantum.observability.alerts import alert, _get_admin_supabase
 
 PDT_MAX_DAY_TRADES = int(os.environ.get("PDT_MAX_DAY_TRADES", "3"))
 EXIT_RANKING_ENABLED = os.environ.get("EXIT_RANKING_ENABLED", "1") == "1"
@@ -449,6 +450,9 @@ def evaluate_position_exit(
     else:
         print(f"[EXIT_EVAL_DEBUG] position={pos_id} max_credit is None — skipping P&L conditions", flush=True)
 
+    # #72-H5a: aggregation list for per-condition eval failures
+    per_condition_failures = []
+
     for condition_name, condition in conditions.items():
         try:
             result = condition["check"](position)
@@ -464,6 +468,34 @@ def evaluate_position_exit(
                 f"{position.get('id')}: {e}"
             )
             print(f"[EXIT_EVAL_DEBUG] position={pos_id} condition={condition_name} ERROR: {e}", flush=True)
+            per_condition_failures.append({
+                "position_id": position.get("id"),
+                "symbol": position.get("symbol"),
+                "condition_name": condition_name,
+                "error_class": type(e).__name__,
+                "error_message": str(e)[:200],
+            })
+
+    # #72-H5a: aggregated alert for per-condition exit eval failures
+    if per_condition_failures:
+        _failed_symbols = list({f["symbol"] for f in per_condition_failures if f.get("symbol")})[:20]
+        _distinct_error_classes = sorted({f["error_class"] for f in per_condition_failures})
+        alert(
+            _get_admin_supabase(),
+            alert_type="paper_exit_per_condition_eval_failed",
+            severity="warning",
+            message=f"{len(per_condition_failures)} per-condition exit evaluations failed",
+            user_id=position.get("user_id"),
+            metadata={
+                "function_name": "evaluate_position_exit",
+                "failed_count": len(per_condition_failures),
+                "failed_symbols": _failed_symbols,
+                "distinct_error_classes": _distinct_error_classes,
+                "position_id": position.get("id"),
+                "consequence": f"{len(per_condition_failures)} exit conditions skipped — positions may not exit when triggers fire",
+            },
+        )
+
     return None
 
 
@@ -556,6 +588,19 @@ class PaperExitEvaluator:
                 )
         except Exception as e:
             logger.warning(f"[EXIT_EVAL] Failed to load cohort configs: {e}")
+            alert(
+                _get_admin_supabase(),
+                alert_type="paper_exit_cohort_configs_load_failed",
+                severity="warning",
+                message=f"Cohort configs load failed: {type(e).__name__}",
+                user_id=user_id,
+                metadata={
+                    "function_name": "evaluate_exits",
+                    "error_class": type(e).__name__,
+                    "error_message": str(e)[:500],
+                    "consequence": "exit evaluation continues with default cohort routing — cohort-specific exit logic may not apply",
+                },
+            )
 
         for position in positions:
             # Resolve cohort-specific exit conditions
@@ -671,6 +716,10 @@ class PaperExitEvaluator:
 
         # 6. Close triggered positions
         closed_results = []
+        # #72-H5a: aggregation list for close-loop failures (close itself
+        # plus the record_day_trade write — both are caught by the outer
+        # except and would otherwise be log-only).
+        _close_loop_failures = []
         for close_item in closes:
             try:
                 result = self._close_position(
@@ -701,6 +750,32 @@ class PaperExitEvaluator:
                     f"Failed to close position {close_item['position_id']}: {e}"
                 )
                 closed_results.append({**close_item, "error": str(e)})
+                _close_loop_failures.append({
+                    "position_id": close_item.get("position_id"),
+                    "symbol": close_item.get("symbol"),
+                    "error_class": type(e).__name__,
+                    "error_message": str(e)[:200],
+                })
+
+        # #72-H5a: aggregated alert for close-loop failures (record_day_trade
+        # writes + any unhandled exceptions from _close_position).
+        if _close_loop_failures:
+            _failed_symbols = list({f["symbol"] for f in _close_loop_failures if f.get("symbol")})[:20]
+            _distinct_error_classes = sorted({f["error_class"] for f in _close_loop_failures})
+            alert(
+                _get_admin_supabase(),
+                alert_type="paper_exit_day_trade_record_failed",
+                severity="warning",
+                message=f"{len(_close_loop_failures)} close-loop processing failures during exits",
+                user_id=user_id,
+                metadata={
+                    "function_name": "evaluate_exits",
+                    "failed_count": len(_close_loop_failures),
+                    "failed_symbols": _failed_symbols,
+                    "distinct_error_classes": _distinct_error_classes,
+                    "consequence": f"{len(_close_loop_failures)} positions: day-trade history records lost (PDT counter may drift) and/or close-pipeline post-processing failed",
+                },
+            )
 
         # 7. Build reason summary
         close_reasons: Dict[str, int] = {}
@@ -747,6 +822,19 @@ class PaperExitEvaluator:
             return pos_res.data or []
         except Exception as e:
             logger.error(f"Failed to fetch positions for exit eval: {e}")
+            alert(
+                _get_admin_supabase(),
+                alert_type="paper_exit_open_positions_fetch_failed",
+                severity="warning",
+                message=f"Open positions fetch failed: {type(e).__name__}",
+                user_id=user_id,
+                metadata={
+                    "function_name": "_get_open_positions",
+                    "error_class": type(e).__name__,
+                    "error_message": str(e)[:500],
+                    "consequence": "exit evaluation skipped this cycle — open positions not exited regardless of triggers",
+                },
+            )
             return []
 
     def _resolve_position_cohort(self, position: Dict[str, Any]) -> Optional[str]:
@@ -757,7 +845,14 @@ class PaperExitEvaluator:
         1. Direct cohort_id on paper_positions (set at creation time)
         2. Fallback: portfolio_id → policy_lab_cohorts lookup
         3. Fallback: champion cohort for positions on the default portfolio
+
+        #72-H5a: tracks each fallback's failure reason; alerts only when
+        ALL three paths failed (cohort genuinely unresolvable). If any
+        path returns a cohort, the alert is suppressed.
         """
+        # #72-H5a: track resolution failures across all 3 paths
+        _resolution_failures = []
+
         # Fast path: direct cohort_id (new positions have this set)
         cohort_id = position.get("cohort_id")
         if cohort_id:
@@ -769,8 +864,8 @@ class PaperExitEvaluator:
                     .execute()
                 if res.data:
                     return res.data[0]["cohort_name"]
-            except Exception:
-                pass
+            except Exception as _path1_err:
+                _resolution_failures.append(("cohort_id", type(_path1_err).__name__, str(_path1_err)[:200]))
 
         portfolio_id = position.get("portfolio_id")
         user_id = position.get("user_id")
@@ -785,8 +880,8 @@ class PaperExitEvaluator:
                     .execute()
                 if res.data:
                     return res.data[0]["cohort_name"]
-            except Exception:
-                pass
+            except Exception as _path2_err:
+                _resolution_failures.append(("portfolio_id", type(_path2_err).__name__, str(_path2_err)[:200]))
 
         # Fallback: champion cohort for positions on the default portfolio
         if user_id:
@@ -800,8 +895,29 @@ class PaperExitEvaluator:
                     .execute()
                 if res.data:
                     return res.data[0]["cohort_name"]
-            except Exception:
-                pass
+            except Exception as _path3_err:
+                _resolution_failures.append(("champion", type(_path3_err).__name__, str(_path3_err)[:200]))
+
+        # #72-H5a: all three paths failed (each raised) — alert.
+        # If a path simply returned no data (no exception), no alert.
+        if len(_resolution_failures) == 3:
+            alert(
+                _get_admin_supabase(),
+                alert_type="paper_exit_cohort_resolve_exhausted",
+                severity="warning",
+                message=f"All cohort resolution paths failed for position {position.get('id')}",
+                user_id=user_id,
+                metadata={
+                    "function_name": "_resolve_position_cohort",
+                    "position_id": position.get("id"),
+                    "symbol": position.get("symbol"),
+                    "resolution_attempts": [
+                        {"path": p, "error_class": ec, "error_message": em}
+                        for p, ec, em in _resolution_failures
+                    ],
+                    "consequence": "position routed to default cohort — cohort-specific exit logic bypassed",
+                },
+            )
 
         return None
 
@@ -847,6 +963,20 @@ class PaperExitEvaluator:
                 position_is_alpaca = entry_res.data[0].get("alpaca_order_id") is not None
         except Exception as e:
             entry_order_id = f"error:{e}"
+            alert(
+                _get_admin_supabase(),
+                alert_type="paper_exit_routing_query_failed",
+                severity="warning",
+                message=f"Entry-routing query failed for close path: {type(e).__name__}",
+                user_id=user_id,
+                metadata={
+                    "function_name": "_close_position",
+                    "position_id": position_id,
+                    "error_class": type(e).__name__,
+                    "error_message": str(e)[:500],
+                    "consequence": "close path defaulted (may use wrong execution route)",
+                },
+            )
 
         print(
             f"[EXIT_ROUTING] position={position_id[:8]} "
@@ -896,6 +1026,20 @@ class PaperExitEvaluator:
             logger.warning(
                 f"[CLOSE_POSITION] Idempotency check failed for "
                 f"position={position_id[:8]}: {e}"
+            )
+            alert(
+                _get_admin_supabase(),
+                alert_type="paper_exit_idempotency_check_failed",
+                severity="warning",
+                message=f"Idempotency check failed for close: {type(e).__name__}",
+                user_id=user_id,
+                metadata={
+                    "function_name": "_close_position",
+                    "position_id": position_id,
+                    "error_class": type(e).__name__,
+                    "error_message": str(e)[:500],
+                    "consequence": "close proceeds without idempotency guard — duplicate close orders possible",
+                },
             )
 
         # ── Fetch position ───────────────────────────────────────────
@@ -1004,6 +1148,23 @@ class PaperExitEvaluator:
                         f"[ALPACA_DRY_RUN] Exit build failed: order_id={order_id} "
                         f"symbol={position['symbol']} error={e}"
                     )
+                    alert(
+                        _get_admin_supabase(),
+                        alert_type="paper_exit_alpaca_dry_run_build_failed",
+                        severity="warning",
+                        message=f"Alpaca DRY_RUN order build failed: {type(e).__name__}",
+                        user_id=user_id,
+                        symbol=position.get("symbol"),
+                        metadata={
+                            "function_name": "_close_position",
+                            "position_id": position_id,
+                            "order_id": order_id,
+                            "symbol": position.get("symbol"),
+                            "error_class": type(e).__name__,
+                            "error_message": str(e)[:500],
+                            "consequence": "DRY_RUN simulation skipped — close proceeds without dry-run validation",
+                        },
+                    )
                 # Do NOT fall through to internal fill — position stays open
                 return {
                     "order_id": order_id,
@@ -1037,6 +1198,30 @@ class PaperExitEvaluator:
                         "note": "Fill pending — will be synced by alpaca_order_sync",
                     }
                 except Exception as e:
+                    # #72-H5a SAFETY-CRITICAL: 2026-04-16 ghost-position bug shape.
+                    # Alpaca submit failed; code falls through to internal fill,
+                    # marking the position filled when broker order may not have
+                    # submitted. Alert fires BEFORE the fall-through so operator
+                    # awareness precedes phantom-fill accumulation.
+                    alert(
+                        _get_admin_supabase(),
+                        alert_type="paper_exit_alpaca_submit_fallback_to_internal",
+                        severity="critical",
+                        message=f"Alpaca submit failed during close, falling back to internal fill: {type(e).__name__}",
+                        user_id=user_id,
+                        symbol=position.get("symbol"),
+                        position_id=position_id,
+                        metadata={
+                            "function_name": "_close_position",
+                            "position_id": position_id,
+                            "order_id": order_id,
+                            "symbol": position.get("symbol"),
+                            "error_class": type(e).__name__,
+                            "error_message": str(e)[:500],
+                            "consequence": "Alpaca order may not have submitted; position will be marked filled internally regardless. Risk: phantom internal fill while real broker state diverges (2026-04-16 ghost-position pattern).",
+                            "operator_action_required": "Verify Alpaca order status manually for this position before treating internal fill as authoritative. Check for ghost-position pattern from 2026-04-16 incident. If broker order did not submit, manually reconcile position state.",
+                        },
+                    )
                     logger.error(
                         f"[EXIT_EVAL] Alpaca submit failed for close order {order_id}: {e}. "
                         f"Falling back to internal fill."

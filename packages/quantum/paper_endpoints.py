@@ -750,6 +750,9 @@ def _stage_order_internal(supabase, analytics, user_id, ticket: TradeTicket, por
             # and skip Alpaca. Fill simulation deferred to PR2b.
             from packages.quantum.brokers.execution_router import should_submit_to_broker
             if not should_submit_to_broker(order_row["portfolio_id"], supabase):
+                # PR2a: mark routing decision (preserved through fill —
+                # _commit_fill only writes filled-state fields, not
+                # execution_mode).
                 supabase.table("paper_orders") \
                     .update({"execution_mode": "shadow_blocked"}) \
                     .eq("id", order_id) \
@@ -758,6 +761,13 @@ def _stage_order_internal(supabase, analytics, user_id, ticket: TradeTicket, por
                     f"[ROUTING] Blocked Alpaca submit for shadow_only portfolio: "
                     f"order_id={order_id} portfolio_id={str(order_row['portfolio_id'])[:8]}"
                 )
+                # #62a-D4-PR2b: materialize the shadow fill via existing
+                # TCM machinery. target_order_id scopes processing to
+                # this single order; all TCM simulate + _commit_fill
+                # logic reused unchanged. Restores cohort-comparison
+                # learning_feedback_loops outcomes that PR2a left
+                # stuck at status='staged'.
+                _process_orders_for_user(supabase, analytics, user_id, target_order_id=order_id)
                 return order_id
 
             try:

@@ -1180,6 +1180,9 @@ class PaperExitEvaluator:
                 # shadow close fill machinery.
                 from packages.quantum.brokers.execution_router import should_submit_to_broker
                 if not should_submit_to_broker(position["portfolio_id"], supabase):
+                    # PR2a: mark routing decision (preserved through fill —
+                    # _commit_fill only writes filled-state fields, not
+                    # execution_mode).
                     supabase.table("paper_orders") \
                         .update({"execution_mode": "shadow_blocked"}) \
                         .eq("id", order_id) \
@@ -1188,66 +1191,68 @@ class PaperExitEvaluator:
                         f"[ROUTING] Blocked Alpaca close for shadow_only portfolio: "
                         f"order_id={order_id} position_id={position_id[:8]}"
                     )
-                    return {
-                        "order_id": order_id,
-                        "processed": 0,
-                        "routed_to": "shadow_blocked",
-                        "note": "shadow_only portfolio — Alpaca close blocked, position remains open pending PR2b",
-                    }
-                try:
-                    from packages.quantum.brokers.alpaca_order_handler import submit_and_track
-                    from packages.quantum.brokers.alpaca_client import get_alpaca_client
-                    alpaca = get_alpaca_client()
+                    # #62a-D4-PR2b: don't return — fall through to the
+                    # internal-fill block below (line 1252+) which fills
+                    # at current_mark, updates portfolio cash, emits
+                    # ledger entry, and calls close_position_shared
+                    # (writes learning_feedback_loops outcome for cohort
+                    # comparison). Same code path exercised by DRY_RUN
+                    # and Alpaca-failure-fallback flows.
+                else:
+                    try:
+                        from packages.quantum.brokers.alpaca_order_handler import submit_and_track
+                        from packages.quantum.brokers.alpaca_client import get_alpaca_client
+                        alpaca = get_alpaca_client()
 
-                    order_row = supabase.table("paper_orders") \
-                        .select("*").eq("id", order_id).single().execute().data
+                        order_row = supabase.table("paper_orders") \
+                            .select("*").eq("id", order_id).single().execute().data
 
-                    submit_and_track(alpaca, supabase, order_row, user_id)
+                        submit_and_track(alpaca, supabase, order_row, user_id)
 
-                    logger.info(
-                        f"[EXIT_EVAL] Submitted close to Alpaca: order_id={order_id} "
-                        f"symbol={position['symbol']} side={side} qty={abs_qty}"
-                    )
+                        logger.info(
+                            f"[EXIT_EVAL] Submitted close to Alpaca: order_id={order_id} "
+                            f"symbol={position['symbol']} side={side} qty={abs_qty}"
+                        )
 
-                    # Don't fill or close position here — alpaca_order_sync will
-                    # pick up the fill and _commit_fill / _process_orders_for_user
-                    # handles position updates.
-                    return {
-                        "order_id": order_id,
-                        "processed": 0,
-                        "routed_to": "alpaca",
-                        "note": "Fill pending — will be synced by alpaca_order_sync",
-                    }
-                except Exception as e:
-                    # #72-H5a SAFETY-CRITICAL: 2026-04-16 ghost-position bug shape.
-                    # Alpaca submit failed; code falls through to internal fill,
-                    # marking the position filled when broker order may not have
-                    # submitted. Alert fires BEFORE the fall-through so operator
-                    # awareness precedes phantom-fill accumulation.
-                    alert(
-                        _get_admin_supabase(),
-                        alert_type="paper_exit_alpaca_submit_fallback_to_internal",
-                        severity="critical",
-                        message=f"Alpaca submit failed during close, falling back to internal fill: {type(e).__name__}",
-                        user_id=user_id,
-                        symbol=position.get("symbol"),
-                        position_id=position_id,
-                        metadata={
-                            "function_name": "_close_position",
-                            "position_id": position_id,
+                        # Don't fill or close position here — alpaca_order_sync will
+                        # pick up the fill and _commit_fill / _process_orders_for_user
+                        # handles position updates.
+                        return {
                             "order_id": order_id,
-                            "symbol": position.get("symbol"),
-                            "error_class": type(e).__name__,
-                            "error_message": str(e)[:500],
-                            "consequence": "Alpaca order may not have submitted; position will be marked filled internally regardless. Risk: phantom internal fill while real broker state diverges (2026-04-16 ghost-position pattern).",
-                            "operator_action_required": "Verify Alpaca order status manually for this position before treating internal fill as authoritative. Check for ghost-position pattern from 2026-04-16 incident. If broker order did not submit, manually reconcile position state.",
-                        },
-                    )
-                    logger.error(
-                        f"[EXIT_EVAL] Alpaca submit failed for close order {order_id}: {e}. "
-                        f"Falling back to internal fill."
-                    )
-                    # Fall through to internal fill below
+                            "processed": 0,
+                            "routed_to": "alpaca",
+                            "note": "Fill pending — will be synced by alpaca_order_sync",
+                        }
+                    except Exception as e:
+                        # #72-H5a SAFETY-CRITICAL: 2026-04-16 ghost-position bug shape.
+                        # Alpaca submit failed; code falls through to internal fill,
+                        # marking the position filled when broker order may not have
+                        # submitted. Alert fires BEFORE the fall-through so operator
+                        # awareness precedes phantom-fill accumulation.
+                        alert(
+                            _get_admin_supabase(),
+                            alert_type="paper_exit_alpaca_submit_fallback_to_internal",
+                            severity="critical",
+                            message=f"Alpaca submit failed during close, falling back to internal fill: {type(e).__name__}",
+                            user_id=user_id,
+                            symbol=position.get("symbol"),
+                            position_id=position_id,
+                            metadata={
+                                "function_name": "_close_position",
+                                "position_id": position_id,
+                                "order_id": order_id,
+                                "symbol": position.get("symbol"),
+                                "error_class": type(e).__name__,
+                                "error_message": str(e)[:500],
+                                "consequence": "Alpaca order may not have submitted; position will be marked filled internally regardless. Risk: phantom internal fill while real broker state diverges (2026-04-16 ghost-position pattern).",
+                                "operator_action_required": "Verify Alpaca order status manually for this position before treating internal fill as authoritative. Check for ghost-position pattern from 2026-04-16 incident. If broker order did not submit, manually reconcile position state.",
+                            },
+                        )
+                        logger.error(
+                            f"[EXIT_EVAL] Alpaca submit failed for close order {order_id}: {e}. "
+                            f"Falling back to internal fill."
+                        )
+                        # Fall through to internal fill below
 
         # --- Internal fill at current_mark (internal_paper or Alpaca fallback) ---
 

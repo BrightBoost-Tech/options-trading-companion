@@ -19,7 +19,8 @@ For AI session context, this file is loaded every turn.
 
 ## Current Phase
 
-- **Trading mode:** `micro_live` (EXECUTION_MODE env, flipped 2026-04-25 17:10:36Z)
+- **Phase:** `micro_live` (sizing tier indicator; flipped 2026-04-25 17:10:36Z). Phase name is operator-set documentation; affects sizing tier resolution but is **NOT a valid EXECUTION_MODE value**.
+- **EXECUTION_MODE env:** must be one of `internal_paper`, `alpaca_paper`, `alpaca_live`, `shadow`. Routes broker submissions accordingly. For live trading, also requires `LIVE_ENABLED=true` (second-stage safety check at `execution_router.py:88-94` falls back to `alpaca_paper` otherwise). **Bug fixed 2026-04-30:** EXECUTION_MODE was set to `'micro_live'` (phase name, not a valid mode value) for 5 days. Silent fallback to internal_paper. Surfaced when first candidate (BAC) reached the routing layer; force-closed within 15 min by per-symbol risk cap. Loud-error alert added at `execution_router.py` to prevent recurrence (#A4 sequence).
 - **Promotion type:** manual operator-initiated. Green-day gate (1/4) bypassed; continuous-growth model adopted. Audit `risk_alerts.id = 82f1c294-19a4-4c66-8a68-0b0811ef5b24`.
 - **Account:** live Alpaca `211900084`, options Level 3
 - **Starting capital:** $500 on `v3_go_live_state.paper_baseline_capital` (set 2026-04-25 15:38:04Z, audit `c9d87caf-24db-4f7f-842a-748620a5c84f`)
@@ -562,6 +563,34 @@ position management. A future PR that "fixes" the apparent asymmetry
 by adding a gate to morning cycle would break exit auto-generation —
 `test_workflow_orchestrator_micro_concurrency.TestMorningCycleNoConcurrencyGate`
 defends against that mistake.
+
+### Per-symbol risk envelope (live trading)
+
+Under any EXECUTION_MODE that uses live equity (`alpaca_live`,
+`alpaca_paper`), the intraday risk monitor enforces a per-symbol
+stop based on `RISK_MAX_SYMBOL_LOSS` env (default `0.03` = 3%).
+
+- On a $500 live Alpaca account: 3% = **$15 stop per symbol**.
+- On a $500 live Alpaca account: 5% = $25 stop per symbol.
+
+The stop is intentionally tight for capital preservation in
+`micro_live` phase. **Expected operational behavior:**
+- Frequent intraday force-closes on small adverse moves
+- Per-trade realized losses typically $5-15
+- Round-trip Alpaca fees ~$1-2 per trade
+- Each force-close that closes within the same trading session
+  increments the PDT day-trade counter
+
+**Day-trade counter awareness:** same-session entry+force-close
+counts as 1 day-trade. Live Alpaca account 211900084 currently
+at 0/3 day-trades. Three same-session round-trips in 5 business
+days flips PDT status (`pattern_day_trader: true`), which has
+downstream margin implications.
+
+**Operator lever:** `RISK_MAX_SYMBOL_LOSS` env var. Tighter (3%)
+= more force-closes, smaller per-trade losses. Looser (5%) =
+fewer force-closes, larger per-trade losses but more position
+survival. Recommend observing 1 week at 3% before adjusting.
 
 ### History
 

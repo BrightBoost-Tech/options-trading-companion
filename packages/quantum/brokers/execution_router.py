@@ -81,6 +81,47 @@ def get_execution_mode() -> ExecutionMode:
     try:
         mode = ExecutionMode(raw)
     except ValueError:
+        # Loud-Error Doctrine v1.0 — SAFETY-CRITICAL silent fallback.
+        # Unknown EXECUTION_MODE means real-money routing intent
+        # (alpaca_live, alpaca_paper) silently degrades to TCM
+        # simulation. The bug at 2026-04-25 17:10Z set
+        # EXECUTION_MODE='micro_live' (a phase name, not a valid mode),
+        # which silently routed to internal_paper for 5 days. This
+        # site was missed during the H1-H5 doctrine sweep; correcting
+        # now (#A4 sequence).
+        from packages.quantum.observability.alerts import alert, _get_admin_supabase
+        try:
+            alert(
+                _get_admin_supabase(),
+                user_id=None,
+                alert_type="execution_mode_invalid_env_value",
+                severity="critical",
+                message=f"Unknown EXECUTION_MODE='{raw}' — defaulted to internal_paper",
+                metadata={
+                    "function_name": "get_execution_mode",
+                    "raw_value": raw,
+                    "valid_values": [m.value for m in ExecutionMode],
+                    "consequence": (
+                        "All broker submissions silently degraded to TCM simulation. "
+                        "Trades intended as alpaca_live/alpaca_paper went internal_paper "
+                        "instead. Position state and cash accounting may diverge from intent. "
+                        "Live Alpaca account receives no orders despite operator intent."
+                    ),
+                    "operator_action_required": (
+                        "Verify EXECUTION_MODE Railway env. Valid values: "
+                        "internal_paper, alpaca_paper, alpaca_live, shadow. "
+                        "If alpaca_live intended, also ensure LIVE_ENABLED=true "
+                        "(second-stage safety check at execution_router.py:88-94 "
+                        "falls back to alpaca_paper otherwise). "
+                        "Audit paper_orders.execution_mode for trades since the env "
+                        "was set to confirm intent vs reality."
+                    ),
+                },
+            )
+        except Exception:
+            # Alert path failure must not break routing decision.
+            # The warning log below remains as last-resort visibility.
+            pass
         logger.warning(f"[EXEC_ROUTER] Unknown EXECUTION_MODE '{raw}', defaulting to internal_paper")
         return ExecutionMode.INTERNAL_PAPER
 

@@ -101,14 +101,30 @@ buying_power. The "decrement" is each row's status transitioning
 out of 'pending', which has 4 paths in code (manual-stage,
 autopilot-stage, dashboard-dismiss, orchestrator-supersede) but
 ZERO paths for cohort clones from `policy_lab/fork.py` and ZERO
-paths for the close lifecycle. Result: every same-day round-trip
-permanently reduces deployable_capital by the entry premium until
-some external state transition fires.
+paths for the close lifecycle.
+
+**Cross-day cleanup exists.** `suggestions_close.py:85-99` runs
+daily at 8:00 AM CT (gated by `is_market_day()`) and transitions
+all `status='pending' AND cycle_date < today` rows to `dismissed`.
+This means cross-day pending rows are cleaned up reliably.
+
+**The actual bug is within-day degradation.** After the first
+trade fires in any session:
+- Source suggestion transitions to `staged` via paper_autopilot
+- Cohort clones (Conservative + Neutral) remain `pending` with
+  `cycle_date=today`
+- Daily cleanup doesn't catch them (filter is `cycle_date < today`)
+- Position close doesn't transition them
+- Subsequent cycles within the same trading day see degraded
+  deployable_capital
+- Reset happens at 8:00 AM CT next morning
 
 **Today's evidence (2026-04-30):** BAC opened+closed in 16:30 UTC
 cycle with $292 entry premium and ~$0 realized P&L. Live Alpaca
-shows $500. System reports deployable_capital=$208 ($500 - $292).
-Math is exact.
+shows $500. 17:29 UTC manual rerun read deployable_capital=$208
+($500 - $292). Math is exact. Diagnostic confirmed cohort clones
+from policy_lab/fork.py inserted at 16:30 with cycle_date=today
+survived in `pending` state through the day.
 
 **Recommended fix (option b):** replace
 `cash_service.get_deployable_capital` body to read Alpaca
@@ -122,55 +138,60 @@ resolved by reading Alpaca-authoritative.
 (`test_capital_basis_consistency.py`, `test_cash_paper_fallback.py`
 mock the new helper instead of `portfolio_snapshots`).
 
-**Pre-fix dependency:** depends on tomorrow's 16:00 UTC cycle
-reading. If `deployable_capital` still shows $208 (cross-day
-persistent), run SQL cleanup before deploy:
-
-```sql
-UPDATE trade_suggestions
-SET status = 'superseded',
-    dismissed_reason = 'stale_pending_cleanup_pre_93'
-WHERE user_id = '75ee12ad-b119-4f32-aeea-19b4ef55d587'
-  AND status = 'pending'
-  AND created_at < CURRENT_DATE;
-```
-
-If $500 (daily reset works via `post_trade_learning` or similar
-job), no cleanup needed.
+**No SQL pre-cleanup needed.** Tomorrow's 8:00 AM CT
+`suggestions_close` cleanup will dismiss today's cohort clones
+automatically before tomorrow's 16:00 UTC cycle reads
+deployable_capital. Tomorrow's first reading should be $500
+(full live equity); option (b) ships clean.
 
 **Why option (b) over (a):** option (a) — adding decrement-on-close
 paths — requires per-close-path discipline forever. Every future
-close mechanism would need to remember the transition. Option (b)
-makes the maintenance burden go to zero by reading broker truth.
-Same proven pattern as `_compute_weekly_pnl`. Cohort clone
-pollution naturally goes away (Alpaca doesn't see clones, so it
-can't subtract for them).
+close mechanism would need to remember the transition. The
+suggestions_close daily cleanup partially addresses cross-day
+state but does nothing for within-day, which is the actual
+operational bug. Option (b) makes the maintenance burden go to
+zero by reading broker truth. Same proven pattern as
+`_compute_weekly_pnl`. Cohort clone pollution naturally goes
+away (Alpaca doesn't see clones, so it can't subtract for them).
+
+**Operational impact:** for micro tier with max_trades=1 per
+cycle, the within-day window means second cycle of any
+multi-cycle trading day reads degraded budget. Multi-cycle days
+are not the current default but will become more common as
+operational confidence increases. Option (b) ships before
+sustained live trading.
 
 **Future architectural note:** if multi-cohort live routing ships
 (#65 `policy_lab_eval`), reservation semantics for simultaneous
 cohort competition for live capital may need reintroduction. Not
 today's problem.
 
-**#94 — trade_suggestions phantom-pending row hygiene** (P3-P4)
+**#94 — trade_suggestions phantom-row hygiene** (P3-P4)
 
 Cohort clones from `policy_lab/fork.py` are inserted as
-`status='pending'` with no lifecycle transition path. Source
-suggestions also miss transition on position-close. Currently
-inert post-#93 (broker-truth budget ignores them) but accumulate
-indefinitely in the table.
+`status='pending'` with no event-driven lifecycle transition path.
+Daily `suggestions_close` cleanup transitions them to `dismissed`
+after one cycle_date boundary, but this means rows accumulate as
+`dismissed` instead of `pending` — same row count, different
+status field. Source suggestions that survive to fill also miss
+transition on position-close (stay at `staged`).
 
-**Risk:** table size growth without bound; no immediate operational
-impact post-#93.
+Currently inert post-#93 (broker-truth budget ignores all
+statuses) but rows accumulate indefinitely in the table.
+
+**Risk:** table size growth without bound; no immediate
+operational impact post-#93.
 
 **Options:**
-- (a) periodic cleanup job (daily, transitions stale-pending older
-  than N days to 'superseded');
-- (b) extend close-path to transition source + cohort clone rows;
+- (a) periodic deep-cleanup job (weekly/monthly, deletes or
+  archives `dismissed`/`staged` rows older than N days);
+- (b) extend close-path to transition source + cohort clone rows
+  with proper terminal states (`closed`, `expired_clone`, etc.);
 - (c) shadow-fill cleanup in PR #843 `_commit_fill` transitions
-  clone rows.
+  clone rows at materialization time.
 
-**Effort:** small (~half day for option a; ~1 day for option b or c
-which require more careful close-path discipline).
+**Effort:** small (~half day for option a; ~1 day for option b
+or c which require more careful close-path discipline).
 
 **Priority:** P3-P4. Defer until either table size becomes
 operational issue or close-path discipline becomes load-bearing

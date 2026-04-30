@@ -744,11 +744,26 @@ def _stage_order_internal(supabase, analytics, user_id, ticket: TradeTicket, por
             # when dry_run is turned off.
             return order_id
         else:
+            order_row = res.data[0]
+            # #62a-D4-PR2a: gate broker submission on portfolio routing_mode.
+            # shadow_only portfolios mark execution_mode='shadow_blocked'
+            # and skip Alpaca. Fill simulation deferred to PR2b.
+            from packages.quantum.brokers.execution_router import should_submit_to_broker
+            if not should_submit_to_broker(order_row["portfolio_id"], supabase):
+                supabase.table("paper_orders") \
+                    .update({"execution_mode": "shadow_blocked"}) \
+                    .eq("id", order_id) \
+                    .execute()
+                logger.info(
+                    f"[ROUTING] Blocked Alpaca submit for shadow_only portfolio: "
+                    f"order_id={order_id} portfolio_id={str(order_row['portfolio_id'])[:8]}"
+                )
+                return order_id
+
             try:
                 from packages.quantum.brokers.alpaca_order_handler import submit_and_track
                 from packages.quantum.brokers.alpaca_client import get_alpaca_client
                 alpaca = get_alpaca_client()
-                order_row = res.data[0]
                 submit_and_track(alpaca, supabase, order_row, user_id)
             except Exception as e:
                 logger.error(

@@ -63,11 +63,26 @@ def run(payload: Dict[str, Any], ctx: Any = None) -> Dict[str, Any]:
             # expanded the inner poll_pending_orders query but left this
             # outer caller narrower. See PYPL cfe69b28 (2026-04-17) for
             # the motivating ghost-fill incident.
-            pending_res = client.table("paper_orders") \
+            # #62a-D4-PR2a: belt-and-suspenders — exclude shadow_only
+            # portfolios from the sync poll. shadow_only orders shouldn't
+            # have alpaca_order_id post-PR2a (gate blocks submission), but
+            # any pre-PR2a phantoms or race-condition orders must not have
+            # their Alpaca state synced back into paper_orders.
+            shadow_portfolios_res = client.table("paper_portfolios") \
+                .select("id") \
+                .eq("routing_mode", "shadow_only") \
+                .execute()
+            shadow_portfolio_ids = [
+                p["id"] for p in (shadow_portfolios_res.data or [])
+            ]
+
+            pending_query = client.table("paper_orders") \
                 .select("user_id") \
                 .in_("status", ["submitted", "working", "partial", "needs_manual_review"]) \
-                .not_.is_("alpaca_order_id", "null") \
-                .execute()
+                .not_.is_("alpaca_order_id", "null")
+            if shadow_portfolio_ids:
+                pending_query = pending_query.not_.in_("portfolio_id", shadow_portfolio_ids)
+            pending_res = pending_query.execute()
             poll_user_ids = list({r["user_id"] for r in (pending_res.data or [])})
 
             if poll_user_ids:

@@ -263,6 +263,29 @@ def approve_order(
         }).eq("id", approval_id).execute()
         return {"status": "safety_blocked", "reason": safety["blocked_reason"]}
 
+    # #62a-D4-PR2a: gate broker submission on portfolio routing_mode.
+    # Defensive — shadow_only orders shouldn't reach live_approval_queue,
+    # but routing_mode flips during pending approval are now handled.
+    from packages.quantum.brokers.execution_router import should_submit_to_broker
+    if not should_submit_to_broker(order["portfolio_id"], supabase):
+        supabase.table("paper_orders") \
+            .update({"execution_mode": "shadow_blocked"}) \
+            .eq("id", order["id"]) \
+            .execute()
+        supabase.table("live_approval_queue").update({
+            "status": "rejected",
+            "rejection_reason": "Portfolio routing_mode flipped to shadow_only during pending approval",
+            "rejected_at": datetime.now(timezone.utc).isoformat(),
+        }).eq("id", approval_id).execute()
+        logger.info(
+            f"[ROUTING] Blocked approval submission for shadow_only portfolio: "
+            f"approval_id={approval_id} order_id={order['id']}"
+        )
+        return {
+            "status": "shadow_blocked",
+            "note": "approval superseded — portfolio routing flipped to shadow_only",
+        }
+
     # Submit to Alpaca
     from packages.quantum.brokers.alpaca_order_handler import submit_and_track
     result = submit_and_track(alpaca_client, supabase, order, user_id)

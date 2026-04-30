@@ -21,6 +21,7 @@ from typing import Dict, Any, List, Optional, Tuple
 from datetime import datetime, timezone, timedelta
 
 from packages.quantum.table_constants import TRADE_SUGGESTIONS_TABLE
+from packages.quantum.observability.alerts import alert, _get_admin_supabase
 
 logger = logging.getLogger(__name__)
 
@@ -190,6 +191,19 @@ class PaperAutopilotService:
                 }
         except Exception as sg_err:
             logger.warning(f"[STALENESS_GATE] Check failed (non-fatal): {sg_err}")
+            alert(
+                _get_admin_supabase(),
+                alert_type="paper_autopilot_staleness_gate_failed",
+                severity="warning",
+                message=f"Staleness gate check failed: {type(sg_err).__name__}",
+                user_id=user_id,
+                metadata={
+                    "function_name": "execute_top_suggestions",
+                    "error_class": type(sg_err).__name__,
+                    "error_message": str(sg_err)[:500],
+                    "consequence": "autopilot proceeds without staleness verification — stale data may drive entries",
+                },
+            )
 
         # Circuit breaker: block new entries if risk envelope is breached
         try:
@@ -234,6 +248,25 @@ class PaperAutopilotService:
                         "executed_count": 0,
                     }
         except Exception as cb_err:
+            # #72-H5b SAFETY-CRITICAL: circuit breaker check failure means
+            # risk envelope state could not be verified; autopilot proceeds
+            # with entries despite a potential breach (daily/weekly loss
+            # caps, per-symbol concentration, etc). Alert fires BEFORE the
+            # fall-through so operator awareness precedes unsafe entries.
+            alert(
+                _get_admin_supabase(),
+                alert_type="paper_autopilot_circuit_breaker_failed",
+                severity="critical",
+                message=f"Risk-envelope circuit breaker check failed: {type(cb_err).__name__}",
+                user_id=user_id,
+                metadata={
+                    "function_name": "execute_top_suggestions",
+                    "error_class": type(cb_err).__name__,
+                    "error_message": str(cb_err)[:500],
+                    "consequence": "Circuit breaker state could not be verified; autopilot proceeds with entries despite potential envelope breach. Risk: entries continue when they should be blocked by daily/weekly loss caps or per-symbol concentration limits.",
+                    "operator_action_required": "Pause autopilot manually (set PAPER_AUTOPILOT_ENABLED=0 in Railway env) until risk_alerts and position state are reconciled. Verify daily/weekly P&L state, per-symbol exposure, and any active loss-envelope flags before resuming.",
+                },
+            )
             logger.warning(f"[CIRCUIT_BREAKER] Check failed (non-fatal): {cb_err}")
 
         # Policy Lab: execute per-cohort with cohort-specific filtering
@@ -278,6 +311,19 @@ class PaperAutopilotService:
                 )
         except Exception as sweep_err:
             logger.warning(f"paper_auto_execute_sweep_error: user_id={user_id} error={sweep_err}")
+            alert(
+                _get_admin_supabase(),
+                alert_type="paper_autopilot_pre_sweep_failed",
+                severity="warning",
+                message=f"Pre-execution order sweep failed: {type(sweep_err).__name__}",
+                user_id=user_id,
+                metadata={
+                    "function_name": "execute_top_suggestions",
+                    "error_class": type(sweep_err).__name__,
+                    "error_message": str(sweep_err)[:500],
+                    "consequence": "stale orders not cleaned up before new entries — possible duplicate order conditions",
+                },
+            )
 
         # Get executable suggestions
         suggestions = self.get_executable_suggestions(user_id, include_backlog=False)
@@ -381,6 +427,9 @@ class PaperAutopilotService:
 
         executed = []
         errors = []
+        # #72-H5b: aggregation list for per-suggestion failures (status
+        # update + full execution share this list).
+        _per_suggestion_failures = []
 
         for suggestion in to_execute:
             sid = suggestion.get("id")
@@ -413,6 +462,13 @@ class PaperAutopilotService:
                         f"Failed to update suggestion {sid} status to 'staged', "
                         f"proceeding with order processing: {status_err}"
                     )
+                    _per_suggestion_failures.append({
+                        "suggestion_id": sid,
+                        "ticker": ticker,
+                        "stage": "status_staged_update",
+                        "error_class": type(status_err).__name__,
+                        "error_message": str(status_err)[:200],
+                    })
 
                 # Process order via internal fill ONLY for internal_paper mode.
                 # For Alpaca modes, alpaca_order_sync handles fills.
@@ -441,6 +497,34 @@ class PaperAutopilotService:
                     f"symbol={ticker} error={e}"
                 )
                 errors.append({"suggestion_id": sid, "error": str(e)})
+                _per_suggestion_failures.append({
+                    "suggestion_id": sid,
+                    "ticker": ticker,
+                    "stage": "full_execution",
+                    "error_class": type(e).__name__,
+                    "error_message": str(e)[:200],
+                })
+
+        # #72-H5b: aggregated alert for per-suggestion failures.
+        if _per_suggestion_failures:
+            _failed_tickers = list({f["ticker"] for f in _per_suggestion_failures if f.get("ticker")})[:20]
+            _distinct_error_classes = sorted({f["error_class"] for f in _per_suggestion_failures})
+            _stages = sorted({f["stage"] for f in _per_suggestion_failures})
+            alert(
+                _get_admin_supabase(),
+                alert_type="paper_autopilot_per_suggestion_failed",
+                severity="warning",
+                message=f"{len(_per_suggestion_failures)} per-suggestion failures during autopilot execution",
+                user_id=user_id,
+                metadata={
+                    "function_name": "execute_top_suggestions",
+                    "failed_count": len(_per_suggestion_failures),
+                    "failed_tickers": _failed_tickers,
+                    "distinct_error_classes": _distinct_error_classes,
+                    "stages_affected": _stages,
+                    "consequence": f"{len(_per_suggestion_failures)} suggestions did not execute as expected this cycle",
+                },
+            )
 
         logger.info(
             f"paper_auto_execute_summary: user_id={user_id} "
@@ -504,6 +588,8 @@ class PaperAutopilotService:
         all_executed = []
         all_errors = []
         total_processed = 0
+        # #72-H5b: aggregation list for per-cohort per-suggestion failures
+        _cohort_per_suggestion_failures = []
 
         # Debug: also query ALL pending suggestions regardless of cohort to see what exists
         all_pending_res = supabase.table(TRADE_SUGGESTIONS_TABLE) \
@@ -605,6 +691,34 @@ class PaperAutopilotService:
                 except Exception as e:
                     logger.error(f"policy_lab_execute_error: cohort={cohort_name} ticker={ticker} error={e}")
                     all_errors.append({"cohort": cohort_name, "suggestion_id": sid, "error": str(e)})
+                    _cohort_per_suggestion_failures.append({
+                        "cohort_name": cohort_name,
+                        "suggestion_id": sid,
+                        "ticker": ticker,
+                        "error_class": type(e).__name__,
+                        "error_message": str(e)[:200],
+                    })
+
+        # #72-H5b: aggregated alert for cohort per-suggestion failures
+        if _cohort_per_suggestion_failures:
+            _failed_tickers = list({f["ticker"] for f in _cohort_per_suggestion_failures if f.get("ticker")})[:20]
+            _distinct_error_classes = sorted({f["error_class"] for f in _cohort_per_suggestion_failures})
+            _cohorts_affected = sorted({f["cohort_name"] for f in _cohort_per_suggestion_failures if f.get("cohort_name")})
+            alert(
+                _get_admin_supabase(),
+                alert_type="paper_autopilot_cohort_per_suggestion_failed",
+                severity="warning",
+                message=f"{len(_cohort_per_suggestion_failures)} per-cohort suggestion executions failed",
+                user_id=user_id,
+                metadata={
+                    "function_name": "_execute_per_cohort",
+                    "failed_count": len(_cohort_per_suggestion_failures),
+                    "failed_tickers": _failed_tickers,
+                    "distinct_error_classes": _distinct_error_classes,
+                    "cohorts_affected": _cohorts_affected,
+                    "consequence": f"{len(_cohort_per_suggestion_failures)} cohort-routed suggestions did not execute as expected this cycle",
+                },
+            )
 
         # Sweep all working orders across all portfolios (internal_paper only)
         sweep_processed = 0
@@ -617,6 +731,19 @@ class PaperAutopilotService:
             sweep_processed = sweep.get("processed", 0)
         except Exception as e:
             logger.warning(f"policy_lab_sweep_error: {e}")
+            alert(
+                _get_admin_supabase(),
+                alert_type="paper_autopilot_cohort_sweep_failed",
+                severity="warning",
+                message=f"Policy Lab cohort sweep failed: {type(e).__name__}",
+                user_id=user_id,
+                metadata={
+                    "function_name": "_execute_per_cohort",
+                    "error_class": type(e).__name__,
+                    "error_message": str(e)[:500],
+                    "consequence": "Policy Lab sweep skipped — cohort decision logging may be incomplete for this cycle",
+                },
+            )
 
         print(
             f"[AUTO_EXEC] SUMMARY: user={user_id[:8]} "
@@ -699,6 +826,19 @@ class PaperAutopilotService:
             return pos_res.data or []
         except Exception as e:
             logger.warning(f"[CIRCUIT_BREAKER] Failed to fetch positions: {e}")
+            alert(
+                _get_admin_supabase(),
+                alert_type="paper_autopilot_risk_check_positions_fetch_failed",
+                severity="warning",
+                message=f"Risk-check open positions fetch failed: {type(e).__name__}",
+                user_id=user_id,
+                metadata={
+                    "function_name": "_get_open_positions_for_risk_check",
+                    "error_class": type(e).__name__,
+                    "error_message": str(e)[:500],
+                    "consequence": "risk check proceeds without authoritative position state — concentration/correlation gates may be bypassed",
+                },
+            )
             return []
 
     def _estimate_equity(
@@ -745,8 +885,21 @@ class PaperAutopilotService:
             if res.data:
                 row = res.data[0]
                 return float(row.get("net_liq") or row.get("cash_balance") or 100_000)
-        except Exception:
-            pass
+        except Exception as _budget_err:
+            alert(
+                _get_admin_supabase(),
+                alert_type="paper_autopilot_portfolio_budget_failed",
+                severity="warning",
+                message=f"Portfolio budget fetch failed (defaulting to $100k): {type(_budget_err).__name__}",
+                user_id=user_id,
+                metadata={
+                    "function_name": "_get_portfolio_budget",
+                    "error_class": type(_budget_err).__name__,
+                    "error_message": str(_budget_err)[:500],
+                    "fallback_budget": 100000,
+                    "consequence": "sizing uses $100k default budget instead of authoritative portfolio cash — over-sizing risk",
+                },
+            )
         return 100_000  # Safe default
 
     def get_positions_closed_today(self, user_id: str) -> int:
@@ -801,6 +954,25 @@ class PaperAutopilotService:
                         return leg_sym
         except Exception as e:
             logger.warning(f"Failed to resolve OCC symbol for position {pos_id}: {e}")
+            # #72-H5b: per-call alert (static method, can't aggregate
+            # across close-loop without refactoring signature). Bounded
+            # by close-loop size (~1-3 calls per cycle typically).
+            alert(
+                _get_admin_supabase(),
+                alert_type="paper_autopilot_occ_resolve_failed",
+                severity="warning",
+                message=f"OCC symbol resolve failed for position {pos_id}: {type(e).__name__}",
+                user_id=position.get("user_id"),
+                symbol=underlying,
+                metadata={
+                    "function_name": "_resolve_occ_symbol",
+                    "position_id": pos_id,
+                    "underlying": underlying,
+                    "error_class": type(e).__name__,
+                    "error_message": str(e)[:500],
+                    "consequence": "falls back to underlying ticker — quote will be stock NBBO, not options",
+                },
+            )
 
         logger.warning(
             f"No OCC symbol found for position {pos_id} — "
@@ -931,6 +1103,8 @@ class PaperAutopilotService:
         closed = []
         errors = []
         pdt_blocked = 0
+        # #72-H5b: aggregation list for per-position close failures
+        _per_position_close_failures = []
 
         for position in to_close:
             pos_id = position.get("id")
@@ -1000,6 +1174,31 @@ class PaperAutopilotService:
             except Exception as e:
                 logger.error(f"Failed to close position {pos_id}: {e}")
                 errors.append({"position_id": pos_id, "error": str(e)})
+                _per_position_close_failures.append({
+                    "position_id": pos_id,
+                    "symbol": position.get("symbol"),
+                    "error_class": type(e).__name__,
+                    "error_message": str(e)[:200],
+                })
+
+        # #72-H5b: aggregated alert for per-position close failures
+        if _per_position_close_failures:
+            _failed_symbols = list({f["symbol"] for f in _per_position_close_failures if f.get("symbol")})[:20]
+            _distinct_error_classes = sorted({f["error_class"] for f in _per_position_close_failures})
+            alert(
+                _get_admin_supabase(),
+                alert_type="paper_autopilot_per_position_close_failed",
+                severity="warning",
+                message=f"{len(_per_position_close_failures)} per-position close failures during autopilot",
+                user_id=user_id,
+                metadata={
+                    "function_name": "close_positions",
+                    "failed_count": len(_per_position_close_failures),
+                    "failed_symbols": _failed_symbols,
+                    "distinct_error_classes": _distinct_error_classes,
+                    "consequence": f"{len(_per_position_close_failures)} positions failed to close this cycle — may remain open past intended exit",
+                },
+            )
 
         # Compute processing summary
         processing_error_count = sum(

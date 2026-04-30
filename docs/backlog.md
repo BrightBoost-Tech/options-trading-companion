@@ -225,10 +225,16 @@ Doctrine document: `docs/loud_error_doctrine.md` (v1.0).
       `operator_action_required` metadata field on critical-severity
       alerts; provides explicit operator runbook text. 57 structural
       tests in new `test_paper_exit_evaluator_alerts.py`.
-- [ ] **#72-H5b — `paper_autopilot_service.py` HOT swallows.**
-      Second half of #72-H5. ~10 alert sites including 1 SAFETY-CRITICAL
-      site (circuit breaker silent failure). Same pattern as H5a.
-      Closes #72-Phase 2 entirely once shipped. Effort: ~half day.
+- [x] **#72-H5b — `paper_autopilot_service.py` HOT swallows.**
+      **CLOSED 2026-04-30 by PR #839.** Closes #72-Phase 2 entirely.
+      10 alert sites including SAFETY-CRITICAL site 236
+      (`paper_autopilot_circuit_breaker_failed`) with
+      `operator_action_required` metadata, matching H5a site 9
+      convention. Site 4 (lines 411+438) collapsed two-stage pattern
+      sharing failures list (status_staged_update + full_execution).
+      63 structural tests in `test_paper_autopilot_service_alerts.py`.
+      Phase 3 (WARM, shared-helper approach) and Phase 4 (COLD,
+      opportunistic) remain as future work.
 
 #### #72-Phase 3 — WARM fixes (this month, shared-helper approach)
 

@@ -811,11 +811,11 @@ Full backlog (item descriptions, sub-items, audit catalogs) lives in `docs/backl
 
 ### Active focus (next 3)
 
-1. **#72-H4c** — workflow_orchestrator audit + ancillary doctrine sites (~half day).
-2. **#87b** — `scanner_universe` metadata backfill (~half day, reduces per-cycle Polygon calls).
-3. **#62a-D4-PR2** — routing dispatch enforcement (~1 day; builds on D4-PR1 to make conservative/neutral cohorts actually skip live dispatch).
+1. **#71** — RQ dispatch audit (~3-5 PRs). Sweep `public_tasks.py` / `internal_tasks.py` for synchronous handlers; migrate to `enqueue_job_run` pattern.
+2. **Agent sessions observability** (~half day). Shared `agent_session_context` helper so Loss Min / Self-Learning / Profit Optimization Agents write `agent_sessions` rows.
+3. **#62a-D5** — `execution_cost_*` columns silently dropped (decision needed first).
 
-See `docs/backlog.md` for full item descriptions and the catalogs (#62a schema drift, #72 loud-error doctrine).
+See `docs/roadmap.md` for the full Active focus block including recently-closed items and `docs/backlog.md` for full item descriptions and the catalogs (#62a schema drift, #72 loud-error doctrine).
 
 ---
 

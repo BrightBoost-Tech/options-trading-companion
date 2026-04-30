@@ -65,6 +65,11 @@ Last migrated from CLAUDE.md: 2026-04-28.
 - [x] **#72-H4c — workflow_orchestrator audit + ancillary** (PR #835, 2026-04-29). Closes Group C+D of #72-H4 sequence. 6 alert sites covered (5 from original H4 catalog + 1 bonus mirror site discovered during diagnostic): exit market-data fetch, morning per-suggestion insert (loop), morning v4 post-insert observability, midday progression fetch (async helper), midday v4 post-insert observability, midday per-suggestion insert (loop, bonus). 34 new structural tests in `test_workflow_orchestrator_alerts.py`. Closes #72-H4 entirely; only #72-H5 remains in #72-Phase 2.
 - [x] **#92 — Tier-aware spread threshold for micro tier** (PR #837, 2026-04-30). New helper `_get_micro_tier_spread_threshold()` reads `MICRO_TIER_SPREAD_THRESHOLD` env (default 0.30 = 30%). Dispatch at `options_scanner.py:2286` uses `max(regime_default, micro_override)` so micro tier gets at least 30% while regime loosening (SUPPRESSED 20%) still applies. Standard/small tiers unchanged. Catches BAC-class liquid mid-caps (~14% spread ratio) without opening the gate to truly thin markets. Future operators tune via env, no code change. 11 structural tests in new `test_scanner_micro_tier_spread_threshold.py`.
 - [x] **#72-H5a — paper_exit_evaluator loud errors** (PR #838, 2026-04-30). First half of #72-H5. 9 alert sites in `paper_exit_evaluator.py`: per-condition eval (loop), cohort configs load, close-loop (loop), open positions fetch (safety), cohort resolve exhausted (collapsed 3 paths into 1 alert when all fail), routing query (safety), idempotency check (safety), Alpaca DRY_RUN build, Alpaca submit fallback to internal (CRITICAL — 2026-04-16 ghost-position bug shape). **New convention introduced:** `operator_action_required` metadata field on critical-severity alerts; provides explicit operator runbook text without lookup. Future critical alerts in H5b and beyond can adopt. 57 structural tests in new `test_paper_exit_evaluator_alerts.py`.
+- [x] **#72-H5b — paper_autopilot_service loud errors** (PR #839, 2026-04-30). **Closes #72-Phase 2 entirely.** 10 alert sites in `paper_autopilot_service.py` including SAFETY-CRITICAL site 236 (`paper_autopilot_circuit_breaker_failed`) with `operator_action_required` metadata (H5a convention adopted). Site 4 (lines 411+438) collapsed two-stage pattern sharing failures list. 63 structural tests. All 8 sub-PRs of #72-Phase 2 shipped (H1, H2, H2a, H3, H4a, H4b, H4c, H5a, H5b).
+- [x] **Iron condor clarification + design principle** (PR #841, 2026-04-30). Fixed stale `CLAUDE.md:31` claim ("DISABLED in current phase"); diagnostic verified iron condors are enabled, regime-driven natural selection determines what gets emitted (CHOP regime or NEUTRAL/EARNINGS+high-IV). Captured "tune thresholds, not strategy availability" design principle in CLAUDE.md Working Style with rejected-2026-04-30 example (CMCSA credit-spread disable that was correctly turned down — PR #837 spread threshold raise was the right fix instead).
+- [x] **#62a-D4-PR2a — routing safety gate** (PR #842, 2026-04-30). Helper `should_submit_to_broker` at `brokers/execution_router.py` + 3 gate sites (autopilot entry, exit close, human approval) + `alpaca_order_sync` filter. Shadow_only portfolios cannot reach Alpaca regardless of `EXECUTION_MODE`. Includes `routing_dispatch_query_failed` critical alert with `operator_action_required` (matching H5a site 9 + H5b site 236 convention). PR2a explicitly deferred shadow fill simulation to PR2b — orders mark `execution_mode='shadow_blocked'` and stay at `status='staged'` until PR2b lands.
+- [x] **#62a-D4-PR2b — shadow fill simulation** (PR #843, 2026-04-30). Wires `_process_orders_for_user(target_order_id=...)` at entry path (reuses existing TCM simulate + `_commit_fill` machinery); removes early-return at close path so shadow_blocked orders fall through to existing internal-fill block at `paper_exit_evaluator.py:1252+` (current_mark fill, matches live close semantics). `shadow_blocked` marker preserved through `_commit_fill` (which only writes filled-state fields, not `execution_mode`).
+- [x] **#62a-D4-PR3 — clone-builder symbol fix** (PR #844, 2026-04-30). **Closes #62a-D4 sequence entirely.** One-line removal at `fork.py:229` (`"symbol": source.get("symbol")`). Was the upstream-most blocker — without PR3, suggestion fan-out errored at clone insert ('column symbol does not exist'). Verification SQL in PR description becomes meaningful only post-PR3 + next shadow-eligible cycle. Full shadow cohort fan-out restored after ~30 days broken: routing gated (PR2a), fills materializing (PR2b), suggestions writing with correct fields (PR3).
 
 ### Prioritized Roadmap (post-2026-04-26)
 
@@ -90,23 +95,24 @@ slot in here alongside the Monday verification:
   Completed and migration_apply audit row).
 
 **Active focus (next 3, drawn from Priority 2):**
-Updated 2026-04-30 (backlog hygiene pass) — #72-H4c, #87b, and
-intermediate items #834/#835/#837/#838 closed. #72-H5b is in
-review (PR #839); when it merges, #72-Phase 2 closes entirely.
+Updated 2026-04-30 (second hygiene pass) — #72-H4c, #87b,
+#62a-D4-PR2 closed in prior #840 hygiene; H5b (#839), PR2a
+(#842), PR2b (#843), PR3 (#844), iron-condor doc (#841) closed
+since. **#72-Phase 2 closes entirely; #62a-D4 sequence closes
+entirely.**
 
-1. **#62a-D4-PR2** — routing dispatch enforcement (~1 day, MEDIUM
-   risk). Builds on D4-PR1 (`routing_mode` column applied
-   2026-04-26) to make conservative/neutral cohorts actually skip
-   live dispatch. Closes a real safety gap: shadow-cohort fan-out
-   has been broken for ~30 days.
-2. **#71** — RQ dispatch audit (~medium). Sweep `public_tasks.py`
-   / `internal_tasks.py` for synchronous handlers; migrate to
-   `enqueue_job_run` pattern. Same shape as the policy_lab_eval
-   diagnostic that surfaced the 2026-04-26 ImportError.
-3. **Agent sessions observability** (~medium). Shared
+1. **#71** — RQ dispatch audit (~3-5 PRs depending on what
+   surfaces). Sweep `public_tasks.py` / `internal_tasks.py` for
+   synchronous handlers; migrate to `enqueue_job_run` pattern.
+   Same shape as the policy_lab_eval diagnostic that surfaced
+   the 2026-04-26 ImportError.
+2. **Agent sessions observability** (~half day). Shared
    `agent_session_context` helper so Loss Min / Self-Learning /
    Profit Optimization Agents write `agent_sessions` rows (only
    Day Orchestrator currently does).
+3. **#62a-D5** — `execution_cost_*` silently dropped
+   (decision-needed item; ~half day after operator confirms
+   whether signals are load-bearing).
 
 **Priority 2 — This Month**
 - [ ] **#72 Loud-error doctrine — Phase 2 HOT fixes.** Doctrine
@@ -130,13 +136,28 @@ review (PR #839); when it merges, #72-Phase 2 closes entirely.
       apply migration vs delete writes. See #62a-D3 below.
 - [ ] **#62a-D5 — `execution_cost_*` silently dropped.** Decision
       needed: are signals load-bearing? See #62a-D5 below.
-- [ ] **#62a-D4-PR2 — routing dispatch enforcement** (~1 day, MEDIUM
-      risk). Broker dispatch checks `portfolio.routing_mode`;
-      `_simulate_fill` path for `shadow_only`. Tests assert
-      shadow_only portfolios never reach Alpaca regardless of
-      `EXECUTION_MODE`. Sequenced after PR1.
-- [ ] **#62a-D4-PR3 — symbol drop fix** (~5 min code + 30 min verify).
-      Original one-line drop. Sequenced last; LOW risk after PR1+PR2.
+- [x] **#62a-D4-PR2 — routing dispatch enforcement.**
+      **CLOSED 2026-04-30 by PR #842 (PR2a, safety gate) + PR #843
+      (PR2b, shadow fill simulation).** Mid-implementation diagnostic
+      surfaced architectural friction (entry path uses TCM +
+      `_commit_fill`; exit close path uses inline fill at
+      `current_mark` — different machineries). Split into PR2a
+      (Alpaca block + `execution_mode='shadow_blocked'` marker, half
+      day) and PR2b (TCM simulate + commit for entry; fall-through
+      to internal-fill block for closes, half day).
+      `should_submit_to_broker` helper at `brokers/execution_router.py`.
+      New `routing_dispatch_query_failed` critical alert with
+      `operator_action_required`.
+- [x] **#62a-D4-PR3 — symbol drop fix.**
+      **CLOSED 2026-04-30 by PR #844.** One-line removal at
+      `fork.py:229`. Was the upstream-most blocker — without PR3,
+      suggestion fan-out errored at clone insert (`column "symbol"
+      does not exist`), meaning PR2a/PR2b had nothing to gate or
+      materialize for Conservative + Neutral cohorts. **Closes
+      #62a-D4 sequence entirely.** Full shadow cohort fan-out
+      restored after ~30 days broken: routing gated (PR2a), fills
+      materializing (PR2b), suggestions writing with correct fields
+      (PR3).
 (#68 and #69 demoted from Priority 2 to Priority 4 on 2026-04-27
 after the Polygon plan upgrade resolved #87 — see *Polygon
 dependency status* and the entries below.)

@@ -28,6 +28,53 @@ class ExecutionMode(str, Enum):
     SHADOW = "shadow"
 
 
+def should_submit_to_broker(portfolio_id: str, supabase) -> bool:
+    """True if portfolio's routing_mode is live_eligible.
+
+    False (block broker submission) if shadow_only or if the portfolio
+    is missing. The defensive 'False on missing' prevents accidental
+    real-money submission for orphaned order rows.
+
+    Used by 3 broker-submit sites:
+    - paper_endpoints._stage_order_internal (autopilot entry)
+    - paper_exit_evaluator._close_position (exit close)
+    - brokers.safety_checks.approve_order (human approval)
+
+    PR2a behavior: when False, gate sites mark order as
+    execution_mode='shadow_blocked' and leave at status='staged'.
+    Cohort data flow (TCM simulate + commit) is deferred to PR2b.
+
+    Composition with EXECUTION_MODE: routing_mode='shadow_only' blocks
+    broker submission regardless of EXECUTION_MODE setting.
+    """
+    try:
+        res = supabase.table("paper_portfolios") \
+            .select("routing_mode") \
+            .eq("id", portfolio_id) \
+            .limit(1) \
+            .execute()
+        if not res.data:
+            return False
+        return res.data[0].get("routing_mode") == "live_eligible"
+    except Exception as e:
+        from packages.quantum.observability.alerts import alert, _get_admin_supabase
+        alert(
+            _get_admin_supabase(),
+            alert_type="routing_dispatch_query_failed",
+            severity="critical",
+            message=f"routing_mode query failed for portfolio {portfolio_id}",
+            metadata={
+                "function_name": "should_submit_to_broker",
+                "portfolio_id": portfolio_id,
+                "error_class": type(e).__name__,
+                "error_message": str(e)[:500],
+                "consequence": "broker submit blocked (defaulted to shadow); portfolio's intended routing could not be verified",
+                "operator_action_required": "Verify portfolio routing_mode manually. If routing query is genuinely failing, investigate before resuming autopilot — broker dispatch decisions cannot be trusted while query path is unhealthy.",
+            },
+        )
+        return False
+
+
 def get_execution_mode() -> ExecutionMode:
     """Determine execution mode from environment."""
     raw = os.environ.get("EXECUTION_MODE", "internal_paper").lower().strip()

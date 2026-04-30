@@ -1173,6 +1173,27 @@ class PaperExitEvaluator:
                     "note": "Dry run — position held, order staged but not filled",
                 }
             else:
+                # #62a-D4-PR2a: gate broker submission on portfolio routing_mode.
+                # shadow_only positions shouldn't normally exist post-PR2a (entry
+                # path blocks), but pre-PR2a phantom positions need their close
+                # path gated too. Block Alpaca submit; PR2b will handle the
+                # shadow close fill machinery.
+                from packages.quantum.brokers.execution_router import should_submit_to_broker
+                if not should_submit_to_broker(position["portfolio_id"], supabase):
+                    supabase.table("paper_orders") \
+                        .update({"execution_mode": "shadow_blocked"}) \
+                        .eq("id", order_id) \
+                        .execute()
+                    logger.info(
+                        f"[ROUTING] Blocked Alpaca close for shadow_only portfolio: "
+                        f"order_id={order_id} position_id={position_id[:8]}"
+                    )
+                    return {
+                        "order_id": order_id,
+                        "processed": 0,
+                        "routed_to": "shadow_blocked",
+                        "note": "shadow_only portfolio — Alpaca close blocked, position remains open pending PR2b",
+                    }
                 try:
                     from packages.quantum.brokers.alpaca_order_handler import submit_and_track
                     from packages.quantum.brokers.alpaca_client import get_alpaca_client

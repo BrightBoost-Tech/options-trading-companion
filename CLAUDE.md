@@ -28,7 +28,7 @@ For AI session context, this file is loaded every turn.
 - **Universe:** 62 symbols. PR #804 added F, BAC, SOFI, T, KO, VZ; sync triggered 2026-04-25 17:17Z (job_run `25eec261-d3e3-4b4a-aefe-2865770b001d`).
 - **Pipeline status:** Full end-to-end pipeline validated 2026-04-10
 - **daily_progression_eval:** Running at 16:00 CT. The alpaca_paper → micro_live promotion gate has been bypassed (operator-initiated promotion). Future phase transitions are a deferred decision under the continuous-growth model.
-- **Iron condors:** DISABLED in current phase. Debit spreads only.
+- **Iron condors:** Enabled. Triggered by strategy_selector when regime is CHOP, or sentiment is NEUTRAL/EARNINGS with high IV (iv_rank>50 or ELEVATED/SHOCK/REBOUND regime). Recent regimes have been NORMAL with directional sentiment → debit spreads dominate the output stream. This is regime-driven natural selection, not banning. No tier-aware or phase-aware disable mechanism exists in code (verified 2026-04-30).
 - **Calibration job:** Running daily at 05:00 CT; writes to `calibration_adjustments`.
 - **Risk profile:** micro-tier — 90% per trade × regime_mult, one position at a time (see "Risk per trade math"). Hard cutoff at $1000 (standard tier behavior above). Operator spec 2026-04-27.
 - **Phase 2 contract:** enforced — `check_close_reason_enum` (9 values), `check_fill_source_enum`, `close_path_required` constraints intact
@@ -797,6 +797,12 @@ Active priorities are tracked in the ## Backlog section above.
 - When adding features: check GAP priority order before building new things
 - Prefer minimal diffs over full rewrites
 - Always check `job_runs` table before assuming a cron ran successfully
+
+### Design principles
+
+**Strategy availability vs threshold tuning.** Strategy-level pre-filtering at the scanner is not the preferred fix pattern for systemic rejection issues. Tune thresholds (per-tier, per-regime), not strategy availability. The scanner evaluates all strategies; downstream gates (spread, sizing, EV ranking) decide what makes it through. Rejection variety is information — disabling strategies hides signal we'd want to see.
+
+Example anti-pattern (rejected 2026-04-30): after observing CMCSA short_*_credit_spread at 1150% width-to-credit ratio on cheap underlyings, recommended disabling credit spreads at micro tier. Operator correctly rejected this — instead, we raised the spread threshold (#92) and let the existing gates do their job.
 
 
 ## Backlog

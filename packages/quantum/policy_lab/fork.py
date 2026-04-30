@@ -226,7 +226,6 @@ def _clone_suggestion_for_cohort(
         "user_id": source["user_id"],
         "window": source.get("window"),
         "ticker": source.get("ticker"),
-        "symbol": source.get("symbol"),
         "strategy": source.get("strategy"),
         "direction": source.get("direction"),
         "status": "pending",

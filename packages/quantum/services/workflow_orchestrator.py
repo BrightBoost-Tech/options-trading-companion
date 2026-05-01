@@ -2726,6 +2726,12 @@ async def run_midday_cycle(supabase: Client, user_id: str):
             sizing["risk_multiplier"] = risk_multiplier
             sizing["budget_snapshot"] = budgets.model_dump()
             sizing["allowed_risk_dollars"] = allowed_risk_dollars
+            # #95 fix: persist score (0-100 scale, from Scanner agent) into
+            # sizing_metadata so fork.py:_filter_for_cohort can read it for
+            # cohort threshold comparison. Was previously absent — fork
+            # compared risk_adjusted_ev (0-2 ratio) against min_score_threshold
+            # (0-100), filtering all non-aggressive cohorts to zero clones.
+            sizing["score"] = float(cand.get("score") or 0)
 
             cand_features = {
                 "ticker": ticker,

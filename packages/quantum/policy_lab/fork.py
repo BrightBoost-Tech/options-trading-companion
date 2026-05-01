@@ -161,13 +161,17 @@ def _filter_for_cohort(
     for s in suggestions:
         if len(filtered) >= max_new:
             break
-        # Use risk_adjusted_ev when available, fall back to ev
-        rank_value = s.get("risk_adjusted_ev")
-        if rank_value is None:
-            rank_value = float(s.get("ev") or 0)
-        else:
-            rank_value = float(rank_value)
-        if rank_value < config.min_score_threshold:
+        # #95 fix: read score (0-100 scale) from sizing_metadata, where it's
+        # persisted at insert time by workflow_orchestrator.py. Was previously
+        # reading risk_adjusted_ev (0-2 dollar-EV-per-dollar-risk ratio)
+        # against min_score_threshold (0-100), a semantic mismatch that
+        # filtered every non-aggressive cohort to zero clones across all
+        # DB history. Missing-score → filtered out (safe default).
+        sizing_metadata = s.get("sizing_metadata") or {}
+        score_value = sizing_metadata.get("score")
+        if score_value is None:
+            continue
+        if float(score_value) < config.min_score_threshold:
             continue
         filtered.append(s)
 

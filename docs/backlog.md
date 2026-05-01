@@ -93,7 +93,18 @@ pattern matching reliable peers. Effort: medium (audit + 1 PR per
 affected endpoint). Source: 2026-04-26 morning diagnostic.
 
 **#93 — deployable_capital reads stale 'pending' trade_suggestions
-rows** (HIGH-LATENT)
+rows** (HIGH-LATENT) — **CLOSED 2026-05-01** by PR #849. Replaced
+DB-derived computation with broker-truth read of Alpaca
+`options_buying_power` via new helper
+`equity_state.get_alpaca_options_buying_power`. Note: the
+"cohort clones cause within-day degradation" framing below was
+**partially incorrect** — today's diagnostic showed zero cohort
+clones exist in DB history (root cause of #95). Actual root cause
+of yesterday's $208 was the BAC source row staying `pending`
+(paper_autopilot status-update silently bypassed — see #96) plus
+buying_power source reading stale Plaid CUR:USD ($247.84) instead
+of live Alpaca. Both are #93-shaped and the broker-truth fix
+resolves both. Body preserved below for historical context.
 
 `cash_service.get_deployable_capital()` subtracts
 `SUM(sizing_metadata.capital_required) WHERE status='pending'` from
@@ -196,6 +207,88 @@ or c which require more careful close-path discipline).
 **Priority:** P3-P4. Defer until either table size becomes
 operational issue or close-path discipline becomes load-bearing
 for future feature.
+
+**#95 — fork.py threshold semantic mismatch** (HIGH)
+
+`policy_lab/fork.py:_filter_for_cohort` (lines 151-174) compares
+`s.get("risk_adjusted_ev")` (a dollar-EV-per-dollar-risk ratio,
+typically 0–2 for healthy trades) against `config.min_score_threshold`
+(designed as a 0–100 score scale). All non-aggressive cohorts
+filter every suggestion out because `risk_adjusted_ev < 50` is
+near-universal. Result: zero conservative or neutral cohort clones
+have ever been written across the entire DB history.
+
+**Today's evidence (2026-05-01):** BAC source had
+`risk_adjusted_ev=0.131785`, conservative threshold=70, neutral
+threshold=50 → both filter to 0 clones. The fork function logged
+`{'conservative': 0, 'neutral': 0, 'aggressive': 1}` to job_runs
+yesterday, exactly matching every prior day's pattern.
+
+**Operational impact:** the entire D4 sequence (PR2a/PR2b/PR3)
+shipped 2026-04-30 is **operationally inert** because its inputs
+don't exist. Shadow cohort comparison data has never been
+generated. `policy_lab_eval` (post-#65 fix) only sees aggressive
+cohort outcomes — the "champion/challenger" architecture is
+single-cohort by accident, not by design.
+
+**Fix options:**
+- (a) Compare against `score` field (0–100 scale) instead of
+  `risk_adjusted_ev`. Single-line change at `fork.py:165-169`.
+  Matches the variable's name (`min_score_threshold`).
+- (b) Recalibrate cohort thresholds to ratio scale (e.g.,
+  conservative=1.5, neutral=0.8, aggressive=0.3). Three
+  `policy_lab_cohorts.policy_config` updates per user. Preserves
+  `risk_adjusted_ev` as the ranking signal (what the comment
+  block says was intended).
+
+**Effort:** ~half day for either option. (a) is a code fix +
+behavioral test; (b) is a SQL UPDATE + threshold re-derivation.
+Recommend (a) — variable naming aligns with score, and `score`
+is the existing 0–100 scale already used elsewhere.
+
+**Doctrine gap surfaced:** PR2a/PR2b/PR3 all asserted shipped
+behavior in tests but no one verified end-to-end production
+output (would have caught zero clones). Candidate for new H6
+doctrine: "before shipping safety logic for a code path, verify
+the code path is exercised in production."
+
+**#96 — paper_autopilot trade_suggestions status-update silently
+bypassed** (MEDIUM-LATENT)
+
+Yesterday's BAC source `trade_suggestions` row stayed `status='pending'`
+through the entire trading day despite `paper_autopilot.execute`
+having created the position at 16:30:14 UTC. The autopilot's
+status-update at `paper_autopilot_service.py:457`
+(`UPDATE trade_suggestions SET status='staged' WHERE id=...`) is
+wrapped in `try/except Exception` (`:460-471`) that swallows
+failures into a non-fatal `_per_suggestion_failures` list with a
+warning log — no alert fires.
+
+**Possible root causes (need investigation):**
+- (a) The status update raised silently and got swallowed by the
+  try/except.
+- (b) The 5-day `EXECUTION_MODE='micro_live'` (invalid) routing to
+  internal_paper bypassed the autopilot path entirely; some other
+  handler ingested the suggestion without updating status.
+- (c) A race between autopilot stage and another writer reverting
+  the status.
+
+**Operationally inert post-#93:** broker-truth budget no longer
+cares about pending suggestion status, so the immediate budget-
+degradation symptom is gone. But the same status-update bypass
+likely affects other downstream consumers (`policy_decisions`
+joins on status, learning loops filter on status, etc.) — those
+impacts haven't been audited.
+
+**Effort:** ~half day investigation + small fix once root cause
+identified. Add an alert at `paper_autopilot_service.py:460-471`
+in the swallow path (matches H5b convention for the same file
+at SAFETY-CRITICAL site 236). Detection: if the alert fires more
+than once per week post-deploy, escalate.
+
+**Priority:** MEDIUM-LATENT — silent failure that has been
+running for at least 5 days unnoticed; auditing other status-
+update paths is the higher-value follow-on.
 
 ### #72 — Loud-error doctrine + silent-failure catalog
 

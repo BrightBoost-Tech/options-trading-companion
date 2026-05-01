@@ -69,7 +69,8 @@ Last migrated from CLAUDE.md: 2026-04-28.
 - [x] **Iron condor clarification + design principle** (PR #841, 2026-04-30). Fixed stale `CLAUDE.md:31` claim ("DISABLED in current phase"); diagnostic verified iron condors are enabled, regime-driven natural selection determines what gets emitted (CHOP regime or NEUTRAL/EARNINGS+high-IV). Captured "tune thresholds, not strategy availability" design principle in CLAUDE.md Working Style with rejected-2026-04-30 example (CMCSA credit-spread disable that was correctly turned down — PR #837 spread threshold raise was the right fix instead).
 - [x] **#62a-D4-PR2a — routing safety gate** (PR #842, 2026-04-30). Helper `should_submit_to_broker` at `brokers/execution_router.py` + 3 gate sites (autopilot entry, exit close, human approval) + `alpaca_order_sync` filter. Shadow_only portfolios cannot reach Alpaca regardless of `EXECUTION_MODE`. Includes `routing_dispatch_query_failed` critical alert with `operator_action_required` (matching H5a site 9 + H5b site 236 convention). PR2a explicitly deferred shadow fill simulation to PR2b — orders mark `execution_mode='shadow_blocked'` and stay at `status='staged'` until PR2b lands.
 - [x] **#62a-D4-PR2b — shadow fill simulation** (PR #843, 2026-04-30). Wires `_process_orders_for_user(target_order_id=...)` at entry path (reuses existing TCM simulate + `_commit_fill` machinery); removes early-return at close path so shadow_blocked orders fall through to existing internal-fill block at `paper_exit_evaluator.py:1252+` (current_mark fill, matches live close semantics). `shadow_blocked` marker preserved through `_commit_fill` (which only writes filled-state fields, not `execution_mode`).
-- [x] **#62a-D4-PR3 — clone-builder symbol fix** (PR #844, 2026-04-30). **Closes #62a-D4 sequence entirely.** One-line removal at `fork.py:229` (`"symbol": source.get("symbol")`). Was the upstream-most blocker — without PR3, suggestion fan-out errored at clone insert ('column symbol does not exist'). Verification SQL in PR description becomes meaningful only post-PR3 + next shadow-eligible cycle. Full shadow cohort fan-out restored after ~30 days broken: routing gated (PR2a), fills materializing (PR2b), suggestions writing with correct fields (PR3).
+- [x] **#62a-D4-PR3 — clone-builder symbol fix** (PR #844, 2026-04-30). **Closes #62a-D4 sequence entirely.** One-line removal at `fork.py:229` (`"symbol": source.get("symbol")`). Was the upstream-most blocker — without PR3, suggestion fan-out errored at clone insert ('column symbol does not exist'). Verification SQL in PR description becomes meaningful only post-PR3 + next shadow-eligible cycle. Full shadow cohort fan-out restored after ~30 days broken: routing gated (PR2a), fills materializing (PR2b), suggestions writing with correct fields (PR3). **Caveat surfaced 2026-05-01 (see #95):** D4 sequence is shipped but operationally inert — `fork.py:_filter_for_cohort` filters every suggestion out of conservative + neutral cohorts via threshold mismatch. Shadow infrastructure runs but produces zero data until #95 ships.
+- [x] **#93 — deployable_capital broker-truth fix** (PR #849, 2026-05-01). Replaced `cash_service.get_deployable_capital` body to read Alpaca `options_buying_power` directly via new helper `equity_state.get_alpaca_options_buying_power`. Removes `SUM(pending trade_suggestions.sizing_metadata.capital_required)` reservation arithmetic and stale Plaid CUR:USD reads (was returning $247.84 from 2026-03-26 against live Alpaca $500). Same architectural pattern as 2026-04-16 `_compute_weekly_pnl` fix (commit 83872db). Initial framing (PR #847) attributed yesterday's $208 reading to cohort clones; today's diagnostic showed zero clones exist (root cause is #95) — actual root causes were the BAC source row staying `pending` (paper_autopilot status-update silently bypassed, see #96) plus stale Plaid. Fix shape unchanged; broker-truth read resolves both.
 
 ### Prioritized Roadmap (post-2026-04-26)
 
@@ -95,24 +96,38 @@ slot in here alongside the Monday verification:
   Completed and migration_apply audit row).
 
 **Active focus (next 3, drawn from Priority 2):**
-Updated 2026-04-30 (second hygiene pass) — #72-H4c, #87b,
-#62a-D4-PR2 closed in prior #840 hygiene; H5b (#839), PR2a
-(#842), PR2b (#843), PR3 (#844), iron-condor doc (#841) closed
-since. **#72-Phase 2 closes entirely; #62a-D4 sequence closes
-entirely.**
+Updated 2026-05-01 (third hygiene pass) — #93 closed by PR #849.
+Today's morning diagnostic surfaced #95 (fork.py threshold
+semantic mismatch — D4 sequence operationally inert) and #96
+(paper_autopilot status-update silently bypassed). #95 promoted
+to top of active focus given high leverage (unlocks 30+ days of
+shadow-cohort comparison data accumulation that the just-shipped
+D4 sequence was built to support).
 
-1. **#71** — RQ dispatch audit (~3-5 PRs depending on what
+1. **#95** — fork.py threshold semantic mismatch (~half day).
+   `_filter_for_cohort` compares `risk_adjusted_ev` (~0–2 ratio)
+   against `min_score_threshold` (50/70 score scale) → all
+   non-aggressive cohorts produce 0 clones forever. Recommended
+   fix: switch comparison to `score` field (single-line change).
+   Unblocks the D4 sequence (PR2a/PR2b/PR3) by giving it actual
+   clones to gate, materialize, and write.
+2. **#71** — RQ dispatch audit (~3-5 PRs depending on what
    surfaces). Sweep `public_tasks.py` / `internal_tasks.py` for
    synchronous handlers; migrate to `enqueue_job_run` pattern.
    Same shape as the policy_lab_eval diagnostic that surfaced
    the 2026-04-26 ImportError.
-2. **Agent sessions observability** (~half day). Shared
+3. **Agent sessions observability** (~half day). Shared
    `agent_session_context` helper so Loss Min / Self-Learning /
    Profit Optimization Agents write `agent_sessions` rows (only
    Day Orchestrator currently does).
-3. **#62a-D5** — `execution_cost_*` silently dropped
-   (decision-needed item; ~half day after operator confirms
-   whether signals are load-bearing).
+
+**Deferred from active focus (priority drop):**
+- **#62a-D5** — execution_cost_* silently dropped (decision-needed
+  item; defer until operator confirms whether signals are
+  load-bearing).
+- **#96** — paper_autopilot status-update silently bypassed
+  (MEDIUM-LATENT). Operationally inert post-#93; investigation
+  worth doing but not before #95 lands.
 
 **Priority 2 — This Month**
 - [ ] **#72 Loud-error doctrine — Phase 2 HOT fixes.** Doctrine

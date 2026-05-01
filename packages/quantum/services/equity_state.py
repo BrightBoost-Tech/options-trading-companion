@@ -46,6 +46,7 @@ EQUITY_SOURCE = os.environ.get("RISK_EQUITY_SOURCE", "alpaca").lower()
 # `:paper` / `:live` — not needed today.
 _ALPACA_EQUITY_CACHE: Dict[str, Tuple[float, float]] = {}      # user_id → (ts, equity)
 _ALPACA_WEEKLY_PNL_CACHE: Dict[str, Tuple[float, float]] = {}  # user_id → (ts, weekly_pnl)
+_ALPACA_OBP_CACHE: Dict[str, Tuple[float, float]] = {}         # user_id → (ts, options_buying_power)
 _ALPACA_STATE_TTL_SECONDS = 60
 
 
@@ -65,6 +66,31 @@ def get_alpaca_equity(
     if EQUITY_SOURCE == "legacy":
         return _estimate_equity_legacy(supabase, positions or [])
     return _fetch_alpaca_equity(user_id, supabase=supabase)
+
+
+def get_alpaca_options_buying_power(
+    user_id: str,
+    supabase: Any = None,
+) -> Optional[float]:
+    """Return Alpaca `options_buying_power` as float, or `None` on failure.
+
+    #93 fix (2026-05-01): primary source for budget/sizing computations.
+    Replaces the prior DB-derived path (cash_service reading stale Plaid
+    CUR:USD positions and subtracting `SUM(pending trade_suggestions
+    .sizing_metadata.capital_required)`), which produced phantom
+    reservations and divergence from broker truth.
+
+    Mirrors `get_alpaca_equity` exactly: 60s TTL per-user cache, alert +
+    `None` return on failure. Caller MUST treat `None` as "fall back to
+    paper baseline" rather than fabricating a budget — fabricating is the
+    mechanism behind the 2026-04-16 weekly-PnL incident.
+
+    Severity is `critical` because this is the single source of truth for
+    deployable budget. Failure here makes every cycle until resolution
+    size against the paper baseline (or 0), which is operator-visible
+    via the resulting `Deployable capital:` log line.
+    """
+    return _fetch_alpaca_options_buying_power(user_id, supabase=supabase)
 
 
 def get_alpaca_weekly_pnl(
@@ -121,6 +147,66 @@ def _fetch_alpaca_equity(user_id: str, supabase: Any = None) -> Optional[float]:
                 "source": "alpaca",
             },
         )
+        return None
+
+
+def _fetch_alpaca_options_buying_power(user_id: str, supabase: Any = None) -> Optional[float]:
+    now = time.monotonic()
+    cached = _ALPACA_OBP_CACHE.get(user_id)
+    if cached and (now - cached[0]) < _ALPACA_STATE_TTL_SECONDS:
+        return cached[1]
+    try:
+        from packages.quantum.brokers.alpaca_client import get_alpaca_client
+        alpaca = get_alpaca_client()
+        if not alpaca:
+            return None
+        acct = alpaca.get_account()
+        raw = acct.get("options_buying_power")
+        if raw is None:
+            logger.warning(
+                f"[EQUITY_STATE] options_buying_power field missing "
+                f"for {user_id[:8]} — account may not have options approval"
+            )
+            return None
+        obp = float(raw)
+        if obp < 0:
+            obp = 0.0
+        _ALPACA_OBP_CACHE[user_id] = (now, obp)
+        return obp
+    except Exception as e:
+        logger.warning(
+            f"[EQUITY_STATE] Alpaca options_buying_power fetch failed "
+            f"for {user_id[:8]}: {e}"
+        )
+        try:
+            alert(
+                supabase,
+                alert_type="alpaca_options_buying_power_query_failed",
+                severity="critical",
+                message=f"Alpaca options_buying_power fetch failed: {type(e).__name__}",
+                user_id=user_id,
+                metadata={
+                    "function_name": "_fetch_alpaca_options_buying_power",
+                    "error_class": type(e).__name__,
+                    "error_message": str(e)[:500],
+                    "consequence": (
+                        "deployable_capital falls back to paper_baseline_capital. "
+                        "Sizing budget may not match live broker buying_power "
+                        "until Alpaca connection recovers."
+                    ),
+                    "operator_action_required": (
+                        "Verify ALPACA_API_KEY/ALPACA_SECRET_KEY in Railway env. "
+                        "Check Alpaca account status via dashboard. If credentials "
+                        "valid and account active, investigate transient API outage. "
+                        "System uses paper_baseline fallback until resolved — no "
+                        "trading risk, but budget may be smaller than actual buying_power."
+                    ),
+                },
+            )
+        except Exception:
+            # Alert path failure must not break the fallback chain.
+            # Same precedent as H5a/H5b sites and PR #846 execution_router.
+            pass
         return None
 
 
@@ -224,3 +310,4 @@ def _reset_caches_for_testing() -> None:
     """Reset the per-user caches between tests. Not for production use."""
     _ALPACA_EQUITY_CACHE.clear()
     _ALPACA_WEEKLY_PNL_CACHE.clear()
+    _ALPACA_OBP_CACHE.clear()

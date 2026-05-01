@@ -17,101 +17,68 @@ class CashService:
         self.TRADE_SUGGESTIONS_TABLE = "trade_suggestions"
 
     async def get_deployable_capital(self, user_id: str) -> float:
-        """
-        Calculates the amount of capital available for new trades.
-        1. Look up user's latest portfolio snapshot for buying_power.
-        2. Fallback: sum CUR:USD / CASH positions from the `positions` table.
-        2b. Paper-mode fallback: use paper_baseline_capital if buying_power
-            is missing/tiny and ops mode is "paper".
-        3. Read user_settings.cash_buffer if present, default buffer = 0.
-        4. Subtract estimated capital reserved in pending trade_suggestions.
-        Returns a float deployable_capital (>= 0).
-        """
-        buying_power = None
-        snapshot_had_buying_power = False
+        """Return deployable capital for sizing.
 
-        # 1. Try to get buying_power from latest portfolio_snapshots
+        Reads Alpaca `options_buying_power` as the authoritative source.
+        Falls back to `v3_go_live_state.paper_baseline_capital` if Alpaca
+        is unavailable (paper-mode operation, missing options approval,
+        or transient API failure).
+
+        #93 fix (2026-05-01): replaced DB-derived computation that read
+        `portfolio_snapshots.buying_power` (or summed CUR:USD positions)
+        and subtracted `SUM(pending trade_suggestions.sizing_metadata
+        .capital_required)`. The old logic produced phantom reservations
+        because suggestions could stay `pending` indefinitely on
+        paper_autopilot status-update bypass, and the buying_power source
+        could lag broker truth (yesterday: stale Plaid CUR:USD = $247.84
+        from 2026-03-26 against live Alpaca = $500). Same architectural
+        pattern as 2026-04-16 `_compute_weekly_pnl` fix (commit 83872db)
+        — DB-derived state diverging from broker truth resolved by
+        reading broker-authoritative.
+
+        Returns:
+            float: deployable capital in dollars (>= 0)
+        """
+        from packages.quantum.services.equity_state import (
+            get_alpaca_options_buying_power,
+        )
+
+        obp = get_alpaca_options_buying_power(user_id, supabase=self.supabase)
+        if obp is not None:
+            return max(0.0, float(obp))
+
+        # Fallback: paper baseline (used when Alpaca unreachable, missing
+        # options approval, or in paper-mode operation without a live
+        # connection). Returns 0.0 if no baseline configured — caller's
+        # `CapitalScanPolicy.can_scan` then skips the cycle, which is the
+        # safe failure mode.
+        return self._read_paper_baseline(user_id)
+
+    def _read_paper_baseline(self, user_id: str) -> float:
+        """Read `paper_baseline_capital` from `v3_go_live_state` regardless
+        of ops mode. Used as the fallback when Alpaca is unavailable.
+
+        Distinct from `_paper_baseline_fallback` (kept for backwards
+        compat) which gates on ops.mode=="paper" and applies a
+        `max(buying_power, baseline)` floor against an existing
+        buying_power input. The new path has no buying_power input
+        (Alpaca call already failed) and must work in any ops mode.
+        """
         try:
             res = (
-                self.supabase.table("portfolio_snapshots")
-                .select("buying_power")
+                self.supabase.table("v3_go_live_state")
+                .select("paper_baseline_capital")
                 .eq("user_id", user_id)
-                .order("created_at", desc=True)
                 .limit(1)
                 .execute()
             )
-            if res.data and res.data[0].get("buying_power") is not None:
-                buying_power = float(res.data[0]["buying_power"])
-                snapshot_had_buying_power = True
+            if res.data and res.data[0].get("paper_baseline_capital"):
+                return float(res.data[0]["paper_baseline_capital"])
         except Exception as e:
-            print(f"CashService: error reading portfolio_snapshots.buying_power: {e}")
-
-        # 2. Fallback: sum CUR:USD / CASH positions
-        if buying_power is None:
-            try:
-                res = (
-                    self.supabase.table("positions")
-                    .select("symbol, quantity, current_price")
-                    .eq("user_id", user_id)
-                    .execute()
-                )
-                cash_total = 0.0
-                for row in res.data or []:
-                    sym = (row.get("symbol") or "").upper()
-                    if sym in ["CUR:USD", "USD", "CASH", "MM", "USDOLLAR"]:
-                        qty = float(row.get("quantity") or 0.0)
-                        price = float(row.get("current_price") or 1.0)
-                        cash_total += qty * price
-                buying_power = cash_total
-            except Exception as e:
-                print(f"CashService: error aggregating cash from positions: {e}")
-                buying_power = 0.0
-
-        # 2b. Paper-mode capital consistency: In paper mode, use the maximum of
-        #     current buying_power and paper_baseline_capital. This ensures
-        #     budget calculations are consistent with how positions were sized.
-        #     Without this, positions sized for 100k baseline would be checked
-        #     against a tiny budget cap if buying_power shows a stale small value.
-        buying_power = self._paper_baseline_fallback(user_id, buying_power or 0.0)
-
-        # 3. Get Cash Buffer
-        cash_buffer = 0.0
-        try:
-            settings_res = (
-                self.supabase.table("user_settings")
-                .select("cash_buffer")
-                .eq("user_id", user_id)
-                .single()
-                .execute()
+            logger.warning(
+                "[CashService] paper_baseline read failed: %s", e
             )
-            if settings_res.data and settings_res.data.get("cash_buffer") is not None:
-                cash_buffer = float(settings_res.data.get("cash_buffer"))
-        except Exception as e:
-            # print(f"Error fetching cash buffer: {e}") # Harmless if missing
-            pass
-
-        # 4. Calculate Reserved Capital (Pending Suggestions)
-        reserved_capital = 0.0
-        try:
-            pending_res = (
-                self.supabase.table(self.TRADE_SUGGESTIONS_TABLE)
-                .select("sizing_metadata")
-                .eq("user_id", user_id)
-                .eq("status", "pending")
-                .execute()
-            )
-            if pending_res.data:
-                for row in pending_res.data:
-                    meta = row.get("sizing_metadata") or {}
-                    # Assuming sizing_metadata has 'capital_required'
-                    cap_req = meta.get("capital_required", 0.0)
-                    reserved_capital += float(cap_req)
-        except Exception as e:
-            print(f"Error fetching reserved capital: {e}")
-
-        # 5. Final Calculation
-        deployable = buying_power - cash_buffer - reserved_capital
-        return max(0.0, deployable)
+        return 0.0
 
     def _paper_baseline_fallback(self, user_id: str, current_buying_power: float) -> float:
         """

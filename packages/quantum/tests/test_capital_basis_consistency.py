@@ -1,15 +1,19 @@
 """
 Regression tests for capital basis consistency between sizing and risk budget.
 
-Reproduces the bug where:
-- deployable_capital = 20.51 (from stale snapshot)
-- paper_baseline_capital = 100,000
-- positions sized for 100k had risk usage = 137,500
-- budget cap = 35% of 20.51 = 7.18
-- Result: false "risk budget exhausted"
+Updated 2026-05-01 for #93 fix: cash_service.get_deployable_capital now
+reads Alpaca options_buying_power directly (via equity_state helper)
+instead of computing buying_power - cash_buffer - reserved_capital from
+DB-derived sources. The previous logic produced phantom reservations
+when trade_suggestions stayed `pending` indefinitely.
 
-Fix: In paper mode, use max(buying_power, paper_baseline_capital) to ensure
-consistency between how positions were sized and how budget is calculated.
+Pre-#93 tests asserted the old DB arithmetic (paper-baseline floor +
+buffer + reserved subtraction). Those scenarios are no longer reachable
+via the public API; the broker-truth read is the only path. Tests below
+exercise the new contract:
+- Alpaca returns OBP → that value is the deployable
+- Alpaca unavailable → fall back to v3_go_live_state.paper_baseline_capital
+- Both unavailable → 0.0 (caller's CapitalScanPolicy gates the cycle)
 """
 
 import asyncio
@@ -31,6 +35,9 @@ for _k, _v in _MODULE_PATCHES.items():
     sys.modules[_k] = _v
 
 from packages.quantum.services.cash_service import CashService  # noqa: E402
+from packages.quantum.services.equity_state import (  # noqa: E402
+    _reset_caches_for_testing,
+)
 
 USER_ID = "test-user-capital-consistency"
 
@@ -52,94 +59,75 @@ def _make_chain_mock(**table_responses):
     return mock_supabase
 
 
-class TestCapitalBasisConsistency(unittest.TestCase):
-    """
-    Regression tests for the bug:
-    Usage=$137500.00 vs deployable=$20.51, Cap=$7.18
-    """
+class TestDeployableReadsBrokerTruth(unittest.TestCase):
+    """#93: get_deployable_capital reads Alpaca options_buying_power."""
 
     def setUp(self):
-        _mock_ops_module.reset_mock(side_effect=True, return_value=True)
+        _reset_caches_for_testing()
 
-    def test_paper_mode_uses_max_of_buying_power_and_baseline(self):
-        """
-        When buying_power (20.51) < paper_baseline (100k) in paper mode,
-        deployable should be paper_baseline (100k), not buying_power.
+    def test_returns_alpaca_options_buying_power(self):
+        """When Alpaca returns OBP, that is the deployable value."""
+        with patch(
+            "packages.quantum.brokers.alpaca_client.get_alpaca_client"
+        ) as mock_factory:
+            mock_client = MagicMock()
+            mock_client.get_account.return_value = {
+                "options_buying_power": "500.00",
+            }
+            mock_factory.return_value = mock_client
 
-        This ensures budget calculations match how positions were sized.
-        """
-        _mock_ops_module.get_global_ops_control.return_value = {"mode": "paper"}
-        mock_sb = _make_chain_mock(
-            portfolio_snapshots=[{"buying_power": 20.51}],
-            positions=[],
-            v3_go_live_state=[{"paper_baseline_capital": 100_000}],
-            user_settings=None,
-            trade_suggestions=[],
-        )
-        svc = CashService(mock_sb)
-        result = asyncio.run(svc.get_deployable_capital(USER_ID))
+            svc = CashService(_make_chain_mock())
+            result = asyncio.run(svc.get_deployable_capital(USER_ID))
+            self.assertEqual(result, 500.0)
 
-        # Should use baseline (100k) since it's > buying_power (20.51)
-        self.assertEqual(result, 100_000.0)
+    def test_falls_back_to_paper_baseline_on_alpaca_failure(self):
+        """When Alpaca unavailable, read paper_baseline_capital."""
+        with patch(
+            "packages.quantum.brokers.alpaca_client.get_alpaca_client",
+            side_effect=Exception("Alpaca down"),
+        ):
+            mock_sb = _make_chain_mock(
+                v3_go_live_state=[{"paper_baseline_capital": 500}],
+            )
+            svc = CashService(mock_sb)
+            result = asyncio.run(svc.get_deployable_capital(USER_ID))
+            self.assertEqual(result, 500.0)
 
-    def test_paper_mode_buying_power_above_baseline_uses_buying_power(self):
-        """
-        When buying_power (150k) > paper_baseline (100k) in paper mode,
-        deployable should be buying_power (150k).
+    def test_falls_back_to_zero_when_no_baseline(self):
+        """Both Alpaca and baseline unavailable → 0 (caller skips cycle)."""
+        with patch(
+            "packages.quantum.brokers.alpaca_client.get_alpaca_client",
+            return_value=None,
+        ):
+            mock_sb = _make_chain_mock(v3_go_live_state=[])
+            svc = CashService(mock_sb)
+            result = asyncio.run(svc.get_deployable_capital(USER_ID))
+            self.assertEqual(result, 0.0)
 
-        This handles the case where user increased their paper capital.
-        """
-        _mock_ops_module.get_global_ops_control.return_value = {"mode": "paper"}
-        mock_sb = _make_chain_mock(
-            portfolio_snapshots=[{"buying_power": 150_000}],
-            positions=[],
-            v3_go_live_state=[{"paper_baseline_capital": 100_000}],
-            user_settings=None,
-            trade_suggestions=[],
-        )
-        svc = CashService(mock_sb)
-        result = asyncio.run(svc.get_deployable_capital(USER_ID))
+    def test_does_not_subtract_pending_reservations(self):
+        """#93 regression: pending trade_suggestions must NOT reduce
+        deployable. Pre-#93 logic subtracted SUM(capital_required) from
+        the buying_power source; that caused phantom reservations when
+        suggestions stayed `pending` (paper_autopilot status-update
+        bypass). Broker-truth read sidesteps the lifecycle entirely."""
+        with patch(
+            "packages.quantum.brokers.alpaca_client.get_alpaca_client"
+        ) as mock_factory:
+            mock_client = MagicMock()
+            mock_client.get_account.return_value = {
+                "options_buying_power": "500.00",
+            }
+            mock_factory.return_value = mock_client
 
-        # Should use buying_power (150k) since it's > baseline (100k)
-        self.assertEqual(result, 150_000.0)
-
-    def test_live_mode_does_not_use_baseline(self):
-        """
-        In live mode, always use actual buying_power regardless of baseline.
-        """
-        _mock_ops_module.get_global_ops_control.return_value = {"mode": "live"}
-        mock_sb = _make_chain_mock(
-            portfolio_snapshots=[{"buying_power": 20.51}],
-            positions=[],
-            v3_go_live_state=[{"paper_baseline_capital": 100_000}],
-            user_settings=None,
-            trade_suggestions=[],
-        )
-        svc = CashService(mock_sb)
-        result = asyncio.run(svc.get_deployable_capital(USER_ID))
-
-        # Live mode: use actual buying_power
-        self.assertEqual(result, 20.51)
-
-    def test_paper_mode_respects_buffer_and_reserved(self):
-        """
-        In paper mode with baseline, deductions (buffer, reserved) still apply.
-        """
-        _mock_ops_module.get_global_ops_control.return_value = {"mode": "paper"}
-        mock_sb = _make_chain_mock(
-            portfolio_snapshots=[{"buying_power": 20.51}],
-            positions=[],
-            v3_go_live_state=[{"paper_baseline_capital": 100_000}],
-            user_settings={"cash_buffer": 5_000},
-            trade_suggestions=[
-                {"sizing_metadata": {"capital_required": 10_000}},
-            ],
-        )
-        svc = CashService(mock_sb)
-        result = asyncio.run(svc.get_deployable_capital(USER_ID))
-
-        # 100k baseline - 5k buffer - 10k reserved = 85k
-        self.assertEqual(result, 85_000.0)
+            mock_sb = _make_chain_mock(
+                trade_suggestions=[
+                    {"sizing_metadata": {"capital_required": 292.0}},
+                ],
+            )
+            svc = CashService(mock_sb)
+            result = asyncio.run(svc.get_deployable_capital(USER_ID))
+            # Pre-#93 would have returned 500 - 292 = 208.
+            self.assertEqual(result, 500.0)
 
 
 class TestRiskBudgetGuardrail(unittest.TestCase):

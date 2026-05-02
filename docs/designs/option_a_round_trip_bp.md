@@ -223,23 +223,57 @@ def test_rejection_reason_vocabulary_includes_round_trip():
 
 Query historical data to estimate impact:
 ```sql
--- How many of last 30 days' suggestions would have been rejected?
+WITH base AS (
+  SELECT
+    strategy,
+    (sizing_metadata->>'capital_required')::numeric  AS cap_required,
+    -- Formula A: for *_DEBIT_SPREAD, estimated_close_bp = max_loss = cap_required
+    (sizing_metadata->>'capital_required')::numeric  AS est_close_bp,
+    1.1::numeric                                      AS safety_factor
+  FROM trade_suggestions
+  WHERE user_id    = '75ee12ad-b119-4f32-aeea-19b4ef55d587'
+    AND created_at > NOW() - INTERVAL '30 days'
+    AND strategy   LIKE '%DEBIT_SPREAD'
+    AND sizing_metadata ? 'capital_required'
+),
+scored AS (
+  SELECT
+    strategy,
+    cap_required,
+    cap_required + est_close_bp * safety_factor      AS round_trip_required
+  FROM base
+)
 SELECT
   strategy,
-  COUNT(*) AS total,
-  COUNT(*) FILTER (
-    WHERE (sizing_metadata->>'capital_required')::numeric * 2 * 1.1
-          > 500  -- assumed OBP for $500 account
-  ) AS would_reject_at_500,
-  AVG((sizing_metadata->>'capital_required')::numeric) AS avg_capital_required
-FROM trade_suggestions
-WHERE user_id = '75ee12ad-b119-4f32-aeea-19b4ef55d587'
-  AND created_at > NOW() - INTERVAL '30 days'
-  AND strategy LIKE '%DEBIT_SPREAD'
-GROUP BY strategy;
+  COUNT(*)                                                            AS total,
+  ROUND(AVG(cap_required), 2)                                         AS avg_cap_required,
+  ROUND(AVG(round_trip_required), 2)                                  AS avg_round_trip_required,
+  COUNT(*) FILTER (WHERE round_trip_required > 500)                   AS would_reject_at_500,
+  COUNT(*) FILTER (WHERE round_trip_required > 650)                   AS would_reject_at_650,
+  ROUND(100.0 * COUNT(*) FILTER (WHERE round_trip_required > 500)
+        / NULLIF(COUNT(*), 0), 1)                                     AS pct_reject_500,
+  ROUND(100.0 * COUNT(*) FILTER (WHERE round_trip_required > 650)
+        / NULLIF(COUNT(*), 0), 1)                                     AS pct_reject_650
+FROM scored
+GROUP BY strategy
+ORDER BY total DESC;
 ```
 
-**Expected outcome (per BP-to-close diagnostic):** ~50% of debit spreads rejected at $500 account size. That's the right outcome — those are the unsafe trades. Document the count in the PR description so operator sees impact.
+**Expected outcome:** regression scores rejection rate at both $500 (Friday 2026-05-01's pre-deposit OBP, the BAC-incident baseline) and $650 (Monday 2026-05-04's operative OBP after the 2026-05-02 evening deposit). Per BP-to-close diagnostic, ~50% rejection at $500 is the right shape — those are the unsafe trades the BAC incident exposed. The $650 column quantifies headroom for normal live operation. Document both rates in the implementation PR description so the operator sees impact.
+
+### Regression results (run <FILL: YYYY-MM-DD>)
+
+Query executed against production `trade_suggestions` on <FILL: date>.
+
+| strategy | total | avg_cap_required | avg_round_trip_required | would_reject_at_500 | would_reject_at_650 | pct_reject_500 | pct_reject_650 |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| <FILL: paste rows from query result> |
+
+**Calibration decision: ship at `safety_factor = <FILL: 1.0 / 1.1 / 1.2>`.**
+
+Rationale: <FILL: 2-4 sentences referencing the numbers. Example shape — "pct_reject_500=<X>% confirms calibration would have caught the BAC-class incident at Friday's BP. pct_reject_650=<Y>% leaves <Z>% of candidates viable under Monday's $650 OBP, which is sufficient breadth for normal operation. The 1.1 default holds; no pre-merge adjustment.">
+
+Per Section 5's calibration revision plan: if 30-day post-merge observation produces zero `paper_order_marked_needs_manual_review` alerts, consider lowering to 1.0 at next review. If any such alerts fire, raise to 1.2 and inspect `last_error` for Formula A mismatch shape.
 
 ---
 
@@ -321,7 +355,7 @@ Reasons for refinement:
 
 ## 10. Open questions (defer to implementation)
 
-1. **Should `safety_factor` be env-configurable?** Initial recommendation: no, hardcode at 1.1 with comment. After 30 days observation, decide whether to env-ify.
+1. ~~Should `safety_factor` be env-configurable? Initial recommendation: no, hardcode at 1.1 with comment. After 30 days observation, decide whether to env-ify.~~ **Resolved \<FILL: date\>:** `safety_factor = <FILL: value>` hardcoded per regression results above. Env-ification deferred to post-30-day review per Section 5.
 2. **Should `estimated_close_bp` be persisted to `sizing_metadata`?** Recommended yes — small disk cost, big calibration value. Add `sizing_metadata.estimated_close_bp` and `sizing_metadata.round_trip_required` for post-hoc analysis.
 3. **Iron condor first-fire risk:** the formula `2 × max_loss_per_contract` is theoretical. Until first IC trade, no validation. Document as known calibration item.
 

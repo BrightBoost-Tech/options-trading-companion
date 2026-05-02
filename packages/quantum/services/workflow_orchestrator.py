@@ -2650,10 +2650,29 @@ async def run_midday_cycle(supabase: Client, user_id: str):
             risk_multiplier=1.0,   # multiplier already baked into risk_budget_dollars
             max_contracts=max_contracts_limit,
             profile=strategy_track,
+            # #100 / Option A: per-strategy round-trip BP estimation.
+            # safety_factor defaults via DEFAULT_ROUND_TRIP_SAFETY_FACTOR.
+            strategy=cand.get("strategy"),
         )
 
         sizing["strategy_track"] = strategy_track
         allowed_risk_dollars = sizing.get("max_dollar_risk", 0.0)
+
+        # #100 / Option A: log round-trip check result per design doc Section 7.
+        # Surfaces the round-trip math for every candidate that reaches sizing,
+        # whether passed or rejected. Powers ongoing calibration analysis.
+        _rt_close = sizing.get("estimated_close_bp", 0.0)
+        _rt_required = sizing.get("round_trip_required", 0.0)
+        _rt_outcome = "PASS" if sizing["contracts"] > 0 else "FAIL"
+        from packages.quantum.services.sizing_engine import (
+            DEFAULT_ROUND_TRIP_SAFETY_FACTOR as _RT_SAFETY,
+        )
+        print(
+            f"[midday_entry] {ticker} round_trip_check: "
+            f"entry ${collateral:.2f} + close ${_rt_close:.2f} "
+            f"({_RT_SAFETY}×) = ${_rt_required:.2f} required, "
+            f"OBP ${deployable_capital:.2f} → {_rt_outcome}"
+        )
 
         # If contracts == 0, check reasons.
         if sizing["contracts"] == 0:

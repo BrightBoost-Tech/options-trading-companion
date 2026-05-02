@@ -261,17 +261,36 @@ ORDER BY total DESC;
 
 **Expected outcome:** regression scores rejection rate at both $500 (Friday 2026-05-01's pre-deposit OBP, the BAC-incident baseline) and $650 (Monday 2026-05-04's operative OBP after the 2026-05-02 evening deposit). Per BP-to-close diagnostic, ~50% rejection at $500 is the right shape — those are the unsafe trades the BAC incident exposed. The $650 column quantifies headroom for normal live operation. Document both rates in the implementation PR description so the operator sees impact.
 
-### Regression results (run <FILL: YYYY-MM-DD>)
+### Regression results (run 2026-05-02)
 
-Query executed against production `trade_suggestions` on <FILL: date>.
+Query executed against production `trade_suggestions` on 2026-05-02 (Saturday morning, pre-implementation).
+
+**Headline (full 30-day window, all debit-spread suggestions):**
 
 | strategy | total | avg_cap_required | avg_round_trip_required | would_reject_at_500 | would_reject_at_650 | pct_reject_500 | pct_reject_650 |
 |---|---:|---:|---:|---:|---:|---:|---:|
-| <FILL: paste rows from query result> |
+| LONG_CALL_DEBIT_SPREAD | 33 | $1589.57 | $3338.10 | 33 | 32 | 100.0% | 97.0% |
+| LONG_PUT_DEBIT_SPREAD | 8 | $1790.50 | $3760.05 | 8 | 8 | 100.0% | 100.0% |
 
-**Calibration decision: ship at `safety_factor = <FILL: 1.0 / 1.1 / 1.2>`.**
+**Era-split caveat:** the headline numbers are dominated by 39 pre-2026-04-27 suggestions sized under the prior regime (silent 3% balanced default at `RiskBudgetEngine`, before the tier-aware micro-90% fix landed). Those rows have `cap_required` $1119–$2440 — not representative of forward sizing. Forward-relevant calibration is based on the post-fix subset:
 
-Rationale: <FILL: 2-4 sentences referencing the numbers. Example shape — "pct_reject_500=<X>% confirms calibration would have caught the BAC-class incident at Friday's BP. pct_reject_650=<Y>% leaves <Z>% of candidates viable under Monday's $650 OBP, which is sufficient breadth for normal operation. The 1.1 default holds; no pre-merge adjustment.">
+**Forward-representative (post-2026-04-27, N=2 BAC entries):**
+
+| strategy | total | min_cap | avg_cap_required | max_cap | avg_round_trip_required (safety=1.1) | pct_reject_500 | pct_reject_650 |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| LONG_CALL_DEBIT_SPREAD | 2 | $292 | $301.00 | $310 | $632.10 | 100.0% | 50.0% |
+
+Manual round-trip math at the three candidate calibrations:
+
+| safety | $292 entry → required | $310 entry → required | rejects at $500 | rejects at $650 |
+|---|---:|---:|---|---|
+| 1.0 | $584 | $620 | both | neither |
+| **1.1** | **$613.20** | **$651** | **both** | **only $310 (by $1)** |
+| 1.2 | $642.40 | $682 | both | both |
+
+**Calibration decision: ship at `safety_factor = 1.1`.**
+
+Rationale: pct_reject_500=100% confirms calibration would have caught the BAC-class incident at Friday 2026-05-01's pre-deposit OBP — both BAC entries exceed the round-trip threshold. pct_reject_650=50% leaves headroom for ~half of BAC-class candidates under Monday 2026-05-04's $650 OBP, which is sufficient forward breadth (the rejected $310 case exceeds by only $1, naturally accommodated by tomorrow's anticipated win/deposit growth). The 10% safety cushion guards against quote staleness, mid-cycle adverse moves, and Alpaca margin-engine surprises beyond Formula A's empirical model. The 1.1 design default holds; no pre-merge adjustment. N=2 sample is small but unambiguous given the math; ongoing 30-day calibration loop per Section 5 will refine.
 
 Per Section 5's calibration revision plan: if 30-day post-merge observation produces zero `paper_order_marked_needs_manual_review` alerts, consider lowering to 1.0 at next review. If any such alerts fire, raise to 1.2 and inspect `last_error` for Formula A mismatch shape.
 
@@ -355,7 +374,7 @@ Reasons for refinement:
 
 ## 10. Open questions (defer to implementation)
 
-1. ~~Should `safety_factor` be env-configurable? Initial recommendation: no, hardcode at 1.1 with comment. After 30 days observation, decide whether to env-ify.~~ **Resolved \<FILL: date\>:** `safety_factor = <FILL: value>` hardcoded per regression results above. Env-ification deferred to post-30-day review per Section 5.
+1. ~~Should `safety_factor` be env-configurable? Initial recommendation: no, hardcode at 1.1 with comment. After 30 days observation, decide whether to env-ify.~~ **Resolved 2026-05-02:** `safety_factor = 1.1` hardcoded per regression results above. Env-ification deferred to post-30-day review per Section 5.
 2. **Should `estimated_close_bp` be persisted to `sizing_metadata`?** Recommended yes — small disk cost, big calibration value. Add `sizing_metadata.estimated_close_bp` and `sizing_metadata.round_trip_required` for post-hoc analysis.
 3. **Iron condor first-fire risk:** the formula `2 × max_loss_per_contract` is theoretical. Until first IC trade, no validation. Document as known calibration item.
 

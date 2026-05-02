@@ -92,52 +92,31 @@ observability trace. Migrate affected handlers to the `enqueue_job_run`
 pattern matching reliable peers. Effort: medium (audit + 1 PR per
 affected endpoint). Source: 2026-04-26 morning diagnostic.
 
-**#93 — deployable_capital reads stale 'pending' trade_suggestions
-rows** (HIGH-LATENT) — **CLOSED 2026-05-01** by PR #849. Replaced
-DB-derived computation with broker-truth read of Alpaca
-`options_buying_power` via new helper
-`equity_state.get_alpaca_options_buying_power`. Note: the
-"cohort clones cause within-day degradation" framing below was
-**partially incorrect** — today's diagnostic showed zero cohort
-clones exist in DB history (root cause of #95). Actual root cause
-of yesterday's $208 was the BAC source row staying `pending`
-(paper_autopilot status-update silently bypassed — see #96) plus
-buying_power source reading stale Plaid CUR:USD ($247.84) instead
-of live Alpaca. Both are #93-shaped and the broker-truth fix
-resolves both. Body preserved below for historical context.
+**#93 — deployable_capital reads stale Plaid CUR:USD +
+paper_autopilot status bypass** (HIGH, FIXED in PR #850)
 
-`cash_service.get_deployable_capital()` subtracts
-`SUM(sizing_metadata.capital_required) WHERE status='pending'` from
-buying_power. The "decrement" is each row's status transitioning
-out of 'pending', which has 4 paths in code (manual-stage,
-autopilot-stage, dashboard-dismiss, orchestrator-supersede) but
-ZERO paths for cohort clones from `policy_lab/fork.py` and ZERO
-paths for the close lifecycle.
+`cash_service.get_deployable_capital()` previously computed
+deployable as `buying_power - cash_buffer - reserved_capital`
+where buying_power read from `portfolio_snapshots` (Plaid-sourced)
+and reserved_capital was `SUM(sizing_metadata.capital_required)
+WHERE status='pending'`. Both inputs were sources of drift.
 
-**Cross-day cleanup exists.** `suggestions_close.py:85-99` runs
-daily at 8:00 AM CT (gated by `is_market_day()`) and transitions
-all `status='pending' AND cycle_date < today` rows to `dismissed`.
-This means cross-day pending rows are cleaned up reliably.
+**Original framing (PR #847 #93 entry) was wrong.** The first
+diagnostic attributed the $208 reading to within-day cohort
+clone accumulation. Today's diagnostic (2026-05-01) verified
+zero cohort clones exist in DB history across all users — D4
+sequence is shipped but clone INSERT silently fails (see #97).
+Real root cause:
 
-**The actual bug is within-day degradation.** After the first
-trade fires in any session:
-- Source suggestion transitions to `staged` via paper_autopilot
-- Cohort clones (Conservative + Neutral) remain `pending` with
-  `cycle_date=today`
-- Daily cleanup doesn't catch them (filter is `cycle_date < today`)
-- Position close doesn't transition them
-- Subsequent cycles within the same trading day see degraded
-  deployable_capital
-- Reset happens at 8:00 AM CT next morning
+1. portfolio_snapshots last write was 2026-03-26 (5+ weeks
+   stale Plaid CUR:USD = $247.84)
+2. paper_autopilot status update at line 457 silently bypassed
+   for BAC source row (see #96)
+3. Net: yesterday's $208 = $500 paper_baseline_floor - $292 BAC
+   reservation OR $247.84 stale buying_power, depending on
+   fallback path
 
-**Today's evidence (2026-04-30):** BAC opened+closed in 16:30 UTC
-cycle with $292 entry premium and ~$0 realized P&L. Live Alpaca
-shows $500. 17:29 UTC manual rerun read deployable_capital=$208
-($500 - $292). Math is exact. Diagnostic confirmed cohort clones
-from policy_lab/fork.py inserted at 16:30 with cycle_date=today
-survived in `pending` state through the day.
-
-**Recommended fix (option b):** replace
+**Fix shipped (PR #850, 2026-05-01):** replaced
 `cash_service.get_deployable_capital` body to read Alpaca
 `options_buying_power` directly via new helper
 `equity_state.get_alpaca_options_buying_power(user_id)`. Same
@@ -145,150 +124,271 @@ architectural pattern as 2026-04-16 `_compute_weekly_pnl` fix
 (commit 83872db) — DB-derived state diverging from broker truth
 resolved by reading Alpaca-authoritative.
 
-**Effort:** ~half day. ~3 new tests, ~7 modified
-(`test_capital_basis_consistency.py`, `test_cash_paper_fallback.py`
-mock the new helper instead of `portfolio_snapshots`).
+**Verification (2026-05-01 16:00 UTC cycle):**
+deployable_capital=$500 (vs prior days' $208/$247.84), budget
+cap=$450, no helper failures. Verified working.
 
-**No SQL pre-cleanup needed.** Tomorrow's 8:00 AM CT
-`suggestions_close` cleanup will dismiss today's cohort clones
-automatically before tomorrow's 16:00 UTC cycle reads
-deployable_capital. Tomorrow's first reading should be $500
-(full live equity); option (b) ships clean.
-
-**Why option (b) over (a):** option (a) — adding decrement-on-close
-paths — requires per-close-path discipline forever. Every future
-close mechanism would need to remember the transition. The
-suggestions_close daily cleanup partially addresses cross-day
-state but does nothing for within-day, which is the actual
-operational bug. Option (b) makes the maintenance burden go to
-zero by reading broker truth. Same proven pattern as
-`_compute_weekly_pnl`. Cohort clone pollution naturally goes
-away (Alpaca doesn't see clones, so it can't subtract for them).
-
-**Operational impact:** for micro tier with max_trades=1 per
-cycle, the within-day window means second cycle of any
-multi-cycle trading day reads degraded budget. Multi-cycle days
-are not the current default but will become more common as
-operational confidence increases. Option (b) ships before
-sustained live trading.
-
-**Future architectural note:** if multi-cohort live routing ships
-(#65 `policy_lab_eval`), reservation semantics for simultaneous
-cohort competition for live capital may need reintroduction. Not
-today's problem.
+**Status:** CLOSED. Both layers fixed; broker-truth read makes
+stale Plaid + reservation arithmetic irrelevant. Phantom-row
+accumulation continues but is operationally inert (#94).
 
 **#94 — trade_suggestions phantom-row hygiene** (P3-P4)
 
-Cohort clones from `policy_lab/fork.py` are inserted as
-`status='pending'` with no event-driven lifecycle transition path.
-Daily `suggestions_close` cleanup transitions them to `dismissed`
-after one cycle_date boundary, but this means rows accumulate as
-`dismissed` instead of `pending` — same row count, different
-status field. Source suggestions that survive to fill also miss
-transition on position-close (stay at `staged`).
+Source suggestions miss transition on position-close (stay at
+`staged` post-execution). Cohort clones from `policy_lab/fork.py`
+cannot accumulate — they fail INSERT silently (see #97). Daily
+`suggestions_close` cleanup transitions stale `pending` rows
+older than today's cycle_date to `dismissed`, but only catches
+cross-day rows.
 
-Currently inert post-#93 (broker-truth budget ignores all
+Currently inert post-#93 (broker-truth budget ignores all row
 statuses) but rows accumulate indefinitely in the table.
 
 **Risk:** table size growth without bound; no immediate
 operational impact post-#93.
 
 **Options:**
-- (a) periodic deep-cleanup job (weekly/monthly, deletes or
-  archives `dismissed`/`staged` rows older than N days);
-- (b) extend close-path to transition source + cohort clone rows
-  with proper terminal states (`closed`, `expired_clone`, etc.);
-- (c) shadow-fill cleanup in PR #843 `_commit_fill` transitions
-  clone rows at materialization time.
+- (a) periodic deep-cleanup job (weekly/monthly, archives
+  `dismissed`/`staged` rows older than N days)
+- (b) extend close-path to transition source rows to terminal
+  state (`closed`, `expired`, etc.)
+- (c) post-#97 fix, add cohort-clone cleanup at shadow fill
+  materialization
 
-**Effort:** small (~half day for option a; ~1 day for option b
-or c which require more careful close-path discipline).
+**Effort:** small (~half day for option a; ~1 day for b/c with
+proper close-path discipline).
 
-**Priority:** P3-P4. Defer until either table size becomes
-operational issue or close-path discipline becomes load-bearing
-for future feature.
+**Priority:** P3-P4. Defer until table size becomes operational
+issue or close-path discipline becomes load-bearing for future
+feature.
 
-**#95 — fork.py threshold semantic mismatch** (HIGH)
+**#95 — fork.py threshold semantic mismatch** (HIGH, PARTIAL
+FIX in PR #851)
 
-`policy_lab/fork.py:_filter_for_cohort` (lines 151-174) compares
-`s.get("risk_adjusted_ev")` (a dollar-EV-per-dollar-risk ratio,
-typically 0–2 for healthy trades) against `config.min_score_threshold`
-(designed as a 0–100 score scale). All non-aggressive cohorts
-filter every suggestion out because `risk_adjusted_ev < 50` is
-near-universal. Result: zero conservative or neutral cohort clones
-have ever been written across the entire DB history.
+`_filter_for_cohort` at fork.py:165 originally read
+`risk_adjusted_ev` (0-2 ratio) and compared against
+`min_score_threshold` (50/70 score-scale). Conservative +
+neutral cohorts produced 0 clones for entire DB history across
+all users (verified 2026-05-01). D4 sequence (PR2a/PR2b/PR3)
+was shipped but operationally inert.
 
-**Today's evidence (2026-05-01):** BAC source had
-`risk_adjusted_ev=0.131785`, conservative threshold=70, neutral
-threshold=50 → both filter to 0 clones. The fork function logged
-`{'conservative': 0, 'neutral': 0, 'aggressive': 1}` to job_runs
-yesterday, exactly matching every prior day's pattern.
+**Fix shipped (PR #851, 2026-05-01):**
+1. workflow_orchestrator.py:2961 — persist `score` into
+   sizing_metadata at suggestion-insert time
+2. fork.py:165 — read `sizing_metadata.score` instead of
+   `risk_adjusted_ev` for cohort threshold comparison
 
-**Operational impact:** the entire D4 sequence (PR2a/PR2b/PR3)
-shipped 2026-04-30 is **operationally inert** because its inputs
-don't exist. Shadow cohort comparison data has never been
-generated. `policy_lab_eval` (post-#65 fix) only sees aggressive
-cohort outcomes — the "champion/challenger" architecture is
-single-cohort by accident, not by design.
+**Partial verification (16:00 UTC cycle 2026-05-01):**
+- score=76.9 persisted correctly in sizing_metadata ✓
+- Filter accepted BAC for all 3 cohorts (per policy_decisions) ✓
+- But Policy Lab fork result: {'conservative': 0, 'neutral': 0,
+  'aggressive': 1} — clone INSERT silently failed (see #97)
 
-**Fix options:**
-- (a) Compare against `score` field (0–100 scale) instead of
-  `risk_adjusted_ev`. Single-line change at `fork.py:165-169`.
-  Matches the variable's name (`min_score_threshold`).
-- (b) Recalibrate cohort thresholds to ratio scale (e.g.,
-  conservative=1.5, neutral=0.8, aggressive=0.3). Three
-  `policy_lab_cohorts.policy_config` updates per user. Preserves
-  `risk_adjusted_ev` as the ranking signal (what the comment
-  block says was intended).
+**Status:** Score persistence verified. Filter logic verified.
+Clone INSERT path still broken — keep open until #97 fix
+resolves end-to-end clone production.
 
-**Effort:** ~half day for either option. (a) is a code fix +
-behavioral test; (b) is a SQL UPDATE + threshold re-derivation.
-Recommend (a) — variable naming aligns with score, and `score`
-is the existing 0–100 scale already used elsewhere.
+**#96 — paper_autopilot status update silently bypassed**
+(MEDIUM, reproduced 2x in 24h)
 
-**Doctrine gap surfaced:** PR2a/PR2b/PR3 all asserted shipped
-behavior in tests but no one verified end-to-end production
-output (would have caught zero clones). Candidate for new H6
-doctrine: "before shipping safety logic for a code path, verify
-the code path is exercised in production."
+paper_autopilot_service.py:457 attempts to transition
+trade_suggestions.status from 'pending' to 'staged' after
+autopilot stages a suggestion for execution. The update is
+wrapped in try/except at lines 460-471 that swallows status-
+update failures with logger.warning, no DB-visible alert.
 
-**#96 — paper_autopilot trade_suggestions status-update silently
-bypassed** (MEDIUM-LATENT)
+**Reproduced occurrences:**
+- 2026-04-30: BAC source row stayed 'pending' despite autopilot
+  firing and creating position
+- 2026-05-01: BAC source row stayed 'pending' again, same shape
 
-Yesterday's BAC source `trade_suggestions` row stayed `status='pending'`
-through the entire trading day despite `paper_autopilot.execute`
-having created the position at 16:30:14 UTC. The autopilot's
-status-update at `paper_autopilot_service.py:457`
-(`UPDATE trade_suggestions SET status='staged' WHERE id=...`) is
-wrapped in `try/except Exception` (`:460-471`) that swallows
-failures into a non-fatal `_per_suggestion_failures` list with a
-warning log — no alert fires.
+**Mechanism unclear:** bypass could be exception, async race,
+transaction isolation issue, or routing through non-autopilot
+path entirely. Needs Railway log inspection at the swallow site
++ audit of autopilot status-transition lifecycle.
 
-**Possible root causes (need investigation):**
-- (a) The status update raised silently and got swallowed by the
-  try/except.
-- (b) The 5-day `EXECUTION_MODE='micro_live'` (invalid) routing to
-  internal_paper bypassed the autopilot path entirely; some other
-  handler ingested the suggestion without updating status.
-- (c) A race between autopilot stage and another writer reverting
-  the status.
+**Operational impact:**
+- Pre-#93: contributed to phantom reservations in
+  cash_service.get_deployable_capital
+- Post-#93: operationally inert (broker-truth budget ignores
+  'pending' rows)
+- Still affects observability — operator can't track which
+  suggestions actually executed by status alone
 
-**Operationally inert post-#93:** broker-truth budget no longer
-cares about pending suggestion status, so the immediate budget-
-degradation symptom is gone. But the same status-update bypass
-likely affects other downstream consumers (`policy_decisions`
-joins on status, learning loops filter on status, etc.) — those
-impacts haven't been audited.
+**Recommended fix:** add critical alert at the swallow site
+per H5 doctrine. Identify whether failure is exception or
+no-op-success-but-no-state-change. ~half day investigation,
+~half day fix.
 
-**Effort:** ~half day investigation + small fix once root cause
-identified. Add an alert at `paper_autopilot_service.py:460-471`
-in the swallow path (matches H5b convention for the same file
-at SAFETY-CRITICAL site 236). Detection: if the alert fires more
-than once per week post-deploy, escalate.
+**Priority:** MEDIUM. Promoted from MEDIUM-LATENT after
+second occurrence today.
 
-**Priority:** MEDIUM-LATENT — silent failure that has been
-running for at least 5 days unnoticed; auditing other status-
-update paths is the higher-value follow-on.
+**#97 — fork.py clone INSERT silent failure** (HIGH, blocks
+#95 verification)
+
+Filter at fork.py:165 ACCEPTS BAC for all 3 cohorts (verified
+via policy_decisions empty reason_codes 2026-05-01). But INSERT
+at fork.py:123 silently fails for non-aggressive cohorts. The
+try/except at fork.py:118-129 swallows the error with only
+`logger.warning("policy_lab_fork_clone_error: ...")`, no
+DB-visible alert.
+
+**Likely causes (untested):**
+- Missing NOT NULL field in `_clone_suggestion_for_cohort`
+  return dict (e.g., lineage_version)
+- Unique constraint hit (e.g., (user_id, ticker, cycle_date,
+  cohort_name) collision)
+- Schema drift between clone shape and trade_suggestions table
+
+**Diagnostic needed:** Railway log inspection at the swallow
+site to see actual exception. Once root cause known, fix is
+likely small (add missing field, adjust constraint, or fix
+schema).
+
+**Architectural note:** the swallow-with-warning pattern at
+fork.py:118-129 is the same shape as #98's H5a coverage gap.
+Should add critical alert at the swallow site per H5 doctrine
+as part of the fix.
+
+**Operational impact:** entire D4 sequence (PR2a routing gate,
+PR2b shadow fill simulation, PR3 clone-builder fix) is shipped
+but operationally inert until this fixes. Conservative +
+neutral cohorts produce zero comparison data.
+
+**Effort:** ~half day investigation + small fix; depends on
+actual exception cause.
+
+**#98 — needs_manual_review observability gap** (HIGH,
+PARTIAL FIX in PR #853)
+
+On 2026-05-01 16:45 UTC, BAC close order rejected by Alpaca
+3x with "insufficient options buying power" (required $296,
+available $204). `submit_and_track` at
+alpaca_order_handler.py:226-242 marked order
+status='needs_manual_review' and returned dict (did NOT raise).
+H5a alert at paper_exit_evaluator.py:1226 only fires for raised
+exceptions, so silent. Operator discovered ghost position 5+
+hours later.
+
+**Fix shipped (PR #853, Option C):** loud alert at
+submit_and_track:231 immediately when marking
+status='needs_manual_review'. Catches ALL callers (not just
+paper_exit_evaluator) within seconds.
+
+**Defense-in-depth deferred (Option B):** expand
+ghost_position_sweep to detect stale `needs_manual_review`
+orders linked to open positions. ~half day. Catches any
+needs_manual_review write that escapes Option C's alert path.
+Defer until Option C verifies in production with no recurrence.
+
+**Status:** Option C shipped. Option B follow-up queued.
+
+**Underlying architectural cause:** see #100. The close
+rejection happened because sizing didn't check round-trip BP.
+Option C addresses observability; #100 addresses prevention.
+
+**#100 — round-trip BP check at sizing** (HIGH, IN PROGRESS)
+
+Sizing logic at sizing_engine.py:102 only checks
+`contracts_by_collateral = floor(account_buying_power /
+collateral_required_per_contract)`. No second-pass check that
+`account_buying_power - entry_cost ≥ exit_cost_estimate`. The
+system can size into trades it cannot safely close.
+
+**Today's incident (2026-05-01) is the proof:** BAC entry took
+$292 of $500 OBP, leaving $204. Alpaca's close-side margin gate
+required $296. Position stuck open at broker for 5+ hours.
+
+**Design doc complete:** docs/designs/option_a_round_trip_bp.md
+
+**Implementation in progress (Saturday-Sunday 2026-05-02 to 03):**
+- New helper `estimate_close_bp(legs, strategy_type,
+  entry_premium)`
+- Formula A (entry-premium-based): for *_DEBIT_SPREAD,
+  estimated_close_bp = max_loss_per_contract
+- Sizing engine adds 4th dimension: contracts_by_round_trip
+- safety_factor=1.1 starting calibration with revision plan
+- Single new kwarg at workflow_orchestrator.py:2643
+- Test surface: 3 source-level + 9 helper behavioral + 7 sizing
+  integration + 1 regression query
+
+**Effort refined:** ~half day (was originally estimated 1-2
+days; Formula A eliminates Alpaca quote integration burden).
+
+**Verification path:** regression query against last 30 days
+informs calibration; Monday 2026-05-04 paper-mode cycle
+validates integration; Tuesday's live cycle confirms in
+production.
+
+**Architectural note:** future multi-cohort live routing (#65
+`policy_lab_eval`) may need reservation semantics to prevent
+simultaneous-cohort competition for live capital. Not today's
+problem.
+
+**#101 — STRATEGIES_ALLOWLIST env knob** (MEDIUM, optional
+kill-switch)
+
+Environment variable to restrict scanner emission to specific
+strategy types. Useful as kill-switch during incidents (e.g.,
+"single-leg only after BP-to-close issue") without code
+changes.
+
+**Default:** unset (current behavior — all strategies allowed)
+
+**Format:** comma-separated strategy names, e.g.,
+`STRATEGIES_ALLOWLIST=long_call,long_put`
+
+**Implementation site:** scanner gate in options_scanner.py,
+early-return before strategy emission if not in allowlist.
+
+**Priority:** MEDIUM. Currently inert because Option A (#100)
+addresses the use case structurally. Worth keeping as separate
+backlog item for incident-response flexibility.
+
+**Effort:** half day (env var read + scanner gate + tests).
+
+**#102 — Round-trip safety as sizing invariant** (DOCTRINE)
+
+Add to design principles document (CLAUDE.md or
+docs/design_principles.md):
+
+> "Sizing must verify the position can be safely round-tripped
+> within available buying power, not just that entry fits. For
+> any multi-leg strategy where close requires fresh BP (debit
+> spreads, iron condors, etc.), sizing must reserve sufficient
+> headroom for the close-side margin requirement."
+
+Companion to existing principle "tune thresholds, not strategy
+availability." This principle complements it: when an account
+cannot safely round-trip a strategy, the answer is sizing
+rejection, not strategy disablement.
+
+**Status:** to be added during #100 implementation PR.
+
+**#103 — Regime → strategy selection breadth audit** (LOW)
+
+100% of recent live trades (last 14 days) are
+LONG_CALL_DEBIT_SPREAD. Code supports more types (iron_condor
+function exists at options_scanner.py:1053+) but production mix
+is single-shape.
+
+Possibilities:
+- Regime-driven natural selection (NORMAL regime favors debit
+  spreads): correct behavior
+- Coverage gap in strategy emission logic: bug
+- Threshold calibration too narrow for non-debit-spread
+  strategies: configuration
+
+**Investigation needed:** survey strategy emission across all
+regimes (NORMAL, ELEVATED, CONTRACTION) over historical data.
+Verify other strategies are reachable in their appropriate
+regimes.
+
+**Priority:** LOW. Architectural curiosity, not operational
+blocker.
+
+**Effort:** ~half day investigation. Fix scope depends on
+findings.
 
 ### #72 — Loud-error doctrine + silent-failure catalog
 

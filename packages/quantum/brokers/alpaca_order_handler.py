@@ -239,6 +239,58 @@ def submit_and_track(
         "status": "needs_manual_review",
     }).eq("id", order_id).execute()
 
+    # #98 fix (2026-05-01): emit critical alert immediately. The H5a alert at
+    # paper_exit_evaluator.py:1226 only fires for raised exceptions, but
+    # submit_and_track returns a dict on this path instead. Today's BAC ghost
+    # position incident sat silent for 5+ hours because no alert covered the
+    # dict-return failure mode. This alert catches ALL callers regardless of
+    # how they handle the return value.
+    try:
+        from packages.quantum.observability.alerts import (
+            alert, _get_admin_supabase,
+        )
+        alert(
+            _get_admin_supabase(),
+            user_id=user_id,
+            alert_type="paper_order_marked_needs_manual_review",
+            severity="critical",
+            message=(
+                f"Alpaca rejected order after {MAX_SUBMIT_ATTEMPTS} "
+                f"attempts: {str(last_error)[:200]}"
+            ),
+            metadata={
+                "function_name": "submit_and_track",
+                "order_id": str(order_id),
+                "attempts": MAX_SUBMIT_ATTEMPTS,
+                "num_legs": num_legs,
+                "last_error": str(last_error)[:500],
+                "broker_status": "needs_manual_review",
+                "is_close_order": is_close_order,
+                "consequence": (
+                    "Order will not retry. If this was a close order, the "
+                    "linked paper_position will diverge from broker state — "
+                    "broker may still hold position despite DB intent to "
+                    "close. Manual reconciliation required."
+                ),
+                "operator_action_required": (
+                    "1. Check the linked paper_position.status. If 'open', "
+                    "verify broker state via Alpaca dashboard. "
+                    "2. If broker position is open and intent was close: "
+                    "manually close via Alpaca UI. "
+                    "3. UPDATE paper_positions row to status='closed' with "
+                    "appropriate realized_pl. "
+                    "4. Investigate root cause from last_error (insufficient "
+                    "options buying power, contract no longer tradable, "
+                    "account restriction, position intent mismatch, etc.)."
+                ),
+            },
+        )
+    except Exception:
+        # Alert path failure must NOT break the needs_manual_review marker
+        # write or the function's return contract. Same precedent as H5a
+        # site 9, H5b site 236, and PR #846 execution_router alert site.
+        pass
+
     return {"status": "needs_manual_review", "error": last_error, "attempts": MAX_SUBMIT_ATTEMPTS}
 
 

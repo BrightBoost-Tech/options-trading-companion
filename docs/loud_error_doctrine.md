@@ -256,6 +256,104 @@ including the response body / exception class. The operator's
 
 Migration complexity: medium (~2 hours).
 
+### Anti-pattern 7 — Alerts at exception-raising sites don't catch dict-return failure markers
+
+The H5a/H5b sweep added critical alerts at sites that raise
+exceptions on failure. Production failure modes can also include
+functions that swallow exceptions into dict-return failure
+markers (e.g., `submit_and_track` returns
+`{"status": "needs_manual_review"}` instead of raising).
+
+Both modes need observability. A try/except above a function
+call is no guarantee the called function will raise.
+
+**Pattern:** when auditing for silent-failure sites, distinguish
+between exception-raising and return-value-marking paths.
+Coverage requires alerts on BOTH:
+- At the call site (catches raised exceptions)
+- At the write site of the failure marker (catches dict-return
+  failures, regardless of who calls the function)
+
+**Origin:** 2026-05-01 BAC ghost position incident. PR #853
+addresses by alerting at the marker write site, catching all
+callers regardless of how they handle the return.
+
+**Implementation precedent:** see PR #853, `alpaca_order_handler.py`
+needs_manual_review write site alert.
+
+Migration complexity: small (~1-2 hours per site once the
+write-site pattern is identified).
+
+## Higher-order coverage doctrines
+
+The anti-patterns above target specific code-shape mistakes. The
+doctrines in this section sit one level up — they describe
+verification disciplines and cross-cutting invariants that
+prevent whole classes of silent failures from shipping in the
+first place.
+
+### Verify code path exercised in production before shipping safety logic for it
+
+Three instances surfaced in 2026-04-29 to 2026-05-01 session:
+
+1. **D4-PR3 (PR #844)** corrected a clone-builder symbol-field
+   bug in code that never executed in production (zero shadow
+   cohort clones in entire DB history)
+
+2. **PR2a/PR2b (PRs #842/#843)** shipped routing gates and
+   fill paths for cohort clones that never existed
+
+3. **D4 sequence framing as "30-day broken cohort fan-out"**
+   was based on the assumption that cohort comparison data
+   existed historically. DB query showed zero clones EVER.
+
+**Pattern:** before shipping safety/observability logic for a
+code path, verify the code path is exercised in production via:
+- DB query for the data the code path produces/consumes
+- Log evidence the path executes
+- Audit table entries showing function invocation
+
+**The cost of skipping verification:** safety logic that's
+architecturally correct but operationally inert. Code looks
+right in tests, ships clean, never fires.
+
+**The verification step is cheap.** A simple `SELECT COUNT(*)
+FROM <table> WHERE <conditions>` query at the start of design
+is all that's needed.
+
+**Origin:** 2026-05-01 cohort fan-out diagnostic. Surfaced
+that #95 fork.py threshold semantic mismatch was the upstream
+cause that made D4 sequence inert.
+
+### Operations preserve capital invariants in both directions
+
+When a system models capital as a single number (e.g.,
+`account_buying_power`, `deployable_capital`), verify that
+operations preserve the invariant in BOTH directions of the
+transaction.
+
+Half the BP problems come from forgetting the close requires
+capital too. The entry-side check is the obvious one; the
+exit-side check is the often-missed one.
+
+**Patterns to look for:**
+- Sizing: does it check entry_cost AND close_cost ≤
+  available_capital?
+- Lifecycle: does each state transition preserve total capital
+  conservation?
+- Multi-leg: does the close-side margin recompute match the
+  entry-side reservation?
+- Async: do partial fills preserve invariants between fill
+  events?
+
+**Specific application:** Option A (#100) implements this for
+sizing logic. Sizing now checks
+`entry_cost + close_cost × safety_factor ≤ available_OBP`, not
+just `entry_cost ≤ available_OBP`.
+
+**Origin:** 2026-05-01 BP-to-close architectural diagnostic.
+BAC stuck-close revealed sizing's one-direction check.
+
 ## Valid silent-failure patterns
 
 Not all exception swallowing is a doctrine violation. The following

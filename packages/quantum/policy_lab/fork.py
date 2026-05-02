@@ -115,6 +115,7 @@ def fork_suggestions_for_cohorts(
         # Clone with adjusted sizing
         cloned = 0
         for s in filtered:
+            clone = None
             try:
                 clone = _clone_suggestion_for_cohort(
                     s, cohort_name, config, deployable,
@@ -127,6 +128,49 @@ def fork_suggestions_for_cohorts(
                     f"policy_lab_fork_clone_error: cohort={cohort_name} "
                     f"ticker={s.get('ticker')} error={e}"
                 )
+                # Loud-Error Doctrine v1.0 anti-pattern 4 fix (#97 Phase 1).
+                # Surface the swallowed exception so the underlying root
+                # cause (missing NOT NULL / unique constraint / schema
+                # drift) becomes diagnosable from `risk_alerts` metadata.
+                # Observability-only — no behavioral change to the loop.
+                try:
+                    from packages.quantum.observability.alerts import (
+                        alert, _get_admin_supabase,
+                    )
+                    alert(
+                        _get_admin_supabase(),
+                        alert_type="cohort_clone_insert_failed",
+                        severity="critical",
+                        message=(
+                            f"Cohort {cohort_name} clone insert failed: "
+                            f"{type(e).__name__}"
+                        ),
+                        user_id=user_id,
+                        metadata={
+                            "cohort_name": cohort_name,
+                            "source_suggestion_id": s.get("id"),
+                            "ticker": s.get("ticker") or s.get("symbol"),
+                            "strategy": s.get("strategy"),
+                            "error_class": type(e).__name__,
+                            "error_message": str(e)[:500],
+                            "clone_keys": (
+                                sorted(list(clone.keys()))
+                                if isinstance(clone, dict)
+                                else None
+                            ),
+                            "operator_action_required": (
+                                "Inspect error_class + error_message to "
+                                "determine root cause class (NOT NULL "
+                                "violation / unique constraint / schema "
+                                "drift). Fix to follow in PR addressing "
+                                "#97."
+                            ),
+                        },
+                    )
+                except Exception:
+                    # Alert-write failure → fall through. Per doctrine
+                    # Valid 5 (alert-write recursion prevention).
+                    logger.exception("cohort_clone_alert_write_failed")
 
         created[cohort_name] = cloned
         logger.info(

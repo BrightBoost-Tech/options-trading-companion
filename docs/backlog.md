@@ -188,40 +188,27 @@ was shipped but operationally inert.
 Clone INSERT path still broken — keep open until #97 fix
 resolves end-to-end clone production.
 
-**#96 — paper_autopilot status update silently bypassed**
-(MEDIUM, reproduced 2x in 24h)
+**#96 — paper_autopilot status update silently bypassed** — **CLOSED 2026-05-03**
+Covered by PR #839's H5b sweep. The status-update swallow at
+`paper_autopilot_service.py:460-471` appends to the shared
+`_per_suggestion_failures` list with `stage="status_staged_update"`,
+and the aggregated H5b alert at line 513
+(`alert_type="paper_autopilot_per_suggestion_failed"`,
+severity="warning") fires on that list at end-of-loop. The
+`stages_affected` metadata field surfaces "status_staged_update"
+specifically, so operators querying `risk_alerts` can distinguish this
+swallow site from the line-500 full_execution swallow.
 
-paper_autopilot_service.py:457 attempts to transition
-trade_suggestions.status from 'pending' to 'staged' after
-autopilot stages a suggestion for execution. The update is
-wrapped in try/except at lines 460-471 that swallows status-
-update failures with logger.warning, no DB-visible alert.
+The two BAC reproductions cited in the original entry (2026-04-30,
+2026-05-01) predated full appreciation of H5b's coverage shape.
+Subsequent reproductions produce
+`paper_autopilot_per_suggestion_failed` `risk_alerts` rows with
+`metadata.stages_affected` containing "status_staged_update".
 
-**Reproduced occurrences:**
-- 2026-04-30: BAC source row stayed 'pending' despite autopilot
-  firing and creating position
-- 2026-05-01: BAC source row stayed 'pending' again, same shape
-
-**Mechanism unclear:** bypass could be exception, async race,
-transaction isolation issue, or routing through non-autopilot
-path entirely. Needs Railway log inspection at the swallow site
-+ audit of autopilot status-transition lifecycle.
-
-**Operational impact:**
-- Pre-#93: contributed to phantom reservations in
-  cash_service.get_deployable_capital
-- Post-#93: operationally inert (broker-truth budget ignores
-  'pending' rows)
-- Still affects observability — operator can't track which
-  suggestions actually executed by status alone
-
-**Recommended fix:** add critical alert at the swallow site
-per H5 doctrine. Identify whether failure is exception or
-no-op-success-but-no-state-change. ~half day investigation,
-~half day fix.
-
-**Priority:** MEDIUM. Promoted from MEDIUM-LATENT after
-second occurrence today.
+Operationally inert post-#93 (broker-truth budget ignores pending
+status). Latent observability for downstream consumers
+(`policy_decisions` joins on status, learning loops filtering on
+status) is now in place.
 
 **#97 — fork.py clone INSERT silent failure** (HIGH, blocks
 #95 verification)

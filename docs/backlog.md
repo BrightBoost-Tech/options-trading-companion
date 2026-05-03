@@ -347,23 +347,15 @@ backlog item for incident-response flexibility.
 
 **Effort:** half day (env var read + scanner gate + tests).
 
-**#102 — Round-trip safety as sizing invariant** (DOCTRINE)
-
-Add to design principles document (CLAUDE.md or
-docs/design_principles.md):
-
-> "Sizing must verify the position can be safely round-tripped
-> within available buying power, not just that entry fits. For
-> any multi-leg strategy where close requires fresh BP (debit
-> spreads, iron condors, etc.), sizing must reserve sufficient
-> headroom for the close-side margin requirement."
-
-Companion to existing principle "tune thresholds, not strategy
-availability." This principle complements it: when an account
-cannot safely round-trip a strategy, the answer is sizing
-rejection, not strategy disablement.
-
-**Status:** to be added during #100 implementation PR.
+**#102 — Round-trip safety as sizing invariant (DOCTRINE)** — **CLOSED 2026-05-03**
+Covered by PR #856's "Operations preserve capital invariants in both
+directions" entry in `docs/loud_error_doctrine.md` (the H7 framing).
+That entry explicitly names sizing as the primary "Patterns to look for"
+case (`Sizing: does it check entry_cost AND close_cost ≤
+available_capital?`) and cites Option A (#100) as its concrete
+application, with the BAC ghost-position incident as origin. CLAUDE.md
+Working Style updated with a cross-reference so future operators find
+the doctrine from the system-overview surface.
 
 **#103 — Regime → strategy selection breadth audit** (LOW)
 

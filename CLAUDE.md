@@ -833,6 +833,8 @@ Active priorities are tracked in the ## Backlog section above.
 
 Example anti-pattern (rejected 2026-04-30): after observing CMCSA short_*_credit_spread at 1150% width-to-credit ratio on cheap underlyings, recommended disabling credit spreads at micro tier. Operator correctly rejected this — instead, we raised the spread threshold (#92) and let the existing gates do their job.
 
+**Round-trip safety as sizing invariant.** See `docs/loud_error_doctrine.md` "Operations preserve capital invariants in both directions" (the H7 doctrine) for the principle; PR #100 (round-trip BP at sizing) is the concrete application protecting against the BAC-class ghost-position incident (2026-05-01). Sizing must verify a position can be safely round-tripped within available buying power, not just that entry fits.
+
 
 ## Backlog
 

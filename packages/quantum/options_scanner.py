@@ -80,6 +80,22 @@ EXECUTION_SPREAD_TAKE_FRAC_LIMIT = float(os.getenv("EXECUTION_SPREAD_TAKE_FRAC_L
 # Execution slippage fraction for market orders (default 50% of spread)
 EXECUTION_SPREAD_TAKE_FRAC_MARKET = float(os.getenv("EXECUTION_SPREAD_TAKE_FRAC_MARKET", "0.50"))
 
+# Spread classification thresholds — split spread_too_wide rejections per #106.
+# The spread_pct formula `combo_spread / entry_cost` produces deceptively-large
+# percentages when entry_cost is tiny (e.g., today's PFE: combo=$0.12 / entry=$0.06
+# = 200%, but neither value indicates a real liquidity issue). These thresholds
+# distinguish three cases:
+#   - spread_too_wide_real:  combo_spread > ABSOLUTE_SPREAD_THRESHOLD (real wide)
+#   - entry_cost_too_low:    entry_cost   < MIN_ECONOMIC_ENTRY        (uneconomic)
+#   - spread_too_wide:       both absolute checks pass (boundary case)
+# Tune based on post-deploy rejection_counts distribution.
+ABSOLUTE_SPREAD_THRESHOLD = float(
+    os.getenv("ABSOLUTE_SPREAD_THRESHOLD", "0.20")
+)  # dollars; above = real wide spread
+MIN_ECONOMIC_ENTRY = float(
+    os.getenv("MIN_ECONOMIC_ENTRY", "0.15")
+)  # dollars; below = trade too tiny to be economic
+
 # EV-aware condor grid search configuration
 CONDOR_TARGET_DELTAS = [float(d) for d in os.getenv("CONDOR_TARGET_DELTAS", "0.06,0.08,0.10,0.12,0.15").split(",")]
 CONDOR_WIDTHS = [float(w) for w in os.getenv("CONDOR_WIDTHS", "2.5,5,7.5").split(",")]
@@ -2405,7 +2421,10 @@ def scan_for_opportunities(
                     banned_strategies=banned_strategies,
                 )
                 if not candidates:
-                    rej_stats.record("strategy_hold")
+                    # #105: split rejection. Selector evaluated all
+                    # strategies and none scored above threshold. Distinct
+                    # from the explicit HOLD/CASH verdict below.
+                    rej_stats.record("strategy_hold_no_candidates")
                     return None
                 _multi_strategy_candidates[symbol] = candidates
                 suggestion = candidates[0]
@@ -2444,7 +2463,10 @@ def scan_for_opportunities(
             # -----------------------------------------
 
             if suggestion["strategy"] == "HOLD" or suggestion["strategy"] == "CASH":
-                rej_stats.record("strategy_hold")
+                # #105: split rejection. Selector explicitly verdicted
+                # HOLD/CASH (regime/IV/score gate). Distinct from the
+                # no-candidates branch above.
+                rej_stats.record("strategy_hold_explicit_verdict")
                 return None
 
             # Double check policy (redundant but safe)
@@ -2858,15 +2880,30 @@ def scan_for_opportunities(
                         f"regime={regime_name}",
                         flush=True,
                     )
+                    # #106: classify the rejection — distinguish real wide
+                    # spread (absolute combo > threshold) from tiny-entry-cost
+                    # amplification (entry_cost so small that ANY spread looks
+                    # huge ratio-wise). Both end the trade, but operators see
+                    # accurate signal. PFE today (combo=$0.12, entry=$0.06)
+                    # classifies as entry_cost_too_low; would-be liquid trade
+                    # with combo=$0.30 classifies as spread_too_wide_real;
+                    # neither-extreme cases keep the legacy spread_too_wide.
+                    if combo_width_share > ABSOLUTE_SPREAD_THRESHOLD:
+                        reject_reason = "spread_too_wide_real"
+                    elif entry_cost_share < MIN_ECONOMIC_ENTRY:
+                        reject_reason = "entry_cost_too_low"
+                    else:
+                        reject_reason = "spread_too_wide"
+
                     if hasattr(rej_stats, 'record_with_sample'):
                         sample = {
                             "symbol": symbol,
                             "strategy_key": strategy_key,
                             "spread_debug": debug_spread,
                         }
-                        rej_stats.record_with_sample("spread_too_wide", sample)
+                        rej_stats.record_with_sample(reject_reason, sample)
                     else:
-                        rej_stats.record("spread_too_wide")
+                        rej_stats.record(reject_reason)
                     return None
 
             # H. Unified Scoring

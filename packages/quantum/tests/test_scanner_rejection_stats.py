@@ -338,8 +338,14 @@ class TestRejectionReasonsCovered:
 
         assert 'rej_stats.record("no_chain")' in content
 
-    def test_spread_too_wide_tracked(self):
-        """Verify spread_too_wide rejection is tracked."""
+    def test_spread_rejection_vocabulary_tracked(self):
+        """Verify the post-#106 spread rejection vocabulary is wired.
+
+        After PR #106 split, spread_too_wide became three reason codes:
+        - spread_too_wide_real (real wide spread)
+        - entry_cost_too_low (tiny entry amplifies any spread)
+        - spread_too_wide (boundary case retained for neither-extreme rejections)
+        """
         file_path = os.path.join(
             os.path.dirname(__file__),
             "..",
@@ -349,10 +355,19 @@ class TestRejectionReasonsCovered:
         with open(file_path, "r", encoding="utf-8") as f:
             content = f.read()
 
-        assert 'rej_stats.record("spread_too_wide")' in content
+        # All three new reason names appear at the rejection site
+        assert '"spread_too_wide_real"' in content
+        assert '"entry_cost_too_low"' in content
+        # Boundary case still present
+        assert '"spread_too_wide"' in content
 
-    def test_strategy_hold_tracked(self):
-        """Verify strategy_hold rejection is tracked."""
+    def test_strategy_hold_split_vocabulary_tracked(self):
+        """Verify the post-#105 strategy_hold split vocabulary is wired.
+
+        After PR #105 split, strategy_hold became two reason codes:
+        - strategy_hold_no_candidates (selector returned [])
+        - strategy_hold_explicit_verdict (HOLD/CASH verdict)
+        """
         file_path = os.path.join(
             os.path.dirname(__file__),
             "..",
@@ -362,7 +377,17 @@ class TestRejectionReasonsCovered:
         with open(file_path, "r", encoding="utf-8") as f:
             content = f.read()
 
-        assert 'rej_stats.record("strategy_hold")' in content
+        assert 'rej_stats.record("strategy_hold_no_candidates")' in content
+        assert 'rej_stats.record("strategy_hold_explicit_verdict")' in content
+        # Bare legacy name removed (only substring matches via the new names)
+        import re
+        bare_holds = re.findall(
+            r'rej_stats\.record\("strategy_hold"\)', content
+        )
+        assert bare_holds == [], (
+            f"Bare strategy_hold record should not remain post-#105 split; "
+            f"found: {bare_holds}"
+        )
 
     def test_execution_cost_exceeds_ev_tracked(self):
         """Verify execution_cost_exceeds_ev rejection is tracked."""

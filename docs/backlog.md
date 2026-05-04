@@ -369,6 +369,36 @@ blocker.
 **Effort:** ~half day investigation. Fix scope depends on
 findings.
 
+**#105 — `strategy_hold` lumps two distinct conditions** — **CLOSED 2026-05-04**
+Resolved by PR #<NUM>. `options_scanner.py` recorded
+`rej_stats.record("strategy_hold")` at two distinct sites for distinct
+conditions:
+- Line ~2408: selector returned empty list of candidates
+- Line ~2447: explicit `HOLD`/`CASH` verdict from selector
+
+Split into `strategy_hold_no_candidates` and
+`strategy_hold_explicit_verdict`. Operators can now distinguish whether
+to investigate selector candidate generation versus the HOLD/CASH gate.
+Surfaced by 2026-05-04 scanner pipeline diagnostic (6 strategy_holds
+in single cycle, ambiguous root cause). Unblocks #107 (strategy
+selector low-EV emission investigation needs the disambiguated counts
+to tune meaningfully).
+
+**#106 — `spread_too_wide` misnamed for tiny-entry-cost trades** — **CLOSED 2026-05-04**
+Resolved by PR #<NUM>. The spread formula `combo_spread / entry_cost`
+produces deceptively-large percentages when entry_cost is tiny. Today's
+PFE rejection (combo=$0.12, entry=$0.06 = 200%) was correctly rejected
+(uneconomic trade) but the name suggested a liquidity issue.
+
+Split into three reason codes via classification at the rejection site:
+- `spread_too_wide_real` (combo > $0.20 — actual wide spread)
+- `entry_cost_too_low` (entry < $0.15 — uneconomic trade, today's PFE shape)
+- `spread_too_wide` (boundary case retained — neither absolute threshold triggered)
+
+Tunable via `ABSOLUTE_SPREAD_THRESHOLD` and `MIN_ECONOMIC_ENTRY` module
+constants (env-overridable). Operationally inert — same trades accepted/
+rejected as before; operators see accurate signal in `rejection_counts`.
+
 ### #72 — Loud-error doctrine + silent-failure catalog
 
 **Phase 1 (doctrine + catalog) complete 2026-04-27.**

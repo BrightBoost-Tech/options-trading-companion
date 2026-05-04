@@ -284,6 +284,52 @@ needs_manual_review write site alert.
 Migration complexity: small (~1-2 hours per site once the
 write-site pattern is identified).
 
+### Anti-pattern 8 — Intermediate wrapper drops fields the caller depends on
+
+When a service-layer fix introduces a dependency on a NEW field from
+an upstream provider, that field must traverse every intermediate
+wrapper between provider and consumer. A whitelist-style wrapper that
+hand-builds its return dict will silently drop fields the caller now
+needs — no exception, no log, just `None` flowing through. The
+consumer's safest-default branch then takes over and the fix appears
+to ship without taking effect.
+
+Each layer in isolation looks correct: the upstream API returns the
+field, the new helper coerces it correctly, the consumer falls back
+gracefully when the field is absent. The defect is in the seam
+between layers.
+
+**Example:** PR #849 (#93 broker-truth fix) moved
+`cash_service.get_deployable_capital` to read Alpaca
+`options_buying_power` directly via a new helper. The helper called
+`AlpacaClient.get_account()` which had a hand-built return dict
+listing equity, buying_power, etc. — but NOT
+`options_buying_power`. The helper always read `None` and the
+consumer fell back to the stale `paper_baseline_capital` for 5 days.
+Surfaced 2026-05-04 by manual diagnostic, not by alert.
+
+**Pattern:** any time a fix introduces a NEW field dependency on an
+upstream provider, audit the WHOLE chain end-to-end. Whitelist-style
+wrappers (hand-built return dicts) are the high-risk shape. Forwarding
+wrappers (return the upstream object directly) don't have this
+failure mode but lose type-narrowing and explicit-contract benefits.
+
+**Detection:**
+- Integration tests that exercise the new field through the real
+  wrapper chain catch this at PR time.
+- Source-level guards that assert the wrapper exposes the field
+  catch regressions. Precedent:
+  `test_alpaca_client_get_account_wrapper.py` shipped in PR #864.
+- Defense-in-depth: alert at the consumer's fallback site so future
+  drops surface within one cycle. Precedent: PR #865.
+
+**Origin:** 2026-05-04 OBP-divergence diagnostic. Fixed by PR #864
+(field added to wrapper) + PR #865 (alert at cash_service fallback).
+
+Migration complexity: small (~30 min per wrapper to identify caller
+fields). Audit pattern: grep callers of the wrapper, list fields
+they read, diff against the wrapper's whitelist.
+
 ## Higher-order coverage doctrines
 
 The anti-patterns above target specific code-shape mistakes. The
@@ -353,6 +399,52 @@ just `entry_cost ≤ available_OBP`.
 
 **Origin:** 2026-05-01 BP-to-close architectural diagnostic.
 BAC stuck-close revealed sizing's one-direction check.
+
+### Persistent worker deploys ≠ code restart
+
+Long-running workers (RQ, APScheduler) on Railway do NOT auto-reload
+on code deploy. The deploy ships a new image to the service slot,
+but the existing worker process keeps executing the prior image's
+code until it is explicitly restarted. A PR that ships, gets a green
+deploy, and runs in CI is NOT the same as that PR's code being
+executed by the production worker.
+
+The diagnostic shape is distinctive: "PR shipped, deployment shows
+SUCCESS, but production behavior unchanged." Almost always the
+worker hasn't recycled. Wasted hours come from re-reading the diff
+looking for a bug that isn't there.
+
+**Pattern:** any PR that touches code path X must verify that the
+process running code path X has been restarted post-deploy before
+declaring the fix verified. Validation cycles before restart are
+running the OLD code and produce misleading evidence — both
+"unchanged" (suggests fix didn't work) and "changed" (suggests
+correlation with something else) are unreliable signals.
+
+**Verification step (cheap):** check Railway deployment status via
+`mcp__railway-mcp-server__list-deployments` AND the worker's most
+recent boot timestamp. If `last_deployment_at > worker_boot_time`,
+the deploy hasn't propagated to that worker yet. For the worker
+service specifically, deploy state of `DEPLOYING` (vs `SUCCESS`)
+means the new image is shipping but isn't running.
+
+**Operator-side mitigation:** if the worker doesn't restart on its
+own within the expected window (typically <5 min for image swap on
+Railway), trigger explicit restart via Railway MCP. The deploy step
+ships the image; the restart applies it.
+
+**Origin:** 2026-05-04 OBP-fix verification incident. PR #864
+("PR A") was thought stale at 17:46 UTC because the OBP reading
+hadn't moved. Diagnostic via Railway MCP showed the deploy was in
+DEPLOYING state, not SUCCESS — the 17:46 cycle ran on PR #862's
+image. Once #864 finished deploying ~5 minutes later, the 17:54
+cycle correctly read $417.75. No code defect; pure deploy-timing
+gap dressed up as a fix-validity question.
+
+**Scope:** affects RQ workers (`worker.railway.internal`),
+APScheduler-resident jobs, any long-running process on Railway.
+Does NOT affect FastAPI request handlers, which re-instantiate per
+request from the deployed image.
 
 ## Valid silent-failure patterns
 

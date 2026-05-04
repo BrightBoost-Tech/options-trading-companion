@@ -274,43 +274,26 @@ Defer until Option C verifies in production with no recurrence.
 rejection happened because sizing didn't check round-trip BP.
 Option C addresses observability; #100 addresses prevention.
 
-**#100 — round-trip BP check at sizing** (HIGH, IN PROGRESS)
+**#100 — round-trip BP check at sizing** — **CLOSED 2026-05-04**
+Resolved by PR #858 (Option A — Formula A entry-premium-based estimator).
+Sizing engine now computes `contracts_by_round_trip` as a 4th sizing
+dimension via `estimate_close_bp(legs, strategy_type, entry_premium)`;
+for *_DEBIT_SPREAD, `estimated_close_bp = max_loss_per_contract` with
+`safety_factor=1.1` starting calibration. Wired through
+`workflow_orchestrator.py:2643` via a single new kwarg. Test surface
+landed: 3 source-level + 9 helper behavioral + 7 sizing integration +
+1 regression query.
 
-Sizing logic at sizing_engine.py:102 only checks
-`contracts_by_collateral = floor(account_buying_power /
-collateral_required_per_contract)`. No second-pass check that
-`account_buying_power - entry_cost ≥ exit_cost_estimate`. The
-system can size into trades it cannot safely close.
+**Origin incident (2026-05-01):** BAC entry took $292 of $500 OBP,
+leaving $204. Alpaca's close-side margin gate required $296. Position
+stuck open at broker for 5+ hours. Doctrine entry (#102) plus this
+sizing gate (#100) close the loop on round-trip safety as a sizing
+invariant.
 
-**Today's incident (2026-05-01) is the proof:** BAC entry took
-$292 of $500 OBP, leaving $204. Alpaca's close-side margin gate
-required $296. Position stuck open at broker for 5+ hours.
-
-**Design doc complete:** docs/designs/option_a_round_trip_bp.md
-
-**Implementation in progress (Saturday-Sunday 2026-05-02 to 03):**
-- New helper `estimate_close_bp(legs, strategy_type,
-  entry_premium)`
-- Formula A (entry-premium-based): for *_DEBIT_SPREAD,
-  estimated_close_bp = max_loss_per_contract
-- Sizing engine adds 4th dimension: contracts_by_round_trip
-- safety_factor=1.1 starting calibration with revision plan
-- Single new kwarg at workflow_orchestrator.py:2643
-- Test surface: 3 source-level + 9 helper behavioral + 7 sizing
-  integration + 1 regression query
-
-**Effort refined:** ~half day (was originally estimated 1-2
-days; Formula A eliminates Alpaca quote integration burden).
-
-**Verification path:** regression query against last 30 days
-informs calibration; Monday 2026-05-04 paper-mode cycle
-validates integration; Tuesday's live cycle confirms in
-production.
-
-**Architectural note:** future multi-cohort live routing (#65
-`policy_lab_eval`) may need reservation semantics to prevent
-simultaneous-cohort competition for live capital. Not today's
-problem.
+**Architectural note (carried forward):** future multi-cohort live
+routing (#65 `policy_lab_eval`) may need reservation semantics to
+prevent simultaneous-cohort competition for live capital — not blocked
+by anything today, just a forward-looking pointer.
 
 **#101 — STRATEGIES_ALLOWLIST env knob** (MEDIUM, optional
 kill-switch)

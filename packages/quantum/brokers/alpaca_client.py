@@ -200,12 +200,22 @@ class AlpacaClient:
     def get_account(self) -> Dict[str, Any]:
         """Account summary: balance, buying power, equity, PDT status."""
         acct = self._call_with_retry(self._client.get_account)
+        # `options_buying_power` uses None-preserving coercion (rather than
+        # the `or 0` style applied to `daytrading_buying_power` above)
+        # because `equity_state.get_alpaca_options_buying_power` (PR #849
+        # for #93) explicitly distinguishes None ("field absent / no
+        # options approval") from a valid 0.0 ("approved but zero BP
+        # available right now"). Coercing None → 0.0 here would silently
+        # mask the missing-field signal that helper relies on.
+        _obp = acct.options_buying_power
+        options_buying_power = float(_obp) if _obp is not None else None
         return {
             "account_id": str(acct.id),
             "status": str(acct.status),
             "equity": float(acct.equity),
             "cash": float(acct.cash),
             "buying_power": float(acct.buying_power),
+            "options_buying_power": options_buying_power,
             "portfolio_value": float(acct.portfolio_value),
             "pattern_day_trader": acct.pattern_day_trader,
             "daytrade_count": int(acct.daytrade_count),

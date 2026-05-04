@@ -245,34 +245,40 @@ neutral cohorts produce zero comparison data.
 **Effort:** ~half day investigation + small fix; depends on
 actual exception cause.
 
-**#98 — needs_manual_review observability gap** (HIGH,
-PARTIAL FIX in PR #853)
+**#98 — needs_manual_review observability gap** — **CLOSED 2026-05-04**
+Both Option C (write-site alert) and Option B (recurring sweep catch) shipped.
 
-On 2026-05-01 16:45 UTC, BAC close order rejected by Alpaca
-3x with "insufficient options buying power" (required $296,
-available $204). `submit_and_track` at
-alpaca_order_handler.py:226-242 marked order
-status='needs_manual_review' and returned dict (did NOT raise).
-H5a alert at paper_exit_evaluator.py:1226 only fires for raised
-exceptions, so silent. Operator discovered ghost position 5+
-hours later.
+**Origin:** 2026-05-01 16:45 UTC BAC close order rejected by Alpaca 3x
+with "insufficient options buying power" (required $296, available $204).
+`submit_and_track` at `alpaca_order_handler.py:226-242` marked order
+status='needs_manual_review' and returned dict (did NOT raise). H5a alert
+at `paper_exit_evaluator.py:1226` only fires for raised exceptions, so
+silent. Operator discovered ghost position 5+ hours later.
 
-**Fix shipped (PR #853, Option C):** loud alert at
-submit_and_track:231 immediately when marking
-status='needs_manual_review'. Catches ALL callers (not just
-paper_exit_evaluator) within seconds.
+**Option C shipped (PR #853, 2026-05-01):** loud alert at
+`submit_and_track:231` immediately when marking status='needs_manual_review'.
+Catches ALL callers within seconds.
 
-**Defense-in-depth deferred (Option B):** expand
-ghost_position_sweep to detect stale `needs_manual_review`
-orders linked to open positions. ~half day. Catches any
-needs_manual_review write that escapes Option C's alert path.
-Defer until Option C verifies in production with no recurrence.
+**Option B shipped (PR #<NUM>, 2026-05-04):** extended `ghost_position_sweep`
+with a new check — paper_orders rows in `status='needs_manual_review'` linked
+to open `paper_positions` past 1-hour staleness. New `alert_type=
+'stale_manual_review_with_open_position'` at warning severity. 1-hour
+idempotency gate via `metadata->>order_id` JSON path filter prevents flooding
+risk_alerts at sweep cadence (alpaca_order_sync runs every 5 min; without
+the gate, BAC's 3-day stuck duration would have produced ~864 alerts).
 
-**Status:** Option C shipped. Option B follow-up queued.
+Defense-in-depth catch when Option C's write-site alert is missed in the
+moment. Sweep surfaces persistent stuck state on every cycle until operator
+clears it. 5 structural + 4 behavioral tests guard alert wiring + idempotency.
 
-**Underlying architectural cause:** see #100. The close
-rejection happened because sizing didn't check round-trip BP.
-Option C addresses observability; #100 addresses prevention.
+Operationally inert post-#100 (Option A protects against the Friday-class
+sizing failure that produced these stuck states), but the class is latent
+for non-Friday failure modes: broker outages, non-BP rejections, manual
+operator actions that orphan rows, etc.
+
+**Underlying architectural cause:** see #100. The close rejection happened
+because sizing didn't check round-trip BP. Options B and C address
+observability; #100 addresses prevention.
 
 **#100 — round-trip BP check at sizing** — **CLOSED 2026-05-04**
 Resolved by PR #858 (Option A — Formula A entry-premium-based estimator).

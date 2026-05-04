@@ -835,6 +835,10 @@ Example anti-pattern (rejected 2026-04-30): after observing CMCSA short_*_credit
 
 **Round-trip safety as sizing invariant.** See `docs/loud_error_doctrine.md` "Operations preserve capital invariants in both directions" (the H7 doctrine) for the principle; PR #100 (round-trip BP at sizing) is the concrete application protecting against the BAC-class ghost-position incident (2026-05-01). Sizing must verify a position can be safely round-tripped within available buying power, not just that entry fits.
 
+**Persistent worker deploys ≠ code restart.** See `docs/loud_error_doctrine.md` "Persistent worker deploys ≠ code restart" (the H8 doctrine). RQ + APScheduler workers on Railway do not auto-reload on code deploy — the new image ships to the service slot but the existing process keeps running the prior image. Any PR touching worker-resident code requires explicit "verify worker restarted" before validating the fix. Diagnostic shape: "PR shipped, deploy SUCCESS, behavior unchanged" almost always means the worker hasn't recycled yet. Origin: 2026-05-04 OBP-fix verification incident (PR #864 appeared stale at 17:46 UTC; was actually still in DEPLOYING).
+
+**Wrapper drift on field-dependency introductions.** See `docs/loud_error_doctrine.md` Anti-pattern 8. When a fix introduces a NEW field dependency on an upstream provider, audit the WHOLE wrapper chain end-to-end — hand-built whitelist wrappers silently drop new fields and consumers fall through to safe defaults without alerting. Each layer in isolation looks correct; the defect is in the seam between layers. Origin: PR #849 (#93 broker-truth fix) took 5 days to take effect because `alpaca_client.py:200-225` dropped `options_buying_power`; fixed by PR #864 + alert at fallback site (PR #865).
+
 
 ## Backlog
 

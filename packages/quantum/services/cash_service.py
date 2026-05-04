@@ -52,7 +52,59 @@ class CashService:
         # connection). Returns 0.0 if no baseline configured — caller's
         # `CapitalScanPolicy.can_scan` then skips the cycle, which is the
         # safe failure mode.
-        return self._read_paper_baseline(user_id)
+        paper_baseline = self._read_paper_baseline(user_id)
+
+        # Loud-Error Doctrine v1.0 anti-pattern 2 fix (#849 follow-up B).
+        # The broker-truth read failed and we're substituting a stale
+        # baseline. This was silent for 3 days post-#849 (alpaca_client
+        # wrapper dropped options_buying_power; PR A fixes that). Even
+        # post-PR-A, this fallback can fire on alpaca-py version skew,
+        # account-side options-approval revocation, or transient API
+        # outage. Surface the substitution so the operator sees stale-
+        # data operation before it drives a sizing decision.
+        try:
+            from packages.quantum.observability.alerts import (
+                alert, _get_admin_supabase,
+            )
+            alert(
+                _get_admin_supabase(),
+                alert_type="cash_service_alpaca_obp_fallback",
+                severity="warning",
+                message=(
+                    f"cash_service.get_deployable_capital: broker-truth OBP "
+                    f"read returned None; fell back to paper_baseline_capital="
+                    f"${paper_baseline:.2f}. Helper failure may indicate "
+                    f"alpaca_client wrapper drift, alpaca-py version skew, "
+                    f"or options_approved_level=0 at broker."
+                ),
+                user_id=user_id,
+                metadata={
+                    "function_name": "get_deployable_capital",
+                    "paper_baseline_capital": paper_baseline,
+                    "fallback_reason": "alpaca_options_buying_power_returned_none",
+                    "consequence": (
+                        "Sizing decisions this cycle use stale baseline "
+                        "instead of live OBP. Over-reads possible (permissive "
+                        "direction); Friday-class shape latent if "
+                        "round_trip_required falls in (live_obp, baseline] "
+                        "window."
+                    ),
+                    "operator_action_required": (
+                        "Inspect equity_state.get_alpaca_options_buying_power "
+                        "warning logs. Common causes: alpaca_client wrapper "
+                        "drops options_buying_power field (PR A 2026-05-04), "
+                        "alpaca-py version skew, account permissions changed "
+                        "at broker. While this fires, sizing uses stale "
+                        "baseline — Friday-class incident shape is latent."
+                    ),
+                },
+            )
+        except Exception:
+            # Alert-write failure → fall through. Per doctrine Valid 5
+            # (alert-write recursion prevention).
+            logger.exception("cash_service_obp_fallback_alert_write_failed")
+
+        return paper_baseline
 
     def _read_paper_baseline(self, user_id: str) -> float:
         """Read `paper_baseline_capital` from `v3_go_live_state` regardless

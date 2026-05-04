@@ -369,6 +369,31 @@ blocker.
 **Effort:** ~half day investigation. Fix scope depends on
 findings.
 
+**#104 — RejectionStats coverage audit of `_process_symbol_multi`** — **CLOSED 2026-05-04**
+Resolved by PR #<NUM>. Loud-Error Doctrine v1.0 anti-pattern 4 (per-iteration
+swallow in tight loops) requires every early-return path inside the scanner's
+per-symbol pipeline to record a meaningful rejection reason via `rej_stats`.
+
+**Audit conducted against post-#866 source.**
+
+`process_symbol` (line 2257): all 26 `return None` paths verified instrumented
+(PR #866 closed the last two via #105/#106 splits). Source-level guard added
+(`test_process_symbol_returns_are_all_instrumented`) to detect regression
+when new gates are introduced.
+
+`_process_symbol_multi` (line 3200): one silent return at line 3219 —
+`if len(cands) <= 1: return None` when the selector produced ≤1 candidate
+so no fallback retry is possible. The primary's rejection reason was already
+counted by `process_symbol`, but there was no counter for "multi-strategy
+mechanism couldn't help because no fallbacks existed." Distinct from
+`all_strategies_rejected` which means fallbacks WERE tried and all failed.
+
+Fix: added `rej_stats.record("no_fallback_strategies_available")` at the
+silent site. Observability-only — same trades accepted/rejected as before.
+Operators can now distinguish how often the multi-strategy mechanism added
+value (`all_strategies_rejected` count) vs how often it was inert
+(`no_fallback_strategies_available` count) per cycle.
+
 **#105 — `strategy_hold` lumps two distinct conditions** — **CLOSED 2026-05-04**
 Resolved by PR #<NUM>. `options_scanner.py` recorded
 `rej_stats.record("strategy_hold")` at two distinct sites for distinct

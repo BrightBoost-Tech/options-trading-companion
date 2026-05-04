@@ -3216,6 +3216,18 @@ def scan_for_opportunities(
         # Primary strategy failed — use the candidates list stashed by process_symbol
         cands = _multi_strategy_candidates.get(sym, [])
         if len(cands) <= 1:
+            # #104: instrument silent return. Primary's rejection reason is
+            # already counted upstream by process_symbol; this counter measures
+            # how often the multi-strategy mechanism couldn't help because no
+            # fallback strategies were available. Two sub-cases collapse here:
+            #  (a) cands == []      — primary failed before line 2429 populated
+            #                         _multi_strategy_candidates (chain not
+            #                         loaded, HOLD/CASH verdict, etc.)
+            #  (b) cands == [primary] — selector only suggested one strategy
+            # Both indicate "multi-strategy mechanism added no value for this
+            # symbol on this cycle." Distinct from all_strategies_rejected,
+            # which means fallbacks WERE tried and all failed.
+            rej_stats.record("no_fallback_strategies_available")
             return None  # No fallbacks available
 
         fallback_cands = cands[1:]

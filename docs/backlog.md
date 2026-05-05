@@ -262,40 +262,49 @@ status). Latent observability for downstream consumers
 (`policy_decisions` joins on status, learning loops filtering on
 status) is now in place.
 
-**#97 — fork.py clone INSERT silent failure** (HIGH, blocks
-#95 verification)
+**#97 — fork.py clone INSERT silent failure** — **CLOSED 2026-05-05**
 
-Filter at fork.py:165 ACCEPTS BAC for all 3 cohorts (verified
-via policy_decisions empty reason_codes 2026-05-01). But INSERT
-at fork.py:123 silently fails for non-aggressive cohorts. The
-try/except at fork.py:118-129 swallows the error with only
-`logger.warning("policy_lab_fork_clone_error: ...")`, no
-DB-visible alert.
+Two-phase resolution following Loud-Error Doctrine v1.0 anti-pattern 4
+(silent-failure → loud-failure → diagnose → fix) lifecycle.
 
-**Likely causes (untested):**
-- Missing NOT NULL field in `_clone_suggestion_for_cohort`
-  return dict (e.g., lineage_version)
-- Unique constraint hit (e.g., (user_id, ticker, cycle_date,
-  cohort_name) collision)
-- Schema drift between clone shape and trade_suggestions table
+**Phase 1 (PR #859, 2026-05-02):** alert wiring at the cloner's
+exception path. New `cohort_clone_insert_failed` critical alert
+captures `error_class`, `error_message`, `clone_keys`, `cohort_name`,
+`ticker` for next-cycle root-cause classification. Observability-only;
+no behavioral change.
 
-**Diagnostic needed:** Railway log inspection at the swallow
-site to see actual exception. Once root cause known, fix is
-likely small (add missing field, adjust constraint, or fix
-schema).
+**Phase 2 (PR #<NUM>, 2026-05-05):** root cause classified from
+production alert metadata. First production fire arrived 2026-05-05
+16:00:18Z (today's CSX cycle, ~3h after the suggestions_open
+producing the source candidate). Both alert rows (conservative +
+neutral cohorts) showed identical signature:
+- `error_class`: APIError (PostgreSQL 23505 unique violation)
+- `constraint`: `idx_trade_suggestions_trace_id_unique`
+- `error_message`: same source `trace_id` collided across cohort
+  inserts
 
-**Architectural note:** the swallow-with-warning pattern at
-fork.py:118-129 is the same shape as #98's H5a coverage gap.
-Should add critical alert at the swallow site per H5 doctrine
-as part of the fix.
+Schema verification confirmed `trace_id` is row-unique by design
+(partial unique index on non-null; column has
+`DEFAULT gen_random_uuid()`). Lineage tracking lives in separate
+columns (`lineage_hash`, `lineage_sig`, `lineage_version`,
+`decision_lineage`) — those are intentionally inherited across
+clones. The cloner's `"trace_id": source.get("trace_id")` at
+`fork.py:287` was the bug.
 
-**Operational impact:** entire D4 sequence (PR2a routing gate,
-PR2b shadow fill simulation, PR3 clone-builder fix) is shipped
-but operationally inert until this fixes. Conservative +
-neutral cohorts produce zero comparison data.
+Fix: `"trace_id": str(uuid.uuid4())` per clone — single line.
+Phase 1's alert wiring retained as the regression canary. 11 new
+tests + 4 existing fork regression tests all pass.
 
-**Effort:** ~half day investigation + small fix; depends on
-actual exception cause.
+**Doctrine validation:** the alert-then-diagnose-then-fix lifecycle
+worked end-to-end. Phase 1 alert sat dormant Sat→Mon→Tue afternoon
+(zero fires); first fire arrived within hours of CSX surfacing a
+successful primary candidate; full root cause classified from
+metadata in a single SQL query; fix shipped same day.
+
+**Unblocks:** #95 verification can now confirm cohort comparison
+data accumulates (3 cohorts producing rows in `trade_suggestions`
+per fork). Any next-cycle CSX-shape candidate produces 3 cohort
+clones inserting cleanly.
 
 **#98 — needs_manual_review observability gap** — **CLOSED 2026-05-04**
 Both Option C (write-site alert) and Option B (recurring sweep catch) shipped.

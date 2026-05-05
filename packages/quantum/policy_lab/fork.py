@@ -8,6 +8,7 @@ adjusted sizing and filtering per PolicyConfig.
 
 import logging
 import math
+import uuid
 from datetime import datetime, timezone, date
 from typing import Dict, List, Optional, Any
 
@@ -284,7 +285,15 @@ def _clone_suggestion_for_cohort(
         "cohort_name": cohort_name,
         "cycle_date": source.get("cycle_date"),
         "legs_fingerprint": cohort_fp,
-        "trace_id": source.get("trace_id"),
+        # #97 Phase 2 fix: trace_id is row-unique per
+        # idx_trade_suggestions_trace_id_unique (partial unique on
+        # non-null). Inheriting source's trace_id collided across
+        # cohort clones — first INSERT took the trace_id, second
+        # failed with PostgreSQL 23505 unique violation. Generate
+        # fresh per clone. Lineage tracking is intentionally retained
+        # via decision_lineage / lineage_hash / lineage_sig /
+        # lineage_version (those ARE inherited correctly below).
+        "trace_id": str(uuid.uuid4()),
         "model_version": source.get("model_version"),
         "features_hash": source.get("features_hash"),
         "regime": source.get("regime"),

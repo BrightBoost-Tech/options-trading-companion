@@ -1547,7 +1547,7 @@ async def task_validation_preflight(
         }
 
 
-@router.post("/validation/init-window", status_code=200)
+@router.post("/validation/init-window", status_code=202)
 @limiter.limit("20/minute")
 async def task_validation_init_window(
     request: Request,
@@ -1555,7 +1555,7 @@ async def task_validation_init_window(
     auth: TaskSignatureResult = Depends(verify_task_signature("tasks:validation_init_window"))
 ):
     """
-    v4-L1F: Ensure forward checkpoint window is initialized.
+    Triggers v4-L1F forward-window initialization job.
 
     Auth: Requires v4 HMAC signature with scope 'tasks:validation_init_window'.
 
@@ -1564,45 +1564,40 @@ async def task_validation_init_window(
 
     Requirements:
     - Requires specific user_id (not "all")
-    - Must be in paper mode
-    - Respects pause gate
-    - Idempotent once per day (UTC bucket)
+    - Must be in paper mode (gate enforced before enqueue)
+    - Respects pause gate (gate enforced before enqueue)
+    - Idempotent once per UTC hour bucket
+
+    Migrated 2026-05-04 from inline sync execution (#71 PR-3). The mode +
+    pause gates remain at the endpoint to reject before enqueue and avoid
+    producing noisy "queued then failed" job_runs rows. The work itself
+    runs in the queued handler at
+    `packages/quantum/jobs/handlers/validation_init_window.py`.
+
+    Failure observability via job_runs.status='failed' replaces the
+    pre-migration custom error envelope.
     """
     user_id = payload.user_id
 
-    # Check gates
+    # Check gates BEFORE enqueue — paper-mode + paused. Rejects early so
+    # operator gets immediate response (not "queued, then failed"), and
+    # job_runs isn't polluted with rows that were never going to run.
     gate_error = _check_readiness_hardening_gates(user_id)
     if gate_error:
         return gate_error
 
-    # Idempotency check
     bucket_date = datetime.now(timezone.utc).date().isoformat()
     idempotency_key = _readiness_hardening_idempotency_key("init-window", user_id)
-
-    try:
-        from packages.quantum.jobs.handlers.utils import get_admin_client
-        from packages.quantum.services.go_live_validation_service import GoLiveValidationService
-
-        supabase = get_admin_client()
-        service = GoLiveValidationService(supabase)
-
-        result = service.ensure_forward_window_initialized(user_id)
-
-        return {
-            **result,
-            "idempotency_key": idempotency_key,
-            "bucket_date": bucket_date,
-            "as_of": datetime.now(timezone.utc).isoformat()
-        }
-
-    except Exception as e:
-        logger.error(f"Init window failed for user {user_id}: {e}")
-        return {
-            "status": "error",
-            "error": str(e),
-            "user_id": user_id,
-            "idempotency_key": idempotency_key
-        }
+    job_payload: Dict[str, Any] = {
+        "user_id": user_id,
+        "date": bucket_date,
+    }
+    return enqueue_job_run(
+        job_name="validation_init_window",
+        idempotency_key=idempotency_key,
+        payload=job_payload,
+        force_rerun=payload.force_rerun,
+    )
 
 
 @router.post("/paper/exit-evaluate", status_code=202)

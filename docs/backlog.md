@@ -92,6 +92,28 @@ observability trace. Migrate affected handlers to the `enqueue_job_run`
 pattern matching reliable peers. Effort: medium (audit + 1 PR per
 affected endpoint). Source: 2026-04-26 morning diagnostic.
 
+**PR-1 shipped 2026-05-04** (audit only, PR #<NUM>). Findings at
+`docs/rq_dispatch_audit_2026_05_04.md`. Inventory:
+- 38 total task endpoints (22 public + 16 internal)
+- 30 already async (canonical `enqueue_job_run` pattern)
+- 8 sync; **5 are migration candidates**, 3 deferred (intentional
+  sync per docstring: /paper/process-orders, /validation/shadow-eval,
+  /validation/preflight)
+
+Recommended PR-2 target: `/tasks/policy-lab/eval` (Tier 1: LOW risk,
+HIGH value, ~1h effort). Handler at
+`packages/quantum/jobs/handlers/policy_lab_eval.py` already exists; the
+migration is a 1-hour endpoint body swap. This is the original
+CLAUDE.md "documented blind spot" case — APScheduler fires the
+endpoint daily at 16:30 CT, work runs inline against the request
+thread, failures produce no `job_runs` trace.
+
+Subsequent migrations (PR-3 through PR-7): `/validation/init-window`,
+`/validation/cohort-eval`, `/validation/autopromote-cohort`
+(includes idempotency redesign PR), `/train-learning-v3` (largest,
+needs per-user decomposition). Total scope: 6 PRs across 5 endpoint
+migrations + 1 idempotency redesign.
+
 **#93 — deployable_capital reads stale Plaid CUR:USD +
 paper_autopilot status bypass** (HIGH, FIXED in PR #850)
 

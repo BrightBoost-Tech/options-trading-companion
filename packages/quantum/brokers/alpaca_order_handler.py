@@ -674,16 +674,29 @@ def ghost_position_sweep(
     supabase,
     user_id: str,
     min_age_seconds: int = 600,
+    stale_review_min_seconds: int = 3600,
 ) -> Dict[str, Any]:
     """
     Leg-level drift sweep: find DB open positions whose OCC legs are not
     present on Alpaca. Writes a severity=warn risk_alert per ghost position.
 
+    Also (per #98 Option B) finds paper_orders rows in needs_manual_review
+    state linked to open paper_positions past `stale_review_min_seconds`
+    staleness. Defense-in-depth catch for the 2026-05-01 BAC ghost-position
+    incident shape — Option C's write-site alert (PR #853) catches these
+    at creation; this sweep is the recurring catch when that alert is
+    missed in the moment.
+
     Gated by the caller (RECONCILE_POSITIONS_ENABLED env var). `min_age_seconds`
     protects entries that just filled on Alpaca but whose position row is still
-    catching up (default 10 minutes).
+    catching up (default 10 minutes). `stale_review_min_seconds` (default 1h)
+    gives Option C's alert + operator time to clear the state before this
+    recurring catch fires. Idempotency: at most one alert per stuck order
+    per hour to avoid flooding risk_alerts at sweep cadence.
 
-    Returns {ghost_count, positions_checked, alpaca_leg_count, ghosts: [...]}.
+    Returns {ghost_count, positions_checked, alpaca_leg_count, ghosts,
+    stale_review_orders_checked, stale_review_alerts_fired,
+    stale_review_alerts}.
     """
     from datetime import datetime, timezone, timedelta
 
@@ -769,9 +782,143 @@ def ghost_position_sweep(
                 f"[GHOST_SWEEP] Failed to write risk_alert for {g['position_id'][:8]}: {alert_err}"
             )
 
+    # ─────────────────────────────────────────────────────────────────────
+    # #98 Option B: stale needs_manual_review orders linked to open positions
+    #
+    # Defense-in-depth catch for the 2026-05-01 BAC incident shape. Option C
+    # (PR #853) alerts at the moment submit_and_track marks an order
+    # needs_manual_review; this sweep surfaces the persistent stuck state
+    # if that alert was missed in the moment. BAC sat in needs_manual_review
+    # with an open position from Friday 16:45 UTC to Monday 13:52 UTC — this
+    # check would have fired hourly through that window.
+    # ─────────────────────────────────────────────────────────────────────
+    open_position_map = {pos["id"]: pos for pos in open_positions if pos.get("id")}
+
+    stale_cutoff = (
+        datetime.now(timezone.utc) - timedelta(seconds=stale_review_min_seconds)
+    ).isoformat()
+    stale_orders_res = supabase.table("paper_orders") \
+        .select("id, position_id, status, broker_status, submitted_at, created_at, broker_response") \
+        .in_("portfolio_id", p_ids) \
+        .eq("status", "needs_manual_review") \
+        .lt("created_at", stale_cutoff) \
+        .execute()
+    stale_orders = stale_orders_res.data or []
+
+    dedup_cutoff = (
+        datetime.now(timezone.utc) - timedelta(hours=1)
+    ).isoformat()
+    now_utc = datetime.now(timezone.utc)
+    stale_review_alerts: List[Dict[str, Any]] = []
+
+    for ord_row in stale_orders:
+        pos_id = ord_row.get("position_id")
+        if not pos_id:
+            continue
+        pos = open_position_map.get(pos_id)
+        if not pos:
+            # Linked position not in the open set (closed, missing, or
+            # belongs to a different portfolio). The order is stuck but
+            # the position is no longer open — out of scope for this check.
+            continue
+
+        # Idempotency gate: skip if we've already alerted on this order
+        # within the last hour. Without this, sweep cadence (every 5 min
+        # via alpaca_order_sync) would flood risk_alerts with ~12 rows per
+        # hour for a single stuck order. BAC's 3-day stuck duration would
+        # have produced 864 alerts.
+        try:
+            prior_res = supabase.table("risk_alerts") \
+                .select("id") \
+                .eq("alert_type", "stale_manual_review_with_open_position") \
+                .filter("metadata->>order_id", "eq", ord_row["id"]) \
+                .gte("created_at", dedup_cutoff) \
+                .limit(1) \
+                .execute()
+            if prior_res.data:
+                continue
+        except Exception as dedup_err:
+            # Idempotency-check failure must not block the alert path.
+            # Better to risk a duplicate alert than to silently drop the
+            # whole signal. Log and proceed.
+            logger.warning(
+                f"[GHOST_SWEEP] stale_review dedup check failed for "
+                f"order={ord_row['id'][:8]}: {dedup_err}; firing anyway"
+            )
+
+        try:
+            created_dt = datetime.fromisoformat(
+                (ord_row.get("created_at") or "").replace("Z", "+00:00")
+            )
+            hours_stale = (now_utc - created_dt).total_seconds() / 3600.0
+        except Exception:
+            hours_stale = 0.0
+
+        symbol = pos.get("symbol")
+        stale_review_alerts.append({
+            "order_id": ord_row["id"],
+            "position_id": pos_id,
+            "symbol": symbol,
+            "hours_stale": round(hours_stale, 2),
+            "order_created_at": ord_row.get("created_at"),
+            "order_submitted_at": ord_row.get("submitted_at"),
+            "position_quantity": pos.get("quantity"),
+            "broker_response": ord_row.get("broker_response"),
+            "broker_status": ord_row.get("broker_status"),
+        })
+
+    for sa in stale_review_alerts:
+        try:
+            supabase.table("risk_alerts").insert({
+                "user_id": user_id,
+                "alert_type": "stale_manual_review_with_open_position",
+                "severity": "warn",
+                "position_id": sa["position_id"],
+                "symbol": sa["symbol"],
+                "message": (
+                    f"Stale needs_manual_review order for {sa['symbol']}: "
+                    f"{sa['hours_stale']:.1f}h old, position still open. "
+                    f"Same shape as 2026-05-01 BAC ghost-position incident."
+                ),
+                "metadata": {
+                    "order_id": sa["order_id"],
+                    "position_id": sa["position_id"],
+                    "symbol": sa["symbol"],
+                    "hours_stale": sa["hours_stale"],
+                    "order_created_at": sa["order_created_at"],
+                    "order_submitted_at": sa["order_submitted_at"],
+                    "position_quantity": sa["position_quantity"],
+                    "broker_response": sa["broker_response"],
+                    "broker_status": sa["broker_status"],
+                    "detector": "ghost_position_sweep",
+                    "operator_action_required": (
+                        "Order is stuck in needs_manual_review with linked "
+                        "position still open. Investigate broker_response "
+                        "for rejection reason. Resolution paths: "
+                        "(1) manual close at Alpaca UI + DB reconciliation "
+                        "per docs/pr6_close_path_consolidation.md Section 4, "
+                        "or (2) confirm position is flat at broker "
+                        "(ghost-state scenario) and update DB to closed. "
+                        "Do NOT retry the close until root cause is "
+                        "understood."
+                    ),
+                    "doctrine_ref": (
+                        "loud_error_doctrine.md anti-pattern 4 "
+                        "(per-iteration recurring catch)"
+                    ),
+                },
+            }).execute()
+        except Exception as alert_err:
+            logger.error(
+                f"[GHOST_SWEEP] Failed to write stale_review alert for "
+                f"order={sa['order_id'][:8]}: {alert_err}"
+            )
+
     logger.info(
         f"[GHOST_SWEEP] user={user_id[:8]} checked={len(open_positions)} "
-        f"alpaca_legs={len(alpaca_legs)} ghosts={len(ghosts)}"
+        f"alpaca_legs={len(alpaca_legs)} ghosts={len(ghosts)} "
+        f"stale_review_orders={len(stale_orders)} "
+        f"stale_review_alerts_fired={len(stale_review_alerts)}"
     )
 
     return {
@@ -780,6 +927,9 @@ def ghost_position_sweep(
         "positions_checked": len(open_positions),
         "alpaca_leg_count": len(alpaca_legs),
         "ghosts": ghosts,
+        "stale_review_orders_checked": len(stale_orders),
+        "stale_review_alerts_fired": len(stale_review_alerts),
+        "stale_review_alerts": stale_review_alerts,
     }
 
 

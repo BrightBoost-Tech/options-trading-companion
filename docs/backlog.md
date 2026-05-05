@@ -142,6 +142,21 @@ gate-rejected calls. This pattern generalizes to Tier 3+ endpoints
 that share the same gate helper (`/validation/cohort-eval` and
 `/validation/autopromote-cohort`).
 
+**PR-3 validated 2026-05-05** via manual GHA fire (Trading Tasks →
+manual-task → `validation_init_window` with `force_rerun=true`).
+`job_runs` row produced (id `bbfe5863-f207-426a-86e7-772b12820b63`),
+status=`succeeded`, handler duration 0.17s DB-side. Handler's return
+matches `v3_go_live_state` row exactly; `was_repaired: false` confirms
+correct idempotent no-op behavior (existing window state passes
+service contract). Auto-discovery + `force_rerun` plumbing + endpoint
+gate behavior + new envelope shape all confirmed working end-to-end.
+Migration no longer "deployed-untested."
+
+Side observation (not a migration defect): user's `paper_window_end`
+is 2026-03-28 (expired). Service-level question whether
+`ensure_forward_window_initialized` should re-window expired states;
+out of scope for #71 sweep.
+
 Remaining: 3 migrations + 1 idempotency redesign across PR-4 to PR-7.
 
 **#93 — deployable_capital reads stale Plaid CUR:USD +

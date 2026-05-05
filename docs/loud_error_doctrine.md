@@ -330,6 +330,72 @@ Migration complexity: small (~30 min per wrapper to identify caller
 fields). Audit pattern: grep callers of the wrapper, list fields
 they read, diff against the wrapper's whitelist.
 
+### Anti-pattern 9 — Syntactic-only verification of dead code paths
+
+Code that has never executed in production cannot be verified for
+correctness by reading it. Static inspection confirms syntax, type
+signatures, import resolution, and call shape — but a method call
+that's syntactically valid against an imported class is still wrong
+if the method doesn't exist on the class. Only runtime exercise
+surfaces this class of bug.
+
+**Worked example (2026-05-05):** `/internal/tasks/train-learning-v3`
+(deleted in PR #880) called `CalibrationService.train_and_persist`.
+The endpoint imported `CalibrationService`, the call shape was
+valid Python, code-level review would have passed. The method
+didn't exist on the class — first execution would have raised
+`AttributeError`. The bug was invisible because the endpoint had
+zero production runs.
+
+**Pattern:** Before refactoring or migrating dead code, confirm it
+actually works at runtime — even briefly. The migration cost of
+preserving dead-but-broken code is wasted; deletion is usually
+correct.
+
+**Audit implications:** "Does this endpoint exist and have valid
+call shape?" is necessary but not sufficient. "Has this endpoint
+ever fired in production?" must also be answered before scope
+decisions (migrate vs delete vs rewrite) are made. The #71 sweep
+(2026-05-04 to 2026-05-05) demonstrated this concretely — three
+of the seven planned endpoint migrations became deletions once
+production-exercise verification was added at the diagnostic
+stage. Audit catalogued endpoints that EXISTED but didn't catalogue
+endpoints that FIRED. For #71, those were different sets, and
+the difference materially changed scope (3 PRs of migration work
+avoided).
+
+**Detection at audit time:**
+
+```sql
+-- For each endpoint candidate, check production-exercise count:
+SELECT job_name, COUNT(*) AS runs, MAX(started_at)
+FROM job_runs
+WHERE job_name = '<candidate>'
+GROUP BY job_name;
+
+-- If endpoint doesn't use enqueue_job_run yet (sync endpoint),
+-- check side-effect tables instead — analytics_events, the
+-- target table the endpoint writes to, etc.
+SELECT COUNT(*), MAX(created_at)
+FROM <table_endpoint_writes_to>
+WHERE <evidence_columns> AND created_at > NOW() - INTERVAL '90 days';
+```
+
+Zero production exercise + operator-on-demand only + no scheduler
+caller = strong deletion candidate, regardless of how clean the
+code reads.
+
+**Origin:** 2026-05-05 #71 sweep closure. PR-4 (PR #879) and PR-5
+(PR #880) both surfaced the same shape — endpoints that looked
+ready to migrate were actually never-fired dead code, with PR-5
+additionally surfacing a broken method reference that syntactic
+inspection wouldn't have caught.
+
+Migration complexity: zero — this is an audit-input recommendation,
+not a code change. Adding the production-exercise check to future
+audit prompts is a one-line addition to whatever diagnostic
+template the audit uses.
+
 ## Higher-order coverage doctrines
 
 The anti-patterns above target specific code-shape mistakes. The

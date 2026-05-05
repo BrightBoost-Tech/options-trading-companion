@@ -214,6 +214,14 @@ statuses) but rows accumulate indefinitely in the table.
 **Risk:** table size growth without bound; no immediate
 operational impact post-#93.
 
+**Verify-pass 2026-05-05:** total_rows = 171 (across 5+ months,
+oldest = 2025-12-11). Last 14 days produced only 11 rows
+(thin universe + micro-tier sizing keeps emission low). Status
+mix: 2 pending, 65 staged, 66 dismissed, 38 other. Phantom-row
+volume is not operationally concerning — table size is trivial
+and growth rate is ~1 row/day. Re-verify monthly OR if cohort
+fan-out post-#876 + #97 produces sustained 3x volume increase.
+
 **Options:**
 - (a) periodic deep-cleanup job (weekly/monthly, archives
   `dismissed`/`staged` rows older than N days)
@@ -229,8 +237,8 @@ proper close-path discipline).
 issue or close-path discipline becomes load-bearing for future
 feature.
 
-**#95 — fork.py threshold semantic mismatch** (HIGH, PARTIAL
-FIX in PR #851)
+**#95 — fork.py threshold semantic mismatch** (HIGH, AWAITING
+NEXT-CYCLE VERIFICATION post-#876)
 
 `_filter_for_cohort` at fork.py:165 originally read
 `risk_adjusted_ev` (0-2 ratio) and compared against
@@ -245,15 +253,20 @@ was shipped but operationally inert.
 2. fork.py:165 — read `sizing_metadata.score` instead of
    `risk_adjusted_ev` for cohort threshold comparison
 
-**Partial verification (16:00 UTC cycle 2026-05-01):**
-- score=76.9 persisted correctly in sizing_metadata ✓
-- Filter accepted BAC for all 3 cohorts (per policy_decisions) ✓
-- But Policy Lab fork result: {'conservative': 0, 'neutral': 0,
-  'aggressive': 1} — clone INSERT silently failed (see #97)
+**Verification chain status (2026-05-05 verify-pass):**
+- Score persistence verified ✓
+- Filter logic verified ✓ (filter accepted BAC for all 3 cohorts)
+- Clone INSERT path was broken by #97 trace_id collision —
+  resolved by PR #876 (closed 2026-05-05)
+- End-to-end verification awaits next cohort-firing cycle —
+  zero `cohort_name`-tagged suggestions and zero
+  `cohort_clone_insert_failed` alerts since #876 merge
+  (today's only suggestions_open ran at 16:00:07Z, BEFORE
+  #876's 18:55:34Z merge; pre-fix evidence isn't useful)
 
-**Status:** Score persistence verified. Filter logic verified.
-Clone INSERT path still broken — keep open until #97 fix
-resolves end-to-end clone production.
+**Status:** Functionally unblocked. First post-#876 cohort-firing
+cycle (likely tomorrow's 16:00 UTC) will produce 3 clones per
+qualifying source. Re-verify on first occurrence and close.
 
 **#96 — paper_autopilot status update silently bypassed** — **CLOSED 2026-05-03**
 Covered by PR #839's H5b sweep. The status-update swallow at
@@ -377,8 +390,8 @@ routing (#65 `policy_lab_eval`) may need reservation semantics to
 prevent simultaneous-cohort competition for live capital — not blocked
 by anything today, just a forward-looking pointer.
 
-**#101 — STRATEGIES_ALLOWLIST env knob** (MEDIUM, optional
-kill-switch)
+**#101 — STRATEGIES_ALLOWLIST env knob** (LOW, incident-response
+optional)
 
 Environment variable to restrict scanner emission to specific
 strategy types. Useful as kill-switch during incidents (e.g.,
@@ -393,9 +406,13 @@ changes.
 **Implementation site:** scanner gate in options_scanner.py,
 early-return before strategy emission if not in allowlist.
 
-**Priority:** MEDIUM. Currently inert because Option A (#100)
-addresses the use case structurally. Worth keeping as separate
-backlog item for incident-response flexibility.
+**Priority downgraded MEDIUM → LOW (2026-05-05 verify-pass):**
+the original BP-to-close incident class that motivated this knob
+is structurally addressed by #100 (PR #858, round-trip BP at
+sizing). The knob is still independently useful for OTHER future
+incident classes (regime-strategy mismatch, broker-rejection
+patterns, etc.) — orthogonal to #100, not redundant. Defer until
+a future incident class actually demands it; ship if and when.
 
 **Effort:** half day (env var read + scanner gate + tests).
 
@@ -977,7 +994,31 @@ needed for backtest/replay).
 
 Effort: ~1 day if applying migration, ~1 hour if deleting writes.
 
-#### #62a-D4 — Cohort fan-out routing safety + symbol drop fix
+#### #62a-D4 — Cohort fan-out routing safety + symbol drop fix — **3-PR SEQUENCE SHIPPED 2026-04-30**
+
+PRs #842 (PR2a routing safety gate) + #843 (PR2b shadow fill simulation)
++ #844 (PR3 clone-builder symbol field removal) all merged
+2026-04-30. The architectural sequence (routing_mode column +
+dispatch enforcement + simulated fills + symbol-drop) is
+functionally complete.
+
+**End-to-end verification gate:** the original D4 verification
+step ("shadow trades start appearing in trade_suggestions") was
+blocked by the subsequent #97 trace_id collision discovered
+2026-05-05 — second cohort INSERT failed unique constraint, so
+even though D4 unlocked the path, fan-out remained at
+{aggressive: 1, others: 0}. PR #876 (closed 2026-05-05) resolved
+the trace_id collision. Both #95 and D4 verification gate on the
+same upcoming cohort-firing cycle (likely tomorrow's 16:00 UTC).
+Tracked under #95's "awaiting next-cycle verification" status —
+no separate action needed for D4.
+
+Status: SHIPPED. Verification rolled into #95.
+
+---
+
+(Original D4 framing preserved below for context — describes the
+architectural intent of the 3-PR sequence as designed pre-ship.)
 
 Status: HIGH — multi-PR architectural work, **NOT one-line fix.**
 

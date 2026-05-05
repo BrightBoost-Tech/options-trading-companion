@@ -605,7 +605,7 @@ async def task_learning_ingest(
     )
 
 
-@router.post("/policy-lab/eval", status_code=200)
+@router.post("/policy-lab/eval", status_code=202)
 @limiter.limit("10/minute")
 async def task_policy_lab_eval(
     request: Request,
@@ -613,85 +613,41 @@ async def task_policy_lab_eval(
     auth: TaskSignatureResult = Depends(verify_task_signature("tasks:policy_lab_eval")),
 ):
     """
-    Policy Lab daily evaluation — compare cohort performance and check promotions.
+    Triggers Policy Lab daily cohort evaluation job.
 
     Auth: Requires v4 HMAC signature with scope 'tasks:policy_lab_eval'.
-    Gated behind POLICY_LAB_ENABLED.
+    Gated behind POLICY_LAB_ENABLED (gate enforced inside the job handler).
+
+    Migrated 2026-05-04 from inline sync execution to canonical async
+    dispatch (#71 PR-2). The handler at
+    `packages/quantum/jobs/handlers/policy_lab_eval.py` runs:
+    - evaluate_cohorts
+    - check_promotion
+    - compute_decision_accuracy (was silently dropped by the prior
+      inline endpoint — this PR restores it as a side effect of
+      switching to the canonical handler dispatch)
+
+    Multi-user fan-out: when payload.user_id is omitted, the handler
+    iterates all active users (was unsupported by the prior inline
+    endpoint, which returned an error if user_id was missing).
+
+    Failure observability: per-stage `risk_alerts` writes from the prior
+    sync handler are replaced by the standard `job_runs.status='failed'`
+    record produced when the handler propagates an exception. Net
+    observability improves — pre-migration there were zero `job_runs`
+    rows for `policy_lab_eval`; post-migration each fire produces one.
     """
-    import os
-    if not os.environ.get("POLICY_LAB_ENABLED", "").lower() in ("1", "true"):
-        return {"status": "disabled", "reason": "POLICY_LAB_ENABLED is not set"}
+    today = datetime.now().strftime("%Y-%m-%d")
+    job_payload: Dict[str, Any] = {"date": today}
+    if payload.user_id:
+        job_payload["user_id"] = payload.user_id
 
-    user_id = payload.user_id
-    if not user_id:
-        user_id = os.environ.get("USER_ID")
-    if not user_id:
-        return {"status": "error", "reason": "user_id required"}
-
-    from packages.quantum.policy_lab.evaluator import evaluate_cohorts, check_promotion
-    from packages.quantum.internal_tasks import get_admin_client
-    from datetime import date
-
-    supabase = get_admin_client()
-
-    eval_result = None
-    promo_result = None
-
-    try:
-        eval_result = evaluate_cohorts(user_id, date.today(), supabase)
-    except Exception as e:
-        logger.exception(
-            "policy_lab_eval: evaluate_cohorts raised",
-            extra={"user_id": user_id},
-        )
-        try:
-            supabase.table("risk_alerts").insert({
-                "user_id": user_id,
-                "alert_type": "policy_lab_eval_failure",
-                "severity": "warning",
-                "message": f"evaluate_cohorts raised in task_policy_lab_eval: {type(e).__name__}",
-                "metadata": {
-                    "exception_type": type(e).__name__,
-                    "exception_str": str(e)[:500],
-                    "endpoint": "/tasks/policy-lab/eval",
-                    "stage": "evaluate_cohorts",
-                },
-            }).execute()
-        except Exception:
-            logger.exception("policy_lab_eval: failed to write risk_alert for evaluate_cohorts failure")
-
-    try:
-        promo_result = check_promotion(user_id, supabase)
-    except Exception as e:
-        logger.exception(
-            "policy_lab_eval: check_promotion raised",
-            extra={"user_id": user_id},
-        )
-        try:
-            supabase.table("risk_alerts").insert({
-                "user_id": user_id,
-                "alert_type": "policy_lab_eval_failure",
-                "severity": "warning",
-                "message": f"check_promotion raised in task_policy_lab_eval: {type(e).__name__}",
-                "metadata": {
-                    "exception_type": type(e).__name__,
-                    "exception_str": str(e)[:500],
-                    "endpoint": "/tasks/policy-lab/eval",
-                    "stage": "check_promotion",
-                },
-            }).execute()
-        except Exception:
-            logger.exception("policy_lab_eval: failed to write risk_alert for check_promotion failure")
-
-    return {
-        "status": "ok",
-        "evaluation": eval_result,
-        "promotion": promo_result,
-        "errors": {
-            "evaluate_cohorts": "failed" if eval_result is None else "succeeded",
-            "check_promotion": "failed" if promo_result is None else "succeeded",
-        },
-    }
+    return enqueue_job_run(
+        job_name="policy_lab_eval",
+        idempotency_key=today,
+        payload=job_payload,
+        force_rerun=payload.force_rerun,
+    )
 
 
 @router.post("/paper/learning-ingest", status_code=202)

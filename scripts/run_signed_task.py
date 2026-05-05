@@ -35,8 +35,6 @@ Supported Tasks:
     paper_process_orders           - POST /tasks/paper/process-orders (requires user_id)
     paper_learning_ingest          - POST /tasks/paper/learning-ingest (requires user_id)
     validation_shadow_eval         - POST /tasks/validation/shadow-eval (requires user_id)
-    validation_cohort_eval         - POST /tasks/validation/cohort-eval (requires user_id)
-    validation_autopromote_cohort  - POST /tasks/validation/autopromote-cohort (requires user_id)
     validation_preflight           - POST /tasks/validation/preflight (requires user_id)
     validation_init_window         - POST /tasks/validation/init-window (requires user_id)
     paper_exit_evaluate            - POST /tasks/paper/exit-evaluate (requires user_id)
@@ -217,18 +215,6 @@ TASKS = {
         "path": "/tasks/validation/shadow-eval",
         "scope": "tasks:validation_shadow_eval",
         "description": "Run shadow checkpoint evaluation (requires user_id)",
-        "user_id_mode": "require",
-    },
-    "validation_cohort_eval": {
-        "path": "/tasks/validation/cohort-eval",
-        "scope": "tasks:validation_cohort_eval",
-        "description": "Run cohort evaluations (requires user_id)",
-        "user_id_mode": "require",
-    },
-    "validation_autopromote_cohort": {
-        "path": "/tasks/validation/autopromote-cohort",
-        "scope": "tasks:validation_autopromote_cohort",
-        "description": "Auto-promote best cohort policy (requires user_id)",
         "user_id_mode": "require",
     },
     "validation_preflight": {

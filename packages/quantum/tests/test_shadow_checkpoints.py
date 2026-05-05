@@ -486,65 +486,6 @@ class TestShadowPayloadModels(unittest.TestCase):
         with self.assertRaises(ValidationError):
             ValidationShadowEvalPayload(user_id='all')
 
-    def test_cohort_eval_payload_requires_user_id(self):
-        """ValidationCohortEvalPayload requires user_id."""
-        from packages.quantum.public_tasks_models import ValidationCohortEvalPayload
-        from pydantic import ValidationError
-
-        with self.assertRaises(ValidationError):
-            ValidationCohortEvalPayload()
-
-    def test_cohort_eval_payload_accepts_valid_uuid(self):
-        """ValidationCohortEvalPayload accepts valid UUID."""
-        from packages.quantum.public_tasks_models import ValidationCohortEvalPayload
-
-        payload = ValidationCohortEvalPayload(
-            user_id='12345678-1234-1234-1234-123456789abc'
-        )
-        self.assertEqual(
-            payload.user_id,
-            '12345678-1234-1234-1234-123456789abc'
-        )
-
-
-class TestDefaultCohorts(unittest.TestCase):
-    """Tests for default cohort configuration."""
-
-    def test_default_cohorts_loaded(self):
-        """Default cohorts are available when env var not set."""
-        from packages.quantum.public_tasks import DEFAULT_SHADOW_COHORTS
-
-        self.assertIsInstance(DEFAULT_SHADOW_COHORTS, list)
-        self.assertGreater(len(DEFAULT_SHADOW_COHORTS), 0)
-
-        # Verify structure
-        for cohort in DEFAULT_SHADOW_COHORTS:
-            self.assertIn('name', cohort)
-            self.assertIn('paper_window_days', cohort)
-            self.assertIn('target_return_pct', cohort)
-
-    @patch.dict('os.environ', {'SHADOW_COHORTS_JSON': '[]'})
-    def test_get_shadow_cohorts_empty_falls_back(self):
-        """Empty JSON falls back to defaults."""
-        from packages.quantum.public_tasks import _get_shadow_cohorts, DEFAULT_SHADOW_COHORTS
-
-        result = _get_shadow_cohorts()
-
-        self.assertEqual(result, DEFAULT_SHADOW_COHORTS)
-
-    @patch.dict('os.environ', {
-        'SHADOW_COHORTS_JSON': '[{"name":"custom","paper_window_days":7,"target_return_pct":0.05}]'
-    })
-    def test_get_shadow_cohorts_parses_env(self):
-        """Custom JSON is parsed correctly."""
-        from packages.quantum.public_tasks import _get_shadow_cohorts
-
-        result = _get_shadow_cohorts()
-
-        self.assertEqual(len(result), 1)
-        self.assertEqual(result[0]['name'], 'custom')
-        self.assertEqual(result[0]['paper_window_days'], 7)
-
 
 class TestShadowLogging(unittest.TestCase):
     """Tests that shadow evaluation logs with shadow tag."""

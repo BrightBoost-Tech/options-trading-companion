@@ -157,7 +157,26 @@ is 2026-03-28 (expired). Service-level question whether
 `ensure_forward_window_initialized` should re-window expired states;
 out of scope for #71 sweep.
 
-Remaining: 3 migrations + 1 idempotency redesign across PR-4 to PR-7.
+**Tier 3 + Tier 4 closed by DELETION 2026-05-05** (PR #<NUM>).
+PR-4 attempt on `/validation/cohort-eval` (Tier 3) surfaced a
+fourth-case finding: the writer targets `shadow_cohort_daily`, a
+table that doesn't exist in production. Verification showed neither
+the writer endpoint nor the consumer endpoint
+(`/validation/autopromote-cohort`, Tier 4) has ever fired in
+production — zero `job_runs` rows for either, ever. The whole
+shadow_cohort_daily channel was unexercised dead code.
+
+Per #62a-D7 resolution, both endpoints removed entirely rather than
+migrated. Tier 3 and Tier 4 of the audit are no longer migration
+candidates — they're deletions. Net effect on #71 sweep:
+
+- Tier 3 (cohort-eval): closed by deletion, not migration
+- Tier 4 (autopromote-cohort + idempotency redesign): closed by
+  deletion (idempotency redesign no longer needed)
+- Tier 5 (`/train-learning-v3`): remains as the final migration item
+
+**Remaining:** 1 migration (PR-5 = `/train-learning-v3`, the largest
+scope per audit — needs per-user decomposition).
 
 **#93 — deployable_capital reads stale Plaid CUR:USD +
 paper_autopilot status bypass** (HIGH, FIXED in PR #850)
@@ -1109,17 +1128,45 @@ Nesting v3 is dormant.
 
 Effort: ~1 day.
 
-#### #62a-D7 — `shadow_cohort_daily` table missing (MEDIUM)
+#### #62a-D7 — `shadow_cohort_daily` table missing — **CLOSED 2026-05-05**
 
-File: `packages/quantum/public_tasks.py:1861`. Migration
-`20260122100000_shadow_cohort_daily.sql` not applied. Autopromote
-v4-L1E feature broken silently. Note: `POLICY_LAB_AUTOPROMOTE=false`
-permanently, so the consumer feature is off anyway.
+Resolved by removing the cohort shadow eval entirely (PR #<NUM>).
+Earlier framing referenced `POLICY_LAB_AUTOPROMOTE=false` as the
+gating env var, but verification revealed the consumer is actually
+gated by `AUTOPROMOTE_ENABLED` at `public_tasks.py:1207` (separate
+flag from `POLICY_LAB_AUTOPROMOTE` which gates a different
+policy_lab evaluator). Both gates default off and neither has been
+observed flipped on in production.
 
-Fix: apply migration OR remove writer (deletion is the lower-risk
-choice given the consumer is off).
+**Production-exercise verification (load-bearing):** zero `job_runs`
+rows ever for `validation_cohort_eval` (the writer endpoint) AND
+zero rows ever for `validation_autopromote_cohort` (the reader
+endpoint). The whole shadow_cohort_daily channel was unexercised
+dead code — the writer's silent no-op (table missing) had no
+downstream consumer to even notice.
 
-Effort: ~1 hour to remove writer, ~2 hours to apply + verify.
+**Resolution shape — Branch B2 (delete entirely):**
+- Removed both endpoints + their helpers from `public_tasks.py`
+- Removed `ValidationCohortEvalPayload` + `ValidationAutopromoteCohortPayload`
+  from `public_tasks_models.py`
+- Removed dispatch entries from `scripts/run_signed_task.py` +
+  `scripts/invoke-task.ps1`
+- Removed two scheduled job blocks + manual-dispatch enum entries
+  from `.github/workflows/trading_tasks.yml`
+- Deleted dedicated test files; surgical removal of references in
+  shared test files
+- Service method `eval_paper_forward_checkpoint_shadow` PRESERVED
+  (still used by `/validation/shadow-eval` which stays — intentional
+  sync per audit)
+
+Side benefit: closes Tier 3 (cohort-eval) and Tier 4 (autopromote-cohort)
+of the #71 RQ dispatch sweep by removing rather than migrating those
+endpoints. See #71 entry for sweep impact.
+
+If autopromote reactivation is ever pursued, restoration requires
+re-implementing the eval, the persistence (table + writer), and the
+consumer logic together as a unified feature, not piece-by-piece.
+See git history for the original endpoint shape (PR #<NUM>).
 
 #### #62a-D8 — `trade_executions` 8 wrong columns (MEDIUM)
 

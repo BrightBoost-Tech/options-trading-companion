@@ -6,6 +6,35 @@
 
 ---
 
+## AMENDMENT 2026-05-05 — Tier 3 + Tier 4 closed by DELETION
+
+PR-4 attempt on Tier 3 (`/validation/cohort-eval`) surfaced a
+fourth-case finding the original audit didn't anticipate: the
+endpoint's `.upsert()` call targets `shadow_cohort_daily`, a table
+that **does not exist** in production (#62a-D7 schema-drift
+artifact). Verification showed neither `validation_cohort_eval` nor
+`validation_autopromote_cohort` (Tier 4) has ever fired in
+production — zero `job_runs` rows ever for either endpoint.
+
+Rather than migrate dead code into queued handlers, both endpoints
+were **deleted entirely** (PR #<NUM>) per #62a-D7's "remove writer"
+resolution. Net effect on this audit's plan:
+
+- **Tier 3 (cohort-eval):** closed by deletion, NOT migration
+- **Tier 4 (autopromote-cohort + idempotency redesign):** closed by
+  deletion (idempotency redesign no longer needed)
+- **Tier 5 (`/train-learning-v3`):** unchanged — remains the final
+  migration item, now PR-5
+
+**Revised scope:** 1 migration remaining (Tier 5) + the 3 already
+shipped (Tier 1 PR #873, Tier 2 PR #874). Original "5 migrations"
+inventory becomes "3 migrations + 2 deletions."
+
+The remainder of this document preserves the original audit-time
+analysis as historical record.
+
+---
+
 ## Executive summary
 
 Audited `packages/quantum/public_tasks.py` (22 endpoints) and

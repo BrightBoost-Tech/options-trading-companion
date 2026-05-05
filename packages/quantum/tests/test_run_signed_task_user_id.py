@@ -23,8 +23,6 @@ TASK_USER_ID_MODES = {
     "paper_auto_close": "require",
     "paper_safety_close_one": "require",
     "validation_shadow_eval": "require",
-    "validation_cohort_eval": "require",
-    "validation_autopromote_cohort": "require",
     "validation_preflight": "require",
     "validation_init_window": "require",
     "ops_health_check": "none",

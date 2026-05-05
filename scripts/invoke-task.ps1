@@ -81,8 +81,6 @@ $TaskRegistry = @{
     # Validation
     "/tasks/validation/eval"                      = "tasks:validation_eval"
     "/tasks/validation/shadow-eval"               = "tasks:validation_shadow_eval"
-    "/tasks/validation/cohort-eval"               = "tasks:validation_cohort_eval"
-    "/tasks/validation/autopromote-cohort"        = "tasks:validation_autopromote_cohort"
     "/tasks/validation/preflight"                 = "tasks:validation_preflight"
     "/tasks/validation/init-window"               = "tasks:validation_init_window"
     # Other

@@ -348,3 +348,32 @@ Total scope: 5 endpoint migrations + 1 idempotency redesign across 6 PRs.
 The ordering is conservative — if Tier 2/3 prove low-friction in
 practice, they can bundle into one PR. Tier 4 and Tier 5 should stay
 standalone given their idempotency / decomposition concerns.
+
+
+---
+
+## Final closure (2026-05-05)
+
+Sweep completed. Outcomes per audited endpoint:
+
+| Endpoint | Audit recommendation | Actual outcome | PR |
+|----------|---------------------|----------------|-----|
+| /policy-lab/eval | Tier 1 migration | Migrated | #873 |
+| /validation/init-window | Tier 2 migration | Migrated | #874 + #877 (validated) |
+| /validation/cohort-eval | Tier 3 migration | Deleted (zero runs ever) | #879 |
+| /validation/autopromote-cohort | Tier 4 migration | Deleted (zero runs ever) | #879 |
+| /train-learning-v3 | Tier 5 migration | Deleted (zero runs ever; broken method ref) | #<this PR> |
+
+Three endpoints became deletions rather than migrations after
+production-exercise verification. The audit catalogued endpoints
+that EXIST but didn't catalogue endpoints that FIRE. For the #71
+sweep, those were different sets, and the difference materially
+changed scope — 3 PRs of migration work avoided.
+
+**Recommendation for future endpoint audits:** add a "last fired in
+production" column from `job_runs` and analytics-event traces. The
+"is this sync vs async" question is answered by reading code; the
+"is this actually used" question requires production data.
+
+Original audit's "5 migrations + 1 idempotency redesign" → final
+result "2 migrations + 3 deletions."

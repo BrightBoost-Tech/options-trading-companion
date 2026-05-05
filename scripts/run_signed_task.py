@@ -268,12 +268,6 @@ TASKS = {
         "description": "Refresh IV points",
         "user_id_mode": "none",
     },
-    "learning_train": {
-        "path": "/internal/tasks/train-learning-v3",
-        "scope": "tasks:learning_train",
-        "description": "Train learned nesting v3",
-        "user_id_mode": "none",
-    },
     "daily_progression_eval": {
         "path": "/internal/tasks/progression/daily-eval",
         "scope": "tasks:daily_progression_eval",

@@ -114,6 +114,28 @@ Subsequent migrations (PR-3 through PR-7): `/validation/init-window`,
 needs per-user decomposition). Total scope: 6 PRs across 5 endpoint
 migrations + 1 idempotency redesign.
 
+**PR-3 shipped 2026-05-04** (2/5 migrations complete, PR #<NUM>).
+`/tasks/validation/init-window` migrated to canonical async dispatch.
+New handler scaffolded at
+`packages/quantum/jobs/handlers/validation_init_window.py` (Tier 2
+audit blocker resolved); auto-discovered via the existing
+`packages/quantum/jobs/registry.discover_handlers` mechanism — no
+explicit registration needed.
+
+Pure migration; no behavior changes (unlike PR-2's
+`compute_decision_accuracy` reactivation). Operator-on-demand endpoint;
+GHA workflow `validation-init-window` fires it daily 8:40 AM CT via
+`run_signed_task.py` which accepts both 200 and 202.
+
+**Design note on gates:** the paper-mode + paused gates
+(`_check_readiness_hardening_gates`) remain at the endpoint to reject
+before enqueue, avoiding "queued then failed" `job_runs` rows for
+gate-rejected calls. This pattern generalizes to Tier 3+ endpoints
+that share the same gate helper (`/validation/cohort-eval` and
+`/validation/autopromote-cohort`).
+
+Remaining: 3 migrations + 1 idempotency redesign across PR-4 to PR-7.
+
 **#93 — deployable_capital reads stale Plaid CUR:USD +
 paper_autopilot status bypass** (HIGH, FIXED in PR #850)
 

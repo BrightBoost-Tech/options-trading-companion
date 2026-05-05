@@ -92,7 +92,7 @@ observability trace. Migrate affected handlers to the `enqueue_job_run`
 pattern matching reliable peers. Effort: medium (audit + 1 PR per
 affected endpoint). Source: 2026-04-26 morning diagnostic.
 
-**PR-1 shipped 2026-05-04** (audit only, PR #<NUM>). Findings at
+**PR-1 shipped 2026-05-04** (audit only, PR #872). Findings at
 `docs/rq_dispatch_audit_2026_05_04.md`. Inventory:
 - 38 total task endpoints (22 public + 16 internal)
 - 30 already async (canonical `enqueue_job_run` pattern)
@@ -100,19 +100,27 @@ affected endpoint). Source: 2026-04-26 morning diagnostic.
   sync per docstring: /paper/process-orders, /validation/shadow-eval,
   /validation/preflight)
 
-Recommended PR-2 target: `/tasks/policy-lab/eval` (Tier 1: LOW risk,
-HIGH value, ~1h effort). Handler at
-`packages/quantum/jobs/handlers/policy_lab_eval.py` already exists; the
-migration is a 1-hour endpoint body swap. This is the original
-CLAUDE.md "documented blind spot" case — APScheduler fires the
-endpoint daily at 16:30 CT, work runs inline against the request
-thread, failures produce no `job_runs` trace.
+**PR-2 shipped 2026-05-04** (1/5 migrations complete, PR #<NUM>).
+`/tasks/policy-lab/eval` migrated from inline sync to canonical async
+dispatch. Pre-migration: APScheduler fired the endpoint daily at
+16:30 CT and the work ran against the request thread with zero
+`job_runs` trace. Post-migration: each fire produces a `job_runs`
+row.
+
+Intended behavior changes documented in PR description:
+- `compute_decision_accuracy` now runs (was silently dropped by the
+  inline endpoint — handler always had it; the inline path was the bug)
+- Multi-user fan-out supported when payload omits `user_id` (handler
+  iterates active users; inline endpoint required user_id)
+- Per-stage `risk_alerts` writes from the prior sync handler replaced
+  by `job_runs.status='failed'` observability (different shape, net
+  observability improves — pre-migration there were zero rows)
 
 Subsequent migrations (PR-3 through PR-7): `/validation/init-window`,
 `/validation/cohort-eval`, `/validation/autopromote-cohort`
 (includes idempotency redesign PR), `/train-learning-v3` (largest,
-needs per-user decomposition). Total scope: 6 PRs across 5 endpoint
-migrations + 1 idempotency redesign.
+needs per-user decomposition). Total remaining: 4 migrations + 1
+idempotency redesign.
 
 **PR-3 shipped 2026-05-04** (2/5 migrations complete, PR #<NUM>).
 `/tasks/validation/init-window` migrated to canonical async dispatch.

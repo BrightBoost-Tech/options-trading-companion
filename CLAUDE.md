@@ -140,13 +140,25 @@ Paper keys consistently use `PKPR2` prefix. Distinguishing rule:
 | Agent | Trigger | Purpose | agent_sessions rows? |
 |---|---|---|---|
 | Day Orchestrator | 7:30 AM CT | Boot check, missed-job detection | ✅ yes |
-| Loss Minimization | Every 15 min during market hours | Intraday envelope monitoring + force-close | ❌ no |
-| Self-Learning | 4:45 PM CT | Post-trade calibration + drift detection | ❌ no |
-| Profit Optimization | apply_calibration during suggestions | Calibrated EV/PoP from learned adjustments | ❌ no |
+| Loss Minimization | Every 15 min during market hours | Intraday envelope monitoring + force-close | ✅ yes (since 2026-05-04) |
+| Self-Learning | 4:45 PM CT | Post-trade calibration + drift detection | ✅ yes (since 2026-05-04) |
+| Profit Optimization | apply_calibration during suggestions | Calibrated EV/PoP from learned adjustments | ❌ no (per-call function — different mechanism needed) |
 
-**Gap:** Only Day Orchestrator writes to `agent_sessions`. The other three
-run on schedule but produce no agent-session records. Planned: shared
-`agent_session_context` helper; tracked for post-micro_live observability PR.
+**Gap mostly closed 2026-05-04:** Shared `agent_session` context manager
+at `packages/quantum/observability/agent_sessions.py` wraps the
+`execute()` body of `IntradayRiskMonitor` (loss_minimization) and
+`PostTradeLearningAgent` (self_learning). Both now write rows matching
+Day Orchestrator's existing column convention (agent_name, status,
+started_at, completed_at, summary) plus populate the schema's `error`
+column on the failed path. Day Orchestrator left untouched in that PR
+(refactor is separate scope).
+
+**Remaining gap — Profit Optimization:** `apply_calibration` is a
+per-suggestion math function called hundreds of times per scanner
+cycle, not a per-invocation agent. Wrapping it row-by-row would flood
+`agent_sessions` without insight. Per-cycle aggregation at
+`workflow_orchestrator.py` is the right shape; that work is tracked
+separately (would touch the highest-blast-radius file in the codebase).
 
 ### Replay / forensic subsystem (gated off)
 
@@ -373,7 +385,7 @@ T+24h"), do NOT apply on merge. Follow the PR's gating exactly.
 | `job_runs` | Job execution log (idempotency + status) |
 | `risk_alerts` | Risk violations, force-close events, drift alerts |
 | `policy_decisions` | Per-cohort accept/reject decisions with realized_outcome |
-| `agent_sessions` | Managed Agent session observability (currently only Day Orchestrator writes) |
+| `agent_sessions` | Managed Agent session observability (Day Orch + Loss Min + Self-Learning write; Profit Optimization deferred — see Managed Agents table) |
 
 ### Quick Health Check SQL
 ```sql
@@ -409,9 +421,13 @@ WHERE outcome_type='trade_closed'
   AND created_at >= '2026-04-13'
   AND created_at::date = CURRENT_DATE;
 
--- Agent sessions (only Day Orchestrator writes today)
-SELECT agent_name, status, started_at, completed_at FROM agent_sessions
-ORDER BY created_at DESC LIMIT 5;
+-- Agent sessions (Day Orch + Loss Min + Self-Learning write today;
+-- Profit Optimization deferred — see Managed Agents table)
+SELECT agent_name, status, COUNT(*), MAX(started_at)
+FROM agent_sessions
+WHERE created_at > NOW() - INTERVAL '24 hours'
+GROUP BY agent_name, status
+ORDER BY agent_name, status;
 ```
 
 ---

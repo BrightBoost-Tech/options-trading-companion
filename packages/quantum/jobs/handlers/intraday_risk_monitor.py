@@ -75,36 +75,44 @@ class IntradayRiskMonitor:
 
     def execute(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         """Run a single monitoring cycle."""
+        from packages.quantum.observability.agent_sessions import agent_session
 
-        # 1. Market hours check
-        if not self._is_market_open():
-            return {"ok": True, "status": "market_closed", "checks": 0}
+        with agent_session("loss_minimization") as session:
+            # 1. Market hours check
+            if not self._is_market_open():
+                result = {"ok": True, "status": "market_closed", "checks": 0}
+                session.summary = result
+                return result
 
-        # 2. Get user IDs to monitor
-        user_ids = self._get_active_user_ids(payload)
-        if not user_ids:
-            return {"ok": True, "status": "no_users", "checks": 0}
+            # 2. Get user IDs to monitor
+            user_ids = self._get_active_user_ids(payload)
+            if not user_ids:
+                result = {"ok": True, "status": "no_users", "checks": 0}
+                session.summary = result
+                return result
 
-        all_results = []
-        for user_id in user_ids:
-            try:
-                result = self._check_user(user_id)
-                all_results.append(result)
-            except Exception as e:
-                logger.error(f"[RISK_MONITOR] Error for user {user_id[:8]}: {e}")
-                all_results.append({"user_id": user_id[:8], "error": str(e)})
+            all_results = []
+            for user_id in user_ids:
+                try:
+                    user_result = self._check_user(user_id)
+                    all_results.append(user_result)
+                except Exception as e:
+                    logger.error(f"[RISK_MONITOR] Error for user {user_id[:8]}: {e}")
+                    all_results.append({"user_id": user_id[:8], "error": str(e)})
 
-        total_violations = sum(r.get("violations", 0) for r in all_results)
-        total_force_closes = sum(r.get("force_closes_submitted", 0) for r in all_results)
+            total_violations = sum(r.get("violations", 0) for r in all_results)
+            total_force_closes = sum(r.get("force_closes_submitted", 0) for r in all_results)
 
-        return {
-            "ok": True,
-            "status": "completed",
-            "users_checked": len(user_ids),
-            "total_violations": total_violations,
-            "total_force_closes": total_force_closes,
-            "results": all_results,
-        }
+            result = {
+                "ok": True,
+                "status": "completed",
+                "users_checked": len(user_ids),
+                "total_violations": total_violations,
+                "total_force_closes": total_force_closes,
+                "results": all_results,
+            }
+            session.summary = result
+            return result
 
     def _check_user(self, user_id: str) -> Dict[str, Any]:
         """Run full risk check for a single user."""

@@ -61,61 +61,69 @@ class PostTradeLearningAgent:
         self.supabase = get_admin_client()
 
     def execute(self, payload: Dict[str, Any]) -> Dict[str, Any]:
-        user_id = payload.get("user_id") or os.environ.get("USER_ID") or os.environ.get("TASK_USER_ID")
-        if not user_id:
-            return {"ok": True, "status": "no_user_id", "trades_processed": 0}
+        from packages.quantum.observability.agent_sessions import agent_session
 
-        trade_ids = payload.get("trade_ids")
+        with agent_session("self_learning") as session:
+            user_id = payload.get("user_id") or os.environ.get("USER_ID") or os.environ.get("TASK_USER_ID")
+            if not user_id:
+                result = {"ok": True, "status": "no_user_id", "trades_processed": 0}
+                session.summary = result
+                return result
 
-        # 1. Get unprocessed trades
-        trades = self._get_unprocessed_trades(user_id, trade_ids)
-        if not trades:
-            return {"ok": True, "status": "no_unprocessed_trades", "trades_processed": 0}
+            trade_ids = payload.get("trade_ids")
 
-        logger.info(f"[LEARNING] Processing {len(trades)} unprocessed trades for user {user_id[:8]}")
+            # 1. Get unprocessed trades
+            trades = self._get_unprocessed_trades(user_id, trade_ids)
+            if not trades:
+                result = {"ok": True, "status": "no_unprocessed_trades", "trades_processed": 0}
+                session.summary = result
+                return result
 
-        # 2. Process each trade
-        segments_updated = set()
-        strategies_checked = set()
-        drift_alerts = 0
+            logger.info(f"[LEARNING] Processing {len(trades)} unprocessed trades for user {user_id[:8]}")
 
-        for trade in trades:
-            alpha = self._compute_alpha(trade)
-            segment_key = self._build_segment_key(trade)
+            # 2. Process each trade
+            segments_updated = set()
+            strategies_checked = set()
+            drift_alerts = 0
 
-            if segment_key:
-                self._update_segment_calibration(segment_key, trade, user_id)
-                segments_updated.add(segment_key)
+            for trade in trades:
+                alpha = self._compute_alpha(trade)
+                segment_key = self._build_segment_key(trade)
 
-            strategy = trade.get("strategy")
-            if strategy and strategy not in strategies_checked:
-                self._check_strategy_health(strategy, user_id)
-                strategies_checked.add(strategy)
+                if segment_key:
+                    self._update_segment_calibration(segment_key, trade, user_id)
+                    segments_updated.add(segment_key)
 
-            if segment_key:
-                if self._detect_drift(segment_key, user_id):
-                    drift_alerts += 1
+                strategy = trade.get("strategy")
+                if strategy and strategy not in strategies_checked:
+                    self._check_strategy_health(strategy, user_id)
+                    strategies_checked.add(strategy)
 
-        # 3. Mark trades as processed
-        trade_ids_to_mark = [t.get("id") for t in trades if t.get("id")]
-        if trade_ids_to_mark:
-            self._mark_trades_processed(trade_ids_to_mark)
+                if segment_key:
+                    if self._detect_drift(segment_key, user_id):
+                        drift_alerts += 1
 
-        # 4. Check promotion readiness
-        promotion_result = self._check_promotion_readiness(user_id)
+            # 3. Mark trades as processed
+            trade_ids_to_mark = [t.get("id") for t in trades if t.get("id")]
+            if trade_ids_to_mark:
+                self._mark_trades_processed(trade_ids_to_mark)
 
-        result = {
-            "ok": True,
-            "status": "completed",
-            "trades_processed": len(trades),
-            "segments_updated": len(segments_updated),
-            "strategies_checked": len(strategies_checked),
-            "drift_alerts": drift_alerts,
-            "promotion": promotion_result,
-        }
+            # 4. Check promotion readiness
+            promotion_result = self._check_promotion_readiness(user_id)
 
-        logger.info(f"[LEARNING] Complete: {result}")
-        return result
+            result = {
+                "ok": True,
+                "status": "completed",
+                "trades_processed": len(trades),
+                "segments_updated": len(segments_updated),
+                "strategies_checked": len(strategies_checked),
+                "drift_alerts": drift_alerts,
+                "promotion": promotion_result,
+            }
+
+            logger.info(f"[LEARNING] Complete: {result}")
+            session.summary = result
+            return result
 
     # ── Trade fetching ────────────────────────────────────────────────
 

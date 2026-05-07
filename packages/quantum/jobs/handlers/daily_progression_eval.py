@@ -54,50 +54,34 @@ def run(payload: Dict[str, Any], ctx: Any = None) -> Dict[str, Any]:
             results = []
             promotions = 0
 
+            from packages.quantum.services.progression_service import (
+                get_alpaca_real_closed_trades,
+                cumulative_realized_pl,
+            )
+            from datetime import datetime as _dt
+
+            today_start_dt = _dt.fromisoformat(today_start)
+            today_end_dt = _dt.fromisoformat(today_end)
+
             for uid in active_users:
                 try:
                     # Sum realized PnL from Alpaca-routed positions closed today.
-                    # Only count positions whose ENTRY order went through Alpaca
-                    # (execution_mode='alpaca_paper' AND alpaca_order_id IS NOT NULL).
-                    # Internal paper fills are excluded from green day calculation.
-                    res = client.table("paper_positions") \
-                        .select("id, realized_pl") \
-                        .eq("user_id", uid) \
-                        .eq("status", "closed") \
-                        .gte("closed_at", today_start) \
-                        .lte("closed_at", today_end) \
-                        .execute()
-
-                    all_closed = res.data or []
-
-                    # Filter to Alpaca-only: check the ENTRY (earliest) order per position.
-                    # Exit orders also have position_id and may have execution_mode='alpaca_paper'
-                    # from the global env var, even when the entry was internal.
-                    alpaca_positions = []
-                    if all_closed:
-                        alpaca_pos_ids = set()
-                        for pos in all_closed:
-                            try:
-                                entry_res = client.table("paper_orders") \
-                                    .select("alpaca_order_id") \
-                                    .eq("position_id", pos["id"]) \
-                                    .order("created_at", desc=False) \
-                                    .limit(1) \
-                                    .execute()
-                                if entry_res.data and entry_res.data[0].get("alpaca_order_id"):
-                                    alpaca_pos_ids.add(pos["id"])
-                            except Exception:
-                                pass
-                        alpaca_positions = [p for p in all_closed if p["id"] in alpaca_pos_ids]
+                    # Uses shared helper (see progression_service.py) that filters
+                    # to entry-order alpaca_order_id IS NOT NULL — same lens used
+                    # by promotion_check for full_auto eligibility.
+                    closed_positions = get_alpaca_real_closed_trades(
+                        user_id=uid,
+                        supabase=client,
+                        since=today_start_dt,
+                        until=today_end_dt,
+                    )
 
                     print(
                         f"[PROGRESSION] user={uid[:8]}: "
-                        f"total_closed={len(all_closed)} alpaca_entries={len(alpaca_positions)} "
-                        f"internal_excluded={len(all_closed) - len(alpaca_positions)}",
+                        f"alpaca_entries_today={len(closed_positions)}",
                         flush=True,
                     )
 
-                    closed_positions = alpaca_positions
                     if not closed_positions:
                         results.append({
                             "user_id": uid[:8],
@@ -106,9 +90,7 @@ def run(payload: Dict[str, Any], ctx: Any = None) -> Dict[str, Any]:
                         })
                         continue
 
-                    realized_pnl = sum(
-                        float(p.get("realized_pl") or 0) for p in closed_positions
-                    )
+                    realized_pnl = cumulative_realized_pl(closed_positions)
 
                     # Record the day
                     result = svc.record_trading_day(uid, today, realized_pnl)
@@ -121,8 +103,6 @@ def run(payload: Dict[str, Any], ctx: Any = None) -> Dict[str, Any]:
                         "status": "green" if realized_pnl > 0 else "red",
                         "realized_pnl": round(realized_pnl, 2),
                         "alpaca_positions": len(closed_positions),
-                        "total_closed": len(all_closed),
-                        "internal_excluded": len(all_closed) - len(closed_positions),
                         "promoted": promoted,
                         "green_days": result["state"].get("alpaca_paper_green_days"),
                     })

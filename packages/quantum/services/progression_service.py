@@ -7,8 +7,17 @@ Gate from alpaca_paper → micro_live:
   - N consecutive green trading days (default 4)
   - A green day = total realized PnL from closed positions > $0
 
-Gate from micro_live → full_auto:
-  - Manual promotion (for now)
+Gate from micro_live → full_auto (rewritten 2026-05-06):
+  - broker equity ≥ $1500
+  - cumulative realized_pl > 0 across Alpaca-real closed trades
+  - alpaca_real_trade_count ≥ 3
+  Manual promotion via promote() preserved as bypass.
+
+The "Alpaca-real" trade definition (closed paper_position whose entry
+order has alpaca_order_id IS NOT NULL) is shared via
+get_alpaca_real_closed_trades() between alpaca_paper green-day counting
+and full_auto eligibility. Excludes internal-paper-era simulations and
+the 34 corrupted rows documented in CLAUDE.md 2026-04-16 entry.
 
 All trading-day calculations use Chicago timezone.
 """
@@ -16,7 +25,7 @@ All trading-day calculations use Chicago timezone.
 import logging
 import os
 from datetime import date, datetime, timedelta, timezone
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from supabase import Client
 
@@ -24,6 +33,83 @@ logger = logging.getLogger(__name__)
 
 TABLE = "go_live_progression"
 LOG_TABLE = "go_live_progression_log"
+
+# Gate thresholds for micro_live → full_auto auto-promotion (2026-05-06)
+EQUITY_THRESHOLD_FULL_AUTO = 1500.0
+MIN_TRADES_FULL_AUTO = 3
+
+
+def get_alpaca_real_closed_trades(
+    user_id: str,
+    supabase,
+    since: Optional[datetime] = None,
+    until: Optional[datetime] = None,
+) -> List[Dict[str, Any]]:
+    """Return closed paper_positions whose ENTRY order was Alpaca-routed.
+
+    Excludes internal-paper era simulations and the 34 corrupted rows
+    documented in CLAUDE.md 2026-04-16 entry. This is the canonical
+    'real trade' definition shared by:
+    - daily_progression_eval (alpaca_paper green-day counter)
+    - promotion_check (micro_live → full_auto gate)
+
+    Mirrors the inline pattern that previously lived at
+    daily_progression_eval.py:63-91; extracted to a helper so both
+    callers agree on the trade lens.
+
+    Args:
+        user_id: User UUID
+        supabase: Supabase client instance
+        since: Optional datetime; only return positions closed at/after
+        until: Optional datetime; only return positions closed at/before
+
+    Returns:
+        List of paper_positions row dicts with at least id and realized_pl.
+        Empty list if no qualifying trades.
+    """
+    query = supabase.table("paper_positions") \
+        .select("id, realized_pl, closed_at") \
+        .eq("user_id", user_id) \
+        .eq("status", "closed")
+    if since is not None:
+        query = query.gte("closed_at", since.isoformat())
+    if until is not None:
+        query = query.lte("closed_at", until.isoformat())
+
+    res = query.execute()
+    all_closed = res.data or []
+    if not all_closed:
+        return []
+
+    # Filter to Alpaca-only by checking the ENTRY (earliest) order per
+    # position. Exit orders may also have execution_mode='alpaca_paper'
+    # from the global env var even when entry was internal — the
+    # earliest-order check is what distinguishes a real entry.
+    alpaca_pos_ids = set()
+    for pos in all_closed:
+        try:
+            entry_res = supabase.table("paper_orders") \
+                .select("alpaca_order_id") \
+                .eq("position_id", pos["id"]) \
+                .order("created_at", desc=False) \
+                .limit(1) \
+                .execute()
+            if entry_res.data and entry_res.data[0].get("alpaca_order_id"):
+                alpaca_pos_ids.add(pos["id"])
+        except Exception:
+            # Graceful degradation per existing pattern — a per-position
+            # entry-order lookup failure should not abort the whole sweep.
+            pass
+
+    return [p for p in all_closed if p["id"] in alpaca_pos_ids]
+
+
+def cumulative_realized_pl(trades: List[Dict[str, Any]]) -> float:
+    """Sum realized_pl across a list of trade rows.
+
+    Treats None/missing realized_pl as 0.0. Empty list returns 0.0.
+    """
+    return sum(float(t.get("realized_pl") or 0) for t in trades)
 
 # Valid phase transitions
 VALID_TRANSITIONS = {
@@ -183,10 +269,20 @@ class ProgressionService:
         state.update(update)
         return {"state": state, "promoted": promoted}
 
-    def promote(self, user_id: str, to_phase: str) -> Dict[str, Any]:
+    def promote(
+        self,
+        user_id: str,
+        to_phase: str,
+        trigger_details: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
         """
-        Manual promotion (e.g., micro_live → full_auto).
-        Validates the transition is allowed.
+        Promote user to next phase. Validates the transition is allowed.
+
+        trigger_details: optional dict written to go_live_progression_log
+            for the audit trail. Defaults to {"trigger": "manual"} for
+            backwards compatibility with manual operator bypass. Auto-
+            promotion paths (e.g., evaluate_full_auto_promotion) pass
+            their own trigger context (gate values, equity, etc.).
         """
         state = self.get_state(user_id)
         current = state.get("current_phase")
@@ -216,14 +312,77 @@ class ProgressionService:
             .eq("user_id", user_id) \
             .execute()
 
-        self._log_event(user_id, "promotion", from_phase=current, to_phase=to_phase, details={
-            "trigger": "manual",
-        })
+        details = trigger_details if trigger_details is not None else {"trigger": "manual"}
+        self._log_event(user_id, "promotion", from_phase=current, to_phase=to_phase, details=details)
 
-        logger.info(f"[PROGRESSION] MANUAL PROMOTION: {user_id[:8]} {current} → {to_phase}")
+        trigger_label = details.get("trigger", "unspecified")
+        logger.info(
+            f"[PROGRESSION] PROMOTION ({trigger_label}): "
+            f"{user_id[:8]} {current} → {to_phase}"
+        )
 
         state.update(update)
         return {"state": state, "promoted": True}
+
+    def is_eligible_for_full_auto(self, user_id: str) -> Dict[str, Any]:
+        """Evaluate the three gates for micro_live → full_auto promotion.
+
+        Gates (all must pass):
+          1. broker equity ≥ EQUITY_THRESHOLD_FULL_AUTO ($1500)
+          2. cumulative realized_pl > 0 across Alpaca-real closed trades
+          3. alpaca_real_trade_count ≥ MIN_TRADES_FULL_AUTO (3)
+
+        Equity is read from broker (Alpaca-authoritative, not DB cache)
+        per the wrapper-drift fix in PR #864 + cash_service alert in
+        PR #865. Cumulative P&L and trade count use the shared
+        get_alpaca_real_closed_trades helper that filters out internal-
+        paper era simulations.
+
+        Returns dict with `eligible` bool plus all three gate values
+        and a human-readable `reason` string for audit + alert metadata.
+        """
+        # Gate 1: equity from broker truth
+        from packages.quantum.brokers.alpaca_client import get_alpaca_client
+        equity = 0.0
+        try:
+            alpaca = get_alpaca_client()
+            if alpaca:
+                acct = alpaca.get_account()
+                equity = float(acct.get("equity") or 0)
+        except Exception as e:
+            logger.warning(f"[PROGRESSION] Failed to read equity for eligibility: {e}")
+
+        # Gates 2 + 3: shared helper + computation
+        real_trades = get_alpaca_real_closed_trades(user_id, self.client)
+        cumulative_pl = cumulative_realized_pl(real_trades)
+        trade_count = len(real_trades)
+
+        eligible = (
+            equity >= EQUITY_THRESHOLD_FULL_AUTO
+            and cumulative_pl > 0
+            and trade_count >= MIN_TRADES_FULL_AUTO
+        )
+
+        return {
+            "eligible": eligible,
+            "equity": equity,
+            "cumulative_realized_pl": cumulative_pl,
+            "alpaca_real_trade_count": trade_count,
+            "reason": _build_full_auto_reason(equity, cumulative_pl, trade_count),
+        }
+
+
+def _build_full_auto_reason(
+    equity: float, cumulative_pl: float, trade_count: int,
+) -> str:
+    """Human-readable reason string for full_auto eligibility decision."""
+    if equity < EQUITY_THRESHOLD_FULL_AUTO:
+        return f"equity_below_threshold (${equity:.2f} < ${EQUITY_THRESHOLD_FULL_AUTO:.2f})"
+    if cumulative_pl <= 0:
+        return f"cumulative_pl_not_positive (${cumulative_pl:.2f})"
+    if trade_count < MIN_TRADES_FULL_AUTO:
+        return f"insufficient_trades ({trade_count}/{MIN_TRADES_FULL_AUTO} required)"
+    return "all_gates_passed"
 
     def get_execution_mode(self, user_id: str) -> str:
         """

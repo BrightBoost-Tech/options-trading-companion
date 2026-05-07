@@ -90,7 +90,6 @@ $TaskRegistry = @{
     "/tasks/weekly-report"                        = "tasks:weekly_report"
     "/tasks/strategy/autotune"                    = "tasks:strategy_autotune"
     "/internal/tasks/iv/daily-refresh"            = "tasks:iv_daily_refresh"
-    "/internal/tasks/train-learning-v3"           = "tasks:learning_train"
     "/internal/tasks/plaid/backfill-history"       = "tasks:plaid_backfill"
     "/internal/tasks/autotune/walk-forward"       = "tasks:walk_forward_autotune"
     "/internal/tasks/promotion/check"             = "tasks:promotion_check"

@@ -127,8 +127,26 @@ class RejectionStats:
     # Default cap for rejection samples (can be overridden via env var)
     DEFAULT_SAMPLES_CAP = 3
 
+    # #113 PR-6 sentinel for rejections that happen before a candidate
+    # has a strategy assigned (universe-level filters, missing data, etc).
+    # Operator queries can sum by this key to see pre-strategy filtering
+    # separately from strategy-specific filtering.
+    PRE_STRATEGY_KEY = "__pre_strategy__"
+
     def __init__(self):
         self._counts: Dict[str, int] = defaultdict(int)
+        # #113 PR-6: per-strategy dimension. Outer dict keyed by
+        # strategy_name (or PRE_STRATEGY_KEY); inner dict keyed by
+        # rejection reason. Updated atomically with the legacy _counts
+        # under the same lock.
+        self._per_strategy_counts: Dict[str, Dict[str, int]] = defaultdict(
+            lambda: defaultdict(int)
+        )
+        # #113 PR-6: emission counter. Incremented once per
+        # successfully-emitted candidate at process_symbol's return
+        # point. Both primary and fallback paths flow through that
+        # site, so this counts each emitted candidate exactly once.
+        self._emission_counts: Dict[str, int] = defaultdict(int)
         self._lock = threading.Lock()
         self.symbols_processed = 0
         self.chains_loaded = 0
@@ -136,26 +154,56 @@ class RejectionStats:
         self._samples: List[Dict[str, Any]] = []
         self._samples_cap: int = int(os.getenv("REJECTION_SAMPLES_CAP", str(self.DEFAULT_SAMPLES_CAP)))
 
-    def record(self, reason: str) -> None:
-        """Record a rejection reason (thread-safe)."""
+    def record(self, reason: str, strategy: Optional[str] = None) -> None:
+        """Record a rejection reason (thread-safe).
+
+        #113 PR-6: optional ``strategy`` kwarg attributes the rejection
+        to a strategy bucket in addition to the legacy per-reason
+        counter. ``None`` (default) attributes to ``PRE_STRATEGY_KEY`` —
+        preserves pre-#113 behavior at every existing call site.
+        """
         with self._lock:
             self._counts[reason] += 1
+            bucket = strategy or self.PRE_STRATEGY_KEY
+            self._per_strategy_counts[bucket][reason] += 1
 
-    def record_with_sample(self, reason: str, sample: Dict[str, Any]) -> None:
+    def record_with_sample(
+        self,
+        reason: str,
+        sample: Dict[str, Any],
+        strategy: Optional[str] = None,
+    ) -> None:
         """
         Record a rejection reason with a diagnostic sample (thread-safe).
 
         Args:
             reason: The rejection reason key (e.g., 'condor_no_credit')
             sample: A dict containing diagnostic info (must be JSON-serializable)
+            strategy: #113 PR-6 — optional strategy attribution. ``None``
+                attributes to ``PRE_STRATEGY_KEY``.
         """
         with self._lock:
             self._counts[reason] += 1
+            bucket = strategy or self.PRE_STRATEGY_KEY
+            self._per_strategy_counts[bucket][reason] += 1
             if len(self._samples) < self._samples_cap:
                 # Ensure sample includes the reason
                 safe_sample = self._make_json_safe(sample)
                 safe_sample["reason"] = reason
+                if strategy:
+                    safe_sample["strategy"] = strategy
                 self._samples.append(safe_sample)
+
+    def record_emission(self, strategy: str) -> None:
+        """#113 PR-6: increment the per-strategy emission counter.
+
+        Called at the candidate-emission point (process_symbol's
+        successful return). Both primary and fallback paths funnel
+        through that site so each emitted candidate counts exactly
+        once.
+        """
+        with self._lock:
+            self._emission_counts[strategy] += 1
 
     @staticmethod
     def _make_json_safe(obj: Any) -> Any:
@@ -192,6 +240,14 @@ class RejectionStats:
     def to_dict(self) -> Dict[str, Any]:
         """Return rejection stats as a dictionary."""
         with self._lock:
+            # #113 PR-6: surface per-strategy emission + rejection
+            # counts alongside the legacy per-reason histogram.
+            # Convert nested defaultdicts to plain dicts so JSON
+            # serialization downstream is well-defined.
+            per_strategy = {
+                strat: dict(reasons)
+                for strat, reasons in self._per_strategy_counts.items()
+            }
             return {
                 "rejection_counts": dict(self._counts),
                 "symbols_processed": self.symbols_processed,
@@ -200,6 +256,8 @@ class RejectionStats:
                 "total_rejections": sum(self._counts.values()),
                 "rejection_samples": list(self._samples),
                 "rejection_samples_cap": self._samples_cap,
+                "emission_counts_by_strategy": dict(self._emission_counts),
+                "rejection_counts_by_strategy_and_reason": per_strategy,
             }
 
     def top_reasons(self, n: int = 5) -> List[Tuple[str, int]]:
@@ -2588,12 +2646,15 @@ def scan_for_opportunities(
                 # #105: split rejection. Selector explicitly verdicted
                 # HOLD/CASH (regime/IV/score gate). Distinct from the
                 # no-candidates branch above.
-                rej_stats.record("strategy_hold_explicit_verdict")
+                rej_stats.record(
+                    "strategy_hold_explicit_verdict",
+                    strategy=suggestion["strategy"],
+                )
                 return None
 
             # Double check policy (redundant but safe)
             if not policy.is_allowed(suggestion["strategy"]):
-                rej_stats.record("strategy_banned")
+                rej_stats.record("strategy_banned", strategy=suggestion["strategy"])
                 return None
 
             # F. Construct Contract & Calculate EV
@@ -3204,7 +3265,10 @@ def scan_for_opportunities(
                 suggestion["strategy"], "live_full"
             )
             if candidate_lifecycle_state in ("designed", "deprecated"):
-                rej_stats.record(f"strategy_{candidate_lifecycle_state}")
+                rej_stats.record(
+                    f"strategy_{candidate_lifecycle_state}",
+                    strategy=suggestion["strategy"],
+                )
                 return None
 
             candidate_dict = {
@@ -3329,6 +3393,11 @@ def scan_for_opportunities(
                 "selection_mode": "multi_strategy" if len(candidates) > 1 else "single",
             }
 
+            # #113 PR-6: emission counter increment. Fires once per
+            # successfully-emitted candidate. Both primary and fallback
+            # paths in _process_symbol_multi flow through this return,
+            # so each emitted candidate counts exactly once.
+            rej_stats.record_emission(suggestion["strategy"])
             return candidate_dict
 
         except Exception as e:
@@ -3443,5 +3512,28 @@ def scan_for_opportunities(
         top_reasons = rejection_stats.top_reasons(5)
         if top_reasons:
             logger.info(f"[Scanner] Top rejection reasons: {top_reasons}")
+
+    # #113 PR-6: per-cycle emission + rejection summary. Fires every
+    # cycle (not gated on no-candidates) so the structured log carries
+    # the per-strategy distribution operator queries care about. Counts
+    # are also surfaced in rejection_stats.to_dict() → job_runs.result
+    # for post-hoc analysis; this log is the real-time copy.
+    _stats_snapshot = rejection_stats.to_dict()
+    logger.info(
+        "scanner_cycle_emission_summary",
+        extra={
+            "emission_counts_by_strategy": _stats_snapshot[
+                "emission_counts_by_strategy"
+            ],
+            "rejection_counts_by_strategy_and_reason": _stats_snapshot[
+                "rejection_counts_by_strategy_and_reason"
+            ],
+            "total_emitted": sum(
+                _stats_snapshot["emission_counts_by_strategy"].values()
+            ),
+            "total_rejected": _stats_snapshot["total_rejections"],
+            "symbols_processed": _stats_snapshot["symbols_processed"],
+        },
+    )
 
     return candidates, rejection_stats

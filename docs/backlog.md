@@ -8,6 +8,40 @@ Last migrated from CLAUDE.md: 2026-04-28.
 
 ## Backlog (post-promotion)
 
+**Tier-promotion rewrite — CLOSED 2026-05-06** (PR #<NUM>)
+
+Replaced broken micro_live → full_auto auto-promotion. Pre-rewrite the
+handler at `promotion_check.py:26` read state.get for a
+`micro_live_green_days` field that doesn't exist in
+`go_live_progression` schema. Handler ran 23 times historically without
+ever firing the "READY for promotion" critical alert because the
+counter was permanently 0.
+
+New gates (operator-confirmed 2026-05-06):
+- broker equity ≥ $1500
+- cumulative realized_pl > 0 across Alpaca-real closed trades
+- alpaca_real_trade_count ≥ 3
+
+Bonus: extracted `get_alpaca_real_closed_trades` shared helper used by
+both `daily_progression_eval` (alpaca_paper green-day counter) and the
+new `promotion_check` (micro_live → full_auto gate). Both paths now
+agree on the trade lens — eliminates drift risk between progression
+and promotion accounting.
+
+Diagnostic note: original spec assumed `cumulative_pl=-$82, count=1`.
+DB query revealed three lenses with materially different answers:
+naive +$66K (inherits 2026-04-16 corruption), date-floor -$1958,
+Alpaca-only -$20. Operator confirmed Alpaca-only (matches existing
+`daily_progression_eval` pattern). Cross-reference Anti-pattern 9
+in `docs/loud_error_doctrine.md` (audit-methodology, 2026-05-05) —
+production state should be empirically verified against database
+before design specs are locked.
+
+`alpaca_paper → micro_live` logic untouched per operator decision.
+Manual override (`ProgressionService.promote()`) preserved.
+Doctrine: same dead-state-reference shape as #62a-D7 (PR #879) and
+#71 PR-5 (PR #880).
+
 **#65 — Revive `policy_lab_eval`** (HIGH) — **CLOSED 2026-04-26**
 Resolved by PR #807 (ImportError fix) + PR #808 (schema-drift fix +
 per-cohort observability), merged 2026-04-26 06:15:54Z. First

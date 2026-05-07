@@ -517,6 +517,13 @@ constrained by iv_rank computation breakage, not classifier behavior.
 See #107 (diagnostic) and #115 (iv_rank fix). Classifiers themselves
 are working; iv_rank upstream is the actual broken lever.
 
+**Re-closure 2026-05-07 by #113 PR-6.** Strategy emission breadth is
+now empirically observable via
+`job_runs.result.debug.emission_counts_by_strategy` and
+`rejection_counts_by_strategy_and_reason`. Future breadth audits
+become a single SQL query rather than a recurring investigation —
+see #113 entry below for query examples.
+
 — Original entry preserved below for context —
 
 100% of recent live trades (last 14 days) are
@@ -918,7 +925,7 @@ Equity-assignment handling is separate ~1-week follow-up.
 **Cross-reference:** `docs/designs/multi_strategy_phase1.md` Phase 2
 PR-5 + Step 4d.
 
-**#113 — Multi-strategy Phase 2 PR-6: per-strategy emission counts in observability** (LOW)
+**#113 — Multi-strategy Phase 2 PR-6: per-strategy emission counts in observability** — **CLOSED 2026-05-07**
 
 Phase 1 design doc PR-6. Closes #103 (Regime → strategy selection
 breadth audit) by making breadth empirically observable.
@@ -934,6 +941,87 @@ strategy diversity over time without running ad-hoc SQL.
 
 **Cross-reference:** `docs/designs/multi_strategy_phase1.md` Phase 2
 PR-6. Closes/supersedes #103.
+
+**PR-6 status (2026-05-07):** shipped on branch
+`feat/113-pr-6-strategy-emission-counts`. Shape A (no new tables,
+no dashboard — counts surfaced in existing scanner cycle log +
+`job_runs.result` via `RejectionStats.to_dict()`).
+
+Two new dimensions on `RejectionStats`:
+
+- `emission_counts_by_strategy: Dict[str, int]` — incremented at
+  the single `process_symbol` successful return point. Both primary
+  and fallback paths in `_process_symbol_multi` flow through that
+  return, so each emitted candidate counts exactly once.
+- `rejection_counts_by_strategy_and_reason: Dict[str, Dict[str, int]]`
+  — outer dict keyed by ``strategy_name`` or sentinel
+  ``RejectionStats.PRE_STRATEGY_KEY = "__pre_strategy__"`` for
+  rejections that happen before a candidate has a strategy
+  assigned (universe-level filters, missing data, multi-strategy
+  exhaustion).
+
+`record(reason)` and `record_with_sample(reason, sample)` gain
+optional `strategy=...` kwarg. ``None`` (default) attributes to
+``__pre_strategy__`` so every existing call site (~30 of them)
+continues to work without edits. Strategy-known sites in
+`process_symbol` migrated to pass `strategy=suggestion["strategy"]`:
+`strategy_hold_explicit_verdict`, `strategy_banned`, the lifecycle
+gate from #110.
+
+Cycle log line `scanner_cycle_emission_summary` (INFO level) fires
+once per scan with both count dimensions, total_emitted,
+total_rejected, and symbols_processed in the structured `extra`
+fields. Real-time copy of what `to_dict()` surfaces post-hoc.
+
+**#103 closure:** strategy emission breadth is now empirically
+observable via `job_runs.result.emission_counts_by_strategy` and
+`rejection_counts_by_strategy_and_reason`. Second time #103 has
+been closed — first via #107 diagnostic finding (iv_rank=50 root
+cause → #115); this closure is the observability infrastructure
+that makes future breadth audits unnecessary.
+
+**Operator query examples:**
+
+```sql
+-- Daily strategy emission distribution (last 30 days)
+SELECT
+  DATE(finished_at) AS day,
+  result -> 'debug' -> 'emission_counts_by_strategy' AS emissions,
+  result -> 'debug' -> 'rejection_counts_by_strategy_and_reason' AS rejections
+FROM job_runs
+WHERE job_name = 'suggestions_open'
+  AND finished_at >= NOW() - INTERVAL '30 days'
+  AND status = 'succeeded'
+ORDER BY day DESC;
+
+-- Rolling per-strategy emission totals
+SELECT
+  strategy,
+  SUM(count_value::int) AS total
+FROM (
+  SELECT
+    key AS strategy,
+    value AS count_value
+  FROM job_runs,
+    jsonb_each_text(result -> 'debug' -> 'emission_counts_by_strategy')
+  WHERE job_name = 'suggestions_open'
+    AND finished_at >= NOW() - INTERVAL '30 days'
+    AND status = 'succeeded'
+) sub
+GROUP BY strategy
+ORDER BY total DESC;
+```
+
+Adapt `result -> 'debug' -> ...` path to actual envelope shape
+(orchestrator wraps `rejection_stats.to_dict()` under a `debug`
+key in the cycle response).
+
+**Phase 2 lifecycle infrastructure COMPLETE.** Four PRs shipped:
+#108 PR-1 (helpers), #109 PR-2 (lifecycle table + scheduler),
+#110 PR-3 (sizing override), #113 PR-6 (observability). #111 0DTE
+and #112 CSP can now ship strategies in DESIGNED/EXPERIMENTAL state
+without further plumbing changes; this PR ensures their emission
+behavior is observable from day one.
 
 **#114 — Ban-knob experiment for classifier diagnostic** — **SUPERSEDED 2026-05-07**
 

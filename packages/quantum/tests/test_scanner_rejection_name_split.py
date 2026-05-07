@@ -51,11 +51,20 @@ class TestStrategyHoldSplit(unittest.TestCase):
         )
 
     def test_explicit_verdict_reason_present(self):
-        self.assertIn(
-            'rej_stats.record("strategy_hold_explicit_verdict")', self.src,
+        # #113 PR-6 added an optional `strategy=...` kwarg to record(),
+        # so the call may span multiple lines. Look for the reason
+        # literal inside an enclosing rej_stats.record(...) call
+        # rather than pinning to a single-line shape.
+        anchor = self.src.find('"strategy_hold_explicit_verdict"')
+        self.assertGreater(
+            anchor, 0,
             "Site 2 (HOLD/CASH verdict) must record "
             "strategy_hold_explicit_verdict",
         )
+        # Walk backward up to ~200 chars — must find rej_stats.record(
+        # opening the surrounding call.
+        window = self.src[max(0, anchor - 200):anchor]
+        self.assertIn("rej_stats.record(", window)
 
     def test_bare_strategy_hold_record_removed(self):
         """No `rej_stats.record("strategy_hold")` (the legacy bare name)

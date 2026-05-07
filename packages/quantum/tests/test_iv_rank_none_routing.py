@@ -69,20 +69,28 @@ class TestRegimeNoIvSignalClassifier(unittest.TestCase):
     Avoids the full `compute_symbol_snapshot` flow because that method
     fetches IV context, bars, and chains. The classifier method is
     pure given its inputs and is what PR-B-1 actually changes.
+
+    Imports + constructs inside each test to avoid module-level patch
+    leaks from other tests in the suite (test_credit_spread_delta_source,
+    test_iron_condor_candidate, etc., patch RegimeEngineV3 within their
+    scope; capturing a class reference at setUpClass time has surfaced
+    Mock-poisoned references in CI).
     """
 
-    @classmethod
-    def setUpClass(cls):
+    def _engine(self):
         from packages.quantum.analytics.regime_engine_v3 import (
             RegimeEngineV3,
         )
-        cls.RegimeEngineV3 = RegimeEngineV3
-
-    def _engine(self):
-        # The classifier is an instance method but doesn't touch
-        # supabase / market_data — a stub instance suffices.
-        eng = self.RegimeEngineV3.__new__(self.RegimeEngineV3)
-        return eng
+        # Pass mocks for dependencies so __init__ doesn't construct
+        # real MarketDataTruthLayer / IVRepository instances. The
+        # classifier under test is a pure method; instance state is
+        # irrelevant.
+        return RegimeEngineV3(
+            supabase_client=None,
+            market_data=MagicMock(),
+            iv_repository=MagicMock(),
+            iv_point_service=MagicMock(),
+        )
 
     def _common_kwargs(self, rv_20d):
         return dict(
@@ -161,10 +169,13 @@ class TestRegimeFlagOffPreservesBehavior(unittest.TestCase):
         )
         from packages.quantum.common_enums import RegimeState
 
-        # Stub instance to avoid touching network/db.
-        eng = RegimeEngineV3.__new__(RegimeEngineV3)
-        eng.iv_repo = None
-        eng.market_data = MagicMock()
+        eng = RegimeEngineV3(
+            supabase_client=None,
+            market_data=MagicMock(),
+            iv_repository=MagicMock(),
+            iv_point_service=MagicMock(),
+        )
+        eng.iv_repo = None  # exercise the legacy fallback branch
         # daily_bars: 25 closes flat at 100 → rv_20d ≈ 0
         bars = [{"close": 100.0} for _ in range(25)]
         eng.market_data.daily_bars.return_value = bars
@@ -204,9 +215,13 @@ class TestRegimeFlagOffPreservesBehavior(unittest.TestCase):
 
         os.environ["IV_RANK_NONE_ROUTING_ENABLED"] = "1"
         try:
-            eng = RegimeEngineV3.__new__(RegimeEngineV3)
+            eng = RegimeEngineV3(
+                supabase_client=None,
+                market_data=MagicMock(),
+                iv_repository=MagicMock(),
+                iv_point_service=MagicMock(),
+            )
             eng.iv_repo = None
-            eng.market_data = MagicMock()
             bars = [{"close": 100.0} for _ in range(25)]
             eng.market_data.daily_bars.return_value = bars
 

@@ -61,7 +61,29 @@ class OpportunityScorer:
                 max_loss = (width - premium) * 100 if width > 0 else 0.0 # Standard vertical spread
                 # Handle Iron Condors or naked puts if needed (assuming verticals/IC for now)
             else:
-                premium = float(trade_candidate.get('debit') or trade_candidate.get('cost') or 0.0)
+                # #115c: anti-pattern 2 fix. Pre-fix `or 0.0` silently
+                # produced premium=0 when both `debit` and `cost` were
+                # None on a debit candidate — yielding max_loss=0 and
+                # max_profit=width*100, a fabricated free-money score
+                # purely from missing data. Same shape as PR-B-2 iv_rank
+                # site at line 142. When the input is genuinely missing,
+                # bail with an explicit error result rather than score
+                # the malformed candidate.
+                raw_premium = trade_candidate.get('debit') or trade_candidate.get('cost')
+                if raw_premium is None:
+                    logger.info(
+                        "opportunity_scorer: debit/cost both None for %s — "
+                        "skipping score (cannot evaluate without premium)",
+                        symbol,
+                    )
+                    return {
+                        "score": 0.0,
+                        "metrics": {},
+                        "penalties": {},
+                        "features_hash": None,
+                        "debug": {"reason": "premium_missing"},
+                    }
+                premium = float(raw_premium)
                 max_loss = premium * 100
                 width = abs(short_strike - long_strike) if short_strike and long_strike else 0.0
                 max_profit = (width - premium) * 100 if width > 0 else 0.0

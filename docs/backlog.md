@@ -579,6 +579,222 @@ Tunable via `ABSOLUTE_SPREAD_THRESHOLD` and `MIN_ECONOMIC_ENTRY` module
 constants (env-overridable). Operationally inert — same trades accepted/
 rejected as before; operators see accurate signal in `rejection_counts`.
 
+**#107 — Regime + sentiment classifier diagnostic** (HIGH)
+
+Phase 1 multi-strategy emission diagnostic (PR #884,
+`docs/designs/multi_strategy_phase1.md`) revealed the scanner is already
+multi-strategy abstracted. Production has historically emitted 78
+IRON_CONDOR + 45 LONG_PUT_DEBIT_SPREAD + 36 LONG_CALL_DEBIT_SPREAD.
+Post-2026-04-13 (post-corruption-floor): only LONG_CALL_DEBIT_SPREAD has
+emitted, 29 emissions in 23 days.
+
+Per CLAUDE.md, this is regime-driven natural selection — not banning. But
+classifiers landing in NORMAL+BULLISH for 23 consecutive cycles deserves
+verification BEFORE any multi-strategy lifecycle work ships. If
+classifiers are biased, the fix is upstream — correcting the classifier
+gets you strategy diversity without writing any new selector code.
+
+**Three hypotheses to test:**
+- H1: SPY/QQQ market action 2026-04-13 → 2026-05-06 was actually
+  consistent with NORMAL+BULLISH classification (system is correct)
+- H2: Regime classifier has a default-fallback bias toward NORMAL when
+  uncertainty is high
+- H3: Sentiment classifier (SMA20 > SMA50 crossover) has a sticky-bullish
+  bias when most universe symbols trend up together
+
+**Why this matters:** if H1, no action — system is right. If H2 or H3,
+the fix is upstream of any lifecycle work and dramatically smaller than
+shipping new strategies.
+
+**Approach:** read-only diagnostic. Pull regime + sentiment classifier
+output for past 30 days, cross-reference with SPY/QQQ price action,
+identify whether output is correct or biased.
+
+**Cross-reference:** sharpens #103 (Regime → strategy selection breadth
+audit) which becomes informational only post this diagnostic.
+Source: `docs/designs/multi_strategy_phase1.md` Step 1, Step 2.
+
+**Priority:** HIGH — gates the value of Entries #108-#114 below. Run
+before any multi-strategy lifecycle work.
+
+**Effort:** ~2 hours diagnostic + ~half day fix if classifier needs
+adjustment.
+
+**#108 — Multi-strategy Phase 2 PR-1: per-strategy realized P&L helper extension** (LOW)
+
+Phase 1 design doc PR-1. Foundation for strategy lifecycle gating.
+Extends `get_alpaca_real_closed_trades(user_id, supabase, since=None,
+until=None)` (shipped in PR #883) with optional `strategy_name` parameter.
+When provided, joins through `paper_orders → trade_suggestions` to
+filter to that strategy's closed trades only.
+
+Add `get_strategy_eligibility(strategy_name, user_id, supabase)`
+returning `{eligible, cumulative_pl, trade_count}` matching the
+tier-promotion gate shape from PR #883.
+
+Tests: 6-8 unit tests on filter behavior + missing-strategy-name
+backward-compat.
+
+**Dependencies:** none. Self-contained extension.
+
+**Effort:** half day.
+
+**Cross-reference:** `docs/designs/multi_strategy_phase1.md` Phase 2 PR-1.
+
+**#109 — Multi-strategy Phase 2 PR-2: strategy_lifecycle_states table + scheduler hook** (LOW)
+
+Phase 1 design doc PR-2. State machine: DESIGNED → EXPERIMENTAL →
+LIVE_FULL → DEPRECATED.
+
+Migration: `strategy_lifecycle_states` table with `strategy_name` PK,
+`current_state`, `transitioned_at`, `transition_reason` jsonb,
+`closed_trade_count`, `cumulative_realized_pl`, `updated_at`.
+
+Initial seed: existing 5 strategies (LONG_CALL_DEBIT_SPREAD,
+LONG_PUT_DEBIT_SPREAD, SHORT_PUT_CREDIT_SPREAD,
+SHORT_CALL_CREDIT_SPREAD, IRON_CONDOR) as `live_full` (preserves
+current behavior). New strategies (BULL_PUT_SPREAD_0DTE,
+CASH_SECURED_PUT) as `designed`.
+
+`evaluate_strategy_lifecycle()` function piggybacked on
+`daily_progression_eval` (4 PM CT). Reuses helper from #108.
+
+Graduation: EXPERIMENTAL → LIVE_FULL when cumulative_realized_pl > 0
+across ≥3 closed Alpaca-real trades for that strategy.
+
+Tests: graduation logic + state transition + audit log.
+
+**Dependencies:** #108 (helper extension).
+
+**Effort:** half day.
+
+**Cross-reference:** `docs/designs/multi_strategy_phase1.md` Phase 2 PR-2.
+
+**#110 — Multi-strategy Phase 2 PR-3: sizing engine EXPERIMENTAL override** (LOW)
+
+Phase 1 design doc PR-3. Caps EXPERIMENTAL strategies at 1 contract
+regardless of normal sizing.
+
+Read lifecycle state in sizing_engine via cached lookup:
+- EXPERIMENTAL → cap to 1 contract (override max sizing)
+- LIVE_FULL → no override (existing risk-pct math)
+- DESIGNED/DEPRECATED → strategy filtered upstream by scanner via
+  `banned_strategies` env arg
+
+Tests: 4-6 unit tests on size-override behavior + interaction with
+existing risk-pct math.
+
+**Dependencies:** #109 (lifecycle states table).
+
+**Effort:** half day.
+
+**Cross-reference:** `docs/designs/multi_strategy_phase1.md` Phase 2 PR-3.
+
+**#111 — Multi-strategy Phase 2 PR-4: 0DTE bull put spread + intraday cadence refactor** (MEDIUM)
+
+Phase 1 design doc PR-4. 0DTE doesn't exist in selector today.
+
+New strategy entry in `strategy_selector.py` (~30 lines). Scanner DTE
+filter: support same-day expiry under feature flag.
+
+**Architectural prerequisite:** intraday polling cadence. Current
+`intraday_risk_monitor` runs every 15 min; 0DTE benefits from 5-min
+cadence. Two options:
+- Conditional cadence (accelerate when 0DTE positions are open) —
+  touches load-bearing job
+- Parallel `intraday_0dte_monitor` (recommended) — independent
+  scheduler entry, no-op when no 0DTE positions
+
+Force-close-by-3:55-PM logic for any 0DTE position not exited via
+target/stop.
+
+Tests: scanner integration, exit lifecycle, settlement timing,
+force-close behavior.
+
+**Dependencies:** #108 + #109 + #110 (lifecycle infrastructure).
+Strategy starts in DESIGNED state until polling refactor lands.
+
+**Capital gate:** 0DTE benefits from concurrent positions (multiple
+intraday round-trips). Operator account at $696 supports only one
+position via micro-tier gate. 0DTE realistically needs small-tier
+($1000+) and ideally standard-tier ($5000+) for efficient deployment.
+
+**Effort:** 3-4 days.
+
+**Cross-reference:** `docs/designs/multi_strategy_phase1.md` Phase 2
+PR-4 + Step 4c.
+
+**#112 — Multi-strategy Phase 2 PR-5: cash-secured-put + capital gating** (MEDIUM)
+
+Phase 1 design doc PR-5. CSP doesn't exist in selector today.
+
+New strategy entry in `strategy_selector.py` (~20 lines). Single-leg
+structure: sizing engine accepts 1-leg candidates with
+`collateral_required` field.
+
+Capital gate: `EQUITY_THRESHOLD_CSP = $5,000`. Below threshold,
+strategy stays DESIGNED regardless of operator flip.
+
+Auto-close-before-expiry semantics initially (avoids equity-assignment
+handling). Real CSP semantics with assignment is a follow-up project.
+
+Tests: capital gate behavior, sizing math, auto-close timing,
+refusal-to-emit when below threshold.
+
+**Dependencies:** #108 + #109 + #110 (lifecycle infrastructure).
+
+**Capital gate:** $5,000 minimum. Operator account at $696 doesn't
+support CSP at retail-relevant strikes. Strategy stays DESIGNED
+indefinitely until equity grows.
+
+**Effort:** 3-4 days for selector + scanner + capital gate.
+Equity-assignment handling is separate ~1-week follow-up.
+
+**Cross-reference:** `docs/designs/multi_strategy_phase1.md` Phase 2
+PR-5 + Step 4d.
+
+**#113 — Multi-strategy Phase 2 PR-6: per-strategy emission counts in observability** (LOW)
+
+Phase 1 design doc PR-6. Closes #103 (Regime → strategy selection
+breadth audit) by making breadth empirically observable.
+
+Add per-strategy emission counts to scanner cycle logs / job_runs
+result envelope. Daily aggregate per-strategy counts surfaced in
+observability dashboard or log summaries. Enables operator to verify
+strategy diversity over time without running ad-hoc SQL.
+
+**Dependencies:** none. Self-contained observability addition.
+
+**Effort:** half day.
+
+**Cross-reference:** `docs/designs/multi_strategy_phase1.md` Phase 2
+PR-6. Closes/supersedes #103.
+
+**#114 — Ban-knob experiment for classifier diagnostic** (LOW)
+
+Phase 1 diagnostic surfaced this as the cheapest available classifier
+diagnostic — operator action, not coding work.
+
+If regime/sentiment classifiers appear stuck on NORMAL+BULLISH (per
+#107 investigation findings), set
+`banned_strategies=["LONG_CALL_DEBIT_SPREAD"]` for 1-2 days.
+
+Observe what selector emits in current conditions:
+- LONG_PUT_DEBIT_SPREAD → confirms sentiment classification was being
+  preferred-but-not-required as bullish
+- IRON_CONDOR → confirms sentiment was actually NEUTRAL or regime
+  was actually CHOP
+- HOLD (no emissions) → confirms classifier output is genuinely
+  correct, NORMAL+BULLISH is the right state
+
+**Operator action, not coding work.** ~10 min to flip env var +
+24-48 hours of observation.
+
+**Dependencies:** #107 should run first to determine if classifier
+needs investigation at all.
+
+**Cross-reference:** `docs/designs/multi_strategy_phase1.md` Step 4a.
+
 ### #72 — Loud-error doctrine + silent-failure catalog
 
 **Phase 1 (doctrine + catalog) complete 2026-04-27.**

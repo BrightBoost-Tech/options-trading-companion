@@ -292,9 +292,25 @@ class ConvictionService:
                     self._store_v3_multiplier(multipliers, strategy, window, regime, m)
                     continue
 
-            # Calculate EV-based multiplier
-            avg_leakage = float(row.get("avg_ev_leakage") or 0.0)
-            avg_predicted = float(row.get("avg_predicted_ev") or 0.0)
+            # Calculate EV-based multiplier.
+            # #115c (observability): pre-fix `or 0.0` arithmetically
+            # collapsed to a neutral 1.0 multiplier when either field
+            # was None — same outcome as the explicit weak-signal
+            # branch above (line ~290). Make the path explicit so
+            # missing-data fallbacks surface in logs instead of
+            # masquerading as "real signal that happens to be zero."
+            raw_leakage = row.get("avg_ev_leakage")
+            raw_predicted = row.get("avg_predicted_ev")
+            if raw_leakage is None or raw_predicted is None:
+                logger.info(
+                    "conviction_service: leakage/predicted_ev missing for "
+                    "%s/%s/%s — storing neutral 1.0 multiplier",
+                    strategy, window, regime,
+                )
+                self._store_v3_multiplier(multipliers, strategy, window, regime, 1.0)
+                continue
+            avg_leakage = float(raw_leakage)
+            avg_predicted = float(raw_predicted)
 
             # leakage = realized - predicted
             # raw = 1 + (leakage / basis)
@@ -358,11 +374,26 @@ class ConvictionService:
                 lookup_key = (strat, win_key)
 
                 trade_count = row.get("total_trades") or 0
-                avg_pnl_val = float(row.get("avg_return") or 0.0)
 
-                # Skip if insufficient sample size
+                # Skip if insufficient sample size — checked BEFORE the
+                # avg_return None-check below so we don't log a missing
+                # value for buckets that wouldn't be considered anyway.
                 if trade_count < 5:
                     continue
+
+                # #115c (observability): pre-fix `or 0.0` produced
+                # pnl_edge=0 ("no edge") indistinguishable from a real
+                # zero-edge result when avg_return was NULL despite
+                # sufficient sample size. Skip rather than fabricate.
+                raw_avg_return = row.get("avg_return")
+                if raw_avg_return is None:
+                    logger.info(
+                        "conviction_service: avg_return is None for legacy "
+                        "(%s, %s) despite trade_count=%s — skipping bucket",
+                        strat, win_key, trade_count,
+                    )
+                    continue
+                avg_pnl_val = float(raw_avg_return)
 
                 base_val = 1.0
                 pnl_edge = avg_pnl_val

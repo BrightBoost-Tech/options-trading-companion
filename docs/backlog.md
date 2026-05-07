@@ -1337,7 +1337,7 @@ undetermined until diagnostic completes.
 
 **Cross-reference:** #115 diagnostic synthesis Step 5.
 
-**#115c — Anti-pattern 2 cleanup batch: non-iv_rank/Greeks sites identified by #115 diagnostic** (LOW)
+**#115c — Anti-pattern 2 cleanup batch: non-iv_rank/Greeks sites identified by #115 diagnostic** — **CLOSED 2026-05-07**
 
 **Discovery:** #115 diagnostic Step 6 surfaced a small set of
 localised (not systemic) `or <sentinel>` patterns in
@@ -1370,6 +1370,75 @@ not blocking anything. Coordinate with #115 PR-B if
 **Cross-reference:** #72 silent-failure catalog (these are
 already counted in the P2 ~165 audit total but not
 individually tagged); #115 diagnostic Step 6.
+
+**Shipped (2026-05-07) on branch `feat/115c-antipattern-2-cleanup-batch`.** Per-site verdict from intent diagnostic:
+
+**APPLY FIX (4 sites):**
+
+- `analytics/opportunity_scorer.py:64` (was line 63 in catalog) —
+  `debit or cost or 0.0` chained fallback. Pre-fix produced
+  `premium=0` → `max_loss=0` and `max_profit=width*100` for any
+  debit candidate where both `debit` and `cost` were None — a
+  fabricated free-money score from missing data. Post-fix: bail
+  with explicit `{"score": 0.0, "debug": {"reason":
+  "premium_missing"}}` error result + INFO log. Same
+  bail-on-pathological-input shape as PR-B-2's iv_rank fix at line
+  142 (just below this site).
+- `analytics/conviction_service.py:296+297` (was 279+280) —
+  `avg_ev_leakage` / `avg_predicted_ev` paired fix. Pre-fix `or 0.0`
+  arithmetically collapsed to neutral 1.0 multiplier when either
+  field was None — same outcome as the explicit weak-signal branch
+  above (line ~290). Post-fix: explicit None-check stores 1.0 with
+  INFO log via the existing `_store_v3_multiplier` helper, mirroring
+  the line 290-292 pattern. Pure observability — no behavioral
+  change on the happy path.
+- `analytics/conviction_service.py:361` (was 344) — `avg_return or
+  0.0` in legacy multiplier path. Pre-fix produced `pnl_edge=0`
+  ("no edge") indistinguishable from a real zero-edge result when
+  `avg_return` was NULL despite `trade_count >= 5`. Post-fix: log +
+  `continue`, skipping the bucket entirely. Reordered code so the
+  trade_count gate runs FIRST so insufficient-samples buckets don't
+  emit "missing avg_return" noise.
+
+**EXCLUDED (3 sites — intentional design):**
+
+- `execution/transaction_cost_model.py:217` —
+  `fill_probability or 0.5`. Inside `_handle_missing_quote_fallback`
+  for paper-trading missing-quote path. Lines 227-233 explicitly
+  document that paper fills happen deterministically at
+  `expected_fill_price` regardless. The `fill_probability` value
+  flows ONLY into `result["fill_probability_used"]` — an audit-only
+  field, not a decision. The 0.5 sentinel documents "no precomputed
+  TCM value" in the audit log. Not load-bearing; preserve verbatim.
+- `analytics/opportunity_scorer.py:50, 51` — `short_strike or 0.0`,
+  `long_strike or 0.0`. The `0.0` sentinel is the documented
+  "no leg" value used by downstream dispatch
+  (`if short_strike > 0` at line 103, `if short_strike and
+  long_strike` at line 60). Single-leg strategies legitimately have
+  one strike at 0.0. Changing to None would propagate through Python
+  math operators and require coordinated fixes across 10+
+  downstream consumer sites — vastly out of #115c scope. Documented
+  as intentional design.
+
+**OVERLAP NOTE:** the catalog included
+`opportunity_scorer.py:141 — iv_rank or 0.0` which was already
+addressed by #115 PR-B-2. Removed from #115c scope as duplicative.
+
+**#115 doctrine arc closure 2026-05-07.** Series scope:
+
+- PR-A: `iv_daily_refresh` schedule + `iv_pipeline_no_data` alert
+- PR-B-1: scanner + regime engine None-routing (flag-gated)
+- PR-B-2: 3 remaining iv_rank consumer sites (flag-gated)
+- #115c: 4 non-iv_rank Anti-pattern 2 sites + 3 intentional-design
+  documented exclusions
+
+#115b (Greeks parallel investigation) remains open; gated on
+PR-B-2 verify + 2 weeks `underlying_iv_points` data accumulation.
+
+#115 itself remains OPEN — operational realization still pending:
+PR-A producer cron firing successfully (Friday 4:30 CT first
+natural fire), operator pre-flip checklist, flag flip, ~60 trading
+days of warmup.
 
 ### #72 — Loud-error doctrine + silent-failure catalog
 

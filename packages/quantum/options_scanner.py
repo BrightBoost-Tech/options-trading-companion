@@ -2080,6 +2080,86 @@ def _apply_tier_price_filter(
     return kept
 
 
+IV_PIPELINE_NONE_RATE_THRESHOLD = 0.5
+IV_PIPELINE_ALERT_DEDUP_HOURS = 24
+
+
+def _check_iv_pipeline_health(
+    iv_context_map: Dict[str, Any],
+    symbols: List[str],
+    supabase_client: Optional[Client],
+) -> None:
+    """#115 PR-A: emit `iv_pipeline_no_data` when iv_rank is None across
+    most of the universe in a single scan cycle.
+
+    Counts a symbol as "None" when its iv_context entry is missing
+    entirely (no row for that underlying in `underlying_iv_points`) or
+    present with `iv_rank=None` (sample_size < 60 in
+    `IVRepository.get_iv_context_batch`). Threshold is intentionally
+    conservative (0.5) so the alert keeps firing through the ~60-day
+    warmup window after the first `iv_daily_refresh` run; that confirms
+    the alert path is wired and surfaces a known incomplete state.
+
+    Deduped to one alert per 24h via a direct `risk_alerts` lookup.
+    Fail-soft: any error in the check or dedup query is swallowed —
+    this is observability scaffolding, not a scan blocker.
+    """
+    if not symbols or not supabase_client:
+        return
+    try:
+        total = len(symbols)
+        none_count = sum(
+            1 for s in symbols
+            if (iv_context_map.get(s) or {}).get("iv_rank") is None
+        )
+        none_rate = none_count / total
+        if none_rate <= IV_PIPELINE_NONE_RATE_THRESHOLD:
+            return
+
+        cutoff = (
+            datetime.now(timezone.utc)
+            - timedelta(hours=IV_PIPELINE_ALERT_DEDUP_HOURS)
+        ).isoformat()
+        recent = (
+            supabase_client.table("risk_alerts")
+            .select("id")
+            .eq("alert_type", "iv_pipeline_no_data")
+            .gte("created_at", cutoff)
+            .limit(1)
+            .execute()
+        )
+        if recent.data:
+            return  # already alerted within dedup window
+
+        from packages.quantum.observability.alerts import alert
+        alert(
+            supabase_client,
+            alert_type="iv_pipeline_no_data",
+            severity="warning",
+            message=(
+                f"iv_rank missing for {none_count}/{total} symbols "
+                f"({none_rate:.0%}) — check underlying_iv_points + "
+                f"iv_daily_refresh job_runs"
+            ),
+            metadata={
+                "iv_none_count": none_count,
+                "total_universe_count": total,
+                "none_rate": round(none_rate, 4),
+                "threshold": IV_PIPELINE_NONE_RATE_THRESHOLD,
+                "dedup_window_hours": IV_PIPELINE_ALERT_DEDUP_HOURS,
+                "operator_action_required": (
+                    "Check `SELECT COUNT(*) FROM underlying_iv_points` "
+                    "and the latest `iv-daily-refresh` row in `job_runs`. "
+                    "If the producer is healthy, this is the expected "
+                    "warmup-window signal (clears after ~60 trading "
+                    "days of accumulated history)."
+                ),
+            },
+        )
+    except Exception:
+        logger.exception("[Scanner] iv_pipeline_no_data check failed")
+
+
 def scan_for_opportunities(
     symbols: List[str] = None,
     supabase_client: Client = None,
@@ -2211,6 +2291,16 @@ def scan_for_opportunities(
             iv_context_map = regime_engine.iv_repo.get_iv_context_batch(symbols)
         except Exception as e:
             print(f"[Scanner] Failed to batch fetch IV context: {e}")
+
+    # #115 PR-A: loud-error surface for upstream iv pipeline failure.
+    # Counts symbols with iv_rank=None (either missing from the batch
+    # response or present-with-None because sample_size < 60). Fires
+    # one `iv_pipeline_no_data` alert per cycle when None-rate exceeds
+    # threshold; deduped to one alert per 24h to avoid noise during the
+    # ~60-day warmup window when iv_rank legitimately won't have enough
+    # samples. After warmup, near-100% None-rate would mean the
+    # producer broke again — alert resumes immediately on dedup expiry.
+    _check_iv_pipeline_health(iv_context_map, symbols, supabase_client)
 
     # Batch Fetch Sector Data (for risk envelope concentration checks)
     sector_map: Dict[str, str] = {}

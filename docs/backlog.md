@@ -759,11 +759,17 @@ operator UUID from CLAUDE.md.
 transition to `DEPRECATED` are manual-SQL-only per operator
 decision. Don't add demotion code in #110+ either.
 
-**Migration apply (post-merge):** apply via
-`mcp__supabase__apply_migration` per CLAUDE.md procedure. The
-migration is idempotent (`IF NOT EXISTS` + `ON CONFLICT DO
-NOTHING`). Capture audit row in `risk_alerts` with
-`alert_type='migration_apply'` after apply.
+**Migration applied 2026-05-07 16:10:12Z** via
+`mcp__supabase__apply_migration` (audit:
+`risk_alerts.id = c2bd23db-a236-408d-88df-b74454ee0405`,
+commit `c80c0af`). Verification confirmed:
+
+- 5/5 strategies seeded as `live_full` with correct
+  `transition_reason` JSONB
+- CHECK constraint enforces 4-value enum
+  (`designed`/`experimental`/`live_full`/`deprecated`)
+- `set_updated_at_strategy_lifecycle_states` trigger present
+- RLS enabled with service-role-only policy
 
 **Day-1 expected behavior:** zero EXPERIMENTAL strategies in the
 table on first run (seed places all 5 as `live_full`), so

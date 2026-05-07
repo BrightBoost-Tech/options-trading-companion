@@ -882,6 +882,166 @@ undetermined until diagnostic completes.
 **Cross-reference:** #107 diagnostic synthesis (2026-05-07).
 Closes the original #103 question about strategy selection breadth.
 
+---
+
+**Diagnostic findings (2026-05-07) — verdict: NEVER WORKED.**
+
+Producer cron `iv_daily_refresh` was never registered in
+`packages/quantum/scheduler.py:SCHEDULES`. APScheduler introduced
+2026-04-01 (commit `7911076`); the job has zero executions in
+`job_runs` ever. The handler, signed endpoint, and tests all
+exist — only the schedule entry is missing.
+
+**Root cause chain (3 stacked failures):**
+
+1. `iv_daily_refresh` handler is correctly wired
+   (UniverseService → MarketDataTruthLayer → IVPointService →
+   IVRepository) but never invoked because the SCHEDULES entry
+   is absent.
+2. `underlying_iv_points` table is empty (0 rows ever). With
+   `sample_size < 60`, `iv_repo.get_iv_context()` returns
+   `iv_rank=None` deterministically (`iv_repository.py:135`).
+3. Two layers of silent fallback mask the upstream failure.
+   `options_scanner.py:2395` (`iv_rank or 50.0`) plus
+   `regime_engine_v3.py:529`
+   (`f_rank = iv_rank if iv_rank is not None else 50.0`). Both
+   are Anti-pattern 2 violations per
+   `docs/loud_error_doctrine.md`.
+
+**Consumer split (5 silent / 2 explicit):**
+
+- `options_scanner.py:2395` — `iv_rank or 50.0` ⚠️ (the one #107 surfaced)
+- `regime_engine_v3.py:529` — `if iv_rank is not None else 50.0` ⚠️
+- `strategy_design_agent.py:73` — `context.get("iv_rank", 50.0)` ⚠️
+- `analytics/conviction_service.py:189` — `if pos.iv_rank is not None else 50.0` ⚠️
+- `analytics/opportunity_scorer.py:141` — `or 0.0` ⚠️ (different sentinel)
+- `agents/agents/vol_surface_agent.py:21` — `if iv_rank is None: …` ✓ explicit
+- `analytics/guardrails.py:118` — `if iv_rank is not None: …` ✓ explicit
+
+**Operational impact (now explained):**
+
+- 100% NORMAL regime classification in W3: `iv_rank=50` →
+  `score=50` → NORMAL bracket via `regime_engine_v3.py:541-548`.
+  With real iv_rank values, the regime classifier would
+  distribute across SUPPRESSED / NORMAL / ELEVATED / SHOCK as
+  designed.
+- Strategy emission asymmetry partially explained: iron condor
+  trigger requires `iv_rank > 50` strict OR ELEVATED+ regime.
+  With frozen iv_rank=50, neither condition fires post-CHOP
+  windows.
+
+**Greeks parallel question:** `analytics/greeks_aggregator.py:48-51`
+and `api.py:575-578, 943-946` use `delta or 0.0`, `theta or 0.0`,
+etc. — same Anti-pattern 2 shape. Whether Greeks are actually
+always-None like iv_rank requires checking the truth_layer Polygon
+enrichment path post-2026-04-27 plan upgrade. Deferred to **#115b**.
+
+**Fix-scope decision (operator, 2026-05-07): doctrine-aligned, PR-A + PR-B sequenced.**
+
+- **PR-A (~half day):** add `iv_daily_refresh` entry to
+  `SCHEDULES` + add `iv_pipeline_no_data` loud-error alert when
+  `get_iv_context()` returns None for >N% of universe in a
+  single scan cycle. Producer starts populating
+  `underlying_iv_points` daily. Alert ensures future silent
+  failures of the producer are caught immediately.
+- **PR-B (effort TBD; drafted after PR-A lands):** replace
+  silent fallbacks at the 5 consumer sites with explicit
+  None-routing per `loud_error_doctrine.md` Anti-pattern 2.
+  Semantics (skip vs flag vs explicit-route-to-normal)
+  decided during PR-B drafting based on warmup-window
+  emission tradeoffs.
+
+**Warmup window:** even after PR-A ships, `iv_rank` doesn't
+become meaningful until ~60 trading days of
+`underlying_iv_points` history accumulate. PR-B is what makes
+the fix meaningful from day one — without it, the system
+continues using silent 50.0 fallback during the entire warmup
+window.
+
+**Cross-references (additional):**
+
+- `docs/loud_error_doctrine.md` Anti-pattern 2.
+- Same dead-state-reference shape as #62a-D7
+  (`shadow_cohort_daily` missing) and #71 PR-5
+  (`CalibrationService.train_and_persist` missing). Now a
+  4-data-point pattern.
+- Schedule entry pattern: see existing `daily_progression_eval`
+  entry in `SCHEDULES` (recently shipped).
+
+**#115b — Greeks parallel investigation: same-shape fallbacks in greeks_aggregator and api** (MEDIUM)
+
+**Discovery:** #115 iv_rank diagnostic surfaced parallel
+`or 0.0` fallback patterns for Greeks at
+`analytics/greeks_aggregator.py:48-51` and
+`api.py:575-578, 943-946`. Same Anti-pattern 2 shape as
+iv_rank's `or 50.0`.
+
+**Question:** are Greeks producing real values, or are they
+silently None like iv_rank? Two possibilities:
+
+- **Pre-2026-04-27:** Polygon Options Basic plan didn't include
+  real-time Greeks — the `or 0.0` fallback may have been
+  load-bearing during that window.
+- **Post-2026-04-27:** Polygon Options Developer plan ($79/mo,
+  upgraded per #87) should populate Greeks. Whether the
+  `MarketDataTruthLayer` enrichment path actually pulls them
+  is unknown.
+
+**Approach (when scheduled):** read-only diagnostic similar to
+#115. Walk the truth_layer Polygon enrichment chain for
+Greeks. Check DB variance: do `delta` / `gamma` / `theta` /
+`vega` fields in `paper_orders.order_json` (per leg) or
+`trade_suggestions.order_json` show variance, or are they
+uniformly 0? If uniform → Greeks have the same upstream
+problem. If varied → fallback is defensive only.
+
+**Timing:** schedule AFTER #115 PR-A + PR-B land and `iv_rank`
+values are confirmed flowing. Bundling with #115 would couple
+two independent investigations.
+
+**Dependencies:** #115 PR-A merged + at least 2 weeks of
+`underlying_iv_points` accumulating data (so the iv_rank
+diagnostic has clean signal to compare Greeks against).
+
+**Estimated effort:** ~1.5–2 hours diagnostic. Fix scope
+undetermined until diagnostic completes.
+
+**Cross-reference:** #115 diagnostic synthesis Step 5.
+
+**#115c — Anti-pattern 2 cleanup batch: non-iv_rank/Greeks sites identified by #115 diagnostic** (LOW)
+
+**Discovery:** #115 diagnostic Step 6 surfaced a small set of
+localised (not systemic) `or <sentinel>` patterns in
+production code outside the iv_rank and Greeks chains. Same
+Anti-pattern 2 shape, smaller blast radius.
+
+**Sites identified:**
+
+- `execution/transaction_cost_model.py:217` — `fill_probability or 0.5`
+- `analytics/opportunity_scorer.py:49` — `short_strike or 0.0`
+- `analytics/opportunity_scorer.py:50` — `long_strike or 0.0`
+- `analytics/opportunity_scorer.py:63` — `debit or cost or 0.0`
+- `analytics/opportunity_scorer.py:141` — `iv_rank or 0.0` (also covered by #115/PR-B; remove duplication when batch ships)
+- `analytics/conviction_service.py:279` — `avg_ev_leakage or 0.0`
+- `analytics/conviction_service.py:280` — `avg_predicted_ev or 0.0`
+- `analytics/conviction_service.py:344` — `avg_return or 0.0`
+
+**Approach:** for each site, decide whether the field is
+boundary input (validate-and-fail-fast) or internal (route
+None forward). Replace `or <sentinel>` with explicit None
+handling + alert at the producing-side fallback boundary,
+per `loud_error_doctrine.md` Anti-pattern 2.
+
+**Timing:** ships when doctrine-cleanup time is available;
+not blocking anything. Coordinate with #115 PR-B if
+`opportunity_scorer.py:141` is touched there.
+
+**Estimated effort:** ~2-3 hours total once dispatched.
+
+**Cross-reference:** #72 silent-failure catalog (these are
+already counted in the P2 ~165 audit total but not
+individually tagged); #115 diagnostic Step 6.
+
 ### #72 — Loud-error doctrine + silent-failure catalog
 
 **Phase 1 (doctrine + catalog) complete 2026-04-27.**

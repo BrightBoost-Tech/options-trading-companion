@@ -723,6 +723,54 @@ Tests: graduation logic + state transition + audit log.
 
 **Cross-reference:** `docs/designs/multi_strategy_phase1.md` Phase 2 PR-2.
 
+**PR-2 status (2026-05-07):** shipped on branch
+`feat/109-pr-2-strategy-lifecycle-states`. Four pieces:
+
+- **Migration** `20260507000000_add_strategy_lifecycle_states.sql`
+  — creates `strategy_lifecycle_states` (strategy_name PK,
+  current_state CHECK enum of `designed`/`experimental`/`live_full`/
+  `deprecated`, transition_reason JSONB, closed_trade_count,
+  cumulative_realized_pl, updated_at trigger). Seeds 5 currently-
+  shipped strategies as `live_full` via `ON CONFLICT DO NOTHING`
+  (idempotent re-apply). Inline `DO $$` invariant check raises if
+  seed leaves the table in unexpected state. RLS enabled with
+  service-role-only access (lifecycle is global, not per-user).
+- **`evaluate_strategy_lifecycle(supabase)`** in
+  `progression_service.py` — first caller of #108 PR-1's
+  `get_strategy_eligibility`. Reads EXPERIMENTAL rows, evaluates
+  each, transitions eligible ones to LIVE_FULL with audit. Failure
+  isolation: per-strategy errors logged + alerted via
+  `strategy_lifecycle_eval_error`, sweep continues. Idempotent —
+  WHERE filter on `current_state='experimental'` means a second run
+  finds nothing.
+- **`daily_progression_eval` hook** — sibling step OUTSIDE the
+  per-user loop (lifecycle is global). Wrapped in last-resort
+  try/except so any unexpected escape doesn't lose the user-loop
+  result envelope. Result dict gains `strategy_transitions` key.
+- **Audit alert** `strategy_graduated_to_full` (severity=info) on
+  every transition, with `cumulative_realized_pl` + `trade_count`
+  + `min_required_trades` in metadata.
+
+**`STRATEGY_LIFECYCLE_OWNER_USER_ID` env var** introduced as the
+seam for future multi-tenant aggregation. Defaults to the canonical
+operator UUID from CLAUDE.md.
+
+**No demotion logic.** `LIVE_FULL → EXPERIMENTAL` and any
+transition to `DEPRECATED` are manual-SQL-only per operator
+decision. Don't add demotion code in #110+ either.
+
+**Migration apply (post-merge):** apply via
+`mcp__supabase__apply_migration` per CLAUDE.md procedure. The
+migration is idempotent (`IF NOT EXISTS` + `ON CONFLICT DO
+NOTHING`). Capture audit row in `risk_alerts` with
+`alert_type='migration_apply'` after apply.
+
+**Day-1 expected behavior:** zero EXPERIMENTAL strategies in the
+table on first run (seed places all 5 as `live_full`), so
+`evaluate_strategy_lifecycle()` returns `[]` and writes nothing.
+First real graduation will fire when #111 (0DTE) or #112 (CSP)
+ships their strategy in EXPERIMENTAL state.
+
 **#110 — Multi-strategy Phase 2 PR-3: sizing engine EXPERIMENTAL override** (LOW)
 
 Phase 1 design doc PR-3. Caps EXPERIMENTAL strategies at 1 contract

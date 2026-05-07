@@ -118,11 +118,40 @@ def run(payload: Dict[str, Any], ctx: Any = None) -> Dict[str, Any]:
 
         user_results, total_promotions = run_async(process_users())
 
+        # #109 PR-2: global strategy lifecycle evaluation. Sibling step,
+        # outside the per-user loop — strategy state is global, not
+        # per-user. Failure here is logged + alerted via the
+        # function's internal handlers but does NOT undo the user-loop
+        # work above.
+        strategy_transitions: list = []
+        try:
+            from packages.quantum.services.progression_service import (
+                evaluate_strategy_lifecycle,
+            )
+            strategy_transitions = evaluate_strategy_lifecycle(client) or []
+            if strategy_transitions:
+                names = [t["strategy_name"] for t in strategy_transitions]
+                print(
+                    f"[PROGRESSION] Strategy lifecycle: "
+                    f"{len(strategy_transitions)} graduated -> live_full: "
+                    f"{names}",
+                    flush=True,
+                )
+        except Exception as e:
+            # Last-resort guard: evaluate_strategy_lifecycle handles its
+            # own per-strategy failures, but any unexpected escape lands
+            # here so the user-loop result envelope still returns.
+            print(
+                f"[PROGRESSION] Strategy lifecycle eval crashed: {e}",
+                flush=True,
+            )
+
         return {
             "ok": True,
             "trade_date": today.isoformat(),
             "users_evaluated": len(user_results),
             "promotions": total_promotions,
+            "strategy_transitions": strategy_transitions,
             "timing_ms": (time.time() - start_time) * 1000,
             "results": user_results[:20],
         }

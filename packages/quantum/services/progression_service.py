@@ -186,6 +186,232 @@ def get_strategy_eligibility(
         "min_required_trades": MIN_TRADES_FOR_STRATEGY_GRADUATION,
     }
 
+
+# As of #109 PR-2 (2026-05-07), the seed migration places all 5
+# currently-shipped strategies in LIVE_FULL state — there are zero
+# EXPERIMENTAL strategies yet. evaluate_strategy_lifecycle() will
+# return [] until either:
+#   - A new strategy is added in EXPERIMENTAL state (#111 0DTE / #112 CSP)
+#   - An existing strategy is manually demoted via SQL (operator action)
+# The function is correct + tested; it's just waiting for work to do.
+def _get_default_strategy_owner_user_id() -> Optional[str]:
+    """Return the user_id whose closed-trade history backs strategy
+    eligibility decisions.
+
+    Single-tenant for now: the operator's UUID. Reads from env first
+    (``STRATEGY_LIFECYCLE_OWNER_USER_ID``) then falls back to the
+    canonical operator UUID documented in CLAUDE.md. Multi-tenant
+    aggregation across users is deferred — the helper is the seam
+    where that future change lands.
+    """
+    return (
+        os.environ.get("STRATEGY_LIFECYCLE_OWNER_USER_ID")
+        or "75ee12ad-b119-4f32-aeea-19b4ef55d587"
+    )
+
+
+def evaluate_strategy_lifecycle(supabase) -> List[Dict[str, Any]]:
+    """Evaluate every EXPERIMENTAL strategy for graduation to LIVE_FULL.
+
+    Reads ``strategy_lifecycle_states`` for current state, calls
+    ``get_strategy_eligibility`` for each EXPERIMENTAL row, transitions
+    eligible strategies to LIVE_FULL with audit trail, and returns the
+    list of transition records.
+
+    No ``user_id`` parameter: strategy lifecycle is global, not
+    per-user. Trade history comes from the operator's user_id via
+    ``_get_default_strategy_owner_user_id`` (single-tenant assumption
+    documented at that helper).
+
+    Idempotent. The WHERE filter ``current_state = 'experimental'``
+    means a successful first run leaves nothing for a second run to
+    pick up — re-run produces ``[]`` and writes no audit rows.
+
+    Failure isolation: a single eligibility / DB error for one
+    strategy is logged and skipped; the sweep continues for the
+    remaining EXPERIMENTAL rows. Loud-Error Doctrine v1.0 anti-pattern
+    4 (per-iteration swallow) — a ``strategy_lifecycle_eval_error``
+    risk_alert is written so failures surface in the audit feed.
+
+    Returns:
+        List of transition dicts. Each entry:
+            {
+              "strategy_name": str,
+              "previous_state": "experimental",
+              "new_state": "live_full",
+              "cumulative_realized_pl": float,
+              "trade_count": int,
+              "min_required_trades": int,
+            }
+    """
+    try:
+        experimental_res = (
+            supabase.table("strategy_lifecycle_states")
+            .select("strategy_name, current_state")
+            .eq("current_state", "experimental")
+            .execute()
+        )
+    except Exception as e:
+        logger.exception(
+            f"[STRATEGY_LIFECYCLE] Failed to read EXPERIMENTAL strategies: {e}"
+        )
+        _emit_lifecycle_alert(
+            supabase=supabase,
+            severity="warning",
+            message=f"strategy_lifecycle_eval read failure: {e}",
+            metadata={"phase": "read_experimental"},
+        )
+        return []
+
+    rows = experimental_res.data or []
+    if not rows:
+        return []
+
+    owner_user_id = _get_default_strategy_owner_user_id()
+    transitions: List[Dict[str, Any]] = []
+
+    for row in rows:
+        strategy_name = row["strategy_name"]
+        try:
+            eligibility = get_strategy_eligibility(
+                strategy_name=strategy_name,
+                user_id=owner_user_id,
+                supabase=supabase,
+            )
+        except Exception as e:
+            logger.exception(
+                f"[STRATEGY_LIFECYCLE] {strategy_name}: eligibility check failed: {e}"
+            )
+            _emit_lifecycle_alert(
+                supabase=supabase,
+                severity="warning",
+                message=(
+                    f"strategy_lifecycle_eval eligibility failure for "
+                    f"{strategy_name}: {e}"
+                ),
+                metadata={
+                    "phase": "eligibility_check",
+                    "strategy_name": strategy_name,
+                },
+            )
+            continue
+
+        if not eligibility["eligible"]:
+            continue
+
+        try:
+            transition = _promote_strategy_to_full(
+                strategy_name=strategy_name,
+                eligibility=eligibility,
+                supabase=supabase,
+            )
+            transitions.append(transition)
+        except Exception as e:
+            logger.exception(
+                f"[STRATEGY_LIFECYCLE] {strategy_name}: promotion write failed: {e}"
+            )
+            _emit_lifecycle_alert(
+                supabase=supabase,
+                severity="warning",
+                message=(
+                    f"strategy_lifecycle_eval promotion-write failure for "
+                    f"{strategy_name}: {e}"
+                ),
+                metadata={
+                    "phase": "promotion_write",
+                    "strategy_name": strategy_name,
+                    "cumulative_pl": eligibility.get("cumulative_pl"),
+                    "trade_count": eligibility.get("trade_count"),
+                },
+            )
+
+    return transitions
+
+
+def _promote_strategy_to_full(
+    strategy_name: str,
+    eligibility: Dict[str, Any],
+    supabase,
+) -> Dict[str, Any]:
+    """Update lifecycle row to LIVE_FULL + write audit alert.
+
+    Caller (``evaluate_strategy_lifecycle``) wraps in try/except so
+    a write failure here is logged + alerted but doesn't abort the
+    sweep over other EXPERIMENTAL strategies.
+    """
+    transition_reason = {
+        "reason": "graduation_eligible",
+        "previous_state": "experimental",
+        "cumulative_realized_pl": eligibility["cumulative_pl"],
+        "trade_count": eligibility["trade_count"],
+        "min_required_trades": eligibility["min_required_trades"],
+    }
+
+    supabase.table("strategy_lifecycle_states").update({
+        "current_state": "live_full",
+        "transitioned_at": datetime.now(timezone.utc).isoformat(),
+        "transition_reason": transition_reason,
+        "closed_trade_count": eligibility["trade_count"],
+        "cumulative_realized_pl": eligibility["cumulative_pl"],
+    }).eq("strategy_name", strategy_name).execute()
+
+    _emit_lifecycle_alert(
+        supabase=supabase,
+        severity="info",
+        message=(
+            f"Strategy {strategy_name} graduated experimental -> live_full "
+            f"(pl=${eligibility['cumulative_pl']:.2f}, "
+            f"trades={eligibility['trade_count']})"
+        ),
+        metadata={
+            "strategy_name": strategy_name,
+            **transition_reason,
+        },
+        alert_type="strategy_graduated_to_full",
+    )
+
+    logger.warning(
+        f"[STRATEGY_LIFECYCLE] {strategy_name} graduated "
+        f"experimental -> live_full "
+        f"(pl=${eligibility['cumulative_pl']:.2f}, "
+        f"trades={eligibility['trade_count']})"
+    )
+
+    return {
+        "strategy_name": strategy_name,
+        "previous_state": "experimental",
+        "new_state": "live_full",
+        **{k: v for k, v in transition_reason.items() if k != "previous_state"},
+    }
+
+
+def _emit_lifecycle_alert(
+    supabase,
+    severity: str,
+    message: str,
+    metadata: Dict[str, Any],
+    alert_type: str = "strategy_lifecycle_eval_error",
+) -> None:
+    """Wrapper around the canonical ``alert()`` helper for lifecycle
+    audit + error rows. Soft-fails (logger.exception) on alert-write
+    error per doctrine valid-pattern 5 (no recursion).
+    """
+    try:
+        from packages.quantum.observability.alerts import alert
+        alert(
+            supabase,
+            alert_type=alert_type,
+            severity=severity,
+            message=message,
+            metadata=metadata,
+        )
+    except Exception:
+        logger.exception(
+            "[STRATEGY_LIFECYCLE] alert write failed",
+            extra={"alert_type": alert_type, "severity": severity},
+        )
+
+
 # Valid phase transitions
 VALID_TRANSITIONS = {
     "alpaca_paper": "micro_live",

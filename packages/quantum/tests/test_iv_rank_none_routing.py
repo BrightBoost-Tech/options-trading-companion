@@ -23,11 +23,15 @@ from unittest.mock import MagicMock, patch
 
 # Defensive remediation: test_weekly_report_win_rate.py at module-import
 # time stamps `sys.modules['packages.quantum.analytics.regime_engine_v3']`
-# with a MagicMock to skip heavy dependencies. Pytest collection order is
-# not stable across CI vs local, and once that file is imported the
-# regime engine module is permanently mocked for every subsequent test.
-# Force a fresh real import here so behavioral tests below get the
-# actual class.
+# with a MagicMock so it can isolate workflow_orchestrator. Pytest
+# collects test files alphabetically; this file (test_iv_rank_*) is
+# loaded BEFORE test_weekly_report_*, so when our tests RUN the
+# pollution is already in place and any
+# `from ... import RegimeEngineV3` returns a MagicMock attribute.
+#
+# Strategy: import the real classes once at file-load time (before
+# weekly_report has had a chance to pollute), bind them to module
+# globals, and use those bindings in every test method.
 for _modname in (
     "packages.quantum.analytics.regime_engine_v3",
     "packages.quantum.services.iv_repository",
@@ -35,11 +39,25 @@ for _modname in (
     "packages.quantum.services.market_data_truth_layer",
 ):
     sys.modules.pop(_modname, None)
-importlib.import_module("packages.quantum.analytics.regime_engine_v3")
+_regime_module = importlib.import_module(
+    "packages.quantum.analytics.regime_engine_v3"
+)
+RegimeEngineV3 = _regime_module.RegimeEngineV3
+GlobalRegimeSnapshot = _regime_module.GlobalRegimeSnapshot
+SymbolRegimeSnapshot = _regime_module.SymbolRegimeSnapshot
+
+# Sanity check: if any of the above is itself a Mock, weekly_report
+# beat us to the pollution and the file should fail loudly rather
+# than produce confusing assertion failures downstream.
+assert not isinstance(RegimeEngineV3, MagicMock), (
+    "regime_engine_v3 module is mocked at file-load time — "
+    "test ordering broke the assumption this file relies on."
+)
 
 from packages.quantum.observability.feature_flags import (
     is_iv_rank_none_routing_enabled,
 )
+from packages.quantum.common_enums import RegimeState
 
 
 SCANNER_PATH = (
@@ -96,13 +114,10 @@ class TestRegimeNoIvSignalClassifier(unittest.TestCase):
     """
 
     def _engine(self):
-        from packages.quantum.analytics.regime_engine_v3 import (
-            RegimeEngineV3,
-        )
         # Pass mocks for dependencies so __init__ doesn't construct
-        # real MarketDataTruthLayer / IVRepository instances. The
-        # classifier under test is a pure method; instance state is
-        # irrelevant.
+        # real MarketDataTruthLayer / IVRepository instances. Uses the
+        # module-level RegimeEngineV3 captured at file-load time to
+        # bypass test_weekly_report_win_rate.py sys.modules pollution.
         return RegimeEngineV3(
             supabase_client=None,
             market_data=MagicMock(),
@@ -123,7 +138,6 @@ class TestRegimeNoIvSignalClassifier(unittest.TestCase):
         )
 
     def test_rv_unavailable_returns_normal(self):
-        from packages.quantum.common_enums import RegimeState
         snap = self._engine()._classify_no_iv_signal(
             **self._common_kwargs(rv_20d=None),
         )
@@ -132,21 +146,18 @@ class TestRegimeNoIvSignalClassifier(unittest.TestCase):
         self.assertTrue(snap.quality_flags.get("no_iv_signal"))
 
     def test_low_rv_returns_normal(self):
-        from packages.quantum.common_enums import RegimeState
         snap = self._engine()._classify_no_iv_signal(
             **self._common_kwargs(rv_20d=0.15),
         )
         self.assertEqual(snap.state, RegimeState.NORMAL)
 
     def test_elevated_rv_returns_elevated(self):
-        from packages.quantum.common_enums import RegimeState
         snap = self._engine()._classify_no_iv_signal(
             **self._common_kwargs(rv_20d=0.35),
         )
         self.assertEqual(snap.state, RegimeState.ELEVATED)
 
     def test_shock_rv_returns_shock(self):
-        from packages.quantum.common_enums import RegimeState
         snap = self._engine()._classify_no_iv_signal(
             **self._common_kwargs(rv_20d=0.60),
         )
@@ -182,11 +193,6 @@ class TestRegimeFlagOffPreservesBehavior(unittest.TestCase):
         os.environ.pop("IV_RANK_NONE_ROUTING_ENABLED", None)
 
     def test_flag_off_iv_none_routes_through_legacy_path(self):
-        from packages.quantum.analytics.regime_engine_v3 import (
-            RegimeEngineV3, GlobalRegimeSnapshot,
-        )
-        from packages.quantum.common_enums import RegimeState
-
         eng = RegimeEngineV3(
             supabase_client=None,
             market_data=MagicMock(),
@@ -226,11 +232,6 @@ class TestRegimeFlagOffPreservesBehavior(unittest.TestCase):
         self.assertNotIn("no_iv_signal", snap.quality_flags)
 
     def test_flag_on_iv_none_routes_through_no_iv_signal(self):
-        from packages.quantum.analytics.regime_engine_v3 import (
-            RegimeEngineV3, GlobalRegimeSnapshot,
-        )
-        from packages.quantum.common_enums import RegimeState
-
         os.environ["IV_RANK_NONE_ROUTING_ENABLED"] = "1"
         try:
             eng = RegimeEngineV3(

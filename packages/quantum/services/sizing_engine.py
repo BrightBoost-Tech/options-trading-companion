@@ -1,5 +1,8 @@
+import logging
 import math
 from typing import Any, Dict, List, Optional
+
+logger = logging.getLogger(__name__)
 
 
 # Round-trip BP safety factor for #100 / Option A.
@@ -82,6 +85,7 @@ def calculate_sizing(
     *,
     strategy: Optional[str] = None,
     safety_factor: float = DEFAULT_ROUND_TRIP_SAFETY_FACTOR,
+    lifecycle_state: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Calculates the appropriate position size based on max loss (risk) and available capital.
@@ -204,6 +208,31 @@ def calculate_sizing(
     )
     contracts = int(max(0, contracts))
 
+    # 5b. #110 PR-3: lifecycle override.
+    #
+    # Lifecycle state cap behavior:
+    #   - live_full      : no override, normal sizing math returns
+    #   - experimental   : cap to 1 if normal > 0; honor 0 (sub-threshold rejection)
+    #   - designed       : should not reach sizing (filtered at scanner)
+    #   - deprecated     : should not reach sizing (filtered at scanner)
+    #
+    # If a designed/deprecated candidate somehow reaches here
+    # (defensive), preserve normal sizing math — sizing is not the
+    # right place to gate emission. The scanner's lifecycle filter is
+    # the correct gate.
+    experimental_capped = False
+    if lifecycle_state == "experimental" and contracts > 1:
+        logger.info(
+            "experimental_sizing_cap_applied",
+            extra={
+                "strategy": strategy,
+                "normal_contracts": contracts,
+                "capped_contracts": 1,
+            },
+        )
+        contracts = 1
+        experimental_capped = True
+
     # 6. Computed Totals
     capital_required = contracts * collateral_required_per_contract
     max_loss_total = contracts * max_loss_per_contract
@@ -236,6 +265,9 @@ def calculate_sizing(
     elif contracts == contracts_by_collateral and contracts < contracts_by_risk:
         reason += " (capped by buying power)"
 
+    if experimental_capped:
+        reason += " (capped by experimental lifecycle)"
+
     return {
         "contracts": contracts,
         "reason": reason,
@@ -250,4 +282,9 @@ def calculate_sizing(
         "estimated_close_bp": estimated_close_bp,
         "round_trip_required": round_trip_required_per_contract,
         "round_trip_required_total": round_trip_required_total,
+        # #110 PR-3: surfaces whether the experimental cap fired so
+        # downstream observers (post-trade analytics, audit) can
+        # distinguish capped vs natural-1-contract sizing.
+        "experimental_capped": experimental_capped,
+        "lifecycle_state": lifecycle_state,
     }

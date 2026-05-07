@@ -2293,6 +2293,21 @@ def scan_for_opportunities(
         except Exception as e:
             print(f"[Scanner] Failed to batch fetch IV context: {e}")
 
+    # #110 PR-3: load strategy_lifecycle_states once per cycle. Small
+    # table (5-10 rows); cached for the duration of this scan. Each
+    # emitted candidate is tagged with `lifecycle_state` so the
+    # downstream sizing engine can apply the EXPERIMENTAL cap without
+    # a per-candidate DB round-trip.
+    lifecycle_states_map: Dict[str, str] = {}
+    if supabase_client is not None:
+        try:
+            from packages.quantum.services.progression_service import (
+                load_strategy_lifecycle_states,
+            )
+            lifecycle_states_map = load_strategy_lifecycle_states(supabase_client)
+        except Exception as e:
+            logger.warning(f"[Scanner] lifecycle states fetch failed: {e}")
+
     # #115 PR-A: loud-error surface for upstream iv pipeline failure.
     # Counts symbols with iv_rank=None (either missing from the batch
     # response or present-with-None because sample_size < 60). Fires
@@ -3176,12 +3191,29 @@ def scan_for_opportunities(
                 except Exception as e:
                     print(f"[Scanner] Earnings date parse error for {symbol}: {e}")
 
+            # #110 PR-3: lifecycle gate. Filter strategies that aren't
+            # ready for emission. ``live_full`` and ``experimental``
+            # proceed (the latter sized down by sizing_engine via the
+            # `lifecycle_state` tag below). ``designed`` /
+            # ``deprecated`` rows are filtered here — code exists
+            # (someone wrote it) but lifecycle says don't trade it.
+            # Default to ``live_full`` for unknown strategies to
+            # preserve pre-#110 behavior on table-read failure or
+            # seed gap.
+            candidate_lifecycle_state = lifecycle_states_map.get(
+                suggestion["strategy"], "live_full"
+            )
+            if candidate_lifecycle_state in ("designed", "deprecated"):
+                rej_stats.record(f"strategy_{candidate_lifecycle_state}")
+                return None
+
             candidate_dict = {
                 "symbol": symbol,
                 "ticker": symbol,
                 "type": suggestion["strategy"],
                 "strategy": suggestion["strategy"],
                 "strategy_key": strategy_key,
+                "lifecycle_state": candidate_lifecycle_state,
                 "suggested_entry": round(abs(total_cost), 2),
                 "ev": total_ev,
                 "score": round(unified_score.score, 1),

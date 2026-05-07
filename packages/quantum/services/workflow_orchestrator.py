@@ -2653,6 +2653,10 @@ async def run_midday_cycle(supabase: Client, user_id: str):
             # #100 / Option A: per-strategy round-trip BP estimation.
             # safety_factor defaults via DEFAULT_ROUND_TRIP_SAFETY_FACTOR.
             strategy=cand.get("strategy"),
+            # #110 PR-3: scanner-tagged lifecycle state. Default
+            # ``live_full`` for candidates that bypassed the scanner
+            # tag (e.g., test fixtures, legacy paths).
+            lifecycle_state=cand.get("lifecycle_state", "live_full"),
         )
 
         sizing["strategy_track"] = strategy_track

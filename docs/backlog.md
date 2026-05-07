@@ -797,6 +797,64 @@ existing risk-pct math.
 
 **Cross-reference:** `docs/designs/multi_strategy_phase1.md` Phase 2 PR-3.
 
+**PR-3 status (2026-05-07):** shipped on branch
+`feat/110-pr-3-sizing-experimental-cap`. Three changes plus a new
+helper, all coordinated through Option C (lifecycle injected at
+scanner emission, no DB dependency in sizing_engine):
+
+- **`load_strategy_lifecycle_states(supabase)`** in
+  `progression_service.py` — read helper. Returns
+  ``{strategy_name: current_state}`` for the small lifecycle
+  table. Fails soft to ``{}`` on read errors or empty seed (caller
+  defaults missing strategies to ``live_full``).
+- **Scanner gate** in `options_scanner.scan_for_opportunities` —
+  loads lifecycle states once per cycle, caches in
+  ``lifecycle_states_map``. Each candidate carries
+  ``"lifecycle_state"`` in its dict. ``designed`` and ``deprecated``
+  candidates short-circuit before construction with
+  ``rej_stats.record(f"strategy_{state}")`` so the rejection is
+  visible in scanner observability.
+- **Sizing engine cap** — `calculate_sizing` accepts new
+  ``lifecycle_state`` kwarg. Cap applied AFTER the
+  min(risk/collateral/round_trip/max) computation: if state is
+  ``experimental`` and ``contracts > 1``, cap to 1 with
+  ``experimental_sizing_cap_applied`` INFO log. Sub-threshold
+  ``contracts=0`` is preserved (cap is ceiling, not floor).
+  ``designed`` / ``deprecated`` reaching here defensively are
+  ignored — sizing is not the gate. Returns now include
+  ``experimental_capped: bool`` and ``lifecycle_state: str`` for
+  downstream observability.
+- **workflow_orchestrator wiring** — passes
+  ``lifecycle_state=cand.get("lifecycle_state", "live_full")``
+  through the single `calculate_sizing(...)` call site in
+  `run_midday_cycle`.
+
+**Day-1 expected behavior:** all 5 seeded strategies are
+``live_full`` (per #109 PR-2 seed), so neither the scanner gate
+nor the sizing cap fires. Behavior identical to pre-#110 verbatim.
+
+**Verification recipe (optional, post-merge operator action):**
+
+1. SQL: `UPDATE strategy_lifecycle_states SET current_state = 'experimental' WHERE strategy_name = 'LONG_PUT_DEBIT_SPREAD';`
+2. Wait for next scanner cycle (or trigger manually).
+3. Confirm: any LONG_PUT_DEBIT_SPREAD candidate emits with
+   ``lifecycle_state="experimental"`` and contracts=1 regardless
+   of normal math; INFO log
+   ``experimental_sizing_cap_applied`` fires.
+4. Confirm: 4:00 PM CT `daily_progression_eval` evaluates the
+   newly-EXPERIMENTAL strategy. Operator's actual closed Alpaca-
+   real LONG_PUT_DEBIT_SPREAD trades (-$4457 cumulative_pl per
+   #108 PR-1 baseline) → eligibility=False → strategy stays
+   experimental.
+5. Reset: `UPDATE strategy_lifecycle_states SET current_state = 'live_full' WHERE strategy_name = 'LONG_PUT_DEBIT_SPREAD';`
+
+Don't run this verification unless comfortable with reduced
+sizing on LONG_PUT_DEBIT_SPREAD until reset.
+
+**Phase 2 lifecycle infrastructure COMPLETE.** Ready for #111
+(0DTE) / #112 (CSP) to add new strategies in
+DESIGNED/EXPERIMENTAL state.
+
 **#111 — Multi-strategy Phase 2 PR-4: 0DTE bull put spread + intraday cadence refactor** (MEDIUM)
 
 Phase 1 design doc PR-4. 0DTE doesn't exist in selector today.

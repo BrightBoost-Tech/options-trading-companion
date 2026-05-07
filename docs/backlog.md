@@ -658,6 +658,42 @@ backward-compat.
 
 **Cross-reference:** `docs/designs/multi_strategy_phase1.md` Phase 2 PR-1.
 
+**PR-1 status (2026-05-07):** shipped on branch
+`feat/108-pr-1-strategy-eligibility-helper`. Two changes:
+
+- `get_alpaca_real_closed_trades(user_id, supabase, since=None,
+  until=None, strategy_name=None)`: optional `strategy_name`
+  parameter narrows results to a single strategy via direct
+  `paper_positions.strategy` filter. Step 1 schema check confirmed
+  Outcome A — column populated 17/17 for Alpaca-real closed
+  positions, no JOIN required. `strategy_name=None` (default)
+  preserves pre-#108 behavior verbatim.
+- `get_strategy_eligibility(strategy_name, user_id, supabase)`:
+  new evaluation function returning `{eligible, cumulative_pl,
+  trade_count, min_required_trades}`. Mirrors the tier-promotion
+  gate shape from PR #883 but scoped to a single strategy.
+  Threshold constant `MIN_TRADES_FOR_STRATEGY_GRADUATION = 3`,
+  intentionally separate from `MIN_TRADES_FULL_AUTO` (same value
+  today, may diverge later).
+
+**No callers in production code yet.** Both new symbols are
+intentionally orphan code awaiting #109 (the lifecycle states
+table + daily scheduler hook). An orphan-code marker comment at
+`get_strategy_eligibility` documents this and asks the next
+operator to revisit if #109 hasn't shipped within ~30 days.
+
+**Manual baseline against operator data (2026-05-07):**
+
+- `IRON_CONDOR`: 3 trades, cumulative_pl=+$5066 → would graduate
+  (`eligible=True`)
+- `LONG_CALL_DEBIT_SPREAD`: 9 trades, cumulative_pl=-$629 →
+  blocked by P&L gate
+- `LONG_PUT_DEBIT_SPREAD`: 5 trades, cumulative_pl=-$4457 →
+  blocked by P&L gate
+
+When #109 lands, IRON_CONDOR would be the first auto-graduated
+strategy under the new gating system.
+
 **#109 — Multi-strategy Phase 2 PR-2: strategy_lifecycle_states table + scheduler hook** (LOW)
 
 Phase 1 design doc PR-2. State machine: DESIGNED → EXPERIMENTAL →

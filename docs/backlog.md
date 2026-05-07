@@ -968,6 +968,18 @@ window.
 - Schedule entry pattern: see existing `daily_progression_eval`
   entry in `SCHEDULES` (recently shipped).
 
+**PR-A status (2026-05-07):** shipped on branch
+`feat/115-pr-a-iv-schedule-and-alert`. Adds `iv_daily_refresh`
+to `SCHEDULES` (4:30 AM CT, before `calibration_update`) and
+the `iv_pipeline_no_data` loud-error alert at the scanner
+batch-fetch boundary (threshold 0.5 None-rate, 24h dedup via
+`risk_alerts` lookup). Producer starts populating
+`underlying_iv_points` daily; iv_rank values become meaningful
+after ~60 trading days of accumulated history. PR-B
+(None-routing at the 5 silent-fallback consumer sites) still
+pending — system continues to fall back to 50.0 during the
+warmup window until PR-B lands.
+
 **#115b — Greeks parallel investigation: same-shape fallbacks in greeks_aggregator and api** (MEDIUM)
 
 **Discovery:** #115 iv_rank diagnostic surfaced parallel

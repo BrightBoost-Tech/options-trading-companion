@@ -157,7 +157,7 @@ is 2026-03-28 (expired). Service-level question whether
 `ensure_forward_window_initialized` should re-window expired states;
 out of scope for #71 sweep.
 
-**Tier 3 + Tier 4 closed by DELETION 2026-05-05** (PR #<NUM>).
+**Tier 3 + Tier 4 closed by DELETION 2026-05-05** (PR #879).
 PR-4 attempt on `/validation/cohort-eval` (Tier 3) surfaced a
 fourth-case finding: the writer targets `shadow_cohort_daily`, a
 table that doesn't exist in production. Verification showed neither
@@ -167,16 +167,36 @@ production — zero `job_runs` rows for either, ever. The whole
 shadow_cohort_daily channel was unexercised dead code.
 
 Per #62a-D7 resolution, both endpoints removed entirely rather than
-migrated. Tier 3 and Tier 4 of the audit are no longer migration
-candidates — they're deletions. Net effect on #71 sweep:
+migrated.
 
-- Tier 3 (cohort-eval): closed by deletion, not migration
-- Tier 4 (autopromote-cohort + idempotency redesign): closed by
-  deletion (idempotency redesign no longer needed)
-- Tier 5 (`/train-learning-v3`): remains as the final migration item
+**Tier 5 also closed by DELETION 2026-05-05** (PR #<NUM>).
+`/internal/tasks/train-learning-v3` diagnostic confirmed zero
+production runs ever, no scheduler entry, no GHA workflow caller.
+Bonus finding: `CalibrationService.train_and_persist` (the only
+unique service method the endpoint called) doesn't exist on the
+class — the endpoint would have crashed with `AttributeError` on
+first execution if it had ever fired. Same B2-deletion pattern as
+#62a-D7.
 
-**Remaining:** 1 migration (PR-5 = `/train-learning-v3`, the largest
-scope per audit — needs per-user decomposition).
+**#71 SWEEP CLOSED 2026-05-05.** Final state across 5 PRs:
+- PR-1 #872 (audit, docs-only)
+- PR-2 #873 (`/policy-lab/eval` migrated)
+- PR-3 #874 + #877 (`/validation/init-window` migrated, then validated)
+- PR-4 #879 (`/validation/cohort-eval` + `/validation/autopromote-cohort`
+  deleted as B2)
+- PR-5 #<NUM> (`/internal/tasks/train-learning-v3` deleted as B2)
+
+Original audit's "5 migrations + 1 idempotency redesign" became
+"2 migrations + 3 deletions." The audit was conservative on
+deletion calculus — production-exercise verification (added at
+diagnostic stage) caught three endpoints that had never fired,
+making the migration-vs-delete decision moot.
+
+**Doctrine note:** future endpoint audits should include
+"production-exercise count" as a first-class column. The original
+audit catalogued endpoints that EXIST but didn't catalogue endpoints
+that FIRE. For #71, those were different sets, and the difference
+materially changed scope (3 PRs avoided).
 
 **#93 — deployable_capital reads stale Plaid CUR:USD +
 paper_autopilot status bypass** (HIGH, FIXED in PR #850)

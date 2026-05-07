@@ -1,3 +1,4 @@
+import logging
 from typing import Dict, List, Optional, Any
 from dataclasses import dataclass
 import math
@@ -12,6 +13,9 @@ from .regime_integration import (
     DEFAULT_CATALYST_PROFILES,
     DEFAULT_LIQUIDITY_SCALAR
 )
+from packages.quantum.observability.feature_flags import is_iv_rank_none_routing_enabled
+
+logger = logging.getLogger(__name__)
 
 MIN_TRADES = 20
 LEAKAGE_FLOOR = 1.0
@@ -183,6 +187,19 @@ class ConvictionService:
 
     def _compute_raw_score_helper(self, pos: PositionDescriptor, regime: str) -> Optional[float]:
         try:
+            # #115 PR-B-2: when IV_RANK_NONE_ROUTING_ENABLED and iv_rank
+            # is None, return None so the caller routes the position to
+            # conviction=0.5 (neutral) rather than scoring against a
+            # fabricated 50.0 input. Trend/value placeholders here are a
+            # separate concern (out of scope for #115). Flag OFF
+            # preserves the legacy silent fallback verbatim.
+            if is_iv_rank_none_routing_enabled() and pos.iv_rank is None:
+                logger.info(
+                    "conviction_service: pos.iv_rank=None for %s, returning None "
+                    "(routes caller to conviction=0.5)",
+                    pos.symbol,
+                )
+                return None
             factors = {
                 "trend": 50.0,
                 "value": 50.0,

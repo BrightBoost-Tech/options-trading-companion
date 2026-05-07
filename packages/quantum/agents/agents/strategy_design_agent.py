@@ -1,6 +1,10 @@
+import logging
 from typing import Dict, Any, List, Optional
 from packages.quantum.agents.core import BaseQuantAgent, AgentSignal
 from packages.quantum.analytics.strategy_policy import StrategyPolicy
+from packages.quantum.observability.feature_flags import is_iv_rank_none_routing_enabled
+
+logger = logging.getLogger(__name__)
 
 class StrategyDesignAgent(BaseQuantAgent):
     """
@@ -70,7 +74,19 @@ class StrategyDesignAgent(BaseQuantAgent):
         legacy_strategy = self._normalize_strategy(raw_legacy)
 
         effective_regime = str(context.get("effective_regime", "NEUTRAL")).upper()
-        iv_rank = float(context.get("iv_rank", 50.0))
+        # #115 PR-B-2: when IV_RANK_NONE_ROUTING_ENABLED, skip the iv-aware
+        # override branch instead of fabricating 50.0 (the silent default
+        # that always evaluated `50 >= 60` as False, masking missing input
+        # by routing into the no-override path). Flag OFF preserves the
+        # legacy fallback to 50.0 verbatim.
+        raw_iv_rank = context.get("iv_rank")
+        if is_iv_rank_none_routing_enabled() and raw_iv_rank is None:
+            iv_rank = None
+            logger.info(
+                "strategy_design_agent: iv_rank missing — skipping high-IV override branch"
+            )
+        else:
+            iv_rank = float(raw_iv_rank if raw_iv_rank is not None else 50.0)
 
         # Initialize Policy
         # raw_banned can be None, StrategyPolicy handles None
@@ -113,7 +129,10 @@ class StrategyDesignAgent(BaseQuantAgent):
 
         # 3. High IV Rank Check
         # "If iv_rank high (>=60) and legacy is long premium -> override to defined-risk credit variant (reduce vega bleed)"
-        if iv_rank >= 60.0 and recommended != "cash":
+        # PR-B-2: when iv_rank is None (flag ON + missing input), this
+        # branch is skipped entirely — no override decision is made on
+        # absent data.
+        if iv_rank is not None and iv_rank >= 60.0 and recommended != "cash":
             # Only override if we haven't already settled on something safe
             # And if current rec is long premium
             is_long_premium = "debit" in recommended or "long" in recommended or "buy" in recommended

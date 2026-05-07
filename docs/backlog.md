@@ -1002,6 +1002,40 @@ PR-B-2 (remaining 3 consumer sites: `strategy_design_agent.py:73`,
 `conviction_service.py:189`, `opportunity_scorer.py:141`) still
 pending. Same `IV_RANK_NONE_ROUTING_ENABLED` flag will gate those.
 
+**PR-B-2 status (2026-05-07):** shipped on branch
+`feat/115-pr-b-2-remaining-consumer-sites`. All 3 remaining consumer
+sites routed under the same flag introduced by PR-B-1; default OFF
+preserves legacy behavior verbatim. Site-specific semantics
+determined by per-site intent diagnostic:
+
+- `agents/agents/strategy_design_agent.py:73` (branch-skip):
+  pre-fix `iv_rank = float(context.get("iv_rank", 50.0))` always
+  evaluated `50 >= 60` False, silently skipping the high-IV
+  override branch. Post-fix when flag ON + iv_rank=None: skip the
+  iv-aware branch explicitly with INFO log. SHOCK / CHOP / policy
+  overrides still run normally.
+- `analytics/conviction_service.py:189` (return-None): pre-fix
+  fabricated 50.0 volatility factor and ran scoring. Post-fix when
+  flag ON + iv_rank=None: helper returns None, caller routes the
+  position to conviction=0.5 (neutral) via the existing branch at
+  caller line ~86. Trend/value placeholders at lines 187-188 are a
+  separate concern, out of #115 scope.
+- `analytics/opportunity_scorer.py:141` (zero-bonus, MOST IMPACTFUL):
+  pre-fix `iv_rank = float(market_ctx.get('iv_rank') or 0.0)` then
+  `not is_credit and 0 < 50 → iv_bonus = (50 - 0) * 0.2 = 10` —
+  silently awarded **maximum 10-point IV bonus** to every debit
+  candidate when iv_rank was missing. Post-fix when flag ON +
+  iv_rank=None: skip the bonus computation entirely (`iv_bonus=0`)
+  with INFO log. Active score distortion eliminated.
+
+**All 5 anti-pattern 2 consumer sites for iv_rank are now closed**
+(2 in PR-B-1 + 3 in PR-B-2). #115 remains OPEN until the operator
+flips the flag and PR-A's producer accumulates ~60 trading days of
+history; only then is the fix value-realised end-to-end.
+
+Pre-flip checklist below applies to PR-B-2 sites identically — same
+flag, same operator decision. No new env vars introduced.
+
 **Pre-flip checklist for `IV_RANK_NONE_ROUTING_ENABLED`:**
 
 Before flipping the env var to ON, verify:

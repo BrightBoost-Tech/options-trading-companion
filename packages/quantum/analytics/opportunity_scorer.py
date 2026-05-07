@@ -5,6 +5,7 @@ import json
 import logging
 from typing import Dict, Any, Optional, List
 from packages.quantum.services.replay.canonical import compute_content_hash
+from packages.quantum.observability.feature_flags import is_iv_rank_none_routing_enabled
 
 logger = logging.getLogger(__name__)
 
@@ -138,12 +139,29 @@ class OpportunityScorer:
             pop_score = metrics['prob_profit'] * 50.0 # Max 50 pts
 
             # Add IV Rank Bonus
-            iv_rank = float(market_ctx.get('iv_rank') or 0.0)
+            # #115 PR-B-2: most-impactful site. Pre-fix `or 0.0` silently
+            # awarded debit candidates the MAXIMUM 10-point bonus when
+            # iv_rank was missing — `not is_credit and 0 < 50` is True,
+            # `(50 - 0) * 0.2 = 10`. Anti-pattern 2 with active score
+            # distortion. When IV_RANK_NONE_ROUTING_ENABLED and iv_rank
+            # is genuinely None, set iv_bonus=0 (neither direction gets a
+            # bonus) and skip the comparison entirely. Flag OFF preserves
+            # the legacy distorted behavior so anything currently
+            # depending on it stays stable until the operator flips.
+            raw_iv_rank = market_ctx.get('iv_rank')
             iv_bonus = 0.0
-            if is_credit and iv_rank > 50:
-                iv_bonus = (iv_rank - 50) * 0.2 # Max 10 pts
-            elif not is_credit and iv_rank < 50:
-                 iv_bonus = (50 - iv_rank) * 0.2 # Max 10 pts
+            if is_iv_rank_none_routing_enabled() and raw_iv_rank is None:
+                logger.info(
+                    "opportunity_scorer: iv_rank missing for %s — "
+                    "iv_bonus=0 (no fabricated max bonus)",
+                    symbol,
+                )
+            else:
+                iv_rank = float(raw_iv_rank or 0.0)
+                if is_credit and iv_rank > 50:
+                    iv_bonus = (iv_rank - 50) * 0.2 # Max 10 pts
+                elif not is_credit and iv_rank < 50:
+                     iv_bonus = (50 - iv_rank) * 0.2 # Max 10 pts
 
             raw_score = ev_score + pop_score + iv_bonus
 

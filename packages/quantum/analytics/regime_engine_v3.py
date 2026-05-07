@@ -14,6 +14,7 @@ from packages.quantum.services.iv_point_service import IVPointService
 from packages.quantum.services.universe_service import UniverseService
 from packages.quantum.analytics.factors import calculate_trend, calculate_iv_rank
 from packages.quantum.common_enums import RegimeState
+from packages.quantum.observability.feature_flags import is_iv_rank_none_routing_enabled
 
 logger = logging.getLogger(__name__)
 
@@ -526,6 +527,24 @@ class RegimeEngineV3:
         if term_slope is None: quality_flags["term_missing"] = True
 
         # 5. Classification (V4: skew and term now contribute to score)
+        # #115 PR-B-1: when routing flag is ON and iv_rank is None,
+        # branch into a no-IV-signal classifier that uses realized
+        # vol (rv_20d) instead of fabricating f_rank=50.0. This avoids
+        # the silent collapse to NORMAL bracket that hid the upstream
+        # iv pipeline failure for ~5 weeks (#115 diagnostic 2026-05-07).
+        # Flag OFF preserves pre-PR-B-1 behavior verbatim.
+        if is_iv_rank_none_routing_enabled() and iv_rank is None:
+            return self._classify_no_iv_signal(
+                symbol=symbol,
+                as_of=as_of,
+                atm_iv=atm_iv,
+                rv_20d=rv_20d,
+                iv_rv_spread=iv_rv_spread,
+                skew_25d=skew_25d,
+                term_slope=term_slope,
+                quality_flags=quality_flags,
+            )
+
         f_rank = iv_rank if iv_rank is not None else 50.0
         f_spread = (iv_rv_spread * 100) if iv_rv_spread is not None else 0
 
@@ -567,6 +586,89 @@ class RegimeEngineV3:
             term_slope=term_slope,
             quality_flags=quality_flags,
             features=features
+        )
+
+    # Realized-vol thresholds for no-IV-signal classification (annualized).
+    # Tuned to surface a clear "this symbol is unusually volatile right
+    # now" signal without iv_rank context. Sub-30% annualized is a
+    # quiet/normal regime; 30-50% is elevated; 50%+ is shock-like.
+    _NO_IV_RV_ELEVATED = 0.30
+    _NO_IV_RV_SHOCK = 0.50
+
+    def _classify_no_iv_signal(
+        self,
+        *,
+        symbol: str,
+        as_of: datetime,
+        atm_iv: Optional[float],
+        rv_20d: Optional[float],
+        iv_rv_spread: Optional[float],
+        skew_25d: Optional[float],
+        term_slope: Optional[float],
+        quality_flags: Dict[str, Any],
+    ) -> "SymbolRegimeSnapshot":
+        """#115 PR-B-1: regime classification when iv_rank is unavailable.
+
+        Used only when ``IV_RANK_NONE_ROUTING_ENABLED=1``. Falls back to
+        realized-vol-based classification instead of fabricating a 50.0
+        median percentile. The pre-PR-B-1 silent fallback collapsed
+        every iv_rank=None symbol into the NORMAL bracket, which is
+        what hid the empty ``underlying_iv_points`` pipeline for five
+        weeks.
+
+        State mapping:
+        - rv_20d unavailable → NORMAL (defensive default; we have no
+          vol signal at all)
+        - rv_20d ≥ 0.50 annualized → SHOCK
+        - rv_20d ≥ 0.30 annualized → ELEVATED
+        - otherwise → NORMAL
+
+        ``quality_flags["no_iv_signal"]`` is set so downstream
+        observers can distinguish this branch from a regular NORMAL
+        classification. The score is reported as None (no synthetic
+        percentile) to make the absence of IV signal visible to any
+        consumer that reads the score field.
+        """
+        if rv_20d is None:
+            state = RegimeState.NORMAL
+        elif rv_20d >= self._NO_IV_RV_SHOCK:
+            state = RegimeState.SHOCK
+        elif rv_20d >= self._NO_IV_RV_ELEVATED:
+            state = RegimeState.ELEVATED
+        else:
+            state = RegimeState.NORMAL
+
+        quality_flags = dict(quality_flags)
+        quality_flags["no_iv_signal"] = True
+
+        logger.info(
+            "regime_no_iv_signal: symbol=%s rv_20d=%s state=%s",
+            symbol,
+            rv_20d,
+            state.value,
+        )
+
+        features = {
+            "iv_rank": None,
+            "iv_rv_spread": (iv_rv_spread * 100) if iv_rv_spread is not None else 0,
+            "skew": (skew_25d * 100) if skew_25d is not None else 0,
+            "term": (-term_slope * 100) if term_slope is not None else 0,
+            "rv_20d": rv_20d,
+        }
+
+        return SymbolRegimeSnapshot(
+            symbol=symbol,
+            as_of_ts=as_of.isoformat(),
+            state=state,
+            score=0.0,
+            iv_rank=None,
+            atm_iv_30d=atm_iv,
+            rv_20d=rv_20d,
+            iv_rv_spread=iv_rv_spread,
+            skew_25d=skew_25d,
+            term_slope=term_slope,
+            quality_flags=quality_flags,
+            features=features,
         )
 
     def get_effective_regime(self, symbol_snap: SymbolRegimeSnapshot, global_snap: GlobalRegimeSnapshot) -> RegimeState:

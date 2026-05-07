@@ -27,6 +27,7 @@ from packages.quantum.analytics.scoring import calculate_unified_score
 from packages.quantum.services.execution_service import ExecutionService
 from packages.quantum.analytics.guardrails import earnings_week_penalty
 from packages.quantum.services.earnings_calendar_service import EarningsCalendarService
+from packages.quantum.observability.feature_flags import is_iv_rank_none_routing_enabled
 from packages.quantum.agents.runner import AgentRunner, build_agent_pipeline
 
 # Surface V4 integration (optional, gated by env)
@@ -2482,7 +2483,23 @@ def scan_for_opportunities(
                 if _cached_data is not None:
                     _cached_data["effective_regime"] = effective_regime_state
 
-            iv_rank = symbol_snapshot.iv_rank or 50.0
+            # #115 PR-B-1: explicit iv_rank quality tracking gated on
+            # IV_RANK_NONE_ROUTING_ENABLED. Flag OFF preserves the
+            # pre-PR-A silent fallback. Flag ON keeps the 50.0 numeric
+            # default for downstream math (StrategySelector, scoring,
+            # design agent all expect a float) but tags the candidate
+            # so the exit sort can rank real-iv candidates ahead.
+            raw_iv_rank = symbol_snapshot.iv_rank
+            if is_iv_rank_none_routing_enabled():
+                if raw_iv_rank is None:
+                    iv_rank = 50.0
+                    iv_rank_quality = "missing"
+                else:
+                    iv_rank = raw_iv_rank
+                    iv_rank_quality = "real"
+            else:
+                iv_rank = raw_iv_rank or 50.0
+                iv_rank_quality = "unknown"
 
             # Bolt Optimization: Use sum() / len() for small lists (20x faster than np.mean)
             s20 = closes[-20:]
@@ -3170,6 +3187,7 @@ def scan_for_opportunities(
                 "score": round(unified_score.score, 1),
                 "unified_score_details": unified_score.components.model_dump(),
                 "iv_rank": iv_rank,
+                "iv_rank_quality": iv_rank_quality,
                 "trend": trend,
                 "legs": legs,
                 "badges": unified_score.badges,
@@ -3372,7 +3390,21 @@ def scan_for_opportunities(
 
     # Sort by Unified Score descending
     # Bolt Determinism: Add symbol as tie-breaker for stable ordering across concurrent runs
-    candidates.sort(key=lambda x: (x['score'], x['symbol']), reverse=True)
+    # #115 PR-B-1: when routing flag is ON, real-iv candidates rank
+    # ahead of missing-iv candidates regardless of score; within each
+    # tier, score-then-symbol ordering is preserved. When flag is OFF,
+    # the sort is identical to pre-PR-B-1.
+    if is_iv_rank_none_routing_enabled():
+        candidates.sort(
+            key=lambda x: (
+                x.get("iv_rank_quality") == "real",
+                x["score"],
+                x["symbol"],
+            ),
+            reverse=True,
+        )
+    else:
+        candidates.sort(key=lambda x: (x['score'], x['symbol']), reverse=True)
 
     # Log rejection summary if no candidates
     if not candidates:

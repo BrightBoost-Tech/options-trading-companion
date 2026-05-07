@@ -980,6 +980,53 @@ after ~60 trading days of accumulated history. PR-B
 pending — system continues to fall back to 50.0 during the
 warmup window until PR-B lands.
 
+**PR-B-1 status (2026-05-07):** shipped on branch
+`feat/115-pr-b-1-scanner-regime-none-routing`. Two consumer sites
+now route iv_rank=None explicitly when
+`IV_RANK_NONE_ROUTING_ENABLED=1` (default OFF — zero behavioral
+change at merge):
+
+- `options_scanner.py:2485` (`raw_iv_rank` block): tags candidate
+  with `iv_rank_quality ∈ {real, missing, unknown}`. Module-level
+  exit sort prefers `real` over `missing` while preserving the
+  `(score, symbol)` secondary order within each tier.
+- `analytics/regime_engine_v3.py:529`: when iv_rank is None, routes
+  through new `_classify_no_iv_signal()` instead of fabricating
+  `f_rank=50.0`. The new path uses realized vol (`rv_20d`) — < 0.30
+  → NORMAL, 0.30–0.50 → ELEVATED, ≥ 0.50 → SHOCK; rv_20d unavailable
+  → NORMAL (defensive default). Sets `quality_flags.no_iv_signal=True`
+  and reports `score=0.0` so downstream observers can distinguish
+  this branch from a real NORMAL classification.
+
+PR-B-2 (remaining 3 consumer sites: `strategy_design_agent.py:73`,
+`conviction_service.py:189`, `opportunity_scorer.py:141`) still
+pending. Same `IV_RANK_NONE_ROUTING_ENABLED` flag will gate those.
+
+**Pre-flip checklist for `IV_RANK_NONE_ROUTING_ENABLED`:**
+
+Before flipping the env var to ON, verify:
+
+1. `job_runs` shows successful `iv_daily_refresh` runs on at least 3
+   consecutive business days (PR-A's producer cron is healthy).
+2. `underlying_iv_points` has rows for ≥ 80% of `scanner_universe`
+   symbols.
+3. `iv_pipeline_no_data` alert has fired at least once during warmup
+   (confirms PR-A alert wiring works) AND has not fired with
+   severity=critical (no catastrophic pipeline failure).
+4. No new errors in `regime_engine_v3` logs since PR-B-1 merge.
+5. Manual flag flip on a non-prod environment if available.
+
+After flipping:
+
+1. Watch first 3 scanner cycles for changes in candidate emission count.
+2. Watch regime classification distribution — should remain similar to
+   pre-flip (CHOP/NORMAL/ELEVATED ratios) until ~60 trading days of
+   warmup completes.
+3. Watch strategy emission distribution — during warmup, expect mostly
+   LONG_CALL/PUT_DEBIT_SPREAD as before. Post-warmup, expect IRON_CONDOR
+   and credit spreads to reappear as iv_rank values converge.
+4. If anomaly: flip OFF immediately. Investigate before re-enabling.
+
 **#115b — Greeks parallel investigation: same-shape fallbacks in greeks_aggregator and api** (MEDIUM)
 
 **Discovery:** #115 iv_rank diagnostic surfaced parallel

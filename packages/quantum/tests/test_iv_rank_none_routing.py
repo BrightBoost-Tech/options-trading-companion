@@ -12,12 +12,30 @@ without a substantial fixture). Behavioral tests focus on the regime
 engine's classifier, which is pure-Python and easy to call directly.
 """
 
+import importlib
 import os
 import re
+import sys
 import unittest
 from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import MagicMock, patch
+
+# Defensive remediation: test_weekly_report_win_rate.py at module-import
+# time stamps `sys.modules['packages.quantum.analytics.regime_engine_v3']`
+# with a MagicMock to skip heavy dependencies. Pytest collection order is
+# not stable across CI vs local, and once that file is imported the
+# regime engine module is permanently mocked for every subsequent test.
+# Force a fresh real import here so behavioral tests below get the
+# actual class.
+for _modname in (
+    "packages.quantum.analytics.regime_engine_v3",
+    "packages.quantum.services.iv_repository",
+    "packages.quantum.services.iv_point_service",
+    "packages.quantum.services.market_data_truth_layer",
+):
+    sys.modules.pop(_modname, None)
+importlib.import_module("packages.quantum.analytics.regime_engine_v3")
 
 from packages.quantum.observability.feature_flags import (
     is_iv_rank_none_routing_enabled,

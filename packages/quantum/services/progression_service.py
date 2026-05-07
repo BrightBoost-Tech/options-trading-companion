@@ -187,6 +187,43 @@ def get_strategy_eligibility(
     }
 
 
+def load_strategy_lifecycle_states(supabase) -> Dict[str, str]:
+    """#110 PR-3: read every row of strategy_lifecycle_states once per
+    scanner cycle.
+
+    Small table (5-10 rows post-#109 seed). A full SELECT is cheaper
+    than per-strategy lookups across the cycle's per-symbol fan-out.
+    Caller is expected to cache the return value for the cycle's
+    duration and tag each emitted candidate with its strategy's state.
+
+    Returns:
+        Mapping of ``strategy_name`` -> ``current_state``. Empty dict
+        on read failure or empty table — caller defaults missing
+        strategies to ``live_full`` to preserve pre-#110 behavior
+        (don't break the scanner if seed is missing or DB blip).
+    """
+    try:
+        res = (
+            supabase.table("strategy_lifecycle_states")
+            .select("strategy_name, current_state")
+            .execute()
+        )
+    except Exception as e:
+        logger.warning(
+            f"[STRATEGY_LIFECYCLE] load_strategy_lifecycle_states "
+            f"failed: {e} — caller defaults missing strategies to live_full"
+        )
+        return {}
+    rows = res.data or []
+    if not rows:
+        logger.warning(
+            "[STRATEGY_LIFECYCLE] strategy_lifecycle_states is empty "
+            "— caller defaults missing strategies to live_full"
+        )
+        return {}
+    return {r["strategy_name"]: r["current_state"] for r in rows}
+
+
 # As of #109 PR-2 (2026-05-07), the seed migration places all 5
 # currently-shipped strategies in LIVE_FULL state — there are zero
 # EXPERIMENTAL strategies yet. evaluate_strategy_lifecycle() will

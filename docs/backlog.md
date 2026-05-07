@@ -499,7 +499,25 @@ application, with the BAC ghost-position incident as origin. CLAUDE.md
 Working Style updated with a cross-reference so future operators find
 the doctrine from the system-overview surface.
 
-**#103 — Regime → strategy selection breadth audit** (LOW)
+**#103 — Regime → strategy selection breadth audit** — **CLOSED 2026-05-07**
+
+Resolved 2026-05-07 by #107 diagnostic. Of the three possibilities
+originally listed:
+- "Regime-driven natural selection" — partially correct for W3
+  sentiment alone (SPY+QQQ truly bullish-trending)
+- "Coverage gap in strategy emission logic" — confirmed yes, but the
+  gap is upstream of the selector: iv_rank=50.0 hardcoded fallback at
+  `options_scanner.py:2395` routes 4 of 7 strategy paths to
+  never-trigger state
+- "Threshold calibration too narrow" — partially relevant (SUPPRESSED
+  vs NORMAL borderline), but secondary
+
+**Cross-reference:** the regime → strategy selection breadth is
+constrained by iv_rank computation breakage, not classifier behavior.
+See #107 (diagnostic) and #115 (iv_rank fix). Classifiers themselves
+are working; iv_rank upstream is the actual broken lever.
+
+— Original entry preserved below for context —
 
 100% of recent live trades (last 14 days) are
 LONG_CALL_DEBIT_SPREAD. Code supports more types (iron_condor
@@ -579,46 +597,45 @@ Tunable via `ABSOLUTE_SPREAD_THRESHOLD` and `MIN_ECONOMIC_ENTRY` module
 constants (env-overridable). Operationally inert — same trades accepted/
 rejected as before; operators see accurate signal in `rejection_counts`.
 
-**#107 — Regime + sentiment classifier diagnostic** (HIGH)
+**#107 — Regime + sentiment classifier diagnostic** — **CLOSED 2026-05-07**
 
-Phase 1 multi-strategy emission diagnostic (PR #884,
-`docs/designs/multi_strategy_phase1.md`) revealed the scanner is already
-multi-strategy abstracted. Production has historically emitted 78
-IRON_CONDOR + 45 LONG_PUT_DEBIT_SPREAD + 36 LONG_CALL_DEBIT_SPREAD.
-Post-2026-04-13 (post-corruption-floor): only LONG_CALL_DEBIT_SPREAD has
-emitted, 29 emissions in 23 days.
+Diagnostic completed 2026-05-07. Three original hypotheses partially
+refuted in favor of a new H4 finding.
 
-Per CLAUDE.md, this is regime-driven natural selection — not banning. But
-classifiers landing in NORMAL+BULLISH for 23 consecutive cycles deserves
-verification BEFORE any multi-strategy lifecycle work ships. If
-classifiers are biased, the fix is upstream — correcting the classifier
-gets you strategy diversity without writing any new selector code.
+**Findings:**
+- **Sentiment classifier (H1 verdict):** SUPPORTED. SPY $686 → $733.77
+  (+6.96%) over W3's 17 trading days, daily-return std ~0.65%, annualized
+  vol ~10.3%. Internal BULLISH classification matches external truth.
+  H3 (sentiment sticky-bullish) refuted — W2 had 29 LONG_PUT_DEBIT_SPREAD
+  emissions, sentiment does flip when symbols trend down.
+- **Regime classifier (H1 weak/H2 weak):** WEAKLY supported either way.
+  Regime varied widely in W1+W2 (CHOP=71, NORMAL=63, ELEVATED=26,
+  REBOUND=6 across 90 days). W3's 100%-NORMAL streak is plausible given
+  actual W3 market regime. Sub-finding: SUPPRESSED never observed in 90d
+  despite genuinely low-vol periods (~10% W3 vol borders SUPPRESSED
+  threshold). Minor calibration concern, not a strategic issue — both
+  NORMAL and SUPPRESSED routes emit debit spreads for BULLISH.
+- **🚨 NEW H4 (PRIMARY VERDICT):** `iv_rank = symbol_snapshot.iv_rank or
+  50.0` at `options_scanner.py:2395` is a Loud-Error Doctrine
+  Anti-pattern 2 violation. iv_rank=50.0 across ALL 166
+  trade_suggestions in 90-day window (zero variance). Hardcoded
+  fallback masks broken upstream computation.
 
-**Three hypotheses to test:**
-- H1: SPY/QQQ market action 2026-04-13 → 2026-05-06 was actually
-  consistent with NORMAL+BULLISH classification (system is correct)
-- H2: Regime classifier has a default-fallback bias toward NORMAL when
-  uncertainty is high
-- H3: Sentiment classifier (SMA20 > SMA50 crossover) has a sticky-bullish
-  bias when most universe symbols trend up together
+**Strategic consequence:** iv_rank=50 routes through "normal IV"
+selector branches and eliminates 4 of 7 strategy paths:
+SHORT_PUT_CREDIT_SPREAD, SHORT_CALL_CREDIT_SPREAD, NEUTRAL+high-IV
+IRON_CONDOR, EARNINGS+high-IV IRON_CONDOR all never trigger.
+Surviving paths: 3 directional debit spreads + CHOP-regime IRON_CONDOR.
+This is the SINGLE root cause of W3's strategy diversity loss.
 
-**Why this matters:** if H1, no action — system is right. If H2 or H3,
-the fix is upstream of any lifecycle work and dramatically smaller than
-shipping new strategies.
+**Outcomes:**
+- New #115 (HIGH) opened for iv_rank fix work
+- #103 closed (#107 + #115 supersede the original "regime → strategy
+  selection breadth" question)
+- #114 (ban-knob experiment) superseded; would not surface credit
+  spreads or non-CHOP iron condors under iv_rank=50
 
-**Approach:** read-only diagnostic. Pull regime + sentiment classifier
-output for past 30 days, cross-reference with SPY/QQQ price action,
-identify whether output is correct or biased.
-
-**Cross-reference:** sharpens #103 (Regime → strategy selection breadth
-audit) which becomes informational only post this diagnostic.
-Source: `docs/designs/multi_strategy_phase1.md` Step 1, Step 2.
-
-**Priority:** HIGH — gates the value of Entries #108-#114 below. Run
-before any multi-strategy lifecycle work.
-
-**Effort:** ~2 hours diagnostic + ~half day fix if classifier needs
-adjustment.
+**Effort actual:** ~50 min for diagnostic. No PR drafted (read-only).
 
 **#108 — Multi-strategy Phase 2 PR-1: per-strategy realized P&L helper extension** (LOW)
 
@@ -770,7 +787,21 @@ strategy diversity over time without running ad-hoc SQL.
 **Cross-reference:** `docs/designs/multi_strategy_phase1.md` Phase 2
 PR-6. Closes/supersedes #103.
 
-**#114 — Ban-knob experiment for classifier diagnostic** (LOW)
+**#114 — Ban-knob experiment for classifier diagnostic** — **SUPERSEDED 2026-05-07**
+
+Superseded 2026-05-07 by #107 diagnostic finding. Under the
+iv_rank=50 hardcoded fallback (see #115), the ban-knob experiment
+cannot surface credit spreads or non-CHOP iron condors regardless of
+which directional strategy is banned — those paths are blocked
+upstream by the iv_rank=50 routing through "normal IV" selector
+branches. Banning LONG_CALL_DEBIT_SPREAD would shift output to
+LONG_PUT_DEBIT_SPREAD or HOLD only; would not surface the missing
+strategy paths.
+
+The experiment becomes useful only AFTER #115 (iv_rank fix) lands.
+Revisit then if classifier behavior is still unclear.
+
+— Original entry preserved below for context —
 
 Phase 1 diagnostic surfaced this as the cheapest available classifier
 diagnostic — operator action, not coding work.
@@ -794,6 +825,62 @@ Observe what selector emits in current conditions:
 needs investigation at all.
 
 **Cross-reference:** `docs/designs/multi_strategy_phase1.md` Step 4a.
+
+**#115 — iv_rank computation broken; hardcoded fallback masks failure** (HIGH)
+
+**Discovery:** #107 classifier diagnostic (2026-05-07) identified
+iv_rank=50.0 across ALL 166 trade_suggestions in 90-day window. Zero
+variance is statistically impossible if iv_rank were computing
+correctly; confirms hardcoded fallback masks upstream failure.
+
+**Root cause:** `options_scanner.py:2395` reads
+`iv_rank = symbol_snapshot.iv_rank or 50.0`. The `or 50.0` is a
+Loud-Error Doctrine v1.0 Anti-pattern 2 violation (silent log-only
+swallow with default sentinel value). `symbol_snapshot.iv_rank`
+returns None/0 for ALL symbols across the full 90-day window,
+suggesting the upstream computation has been broken for ≥90 days,
+possibly since feature inception.
+
+**Impact:** eliminates 4 of 7 strategy paths in
+`strategy_selector.py`:
+- BULLISH + high_vol → SHORT_PUT_CREDIT_SPREAD ❌ never triggers
+- BEARISH + high_vol → SHORT_CALL_CREDIT_SPREAD ❌ never triggers
+- NEUTRAL + high_vol → IRON_CONDOR ❌ never triggers (BULLISH/BEARISH-NEUTRAL path)
+- EARNINGS + high_vol → IRON_CONDOR ❌ never triggers (earnings path)
+
+Surviving paths: 3 directional debit spreads + CHOP-regime
+IRON_CONDOR (regime-triggered, not IV-triggered). This explains W3's
+100%-LONG_CALL_DEBIT_SPREAD streak entirely.
+
+**Recommended approach (two components):**
+1. **Upstream diagnostic** (read-only, ~2 hours): find where iv_rank
+   is supposed to be computed, why `symbol_snapshot.iv_rank` is
+   None/0, what data source it depends on, whether iv_rank ever
+   worked historically. Produces evidence for fix design.
+2. **Fix PR** (scope unknown until diagnostic): repair upstream
+   computation + replace `or 50.0` fallback with `alert()` call per
+   loud-error doctrine. Bundle vs split decided post-diagnostic.
+
+**Why HIGH priority:** fixing this likely restores
+SHORT_PUT_CREDIT_SPREAD, SHORT_CALL_CREDIT_SPREAD, and high-IV
+IRON_CONDOR emissions immediately. Three strategy paths reactivated
+by fixing one bug. The lifecycle PRs (#108-#110) are foundation work
+for new strategies (0DTE, CSP) but don't unlock anything from
+existing strategies. iv_rank fix does — unblocks credit-strategy
+emission without writing any new selector code.
+
+**Doctrine cross-reference:** `docs/loud_error_doctrine.md`
+Anti-pattern 2 (silent fallback masking upstream failure). Same
+pattern shape as #62a-D7 (shadow_cohort_daily missing) and #71 PR-5
+(CalibrationService.train_and_persist missing) — code references
+state that doesn't produce real values, no alert fires when fallback
+path is taken.
+
+**Estimated effort:** Upstream diagnostic ~2 hours. Fix PR scope
+undetermined until diagnostic completes.
+
+**Cross-reference:** #107 diagnostic synthesis (2026-05-07).
+Closes the original #103 question about strategy selection breadth.
 
 ### #72 — Loud-error doctrine + silent-failure catalog
 

@@ -7,8 +7,10 @@ from datetime import datetime, timezone
 from unittest.mock import MagicMock
 
 from packages.quantum.services.progression_service import (
+    MIN_TRADES_FOR_STRATEGY_GRADUATION,
     cumulative_realized_pl,
     get_alpaca_real_closed_trades,
+    get_strategy_eligibility,
 )
 
 
@@ -58,7 +60,14 @@ def _make_supabase_mock(
 ):
     """Build a Supabase mock with a single paper_positions response and a
     pop-on-each-call queue for paper_orders responses (one per position
-    in paper_positions_response)."""
+    in paper_positions_response).
+
+    For paper_positions specifically, the mock honors ``.eq("strategy", X)``
+    filters in Python so #108 PR-1 strategy-filter tests can validate
+    real filtering behavior, not just that the chain method was called.
+    Other ``.eq`` calls (user_id, status, etc.) are ignored — those
+    aren't what the strategy-filter tests need to exercise.
+    """
 
     def _make_chain(execute_data):
         chain = MagicMock()
@@ -70,11 +79,41 @@ def _make_supabase_mock(
             getattr(chain, method).return_value = chain
         return chain
 
+    def _make_positions_chain(rows):
+        """Filtering chain that honors strategy/user_id/status .eq calls.
+
+        Each .eq("strategy", X) narrows the rows that .execute() will return,
+        so behavioral tests of the strategy_name filter actually exercise
+        filtering rather than just rubber-stamping the call.
+        """
+        chain = MagicMock()
+        # Mutable holder so .eq mutations can apply layered filtering
+        state = {"rows": list(rows)}
+
+        def _eq(col, val):
+            if col == "strategy":
+                state["rows"] = [r for r in state["rows"] if r.get("strategy") == val]
+            return chain
+
+        chain.eq.side_effect = _eq
+
+        def _execute():
+            return MagicMock(data=list(state["rows"]))
+
+        chain.execute.side_effect = _execute
+
+        for method in (
+            "select", "neq", "gte", "lte", "lt", "gt",
+            "in_", "order", "limit", "single",
+        ):
+            getattr(chain, method).return_value = chain
+        return chain
+
     paper_orders_queue = list(paper_orders_responses)
 
     def table_side_effect(name):
         if name == "paper_positions":
-            return _make_chain(paper_positions_response)
+            return _make_positions_chain(paper_positions_response)
         if name == "paper_orders":
             data = paper_orders_queue.pop(0) if paper_orders_queue else []
             return _make_chain(data)
@@ -322,6 +361,198 @@ class TestEligibilityForFullAuto(unittest.TestCase):
         # Diagnostic fields populated for audit even though blocked
         self.assertEqual(result["alpaca_real_trade_count"], 17)
         self.assertEqual(result["cumulative_realized_pl"], -20.0)
+
+
+# ─────────────────────────────────────────────────────────────────────
+# #108 PR-1: strategy_name filter on the trade-lens helper +
+# get_strategy_eligibility evaluation function.
+# ─────────────────────────────────────────────────────────────────────
+
+
+class TestStrategyNameFilter(unittest.TestCase):
+    """Behavioral tests for the new ``strategy_name`` parameter on
+    ``get_alpaca_real_closed_trades``.
+
+    The supabase mock honors ``.eq("strategy", X)`` filters in Python so
+    these tests exercise real filtering behavior — see
+    ``_make_supabase_mock`` notes.
+    """
+
+    def _alpaca_orders_for(self, n):
+        """Generate n entry-order responses, all alpaca-routed."""
+        return [[{"alpaca_order_id": f"a{i}"}] for i in range(n)]
+
+    def test_default_none_returns_all_strategies(self):
+        """strategy_name=None preserves pre-#108 behavior verbatim."""
+        positions = [
+            {"id": "p1", "realized_pl": 10.0, "strategy": "IRON_CONDOR"},
+            {"id": "p2", "realized_pl": 20.0, "strategy": "LONG_CALL_DEBIT_SPREAD"},
+            {"id": "p3", "realized_pl": 30.0, "strategy": "LONG_PUT_DEBIT_SPREAD"},
+        ]
+        sb = _make_supabase_mock(positions, self._alpaca_orders_for(3))
+        result = get_alpaca_real_closed_trades("user-1", sb)
+        self.assertEqual(len(result), 3)
+
+    def test_strategy_filter_narrows_to_one(self):
+        positions = [
+            {"id": "p1", "realized_pl": 10.0, "strategy": "IRON_CONDOR"},
+            {"id": "p2", "realized_pl": 20.0, "strategy": "LONG_CALL_DEBIT_SPREAD"},
+            {"id": "p3", "realized_pl": 30.0, "strategy": "IRON_CONDOR"},
+        ]
+        sb = _make_supabase_mock(positions, self._alpaca_orders_for(2))
+        result = get_alpaca_real_closed_trades(
+            "user-1", sb, strategy_name="IRON_CONDOR",
+        )
+        self.assertEqual([r["id"] for r in result], ["p1", "p3"])
+
+    def test_strategy_filter_empty_when_no_match(self):
+        positions = [
+            {"id": "p1", "realized_pl": 10.0, "strategy": "IRON_CONDOR"},
+        ]
+        sb = _make_supabase_mock(positions, self._alpaca_orders_for(1))
+        result = get_alpaca_real_closed_trades(
+            "user-1", sb, strategy_name="LONG_CALL_DEBIT_SPREAD",
+        )
+        self.assertEqual(result, [])
+
+    def test_strategy_filter_unknown_name_returns_empty(self):
+        """Caller is responsible for strategy validity; an unknown name
+        is not an error — just returns the empty-result shape."""
+        positions = [
+            {"id": "p1", "realized_pl": 10.0, "strategy": "IRON_CONDOR"},
+        ]
+        sb = _make_supabase_mock(positions, self._alpaca_orders_for(1))
+        result = get_alpaca_real_closed_trades(
+            "user-1", sb, strategy_name="NONEXISTENT_STRATEGY",
+        )
+        self.assertEqual(result, [])
+
+    def test_strategy_filter_excludes_internal_paper_trades(self):
+        """The Alpaca-real lens still applies on top of the strategy
+        filter. Internal-paper rows with the matching strategy are
+        excluded (entry order alpaca_order_id=None)."""
+        positions = [
+            {"id": "p-alpaca", "realized_pl": 50.0, "strategy": "IRON_CONDOR"},
+            {"id": "p-internal", "realized_pl": 999.0, "strategy": "IRON_CONDOR"},
+        ]
+        orders = [
+            [{"alpaca_order_id": "a1"}],
+            [{"alpaca_order_id": None}],
+        ]
+        sb = _make_supabase_mock(positions, orders)
+        result = get_alpaca_real_closed_trades(
+            "user-1", sb, strategy_name="IRON_CONDOR",
+        )
+        self.assertEqual([r["id"] for r in result], ["p-alpaca"])
+
+
+class TestGetStrategyEligibility(unittest.TestCase):
+    """Behavioral tests for the new ``get_strategy_eligibility``
+    evaluation function.
+
+    No callers exist as of PR-1; #109 is the first caller. These tests
+    validate the gate semantics so PR-1 ships with verified math.
+    """
+
+    def _alpaca_orders_for(self, n):
+        return [[{"alpaca_order_id": f"a{i}"}] for i in range(n)]
+
+    def test_no_trades_yet_returns_ineligible_zeros(self):
+        sb = _make_supabase_mock([], [])
+        result = get_strategy_eligibility("IRON_CONDOR", "user-1", sb)
+        self.assertFalse(result["eligible"])
+        self.assertEqual(result["cumulative_pl"], 0.0)
+        self.assertEqual(result["trade_count"], 0)
+        self.assertEqual(
+            result["min_required_trades"],
+            MIN_TRADES_FOR_STRATEGY_GRADUATION,
+        )
+
+    def test_two_winning_trades_blocked_by_min_count(self):
+        positions = [
+            {"id": "p1", "realized_pl": 100.0, "strategy": "IRON_CONDOR"},
+            {"id": "p2", "realized_pl": 50.0, "strategy": "IRON_CONDOR"},
+        ]
+        sb = _make_supabase_mock(positions, self._alpaca_orders_for(2))
+        result = get_strategy_eligibility("IRON_CONDOR", "user-1", sb)
+        self.assertFalse(result["eligible"])
+        self.assertEqual(result["trade_count"], 2)
+        self.assertEqual(result["cumulative_pl"], 150.0)
+
+    def test_three_winning_trades_eligible(self):
+        positions = [
+            {"id": "p1", "realized_pl": 100.0, "strategy": "IRON_CONDOR"},
+            {"id": "p2", "realized_pl": 50.0, "strategy": "IRON_CONDOR"},
+            {"id": "p3", "realized_pl": 25.0, "strategy": "IRON_CONDOR"},
+        ]
+        sb = _make_supabase_mock(positions, self._alpaca_orders_for(3))
+        result = get_strategy_eligibility("IRON_CONDOR", "user-1", sb)
+        self.assertTrue(result["eligible"])
+        self.assertEqual(result["trade_count"], 3)
+        self.assertEqual(result["cumulative_pl"], 175.0)
+
+    def test_five_losing_trades_blocked_by_pl_gate(self):
+        positions = [
+            {"id": f"p{i}", "realized_pl": -50.0, "strategy": "LONG_CALL_DEBIT_SPREAD"}
+            for i in range(5)
+        ]
+        sb = _make_supabase_mock(positions, self._alpaca_orders_for(5))
+        result = get_strategy_eligibility(
+            "LONG_CALL_DEBIT_SPREAD", "user-1", sb,
+        )
+        self.assertFalse(result["eligible"])
+        self.assertEqual(result["trade_count"], 5)
+        self.assertEqual(result["cumulative_pl"], -250.0)
+
+    def test_pl_exactly_zero_is_ineligible_strict_gt(self):
+        """Strict > 0 gate: pl=0 must not graduate."""
+        positions = [
+            {"id": "p1", "realized_pl": 50.0, "strategy": "IRON_CONDOR"},
+            {"id": "p2", "realized_pl": -50.0, "strategy": "IRON_CONDOR"},
+            {"id": "p3", "realized_pl": 0.0, "strategy": "IRON_CONDOR"},
+        ]
+        sb = _make_supabase_mock(positions, self._alpaca_orders_for(3))
+        result = get_strategy_eligibility("IRON_CONDOR", "user-1", sb)
+        self.assertFalse(result["eligible"])
+        self.assertEqual(result["cumulative_pl"], 0.0)
+
+    def test_other_strategies_do_not_count_toward_target(self):
+        """Three winning IRON_CONDORs should not graduate
+        LONG_CALL_DEBIT_SPREAD — the filter scopes the lens."""
+        positions = [
+            {"id": "p1", "realized_pl": 100.0, "strategy": "IRON_CONDOR"},
+            {"id": "p2", "realized_pl": 100.0, "strategy": "IRON_CONDOR"},
+            {"id": "p3", "realized_pl": 100.0, "strategy": "IRON_CONDOR"},
+            {"id": "p4", "realized_pl": 25.0, "strategy": "LONG_CALL_DEBIT_SPREAD"},
+        ]
+        sb = _make_supabase_mock(positions, self._alpaca_orders_for(4))
+        result = get_strategy_eligibility(
+            "LONG_CALL_DEBIT_SPREAD", "user-1", sb,
+        )
+        self.assertFalse(result["eligible"])
+        self.assertEqual(result["trade_count"], 1)
+        self.assertEqual(result["cumulative_pl"], 25.0)
+
+    def test_internal_paper_trades_excluded_from_strategy_count(self):
+        """Filter out internal-paper rows even when they match the
+        target strategy — same lens as ``is_eligible_for_full_auto``.
+        """
+        positions = [
+            {"id": "p1", "realized_pl": 100.0, "strategy": "IRON_CONDOR"},
+            {"id": "p2", "realized_pl": 999.0, "strategy": "IRON_CONDOR"},
+            {"id": "p3", "realized_pl": 50.0, "strategy": "IRON_CONDOR"},
+        ]
+        orders = [
+            [{"alpaca_order_id": "a1"}],
+            [{"alpaca_order_id": None}],   # internal — excluded
+            [{"alpaca_order_id": "a3"}],
+        ]
+        sb = _make_supabase_mock(positions, orders)
+        result = get_strategy_eligibility("IRON_CONDOR", "user-1", sb)
+        # 2 alpaca-real trades, sum=150 — fails 3-trade gate
+        self.assertFalse(result["eligible"])
+        self.assertEqual(result["trade_count"], 2)
+        self.assertEqual(result["cumulative_pl"], 150.0)
 
 
 # ─────────────────────────────────────────────────────────────────────

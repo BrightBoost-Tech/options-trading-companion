@@ -38,12 +38,20 @@ LOG_TABLE = "go_live_progression_log"
 EQUITY_THRESHOLD_FULL_AUTO = 1500.0
 MIN_TRADES_FULL_AUTO = 3
 
+# Gate threshold for strategy lifecycle EXPERIMENTAL → LIVE_FULL graduation
+# (#108 PR-1, 2026-05-07). Kept separate from MIN_TRADES_FULL_AUTO because
+# tier-promotion and strategy-graduation may diverge later — same value
+# today (3) but no semantic coupling. Revisit unification if both
+# constants stay in lockstep across multiple changes.
+MIN_TRADES_FOR_STRATEGY_GRADUATION = 3
+
 
 def get_alpaca_real_closed_trades(
     user_id: str,
     supabase,
     since: Optional[datetime] = None,
     until: Optional[datetime] = None,
+    strategy_name: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
     """Return closed paper_positions whose ENTRY order was Alpaca-routed.
 
@@ -62,19 +70,29 @@ def get_alpaca_real_closed_trades(
         supabase: Supabase client instance
         since: Optional datetime; only return positions closed at/after
         until: Optional datetime; only return positions closed at/before
+        strategy_name: Optional strategy filter (e.g. ``"IRON_CONDOR"``).
+            When provided, restricts results to closed positions whose
+            ``strategy`` column equals this value. Reads
+            ``paper_positions.strategy`` directly — column verified
+            populated 17/17 for Alpaca-real closed positions
+            (2026-05-07 schema check) so a JOIN through
+            ``trade_suggestions`` is unnecessary. ``None`` (default)
+            preserves pre-#108 behavior verbatim.
 
     Returns:
-        List of paper_positions row dicts with at least id and realized_pl.
-        Empty list if no qualifying trades.
+        List of paper_positions row dicts with at least id, realized_pl,
+        closed_at, and strategy. Empty list if no qualifying trades.
     """
     query = supabase.table("paper_positions") \
-        .select("id, realized_pl, closed_at") \
+        .select("id, realized_pl, closed_at, strategy") \
         .eq("user_id", user_id) \
         .eq("status", "closed")
     if since is not None:
         query = query.gte("closed_at", since.isoformat())
     if until is not None:
         query = query.lte("closed_at", until.isoformat())
+    if strategy_name is not None:
+        query = query.eq("strategy", strategy_name)
 
     res = query.execute()
     all_closed = res.data or []
@@ -110,6 +128,63 @@ def cumulative_realized_pl(trades: List[Dict[str, Any]]) -> float:
     Treats None/missing realized_pl as 0.0. Empty list returns 0.0.
     """
     return sum(float(t.get("realized_pl") or 0) for t in trades)
+
+
+# NOTE: As of #108 PR-1 (2026-05-07), this function has no callers in
+# production code. It exists as foundation for #109 (strategy_lifecycle_states
+# table + daily scheduler hook), which will be the first caller. If #109
+# hasn't shipped within ~30 days of #108 PR-1's merge, revisit whether this
+# orphan code should be removed or repurposed. See `docs/backlog.md` #108.
+def get_strategy_eligibility(
+    strategy_name: str,
+    user_id: str,
+    supabase,
+) -> Dict[str, Any]:
+    """Evaluate whether a strategy meets graduation criteria.
+
+    Mirrors the tier-promotion gate shape from PR #883 but scoped to a
+    single strategy. Used by future lifecycle gating (#109): an
+    EXPERIMENTAL strategy graduates to LIVE_FULL when both gates pass:
+      1. cumulative realized_pl > 0 across that strategy's
+         Alpaca-real closed trades
+      2. trade_count ≥ MIN_TRADES_FOR_STRATEGY_GRADUATION
+
+    No side effects. No database writes. Pure read function.
+
+    Args:
+        strategy_name: Strategy identifier as stored in
+            ``paper_positions.strategy`` (e.g. ``"IRON_CONDOR"``,
+            ``"LONG_CALL_DEBIT_SPREAD"``). Caller is responsible for
+            validity; an unknown name returns the empty-result shape.
+        user_id: User UUID.
+        supabase: Supabase client instance.
+
+    Returns:
+        Dict with:
+          - ``eligible`` (bool): both gates pass
+          - ``cumulative_pl`` (float): sum of realized_pl
+          - ``trade_count`` (int): number of Alpaca-real closed trades
+            for this strategy
+          - ``min_required_trades`` (int): the threshold, exposed for
+            caller observability + audit logging
+    """
+    trades = get_alpaca_real_closed_trades(
+        user_id=user_id,
+        supabase=supabase,
+        strategy_name=strategy_name,
+    )
+    cumulative_pl = cumulative_realized_pl(trades)
+    trade_count = len(trades)
+    eligible = (
+        cumulative_pl > 0
+        and trade_count >= MIN_TRADES_FOR_STRATEGY_GRADUATION
+    )
+    return {
+        "eligible": eligible,
+        "cumulative_pl": cumulative_pl,
+        "trade_count": trade_count,
+        "min_required_trades": MIN_TRADES_FOR_STRATEGY_GRADUATION,
+    }
 
 # Valid phase transitions
 VALID_TRANSITIONS = {

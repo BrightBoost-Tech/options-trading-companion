@@ -105,10 +105,15 @@ class TestIvDailyRefreshScheduled(unittest.TestCase):
         scope. We anchor on the job_id literal, then look ahead for the
         endpoint + scope strings within the same line.
         """
+        # URL fix shipped 2026-05-08 — was "/tasks/iv/daily-refresh"
+        # in PR-A; first natural fire returned HTTP 404 because
+        # internal_tasks.router mounts at prefix="/internal/tasks".
+        # Class-prevention test in test_scheduler_routes_match.py
+        # guards the broader pattern.
         m = re.search(
             r'\("iv_daily_refresh",\s*'
             r'dict\(hour=4,\s*minute=30\),\s*'
-            r'"/tasks/iv/daily-refresh",\s*'
+            r'"/internal/tasks/iv/daily-refresh",\s*'
             r'"tasks:iv_daily_refresh"',
             self.src,
         )

@@ -68,7 +68,7 @@ SCHEDULES = [
     # entry — until then, the producer was wired but never triggered, so
     # `underlying_iv_points` stayed empty since 2026-04-01 and iv_rank
     # silently fell back to 50.0 across every scan.
-    ("iv_daily_refresh",            dict(hour=4,  minute=30), "/tasks/iv/daily-refresh",            "tasks:iv_daily_refresh",         "Daily IV point refresh"),
+    ("iv_daily_refresh",            dict(hour=4,  minute=30), "/internal/tasks/iv/daily-refresh",   "tasks:iv_daily_refresh",         "Daily IV point refresh"),
     ("calibration_update",          dict(hour=5,  minute=0),  "/internal/tasks/calibration/update", "tasks:calibration_update",       "Compute calibration adjustments"),
     ("day_orchestrator",            dict(hour=7,  minute=30), "/internal/tasks/orchestrator/start-day", "tasks:day_orchestrator",    "Day orchestrator boot check"),
 

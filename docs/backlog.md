@@ -1216,6 +1216,23 @@ after ~60 trading days of accumulated history. PR-B
 pending — system continues to fall back to 50.0 during the
 warmup window until PR-B lands.
 
+**PR-A endpoint URL fix (2026-05-08):** first natural fire at
+04:30 CT returned HTTP 404. PR-A's `SCHEDULES` entry used
+`/tasks/iv/daily-refresh` but `internal_tasks.router` mounts
+at `prefix="/internal/tasks"` — actual handler path is
+`/internal/tasks/iv/daily-refresh`. Caught by H2 doctrine alert
+(`scheduler_task_http_status_error`, severity=warning) at first
+fire — loud-error pathway healthy and load-bearing. Fix shipped
+on branch `fix/115-pr-a-iv-daily-refresh-url`: 9-character URL
+correction in `scheduler.py:SCHEDULES` + class-prevention test
+`test_scheduler_routes_match.py` asserting every `SCHEDULES` URL
+resolves to a registered FastAPI route. The bug is the same
+**wrapper-drift** class as PR #864's alpaca_client field-drop —
+2nd data point for the doctrine pattern (string identifier in
+module A doesn't match real registration in module B).
+Manual-fire instructions in PR description compress warmup window
+by ~3 days vs Monday's natural fire.
+
 **PR-B-1 status (2026-05-07):** shipped on branch
 `feat/115-pr-b-1-scanner-regime-none-routing`. Two consumer sites
 now route iv_rank=None explicitly when

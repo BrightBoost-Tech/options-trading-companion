@@ -1223,15 +1223,41 @@ at `prefix="/internal/tasks"` — actual handler path is
 `/internal/tasks/iv/daily-refresh`. Caught by H2 doctrine alert
 (`scheduler_task_http_status_error`, severity=warning) at first
 fire — loud-error pathway healthy and load-bearing. Fix shipped
-on branch `fix/115-pr-a-iv-daily-refresh-url`: 9-character URL
-correction in `scheduler.py:SCHEDULES` + class-prevention test
-`test_scheduler_routes_match.py` asserting every `SCHEDULES` URL
-resolves to a registered FastAPI route. The bug is the same
-**wrapper-drift** class as PR #864's alpaca_client field-drop —
-2nd data point for the doctrine pattern (string identifier in
-module A doesn't match real registration in module B).
-Manual-fire instructions in PR description compress warmup window
-by ~3 days vs Monday's natural fire.
+on branch `fix/115-pr-a-iv-daily-refresh-url` (#899): 9-character
+URL correction in `scheduler.py:SCHEDULES` + class-prevention
+test `test_scheduler_routes_match.py` asserting every
+`SCHEDULES` URL resolves to a registered FastAPI route. The bug
+is the same **wrapper-drift** class as PR #864's alpaca_client
+field-drop — 2nd data point for the doctrine pattern (string
+identifier in module A doesn't match real registration in
+module B). GHA workflow_dispatch options updated in #900
+follow-up (timing race meant the GHA change didn't make the
+#899 squash merge).
+
+**PR-A enqueue-path fix (2026-05-08, layer 2):** post-#899 manual
+fire HIT the API but the job sat `status='queued'` for 30+
+minutes. Root cause: `iv_daily_refresh_task` in
+`internal_tasks.py` used the legacy DB-only `enqueue_idempotent`
+(from `jobs/enqueue.py`) — wrote a `job_runs` row but never
+pushed to RQ. d4bba93 (2026-03-28) migrated 4 sibling endpoints
+to canonical `enqueue_job_run` (DB + RQ) but **carved out
+iv_daily_refresh as "NOT in target list" with no documented
+reason** — undocumented oversight that became a latent bug. PR-A
+activating the SCHEDULES entry surfaced it. Fix migrates
+`iv_daily_refresh_task` to `enqueue_job_run` and standardises
+job_name to underscored `iv_daily_refresh` (matching d4bba93's
+discipline + handler `JOB_NAME` constant). Targeted
+regression-guard test `test_iv_daily_refresh_enqueue_canonical.py`.
+3rd data point for wrapper-drift class. Stuck `iv-daily-refresh`
+queued row from the morning's manual fire becomes orphan post-
+standardisation — cleanup SQL in PR description.
+
+**Known follow-up scope (not in this PR):** 4 OTHER endpoints in
+`internal_tasks.py` still use the legacy enqueue path —
+`/morning-brief`, `/midday-scan`, `/weekly-report`,
+`/universe/sync`. None are in SCHEDULES so they're dormant
+rather than active, but the same shape bug applies. Worth a
+sweep PR if any of them ever get scheduled.
 
 **PR-B-1 status (2026-05-07):** shipped on branch
 `feat/115-pr-b-1-scanner-regime-none-routing`. Two consumer sites

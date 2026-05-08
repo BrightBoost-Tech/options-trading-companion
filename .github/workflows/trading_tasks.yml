@@ -95,6 +95,7 @@ on:
           - weekly_report
           - validation_eval
           - daily_progression_eval
+          - iv_daily_refresh
           - alpaca_order_sync
           - strategy_autotune
           - walk_forward_autotune

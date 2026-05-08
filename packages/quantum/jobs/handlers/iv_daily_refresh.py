@@ -10,11 +10,11 @@ from packages.quantum.services.market_data_truth_layer import MarketDataTruthLay
 from packages.quantum.services.iv_repository import IVRepository
 from packages.quantum.services.iv_point_service import IVPointService
 
-JOB_NAME = "iv-daily-refresh"
+JOB_NAME = "iv_daily_refresh"
 
 def run(payload: Dict[str, Any], ctx: Any = None) -> Dict[str, Any]:
     """
-    Handler for iv-daily-refresh job.
+    Handler for iv_daily_refresh job.
     Refreshes IV points for universe.
     """
     print(f"[{JOB_NAME}] Starting job with payload: {payload}")

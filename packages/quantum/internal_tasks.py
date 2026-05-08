@@ -317,35 +317,31 @@ async def walk_forward_autotune_task(
     )
 
 
-# Keep remaining endpoints unchanged as they were not in the target list
 @router.post("/iv/daily-refresh", status_code=202)
 async def iv_daily_refresh_task(
-    client: Client = Depends(get_admin_client),
     auth: TaskSignatureResult = Depends(verify_task_signature("tasks:iv_daily_refresh"))
 ):
-    """
-    Refreshes IV points for universe.
-    Now enqueued as a background job to prevent blocking the API.
+    """Refreshes IV points for universe.
+
+    Migrated 2026-05-08 from the legacy DB-only ``enqueue_idempotent``
+    path to the canonical ``enqueue_job_run`` (DB + RQ push) per
+    commit d4bba93's discipline. The carve-out at d4bba93 time was an
+    undocumented oversight; PR-A (#115) activating the SCHEDULES
+    entry surfaced the gap when the first scheduled fire wrote a
+    ``status='queued'`` row that no RQ worker ever consumed.
+
+    Job name standardised to underscored ``iv_daily_refresh`` to
+    match d4bba93's pattern across sibling endpoints. The handler's
+    ``JOB_NAME`` constant is updated in tandem so dispatch via
+    ``discover_handlers()`` continues to resolve.
     """
     today = datetime.now().strftime("%Y-%m-%d")
-    job_name = "iv-daily-refresh"
-    key = f"{job_name}-{today}"
-
-    job_id = enqueue_idempotent(
-        client=client,
-        job_name=job_name,
-        idempotency_key=key,
+    return enqueue_job_run(
+        job_name="iv_daily_refresh",
+        idempotency_key=f"iv_daily_refresh-{today}",
         payload={
             "app_version": APP_VERSION,
             "trigger_ts": datetime.now().isoformat(),
-            "task_name": job_name
-        }
+        },
     )
-
-    return {
-        "job_run_id": str(job_id),
-        "job_name": job_name,
-        "idempotency_key": key,
-        "status": "queued"
-    }
 

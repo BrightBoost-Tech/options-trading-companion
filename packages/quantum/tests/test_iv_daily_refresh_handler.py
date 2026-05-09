@@ -36,6 +36,12 @@ class TestIVDailyRefreshHandler:
         # Computation mock
         MockIVPointService.compute_atm_iv_target_from_chain.return_value = {"iv_30d": 0.2}
 
+        # #115 PR-A Layer 4: handler now checks upsert return + verifies
+        # actual row count post-loop. Mock both methods explicitly so the
+        # accounting math has integer types to compare.
+        MockIVRepository.return_value.upsert_iv_point.return_value = True
+        MockIVRepository.return_value.count_rows_for_date.return_value = 5
+
         # Execute
         result = run({})
 
@@ -49,6 +55,8 @@ class TestIVDailyRefreshHandler:
 
         # Verify that upsert was called
         MockIVRepository.return_value.upsert_iv_point.assert_called()
+        # #115 PR-A Layer 4: verify accounting check ran post-loop
+        MockIVRepository.return_value.count_rows_for_date.assert_called()
 
     @patch("packages.quantum.jobs.handlers.iv_daily_refresh.get_admin_client")
     def test_run_fail_universe(self, mock_get_client):

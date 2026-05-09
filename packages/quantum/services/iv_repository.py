@@ -1,5 +1,6 @@
+import logging
 from typing import Dict, Optional, Any, List, Union
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, date
 from supabase import Client
 import pandas as pd
 import numpy as np
@@ -7,6 +8,8 @@ import concurrent.futures
 import os
 import time
 from packages.quantum.security.masking import sanitize_exception
+
+logger = logging.getLogger(__name__)
 
 # Configurable concurrency for batch fetch (default 4 to reduce DB load)
 IVREPO_MAX_WORKERS = int(os.getenv("IVREPO_MAX_WORKERS", "4"))
@@ -44,10 +47,34 @@ class IVRepository:
         self.supabase = supabase
         self.table = "underlying_iv_points"
 
-    def upsert_iv_point(self, underlying: str, data: Dict[str, Any], as_of_ts: datetime) -> None:
-        """
-        Upserts an IV point record.
-        Sanitizes numeric fields to prevent "null" strings from being written.
+    def upsert_iv_point(
+        self,
+        underlying: str,
+        data: Dict[str, Any],
+        as_of_ts: datetime,
+    ) -> bool:
+        """Upsert an IV point row. Returns True on confirmed write, False otherwise.
+
+        #115 PR-A Layer 4 fix (2026-05-09). Pre-fix this method
+        silently swallowed errors with ``print(...)`` and always
+        returned None. The PR-A handler trusted the silent return
+        and counted ``stats["ok"]`` regardless of the actual write
+        outcome. Combined with Layer 3 (missing UNIQUE constraint)
+        every upsert silently rejected with PostgreSQL 42P10 while
+        the handler reported success.
+
+        Per Loud-Error Doctrine v1.0 Anti-pattern 2: callers must
+        check the return value and surface failures via accounting
+        + alert pathways, not via silent log swallow.
+
+        Field name notes:
+        - ``iv_30d_method`` is read from ``data.get("iv_30d_method",
+          "unknown")``. The IVPointService produces ``iv_method`` (no
+          ``_30d_`` infix), so this default fires today. Aligning
+          the field names is left for a follow-up that touches the
+          producer side; this PR preserves the silent-default to
+          avoid scope creep and surfacing it loudly via the new
+          handler accounting alert.
         """
         payload = {
             "underlying": underlying,
@@ -68,12 +95,61 @@ class IVRepository:
         }
 
         try:
-            self.supabase.table(self.table).upsert(
+            result = self.supabase.table(self.table).upsert(
                 payload,
-                on_conflict="underlying, as_of_date"
+                on_conflict="underlying, as_of_date",
             ).execute()
         except Exception as e:
-            print(f"[IVRepo] Upsert failed for {underlying}: {e}")
+            logger.error(
+                "iv_repo_upsert_failed",
+                extra={
+                    "underlying": underlying,
+                    "as_of_date": payload["as_of_date"],
+                    "error": str(e),
+                    "error_type": type(e).__name__,
+                },
+            )
+            return False
+
+        # PostgREST returns the upserted row(s) on success. Empty
+        # data here typically means the server-side upsert was
+        # silently rejected (e.g., RLS blocked write, conflict
+        # spec mismatched, schema cache stale). Treat as failure.
+        if not getattr(result, "data", None):
+            logger.warning(
+                "iv_repo_upsert_returned_empty",
+                extra={
+                    "underlying": underlying,
+                    "as_of_date": payload["as_of_date"],
+                },
+            )
+            return False
+
+        return True
+
+    def count_rows_for_date(self, as_of_date: Union[date, str]) -> int:
+        """#115 PR-A Layer 4 fix: count rows present for a given
+        ``as_of_date``. Used by the handler's accounting verification
+        to compare reported success counts against actual DB state.
+        """
+        date_str = (
+            as_of_date if isinstance(as_of_date, str)
+            else as_of_date.strftime('%Y-%m-%d')
+        )
+        try:
+            res = (
+                self.supabase.table(self.table)
+                .select("underlying", count="exact")
+                .eq("as_of_date", date_str)
+                .execute()
+            )
+            return res.count or 0
+        except Exception as e:
+            logger.warning(
+                "iv_repo_count_rows_failed",
+                extra={"as_of_date": date_str, "error": str(e)},
+            )
+            return -1  # sentinel — caller treats as "couldn't verify"
 
     def get_iv_context(self, underlying: str) -> Dict[str, Any]:
         """

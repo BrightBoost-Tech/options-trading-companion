@@ -1259,6 +1259,56 @@ standardisation — cleanup SQL in PR description.
 rather than active, but the same shape bug applies. Worth a
 sweep PR if any of them ever get scheduled.
 
+**PR-A write-boundary fix (2026-05-09, layers 3+4):** post-#901
+manual fire dispatched the chain end-to-end; handler reported
+`{ok: 68, failed: 2}` but `underlying_iv_points` stayed at 0
+rows. Two stacked failures at the producer write boundary:
+
+- **Layer 3:** `IVRepository.upsert_iv_point` calls Supabase
+  `.upsert(payload, on_conflict="underlying, as_of_date")` but
+  the schema had no UNIQUE constraint matching that spec. Every
+  upsert errored with PostgreSQL `42P10` ("no unique or
+  exclusion constraint matching the ON CONFLICT specification").
+- **Layer 4:** the `except` block silently swallowed the error
+  with `print(...)` and returned None. The handler's accounting
+  incremented `stats["ok"]` based on no-exception, ignoring
+  whether the upsert actually succeeded. Classic Anti-pattern 2
+  silent fallback combined with handler-trusts-wrapper —
+  identical Layer 4 shape will exist at every other handler
+  that calls a side-effect-producing wrapper without checking
+  the outcome.
+
+Fix shipped on branch `fix/115-pr-a-write-boundary`:
+
+- Migration `20260509000000_add_underlying_iv_points_unique_constraint.sql`
+  adds the missing UNIQUE constraint with `IF NOT EXISTS` +
+  inline `DO $$` self-verification.
+- `IVRepository.upsert_iv_point` returns `bool` reflecting
+  actual write outcome. Treats both exception path AND empty
+  PostgREST `result.data` (server-side silent rejection) as
+  failure. Replaces `print(...)` with structured `logger.error`.
+- `IVRepository.count_rows_for_date(as_of_date)` new helper
+  for post-loop accounting verification. Returns -1 sentinel
+  on query failure so the handler doesn't fire false-positive
+  alerts when it can't verify.
+- Handler `iv_daily_refresh.py` checks the upsert return value,
+  splits stats into `{ok, failed, missing_data}` so `ok`
+  reflects only confirmed DB writes. Post-loop verification:
+  queries `count_rows_for_date` and fires
+  `iv_handler_accounting_mismatch` (severity=critical) if the
+  reported `ok` count disagrees with actual DB row count. Makes
+  Layer 4 silent regression impossible going forward.
+
+**4th wrapper-drift data point** (Layers 1–3 wrapper-drift,
+Layer 4 anti-pattern 2 / handler-trusts-wrapper). Per #901's
+escape hatch ("three is a pattern; four is architectural-review
+territory") this fix ships the minimum-viable correction AND
+seeds Monday's design conversation with concrete questions about
+verified-write wrapper conventions across all DB and external-API
+boundaries. CSX close-order failure (Issue B from this Friday
+session) appears to be the same handler-trusts-wrapper class at
+the broker-API boundary — worth bringing to the same review.
+
 **PR-B-1 status (2026-05-07):** shipped on branch
 `feat/115-pr-b-1-scanner-regime-none-routing`. Two consumer sites
 now route iv_rank=None explicitly when

@@ -1309,6 +1309,20 @@ boundaries. CSX close-order failure (Issue B from this Friday
 session) appears to be the same handler-trusts-wrapper class at
 the broker-API boundary — worth bringing to the same review.
 
+**Migration applied 2026-05-09 05:17:11Z** via
+`mcp__supabase__apply_migration` (audit:
+`risk_alerts.id = 2381223c-28d3-4852-9afb-6a542935f4bc`,
+commit `ee826a8`). Verification confirmed both
+`underlying_iv_points_pkey (id)` AND new
+`underlying_iv_points_underlying_as_of_date_key
+UNIQUE (underlying, as_of_date)` constraints present
+post-apply. Pre-flight had zero duplicate pairs + empty table,
+so constraint applied cleanly. **Layer 3 of the cascade is now
+durably closed at the schema level.** Next manual fire (or
+Monday 04:30 CT scheduler) will exercise the full chain
+end-to-end with both Layer 4 protections (upsert returns
+bool + post-loop accounting verification) live in code.
+
 **PR-B-1 status (2026-05-07):** shipped on branch
 `feat/115-pr-b-1-scanner-regime-none-routing`. Two consumer sites
 now route iv_rank=None explicitly when

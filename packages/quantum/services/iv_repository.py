@@ -90,7 +90,20 @@ class IVRepository:
             "strike1": _sanitize_numeric(data.get("strike1")),
             "strike2": _sanitize_numeric(data.get("strike2")),
             "source": "polygon",
-            "quality_score": _sanitize_numeric(data.get("quality_score")),
+            # #115 PR-A Layer 7 fix (2026-05-09): cast to int.
+            # `quality_score` is the only INTEGER column on
+            # underlying_iv_points; `_sanitize_numeric` always
+            # returns a float, which PostgreSQL rejects with
+            # 22P02 (`invalid input syntax for type integer:
+            # "100.0"`). The producer (IVPointService) returns
+            # integer-valued arithmetic so the cast is lossless.
+            # Layer 7 was only reachable after Layer 3 (UNIQUE
+            # constraint) closed; PostgreSQL's UPSERT validation
+            # short-circuited at constraint resolution before
+            # reaching column-type validation.
+            "quality_score": int(
+                _sanitize_numeric(data.get("quality_score")) or 0
+            ),
             "inputs": data.get("inputs"),
         }
 

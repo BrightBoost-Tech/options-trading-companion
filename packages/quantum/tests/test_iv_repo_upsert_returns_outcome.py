@@ -125,6 +125,77 @@ class TestUpsertReturnsOutcome(unittest.TestCase):
         ok = repo.upsert_iv_point("AAPL", _payload_data(), _dt(2026, 5, 9))
         self.assertFalse(ok)
 
+    def test_quality_score_payload_is_integer_type(self):
+        """#115 PR-A Layer 7 fix (2026-05-09). The
+        ``quality_score`` column on ``underlying_iv_points`` is
+        INTEGER. ``_sanitize_numeric`` always returns ``float``,
+        which PostgreSQL rejects with 22P02 (`invalid input
+        syntax for type integer: "100.0"`). The fix wraps the
+        sanitised value with ``int(...)``.
+
+        Regression guard: assert the payload sent to Supabase
+        contains a Python ``int`` for ``quality_score``, not a
+        ``float``. Catches future reverts to bare
+        ``_sanitize_numeric`` (which always coerces to float).
+        """
+        from datetime import datetime as _dt
+
+        captured: dict = {}
+
+        sb = MagicMock()
+        table_chain = MagicMock()
+        upsert_chain = MagicMock()
+
+        def _capture(payload, **kwargs):
+            captured.update(payload)
+            return upsert_chain
+
+        table_chain.upsert.side_effect = _capture
+        upsert_chain.execute.return_value = MagicMock(data=[{"id": "x"}])
+        sb.table.return_value = table_chain
+
+        repo = IVRepository(sb)
+        ok = repo.upsert_iv_point("AAPL", _payload_data(), _dt(2026, 5, 9))
+        self.assertTrue(ok)
+
+        # The actual type is what PostgreSQL sees post-JSON-serialization.
+        # bool subclasses int, but JSON serialises True/False as booleans
+        # not numbers, so the explicit isinstance(int) AND not bool is
+        # the correct invariant.
+        self.assertIsInstance(captured.get("quality_score"), int)
+        self.assertNotIsInstance(captured.get("quality_score"), bool)
+        # Lossless coercion check: producer's 90 → payload's 90
+        self.assertEqual(captured["quality_score"], 90)
+
+    def test_quality_score_handles_none_input(self):
+        """When the producer omits quality_score (or it's None),
+        the int() coercion must not crash. ``or 0`` provides the
+        safe default — value lands as int(0), not None.
+        """
+        from datetime import datetime as _dt
+
+        captured: dict = {}
+        sb = MagicMock()
+        table_chain = MagicMock()
+        upsert_chain = MagicMock()
+
+        def _capture(payload, **kwargs):
+            captured.update(payload)
+            return upsert_chain
+
+        table_chain.upsert.side_effect = _capture
+        upsert_chain.execute.return_value = MagicMock(data=[{"id": "x"}])
+        sb.table.return_value = table_chain
+
+        repo = IVRepository(sb)
+        # Payload missing quality_score
+        data = _payload_data()
+        del data["quality_score"]
+        ok = repo.upsert_iv_point("AAPL", data, _dt(2026, 5, 9))
+        self.assertTrue(ok)
+        self.assertEqual(captured.get("quality_score"), 0)
+        self.assertIsInstance(captured["quality_score"], int)
+
     def test_failure_log_message_contains_error_text(self):
         """#115 PR-A logging fix (2026-05-09). Pre-fix the
         ``logger.error("name", extra={...})`` pattern dropped the

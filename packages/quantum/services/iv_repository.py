@@ -100,8 +100,21 @@ class IVRepository:
                 on_conflict="underlying, as_of_date",
             ).execute()
         except Exception as e:
+            # #115 PR-A Layer 4 follow-up (2026-05-09): interpolate
+            # the diagnostic context into the message string itself.
+            # Pre-fix the bare ``logger.error("name", extra={...})``
+            # pattern dropped the extras at Railway's default
+            # formatter, leaving log entries with no error context.
+            # Saturday morning's Outcome D diagnostic discovered the
+            # gap. Doctrine candidate: forbid bare extras-only logger
+            # calls on diagnostic-critical paths.
             logger.error(
-                "iv_repo_upsert_failed",
+                "iv_repo_upsert_failed underlying=%s as_of_date=%s "
+                "error_type=%s error=%s",
+                underlying,
+                payload["as_of_date"],
+                type(e).__name__,
+                str(e),
                 extra={
                     "underlying": underlying,
                     "as_of_date": payload["as_of_date"],
@@ -117,7 +130,9 @@ class IVRepository:
         # spec mismatched, schema cache stale). Treat as failure.
         if not getattr(result, "data", None):
             logger.warning(
-                "iv_repo_upsert_returned_empty",
+                "iv_repo_upsert_returned_empty underlying=%s as_of_date=%s",
+                underlying,
+                payload["as_of_date"],
                 extra={
                     "underlying": underlying,
                     "as_of_date": payload["as_of_date"],

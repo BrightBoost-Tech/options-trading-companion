@@ -33,10 +33,26 @@ def run(payload: Dict[str, Any], ctx: Any = None) -> Dict[str, Any]:
             print(f"[{JOB_NAME}] Error fetching universe: {e}")
             raise e
 
-        # 3. Process Symbols
+        # 3. Process Symbols.
+        #
+        # #115 PR-A Layer 4 fix (2026-05-09): per-symbol stats now
+        # split into four buckets so the load-bearing ``ok`` count
+        # reflects ACTUAL DB writes, not handler-side optimism. The
+        # post-loop verification at the bottom compares ``stats["ok"]``
+        # against ``count_rows_for_date`` and fires
+        # ``iv_handler_accounting_mismatch`` if they disagree —
+        # makes Layer 4 silent regression impossible.
         truth_layer = MarketDataTruthLayer()
         iv_repo = IVRepository(client)
-        stats = {"ok": 0, "failed": 0, "errors": []}
+        stats = {
+            "ok": 0,           # confirmed DB writes
+            "failed": 0,       # write attempted, repository returned False
+            "missing_data": 0, # upstream produced no IV (skip pre-write)
+            "errors": [],
+        }
+        failed_symbols: List[Dict[str, Any]] = []
+        run_ts = datetime.now()
+        as_of_date_str = run_ts.strftime('%Y-%m-%d')
 
         for sym in symbols:
             try:
@@ -58,14 +74,16 @@ def run(payload: Dict[str, Any], ctx: Any = None) -> Dict[str, Any]:
                         spot = bars[-1]["close"]
 
                 if spot <= 0:
-                    stats["failed"] += 1
+                    stats["missing_data"] += 1
+                    failed_symbols.append({"symbol": sym, "reason": "no_spot"})
                     continue
 
                 # 3. Get Chain via TruthLayer (pass spot to avoid redundant snapshot fetch)
                 chain = truth_layer.option_chain(norm_sym, strike_range=0.20, spot=spot)
 
                 if not chain:
-                    stats["failed"] += 1
+                    stats["missing_data"] += 1
+                    failed_symbols.append({"symbol": sym, "reason": "no_chain"})
                     continue
 
                 # 4. Adapt Chain for IVPointService (Legacy Compatibility)
@@ -83,16 +101,72 @@ def run(payload: Dict[str, Any], ctx: Any = None) -> Dict[str, Any]:
 
                 result = IVPointService.compute_atm_iv_target_from_chain(adapted_chain, spot, datetime.now())
                 if result.get("iv_30d") is None:
-                    stats["failed"] += 1
-                else:
-                    iv_repo.upsert_iv_point(sym, result, datetime.now())
+                    stats["missing_data"] += 1
+                    failed_symbols.append({"symbol": sym, "reason": "iv_30d_none"})
+                    continue
+
+                # #115 PR-A Layer 4: check upsert return value.
+                # Pre-fix the handler trusted the wrapper's None
+                # return and incremented ok regardless.
+                write_succeeded = iv_repo.upsert_iv_point(sym, result, run_ts)
+                if write_succeeded:
                     stats["ok"] += 1
+                else:
+                    stats["failed"] += 1
+                    failed_symbols.append({"symbol": sym, "reason": "db_write_failed"})
             except Exception as e:
                 stats["failed"] += 1
                 stats["errors"].append(f"{sym}: {e}")
+                failed_symbols.append({"symbol": sym, "reason": f"exception:{type(e).__name__}"})
 
-        print(f"[{JOB_NAME}] Finished. Stats: {stats}")
-        return {"status": "ok", "stats": stats}
+        # #115 PR-A Layer 4 — accounting verification.
+        # Query the table for actual rows written this cycle and
+        # compare against handler-reported ok count. Disagreement
+        # means the handler is lying (silent wrapper failure,
+        # Layer 5 wrapper-drift, etc.) — fire critical alert so
+        # the regression surfaces at the next monitoring sweep
+        # rather than waiting for downstream consumers to notice
+        # the empty pipeline.
+        actual_rows = iv_repo.count_rows_for_date(as_of_date_str)
+        accounting_match = (actual_rows == stats["ok"])
+        if not accounting_match and actual_rows >= 0:
+            try:
+                from packages.quantum.observability.alerts import (
+                    alert, _get_admin_supabase,
+                )
+                alert(
+                    _get_admin_supabase(),
+                    alert_type="iv_handler_accounting_mismatch",
+                    severity="critical",
+                    message=(
+                        f"iv_daily_refresh handler reported "
+                        f"{stats['ok']} writes but DB has {actual_rows} "
+                        f"rows for {as_of_date_str}"
+                    ),
+                    metadata={
+                        "stats_ok": stats["ok"],
+                        "actual_rows": actual_rows,
+                        "delta": stats["ok"] - actual_rows,
+                        "as_of_date": as_of_date_str,
+                        "doctrine_ref": "wrapper-drift Layer 4 / anti-pattern 2",
+                    },
+                )
+            except Exception as alert_err:
+                # Per loud-error doctrine valid-pattern 5: alert
+                # write failure must not undo the handler result.
+                print(f"[{JOB_NAME}] accounting alert write failed: {alert_err}")
+
+        print(f"[{JOB_NAME}] Finished. Stats: {stats}, "
+              f"actual_rows={actual_rows}, match={accounting_match}")
+        return {
+            "status": "ok",
+            "stats": stats,
+            "failed_symbols": failed_symbols[:20],  # truncate huge payloads
+            "actual_rows_written": actual_rows,
+            "accounting_match": accounting_match,
+            "as_of_date": as_of_date_str,
+            "total_processed": len(symbols),
+        }
 
     except Exception as e:
         print(f"[{JOB_NAME}] Job failed: {e}")

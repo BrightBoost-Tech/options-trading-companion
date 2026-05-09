@@ -125,6 +125,50 @@ class TestUpsertReturnsOutcome(unittest.TestCase):
         ok = repo.upsert_iv_point("AAPL", _payload_data(), _dt(2026, 5, 9))
         self.assertFalse(ok)
 
+    def test_failure_log_message_contains_error_text(self):
+        """#115 PR-A logging fix (2026-05-09). Pre-fix the
+        ``logger.error("name", extra={...})`` pattern dropped the
+        diagnostic context at Railway's default formatter — log
+        entries had no error visibility. Post-fix the message
+        string itself contains underlying + error_type + error so
+        Railway's message-only capture still surfaces signal.
+
+        Regression guard: if a future refactor reverts to the bare
+        extras-only pattern, this test fails immediately rather
+        than waiting for the next production diagnostic to discover
+        the gap.
+        """
+        import logging as _logging
+        from datetime import datetime as _dt
+        from io import StringIO
+
+        sb = _make_supabase(upsert_data=None, raises=True)
+        repo = IVRepository(sb)
+
+        buf = StringIO()
+        handler = _logging.StreamHandler(buf)
+        handler.setFormatter(_logging.Formatter("%(message)s"))
+        repo_logger = _logging.getLogger(
+            "packages.quantum.services.iv_repository"
+        )
+        repo_logger.addHandler(handler)
+        prior_level = repo_logger.level
+        repo_logger.setLevel(_logging.ERROR)
+        try:
+            ok = repo.upsert_iv_point(
+                "TEST_SYM", _payload_data(), _dt(2026, 5, 9),
+            )
+        finally:
+            repo_logger.removeHandler(handler)
+            repo_logger.setLevel(prior_level)
+
+        self.assertFalse(ok)
+        rendered = buf.getvalue()
+        self.assertIn("iv_repo_upsert_failed", rendered)
+        self.assertIn("TEST_SYM", rendered)
+        self.assertIn("error_type=", rendered)
+        self.assertIn("error=", rendered)
+
 
 class TestCountRowsForDate(unittest.TestCase):
     """Layer 4 verification primitive."""

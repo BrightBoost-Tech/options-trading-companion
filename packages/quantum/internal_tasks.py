@@ -218,16 +218,28 @@ async def day_orchestrator_task(
 
 @router.post("/progression/daily-eval", status_code=202)
 async def daily_progression_eval_task(
+    body: Optional[Dict] = Body(default=None),
     auth: TaskSignatureResult = Depends(verify_task_signature("tasks:daily_progression_eval"))
 ):
+    """#115 PR-A Layer 5 fix (2026-05-09). Pre-fix the endpoint
+    signature dropped the request body, so the CLI's
+    ``payload={"force_rerun": true}`` was silently discarded by
+    FastAPI before reaching ``enqueue_job_run``. Re-fires within
+    the same UTC day hit terminal-state dedup and never executed.
+    Same shape exists in 9 other internal_tasks endpoints — see PR
+    description for follow-up scope.
+    """
     today = datetime.now().strftime("%Y-%m-%d")
+    force_rerun = bool((body or {}).get("force_rerun", False))
     return enqueue_job_run(
         job_name="daily_progression_eval",
         idempotency_key=f"daily_progression_eval-{today}",
         payload={
             "app_version": APP_VERSION,
             "trigger_ts": datetime.now().isoformat(),
+            **({"force_rerun": True} if force_rerun else {}),
         },
+        force_rerun=force_rerun,
     )
 
 
@@ -319,6 +331,7 @@ async def walk_forward_autotune_task(
 
 @router.post("/iv/daily-refresh", status_code=202)
 async def iv_daily_refresh_task(
+    body: Optional[Dict] = Body(default=None),
     auth: TaskSignatureResult = Depends(verify_task_signature("tasks:iv_daily_refresh"))
 ):
     """Refreshes IV points for universe.
@@ -334,14 +347,23 @@ async def iv_daily_refresh_task(
     match d4bba93's pattern across sibling endpoints. The handler's
     ``JOB_NAME`` constant is updated in tandem so dispatch via
     ``discover_handlers()`` continues to resolve.
+
+    #115 PR-A Layer 5 fix (2026-05-09): endpoint now accepts a
+    request body and forwards ``force_rerun`` to ``enqueue_job_run``.
+    Pre-fix the body was silently dropped at the FastAPI signature
+    layer, so re-fires within the same UTC day hit terminal-state
+    dedup and never executed.
     """
     today = datetime.now().strftime("%Y-%m-%d")
+    force_rerun = bool((body or {}).get("force_rerun", False))
     return enqueue_job_run(
         job_name="iv_daily_refresh",
         idempotency_key=f"iv_daily_refresh-{today}",
         payload={
             "app_version": APP_VERSION,
             "trigger_ts": datetime.now().isoformat(),
+            **({"force_rerun": True} if force_rerun else {}),
         },
+        force_rerun=force_rerun,
     )
 

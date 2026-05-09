@@ -1323,6 +1323,38 @@ Monday 04:30 CT scheduler) will exercise the full chain
 end-to-end with both Layer 4 protections (upsert returns
 bool + post-loop accounting verification) live in code.
 
+**Layer 5 fix (2026-05-09):** post-Layer-3+4 manual fire produced
+`{ok: 0, failed: 70, accounting_match: true}` — Layer 4
+accounting honestly reported the failure caused by PostgREST's
+schema cache lag. After NOTIFY pgrst, attempted re-fire with
+`--force-rerun` returned 202 but no new `job_runs` row appeared.
+Diagnosis: `iv_daily_refresh_task` and `daily_progression_eval_task`
+endpoint signatures dropped the request body, so the CLI's
+`payload={"force_rerun": true}` was silently discarded by FastAPI
+before reaching `enqueue_job_run`. Re-fires within the same UTC
+day hit terminal-state dedup and never executed.
+
+**5th wrapper-drift in PR-A's chain in 36 hours.** Same shape
+across 9 OTHER internal_tasks endpoints (weekly_report,
+universe_sync, alpaca_order_sync, intraday_risk_monitor,
+post_trade_learning, day_orchestrator, promotion_check,
+heartbeat, phase2_precheck) — all accept no request body and
+would silently drop force_rerun if anyone tried it. Latent
+rather than active; surfaced for follow-up sweep.
+
+Fix shipped on branch `fix/115-pr-a-layer-5-force-rerun-body`:
+both targeted endpoints now accept `body: Optional[Dict] =
+Body(default=None)`, extract `force_rerun` defensively
+(`(body or {}).get("force_rerun", False)`), and forward to
+`enqueue_job_run`'s `force_rerun=` kwarg + mark in payload for
+audit. Defensive None-handling preserves the no-body path
+(scheduled fires that don't send a payload) without crashing.
+
+5 source-level tests in `test_internal_tasks_force_rerun_body.py`
+cover the contract on both endpoints. Existing
+`test_iv_daily_refresh_handler.py` + sibling tests pass without
+changes.
+
 **PR-B-1 status (2026-05-07):** shipped on branch
 `feat/115-pr-b-1-scanner-regime-none-routing`. Two consumer sites
 now route iv_rank=None explicitly when

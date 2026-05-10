@@ -48,6 +48,18 @@ class TradeTicket(BaseModel):
     risk_bracket: Optional[str] = None  # "conservative", "aggressive"
     regime_context: Dict[str, Any] = {}
 
+    # Alpaca mleg sign convention marker.
+    # Why: Alpaca's multi-leg parent limit_price is signed — positive = net
+    #   debit (you pay), negative = net credit (you receive). When closing a
+    #   long debit-opened spread (qty>0) by selling it back, the close
+    #   produces net credit and Alpaca's gateway pre-rejects positive
+    #   limit_price as economically incoherent (CSX 22-order cascade,
+    #   2026-05-07 → 2026-05-09).
+    # Set: paper_exit_evaluator._close_position when qty>0 AND len(legs)>=2.
+    # Read: alpaca_order_handler.build_alpaca_order_request, which negates
+    #   limit_price at the broker boundary. requested_price stays unsigned.
+    is_credit_close: Optional[bool] = None
+
 
 class SuggestionLog(BaseModel):
     id: Optional[str] = None # UUID

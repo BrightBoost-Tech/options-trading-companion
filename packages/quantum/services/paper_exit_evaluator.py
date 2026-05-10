@@ -1094,6 +1094,15 @@ class PaperExitEvaluator:
                 "expiry": orig_leg.get("expiry"),
             }]
 
+        # Alpaca mleg sign convention: SELL-to-close on a long debit-opened
+        # spread (qty>0, multi-leg) produces net credit; the broker boundary
+        # must send NEGATIVE limit_price. We mark the ticket here and let
+        # build_alpaca_order_request apply the sign at translation time so
+        # requested_price stays unsigned for accounting/reporting consumers.
+        # Single-leg orders use unsigned limit_price (Alpaca infers direction
+        # from the leg's side), so the marker only matters for spreads.
+        is_credit_close = (qty > 0) and (len(close_legs) >= 2)
+
         ticket = TradeTicket(
             symbol=position["symbol"],
             quantity=abs_qty,
@@ -1102,6 +1111,7 @@ class PaperExitEvaluator:
             strategy_type="custom",
             source_engine="paper_exit_evaluator",
             legs=close_legs,
+            is_credit_close=is_credit_close,
         )
 
         if position.get("suggestion_id"):

@@ -1,0 +1,24 @@
+-- #62a-D8 sweep deletion (2026-05-10): drop the dormant `trade_executions` table.
+--
+-- Audit findings (Saturday 2026-05-09 + verified Sunday 2026-05-10):
+--   * Total rows EVER: 0. `MAX(timestamp)` returned NULL.
+--   * `ExecutionService.register_execution()` had zero production callers
+--     (only test files). Deleted in same PR.
+--   * `ExecutionService.get_*execution_drag_stats()` queried this table
+--     but always returned `{}` (table empty); single caller in
+--     options_scanner.py handled `{}` gracefully via fallback to proxy
+--     spread cost. Deleted in same PR.
+--   * `exit_stats_service.py` queried this table but always returned
+--     `insufficient_history=True`; both callers (trade_builder.py,
+--     workflow_orchestrator.py) handled that branch as their default.
+--     Deleted in same PR.
+--   * `outcome_aggregator.py` reads from this table too (lines 111+127),
+--     but outcome_aggregator is itself flagged as dead code in backlog
+--     #67. Reads return empty + the outcomes_log table it writes to is
+--     also empty. Out of scope here; folds into #67's cleanup.
+--
+-- DROP CASCADE in case any RLS policies or grants reference the table.
+-- The schema had no foreign-key dependencies pointing IN — this table
+-- only had outbound references (to user_id, suggestion_id) and those
+-- were nullable.
+DROP TABLE IF EXISTS public.trade_executions CASCADE;

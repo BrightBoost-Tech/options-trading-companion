@@ -118,17 +118,17 @@ class TestOptionsScanner(unittest.TestCase):
             "legs": [{"delta_target": 0.5, "side": "buy", "type": "call"}]
         }
 
-        mock_exec_instance = mock_exec_service.return_value
-        # Force history usage
-        mock_exec_instance.get_batch_execution_drag_stats.return_value = {
-            "AAPL": {"avg_drag": 10.0, "n": 10}
-        }
+        # #62a-D8 (2026-05-10): the historical drag-stats path was
+        # removed. The scanner always uses the proxy spread cost now.
+        # ExecutionService is still mocked so the optional
+        # `estimate_execution_cost` calls inside the candidate loop
+        # don't blow up; it's not called via get_batch_execution_drag_stats.
+        _ = mock_exec_service.return_value  # keep mock alive
 
         candidates = scan_for_opportunities(symbols=["AAPL"], supabase_client=mock_client, user_id="test_user")
 
         self.assertEqual(len(candidates), 1)
-        self.assertEqual(candidates[0]['execution_drag_source'], "history")
-        self.assertEqual(candidates[0]['execution_drag_estimate'], 10.0)
+        self.assertEqual(candidates[0]['execution_drag_source'], "proxy")
 
     @patch('packages.quantum.options_scanner.MarketDataTruthLayer')
     @patch('packages.quantum.options_scanner.PolygonService')
@@ -177,8 +177,9 @@ class TestOptionsScanner(unittest.TestCase):
             "legs": [{"delta_target": 0.5, "side": "buy", "type": "call"}]
         }
 
-        mock_exec_instance = mock_exec_service.return_value
-        mock_exec_instance.get_batch_execution_drag_stats.return_value = {}
+        # #62a-D8 (2026-05-10): get_batch_execution_drag_stats no longer
+        # called; the proxy fallback is the only path.
+        _ = mock_exec_service.return_value  # keep mock alive
 
         mock_ev_obj = MagicMock()
         mock_ev_obj.expected_value = 10.0
@@ -196,5 +197,5 @@ class TestOptionsScanner(unittest.TestCase):
 
         self.assertEqual(len(results), 1)
         self.assertEqual(results[0]["execution_drag_source"], "proxy")
-
-        mock_exec_instance.get_batch_execution_drag_stats.assert_called_once()
+        # #62a-D8 removed get_batch_execution_drag_stats — was previously
+        # asserted called_once here. Proxy fallback is now the only path.

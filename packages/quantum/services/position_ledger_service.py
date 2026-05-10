@@ -58,14 +58,16 @@ class PositionLedgerService:
         """
         Record a fill and update position ledger.
 
-        This is the main entry point for recording fills from:
-        - ExecutionService.register_execution()
+        Entry points (#62a-D8 sweep 2026-05-10 removed
+        ExecutionService.register_execution + the trade_executions table;
+        the trade_execution_id parameter below is now historical):
         - Broker fill imports
         - Paper trading (future migration)
 
         Args:
             user_id: User UUID
-            trade_execution_id: Optional FK to trade_executions.id
+            trade_execution_id: Historical parameter (no longer populated;
+                trade_executions table dropped 2026-05-10)
             fill_data: Fill details {
                 symbol: str,           # Full symbol (e.g., "AAPL240119C00150000")
                 underlying: str,       # e.g., "AAPL"

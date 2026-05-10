@@ -18,7 +18,10 @@ from .cash_service import CashService
 from .sizing_engine import calculate_sizing
 from .journal_service import JournalService
 from .options_utils import group_spread_positions, format_occ_symbol_readable, compute_legs_fingerprint
-from .exit_stats_service import ExitStatsService
+# #62a-D8 (2026-05-10): ExitStatsService import removed alongside the
+# dropped trade_executions table. The service always returned
+# insufficient_history=True (table had zero rows for entire lifetime);
+# the take-profit rationale code below always took that branch.
 from .market_data_truth_layer import MarketDataTruthLayer
 from .analytics_service import AnalyticsService
 from packages.quantum.analytics.strategy_policy import StrategyPolicy
@@ -477,9 +480,9 @@ DROPPABLE_SUGGESTION_COLUMNS = {
     "marketdata_quality",
     "blocked_reason",
     "blocked_detail",
-    "execution_cost_soft_gate",
-    "execution_cost_soft_penalty",
-    "execution_cost_ev_ratio",
+    # 3 execution_cost_* entries removed 2026-05-10 (#62a-D5 Option B);
+    # producer assignments at options_scanner.py also removed.
+    # Broader doctrine audit of this shim tracked in backlog #117.
 }
 
 
@@ -1150,11 +1153,9 @@ async def run_morning_cycle(supabase: Client, user_id: str):
     # Record rates/divs for deterministic replay (Patch 2.1)
     truth_layer.rates_divs("SPY", as_of=datetime.now(timezone.utc))
 
-    # Try to persist global snapshot (non-critical write)
-    try:
-        supabase.table("regime_snapshots").insert(global_snap.to_dict()).execute()
-    except Exception:
-        pass
+    # #62a-D3: regime_snapshots persistence removed 2026-05-10 — see api.py
+    # equivalent + sweep PR for context. global_snap is load-bearing
+    # in-memory; the audit-trail write was the only missing piece.
 
     # === RISK BUDGET CHECK (serial — depends on regime + capital + positions) ===
     risk_engine = RiskBudgetEngine(supabase)
@@ -1413,25 +1414,15 @@ async def run_morning_cycle(supabase: Client, user_id: str):
                 rationale_text += f" ⚠️ {exit_warning}"
 
         else:
-            # Normal take-profit
-            hist_stats = ExitStatsService.get_stats(
-                underlying=underlying,
-                regime=iv_regime,
-                strategy="take_profit_limit",
-                supabase_client=supabase
+            # Normal take-profit. #62a-D8 (2026-05-10): ExitStatsService
+            # always returned insufficient_history=True because the
+            # underlying trade_executions table had zero rows for its
+            # entire lifetime. This branch always produced the EV-model
+            # rationale below; the historical-win-rate branch never fired.
+            rationale_text = (
+                f"Take profit at ${final_limit_price:.2f} based on EV model. "
+                f"(Insufficient history for win-rate stats in {iv_regime} regime.){budget_note}"
             )
-
-            if hist_stats.get("insufficient_history") or hist_stats.get("win_rate") is None:
-                rationale_text = (
-                    f"Take profit at ${final_limit_price:.2f} based on EV model. "
-                    f"(Insufficient history for win-rate stats in {iv_regime} regime.){budget_note}"
-                )
-            else:
-                win_rate_pct = hist_stats['win_rate'] * 100
-                rationale_text = (
-                    f"Take profit at ${final_limit_price:.2f} based on {win_rate_pct:.0f}% "
-                    f"historical win rate for similar exits in {iv_regime} regime.{budget_note}"
-                )
 
             if clamp_reason:
                 rationale_text += f" [{clamp_reason}]"
@@ -2082,11 +2073,9 @@ async def run_midday_cycle(supabase: Client, user_id: str):
     # Record rates/divs for deterministic replay (Patch 2.1)
     truth_layer.rates_divs("SPY", as_of=datetime.now(timezone.utc))
 
-    # Try to persist global snapshot (non-critical write)
-    try:
-        supabase.table("regime_snapshots").insert(global_snap.to_dict()).execute()
-    except Exception:
-        pass
+    # #62a-D3: regime_snapshots persistence removed 2026-05-10 — see api.py
+    # equivalent + sweep PR for context. global_snap is load-bearing
+    # in-memory; the audit-trail write was the only missing piece.
 
     # === RISK BUDGET ENGINE (serial — depends on regime + capital + positions) ===
     strategy_track = os.environ.get("STRATEGY_TRACK", "balanced")

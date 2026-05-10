@@ -47,6 +47,14 @@ def simulate_execution_cost_gate(
     Returns:
         (candidate_dict or None, was_soft_gate_triggered)
     """
+    # #62a-D5 Option B (2026-05-10): the simulator previously persisted
+    # 3 execution_cost_* observability fields onto the candidate dict
+    # alongside the score-penalty side effects. Those fields had zero
+    # readers and were silently dropped by the DROPPABLE shim on every
+    # persist, so the production code stopped emitting them. The local
+    # `execution_cost_soft_gate_triggered` flag is preserved on the
+    # tuple return because the test classes below assert on it; no
+    # downstream production code depends on it.
     execution_cost_soft_gate_triggered = False
 
     if expected_execution_cost >= total_ev:
@@ -62,7 +70,7 @@ def simulate_execution_cost_gate(
         unified_score.badges.append("HIGH_EXECUTION_COST")
         execution_cost_soft_gate_triggered = True
 
-    # Build candidate
+    # Build candidate (no execution_cost_* persistence fields per #62a-D5)
     candidate = {
         "symbol": "TEST",
         "ev": total_ev,
@@ -70,13 +78,6 @@ def simulate_execution_cost_gate(
         "badges": unified_score.badges,
         "execution_drag_estimate": expected_execution_cost,
     }
-
-    if execution_cost_soft_gate_triggered:
-        candidate["execution_cost_soft_gate"] = True
-        candidate["execution_cost_soft_penalty"] = soft_penalty
-        candidate["execution_cost_ev_ratio"] = round(
-            expected_execution_cost / max(1e-9, total_ev), 4
-        )
 
     return candidate, execution_cost_soft_gate_triggered
 
@@ -179,7 +180,11 @@ class TestSoftRejectMode:
         assert result["score"] == 0.0  # max(0, 5-10)
 
     def test_includes_soft_gate_fields(self):
-        """Should include soft gate metadata in candidate."""
+        """Soft gate signal flows through (a) the returned `triggered`
+        flag, (b) the HIGH_EXECUTION_COST badge, and (c) the score
+        reduction. The 3 candidate-dict execution_cost_* persistence
+        fields were removed in #62a-D5 Option B (zero readers, silently
+        dropped by DROPPABLE shim)."""
         unified_score = MockUnifiedScore(score=50.0)
 
         result, triggered = simulate_execution_cost_gate(
@@ -191,9 +196,9 @@ class TestSoftRejectMode:
         )
 
         assert result is not None
-        assert result["execution_cost_soft_gate"] is True
-        assert result["execution_cost_soft_penalty"] == 10.0
-        assert result["execution_cost_ev_ratio"] == 1.2  # 30/25
+        assert triggered is True
+        assert "HIGH_EXECUTION_COST" in result["badges"]
+        assert result["score"] == 40.0  # 50 - 10 soft_penalty
 
     def test_still_rejects_extreme_cost(self):
         """Should still reject when cost >= EV * max_mult even in soft mode."""
@@ -284,7 +289,7 @@ class TestEdgeCases:
 
         assert result is not None
         assert result["score"] == 75.0  # 100 - 25
-        assert result["execution_cost_soft_penalty"] == 25.0
+        assert triggered is True  # #62a-D5: was assertion on candidate["execution_cost_soft_penalty"]
 
     def test_custom_max_mult(self):
         """Should use custom max_mult threshold."""
@@ -304,8 +309,10 @@ class TestEdgeCases:
         assert result is None
         assert triggered is False
 
-    def test_cost_ratio_calculation(self):
-        """Should correctly calculate cost/EV ratio."""
+    def test_cost_ratio_borderline_passes(self):
+        """Cost/EV ratio just below max_mult should pass with soft gate
+        triggered (was assertion on candidate["execution_cost_ev_ratio"]
+        before #62a-D5 Option B removed that observability field)."""
         unified_score = MockUnifiedScore(score=50.0)
 
         result, triggered = simulate_execution_cost_gate(
@@ -318,7 +325,8 @@ class TestEdgeCases:
         )
 
         assert result is not None
-        assert result["execution_cost_ev_ratio"] == 1.5  # 15/10
+        assert triggered is True
+        assert "HIGH_EXECUTION_COST" in result["badges"]
 
 
 class TestIntegrationScenarios:
@@ -342,7 +350,9 @@ class TestIntegrationScenarios:
         assert triggered is True
         assert result["score"] == 55.0  # 65 - 10
         assert "HIGH_EXECUTION_COST" in result["badges"]
-        assert result["execution_cost_ev_ratio"] == 1.1
+        # #62a-D5: candidate["execution_cost_ev_ratio"] removed; ratio
+        # equivalence (22/20=1.1, < max_mult 1.5) implicitly verified by
+        # triggered=True above.
 
     def test_borderline_cost_passes_in_soft_mode(self):
         """Cost barely exceeding EV should pass in soft mode."""

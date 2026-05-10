@@ -256,12 +256,6 @@ TASKS = {
         "description": "Evaluate Policy Lab cohorts and check promotions (requires user_id)",
         "user_id_mode": "require",
     },
-    "plaid_backfill": {
-        "path": "/internal/tasks/plaid/backfill-history",
-        "scope": "tasks:plaid_backfill",
-        "description": "Backfill Plaid history",
-        "user_id_mode": "allow",
-    },
     "iv_daily_refresh": {
         "path": "/internal/tasks/iv/daily-refresh",
         "scope": "tasks:iv_daily_refresh",

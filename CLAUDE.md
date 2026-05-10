@@ -25,7 +25,7 @@ For AI session context, this file is loaded every turn.
 - **Account:** live Alpaca `211900084`, options Level 3
 - **Starting capital:** $500 on `v3_go_live_state.paper_baseline_capital` (set 2026-04-25 15:38:04Z, audit `c9d87caf-24db-4f7f-842a-748620a5c84f`)
 - **Open positions:** 0 (AMZN closed 2026-04-25 15:56:36Z with realized_pl +$325.50, audit `b6229d5e-1543-4304-9ab1-6f37e0e869c8`)
-- **Settlement:** `options_buying_power = $0` as of 2026-04-25 (ACH settlement pending; expected to clear Mon–Tue)
+- **Settlement:** `options_buying_power = $501.61` as of 2026-05-10 (ACH settled; equity $801.61, position_market_value $265 across the open CSX 43/47 debit spread)
 - **Universe:** 62 symbols. PR #804 added F, BAC, SOFI, T, KO, VZ; sync triggered 2026-04-25 17:17Z (job_run `25eec261-d3e3-4b4a-aefe-2865770b001d`).
 - **Pipeline status:** Full end-to-end pipeline validated 2026-04-10
 - **daily_progression_eval:** Running at 16:00 CT. The alpaca_paper → micro_live promotion gate has been bypassed (operator-initiated promotion). Future phase transitions are a deferred decision under the continuous-growth model.
@@ -863,9 +863,9 @@ Full backlog (item descriptions, sub-items, audit catalogs) lives in `docs/backl
 
 ### Active focus (next 3)
 
-1. **#71** — RQ dispatch audit (~3-5 PRs). Sweep `public_tasks.py` / `internal_tasks.py` for synchronous handlers; migrate to `enqueue_job_run` pattern.
-2. **Agent sessions observability** (~half day). Shared `agent_session_context` helper so Loss Min / Self-Learning / Profit Optimization Agents write `agent_sessions` rows.
-3. **#62a-D5** — `execution_cost_*` columns silently dropped (decision needed first).
+1. **Monday validation (PRs #908, #909, #115 PR-A chain)** — first real-money exercise of the weekend's fixes. Watch CSX force-close (Issue B sign-flip) at first 14:30 UTC monitor cycle; smoke `python scripts/run_signed_task.py alpaca_order_sync --force-rerun` to confirm Tier 1 body acceptance; verify 04:30 CT iv_daily_refresh natural fire writes Day 2 of warmup. If any of these regress, diagnostic before further build.
+2. **Wrapper-drift / verified-write doctrine review (Monday morning)** — synthesize PR-A's 7-layer cascade + Issue B's 4-layer cascade + #864 `alpaca_client` field-drop + the #71 sweep findings into a verified-write convention covering DB write boundary, broker API boundary, and CLI/route boundary. 5+ data points; CLAUDE.md notes it as a Monday review item.
+3. **#62a-D3, #62a-D5 architectural decisions** — both HIGH "decision needed" and unblock follow-up work. D3 = `regime_snapshots` table missing (apply migration vs delete writes). D5 = `execution_cost_*` columns silently dropped (load-bearing? add cols vs remove computation).
 
 See `docs/roadmap.md` for the full Active focus block including recently-closed items and `docs/backlog.md` for full item descriptions and the catalogs (#62a schema drift, #72 loud-error doctrine).
 
@@ -876,6 +876,6 @@ See `docs/roadmap.md` for the full Active focus block including recently-closed 
 - **Promotion gate:** bypassed; continuous-growth model
 - **Open positions:** 0 (AMZN closed 2026-04-25 15:56Z, realized_pl +$325.50)
 - **Alpaca live equity:** $500.00 (account 211900084)
-- **Alpaca options BP:** $0.00 (ACH settlement pending)
+- **Alpaca options BP:** $501.61 (ACH settled)
 - **Universe:** 62 symbols (refreshed 2026-04-25 17:17Z)
 - **Last updated:** 2026-04-25

@@ -149,16 +149,28 @@ async def universe_sync_task(
 
 @router.post("/alpaca/order-sync", status_code=202)
 async def alpaca_order_sync_task(
+    body: Optional[Dict] = Body(default=None),
     auth: TaskSignatureResult = Depends(verify_task_signature("tasks:alpaca_order_sync"))
 ):
+    """#71 Tier 1 fix (2026-05-10). Pre-fix the endpoint signature
+    dropped the request body, so the CLI's
+    ``payload={"force_rerun": true}`` (set by --force-rerun /
+    --force) was silently discarded by FastAPI before reaching
+    ``enqueue_job_run``. Re-fires within the same minute-block
+    hit terminal-state dedup and never executed. Same shape as
+    PR #905's iv_daily_refresh / daily_progression_eval fix.
+    """
     now = datetime.now()
+    force_rerun = bool((body or {}).get("force_rerun", False))
     return enqueue_job_run(
         job_name="alpaca_order_sync",
         idempotency_key=f"alpaca_order_sync-{now.strftime('%Y-%m-%d-%H%M')}",
         payload={
             "app_version": APP_VERSION,
             "trigger_ts": now.isoformat(),
+            **({"force_rerun": True} if force_rerun else {}),
         },
+        force_rerun=force_rerun,
     )
 
 
@@ -245,10 +257,21 @@ async def daily_progression_eval_task(
 
 @router.post("/calibration/update", status_code=202)
 async def calibration_update_task(
-    window_days: int = Body(30, embed=True),
+    body: Optional[Dict] = Body(default=None),
     auth: TaskSignatureResult = Depends(verify_task_signature("tasks:calibration_update"))
 ):
+    """#71 Tier 1 fix (2026-05-10). Pre-fix the endpoint accepted
+    only ``window_days`` via ``Body(..., embed=True)`` and silently
+    dropped any other JSON keys — including the CLI's
+    ``force_rerun`` flag set by --force-rerun / --force. Migrated
+    to the dict-body shape used by PR #905's iv_daily_refresh /
+    daily_progression_eval; default window_days=30 preserved so
+    SCHEDULES + body-less callers keep working.
+    """
     today = datetime.now().strftime("%Y-%m-%d")
+    payload_in = body or {}
+    window_days = int(payload_in.get("window_days", 30))
+    force_rerun = bool(payload_in.get("force_rerun", False))
     return enqueue_job_run(
         job_name="calibration_update",
         idempotency_key=f"calibration_update-{today}",
@@ -256,7 +279,9 @@ async def calibration_update_task(
             "app_version": APP_VERSION,
             "trigger_ts": datetime.now().isoformat(),
             "window_days": window_days,
+            **({"force_rerun": True} if force_rerun else {}),
         },
+        force_rerun=force_rerun,
     )
 
 
@@ -312,11 +337,23 @@ async def phase2_precheck_task(
 
 @router.post("/autotune/walk-forward", status_code=202)
 async def walk_forward_autotune_task(
-    lookback_days: int = Body(60, embed=True),
-    cohort_name: str = Body(None, embed=True),
+    body: Optional[Dict] = Body(default=None),
     auth: TaskSignatureResult = Depends(verify_task_signature("tasks:walk_forward_autotune"))
 ):
+    """#71 Tier 1 fix (2026-05-10). Pre-fix the endpoint accepted
+    only ``lookback_days`` and ``cohort_name`` via ``Body(...,
+    embed=True)`` and silently dropped any other JSON keys —
+    including the CLI's ``force_rerun`` flag set by --force-rerun
+    / --force. Migrated to the dict-body shape used by PR #905's
+    iv_daily_refresh / daily_progression_eval; defaults
+    (lookback_days=60, cohort_name=None) preserved so SCHEDULES +
+    body-less callers keep working.
+    """
     today = datetime.now().strftime("%Y-%m-%d")
+    payload_in = body or {}
+    lookback_days = int(payload_in.get("lookback_days", 60))
+    cohort_name = payload_in.get("cohort_name")  # default None preserved
+    force_rerun = bool(payload_in.get("force_rerun", False))
     return enqueue_job_run(
         job_name="walk_forward_autotune",
         idempotency_key=f"walk_forward_autotune-{today}",
@@ -325,7 +362,9 @@ async def walk_forward_autotune_task(
             "trigger_ts": datetime.now().isoformat(),
             "lookback_days": lookback_days,
             "cohort_name": cohort_name,
+            **({"force_rerun": True} if force_rerun else {}),
         },
+        force_rerun=force_rerun,
     )
 
 

@@ -46,8 +46,22 @@ def build_alpaca_order_request(order: Dict[str, Any]) -> Dict[str, Any]:
     Polygon OCC symbols to Alpaca format.
 
     Close orders (position_id set): sets position_intent per leg
-    (buy_to_close / sell_to_close) and clamps limit_price >= 0.01
-    for near-worthless spreads.
+    (buy_to_close / sell_to_close) and clamps |limit_price| to ≥ 0.01
+    for near-worthless spreads — sign-preserving so the credit close
+    convention below isn't masked.
+
+    Alpaca mleg sign convention (#101 fix, 2026-05-10): for multi-leg
+    parent orders, limit_price is signed — positive = net debit (you
+    pay), negative = net credit (you receive). When closing a long
+    debit-opened spread by selling it back, the close produces credit
+    and Alpaca's gateway instant-rejects positive limit_price as
+    economically incoherent. paper_exit_evaluator marks such tickets
+    with order_json.is_credit_close=True; we negate here. Pre-fix, the
+    clamp at lines 86-93 forced negative→+0.01, masking the broken
+    sign. Pre-fix, requested_price was always positive too, so the
+    only path producing native-negative limit_price was the
+    near-worthless-spread mark, which the +0.01 clamp covered. Both
+    behaviors are preserved for non-credit-close orders.
     """
     order_json = order.get("order_json") or {}
     legs_data = order_json.get("legs") or []
@@ -57,6 +71,7 @@ def build_alpaca_order_request(order: Dict[str, Any]) -> Dict[str, Any]:
 
     # Detect close orders: position_id is set when closing an existing position
     is_close_order = bool(order.get("position_id"))
+    is_credit_close = bool(order_json.get("is_credit_close")) if is_close_order else False
 
     alpaca_legs = []
     for i, leg in enumerate(legs_data):
@@ -83,18 +98,32 @@ def build_alpaca_order_request(order: Dict[str, Any]) -> Dict[str, Any]:
         )
         alpaca_legs.append(alpaca_leg)
 
-    # Close orders on near-worthless spreads can have negative or zero mark.
-    # Clamp to 0.01 so Alpaca accepts the order (you're paying a penny to close).
-    if is_close_order and limit_price <= 0:
-        logger.warning(
-            f"[ALPACA_HANDLER] Close order limit_price={limit_price} <= 0 "
-            f"(order={order.get('id')}). Clamping to 0.01."
+    # Apply Alpaca mleg credit-close sign BEFORE the worthless-spread clamp,
+    # so |signed_price| < 0.01 still trips the clamp (preserving the original
+    # protection) but a legitimate $1.86 credit becomes -$1.86 cleanly.
+    if is_credit_close and limit_price > 0:
+        logger.info(
+            f"[ALPACA_HANDLER] Credit-close sign-flip: order={order.get('id')} "
+            f"limit_price={limit_price} → {-limit_price} (Alpaca mleg convention)"
         )
-        limit_price = 0.01
+        limit_price = -limit_price
+
+    # Close orders on near-worthless spreads can have ~zero mark; clamp the
+    # MAGNITUDE to ≥ 0.01 so Alpaca accepts (you're paying/receiving a penny
+    # to close). Sign is preserved — pre-2026-05-10 this clamped any
+    # negative→+0.01 which masked the credit-close convention above.
+    if is_close_order and 0 < abs(limit_price) < 0.01:
+        clamp_target = -0.01 if limit_price < 0 else 0.01
+        logger.warning(
+            f"[ALPACA_HANDLER] Close order |limit_price|={abs(limit_price)} < 0.01 "
+            f"(order={order.get('id')}). Clamping {limit_price} → {clamp_target}."
+        )
+        limit_price = clamp_target
 
     # Options must always be limit orders — Alpaca rejects market orders
-    # outside market hours. If no limit_price, the order cannot be submitted.
-    if not limit_price or limit_price <= 0:
+    # outside market hours. Magnitude check, not sign — credit closes are
+    # legitimately negative.
+    if not limit_price or abs(limit_price) < 0.01:
         raise ValueError(
             f"Cannot submit options order without limit_price "
             f"(got {limit_price}). Order ID: {order.get('id')}"
@@ -568,9 +597,17 @@ def poll_pending_orders(
                                 f"[ALPACA_HANDLER] Watchdog cancel failed: {cancel_err}"
                             )
 
+                        # #101 Component 4: also write cancelled_at/reason
+                        # at the row level so forensic queries don't have
+                        # to dig into broker_response JSONB.
                         supabase.table("paper_orders").update({
                             "broker_status": "watchdog_cancelled",
                             "status": "watchdog_cancelled",
+                            "cancelled_at": now_utc.isoformat(),
+                            "cancelled_reason": (
+                                f"watchdog_idle_timeout idle={round(idle_seconds)}s "
+                                f"threshold={IDLE_WATCHDOG_SECONDS}s"
+                            ),
                             "broker_response": {
                                 **alpaca_order,
                                 "watchdog": {
@@ -601,8 +638,104 @@ def poll_pending_orders(
                 if alpaca_order.get("filled_at"):
                     update["filled_at"] = alpaca_order["filled_at"]
 
+            # #101 Component 4: capture broker rejection reason + transition
+            # timestamp. Pre-fix, rejected/failed orders had cancelled_at and
+            # cancelled_reason both NULL — forensic blind spot during the
+            # CSX 22-rejection cascade. Alpaca surfaces rejection text on the
+            # leg-level status_text field for mleg orders; for simple orders
+            # it lands on a top-level field. We try both, fall back to the
+            # status code itself when no text is available.
+            broker_failed_at = alpaca_order.get("failed_at")
+            broker_canceled_at = alpaca_order.get("canceled_at")
+            is_broker_rejection = alpaca_status in ("rejected", "expired") or (
+                alpaca_status == "canceled" and broker_failed_at is not None
+            )
+            rejection_reason = None
+            if is_broker_rejection or alpaca_status in ("canceled", "expired"):
+                for leg in (alpaca_order.get("legs") or []):
+                    text = leg.get("status_text") or leg.get("reject_reason")
+                    if text:
+                        rejection_reason = text
+                        break
+                if not rejection_reason:
+                    rejection_reason = (
+                        alpaca_order.get("status_text")
+                        or alpaca_order.get("reject_reason")
+                        or f"alpaca_status={alpaca_status}"
+                    )
+                update["cancelled_reason"] = str(rejection_reason)[:500]
+                update["cancelled_at"] = (
+                    broker_failed_at or broker_canceled_at or now_utc.isoformat()
+                )
+
             supabase.table("paper_orders").update(update).eq("id", order_id).execute()
             synced += 1
+
+            # #101 Component 3: loud alert when the broker pre-rejects an
+            # order. Pre-fix, 22 CSX close orders rejected silently over 36+
+            # hours — only force_close + warn alerts fired, none surfacing
+            # the actual broker-side failure. Throttle to 1/hour per
+            # (alert_type, position_id) so retry storms produce one alert,
+            # not one-per-attempt. Best-effort: any throttle-query or
+            # alert-write failure must NOT break the poll loop.
+            if is_broker_rejection:
+                try:
+                    from packages.quantum.observability.alerts import alert
+                    pos_id = order.get("position_id")
+                    throttle_q = supabase.table("risk_alerts") \
+                        .select("id") \
+                        .eq("alert_type", "order_rejected_by_broker") \
+                        .gte("created_at", (now_utc - timedelta(hours=1)).isoformat())
+                    if pos_id:
+                        throttle_q = throttle_q.eq("position_id", pos_id)
+                    else:
+                        throttle_q = throttle_q.eq("user_id", user_id)
+                    recent_alert = throttle_q.limit(1).execute()
+                    if not (recent_alert.data or []):
+                        leg_summary = [
+                            {
+                                "symbol": leg.get("symbol"),
+                                "side": leg.get("side"),
+                                "position_intent": leg.get("position_intent"),
+                            }
+                            for leg in (alpaca_order.get("legs") or [])
+                        ]
+                        alert(
+                            supabase,
+                            alert_type="order_rejected_by_broker",
+                            severity="critical",
+                            message=(
+                                f"Alpaca rejected {order.get('side', '?')} order "
+                                f"on {order.get('order_json', {}).get('symbol', '?')}: "
+                                f"{str(rejection_reason)[:200]}"
+                            ),
+                            user_id=user_id,
+                            position_id=pos_id,
+                            symbol=(order.get("order_json") or {}).get("symbol"),
+                            metadata={
+                                "alpaca_order_id": alpaca_id,
+                                "internal_order_id": str(order_id),
+                                "alpaca_status": alpaca_status,
+                                "broker_failed_at": broker_failed_at,
+                                "broker_canceled_at": broker_canceled_at,
+                                "limit_price": alpaca_order.get("limit_price"),
+                                "leg_structure": leg_summary,
+                                "rejection_reason": rejection_reason,
+                                "consequence": (
+                                    "Position cannot be closed via this order. "
+                                    "If retried with same parameters it will "
+                                    "reject again. Investigate sign convention, "
+                                    "position-intent, account entitlements, "
+                                    "limit-price bounds."
+                                ),
+                            },
+                        )
+                except Exception as alert_err:
+                    # Never break the poll loop on alert-path failure.
+                    logger.warning(
+                        f"[ALPACA_HANDLER] order_rejected_by_broker alert "
+                        f"path failed: order={order_id} err={alert_err}"
+                    )
 
             # When order transitions to filled, handle position updates.
             if internal_status == "filled" and filled_qty > 0:

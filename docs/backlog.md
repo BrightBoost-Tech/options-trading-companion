@@ -232,6 +232,56 @@ audit catalogued endpoints that EXIST but didn't catalogue endpoints
 that FIRE. For #71, those were different sets, and the difference
 materially changed scope (3 PRs avoided).
 
+**[ADDENDUM 2026-05-10] Tier 1+2 sweep reactivated** after PR-A's
+Layer 2 (#901) and Layer 5 (#905) cascades surfaced the same
+body-dropping and legacy-enqueue bug classes in 3+ additional
+endpoints that the May-5 audit had missed. Saturday's re-sweep
+audit catalogued all 35 endpoints across `public_tasks.py` +
+`internal_tasks.py` and produced two follow-up PRs:
+
+- **PR #909 (Tier 1):** extended body acceptance + force_rerun
+  forwarding on 3 CLI-exposed internal endpoints
+  (`/alpaca/order-sync` full body-add; `/calibration/update` and
+  `/autotune/walk-forward` Path-A migration from
+  `Body(embed=True)` to single dict body, defaults preserved).
+  Fixes silent drop of `force_rerun` from CLI calls — same
+  shape as PR #905's iv_daily_refresh fix.
+
+- **PR #910 (Tier 2):** deleted 4 dormant duplicate endpoints
+  (`/internal/tasks/{morning-brief,midday-scan,weekly-report,
+  universe/sync}`) + cascading dead-code cleanup (legacy
+  `from packages.quantum.jobs.enqueue import enqueue_idempotent`
+  import + `EnqueueResponse` import + `get_admin_client` helper
+  + `supabase_admin` scaffold + 4 dead service imports + 3
+  unused stdlib imports) + stale `plaid_backfill` CLI catalog
+  entry. Net -130 lines.
+
+Audit synthesis: 35 endpoints reviewed. Active+buggy: 1
+(`alpaca/order-sync`, full body-drop). Partial-body: 2
+(`calibration/update`, `autotune/walk-forward` — drop
+force_rerun only). Dormant duplicates: 4 (deleted). Clean: 28.
+public_tasks.py: zero issues.
+
+**Class A pattern fully closed in production code post-#910.**
+Only remaining importer of legacy `enqueue_idempotent` from
+`packages.quantum.jobs.enqueue` is the operator smoke script
+`packages/quantum/scripts/rq_smoke_morning_brief.py` (out of
+#71 scope).
+
+**Tier 3 (deferred):** widen PR #901's grep-based class-prevention
+test (currently scoped to `iv_daily_refresh`) into a codebase-wide
+hard CI gate asserting "no production module imports
+`enqueue_idempotent` from `packages.quantum.jobs.enqueue`." Now
+enforceable as a single-line gate; ship as a small follow-up PR.
+
+**Doctrine validation:** activate-then-migrate pattern held end-to-end.
+The 4 dormant Class A endpoints sat with both bugs unsurfaced for an
+unknown time; nothing exercised them so nothing broke. For the dormant
+case here, deletion was cleaner than migration because functional
+public counterparts at `/tasks/*` are already CLI-mapped and active.
+This is the second time the doctrine has paid off this week
+(first: shadow_cohort_daily B2 deletion, May 5).
+
 **#93 — deployable_capital reads stale Plaid CUR:USD +
 paper_autopilot status bypass** (HIGH, FIXED in PR #850)
 
@@ -1257,7 +1307,13 @@ standardisation — cleanup SQL in PR description.
 `/morning-brief`, `/midday-scan`, `/weekly-report`,
 `/universe/sync`. None are in SCHEDULES so they're dormant
 rather than active, but the same shape bug applies. Worth a
-sweep PR if any of them ever get scheduled.
+sweep PR if any of them ever get scheduled. **[CLOSED 2026-05-10
+by PR #910 — #71 Tier 2]:** all 4 dormant endpoints deleted
+(deletion preferred over migration since functional public
+duplicates already exist at `/tasks/*`). Cascading dead-code
+cleanup removed the legacy `enqueue_idempotent` import too —
+production code has zero importers of
+`packages.quantum.jobs.enqueue` post-#910.
 
 **PR-A write-boundary fix (2026-05-09, layers 3+4):** post-#901
 manual fire dispatched the chain end-to-end; handler reported
@@ -1436,7 +1492,18 @@ After flipping:
    and credit spreads to reappear as iv_rank values converge.
 4. If anomaly: flip OFF immediately. Investigate before re-enabling.
 
-**#115b — Greeks parallel investigation: same-shape fallbacks in greeks_aggregator and api** (MEDIUM)
+**#115b — Greeks adapter-chain pass-through verification** (MEDIUM)
+
+**[SCOPE NARROWED 2026-05-10]** Per #88 H2 finding, Alpaca
+returns populated Greeks (`delta`, `gamma`, `theta`, `vega`,
+`rho`) plus `impliedVolatility` for near-ATM contracts via the
+options snapshot endpoint. Producer chain confirmed using
+Alpaca, not Polygon, for Greeks (verified at
+`market_data_truth_layer._parse_alpaca_chain_item` lines
+~1599-1605). The original "Polygon plan upgrade hypothesis"
+framing is **OBSOLETE** — Greeks are populated at the producer
+boundary; the question is whether they survive the adapter
+chain end-to-end.
 
 **Discovery:** #115 iv_rank diagnostic surfaced parallel
 `or 0.0` fallback patterns for Greeks at
@@ -1444,37 +1511,40 @@ After flipping:
 `api.py:575-578, 943-946`. Same Anti-pattern 2 shape as
 iv_rank's `or 50.0`.
 
-**Question:** are Greeks producing real values, or are they
-silently None like iv_rank? Two possibilities:
+**Narrowed question:** Either consumers receive populated Greeks
+(no fallback fires; the `or 0.0` is defensive-only), OR they
+were populated upstream then dropped by an intermediate
+transform (same wrapper-drift class as #864 alpaca_client
+field-drop).
 
-- **Pre-2026-04-27:** Polygon Options Basic plan didn't include
-  real-time Greeks — the `or 0.0` fallback may have been
-  load-bearing during that window.
-- **Post-2026-04-27:** Polygon Options Developer plan ($79/mo,
-  upgraded per #87) should populate Greeks. Whether the
-  `MarketDataTruthLayer` enrichment path actually pulls them
-  is unknown.
+**Approach (when scheduled):** read-only adapter-chain probe.
+Walk truth_layer → enrichment → consumer for one symbol with
+known-populated Alpaca snapshot. Verify `delta`/`gamma`/`theta`/`vega`
+arrive at `greeks_aggregator` and `api.py` without sentinel
+defaults masking a drop. Check DB variance: do `delta` / `gamma` /
+`theta` / `vega` fields in `paper_orders.order_json` (per leg)
+or `trade_suggestions.order_json` show variance, or are they
+uniformly 0?
 
-**Approach (when scheduled):** read-only diagnostic similar to
-#115. Walk the truth_layer Polygon enrichment chain for
-Greeks. Check DB variance: do `delta` / `gamma` / `theta` /
-`vega` fields in `paper_orders.order_json` (per leg) or
-`trade_suggestions.order_json` show variance, or are they
-uniformly 0? If uniform → Greeks have the same upstream
-problem. If varied → fallback is defensive only.
+- Uniform 0 → Greeks dropped somewhere in the adapter chain
+  (wrapper-drift class).
+- Varied → fallback is defensive-only; can be tightened to
+  `if greek is None: alert()` per loud-error doctrine without
+  affecting correctness.
 
-**Timing:** schedule AFTER #115 PR-A + PR-B land and `iv_rank`
-values are confirmed flowing. Bundling with #115 would couple
-two independent investigations.
+**Timing:** schedule AFTER #115 PR-B verify completes (waiting
+on iv_rank warmup so the parallel diagnostic has clean
+comparison signal).
 
-**Dependencies:** #115 PR-A merged + at least 2 weeks of
-`underlying_iv_points` accumulating data (so the iv_rank
-diagnostic has clean signal to compare Greeks against).
+**Dependencies:** #115 PR-A merged ✓ + at least 2 weeks of
+`underlying_iv_points` accumulating data.
 
-**Estimated effort:** ~1.5–2 hours diagnostic. Fix scope
-undetermined until diagnostic completes.
+**Estimated effort:** ~1-2 hours diagnostic — smaller than
+original framing now that the upstream populates is confirmed.
+Fix scope undetermined until diagnostic completes.
 
-**Cross-reference:** #115 diagnostic synthesis Step 5.
+**Cross-reference:** #115 diagnostic synthesis Step 5; #88 H2
+finding (Alpaca Greeks confirmed populated at boundary, 2026-05-10).
 
 **#115c — Anti-pattern 2 cleanup batch: non-iv_rank/Greeks sites identified by #115 diagnostic** — **CLOSED 2026-05-07**
 
@@ -1578,6 +1648,77 @@ PR-B-2 verify + 2 weeks `underlying_iv_points` data accumulation.
 PR-A producer cron firing successfully (Friday 4:30 CT first
 natural fire), operator pre-flip checklist, flag flip, ~60 trading
 days of warmup.
+
+**#116 — Backfill `underlying_iv_points` from historical option data — compresses iv_rank warmup ~12 weeks → immediate** (HIGH — decision needed)
+
+**Discovery:** #88 H3 finding (2026-05-08). PR-A's
+`iv_daily_refresh` produces forward-only Day 1 of warmup as of
+2026-05-09. iv_rank requires ~60 trading days of accumulated
+history before consumer-side values become meaningful. Without
+backfill, the `IV_RANK_NONE_ROUTING_ENABLED` flag stays useful-
+but-gated through ~late July 2026.
+
+**Three paths to evaluate. Operator decision required.**
+
+**Path 1 — Forward-only (currently active, no action):**
+- Status: Day 1 of warmup in (2026-05-09); accumulating daily.
+- Cost: $0 incremental.
+- Timeline: meaningful iv_rank ~late July 2026.
+- Effort: 0.
+- Risk: lowest; the producer chain is already exercised end-to-
+  end after PR-A's 7-layer cascade closures.
+
+**Path 2 — Alpaca historical via Algo Trader Plus:**
+- Prerequisite 1: OPRA market data agreement signature (free,
+  ~30 sec, operator-side click-through on Alpaca dashboard).
+- Prerequisite 2: Algo Trader Plus subscription ($99/mo
+  recurring; per Saturday's web search).
+- Effort: ~half-day implementation (backfill script reusing
+  `get_option_bars` SDK method verified working in #88 H2
+  diagnostic + integration test verifying upsert path).
+- Timeline: meaningful iv_rank immediate after backfill PR ships.
+- Risk: known-quantity. Alpaca SDK exposes `get_option_bars` for
+  historical option chains; verified populated at the boundary
+  in #88. The truth_layer adapter chain is already exercised by
+  the daily forward path, so the backfill writes hit the same
+  validated upsert plumbing.
+- Cost-benefit: $99/mo recurring vs ~12 weeks compressed timeline.
+  At current account size ($801.61), $99/mo is ~12% of equity
+  per month — meaningful. Becomes more attractive once account
+  scales past $5k threshold (#112's CSP capital gate).
+
+**Path 3 — Polygon historical (existing subscription):**
+- Prerequisite: investigate Polygon Options Developer plan
+  ($79/mo, already paying per #87) historical option-chain
+  lookback depth + API surface for IV computation.
+- Effort: ~30-60 min diagnostic, then ~half-day implementation
+  if feasible.
+- Timeline: meaningful iv_rank immediate after backfill PR ships
+  (if Path 3 viable).
+- Cost: $0 incremental (already paying Polygon).
+- Risk: unknown. Polygon historical may not expose option chains
+  at the granularity needed; their docs around historical option
+  data are less precise than the equity side.
+- Open question: does Polygon's current tier expose 60+ days of
+  historical option chains by symbol with strikes/expiries that
+  allow ATM IV computation?
+
+**Decision points (operator):**
+- Which path to pursue (or wait on Path 1)?
+- If Path 2: sign OPRA agreement + decide on subscription upgrade.
+- If Path 3: run the Polygon historical diagnostic first to
+  determine viability.
+- Path 1 doesn't require active decision; runs in background
+  regardless.
+
+**Cross-references:**
+- #88 (Alpaca options data verification — H3 backfill discovery)
+- #115 (iv_rank fix; warmup timeline depends on backfill decision)
+- #87 (Polygon Options Developer plan upgrade — prerequisite for
+  Path 3 evaluation)
+
+**Estimated effort:** Path 1 = 0. Path 2 = ~half day implementation.
+Path 3 = ~30-60 min diagnostic + ~half day if feasible.
 
 ### #72 — Loud-error doctrine + silent-failure catalog
 

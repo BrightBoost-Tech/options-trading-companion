@@ -268,11 +268,26 @@ Only remaining importer of legacy `enqueue_idempotent` from
 `packages/quantum/scripts/rq_smoke_morning_brief.py` (out of
 #71 scope).
 
-**Tier 3 (deferred):** widen PR #901's grep-based class-prevention
-test (currently scoped to `iv_daily_refresh`) into a codebase-wide
-hard CI gate asserting "no production module imports
-`enqueue_idempotent` from `packages.quantum.jobs.enqueue`." Now
-enforceable as a single-line gate; ship as a small follow-up PR.
+**Tier 3 SHIPPED 2026-05-10** (PR #<NUM>): widened PR #901's
+class-prevention test as a codebase-wide hard CI gate. New
+`TestNoProductionCodeImportsLegacyEnqueue` walks
+`packages/quantum/` excluding `scripts/`, `tests/`, `__pycache__/`,
+`venv/`; asserts zero matches for
+`from packages.quantum.jobs.enqueue import enqueue_idempotent`.
+Existing iv_daily_refresh-specific tests preserved (they document
+endpoint-specific job_name + handler invariants the wider test
+doesn't capture). Fail-then-pass cycle verified: introducing a
+legacy import to `internal_tasks.py` produced the expected
+violation message with migration hint pointing at
+`enqueue_job_run`. **#71 sweep arc fully complete: Tier 1 (PR #909)
++ Tier 2 (PR #910) + Tier 3 (this PR).**
+
+**Follow-up candidate:** smoke script
+`packages/quantum/scripts/rq_smoke_morning_brief.py` is the only
+remaining importer of legacy enqueue (out of scope for production
+CI gate). After deciding the script's fate (delete or migrate),
+the legacy `packages/quantum/jobs/enqueue.py` module itself
+becomes deletable. Tracked separately as **#118**.
 
 **Doctrine validation:** activate-then-migrate pattern held end-to-end.
 The 4 dormant Class A endpoints sat with both bugs unsurfaced for an
@@ -1791,6 +1806,38 @@ additional latent fields the diagnostic missed.
 - `docs/loud_error_doctrine.md` (Anti-pattern 2)
 - Wrapper-drift class catalog (PR-A's 7-layer cascade #115 PR-A
   Layers 1-7, Issue B's 4-layer cascade in PR #908)
+
+**#118 — Delete legacy `packages/quantum/jobs/enqueue.py` module** (LOW)
+
+**Discovery:** #71 Tier 3 (PR <THIS>) confirmed only the smoke
+script `packages/quantum/scripts/rq_smoke_morning_brief.py` still
+imports the legacy module. Production code is clean (codebase-wide
+CI gate enforces this).
+
+**Path forward:**
+
+1. Audit `packages/quantum/scripts/rq_smoke_morning_brief.py` —
+   is the smoke script still useful operator tooling, or dormant?
+   When was it last run? Does it have a documented operator
+   workflow?
+2. If dormant: delete the script.
+3. If still useful: migrate to canonical
+   `packages.quantum.public_tasks.enqueue_job_run` path.
+4. After either path: delete `packages/quantum/jobs/enqueue.py`
+   entirely (the module has zero importers post-migration).
+
+**Bonus consideration:** the codebase-wide CI gate could be
+extended to walk `scripts/` too (currently excluded). Decide
+whether smoke scripts and operator tooling are held to the same
+canonical-path discipline. Probably yes for consistency, but
+worth an explicit operator decision rather than implicit.
+
+**Effort:** ~30 min - 1 hour depending on smoke script status.
+
+**Cross-references:**
+- PR #901 (class-prevention test, original scope)
+- PR #910 (#71 Tier 2 deletion)
+- PR <THIS> (#71 Tier 3 codebase-wide test)
 
 ### #72 — Loud-error doctrine + silent-failure catalog
 

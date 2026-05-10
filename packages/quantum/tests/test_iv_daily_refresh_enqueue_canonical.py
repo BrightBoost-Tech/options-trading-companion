@@ -105,5 +105,105 @@ class TestIvDailyRefreshUsesCanonicalEnqueue(unittest.TestCase):
         self.assertNotIn('JOB_NAME = "iv-daily-refresh"', handler_src)
 
 
+# ─────────────────────────────────────────────────────────────────────
+# #71 Tier 3 (PR closing the sweep arc) — codebase-wide CI gate
+# ─────────────────────────────────────────────────────────────────────
+
+
+# packages/quantum/ root (sibling of `tests/`).
+_QUANTUM_ROOT = INTERNAL_TASKS_PATH.parent
+
+# Subdirectories that are NOT production code. Walk skips them entirely.
+# - `scripts/` is operator-facing tooling (smoke scripts, CLI entry
+#   points). The remaining legacy importer
+#   `rq_smoke_morning_brief.py` lives here intentionally; future
+#   cleanup tracked separately (#118).
+# - `tests/` is the test suite itself.
+# - `__pycache__/` is bytecode cache.
+# - `venv/` is a local virtualenv that may exist on operator machines
+#   (out of git but glob-walked anyway).
+_NON_PRODUCTION_DIRS = {"scripts", "tests", "__pycache__", "venv", ".venv"}
+
+# Forbidden import. Matches both single and multi-space variants and
+# tolerates trailing comments.
+_LEGACY_IMPORT_RE = re.compile(
+    r"from\s+packages\.quantum\.jobs\.enqueue\s+import\s+enqueue_idempotent",
+)
+
+
+class TestNoProductionCodeImportsLegacyEnqueue(unittest.TestCase):
+    """Codebase-wide CI gate: production code must NOT import
+    ``enqueue_idempotent`` from the legacy DB-only path
+    ``packages.quantum.jobs.enqueue``. Canonical path is
+    ``packages.quantum.public_tasks.enqueue_job_run`` (DB + RQ push
+    + pause/go-live gates).
+
+    History:
+      - PR #901 (#115 PR-A Layer 2): added the iv_daily_refresh-
+        scoped guard above. Other internal_tasks endpoints still
+        used the legacy path at that time, so the assertion was
+        deliberately narrow.
+      - PR #910 (#71 Tier 2): deleted the last 4 production-code
+        callers (the dormant duplicate endpoints
+        /morning-brief, /midday-scan, /weekly-report,
+        /universe/sync at /internal/tasks/*) along with the
+        cascading legacy imports.
+      - This PR (#71 Tier 3): widens the guard codebase-wide for
+        production code. Closes the #71 sweep arc.
+
+    Anything new that matches the forbidden import pattern fails CI
+    here, with a message pointing to the canonical migration target.
+    """
+
+    def test_no_production_module_imports_legacy_enqueue(self):
+        violations = []
+
+        for py_file in _QUANTUM_ROOT.rglob("*.py"):
+            relative_parts = py_file.relative_to(_QUANTUM_ROOT).parts
+            if any(part in _NON_PRODUCTION_DIRS for part in relative_parts):
+                continue
+
+            try:
+                content = py_file.read_text(encoding="utf-8")
+            except (UnicodeDecodeError, OSError):
+                continue
+
+            if _LEGACY_IMPORT_RE.search(content):
+                violations.append(
+                    str(py_file.relative_to(_QUANTUM_ROOT)).replace("\\", "/")
+                )
+
+        self.assertEqual(
+            violations, [],
+            "Production code imports legacy enqueue_idempotent from "
+            "`packages.quantum.jobs.enqueue` in the following file(s):\n  "
+            + "\n  ".join(violations) + "\n\n"
+            "Migrate to the canonical path:\n"
+            "  `from packages.quantum.public_tasks import enqueue_job_run`\n\n"
+            "The legacy path writes a `status='queued'` row to job_runs "
+            "but never pushes to RQ — the worker never picks it up. See "
+            "PR #901 for the iv_daily_refresh case study and PR #910 for "
+            "the Tier 2 sweep that deleted the last legacy callers.",
+        )
+
+    def test_excluded_directories_are_truly_non_production(self):
+        """Defense against future drift: assert each excluded directory
+        either (a) doesn't exist or (b) contains only the file shapes we
+        expect (scripts/, tests/, etc.). Catches the case where a future
+        contributor mass-renames a production directory to something the
+        exclusion filter incidentally matches.
+        """
+        for non_prod in _NON_PRODUCTION_DIRS:
+            candidate = _QUANTUM_ROOT / non_prod
+            if not candidate.exists():
+                continue
+            self.assertTrue(
+                candidate.is_dir(),
+                f"Non-production exclusion `{non_prod}` exists at "
+                f"{candidate} but is not a directory — exclusion filter "
+                f"may be matching unintended files.",
+            )
+
+
 if __name__ == "__main__":
     unittest.main()

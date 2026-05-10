@@ -1,22 +1,18 @@
-from fastapi import APIRouter, Depends, Header, HTTPException, Body
+from fastapi import APIRouter, Depends, Body
 from typing import Optional, Dict
 from packages.quantum.security.task_signing_v4 import verify_task_signature, TaskSignatureResult
-from packages.quantum.security.secrets_provider import SecretsProvider
-from supabase import create_client, Client
-from datetime import datetime, timedelta
+from datetime import datetime
 import os
 
-# Job Enqueue Dependencies
-from packages.quantum.jobs.enqueue import enqueue_idempotent  # DB-only (legacy)
-from packages.quantum.jobs.http_models import EnqueueResponse
-from packages.quantum.public_tasks import enqueue_job_run  # DB + RQ (correct path)
-
-# Keep imports that might be needed for other endpoints not being converted
-# (e.g. IV daily refresh which was NOT in the target list)
-from packages.quantum.services.universe_service import UniverseService
-from packages.quantum.services.market_data_truth_layer import MarketDataTruthLayer
-from packages.quantum.services.iv_repository import IVRepository
-from packages.quantum.services.iv_point_service import IVPointService
+# Job Enqueue Dependency.
+# Pre-2026-05-10, this module also imported `enqueue_idempotent` from
+# `packages.quantum.jobs.enqueue` (DB-only legacy path) for 4 dormant
+# duplicate endpoints (/morning-brief, /midday-scan, /weekly-report,
+# /universe/sync). #71 Tier 2 deleted those endpoints + the legacy
+# import. The only remaining legacy importer in the repo is the
+# operator smoke script `packages/quantum/scripts/rq_smoke_morning_brief.py`,
+# which is out of #71 scope.
+from packages.quantum.public_tasks import enqueue_job_run  # DB + RQ (canonical)
 
 router = APIRouter(
     prefix="/internal/tasks",
@@ -24,128 +20,8 @@ router = APIRouter(
     include_in_schema=False, # Hidden from public OpenAPI docs
 )
 
-# Admin Client Init
-secrets_provider = SecretsProvider()
-supa_secrets = secrets_provider.get_supabase_secrets()
-url = supa_secrets.url
-key = supa_secrets.service_role_key
-supabase_admin: Client = create_client(url, key) if url and key else None
-
 APP_VERSION = os.getenv("APP_VERSION", "v2-dev")
 
-def get_admin_client():
-    if not supabase_admin:
-        raise HTTPException(status_code=503, detail="Database not available")
-    return supabase_admin
-
-@router.post("/morning-brief", status_code=202)
-async def morning_brief(
-    client: Client = Depends(get_admin_client),
-    auth: TaskSignatureResult = Depends(verify_task_signature("tasks:morning_brief"))
-):
-    today = datetime.now().strftime("%Y-%m-%d")
-    job_name = "morning-brief"
-    key = f"{job_name}-{today}"
-
-    job_id = enqueue_idempotent(
-        client=client,
-        job_name=job_name,
-        idempotency_key=key,
-        payload={
-            "app_version": APP_VERSION,
-            "trigger_ts": datetime.now().isoformat(),
-            "task_name": job_name
-        }
-    )
-
-    return {
-        "job_run_id": str(job_id),
-        "job_name": job_name,
-        "idempotency_key": key,
-        "status": "queued"
-    }
-
-@router.post("/midday-scan", status_code=202)
-async def midday_scan(
-    client: Client = Depends(get_admin_client),
-    auth: TaskSignatureResult = Depends(verify_task_signature("tasks:midday_scan"))
-):
-    today = datetime.now().strftime("%Y-%m-%d")
-    job_name = "midday-scan"
-    key = f"{job_name}-{today}"
-
-    job_id = enqueue_idempotent(
-        client=client,
-        job_name=job_name,
-        idempotency_key=key,
-        payload={
-            "app_version": APP_VERSION,
-            "trigger_ts": datetime.now().isoformat(),
-            "task_name": job_name
-        }
-    )
-
-    return {
-        "job_run_id": str(job_id),
-        "job_name": job_name,
-        "idempotency_key": key,
-        "status": "queued"
-    }
-
-@router.post("/weekly-report", status_code=202)
-async def weekly_report_task(
-    client: Client = Depends(get_admin_client),
-    auth: TaskSignatureResult = Depends(verify_task_signature("tasks:weekly_report"))
-):
-    # Weekly bucket
-    week = datetime.now().strftime("%Y-W%V")
-    job_name = "weekly-report"
-    key = f"{job_name}-{week}"
-
-    job_id = enqueue_idempotent(
-        client=client,
-        job_name=job_name,
-        idempotency_key=key,
-        payload={
-            "app_version": APP_VERSION,
-            "trigger_ts": datetime.now().isoformat(),
-            "task_name": job_name
-        }
-    )
-
-    return {
-        "job_run_id": str(job_id),
-        "job_name": job_name,
-        "idempotency_key": key,
-        "status": "queued"
-    }
-
-@router.post("/universe/sync", status_code=202)
-async def universe_sync_task(
-    client: Client = Depends(get_admin_client),
-    auth: TaskSignatureResult = Depends(verify_task_signature("tasks:universe_sync"))
-):
-    today = datetime.now().strftime("%Y-%m-%d")
-    job_name = "universe-sync"
-    key = f"{job_name}-{today}"
-
-    job_id = enqueue_idempotent(
-        client=client,
-        job_name=job_name,
-        idempotency_key=key,
-        payload={
-            "app_version": APP_VERSION,
-            "trigger_ts": datetime.now().isoformat(),
-            "task_name": job_name
-        }
-    )
-
-    return {
-        "job_run_id": str(job_id),
-        "job_name": job_name,
-        "idempotency_key": key,
-        "status": "queued"
-    }
 
 @router.post("/alpaca/order-sync", status_code=202)
 async def alpaca_order_sync_task(

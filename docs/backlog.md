@@ -1720,6 +1720,78 @@ but-gated through ~late July 2026.
 **Estimated effort:** Path 1 = 0. Path 2 = ~half day implementation.
 Path 3 = ~30-60 min diagnostic + ~half day if feasible.
 
+**#117 — `DROPPABLE_SUGGESTION_COLUMNS` shim doctrine audit** (MEDIUM)
+
+**Discovery:** #62a-D5 diagnostic (2026-05-09). The
+`DROPPABLE_SUGGESTION_COLUMNS` shim at
+`packages/quantum/services/workflow_orchestrator.py:473-482`
+silently strips columns matching a hardcoded list when PostgreSQL
+returns "missing column" errors at line 3193, then retries the
+insert. Three `execution_cost_*` entries removed in the #62a
+sweep PR (D5 Option B); ~6 other entries remain.
+
+**Doctrine concern:** Anti-pattern 2 violation per
+`docs/loud_error_doctrine.md` — silent column-strip with
+`print()` instead of `alert()`. The shim itself is wrapper-drift:
+producer assumes columns persist; shim silently degrades. Same
+class shape as PR-A's 7-layer cascade and Issue B's broker-API
+fix. Pre-#62a-D5, the `execution_cost_*` fields were silently
+dropped on every persist for an unknown duration without any
+alert firing — the diagnostic only surfaced the issue because the
+broader #62a schema-vs-code audit listed them.
+
+**Three options for the broader shim** (mirrors the per-D5
+decision matrix; choose once for the remaining fields rather
+than per-field):
+
+- **Option A (audit each entry):** for each remaining DROPPABLE
+  entry confirm via grep + DB-state probe whether columns
+  SHOULD exist (add via migration) or producer assignments
+  SHOULD be removed (ship per-entry deletions). Likely outcome:
+  same Option-B-style deletion for most fields since they're
+  observability metadata with zero readers (matches D5 pattern).
+- **Option B (replace shim with explicit handling):** when
+  producers assign optional fields, use a documented "optional
+  persistence" pattern that loud-errors on column drop rather
+  than silently retrying. Producers carry the responsibility
+  for opt-in degrade-gracefully behavior.
+- **Option C (remove shim entirely):** require strict
+  schema-payload alignment. All producer assignments must
+  correspond to existing columns. Silent shim becomes hard
+  failure; forces schema-vs-code drift to surface immediately.
+
+**Affected fields after the #62a-D5 cleanup** (~6 remaining):
+
+- `agent_signals`
+- `agent_summary`
+- `source`
+- `marketdata_quality`
+- `blocked_reason`
+- `blocked_detail`
+
+Verify exact list when investigating; audit may surface
+additional latent fields the diagnostic missed.
+
+**Approach (when scheduled):**
+1. For each remaining field: run `grep -rn "<field>" packages/quantum/`
+   for both writers and readers, then DB query to confirm column
+   presence/absence on `trade_suggestions`.
+2. Categorize: load-bearing (consumer reads it) vs observability-only
+   (write-and-forget) vs dead (no producer or no consumer).
+3. For dead/observability-only: ship Option B-style removal
+   (single PR per cleanup batch).
+4. For load-bearing: add migration column.
+5. After all entries resolved: replace the shim with a hard
+   failure; the empty list makes the shim trivially deletable.
+
+**Effort:** ~half day audit + per-batch cleanup PRs.
+
+**Cross-references:**
+- #62a-D5 (closed via Option B in #62a sweep PR)
+- `docs/loud_error_doctrine.md` (Anti-pattern 2)
+- Wrapper-drift class catalog (PR-A's 7-layer cascade #115 PR-A
+  Layers 1-7, Issue B's 4-layer cascade in PR #908)
+
 ### #72 — Loud-error doctrine + silent-failure catalog
 
 **Phase 1 (doctrine + catalog) complete 2026-04-27.**
@@ -2196,9 +2268,9 @@ empty-table writes don't fit the loud-error doctrine emerging from
 `supabase` import in `backbone.py`, dead import in `optimizer.py`,
 and three unused test mocks. Table-level cleanup tracked as #75.
 
-#### #62a-D3 — `regime_snapshots` table missing (HOT, HIGH)
+#### #62a-D3 — `regime_snapshots` table missing (HOT, HIGH) — **CLOSED 2026-05-10**
 
-Files: `api.py:627`, `workflow_orchestrator.py:1130`, `:1951`.
+Files: `api.py:627`, `workflow_orchestrator.py:1155`, `:2087`.
 Migration `20251213000000_regime_snapshots.sql` exists but never
 applied. Daily morning + midday cycles attempt persistence and
 fail silently.
@@ -2206,7 +2278,14 @@ fail silently.
 Fix: apply migration, OR delete the writes (decide if snapshot is
 needed for backtest/replay).
 
-Effort: ~1 day if applying migration, ~1 hour if deleting writes.
+**[CLOSED 2026-05-10 by #62a sweep PR]:** chose deletion. Saturday's
+diagnostic verified all 3 writers wrapped in `try: ... except: pass`
+("non-critical write" comment) and ZERO production readers anywhere.
+The in-memory `GlobalRegimeSnapshot` dataclass is load-bearing for
+risk budget + strategy selection; only the audit-trail persistence
+was missing. PR deleted 3 writers + the migration file. Closes
+**#62a-D11** in same PR (same migration defined `symbol_regime_snapshots`
+with zero writers).
 
 #### #62a-D4 — Cohort fan-out routing safety + symbol drop fix — **3-PR SEQUENCE SHIPPED 2026-04-30**
 
@@ -2298,9 +2377,9 @@ source for the entire month. The "189 cohort decisions" stat
 referenced in CLAUDE.md cohort architecture section is from
 `policy_decisions`, NOT actual shadow trades.
 
-#### #62a-D5 — `execution_cost_*` columns silently dropped (HOT, HIGH)
+#### #62a-D5 — `execution_cost_*` columns silently dropped (HOT, HIGH) — **CLOSED 2026-05-10 (Option B)**
 
-File: `packages/quantum/services/workflow_orchestrator.py:468-478`.
+File: `packages/quantum/services/workflow_orchestrator.py:473-482`.
 3 columns (`execution_cost_soft_gate`, `execution_cost_soft_penalty`,
 `execution_cost_ev_ratio`) dropped via `DROPPABLE_SUGGESTION_COLUMNS`
 retry shim on every suggestion write. Verified absent from
@@ -2310,9 +2389,23 @@ retry shim on every suggestion write. Verified absent from
 gates? If yes, add columns via migration. If no, remove the
 computation and the shim entirely.
 
-Effort: ~2 hours after decision.
+**[CLOSED 2026-05-10 by #62a sweep PR — Option B chosen]:** Saturday's
+diagnostic verified the 3 fields had ZERO production readers. The
+load-bearing mechanism (`unified_score.score -= EXECUTION_COST_SOFT_PENALTY`
+in-memory + `HIGH_EXECUTION_COST` badge append) was preserved. PR
+deleted the 3 candidate-dict producer assignments at
+`options_scanner.py:3318-3322` + the 3 entries from
+`DROPPABLE_SUGGESTION_COLUMNS` + the now-dead local variable
+`execution_cost_soft_gate_triggered`. Test simulator + assertions
+updated.
 
-#### #62a-D6 — `model_governance_states` table missing (MEDIUM)
+**Broader DROPPABLE shim doctrine concern** (Option C from the
+diagnostic) captured separately in **#117** — the shim itself is
+Anti-pattern 2 territory (silent column-strip + retry, `print()`
+instead of `alert()`); ~6 other DROPPABLE entries deserve the same
+audit-then-add-or-remove treatment.
+
+#### #62a-D6 — `model_governance_states` table missing (MEDIUM) — **CLOSED 2026-05-10**
 
 Migration `20251215000000_learned_nesting_v3.sql` partially applied
 — ALTER statements landed but `CREATE TABLE model_governance_states`
@@ -2321,7 +2414,13 @@ did not. Learned Nesting v3 governance writes fail silently.
 Fix: apply table-creation portion, OR delete the writes if Learned
 Nesting v3 is dormant.
 
-Effort: ~1 day.
+**[CLOSED 2026-05-10 by #62a sweep PR — backlog framing was inaccurate]:**
+Saturday's diagnostic found ZERO code references in the entire
+codebase — no writers, no readers, no imports, no "Learned Nesting"
+string mentions. The "writes fail silently" framing was wrong; there
+were NO writes at all. PR deleted the orphan migration file. Pure
+build-by-contract residue from a feature spec that was never built
+or was deleted.
 
 #### #62a-D7 — `shadow_cohort_daily` table missing — **CLOSED 2026-05-05**
 
@@ -2363,7 +2462,7 @@ re-implementing the eval, the persistence (table + writer), and the
 consumer logic together as a unified feature, not piece-by-piece.
 See git history for the original endpoint shape (PR #<NUM>).
 
-#### #62a-D8 — `trade_executions` 8 wrong columns (MEDIUM)
+#### #62a-D8 — `trade_executions` 8 wrong columns (MEDIUM) — **CLOSED 2026-05-10**
 
 File: `packages/quantum/services/execution_service.py:215-254`.
 Writes `mid_price_at_submission`, `order_json`, `trace_id`,
@@ -2375,7 +2474,31 @@ path is `paper_orders` + `position_legs`.
 active path. If dead → delete the legacy `ExecutionService`. If
 alive → drop-cols-or-add-cols decision.
 
-Effort: ~half day investigation + ~1-2 hours fix.
+**[CLOSED 2026-05-10 by #62a sweep PR — fully dormant, deletion
+chosen]:** Saturday's diagnostic verified the table has 0 rows
+ever (latest_write timestamp NULL); `register_execution()` had
+ZERO production callers (only tests); the readers
+(`exit_stats_service.py`) handled the always-empty
+`insufficient_history=True` path that both call sites already
+defaulted to. PR deleted: `register_execution` + 5 helper methods
+(`_record_to_position_ledger`, `_record_multi_leg_fills`,
+`_record_single_leg_fill`, `_resolve_leg_action`,
+`_extract_underlying`) + 4 module-level legs-fingerprint helpers
++ `get_batch_execution_drag_stats` + `get_execution_drag_stats`
++ `simulate_fill` + `exit_stats_service.py` + `self.executions_table`
+init field + the scanner's batch-fetch call (always returned `{}`)
++ trade-builder + workflow-orchestrator caller sites (always took
+the insufficient-history default). Drop-table migration shipped:
+`20260510000000_drop_trade_executions.sql`.
+
+**PRESERVED:** `ExecutionService.estimate_execution_cost` (called
+by `optimizer.py:543` — the only active caller) — refactored to
+always use the heuristic spread proxy since the history branch's
+data source was deleted.
+
+`outcome_aggregator.py` reads of `trade_executions` (lines 111+127)
+fold into separate **#67** cleanup; outcome_aggregator is itself
+flagged dead in that entry.
 
 #### #62a-D9 — `trade_suggestions` rebalance flow extra cols (LOW)
 
@@ -2391,11 +2514,16 @@ Effort: ~1 hour (verify cold, then either fix or remove endpoint).
 `counterfactual_available`, `counterfactual_reason`) absent. Already
 folded into the dead-code sweep via backlog #67.
 
-#### #62a-D11 — `symbol_regime_snapshots` table missing (LOW)
+#### #62a-D11 — `symbol_regime_snapshots` table missing (LOW) — **CLOSED 2026-05-10 via #62a-D3**
 
 Created by migration `20251213000000_regime_snapshots.sql` (same as
 D3) but no active write site found in code. Note only — no fix
 needed unless a writer is reintroduced.
+
+**[CLOSED 2026-05-10 via #62a-D3]:** the migration file defining
+this table was deleted as part of D3's deletion sweep (same PR).
+Zero writers existed; deletion confirms no future writer will
+be reintroduced via this migration.
 
 #### #62a-D12 — Out-of-band tables (LOW) — ACKNOWLEDGE, NO ACTION
 

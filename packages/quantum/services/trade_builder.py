@@ -4,8 +4,12 @@ from packages.quantum.analytics.guardrails import is_earnings_safe, check_liquid
 from packages.quantum.analytics.scoring import generate_badges
 from packages.quantum.analytics.opportunity_scorer import OpportunityScorer
 from packages.quantum.analytics.sizing import calculate_contract_size
-from packages.quantum.services.exit_stats_service import ExitStatsService
 from supabase import Client
+
+# #62a-D8 (2026-05-10): ExitStatsService import removed alongside the
+# dropped trade_executions table. The service always returned
+# insufficient_history=True (table had zero rows for entire lifetime);
+# the rationale code below always took the "Insufficient history" branch.
 
 def enrich_trade_suggestions(
     trades: List[Dict[str, Any]],
@@ -76,15 +80,16 @@ def enrich_trade_suggestions(
             portfolio_value=portfolio_value
         )
 
-        # 5. Get Historical Stats
+        # 5. Historical Stats (#62a-D8: ExitStatsService removed; always
+        # returned insufficient_history=True from empty trade_executions).
         regime = symbol_market_data.get("iv_regime", "normal")
-        stats = ExitStatsService.get_stats(
-            underlying=symbol,
-            regime=regime,
-            strategy=trade['strategy_type'],
-            supabase_client=supabase_client
-        )
-        trade['stats'] = stats
+        trade['stats'] = {
+            "win_rate": None,
+            "avg_pnl": None,
+            "sample_size": 0,
+            "regime": regime,
+            "insufficient_history": True,
+        }
 
         # 6. Generate Rationale
         rationale_parts = []
@@ -96,14 +101,7 @@ def enrich_trade_suggestions(
         if trade['is_earnings_safe']:
             rationale_parts.append("Earnings safe")
 
-        if not stats.get("insufficient_history"):
-            win_rate = stats.get("win_rate")
-            avg_pnl = stats.get("avg_pnl")
-            sample = stats.get("sample_size")
-            if win_rate is not None:
-                rationale_parts.append(f"Hist Win Rate: {win_rate:.0%} ({sample} samples)")
-        else:
-            rationale_parts.append("Insufficient history")
+        rationale_parts.append("Insufficient history")
 
         trade['rationale'] = "; ".join(rationale_parts) if rationale_parts else "Neutral outlook"
 

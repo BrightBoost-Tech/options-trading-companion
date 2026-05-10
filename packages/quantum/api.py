@@ -622,11 +622,10 @@ async def execute_rebalance(
 
     global_snap = regime_engine.compute_global_snapshot(now, universe_symbols)
 
-    # Store global snapshot to DB
-    try:
-        supabase.table("regime_snapshots").insert(global_snap.to_dict()).execute()
-    except Exception as e:
-        print(f"Failed to persist global regime snapshot: {e}")
+    # #62a-D3: regime_snapshots persistence removed 2026-05-10 — table never
+    # existed in production, all 3 writers were wrapped in silent try/except,
+    # zero readers anywhere. global_snap drives risk budget + strategy
+    # selection in-memory; only the audit-trail write was missing.
 
     positions_for_conviction: List[PositionDescriptor] = []
 

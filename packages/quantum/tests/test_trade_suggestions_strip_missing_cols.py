@@ -13,11 +13,14 @@ import re
 from typing import Optional, Dict, Any, Tuple
 
 
-# Mirror the production constants and functions
+# Mirror the production constants and functions.
+# #62a-D5 Option B (2026-05-10): the 3 execution_cost_* entries were
+# removed from DROPPABLE_SUGGESTION_COLUMNS in production. The shim
+# itself + the remaining 6 entries are unchanged. Broader doctrine
+# audit of the shim is tracked in backlog #117.
 DROPPABLE_SUGGESTION_COLUMNS = {
     "agent_signals", "agent_summary", "source", "marketdata_quality",
-    "blocked_reason", "blocked_detail", "execution_cost_soft_gate",
-    "execution_cost_soft_penalty", "execution_cost_ev_ratio",
+    "blocked_reason", "blocked_detail",
 }
 
 
@@ -85,10 +88,13 @@ class TestExtractMissingColumn:
         err = "Could not find the 'agent_summary' column"
         assert _extract_missing_column(err) == "agent_summary"
 
-    def test_extracts_execution_cost_soft_gate(self):
-        """Should extract 'execution_cost_soft_gate' from error message."""
-        err = "Could not find the 'execution_cost_soft_gate' column"
-        assert _extract_missing_column(err) == "execution_cost_soft_gate"
+    def test_extracts_blocked_reason(self):
+        """Should extract 'blocked_reason' from error message.
+        (Replaces former execution_cost_soft_gate test removed in
+        #62a-D5 Option B; the extraction logic is column-agnostic so
+        any DROPPABLE field exercises the same code path.)"""
+        err = "Could not find the 'blocked_reason' column"
+        assert _extract_missing_column(err) == "blocked_reason"
 
     def test_case_insensitive_matching(self):
         """Should match regardless of case."""
@@ -140,17 +146,14 @@ class TestDroppableSuggestionColumns:
         """Should contain blocked_detail."""
         assert "blocked_detail" in DROPPABLE_SUGGESTION_COLUMNS
 
-    def test_contains_execution_cost_soft_gate(self):
-        """Should contain execution_cost_soft_gate."""
-        assert "execution_cost_soft_gate" in DROPPABLE_SUGGESTION_COLUMNS
-
-    def test_contains_execution_cost_soft_penalty(self):
-        """Should contain execution_cost_soft_penalty."""
-        assert "execution_cost_soft_penalty" in DROPPABLE_SUGGESTION_COLUMNS
-
-    def test_contains_execution_cost_ev_ratio(self):
-        """Should contain execution_cost_ev_ratio."""
-        assert "execution_cost_ev_ratio" in DROPPABLE_SUGGESTION_COLUMNS
+    def test_does_not_contain_execution_cost_fields_post_d5(self):
+        """#62a-D5 Option B (2026-05-10): the 3 execution_cost_* entries
+        were removed from DROPPABLE because their producer assignments
+        were also removed. Producer no longer emits them, so the shim
+        no longer needs to drop them."""
+        assert "execution_cost_soft_gate" not in DROPPABLE_SUGGESTION_COLUMNS
+        assert "execution_cost_soft_penalty" not in DROPPABLE_SUGGESTION_COLUMNS
+        assert "execution_cost_ev_ratio" not in DROPPABLE_SUGGESTION_COLUMNS
 
     def test_does_not_contain_core_fields(self):
         """Should not contain core required fields."""
@@ -271,41 +274,45 @@ class TestIntegrationScenarios:
     """Real-world scenario tests."""
 
     def test_typical_new_column_rollout(self):
-        """Typical scenario: new column added to code but not DB yet."""
+        """Typical scenario: new column added to code but not DB yet.
+        (#62a-D5 Option B swapped the example payload from execution_cost_*
+        to agent_*; the shim's behavior is column-agnostic.)"""
         payload = {
             "ticker": "SPY",
             "strategy": "iron_condor",
             "ev": 15.0,
-            "execution_cost_soft_gate": True,  # New column
-            "execution_cost_soft_penalty": 10.0,  # New column
+            "agent_signals": {"foo": "bar"},
+            "agent_summary": "test summary",
         }
 
         result, stripped = simulate_bounded_retry_insert(
             payload,
-            failing_columns=["execution_cost_soft_gate"]
+            failing_columns=["agent_signals"]
         )
 
         assert result is not None
-        assert "execution_cost_soft_gate" not in result
-        assert "execution_cost_soft_penalty" in result  # Still present
+        assert "agent_signals" not in result
+        assert "agent_summary" in result  # Still present
 
     def test_multiple_new_columns_rollout(self):
-        """Multiple new columns missing from DB."""
+        """Multiple new columns missing from DB.
+        (#62a-D5 Option B: swapped example fields from execution_cost_*
+        to other DROPPABLE entries.)"""
         payload = {
             "ticker": "SPY",
             "strategy": "iron_condor",
             "ev": 15.0,
-            "execution_cost_soft_gate": True,
-            "execution_cost_soft_penalty": 10.0,
-            "execution_cost_ev_ratio": 1.2,
+            "agent_signals": {},
+            "agent_summary": "x",
+            "blocked_reason": "y",
         }
 
         result, stripped = simulate_bounded_retry_insert(
             payload,
             failing_columns=[
-                "execution_cost_soft_gate",
-                "execution_cost_soft_penalty",
-                "execution_cost_ev_ratio"
+                "agent_signals",
+                "agent_summary",
+                "blocked_reason",
             ]
         )
 

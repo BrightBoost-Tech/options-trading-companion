@@ -111,11 +111,12 @@ def test_iron_condor_candidate_generation(
         "legs": [] # Should be ignored by our new logic
     }
 
-    # 5. Mock Execution Service (Low cost to pass gating)
-    mock_execution_instance = mock_execution_service.return_value
-    mock_execution_instance.get_batch_execution_drag_stats.return_value = {
-        "TEST": {"avg_drag": 1.0, "n": 100} # $1.00 drag vs huge EV
-    }
+    # 5. Mock Execution Service (#62a-D8 2026-05-10: scanner no longer
+    # calls get_batch_execution_drag_stats; proxy spread cost is the only
+    # path. Mock setup retained as harmless dead code in case the scanner
+    # adds new calls into ExecutionService later. The candidate passes
+    # gating because the proxy cost is low relative to iron condor EV.)
+    _ = mock_execution_service.return_value  # keep mock alive
 
     # Run Scanner
     candidates = scan_for_opportunities(symbols=["TEST"])

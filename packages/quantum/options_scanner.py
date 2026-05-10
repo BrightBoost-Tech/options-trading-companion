@@ -2328,19 +2328,12 @@ def scan_for_opportunities(
     else:
         print(f"[Scanner] Using provided Global Regime: {global_snapshot.state}")
 
-    # Batch fetch execution drag for efficiency (ONCE)
-    drag_map = {}
-    if execution_service and user_id:
-        try:
-            # Step B2: Build symbol list early, then call batch stats ONCE
-            drag_map = execution_service.get_batch_execution_drag_stats(
-                user_id=user_id,
-                symbols=symbols,
-                lookback_days=45,
-                min_samples=3
-            )
-        except Exception as e:
-            print(f"[Scanner] Failed to fetch execution stats: {e}")
+    # #62a-D8 (2026-05-10): trade_executions table had zero rows for its
+    # entire lifetime, so this batch fetch always returned {} in practice.
+    # The downstream `stats = drag_map.get(symbol)` consumer at line ~2061
+    # already handles None gracefully (falls back to proxy spread cost).
+    # Removed alongside ExecutionService.get_*execution_drag_stats methods.
+    drag_map: Dict[str, Any] = {}
 
     # Batch Fetch IV Context (Bolt Optimization)
     iv_context_map = {}
@@ -3132,7 +3125,13 @@ def scan_for_opportunities(
             # Execution cost gate: reject or badge based on configuration + regime
             # EXECUTION_COST_HARD_REJECT=1 (default): hard reject if cost >= EV
             # EXECUTION_COST_HARD_REJECT=0 OR ELEVATED/SHOCK regime: soft mode
-            execution_cost_soft_gate_triggered = False
+            #
+            # The previous `execution_cost_soft_gate_triggered` flag (set below
+            # when soft mode applied + the in-memory score penalty fired) was
+            # only used to gate persistence of 3 observability fields with
+            # zero readers. Removed 2026-05-10 (#62a-D5 Option B). The
+            # downstream observability lives on `unified_score.badges`
+            # ("HIGH_EXECUTION_COST" tag) — see badge append below.
 
             # In elevated/shock regimes, wider spreads inflate execution cost.
             # Use soft mode (penalty instead of rejection) to avoid filtering
@@ -3182,7 +3181,6 @@ def scan_for_opportunities(
                 if not hasattr(unified_score, 'badges') or unified_score.badges is None:
                     unified_score.badges = []
                 unified_score.badges.append("HIGH_EXECUTION_COST")
-                execution_cost_soft_gate_triggered = True
 
             # Define Missing Greeks for Candidate Dict
             net_delta_contract = sum((l.get('delta') or 0.0) * (1 if l['side'] == 'buy' else -1) for l in legs)
@@ -3314,13 +3312,14 @@ def scan_for_opportunities(
                 "sector": sector_map.get(symbol, "unknown"),
             }
 
-            # Add soft execution cost gate fields if triggered
-            if execution_cost_soft_gate_triggered:
-                candidate_dict["execution_cost_soft_gate"] = True
-                candidate_dict["execution_cost_soft_penalty"] = EXECUTION_COST_SOFT_PENALTY
-                candidate_dict["execution_cost_ev_ratio"] = round(
-                    expected_execution_cost / max(1e-9, total_ev), 4
-                )
+            # #62a-D5 Option B (2026-05-10): the 3 execution_cost_*
+            # observability fields previously assigned here had zero readers
+            # and were silently dropped by the DROPPABLE_SUGGESTION_COLUMNS
+            # shim at workflow_orchestrator.py on every persist. The actual
+            # score penalty (`unified_score.score -= EXECUTION_COST_SOFT_PENALTY`
+            # earlier in this loop) is the load-bearing mechanism and is
+            # unchanged. Broader DROPPABLE shim doctrine concerns tracked
+            # in backlog #117.
 
             # Calculate Probability of Profit
             # Pass dictionary representation of global snapshot for compatibility

@@ -512,6 +512,81 @@ APScheduler-resident jobs, any long-running process on Railway.
 Does NOT affect FastAPI request handlers, which re-instantiate per
 request from the deployed image.
 
+#### False-alarm pattern + verification discipline (added 2026-05-12)
+
+H8-class hypotheses ("PR shipped, behavior unchanged, suspect worker
+stale") should ALWAYS go through worker verification BEFORE any
+restart action is taken. Hypothesis-generation is cheap; acting on an
+unverified hypothesis is the failure mode.
+
+The verification step itself is small — typically 5-10 minutes:
+
+1. **Get PR merge time** from `git log -1 --format='%ci' <merge_sha>`.
+2. **Get deployment SUCCESS timestamp** via
+   `mcp__railway-mcp-server__list-deployments` (filter to SUCCESS,
+   note the latest one's timestamp).
+3. **Get current worker process boot timestamp** by searching deploy
+   logs for `Worker <id>: started with PID` (or the equivalent boot
+   signature for the worker runtime in use).
+4. **Compare:**
+   - If `worker_boot_time > deploy_SUCCESS_time` AND
+     `deploy_SUCCESS_time > PR_merge_time`: the code is live; H8 is a
+     false alarm; look elsewhere.
+   - If `worker_boot_time < deploy_SUCCESS_time` (worker booted on an
+     older image): TRUE H8; restart the worker.
+   - If most-recent deploy is in DEPLOYING state: wait for SUCCESS;
+     the H8 is real but transient.
+5. **Action gated on (4):** only restart if verification confirms
+   stale code. Do not restart on hypothesis alone.
+
+#### Why verification matters even when hypothesis seems likely
+
+- **Cost of acting on a FALSE H8 hypothesis:** unnecessary worker
+  restart (~1-2 min outage, brief reset of in-memory state including
+  RQ queue subscriptions). Small but real.
+- **Cost of acting on a TRUE H8 hypothesis when undetected:** stale
+  code keeps running indefinitely. High if not caught.
+- **Cost of skipping verification:** the diagnostic becomes
+  unreproducible — the operator can't tell after the fact whether
+  the restart was needed or whether it was a false positive that
+  also happened to fix things via coincidence (e.g., the next deploy
+  cycle landed during the "restart window").
+
+Verification is always cheaper than the false-action outcome in
+either direction. Run the steps even when the H8 hypothesis has
+strong supporting evidence; the verification refutes the hypothesis
+cleanly when warranted.
+
+#### Confirmed instances this month
+
+| Date | Hypothesis | Result | Action taken |
+|---|---|---|---|
+| 2026-05-04 | OBP-fix verification (PR #864) | TRUE H8 — deploy still in DEPLOYING state | Waited ~5 min for SUCCESS; no restart needed |
+| 2026-05-12 | PR #908 mleg sign-flip not live | FALSE alarm — current worker booted 19:00:46 UTC on image built post-PR-#908 merge; 15:15Z rejection was on now-REMOVED earlier deploy | No restart; root cause for the rejection was deploy timing, not staleness |
+
+#### Doctrine signal — false-alarm count is itself useful
+
+The 2026-05-12 false alarm is NOT evidence the verification step is
+overkill or that hypothesis-generation was wrong. The evidence
+supporting the H8 hypothesis was real (pre-PR-#908 error text in
+production). The verification step is what refuted the hypothesis
+cleanly. Don't penalize hypothesis-generation when the diagnostic
+produced concrete supporting evidence — penalize only the case where
+action was taken without verification.
+
+The discipline working as intended: hypothesis surfaces with concrete
+evidence → verification tests against ground truth → action is gated
+on verification result. Both TRUE and FALSE outcomes of verification
+are healthy diagnostic signals.
+
+#### Diagnostic-prompt convention
+
+When a diagnostic surfaces "PR shipped, behavior unchanged" as a
+hypothesis, the prompt MUST include the verification steps above
+before any restart action is recommended. Verification = compare
+worker boot time to PR's deploy SUCCESS time. Restart action is
+gated on the verification result.
+
 ### H9 — Verified-write across wrapper chains
 
 When data flows producer → wrapper(s) → consumer through more than
@@ -687,6 +762,148 @@ while it's fresh — the operator-side question for Monday review is
 **which class-prevention infrastructure to ship next** (the AST/
 wrapper-grep/type-narrowing candidates above), not whether the
 class is real.
+
+### H10 — Stale state cascades through pipeline gates (ghost reconciliation is load-bearing)
+
+A single stale row in a hot table can suppress an entire pipeline by
+cascading through multiple sequential gates. The symptom presents as
+"system is silent" — no trades, no candidates, no obvious error — but
+the underlying state is the opposite of silent: each gate is firing
+loud diagnostics against the stale row, the gates are just consecutive
+enough that the surface appears blank.
+
+Reconciliation of orphan rows (after operator-side manual actions
+bypass the system's submission chain) is not optional observability
+hygiene. It is a **load-bearing prerequisite** for the trade pipeline
+to function.
+
+#### Observed cascade (2026-05-12 CSX ghost incident)
+
+A `paper_positions` row marked `status='open'` after the underlying
+position was closed via the Alpaca UI cascaded through three pipeline
+gates:
+
+| Layer | Gate | Effect |
+|---|---|---|
+| 1 | `suggestions_open` micro-tier "one position at a time" | `suggestions_skipped:true, reason:micro_tier_position_open, 0 candidates produced` |
+| 2 | `paper_auto_execute` per-symbol risk envelope cap | `"CSX is 100% of risk (limit 40%)"` fired every 15 min from 14:45Z; `status:blocked, executed_count:0` |
+| 3 | `intraday_risk_monitor` in-memory loss recompute | Stale `unrealized_pl` triggered force-close attempt against a phantom position → broker rejection → 2 critical `paper_order_marked_needs_manual_review` alerts |
+
+Each layer in isolation looked like normal gating behavior. Read in
+sequence, they describe a pipeline that has been suppressed end-to-end
+by a single row.
+
+#### Detection signatures
+
+- **"No trades today"** symptom with healthy scheduler heartbeats.
+  Gate diagnostics are firing in `risk_alerts` but the user-facing
+  surface is blank.
+- **`ghost_position` alerts firing repeatedly** against the same
+  `paper_positions.id`. PR #98's Option B sweep emits these at
+  `~1 fire per 5 min` matching `alpaca_order_sync` cadence. Treat
+  the volume as urgent operational signal, not informational noise.
+- **Force-close attempts producing broker rejections** without any
+  recent live entry. The phantom unrealized triggered the close; the
+  broker rejects because there's nothing to close.
+
+#### Operational discipline
+
+When operator manually intervenes (e.g., closing a position via Alpaca
+UI to bypass a broken code path, manual SQL update to unblock a
+diagnostic, etc.), the FIRST follow-up action is DB reconciliation —
+before any other engineering work resumes. Operator-side state changes
+that bypass the system's submission chain create orphan rows that the
+system will then treat as load-bearing.
+
+The reconciliation procedure for `paper_positions` orphans (see CSX
+2026-05-11 entry in `docs/backlog.md`):
+1. Identify the orphan via Alpaca authoritative fill data
+2. Compute realized P&L from entry + close fills
+3. `UPDATE paper_positions SET status='closed', closed_at=<fill_ts>,
+   realized_pl=<computed>, close_reason='manual_close_user_initiated',
+   fill_source='manual_endpoint'` (matches CHECK constraint enums)
+4. Write `risk_alerts` audit row with the reconciliation rationale
+
+#### Relationship to other doctrines
+
+- **Adjacent to H9 (verified-write across wrapper chains):** H9 covers
+  data flow from producer to consumer through wrappers; H10 covers a
+  single stale state propagating through sequential pipeline GATES.
+  H9's seam-between-layers maps to H10's between-gates.
+- **Adjacent to "parallel architectures without integration"** (the
+  doctrine candidate raised in #62a-D1's sub-investigation). Both
+  describe failure modes where each component works in isolation but
+  the *interaction* (between layers, between gates, between
+  unconnected architectures) is the bug.
+
+#### Origin
+
+2026-05-12 trade-absence diagnostic. The CSX ghost row had existed
+for ~6 days post-operator manual close but only surfaced as a pipeline
+liveness issue when a new candidate was expected. PR #921's
+reconciliation framing as "data correction to silence alerts" was
+incomplete — the reconciliation was the unblock for tomorrow's
+suggestions + execution.
+
+### H11 — Status-check methodology: critical alerts as baseline section
+
+Every operational status check or diagnostic that investigates a
+specific operator hypothesis (e.g., "did a trade happen?", "is the
+worker stale?", "did the close fire?") MUST also include a baseline
+section querying critical/high severity `risk_alerts` independently
+of the hypothesis. The operator's framing is the hypothesis *under
+investigation*, not the *boundary* of the investigation.
+
+When status-check queries are anchored on `paper_positions` and
+`paper_orders` only, critical events that don't materialize on those
+tables (force-close attempts rejected at the broker handler, manual
+review alerts, `ghost_position` storms) go unseen — even when they
+are the actual operationally critical story of the period.
+
+#### Required baseline query
+
+Every operational diagnostic touching `risk_alerts` indirectly should
+include this as a baseline section, queried independently of the
+hypothesis being tested:
+
+```sql
+-- BASELINE — critical/high severity events regardless of operator framing
+SELECT alert_type, severity, position_id, symbol, message,
+       metadata, created_at
+FROM risk_alerts
+WHERE created_at >= NOW() - INTERVAL '<window>'
+  AND severity IN ('critical', 'high')
+ORDER BY created_at DESC;
+```
+
+Window choice: align to the operator's stated period (e.g., NOW() - 24h
+for end-of-day, NOW() - 4h for post-trade-execution, NOW() - 30 min
+for incident-in-progress). When in doubt, widen rather than narrow —
+the cost of returning a few extra rows is small; the cost of missing
+the actual story is large.
+
+#### Where to apply
+
+- Morning post-open status check templates
+- Post-trade-execution status check
+- End-of-day status check
+- Any operational diagnostic that touches `risk_alerts` indirectly via
+  joins or downstream tables
+- Worker verification (H8) diagnostics — the baseline catches the
+  alert volume that motivates the H8 hypothesis in the first place
+
+#### Origin
+
+2026-05-12 morning status check. Structured around "did a position
+open" rather than "what critical events happened regardless of operator
+framing." Missed two critical `paper_order_marked_needs_manual_review`
+alerts at 15:15Z because the queries were anchored on `paper_positions`
+and `paper_orders`. The force-close attempt + broker rejection only
+appeared in `risk_alerts` and the status check never reached that
+table. The H8 hypothesis that later surfaced ("worker stale, PR #908
+not running") was generated from re-reading the worker logs after the
+fact, not from the morning status check — which itself is evidence
+the baseline section would have changed the diagnostic timeline.
 
 ## Valid silent-failure patterns
 
@@ -888,3 +1105,92 @@ silent-failure shape is discovered:
 
 The principle (re-raise / alert / structured-log) stays at v1; only
 new anti-pattern shapes drive minor-version bumps.
+
+---
+
+## Appendix — Doctrine observation summary (2026-05-12)
+
+Five doctrine-class observations surfaced across multiple
+diagnostics on 2026-05-12 (CSX trade-absence + worker verification
++ MTM-staleness + #62a-D1 sub-investigation). Consolidated here for
+future design review. Each is captured in its own section above or
+in `docs/backlog.md`; this appendix is the cross-reference index.
+
+### 1. H9 wrapper-drift (5th confirmed instance class)
+
+Five concurrent or near-concurrent instances this week, all
+sharing the producer → wrapper → consumer silent-degrade shape:
+
+| # | Cascade | Closure |
+|---|---|---|
+| 1 | PR-A `iv_daily_refresh` (7-layer) | PRs #899, #901, #903, #905, #906, #907 |
+| 2 | Issue B CSX close-order rejection (4-layer) | PR #908 |
+| 3 | PR #864 `alpaca_client` field-drop | PR #864 + #865 (consumer fallback alert) |
+| 4 | #62a-D5 / #117 DROPPABLE shim | PR #912 + #117 backlog |
+| 5 | MTM-staleness silent-skip (this morning) | PRs #919 (alert + observability column) + #920 (broker fallback) |
+
+H9 doctrine catalogued at section above. Class-prevention work
+proposed in PR #916 (H9 ratification PR).
+
+### 2. Intent drift across encodings (3rd instance class — distinct from H9)
+
+Distinct from wrapper-drift: this class describes mismatches
+between intent encoded in different artifacts (migrations vs code,
+docs vs implementation, framing-as-X vs operationally-Y), not
+information lost between layers of a single data flow.
+
+| # | Instance | Encoding mismatch |
+|---|---|---|
+| 1 | #62a-D1 (yesterday) | 4-way encoding map: migration intent ≠ live code ≠ DB state ≠ operator intent |
+| 2 | MTM staleness (this morning) | Documented behavior ("refresh on read") ≠ actual (silent-skip on incomplete snapshot) |
+| 3 | 3-layer cascade (this evening) | Ghost reconciliation framed as "data hygiene" but operationally load-bearing for pipeline liveness |
+
+Worth design-review discussion alongside H9 work. Currently no
+doctrine entry; candidate name **H12 — Intent drift across
+encodings** if the class earns its third independent instance via
+a NEW finding (not retrospective relabeling of the three above).
+
+### 3. Status-check structural requirement (H11, captured)
+
+- Operator's framing is hypothesis, not investigation boundary
+- Critical/high severity `risk_alerts` must be queried independently
+  as baseline section in every operational diagnostic
+- Captured as **H11** doctrine entry above; applies to all future
+  diagnostic prompts
+
+### 4. H8 false-alarm verification discipline (H8 extension, captured)
+
+- Hypothesis-generation produces real value even when refuted by
+  verification
+- Verification cost (5-10 min) < false-action cost in both
+  directions
+- Today's PR #908 H8 hypothesis: false-alarm caught cleanly via
+  verification procedure
+- Confirmed instance table updated under H8 doctrine entry above
+
+### 5. Cascading suppression pattern (H10, captured)
+
+- A single stale `paper_positions` row can suppress entire pipeline
+  via gate cascade (suggestions_open → paper_auto_execute →
+  intraday_risk_monitor)
+- Reconciliation is operationally urgent, not just cosmetic
+- Captured as **H10** doctrine entry above
+- CLAUDE.md "Design principles" section carries the brief
+  cross-reference for in-session lookup
+
+### Why this appendix exists
+
+Five doctrine-class findings in a single day is unusual. The
+appendix prevents the consolidation work from being lost in
+session context. Two of the five (intent drift, possible H12) are
+NOT yet ratified as doctrine entries — they need a third
+independent instance to earn the class-elevation. The other three
+(H10 cascade-suppression, H11 status-check baseline, H8 false-alarm
+extension) shipped as durable doctrine entries above in this same
+PR.
+
+Future design review (likely the Monday wrapper-drift session
+already scheduled in CLAUDE.md active focus #2) is the natural
+forum to discuss: which class-prevention infrastructure earns
+priority next, and whether the H12 candidate has accumulated
+enough instances to elevate to ratified doctrine.

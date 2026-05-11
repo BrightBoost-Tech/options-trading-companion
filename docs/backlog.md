@@ -41,6 +41,92 @@ hygiene work. Captured separately rather than fixed inline because
 the reconciliation makes the throttle issue operationally inert
 today.
 
+**[ADDENDUM 2026-05-12 evening — CSX reconciliation reframed]:**
+Today's trade-absence diagnostic revealed that PR #921's
+reconciliation was more operationally important than its docs-only
+framing suggested. The CSX ghost row was cascading through 3
+pipeline gates (suggestions_open's micro-tier "one position" gate
+→ paper_auto_execute's per-symbol risk envelope cap → intraday_risk_monitor's
+force-close attempt against phantom unrealized) and produced "no
+trades today" symptom + 2 critical `paper_order_marked_needs_manual_review`
+alerts at 15:15Z. Reconciliation tonight unblocked tomorrow's
+suggestion + execution pipeline. Captured as new H10 doctrine entry
+in `docs/loud_error_doctrine.md` ("Stale state cascades through
+pipeline gates").
+
+**[2026-05-12] Status-check methodology gap captured as H11 doctrine.**
+Morning status check missed today's actual critical events because
+queries were structured around "did a position open" (anchored on
+`paper_positions` and `paper_orders`) rather than "what critical
+events happened regardless of operator framing." 2 critical
+`paper_order_marked_needs_manual_review` alerts at 15:15Z went
+unseen at the morning check; only surfaced ~5h later when the
+trade-absence diagnostic widened the query surface to `risk_alerts`
+directly. Fix captured as H11 doctrine in
+`docs/loud_error_doctrine.md` ("Status-check methodology: critical
+alerts as baseline section"). Applies to all future diagnostic
+prompts. No code change.
+
+**[2026-05-12] H8 false-alarm pattern + verification discipline
+captured (extends existing H8 doctrine).**
+Today's trade-absence diagnostic surfaced an H8-class hypothesis
+("PR #908 not running on production worker") based on real
+evidence (pre-PR-#908 error text at 15:15Z rejection). Verification
+refuted the hypothesis cleanly: worker `ee7219f287b94b028478b3803d779251`
+booted 19:00:46 UTC on image built 19:00:22 UTC, which postdates
+PR #908's merge (2026-05-10 05:40 UTC) — the 15:15Z rejection
+happened on a now-REMOVED earlier deploy. Captured as extension
+to existing H8 doctrine entry in `docs/loud_error_doctrine.md`,
+including:
+- Verification procedure (5 steps: PR merge time → deploy SUCCESS
+  time → worker boot time → comparison → action gated on result)
+- Confirmed instances table (2026-05-04 TRUE H8 + 2026-05-12 FALSE
+  alarm; both healthy diagnostic signals)
+- Doctrine note: hypothesis-generation produces real value even
+  when refuted by verification
+- Diagnostic-prompt convention: include verification BEFORE any
+  restart action
+
+**[2026-05-12 → 2026-05-13] PR #908 empirical validation pending**
+Code is live in production worker (verified 2026-05-12 19:00:46Z
+boot, image built 19:00:22Z, post-PR-#908 merge). Empirically
+untested on a live close in this image.
+
+**Next validation event:** First natural close that fires after a
+new position opens (now unblocked post-CSX-reconciliation).
+
+**What to capture when the close fires:**
+- Order's `limit_price` (should be NEGATIVE for credit-side close
+  per PR #908's sign-flip design)
+- `abs(limit_price)` (should be ≥ 0.01, matching the clamp condition)
+- Broker response (filled? rejected?)
+- If rejected, error text (compare to pre-PR-#908 format)
+- `paper_orders` row with `broker_response` payload for forensic
+  inspection
+- `risk_alerts` rows fired during the close (use H11 baseline query)
+
+**Failure modes to watch for:**
+- Same error text as today's 15:15Z rejection (`"Cannot submit
+  options order without limit_price (got -2.08)"`) → suggests
+  another code path has the old check; PR #908's scope was
+  incomplete
+- Different error text → new failure mode, separate investigation
+- Alpaca-side rejection (not internal ValueError) → PR #908's
+  approach architecturally wrong; sign-flip may not be
+  Alpaca-compatible
+- Filled successfully → PR #908 empirically validated; mark this
+  entry CLOSED with the validation event timestamp
+
+**Why this matters:** PR #908 fixes the class of bug where credit-side
+close orders carry positive `limit_price` and get rejected at our
+broker handler. The fix shipped 2026-05-10; today's failure was on
+the older deploy. Tomorrow's close is the first opportunity to
+confirm the fix actually works in production.
+
+**Pre-drafted post-close diagnostic prompt:** deferred. Draft tomorrow
+morning when close event is imminent, OR earlier if operator opts to
+pre-stage. Decision left to next session.
+
 ---
 
 ## Backlog (post-promotion)

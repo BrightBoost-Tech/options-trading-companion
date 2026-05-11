@@ -856,6 +856,8 @@ Example anti-pattern (rejected 2026-04-30): after observing CMCSA short_*_credit
 
 **Wrapper drift on field-dependency introductions.** See `docs/loud_error_doctrine.md` Anti-pattern 8. When a fix introduces a NEW field dependency on an upstream provider, audit the WHOLE wrapper chain end-to-end — hand-built whitelist wrappers silently drop new fields and consumers fall through to safe defaults without alerting. Each layer in isolation looks correct; the defect is in the seam between layers. Origin: PR #849 (#93 broker-truth fix) took 5 days to take effect because `alpaca_client.py:200-225` dropped `options_buying_power`; fixed by PR #864 + alert at fallback site (PR #865).
 
+**Verified-write across wrapper chains.** See `docs/loud_error_doctrine.md` "H9 — Verified-write across wrapper chains" — the higher-order doctrine sitting above Anti-patterns 2 and 8. When data flows producer → wrapper(s) → consumer through more than one boundary, the consumer must verify the side effect actually occurred, not infer success from intermediate "no exception raised" signals. Wrappers must return outcome (bool / Result / typed enum), not just absence-of-exception; consumers must verify at anchor checkpoints (independent queries that confirm end-to-end). PR-A Layer 4's `count_rows_for_date` post-loop check is the reference implementation. Origin: 2026-05-04 → 2026-05-10 cascade week — PR-A's 7-layer cascade (#115) + Issue B's 4-layer cascade (PR #908) + #62a sweep (D3/D5/D6/D8) + #864 alpaca_client field-drop + #117 DROPPABLE shim, all sharing the class shape. Cascading-cascade discipline: ship each layer independently so each fix's deploy validates the next-layer surface before fixing it.
+
 
 ## Backlog
 

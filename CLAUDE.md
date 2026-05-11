@@ -479,6 +479,66 @@ layer's math correlates with better outcomes.
 revival, the system runs single-strategy (aggressive only) with no
 learning loop on cohort comparisons.
 
+**[ADDENDUM 2026-05-12 — corrected framing from #62a-D1 sub-investigation]**
+
+The "Original design vs Actual implementation" framing above was
+accurate but incomplete. Sub-investigation revealed the system has
+**two complete-but-unwired architectures**:
+
+1. **Champion/challenger evaluator** (`policy_lab/evaluator.py`,
+   `scoring.py`, `policy_lab_eval` scheduled job) — fully built,
+   runs daily, scores all 3 cohorts via 7 promotion gates (≥3 days,
+   ≥10 trades, no -20% drawdown, ≥15% utility margin, ≥70%
+   posterior probability, drawdown not worse than champion, 2-day
+   cooldown). On promotion: writes `UPDATE policy_lab_cohorts SET
+   promoted_at = NOW()` AND inserts `policy_lab_promotions` audit
+   row. 4 successful runs to date, 0 promotions (either no
+   qualifying challenger or gates miscalibrated — empirical signal
+   needed).
+2. **Live route hardcode** (`fork.py:67`) — fully built since
+   2026-03-20 (commit `f396334f`, original file commit). Hardcodes
+   `cohort_name = "aggressive"`. No connection to evaluator output.
+
+The evaluator writes `promoted_at`; the live route ignores
+`promoted_at`. Nothing currently reads `promoted_at` for routing.
+
+**Two silent-failure `is_champion` query sites are bugs:**
+- `paper_autopilot_service.py:867` `_get_champion_portfolio`
+- `paper_exit_evaluator.py:892` cohort fallback
+
+Both query `is_champion = True` (a non-existent column), wrapped
+in `try/except: pass`, return None on exception. Authored when
+someone assumed the migration's `is_champion=true` INSERT intent
+would land as a column. Architectural PR will replace these with
+`promoted_at`-based queries OR delete them as redundant.
+
+**DB state misalignment (pending correction):** `promoted_at` is
+currently set on `neutral` (operator manual UPDATE on
+2026-04-02 21:28Z, predating the intent clarification). Should be
+on `aggressive` per operator intent confirmed 2026-05-12 (aggressive
+= starting champion; conservative + neutral are shadow challengers).
+
+**`POLICY_LAB_AUTOPROMOTE`** stays OFF (C-1 endpoint chosen) until
+evaluator gates have empirical track record. Manual promotion only;
+evaluator output is advisory until the gates are validated against
+observed outcomes.
+
+**Architectural PR queued (ships after CSX validation week):**
+- DB: flip `promoted_at` from neutral to aggressive
+- Fix the 2 silent-failure query sites (or delete if redundant)
+- Modify `fork.py:67` to read current champion via `promoted_at`
+  instead of hardcoding aggressive
+- Effort: ~half day. No live trading behavior change at the time
+  of wire-up (aggressive stays live; this is mechanical correctness,
+  not param change). Tracked as #62a-D1.
+
+**Doctrine note:** This is the first concrete instance of "parallel
+architectures without integration" — adjacent to H9 wrapper-drift
+in `docs/loud_error_doctrine.md` but a distinct class. Two complete
+subsystems can each work in isolation while the integration seam
+(the writer's output → consumer's input wire) is the bug. Worth
+design-review discussion alongside #62a-D1's architectural PR.
+
 ---
 
 ## Risk per trade math

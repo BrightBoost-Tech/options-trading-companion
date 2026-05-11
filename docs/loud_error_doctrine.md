@@ -648,12 +648,27 @@ and answers the meta-question: when these shapes manifest in a
 chain rather than a single function, how do you prevent the chain
 from silently degrading end-to-end?
 
+**Class-prevention infrastructure shipped:**
+
+- **Class A — grep gate (PR #913):** no production module imports
+  `enqueue_idempotent` from `packages.quantum.jobs.enqueue` (the
+  legacy DB-only path). Codebase-wide AST walk excluding
+  `scripts/`, `tests/`, `__pycache__/`, `venv/`. Failure message
+  points at canonical `enqueue_job_run` migration target.
+- **Class B — AST gate (PR \<NEXT\>):** every internal_tasks
+  endpoint that BOTH calls `enqueue_job_run` AND appears in the
+  CLI TASKS catalog at `scripts/run_signed_task.py` must accept
+  a Body parameter. The CLI-catalog intersection precisely matches
+  the threat model — scheduler-only enqueue callers are
+  auto-exempt because nothing external sends them a body.
+  First design pass tried "all enqueue callers must have Body"
+  but caught 5 false positives (intraday_risk_monitor,
+  day_orchestrator, promotion_check, heartbeat, phase2_precheck);
+  CLI-catalog intersection is the correct enforcement axis.
+
 **Future class-prevention infrastructure candidates** (separate
 backlog work):
 
-- AST test asserting every internal_tasks `@router.post` accepts
-  `Body(...)` (catches future Class-B body-drop reintroduction;
-  deferred from #71 Tier 3).
 - Grep test asserting wrappers in `packages/quantum/brokers/`
   forward upstream objects rather than hand-building return dicts
   (catches future Anti-pattern 8 reintroduction).

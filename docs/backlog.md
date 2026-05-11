@@ -289,6 +289,20 @@ CI gate). After deciding the script's fate (delete or migrate),
 the legacy `packages/quantum/jobs/enqueue.py` module itself
 becomes deletable. Tracked separately as **#118**.
 
+**Class B class-prevention infrastructure SHIPPED 2026-05-11**
+(PR \<NEXT\>): AST gate for Class B (silent body-drop) at
+`test_internal_tasks_class_b_body_gate.py`. Asserts every
+internal_tasks endpoint that BOTH calls `enqueue_job_run` AND
+appears in the CLI TASKS catalog at `scripts/run_signed_task.py`
+must accept a Body parameter. CLI-catalog intersection precisely
+matches the threat model — scheduler-only enqueue callers
+(intraday_risk_monitor, day_orchestrator, promotion_check,
+heartbeat, phase2_precheck) are auto-exempt. New CLI-exposed
+endpoints automatically come under enforcement without code change
+in the test (catalog intersection recomputed each run). Closes the
+H9 doctrine's Class B candidate; wrapper-grep test for brokers/
++ Result-type narrowing remain as future infrastructure candidates.
+
 **Doctrine validation:** activate-then-migrate pattern held end-to-end.
 The 4 dormant Class A endpoints sat with both bugs unsurfaced for an
 unknown time; nothing exercised them so nothing broke. For the dormant

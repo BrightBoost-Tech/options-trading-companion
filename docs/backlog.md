@@ -127,6 +127,41 @@ confirm the fix actually works in production.
 morning when close event is imminent, OR earlier if operator opts to
 pre-stage. Decision left to next session.
 
+**[2026-05-12 → 2026-05-19] H9 AST gate: flip to strict mode.**
+Slot 1 shipped today in warn-only mode (PR ships separately). After
+~1 week of CI observability:
+1. Review `h9_violations.json` artifacts from each CI run
+2. Confirm allow-list is stable (no new legitimate-code violations
+   surfacing in stderr warnings)
+3. Confirm violation count holds at 7 (current allow-list size)
+4. If stable: flip `H9_GATE_STRICT = True` in
+   `packages/quantum/tests/test_h9_wrapper_drift_gate.py`
+5. If not stable: investigate; may need detection refinement or
+   allow-list expansion before flipping
+
+Effort: ~30 min to flip + verify CI is green on the strict assertion.
+
+**[2026-05-12] H9 migration candidates surfaced by Slot 1 scan.**
+Real H9 violations found in the codebase scan (currently allow-listed
+as deferred work):
+- `packages/quantum/services/iv_point_service.py::upsert_point` —
+  legacy IV path; logger-only swallow. Migration candidate (~30
+  min) OR deprecation if `iv_repository.upsert_iv_point` is canonical.
+- `packages/quantum/services/position_pnl_service.py::refresh_marks_for_user`
+  — legacy leg-level refresh distinct from `paper_mark_to_market_service.refresh_marks`
+  (#919+#920 fix path). Migration candidate (~2-4 hours) — apply same
+  pattern (per-position alert + partial-status enum).
+- `packages/quantum/services/universe_service.py::sync_universe` —
+  print-swallow on upsert failure. Small fix (~30 min); replace
+  `print(...)` with `alert()` per Anti-pattern 2.
+- `packages/quantum/jobs/handlers/alpaca_order_sync.py::sync_orders`
+  — nested handler with multiple logger-only paths. Larger refactor
+  (~half day) — needs decomposition before H9 verification points
+  can be inserted cleanly.
+
+Effort to close all 4: ~1-2 days total. Not urgent; allow-list
+expirations set to 2026-08-12 (3 months) to force re-review.
+
 **[2026-05-12 EOD] Active focus #2 closed: H9 Convention codified.**
 H9 doctrine entry in `docs/loud_error_doctrine.md` extended with
 "Codified pattern with empirical anchors" subsection — cross-instance

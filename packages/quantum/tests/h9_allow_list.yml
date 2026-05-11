@@ -1,0 +1,125 @@
+# H9 wrapper-drift AST gate — allow-list
+#
+# Entries here are matched by (module, function) and suppress the
+# corresponding violation in `test_h9_wrapper_drift_gate.py`.
+#
+# Each entry MUST include:
+# - `module`: dotted path (e.g., `packages.quantum.services.foo`)
+# - `function`: bare name (no leading underscore stripping)
+# - `rationale`: specific reason; "TODO" or empty entries fail review
+# - `reviewer`: GitHub handle or operator name that approved the entry
+# - `added`: ISO date the entry was added
+# - `expires`: ISO date forcing re-review (recommended; not yet enforced)
+#
+# Goal: this list should SHRINK over time, not grow. Every entry is a
+# deferred fix. Periodically audit; convert entries to real fixes.
+#
+# Reference: docs/loud_error_doctrine.md H9 section, "Codified pattern
+# with empirical anchors" subsection (Slot 1 — AST gate).
+
+allow_list:
+  # ─────────────────────────────────────────────────────────────────
+  # Chain-level-verified — wrapper itself is silent, but the
+  # consumer verifies side effect via authoritative checkpoint.
+  # The gate is function-scoped and can't see consumer-side
+  # verification. These are H9-compliant overall.
+  # ─────────────────────────────────────────────────────────────────
+
+  - module: packages.quantum.services.iv_repository
+    function: upsert_iv_point
+    rationale: >-
+      Post-PR-A-Layer-4 fix. Returns bool typed outcome (Rule 1).
+      Caller (iv_daily_refresh handler at jobs/handlers/iv_daily_refresh.py:130)
+      runs count_rows_for_date anchor checkpoint + fires
+      iv_handler_accounting_mismatch (critical) when stats lie.
+      Chain is H9-compliant; gate cannot see chain-level verification.
+    reviewer: Operator
+    added: "2026-05-12"
+    expires: "2026-08-12"
+
+  # ─────────────────────────────────────────────────────────────────
+  # Read-shaped despite "sync"/"refresh" naming — wrapper fetches
+  # broker state and returns it; no DB write side effect to verify.
+  # Tightening the name pattern in WRAPPER_NAME_PREFIXES would lose
+  # these, but it would also lose real write-side wrappers. Keep
+  # the broad pattern + allow-list the read-shaped exceptions.
+  # ─────────────────────────────────────────────────────────────────
+
+  - module: packages.quantum.brokers.execution_router
+    function: sync_positions
+    rationale: >-
+      Read-only Alpaca position fetch for logging/visibility. No DB
+      write side effect; returned dict is consumed by callers that
+      treat the status field as authoritative. Function name carries
+      'sync' but the operation is pure read.
+    reviewer: Operator
+    added: "2026-05-12"
+    expires: "2026-08-12"
+
+  - module: packages.quantum.brokers.position_sync
+    function: sync_from_alpaca
+    rationale: >-
+      Read-only Alpaca position fetch for reconciliation/visibility
+      (explicit comment 'Does NOT overwrite internal paper_positions').
+      No DB write side effect. Same shape as execution_router.sync_positions.
+    reviewer: Operator
+    added: "2026-05-12"
+    expires: "2026-08-12"
+
+  # ─────────────────────────────────────────────────────────────────
+  # Legacy migration candidates — function-level silent swallows
+  # that genuinely match H9 violation shape. Documented here as
+  # deferred work; entry rationale is the migration target. Sized
+  # too large to fix inline as part of the Slot 1 PR; will surface
+  # as backlog items for follow-up.
+  # ─────────────────────────────────────────────────────────────────
+
+  - module: packages.quantum.services.iv_point_service
+    function: upsert_point
+    rationale: >-
+      Legacy IV path; logger-only swallow on upsert failure. Returns
+      bool but no alert fires on the False branch. Migration candidate
+      — caller-side verification needed (similar to iv_repository
+      pattern), OR deprecation if iv_repository.upsert_iv_point is
+      the canonical path going forward. Tracked as H9 follow-up.
+    reviewer: Operator
+    added: "2026-05-12"
+    expires: "2026-08-12"
+
+  - module: packages.quantum.services.position_pnl_service
+    function: refresh_marks_for_user
+    rationale: >-
+      Legacy leg-level mark refresh; distinct from
+      paper_mark_to_market_service.refresh_marks (PR #919+#920 fix
+      path). Has logger.warning swallows on per-leg and per-group
+      errors with no alerts. Returns errors list to caller but
+      relies on caller to inspect. Migration candidate — same shape
+      as PR #919 fix would apply (add per-position alert + return
+      partial-status enum). Tracked as H9 follow-up.
+    reviewer: Operator
+    added: "2026-05-12"
+    expires: "2026-08-12"
+
+  - module: packages.quantum.services.universe_service
+    function: sync_universe
+    rationale: >-
+      Print-swallow on upsert failure to scanner_universe. Real H9
+      shape; small function. Fix candidate (~30 min) but out of scope
+      for the Slot 1 ship PR. Tracked as H9 follow-up. Migration:
+      replace 'print(f"Error syncing universe...")' with alert() per
+      Loud-Error Doctrine Anti-pattern 2.
+    reviewer: Operator
+    added: "2026-05-12"
+    expires: "2026-08-12"
+
+  - module: packages.quantum.jobs.handlers.alpaca_order_sync
+    function: sync_orders
+    rationale: >-
+      Nested handler with multiple logger-only silent paths (orphan
+      repair failure, reconcile failure, etc.). Larger refactor
+      candidate (~half day) — needs decomposition into smaller wrapper
+      functions before H9 verification points can be inserted cleanly.
+      Tracked as H9 follow-up; deferred until decomposition lands.
+    reviewer: Operator
+    added: "2026-05-12"
+    expires: "2026-08-12"

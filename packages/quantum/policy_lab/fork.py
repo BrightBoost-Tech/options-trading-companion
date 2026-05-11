@@ -61,7 +61,31 @@ def fork_suggestions_for_cohorts(
         logger.info(f"policy_lab_fork: no source suggestions for user={user_id}")
         return {"status": "no_source_suggestions", "created": {}}
 
-    # Tag source suggestions as the aggressive cohort (default)
+    # Tag source suggestions as the aggressive cohort (default).
+    #
+    # KNOWN WIRE-UP GAP (#62a-D1, addendum 2026-05-12):
+    # The designed mechanism reads the current champion via
+    # `policy_lab_cohorts.promoted_at` (set by the evaluator at
+    # `policy_lab/evaluator.py:537-545` when its 7 promotion gates
+    # pass). This site should be:
+    #
+    #     champion_row = (
+    #         supabase.table("policy_lab_cohorts")
+    #             .select("cohort_name")
+    #             .eq("user_id", user_id)
+    #             .not_.is_("promoted_at", "null")
+    #             .order("promoted_at", desc=True)
+    #             .limit(1)
+    #             .execute()
+    #     )
+    #     champion_name = champion_row.data[0]["cohort_name"] if champion_row.data else "aggressive"
+    #
+    # Hardcoded "aggressive" is a temporary workaround. Architectural
+    # PR queued post-CSX-validation week per the #62a-D1 backlog
+    # entry; see CLAUDE.md "Cohort architecture" addendum for full
+    # context. Live behavior unchanged at the time of wire-up because
+    # the operator-intent champion IS aggressive — the wire-up is
+    # mechanical correctness, not a behavior change.
     for s in source_suggestions:
         try:
             supabase.table("trade_suggestions").update({

@@ -2291,7 +2291,7 @@ Catalog summary:
 Status: AUDIT COMPLETE. Catalog forms the work plan for #62 proper.
 Sub-items #62a-D1 through #62a-D12 below.
 
-#### #62a-D1 — `is_champion` column missing (LATENT, HIGH)
+#### #62a-D1 — wire evaluator output to live route (HIGH; architectural PR queued)
 
 Verified 2026-04-26: column missing from `policy_lab_cohorts`, but
 autopilot has produced zero orders in 8+ days, and live routing
@@ -2315,6 +2315,114 @@ Fix scope after intent resolution:
   2026-04-02.
 
 Effort: ~2-4 hours after intent resolution.
+
+---
+
+**[ADDENDUM 2026-05-12 — sub-investigation complete + framing corrected]**
+
+Monday's sub-investigation (read-only diagnostic) refuted both the
+original "missing column" framing AND Monday morning's reframing as
+"complete the shadow-evaluate-promote system." The system is already
+complete in two parts that don't talk to each other.
+
+**Two-architecture finding:**
+
+| Architecture | Status | Mechanism |
+|---|---|---|
+| Champion/challenger evaluator | EXISTS_COMPLETE; runs daily | `promoted_at` column + 7 promotion gates + `policy_daily_scores` + `policy_lab_promotions` audit |
+| Live route hardcode | EXISTS_COMPLETE; runs in production | `fork.py:67` hardcodes `cohort_name = "aggressive"` |
+
+The evaluator (`packages/quantum/policy_lab/evaluator.py`) is fully
+built: 7 promotion gates (≥3 trading days, ≥10 closed trades, no
+-20% drawdown, ≥15% utility margin, ≥70% posterior probability
+challenger > default, drawdown not worse than champion, 2-day
+cooldown), `UPDATE policy_lab_cohorts SET promoted_at = NOW()`
+write at line 537-545, `policy_lab_promotions` audit table,
+rollback path, env-gated AUTO_PROMOTE. 4 successful job runs to
+date (latest 2026-05-08 21:30Z), 0 promotions written (no
+challenger has passed all gates so far OR AUTO_PROMOTE off).
+
+`fork.py:67`'s hardcode is original to the file (git blame shows
+commit `f396334f` from 2026-03-20 — the first commit that
+introduced fork.py). Never had dynamic-selection. The two
+architectures were authored independently and never wired.
+
+**Two `is_champion` silent-failure query sites are bugs:**
+- `paper_autopilot_service.py:867` `_get_champion_portfolio` —
+  queries `is_champion=True`, wrapped in try/except: pass,
+  returns None on exception (column doesn't exist → always None)
+- `paper_exit_evaluator.py:892` — fallback path queries
+  `is_champion=True`, logs to `_resolution_failures` list
+
+Both were written when someone assumed the migration's
+`is_champion=true` intent would land as a column. Migration
+INSERT does name `is_champion` in the column list but does NOT
+set `promoted_at`. Someone (operator) manually `UPDATE`'d
+`promoted_at` on neutral around 2026-04-02 21:28Z (closest to
+the migration apply window) as initial-champion designation.
+
+**Operator intent confirmed 2026-05-12:** aggressive = starting
+champion (matches fork.py:67's hardcode AND the live trading
+that's been running for 6+ weeks). Conservative + neutral run
+as shadow challengers on separate `paper_portfolio_id`s. When
+evaluator promotes a challenger (manually approved per C-1
+endpoint), live route follows.
+
+**Current DB state misalignment:** `promoted_at` is set on
+`neutral` (not aggressive) — predates the intent clarification.
+Architectural PR will correct.
+
+**Endpoint chosen: C-1 — read promoted_at + manual promotion only**
+- AUTO_PROMOTE stays OFF until evaluator's 7 gates have empirical
+  track record (currently 4 runs / 0 promotions; not enough data
+  to trust automated cohort switches on live capital)
+- C-2 (keep hardcoded aggressive) was rejected because the
+  evaluator's daily scoring would have no consumer
+- C-3 (full automation) was rejected as premature
+
+**Architectural PR scope (queued, ships after CSX validation week
+completes):**
+- DB: `UPDATE policy_lab_cohorts SET promoted_at = NOW() WHERE
+  cohort_name = 'aggressive'`; `UPDATE ... SET promoted_at = NULL
+  WHERE cohort_name = 'neutral'`
+- Fix the 2 silent-failure `is_champion` query sites:
+  - `paper_autopilot_service.py:867` `_get_champion_portfolio` —
+    rewrite to `WHERE promoted_at IS NOT NULL ORDER BY promoted_at
+    DESC LIMIT 1`; or delete if redundant after fork.py:67 change
+  - `paper_exit_evaluator.py:892` — same rewrite or delete
+- `fork.py:67`: read current champion's `cohort_name` via
+  `promoted_at` lookup instead of hardcoding `"aggressive"`
+- `POLICY_LAB_AUTOPROMOTE` stays OFF (no env-var change needed)
+- Optional cleanup: 3 orphan $500 "Main Paper" portfolios from
+  2026-04-02 (deferred per original entry — still applies)
+
+**Effort:** ~half day for architectural PR. Single validation
+cycle (live trading params don't change from current state because
+aggressive's policy_config matches the current hardcoded live route
+— wire-up is mechanical correctness, not behavior change).
+
+**Open future considerations (NOT in architectural PR scope):**
+- **Evaluator gate validation** — review the 7 gates for sanity
+  (sample size thresholds, posterior probability cutoff, drawdown
+  bounds). Should happen before AUTO_PROMOTE is enabled. Currently
+  4 runs / 0 promotions could be either "gates working, no
+  qualifying challenger" or "gates miscalibrated" — empirical
+  signal needed.
+- **AUTO_PROMOTE enablement** — separate work item; needs
+  empirical track record of manual promotions matching evaluator
+  recommendations first.
+- **Doctrine candidate** — "parallel architectures without
+  integration" as new class adjacent to H9 wrapper-drift. Two
+  complete subsystems can each work in isolation while the
+  integration seam (the writer's output → consumer's input wire)
+  is the bug. Worth design-review discussion.
+
+**Cross-references:**
+- Sub-investigation diagnostic 2026-05-12 (session history)
+- Sunday's #62a-D1 initial diagnostic 2026-05-10 (session history)
+- H9 doctrine (`docs/loud_error_doctrine.md`) — adjacent class
+- CLAUDE.md "Cohort architecture" section — known-gap state
+  documented in tandem with this entry
 
 #### #62a-D2 — `nested_regimes` writer deleted (CLOSED 2026-04-26)
 

@@ -2538,6 +2538,36 @@ init field + the scanner's batch-fetch call (always returned `{}`)
 the insufficient-history default). Drop-table migration shipped:
 `20260510000000_drop_trade_executions.sql`.
 
+**Migration applied 2026-05-10 20:08:01Z** via
+`mcp__supabase__apply_migration` (audit:
+`risk_alerts.id = 1553150d-353b-4729-ac2f-650a081f6009`,
+`schema_migrations.version = 20260510200701` /
+`name = drop_trade_executions`, commit `0acf897`). Verification
+confirmed: table dropped + both inbound FK constraints
+(`fk_suggestion_execution`, `fills_trade_execution_id_fkey`) gone +
+both orphan columns (`suggestion_logs.trade_execution_id`,
+`fills.trade_execution_id`) survived as nullable shells.
+
+**Apply-time finding (worth noting for future audits):** the
+migration comment had said "no inbound FKs" based on the original
+diagnostic; pre-flight at apply time surfaced 2 inbound FKs from
+`suggestion_logs` and `fills`. Both columns had ZERO populated rows
+(suggestion_logs: 216 total / 0 with FK set; fills: 0 total) and
+their only writer (`register_execution` via
+`position_ledger_service._insert_fill`) was already deleted in the
+same PR, so the CASCADE was operationally safe. The diagnostic's
+inbound-FK check was incomplete — for future drop-table migrations,
+run a `pg_constraint` query against `confrelid` rather than relying
+on `information_schema.referential_constraints`. Captured this as a
+diagnostic-methodology lesson.
+
+**Orphan-column cleanup follow-up:** `suggestion_logs.trade_execution_id`
+and `fills.trade_execution_id` survive as nullable shells. Neither
+has any writer post-PR-#912 deletion. Worth a small follow-up PR to
+drop the columns + remove `trade_execution_id` from `_insert_fill`'s
+parameter signature (its docstring already notes it's historical).
+Low priority; not load-bearing.
+
 **PRESERVED:** `ExecutionService.estimate_execution_cost` (called
 by `optimizer.py:543` — the only active caller) — refactored to
 always use the heuristic spread proxy since the history branch's

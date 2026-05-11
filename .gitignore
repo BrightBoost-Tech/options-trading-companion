@@ -49,6 +49,7 @@ server.log
 .pytest_cache/
 .coverage
 htmlcov/
+h9_violations.json
 
 # Supabase Temp
 supabase/.temp/

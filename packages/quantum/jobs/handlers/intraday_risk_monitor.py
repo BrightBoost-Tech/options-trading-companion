@@ -325,6 +325,14 @@ class IntradayRiskMonitor:
         # Batch fetch — routes options to Alpaca, equities to Polygon
         snapshots = truth_layer.snapshot_many(all_symbols)
 
+        # #2026-05-12 MTM-staleness PR-1: track positions whose in-memory
+        # recompute fails (multi-leg with any incomplete leg quote → the
+        # all_priced guard below short-circuits). Pre-fix, these silently
+        # retained their DB-staleness value and threshold checks operated
+        # on it. Tracking the skip set so we can emit a loud alert after
+        # the loop. H9 wrapper-drift class.
+        skipped_positions: List[Dict] = []
+
         # Update positions with fresh marks
         for pos in positions:
             legs = pos.get("legs") or []
@@ -371,6 +379,51 @@ class IntradayRiskMonitor:
                     pos["unrealized_pl"] = entry_value - abs(leg_total)
                 else:
                     pos["unrealized_pl"] = leg_total - entry_value
+            else:
+                # #2026-05-12 MTM-staleness PR-1: multi-leg recompute
+                # short-circuited due to at least one leg returning
+                # mid <= 0. Position retains its DB-stale unrealized_pl
+                # for the downstream threshold checks — record the skip
+                # so we alert after the loop.
+                skipped_positions.append({
+                    "position_id": pos.get("id"),
+                    "symbol": pos.get("symbol"),
+                    "leg_count": len([l for l in legs if isinstance(l, dict)]),
+                    "stale_unrealized_pl": float(pos.get("unrealized_pl") or 0),
+                })
+
+        # #2026-05-12 MTM-staleness PR-1: loud alert when any position's
+        # in-memory recompute failed. Pre-fix, the silent skip left
+        # threshold checks operating on DB-stale values (today's CSX:
+        # DB=-$8, Alpaca truth=-$196, no force-close fired). Same
+        # alert_type as paper_mark_to_market_service.refresh_marks's
+        # equivalent fire — queryable together; `source` distinguishes
+        # which refresh site fired.
+        if skipped_positions:
+            self._log_alert(
+                user_id=positions[0].get("user_id") if positions else "",
+                alert_type="mtm_refresh_partial",
+                severity="warning",
+                message=(
+                    f"intraday_risk_monitor MTM recompute skipped "
+                    f"{len(skipped_positions)} of {len(positions)} positions "
+                    f"due to incomplete leg quotes"
+                ),
+                metadata={
+                    "source": "intraday_risk_monitor._refresh_marks",
+                    "positions_skipped": len(skipped_positions),
+                    "total_positions": len(positions),
+                    "skipped": skipped_positions[:20],
+                    "consequence": (
+                        "Skipped positions retain stale DB unrealized_pl. "
+                        "Per-symbol / daily / weekly loss thresholds will "
+                        "operate on stale values; force-close may not fire "
+                        "on positions that have moved against us intraday. "
+                        "Resolved by PR-2 (broker-authoritative fallback "
+                        "via Alpaca.get_all_positions)."
+                    ),
+                },
+            )
 
         return positions
 

@@ -11,6 +11,8 @@ import logging
 from datetime import datetime, timezone, date
 from typing import Dict, Any, List, Optional
 
+from packages.quantum.observability.alerts import alert
+
 logger = logging.getLogger(__name__)
 
 
@@ -100,6 +102,12 @@ class PaperMarkToMarketService:
                     "id": pos_id,
                     "current_mark": per_contract_mark,
                     "unrealized_pl": unrealized,
+                    # last_marked_at populated ONLY on the success branch
+                    # (#2026-05-12 MTM-staleness PR-1). Skipped positions
+                    # intentionally leave this stale so future queries
+                    # like "open positions not marked in last 30m" surface
+                    # the silently-skipped ones.
+                    "last_marked_at": datetime.now(timezone.utc).isoformat(),
                     "updated_at": datetime.now(timezone.utc).isoformat(),
                 })
                 marked += 1
@@ -139,6 +147,45 @@ class PaperMarkToMarketService:
                 f"[MARK_TO_MARKET] user={user_id} marked={marked} "
                 f"skipped={skipped} (incomplete quotes) total={len(positions)}"
             )
+
+        # #2026-05-12 MTM-staleness PR-1: emit loud alert when refresh
+        # silently skipped any positions. Pre-fix, the skip path
+        # `continue`'d with no observability — callers
+        # (paper_exit_evaluator, intraday_risk_monitor via their own
+        # _refresh_marks) trusted the wrapper's "success" return and
+        # proceeded on stale unrealized_pl. H9 wrapper-drift class —
+        # see docs/loud_error_doctrine.md.
+        if skipped > 0 or errors:
+            try:
+                alert(
+                    self.client,
+                    alert_type="mtm_refresh_partial",
+                    severity="warning",
+                    message=(
+                        f"MTM refresh partial: {marked}/{len(positions)} marked, "
+                        f"{skipped} skipped due to incomplete leg quotes"
+                    ),
+                    user_id=user_id,
+                    metadata={
+                        "source": "paper_mark_to_market_service.refresh_marks",
+                        "positions_marked": marked,
+                        "positions_skipped": skipped,
+                        "total_positions": len(positions),
+                        "errors": errors[:20] if errors else [],
+                        "consequence": (
+                            "Skipped positions retain stale unrealized_pl "
+                            "from prior refresh. Risk envelope + exit "
+                            "evaluator will read stale values until the "
+                            "next successful refresh OR PR-2's broker "
+                            "fallback ships."
+                        ),
+                    },
+                )
+            except Exception as alert_err:
+                logger.warning(
+                    f"[MARK_TO_MARKET] mtm_refresh_partial alert path "
+                    f"failed: {alert_err}"
+                )
 
         return {
             "status": "ok" if not errors else "partial",

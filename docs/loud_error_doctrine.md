@@ -512,6 +512,167 @@ APScheduler-resident jobs, any long-running process on Railway.
 Does NOT affect FastAPI request handlers, which re-instantiate per
 request from the deployed image.
 
+### H9 — Verified-write across wrapper chains
+
+When data flows producer → wrapper(s) → consumer through more than
+one process boundary, **the consumer (or end of the chain) must
+verify the side effect actually occurred**, not infer success from
+intermediate "no exception raised" signals.
+
+This sits one level above Anti-pattern 8 (whitelist wrapper drops
+fields). Anti-pattern 8 is one *manifestation*; H9 is the *class*.
+Five+ data points surfaced this week confirm the class shape:
+producer assumes success, intermediate wrapper silently degrades
+output, consumer sees a default-shaped value (None / empty dict /
+fallback path), nothing alerts. Each layer in isolation looks
+correct. The defect is always in the seam.
+
+**The class is recursive.** Once you start fixing one cascade, the
+next layer's silent-degrade often surfaces as the layer before it
+gains honest accounting. PR-A (#115) was the headline example: a
+URL-typo fix exposed an enqueue-path drop, which exposed a missing
+DB constraint, which exposed a swallowed upsert, which exposed a
+body-dropping endpoint signature, which exposed a logger-formatter
+drop, which exposed an INTEGER coercion drop. Seven layers, each
+genuinely independent, surfaced one-by-one over 36 hours as each
+fix unblocked the next failure to become loud.
+
+#### The 2026-05-04 → 2026-05-10 catalog
+
+Six concurrent or near-concurrent instances surfaced this past week,
+each at a different boundary type:
+
+| # | Cascade | Boundary | Layers | Closure |
+|---|---|---|---|---|
+| 1 | PR #864 alpaca_client field-drop | provider→wrapper→consumer (HTTP API) | 1 | PR #864 fixed wrapper, PR #865 added consumer fallback alert |
+| 2 | #115 PR-A iv_daily_refresh | scheduler → endpoint → handler → DB write | 7 | PRs #899, #901, #903, #905, #906, #907 |
+| 3 | Issue B CSX close-orders (#908) | sizing → broker translation → broker API | 4 | PR #908 (sign-flip + clamp + alert + reason capture) |
+| 4 | #62a-D3 regime_snapshots | producer → DB write into missing table | 1 (silent) | PR #912 deletion |
+| 5 | #62a-D5 / #117 DROPPABLE shim | producer → persistence shim → DB | 1 (silent strip + retry) | PR #912 (D5 fields) + #117 backlog (broader audit) |
+| 6 | drop-table apply-time FK surprise | diagnostic tool → operator | 1 (`information_schema` underreports) | This week's #62a sweep documented the methodology gap |
+
+The boundaries vary widely (HTTP API, DB constraint, broker
+gateway, scheduler URL, persistence shim, diagnostic introspection).
+The shape is identical: an intermediate transform silently degrades
+information, and a downstream consumer or operator proceeds on a
+false-positive success signal.
+
+#### Detection signatures
+
+These shapes are high-risk and should trigger careful review at PR
+time:
+
+- **Wrapper hand-builds output dict** instead of forwarding the
+  upstream object. Risk: any new field the consumer needs from
+  upstream silently goes missing. Anti-pattern 8 case.
+- **Wrapper catches exceptions and returns success-shaped default**
+  without alerting. Risk: consumer can't distinguish "operation
+  succeeded with no result" from "operation failed silently."
+  Anti-pattern 2 case.
+- **Producer's success indicator doesn't reflect the side effect**
+  (e.g., function returns "ok" without checking the DB row landed,
+  HTTP returns 202 without verifying the queue accepted the job).
+  Risk: handler-trusts-wrapper class.
+- **Consumer fallback path is operationally indistinguishable from
+  the success path** (e.g., empty dict produces same downstream
+  behavior as a populated dict that happens to have no entries).
+  Risk: silent fallback masks upstream failure for unbounded time.
+- **Type signature lies** (function annotated `-> dict` returns
+  `{}` on both success-with-no-data AND failure). Risk: caller
+  can't distinguish.
+- **Tooling that under-reports** (introspection query, schema
+  lookup, FK enumerator that misses some entries). Risk: diagnostic
+  itself becomes a wrapper-drift instance. The 2026-05-10
+  drop-table apply caught this — `information_schema.referential_constraints`
+  underreported inbound FKs vs `pg_constraint`-against-`confrelid`.
+
+#### Convention: "verified-write"
+
+For any operation with externally-visible side effects, the
+producer/wrapper/consumer chain MUST satisfy:
+
+1. **Wrappers return outcome, not just absence-of-exception.**
+   Boolean / Result / typed enum reflecting the actual write.
+   Pre-#115-PR-A `IVRepository.upsert_iv_point` returned `None`
+   on both success and failure; post-fix it returns `bool`
+   distinguishing the two paths.
+
+2. **Consumers verify the outcome AND verify the side effect at
+   anchor checkpoints.** Anchor checkpoints are independent
+   queries that confirm the chain worked end-to-end (the fish
+   actually got into the boat, not just that the line tugged).
+   PR-A Layer 4's `count_rows_for_date` post-loop check is the
+   reference implementation. The handler's per-symbol stats can
+   lie; the row count cannot.
+
+3. **Silent-degrade paths must `alert()` per Anti-pattern 2.**
+   The DROPPABLE shim's `print(...)` was the failure mode that
+   let #62a-D5's silently-dropped fields persist for unknown
+   duration. Loud-Error Doctrine v1.0 is structurally what closes
+   wrapper drift over time.
+
+4. **Class-prevention tests at the seam, not just at the
+   endpoints.** The wrapper boundary is what drifts; the test
+   should walk the chain and assert the field/outcome survives.
+   `test_alpaca_client_get_account_wrapper.py` (PR #864) and
+   `TestNoProductionCodeImportsLegacyEnqueue` (PR #913) are the
+   reference shape.
+
+#### Cascading-cascade discipline
+
+When one wrapper-drift fix surfaces another, the temptation is to
+batch them all into one mega-PR. Don't. Each layer should ship
+independently so:
+
+- Each layer's deploy validates the next-layer surface before fixing
+  it. Pre-PR-A Layer 4's accounting fix, Layers 5 and 6 weren't
+  visible. Skipping the validation cycle would have shipped Layer 5
+  blind — it would have surfaced via the next operator-driven
+  re-fire instead.
+- Each layer's PR description carries a single clean root-cause
+  story rather than a tangled multi-cause narrative. Future debugging
+  benefits from linear history.
+- The doctrine-document anchor (this entry) gets one new data point
+  per PR, not a blob of 5+ items in one commit.
+
+The cascading-cascade pattern is itself a class signature: if PR-A's
+shape recurs (single-cascade investigation that grows into a
+multi-PR sequence), explicit "wait for next-layer surface before
+shipping the next fix" discipline is what keeps the work tractable.
+
+#### Anti-pattern catalog updates
+
+Anti-pattern 2 (silent fallback) and Anti-pattern 8 (whitelist
+wrapper) remain the specific code-shape rules. H9 sits above them
+and answers the meta-question: when these shapes manifest in a
+chain rather than a single function, how do you prevent the chain
+from silently degrading end-to-end?
+
+**Future class-prevention infrastructure candidates** (separate
+backlog work):
+
+- AST test asserting every internal_tasks `@router.post` accepts
+  `Body(...)` (catches future Class-B body-drop reintroduction;
+  deferred from #71 Tier 3).
+- Grep test asserting wrappers in `packages/quantum/brokers/`
+  forward upstream objects rather than hand-building return dicts
+  (catches future Anti-pattern 8 reintroduction).
+- Convention enforcement via pyright/mypy: wrapper return types
+  must be unions like `Result[T, E]` or `Optional[T]` with
+  documented success/failure semantics, not bare `Dict[str, Any]`
+  that lies about success.
+
+#### Origin
+
+2026-05-04 → 2026-05-10 cascade week. PR-A's 7-layer cascade was
+the headline; Issue B + #62a + #117 + #864 are the concurrent data
+points that elevate this from "interesting incident" to
+"architectural class." Adding this as H9 captures the synthesis
+while it's fresh — the operator-side question for Monday review is
+**which class-prevention infrastructure to ship next** (the AST/
+wrapper-grep/type-narrowing candidates above), not whether the
+class is real.
+
 ## Valid silent-failure patterns
 
 Not all exception swallowing is a doctrine violation. The following

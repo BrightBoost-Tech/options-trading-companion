@@ -693,6 +693,335 @@ producer/wrapper/consumer chain MUST satisfy:
    `TestNoProductionCodeImportsLegacyEnqueue` (PR #913) are the
    reference shape.
 
+#### Codified pattern with empirical anchors (2026-05-12)
+
+The four rules above are abstract. The five H9 instances closed
+between 2026-05-04 and 2026-05-12 used a consistent concrete fix
+shape. Codifying it here with the actual code anchors so future
+fixes can copy from precedent rather than re-derive.
+
+##### Cross-instance fix-pattern table
+
+| Instance | Boundary | Wrapper's pre-fix claim | Actual outcome | Fix shape (rule mapping) |
+|---|---|---|---|---|
+| PR-A Layer 4 (PR #903) | DB write (`upsert_iv_point`) | `None` return on both success/exception | Silent rejection (PostgreSQL 42P10 from missing UNIQUE) | Typed return + anchor checkpoint + critical alert (Rules 1+2+3) |
+| Issue B / PR #908 | Broker API (`build_alpaca_order_request`) | Positive limit_price clamped to ≥0.01 → "submitted" | Alpaca rejected with 4-9ms latency (sign convention) | Sign-preserving magnitude clamp + `order_rejected_by_broker` alert at poll site (Rules 1+3) |
+| PR #864 | Broker API (`AlpacaClient.get_account`) | Hand-built dict missing `options_buying_power` | Consumer fell back to `paper_baseline_capital` for 5 days | Wrapper forwards field + source-level guard test + consumer-fallback alert (Rules 1+4 + Anti-pattern 8) |
+| #62a-D5 / #117 (PR #912) | Persistence shim (`DROPPABLE_SUGGESTION_COLUMNS`) | `print(...)` on drop, retry, return success | Fields silently stripped for unknown duration | Loud-Error Doctrine Anti-pattern 2 closure + field-presence audit (Rule 3) |
+| MTM PR-1+PR-2 (#919, #920) | Refresh service (`refresh_marks`) | `{"status": "ok"}` on partial-skip | DB unrealized stale by -$188 | `{ok, partial, fallback_used, skipped}` return + `last_marked_at` column + `mtm_refresh_partial` alert + broker-authoritative fallback (Rules 1+2+3) |
+
+The boundaries differ (DB write, broker API in/out, persistence
+shim, refresh-side-effect) but each fix used the same building
+blocks: typed return + anchor checkpoint + loud-partial alert.
+
+##### Rule 1 — Typed-outcome return (concrete anchors)
+
+The wrapper's return must distinguish "wrote it" from "didn't
+write it" — boolean / Result / typed enum, not `None` on both
+paths or `dict` with single `"status": "ok"` shape that doesn't
+encode partial state.
+
+- **PR-A Layer 4 anchor:** `IVRepository.upsert_iv_point` at
+  `packages/quantum/services/iv_repository.py:50-55` —
+  `-> bool` annotation; returns `True` on confirmed write, `False`
+  on exception OR empty PostgREST `result.data` (server-side
+  silent rejection).
+- **MTM PR-1 anchor:** `refresh_marks` at
+  `packages/quantum/services/paper_mark_to_market_service.py:29`
+  returns extended dict including
+  `{"status", "positions_marked", "positions_skipped",
+  "fallback_used", "errors", "total_positions"}` — `status`
+  enum carries `"ok"`, `"partial"`, `"failed"` semantics; the
+  count fields encode partial state explicitly.
+- **#864 anchor:** `AlpacaClient.get_account` at
+  `packages/quantum/brokers/alpaca_client.py:200-225` —
+  `options_buying_power` uses **None-preserving coercion**
+  (`float(_obp) if _obp is not None else None`) so consumers can
+  distinguish "field absent" from "valid 0.0", which is itself a
+  typed-outcome distinction.
+
+##### Rule 2 — Anchor checkpoint (concrete anchors)
+
+Independent query / authoritative re-read that confirms the
+side effect occurred. Not the wrapper's own success indicator.
+
+- **PR-A Layer 4 anchor:** `IVRepository.count_rows_for_date(date)`
+  at `packages/quantum/services/iv_repository.py:158`. The
+  handler at `packages/quantum/jobs/handlers/iv_daily_refresh.py:130`
+  calls it post-loop; mismatch with `stats["ok"]` fires
+  `iv_handler_accounting_mismatch` (`severity="critical"`,
+  `:137-153`). Returns `-1` sentinel on query failure so the
+  handler doesn't fire false positives when verification itself
+  fails.
+- **MTM PR-2 anchor:**
+  `paper_mark_to_market_service._compute_position_value_from_broker`
+  at `:518` reads from broker-authoritative
+  `broker_positions_by_symbol` dict (pre-fetched via
+  `Alpaca.get_all_positions()` at `:73-95`) when snapshot path
+  returns incomplete leg pricing. Verification source IS the
+  broker, not derived snapshot state.
+- **#864 anchor:** PR #864's
+  `test_alpaca_client_get_account_wrapper.py` is the anchor
+  checkpoint at the source-code level — asserts the wrapper
+  exposes the field. PR #865 added the consumer-side alert at
+  `cash_service` fallback so missing-field surfaces at runtime
+  within one cycle.
+
+##### Rule 3 — Loud-partial alert (concrete anchors)
+
+When partial state is encountered, emit an alert per Anti-pattern
+2. The wrapper's return must enable callers to distinguish, AND
+the wrapper itself must alert when it detects partial.
+
+- **MTM PR-1 anchor:** `mtm_refresh_partial` alert at
+  `paper_mark_to_market_service.py:240` (severity=warning,
+  metadata includes `{positions_marked, positions_skipped,
+  total_positions, source, errors, consequence, fallback_used,
+  skipped}` — captures both "what was skipped" and "what fell
+  back to broker authoritative").
+- **#908 anchor:** `order_rejected_by_broker` alert at
+  `packages/quantum/brokers/alpaca_order_handler.py:705`
+  (severity=critical, 1/hour throttled per
+  `(alert_type, position_id)` via the dedup query at `:687`).
+  Wrapped in try/except so alert-path failure never breaks the
+  poll loop's primary work.
+- **PR-A Layer 4 anchor:** `iv_handler_accounting_mismatch` at
+  `iv_daily_refresh.py:137-153` (severity=critical, metadata
+  includes `{stats_ok, actual_rows, delta, as_of_date,
+  doctrine_ref}`).
+- **#62a-D5 anchor:** the DROPPABLE shim's `print(...)` was
+  exactly the failure mode this rule forbids. PR #912 closed
+  the silent path; Anti-pattern 2 in this doctrine documents
+  the broader shape.
+
+##### Boundary-specific applications
+
+The convention applies across four boundary types with shape
+variations. The first three have empirical instances; the
+fourth is hypothetical.
+
+| Boundary | Producer | Anchor checkpoint | Alert pattern | Reference instance |
+|---|---|---|---|---|
+| DB write | iteration writing rows | `SELECT COUNT(*)` vs expected | `<handler>_accounting_mismatch` | PR-A Layer 4 / `iv_handler_accounting_mismatch` |
+| Broker API (outbound) | order construction / submission | re-read order from broker; check fields match intent | `order_rejected_by_broker` or `broker_intent_mismatch` | PR #908 + #864 |
+| Refresh / RMW | data-fetch that may return incomplete data | timestamp/completeness probe (e.g. `last_marked_at`) | `<service>_refresh_partial` | MTM PR-1+PR-2 |
+| CLI/route | HTTP endpoint / CLI command | re-read state via separate endpoint to confirm action | `<endpoint>_action_unconfirmed` | **None yet** — first instance will calibrate |
+
+For DB writes specifically: prefer authoritative-source
+verification (the table the wrapper writes to) over derived
+stats. `stats["ok"]` is a producer's claim;
+`count_rows_for_date` is the side effect itself.
+
+For broker API: prefer the broker as authoritative
+(`get_all_positions()`, `get_order(id)`) over our own ledger.
+The broker is the source of truth for what actually exists in
+the market; our ledger is a hopeful mirror.
+
+##### When the convention does NOT apply
+
+The convention is for wrappers where the return value drives
+downstream decisions on operationally important side effects.
+It is NOT required for:
+
+- **Pure functions** with no side effects (nothing to verify).
+- **Fire-and-forget logging** where the wrapper's failure is
+  acceptable (the failure mode itself is the "no log line").
+- **Wrappers where the side effect IS the return value** (e.g.,
+  `compute_unified_score(...)` returns the score; there is no
+  separate side effect).
+- **Hot-path inner loops** where authoritative re-read would
+  add unacceptable latency. In this case, fall back to typed
+  return + alert; skip the anchor checkpoint, but DO emit
+  alerts on partial state so operators can sample post-hoc.
+
+Use judgment. The convention prevents wrapper-drift on
+operationally important side effects; it does not exist to add
+ceremony to every function call.
+
+##### Future considerations
+
+- **CLI/route boundary instances:** the convention's shape there
+  is hypothetical. First real instance will refine — e.g., a
+  CLI command that triggers a side-effect endpoint and needs
+  post-hoc verification before reporting success to the
+  operator.
+- **Cost of verification:** Rule 2 (anchor checkpoint) adds API
+  calls or DB reads. Acceptable trade-off for operationally
+  important side effects; not always for every wrapper. See
+  "hot-path inner loops" exception above.
+- **Recursive verification:** if the verification step itself
+  uses a wrapper, the same convention applies recursively.
+  Cycle-safety needs monitoring (verify-then-verify-then-verify
+  could exhaust budget). Pre-fetch + cache pattern in MTM PR-2
+  amortizes this — broker positions fetched once, used as
+  verification source for many positions.
+
+#### Class-prevention infrastructure proposals (2026-05-12)
+
+Three infrastructure pieces would mechanically enforce H9
+Convention. Ranked by coverage × effort + precedent strength.
+
+Each proposal is a future PR slot, not part of this codification
+PR.
+
+##### Slot 1 — AST gate: "wrapper returns success without verification"
+
+**Goal:** at CI time, flag Python wrapper functions that return
+typed-success indicators without a corresponding verification
+step.
+
+**Detection heuristic:**
+- Function name matches side-effect wrapper pattern:
+  `refresh_*`, `write_*`, `submit_*`, `update_*`, `upsert_*`,
+  `persist_*`, `apply_*`, `mark_*` (configurable allow-list).
+- Function returns dict with `"status"` key OR returns `bool`
+  OR returns enum/Literal that carries success/failure
+  semantics.
+- Function body OR caller chain contains NO verification
+  pattern: no `count_*_for_*`, `get_*_by_id`, `assert_*`,
+  `verify_*`, post-loop `SELECT COUNT`, broker-side re-read.
+
+**Precedent:** PR #917 Class B AST gate
+(`test_internal_tasks_class_b_body_gate.py`) — uses
+`ast.parse` + node-walker to enforce structural rules on
+`/internal/tasks/*` endpoints. Same skeleton applies here.
+
+**Coverage:** would have caught all 5 H9 instances at PR time
+(each wrapper had typed return without verification before
+the fix). High-precision rule via name + signature filtering.
+
+**Effort:** ~half day implementation + ~half day to build the
+allow-list with operator sign-off on legitimate exceptions
+(e.g., fire-and-forget loggers, pure-compute wrappers
+mis-named).
+
+**Limitations:**
+- False positives on wrappers whose verification is implicit
+  in the caller chain (e.g., test wrappers, scheduler retry
+  paths).
+- Doesn't catch verification that exists but is wrong (verifies
+  the wrong thing, returns dummy data).
+- Naming-pattern drift requires periodic allow-list maintenance.
+
+**Test fixtures:** each of the 5 H9 instances has a "before"
+code state available via `git show <pre-fix-sha>`. Build
+fixtures from those; verify the AST gate flags each.
+
+##### Slot 2 — Grep test: silent-exception patterns in wrapper paths
+
+**Goal:** detect `try: ... except: pass`,
+`try: ... except: return None`, and `print(...)` swallow
+patterns specifically in wrapper-path files
+(`services/`, `brokers/`, `jobs/handlers/`).
+
+**Detection rule (regex sketch, brittle but viable):**
+- Pattern: `except.*:\s*\n\s*(pass|return None|return False|continue|print\()`
+- Scope: only files under `packages/quantum/services/`,
+  `packages/quantum/brokers/`, `packages/quantum/jobs/handlers/`.
+- Allow-list: per-file or per-line annotation pragma
+  (`# noqa: H9-AP2-VALID` for legitimate cases — Valid 5
+  alert-write recursion, Valid 7 idempotent inserts).
+
+**Precedent:** PR #913 Tier 3 widen test (legacy `enqueue_idempotent`
+grep gate). Same shape: codebase-wide scan with allow-list.
+
+**Coverage:** medium. Catches Anti-pattern 1 (bare except: pass)
+and Anti-pattern 2 (log-only swallow) in the boundary-relevant
+directories. Misses wrappers that return success-shaped data
+without try/except at all (Slot 1 covers those).
+
+**Effort:** ~2 hours. Most of the cost is curating the initial
+allow-list — every existing `except: pass` in scope needs an
+explicit decision (legitimate / refactor target / migrate to
+alert).
+
+**Limitations:**
+- Brittle regex; can be evaded with slightly different syntax
+  (`except Exception as _: pass` doesn't match the simplest
+  rule).
+- Doesn't understand semantics — some `except: pass` is
+  legitimate (Valid 5 alert-write recursion, Valid 7
+  idempotency).
+- Requires growing allow-list as new legitimate cases surface.
+
+**Cross-reference with Anti-pattern 2 above:** the doctrine
+already forbids silent-fallback; this gate mechanizes the
+forbiddance for the high-risk directories.
+
+##### Slot 3 — Type-narrowing convention: Literal status returns
+
+**Goal:** encode the "fully succeeded / partial / failed"
+distinction in return types so the type checker forces callers
+to handle each case explicitly.
+
+**Convention sketch:**
+```python
+from typing import Literal, TypedDict
+
+class RefreshResult(TypedDict):
+    status: Literal["ok", "partial", "failed"]
+    marked: int
+    skipped: list[str]
+    errors: list[dict]
+
+def refresh_marks(user_id: str) -> RefreshResult:
+    ...
+
+# Caller must handle all 3 Literal cases
+match result["status"]:
+    case "ok":     ...
+    case "partial": ...   # mypy/pyright enforces no-skip
+    case "failed":  ...
+```
+
+**Precedent:** no direct codebase precedent yet. Would establish
+the pattern for new wrappers. MTM PR-1's extended return shape
+is the implicit precedent — explicit Literal typing would
+formalize it.
+
+**Coverage:** new wrappers + opt-in refactors of existing
+wrappers. Does not retrofit; grows over time.
+
+**Effort:** ongoing rather than one-shot. Per-wrapper effort is
+~10 min (TypedDict definition + caller-site match statement).
+mypy strict mode requirement is the upfront cost; current
+codebase config likely needs incremental tightening.
+
+**Limitations:**
+- Doesn't retrofit existing code without operator decision.
+- Requires mypy strict mode OR pyright strict — current CI
+  may not have either enabled at the requisite level.
+- Adds slight verbosity at caller sites (match statement vs
+  single dict-key check).
+
+##### Priority recommendation
+
+Ship **Slot 1 first** (AST gate): highest coverage, clearest
+precedent (#917), would have caught all 5 known H9 instances
+at PR time. Ship **Slot 2 second**: backfills the
+silent-exception pattern coverage in the same directories.
+Adopt **Slot 3 as convention** for new wrappers — no upfront
+retrofit, but new code should follow the Literal pattern.
+
+If only one slot ships near-term: **Slot 1.** It is the highest
+leverage; Slot 2's coverage is partially redundant with
+Anti-pattern 2 already documented, and Slot 3 grows from
+discipline rather than enforcement.
+
+If verification reveals Slot 1's AST gate would cover Slot 2's
+grep pattern as a subset (i.e., the AST gate already detects
+silent-exception inside wrapper bodies), **consolidate** rather
+than ship overlapping infrastructure.
+
+##### Status
+
+- **Slot 1:** PR slot queued. No assignee, no scheduled merge.
+- **Slot 2:** PR slot queued behind Slot 1. May be cancelled
+  if Slot 1 covers the same surface.
+- **Slot 3:** convention adopted for new wrappers starting
+  2026-05-13. No infrastructure work required; code review
+  catches violations.
+
 #### Cascading-cascade discipline
 
 When one wrapper-drift fix surfaces another, the temptation is to
@@ -744,13 +1073,17 @@ from silently degrading end-to-end?
 **Future class-prevention infrastructure candidates** (separate
 backlog work):
 
-- Grep test asserting wrappers in `packages/quantum/brokers/`
-  forward upstream objects rather than hand-building return dicts
-  (catches future Anti-pattern 8 reintroduction).
-- Convention enforcement via pyright/mypy: wrapper return types
-  must be unions like `Result[T, E]` or `Optional[T]` with
-  documented success/failure semantics, not bare `Dict[str, Any]`
-  that lies about success.
+Replaced 2026-05-12 by the **Slot 1 / Slot 2 / Slot 3** ranked
+proposals in "Class-prevention infrastructure proposals" above.
+The two bullets that previously lived here (broker-wrapper grep
+test + pyright/mypy convention) are subsumed:
+- Broker-wrapper grep → Slot 2 (silent-exception patterns in
+  wrapper paths, scoped to `services/` + `brokers/` + `jobs/handlers/`)
+- pyright/mypy Literal convention → Slot 3 (Literal status
+  returns)
+
+Plus a new Slot 1 (AST gate for wrappers-without-verification)
+that has no prior bullet and is the recommended first ship.
 
 #### Origin
 

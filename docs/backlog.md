@@ -6,6 +6,43 @@ Last migrated from CLAUDE.md: 2026-04-28.
 
 ---
 
+## Recent operational events
+
+**[2026-05-11] CSX ghost position reconciled.**
+Pre-state: `paper_positions` row `1f77f6af-b536-46a3-9975-88dfef41f855`
+at `status='open'` (6 days old) despite Alpaca-side close at
+2026-05-11 15:06:50Z. Action: UPDATE to `status='closed'`,
+`closed_at='2026-05-11 15:06:50.319+00'`,
+`realized_pl=-161.00`,
+`close_reason='manual_close_user_initiated'`,
+`fill_source='manual_endpoint'`. Audit row:
+`risk_alerts.id = bed2ccf6-d5e4-4ce1-8a5c-20f98a0f2b7a`. P&L derived
+from authoritative Alpaca fills: entry $216 debit (BUY 43C @ $2.66
++ SELL 47C @ $0.50, 2026-05-05), close $55 credit (SELL 43C @ $1.15
++ BUY 47C @ $0.60, 2026-05-11) → -$161.00 realized. Zero fees
+(Alpaca paper account doesn't charge regulatory fees on options).
+Trigger: yesterday's MTM-staleness intraday blind spot caused operator
+to manually close via Alpaca UI; that path bypasses our submission
+chain so the DB row was never reconciled. MTM-staleness root cause
+since fixed by PRs #919 + #920. Effect: 12+ `ghost_position` alerts
+per hour cease firing against this row; open position count = 0.
+
+**FOLLOW-UP: ghost_position alert throttle review** (LOW, ~30-60 min)
+PR #98 Option B documented a 1-hour idempotency window on
+`ghost_position` alerts via the `metadata->>order_id` JSON-path
+filter. Observed today (2026-05-11): 12 fires in 1h against the
+single CSX ghost row, ~1 fire per 5 min matching the
+`alpaca_order_sync` cadence. Implication: throttle is either broken
+OR keyed differently than expected (e.g., per-cycle instead of
+per-position, or the keying field doesn't disambiguate cycles).
+Priority LOW (only fires on ghost rows, which should be rare
+post-reconcile). Investigate after a follow-up ghost surfaces or as
+hygiene work. Captured separately rather than fixed inline because
+the reconciliation makes the throttle issue operationally inert
+today.
+
+---
+
 ## Backlog (post-promotion)
 
 **Tier-promotion rewrite — CLOSED 2026-05-06** (PR #<NUM>)

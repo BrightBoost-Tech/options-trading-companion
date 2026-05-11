@@ -60,8 +60,64 @@ class PaperMarkToMarketService:
         # Single batched snapshot call (uses /v3/snapshot with ticker.any_of)
         snapshots = truth_layer.snapshot_many(all_leg_symbols) if all_leg_symbols else {}
 
+        # #2026-05-13 MTM-staleness PR-2: bulk pre-fetch Alpaca's
+        # broker-authoritative position values (single API call per
+        # refresh cycle). Used as fallback when snapshot path returns
+        # incomplete leg data. Pre-fix this path silently skipped such
+        # positions → DB unrealized_pl stayed stale → risk envelope ran
+        # on stale value (2026-05-12 CSX: DB -$8 vs Alpaca truth -$196).
+        # Dict keyed by Polygon-format OCC symbol (matches leg.occ_symbol
+        # / leg.symbol convention); Alpaca's serializer at
+        # alpaca_client.py:_serialize_position converts to that format
+        # for length->10 option symbols.
+        broker_positions_by_symbol: Dict[str, Dict[str, Any]] = {}
+        try:
+            from packages.quantum.brokers.alpaca_client import get_alpaca_client
+            alpaca = get_alpaca_client()
+            if alpaca:
+                for bp in alpaca.get_positions():
+                    sym = bp.get("symbol")
+                    if sym:
+                        broker_positions_by_symbol[sym] = bp
+        except Exception as exc:
+            logger.warning(
+                f"[MARK_TO_MARKET] Alpaca position pre-fetch failed: {exc}. "
+                f"Falling back to snapshot-only path; any positions with "
+                f"incomplete snapshots will silently skip + fire "
+                f"mtm_refresh_partial alert per PR-1."
+            )
+            try:
+                alert(
+                    self.client,
+                    alert_type="mtm_broker_prefetch_failed",
+                    severity="warning",
+                    message=(
+                        f"Alpaca position pre-fetch failed during refresh_marks: "
+                        f"{type(exc).__name__}"
+                    ),
+                    user_id=user_id,
+                    metadata={
+                        "source": "paper_mark_to_market_service.refresh_marks",
+                        "error_class": type(exc).__name__,
+                        "error_message": str(exc)[:500],
+                        "consequence": (
+                            "Broker fallback unavailable this cycle. "
+                            "Positions with incomplete snapshots will silently "
+                            "skip per pre-PR-2 behavior (PR-1's "
+                            "mtm_refresh_partial alert still fires). "
+                            "Re-fires next cycle (15-min cadence)."
+                        ),
+                    },
+                )
+            except Exception as alert_err:
+                logger.warning(
+                    f"[MARK_TO_MARKET] mtm_broker_prefetch_failed alert "
+                    f"path failed: {alert_err}"
+                )
+
         marked = 0
         skipped = 0
+        fallback_used = 0
         errors = []
         batch_updates = []
 
@@ -69,10 +125,31 @@ class PaperMarkToMarketService:
             pos_id = pos["id"]
             try:
                 current_value = self._compute_position_value_from_snapshots(pos, snapshots)
+                value_source = "snapshot"
                 if current_value is None:
-                    skipped += 1
-                    errors.append({"position_id": pos_id, "error": "incomplete_quotes_skipped"})
-                    continue
+                    # #2026-05-13 MTM-staleness PR-2: snapshot path returned
+                    # None (incomplete leg pricing). Try broker-authoritative
+                    # fallback via Alpaca position values before giving up.
+                    # If broker fallback also fails (drift case: leg absent
+                    # from Alpaca, or pre-fetch failed earlier this cycle),
+                    # silent-skip + PR-1's alert as before.
+                    current_value = self._compute_position_value_from_broker(
+                        pos, broker_positions_by_symbol,
+                    )
+                    if current_value is None:
+                        skipped += 1
+                        errors.append({
+                            "position_id": pos_id,
+                            "error": "snapshot_incomplete_and_broker_lookup_missing",
+                        })
+                        continue
+                    value_source = "alpaca_fallback"
+                    fallback_used += 1
+                    logger.info(
+                        f"[MARK_TO_MARKET] Broker fallback used for "
+                        f"position={pos_id} symbol={pos.get('symbol')} "
+                        f"current_value={current_value}"
+                    )
 
                 qty = float(pos.get("quantity") or 1)
                 multiplier = 100
@@ -148,13 +225,14 @@ class PaperMarkToMarketService:
                 f"skipped={skipped} (incomplete quotes) total={len(positions)}"
             )
 
-        # #2026-05-12 MTM-staleness PR-1: emit loud alert when refresh
-        # silently skipped any positions. Pre-fix, the skip path
-        # `continue`'d with no observability — callers
-        # (paper_exit_evaluator, intraday_risk_monitor via their own
-        # _refresh_marks) trusted the wrapper's "success" return and
-        # proceeded on stale unrealized_pl. H9 wrapper-drift class —
-        # see docs/loud_error_doctrine.md.
+        # PR-1 alert reframed by PR-2 (#2026-05-13): pre-PR-2 this fired
+        # whenever snapshot was incomplete (frequent — option-leg quote
+        # data is unreliable on Alpaca paper account). Post-PR-2 it fires
+        # only when BOTH snapshot AND broker fallback failed — true drift
+        # case: Alpaca-side position missing for a leg we have in DB, or
+        # broker pre-fetch failed earlier this cycle. Alert count should
+        # drop to near-zero after PR-2 merges; remaining fires indicate
+        # genuine drift worth investigating.
         if skipped > 0 or errors:
             try:
                 alert(
@@ -162,22 +240,27 @@ class PaperMarkToMarketService:
                     alert_type="mtm_refresh_partial",
                     severity="warning",
                     message=(
-                        f"MTM refresh partial: {marked}/{len(positions)} marked, "
-                        f"{skipped} skipped due to incomplete leg quotes"
+                        f"MTM refresh partial: {marked}/{len(positions)} marked "
+                        f"({fallback_used} via broker fallback), "
+                        f"{skipped} skipped — BOTH snapshot AND broker "
+                        f"fallback failed"
                     ),
                     user_id=user_id,
                     metadata={
                         "source": "paper_mark_to_market_service.refresh_marks",
                         "positions_marked": marked,
                         "positions_skipped": skipped,
+                        "fallback_used": fallback_used,
                         "total_positions": len(positions),
                         "errors": errors[:20] if errors else [],
                         "consequence": (
-                            "Skipped positions retain stale unrealized_pl "
-                            "from prior refresh. Risk envelope + exit "
-                            "evaluator will read stale values until the "
-                            "next successful refresh OR PR-2's broker "
-                            "fallback ships."
+                            "Skipped positions retain stale unrealized_pl. "
+                            "Post-PR-2 semantics: this state indicates true "
+                            "drift (e.g., Alpaca-side position missing for a "
+                            "leg in DB) or broker pre-fetch failure earlier "
+                            "this cycle — not the routine snapshot-incomplete "
+                            "case that PR-2 handles via fallback. Investigate "
+                            "per-position errors below."
                         ),
                     },
                 )
@@ -191,6 +274,11 @@ class PaperMarkToMarketService:
             "status": "ok" if not errors else "partial",
             "positions_marked": marked,
             "positions_skipped": skipped,
+            # #2026-05-13 PR-2 success metric: how often did broker
+            # fallback rescue an incomplete snapshot? Operator can
+            # query the result envelope to monitor this directly
+            # (or grep "Broker fallback used" in logs).
+            "fallback_used": fallback_used,
             "errors": errors if errors else None,
             "total_positions": len(positions),
         }
@@ -422,6 +510,97 @@ class PaperMarkToMarketService:
                 f"{len(failed_legs)}/{priceable_legs} legs failed to price "
                 f"({', '.join(failed_legs)}). Keeping previous mark."
             )
+            return None
+
+        return sum(leg_values)
+
+    @staticmethod
+    def _compute_position_value_from_broker(
+        position: Dict[str, Any],
+        broker_positions_by_symbol: Dict[str, Dict[str, Any]],
+    ) -> Optional[float]:
+        """
+        Broker-authoritative fallback for refresh_marks. Used when
+        ``_compute_position_value_from_snapshots`` returns None
+        (incomplete leg pricing in the snapshot path).
+
+        Returns signed current_value matching the snapshot helper's
+        contract: sum of per-leg market values with side_mult inverting
+        short legs. Downstream math in ``refresh_marks``
+        (``unrealized = current_value - entry_value``, inverted for
+        negative qty) operates unchanged.
+
+        Returns None if any leg is missing from Alpaca's response — true
+        drift case (Alpaca-side position state diverged from DB) where
+        caller treats None as silent-skip + alert per PR-1 framing.
+
+        2026-05-13 PR-2: ships this method as the structural fix for the
+        H9 wrapper-drift cascade that produced the 2026-05-12 CSX
+        situation (DB -$8 vs Alpaca truth -$196 because option-snapshot
+        path silently degraded). Same broker-truth pattern as #93's
+        ``equity_state.get_alpaca_options_buying_power``.
+        """
+        multiplier = 100
+        legs = position.get("legs") or []
+
+        # Single-leg / leg-less position: lookup by position-level symbol.
+        if not legs:
+            symbol = position.get("symbol", "")
+            if not symbol:
+                return None
+            bp = broker_positions_by_symbol.get(symbol)
+            if not bp:
+                return None
+            current_price = bp.get("current_price")
+            if current_price is None or float(current_price) <= 0:
+                return None
+            qty = abs(float(position.get("quantity") or 1))
+            return float(current_price) * multiplier * qty
+
+        # Multi-leg position: sum per-leg signed market value.
+        leg_values: List[float] = []
+        failed_legs: List[str] = []
+
+        for leg in legs:
+            if not isinstance(leg, dict):
+                continue
+            occ_symbol = leg.get("occ_symbol") or leg.get("symbol", "")
+            if not occ_symbol:
+                continue
+
+            bp = broker_positions_by_symbol.get(occ_symbol)
+            if not bp:
+                # Leg present in DB but absent from Alpaca's position
+                # response. True drift case — surface via None return so
+                # caller skips + alerts.
+                failed_legs.append(occ_symbol)
+                continue
+
+            current_price = bp.get("current_price")
+            if current_price is None or float(current_price) <= 0:
+                # Alpaca returned the leg but with no current_price
+                # (rare — usually expired contract or halted trading).
+                failed_legs.append(occ_symbol)
+                continue
+
+            leg_qty = float(leg.get("quantity") or position.get("quantity") or 1)
+            action = leg.get("action", "buy")
+            side_mult = 1.0 if action == "buy" else -1.0
+            leg_values.append(
+                float(current_price) * multiplier * abs(leg_qty) * side_mult
+            )
+
+        if failed_legs:
+            pos_id = position.get("id", "?")
+            logger.warning(
+                f"[MARK_TO_MARKET] Broker fallback skipping position "
+                f"{pos_id}: {len(failed_legs)} leg(s) missing from Alpaca "
+                f"response ({', '.join(failed_legs)}). Drift case — caller "
+                f"alerts via PR-1's mtm_refresh_partial path."
+            )
+            return None
+
+        if not leg_values:
             return None
 
         return sum(leg_values)

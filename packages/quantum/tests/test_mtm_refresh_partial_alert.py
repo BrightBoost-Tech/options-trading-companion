@@ -80,10 +80,24 @@ class TestPaperMarkToMarketServicePopulatesLastMarkedAt(unittest.TestCase):
 
     def test_last_marked_at_not_populated_on_skip_path(self):
         """The skip path (current_value is None) must NOT touch
-        last_marked_at — preserves staleness observability."""
-        # Anchor at the silent-skip branch
-        idx = self.src.find('"incomplete_quotes_skipped"')
-        self.assertGreater(idx, 0)
+        last_marked_at — preserves staleness observability.
+
+        PR-2 (#2026-05-13) renamed the skip error string from
+        `"incomplete_quotes_skipped"` to
+        `"snapshot_incomplete_and_broker_lookup_missing"` to reflect
+        that the skip path now means BOTH snapshot AND broker fallback
+        failed. Anchor accepts either string so this test stays valid
+        across PR-1 → PR-2 sequencing.
+        """
+        idx = self.src.find('"snapshot_incomplete_and_broker_lookup_missing"')
+        if idx <= 0:
+            idx = self.src.find('"incomplete_quotes_skipped"')
+        self.assertGreater(
+            idx, 0,
+            "skip-path error anchor missing (expected one of "
+            "'snapshot_incomplete_and_broker_lookup_missing' or "
+            "'incomplete_quotes_skipped').",
+        )
         # 200 chars around this branch shouldn't mention last_marked_at
         window = self.src[max(0, idx - 200):idx + 200]
         self.assertNotIn(

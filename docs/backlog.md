@@ -127,6 +127,42 @@ confirm the fix actually works in production.
 morning when close event is imminent, OR earlier if operator opts to
 pre-stage. Decision left to next session.
 
+**[2026-05-12 EOD] Active focus #2 closed: H9 Convention codified.**
+H9 doctrine entry in `docs/loud_error_doctrine.md` extended with
+"Codified pattern with empirical anchors" subsection — cross-instance
+fix-pattern table covering all 5 closed H9 instances (PR-A Layer 4,
+Issue B / #908, #864, #62a-D5 / #117, MTM #919+#920), concrete code
+anchors per rule (file:line references rather than abstract examples),
+boundary-specific applications (DB write / broker API / refresh /
+CLI-route), and when-NOT-to-apply guidance. Plus a new
+"Class-prevention infrastructure proposals" subsection ranking 3
+PR slots:
+
+- **Slot 1 — AST gate** for wrappers-without-verification (~half
+  day, precedent PR #917 Class B AST gate, catches all 5 known
+  instances at PR time). RECOMMENDED first ship.
+- **Slot 2 — Grep test** for silent-exception patterns in wrapper
+  paths (`services/` + `brokers/` + `jobs/handlers/`) (~2 hours,
+  precedent PR #913). Queued behind Slot 1; may consolidate if
+  Slot 1 covers same surface.
+- **Slot 3 — Type-narrowing** convention with `Literal["ok",
+  "partial", "failed"]` status returns. Adopted as convention for
+  new wrappers starting 2026-05-13; no infrastructure work.
+
+Doctrine state after this PR + PR #922:
+- H8: extended with false-alarm verification discipline (PR #922)
+- H9: extended with codified convention + ranked infrastructure
+  proposals (THIS PR)
+- H10: cascade-suppression (PR #922)
+- H11: status-check methodology baseline (PR #922)
+- H12: intent drift across encodings — candidate, awaiting 3rd
+  new instance for ratification
+
+CLAUDE.md Active focus block: item #2 retitled to "H9 Convention
+Slot 1 — AST gate"; item #3 refreshed (stale D3/D5 reference
+replaced with #62a-D1 architectural PR which is the actual
+queued HIGH work).
+
 ---
 
 ## Backlog (post-promotion)

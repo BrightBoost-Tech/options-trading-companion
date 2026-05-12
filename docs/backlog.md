@@ -349,6 +349,90 @@ Slot 1 — AST gate"; item #3 refreshed (stale D3/D5 reference
 replaced with #62a-D1 architectural PR which is the actual
 queued HIGH work).
 
+**[2026-05-12 20:56 UTC] Path A shipped: MICRO_TIER_MAX_UNDERLYING $60 → $100.**
+
+Lever 1 universe-widening experiment via Railway env var on the
+`worker` service. No code change, no PR (Railway audit trail captures
+the action). Triggered a fresh build (`a47c24c6-8f51-4f26-82f0-0b6439a035ef`,
+BUILDING at the time this entry was written) which will recycle the
+worker on completion.
+
+**Pre-bump baseline correction:** Today's combined diagnostic
+analysis assumed the threshold was at the code default $50, but
+Railway had it set to $60 (long-standing override, predating today's
+session). The diagnostic's "$50 → $75" widening math was based on
+the wrong baseline. After re-inspection via
+`underlying_iv_points.spot` distribution today: 48 scanner-active
+symbols sit above $60; operator chose $100 as the conservative tier.
+
+**Pre-bump baseline (Tuesday 2026-05-12 16:00 UTC suggestions_open):**
+- 62 universe → 28 micro_tier_rejected → 34 remaining → 14 processed
+- Rejection counts (total 52): 28 micro_tier, 9 strategy_hold, 9
+  no_fallback, 4 entry_cost_too_low, 2 all_strategies_rejected
+- Emissions: 1 LONG_CALL_DEBIT_SPREAD; counts.created: 0
+- `iv_pipeline_no_data` warning fired (40/40 missing iv_rank — warmup
+  state, day 3 of ~60)
+
+**Expected symbols recovered by $60 → $100 bump:**
+8 names in the $60-$100 band — MDLZ $61, EEM $68, KO $78, HYG $80,
+XLP $83, NFLX $85, TLT $86, CSCO $98. Effective recovery likely
+~5-6 per cycle due to scanner snapshot-timing vs IV-refresh-timing
+(48 vs 28 gap observed today). Contracts at these underlyings
+should fit micro $450 budget at 2.5-wide spreads (~$200-$400
+max_loss/contract).
+
+**What to compare on Wednesday + Thursday's `suggestions_open` cycles:**
+- `micro_tier_underlying_too_high` count: expect ~20 (down from 28)
+- `symbols_processed` count: expect ~17-20 if 34→14 trim doesn't eat
+  the new admissions
+- `emission_counts_by_strategy`: expect to rise above today's 1
+- `counts.created`: expect >0; this is the actual win condition
+- New rejection patterns: watch for `sizing_rejected` /
+  `budget_exceeded` if mid-cap contracts exceed budget
+
+**Decision trigger date: 2026-05-15 (Thursday afternoon, post-cycle).**
+
+Decision shape:
+- **Widening helped (emissions/creates rise):** Path A worked.
+  Decide whether to push further to $150 OR concentrate on the
+  34→14 trim investigation. Lever 2 (IV backfill) decision is
+  separate and stays on the warmup-window-progress curve.
+- **No change in emissions despite more processed symbols:** the
+  34→14 trim is the real bottleneck. Investigate the trim before
+  any further widening. Path A still keeps the $100 setting; revert
+  only if it caused harm.
+- **No change in `symbols_processed`:** env var didn't take effect
+  OR new symbols are also being eaten by the 34→14 trim. Verify
+  env first.
+- **Sizing rejections spike:** $60-$100 contracts exceed micro
+  budget at sizing layer. Consider reverting OR adjusting sizing
+  tolerance. Per diagnostic, this is the less-likely failure mode
+  at $100 (sub-$100 names typically use 2.5-wide spreads).
+
+**Reversibility:** instant. Revert via Railway dashboard (set back
+to 60) if Wednesday's cycle shows immediate harm. The env-var change
+triggered a fresh deploy; revert would do the same.
+
+**Notable adjacent state:**
+- A NEW SUCCESS deploy fired at 2026-05-12 14:12 UTC (deployment
+  `b76132c7-0909-4550-a942-cc84508f7afa`) — pre-dates this env-var
+  change. Worker had already recycled today onto a fresh image
+  (likely containing PR #924's H9 gate content via the PR #925 merge
+  trigger). Today's 16:00 UTC `suggestions_open` ran on this image,
+  not on PR #923's. The current BUILDING deploy from the env-var
+  change will be the SECOND restart today. PR #924 deploy pairing
+  reminder (entry above) is now likely satisfied — verify when the
+  BUILDING deploy completes.
+
+**Related work:**
+- Lever 2 α (BS-inversion IV backfill) design diagnostic still
+  pending; sequence is "observe Path A first, then decide if α
+  warranted vs Lever 2 β (lower `sample_size` constant)"
+- "1 emission → 0 created" watch still active (expires 2026-05-15)
+- Path A status: shipped (`MICRO_TIER_MAX_UNDERLYING=100`)
+
+**Status:** Shipped. Empirical observation in flight.
+
 ---
 
 ## Backlog (post-promotion)

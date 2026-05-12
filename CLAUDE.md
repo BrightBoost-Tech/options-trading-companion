@@ -935,6 +935,10 @@ Full backlog (item descriptions, sub-items, audit catalogs) lives in `docs/backl
 
 See `docs/roadmap.md` for the full Active focus block including recently-closed items and `docs/backlog.md` for full item descriptions and the catalogs (#62a schema drift, #72 loud-error doctrine).
 
+### Operational state notes
+
+**[2026-05-12] Warmup window day 3 of ~60.** Expected reduced trade frequency through warmup-window completion (`iv_repository.get_iv_context` requires `sample_size >= 60` at `iv_repository.py:239`; `iv_daily_refresh` producer healthy, writing ~69 rows/day). IV-sensitive strategies (credit spreads, iron condors) are gated until accumulated history clears the sample-size threshold. "No trade today" outcomes during warmup window are EXPECTED unless H11 `risk_alerts` baseline surfaces critical events. See `docs/backlog.md` "Warmup-window expectation (TESTABLE HYPOTHESIS)" entry — empirical validation pending; promote here if validated, revise/retract if refuted.
+
 ---
 
 ## Live State (auto-updated)

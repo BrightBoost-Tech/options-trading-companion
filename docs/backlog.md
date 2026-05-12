@@ -127,6 +127,157 @@ confirm the fix actually works in production.
 morning when close event is imminent, OR earlier if operator opts to
 pre-stage. Decision left to next session.
 
+**[2026-05-12] Warmup-window expectation (TESTABLE HYPOTHESIS).**
+
+**Hypothesis:** During the ~57 remaining trading days of warmup window
+(`iv_repository.get_iv_context` requires `sample_size >= 60` at
+`iv_repository.py:239`; today is day 3 of warmup with `iv_daily_refresh`
+writing `ok=69` rows daily), the system is expected to produce few or
+no IV-sensitive strategy trades (credit spreads, iron condors).
+Non-IV-sensitive strategies (debit spreads, naked calls/puts) can
+still fire if other gates pass.
+
+**Today's data point (2026-05-12, day 3 of warmup):**
+- `suggestions_open` at 16:00 UTC: `skipped=false, reason=no_candidates`
+- 14 sub-$50 symbols processed (28 filtered by micro-tier price cap)
+- 9 IV-sensitive strategies held with `strategy_hold_no_candidates`
+- 1 LONG_CALL_DEBIT_SPREAD emission, 0 created (separate watch entry)
+- `iv_pipeline_no_data` warning fired (40/40 symbols missing `iv_rank`)
+- 0 suggestions produced, 0 trades
+
+**Why this is a hypothesis, not a fact:**
+- Prediction depends on what % of candidate strategies are IV-sensitive
+  in practice (today's 9-of-14 may not generalize)
+- Non-IV-sensitive paths might produce candidates regularly during
+  warmup (we just didn't see one survive today)
+- Universe rotation, regime changes, or volatility shifts could produce
+  unexpected candidates
+- 3 days of warmup data isn't enough to validate the prediction shape
+
+**What confirms the hypothesis:**
+- Trade count remains near-zero through warmup window
+- Trade count rises after day ~60 as `iv_rank` stabilizes
+
+**What refutes the hypothesis:**
+- Trades fire regularly during warmup despite IV-sensitive gating
+- Trade count doesn't materially change post-warmup
+- Some other gate is the actual bottleneck
+
+**Operator implication:**
+- "No trade today" during warmup window is EXPECTED, not a bug
+- Don't re-investigate every low-trade day during warmup unless H11
+  baseline surfaces critical alerts
+- Run a fresh diagnostic if pattern breaks (e.g., trades fire
+  unexpectedly, OR warmup completes without trade rate change)
+
+**Reference:** Tuesday 2026-05-12 bundled diagnostic synthesis.
+Adjacent observations: "1 emission → 0 created" watch and `entry_cost_too_low`
+threshold observation (separate entries below). Existing #115
+documentation in this backlog covers the upstream `iv_rank` computation
+that the warmup window is feeding.
+
+**Status:** Hypothesis logged. Empirical validation across warmup
+window. Promote to CLAUDE.md if validated; revise or retract if
+refuted.
+
+**[2026-05-12] WATCH: "1 emission → 0 created" downstream-gate question.**
+
+**Observation:** Today's `suggestions_open` produced
+`emission_counts_by_strategy: {LONG_CALL_DEBIT_SPREAD: 1}` but
+`counts.created: 0`. One LONG_CALL_DEBIT_SPREAD emission didn't survive
+a downstream gate to become a created suggestion row. The downstream
+gate is unidentified — could be:
+- Sizing logic (insufficient capital for the spread)
+- EV-ranker (expected value below threshold)
+- Risk-adjusted EV gate
+- Anti-duplicate / legs-fingerprint dedupe
+- Other gate not enumerated in today's diagnostic
+
+**Why this is a watch, not an investigation:**
+Today's other rejection counts (52 total: 28 micro-tier price cap, 9
+strategy-hold, 9 no-fallback, 4 entry_cost_too_low, 2 all_strategies)
+account for most of the rejection volume. The 1 emission-vs-0-created
+is small but represents a SILENT-DROP point — emission existed in
+the cycle stats, then disappeared without surfacing in
+`rejection_counts`.
+
+**Watch criterion:** If "emissions exist but 0 created" persists for
+2-3 more days, trace the downstream gate. Possibly H9-shaped
+(wrapper-drift between emission and creation — the gap between
+"emission_counts_by_strategy" and "counts.created" is the seam).
+
+**Status:** Watch active 2026-05-12 → 2026-05-15 (3 trading days).
+If pattern persists past 2026-05-15, escalate to dedicated diagnostic.
+
+**Reference:** Tuesday 2026-05-12 bundled diagnostic synthesis,
+"emission_counts_by_strategy" section.
+
+**[2026-05-12] OBSERVATION: spread-threshold friction on cheap universe.**
+
+**Observation:** Today, 4 of 14 (~28%) processed symbols rejected with
+`entry_cost_too_low`. Backlog item #92's spread-threshold tightening
+(closed via #106 classification work on 2026-05-04) may be over-tight
+for the <$50 universe slice currently dominating the micro-tier
+processable set. Today's rejections matched #106's PFE shape exactly
+(threshold=0.3, entry_cost_share=0.05–0.06).
+
+**Why this is an observation, not a finding:**
+- Single data point (today). Not enough for statistical inference.
+- Universe composition shifts daily; today's <$50 dominance may not
+  repeat tomorrow.
+- The threshold may be correctly calibrated and today's rejections
+  may genuinely indicate "spreads too narrow to make money" — that's
+  the gate working as designed (per #106 closure rationale).
+
+**Watch criterion:** Track `entry_cost_too_low` count as % of processed
+symbols over next 2 weeks. If consistently >25%, the threshold may
+need empirical re-calibration via `ABSOLUTE_SPREAD_THRESHOLD` /
+`MIN_ECONOMIC_ENTRY` env overrides. If varies significantly
+day-to-day, today's was a snapshot artifact.
+
+**Action:** None today. Empirical observation only.
+
+**Reference:** Tuesday 2026-05-12 bundled diagnostic synthesis,
+`rejection_counts` section. Cross-reference #92 (CLAUDE.md design
+principles note) and #106 (closed 2026-05-04 — entry_cost_too_low
+classification work).
+
+**Status:** Observation logged. 2-week empirical window
+(2026-05-12 → 2026-05-26).
+
+**[2026-05-12] REMINDER: PR #924 (H9 AST gate) deploy pairing.**
+
+**State:** PR #924 merged 2026-05-11 but Railway deploy at 18:20 CDT
+failed (Docker Hub metadata-pull transient on Metal builder; same
+fingerprint as two earlier failures that day). Worker has been on
+PR #923's image (`e771e611`, deployed 2026-05-11 17:23 CDT) for ~21
+hours as of today's afternoon diagnostic. PR #924's content
+(`packages/quantum/observability/h9.py` decorator + AST gate test +
+allow-list) is functionally inert in production — zero production
+imports of the `h9_exempt` decorator verified 2026-05-12 afternoon.
+
+**Plan:** Pair with next code merge to trigger fresh Railway build
+that includes PR #924's content. No urgency since the gate is in
+warn-only mode and isn't blocking anything. Alternative: manual
+retry via Railway dashboard.
+
+**Validity:** This reminder stays valid until either:
+- Next code merge deploys cleanly AND confirms PR #924 content is
+  live (h9.py present in deployed image, gate test runs in CI)
+- Manual retry of PR #924 deploy is triggered + succeeds
+- PR #924's content is determined to be no longer needed (unlikely)
+
+**Verification when triggered:**
+- Worker boot time > deploy SUCCESS time (H8 check)
+- `packages/quantum/observability/h9.py` exists in deployed image
+- `packages/quantum/tests/test_h9_wrapper_drift_gate.py` runs in CI
+- `h9_violations.json` artifact appears in CI run output
+- Strict-mode flip schedule (2026-05-19) still applicable
+
+**Status:** Pending pairing. Worker confirmed healthy on PR #923's
+image at 2026-05-12 18:30 UTC (worker `40aff4b7679c430f85d68889138726ea`
+running standard job mix without error).
+
 **[2026-05-12 → 2026-05-19] H9 AST gate: flip to strict mode.**
 Slot 1 shipped today in warn-only mode (PR ships separately). After
 ~1 week of CI observability:

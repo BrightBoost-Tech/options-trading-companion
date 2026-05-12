@@ -278,6 +278,76 @@ retry via Railway dashboard.
 image at 2026-05-12 18:30 UTC (worker `40aff4b7679c430f85d68889138726ea`
 running standard job mix without error).
 
+**[2026-05-12] LEARNING-MODE CODIFICATION.**
+
+**What:** Captured operator's explicit learning-mode framing in
+CLAUDE.md `## Backlog → ### Operating mode` subsection (placed
+ABOVE Active focus so it frames the focus items below).
+
+**Why:** Today's session repeatedly drifted toward "more trades"
+recommendations (Path A widening, Lever 2 IV backfill design,
+capital tier inflection analysis) because that's the default shape
+of help when operator says "no trades today." Without explicit
+codification, future sessions would re-derive the wrong framing
+from the same observable state ($681 account, low trade frequency,
+warmup gating).
+
+**Source statement (operator, 2026-05-12 afternoon):**
+
+> "At micro tier I want to perfect the code and make sure it enters
+> and exits accordingly. After these are perfected I will add more
+> capital. Right now I want to focus on logic and learning to
+> optimize the best list of options and the best combination for
+> profits/time for the account."
+
+**Operational changes from this codification:**
+- Capital addition deferred until operator signals readiness — the
+  $681 → $1,000 micro→small cliff documented in today's tier
+  inflection diagnostic is informational, not actionable
+- Observability / analytics infrastructure becomes high-priority work
+- "No trade today" no longer auto-triggers investigation if system
+  shows working-as-designed behavior (warmup state, micro filters,
+  etc.). H11 baseline still fires on critical alerts — orthogonal
+  to trade-frequency framing.
+- Low trade frequency during warmup window framed as expected, not
+  as a problem to fix
+
+**Validity:** Indefinite. Mode change requires explicit operator
+declaration. If unsure whether learning-mode still applies, ASK.
+
+**Tension with existing doctrine (surfaced, not resolved):**
+- H11 risk_alerts baseline still mandates critical/high severity
+  alerts as independent section in every diagnostic. Learning-mode
+  doesn't override H11 — it shapes how findings are interpreted.
+  Example: "no trade today + zero critical alerts" under
+  learning-mode = system working as designed, not a problem to
+  investigate.
+- Warmup-window hypothesis (testable, codified 2026-05-12 morning)
+  predicts low frequency through ~2026-07 — aligns naturally with
+  learning-mode's "don't treat low frequency as bottleneck."
+- The forward-looking framing means PRIOR session work (Path A
+  bump prompts, Lever 2 α design diagnostic) is NOT rewritten.
+  Those were correct under their own framing; learning-mode applies
+  to FUTURE recommendations.
+
+**Related codifications + work:**
+- H10/H11/H8-extension doctrine (codified 2026-05-11 PR #922)
+- H9 convention + Slot 1 AST gate (2026-05-11/2026-05-12 PRs #923 + #924)
+- Warmup-window hypothesis (codified 2026-05-12 morning PR #925)
+- Path A experiment ($60 → $100 universe filter, shipped 2026-05-12
+  afternoon, Thursday decision trigger)
+- Lever 2 α design diagnostic (drafted; implementation gated on
+  Thursday Path A results AND learning-mode-aware decision)
+- Tier inflection diagnostic (executed 2026-05-12 afternoon, session
+  history) — surfaced the $1,000 cliff that triggered this codification
+
+**Discipline shape:** mirrors PR #922 (H10/H11 doctrine capture)
+and PR #923 (H9 convention codification) — findings get codified
+durably so they shape future work rather than being re-derived
+each session.
+
+**Status:** Codified.
+
 **[2026-05-12 → 2026-05-19] H9 AST gate: flip to strict mode.**
 Slot 1 shipped today in warn-only mode (PR ships separately). After
 ~1 week of CI observability:

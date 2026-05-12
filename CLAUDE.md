@@ -927,6 +927,47 @@ Example anti-pattern (rejected 2026-04-30): after observing CMCSA short_*_credit
 
 Full backlog (item descriptions, sub-items, audit catalogs) lives in `docs/backlog.md`. This section keeps only the active focus.
 
+### Operating mode — learning-mode at micro tier (declared 2026-05-12)
+
+**Operator is in learning-mode at micro tier. Goal is code correctness + system behavior validation, NOT capital deployment.**
+
+Current capital ($681, micro tier) is INTENTIONAL — not a constraint to escape. Micro tier is the development environment for perfecting entry/exit logic before scaling capital.
+
+**Operator's stated framing:**
+
+> "At micro tier I want to perfect the code and make sure it enters and exits accordingly. After these are perfected I will add more capital. Right now I want to focus on logic and learning to optimize the best list of options and the best combination for profits/time for the account."
+
+**What this means operationally (for future sessions reading this file):**
+
+DO:
+- Recommend observability/analytics infrastructure work
+- Recommend bug fixes as they surface
+- Recommend diagnostics that surface system behavior
+- Recommend doctrine/codification work that captures empirical findings
+- Recommend strategy-mix observation (which strategies behave well at micro tier)
+- Treat low trade frequency as a FEATURE of careful operation, not a problem
+
+DO NOT:
+- Recommend capital addition unless explicitly asked
+- Push toward "more trades" framing as a goal
+- Treat "no trade today" as a problem to fix when the system is working as designed
+- Push toward tier-upgrade work (small/standard tier features) until operator signals readiness
+- Treat warmup-window low frequency as a bottleneck to be eliminated
+
+TREAT WITH CARE:
+- Universe widening / strategy unlocking work — valuable for OBSERVATION (more behavior to learn from) but NOT for capital deployment goals
+- Diagnostics that surface "system isn't trading enough" — first verify the framing is correct given learning-mode (system working correctly may not produce trades; that's expected). H11 baseline still fires on critical alerts; that's orthogonal to trade-frequency framing.
+
+**Mode exit:** operator declares mode transition explicitly. No hard exit criteria. Likely signals (not triggers): operator explicitly says "I'm adding capital" or "moving past learning-mode"; operator asks about scaling decisions; operator references entry/exit reliability metrics as "good enough now." If unsure whether learning-mode still applies, ASK rather than assume.
+
+**Source:** Tuesday 2026-05-12 afternoon strategic discussion. Tier inflection diagnostic surfaced the $1,000 cliff (micro→small per `small_account_compounder.py:24-50`); operator's explicit reframe redirected from "deploy capital efficiently" toward "perfect code, then scale." See `docs/backlog.md` "[2026-05-12] LEARNING-MODE CODIFICATION" entry.
+
+**Related work shaped by this framing:**
+- Lever 2 α (IV backfill, design diagnostic shipped 2026-05-12): valuable for observation surface during warmup, not capital deployment
+- Path A (universe widening to $100, shipped 2026-05-12): valuable for candidate volume to observe, not for activity-maximization
+- Observability / analytics infrastructure: HIGH priority — directly serves learning-mode goal
+- Capital tier inflection at $1,000+: DEFERRED until operator signals readiness
+
 ### Active focus (next 3)
 
 1. **PR #908 empirical validation (tomorrow's first close)** — PR #908's mleg sign-flip + clamp is live in the current worker (verified 2026-05-12 H8 false-alarm investigation: worker booted 19:00:46Z on image built 19:00:22Z, post-PR-#908 merge) but still untested on a real close. Tomorrow's first natural close after a new position opens (now unblocked post-CSX-reconciliation) is the validation event. Capture: `limit_price` sign, `abs(limit_price)` ≥ 0.01, broker response. Failure-mode triage spec in `docs/backlog.md` "Recent operational events" → PR #908 empirical validation entry. Also still on watch: Tier 1 body acceptance smoke (`python scripts/run_signed_task.py alpaca_order_sync --force-rerun`), and 04:30 CT iv_daily_refresh natural fire writes Day 2 of warmup.

@@ -278,6 +278,104 @@ retry via Railway dashboard.
 image at 2026-05-12 18:30 UTC (worker `40aff4b7679c430f85d68889138726ea`
 running standard job mix without error).
 
+**[2026-05-12] Tier 1B convenience views shipped.**
+
+Three SQL views applied to surface existing learning analytics data
+without ad-hoc SQL (per learning-mode codification in CLAUDE.md
+Active focus):
+
+- `symbol_performance` (90-day window, on `learning_trade_outcomes_v3`)
+  — per-symbol win rate, P&L, strategy diversity. 17 rows on apply.
+- `hold_period_buckets` (90-day window, on `paper_positions`) — hold
+  time distribution by outcome bucket (winner / loser / force_close /
+  manual_close / reconciler / other). 6 rows on apply.
+- `recent_closes_audit` (30-day window, on `paper_positions` LEFT
+  JOIN `trade_suggestions` + `learning_feedback_loops`) — full
+  decision audit trail per closed position. 13 rows on apply.
+
+**Schema corrections discovered during pre-flight:**
+- `learning_trade_outcomes_v3` uses `ticker` + `strategy`; design
+  diagnostic draft assumed `strategy_type` — corrected before apply
+- `paper_positions` uses `symbol` + `strategy_key`; same difference
+- `trade_suggestions.score` is actually in `sizing_metadata` jsonb;
+  view uses `sizing_metadata->>'score'`
+- `learning_feedback_loops` has no `position_id`; joins via
+  `suggestion_id` instead
+- `close_reason` enum surveyed empirically (44 target_profit_hit /
+  7 manual / 7 stop_loss / 4 reconciler variants / 1 envelope_force)
+
+Migrations 20260513000001-3 applied via `mcp__supabase__apply_migration`
+prior to PR merge (idempotent CREATE OR REPLACE VIEW, fully reversible
+via DROP VIEW). Audit rows in `risk_alerts` per migration apply
+procedure.
+
+**[2026-05-12] OBSERVATION: framing-artifact false-alarm pattern (3 instances).**
+
+Diagnostics can produce concrete-evidence hypotheses whose underlying
+ASSUMPTION is wrong. Verification step refutes the conclusion while
+the evidence itself remains accurate.
+
+**Instances surfaced this week:**
+
+1. **2026-05-11 H11 status-check methodology gap** (codified as H11
+   in `docs/loud_error_doctrine.md`). Operator framing of "did
+   anything trade today" produced a status check that missed critical
+   risk_alerts. The framing was the gap, not the data.
+
+2. **2026-05-12 H8 PR #908 worker-stale hypothesis** (codified as
+   H8 extension). Diagnostic surfaced timestamp evidence suggesting
+   PR #908 hadn't deployed. Verification revealed an earlier deploy
+   had been replaced; PR #908 was already live. Evidence was
+   accurate; conclusion was wrong because the framing assumed a
+   single deploy point.
+
+3. **2026-05-12 H8 analytics_events writer-break hypothesis.**
+   Yesterday's observability design diagnostic flagged
+   `analytics_events` as "stale since 2026-05-05." Verification
+   today revealed writes are event-driven and correlate 1:1 with
+   trade-lifecycle events. The "staleness" is healthy zero-output
+   during zero-activity period — last event 2026-05-05 matches
+   CSX entry, no entries since. Evidence (timestamp, row count)
+   was accurate; conclusion conflated time-based-stale with
+   event-driven-silent.
+
+**Underlying shape:** diagnostic measures something accurately but
+interprets the measurement against the wrong baseline expectation.
+Verification works by asking "what would this measurement look like
+under HEALTHY operation given the actual generative process?"
+
+**Why not new doctrine yet:** H8 already codifies the verification
+discipline ("hypothesis-generation produces value even when refuted
+by verification"). The "framing artifact" is a sub-pattern of H8
+false alarms, not a new doctrine. Capturing the pattern shape may
+be useful for future diagnostic prompts (check baseline assumptions
+explicitly before concluding) without needing formal doctrine status.
+
+**Promotion criterion:** if a 4th instance emerges with a NEW
+underlying shape that H8 doesn't cleanly cover, promote to formal
+doctrine. Until then: pattern noted in backlog, applied informally
+in diagnostic drafting.
+
+**Diagnostic-design implication:** future diagnostic prompts should
+consider including a "baseline assumption" section explicitly:
+"what would the measurement look like under HEALTHY operation given
+the actual generative process?" Then the verification step compares
+observed vs healthy-expected baseline rather than against an
+arbitrary expectation.
+
+**Companion Tier 2 observability candidate:** an
+`event_driven_writer_health` view that joins event-driven writer
+output against the upstream event source (e.g., `analytics_events`
+against `paper_positions` lifecycle events). Computes
+"events_expected vs events_written" — mismatch = real bug,
+zero=zero = healthy quiet day. Would systematically distinguish
+shape-(a) time-based stale from shape-(b) event-driven silent.
+Captured but NOT shipped as Tier 1.
+
+**Status:** Observation captured. Inform future diagnostic drafting.
+Not promoting to formal doctrine without a 4th instance with new
+shape.
+
 **[2026-05-12] LEARNING-MODE CODIFICATION.**
 
 **What:** Captured operator's explicit learning-mode framing in

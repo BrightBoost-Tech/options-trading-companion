@@ -212,6 +212,90 @@ If pattern persists past 2026-05-15, escalate to dedicated diagnostic.
 **Reference:** Tuesday 2026-05-12 bundled diagnostic synthesis,
 "emission_counts_by_strategy" section.
 
+**[2026-05-12 → 2026-05-13] WATCH CLOSED: RESOLVED-NOT-A-BUG, CORRECTED ROOT CAUSE.**
+
+**Resolution date:** 2026-05-13 (Wednesday afternoon).
+
+**Status:** **CLOSED**, but the resolution required a course-correction
+from the first attempt's wrong-line attribution.
+
+**Correct root cause:**
+
+H7 `round_trip_bp_insufficient` firing correctly on Path A-admitted
+high-priced underlyings whose debit-spread max_loss exceeds round-trip
+BP at $681 micro capital.
+
+Specifically (2026-05-13 Wednesday cycle):
+1. Tuesday 2026-05-12: Path A bumped MICRO_TIER_MAX_UNDERLYING $60 → $100
+2. Wednesday 2026-05-13: Scanner emitted 5 candidates including KO
+   ($78.43, LONG_CALL_DEBIT_SPREAD)
+3. KO's leg selection ran through `_select_legs_from_chain`
+   (`options_scanner.py:1059`) — delta-target based, NOT width-based
+4. KO at $78 has $5-wide strike intervals (standard for $50-$100 stocks);
+   debit-spread leg_defs target deltas resolving to ~1 strike apart →
+   ~$5-wide spread → ~$500 max_loss/contract
+5. Sizing engine round-trip BP check (`workflow_orchestrator.py:2671`):
+   entry $486 + close safety $534.60 = $1,020 required vs $681 BP
+   available → contracts=0 → REJECT
+6. Post-loop fired `no_suggestions_after_gates`
+
+**Why the EARLIER attempted resolution was wrong:**
+
+The first resolution attempt (the γ1 fix prompt) attributed the $486
+max_loss to `options_scanner.py:1260`
+(`width = 5.0 if current_price >= 50.0 else 2.5`). Line 1260 only
+applies to iron condors — it's inside `_select_iron_condor_legs`. KO's
+debit spread doesn't use that code path. The proposed γ1 fix (change
+line 1260's threshold $50 → $100) would have changed iron-condor
+widths, not KO's debit-spread max_loss.
+
+The verification escape hatch in the γ1 implementation prompt caught
+the error before shipping — STOP triggered when the code path read
+revealed line 1260 was iron-condor-only. This became instance 4 of
+the framing-artifact pattern (see entry below — promoted to H12
+doctrine).
+
+**Why this is CORRECT_FIRING:**
+
+PR #100 added the round-trip BP check after the 2026-05-01 BAC
+ghost-position incident. H7 doctrine codifies "Operations preserve
+capital invariants in both directions" as load-bearing — NOT tunable.
+The gate did exactly what it was designed to do.
+
+**Why the pattern emerged:**
+
+Path A's universe widening to $100 admitted underlyings whose
+debit-spread strike geometry produces max_loss exceeding round-trip
+BP at current capital. Not a fixable mismatch via spread-width
+threshold; the underlying math is "debit spread on $50-$100 stock
+needs ~$1,500+ BP for round-trip safety."
+
+**Fix shipped (separate PR, Option A revert):**
+
+Reverted MICRO_TIER_MAX_UNDERLYING $100 → $60 via Railway env (PR
+shipping this entry). Restores pre-Path-A creatable-candidate state.
+Future capital scaling enables post-revert re-attempt of universe
+widening.
+
+**Empirical validation:**
+
+Thursday 2026-05-14 morning cycle: if sub-$60 admits produce a created
+suggestion (per pre-Path-A pattern), revert is validated.
+
+**Learning captured:**
+
+- The 2-day watch window with empirical refinement worked correctly:
+  N=1 (Tuesday) was vague, N=2 (Wednesday) was actionable.
+- However, the actionable investigation produced WRONG WHERE-to-fix
+  while correct WHAT-is-firing — instance 4 of framing-artifact
+  pattern.
+- H12 doctrine promoted in this PR to prevent recurrence.
+- Path A's experiment produced clean empirical data: $100 widens
+  universe but admitted candidates fail H7 at current capital.
+- This validates Tuesday's tier-inflection diagnostic's prediction
+  about $50-$100 admits not fitting round-trip BP (though that
+  diagnostic itself partially shared the same framing-artifact shape).
+
 **[2026-05-12] OBSERVATION: spread-threshold friction on cheap universe.**
 
 **Observation:** Today, 4 of 14 (~28%) processed symbols rejected with
@@ -523,6 +607,44 @@ Captured but NOT shipped as Tier 1.
 **Status:** Observation captured. Inform future diagnostic drafting.
 Not promoting to formal doctrine without a 4th instance with new
 shape.
+
+**UPDATE 2026-05-13:** PROMOTED to H12 formal doctrine. 4th instance
+(KO H7 spread-width attribution, Wednesday 2026-05-13) demonstrated
+the "wrong-scope-generalization" sub-shape distinct from prior
+instances (wrong-baseline / wrong-deploy-model / wrong-temporal-model).
+See H12 entry in `docs/loud_error_doctrine.md`. This backlog
+observation is now CLOSED — superseded by formal doctrine.
+
+**[2026-05-13] DEFERRED: Universe expansion plan (sub-$100 tickers).**
+
+**Originally scoped:** After Path A's $100 bump (2026-05-12), planned
+addition of 10+ sub-$100 liquid tickers from Tuesday's diagnostic
+candidate set (NEE, BMY, KHC, HBAN, MRO, GM, MO, NIO, LCID, RIVN).
+
+**Status as of 2026-05-13:** **DEFERRED pending Option A validation.**
+
+**Why deferred:**
+
+Wednesday's downstream gate trace revealed Path A's admitted underlyings
+($50-$100 names) fail H7 round-trip BP at current capital. Option A
+(revert Path A to $60) shipped concurrent with this entry. The original
+sub-$100 expansion scope becomes misaligned — most candidate tickers
+were specifically chosen for the sub-$100 band Path A enabled.
+
+**Reactivation criteria:**
+
+After Option A validates (Thursday 2026-05-14 cycle produces created
+suggestion from sub-$60 admit), re-scope:
+
+- **If capital scales toward $1,500+:** sub-$100 universe expansion
+  becomes viable; Path A's $100 bump may be reattempted.
+- **If staying at $681 micro:** sub-$50 universe expansion is the
+  viable shape — adds candidates without H7 conflict. Different
+  ticker list than Tuesday's (would target sub-$50 liquid names:
+  HBAN, MRO, MO, NIO, LCID, RIVN, plus possibly others).
+
+**Status:** Deferred. Reactivate when criteria met. No timeline
+commitment.
 
 **[2026-05-12] LEARNING-MODE CODIFICATION.**
 

@@ -309,6 +309,74 @@ prior to PR merge (idempotent CREATE OR REPLACE VIEW, fully reversible
 via DROP VIEW). Audit rows in `risk_alerts` per migration apply
 procedure.
 
+**[2026-05-13] Tier 1C: per-suggestion rejection persistence shipped.**
+
+Granular per-rejection rows now persist alongside the existing
+aggregate `rejection_counts` in `job_runs.result`. Operator can ask
+"which 8 PFE rejections for `entry_cost_too_low` in May, with what
+spread context" — previously aggregate counts only.
+
+**Schema:** new table `suggestion_rejections` (id, symbol,
+strategy_key NULLABLE, reason NOT NULL, cycle_date, job_run_id
+NULLABLE, spread_debug jsonb, created_at) with 3 indices for the
+expected queries (per-symbol-reason, per-cycle, per-reason).
+Migration 20260513000005.
+
+**Companion view:** `rejection_patterns` — per (symbol, reason)
+over rolling 30 days with last spread_debug context. Returns 0
+rows initially (forward-only); populates as scanner cycles run.
+Migration 20260513000006.
+
+**Capture-point change:** centralized via `RejectionStats` class
+in `options_scanner.py` rather than editing 30+ call sites
+individually. New behavior:
+- `RejectionStats(supabase=..., cycle_date=..., job_run_id=...)`
+  constructor opts in to persistence
+- `set_symbol(symbol)` stores per-thread context via
+  `threading.local()` (scanner uses ThreadPoolExecutor, so per-thread
+  isolation is required)
+- `record()` and `record_with_sample()` call internal
+  `_persist_rejection()` after the existing aggregate increments
+- 3 entry-point edits to call `set_symbol()`:
+  `_apply_tier_price_filter` loop, `process_symbol(symbol)` top,
+  `_process_symbol_multi(sym)` top
+
+**H9 Convention compliance note:** persistence intentionally fails
+silently (try/except logs warning, doesn't raise). This is the
+OPPOSITE of H9's "verify side effect" — appropriate per Anti-pattern
+5 valid case (observability writes must not undo primary work). The
+aggregate count in `_counts` remains the authoritative source;
+suggestion_rejections rows are supplementary granularity.
+
+**Tests:** 13 unit tests in `test_rejection_stats_persistence.py`
+covering: constructor configuration, persistence-when-symbol-set,
+no-symbol-no-write, optional-field omission, db-failure isolation,
+warning-log-on-failure, threading isolation across 4 worker threads,
+aggregate-unchanged sanity. All pass.
+
+**Apply procedure:** migrations 20260513000005 (table) and
+20260513000006 (view) applied via `mcp__supabase__apply_migration`
+pre-PR-merge per same low-risk profile as PR #928/#929 (forward-only
+new table; view is CREATE OR REPLACE). Audit rows in `risk_alerts`.
+
+**Forward-only:** no backfill of historical rejections. Pre-PR
+aggregates remain in `job_runs.result.cycle_results.debug.rejection_counts`.
+Synthetic backfill from aggregates would produce false granularity.
+
+**Verification post-deploy:** worker recycle on next merge will
+load the new code. Tomorrow's 16:00 UTC `suggestions_open` cycle
+should populate suggestion_rejections rows. Cross-check:
+aggregate `cycle_results.debug.rejection_counts` totals should
+equal `SELECT COUNT(*) FROM suggestion_rejections WHERE cycle_date
+= CURRENT_DATE GROUP BY reason`.
+
+**Related work:**
+- Yesterday's observability design diagnostic (Tier 1C section)
+- PR #928 (Tier 1B convenience views — same migration pattern)
+- PR #929 (hold_period_buckets v2)
+- Learning-mode codification in CLAUDE.md (sets framing — granular
+  rejection visibility serves learning-mode goal directly)
+
 **[2026-05-13] hold_period_buckets v2 relabel + exit-threshold doc note.**
 
 Two small follow-ups from today's hold-ratio investigation:

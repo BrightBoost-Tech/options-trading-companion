@@ -133,7 +133,12 @@ class RejectionStats:
     # separately from strategy-specific filtering.
     PRE_STRATEGY_KEY = "__pre_strategy__"
 
-    def __init__(self):
+    def __init__(
+        self,
+        supabase: Optional["Client"] = None,
+        cycle_date: Optional[date] = None,
+        job_run_id: Optional[str] = None,
+    ):
         self._counts: Dict[str, int] = defaultdict(int)
         # #113 PR-6: per-strategy dimension. Outer dict keyed by
         # strategy_name (or PRE_STRATEGY_KEY); inner dict keyed by
@@ -153,6 +158,68 @@ class RejectionStats:
         self.chains_empty = 0
         self._samples: List[Dict[str, Any]] = []
         self._samples_cap: int = int(os.getenv("REJECTION_SAMPLES_CAP", str(self.DEFAULT_SAMPLES_CAP)))
+        # Tier 1C (2026-05-13): granular per-rejection persistence.
+        # When `supabase` + `cycle_date` are provided, every record()
+        # call also writes a row to `suggestion_rejections`. Per-thread
+        # symbol context is set via set_symbol() at the top of
+        # process_symbol / _apply_tier_price_filter loops — avoids
+        # threading 30+ call sites with `symbol=` kwargs.
+        # Failures are logged but not raised (observability ≠ load-bearing).
+        self._supabase = supabase
+        self._cycle_date = cycle_date
+        self._job_run_id = job_run_id
+        self._tls = threading.local()
+
+    def set_symbol(self, symbol: Optional[str]) -> None:
+        """Set the per-thread symbol context for subsequent record()
+        calls. Tier 1C (2026-05-13). Called at the top of
+        ``process_symbol(symbol)`` and inside the
+        ``_apply_tier_price_filter`` loop. Pass ``None`` to clear."""
+        self._tls.current_symbol = symbol
+
+    def _persist_rejection(
+        self,
+        reason: str,
+        strategy: Optional[str],
+        sample: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        """Best-effort granular persist to suggestion_rejections.
+
+        Tier 1C (2026-05-13). Fails silently — observability writes
+        must not break the aggregate flow. The aggregate count in
+        ``_counts`` is the authoritative source; this row is
+        supplementary granularity for learning-mode analysis.
+
+        H9 Convention note: this is the OPPOSITE of "verify side
+        effect, surface failure" — appropriate here because the row
+        is purely additive observability, not on the trade-decision
+        path. Anti-pattern 5 valid case (failure of observability
+        write must not undo primary work).
+        """
+        if self._supabase is None or self._cycle_date is None:
+            return
+        symbol = getattr(self._tls, "current_symbol", None)
+        if symbol is None:
+            # Rejection emitted outside set_symbol() scope. Skip
+            # rather than write a row with no attribution.
+            return
+        try:
+            payload: Dict[str, Any] = {
+                "symbol": symbol,
+                "strategy_key": strategy,
+                "reason": reason,
+                "cycle_date": self._cycle_date.isoformat(),
+            }
+            if self._job_run_id is not None:
+                payload["job_run_id"] = self._job_run_id
+            if sample is not None:
+                payload["spread_debug"] = self._make_json_safe(sample)
+            self._supabase.table("suggestion_rejections").insert(payload).execute()
+        except Exception as e:  # noqa: BLE001 — observability fail-soft
+            logger.warning(
+                "suggestion_rejections insert failed (symbol=%s reason=%s strategy=%s): %s",
+                symbol, reason, strategy, e,
+            )
 
     def record(self, reason: str, strategy: Optional[str] = None) -> None:
         """Record a rejection reason (thread-safe).
@@ -161,11 +228,19 @@ class RejectionStats:
         to a strategy bucket in addition to the legacy per-reason
         counter. ``None`` (default) attributes to ``PRE_STRATEGY_KEY`` —
         preserves pre-#113 behavior at every existing call site.
+
+        Tier 1C (2026-05-13): if persistence is configured (constructor
+        received supabase + cycle_date AND set_symbol() established
+        per-thread context), also writes a row to
+        ``suggestion_rejections``. Persistence runs OUTSIDE the lock
+        to avoid serializing DB calls; the aggregate increments are
+        already complete by then.
         """
         with self._lock:
             self._counts[reason] += 1
             bucket = strategy or self.PRE_STRATEGY_KEY
             self._per_strategy_counts[bucket][reason] += 1
+        self._persist_rejection(reason, strategy)
 
     def record_with_sample(
         self,
@@ -181,6 +256,9 @@ class RejectionStats:
             sample: A dict containing diagnostic info (must be JSON-serializable)
             strategy: #113 PR-6 — optional strategy attribution. ``None``
                 attributes to ``PRE_STRATEGY_KEY``.
+
+        Tier 1C (2026-05-13): also persists per-rejection row when
+        configured. The ``sample`` dict flows into ``spread_debug``.
         """
         with self._lock:
             self._counts[reason] += 1
@@ -193,6 +271,7 @@ class RejectionStats:
                 if strategy:
                     safe_sample["strategy"] = strategy
                 self._samples.append(safe_sample)
+        self._persist_rejection(reason, strategy, sample=sample)
 
     def record_emission(self, strategy: str) -> None:
         """#113 PR-6: increment the per-strategy emission counter.
@@ -2116,6 +2195,12 @@ def _apply_tier_price_filter(
     threshold = _get_micro_tier_max_underlying()
     kept: List[str] = []
     for s in symbols:
+        # Tier 1C (2026-05-13): set per-thread symbol so the
+        # subsequent rejection_stats.record() call writes a row to
+        # suggestion_rejections with the correct symbol attribution.
+        # No-op when persistence isn't configured. This loop is
+        # single-threaded; threading.local works the same.
+        rejection_stats.set_symbol(s)
         snap = quotes_map.get(s)
         if not snap:
             kept.append(s)  # let downstream handle missing quotes
@@ -2131,6 +2216,10 @@ def _apply_tier_price_filter(
             kept.append(s)
         else:
             rejection_stats.record("micro_tier_underlying_too_high")
+    # Clear thread-local context after the loop so any subsequent
+    # rejection emission outside set_symbol() scope doesn't get
+    # mis-attributed to the last symbol seen.
+    rejection_stats.set_symbol(None)
 
     print(
         f"[Scanner] Micro-tier price filter: kept "
@@ -2249,7 +2338,15 @@ def scan_for_opportunities(
     - chains_empty: int
     """
     candidates = []
-    rejection_stats = RejectionStats()
+    # Tier 1C (2026-05-13): pass supabase + cycle_date so
+    # RejectionStats.record() can persist per-rejection rows to
+    # suggestion_rejections alongside the aggregate count.
+    # Falls back to aggregate-only when supabase_client is None
+    # (tests, dry-runs).
+    rejection_stats = RejectionStats(
+        supabase=supabase_client,
+        cycle_date=datetime.now().date(),
+    )
 
     # Initialize services
     market_data = PolygonService()
@@ -2413,6 +2510,12 @@ def scan_for_opportunities(
 
     def process_symbol(symbol: str, drag_map: Dict[str, Any], quotes_map: Dict[str, Any], earnings_map: Dict[str, Any], iv_context: Dict[str, Any], rej_stats: RejectionStats, strategy_override: Optional[Dict] = None, _cached_data: Optional[Dict] = None) -> Optional[Dict[str, Any]]:
         """Process a single symbol and return a candidate dict or None."""
+        # Tier 1C (2026-05-13): set per-thread symbol context so any
+        # rej_stats.record() call inside this function (and downstream
+        # call chains in the same thread) writes a row to
+        # suggestion_rejections with correct symbol attribution.
+        # No-op when persistence isn't configured.
+        rej_stats.set_symbol(symbol)
         rej_stats.increment_processed()
         try:
             # A. Enrich Data
@@ -3412,6 +3515,14 @@ def scan_for_opportunities(
         bars, regime, and chain are fetched only once per symbol.
         """
         print(f"[SCANNER_MULTI] {sym}: entering multi-strategy eval (MULTI_STRATEGY_EVAL={MULTI_STRATEGY_EVAL})", flush=True)
+
+        # Tier 1C (2026-05-13): set per-thread symbol context for any
+        # rej_stats.record() calls in THIS function (e.g., the
+        # 'no_fallback_strategies_available' and 'all_strategies_rejected'
+        # paths below) — process_symbol() also sets it on entry, but the
+        # fallback record sites here run after process_symbol returns,
+        # so we set it here too. Idempotent / no-op-safe.
+        rej_stats.set_symbol(sym)
 
         # Shared cache: bars, closes, regime, and chain are computed once
         # and reused across all strategy attempts for this symbol.

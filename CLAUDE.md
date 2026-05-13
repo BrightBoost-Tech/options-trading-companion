@@ -980,6 +980,51 @@ See `docs/roadmap.md` for the full Active focus block including recently-closed 
 
 **[2026-05-12] Warmup window day 3 of ~60.** Expected reduced trade frequency through warmup-window completion (`iv_repository.get_iv_context` requires `sample_size >= 60` at `iv_repository.py:239`; `iv_daily_refresh` producer healthy, writing ~69 rows/day). IV-sensitive strategies (credit spreads, iron condors) are gated until accumulated history clears the sample-size threshold. "No trade today" outcomes during warmup window are EXPECTED unless H11 `risk_alerts` baseline surfaces critical events. See `docs/backlog.md` "Warmup-window expectation (TESTABLE HYPOTHESIS)" entry — empirical validation pending; promote here if validated, revise/retract if refuted.
 
+### Exit thresholds (defaults under empirical review)
+
+**Current values** (`paper_exit_evaluator.py:329-330`):
+
+- `_DEFAULT_TARGET_PROFIT_PCT = 0.35` — Target profit fires at +35% of entry cost (env-overridable via `EXIT_TARGET_PROFIT_PCT`)
+- `_DEFAULT_STOP_LOSS_PCT = 0.50` — Stop loss fires at -50% of entry cost (env-overridable via `EXIT_STOP_LOSS_PCT`)
+
+**Time-scaling** (`paper_exit_evaluator.py:180-203`):
+
+- Profit target time-scales 50% (at entry) → 25% (near expiry) via sqrt-decay function, locking in profits before theta accelerates against winners.
+- Stop loss is NOT time-scaled — fires at flat 50% regardless of DTE.
+
+**Status: inherited defaults, under empirical review.**
+
+These threshold values were inherited rather than set by deliberate design. They produce an asymmetric exit profile (system tolerates more loss than gain before exiting):
+
+- Threshold ratio: 50/35 = 1.43× (loss tolerance vs gain capture)
+- Within-strategy hold ratio observed: ~2.5× (debit spreads, N=15 across both buckets)
+- Aggregate hold ratio observed: ~5× (across full strategy mix — partly inflated by iron-condor wins resolving fast vs debit-spread losses bleeding slow)
+
+**Empirical observation as of 2026-05-13 (90-day window, paper_positions):**
+
+| Strategy family | Exit type | N | Avg hold | Avg PnL |
+|---|---|---|---|---|
+| iron_condor | profit_target | 35 | 18.4h | +$1,852 |
+| iron_condor | stop_loss | 1 | 96.4h | +$1,202* |
+| debit_spread | profit_target | 9 | 56.4h | +$1,511 |
+| debit_spread | stop_loss | 6 | 143.4h | -$2,063 |
+| debit_spread | other_close | 13 | 89.9h | -$40 |
+
+\* The single iron-condor stop_loss is profitable — wing-breach exit on already-profitable position. PR #929's `hold_period_buckets` v2 view buckets this as `profitable_stop` to avoid mislabeling.
+
+**Re-evaluation criterion:** when debit-spread sample reaches **N=20 per outcome bucket** (currently 9 winners / 6 losers), re-investigate whether 35/50 is the right threshold pair for micro-tier behavior. Earlier re-evaluation may be triggered if outcome-bucket pattern shifts substantially. See `docs/backlog.md` "[2026-05-13] WATCH: Exit threshold re-evaluation trigger (N=20)" entry.
+
+**What this note does NOT claim:**
+- That 35/50 is the right design (they're inherited, not validated)
+- That they should be changed (insufficient evidence either way)
+- That asymmetry is wrong (asymmetric thresholds are common in options strategies; just not deliberately chosen here)
+
+**Cross-references:**
+- Hold-ratio investigation 2026-05-13 (session history)
+- PR #928 (`hold_period_buckets` v1 view that surfaces this data)
+- PR #929 (this PR — operational note + view v2 relabel)
+- Learning-mode codification — micro tier IS the development environment for evaluating these defaults
+
 ---
 
 ## Live State (auto-updated)

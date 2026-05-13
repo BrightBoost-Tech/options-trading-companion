@@ -309,6 +309,86 @@ prior to PR merge (idempotent CREATE OR REPLACE VIEW, fully reversible
 via DROP VIEW). Audit rows in `risk_alerts` per migration apply
 procedure.
 
+**[2026-05-13] hold_period_buckets v2 relabel + exit-threshold doc note.**
+
+Two small follow-ups from today's hold-ratio investigation:
+
+1. `hold_period_buckets` v2 (migration 20260513000004): splits the
+   `stop_loss_hit` bucket by P&L sign — `profitable_stop` (1 row,
+   AMD iron condor wing-breach exit at +$1,202) vs `stop_loss_exit`
+   (6 rows, all true loss-side closes). Resolves the v1 mislabeling
+   surfaced by today's investigation. All other buckets unchanged.
+
+2. CLAUDE.md `### Exit thresholds (defaults under empirical review)`
+   subsection added under Operational state notes. Documents the
+   current 35% target / 50% stop values as INHERITED DEFAULTS (not
+   deliberate design), plus the empirical hold-pattern data from
+   today's investigation (per-strategy breakdown table). Cross-
+   references the N=20 re-evaluation trigger entry below.
+
+Both small. Migration 20260513000004 applied via
+`mcp__supabase__apply_migration` pre-PR-merge per same idempotency
+profile as v1. Audit row in `risk_alerts`.
+
+**[2026-05-13] WATCH: Exit threshold re-evaluation trigger (N=20).**
+
+**Trigger:** Re-evaluate exit thresholds (35% target / 50% stop) when
+debit-spread sample reaches **N=20 per outcome bucket** (winner /
+loser).
+
+**Current state (2026-05-13):** 9 winners / 6 losers in 90-day
+window. Statistical confidence limited; threshold change would be
+tuning on noise.
+
+**Why this watch:** Today's hold-ratio investigation revealed
+thresholds are inherited defaults (not deliberate design choices).
+Re-evaluation should happen when sample supports inference, not
+before. Premature optimization on small N produces worse outcomes
+than no optimization. Path-dependent option pricing dynamics +
+strategy-mix differences mean small-sample threshold tuning is
+particularly risky.
+
+**Re-evaluation method (when triggered):**
+
+Empirical approach (recommended):
+- For each closed loser, compute counterfactual P&L at tighter
+  stops (e.g., 30%, 40%, 50%) using historical MTM trajectory if
+  available
+- For each closed winner, compute counterfactual P&L at wider
+  targets (e.g., 35%, 50%, 75%)
+- Build expected-value curve per (target, stop) pair
+- Pick pair with best risk-adjusted EV given current strategy mix
+
+Alternative — theoretical/principled:
+- Strategy-specific thresholds (different defaults per strategy
+  family — iron condors typically run tighter than debit spreads
+  per industry convention)
+- Risk-adjusted Kelly fraction analysis
+- Time-horizon adjusted (short-DTE wants tighter, longer-DTE wider)
+
+**Anti-criteria (don't trigger re-evaluation if):**
+- Sample still <N=20 per debit-spread bucket
+- Recent threshold change still being evaluated
+- Strategy mix changed materially (rebalance first, then evaluate)
+- Bigger blocker active (warmup, capital constraint)
+
+**Decision shape when triggered:**
+- Run empirical analysis
+- Surface findings + recommendation
+- Operator decides: change thresholds, change them per-strategy,
+  or leave as-is with documented justification
+
+**Validity:** Until triggered OR until thresholds are changed.
+
+**Related work:**
+- Hold-ratio investigation 2026-05-13 (source)
+- PR #928's `hold_period_buckets` v1 (tracks data accumulation)
+- PR #929 (this PR — v2 relabel + operational note in CLAUDE.md)
+- Learning-mode codification — micro tier IS the dev environment for
+  evaluating these thresholds against empirical hold patterns
+
+**Status:** Watch active. Re-evaluation conditional on N=20.
+
 **[2026-05-12] OBSERVATION: framing-artifact false-alarm pattern (3 instances).**
 
 Diagnostics can produce concrete-evidence hypotheses whose underlying

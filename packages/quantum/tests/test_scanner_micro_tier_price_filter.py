@@ -23,13 +23,28 @@ from packages.quantum.options_scanner import (
 
 
 class _FakeRejectionStats:
-    """Minimal stand-in for RejectionStats — counts record() calls."""
+    """Minimal stand-in for RejectionStats — counts record() calls.
+
+    Mirrors the production RejectionStats interface used by
+    `_apply_tier_price_filter`. Tier 1C (2026-05-13) added
+    `set_symbol()` for per-thread context; this stub captures
+    set_symbol calls so tests can assert symbol attribution if
+    they want, but defaults to no-op for tests that don't care.
+    """
 
     def __init__(self):
         self.counts = {}
+        self.symbols_set = []
 
     def record(self, reason: str):
         self.counts[reason] = self.counts.get(reason, 0) + 1
+
+    def set_symbol(self, symbol):
+        # Captures the per-iteration symbol context so the loop in
+        # _apply_tier_price_filter doesn't AttributeError. The
+        # filter calls set_symbol(s) before each price check and
+        # set_symbol(None) after the loop — both flow through here.
+        self.symbols_set.append(symbol)
 
 
 def _quote(price=None, bid=None, ask=None, mid=None, last=None):

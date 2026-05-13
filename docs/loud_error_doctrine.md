@@ -1238,6 +1238,147 @@ not running") was generated from re-reading the worker logs after the
 fact, not from the morning status check — which itself is evidence
 the baseline section would have changed the diagnostic timeline.
 
+### H12 — Framing-artifact discipline
+
+Diagnostics can produce concrete-evidence conclusions whose underlying
+ASSUMPTION is wrong. The measurement is accurate; the interpretation
+(against what baseline, with what generalization) is where the error
+enters. H8 already codifies verification of hypotheses; H12 sharpens
+H8 by naming the specific failure mode — the verification step often
+confirms surface evidence (true) without confirming the baseline
+assumption (false).
+
+**Discipline statement:** when a diagnostic conclusion is drawn from
+data, explicitly state the baseline assumption AND the generalization
+scope. Verify both before treating the conclusion as actionable.
+
+#### Confirmed instances (codification trigger reached at 4)
+
+The pattern was tracked as a backlog observation from 2026-05-12 with
+"4th instance with new sub-shape" as the promotion criterion. Today's
+KO H7 spread-width attribution provides that 4th instance with a
+distinct sub-shape from the prior three. Promoted to formal doctrine
+2026-05-13.
+
+1. **2026-05-11 H11 status-check methodology gap.**
+   - Diagnostic finding: status check showed no operational issues
+   - Wrong baseline: framing assumed critical risk_alerts irrelevant
+     to "did anything trade today" question
+   - Correction: H11 baseline now includes critical alerts regardless
+     of operator framing (codified separately as H11)
+   - Sub-shape: **wrong-baseline framing**
+
+2. **2026-05-12 PR #908 worker-stale hypothesis.**
+   - Diagnostic finding: timestamp evidence suggested PR #908 not
+     deployed
+   - Wrong baseline: framing assumed single deploy point
+   - Correction: verified earlier deploy had been replaced; PR #908
+     IS live (codified separately as H8 extension)
+   - Sub-shape: **wrong-deploy-model framing**
+
+3. **2026-05-12 analytics_events writer-break hypothesis.**
+   - Diagnostic finding: `analytics_events` "stale since 2026-05-05"
+   - Wrong baseline: framing assumed time-based writing pattern
+   - Correction: writer is event-driven; zero output during
+     zero-activity period is healthy
+   - Sub-shape: **wrong-temporal-model framing**
+
+4. **2026-05-13 KO H7 spread-width attribution (this codification).**
+   - Diagnostic finding: KO LONG_CALL_DEBIT_SPREAD $486 max_loss
+     attributable to `options_scanner.py:1260` spread-width threshold
+   - Wrong generalization: line 1260 was generalized from
+     iron-condor-only to all spreads
+   - Correction: debit spreads use `_select_legs_from_chain`
+     (delta-target leg selection), not width-threshold logic; line
+     1260 lives inside `_select_iron_condor_legs` and applies only
+     to iron condors. KO's $486 max_loss comes from chain strike
+     granularity ($5-wide strikes on $78 underlying) plus
+     debit-spread leg_defs targeting deltas ~1 strike apart.
+   - The verification escape hatch in the γ1 implementation prompt
+     caught the error before shipping — STOP triggered when the
+     code path read revealed line 1260 was iron-condor-only.
+   - Sub-shape: **wrong-scope-generalization framing**
+
+The four sub-shapes (wrong baseline / wrong deploy model / wrong
+temporal model / wrong scope generalization) share the underlying
+class: surface measurement accurate, model behind interpretation
+wrong.
+
+#### Verification protocol
+
+Before treating a diagnostic conclusion as actionable:
+
+1. **Identify the baseline assumption.** What model does the
+   conclusion assume? Examples:
+   - "single deploy point" (assumes the deploy timeline maps to a
+     single timestamp; reality: deploys can be replaced)
+   - "time-based writing" (assumes a writer fires on a schedule;
+     reality: event-driven writers fire only on events)
+   - "universal spread-width threshold" (assumes one width constant
+     applies to all strategies; reality: separate strategy paths)
+   - "single-table data origin" (assumes anchoring on one table
+     suffices; reality: critical signals live in a different table)
+
+2. **Verify the assumption holds for THIS case.** The fact that
+   "spread-width often is threshold-based" doesn't mean "this
+   specific candidate's spread-width is threshold-based." Test the
+   premise before testing the conclusion.
+
+3. **Test before shipping.** If the conclusion suggests a code
+   change, verify the code path actually runs as the conclusion
+   assumes BEFORE shipping. Today's STOP at the verification step
+   caught instance 4.
+
+#### Diagnostic-prompt convention
+
+When drafting investigation prompts that lead to fix prompts:
+
+- Have the investigation prompt state: "the conclusion assumes X.
+  Verify X before treating the conclusion as actionable."
+- Have the fix prompt include an explicit STOP-and-verify step that
+  reads the code path the conclusion names — not as ceremony, as
+  H12's load-bearing safety check.
+- Treat the verification step itself as a doctrine instance: even
+  when it produces "no, the conclusion holds," that's signal worth
+  noting in synthesis. False-alarm refutations have value (H8
+  doctrine note).
+
+#### Relation to existing doctrine
+
+- **H8 (false-alarm verification discipline):** covers "verify
+  hypothesis before acting." H12 sharpens H8 by naming the specific
+  failure mode where verification can pass on surface evidence yet
+  miss the baseline assumption. H8 + H12 together: "verify both the
+  evidence AND the baseline."
+- **H11 (status-check methodology):** instance 1 of H12 is the
+  origin of H11. H11 is the specific corrective for one sub-shape
+  (wrong-baseline framing in status checks).
+- **H9 (verified-write across wrapper chains):** structurally
+  similar pattern — the "wrong baseline" in H9 is "wrapper return
+  value reflects side effect," and the verification disposition is
+  similar (verify the side effect, not the wrapper claim).
+
+#### When this fires
+
+H12 applies whenever a diagnostic:
+- Identifies a specific code line / config / data point as causal
+- Generalizes from a known pattern to a new context
+- Assumes a temporal / structural / behavioral model that wasn't
+  separately verified
+
+If the diagnostic involves "this works like X, therefore Y"
+reasoning, verify the "works like X" claim explicitly for the
+current case.
+
+#### Origin
+
+2026-05-12 backlog observation codifying 3-instance pattern with
+"4th instance with new sub-shape" as promotion criterion.
+2026-05-13 KO H7 spread-width attribution provided that 4th
+instance. Promotion to doctrine concurrent with Option A revert
+(reverting Path A's universe-widening experiment that produced
+the empirical data revealing instance 4).
+
 ## Valid silent-failure patterns
 
 Not all exception swallowing is a doctrine violation. The following

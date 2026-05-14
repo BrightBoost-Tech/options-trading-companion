@@ -1299,10 +1299,76 @@ distinct sub-shape from the prior three. Promoted to formal doctrine
      code path read revealed line 1260 was iron-condor-only.
    - Sub-shape: **wrong-scope-generalization framing**
 
-The four sub-shapes (wrong baseline / wrong deploy model / wrong
-temporal model / wrong scope generalization) share the underlying
-class: surface measurement accurate, model behind interpretation
-wrong.
+5. **2026-05-14 scheduler-stuck mechanism attribution.**
+   - Diagnostic finding: BE service silent on job dispatches since
+     05:00 UTC (~8h40m); morning jobs (`iv_daily_refresh`,
+     `day_orchestrator`, `alpaca_order_sync`) missing.
+   - Initial framing: "APScheduler dispatcher stuck / scheduler
+     thread died."
+   - Wrong baseline: assumed scheduler thread had failed.
+   - Actual cause: scheduler thread was ALIVE and dispatching. Every
+     job hung on outbound Supabase HTTP timeout
+     (`observability/alerts.py:85` raising `httpx.ConnectTimeout`).
+     Dispatcher queued jobs faster than they could complete because
+     jobs couldn't complete (they hung on HTTP). `Auto-retry failed
+     jobs` hit instance limit, confirming dispatcher was alive but
+     all execution paths were blocked.
+   - Correction: surface symptom (no `job_runs` writes) was correct
+     evidence; inferred mechanism (scheduler dead) was wrong. Real
+     mechanism was downstream outbound provider HTTP hang.
+   - Recovery: BE service restart via env-var trigger
+     (`RESTART_NONCE`). Scheduler resumed dispatching within 3 min;
+     `suggestions_open` validation cycle fired cleanly.
+   - Sub-shape: **wrong-mechanism-attribution framing** — same class
+     as instance 1 (wrong-baseline). Surface measurement accurate,
+     causal mechanism inferred from measurement was wrong.
+
+The five sub-shapes (wrong baseline / wrong deploy model / wrong
+temporal model / wrong scope generalization / wrong mechanism
+attribution) share the underlying class: surface measurement
+accurate, model behind interpretation wrong.
+
+Instance #5 status: H12 already covers this shape; the doctrine
+worked as designed — operator pulled BE logs before assuming the
+"scheduler thread died" hypothesis was correct, and the logs
+revealed the actual mechanism. H12's verification protocol
+(identify baseline / verify holds for THIS case / test before
+shipping) prevented restart-then-find-it-still-broken outcome.
+
+#### Meta-observation (2026-05-14): H12 applies to diagnostic synthesis
+
+Today's Option A validation diagnostic synthesis initially produced
+a broader framing than evidence supported:
+
+- **Specific finding (well-supported):** 2-leg debit spreads on
+  $50+ underlyings with $5-wide strikes produce ~$500 max_loss
+  which exceeds H7 round-trip safety at $681 BP.
+
+- **Over-generalized inference (NOT well-supported):** "$681
+  capital + standard chain geometry = no viable strategies
+  regardless of universe tuning."
+
+The over-generalization was caught by operator pushback in real
+time. The diagnostic's evidence was specific to 2-leg debit spreads;
+the synthesis broadened it to "all strategies" without verifying
+non-debit-spread structures (credit spreads, iron condors, 1-leg
+longs, sub-$30 names with $1/$2.50 strikes).
+
+**H12-shaped:** measurement accurate (2-leg debit spreads at $681
+fail H7 ✓), generalization to "all strategies" unjustified, the
+generalization was treated as actionable until operator caught it.
+
+**Doctrine implication:** H12 applies to diagnostic SYNTHESIS, not
+just root-cause attribution. When summarizing findings, separate
+"evidence about specific X" from "general conclusion about Y
+broader than X." The verification protocol's step 3 ("test before
+shipping") should explicitly include "test whether synthesis scope
+matches evidence scope."
+
+**Refinement candidate for next doctrine hygiene round:** add an
+explicit step to the verification protocol — "verify synthesis
+scope matches evidence scope." Not adding inline today; capturing
+as observation pending broader doctrine review.
 
 #### Verification protocol
 

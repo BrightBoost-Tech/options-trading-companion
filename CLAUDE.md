@@ -980,6 +980,15 @@ See `docs/roadmap.md` for the full Active focus block including recently-closed 
 
 **[2026-05-12] Warmup window day 3 of ~60.** Expected reduced trade frequency through warmup-window completion (`iv_repository.get_iv_context` requires `sample_size >= 60` at `iv_repository.py:239`; `iv_daily_refresh` producer healthy, writing ~69 rows/day). IV-sensitive strategies (credit spreads, iron condors) are gated until accumulated history clears the sample-size threshold. "No trade today" outcomes during warmup window are EXPECTED unless H11 `risk_alerts` baseline surfaces critical events. See `docs/backlog.md` "Warmup-window expectation (TESTABLE HYPOTHESIS)" entry — empirical validation pending; promote here if validated, revise/retract if refuted.
 
+**[2026-05-14] Open mechanisms (pending Tier 2 investigation).** Two mechanisms surfaced during today's iv drift investigation are captured as Tier 2 candidates in `docs/backlog.md`. Both are Phase 1 readiness blockers:
+
+- **`count_rows_for_date` structured artifact:** the H9 accounting check function returns "5" in a specific edge case that has reproduced identically across 3 independent firings (2× on 2026-05-09, 1× on 2026-05-14, all with `stats_ok=1, actual_rows=5, delta=-4`). The "5" doesn't reflect real row state — `pg_stat_user_tables` confirms `n_tup_del=1` lifetime (no actual deletions occurred). Mechanism unresolved.
+- **Silent handler invocation:** `iv_daily_refresh` ran today without a `job_runs` entry. The alert string proves the handler executed (only `iv_daily_refresh.py` emits `iv_handler_accounting_mismatch`); the absence of a `job_runs` row indicates an inline invocation path bypassing standard observability. Timing places it 26s after `suggestions_open` completed.
+
+**Implication for Phase 1:** the `iv_historical_backfill` verification path uses `count_rows_for_date`; unreliable count = unreliable Phase 1 verification. Silent invocation path could affect Phase 1's observability traceability if `iv_historical_backfill` shares the same vulnerability.
+
+**Status:** Phase 1 trigger CONDITIONAL until both characterized. See Tier 2 candidate entries in `docs/backlog.md` dated 2026-05-14.
+
 ### Exit thresholds (defaults under empirical review)
 
 **Current values** (`paper_exit_evaluator.py:329-330`):

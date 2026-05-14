@@ -131,18 +131,24 @@ def _get_admin_supabase():
         failed.
 
     Test-hygiene guard (added 2026-05-14): when running under pytest
-    (``PYTEST_CURRENT_TEST`` env var set), return None unconditionally.
-    Prevents local test execution against a developer environment with
-    real Supabase credentials from polluting production tables via
-    lazy alert imports that bypass handler-level mocking. Origin:
+    (``PYTEST_CURRENT_TEST`` env var set) AND the singleton has not
+    already been initialized, return None. Prevents local test
+    execution against a developer environment with real Supabase
+    credentials from polluting production tables via lazy alert
+    imports that bypass handler-level mocking. Origin:
     iv_handler_accounting_mismatch alert pollution traced via H5
-    unification investigation (see docs/backlog.md). Tests that
-    intentionally exercise this function's real-init path set
+    unification investigation (see docs/backlog.md).
+
+    Tests that pre-arm the singleton (set ``_ADMIN_INIT_ATTEMPTED=True``
+    + ``_ADMIN_SUPABASE=<mock>``) pass through unaffected — the guard
+    only fires on the lazy-init path. Tests that intentionally
+    exercise the lazy-init path itself set
     ``ALERTS_ALLOW_ADMIN_UNDER_PYTEST=1`` to opt out.
     """
     global _ADMIN_SUPABASE, _ADMIN_INIT_ATTEMPTED
     if (
-        os.environ.get("PYTEST_CURRENT_TEST")
+        not _ADMIN_INIT_ATTEMPTED
+        and os.environ.get("PYTEST_CURRENT_TEST")
         and not os.environ.get("ALERTS_ALLOW_ADMIN_UNDER_PYTEST")
     ):
         return None

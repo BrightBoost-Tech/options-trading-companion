@@ -989,6 +989,8 @@ See `docs/roadmap.md` for the full Active focus block including recently-closed 
 
 **Status:** Phase 1 trigger CONDITIONAL until both characterized. See Tier 2 candidate entries in `docs/backlog.md` dated 2026-05-14.
 
+**Update (2026-05-14 evening):** Today's `count_rows_for_date` investigation surfaced a unification hypothesis (H5) — the two mechanisms above may share a single root cause via a silent invocation path that uses a different client context. Evidence: all 3 alert firings share both identical metadata AND absent `job_runs` entries; the "5" is returned regardless of actual table state (0 rows → 5; 70 rows → 5); yesterday's standard-path cron run worked correctly. See updated Tier 2 entries in `docs/backlog.md` for full evidence chain. **Phase 1 readiness refined:** the STANDARD `enqueue_job_run` path is likely reliable (verified via 2026-05-13 cron run); the silent invocation path is the remaining observability concern but doesn't directly block Phase 1 if Phase 1 uses the standard path. Silent invocation investigation queued as next investigation work.
+
 ### Exit thresholds (defaults under empirical review)
 
 **Current values** (`paper_exit_evaluator.py:329-330`):

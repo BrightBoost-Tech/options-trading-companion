@@ -908,6 +908,54 @@ Plausible candidates for what produces the (5, 1, -4) artifact:
   misleading filter (e.g., wrong as_of_date type coercion, cross-table
   join, count over a different scope)
 
+**Unification hypothesis (added 2026-05-14 evening, post-investigation):**
+
+Today's count_rows_for_date investigation produced strong directional
+evidence that this Tier 2 candidate and the sibling candidate
+(`iv_daily_refresh` silent invocation path) may share a single root
+mechanism. Evidence:
+
+- All 3 alert firings (2026-05-09 ×2, 2026-05-14 ×1) have identical
+  metadata: `stats_ok=1, actual_rows=5, delta=-4`
+- All 3 alert firings have NO corresponding `job_runs` entry —
+  verified for both days
+- The "5" doesn't correspond to any natural counting scope of
+  `underlying_iv_points` (no underlying has 5 rows, no source has
+  5 rows, total table is 279)
+- The "5" is returned regardless of actual table state: 0 rows for
+  date → 5; 70 rows for date → 5; different date with 0 rows → 5
+- Yesterday's 2026-05-13 cron run (via standard `enqueue_job_run`
+  path) reported `accounting_match=true` with `actual_rows=70` —
+  the STANDARD path works correctly
+
+**Hypothesis H5:** The silent invocation path uses a different client
+context (test client? mocked client? misconfigured client?) that
+returns a fixed count of 5. Both surface symptoms (no `job_runs` +
+count=5) are produced by the same invocation path.
+
+**Implication for investigation scope:** investigating
+`count_rows_for_date` in isolation will miss the unifying mechanism.
+The right next move is the silent invocation investigation, which
+would likely resolve both candidates.
+
+**Investigation paths ruled out (today, 2026-05-14):**
+
+- Stale read replica (H1): no replicas configured for this Supabase
+  project (`pg_stat_replication` returns 0 rows)
+- Code-side filter construction (H4): `count_rows_for_date`
+  implementation is clean — single `.eq()` filter on DATE column
+  with properly formatted `'%Y-%m-%d'` string, no type coercion bug,
+  no wrong-table reference
+
+**Investigation paths still unresolved (scope-limited):**
+
+- PostgREST count cache (H2): code uses `count="exact"` which is the
+  most reliable count mode; no application-level caching observed;
+  cannot rule out supabase-py library bug without inspecting
+  installed package source
+- HTTP-layer caching (H3): cannot inspect Railway → Supabase HTTP
+  infrastructure within read-only investigation scope
+
 **Investigation surface (when prioritized):**
 
 - Read `IVRepository.count_rows_for_date` at
@@ -974,6 +1022,35 @@ hyphenated variants) for 2026-05-14. Most recent successful
 completed at 16:00:22Z. Suggests possible inline invocation from
 `suggestions_open` or a downstream component during the midday cycle.
 
+**Unification hypothesis (added 2026-05-14 evening, post-investigation):**
+
+Today's count_rows_for_date investigation produced strong directional
+evidence that this Tier 2 candidate and the sibling candidate
+(`count_rows_for_date` stale-read mechanism) may share a single root
+mechanism. See the `count_rows_for_date` entry above for full
+evidence chain.
+
+**Hypothesis H5:** The silent invocation path uses a different client
+context that returns a fixed count of 5. The "no `job_runs`" symptom
+and the "count=5 artifact" symptom are produced by the same
+invocation path.
+
+**Implication for investigation scope:** investigating silent
+invocation should integrate the H5 framing from the start. Finding
+the silent invocation path likely resolves the count=5 mechanism too.
+The investigation should specifically look at:
+
+- What client construction does the silent invocation path use?
+- Does it differ from the standard handler invocation (via
+  `enqueue_job_run`) in client context, configuration, or wrapping?
+- Could the path be importing `iv_daily_refresh`'s handler function
+  inline rather than via the dispatcher?
+- Is there a test/mock client leak into a production code path?
+
+**Refined effort estimate:** still ~45-60 min focused investigation,
+but with sharper framing — the search is for a specific code path
+that explains both symptoms, not two parallel investigations.
+
 **Investigation surface (when prioritized):**
 
 - Search for any inline calls to `iv_daily_refresh`'s handler function
@@ -988,13 +1065,24 @@ completed at 16:00:22Z. Suggests possible inline invocation from
 - Verify whether α's `iv_historical_backfill` could share a similar
   silent-invocation risk
 
-**Phase 1 dependency:**
+**Phase 1 dependency (refined 2026-05-14 evening):**
 
-Phase 1 is operator-triggered and SHOULD write a `job_runs` row via
-standard handler invocation. But if `iv_daily_refresh`'s handler can
-be invoked silently (path TBD), `iv_historical_backfill` might share
-that vulnerability. Phase 1's observability could be partially blind.
-Secondary Phase 1 readiness blocker (count_rows_for_date is primary).
+The CONDITIONAL Phase 1 readiness verdict from the original capture
+is refined post-investigation:
+
+- `count_rows_for_date` in the STANDARD path (cron-fired handler via
+  the normal Supabase client) is likely reliable. Yesterday's
+  2026-05-13 cron run validates this (`accounting_match=true`,
+  `actual_rows=70`).
+- Phase 1 trigger via the standard `enqueue_job_run` path should
+  work correctly.
+- The silent invocation path is a separate observability concern
+  but doesn't directly block Phase 1 if Phase 1 uses the standard
+  path.
+
+Phase 1 readiness is less blocked than the original Tier 2 capture
+suggested, while still recommending the silent invocation
+investigation as the next priority.
 
 **Effort estimate:** ~45-60 min focused investigation. Could be
 shorter if the inline-call path is obvious from a grep.

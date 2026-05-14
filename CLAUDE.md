@@ -1025,6 +1025,64 @@ These threshold values were inherited rather than set by deliberate design. They
 - PR #929 (this PR — operational note + view v2 relabel)
 - Learning-mode codification — micro tier IS the development environment for evaluating these defaults
 
+### Structural learning: 2-leg debit spread geometry at micro BP (2026-05-14)
+
+**Specific finding (well-supported by Path A + Option A experiments):**
+
+At $681 micro BP, with H7 round-trip safety enforced, and with the scanner's current 2-leg debit spread emissions using $5-wide strikes on $50+ underlyings:
+
+- Typical max_loss per contract: ~$500
+- Round-trip cost (entry + 1.1× close safety): ~$1,020
+- $1,020 > $681 BP → contracts=0 → REJECT at sizing layer
+- Result: 2-leg debit spreads on $50+ underlyings cannot pass H7 at current capital
+
+**This is mechanical math, not a tunable parameter.** The H7 check is load-bearing capital invariant (codified after the BAC 2026-05-01 ghost-position incident); the chain geometry comes from underlying market structure ($5-wide strikes are standard for $50-$200 stocks); the budget is the operator's current capital.
+
+**What this DOES NOT imply (over-generalization warned against):**
+
+The diagnostic synthesis initially generalized this finding to "no strategies fit at $681." Operator caught the over-generalization. The specific finding does NOT imply:
+
+- That NO strategies fit at $681 (some may; not all tested)
+- That capital scaling is the only path (strategy class change also changes the math)
+- That the H7 check should be modified (it's working correctly)
+- That spread-width should be changed across all tiers (yesterday's γ1 near-miss showed why)
+
+**Specific NOT-evaluated cases that may still be viable at $681:**
+
+- 2-leg credit spreads (max_loss = width − premium collected)
+- Iron condors (4-leg credit structure with collected premium)
+- 1-leg long options where premium is small (max_loss = premium paid)
+- 2-leg debit spreads on sub-$30 underlyings with $1 or $2.50 strikes (max_loss reduced by chain granularity)
+- Different delta-gap strategies producing narrower max_loss
+
+**Diagnostic gate:** before claiming "strategy X doesn't fit," verify empirically with chain data + sizing math. Without that verification, "doesn't fit" is over-generalization (H12 instance from 2026-05-14 — see `docs/loud_error_doctrine.md` meta-observation).
+
+**Operational implication:**
+
+Two strategic responses possible (NOT decided in this note):
+1. **Capital scaling** — adds available BP, makes existing geometry work
+2. **Strategy class shift** — different geometry, may work at current BP
+
+Both may apply. See `docs/backlog.md` "Capital scaling framework" entry for open questions; α implementation (separate work) tests the strategy-class-shift hypothesis.
+
+**Refinement of "perfect code" (learning-mode):**
+
+The learning-mode codification stated: "At micro tier I want to perfect the code and make sure it enters and exits accordingly. After these are perfected I will add more capital."
+
+Today's finding refines "perfect code" to include **structural fit between emission geometry and operational capital**. A scanner that produces emissions structurally incompatible with available BP at the intended capital level is not "perfected" — it has a structural mismatch.
+
+The codification's discipline is preserved: code must be perfected before capital scales. Today's finding clarifies that "perfected" includes "structural fit between emission geometry and operational capital."
+
+**Cross-references:**
+- Path A experiment (2026-05-12) — empirical refutation of $100 cap (KO H7 trace)
+- Option A experiment / PR #932 (2026-05-13) — Path A reverted
+- Option A validation 2026-05-14 — empirical refutation of "pure $60 revert reliably produces creatable candidates"
+- KO H7 trace 2026-05-13 (downstream gate identification)
+- γ1 near-miss 2026-05-13 (wrong-line attribution — H12 instance 4)
+- Scheduler-stuck mechanism attribution 2026-05-14 (H12 instance 5)
+- Meta-observation 2026-05-14 (H12 applies to synthesis scope; this entry is the corrective)
+- `docs/backlog.md` Capital scaling framework entry
+
 ---
 
 ## Live State (auto-updated)

@@ -787,6 +787,191 @@ Slot 1 — AST gate"; item #3 refreshed (stale D3/D5 reference
 replaced with #62a-D1 architectural PR which is the actual
 queued HIGH work).
 
+**[2026-05-14] TIER 2 CANDIDATE: dispatcher_health monitor.**
+
+**Surfaced by:** 2026-05-14 08:41 CT pre-cycle status check
+identified BE service silent on job dispatches since 05:00 UTC
+(~8h40m of effective downtime). H11 baseline didn't catch it
+because no internal monitor exists for "expected dispatches missing
+during market hours." Only manual status check identified the outage.
+
+**Observability gap:** Scheduler-stuck-detection has no current
+mechanism. Worker liveness alone is insufficient because RQ
+housekeeping runs even when the scheduler dispatcher is broken
+(today's case: worker emitting "cleaning registries for queue: otc"
+every ~13.5 min while no jobs got dispatched for 9h+).
+
+**Proposed Tier 2 work:** `dispatcher_health` view + monitor.
+- Internal view `expected_vs_actual_dispatches` joining APScheduler
+  config-based expected fire schedule against actual `job_runs` fires
+- During market hours (13:30-21:00 UTC weekdays), if any `job_name`
+  shows `expected_count - actual_count >= threshold` within last
+  N min, surface as `risk_alert`
+- Threshold tuning needs design discussion (1 missed = transient;
+  3+ missed = pattern)
+
+**Effort estimate:** ~half day implementation + design.
+
+**Anti-criteria (don't build yet):**
+- α implementation in flight may un-gate priorities
+- Operator pain from manual workaround is rare (today is N=1)
+- More urgent Tier 2 work surfaces first
+
+**Related shape:** Tier 1A's `event_driven_writer_health` candidate.
+Both monitors bridge gaps between worker liveness and component
+liveness — "is THIS surface producing output as expected?"
+
+**Cross-references:**
+- 2026-05-14 pre-cycle status check
+- 2026-05-14 scheduler recovery (manual + restart)
+- Tier 1B PR #928 (convenience views infrastructure)
+- `event_driven_writer_health` (sibling candidate)
+- H12 instance 5 (scheduler-stuck mechanism attribution)
+
+**Status:** Captured. Tier 2 candidate. Prioritization TBD.
+
+**[2026-05-14] TIER 2 CANDIDATE: supabase_http_health monitor.**
+
+**Surfaced by:** 2026-05-14 scheduler recovery diagnostic
+(post-restart log analysis) identified the actual root cause: BE
+service hung on outbound Supabase HTTP timeouts at
+`observability/alerts.py:85` (`httpx.ConnectTimeout`). Scheduler
+thread was ALIVE and dispatching; every job hung on its Supabase
+write. Surface symptom = no `job_runs` writes; mechanism =
+outbound provider hang.
+
+**Observability gap:** No monitor for outbound provider response
+times. Today's incident was invisible until manual investigation
+pulled BE logs.
+
+**Proposed Tier 2 work:** outbound-provider response-time monitor.
+- Track p50/p95 response times for outbound HTTP (Supabase, Alpaca,
+  Polygon) during market hours
+- If p95 exceeds N seconds for M consecutive minutes during market
+  hours → surface `risk_alert`
+- Different threshold per provider (Polygon may legitimately take
+  longer than Supabase)
+- Integrates with existing `observability/alerts.py` infrastructure
+
+**Effort estimate:** ~half day design + build + test.
+
+**Anti-criteria (don't build yet):**
+- Provider issues are rare (today is N=1)
+- `dispatcher_health` (Tier 2 sibling) may cover the user-visible
+  symptom subset
+- Vendor-side issues might be better monitored via their own status
+  pages than internal infrastructure
+
+**Open scope question:** does `dispatcher_health` subsume this? If
+the dispatcher monitor catches "no dispatches," users get the same
+signal whether mechanism is scheduler-dead or provider-hung. Design
+diagnostic should clarify whether mechanism-monitor is worth
+separate work.
+
+**Cross-references:**
+- 2026-05-14 scheduler recovery investigation
+- `dispatcher_health` (sibling candidate)
+- `observability/alerts.py:85` (the actual timeout site today)
+- H12 instance 5 (today's mechanism-attribution finding)
+
+**Status:** Captured. Tier 2 candidate. May overlap with
+`dispatcher_health`; design diagnostic should clarify scope.
+
+**[2026-05-14] FRAMEWORK CAPTURE: capital scaling preparation.**
+
+**Originated:** 2026-05-14 structural finding (see CLAUDE.md
+"Structural learning: 2-leg debit spread geometry at micro BP")
+revealed 2-leg debit spreads at $681 + standard $5 chains on $50+
+underlyings are structurally incompatible. Two strategic responses
+available: capital scaling or strategy class shift. Operator framing:
+both may apply.
+
+**This entry captures OPEN QUESTIONS for the capital scaling
+framework. NO DECISIONS in this entry — questions are durable
+artifacts for future thinking.**
+
+### Open question 1: Trigger criteria
+
+What evidence justifies a capital addition?
+
+Candidates:
+- **α validates AND credit spreads also fail H7:** confirms
+  structural scope extends beyond debit spreads; capital becomes
+  more compelling
+- **Budget-fit diagnostic identifies viable structures at $681:**
+  capital becomes less urgent (strategy class change is the path)
+- **Time-based:** N weeks of post-α observation with zero creatable
+  suggestions → capital addition triggered
+- **Specific milestone:** code produces N viable creatable
+  suggestions per week consistently → ready to scale
+
+Each implies a different patience profile. No single right answer.
+
+### Open question 2: Target amount
+
+Multiple thresholds matter:
+
+- **$1,500:** smallest meaningful change. Standard $5-wide debit
+  spread math works ($500 × 2.1 = $1,050 < $1,500). Single position
+  capacity restored.
+- **$3,000-$5,000:** enables concurrent positions per Tuesday's
+  tier inflection diagnostic (4 positions at micro tier with proper
+  diversification)
+- **$10,000+:** enables small-tier behavior, different concurrency
+  policy, different EV calculations
+
+Each level has implications. Operator decides based on risk
+appetite + runway + product maturity.
+
+### Open question 3: Validation signals
+
+How do we know a capital addition was right?
+
+Candidates:
+- Trade frequency stabilizes at non-zero rate
+- Win rate stays consistent with paper-trade baseline (no regime
+  shift artifacts)
+- No new structural-fit failures surface
+- H7 / sizing rejections drop to pre-Path-A rates
+
+### Open question 4: Sequencing vs α
+
+If α is shipping (un-gated by today's findings), should capital
+scaling decision wait for α's data?
+
+- **Wait for α data:** more informed decision; α might reveal
+  credit spreads work at $681, reducing capital urgency
+- **Ship α + plan capital independently:** parallel paths; capital
+  decision proceeds on its own timeline
+- **Conditional sequencing:** capital decision IF α validates
+  structural finding extends beyond debit spreads
+
+### Anti-criteria
+
+Do NOT trigger capital scaling without:
+- α implementation shipped + at least 1-2 weeks of observation
+- Budget-fit diagnostic results (separate work)
+- Explicit trigger from Open Question 1 satisfied
+
+### Decision shape when triggered
+
+- Specific amount chosen + rationale
+- Specific validation criteria committed
+- Specific monitoring plan post-addition (track Q3 signals)
+- Reversibility plan (if signals don't match, what to do)
+
+**Validity:** Until triggered OR until structural finding is
+invalidated by α / diagnostic / other evidence.
+
+**Cross-references:**
+- 2026-05-14 structural learning note (CLAUDE.md)
+- Tuesday's tier inflection diagnostic (concurrency thresholds)
+- α implementation prompt (Thursday-gated, may un-gate)
+- Future budget-fit diagnostic (informs Q1 trigger)
+- Learning-mode codification (refined per today's finding)
+
+**Status:** Framework captured as open questions. No decisions.
+
 **[2026-05-12 20:56 UTC] Path A shipped: MICRO_TIER_MAX_UNDERLYING $60 → $100.**
 
 Lever 1 universe-widening experiment via Railway env var on the
@@ -870,6 +1055,27 @@ triggered a fresh deploy; revert would do the same.
 - Path A status: shipped (`MICRO_TIER_MAX_UNDERLYING=100`)
 
 **Status:** Shipped. Empirical observation in flight.
+
+**UPDATE 2026-05-14:** Path A experiment CONCLUDED.
+
+Path A produced empirical refutation data on 2026-05-13 (KO H7 trace
+identified that $100 admits fail H7 round_trip_bp_insufficient at
+$681 BP). Option A reverted to $60 via PR #932 on 2026-05-13. Today's
+validation cycle (manually triggered + then misfire-recovered after
+scheduler outage) produced refutation data on the reverse hypothesis
+("$60 reliably produces creatable candidates") — emissions were 0
+today vs Tuesday baseline of 1.
+
+Combined finding: both universe tunings produced refutation data
+pointing at the same structural limit (capital + chain geometry).
+Structural finding captured in CLAUDE.md "Structural learning:
+2-leg debit spread geometry at micro BP" 2026-05-14.
+
+Path A served its purpose. No further universe tuning work without
+strategy class change OR capital scaling decision. See capital
+scaling framework entry for the decision pipeline.
+
+**Status:** CLOSED. Findings rolled up to structural learning note.
 
 ---
 

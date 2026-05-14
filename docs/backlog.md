@@ -972,11 +972,11 @@ invalidated by α / diagnostic / other evidence.
 
 **Status:** Framework captured as open questions. No decisions.
 
-**[2026-05-15] Budget-fit landscape diagnostic findings.**
+**[2026-05-14] Budget-fit landscape diagnostic findings.**
 
 **Conducted:** Empirical scan across 3 sample underlyings (HBAN
 $15.57, KHC $23.58, KO $80.72) testing 22+ option structures against
-H7 round-trip safety (`max_loss × 2.1 ≤ $681`). Mid-afternoon CT
+H7 round-trip safety (`max_loss × 2.1 ≤ $681`). Late-morning CT
 snapshot; Jun 12 / Jun 18 / Jun 26 expirations (28-42 DTE).
 
 **Key findings:**
@@ -1049,9 +1049,44 @@ as "fits today on names tested at current IV" not "always fits."
 **Status:** Diagnostic complete. Findings preserved in operational
 note + this backlog entry. No automated action.
 
-**[2026-05-15] UNIVERSE HYGIENE: Stale-ticker audit candidate (Tier 3).**
+**Refinement from empirical observation (2026-05-14 midday cycle):**
 
-**Surfaced by:** Today's budget-fit diagnostic encountered MRO
+The 2026-05-14 16:00 UTC suggestions_open cycle produced a Ford
+F LONG_CALL_DEBIT_SPREAD candidate (Class B territory, sub-$15
+underlying):
+- Passed scanner-internal gates ✓
+- Passed H7 round-trip safety ✓ (Class B fit confirmed in production)
+- Reached `trade_suggestions` creation ✓ (created=1 for the cycle)
+- Blocked at `edge_below_minimum` ✗ (EV 15.44 below threshold;
+  PoP 32.96%)
+- Final status: `NOT_EXECUTABLE`
+
+**Implications:**
+- Class B (sub-$30 narrow-strike) DOES emit candidates at $681
+  capital — empirical confirmation of this diagnostic's prediction.
+- `edge_below_minimum` is the next-most-load-bearing downstream gate
+  beyond H7 for Class B-shape candidates.
+- The structural finding's framing ("system can't produce trades at
+  $681") remains technically correct, but the BINDING CONSTRAINT
+  has shifted from H7 to `edge_below_minimum` for Class B candidates
+  specifically.
+
+**Follow-up worth considering (separate work, not this entry):**
+- What is the `edge_below_minimum` threshold and where is it set?
+- Is EV 15.44 (Ford's value) far below threshold or just below?
+- Could threshold tuning unlock Class B emissions at micro tier?
+- Is `edge_below_minimum` a tuneable parameter or a load-bearing
+  invariant like H7?
+
+These are open empirical questions, not actions for this entry.
+The Ford F observation also surfaced via the cycle-shape diagnostic
+(H12 instance #6 — see `docs/loud_error_doctrine.md`) which caught
+that today's midday cycle was a real scanner run, not the "anemic
+wrapper" the midday status check initially misread.
+
+**[2026-05-14] UNIVERSE HYGIENE: Stale-ticker audit candidate (Tier 3).**
+
+**Surfaced by:** The 2026-05-14 budget-fit diagnostic encountered MRO
 (Marathon Oil) returning Nov 2024 daily-bar data with no recent
 quotes. MRO was acquired by ConocoPhillips in Nov 2024; the ticker
 is effectively defunct but still present in candidate pools.
@@ -1084,7 +1119,7 @@ cross-reference step.
 - Bigger work items in flight
 
 **Cross-references:**
-- 2026-05-15 budget-fit diagnostic (surfacing event)
+- 2026-05-14 budget-fit diagnostic (surfacing event)
 - `BASE_UNIVERSE` in `universe_service.py`
 
 **Status:** Captured. Tier 3 candidate. Low priority.

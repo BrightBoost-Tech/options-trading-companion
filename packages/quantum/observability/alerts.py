@@ -5,6 +5,7 @@ Reference: docs/loud_error_doctrine.md
 """
 
 import logging
+import os
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -128,8 +129,23 @@ def _get_admin_supabase():
     Returns:
         Optional[Client]: Supabase admin client, or None if creation
         failed.
+
+    Test-hygiene guard (added 2026-05-14): when running under pytest
+    (``PYTEST_CURRENT_TEST`` env var set), return None unconditionally.
+    Prevents local test execution against a developer environment with
+    real Supabase credentials from polluting production tables via
+    lazy alert imports that bypass handler-level mocking. Origin:
+    iv_handler_accounting_mismatch alert pollution traced via H5
+    unification investigation (see docs/backlog.md). Tests that
+    intentionally exercise this function's real-init path set
+    ``ALERTS_ALLOW_ADMIN_UNDER_PYTEST=1`` to opt out.
     """
     global _ADMIN_SUPABASE, _ADMIN_INIT_ATTEMPTED
+    if (
+        os.environ.get("PYTEST_CURRENT_TEST")
+        and not os.environ.get("ALERTS_ALLOW_ADMIN_UNDER_PYTEST")
+    ):
+        return None
     if not _ADMIN_INIT_ATTEMPTED:
         _ADMIN_INIT_ATTEMPTED = True
         try:

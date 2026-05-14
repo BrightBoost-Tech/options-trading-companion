@@ -186,6 +186,19 @@ class TestGetAdminSupabase(unittest.TestCase):
         from packages.quantum.observability import alerts
         importlib.reload(alerts)
         self.alerts = alerts
+        # Opt out of the test-hygiene env-guard so these tests can
+        # exercise the function's real-init code path. See env-guard
+        # block in alerts._get_admin_supabase docstring.
+        import os
+        self._prior_opt_out = os.environ.get("ALERTS_ALLOW_ADMIN_UNDER_PYTEST")
+        os.environ["ALERTS_ALLOW_ADMIN_UNDER_PYTEST"] = "1"
+
+    def tearDown(self):
+        import os
+        if self._prior_opt_out is None:
+            os.environ.pop("ALERTS_ALLOW_ADMIN_UNDER_PYTEST", None)
+        else:
+            os.environ["ALERTS_ALLOW_ADMIN_UNDER_PYTEST"] = self._prior_opt_out
 
     def test_caches_after_first_call(self):
         from unittest.mock import patch
@@ -214,6 +227,62 @@ class TestGetAdminSupabase(unittest.TestCase):
         # Sentinel must prevent retry.
         self.assertEqual(factory.call_count, 1)
         self.assertTrue(self.alerts._ADMIN_INIT_ATTEMPTED)
+
+
+class TestPytestEnvGuard(unittest.TestCase):
+    """Verify the PYTEST_CURRENT_TEST env-guard added 2026-05-14.
+
+    Origin: iv_handler_accounting_mismatch alert pollution traced via
+    H5 unification investigation. Local pytest execution against real
+    Supabase credentials was writing to production risk_alerts via
+    lazy alert imports that bypassed handler-level mocking. Guard
+    returns None under pytest unless explicitly opted out.
+    """
+
+    def setUp(self):
+        import importlib
+        from packages.quantum.observability import alerts
+        importlib.reload(alerts)
+        self.alerts = alerts
+
+    def test_returns_none_under_pytest_by_default(self):
+        import os
+        # Sanity: pytest sets PYTEST_CURRENT_TEST automatically when a
+        # test is running.
+        self.assertIsNotNone(os.environ.get("PYTEST_CURRENT_TEST"))
+        # Without the opt-out, guard returns None and does not even
+        # attempt the get_admin_client factory.
+        from unittest.mock import patch
+        factory = MagicMock()
+        with patch(
+            "packages.quantum.jobs.handlers.utils.get_admin_client",
+            factory,
+        ):
+            result = self.alerts._get_admin_supabase()
+        self.assertIsNone(result)
+        factory.assert_not_called()
+        # Guard short-circuits before init bookkeeping, so the sentinel
+        # state stays at its initial value.
+        self.assertFalse(self.alerts._ADMIN_INIT_ATTEMPTED)
+
+    def test_opt_out_env_var_bypasses_guard(self):
+        import os
+        from unittest.mock import patch
+        client_mock = MagicMock()
+        prior = os.environ.get("ALERTS_ALLOW_ADMIN_UNDER_PYTEST")
+        os.environ["ALERTS_ALLOW_ADMIN_UNDER_PYTEST"] = "1"
+        try:
+            with patch(
+                "packages.quantum.jobs.handlers.utils.get_admin_client",
+                return_value=client_mock,
+            ):
+                result = self.alerts._get_admin_supabase()
+            self.assertIs(result, client_mock)
+        finally:
+            if prior is None:
+                os.environ.pop("ALERTS_ALLOW_ADMIN_UNDER_PYTEST", None)
+            else:
+                os.environ["ALERTS_ALLOW_ADMIN_UNDER_PYTEST"] = prior
 
 
 if __name__ == "__main__":

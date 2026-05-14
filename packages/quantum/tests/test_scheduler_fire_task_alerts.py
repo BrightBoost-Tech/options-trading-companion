@@ -179,6 +179,19 @@ class TestSupabaseSingletonFailureFailsSoft(unittest.TestCase):
         # Singleton lives in alerts now; reset to fresh state.
         alerts._ADMIN_SUPABASE = None
         alerts._ADMIN_INIT_ATTEMPTED = False
+        # Opt out of the pytest test-hygiene env-guard so these tests
+        # can exercise the lazy-init code path (see env-guard docstring
+        # in alerts._get_admin_supabase).
+        import os
+        self._prior_opt_out = os.environ.get("ALERTS_ALLOW_ADMIN_UNDER_PYTEST")
+        os.environ["ALERTS_ALLOW_ADMIN_UNDER_PYTEST"] = "1"
+
+    def tearDown(self):
+        import os
+        if self._prior_opt_out is None:
+            os.environ.pop("ALERTS_ALLOW_ADMIN_UNDER_PYTEST", None)
+        else:
+            os.environ["ALERTS_ALLOW_ADMIN_UNDER_PYTEST"] = self._prior_opt_out
 
     def test_singleton_failure_does_not_crash_fire_task(self):
         with patch(

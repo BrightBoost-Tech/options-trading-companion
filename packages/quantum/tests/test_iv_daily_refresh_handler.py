@@ -4,12 +4,21 @@ from packages.quantum.jobs.handlers.iv_daily_refresh import run, JOB_NAME
 
 class TestIVDailyRefreshHandler:
 
+    # Mock the alert path's lazy `_get_admin_supabase` import so test
+    # execution never constructs a real admin client. Defense vs. the
+    # 2026-05-14 silent invocation finding: the handler's accounting
+    # check (iv_daily_refresh.py:130-153) does
+    # `from packages.quantum.observability.alerts import _get_admin_supabase`
+    # at runtime, bypassing the IVRepository mock and writing to real
+    # risk_alerts when run with developer-environment credentials.
+    @patch("packages.quantum.observability.alerts._get_admin_supabase",
+           return_value=None)
     @patch("packages.quantum.jobs.handlers.iv_daily_refresh.get_admin_client")
     @patch("packages.quantum.jobs.handlers.iv_daily_refresh.UniverseService")
     @patch("packages.quantum.jobs.handlers.iv_daily_refresh.MarketDataTruthLayer")
     @patch("packages.quantum.jobs.handlers.iv_daily_refresh.IVRepository")
     @patch("packages.quantum.jobs.handlers.iv_daily_refresh.IVPointService")
-    def test_run_success(self, MockIVPointService, MockIVRepository, MockTruthLayer, MockUniverseService, mock_get_client):
+    def test_run_success(self, MockIVPointService, MockIVRepository, MockTruthLayer, MockUniverseService, mock_get_client, _mock_get_admin_supabase):
         # Setup mocks
         mock_client = MagicMock()
         mock_get_client.return_value = mock_client

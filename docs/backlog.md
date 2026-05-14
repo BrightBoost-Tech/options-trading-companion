@@ -999,8 +999,43 @@ if Supabase configuration access is needed.
 - Related Tier 2 candidate: `iv_daily_refresh` silent invocation path
   (bundled for Phase 1 readiness path)
 
-**Status:** Captured. Tier 2 candidate. Prioritization TBD. Blocks
-Phase 1 trigger until characterized.
+**Status:** RESOLVED (2026-05-14 evening).
+
+**Resolution:** H5 unification hypothesis confirmed via the silent
+invocation investigation. The alerts come from local developer pytest
+execution of `test_iv_daily_refresh_handler.py` against a developer
+environment with real Supabase credentials. The test mocks
+`IVRepository` (causing `count_rows_for_date` to return hardcoded `5`
+at `test_iv_daily_refresh_handler.py:43`) but does NOT mock the
+handler's lazy alert import path. When the accounting check fires
+(`iv_daily_refresh.py:130-153`), it does
+`from packages.quantum.observability.alerts import ... _get_admin_supabase`
+which reads env at call time and constructs a real production
+admin client, then writes to production `risk_alerts` as a
+side-effect of test execution. All evidence reconciled:
+
+- "5" = test mock's hardcoded return value
+- "1" = test universe math (only AAPL has snapshot mock; 4 others
+  fall to MagicMock fallback marked as `missing_data`)
+- "delta=-4" = arithmetic (stats_ok − actual_rows = 1 − 5)
+- "no `job_runs` entry" = test calls `run({})` directly, bypassing
+  `enqueue_job_run`
+- Reproduces across days because test setup is constant code (not
+  dependent on table state)
+- 2026-05-09 ×2 = PR #115 wrapper-drift debugging windows
+- 2026-05-14 ×1 = today's PR work
+
+**Fix applied:** test now mocks
+`packages.quantum.observability.alerts._get_admin_supabase` directly
+(primary, surgical); `_get_admin_supabase` gains a `PYTEST_CURRENT_TEST`
+env-guard returning `None` unless `ALERTS_ALLOW_ADMIN_UNDER_PYTEST=1`
+is set (defense-in-depth for any future test that bypasses
+handler-level mocking).
+
+**Phase 1 readiness:** CLEAR. The mechanism is test pollution, not
+production reliability. Standard `enqueue_job_run` path verified
+working (2026-05-13 cron, `accounting_match=true`,
+`actual_rows=70`).
 
 **[2026-05-14] TIER 2 CANDIDATE: iv_daily_refresh silent invocation path.**
 
@@ -1107,8 +1142,34 @@ shorter if the inline-call path is obvious from a grep.
 - H11 doctrine: critical alerts independent of operator framing (the
   alert fired correctly; the gap is the invocation traceability)
 
-**Status:** Captured. Tier 2 candidate. Prioritization TBD. Bundled
-with `count_rows_for_date` for Phase 1 readiness path.
+**Status:** RESOLVED (2026-05-14 evening).
+
+**Resolution:** Same mechanism as the sibling `count_rows_for_date`
+entry above — see that entry for the full evidence chain. Both
+symptoms (no `job_runs` row + `count_rows_for_date` returning
+hardcoded `5`) are produced by a SINGLE invocation path: local
+developer pytest execution of `test_iv_daily_refresh_handler.py`
+against a developer environment with real Supabase credentials.
+
+The test calls `run({})` directly (`test_iv_daily_refresh_handler.py:46`),
+bypassing `enqueue_job_run` entirely. No `job_runs` row is ever
+created because the dispatcher path is never entered. The
+accounting alert that fires inside the handler writes to production
+`risk_alerts` via a lazy `_get_admin_supabase` import that
+side-steps the test's IVRepository mock.
+
+**Fix applied:** test patches
+`packages.quantum.observability.alerts._get_admin_supabase` to
+return `None` (primary); `_get_admin_supabase` gains a
+`PYTEST_CURRENT_TEST` env-guard (defense-in-depth). See sibling
+entry for code references.
+
+**Phase 1 readiness:** CLEAR. Phase 1's
+`iv_historical_backfill` handler does not have the same lazy-import
+pattern — it writes its audit `risk_alerts` row via the
+test-mocked `client` directly (`iv_historical_backfill.py:188`),
+so `test_iv_historical_backfill_handler.py` was never at risk.
+Verified during today's investigation.
 
 **[2026-05-14] FRAMEWORK CAPTURE: capital scaling preparation.**
 

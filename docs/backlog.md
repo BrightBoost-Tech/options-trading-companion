@@ -877,6 +877,151 @@ separate work.
 **Status:** Captured. Tier 2 candidate. May overlap with
 `dispatcher_health`; design diagnostic should clarify scope.
 
+**[2026-05-14] TIER 2 CANDIDATE: count_rows_for_date stale-read mechanism.**
+
+**Surfaced by:** 2026-05-14 evening iv drift investigation found that
+the `iv_handler_accounting_mismatch` alert has fired exactly THREE
+times in table history, all with identical metadata:
+
+- 2026-05-09 05:06:13Z: stats_ok=1, actual_rows=5, delta=-4
+- 2026-05-09 05:48:51Z: stats_ok=1, actual_rows=5, delta=-4
+- 2026-05-14 16:00:48Z: stats_ok=1, actual_rows=5, delta=-4
+
+The constant (5, 1, -4) shape across three independent firings is the
+smoking gun. This is a structured artifact of the count mechanism,
+not three coincidentally-equal real row states.
+
+**Verification of "not real":** `pg_stat_user_tables` on
+`underlying_iv_points` shows `n_tup_del=1` LIFETIME, `live_rows=279`,
+sum-by-date reconciles to exactly 279 across known good days
+(70+70+69+70). If 5 rows had ever existed and been deleted, `n_tup_del`
+would reflect that. It doesn't.
+
+**Mechanism (unresolved — Tier 2 investigation candidate):**
+
+Plausible candidates for what produces the (5, 1, -4) artifact:
+- Stale Supabase read replica showing pre-deletion state from an
+  unrelated table operation
+- PostgREST count cache invalidation lag
+- HTTP-layer caching between worker and Supabase
+- Specific code path in `count_rows_for_date` that constructs a
+  misleading filter (e.g., wrong as_of_date type coercion, cross-table
+  join, count over a different scope)
+
+**Investigation surface (when prioritized):**
+
+- Read `IVRepository.count_rows_for_date` at
+  `packages/quantum/services/iv_repository.py:158-180` carefully —
+  what query shape does it produce?
+- Try to reproduce the (5, 1, -4) shape: under what conditions does
+  count return 5?
+- Cross-reference Supabase project configuration (read replicas,
+  PostgREST caching settings, connection pool semantics)
+- Verify whether the count's "5" is consistent with ANY scope reading
+  of `underlying_iv_points` or related tables
+
+**Phase 1 dependency:**
+
+Phase 1's `iv_historical_backfill` handler ALSO uses
+`count_rows_for_date` for verification (see
+`test_iv_historical_backfill_handler.py:60+`). If the count can return
+misleading values, Phase 1's verification path can fire false-positive
+alerts AND/OR mask real issues. This is a Phase 1 readiness blocker.
+
+**Effort estimate:** ~45-60 min focused investigation. Could expand
+if Supabase configuration access is needed.
+
+**Anti-criteria (don't prioritize if):**
+
+- α implementation in flight with other Phase 1 blockers — wait
+- 4th identical (5, 1, -4) firing happens → escalate, not deprioritize
+- Operational picture changes substantially (e.g., handler stops
+  running) — re-evaluate scope
+
+**Cross-references:**
+
+- 2026-05-14 iv drift investigation (session history; evidence chains
+  documented)
+- 2026-05-14 iv root cause investigation (precursor)
+- H9 doctrine: count check is PR #115 Layer 4 wiring
+- H12 doctrine: today's 4th catch surfaced this finding (post-nap
+  sync's "5→0 drift" framing was the artifact)
+- Sibling Tier 2 candidates: `dispatcher_health`, `supabase_http_health`
+  (different infrastructure surfaces, complementary observability)
+- Related Tier 2 candidate: `iv_daily_refresh` silent invocation path
+  (bundled for Phase 1 readiness path)
+
+**Status:** Captured. Tier 2 candidate. Prioritization TBD. Blocks
+Phase 1 trigger until characterized.
+
+**[2026-05-14] TIER 2 CANDIDATE: iv_daily_refresh silent invocation path.**
+
+**Surfaced by:** 2026-05-14 evening iv drift investigation found that
+the `iv_handler_accounting_mismatch` alert fired at 2026-05-14
+16:00:48 UTC, attributable ONLY to code in
+`packages/quantum/jobs/handlers/iv_daily_refresh.py` (verified — only
+3 files reference the alert_type: the handler + 2 test files).
+
+**Yet:** no `job_runs` row exists for `iv_daily_refresh` (or
+hyphenated variants) for 2026-05-14. Most recent successful
+`iv_daily_refresh` job run: 2026-05-13 09:30Z (yesterday's cron). The
+04:30 CT scheduled fire for 2026-05-14 did not occur as a tracked job.
+
+**Implication:** the handler ran today via a code path that bypasses
+`enqueue_job_run` / `job_runs` observability.
+
+**Timing clue:** the alert fired 26s after `suggestions_open`
+completed at 16:00:22Z. Suggests possible inline invocation from
+`suggestions_open` or a downstream component during the midday cycle.
+
+**Investigation surface (when prioritized):**
+
+- Search for any inline calls to `iv_daily_refresh`'s handler function
+  from other components:
+  ```bash
+  grep -rn "iv_daily_refresh\|refresh_iv\|run_iv_daily" \
+    packages/quantum/ --include="*.py" | head -20
+  ```
+- Check `suggestions_open`'s handler / scanner code for any inline
+  iv-related calls
+- Check `paper_autopilot_service` for any iv refresh triggers
+- Verify whether α's `iv_historical_backfill` could share a similar
+  silent-invocation risk
+
+**Phase 1 dependency:**
+
+Phase 1 is operator-triggered and SHOULD write a `job_runs` row via
+standard handler invocation. But if `iv_daily_refresh`'s handler can
+be invoked silently (path TBD), `iv_historical_backfill` might share
+that vulnerability. Phase 1's observability could be partially blind.
+Secondary Phase 1 readiness blocker (count_rows_for_date is primary).
+
+**Effort estimate:** ~45-60 min focused investigation. Could be
+shorter if the inline-call path is obvious from a grep.
+
+**Anti-criteria (don't prioritize if):**
+
+- `count_rows_for_date` investigation surfaces a fix that also
+  addresses observability — bundle them
+- Phase 1 readiness becomes time-critical and silent-handler is
+  determined to be benign (low risk of Phase 1 impact)
+- Operator decides observability gap can be lived with for Phase 1
+  if iv state is verified manually post-trigger
+
+**Cross-references:**
+
+- 2026-05-14 iv drift investigation (session history)
+- 2026-05-14 iv root cause investigation (precursor finding of
+  "didn't fire at 04:30 CT during outage")
+- Related Tier 2 candidate: `count_rows_for_date` stale-read mechanism
+- Sibling Tier 2 candidate: `dispatcher_health` (would have caught
+  this silent invocation if expected/actual dispatch monitor existed)
+- H11 doctrine: critical alerts independent of operator framing (the
+  alert fired correctly; the gap is the invocation traceability)
+
+**Status:** Captured. Tier 2 candidate. Prioritization TBD. Bundled
+with `count_rows_for_date` for Phase 1 readiness path.
+
 **[2026-05-14] FRAMEWORK CAPTURE: capital scaling preparation.**
 
 **Originated:** 2026-05-14 structural finding (see CLAUDE.md

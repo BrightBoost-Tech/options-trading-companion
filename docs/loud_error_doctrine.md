@@ -1323,10 +1323,49 @@ distinct sub-shape from the prior three. Promoted to formal doctrine
      as instance 1 (wrong-baseline). Surface measurement accurate,
      causal mechanism inferred from measurement was wrong.
 
-The five sub-shapes (wrong baseline / wrong deploy model / wrong
+6. **2026-05-14 cycle-shape misread during midday status check.**
+   - Diagnostic finding: today's two `suggestions_open` cycles had
+     "anemic payloads" — short duration (14-21s), no top-level
+     `rejection_counts` / `budget` / `emission_counts_by_strategy`
+     keys in `result`. The cycles "looked like wrapper-only success
+     markers" relative to the assumed shape of a full scanner cycle.
+   - Wrong baseline: framing assumed scanner output lives at the
+     TOP-LEVEL of the `result` JSON. The comparison to "yesterday's
+     full payload" was based on conversation-memory of what a
+     successful cycle returns, not a verified read of any
+     known-good day's row.
+   - Correction: the full cycle data has always lived nested at
+     `result.cycle_results[0].debug.rejection_stats` — not at the
+     top level. Yesterday's (2026-05-13) cycle has the SAME thin
+     top-level shape as today's. Today's midday cycle additionally
+     lacks the `debug` block because it took the SUCCESS branch
+     (candidate found), not because of degradation. The "thin
+     top-level" is the consistent handler shape across the entire
+     week (2026-05-08 → 2026-05-14).
+   - Empirical impact: the midday combined status check produced a
+     partial BLOCKER verdict on grounds that included "midday cycle
+     looks like wrapper success." That sub-finding was wrong. The
+     cycle-shape diagnostic surfaced the misread. Today's midday
+     cycle actually produced a real Ford F LONG_CALL_DEBIT_SPREAD
+     candidate that reached `trade_suggestions` (blocked downstream
+     at `edge_below_minimum`, not at scanner / H7).
+   - Sub-shape: **wrong-payload-shape framing** — same class as
+     instance 1 (wrong baseline) and instance 4 (wrong-line
+     attribution). Surface measurement was real (top-level
+     keys missing); inference about what that meant (cycle
+     degraded) was wrong because the baseline of "what real
+     output looks like" was inferred from memory, not from data.
+   - Discipline lesson: when comparing "today's output" to
+     "expected shape," pull a representative known-good day's
+     output FIRST and verify the comparison structure end-to-end.
+     Don't infer comparison shape from conversation memory.
+     Specifically, when JSON output has nested structure, the
+     `jsonb_pretty` of a single row is the cheapest baseline read.
+
+The six sub-shapes (wrong baseline / wrong deploy model / wrong
 temporal model / wrong scope generalization / wrong mechanism
-attribution) share the underlying class: surface measurement
-accurate, model behind interpretation wrong.
+attribution / wrong payload shape) share the underlying class:
+surface measurement accurate, model behind interpretation wrong.
 
 Instance #5 status: H12 already covers this shape; the doctrine
 worked as designed — operator pulled BE logs before assuming the
@@ -1370,7 +1409,33 @@ explicit step to the verification protocol — "verify synthesis
 scope matches evidence scope." Not adding inline today; capturing
 as observation pending broader doctrine review.
 
-#### Verification protocol
+#### In-conversation H12 catch (2026-05-14 midday): date-framing artifact
+
+During the 2026-05-14 midday combined status check, the conversation
+framing had treated "today" as 2026-05-15 throughout (earlier prompts,
+PR #936 draft headings, "yesterday's PR #934" temporal references).
+H12 discipline applied to the SQL date filter (`WHERE created_at >=
+'2026-05-15 13:41:00+00'` returned 0 rows) forced a verification
+query against `NOW()` — which returned `2026-05-14 16:35 UTC`.
+
+System clock was the source of truth; conversation framing was one
+calendar day ahead.
+
+**Affected artifacts (corrected in PR #936's amendments):**
+- PR #936's CLAUDE.md operational note heading
+  ("Entry-premium-vs-width ratio (2026-05-15)") → 2026-05-14
+- PR #936's backlog entry datestamps → 2026-05-14
+- PR #936's "yesterday's note" temporal framing for PR #934 → "the
+  prior note" (PR #934 actually merged 2026-05-14 10:31 CT, before
+  PR #935 11:03 CT, before PR #936 itself)
+
+**Discipline shape:** the date filter sub-routine in the status-check
+prompt template ("query NOW() if returns look suspicious") caught
+this prospectively. The doctrine's check-the-baseline reflex worked
+exactly as designed — not retrospective root-cause analysis but
+real-time verification when surface data felt off (0 rows where some
+expected). Not promoted to a numbered instance because it was caught
+during verification rather than after acting on the wrong inference.
 
 Before treating a diagnostic conclusion as actionable:
 

@@ -1083,6 +1083,68 @@ The codification's discipline is preserved: code must be perfected before capita
 - Meta-observation 2026-05-14 (H12 applies to synthesis scope; this entry is the corrective)
 - `docs/backlog.md` Capital scaling framework entry
 
+### Structural finding refinement — Entry-premium-vs-width ratio (2026-05-15)
+
+**Pairs with:** the prior structural learning note (added 2026-05-14 via PR #934). Yesterday identified the symptom; today identifies the mechanism. Read together.
+
+**Refinement:**
+
+Yesterday's note identified that current 2-leg debit spread emissions with $5-wide chains on $50+ underlyings exceed H7 round-trip safety at $681. Today's budget-fit diagnostic (empirical test of 22+ structures across 3 sample underlyings: HBAN $15.57, KHC $23.58, KO $80.72) identified the underlying mechanism:
+
+**The H7-fit constraint is governed by entry-premium-vs-width ratio, NOT by width or leg count alone.**
+
+Max_loss for any spread structure follows:
+- Debit spread: `max_loss = (width × 100) − entry_premium_paid`
+- Credit spread: `max_loss = (width × 100) − premium_collected`
+
+H7 requires `max_loss × 2.1 ≤ available_BP`. At $681 BP, `max_loss ≤ ~$324/contract`.
+
+**Empirical examples (2026-05-15 snapshot, ~late-afternoon CT):**
+
+| Underlying | Width | Structure | Entry/Credit | Max_loss | Fits at $681? |
+|---|---|---|---|---|---|
+| KO ($80) | $5 | debit ATM-OTM (77.5C/82.5C) | $301 paid | $199 | NO ($418 RT — yesterday's firing case) |
+| KO ($80) | $2.50 | debit deep-ITM (77.5C/80C) | $175 paid | $75 | YES ($158 RT) |
+| KO ($80) | $2.50 | debit ATM-OTM (82.5C/85C) | $65 paid | $185 | NO ($389 RT) |
+| KO ($80) | $1 | credit OTM put (79P/78P) | $26 collected | $74 | YES ($155 RT) |
+| KO ($80) | $1 | iron condor (78P/79P/82C/83C) | $46 net credit | $54/wing | YES ($113 RT) |
+| KHC ($23) | $0.50 | debit ATM (23C/23.5C) | $24.50 paid | $25.50 | YES ($54 RT) |
+| KHC ($23) | $1 IC | iron condor (21.5P/22.5P/24.5C/25.5C) | $21 net credit | $79/wing | YES ($166 RT) |
+| HBAN ($15) | $1 | debit OTM (16C/17C) | $25 paid | $75 | YES ($158 RT) |
+
+**Implications for scanner emission patterns (observation, not action):**
+
+The scanner's `_select_legs_from_chain` uses delta-target leg selection, which naturally clusters legs ATM-to-OTM. At $50+ underlyings with $5-wide chains, ATM-OTM debit spreads produce the worst H7-fit region (low entry premium → high max_loss). This is exactly why yesterday's KO emission failed H7. (Note: the spread-width line at `options_scanner.py:1260` is iron-condor-only — see γ1 wrong-line attribution from 2026-05-13, H12 instance 4.)
+
+For scanner emission to produce H7-fittable candidates at $50+ underlyings at micro capital, one of:
+- **Different strategy class:** credit spreads collect premium, reducing max_loss
+- **Strike-granularity awareness:** KO Jun 12 has $1 strikes, Jun 18 has $2.50 — varies by expiration cycle
+- **Universe extending to sub-$30 names** with $0.50 or $1 chain granularity (KHC has $0.50 strikes)
+- **Delta-target reaching deep-ITM:** high entry premium → low max_loss (counter-intuitive but mechanically correct)
+
+**Verified-fittable structure classes at $681 today (2026-05-15 snapshot):**
+
+- **Class A (1-leg long options at modest deltas):** widely fits (16/22 tested). Lower systematic edge; scanner doesn't currently target this surface.
+- **Class B (sub-$30 narrow-strike debit spreads):** universally fits (8/8 tested). Robust across $0.50, $1, $2-wide.
+- **Class C ($1-wide credit spreads):** fits broadly on both sub-$30 and $50+ names; thin per-contract credit ($9-$46) on $50+ names.
+- **Class D (narrow-wing iron condors):** fits per-contract math on KO and KHC, BUT blocked by `iv_rank` gate in `strategy_selector` until α implementation accumulates historical IV depth. **α directly unlocks this class.**
+- **Class E (cash-secured puts / covered calls):** excluded — underlying capital reservation ($1,400+ even for HBAN) far exceeds $681 BP.
+
+**Cross-references:**
+- PR #934 (yesterday's narrow-scope structural finding; this note pairs with it)
+- Today's budget-fit diagnostic (empirical evidence base — see `docs/backlog.md` 2026-05-15 entry)
+- Capital scaling framework (`docs/backlog.md` 2026-05-14 framework entry — informs Q1 trigger)
+- PR #935 (α historical IV backfill — directly unlocks Class D)
+- H12 framing-artifact doctrine (`docs/loud_error_doctrine.md`) — the 2026-05-14 "no strategies fit" over-generalization is what this empirical work corrects
+
+**What this note refines and what it preserves:**
+
+Refines: the constraint isn't "width" or "leg count" — it's entry-premium-vs-width ratio. Multiple structure classes fit at $681 with different geometry choices. α is more load-bearing than "observability fill" — it unlocks a verified-fittable structure class.
+
+Preserves: yesterday's specific finding remains accurate (current 2-leg debit spread emissions with $5-wide chains on $50+ underlyings DO fail H7 — that's the symptom). Today's mechanism explanation doesn't invalidate yesterday's symptom observation; it identifies why.
+
+**Sample-size caveats:** 3 underlyings. Bid-ask spreads run 20-100%+ on OTM wings of sub-$30 names. KO IV at 0.17-0.21 is historically low — a vol spike would shift Class C/D credit collected meaningfully and could re-shape the landscape. Findings phrased as "fits today on names tested at current IV" not "always fits."
+
 ---
 
 ## Live State (auto-updated)

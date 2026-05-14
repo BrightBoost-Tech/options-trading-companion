@@ -972,6 +972,123 @@ invalidated by α / diagnostic / other evidence.
 
 **Status:** Framework captured as open questions. No decisions.
 
+**[2026-05-15] Budget-fit landscape diagnostic findings.**
+
+**Conducted:** Empirical scan across 3 sample underlyings (HBAN
+$15.57, KHC $23.58, KO $80.72) testing 22+ option structures against
+H7 round-trip safety (`max_loss × 2.1 ≤ $681`). Mid-afternoon CT
+snapshot; Jun 12 / Jun 18 / Jun 26 expirations (28-42 DTE).
+
+**Key findings:**
+- **Class A (1-leg long options):** 16/22 combinations fit. Sub-$30
+  names: most ATM and OTM strikes fit. $50+ names: only mid-delta
+  calls and OTM puts; ATM and deep ITM fail. Caveat: lower
+  systematic edge; current scanner doesn't target directional 1-leg.
+- **Class B (narrow-strike debit spreads on sub-$30):** 8/8 fit.
+  Discovered: KHC has $0.50 strikes (finer than original prompt
+  assumption). HBAN $1-wide and KHC $0.50-$2-wide both fit reliably.
+- **Class C (credit spreads):** width-dependent. $1-wide fits
+  broadly on both sub-$30 and $50+ names. $2.50-wide on KO ATM-OTM
+  marginal (fits or fails depending on premium collected).
+  $5-wide on $50+ names fails (same geometry mirror as 2026-05-14
+  KO H7 firing).
+- **Class D (iron condors with $1-wide wings):** fits per-contract
+  math on both KO ($46 net credit → $54/wing max_loss → $113 RT)
+  AND KHC ($21 net credit → $79/wing max_loss → $166 RT). BUT
+  blocked by `iv_rank` gate in `strategy_selector` until α
+  accumulates historical IV depth.
+- **Class E (CSPs / covered calls):** excluded by underlying capital
+  reservation ($1,400+ even for HBAN @ $14 strike).
+
+**Structural mechanism finding (promoted to CLAUDE.md operational
+note in this PR):** The right frame for H7 fit is
+entry-premium-vs-width ratio, NOT width or leg count alone. The
+scanner's `_select_legs_from_chain` uses delta-target leg selection
+which naturally clusters ATM-OTM — the worst H7 region at $50+
+underlyings. Strike granularity also varies by expiration (KO Jun 12
+has $1 strikes, Jun 18 has $2.50).
+
+**Implications for next direction (NO decisions captured here):**
+- **α implementation is more load-bearing than "observability fill"** —
+  it unlocks Class D candidates verified-fittable today but blocked
+  by `iv_rank` gate. Refines the prior framing where α's value was
+  rank-window observability + Polygon-cost hedge.
+- Scanner-emission patterns may want awareness of strike granularity
+  per-expiration + width-to-premium ratio, not just width.
+- Class B fit at sub-$30 names contrasts with current universe
+  scope (Option A capped at $60; sub-$30 names present in
+  BASE_UNIVERSE but emission rate at micro tier not verified by
+  this diagnostic).
+- Updates Capital scaling framework Open Question 1: budget-fit
+  diagnostic has now identified viable structures at $681 (Class
+  B, Class D after α). Per Q1 candidates, this makes capital scaling
+  "less urgent" rather than "more compelling" — strategy class
+  change is a verified path.
+
+**Cross-references:**
+- 2026-05-14 structural learning (CLAUDE.md operational note); this
+  diagnostic is the empirical corrective to the "no strategies fit"
+  over-generalization caught at synthesis time
+- CLAUDE.md operational note in this PR (mechanism explanation)
+- PR #935 (α historical IV backfill — directly unlocks Class D)
+- Capital scaling framework (2026-05-14 entry, updates Q1)
+- H12 framing-artifact doctrine (the H12 instance this diagnostic
+  empirically rebuts)
+
+**Re-run trigger:** material IV regime shift (KO IV currently
+0.17-0.21 — historically low; a vol spike would shift Class C/D
+credits collected meaningfully). Or: broader sample pool (>10
+underlyings) to refine fit-rate confidence per class.
+
+**Sample-size caveats:** 3 underlyings is small. Bid-ask spreads
+run 20-100%+ on OTM wings of sub-$30 names (e.g., KHC 22C
+0.89/2.35 = 164% spread). Mid prices used for fit math; actual
+marketable entry cost would be ≥ mid + 0.5×spread. Findings phrased
+as "fits today on names tested at current IV" not "always fits."
+
+**Status:** Diagnostic complete. Findings preserved in operational
+note + this backlog entry. No automated action.
+
+**[2026-05-15] UNIVERSE HYGIENE: Stale-ticker audit candidate (Tier 3).**
+
+**Surfaced by:** Today's budget-fit diagnostic encountered MRO
+(Marathon Oil) returning Nov 2024 daily-bar data with no recent
+quotes. MRO was acquired by ConocoPhillips in Nov 2024; the ticker
+is effectively defunct but still present in candidate pools.
+
+**Observation:** BASE_UNIVERSE may contain other stale tickers from
+acquisitions, delistings, or name changes that aren't surfaced by
+liquidity screens alone. A delisted ticker returns no liquidity (so
+liquidity screens filter it), but a recently-acquired ticker may
+return stale historical data without obvious upstream failure —
+the scanner just doesn't generate emissions for it.
+
+**Proposed audit (Tier 3 candidate, low priority):**
+- One-time scan: query each BASE_UNIVERSE ticker via Alpaca /
+  Polygon for `latest_quote` and `latest_trade.t`
+- Flag tickers with `latest_trade.t > 30 days ago` OR no recent
+  quotes
+- Cross-reference against a recent-acquisitions list (manual or
+  programmatic)
+- Update BASE_UNIVERSE: remove confirmed-defunct tickers; surface
+  ambiguous cases for operator review
+
+**Effort estimate:** 1-2 hours including the corporate-action
+cross-reference step.
+
+**Anti-criteria (don't prioritize if):**
+- Scanner gracefully handles stale tickers today (they'd produce
+  zero emissions per cycle without breaking)
+- No other operational impact observed beyond wasted Polygon API
+  calls
+- Bigger work items in flight
+
+**Cross-references:**
+- 2026-05-15 budget-fit diagnostic (surfacing event)
+- `BASE_UNIVERSE` in `universe_service.py`
+
+**Status:** Captured. Tier 3 candidate. Low priority.
+
 **[2026-05-12 20:56 UTC] Path A shipped: MICRO_TIER_MAX_UNDERLYING $60 → $100.**
 
 Lever 1 universe-widening experiment via Railway env var on the

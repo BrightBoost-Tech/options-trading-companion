@@ -105,6 +105,89 @@ class TestIvDailyRefreshUsesCanonicalEnqueue(unittest.TestCase):
         self.assertNotIn('JOB_NAME = "iv-daily-refresh"', handler_src)
 
 
+class TestIvHistoricalBackfillUsesCanonicalEnqueue(unittest.TestCase):
+    """Sibling regression guard for the α PR #935 +
+    2026-05-14 plumbing PR pair. The handler shipped in #935 but
+    the operator-trigger plumbing (HTTP route + run_signed_task
+    entry) was missing — surfaced during Phase 1 trigger
+    verification. This test defends both the canonical
+    ``enqueue_job_run`` wiring AND the underscored ``job_name``
+    contract, mirroring the iv_daily_refresh guards above.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.src = INTERNAL_TASKS_PATH.read_text(encoding="utf-8")
+
+    def _function_body(self, fn_signature_prefix: str) -> str:
+        anchor = self.src.find(fn_signature_prefix)
+        self.assertGreater(
+            anchor, 0,
+            f"{fn_signature_prefix} missing from internal_tasks.py",
+        )
+        end_match = re.search(
+            r"\n(@router\.post|async def |def )",
+            self.src[anchor + 50:],
+        )
+        body_end = (
+            anchor + 50 + end_match.start()
+            if end_match else len(self.src)
+        )
+        return self.src[anchor:body_end]
+
+    def test_route_uses_enqueue_job_run(self):
+        body = self._function_body("async def iv_historical_backfill_task(")
+        self.assertIn(
+            "enqueue_job_run(", body,
+            "iv_historical_backfill_task must use the canonical "
+            "enqueue_job_run path (DB + RQ push). Same class as the "
+            "iv_daily_refresh PR-A regression (2026-05-08).",
+        )
+        self.assertNotIn(
+            "enqueue_idempotent(", body,
+            "iv_historical_backfill_task uses the legacy DB-only "
+            "enqueue path. Migrate to enqueue_job_run.",
+        )
+
+    def test_route_uses_underscored_job_name(self):
+        body = self._function_body("async def iv_historical_backfill_task(")
+        self.assertIn(
+            'job_name="iv_historical_backfill"', body,
+            "iv_historical_backfill_task must pass the underscored "
+            "job_name to enqueue_job_run, matching the handler's "
+            "JOB_NAME constant. Hyphenated job_names don't resolve "
+            "via discover_handlers().",
+        )
+
+    def test_handler_job_name_underscored(self):
+        handler_path = (
+            INTERNAL_TASKS_PATH.parent / "jobs" / "handlers"
+            / "iv_historical_backfill.py"
+        )
+        handler_src = handler_path.read_text(encoding="utf-8")
+        self.assertIn(
+            'JOB_NAME = "iv_historical_backfill"', handler_src,
+        )
+
+    def test_route_path_resolves_via_router(self):
+        """The route must register at /internal/tasks/iv/historical-backfill
+        — same prefix-handling pattern as iv_daily_refresh. Catches
+        the same class of bug that produced PR-A's 404 on first fire.
+        """
+        from packages.quantum import internal_tasks
+        registered_paths = {
+            getattr(r, "path", None) for r in internal_tasks.router.routes
+        }
+        self.assertIn(
+            "/internal/tasks/iv/historical-backfill",
+            registered_paths,
+            "iv_historical_backfill HTTP route not registered. Without "
+            "this, run_signed_task.py iv_historical_backfill would 404 — "
+            "the exact gap that surfaced during 2026-05-14 Phase 1 "
+            "trigger verification.",
+        )
+
+
 # ─────────────────────────────────────────────────────────────────────
 # #71 Tier 3 (PR closing the sweep arc) — codebase-wide CI gate
 # ─────────────────────────────────────────────────────────────────────

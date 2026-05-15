@@ -30,6 +30,8 @@ Supported Tasks:
     validation_eval                - POST /tasks/validation/eval
     strategy_autotune              - POST /tasks/strategy/autotune
     ops_health_check               - POST /tasks/ops/health_check (every 30 min)
+    iv_daily_refresh               - POST /internal/tasks/iv/daily-refresh
+    iv_historical_backfill         - POST /internal/tasks/iv/historical-backfill (α Phase 1)
     paper_auto_execute             - POST /tasks/paper/auto-execute (requires user_id)
     paper_auto_close               - POST /tasks/paper/auto-close (requires user_id)
     paper_process_orders           - POST /tasks/paper/process-orders (requires user_id)
@@ -261,6 +263,17 @@ TASKS = {
         "scope": "tasks:iv_daily_refresh",
         "description": "Refresh IV points",
         "user_id_mode": "none",
+    },
+    "iv_historical_backfill": {
+        "path": "/internal/tasks/iv/historical-backfill",
+        "scope": "tasks:iv_historical_backfill",
+        "description": (
+            "One-shot historical IV backfill via Polygon BS inversion "
+            "(α Phase 1). Payload: {\"days\": 60, \"symbols\": [\"SPY\","
+            " \"AAPL\", \"AMD\"]} for reference-only run."
+        ),
+        "user_id_mode": "none",
+        "skip_time_gate": True,
     },
     "daily_progression_eval": {
         "path": "/internal/tasks/progression/daily-eval",

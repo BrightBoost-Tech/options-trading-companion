@@ -990,6 +990,17 @@ See `docs/roadmap.md` for the full Active focus block including recently-closed 
 
 **Cross-references:** see `docs/backlog.md` Tier 2 candidates (now RESOLVED) + today's silent invocation investigation in conversation history for full evidence chain.
 
+**[2026-05-14] α Phase 1 trigger (post-plumbing PR).** α PR #935 shipped the `iv_historical_backfill` handler but the operator-trigger plumbing (HTTP route + `run_signed_task.py` registry entry) was missing — surfaced during today's Phase 1 trigger verification. Plumbing landed via the follow-up PR. Canonical Phase 1 trigger:
+
+```
+python scripts/run_signed_task.py iv_historical_backfill \
+  --payload-json '{"days": 60, "symbols": ["SPY", "AAPL", "AMD"]}'
+```
+
+POSTs to `/internal/tasks/iv/historical-backfill`, writes a `job_runs` row via `enqueue_job_run`, worker claims and executes in production environment. Full observability via `job_runs` + handler's own audit `risk_alerts` row + new `underlying_iv_points` rows. Smoke variant: `'{"days": 1, "symbols": ["SPY"]}'` produces ~1 row for plumbing verification before the 60-day fire.
+
+Phase 2 (manual validation) follows: capture barchart/Tastytrade `iv_rank` reference for SPY/AAPL/AMD; run `validate_alpha_backfill.py` harness; ≥2/3 within ±10 percentile points = α validated.
+
 ### Exit thresholds (defaults under empirical review)
 
 **Current values** (`paper_exit_evaluator.py:329-330`):

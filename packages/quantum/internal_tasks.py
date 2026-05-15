@@ -282,3 +282,65 @@ async def iv_daily_refresh_task(
         force_rerun=force_rerun,
     )
 
+
+@router.post("/iv/historical-backfill", status_code=202)
+async def iv_historical_backfill_task(
+    body: Optional[Dict] = Body(default=None),
+    auth: TaskSignatureResult = Depends(
+        verify_task_signature("tasks:iv_historical_backfill")
+    )
+):
+    """One-shot historical IV backfill via Polygon BS inversion.
+
+    Wires α PR #935's ``iv_historical_backfill`` handler to the
+    canonical operator-trigger path. Pre-2026-05-14 evening, the
+    handler shipped without this route or a ``run_signed_task.py``
+    registry entry — the α PR's test plan referenced this trigger
+    command but the plumbing was never added. Surfaced during the
+    Phase 1 trigger verification that followed PR #940's iv test
+    hygiene fix.
+
+    Payload schema (all optional — handler uses env-defaults if
+    absent; see ``packages/quantum/jobs/handlers/iv_historical_backfill.py``):
+
+    - ``days`` (int): historical window. Default 60 (or
+      ``BACKFILL_DAYS`` env).
+    - ``symbols`` (list[str]): symbols to backfill. Default
+      ``["SPY", "AAPL", "AMD"]`` (or ``BACKFILL_REFERENCE_SYMBOLS``
+      env). Omit for reference-only Phase 1.
+    - ``risk_free_rate`` (float): BS inversion rate. Default 0.045
+      (or ``BACKFILL_RISK_FREE_RATE`` env).
+    - ``force_rerun`` (bool): bypass idempotency dedup for re-fires.
+
+    Idempotency: keyed by ``date + symbols + days``, so different
+    windows or symbol sets enqueue as distinct runs; identical
+    operator triggers dedup. ``force_rerun=true`` overrides.
+    """
+    today = datetime.now().strftime("%Y-%m-%d")
+    payload_in = body or {}
+    force_rerun = bool(payload_in.get("force_rerun", False))
+
+    days = int(payload_in.get("days") or 60)
+    symbols_in = payload_in.get("symbols") or ["SPY", "AAPL", "AMD"]
+    symbols_key = ",".join(sorted(s.strip().upper() for s in symbols_in))
+
+    handler_payload: Dict = {
+        "app_version": APP_VERSION,
+        "trigger_ts": datetime.now().isoformat(),
+        "days": days,
+        "symbols": [s.strip().upper() for s in symbols_in],
+    }
+    if "risk_free_rate" in payload_in:
+        handler_payload["risk_free_rate"] = float(payload_in["risk_free_rate"])
+    if force_rerun:
+        handler_payload["force_rerun"] = True
+
+    return enqueue_job_run(
+        job_name="iv_historical_backfill",
+        idempotency_key=(
+            f"iv_historical_backfill-{today}-{symbols_key}-{days}d"
+        ),
+        payload=handler_payload,
+        force_rerun=force_rerun,
+    )
+

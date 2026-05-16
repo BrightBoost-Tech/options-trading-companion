@@ -890,6 +890,15 @@ class PolygonService:
             'strike_price.gte': strike_min,
             'strike_price.lte': strike_max,
             'limit': min(limit, 1000),
+            # Finding B fix (2026-05-17 investigation): without expired=true,
+            # Polygon's default response drops contracts that have since expired,
+            # causing same (symbol, as_of_date) to produce different iv_30d
+            # values over time as bracketing expiry contracts pass.
+            # DO NOT also add 'as_of' here — Sunday 2026-05-17 Test C
+            # empirically confirmed that combining expired=true with as_of
+            # returns empty results. The service-layer as_of_date arg above
+            # is used for cache-key construction only (intentional).
+            'expired': 'true',
             'apiKey': self.api_key
         }
 

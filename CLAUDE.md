@@ -1001,6 +1001,39 @@ POSTs to `/internal/tasks/iv/historical-backfill`, writes a `job_runs` row via `
 
 Phase 2 (manual validation) follows: capture barchart/Tastytrade `iv_rank` reference for SPY/AAPL/AMD; run `validate_alpha_backfill.py` harness; ≥2/3 within ±10 percentile points = α validated.
 
+**[2026-05-15] α Phase 1 — COMPLETED (reference backfill clean).**
+
+Phase 1 reference backfill completed successfully on 2026-05-15.
+job_run_id: `9627c667-61e5-4915-a83c-a584b03bab0a`.
+
+**Results:**
+- Duration: 8.5 hours (11:55 → 20:28 UTC, longer than expected)
+- Rows written: 165 (55 trading days × 3 underlyings)
+- Data quality: PASS — `iv_30d` values smooth and within typical bounds:
+  - SPY: 0.14-0.26 (avg 0.18)
+  - AAPL: 0.23-0.33 (avg 0.28)
+  - AMD: 0.54-0.69 (avg 0.60)
+- Handler stats: ok=165, failed=0, skipped_existing=12, missing_data=3
+- Accounting verification: PASS (handler's H9 post-write count matches table state)
+- Alerts during run: only 2 info-severity audit rows from handler itself
+
+**Phase 1 data is ready for Phase 2 manual validation.**
+
+**Operational finding (captured as Tier 1 candidate in `docs/backlog.md`):**
+
+Phase 1 ran during trading hours and starved the worker queue for 8.5 hours, delaying the entire trading-day pipeline (`day_orchestrator`, `suggestions_close`, `paper_exit_evaluate`, `suggestions_open`, `paper_auto_execute` all delayed 4-8h). When `suggestions_open` finally fired at 20:31 UTC it early-exited on staleness gate. Today's actual cost was low (0 open positions, micro tier) but the same pattern at higher tiers / with open positions starves `intraday_risk_monitor` + `paper_exit_evaluate` — both load-bearing. See backlog entry "[2026-05-15] TIER 1 CANDIDATE: worker-queue blocker" for full mechanism + three mitigation options.
+
+**Phase 2 next steps (when operator chooses):**
+
+1. Capture reference `iv_rank` values from barchart.com or Tastytrade for SPY, AAPL, AMD
+2. Run validation harness comparing computed `iv_rank` (from Phase 1 data) against reference values
+3. Judge ≥2/3 within ±10 percentile points = α validated
+
+**Phase 3 (full 67-symbol backfill) is GATED on:**
+
+- Phase 2 validation passing
+- Worker-queue blocker mitigation (Tier 1 backlog candidate above) addressed
+
 ### Exit thresholds (defaults under empirical review)
 
 **Current values** (`paper_exit_evaluator.py:329-330`):

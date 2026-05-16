@@ -1523,6 +1523,146 @@ scaling framework entry for the decision pipeline.
 
 **Status:** CLOSED. Findings rolled up to structural learning note.
 
+**[2026-05-15] TIER 1 CANDIDATE: worker-queue blocker for long-running backfills.**
+
+**Priority:** TIER 1 — should be addressed BEFORE Phase 3 (full
+67-symbol α backfill).
+
+**Surfaced by:** Today's Phase 1 α reference backfill (job_run
+`9627c667-61e5-4915-a83c-a584b03bab0a`) executed during trading hours
+and demonstrated a worker-queue starvation pattern.
+
+**Mechanism (verified):**
+
+Phase 1 triggered at 2026-05-15 11:55 UTC (US pre-market). Handler
+ran on the single worker queue for 30,759 seconds (~8.5 hours).
+Every other job that should have fired during that window was queued
+behind the backfill and processed only AFTER it completed at
+20:28 UTC.
+
+Jobs delayed (scheduled → actual fire, derived from `job_runs`
+timestamps):
+
+- `day_orchestrator`:        12:30 → 20:28 UTC  (7h 58m delay)
+- `suggestions_close`:       13:00 → 20:28 UTC  (7h 28m delay)
+- `paper_exit_evaluate`:     13:15 → 20:28 UTC  (7h 13m delay, morning)
+- `suggestions_open`:        16:00 → 20:31 UTC  (4h 31m delay)
+- `paper_auto_execute`:      16:30 → 20:31 UTC
+
+When `suggestions_open` finally ran at 20:31 UTC, it fast-path
+early-exited on staleness gate:
+`market_data_stale (age=30.6min, symbols=['SPY'])` because the
+market had been closed 31 minutes.
+
+**Effective state of today:** zero real trading-day pipeline
+execution. No cycle-emitted suggestions evaluated. No exit
+evaluations during the day.
+
+**Why this matters (escalation path at higher tiers):**
+
+Today's actual cost was low — 0 open positions, micro tier, nothing
+to evaluate. The trading-day pipeline starving for 8.5h had no
+consequence because there were no positions to risk-manage and no
+real candidates to process.
+
+The SAME pattern at higher capital tiers or with open positions
+would mean:
+
+- `intraday_risk_monitor` starved → no risk monitoring during
+  trading day
+- `paper_exit_evaluate` starved → exit signals not evaluated;
+  positions could miss stop-loss / take-profit triggers
+- `suggestions_open` delayed → no candidate emission during market
+  hours
+- `paper_auto_execute` delayed → if any candidates HAD emerged,
+  they'd reach execution post-close (similar staleness gate behavior)
+
+These are load-bearing for any open-position state. An 8.5h block
+is not safe.
+
+**Phase 3 implication:**
+
+Phase 3 (full backfill for remaining 67 symbols, ~67 vs today's 3)
+is structurally the same operation. If 3 symbols × 60 days took
+8.5 hours, 67 symbols × 60 days scales much longer (potentially
+1-2+ days even with batching gains). That would block the
+trading-day pipeline for entire trading days. Unacceptable at any
+non-zero position state.
+
+**Mitigation options (enumerated, not yet decided):**
+
+**Option A: Schedule long backfills outside trading hours.**
+
+Add a guard in the trigger plumbing (PR #941's HTTP route) that
+refuses trigger during US trading hours (13:30-21:00 UTC weekdays)
+unless an explicit override flag is passed. Operator self-discipline
+to only trigger overnight/weekend.
+
+- Effort: ~30-45 min (small route + script change)
+- Cost: requires operator to be available during off-hours OR plan
+  ahead
+- Risk: low; preserves canonical pattern
+
+**Option B: Move long backfills to a separate worker queue.**
+
+Add a "background" or "low-priority" worker queue for long-running
+jobs like backfills. Trading-day pipeline jobs continue on the main
+queue. Backfill runs in parallel without blocking.
+
+- Effort: ~half-day to full day (RQ queue config + scheduler routing
+  + Railway service config)
+- Cost: real engineering work + Railway service overhead (additional
+  worker process)
+- Risk: medium; new infrastructure surface
+
+**Option C: Make backfill handler chunk-and-yield friendly.**
+
+Refactor `iv_historical_backfill` to process in smaller chunks (e.g.
+10 days at a time per invocation) and re-enqueue itself for the next
+chunk. Each chunk runs for ~30-45 min; trading-day jobs can
+interleave.
+
+- Effort: ~half-day (handler refactor + re-enqueue logic + state
+  tracking)
+- Cost: more complex handler; need to track partial-completion state
+- Risk: medium; introduces re-entrancy considerations
+
+**Investigation surface (when prioritized):**
+
+- Verify current worker queue topology (single queue vs multiple)
+- Read scheduler/worker config for any existing job priority
+  mechanisms
+- Check if RQ supports job priorities or named queues out-of-box
+- Cross-reference Railway service config for worker resource
+  allocation
+
+**Effort estimate:** decision-only ~30 min; implementation depends
+on chosen mitigation (30-45 min for Option A; half-day+ for
+Options B/C).
+
+**Anti-criteria (don't prioritize if):**
+
+- Phase 2 validation FAILS and α is refuted — no further backfill
+  needed
+- Decision made to limit α to current 3 reference symbols permanently
+- Operator chooses to manually-time all backfills (acceptable for
+  low-tier micro state but not scalable)
+
+**Cross-references:**
+
+- Today's Friday EOD check synthesis (conversation history) —
+  evidence chain
+- PR #941 (trigger plumbing) — created the trigger surface that now
+  needs rate-limiting
+- α implementation plan — Phase 3 (full universe backfill) is the
+  next step that would be blocked by this issue
+- `packages/quantum/jobs/handlers/iv_historical_backfill.py` —
+  current long-running implementation
+
+**Status:** Captured. Tier 1 candidate. Should be addressed before
+Phase 3 trigger. Phase 2 manual validation is NOT blocked by this
+finding (Phase 2 is operator-driven, no worker queue dependency).
+
 ---
 
 ## Backlog (post-promotion)

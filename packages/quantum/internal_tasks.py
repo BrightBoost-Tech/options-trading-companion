@@ -13,6 +13,7 @@ import os
 # operator smoke script `packages/quantum/scripts/rq_smoke_morning_brief.py`,
 # which is out of #71 scope.
 from packages.quantum.public_tasks import enqueue_job_run  # DB + RQ (canonical)
+from packages.quantum.jobs.rq_enqueue import BACKGROUND_QUEUE
 
 router = APIRouter(
     prefix="/internal/tasks",
@@ -335,12 +336,17 @@ async def iv_historical_backfill_task(
     if force_rerun:
         handler_payload["force_rerun"] = True
 
+    # Route to BACKGROUND_QUEUE so the multi-hour run does not starve
+    # the primary "otc" worker queue. See docs/backlog.md
+    # "[2026-05-15] TIER 1 CANDIDATE: worker-queue blocker" for the
+    # Phase 1 incident (job_run 9627c667-...) that motivated this.
     return enqueue_job_run(
         job_name="iv_historical_backfill",
         idempotency_key=(
             f"iv_historical_backfill-{today}-{symbols_key}-{days}d"
         ),
         payload=handler_payload,
+        queue_name=BACKGROUND_QUEUE,
         force_rerun=force_rerun,
     )
 

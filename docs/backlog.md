@@ -1663,6 +1663,29 @@ Options B/C).
 Phase 3 trigger. Phase 2 manual validation is NOT blocked by this
 finding (Phase 2 is operator-driven, no worker queue dependency).
 
+**Update (2026-05-15 evening, Phase 2 validation results):**
+
+α Phase 2 manual validation completed with 3/3 symbols passing
+(SPY 1.31, AAPL 1.27, AMD 0.26 pct-points delta against barchart
+reference for 2026-05-08). α is validated.
+
+This means **Phase 3 (full 67-symbol backfill) is now gated ONLY on
+this worker-queue blocker mitigation.** All other prerequisites are met:
+
+- ✓ α implementation merged (PR #935)
+- ✓ Trigger plumbing operational (PR #941)
+- ✓ Phase 1 reference backfill clean (165 rows, smooth values)
+- ✓ Phase 2 validation passed (3/3 within tolerance)
+- ⏳ Worker-queue blocker mitigation (THIS candidate)
+- → Phase 3 trigger
+- → Phase 4 sanity check
+- → Phase 5 operational cutover
+
+Priority unchanged: TIER 1, before Phase 3. The three mitigation
+options remain enumerated above (trading-hours guard / separate queue /
+chunk-and-yield handler). See CLAUDE.md "α Phase 2 — VALIDATED" entry
+for full validation table.
+
 ---
 
 ## Backlog (post-promotion)

@@ -1686,6 +1686,45 @@ options remain enumerated above (trading-hours guard / separate queue /
 chunk-and-yield handler). See CLAUDE.md "α Phase 2 — VALIDATED" entry
 for full validation table.
 
+**RESOLVED (2026-05-16, Option B — separate worker queue):**
+
+Option B implemented via single engineering PR:
+
+- Added `BACKGROUND_QUEUE = "background"` constant in
+  `packages/quantum/jobs/rq_enqueue.py` (alongside existing queue
+  plumbing).
+- `iv_historical_backfill` route in `internal_tasks.py` now passes
+  `queue_name=BACKGROUND_QUEUE` to `enqueue_job_run`. All other
+  routes continue to use the default `otc` queue (regression-
+  guarded by test).
+- Tests added (`test_background_queue_routing.py`): source-level
+  structural assertions on the route + unit tests verifying
+  `enqueue_idempotent` propagates `queue_name` to the RQ `Queue`
+  construction + `make_job_id` signature lock to keep it queue-
+  agnostic (prevents future drift that would allow cross-queue
+  double-execution).
+- New Railway service `worker-background` deployed by operator
+  with start command `rq worker background`. Same Dockerfile, same
+  env vars (REDIS_URL, SUPABASE creds, Python deps) as the
+  existing `worker` service.
+- CLAUDE.md Infrastructure table + STARTUP.md local-dev guide
+  updated to document the topology.
+
+**Pattern for future long-running jobs:** route to BACKGROUND_QUEUE
+by adding `queue_name=BACKGROUND_QUEUE` to the route's
+`enqueue_job_run(...)` call. If 3+ jobs need this routing, extract
+a registry (YAGNI applied 2026-05-16 — single hardcode for now).
+
+**Phase 3 readiness:** UNBLOCKED. Phase 3 (full 67-symbol α
+backfill) can now run on the background queue without starving the
+trading-day pipeline. All α-side prerequisites are met (PR #935
+implementation, PR #941 trigger plumbing, PR #944/#945 Phase 1+2
+verification).
+
+**Defense-in-depth note:** even with queue isolation, Polygon API
+rate limits and DB write contention are NOT isolated. Recommend
+still scheduling Phase 3 outside US trading hours where possible.
+
 ---
 
 ## Backlog (post-promotion)

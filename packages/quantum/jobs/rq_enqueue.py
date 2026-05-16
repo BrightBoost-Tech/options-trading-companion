@@ -5,6 +5,17 @@ from rq import Queue
 from fastapi import HTTPException
 from typing import Any, Dict, Optional
 
+# Queue names. The "otc" default is left inline in this file's other
+# call sites (and across the codebase) — refactor to a DEFAULT_QUEUE
+# constant is a separate cleanup. BACKGROUND_QUEUE is added so
+# long-running jobs (e.g., iv_historical_backfill, ~8h Phase 1 run)
+# can be routed to a separate Railway worker service and not starve
+# the primary trading-day pipeline. See docs/backlog.md
+# "[2026-05-15] TIER 1 CANDIDATE: worker-queue blocker" for the
+# Phase 1 incident that motivated this split.
+BACKGROUND_QUEUE = "background"
+
+
 def get_redis() -> Redis:
     """
     Returns a Redis client instance.

@@ -54,6 +54,33 @@ The launcher system is built on PowerShell for reliability. You can also run Pow
 
 Scripts are located in `scripts\win\`.
 
+## Worker Queues (Local Dev)
+
+Production runs two Railway worker services on separate RQ queues (see CLAUDE.md Infrastructure):
+
+- **`otc`** — primary queue, all trading-day pipeline jobs (default)
+- **`background`** — long-running jobs (`iv_historical_backfill`); isolated so multi-hour runs don't starve `otc`
+
+For most local-dev work, the default `otc` worker is sufficient:
+
+```powershell
+.\scripts\win\start_worker.ps1
+```
+
+To also handle background long-running jobs locally (e.g. testing `iv_historical_backfill`), start a second worker in another terminal:
+
+```powershell
+.\scripts\win\start_worker.ps1 -Queue background
+```
+
+Or have a single local worker listen on both queues (acceptable for dev where parallel isolation isn't critical):
+
+```powershell
+& "packages\quantum\venv\Scripts\rq.exe" worker otc background --worker-class rq.worker.SimpleWorker
+```
+
+The combined-queue option is NOT used in production, where we want `background` isolated so long jobs can't block trading-day pipeline jobs.
+
 ## Environment Variables
 
 The PowerShell scripts automatically load environment variables from (in priority order):

@@ -43,9 +43,15 @@ For AI session context, this file is loaded every turn.
 |---|---|
 | Backend (Railway) | https://be-production-48b1.up.railway.app |
 | Frontend (Railway) | https://fe-production-d711.up.railway.app |
-| Worker (Railway) | worker.railway.internal (internal) |
+| Worker (Railway) | worker.railway.internal (internal) — RQ queue `otc`, start: `rq worker otc` |
+| Worker-background (Railway) | worker-background.railway.internal (internal) — RQ queue `background`, start: `rq worker background` (added 2026-05-16) |
 | Supabase project | etdlladeorfgdmsopzmz.supabase.co |
 | GitHub Actions | Manual dispatch only (APScheduler is primary) |
+
+**Worker queue topology (2026-05-16):**
+
+- **`otc` queue (primary worker):** all trading-day pipeline jobs — `suggestions_open`, `suggestions_close`, `paper_auto_execute`, `paper_exit_evaluate`, `intraday_risk_monitor`, `iv_daily_refresh`, `alpaca_order_sync`, etc. Default for `enqueue_job_run(...)`.
+- **`background` queue (worker-background):** long-running jobs that would otherwise starve the primary queue. Currently routes only `iv_historical_backfill` (multi-hour BS-inversion backfill — see backlog Tier 1 candidate `[2026-05-15] worker-queue blocker` for the Phase 1 incident that motivated the split). Future long-running handlers should also be routed here by passing `queue_name=BACKGROUND_QUEUE` to their route's `enqueue_job_run(...)` call.
 
 ### Key Environment Variables (Railway backend unless noted)
 | Variable | Value | Purpose |

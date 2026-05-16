@@ -128,23 +128,47 @@ def run(payload: Dict[str, Any], ctx: Any = None) -> Dict[str, Any]:
         rows_written_dates: Set[str] = set()
 
         for sym in symbols:
+            # Filter target_days to the dates this symbol still needs.
+            # Skip-existing happens here (pre-Polygon-call) so we avoid
+            # paying the per-symbol contract+OHLC fetch cost for symbols
+            # whose entire window is already populated.
+            sym_unprocessed_days: List[date] = []
             for d in target_days:
                 d_str = d.strftime("%Y-%m-%d")
-                key = (sym, d_str)
-                if key in skip_set:
+                if (sym, d_str) in skip_set:
                     stats["skipped_existing"] += 1
-                    continue
+                else:
+                    sym_unprocessed_days.append(d)
 
-                try:
-                    result = service.compute_historical_iv_point(sym, d)
-                except Exception as e:  # noqa: BLE001
-                    # Failure isolation: log + continue; never abort
-                    # the entire backfill on one bad (symbol, date).
-                    stats["failed"] += 1
-                    stats["errors"].append(
-                        f"{sym}/{d_str}: compute_exception:{type(e).__name__}:{e}"
-                    )
-                    continue
+            if not sym_unprocessed_days:
+                continue
+
+            # Window method: one chain-listing call per right per symbol +
+            # one OHLC range call per contract per symbol (instead of
+            # per-date × per-contract). See PR-A description for the
+            # ~46x API call count reduction.
+            try:
+                results = service.compute_historical_iv_points_for_window(
+                    sym, sym_unprocessed_days,
+                )
+            except Exception as e:  # noqa: BLE001
+                # Catastrophic per-symbol failure. Mark every date in
+                # this window's unprocessed set as failed and continue.
+                # Mirrors the per-date method's per-failure isolation
+                # at symbol granularity (catastrophic chain fetch
+                # failure can't be locally isolated).
+                stats["failed"] += len(sym_unprocessed_days)
+                stats["errors"].append(
+                    f"{sym}: window_exception:{type(e).__name__}:{e}"
+                )
+                continue
+
+            # Per-date results processing. Same upsert / verify / stats
+            # accounting as the per-date method had; mirroring its
+            # failure-isolation pattern at per-date granularity.
+            for d in sym_unprocessed_days:
+                d_str = d.strftime("%Y-%m-%d")
+                result = results.get(d)
 
                 if not result or result.get("iv") is None:
                     stats["missing_data"] += 1

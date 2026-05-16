@@ -220,6 +220,10 @@ live Alpaca account entitlements (backlog #88).
 - `post_trade_learning` runs after learning_ingest to close the feedback loop
 - GitHub Actions `trading_tasks.yml` is fallback (manual dispatch only)
 
+**Weekend behavior (Mon-Fri only):** All scheduled jobs are Mon-Fri only — `day_of_week='mon-fri'` is applied uniformly to every job in the SCHEDULES list at `packages/quantum/scheduler.py:212-217` (and also to the non-SCHEDULES `auto_retry_failed` job at line 236-248). Saturday/Sunday silence is expected; `scheduler_heartbeat`, `iv_daily_refresh`, `suggestions_open`, etc. do NOT fire on weekends. Next fire after Friday close: Monday 04:30 CT (`iv_daily_refresh`). Operator-driven HTTP triggers via `scripts/run_signed_task.py` work normally over weekends — only the scheduler-driven dispatch is paused.
+
+When investigating weekend silence (no `job_runs` over a weekend window), refer to this note before assuming outage. The Thursday 2026-05-14 morning outage was a real Mon-Fri outage with Supabase HTTP timeouts (see H11 doctrine); weekend silence is design. Saturday 2026-05-16 evening status check rediscovered this pattern in ~5 min and prompted this note.
+
 ---
 
 ## Testing & CI

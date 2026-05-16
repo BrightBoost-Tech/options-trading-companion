@@ -1725,6 +1725,132 @@ verification).
 rate limits and DB write contention are NOT isolated. Recommend
 still scheduling Phase 3 outside US trading hours where possible.
 
+**[2026-05-17] TIER 2 CANDIDATE: anchor-selection time-instability (Finding C).**
+
+**Priority:** TIER 2 — informational; affects iv_rank consumer
+expectations + PR-A test design. Not blocking PR-A (which pins
+fixtures against today's post-PR-A2 outputs per this finding's
+implications).
+
+**Surfaced by:** Post-PR-A2 fresh fixture capture for PR-A
+(2026-05-16 17:15-17:20 UTC, against PR #948 merged at 17:11 UTC).
+
+**Mechanism (verified):**
+
+PR-A2 (PR #948) fixed Finding B (contract listing time-instability
+via `expired=true`). However, even with stable contract listings,
+the handler's anchor-selection algorithm in
+`IVPointService.compute_atm_iv_target_from_chain` picks the "best"
+anchors from the CONTRACT SET AVAILABLE AT QUERY TIME.
+
+When the available contract set changes — whether by new contracts
+being added, expiries passing, OR PR-A2 expanding the visible set
+via `expired=true` — the "best" choice shifts. Phase 1 ran against
+a constrained set (no expired contracts visible); today runs against
+a richer set (expired contracts now visible). The richer set exposes
+nearer-DTE anchors the algorithm prefers, causing iv_30d output to
+shift even for unchanged historical dates.
+
+**Evidence (5 reference tuples re-captured 2026-05-16 post-PR-A2):**
+
+- **SPY @ 2026-04-15:** Phase 1 iv_30d=0.150654 (anchors 05-15 + 05-22,
+  DTE 30/37) → today 0.141438 (anchors 04-24 + 04-24, DTE 9/9).
+  Delta 0.92 pct-pts.
+- **AAPL @ 2026-04-15:** Phase 1 iv_30d=0.296574 (anchors 05-15 + 05-22)
+  → today 0.296574 (anchors 05-15 + 05-15). Delta ~0 (bit-for-bit
+  match — the only one of 5).
+- **AMD @ 2026-05-08:** Phase 1 iv_30d=0.681414 (anchors 06-05 + 06-12,
+  DTE 28/35) → today 0.702508 (anchors 05-15 + 05-15, DTE 7/7).
+  Delta 2.11 pct-pts.
+- **SPY @ 2026-03-13:** Phase 1 iv_30d=0.219546 (strike=662, exp=05-15
+  single anchor q=80) → today 0.338553 (strike=615, exp=03-25). Delta
+  11.9 pct-pts. NOTE: strike shifted from truly-ATM (spot 662.29) to
+  8% below ATM — suggests contract-filtering interaction beyond just
+  anchor selection.
+- **AAPL @ 2026-02-20:** Phase 1 iv_30d=0.272318 (single anchor 05-15
+  q=80) → today 0.252688 (anchors 03-20 + 03-27, DTE 28/35; true
+  interpolation now possible). Delta 1.96 pct-pts.
+
+The AMD case is particularly notable: 2 days ago (Sunday afternoon
+pre-PR-A2) it REPRODUCED at delta=0 with full diagnostic match.
+Today (post-PR-A2) it DIVERGED at delta=2.11. The expanded contract
+set changed the anchor selection from June expiries (Phase 1) to a
+closer 2026-05-15 expiry (today).
+
+**Why this matters:**
+
+1. **iv_rank consumer expectations:** if iv_30d for a historical date
+   can shift by ~1-2 pct-pts between sessions, downstream iv_rank
+   calculations see input drift. Strategy gates that consume iv_rank
+   percentile may see their thresholds straddled differently over
+   time, even for unchanged historical dates.
+
+2. **Reproducibility of Phase 1 data:** Phase 1's
+   `underlying_iv_points` rows are now ARCHIVED snapshots, not values
+   that can be reproduced bit-for-bit by re-running. PR-A's tests
+   cannot use Phase 1's stored values as ground truth.
+
+3. **Test fixture shelf life:** today's captured fixtures (used as
+   PR-A test baselines) will themselves drift over time as further
+   expiries pass and re-shift anchor selection. Recommend re-capturing
+   fixtures if PR-A test runs are scheduled more than ~2 weeks out.
+
+**Investigation surface (when prioritized):**
+
+- Read `compute_atm_iv_target_from_chain` for the anchor-selection
+  algorithm
+- Characterize: what makes one anchor "best"? DTE proximity?
+  Liquidity? Strike proximity? Quality-score weighting?
+- Question: is the algorithm correctly identifying optimal anchors,
+  or does it have a systematic bias (e.g., preferring closer-DTE
+  even when farther-DTE produces better 30-day interpolation)?
+- Question: should anchor selection be deterministic against a
+  CANONICAL contract set (e.g., "weekly + monthly anchors only at
+  capture time", ignoring richer mid-cycle expiries)?
+- SPY @ 2026-03-13's strike shift (662 → 615) suggests the
+  contract-filtering layer (`reconstruct_chain_at_date`'s strike
+  range filter) interacts with the chain density in ways that affect
+  anchor selection. Investigate the filter interaction, not just
+  the selection algorithm itself.
+
+**Anti-criteria (don't prioritize if):**
+
+- iv_rank consumers in production are tolerant of ~2 pct-pt drift
+  in iv_30d (would manifest as occasional percentile-band straddling
+  but not catastrophic at micro tier)
+- Phase 1 data is treated as historical snapshot, not reference truth
+- Alternative architecture (vendor change, persist chain listings at
+  capture time, Polygon tier upgrade exposing historical chain
+  snapshots) supersedes per-call algorithm questions
+
+**Effort estimate:**
+
+- Characterize anchor-selection algorithm + filter interaction:
+  ~30-45 min reading code + documenting behavior
+- Decide on fix shape (algorithm bias correction OR persist chain
+  listings at capture time OR accept drift): operator architectural
+  decision
+- Implementation effort depends on fix shape; ranges from "small
+  bias correction" (~1-2h) to "store chain snapshots in new table at
+  capture time" (multi-hour refactor + schema change)
+
+**Cross-references:**
+
+- PR #948 — Finding B mechanical fix; this Finding builds on PR #948's
+  expanded contract visibility
+- Phase 1 results (job_run `9627c667-61e5-4915-a83c-a584b03bab0a`) —
+  the stored values that cannot be reproduced
+- Polygon tier upgrade investigation (Sunday 2026-05-17 synthesis in
+  session history) — alternative architecture path that may obviate
+  this finding entirely
+- Upcoming PR-A — will pin tests against today's post-PR-A2 fixtures
+  per this finding's implications; will NOT use Phase 1 stored values
+
+**Status:** Captured. Tier 2. Not blocking PR-A. Investigation
+prioritization is operator decision when iv_rank consumers surface
+drift concerns OR when alternative architecture (Polygon tier
+upgrade / persist chain listings) is considered.
+
 ---
 
 ## Backlog (post-promotion)

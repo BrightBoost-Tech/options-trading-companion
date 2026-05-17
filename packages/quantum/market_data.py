@@ -814,7 +814,16 @@ class PolygonService:
         exp_end: date,
         strike_min: float,
         strike_max: float,
-        limit: int = 1000
+        # Total contracts cap across pagination. Polygon's per-page max is
+        # 1000 (enforced at the inner _api method); this controls the
+        # TOTAL across all paginated calls. Raised from 1000 to 20000
+        # (F2a, 2026-05-17) after Phase 3 sparse-coverage investigation:
+        # the 1000 cap was being consumed by daily-expiry strikes of the
+        # first ~8 expiry dates for deep-chain symbols (QQQ etc.), leaving
+        # no anchors for middle/late dates in 60-day backfill windows.
+        # 20000 cap memory impact ~10MB/symbol; API impact up to 20
+        # paginated calls per chain query for deep-chain symbols.
+        limit: int = 20000
     ) -> List[Dict]:
         """
         PR7: Fetches option contract candidates from Polygon reference endpoint.
@@ -830,7 +839,8 @@ class PolygonService:
             exp_end: Maximum expiration date
             strike_min: Minimum strike price
             strike_max: Maximum strike price
-            limit: Max contracts to return
+            limit: Max contracts to return (across pagination; F2a raised
+                default to 20000 for deep-chain symbol coverage)
 
         Returns:
             List of contract dicts with: ticker, strike, expiration, type

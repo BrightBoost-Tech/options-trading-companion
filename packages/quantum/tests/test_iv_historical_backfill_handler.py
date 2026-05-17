@@ -41,7 +41,11 @@ def test_handler_resume_skips_existing_rows():
     """If a (symbol, date) row exists, the service is never invoked
     for that tuple. We patch ``_query_existing_backfilled`` directly
     so the skip-set matches whatever date window ``date.today()``
-    produces at test time."""
+    produces at test time.
+
+    Post-PR-A refactor: skip-filter happens BEFORE the per-symbol
+    window method is called, so neither path runs when all dates
+    are skipped."""
     client = _make_supabase_mock()
 
     def fake_query(client_arg, symbols, dates):
@@ -61,16 +65,19 @@ def test_handler_resume_skips_existing_rows():
 
         result = handler.run({"days": 3, "symbols": ["SPY"]})
 
-        # All 3 days skipped — service never invoked.
+        # All 3 days skipped — neither method called.
+        svc.compute_historical_iv_points_for_window.assert_not_called()
         svc.compute_historical_iv_point.assert_not_called()
         repo.upsert_iv_point.assert_not_called()
         assert result["stats"]["skipped_existing"] == 3
         assert result["stats"]["ok"] == 0
 
 
-def test_handler_per_symbol_exception_isolated():
-    """An exception in compute_historical_iv_point for one
-    (symbol, date) must not abort the rest of the run."""
+def test_handler_window_method_per_date_failure_isolated():
+    """Window method returns ``Dict[date, Optional[result]]``. Dates
+    mapping to None are counted as missing_data; dates mapping to a
+    valid result dict produce upsert calls. One None doesn't abort
+    the others."""
     client = _make_supabase_mock()
 
     with patch.object(handler, "get_admin_client", return_value=client), \
@@ -82,30 +89,55 @@ def test_handler_per_symbol_exception_isolated():
         repo = repo_cls.return_value
         repo.count_rows_for_date.return_value = 1
 
-        # First call raises, second returns valid result, rest return None.
-        call_count = {"n": 0}
+        def window_side_effect(sym, dates):
+            # First date returns valid result, rest None (missing_data).
+            out = {}
+            for i, d in enumerate(dates):
+                if i == 0:
+                    out[d] = {"iv": 0.25, "iv_30d": 0.25,
+                              "iv_method": "test",
+                              "inputs": {"spot": 100.0}}
+                else:
+                    out[d] = None
+            return out
 
-        def compute_side_effect(sym, d):
-            call_count["n"] += 1
-            if call_count["n"] == 1:
-                raise RuntimeError("simulated upstream failure")
-            if call_count["n"] == 2:
-                return {"iv": 0.25, "iv_30d": 0.25, "iv_method": "test",
-                        "inputs": {"spot": 100.0}}
-            return None
-
-        svc.compute_historical_iv_point.side_effect = compute_side_effect
+        svc.compute_historical_iv_points_for_window.side_effect = window_side_effect
         repo.upsert_iv_point.return_value = True
 
         result = handler.run({"days": 3, "symbols": ["SPY"]})
 
-        # Verified: run completed despite the exception, one ok write
-        # captured, one failure recorded with type captured in errors.
         assert result["status"] == "ok"
         assert result["stats"]["ok"] == 1
-        assert result["stats"]["failed"] == 1
-        assert result["stats"]["missing_data"] == 1
-        assert any("RuntimeError" in e for e in result["stats"]["errors"])
+        assert result["stats"]["missing_data"] == 2
+        assert result["stats"]["failed"] == 0
+
+
+def test_handler_window_method_exception_marks_symbol_failed():
+    """If the window method raises (catastrophic per-symbol failure),
+    every unprocessed date for that symbol counts as failed and the
+    error is captured. Mirrors per-date failure-isolation semantics
+    at symbol granularity."""
+    client = _make_supabase_mock()
+
+    with patch.object(handler, "get_admin_client", return_value=client), \
+         patch.object(handler, "PolygonService") as poly_cls, \
+         patch.object(handler, "HistoricalIVService") as svc_cls, \
+         patch.object(handler, "IVRepository") as repo_cls:
+
+        svc = svc_cls.return_value
+        repo = repo_cls.return_value
+        repo.count_rows_for_date.return_value = 0
+        svc.compute_historical_iv_points_for_window.side_effect = (
+            RuntimeError("simulated symbol-level upstream failure")
+        )
+
+        result = handler.run({"days": 3, "symbols": ["SPY"]})
+
+        assert result["status"] == "ok"
+        assert result["stats"]["ok"] == 0
+        assert result["stats"]["failed"] == 3  # all 3 days for SPY
+        assert any("window_exception" in e and "RuntimeError" in e
+                   for e in result["stats"]["errors"])
 
 
 def test_handler_h9_verification_per_written_date():
@@ -121,10 +153,13 @@ def test_handler_h9_verification_per_written_date():
 
         svc = svc_cls.return_value
         repo = repo_cls.return_value
-        svc.compute_historical_iv_point.return_value = {
-            "iv": 0.25, "iv_30d": 0.25, "iv_method": "test",
-            "inputs": {"spot": 100.0},
-        }
+
+        def window_side_effect(sym, dates):
+            return {d: {"iv": 0.25, "iv_30d": 0.25, "iv_method": "test",
+                        "inputs": {"spot": 100.0}}
+                    for d in dates}
+
+        svc.compute_historical_iv_points_for_window.side_effect = window_side_effect
         repo.upsert_iv_point.return_value = True
         repo.count_rows_for_date.return_value = 1
 
@@ -147,10 +182,13 @@ def test_handler_upsert_returning_false_counted_as_failed():
 
         svc = svc_cls.return_value
         repo = repo_cls.return_value
-        svc.compute_historical_iv_point.return_value = {
-            "iv": 0.25, "iv_30d": 0.25, "iv_method": "test",
-            "inputs": {"spot": 100.0},
-        }
+
+        def window_side_effect(sym, dates):
+            return {d: {"iv": 0.25, "iv_30d": 0.25, "iv_method": "test",
+                        "inputs": {"spot": 100.0}}
+                    for d in dates}
+
+        svc.compute_historical_iv_points_for_window.side_effect = window_side_effect
         repo.upsert_iv_point.return_value = False
         repo.count_rows_for_date.return_value = 0
 

@@ -16,6 +16,25 @@ from typing import Any, Dict, Optional
 BACKGROUND_QUEUE = "background"
 
 
+# Per-job-name RQ work-horse timeouts. The default below (10 minutes)
+# is correct for trading-day pipeline jobs that complete in seconds —
+# it preserves runaway-detection. Long-running batch operations
+# (e.g., historical backfills across the full universe) need
+# explicit larger budgets.
+#
+# Sized 2026-05-17 after Phase 3 attempt (job_run 22516c54-...)
+# failed at the default 10m budget. Math from that incident:
+# 4 symbols completed in 525s; the 5th was in-flight when the
+# 600s ceiling fired. Full 67-symbol projection ~2.5h (avg
+# ~131s/symbol); worst-case ~3.9h for deep-chain underlyings.
+# 6h budget gives 50-60% headroom over the conservative projection.
+DEFAULT_JOB_TIMEOUT = "10m"
+
+JOB_TIMEOUTS: Dict[str, str] = {
+    "iv_historical_backfill": "6h",
+}
+
+
 def get_redis() -> Redis:
     """
     Returns a Redis client instance.
@@ -93,11 +112,15 @@ def enqueue_idempotent(
         # Let's just enqueue. RQ handles job_id uniqueness by overwriting or erroring?
         # RQ >= 1.0: enqueue(..., job_id=...)
 
+        # Per-job-name timeout (default 10m for trading jobs; extended for
+        # batch operations like iv_historical_backfill — see JOB_TIMEOUTS
+        # at module top and AMGN timeout diagnostic 2026-05-17 for sizing).
+        job_timeout = JOB_TIMEOUTS.get(job_name, DEFAULT_JOB_TIMEOUT)
         job = q.enqueue(
             handler_path,
             kwargs={"payload": payload},
             job_id=job_id,
-            job_timeout="10m"
+            job_timeout=job_timeout
         )
 
         return {

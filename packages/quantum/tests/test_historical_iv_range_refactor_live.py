@@ -25,8 +25,12 @@ update the constants below.
 
 Recommend refresh every ~2 weeks if tests run regularly.
 
-SKIPS WHEN POLYGON_API_KEY UNSET — these are integration tests; CI
-without the key will skip cleanly.
+SKIPS UNLESS ``RUN_LIVE_POLYGON_TESTS=1`` IS SET — these are
+integration tests that hit real Polygon API and require BOTH a valid
+``POLYGON_API_KEY`` AND explicit opt-in. CI sets a fake POLYGON_API_KEY
+value (``fake_polygon_key``) so a key-presence check alone would
+incorrectly run the tests in CI; the explicit opt-in env var avoids
+that. Locally: ``RUN_LIVE_POLYGON_TESTS=1 pytest <file>``.
 """
 from __future__ import annotations
 
@@ -64,9 +68,16 @@ def _load_env_for_tests() -> None:
 
 _load_env_for_tests()
 
+# Explicit opt-in: CI sets POLYGON_API_KEY=fake_polygon_key so checking
+# key-presence alone would incorrectly run the tests in CI against fake
+# credentials. Require RUN_LIVE_POLYGON_TESTS=1 AND a Polygon key.
 pytestmark = pytest.mark.skipif(
-    not os.environ.get("POLYGON_API_KEY"),
-    reason="POLYGON_API_KEY not set; skipping live Polygon tests",
+    os.environ.get("RUN_LIVE_POLYGON_TESTS") != "1"
+    or not os.environ.get("POLYGON_API_KEY"),
+    reason=(
+        "Live Polygon tests skipped. To run: set RUN_LIVE_POLYGON_TESTS=1 "
+        "in addition to POLYGON_API_KEY."
+    ),
 )
 
 

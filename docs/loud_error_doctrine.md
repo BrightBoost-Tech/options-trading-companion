@@ -1510,6 +1510,51 @@ instance. Promotion to doctrine concurrent with Option A revert
 (reverting Path A's universe-widening experiment that produced
 the empirical data revealing instance 4).
 
+### H13 — Parallel architectures without integration
+
+When two complete subsystems exist that should be connected, the
+integration seam itself can be the bug. Each subsystem in isolation
+appears correct; their handoff is what's missing or wrong.
+
+Distinguishing signal: the **writer** of some piece of state and the
+**consumer** of that state exist independently. Nothing reads what the
+writer wrote; nothing writes what the consumer reads.
+
+This is distinct from H9 (verified-write across wrapper chains): H9 is
+about a single producer → wrapper(s) → consumer flow where intermediate
+layers swallow signal. H13 is about two complete flows that should be
+one.
+
+**Origin instance: 2026-05-18 #62a-D1.** `policy_lab_evaluator.py`
+runs daily and writes `promoted_at` on promotion-eligible cohorts;
+`fork.py:67` hardcoded `cohort_name = "aggressive"` and never read
+`promoted_at`. Two complete-but-unwired subsystems. The fix was
+mechanical (~half day): a small `get_current_champion` helper that
+reads `promoted_at` (with a defensive fallback to "aggressive" for
+transition windows), plus a DB migration aligning `promoted_at` with
+operator intent, plus rewrites of two adjacent silent-failure query
+sites (`_get_champion_portfolio` and `_resolve_position_cohort` path 3)
+that had been authored under the same assumed-but-never-built
+`is_champion` integration model.
+
+**Diagnostic:** when investigating a feature that's "complete but not
+working," check whether the data flow ends where it should. If the
+writer's output isn't read by anyone, or the consumer's input isn't
+written by anyone, the integration seam is the bug.
+
+**Mitigation:** when introducing a new producer → consumer pair,
+write an integration test that exercises the full path end-to-end.
+The H9 AST gate catches wrapper-drift (single-flow signal loss); a
+similar integration-completeness check could catch parallel-
+architecture-drift, but is not yet codified. Until then: review the
+seam explicitly during architecture review, not just each subsystem
+in isolation.
+
+**Numbering note:** the original #62a-D1 backlog framing called this
+"H12 candidate" before H12 was claimed by the framing-artifact
+discipline doctrine (codified 2026-05-13). Numbered H13 here per
+codification order, not per discovery order.
+
 ## Valid silent-failure patterns
 
 Not all exception swallowing is a doctrine violation. The following

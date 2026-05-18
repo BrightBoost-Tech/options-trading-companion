@@ -1,18 +1,18 @@
 # Cohort architecture
 
-Current state as of 2026-05-12 (last sub-investigation review). This document is a single coherent description of how the cohort subsystem works today — not a diff against an earlier framing.
+Current state as of 2026-05-18 (post-#62a-D1 closure). This document is a single coherent description of how the cohort subsystem works today.
 
-## Three cohorts, two subsystems, one un-wired seam
+## Three cohorts, two subsystems, integration seam closed
 
-The system has three cohorts (`conservative`, `neutral`, `aggressive`) in `policy_lab_cohorts` per user. There are two complete subsystems that touch cohorts:
+The system has three cohorts (`conservative`, `neutral`, `aggressive`) in `policy_lab_cohorts` per user. Two subsystems touch cohorts:
 
-1. **Champion/challenger evaluator** — `policy_lab/evaluator.py`, `policy_lab/scoring.py`, scheduled job `policy_lab_eval`. Fully built; runs daily; scores all 3 cohorts via 7 promotion gates (≥3 days, ≥10 trades, no -20% drawdown, ≥15% utility margin, ≥70% posterior probability, drawdown not worse than champion, 2-day cooldown). On promotion: writes `UPDATE policy_lab_cohorts SET promoted_at = NOW()` AND inserts a `policy_lab_promotions` audit row. 4 successful runs to date; 0 promotions (either no qualifying challenger or gates miscalibrated — empirical signal needed).
+1. **Champion/challenger evaluator** — `policy_lab/evaluator.py`, `policy_lab/scoring.py`, scheduled job `policy_lab_eval`. Fully built; runs daily; scores all 3 cohorts via 7 promotion gates (≥3 days, ≥10 trades, no -20% drawdown, ≥15% utility margin, ≥70% posterior probability, drawdown not worse than champion, 2-day cooldown). On promotion: writes `UPDATE policy_lab_cohorts SET promoted_at = NOW()` AND inserts a `policy_lab_promotions` audit row. 4 successful runs as of 2026-05-12; 0 promotions (either no qualifying challenger or gates miscalibrated — empirical signal needed).
 
-2. **Live route hardcode** — `packages/quantum/policy_lab/fork.py:67`. Hardcodes `cohort_name = "aggressive"` regardless of `promoted_at`. Source suggestions emerge from the orchestrator's `SmallAccountCompounder.rank_and_select` call at `packages/quantum/services/workflow_orchestrator.py:2049-2094` and are tagged with that hardcoded value. Fully built since 2026-03-20 (commit `f396334f`).
+2. **Live route reads `promoted_at`** — `packages/quantum/policy_lab/fork.py` now calls `get_current_champion(user_id, supabase)` from `policy_lab/champion.py`. The helper queries `promoted_at IS NOT NULL ORDER BY promoted_at DESC LIMIT 1` and returns the most-recently-promoted cohort_name. Defensive fallback to `"aggressive"` when no cohort is promoted (transition windows, fresh DBs). Source suggestions emerge from the orchestrator's `SmallAccountCompounder.rank_and_select` call at `packages/quantum/services/workflow_orchestrator.py:2049-2094` and are tagged with the resolved champion's `cohort_name`.
 
-**The integration seam is the bug.** The evaluator writes `promoted_at`; the live route ignores `promoted_at`. Nothing currently reads `promoted_at` for routing. Each subsystem works correctly in isolation; the wire between them is missing.
+**Integration seam closure (#62a-D1, 2026-05-18).** Pre-PR, the evaluator wrote `promoted_at` and the live route hardcoded `"aggressive"` — nothing read what the evaluator wrote, nothing wrote what the consumer read. The hardcode is removed; the helper is the seam. See `docs/loud_error_doctrine.md` H13 — Parallel architectures without integration for the codified doctrine that the #62a-D1 incident originated.
 
-This is the first concrete instance of "parallel architectures without integration" in this codebase — adjacent to but distinct from the H9 wrapper-drift class in `docs/loud_error_doctrine.md`. Worth design-review discussion alongside the #62a-D1 architectural PR.
+`POLICY_LAB_AUTOPROMOTE` stays OFF (manual promotion only). The seam is wired; whether the evaluator's gates produce trustworthy promotions is a separate empirical question still under observation.
 
 ## What IS wired today
 
@@ -22,21 +22,23 @@ This is the first concrete instance of "parallel architectures without integrati
 
 ## What ISN'T wired
 
-- **`promoted_at` → live routing.** The evaluator's promotion output is advisory until #62a-D1's architectural PR rewires `fork.py:67` to read champion via `promoted_at` lookup. `POLICY_LAB_AUTOPROMOTE` stays OFF (C-1 endpoint chosen) until evaluator gates have empirical track record.
+- **`POLICY_LAB_AUTOPROMOTE` stays OFF** until the evaluator's gates have empirical track record. The seam is wired (#62a-D1, 2026-05-18); whether to flip the auto-promote env var is a separate decision pending observation of evaluator output over the next several weeks.
 - **Legacy `policy_lab_daily_results` table** has zero writers and zero consumers post-PR #808; cleanup tracked as backlog #73.
 
-## Silent-failure `is_champion` query sites (bugs)
+## Resolved historical state (preserved for archeology)
 
-Two sites query a non-existent column `is_champion = True`, wrapped in `try/except: pass`, returning `None` on exception:
+### Silent-failure `is_champion` query sites — RESOLVED 2026-05-18
+
+Two sites had been authored against an assumed-but-never-built `is_champion` column on `policy_lab_cohorts`. Each queried `is_champion = True`, wrapped in `try/except: pass`, returning `None` on every call:
 
 - `packages/quantum/services/paper_autopilot_service.py:867` — `_get_champion_portfolio`
-- `packages/quantum/services/paper_exit_evaluator.py:892` — cohort fallback
+- `packages/quantum/services/paper_exit_evaluator.py:935-948` — `_resolve_position_cohort` path 3 (champion fallback)
 
-Authored when someone assumed an earlier migration's `is_champion=true` INSERT intent would land as a column. Both are fixed (or deleted, if redundant) as part of #62a-D1's architectural PR — they should query via `promoted_at` instead.
+#62a-D1 rewrote both to query `promoted_at IS NOT NULL ORDER BY promoted_at DESC LIMIT 1`. The silent `try/except: pass` is removed at both sites; exceptions now either log a warning (autopilot site, where None is a legitimate caller-expected value) or feed the existing `_resolution_failures` list that drives the loud `paper_exit_cohort_resolve_exhausted` alert (exit-evaluator site).
 
-## DB state misalignment (pending correction)
+### DB state misalignment — RESOLVED 2026-05-18
 
-`promoted_at` is currently set on `neutral` (operator manual UPDATE on 2026-04-02 21:28Z, predating the intent clarification). It should be on `aggressive` per operator intent confirmed 2026-05-12 (aggressive = starting champion; conservative + neutral are shadow challengers). The DB flip ships in #62a-D1 alongside the routing rewire.
+Pre-PR: `promoted_at` set on `neutral` (operator manual UPDATE on 2026-04-02 21:28Z, predating the intent clarification). Post-migration (`20260518000001_promote_aggressive_cohort.sql`): `promoted_at` set on `aggressive`; `neutral` and `conservative` both NULL. Migration is operator-applied per `docs/migration_procedure.md`; the code's defensive fallback to `"aggressive"` ensures correctness across any deploy-vs-apply ordering.
 
 ## Sizing duality (documented intent, not bug)
 
@@ -47,15 +49,16 @@ Two sizing layers operate on different blast surfaces:
 
 These are intentionally separate sizing layers. Layer 1 drives live execution; Layer 2 drives shadow comparison data. Reconciliation is deferred until 30+ days of `policy_lab_daily_scores` accumulate to inform which layer's math correlates with better outcomes.
 
-## Architectural PR #62a-D1 (queued)
+## Architectural PR #62a-D1 — SHIPPED 2026-05-18
 
-Scope:
+Scope (all three landed in one PR):
 
-- DB: flip `promoted_at` from neutral to aggressive.
-- Fix the 2 silent-failure `is_champion` query sites (or delete if redundant).
-- Modify `fork.py:67` to read current champion via `promoted_at` lookup instead of hardcoding `"aggressive"`.
+- DB: migration `supabase/migrations/20260518000001_promote_aggressive_cohort.sql` flips `promoted_at` from neutral to aggressive (operator-applied per `docs/migration_procedure.md`).
+- The 2 silent-failure `is_champion` query sites rewritten to query `promoted_at`. Both eliminate the H9 anti-pattern (`try/except: pass`).
+- `fork.py` reads the current champion via `get_current_champion(user_id, supabase)` helper in `policy_lab/champion.py`. Defensive fallback to `"aggressive"` preserves pre-PR behavior across any deploy-vs-DB-apply ordering.
+- H13 doctrine entry codified in `docs/loud_error_doctrine.md` — Parallel architectures without integration.
 
-Effort: ~half day. No live trading behavior change at the moment of wire-up (aggressive stays live; this is mechanical correctness, not a param change). Tracked as #62a-D1 in `docs/backlog.md`.
+No live trading behavior change at the moment of wire-up (aggressive stays the live champion; this was mechanical correctness, not a param change).
 
 ## Roadmap
 

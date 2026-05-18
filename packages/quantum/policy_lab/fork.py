@@ -17,6 +17,7 @@ from packages.quantum.policy_lab.config import (
     load_cohort_configs,
     is_policy_lab_enabled,
 )
+from packages.quantum.policy_lab.champion import get_current_champion
 
 logger = logging.getLogger(__name__)
 
@@ -61,35 +62,25 @@ def fork_suggestions_for_cohorts(
         logger.info(f"policy_lab_fork: no source suggestions for user={user_id}")
         return {"status": "no_source_suggestions", "created": {}}
 
-    # Tag source suggestions as the aggressive cohort (default).
+    # Tag source suggestions with the currently-promoted champion cohort.
     #
-    # KNOWN WIRE-UP GAP (#62a-D1, addendum 2026-05-12):
-    # The designed mechanism reads the current champion via
-    # `policy_lab_cohorts.promoted_at` (set by the evaluator at
-    # `policy_lab/evaluator.py:537-545` when its 7 promotion gates
-    # pass). This site should be:
-    #
-    #     champion_row = (
-    #         supabase.table("policy_lab_cohorts")
-    #             .select("cohort_name")
-    #             .eq("user_id", user_id)
-    #             .not_.is_("promoted_at", "null")
-    #             .order("promoted_at", desc=True)
-    #             .limit(1)
-    #             .execute()
-    #     )
-    #     champion_name = champion_row.data[0]["cohort_name"] if champion_row.data else "aggressive"
-    #
-    # Hardcoded "aggressive" is a temporary workaround. Architectural
-    # PR queued post-CSX-validation week per the #62a-D1 backlog
-    # entry; see CLAUDE.md "Cohort architecture" addendum for full
-    # context. Live behavior unchanged at the time of wire-up because
-    # the operator-intent champion IS aggressive — the wire-up is
-    # mechanical correctness, not a behavior change.
+    # #62a-D1 (closed 2026-05-18): this site used to hardcode
+    # `cohort_name = "aggressive"`. The evaluator at
+    # `policy_lab/evaluator.py:537-545` writes `promoted_at` on the
+    # winning cohort when its 7 promotion gates pass; nothing read
+    # `promoted_at` for routing. That integration seam is now closed
+    # via `get_current_champion` (see policy_lab/champion.py).
+    # Defensive fallback in the helper: if no cohort is promoted
+    # (transition window or fresh DB), returns "aggressive" — preserves
+    # pre-PR behavior so deploy-vs-migration ordering doesn't matter.
+    # See `docs/loud_error_doctrine.md` H12 — Parallel architectures
+    # without integration.
+    champion_name = get_current_champion(user_id, supabase)
+
     for s in source_suggestions:
         try:
             supabase.table("trade_suggestions").update({
-                "cohort_name": "aggressive",
+                "cohort_name": champion_name,
             }).eq("id", s["id"]).execute()
         except Exception:
             pass  # Non-critical
@@ -100,9 +91,9 @@ def fork_suggestions_for_cohorts(
 
     created = {}
     for cohort_name, config in configs.items():
-        if cohort_name == "aggressive":
+        if cohort_name == champion_name:
             created[cohort_name] = len(source_suggestions)
-            continue  # Already tagged above
+            continue  # Already tagged above (source suggestions ARE the champion's output)
 
         portfolio_id = cohort_portfolios.get(cohort_name)
         cohort_id = cohort_ids.get(cohort_name)
@@ -203,15 +194,16 @@ def fork_suggestions_for_cohorts(
             f"source={len(source_suggestions)} filtered={len(filtered)} cloned={cloned}"
         )
 
-    # Log decisions for the aggressive cohort too (all accepted by default)
-    aggressive_cohort_id = cohort_ids.get("aggressive")
-    if aggressive_cohort_id and source_suggestions:
+    # Log decisions for the champion cohort too (all accepted by default —
+    # source suggestions ARE the champion's output, so every one is accepted).
+    champion_cohort_id = cohort_ids.get(champion_name)
+    if champion_cohort_id and source_suggestions:
         all_ids = {s["id"] for s in source_suggestions}
         _log_cohort_decisions(
-            supabase, user_id, "aggressive", aggressive_cohort_id,
+            supabase, user_id, champion_name, champion_cohort_id,
             source_suggestions, all_ids,
-            configs.get("aggressive", PolicyConfig()),
-            0,  # aggressive doesn't filter by open positions at fork time
+            configs.get(champion_name, PolicyConfig()),
+            0,  # champion doesn't filter by open positions at fork time
         )
 
     return {"status": "ok", "created": created}

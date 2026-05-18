@@ -560,11 +560,11 @@ The two layers are kept in sync — if you change one, change the other.
 
 ### Tier definitions
 
-| Tier | Capital | Per-trade base | Multipliers | max_trades |
-|---|---|---|---|---|
-| micro | $0–$1000 | **90%** | regime only | **1 (one at a time)** |
-| small | $1k–$5k | 3% | full stack (score × regime × compounding) | 4 |
-| standard | $5k+ | 2% | full stack | 5 |
+| Tier | Capital | Per-trade base | Multipliers | max_trades | Notes |
+|---|---|---|---|---|---|
+| micro | $0–$1000 | **90%** | regime only | **1 (one at a time)** | |
+| small | $1k–$5k | **25% (allocation-aware)** | full stack via PortfolioAllocator + score_skew | 4 | allocation-aware; see `docs/small_tier_allocation.md` |
+| standard | $5k+ | 2% | full stack | 5 | |
 
 **Hard cutoff at $1000** — no smooth interpolation.
 
@@ -578,19 +578,57 @@ compounding multipliers are intentionally bypassed (operator spec
 2026-04-27). `STRATEGY_TRACK` env value has no effect at micro tier —
 the engine takes the tier-aware branch before the risk_profile switch.
 
-For **small/standard tiers**: full stack:
+For **small tier** (post-2026-05-18 allocation-aware policy):
+per-trade sizing flows through `PortfolioAllocator` which distributes
+capital across the viable candidate set in a single cycle. The
+per-trade math is:
+
+- Global envelope: `0.85 × regime_mult × total_equity` (less
+  open-position cost basis)
+- Per-candidate base: `0.85 / n_candidates` of total equity (where
+  `n_candidates = min(viable_count, 4)`)
+- Score skew: `clamp(0.8 + (score − median_score)/50 × 0.4, 0.8, 1.2)`
+  — same clamp range as the pre-existing `score_mult` formula
+- Per-trade ceiling: **36%** of total equity (binding when allocation
+  math produces a larger raw value, e.g., single-candidate case)
+- Compounding behavior implicit: the historical "25% ×
+  multipliers" → 36% ceiling derivation already accounts for the
+  1.2 compounding boost at score≥80; the allocator caps flat 36%
+  regardless of `COMPOUNDING_MODE` value
+- See `docs/small_tier_allocation.md` for full spec + 5 worked
+  examples
+
+For **standard tier**: full stack (unchanged):
 `final_risk_pct = base_risk_pct × score_mult × regime_mult × compounding_mult`.
 
 - `score_mult = clamp(0.8 + (score − 50)/50 × 0.4, 0.8, 1.2)`.
   Examples: score 50→0.80, 75→1.00, 85→1.08, 100→1.20.
-- `compounding_mult`: 1.2 if `COMPOUNDING_MODE=true` AND tier=small
-  AND score ≥ 80; else 1.0. (Standard tier never gets the boost.)
+- `compounding_mult`: standard tier never gets the boost.
 
-**Compounding-off safety override** (small tier only post-2026-04-27):
-when `COMPOUNDING_MODE=false`, small-tier `base_risk_pct` is overridden
-to **0.02 (2%)**. Micro tier ignores the compounding flag entirely.
+**Compounding-off safety override** (small tier only, retained
+behavior): when `COMPOUNDING_MODE=false`, small-tier path falls
+back to the legacy `0.02 (2%)` base computation if the allocator
+is bypassed (e.g., test environments). Production small-tier path
+always goes through the allocator. Micro tier ignores the
+compounding flag entirely.
+
+### Allocation-aware sizing (small tier)
+
+Introduced 2026-05-18 (see `docs/small_tier_allocation.md`). Replaces
+small tier's per-trade `3% × multipliers` independent-sizing pattern
+with a cycle-aware allocator that distributes capital across the
+viable candidate set BEFORE per-trade sizing fires. `PortfolioAllocator`
+runs once per entry cycle, takes the candidate set + total equity +
+regime + open positions as inputs, and returns per-candidate
+allocated budgets. `RiskBudgetEngine` and `SmallAccountCompounder`
+both accept an optional `allocation_hint` parameter; when provided
+(small-tier production path), it overrides the legacy per-trade
+multiplier stack. When absent (test paths, micro tier, standard
+tier), legacy behavior is preserved.
 
 ### Worked examples ($500 capital, micro tier, NORMAL regime)
+
+Micro tier examples (unchanged):
 
 | Score | Regime | risk_budget |
 |---:|---|---:|
@@ -602,12 +640,30 @@ to **0.02 (2%)**. Micro tier ignores the compounding flag entirely.
 For $500 capital + score 85 + normal regime + `COMPOUNDING_MODE=true`:
 `risk_pct = 0.90 × 1.0 = 0.90`, `risk_budget = $500 × 0.90 = $450`.
 
-### Global allocation (micro tier)
+### Worked examples (small tier, post-2026-05-18 allocator)
 
-`global_alloc.max = deployable_capital × 0.90 × regime_mult_for_micro`.
-Mirrors per-trade for one-at-a-time tiers (one position consumes the
-entire slot). Standard/small tiers retain
-`global_alloc.max = total_equity × global_cap_pct` (regime-based 5–50%).
+Full math + 3 more examples in `docs/small_tier_allocation.md`.
+Summaries:
+
+- **$1,500, 4 candidates [95/88/82/76], normal:** allocator emits
+  ~$280/$263/$255/$255 (total ~$1,053 = 70% of equity)
+- **$1,500, 1 candidate [88], normal:** 36% ceiling binds → $540
+  (single-candidate concentration defended by the ceiling)
+- **$1,500, $450 open, 3 new candidates [90/82/74], normal:** envelope
+  $825; allocator emits $367/$340/$118 (Cand 3 truncated by remaining
+  envelope after open-position subtraction)
+
+### Global allocation
+
+**Micro tier:** `global_alloc.max = deployable_capital × 0.90 ×
+regime_mult_for_micro`. Mirrors per-trade for one-at-a-time tiers.
+
+**Small tier (post-2026-05-18):** `global_alloc.max = total_equity ×
+0.85 × regime_mult`. Per-cycle availability after subtracting current
+open-position cost basis. See `docs/small_tier_allocation.md` §2.
+
+**Standard tier:** `global_alloc.max = total_equity × global_cap_pct`
+(regime-based 5-50%, unchanged).
 
 ### Universe price filter (micro tier)
 
@@ -689,6 +745,17 @@ survival. Recommend observing 1 week at 3% before adjusting.
   Discovered during PR #827 fix validation when all 3 candidates
   (BAC at $286, AMZN at $1248, AAPL at $1274 single-contract risk)
   were vetoed at sizing because `max_risk_per_trade=$15` (3% of $500).
+- 2026-05-18: allocation-aware sizing policy landed for small tier.
+  Replaces per-trade-independent `3% × multipliers` math with
+  `PortfolioAllocator` cycle-aware distribution. Motivated by α's
+  full-universe IV pipeline (Phase 3 v3 completed 2026-05-17)
+  unlocking IV-sensitive strategies, expected to produce richer
+  candidate sets per cycle as operator transitions from micro tier
+  ($681) to small tier ($1500+). Spec at
+  `docs/small_tier_allocation.md`; implementation in
+  `packages/quantum/services/portfolio_allocator.py`; integration
+  via additive `allocation_hint` parameter on `RiskBudgetEngine`
+  and `SmallAccountCompounder` for backward-compat.
 
 ---
 

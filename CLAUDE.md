@@ -1200,10 +1200,10 @@ All other prerequisites are met (α implementation, trigger plumbing, Phase 1 ba
 - `_DEFAULT_TARGET_PROFIT_PCT = 0.35` — Target profit fires at +35% of entry cost (env-overridable via `EXIT_TARGET_PROFIT_PCT`)
 - `_DEFAULT_STOP_LOSS_PCT = 0.50` — Stop loss fires at -50% of entry cost (env-overridable via `EXIT_STOP_LOSS_PCT`)
 
-**Time-scaling** (`paper_exit_evaluator.py:180-203`):
+**Time-scaling** (`paper_exit_evaluator.py:180-203`, stop-loss scaling 225-258):
 
 - Profit target time-scales 50% (at entry) → 25% (near expiry) via sqrt-decay function, locking in profits before theta accelerates against winners.
-- Stop loss is NOT time-scaled — fires at flat 50% regardless of DTE.
+- Stop loss is FLAT by default (no time-scaling). As of 2026-05-18, a symmetric sqrt-decay path exists for debit_spread stops, gated behind `EXIT_STOP_LOSS_TIME_SCALING_ENABLED=1` (default OFF). When enabled: sl tightens 50% → floor 0.30 (`EXIT_STOP_LOSS_FLOOR_PCT`). Iron condors explicitly bypass via `_is_iron_condor` guardrail. See `docs/audit_hold_period_asymmetry.md` for the audit (LOW confidence at N=6; sample 5+ weeks stale).
 
 **Status: inherited defaults, under empirical review.**
 

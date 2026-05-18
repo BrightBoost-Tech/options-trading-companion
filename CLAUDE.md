@@ -317,11 +317,12 @@ ORDER BY agent_name, status;
 
 ## Cohort architecture
 
-- 3 cohorts (conservative / neutral / aggressive). Live trade routing is hardcoded to aggressive at `packages/quantum/policy_lab/fork.py:67`. The champion/challenger evaluator runs daily but its output (`promoted_at`) is not wired to live routing — #62a-D1 architectural PR is queued for that rewire.
+- 3 cohorts (conservative / neutral / aggressive). Live trade routing reads `policy_lab_cohorts.promoted_at` via `packages/quantum/policy_lab/champion.py::get_current_champion`. Defensive fallback to `"aggressive"` when no cohort is promoted (e.g., transition windows).
 - Decision logging (`policy_decisions`) + daily scoring (`policy_daily_scores`) are functional.
-- `promoted_at` currently sits on `neutral` (operator manual UPDATE 2026-04-02 predating intent clarification); should be on `aggressive` per operator intent confirmed 2026-05-12. The DB flip ships in #62a-D1.
+- `promoted_at` set on `aggressive` per operator intent (migration `20260518000001_promote_aggressive_cohort.sql`). Pre-PR misalignment (operator manual UPDATE 2026-04-02 had set neutral) corrected by that migration.
+- The 2 silent-failure `is_champion` query sites (`paper_autopilot_service._get_champion_portfolio`, `paper_exit_evaluator._resolve_position_cohort` path 3) are rewritten to query `promoted_at`. The H9 anti-pattern (`try/except: pass`) is eliminated at both sites.
 
-Full architecture, sizing duality, `is_champion` bug sites, and PR scope at `docs/cohort_architecture.md`.
+Full architecture, sizing duality, and integration-seam closure rationale at `docs/cohort_architecture.md`. Doctrine: `docs/loud_error_doctrine.md` H13 — Parallel architectures without integration.
 
 ---
 
@@ -494,6 +495,7 @@ Gate to `micro_live`: 4 consecutive Alpaca paper green days (not internal fills)
 
 ### Recently fixed (last 7 days)
 
+- 2026-05-18: #62a-D1 architectural seam closure — fork.py:67 now reads `promoted_at` via `get_current_champion` helper; 2 silent-failure `is_champion` query sites rewritten; H13 doctrine entry codified; migration `20260518000001_promote_aggressive_cohort.sql` ships with the PR
 - 2026-05-18: H9 AST gate flipped to strict mode (warn-only → strict; allow-list held at 7 entries through the week; zero non-allow-listed violations at flip time)
 - 2026-05-18: staleness-gate over-tightening on routine regimes (vendor-quality clause now regime-conditional)
 - 2026-05-18: BUG-A scale-asymmetric unrealized_pl recompute in `intraday_risk_monitor._refresh_marks`
@@ -586,8 +588,8 @@ TREAT WITH CARE:
 ### Active focus (next 3)
 
 1. **PR #908 empirical validation (waiting on next natural close)** — PR #908's mleg sign-flip + clamp is live in the worker (verified 2026-05-12 H8 false-alarm investigation) but as of 2026-05-17 still untested on a real close: 0 paper_positions opened OR closed since 2026-05-12, so the validation event hasn't been triggerable. Validation remains valid; just dormant. Original framing ("tomorrow's first close") is stale — should be read as "whenever the next position closes naturally". Capture spec unchanged: `limit_price` sign, `abs(limit_price)` ≥ 0.01, broker response. Failure-mode triage in `docs/backlog.md` "Recent operational events" → PR #908 empirical validation entry. Also still on watch: Tier 1 body acceptance smoke (`python scripts/run_signed_task.py alpaca_order_sync --force-rerun`).
-2. **#62a-D1 architectural PR (queued, promoted from #3 2026-05-18 after H9 Slot 1 closed).** `promoted_at` flip from neutral → aggressive + fix 2 silent-failure `is_champion` query sites at `paper_autopilot_service.py:867` and `paper_exit_evaluator.py:892` + rewire `fork.py:67` to read champion via `promoted_at` lookup. ~half day. Backlog notes "ships after CSX validation week completes" — CSX is now reconciled but PR #908 empirical validation still pending, so technically still in window. Doctrine note: first concrete instance of "parallel architectures without integration" class (H12 candidate). NOTE: previous active focus item (#62a-D3 / #62a-D5 architectural decisions) was stale — both items closed 2026-05-10 (D3 via deletion in #62a sweep; D5 via Option B in same sweep).
-3. **H9 Convention Slot 2 — silent-exception grep test (queued).** Slot 1 (AST gate) closed 2026-05-18 with strict-mode flip; allow-list stable at 7 entries since ship, zero non-allow-listed violations on main, this week's 6 PRs all passed the gate without expansion. Slot 2 was originally framed as a complementary regex/grep test for silent-exception shapes that AST inspection might miss; may consolidate with Slot 1 if Slot 1's surface proves adequate. Decision pending observation of strict-mode CI behavior over the next ~2 weeks. Slot 3 (Literal status returns) already adopted as convention for new wrappers; no separate PR needed.
+2. **H9 Convention Slot 2 — silent-exception grep test (queued, promoted from #3 2026-05-18 after #62a-D1 closed).** Slot 1 (AST gate) closed 2026-05-18 with strict-mode flip; allow-list stable at 7 entries since ship, zero non-allow-listed violations on main, this week's 6 PRs all passed the gate without expansion. Slot 2 was originally framed as a complementary regex/grep test for silent-exception shapes that AST inspection might miss; may consolidate with Slot 1 if Slot 1's surface proves adequate. Decision pending observation of strict-mode CI behavior over the next ~2 weeks. Slot 3 (Literal status returns) already adopted as convention for new wrappers; no separate PR needed.
+3. **H9 legacy migration candidates (queued, low urgency).** 4 entries in `packages/quantum/tests/h9_allow_list.yml` are real H9 violations deferred at strict-mode flip time: `iv_point_service.upsert_point` (~30 min), `position_pnl_service.refresh_marks_for_user` (~2-4 hours), `universe_service.sync_universe` (~30 min), `alpaca_order_sync.sync_orders` (~half day decomposition). Allow-list expirations set to 2026-08-12 (3 months) for forced re-review. Effort to close all 4: ~1-2 days total. Migrate when an adjacent PR happens to touch the same file, or batched as a sweep before the 2026-08-12 expiration. NOTE: previous Active focus item (#62a-D1 architectural PR) closed 2026-05-18 — fork.py:67 now reads `promoted_at` via `get_current_champion`; both `is_champion` silent-failure query sites rewritten; H13 doctrine entry codified. Migration `20260518000001_promote_aggressive_cohort.sql` ships with the PR (operator-applied manually per `docs/migration_procedure.md`).
 
 See `docs/roadmap.md` for the full Active focus block including recently-closed items and `docs/backlog.md` for full item descriptions and the catalogs (#62a schema drift, #72 loud-error doctrine).
 

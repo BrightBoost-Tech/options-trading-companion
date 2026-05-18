@@ -859,19 +859,44 @@ class PaperAutopilotService:
         return equity_state.get_alpaca_equity(user_id, supabase=self.client)
 
     def _get_champion_portfolio(self, user_id: str) -> Optional[str]:
-        """Get portfolio_id of the champion cohort, or None for default."""
+        """Get portfolio_id of the currently-promoted champion cohort,
+        or None when no cohort is promoted (caller falls back to the
+        default portfolio_id resolution path).
+
+        #62a-D1 (closed 2026-05-18): pre-PR this queried
+        `is_champion = True` — a non-existent column on
+        `policy_lab_cohorts` — wrapped in a silent `try/except: pass`
+        and always returned None. The integration seam between
+        `policy_lab_evaluator` (writer of `promoted_at`) and the live
+        routing consumer (this site + fork.py:67) was never connected.
+        Rewritten to query `promoted_at`. See champion.py for the
+        helper used by fork.py; this function intentionally returns
+        the portfolio_id rather than the cohort_name because that's
+        what the caller (`_stage_order_internal.portfolio_id_arg`)
+        needs. See `docs/loud_error_doctrine.md` H12 for the doctrine.
+        """
         try:
             res = self.client.table("policy_lab_cohorts") \
                 .select("portfolio_id") \
                 .eq("user_id", user_id) \
-                .eq("is_champion", True) \
                 .eq("is_active", True) \
+                .not_.is_("promoted_at", "null") \
+                .order("promoted_at", desc=True) \
                 .limit(1) \
                 .execute()
-            if res.data and res.data[0].get("portfolio_id"):
-                return res.data[0]["portfolio_id"]
-        except Exception:
-            pass
+        except Exception as e:
+            # Real network / permission failure. Loud log, defensive
+            # None return. Caller treats None as "use default portfolio."
+            logger.warning(
+                f"_get_champion_portfolio lookup failed for user={user_id}: "
+                f"{type(e).__name__}: {str(e)[:200]} — caller will use default portfolio"
+            )
+            return None
+
+        if res.data and res.data[0].get("portfolio_id"):
+            return res.data[0]["portfolio_id"]
+        # No cohort promoted — caller falls back to default portfolio.
+        # Expected during transition windows; not an alert condition.
         return None
 
     def _get_portfolio_budget(self, user_id: str) -> float:

@@ -932,14 +932,27 @@ class PaperExitEvaluator:
             except Exception as _path2_err:
                 _resolution_failures.append(("portfolio_id", type(_path2_err).__name__, str(_path2_err)[:200]))
 
-        # Fallback: champion cohort for positions on the default portfolio
+        # Fallback: currently-promoted champion cohort for positions
+        # on the default portfolio.
+        #
+        # #62a-D1 (closed 2026-05-18): pre-PR this queried
+        # `is_champion = True` — a non-existent column. Always raised,
+        # always contributed to _resolution_failures, never returned a
+        # cohort. Rewritten to use the `promoted_at` lookup that
+        # `policy_lab_evaluator` writes. See champion.py for the
+        # symmetric helper used by fork.py. We keep the inline query
+        # here rather than calling the helper because path 3's
+        # exception goes into `_resolution_failures` for the aggregate
+        # `paper_exit_cohort_resolve_exhausted` alert — the helper's
+        # log-and-return-fallback shape doesn't fit that contract.
         if user_id:
             try:
                 res = self.client.table("policy_lab_cohorts") \
                     .select("cohort_name") \
                     .eq("user_id", user_id) \
-                    .eq("is_champion", True) \
                     .eq("is_active", True) \
+                    .not_.is_("promoted_at", "null") \
+                    .order("promoted_at", desc=True) \
                     .limit(1) \
                     .execute()
                 if res.data:

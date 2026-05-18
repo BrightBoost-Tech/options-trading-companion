@@ -33,3 +33,4 @@ qci-client>=5.0.0; python_version < "3.14"
 pytest>=8.0.0
 pytest-asyncio>=0.23.0  # Required by pyproject.toml asyncio_mode="auto"
 pytest-cov>=4.1.0
+pyyaml>=6.0  # Required by H9 AST gate allow-list loader (test_h9_wrapper_drift_gate.py)

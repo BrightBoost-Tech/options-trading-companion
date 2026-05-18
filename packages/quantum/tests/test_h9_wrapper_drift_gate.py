@@ -61,11 +61,15 @@ except ImportError:  # pragma: no cover
 # ─────────────────────────────────────────────────────────────────────
 
 
-# Set this to True to flip the gate to strict mode (CI fails on
-# unflagged violation). Plan: review h9_violations.json artifacts
-# from ~1 week of CI runs; if violation count is stable and
-# allow-list is comprehensive, flip.
-H9_GATE_STRICT = False
+# Flipped to strict mode on 2026-05-18 after 6 days of warn-only CI
+# observability. Verification at flip time: allow-list held at 7 entries
+# unchanged since the ship commit (2026-05-12); h9_violations.json
+# artifact on main was empty; this week's 6 merged PRs (#958, #959,
+# #960, #961, #962, #963) all passed the gate without expanding the
+# allow-list. From this point forward, any new H9 violation fails CI;
+# reviewers must either fix the violation or explicitly add it to
+# h9_allow_list.yml with rationale (default response is fix-not-allow).
+H9_GATE_STRICT = True
 
 
 # Function-name prefixes that mark a function as wrapper-shaped.
@@ -317,14 +321,29 @@ def _has_post_loop_alert(func_node: ast.AST, loop: ast.AST) -> bool:
 
 
 def _load_allow_list() -> List[Dict[str, str]]:
-    """Read the YAML allow-list. Returns [] if file missing/empty."""
+    """Read the YAML allow-list. Returns [] if file missing.
+
+    Fails loud when PyYAML is unavailable AND the allow-list file
+    exists — the prior silent-empty fallback (warn-only ship) bit
+    us at strict-mode flip time: CI's test venv lacked PyYAML, the
+    loader returned [], all 7 legitimate allow-listed entries
+    surfaced as "new" violations, and strict-mode CI failed despite
+    the file being unchanged. The H9 doctrine the gate enforces
+    explicitly rules out silent fallbacks; the gate itself must
+    follow the same rule. pyyaml is now pinned in requirements.txt.
+    """
     if not ALLOW_LIST_PATH.exists():
         return []
     if yaml is None:
-        # PyYAML not available — fall back to a permissive empty list
-        # and let the test print a soft warning. Yaml is a transitive
-        # dep via supabase, so this should be rare.
-        return []
+        raise RuntimeError(
+            "H9 AST gate cannot load the allow-list: PyYAML is not "
+            "installed but `packages/quantum/tests/h9_allow_list.yml` "
+            "exists. Install via `pip install pyyaml` (pinned in "
+            "`packages/quantum/requirements.txt`). The prior fallback "
+            "behavior (silently returning []) caused the strict-mode "
+            "flip to fail CI on 2026-05-18 because the gate scanned "
+            "the codebase against an empty allow-list."
+        )
     content = ALLOW_LIST_PATH.read_text(encoding="utf-8")
     parsed = yaml.safe_load(content) or {}
     entries = parsed.get("allow_list", [])
@@ -842,8 +861,8 @@ class TestCodebaseH9Compliant(unittest.TestCase):
             )
         msg_lines.extend([
             "",
-            "Gate is in WARN-ONLY mode. Will flip to strict after ~1 week "
-            "of observability data shows the allow-list is stable.",
+            "Gate is in STRICT mode (flipped 2026-05-18). A new H9 "
+            "violation fails CI; default response is fix-not-allow.",
             "",
             "To suppress a legitimate case:",
             "  - Add @h9_exempt(reason=\"...\") decorator",

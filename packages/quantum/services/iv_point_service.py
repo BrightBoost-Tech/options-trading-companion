@@ -50,16 +50,17 @@ class IVPointService:
             logger.error(f"Failed to fetch latest IV point for {symbol}: {e}")
             return None
 
-    def upsert_point(self, point_data: Dict) -> bool:
-        """Upsert a single IV point"""
-        try:
-            self.supabase.table('underlying_iv_points') \
-                .upsert(point_data) \
-                .execute()
-            return True
-        except Exception as e:
-            logger.error(f"Failed to upsert IV point for {point_data.get('symbol')}: {e}")
-            return False
+    # upsert_point removed 2026-05-18 (H9 Anti-pattern 2 cleanup).
+    # The function was dead code: zero production callers in
+    # packages/quantum/. All IV-write paths (iv_daily_refresh,
+    # iv_historical_backfill) use the canonical
+    # IVRepository.upsert_iv_point, which is H9-compliant (returns
+    # typed Result, fires loud alert on failure, post-loop count
+    # verification at the handler level). The duplicated path here
+    # had a logger.error silent swallow pattern, surfaced by the
+    # H9 AST gate scan when it shipped. Deletion eliminates the
+    # legacy anti-pattern without redirect work — there was nothing
+    # to redirect. Cross-reference: docs/loud_error_doctrine.md H9.
 
     def compute_iv_stats(self, points: List[Dict]) -> Dict:
         """Calculate statistics from a list of points"""

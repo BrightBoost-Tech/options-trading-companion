@@ -74,18 +74,6 @@ allow_list:
   # as backlog items for follow-up.
   # ─────────────────────────────────────────────────────────────────
 
-  - module: packages.quantum.services.iv_point_service
-    function: upsert_point
-    rationale: >-
-      Legacy IV path; logger-only swallow on upsert failure. Returns
-      bool but no alert fires on the False branch. Migration candidate
-      — caller-side verification needed (similar to iv_repository
-      pattern), OR deprecation if iv_repository.upsert_iv_point is
-      the canonical path going forward. Tracked as H9 follow-up.
-    reviewer: Operator
-    added: "2026-05-12"
-    expires: "2026-08-12"
-
   - module: packages.quantum.services.position_pnl_service
     function: refresh_marks_for_user
     rationale: >-
@@ -96,18 +84,6 @@ allow_list:
       relies on caller to inspect. Migration candidate — same shape
       as PR #919 fix would apply (add per-position alert + return
       partial-status enum). Tracked as H9 follow-up.
-    reviewer: Operator
-    added: "2026-05-12"
-    expires: "2026-08-12"
-
-  - module: packages.quantum.services.universe_service
-    function: sync_universe
-    rationale: >-
-      Print-swallow on upsert failure to scanner_universe. Real H9
-      shape; small function. Fix candidate (~30 min) but out of scope
-      for the Slot 1 ship PR. Tracked as H9 follow-up. Migration:
-      replace 'print(f"Error syncing universe...")' with alert() per
-      Loud-Error Doctrine Anti-pattern 2.
     reviewer: Operator
     added: "2026-05-12"
     expires: "2026-08-12"

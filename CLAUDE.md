@@ -398,6 +398,26 @@ T+24h"), do NOT apply on merge. Follow the PR's gating exactly.
 | `policy_decisions` | Per-cohort accept/reject decisions with realized_outcome |
 | `agent_sessions` | Managed Agent session observability (Day Orch + Loss Min + Self-Learning write; Profit Optimization deferred — see Managed Agents table) |
 
+### Instrumentation coverage (per-cycle writes)
+
+What each `suggestions_open` cycle writes for observability, post-2026-05-18 instrumentation fixes:
+
+**`job_runs.result` (FIX 1):** every cycle that reaches the happy path writes a structured dict with:
+
+- `result.counts.universe_size` — symbol count entering scanner (post-filter)
+- `result.counts.scanner_emitted` — candidates passing scanner gates
+- `result.counts.trade_suggestions_created` — rows inserted to `trade_suggestions`
+- `result.counts.h7_passed` / `edge_above_minimum` / `executable` / `staged` — funnel subset counts (post-PR allocator integration these become more independent; today they're approximated from `created` since rejection paths increment `rejection_stats` in a single bucket)
+- `result.counts.candidates` / `created` / `existing` — legacy keys preserved for backward-compat
+- `result.counts.rejection_persist_failures` — H9 verification metric (FIX 2)
+- `result.cycle_metadata.regime` / `tier` / `open_position_count` / `available_envelope_dollars` / `deployable_capital`
+
+Early-return paths (fast-path, no_candidates, scanner_failed) keep their existing minimal counts shape — these paths didn't reach the funnel gates, so the full breakdown would be misleading.
+
+**`suggestion_rejections` (FIX 2):** every `RejectionStats.record()` call inside a `set_symbol(symbol)` context writes one row. `RejectionStats` is constructed in `options_scanner.scan_options()` with `supabase + cycle_date + job_run_id` — see `options_scanner.py:~2346` and the Tier 1C 2026-05-13 instrumentation block. Failures are fail-soft per H9 doctrine anti-pattern 5 (observability writes must not undo primary work), but the failure count surfaces via `rejection_persist_failures` in cycle counts so silent drift is visible.
+
+**`paper_orders.submitted_at` + `filled_at` (FIX 3):** internal-fill close path (`paper_exit_evaluator.py:~1270`) now writes BOTH timing fields. Pre-fix only `filled_at` was populated, breaking exit-side latency analysis for `target_profit_hit` (the most common exit). For internal fills, `submitted_at == filled_at` is intentional — submission and fill happen in the same call site. Alpaca-path submissions write `submitted_at` separately upstream.
+
 ### Quick Health Check SQL
 ```sql
 -- Phase status

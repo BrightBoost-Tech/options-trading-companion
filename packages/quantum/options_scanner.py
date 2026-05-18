@@ -169,6 +169,17 @@ class RejectionStats:
         self._cycle_date = cycle_date
         self._job_run_id = job_run_id
         self._tls = threading.local()
+        # FIX 2 (2026-05-18 instrumentation gap) H9 verification:
+        # count of suggestion_rejections.insert() failures since
+        # construction. Surfaces via to_dict() so cycle_metadata can
+        # show a non-zero value if writes are silently failing
+        # (the existing logger.warning is easy to miss in production).
+        # Per H9 doctrine "verified-write across wrapper chains":
+        # observability writes are fail-soft (anti-pattern 5 valid
+        # case — see _persist_rejection docstring), so we don't raise,
+        # but we DO count so the operator can detect drift.
+        self._persist_failures: int = 0
+        self._persist_failures_lock = threading.Lock()
 
     def set_symbol(self, symbol: Optional[str]) -> None:
         """Set the per-thread symbol context for subsequent record()
@@ -216,6 +227,13 @@ class RejectionStats:
                 payload["spread_debug"] = self._make_json_safe(sample)
             self._supabase.table("suggestion_rejections").insert(payload).execute()
         except Exception as e:  # noqa: BLE001 — observability fail-soft
+            # FIX 2 (2026-05-18 H9 verification): increment failure
+            # counter in addition to the existing logger.warning so
+            # the operator can see drift via cycle_metadata.counts.
+            # The counter surfaces in to_dict() → workflow_orchestrator
+            # cycle_result → job_runs.result.counts.rejection_persist_failures.
+            with self._persist_failures_lock:
+                self._persist_failures += 1
             logger.warning(
                 "suggestion_rejections insert failed (symbol=%s reason=%s strategy=%s): %s",
                 symbol, reason, strategy, e,
@@ -327,8 +345,14 @@ class RejectionStats:
                 strat: dict(reasons)
                 for strat, reasons in self._per_strategy_counts.items()
             }
+            # FIX 2 (2026-05-18 H9 verification): both the legacy
+            # `counts` dict-of-reason-counts and `persist_failures` count
+            # are surfaced for cycle_metadata consumption.
+            with self._persist_failures_lock:
+                _pf = self._persist_failures
             return {
                 "rejection_counts": dict(self._counts),
+                "counts": dict(self._counts),  # FIX 1 alias for cycle_metadata reads
                 "symbols_processed": self.symbols_processed,
                 "chains_loaded": self.chains_loaded,
                 "chains_empty": self.chains_empty,
@@ -337,6 +361,7 @@ class RejectionStats:
                 "rejection_samples_cap": self._samples_cap,
                 "emission_counts_by_strategy": dict(self._emission_counts),
                 "rejection_counts_by_strategy_and_reason": per_strategy,
+                "persist_failures": _pf,
             }
 
     def top_reasons(self, n: int = 5) -> List[Tuple[str, int]]:

@@ -143,20 +143,45 @@ class TestSyncUniverseAlertOnFailure(unittest.TestCase):
 class TestIVPointServiceUpsertPointRemoved(unittest.TestCase):
     """upsert_point was dead code (zero production callers). Deleted
     in this sweep. The IVPointService class stays — its static
-    computation methods are heavily used."""
+    computation methods are heavily used.
 
-    def test_upsert_point_no_longer_defined(self):
-        from packages.quantum.services.iv_point_service import IVPointService
-        self.assertFalse(
-            hasattr(IVPointService, "upsert_point"),
-            "upsert_point should be removed; it was dead code with no "
-            "production callers. Canonical write path is "
-            "IVRepository.upsert_iv_point."
+    Source-level assertions (rather than `hasattr` on the imported
+    class) — full-suite test runs can attach attributes via Mock
+    side-effects, and a source check is the unambiguous truth."""
+
+    @classmethod
+    def setUpClass(cls):
+        from pathlib import Path
+        cls.src = (
+            Path(__file__).resolve().parent.parent
+            / "services" / "iv_point_service.py"
+        ).read_text(encoding="utf-8")
+
+    def test_upsert_point_method_definition_removed(self):
+        # The pre-PR `def upsert_point(...)` method body is gone.
+        # The deletion-marker comment `# upsert_point removed` stays
+        # to document the cleanup, so the bare string "upsert_point"
+        # still appears in the file (in the comment + this test's
+        # imports). The structural guard is on `def upsert_point` —
+        # the function definition itself.
+        self.assertNotIn(
+            "def upsert_point(", self.src,
+            "iv_point_service.py must not define an `upsert_point` "
+            "method. Pre-PR was H9 Anti-pattern 2 (logger.error swallow). "
+            "Canonical write path: IVRepository.upsert_iv_point."
+        )
+
+    def test_deletion_marker_comment_present(self):
+        """The deletion left a marker comment explaining the H9
+        cleanup and pointing to the canonical path."""
+        self.assertIn(
+            "# upsert_point removed", self.src,
+            "Deletion marker comment should remain to document the "
+            "cleanup for future readers."
         )
 
     def test_static_computation_methods_still_present(self):
         """Confirm the bulk of IVPointService stays intact."""
-        from packages.quantum.services.iv_point_service import IVPointService
         for method_name in (
             "compute_atm_iv_target_from_chain",
             "compute_skew_25d_from_chain",
@@ -165,18 +190,25 @@ class TestIVPointServiceUpsertPointRemoved(unittest.TestCase):
             "get_latest_point",
             "compute_iv_stats",
         ):
-            self.assertTrue(
-                hasattr(IVPointService, method_name),
-                f"IVPointService.{method_name} should still be present "
+            self.assertIn(
+                f"def {method_name}", self.src,
+                f"IVPointService.{method_name} should still be defined "
                 f"— only upsert_point was dead code."
             )
 
     def test_canonical_path_intact(self):
         """The canonical write path IVRepository.upsert_iv_point is
-        the only one that should remain. Confirm it's importable
-        and callable — its H9 compliance is asserted elsewhere."""
-        from packages.quantum.services.iv_repository import IVRepository
-        self.assertTrue(hasattr(IVRepository, "upsert_iv_point"))
+        the only one that should remain. Confirm the source still
+        defines it."""
+        from pathlib import Path
+        repo_src = (
+            Path(__file__).resolve().parent.parent
+            / "services" / "iv_repository.py"
+        ).read_text(encoding="utf-8")
+        self.assertIn(
+            "def upsert_iv_point", repo_src,
+            "Canonical iv_repository.upsert_iv_point path must remain."
+        )
 
 
 # ─────────────────────────────────────────────────────────────────

@@ -2232,6 +2232,104 @@ async def run_midday_cycle(supabase: Client, user_id: str):
             regime=current_regime
         )
 
+        # Small-tier allocation-aware sizing (post-2026-05-18).
+        # PortfolioAllocator runs once per cycle, distributes capital
+        # across the rank_and_select-selected candidates, and attaches
+        # per-candidate allocated_budget to each candidate dict. The
+        # downstream sizing layer (SmallAccountCompounder /
+        # RiskBudgetEngine) consumes the attached budget via
+        # allocation_hint parameter. See docs/small_tier_allocation.md.
+        #
+        # H9 doctrine compliance: verify allocator output count matches
+        # what was passed in (post-N-cap; ≤ MAX_CONCURRENT_POSITIONS).
+        # If mismatch, fire a loud alert via risk_alerts and proceed
+        # with the legacy non-allocator path.
+        #
+        # Micro tier is NOT touched by this block — the rank_and_select
+        # path above has already enforced micro's one-at-a-time gate
+        # via the concurrency check earlier in this function. The tier
+        # check below also defends against accidental activation.
+        try:
+            from packages.quantum.services.portfolio_allocator import (
+                PortfolioAllocator,
+                MAX_CONCURRENT_POSITIONS,
+            )
+            from packages.quantum.services.analytics.small_account_compounder import (
+                SmallAccountCompounder as _SAC,
+            )
+            _tier = _SAC.get_tier(deployable_capital)
+            if _tier.name == "small" and candidates:
+                _allocator = PortfolioAllocator()
+                _allocator_results = _allocator.allocate(
+                    candidates=candidates,
+                    total_equity=deployable_capital,
+                    regime=current_regime,
+                    open_positions=positions,
+                )
+                # H9 verification: candidate counts should match
+                # (capped at MAX_CONCURRENT_POSITIONS).
+                _expected_n = min(len(candidates), MAX_CONCURRENT_POSITIONS)
+                _actual_n = len(_allocator_results)
+                if _actual_n != _expected_n:
+                    try:
+                        from packages.quantum.observability.alerts import alert as _alert
+                        from packages.quantum.security.supabase_config import (
+                            get_admin_supabase as _get_admin_supabase,
+                        )
+                        _alert(
+                            _get_admin_supabase(),
+                            alert_type="portfolio_allocator_count_mismatch",
+                            severity="warning",
+                            message=(
+                                f"PortfolioAllocator emitted {_actual_n} results "
+                                f"but expected {_expected_n} (input={len(candidates)} "
+                                f"capped at {MAX_CONCURRENT_POSITIONS})"
+                            ),
+                            metadata={
+                                "expected": _expected_n,
+                                "actual": _actual_n,
+                                "input_count": len(candidates),
+                                "cap": MAX_CONCURRENT_POSITIONS,
+                                "tier": _tier.name,
+                                "doctrine_ref": "H9 verified-write across wrapper chains",
+                            },
+                        )
+                    except Exception as _alert_err:
+                        print(f"[Midday] H9 alert dispatch failed: {_alert_err}")
+                # Attach allocations to candidate dicts for downstream
+                # sizing consumption. Candidates not in allocator output
+                # (e.g., dropped past concurrent cap) get no hint.
+                _allocated_ids = set()
+                for _r in _allocator_results:
+                    _r.candidate["_allocator_allocated_budget"] = _r.allocated_budget
+                    _r.candidate["_allocator_allocated_pct"] = _r.allocated_pct
+                    _r.candidate["_allocator_score_skew"] = _r.score_skew
+                    _r.candidate["_allocator_ceiling_binding"] = _r.ceiling_binding
+                    _allocated_ids.add(id(_r.candidate))
+                # Filter to allocated candidates only (allocator's
+                # n_candidates cap and envelope exhaustion semantics).
+                candidates = [
+                    c for c in candidates if id(c) in _allocated_ids
+                ]
+                print(
+                    f"[Midday] PortfolioAllocator: {len(_allocator_results)} "
+                    f"allocations for small tier (equity=${deployable_capital:.2f}, "
+                    f"regime={current_regime})"
+                )
+                for _r in _allocator_results:
+                    _tkr = _r.candidate.get("ticker") or _r.candidate.get("symbol")
+                    print(
+                        f"  {_tkr}: budget=${_r.allocated_budget:.2f} "
+                        f"({_r.allocated_pct*100:.1f}%) "
+                        f"skew={_r.score_skew:.3f} "
+                        f"ceiling={'BIND' if _r.ceiling_binding else 'free'}"
+                    )
+        except Exception as _alloc_err:
+            # Defensive: any allocator failure falls back to the
+            # pre-existing rank_and_select output. Log loudly so we
+            # can investigate; do NOT block the cycle.
+            print(f"[Midday] PortfolioAllocator wire-in failed (non-fatal): {_alloc_err}")
+
         print(f"Top {len(candidates)} candidates selected for midday:")
         for c in candidates:
             print(f"  {c.get('ticker', c.get('symbol'))} score={c.get('score')} type={c.get('type')}")

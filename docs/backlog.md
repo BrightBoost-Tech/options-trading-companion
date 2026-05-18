@@ -1883,63 +1883,194 @@ BKNG is the only symbol where F2a's pagination cap raise didn't
 help. This rules out "1000 cap was the universal sparse-coverage
 cause" — something BKNG-specific is in play.
 
-**Hypotheses (untested):**
+**Root cause (confirmed 2026-05-17 via diagnostic, ~22:45 Chicago):**
 
-1. **Chain depth exceeds 20000 cap:** BKNG trades at ~$4500-5000/share.
-   ATM±20% range = $3600-6000. With $5 strike increments and many
-   expiries, chain might exceed even 20000 contracts. Would manifest
-   as the same "cap consumed by early expiries" issue F2a addressed
-   for other symbols, just at higher scale.
+Stock split adjustment mismatch. BKNG (Booking Holdings) underwent
+a likely 30:1 stock split during/post the backfill window. Polygon's
+API returns split-ADJUSTED historical spot prices (~$167 for what
+was actually a $5000+ stock pre-split), but option contract
+REFERENCES keep their UNADJUSTED strikes (e.g.,
+`O:BKNG260320C03550000` at strike $3550, NOT split-adjusted).
 
-2. **Strike-range filter interaction:** $5 strike increments at $4500
-   spot may produce different filter behavior than $1 increments at
-   $300-500 (most other symbols). Filter math could exclude BKNG
-   contracts that would otherwise be valid anchors.
+The handler's strike-range filter logic:
 
-3. **Symbol-specific Polygon data peculiarity:** BKNG's options data
-   in Polygon may have an unusual structure (e.g., monthly-only
-   expiries during certain periods, sparse historical aggregates)
-   that differs from other ultra-high-priced underlyings.
+1. Fetches spot via `get_historical_spot_price` → $167
+   (split-adjusted)
+2. Computes filter range [$167 × 0.8, $167 × 1.2] = [$134, $200]
+3. Queries Polygon contracts with strike $134-$200
+4. Pre-split BKNG chain was at $3000-$6000 strikes; nothing matches
+5. Empty chain → `missing_data` for every pre-split date
 
-4. **Different code path:** Some BKNG-specific branch in the handler
-   or service code may take a different filtering or aggregation
-   path. Unlikely but possible.
+Daily refresh works because it uses the LIVE chain snapshot
+(post-split contracts at $150-200 strikes match current post-split
+spot ~$170).
 
-**Investigation surface (when prioritized):**
+**Empirical evidence:**
 
-- Empirical: direct Polygon query for BKNG contracts in F2a window
-  (matching what the handler would request). How many contracts
-  returned? How many distinct expiries? Compare to QQQ's pre-F2a
-  1000-contract / 8-expiry pattern.
-- Code path: trace handler's BKNG-specific behavior. Does anything
-  diverge from how other symbols flow through?
-- Cross-check: which dates is BKNG covered on vs missing? Pattern
-  similar to QQQ pre-F2a (early dates only) or different shape?
+- BKNG spot 2026-02-25 (via `adjusted=true`): $166.52
+  (actual BKNG trading price was ~$4500-5000 pre-split)
+- Empirical chain depth for BKNG in window when queried with the
+  pre-split strike range ($3520-$6720): 2741 contracts, 12 distinct
+  expiries — well below F2a's 20000 cap, so H1 refuted
+- Control comparison (all RECOVERED post-F2a with similar/smaller
+  chains): META 3515, NVDA 1668, AVGO 1184, GOOGL 806 — confirms
+  this is not a chain-depth issue
+- Phase 3 v3 wrote 0 new BKNG rows: 30 existing rows are ALL from
+  daily_refresh accumulating over the last ~6 weeks (post-split)
+- BKNG missing-date pattern: 2026-02-19 → 2026-04-02 missing
+  (entire pre-split half); 2026-04-06 → 2026-05-15 present
+  (post-split half) — perfectly bimodal split-at-event
 
-**Effort estimate:**
+**Original hypothesis disposition:**
 
-- Investigation: ~30-45 min (similar shape to original F2a
-  investigation)
-- Fix shape: depends on hypothesis confirmed; range from "raise
-  cap further to 50000+" (if H1) to architectural (if H4)
+- H1 (cap > 20000): REFUTED empirically (chain depth ~2700, well
+  below cap)
+- H2 (strike-range filter at $4500 spot): related but framed wrong;
+  issue is NOT the high spot value, it's the WRONG spot value
+  (adjusted vs unadjusted mismatch)
+- H3 (Polygon data peculiarity): PARTIAL — splits are a
+  generalizable Polygon convention, not BKNG-specific data sparsity
+- H4 (different code path): REFUTED — same handler logic; the
+  mismatch is upstream in the spot fetch
+- **H_NEW (CONFIRMED):** stock split adjustment mismatch between
+  adjusted historical spot prices and unadjusted option contract
+  references
 
-**Anti-criteria (don't prioritize if):**
+**Generalizability:**
 
-- iv_rank for 69 of 70 symbols is acceptable for current strategy
-  decisions
-- Daily refresh will close BKNG's gap over ~30 trading days
-- BKNG-specific operations (if any) tolerate sparse historical
-  iv_rank
+This is NOT BKNG-specific. ANY symbol that splits during a backfill
+window exhibits the same pattern. BKNG is currently N=1 in the
+active universe but is the canonical test case.
 
-**Status:** Tier 3 observation. Captured. Investigation when
-prioritized or convenient.
+**Fix shape options:**
+
+| Option | Description | Effort | Risk |
+|---|---|---|---|
+| F3a | Use `adjusted=false` for spot fetch when computing strike range | ~30-45 min | Medium — may affect other consumers of `get_historical_spot_price` |
+| F3b | Query Polygon corporate-actions endpoint to detect splits + apply split-factor correction per (symbol, date) | ~half-day | Medium — new Polygon endpoint integration + per-tuple logic |
+| F3c | Detect empty-chain + "suspicious spot" heuristic, log warning | ~30 min | Low — observability only; no behavior change |
+| F3d | Accept as data-vendor limitation; daily_refresh closes forward gap | Zero | None |
+
+**Recommendation: F3d for now.**
+
+Reasoning:
+- BKNG is N=1 case at micro tier
+- daily_refresh closes the gap forward by mid-July 2026 (~30
+  trading days from now)
+- F3a/F3b engineering disproportionate to current value
+- See adjacent Tier 3 observation `[2026-05-17] OHLC unavailable
+  for pre-split contract identifiers` — may mean F3a/F3b cannot
+  fully recover BKNG even if shipped
+
+**Promote to F3a/F3b if:**
+
+- Another universe symbol splits during a backfill window
+- iv_rank-gated strategies need full BKNG historical analysis
+- Strategy backtesting requires pre-split BKNG IV data
+
+**Status:** Root cause CONFIRMED (H_NEW). Recommended action F3d
+(accept). Captured for promotion when criteria above are met.
 
 **Cross-references:**
 
-- F2a PR (pagination cap raise; worked for 18 other symbols)
+- BKNG diagnostic synthesis Sunday 2026-05-17 (in conversation
+  history)
+- F2a PR (pagination cap raise; worked for 18 of 19 sparse symbols)
 - Phase 3 v3 result (job_run `13b89a7e-...`, completed 2026-05-17
   21:36 UTC, duration 213 min)
-- Phase 3 sparse-coverage investigation synthesis Sunday 2026-05-17
+- Adjacent Tier 3 `[2026-05-17]`: OHLC unavailable for pre-split
+  contract identifiers (narrows F3a/F3b's potential value)
+
+**[2026-05-17] TIER 3 OBSERVATION: OHLC unavailable for pre-split contract identifiers.**
+
+**Priority:** TIER 3 — adjacent observation to BKNG split mismatch;
+narrows fix-shape options for any future split-correction work.
+
+**Surfaced by:** BKNG diagnostic STEP 2 secondary test (2026-05-17
+~22:45 Chicago).
+
+**Observation:**
+
+Even when the correct pre-split contract OCC ticker is identified,
+Polygon may not return historical OHLC bars for that contract.
+
+**Empirical evidence:**
+
+Tested `O:BKNG260320C03550000` (BKNG call, expiry 2026-03-20,
+strike $3550 — an appropriate ATM strike for BKNG's actual
+pre-split spot of ~$3500-4500):
+
+```
+get_historical_price_range_for_occ(
+    'O:BKNG260320C03550000',
+    start_dt=date(2026, 3, 15),
+    end_dt=date(2026, 3, 15),
+)
+→ {} (empty)
+```
+
+No historical OHLC bars returned for this contract on this date,
+despite the contract being a valid ATM listing for BKNG at the
+time.
+
+**Hypotheses (untested):**
+
+1. **Polygon migrated historical OHLC to split-adjusted tickers:**
+   When BKNG split, historical OHLC for old-strike contracts may
+   have been migrated to new-strike contract identifiers (e.g.,
+   the $3550 contract's OHLC may now be accessible via
+   `O:BKNG260320C00118300` or similar split-adjusted ticker, where
+   the strike is the unadjusted $3550 ÷ 30 = $118.33).
+
+2. **OHLC retention policy excludes pre-split data:** Polygon may
+   simply not retain pre-split contract OHLC after the split
+   corporate action processes.
+
+3. **Different endpoint required:** A Polygon endpoint other than
+   the standard aggregates may serve pre-split historical bars.
+
+**Implication for BKNG fix shape:**
+
+This observation narrows F3a/F3b's potential value:
+
+- **If H1 (migrated tickers):** F3a/F3b need to ALSO translate
+  old-ticker references to new-ticker equivalents before fetching
+  OHLC. Significantly more engineering work.
+- **If H2 (retention policy):** F3a/F3b cannot recover BKNG
+  pre-split historical IV regardless of fix effort. The data
+  simply isn't there.
+- **If H3 (different endpoint):** Investigation surface for what
+  endpoint to use.
+
+**Investigation surface (when prioritized alongside BKNG F3a/F3b):**
+
+- Test whether Polygon returns OHLC for hypothetical split-adjusted
+  tickers (need split ratio + compute the adjusted OCC ticker)
+- Query Polygon's contract reference endpoint with old-ticker to
+  see if it returns metadata pointing to a successor ticker
+- Test other Polygon endpoints (snapshot, trades, quotes) for the
+  old-ticker
+
+**Anti-criteria (don't prioritize if):**
+
+- BKNG (and any future split-affected symbol) accepted as F3d per
+  parent entry
+- Polygon's stated data retention covers post-split tickers only
+  (would confirm H2 without empirical investigation)
+
+**Effort estimate (if investigated):**
+
+- Empirical hypothesis testing: ~30-60 min
+- Combined with F3a/F3b implementation (if pursued): adds ~1-2h to
+  either F3a or F3b scope
+
+**Status:** Captured. Tier 3. Investigation only when BKNG F3a/F3b
+is promoted from current F3d-accept state.
+
+**Cross-references:**
+
+- BKNG residual entry `[2026-05-17]` (parent; F3a-d fix options)
+- BKNG diagnostic synthesis Sunday 2026-05-17
 
 ---
 

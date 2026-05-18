@@ -1266,12 +1266,23 @@ class PaperExitEvaluator:
 
         # --- Internal fill at current_mark (internal_paper or Alpaca fallback) ---
 
-        # 1. Mark order as filled
+        # 1. Mark order as filled.
+        #
+        # FIX 3 (2026-05-18 instrumentation gap): also stamp submitted_at
+        # = now. Pre-fix, target_profit_hit close orders had filled_at
+        # populated but submitted_at NULL (verified empirically: 11 of
+        # 11 such closes in 60d had submitted_at IS NULL). This broke
+        # exit-side latency analysis for the most common exit path.
+        # For internal/fallback fills the submission and fill happen
+        # in the same call site, so submitted_at == filled_at is the
+        # most honest timestamp. Alpaca-path submissions write
+        # submitted_at separately upstream.
         supabase.table("paper_orders").update({
             "status": "filled",
             "filled_qty": abs_qty,
             "avg_fill_price": round(exit_price, 2),
             "fees_usd": 0,
+            "submitted_at": now,
             "filled_at": now,
         }).eq("id", order_id).execute()
 

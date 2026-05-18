@@ -528,9 +528,80 @@ def build_freshness_universe(
     return sorted(list(universe))[:max_symbols]
 
 
+# Regime-conditional staleness — 2026-05-18 fix.
+#
+# The per-symbol staleness decision used to be:
+#   is_symbol_stale = snap.quality.is_stale OR (freshness_ms > threshold)
+#
+# `snap.quality.is_stale` is set by MarketDataTruthLayer.snapshot_many_v4
+# based on vendor-quote-completeness / market-hours / quote-quality logic
+# that is INDEPENDENT of timestamp age. During routine regimes it
+# frequently fires on SIP-entitled core symbols (SPY/QQQ) within the
+# first few minutes after data refresh — well under the 600s timestamp
+# threshold. Combined with the SPY-or-QQQ override below, a single
+# vendor-quality flag would block an entire entry cycle.
+#
+# The 2026-05-18 18:01:48 UTC paper_auto_execute block on CSX was the
+# forcing example: regime=normal, freshness=108s (1.8 min), threshold=600s,
+# but SPY+QQQ both flagged via `is_stale=True` from the vendor side.
+#
+# Fix: activate the vendor-quality clause ONLY in volatile regimes
+# (shock, elevated). In all other regimes — normal, suppressed, chop,
+# rebound — fall back to timestamp-vs-threshold only. The regime list
+# mirrors CLAUDE.md "Risk per trade math" regime_mult semantics: the
+# regimes that trigger sub-1.0 risk multipliers (shock=0.5, elevated=0.8)
+# are also the ones that justify extra caution on data quality.
+#
+# Fail-closed: unknown regime → treat as shock (vendor clause active).
+_REGIME_VENDOR_QUALITY_GATED = frozenset({"shock", "elevated"})
+
+
+def _resolve_regime_for_staleness(regime: Optional[str]) -> str:
+    """Normalize caller-provided regime; fall back to the last recorded
+    cycle regime if None. If lookup yields no usable value, return
+    'shock' so the vendor-quality clause activates (fail-closed).
+
+    The lookup queries the most recent `suggestions_open` job_run for
+    its enriched cycle_metadata.regime — same data PR #959 wires up.
+    Single indexed query, ~tens of ms; logged on failure but never
+    raises (the staleness gate must remain fast and safe)."""
+    if regime:
+        normalized = regime.strip().lower()
+        if normalized:
+            return normalized
+    try:
+        from packages.quantum.jobs.handlers.utils import get_admin_client
+        client = get_admin_client()
+        row = (
+            client.table("job_runs")
+            .select("result")
+            .eq("job_name", "suggestions_open")
+            .eq("status", "succeeded")
+            .order("created_at", desc=True)
+            .limit(1)
+            .execute()
+        )
+        rows = row.data or []
+        if rows:
+            result = rows[0].get("result") or {}
+            cycle_results = result.get("cycle_results") or []
+            if cycle_results:
+                meta = cycle_results[0].get("cycle_metadata") or {}
+                last_regime = meta.get("regime")
+                if last_regime:
+                    return str(last_regime).strip().lower()
+    except Exception as e:
+        logger.warning(
+            f"[FRESHNESS] regime lookup failed; failing closed "
+            f"(treating as 'shock'): {e}"
+        )
+    return "shock"
+
+
 def compute_market_data_freshness(
     universe: List[str],
-    stale_threshold_ms: int = MARKET_DATA_STALE_THRESHOLD_MS
+    stale_threshold_ms: int = MARKET_DATA_STALE_THRESHOLD_MS,
+    regime: Optional[str] = None,
 ) -> MarketDataFreshnessResult:
     """
     Check actual market data freshness for symbols in universe.
@@ -538,9 +609,19 @@ def compute_market_data_freshness(
     Uses MarketDataTruthLayer.snapshot_many_v4() for real-time freshness.
     Stale if ANY core symbol (SPY/QQQ) stale OR >50% universe stale.
 
+    The per-symbol decision is regime-conditional (2026-05-18 fix):
+    `snap.quality.is_stale` only contributes in 'shock' / 'elevated'
+    regimes. In other regimes the timestamp threshold is the sole gate.
+    See _REGIME_VENDOR_QUALITY_GATED above for full rationale.
+
     Args:
         universe: List of ticker symbols to check
         stale_threshold_ms: Staleness threshold in milliseconds (default: 20 min)
+        regime: Current market regime ('normal' | 'suppressed' | 'chop' |
+            'rebound' | 'elevated' | 'shock'). If None, the function
+            resolves it via the most recent suggestions_open cycle's
+            recorded regime; if that lookup fails, falls back to 'shock'
+            (fail-closed — vendor-quality clause stays active).
 
     Returns:
         MarketDataFreshnessResult with detailed freshness status
@@ -557,6 +638,9 @@ def compute_market_data_freshness(
             reason="missing_api_key"
         )
 
+    resolved_regime = _resolve_regime_for_staleness(regime)
+    use_vendor_quality_flag = resolved_regime in _REGIME_VENDOR_QUALITY_GATED
+
     try:
         from packages.quantum.services.market_data_truth_layer import MarketDataTruthLayer
         layer = MarketDataTruthLayer(api_key)
@@ -570,15 +654,26 @@ def compute_market_data_freshness(
 
         for symbol, snap in snapshots.items():
             freshness_ms = snap.quality.freshness_ms
-            is_symbol_stale = snap.quality.is_stale or (
+            # Regime-conditional vendor-quality clause: snap.quality.is_stale
+            # contributes only in shock/elevated regimes. The timestamp
+            # threshold always contributes. See _REGIME_VENDOR_QUALITY_GATED
+            # above for the 2026-05-18 incident that motivated this.
+            timestamp_stale = (
                 freshness_ms is not None and freshness_ms > stale_threshold_ms
             )
+            vendor_quality_stale = (
+                use_vendor_quality_flag and snap.quality.is_stale
+            )
+            is_symbol_stale = vendor_quality_stale or timestamp_stale
             if is_symbol_stale:
                 stale_symbols.append(symbol)
             if freshness_ms is not None and freshness_ms > worst_age_ms:
                 worst_age_ms = freshness_ms
 
-        # Compute overall staleness
+        # Compute overall staleness — SPY-or-QQQ override UNCHANGED.
+        # This intentionally applies regardless of how is_symbol_stale
+        # was computed above; the override is correct policy and only
+        # the per-symbol decision was over-tightened.
         core_stale = any(s in stale_symbols for s in ["SPY", "QQQ"])
         majority_stale = len(stale_symbols) > len(universe) * 0.5
         is_stale = core_stale or majority_stale

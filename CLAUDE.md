@@ -887,6 +887,31 @@ Gate to `micro_live`: 4 consecutive Alpaca paper green days (not internal fills)
 
 ### Last 30 days (verbatim)
 
+- **2026-05-18 staleness-gate over-tightening on routine regimes:**
+  `ops_health_service.compute_market_data_freshness` per-symbol decision
+  combined `snap.quality.is_stale` (vendor-quality flag set by
+  `MarketDataTruthLayer.snapshot_many_v4` independent of timestamp age —
+  vendor-quote-completeness / market-hours / quote-quality logic) OR
+  `freshness_ms > stale_threshold_ms`. The vendor-quality clause
+  frequently fires on SIP-entitled core symbols within minutes of data
+  refresh — well below the 600s timestamp threshold. Combined with the
+  SPY-or-QQQ override (line 582-584), this blocked entire entry cycles
+  on routine-regime days. Forcing example: 2026-05-18 18:01:48 UTC
+  paper_auto_execute block on a valid CSX micro-tier candidate
+  (regime=NORMAL, freshness=108s, threshold=600s, SPY+QQQ both
+  `is_stale=True` from vendor side). Fix: vendor-quality clause is now
+  regime-conditional — active only in `shock` and `elevated` regimes
+  (the regimes that also trigger sub-1.0 `regime_mult` per the Risk per
+  trade math section). Other regimes (`normal`, `suppressed`, `chop`,
+  `rebound`) fall back to timestamp-vs-threshold only. The
+  `_resolve_regime_for_staleness` helper accepts an optional explicit
+  regime; if None, it reads the last recorded regime from the most
+  recent `suggestions_open` job_run's `cycle_results[0].cycle_metadata.regime`
+  (PR #959 enriched writer); if that lookup yields nothing, fails closed
+  with `shock`. SPY-or-QQQ override at line 582-584 PRESERVED — only the
+  per-symbol decision was loosened. Files:
+  `packages/quantum/services/ops_health_service.py:531-625`;
+  `packages/quantum/risk/staleness_gate.py:35-89`.
 - **2026-05-18 BUG-A scale-asymmetric unrealized_pl recompute:**
   `intraday_risk_monitor._refresh_marks` multi-leg branch computed
   `leg_total` per-1-spread (using `leg.quantity = 1` per the stored

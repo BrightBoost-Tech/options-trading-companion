@@ -32,9 +32,21 @@ class StalenessGateResult:
     stale_symbols: list
 
 
-def check_staleness_gate() -> StalenessGateResult:
+def check_staleness_gate(regime: Optional[str] = None) -> StalenessGateResult:
     """
     Check whether market data is too stale to open new positions.
+
+    Args:
+        regime: Optional market regime ('normal' | 'suppressed' | 'chop' |
+            'rebound' | 'elevated' | 'shock'). Passed through to
+            compute_market_data_freshness, which uses it to gate the
+            vendor-quality clause (active only in shock/elevated; see
+            ops_health_service._REGIME_VENDOR_QUALITY_GATED for the
+            2026-05-18 incident that motivated this). Callers that have
+            regime context (e.g. mid-cycle re-checks) should pass it;
+            callers that don't (e.g. pre-cycle entry gates) leave it
+            None and the function resolves the last recorded regime
+            internally, failing closed if that lookup yields nothing.
 
     Returns StalenessGateResult with blocked=True if data is stale.
     Fails closed (blocks) on errors — if we can't verify freshness,
@@ -59,6 +71,7 @@ def check_staleness_gate() -> StalenessGateResult:
         result = compute_market_data_freshness(
             universe=probe_symbols,
             stale_threshold_ms=stale_threshold_ms,
+            regime=regime,
         )
 
         if result.is_stale:

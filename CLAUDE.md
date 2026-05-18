@@ -980,7 +980,7 @@ TREAT WITH CARE:
 
 ### Active focus (next 3)
 
-1. **PR #908 empirical validation (tomorrow's first close)** — PR #908's mleg sign-flip + clamp is live in the current worker (verified 2026-05-12 H8 false-alarm investigation: worker booted 19:00:46Z on image built 19:00:22Z, post-PR-#908 merge) but still untested on a real close. Tomorrow's first natural close after a new position opens (now unblocked post-CSX-reconciliation) is the validation event. Capture: `limit_price` sign, `abs(limit_price)` ≥ 0.01, broker response. Failure-mode triage spec in `docs/backlog.md` "Recent operational events" → PR #908 empirical validation entry. Also still on watch: Tier 1 body acceptance smoke (`python scripts/run_signed_task.py alpaca_order_sync --force-rerun`), and 04:30 CT iv_daily_refresh natural fire writes Day 2 of warmup.
+1. **PR #908 empirical validation (waiting on next natural close)** — PR #908's mleg sign-flip + clamp is live in the worker (verified 2026-05-12 H8 false-alarm investigation) but as of 2026-05-17 still untested on a real close: 0 paper_positions opened OR closed since 2026-05-12, so the validation event hasn't been triggerable. Validation remains valid; just dormant. Original framing ("tomorrow's first close") is stale — should be read as "whenever the next position closes naturally". Capture spec unchanged: `limit_price` sign, `abs(limit_price)` ≥ 0.01, broker response. Failure-mode triage in `docs/backlog.md` "Recent operational events" → PR #908 empirical validation entry. Also still on watch: Tier 1 body acceptance smoke (`python scripts/run_signed_task.py alpaca_order_sync --force-rerun`).
 2. **H9 Convention Slot 1 — AST gate shipped 2026-05-12 in warn-only mode.** See `packages/quantum/tests/test_h9_wrapper_drift_gate.py`. Catches all 5 known H9 instances via fixtures; codebase scan found 7 real-but-deferred violations now in `packages/quantum/tests/h9_allow_list.yml` (4 are chain-level-verified / read-shaped false positives; 3 are genuine legacy migration candidates — `iv_point_service.upsert_point`, `position_pnl_service.refresh_marks_for_user`, `universe_service.sync_universe`). Plus 1 nested-handler refactor candidate (`alpaca_order_sync.sync_orders`). **Next step:** ~1 week observability via `h9_violations.json` CI artifact; flip `H9_GATE_STRICT = True` in `test_h9_wrapper_drift_gate.py` after the allow-list is stable. Slot 2 (silent-exception grep test) queued behind; may consolidate if Slot 1 covers same surface. Slot 3 (Literal status returns) adopted as convention for new wrappers.
 3. **#62a-D1 architectural PR (queued)** — `promoted_at` flip from neutral → aggressive + fix 2 silent-failure `is_champion` query sites at `paper_autopilot_service.py:867` and `paper_exit_evaluator.py:892` + rewire `fork.py:67` to read champion via `promoted_at` lookup. ~half day. Backlog notes "ships after CSX validation week completes" — CSX is now reconciled but PR #908 empirical validation still pending, so technically still in window. Doctrine note: first concrete instance of "parallel architectures without integration" class (H12 candidate). NOTE: previous active focus item (#62a-D3 / #62a-D5 architectural decisions) was stale — both items closed 2026-05-10 (D3 via deletion in #62a sweep; D5 via Option B in same sweep).
 
@@ -988,7 +988,13 @@ See `docs/roadmap.md` for the full Active focus block including recently-closed 
 
 ### Operational state notes
 
-**[2026-05-12] Warmup window day 3 of ~60.** Expected reduced trade frequency through warmup-window completion (`iv_repository.get_iv_context` requires `sample_size >= 60` at `iv_repository.py:239`; `iv_daily_refresh` producer healthy, writing ~69 rows/day). IV-sensitive strategies (credit spreads, iron condors) are gated until accumulated history clears the sample-size threshold. "No trade today" outcomes during warmup window are EXPECTED unless H11 `risk_alerts` baseline surfaces critical events. See `docs/backlog.md` "Warmup-window expectation (TESTABLE HYPOTHESIS)" entry — empirical validation pending; promote here if validated, revise/retract if refuted.
+**[2026-05-17] iv_rank warmup — effectively closed for 67 of 70 active universe symbols.** Post-Phase 3 v3 (job_run `13b89a7e-642c-48f7-9e4f-259c4922eec4`, completed 2026-05-17 21:36 UTC, ~213 min duration), `underlying_iv_points` coverage is:
+
+- **67 symbols at 61+ rows** → `iv_repository.get_iv_context` returns non-null `iv_rank`
+- **2 symbols (WBD, XLK) at 60 rows** → at threshold, marginal
+- **1 symbol (BKNG) at 30 rows** → still null; `daily_refresh` closes the gap naturally over ~30 trading days (mid-July 2026); see Tier 3 backlog observation 2026-05-17
+
+IV-sensitive strategies (credit spreads, iron condors) are now decidable for ~95% of the active universe. Earlier "warmup window day N of ~60" framing was correct at Phase 1+2 delivery (3 reference symbols); Phase 3 v3 short-circuited the per-symbol day-counting wait. "No trade today" outcomes are STILL acceptable in learning-mode (per operating-mode codification above) — warmup gate is no longer the dominant reason for low trade frequency. Production observability remains H11 `risk_alerts` baseline; sample_size threshold no longer gates the universe.
 
 **[2026-05-14] iv accounting alerts — RESOLVED (evening).** The `iv_handler_accounting_mismatch` alerts that fired 3 times in table history (2× on 2026-05-09, 1× on 2026-05-14, all with identical `stats_ok=1, actual_rows=5, delta=-4`) were traced via H5 unification investigation to a single mechanism: local developer pytest execution against real Supabase credentials.
 
@@ -1073,6 +1079,32 @@ Operator entered SPY reference as `0.0512` (typo, missing leading "1") instead o
 All other prerequisites are met (α implementation, trigger plumbing, Phase 1 backfill clean, Phase 2 validation passed).
 
 **Phase 4 + Phase 5:** Will follow Phase 3 completion. Phase 4 = sanity check on `iv_rank` distribution post-backfill. Phase 5 = operational cutover where IV-sensitive strategies (credit spreads, iron condors per the structural finding entries above) activate automatically as `sample_size >= 60` is satisfied universe-wide.
+
+**[2026-05-17] α Phase 3 — COMPLETED + α IMPLEMENTATION CHAIN DELIVERED.**
+
+α historical IV backfill is operationally complete. Goal A (full-universe historical `iv_rank` decidability) achieved.
+
+**Weekend arc 2026-05-15 to 2026-05-17 — chronological delivery chain:**
+
+- **PR #946 (worker queue separation):** new `worker-background` Railway service listening on `background` RQ queue, isolated from trading-day pipeline (`otc` queue). Phase 1's 8.5h run no longer starves trading-day jobs.
+- **PR-A2 (PR #948):** `expired=true` parameter on Polygon contracts endpoint. Finding B mechanical fix: contract listings now time-stable.
+- **PR-A (PR #950, range-query refactor):** per-contract range OHLC fetch replacing per-(symbol, date, contract) serial calls. Phase 3 wall-clock projection dropped from ~4.5 days to ~hours.
+- **F1 (PR #952, RQ timeout map):** per-job-name timeout overrides; `iv_historical_backfill` gets 6h budget (default 10m preserved for trading-day jobs).
+- **F2a (PR #953, pagination cap):** raised contract-listing default cap from 1000 to 20000. Deep-chain symbols (QQQ, MSFT, NVDA, etc.) had their pagination budget consumed by daily-expiry strikes; F2a unblocks full coverage.
+- **Phase 3 v3:** full-universe backfill (job_run `13b89a7e-...`, ~3.5h runtime, 67 of 70 symbols at full 61-row coverage, 0 failed).
+
+**Outstanding (Tier 2/3 backlog; not blocking):**
+
+- **Finding C (Tier 2, captured 2026-05-17, PR #949):** anchor-selection time-instability. Same `(symbol, as_of_date)` may produce different `iv_30d` over time as available-contract set shifts. iv_rank consumers tolerate ~1-2 pct-pt drift.
+- **BKNG sparse residual (Tier 3, captured 2026-05-17, PR #954):** F2a recovered 18 of 19 sparse symbols; BKNG (Booking Holdings, ~$4500/share) remains at 30 rows. Hypotheses range from chain-depth exceeding new 20000 cap to strike-density interaction; investigation when prioritized.
+
+**Architectural notes for future readers:**
+
+- "Phase 3 (full-universe backfill)" is no longer aspirational — it's an operationally tractable trigger with explicit `symbols` list payload. Option P3c (handler-side universe loading via `scanner_universe` table) was discussed but not shipped; explicit symbols in payload is the current pattern.
+- Worker queue separation (PR #946) is justified by actual usage: long backfill jobs (~3.5h+) MUST route to `background` queue to avoid starving trading-day pipeline.
+- Polygon Options Developer tier ($79/mo) is sufficient for α's BS-inversion approach; Options Advanced doesn't expose historical pre-computed IV (verified Sunday 2026-05-17 investigation). Vendor change not needed.
+
+**Phase 4 + Phase 5 framing UPDATED:** with Phase 3 complete and `iv_rank` decidable for 67 symbols, the boundary between "Phase 4 sanity check" and "Phase 5 operational cutover" is fuzzy — IV-sensitive strategies are now technically active via `strategy_selector`'s existing `iv_rank` consumer paths. Operator-driven empirical observation will surface any cutover concerns; no explicit cutover event needed.
 
 ### Exit thresholds (defaults under empirical review)
 

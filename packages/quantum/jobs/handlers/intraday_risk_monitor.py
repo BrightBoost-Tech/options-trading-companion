@@ -186,16 +186,35 @@ class IntradayRiskMonitor:
         force_closes_submitted = 0
         warnings_logged = 0
 
+        # 2026-05-18 BUG-C fix (FIX 2d): track positions that have been
+        # successfully force-closed in THIS cycle. The `positions` list
+        # at line 127 is fetched once per cycle and never refreshed —
+        # after a successful close, the in-memory state is stale (the
+        # DB row's status is now 'closed' but the dict in this list
+        # still shows 'open'). Without this set, the 5a and 5b loops
+        # below would call _execute_force_close repeatedly on the same
+        # position when multiple violations fire against it, staging
+        # zero-qty duplicate close orders and raising spurious critical
+        # alerts. Today's CSX cycle: stop_loss (5a) + 2 loss-envelope
+        # force_closes (5b) → 5 attempts on the same position, 4 of
+        # which fired AFTER the position was already closed.
+        closed_in_this_cycle: set = set()
+
         # 5a. Position-level exit triggers — ALWAYS execute.
         #      Stop losses and expiration-day exits are safety-critical and must
         #      not be gated behind RISK_ENVELOPE_ENFORCE (which controls only
         #      portfolio-level force-close behavior).
         for pos, reason in exit_triggered:
+            pid = pos.get("id")
+            if pid in closed_in_this_cycle:
+                continue
             success = self._execute_force_close(
                 pos, f"intraday_{reason}", user_id
             )
             if success:
                 force_closes_submitted += 1
+                if pid:
+                    closed_in_this_cycle.add(pid)
 
         # 5b. Envelope violations
         #     Daily/weekly/per-symbol loss limits are safety-critical — always
@@ -210,6 +229,8 @@ class IntradayRiskMonitor:
                 if should_execute:
                     # Find positions to close
                     for pos_id in result.force_close_ids:
+                        if pos_id in closed_in_this_cycle:
+                            continue
                         pos = next((p for p in positions if p.get("id") == pos_id), None)
                         if pos:
                             success = self._execute_force_close(
@@ -217,6 +238,7 @@ class IntradayRiskMonitor:
                             )
                             if success:
                                 force_closes_submitted += 1
+                                closed_in_this_cycle.add(pos_id)
                 else:
                     # Warn-only mode for non-loss envelopes
                     self._log_alert(
@@ -351,8 +373,22 @@ class IntradayRiskMonitor:
                     pos["unrealized_pl"] = current_value - entry_value
                 continue
 
-            # Multi-leg: compute from all legs (all-or-nothing)
-            leg_total = 0.0
+            # Multi-leg: compute from all legs (all-or-nothing).
+            #
+            # Scale-consistency invariant (2026-05-18 BUG-A fix):
+            # The stored `legs` JSON persists each leg's `quantity` as the
+            # per-spread leg unit (typically 1) — NOT scaled by the number
+            # of contracts in the position. `pos.quantity` is the spread
+            # contract count (e.g. 4 for a 4-contract debit spread).
+            #
+            # We therefore compute the PER-SPREAD value from the legs
+            # (each leg priced at its declared per-spread quantity), and
+            # scale BOTH current_value and entry_value by pos.quantity in
+            # the same step. Mixing scales — per-1 leg_total against per-N
+            # entry_value — fabricates large losses on any multi-contract
+            # position and force-closes it within seconds of opening.
+            # Today's CSX 4-contract spread was the forcing example.
+            per_spread_value = 0.0  # dollar value of ONE spread (post-fees-ex)
             all_priced = True
             for leg in legs:
                 if not isinstance(leg, dict):
@@ -366,19 +402,44 @@ class IntradayRiskMonitor:
                 if mid <= 0:
                     all_priced = False
                     break
-                leg_qty = float(leg.get("quantity") or pos.get("quantity") or 1)
+                # leg.quantity is the per-spread leg unit. Do NOT mix in
+                # pos.quantity here — that's applied once at the end.
+                leg_qty = float(leg.get("quantity") or 1)
                 action = leg.get("action", "buy")
                 side_mult = 1.0 if action == "buy" else -1.0
-                leg_total += mid * 100 * abs(leg_qty) * side_mult
+                per_spread_value += mid * 100 * abs(leg_qty) * side_mult
 
             if all_priced:
-                qty = abs(float(pos.get("quantity") or 1))
-                entry_value = float(pos.get("avg_entry_price") or 0) * qty * 100
-                pos["current_mark"] = leg_total / (qty * 100) if qty > 0 else 0
-                if float(pos.get("quantity") or 0) < 0:
-                    pos["unrealized_pl"] = entry_value - abs(leg_total)
+                qty_signed = float(pos.get("quantity") or 0)
+                qty_abs = abs(qty_signed)
+                per_spread_entry_value = float(pos.get("avg_entry_price") or 0) * 100
+                # current_mark is the per-spread mark price ($/spread),
+                # independent of pos.quantity. This is what downstream
+                # consumers (paper_eod_snapshots, exit evaluator) expect.
+                pos["current_mark"] = per_spread_value / 100.0
+                # Compute per-spread P&L preserving the pre-fix sign
+                # convention for credit (qty<0) vs debit (qty>0)
+                # structures, THEN scale by qty_abs in the same step.
+                # Pre-fix used qty=1 implicitly (leg_total was per-1 and
+                # entry_value was per-N — only matched at qty=1). Both
+                # branches keep the same per-spread shape; the only
+                # change is that the qty_abs scaling is applied once,
+                # consistently, at the end. avg_entry_price stores the
+                # ABSOLUTE per-spread net premium for both debit and
+                # credit positions, hence the per-spread entry constant
+                # is unsigned and the directional sign comes from which
+                # branch we take below.
+                if qty_signed < 0:
+                    # Short / credit: entry_per_spread is credit received
+                    # (positive); abs(per_spread_value) is current
+                    # liability (positive). PL/spread = entry - liability.
+                    per_spread_pl = per_spread_entry_value - abs(per_spread_value)
                 else:
-                    pos["unrealized_pl"] = leg_total - entry_value
+                    # Long / debit: per_spread_value is current value
+                    # (positive); entry_per_spread is cost paid (positive).
+                    # PL/spread = current - entry.
+                    per_spread_pl = per_spread_value - per_spread_entry_value
+                pos["unrealized_pl"] = per_spread_pl * qty_abs
             else:
                 # #2026-05-12 MTM-staleness PR-1: multi-leg recompute
                 # short-circuited due to at least one leg returning
@@ -459,13 +520,29 @@ class IntradayRiskMonitor:
         # each cycle creates a new order that immediately fails. The deeper
         # guard in _close_position is the true gate, but this avoids the
         # overhead of the routing check + staging attempt.
+        #
+        # 2026-05-18 BUG-C fix: 'filled' and 'cancelled' MUST be in the
+        # filter, AND the lookup must be scoped to the CLOSE side
+        # (sell-to-close for long, buy-to-close for short) so the entry
+        # order — which shares position_id and ends in status='filled' —
+        # does not match. Pre-fix list omitted 'filled', so when the
+        # first internal-paper close order filled synchronously, the next
+        # iteration of the violation loop punched straight through this
+        # guard and staged a duplicate (today's CSX cycle staged 4
+        # zero-qty close orders). 'cancelled' is included for the same
+        # reason: a close attempt that was reasoned away leaves a
+        # terminal trace; treating it as "no close attempted" causes
+        # spurious retries.
+        position_qty = float(position.get("quantity") or 0)
+        close_side = "sell" if position_qty > 0 else "buy"
         try:
             existing = self.supabase.table("paper_orders") \
                 .select("id, status") \
                 .eq("position_id", pos_id) \
+                .eq("side", close_side) \
                 .in_("status", [
                     "staged", "submitted", "working", "partial", "pending",
-                    "needs_manual_review",
+                    "needs_manual_review", "filled", "cancelled",
                 ]) \
                 .execute()
             if existing.data:

@@ -1041,18 +1041,83 @@ class PaperExitEvaluator:
             f"→ {'ALPACA' if position_is_alpaca else 'INTERNAL'}"
         )
 
+        # ── Fetch position ───────────────────────────────────────────
+        # Moved ahead of the idempotency check (2026-05-18 BUG-C fix) so
+        # downstream guards can branch on observed position state, and
+        # the idempotency lookup can be scoped to the close side.
+        pos_res = supabase.table("paper_positions") \
+            .select("*") \
+            .eq("id", position_id) \
+            .single() \
+            .execute()
+        position = pos_res.data
+
+        qty = float(position["quantity"])
+        side = "sell" if qty > 0 else "buy"
+        abs_qty = abs(qty)
+        multiplier = 100.0
+
+        # ── BUG-C / H9 doctrine: refuse to close an already-closed pos ─
+        # H9 (verified-write across wrapper chains) — Anti-pattern from
+        # 2026-05-18 CSX cycle: the violation loop in
+        # intraday_risk_monitor called _execute_force_close 5 times on
+        # the same position; the first call succeeded and closed the
+        # position; the next 4 punched through the upstream idempotency
+        # check (because internal-paper close orders fill synchronously,
+        # so the prior close was already 'filled' — not in the pre-fix
+        # status list) and reached this function. Pre-fix _close_position
+        # had no `status='closed'` guard, so it proceeded to fetch the
+        # position, observe quantity=0, and crash inside compute_realized_pl
+        # ("qty must be positive, got 0"). Each crash wrote a critical
+        # alert. The position was already closed; the caller is operating
+        # on stale state; the right behavior is to short-circuit and
+        # surface that fact, not raise.
+        #
+        # This is a verified-state check: we read the position from the
+        # DB and branch on observed state. We do NOT trust the caller's
+        # implicit assumption that "this function only gets called when
+        # the position is open". The caller may be wrong, and this is
+        # the function that bears responsibility for refusing to operate
+        # on closed state.
+        pos_status = (position.get("status") or "").lower()
+        if pos_status == "closed" or qty == 0:
+            logger.info(
+                f"[CLOSE_POSITION] Skipping — position already closed "
+                f"for position={position_id[:8]} status={pos_status!r} "
+                f"qty={qty}"
+            )
+            return {
+                "order_id": None,
+                "processed": 0,
+                "routed_to": "already_closed",
+                "note": (
+                    f"Position {position_id[:8]} status={pos_status!r} "
+                    f"qty={qty} — no action taken"
+                ),
+            }
+
         # ── Idempotency: block if a close order already exists ──────
         # Check ALL non-terminal statuses including needs_manual_review.
         # Without this, every caller (_execute_force_close, evaluate_exits)
         # creates a new staged order on each invocation, causing 100+ orders
         # to pile up when submission repeatedly fails (e.g. held_for_orders).
+        #
+        # 2026-05-18 BUG-C fix: 'filled' and 'cancelled' MUST be in the
+        # filter, AND the lookup must be scoped to the CLOSE side
+        # (sell-to-close for long, buy-to-close for short) so the entry
+        # order — which shares position_id and ends in status='filled' —
+        # does not match. Pre-fix list omitted 'filled', so when the
+        # first internal-paper close order filled synchronously, the
+        # next invocation of this function punched straight through the
+        # guard and staged a duplicate zero-qty close order.
         try:
             existing_close = supabase.table("paper_orders") \
                 .select("id, status, created_at") \
                 .eq("position_id", position_id) \
+                .eq("side", side) \
                 .in_("status", [
                     "staged", "submitted", "working", "partial", "pending",
-                    "needs_manual_review",
+                    "needs_manual_review", "filled", "cancelled",
                 ]) \
                 .order("created_at", desc=True) \
                 .limit(1) \
@@ -1090,19 +1155,6 @@ class PaperExitEvaluator:
                     "consequence": "close proceeds without idempotency guard — duplicate close orders possible",
                 },
             )
-
-        # ── Fetch position ───────────────────────────────────────────
-        pos_res = supabase.table("paper_positions") \
-            .select("*") \
-            .eq("id", position_id) \
-            .single() \
-            .execute()
-        position = pos_res.data
-
-        qty = float(position["quantity"])
-        side = "sell" if qty > 0 else "buy"
-        abs_qty = abs(qty)
-        multiplier = 100.0
 
         exit_price = float(position.get("current_mark") or position.get("avg_entry_price") or 0)
         entry_price = float(position.get("avg_entry_price") or 0)

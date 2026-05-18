@@ -887,6 +887,51 @@ Gate to `micro_live`: 4 consecutive Alpaca paper green days (not internal fills)
 
 ### Last 30 days (verbatim)
 
+- **2026-05-18 BUG-A scale-asymmetric unrealized_pl recompute:**
+  `intraday_risk_monitor._refresh_marks` multi-leg branch computed
+  `leg_total` per-1-spread (using `leg.quantity = 1` per the stored
+  per-leg JSON convention) but `entry_value` per-N-spread (using
+  `pos.quantity`, e.g. 4). For any multi-contract position the
+  subtraction `leg_total - entry_value` produced a fabricated large
+  loss. Today's CSX 4-contract debit spread (entry $2.50, current
+  spread mid ~$2.20) computed unrealized_pl = $220 - $1000 = -$780
+  within 5 seconds of opening, triggering immediate intraday
+  stop_loss force-close. Fix: scale BOTH sides by `pos.quantity` in
+  the same step (long: `(per_spread_value - per_spread_entry) ×
+  qty_abs`; short: `(per_spread_entry - abs(per_spread_value)) ×
+  qty_abs`); credit/debit branch preserved. Inline scale-consistency
+  invariant comment defends against regression. Single-leg branch
+  was already scale-consistent; no change there. Tier-transition
+  blocker — at micro tier (contracts=1) the bug was invisible; at
+  small tier with `PortfolioAllocator` (PR #958) emitting 2-4
+  contracts, this fires on every multi-contract live position.
+  File: `packages/quantum/jobs/handlers/intraday_risk_monitor.py:354-407`.
+- **2026-05-18 BUG-C retry against already-closed position:** within a
+  single `intraday_risk_monitor` cycle, after the first successful
+  force-close the in-memory `positions` list (fetched once at line
+  127) is stale. The violation loop in 5b iterates
+  `result.force_close_ids` per force-close-severity violation;
+  multiple loss-envelope violations against the same position
+  produced 4 spurious retries today. Two idempotency checks
+  (`intraday_risk_monitor._execute_force_close:462-489` and
+  `paper_exit_evaluator._close_position:1000-1024`) omitted
+  status='filled' from their status filter — internal-paper close
+  orders fill synchronously, so the prior close was already 'filled'
+  and the retry punched through. Neither check filtered by side, so
+  adding 'filled' alone would also match the (filled) entry order.
+  `_close_position` had no `status='closed'`/`quantity=0` early-return,
+  so retries reached compute_realized_pl(qty=0) and raised. Fix
+  (4 sub-fixes): (a) add 'filled' + 'cancelled' to both idempotency
+  filters AND scope by close side (sell for long, buy for short);
+  (b) add `status='closed' or quantity=0` early-return to
+  `_close_position` returning `routed_to='already_closed'` (not an
+  error, expected behavior — H9 verified-state check); (c) move
+  position fetch ahead of idempotency check in `_close_position` so
+  the side filter can use observed `quantity`; (d) track
+  `closed_in_this_cycle` set in `intraday_risk_monitor` violation
+  loop and skip subsequent iterations for already-closed positions.
+  Files: `packages/quantum/jobs/handlers/intraday_risk_monitor.py:186-260,453-505`;
+  `packages/quantum/services/paper_exit_evaluator.py:995-1115`.
 - **2026-04-27 Polygon plan upgrade (#87 RESOLVED):** Stocks Basic
   ($0) → Stocks Starter ($29/mo); Options Basic ($0) → Options
   Developer ($79/mo). Total $108/mo recurring. Today's "chronic 429

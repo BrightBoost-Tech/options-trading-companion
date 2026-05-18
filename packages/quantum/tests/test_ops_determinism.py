@@ -36,8 +36,14 @@ class TestOpsDeterminism(unittest.TestCase):
             mock_layer_instance.snapshot_many_v4.return_value = snapshots
 
             # Call function
+            # regime='shock' activates the vendor-quality (is_stale) clause
+            # so this test continues to exercise the sort-ordering path on
+            # snap.quality.is_stale-driven staleness (the original intent).
+            # See 2026-05-18 regime-conditional staleness fix
+            # (ops_health_service._REGIME_VENDOR_QUALITY_GATED) for why the
+            # regime parameter is now required to trigger that branch.
             with patch.dict(os.environ, {"POLYGON_API_KEY": "fake_key"}):
-                result = compute_market_data_freshness(["A", "B"])
+                result = compute_market_data_freshness(["A", "B"], regime="shock")
 
             # Assertions
             self.assertEqual(result.stale_symbols, ["A", "B"],

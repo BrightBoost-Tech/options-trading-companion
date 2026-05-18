@@ -61,11 +61,15 @@ except ImportError:  # pragma: no cover
 # ─────────────────────────────────────────────────────────────────────
 
 
-# Set this to True to flip the gate to strict mode (CI fails on
-# unflagged violation). Plan: review h9_violations.json artifacts
-# from ~1 week of CI runs; if violation count is stable and
-# allow-list is comprehensive, flip.
-H9_GATE_STRICT = False
+# Flipped to strict mode on 2026-05-18 after 6 days of warn-only CI
+# observability. Verification at flip time: allow-list held at 7 entries
+# unchanged since the ship commit (2026-05-12); h9_violations.json
+# artifact on main was empty; this week's 6 merged PRs (#958, #959,
+# #960, #961, #962, #963) all passed the gate without expanding the
+# allow-list. From this point forward, any new H9 violation fails CI;
+# reviewers must either fix the violation or explicitly add it to
+# h9_allow_list.yml with rationale (default response is fix-not-allow).
+H9_GATE_STRICT = True
 
 
 # Function-name prefixes that mark a function as wrapper-shaped.
@@ -842,8 +846,8 @@ class TestCodebaseH9Compliant(unittest.TestCase):
             )
         msg_lines.extend([
             "",
-            "Gate is in WARN-ONLY mode. Will flip to strict after ~1 week "
-            "of observability data shows the allow-list is stable.",
+            "Gate is in STRICT mode (flipped 2026-05-18). A new H9 "
+            "violation fails CI; default response is fix-not-allow.",
             "",
             "To suppress a legitimate case:",
             "  - Add @h9_exempt(reason=\"...\") decorator",

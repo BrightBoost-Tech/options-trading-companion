@@ -222,6 +222,48 @@ def _check_target_profit(pos: Dict, tp_pct: float = 0.50) -> bool:
         return mc > 0 and upl >= entry_cost * tp_pct
 
 
+_STOP_LOSS_TIME_SCALING_ENABLED = os.environ.get(
+    "EXIT_STOP_LOSS_TIME_SCALING_ENABLED", "0"
+) == "1"
+_STOP_LOSS_TIME_SCALING_FLOOR = float(
+    os.environ.get("EXIT_STOP_LOSS_FLOOR_PCT", "0.30")
+)
+
+
+def _is_iron_condor(position: Dict[str, Any]) -> bool:
+    """Strict iron-condor detection by strategy name. Used to exclude
+    iron condors from stop-loss time-scaling (Q2 audit guardrail —
+    AMZN/GOOGL iron_condor recoveries from <-50% loss)."""
+    strategy = (position.get("strategy_key") or position.get("strategy") or "").upper()
+    return "IRON_CONDOR" in strategy
+
+
+def _time_scaled_stop_loss_pct(pos: Dict, base_sl_pct: float) -> float:
+    """
+    DTE-aware stop-loss for DEBIT SPREADS only (audit/hold-period-asymmetry,
+    2026-05-18). Symmetric to _time_scaled_target_profit_pct's sqrt-decay
+    so theta-acceleration acts on both directions.
+
+    At entry (dte/entry_dte=1.0): sl = base_sl_pct (unchanged from flat)
+    At 50% elapsed:               sl ≈ 0.354
+    At ≤20% elapsed:              sl = floor (default 0.30)
+
+    Iron condors bypass and return base_sl_pct unchanged (caller is
+    expected to gate on _is_iron_condor; this is defense-in-depth).
+    Missing DTE data → returns base_sl_pct (no surprise tightening).
+    """
+    if _is_iron_condor(pos):
+        return base_sl_pct
+    dte = days_to_expiry(pos)
+    entry_dte_raw = pos.get("entry_dte")
+    entry_dte = entry_dte_raw if entry_dte_raw is not None else 35
+    if entry_dte <= 0 or dte <= 0:
+        return base_sl_pct
+    dte_ratio = max(dte / entry_dte, 0.0)
+    scaled = base_sl_pct * (dte_ratio ** 0.5)
+    return max(_STOP_LOSS_TIME_SCALING_FLOOR, min(base_sl_pct, scaled))
+
+
 def _check_stop_loss(pos: Dict, sl_pct: float = 2.0) -> bool:
     """Check if position has exceeded stop loss (debit-aware)."""
     mc = pos.get("max_credit")
@@ -238,9 +280,16 @@ def _check_stop_loss(pos: Dict, sl_pct: float = 2.0) -> bool:
         # For debit spreads sl_pct is reinterpreted as fraction of entry cost
         # (default 2.0 → clamp to 1.0 since you can't lose more than you paid)
         effective_sl = min(sl_pct, 1.0) if sl_pct > 1.0 else sl_pct
+        if _STOP_LOSS_TIME_SCALING_ENABLED and not _is_iron_condor(pos):
+            # Symmetric to profit-target sqrt-decay. Gated default OFF;
+            # iron_condor excluded (Q2 guardrail — AMZN/GOOGL recoveries
+            # from <-50%). See docs/audit_hold_period_asymmetry.md.
+            effective_sl = _time_scaled_stop_loss_pct(pos, effective_sl)
         return upl <= -(entry_cost * effective_sl)
     else:
-        # Credit spread: stop loss at sl_pct × credit received
+        # Credit spread / iron_condor / other: flat threshold preserved.
+        # Time-scaling intentionally excluded — Q2 (2026-05-18 audit)
+        # showed iron_condor winners routinely recover from <-50% loss.
         return mc > 0 and upl <= -(entry_cost * sl_pct)
 
 

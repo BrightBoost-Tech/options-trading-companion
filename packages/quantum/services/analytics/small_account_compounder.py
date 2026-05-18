@@ -62,7 +62,8 @@ class SmallAccountCompounder:
         capital: float,
         tier: CapitalTier,
         regime: str = "normal",
-        compounding: bool = False
+        compounding: bool = False,
+        allocation_hint: Optional[float] = None,
     ) -> Dict[str, Any]:
         """
         Calculates risk % and budget based on score, regime, and tier.
@@ -73,8 +74,18 @@ class SmallAccountCompounder:
         tier.max_trades=1 (concurrency gate enforced in
         workflow_orchestrator.run_midday_cycle).
 
-        Small tier ($1000-$5000) and standard tier ($5000+): full
-        multiplier stack (base_risk_pct × score × regime × compounding).
+        Small tier ($1000-$5000): post-2026-05-18 allocation-aware
+        policy. When ``allocation_hint`` is provided (production path
+        via ``PortfolioAllocator``), it is used directly as the
+        per-trade risk_budget — score/regime/compounding multipliers
+        are bypassed because they've already been folded into the
+        allocator's distribution math. When ``allocation_hint`` is
+        None (test paths, allocator-bypass scenarios), legacy
+        per-trade multiplier-stack math is used. See
+        ``docs/small_tier_allocation.md``.
+
+        Standard tier ($5000+): full multiplier stack
+        (base_risk_pct × score × regime × compounding) — unchanged.
         """
         score = candidate.get("score", 50)
 
@@ -91,10 +102,36 @@ class SmallAccountCompounder:
             # Operator spec: flat base × regime_mult, no score/compounding
             # multipliers. score_mult and compounding_mult set to 1.0 in
             # the return dict for downstream-consumer schema consistency.
+            # Micro tier IGNORES allocation_hint — the allocator is gated
+            # off for micro per the cross-tier-activation regression
+            # guard in test_portfolio_allocator.py.
             score_mult = 1.0
             compounding_mult = 1.0
             final_risk_pct = tier.base_risk_pct * regime_mult
+        elif tier.name == "small" and allocation_hint is not None:
+            # Allocation-aware path (post-2026-05-18). The allocator's
+            # output already accounts for score skew + envelope +
+            # ceiling. Bypass the multiplier stack and use the hint
+            # directly. Multipliers in the return dict are set to 1.0
+            # for schema consistency. See docs/small_tier_allocation.md.
+            score_mult = 1.0
+            compounding_mult = 1.0
+            risk_budget = float(allocation_hint)
+            final_risk_pct = (risk_budget / capital) if capital > 0 else 0.0
+            return {
+                "risk_pct": final_risk_pct,
+                "risk_budget": risk_budget,
+                "tier_name": tier.name,
+                "multipliers": {
+                    "score": score_mult,
+                    "regime": regime_mult,
+                    "compounding": compounding_mult,
+                },
+                "allocation_hint_applied": True,
+            }
         else:
+            # Legacy multiplier-stack path (standard tier always; small
+            # tier when allocator bypassed / test contexts).
             # Score Multiplier: 50→0.8x, 75→1.0x, 90→1.2x.
             score_mult = 0.8 + ((score - 50) / 50.0) * 0.4
             score_mult = max(0.8, min(1.2, score_mult))

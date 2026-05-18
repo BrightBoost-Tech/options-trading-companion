@@ -302,8 +302,25 @@ class RiskBudgetEngine:
         deployable_capital: float,
         regime_input: Union[str, GlobalRegimeSnapshot, RegimeState],
         positions: List[Union[Dict, SpreadPosition]],
-        risk_profile: str = "balanced"
+        risk_profile: str = "balanced",
+        allocation_hint: Optional[float] = None,
     ) -> RiskBudgetReport:
+        """Compute risk budget report.
+
+        Args:
+            user_id: account scope
+            deployable_capital: cash available for new positions
+            regime_input: regime classification
+            positions: currently-open positions (for usage accounting)
+            risk_profile: "balanced" / "aggressive" / "conservative"
+                (legacy small/standard tier control; ignored at micro
+                and at small tier when allocation_hint is set)
+            allocation_hint: small-tier allocation-aware override.
+                When provided (post-2026-05-18 production path via
+                ``PortfolioAllocator``), overrides per-trade math.
+                When None, legacy multiplier-stack math applies. See
+                ``docs/small_tier_allocation.md``.
+        """
 
         regime = self._resolve_regime(regime_input)
         diagnostics = []
@@ -472,15 +489,25 @@ class RiskBudgetEngine:
             vega=RiskAllocations(used=vega_usage, max_limit=vega_cap, remaining=vega_cap-vega_usage, pct_used=vega_usage/vega_cap if vega_cap>0 else 0)
         )
 
-        # 5. Max Risk Per Trade (Sizing) — tier-aware as of 2026-04-27.
-        # Mirrors SmallAccountCompounder.calculate_variable_sizing for
-        # micro tier so per-trade budget and global allocation agree.
+        # 5. Max Risk Per Trade (Sizing) — tier-aware as of 2026-04-27;
+        # small-tier allocation-aware path added 2026-05-18.
+        # Mirrors SmallAccountCompounder.calculate_variable_sizing.
         if tier.name == "micro":
             # Operator spec: one trade at a time, 90% × regime_mult.
+            # Micro tier IGNORES allocation_hint by design.
             max_risk_trade = deployable_capital * 0.90 * regime_mult_for_micro
             diagnostics.append("micro_tier_active")
+        elif tier.name == "small" and allocation_hint is not None:
+            # Allocation-aware path (post-2026-05-18). The hint comes
+            # from PortfolioAllocator's per-cycle distribution and
+            # already accounts for score skew + envelope + ceiling.
+            # See docs/small_tier_allocation.md.
+            max_risk_trade = float(allocation_hint)
+            diagnostics.append("small_tier_allocation_hint_applied")
         else:
-            # Existing risk_profile-based logic for small/standard tiers.
+            # Legacy risk_profile-based logic for standard tier always +
+            # small tier when allocation_hint is absent (test paths /
+            # allocator-bypass).
             if risk_profile == "aggressive":
                 per_trade_pct = 0.05
             elif risk_profile == "conservative":
@@ -503,11 +530,13 @@ class RiskBudgetEngine:
 
         # 6. Global Remaining Check
         # If global remaining is 0, then per_trade should be 0 unless a
-        # tier-specific override is active (small_account_floor or
-        # micro_tier).
+        # tier-specific override is active (small_account_floor,
+        # micro_tier, or small-tier allocation hint which has already
+        # been clamped against the envelope by the upstream allocator).
         skip_zero_clamp = (
             "small_account_floor_active" in diagnostics
             or "micro_tier_active" in diagnostics
+            or "small_tier_allocation_hint_applied" in diagnostics
         )
         if global_alloc.remaining <= 10.0 and not skip_zero_clamp:
              max_risk_trade = 0.0

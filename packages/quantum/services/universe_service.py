@@ -1,4 +1,5 @@
 from typing import List, Dict, Optional
+import logging
 import os
 from datetime import datetime, timedelta
 from supabase import Client
@@ -9,6 +10,9 @@ import os
 # Fix import for when running from different contexts
 from packages.quantum.market_data import PolygonService
 from packages.quantum.services.earnings_calendar_service import EarningsCalendarService
+from packages.quantum.observability.alerts import alert
+
+logger = logging.getLogger(__name__)
 
 class UniverseService:
     # Top 50 liquid tickers + broad market ETFs
@@ -87,7 +91,35 @@ class UniverseService:
             self.supabase.table("scanner_universe").upsert(data, on_conflict="symbol").execute()
             print(f"Synced {len(data)} symbols to scanner_universe.")
         except Exception as e:
-            print(f"Error syncing universe: {e}")
+            # H9 Anti-pattern 2 fix (closes h9_allow_list.yml legacy
+            # entry, 2026-05-18): replace silent print-swallow with
+            # loud alert. Universe sync failure means the scanner
+            # operates against stale `scanner_universe` rows on the
+            # next cycle. The function preserves its pre-fix return
+            # contract (None, implicit) — visibility is the change,
+            # not control flow. `get_scan_candidates` falls back to
+            # BASE_UNIVERSE on read-side failure, so single-cycle
+            # write failure is recoverable; persistent failure
+            # compounds across cycles and surfaces via the alert
+            # repeating.
+            alert(
+                self.supabase,
+                alert_type="universe_sync_upsert_failed",
+                severity="warning",
+                message=f"Universe sync failed: {e}",
+                metadata={
+                    "error_class": type(e).__name__,
+                    "error_message": str(e)[:500],
+                    "batch_size": len(data),
+                    "function_name": "UniverseService.sync_universe",
+                    "consequence": (
+                        "scanner_universe table not refreshed this run; "
+                        "scanner falls back to BASE_UNIVERSE on read. "
+                        "Persistent failure compounds across cycles."
+                    ),
+                },
+            )
+            logger.error(f"sync_universe: upsert failed: {e}")
 
     def update_metrics(self):
         """

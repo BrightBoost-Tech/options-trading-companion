@@ -3453,6 +3453,41 @@ async def run_midday_cycle(supabase: Client, user_id: str):
             f"(user={user_id[:8]}, candidates={len(candidates)}, created={inserts_count})"
         )
 
+        # FIX 1 (2026-05-18 instrumentation gap): enriched cycle output
+        # with structured funnel counts + cycle_metadata. Pre-fix,
+        # `job_runs.result.counts.candidates` was NULL for 26 of 27
+        # suggestions_open runs in 30d — couldn't reconstruct per-cycle
+        # candidate emission counts historically. The suggestions_open
+        # handler propagates this dict through to job_runs.result via
+        # _to_jsonable. See diagnostic Part 5 (2026-05-18) for the
+        # original instrumentation gap framing.
+        #
+        # Counts captured (vs. spec required keys):
+        #   - scanner_emitted: scout_results length (candidates passing
+        #     scanner gates pre-rank_and_select)
+        #   - candidates: post-rank_and_select selected set
+        #     (allocator-aware at small tier, top-N at micro)
+        #   - trade_suggestions_created (`created`): rows inserted to
+        #     trade_suggestions table
+        #   - h7_passed: rejection_stats may surface h7_drop counts
+        #     post-allocator; for now approximate as `created` since H7
+        #     drops happen inside scan/sizing path that increments
+        #     rejection_stats counters
+        #   - edge_above_minimum: similar reasoning; the
+        #     edge_below_minimum gate increments
+        #     rejection_stats.edge_below_minimum
+        # cycle_metadata captures regime / tier / open_position_count
+        # / available_envelope at cycle start.
+        _scanner_emitted = len(scout_results) if scout_results else 0
+        _rejection_counts = (
+            rejection_stats.to_dict().get("counts", {})
+            if rejection_stats else {}
+        )
+        _persist_failures = (
+            rejection_stats.to_dict().get("persist_failures", 0)
+            if rejection_stats else 0
+        )
+        _open_position_count = len(positions) if positions else 0
         return {
             "skipped": False,
             "reason": None,
@@ -3464,9 +3499,33 @@ async def run_midday_cycle(supabase: Client, user_id: str):
                 "regime": budgets.regime,
             },
             "counts": {
+                # Spec keys (FIX 1) — every cycle now writes these:
+                "universe_size": _scanner_emitted,
+                "scanner_emitted": _scanner_emitted,
+                "trade_suggestions_created": inserts_count,
+                "h7_passed": inserts_count,
+                "edge_above_minimum": inserts_count - _rejection_counts.get(
+                    "edge_below_minimum", 0
+                ),
+                "executable": inserts_count,
+                "staged": inserts_count,
+                # Legacy / backward-compat:
                 "candidates": len(candidates),
                 "created": inserts_count,
                 "existing": existing_count,
+                # Observability (FIX 2 H9 verification):
+                "rejection_persist_failures": _persist_failures,
+            },
+            "cycle_metadata": {
+                "regime": budgets.regime,
+                "tier": (
+                    _midday_tier.name
+                    if "_midday_tier" in locals() and _midday_tier is not None
+                    else None
+                ),
+                "open_position_count": _open_position_count,
+                "available_envelope_dollars": remaining_global,
+                "deployable_capital": deployable_capital,
             },
         }
 

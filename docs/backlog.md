@@ -1851,6 +1851,96 @@ prioritization is operator decision when iv_rank consumers surface
 drift concerns OR when alternative architecture (Polygon tier
 upgrade / persist chain listings) is considered.
 
+**[2026-05-17] TIER 3 OBSERVATION: BKNG sparse coverage post-F2a.**
+
+**Priority:** TIER 3 — single-symbol residual; not blocking; iv_rank
+decidable for 69 of 70 active universe symbols.
+
+**Surfaced by:** Phase 3 v3 final verification (job_run
+`13b89a7e-...`, completed 2026-05-17 21:36 UTC, duration 213 min).
+
+**Observation:**
+
+After F2a (PR raising pagination cap from 1000 to 20000), 18 of 19
+previously-sparse symbols recovered to full coverage (61 rows in
+61-day window). BKNG (Booking Holdings) remained at 30 rows — same
+coverage as pre-F2a Phase 3 attempt.
+
+| Symbol | Pre-F2a rows | Post-F2a rows | Recovery |
+|---|---|---|---|
+| QQQ | 12 | 61 | ✓ Full |
+| GLD | 17 | 61 | ✓ Full |
+| IWM | 19 | 61 | ✓ Full |
+| META | 24 | 61 | ✓ Full |
+| TSLA | 27 | 61 | ✓ Full |
+| AVGO | 29 | 61 | ✓ Full |
+| **BKNG** | **30** | **30** | **✗ No change** |
+| MSFT | 33 | 61 | ✓ Full |
+| GOOGL/NVDA | 36 | 61 | ✓ Full |
+| (others 38-59) | various | 61 | ✓ Full |
+
+BKNG is the only symbol where F2a's pagination cap raise didn't
+help. This rules out "1000 cap was the universal sparse-coverage
+cause" — something BKNG-specific is in play.
+
+**Hypotheses (untested):**
+
+1. **Chain depth exceeds 20000 cap:** BKNG trades at ~$4500-5000/share.
+   ATM±20% range = $3600-6000. With $5 strike increments and many
+   expiries, chain might exceed even 20000 contracts. Would manifest
+   as the same "cap consumed by early expiries" issue F2a addressed
+   for other symbols, just at higher scale.
+
+2. **Strike-range filter interaction:** $5 strike increments at $4500
+   spot may produce different filter behavior than $1 increments at
+   $300-500 (most other symbols). Filter math could exclude BKNG
+   contracts that would otherwise be valid anchors.
+
+3. **Symbol-specific Polygon data peculiarity:** BKNG's options data
+   in Polygon may have an unusual structure (e.g., monthly-only
+   expiries during certain periods, sparse historical aggregates)
+   that differs from other ultra-high-priced underlyings.
+
+4. **Different code path:** Some BKNG-specific branch in the handler
+   or service code may take a different filtering or aggregation
+   path. Unlikely but possible.
+
+**Investigation surface (when prioritized):**
+
+- Empirical: direct Polygon query for BKNG contracts in F2a window
+  (matching what the handler would request). How many contracts
+  returned? How many distinct expiries? Compare to QQQ's pre-F2a
+  1000-contract / 8-expiry pattern.
+- Code path: trace handler's BKNG-specific behavior. Does anything
+  diverge from how other symbols flow through?
+- Cross-check: which dates is BKNG covered on vs missing? Pattern
+  similar to QQQ pre-F2a (early dates only) or different shape?
+
+**Effort estimate:**
+
+- Investigation: ~30-45 min (similar shape to original F2a
+  investigation)
+- Fix shape: depends on hypothesis confirmed; range from "raise
+  cap further to 50000+" (if H1) to architectural (if H4)
+
+**Anti-criteria (don't prioritize if):**
+
+- iv_rank for 69 of 70 symbols is acceptable for current strategy
+  decisions
+- Daily refresh will close BKNG's gap over ~30 trading days
+- BKNG-specific operations (if any) tolerate sparse historical
+  iv_rank
+
+**Status:** Tier 3 observation. Captured. Investigation when
+prioritized or convenient.
+
+**Cross-references:**
+
+- F2a PR (pagination cap raise; worked for 18 other symbols)
+- Phase 3 v3 result (job_run `13b89a7e-...`, completed 2026-05-17
+  21:36 UTC, duration 213 min)
+- Phase 3 sparse-coverage investigation synthesis Sunday 2026-05-17
+
 ---
 
 ## Backlog (post-promotion)

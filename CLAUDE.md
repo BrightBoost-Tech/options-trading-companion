@@ -160,6 +160,17 @@ in code (`services/replay/`), gated off via `REPLAY_ENABLE=0`. Designed for
 post-incident forensics. Not active. Evaluate after micro_live stabilizes —
 either wire up or remove using the v4-accounting playbook.
 
+### v4 PnL ledger subsystem (dormant)
+
+`position_legs`, `position_groups`, `position_leg_marks` exist in code
+(`services/position_pnl_service.py` + handlers `jobs/handlers/refresh_ledger_marks_v4.py`
++ `jobs/handlers/run_market_hours_ops_v4.py`), not wired to `scheduler.py`.
+Zero rows in all three tables; zero `job_runs` for `refresh_ledger_marks_v4`
+in 30 days. Same operational shape as the Replay subsystem above. Evaluate
+after micro_live stabilizes — either wire up or remove using the
+v4-accounting playbook. H9-compliant as of 2026-05-18 (PR #968 migrated the
+3 silent-swallow sites — see `docs/bugs_fixed_history.md`).
+
 ---
 
 ## Market Data Provider Routing
@@ -495,6 +506,7 @@ Gate to `micro_live`: 4 consecutive Alpaca paper green days (not internal fills)
 
 ### Recently fixed (last 7 days)
 
+- 2026-05-18: H9 legacy sweep 3-of-3 closed (PR #968) — `position_pnl_service.refresh_marks_for_user` + `compute_group_nlv` migrated to `alert()` shape at 3 swallow sites. Allow-list 5 → 4 entries (remaining 4 are chain-level-verified false positives + the analyzed-and-deferred `alpaca_order_sync.sync_orders`). Function is part of the dormant v4 PnL ledger subsystem; H9 fix is correct shape if/when the subsystem wires up
 - 2026-05-18: H9 legacy sweep (2 of 3 closed) — `universe_service.sync_universe` print-swallow → `alert()`; `iv_point_service.upsert_point` deleted as dead code (zero production callers; canonical write path is `IVRepository.upsert_iv_point`). Allow-list 7 → 5 entries
 - 2026-05-18: #62a-D1 architectural seam closure — fork.py:67 now reads `promoted_at` via `get_current_champion` helper; 2 silent-failure `is_champion` query sites rewritten; H13 doctrine entry codified; migration `20260518000001_promote_aggressive_cohort.sql` ships with the PR
 - 2026-05-18: H9 AST gate flipped to strict mode (warn-only → strict; allow-list held at 7 entries through the week; zero non-allow-listed violations at flip time)
@@ -590,7 +602,7 @@ TREAT WITH CARE:
 
 1. **PR #908 empirical validation (waiting on next natural close)** — PR #908's mleg sign-flip + clamp is live in the worker (verified 2026-05-12 H8 false-alarm investigation) but as of 2026-05-17 still untested on a real close: 0 paper_positions opened OR closed since 2026-05-12, so the validation event hasn't been triggerable. Validation remains valid; just dormant. Original framing ("tomorrow's first close") is stale — should be read as "whenever the next position closes naturally". Capture spec unchanged: `limit_price` sign, `abs(limit_price)` ≥ 0.01, broker response. Failure-mode triage in `docs/backlog.md` "Recent operational events" → PR #908 empirical validation entry. Also still on watch: Tier 1 body acceptance smoke (`python scripts/run_signed_task.py alpaca_order_sync --force-rerun`).
 2. **H9 Convention Slot 2 — silent-exception grep test (queued, promoted from #3 2026-05-18 after #62a-D1 closed).** Slot 1 (AST gate) closed 2026-05-18 with strict-mode flip; allow-list stable at 7 entries since ship, zero non-allow-listed violations on main, this week's 6 PRs all passed the gate without expansion. Slot 2 was originally framed as a complementary regex/grep test for silent-exception shapes that AST inspection might miss; may consolidate with Slot 1 if Slot 1's surface proves adequate. Decision pending observation of strict-mode CI behavior over the next ~2 weeks. Slot 3 (Literal status returns) already adopted as convention for new wrappers; no separate PR needed.
-3. **H9 legacy migration candidates (1 of 4 remaining; 2 closed 2026-05-18; 1 deferred; 1 analyzed-and-deferred).** Allow-list shrunk 7 → 5 entries. Closed: `universe_service.sync_universe` (print-swallow → alert) and `iv_point_service.upsert_point` (deleted as dead code). Remaining legacy candidate: `position_pnl_service.refresh_marks_for_user` (~2-4h; same shape as PR #919 fix applies — per-position alert + partial-status enum). Analyzed and deferred: `alpaca_order_sync.sync_orders` — diagnostic 2026-05-18 concluded the structure is functionally sound; incidents concentrate at dispatch edges, not at structure; re-evaluate at 2026-08-12 allow-list expiration. Full analysis + tier-transition watch items: see `docs/sync_orders_analysis.md`. Both stay on the allow-list with 2026-08-12 forced re-review. NOTE: previous Active focus item (#62a-D1 architectural PR) closed 2026-05-18.
+3. **H9 legacy migration candidates — genuine-legacy arc CLOSED 2026-05-18.** All 3 originally-flagged candidates are resolved: `universe_service.sync_universe` migrated (PR #966), `iv_point_service.upsert_point` deleted as dead code (PR #966), `position_pnl_service.refresh_marks_for_user` migrated (PR #968). Allow-list shrunk 7 → 4 entries. The 4 remaining: 3 chain-level-verified false positives (`iv_repository.upsert_iv_point`, `execution_router.sync_positions`, `position_sync.sync_from_alpaca`) + 1 analyzed-and-deferred nested-handler refactor candidate (`alpaca_order_sync.sync_orders` — see `docs/sync_orders_analysis.md`). All 4 stay on the allow-list with 2026-08-12 forced re-review. NOTE: previous Active focus item (#62a-D1 architectural PR) closed 2026-05-18.
 
 See `docs/roadmap.md` for the full Active focus block including recently-closed items and `docs/backlog.md` for full item descriptions and the catalogs (#62a schema drift, #72 loud-error doctrine).
 

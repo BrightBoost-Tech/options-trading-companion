@@ -68,25 +68,15 @@ allow_list:
 
   # ─────────────────────────────────────────────────────────────────
   # Legacy migration candidates — function-level silent swallows
-  # that genuinely match H9 violation shape. Documented here as
-  # deferred work; entry rationale is the migration target. Sized
-  # too large to fix inline as part of the Slot 1 PR; will surface
-  # as backlog items for follow-up.
+  # that genuinely match H9 violation shape. The original cohort of
+  # 3 candidates was resolved between PR #966 (sync_universe migrate,
+  # iv_point_service.upsert_point delete) and PR #968 (this PR —
+  # position_pnl_service.refresh_marks_for_user migrate). The
+  # alpaca_order_sync.sync_orders entry below is a separate
+  # "nested-handler" refactor candidate — analyzed 2026-05-18 and
+  # deferred per docs/sync_orders_analysis.md; allow-list entry
+  # remains pending operator re-evaluation at 2026-08-12 expiration.
   # ─────────────────────────────────────────────────────────────────
-
-  - module: packages.quantum.services.position_pnl_service
-    function: refresh_marks_for_user
-    rationale: >-
-      Legacy leg-level mark refresh; distinct from
-      paper_mark_to_market_service.refresh_marks (PR #919+#920 fix
-      path). Has logger.warning swallows on per-leg and per-group
-      errors with no alerts. Returns errors list to caller but
-      relies on caller to inspect. Migration candidate — same shape
-      as PR #919 fix would apply (add per-position alert + return
-      partial-status enum). Tracked as H9 follow-up.
-    reviewer: Operator
-    added: "2026-05-12"
-    expires: "2026-08-12"
 
   - module: packages.quantum.jobs.handlers.alpaca_order_sync
     function: sync_orders

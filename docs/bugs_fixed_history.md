@@ -6,6 +6,32 @@ Entries are verbatim — when a fix moves out of the CLAUDE.md window, copy the 
 
 ## Last 30 days
 
+- **2026-05-18 H9 legacy sweep 3-of-3 (PR #968):** Final genuine H9
+  legacy candidate closed. `position_pnl_service.refresh_marks_for_user`
+  (and `compute_group_nlv`) had 3 silent-swallow sites that matched
+  H9 Anti-pattern 2 — `errors.append + logger.warning` with no
+  `alert()`. Migrated all three to call the canonical `alert()` helper
+  at severity `warning`, with `errors.append` and `logger.warning`
+  preserved as secondary channels (typed-Result contract for callers
+  + log visibility). Alert types: `position_pnl_mark_leg_failed`,
+  `position_pnl_group_update_failed`, `position_pnl_compute_nlv_failed`.
+  Allow-list shrunk 5 → 4 entries (remaining 4 are all chain-level-
+  verified false positives or the analyzed-and-deferred
+  `alpaca_order_sync.sync_orders` per `docs/sync_orders_analysis.md`).
+  **BUG-A-safe finding:** the function's MTM math operates per-leg
+  (each leg has its own `qty_current` and `avg_cost_open`); the
+  scale-asymmetry shape that fired BUG-A in `intraday_risk_monitor`
+  doesn't apply here structurally. **Dormant-subsystem framing:**
+  function is part of the v4 PnL ledger subsystem — `position_legs`,
+  `position_groups`, `position_leg_marks` exist but are empty; zero
+  `job_runs` for `refresh_ledger_marks_v4` in 30 days; not wired to
+  `scheduler.py`. Same operational shape as the Replay/forensic
+  subsystem. The H9 migration is correct shape if/when the v4 ledger
+  ever gets wired up; the wire-or-remove decision is deferred per
+  the CLAUDE.md "v4-accounting playbook" framing. Files:
+  `packages/quantum/services/position_pnl_service.py:184-186,192-194,282-287`;
+  `packages/quantum/tests/h9_allow_list.yml` (entry removed);
+  `CLAUDE.md` (new dormant-subsystem entry).
 - **2026-05-18 staleness-gate over-tightening on routine regimes:**
   `ops_health_service.compute_market_data_freshness` per-symbol decision
   combined `snap.quality.is_stale` (vendor-quality flag set by

@@ -244,13 +244,18 @@ class TestAllowListShrunk(unittest.TestCase):
             "after FIX 2 (dead-code deletion)."
         )
 
-    def test_third_legacy_candidate_still_present(self):
-        """position_pnl_service.refresh_marks_for_user remains — this
-        sweep is 2-of-3 scope. The third needs separate effort."""
-        self.assertIn(
+    def test_third_legacy_candidate_now_also_removed(self):
+        """Updated 2026-05-18 by PR #968: when PR #966 shipped, this
+        test asserted the third candidate (refresh_marks_for_user)
+        was STILL on the allow-list as a deferred item. PR #968
+        closed that third candidate, completing the 3-of-3 legacy
+        sweep. The assertion is inverted to defend against
+        accidental re-introduction."""
+        self.assertNotIn(
             "function: refresh_marks_for_user", self.allow_list_src,
-            "position_pnl_service.refresh_marks_for_user should still "
-            "be on the allow-list (separate effort).",
+            "position_pnl_service.refresh_marks_for_user was removed "
+            "from the allow-list by PR #968 (the 3rd and final legacy "
+            "candidate migration).",
         )
 
     def test_chain_level_verified_entries_still_present(self):

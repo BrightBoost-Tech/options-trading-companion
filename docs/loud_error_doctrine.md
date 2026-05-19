@@ -1096,6 +1096,74 @@ while it's fresh — the operator-side question for Monday review is
 wrapper-grep/type-narrowing candidates above), not whether the
 class is real.
 
+#### H9 generalization — silent decisions (2026-05-20)
+
+H9 was originally codified around error handling: silent
+try/except patterns where wrappers swallow exceptions and
+consumers infer success from absence-of-exception. The
+underlying principle is broader: **any decision the system makes
+that affects downstream behavior should leave a queryable
+trace.** Error handling is one instance; selection/filter/
+threshold decisions are another.
+
+**Operational instance discovered 2026-05-19:** universe
+selection via `UniverseService.get_scan_candidates(limit=50)`
+was making 50-of-70 selection decisions every scanner cycle
+with zero observability. The bottom 20 symbols by
+`liquidity_score` were silently dropped — no rejection record,
+no alert, no surface anywhere. 19 of the 34 never-emitter
+symbols surfaced in that day's funnel diagnostic were
+attributable to this single silent-truncation site. The pattern
+is structurally identical to silent-error-swallow: a decision
+boundary with no verification.
+
+**General pattern:** when a function returns a SUBSET of
+available inputs (filter, top-N, threshold cut), the function
+must log what was *excluded*, not just what was *included*.
+Consumers of the function naturally verify inclusion (they see
+the returned set); observability of exclusion requires that
+the dropped tail also be queryable. Without it, "system did
+nothing for symbol X" is operationally indistinguishable from
+"symbol X was silently dropped at an early boundary."
+
+**Convention:** the four verified-write rules above generalize
+to verified-decision. Replace "side effect" with "selection
+decision" and "anchor checkpoint" with "queryable exclusion
+log":
+
+1. **Selectors return outcome, not just inclusion.** The
+   wrapper's primary return is the included set; the
+   observability surface captures both included and excluded
+   sets with the decision criteria (threshold, score, reason).
+2. **Consumers can verify the decision at anchor checkpoints.**
+   The exclusion log IS the anchor — independent of the
+   wrapper's success indicator, queryable post-hoc.
+3. **Selector-write failure must `alert()`.** The exclusion
+   log writer is itself H9-compliant; observability cannot
+   silently regress.
+4. **Class-prevention tests at the decision boundary.** Tests
+   walk the selector and assert both halves of the decision
+   are captured.
+
+**Operational instances of this generalized pattern** (catalog
+as discovered):
+
+- 2026-05-20: `universe_service.get_scan_candidates` →
+  `universe_selection_log` table; verified-write per Rule 3
+  via `universe_selection_log_write_failed` alert. Resolved
+  in PR \<this PR\>.
+- Future instances: add as discovered. Likely surfaces:
+  ranker top-N cuts, EV-floor filters, strategy_selector
+  emission gates, any `policy_lab` cohort selection step.
+  Each is a decision boundary where exclusion is operationally
+  important but pre-PR-time observability typically only
+  captured inclusion.
+
+The doctrine catalog (Anti-pattern 2, Anti-pattern 8) remains
+specific to error-handling shapes. H9 sits above both; the
+silent-decision generalization extends H9's class without
+introducing a new top-level entry — the principle is the same.
+
 ### H10 — Stale state cascades through pipeline gates (ghost reconciliation is load-bearing)
 
 A single stale row in a hot table can suppress an entire pipeline by

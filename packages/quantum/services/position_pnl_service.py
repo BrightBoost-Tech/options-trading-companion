@@ -22,6 +22,8 @@ from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Any, Dict, List, Optional, Tuple
 
+from packages.quantum.observability.alerts import alert
+
 logger = logging.getLogger(__name__)
 
 
@@ -182,7 +184,35 @@ class PositionPnLService:
                             missing_quote_skips += 1
                         errors.append(f"Leg {leg['id']}: {error_msg}")
                 except Exception as e:
+                    # H9 Anti-pattern 2 fix (closes h9_allow_list.yml legacy
+                    # entry, 2026-05-18): per-leg failures used to log a
+                    # warning and append to the errors list but never
+                    # emit an alert. Caller-side inspection of the errors
+                    # list is fragile vs an alert side-channel. The
+                    # errors.append and logger.warning are preserved as
+                    # secondary channels; alert() is the visibility
+                    # primary. Function is part of the dormant v4 PnL
+                    # ledger subsystem (see CLAUDE.md "v4 PnL ledger
+                    # subsystem (dormant)") — these alerts won't fire
+                    # today but are correct shape if/when the subsystem
+                    # gets wired up.
                     errors.append(f"Leg {leg['id']}: {str(e)}")
+                    alert(
+                        self.client,
+                        alert_type="position_pnl_mark_leg_failed",
+                        severity="warning",
+                        message=f"Failed to mark leg {leg['id']}: {e}",
+                        user_id=user_id,
+                        symbol=leg.get("symbol"),
+                        metadata={
+                            "leg_id": leg["id"],
+                            "group_id": leg.get("group_id"),
+                            "symbol": leg.get("symbol"),
+                            "error_class": type(e).__name__,
+                            "error_message": str(e)[:500],
+                            "function_name": "PositionPnLService.refresh_marks_for_user",
+                        },
+                    )
                     logger.warning(f"Error marking leg {leg['id']}: {e}")
 
             # 5. Update group-level aggregates
@@ -190,7 +220,24 @@ class PositionPnLService:
                 try:
                     self._update_group_pnl(group_id, marked_at)
                 except Exception as e:
+                    # H9 Anti-pattern 2 fix (same migration as Site 1
+                    # above). Per-group failures preserve errors.append +
+                    # logger.warning as secondary channels; alert() is
+                    # the visibility primary.
                     errors.append(f"Group {group_id}: {str(e)}")
+                    alert(
+                        self.client,
+                        alert_type="position_pnl_group_update_failed",
+                        severity="warning",
+                        message=f"Failed to update group PnL {group_id}: {e}",
+                        user_id=user_id,
+                        metadata={
+                            "group_id": group_id,
+                            "error_class": type(e).__name__,
+                            "error_message": str(e)[:500],
+                            "function_name": "PositionPnLService.refresh_marks_for_user",
+                        },
+                    )
                     logger.warning(f"Error updating group PnL {group_id}: {e}")
 
             return {
@@ -280,6 +327,33 @@ class PositionPnLService:
             }
 
         except Exception as e:
+            # H9 Anti-pattern 2 fix (same migration as Sites 1+2 in
+            # refresh_marks_for_user). The outer try/except here is a
+            # typed-Result wrapper (returns {"success": False, "error":...})
+            # — that part is H9 Valid pattern. The migration adds alert()
+            # for visibility because the typed-Result alone relies on the
+            # caller inspecting `success` and `error`, which is fragile.
+            #
+            # Gate-coverage note: compute_group_nlv's name doesn't match
+            # the H9 AST gate's WRAPPER_NAME_PREFIXES (refresh_, submit_,
+            # upsert_, persist_, sync_, flush_, write_), so the gate
+            # didn't separately flag this swallow. The migration is
+            # correct regardless — visibility for callers — but the
+            # gate-coverage observation is similar to the sync_orders
+            # inner-helper finding from the 2026-05-18 diagnostic
+            # (docs/sync_orders_analysis.md).
+            alert(
+                self.client,
+                alert_type="position_pnl_compute_nlv_failed",
+                severity="warning",
+                message=f"Failed to compute NLV for group {group_id}: {e}",
+                metadata={
+                    "group_id": group_id,
+                    "error_class": type(e).__name__,
+                    "error_message": str(e)[:500],
+                    "function_name": "PositionPnLService.compute_group_nlv",
+                },
+            )
             logger.error(f"compute_group_nlv failed for {group_id}: {e}")
             return {
                 "success": False,

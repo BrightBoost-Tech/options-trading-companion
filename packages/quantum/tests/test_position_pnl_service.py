@@ -322,6 +322,215 @@ class TestRefreshMarksForUser(unittest.TestCase):
         self.assertIn("missing_quote_skips", diag)
 
 
+# ─────────────────────────────────────────────────────────────────
+# PR #968 — H9 migration regression tests
+#
+# Three swallow sites previously matched H9 Anti-pattern 2:
+#   - refresh_marks_for_user per-leg failure (line 184-186 pre-fix)
+#   - refresh_marks_for_user per-group failure (line 192-194 pre-fix)
+#   - compute_group_nlv outer swallow (line 282-287 pre-fix)
+#
+# Each migrated to call alert() at severity='warning' while
+# preserving the original errors.append + logger.warning secondary
+# channels. The function is part of the dormant v4 PnL ledger
+# subsystem (zero production callers today), so these alerts won't
+# fire in production yet — but the migration closes the H9 allow-
+# list entry and is correct shape if/when the subsystem wires up.
+# ─────────────────────────────────────────────────────────────────
+
+
+class TestH9AlertOnLegFailure(unittest.TestCase):
+    """Site 1: refresh_marks_for_user per-leg failure fires alert."""
+
+    def setUp(self):
+        self.mock_client = MagicMock()
+        self.service = PositionPnLService(self.mock_client, api_key="test-key")
+
+    def test_per_leg_failure_fires_alert(self):
+        """When _mark_leg raises, alert() fires with the right shape
+        AND the errors list is appended (typed-Result contract
+        preserved) AND logger.warning still fires (secondary channel)."""
+        mock_leg = {
+            "id": "leg-1",
+            "group_id": "group-1",
+            "user_id": "user-1",
+            "symbol": "AAPL240119C00150000",
+            "side": "LONG",
+            "qty_current": 10,
+            "avg_cost_open": 2.50,
+            "multiplier": 100,
+        }
+
+        self.mock_client.table.return_value.select.return_value.eq.return_value.neq.return_value.execute.return_value = MagicMock(
+            data=[mock_leg]
+        )
+        self.service._fetch_quotes_batched = MagicMock(return_value={
+            "AAPL240119C00150000": {
+                "bid": 3.00, "ask": 3.10, "mid": 3.05, "last": 3.04,
+                "quality_score": 85, "freshness_ms": 500, "is_stale": False,
+            }
+        })
+        # _mark_leg raises — triggers Site 1 swallow → alert
+        self.service._mark_leg = MagicMock(
+            side_effect=RuntimeError("simulated mark failure")
+        )
+
+        with patch(
+            "packages.quantum.services.position_pnl_service.alert"
+        ) as mock_alert:
+            result = self.service.refresh_marks_for_user("user-1")
+
+        # Result still flows through — errors list populated.
+        self.assertIn("Leg leg-1", result["errors"][0])
+        self.assertFalse(result["success"])
+
+        # Alert fired with correct shape.
+        mock_alert.assert_called_once()
+        call = mock_alert.call_args
+        # First positional is the supabase client.
+        self.assertIs(call.args[0], self.mock_client)
+        kwargs = call.kwargs
+        self.assertEqual(kwargs["alert_type"], "position_pnl_mark_leg_failed")
+        self.assertEqual(kwargs["severity"], "warning")
+        self.assertEqual(kwargs["user_id"], "user-1")
+        self.assertEqual(kwargs["symbol"], "AAPL240119C00150000")
+        meta = kwargs["metadata"]
+        self.assertEqual(meta["leg_id"], "leg-1")
+        self.assertEqual(meta["group_id"], "group-1")
+        self.assertEqual(meta["error_class"], "RuntimeError")
+        self.assertIn("simulated mark failure", meta["error_message"])
+
+
+class TestH9AlertOnGroupFailure(unittest.TestCase):
+    """Site 2: refresh_marks_for_user per-group failure fires alert."""
+
+    def setUp(self):
+        self.mock_client = MagicMock()
+        self.service = PositionPnLService(self.mock_client, api_key="test-key")
+
+    def test_per_group_failure_fires_alert(self):
+        """When _update_group_pnl raises, alert() fires with the right
+        shape. The leg-marking happy path runs to add the group to
+        the `groups_updated` set; then _update_group_pnl raises and
+        triggers Site 2."""
+        mock_leg = {
+            "id": "leg-1",
+            "group_id": "group-X",
+            "user_id": "user-1",
+            "symbol": "AAPL240119C00150000",
+            "side": "LONG",
+            "qty_current": 10,
+            "avg_cost_open": 2.50,
+            "multiplier": 100,
+        }
+        self.mock_client.table.return_value.select.return_value.eq.return_value.neq.return_value.execute.return_value = MagicMock(
+            data=[mock_leg]
+        )
+        self.service._fetch_quotes_batched = MagicMock(return_value={
+            "AAPL240119C00150000": {
+                "bid": 3.00, "ask": 3.10, "mid": 3.05, "last": 3.04,
+                "quality_score": 85, "freshness_ms": 500, "is_stale": False,
+            }
+        })
+        # _mark_leg succeeds → group goes into groups_updated.
+        self.service._mark_leg = MagicMock(return_value={"success": True})
+        # _update_group_pnl raises → triggers Site 2 swallow → alert.
+        self.service._update_group_pnl = MagicMock(
+            side_effect=ConnectionError("simulated group update failure")
+        )
+
+        with patch(
+            "packages.quantum.services.position_pnl_service.alert"
+        ) as mock_alert:
+            result = self.service.refresh_marks_for_user("user-1")
+
+        # Errors list populated.
+        self.assertIn("Group group-X", result["errors"][0])
+
+        # Alert fired with correct shape.
+        mock_alert.assert_called_once()
+        call = mock_alert.call_args
+        kwargs = call.kwargs
+        self.assertEqual(kwargs["alert_type"], "position_pnl_group_update_failed")
+        self.assertEqual(kwargs["severity"], "warning")
+        self.assertEqual(kwargs["user_id"], "user-1")
+        meta = kwargs["metadata"]
+        self.assertEqual(meta["group_id"], "group-X")
+        self.assertEqual(meta["error_class"], "ConnectionError")
+        self.assertIn("simulated group update failure", meta["error_message"])
+
+
+class TestH9AlertOnComputeNlvFailure(unittest.TestCase):
+    """Site 3: compute_group_nlv outer swallow fires alert."""
+
+    def setUp(self):
+        self.mock_client = MagicMock()
+        self.service = PositionPnLService(self.mock_client, api_key="test-key")
+
+    def test_compute_nlv_failure_fires_alert(self):
+        """When the position_groups SELECT raises, alert() fires AND
+        the typed-Result return shape (success=False + error) is
+        preserved."""
+        self.mock_client.table.return_value.select.return_value.eq.return_value.single.return_value.execute.side_effect = (
+            RuntimeError("simulated db failure")
+        )
+
+        with patch(
+            "packages.quantum.services.position_pnl_service.alert"
+        ) as mock_alert:
+            result = self.service.compute_group_nlv("group-1")
+
+        # Typed-Result preserved.
+        self.assertFalse(result["success"])
+        self.assertIn("simulated db failure", result["error"])
+
+        # Alert fired with correct shape.
+        mock_alert.assert_called_once()
+        call = mock_alert.call_args
+        kwargs = call.kwargs
+        self.assertEqual(kwargs["alert_type"], "position_pnl_compute_nlv_failed")
+        self.assertEqual(kwargs["severity"], "warning")
+        meta = kwargs["metadata"]
+        self.assertEqual(meta["group_id"], "group-1")
+        self.assertEqual(meta["error_class"], "RuntimeError")
+        self.assertIn("simulated db failure", meta["error_message"])
+
+
+class TestAllowListEntryRemoved(unittest.TestCase):
+    """Source-level guard: confirm the refresh_marks_for_user entry
+    was dropped from h9_allow_list.yml. Pattern matches
+    test_h9_legacy_sweep.py TestAllowListShrunk style."""
+
+    @classmethod
+    def setUpClass(cls):
+        from pathlib import Path
+        cls.allow_list_src = (
+            Path(__file__).resolve().parent / "h9_allow_list.yml"
+        ).read_text(encoding="utf-8")
+
+    def test_refresh_marks_for_user_removed_from_allow_list(self):
+        self.assertNotIn(
+            "function: refresh_marks_for_user", self.allow_list_src,
+            "refresh_marks_for_user entry should be removed after the "
+            "PR #968 H9 migration."
+        )
+
+    def test_chain_level_verified_entries_still_present(self):
+        """4 chain-level-verified false positives + the sync_orders
+        nested-handler analysis-and-deferred entry must remain
+        untouched by this PR."""
+        for name in (
+            "function: upsert_iv_point",      # iv_repository
+            "function: sync_positions",       # execution_router
+            "function: sync_from_alpaca",     # position_sync
+            "function: sync_orders",          # alpaca_order_sync
+        ):
+            self.assertIn(
+                name, self.allow_list_src,
+                f"{name} entry should still be on the allow-list."
+            )
+
+
 class TestThrottling(unittest.TestCase):
     """Tests for v1.1 throttling and batching."""
 

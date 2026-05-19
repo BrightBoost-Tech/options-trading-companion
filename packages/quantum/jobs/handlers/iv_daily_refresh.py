@@ -26,7 +26,10 @@ def run(payload: Dict[str, Any], ctx: Any = None) -> Dict[str, Any]:
         # 2. Fetch Universe
         try:
             universe_service = UniverseService(client)
-            candidates = universe_service.get_scan_candidates(limit=200)
+            candidates = universe_service.get_scan_candidates(
+                limit=200,
+                caller="iv_daily_refresh.run",
+            )
             symbols = list(set([c['symbol'] for c in candidates] + ['SPY', 'QQQ', 'IWM', 'DIA']))
             print(f"[{JOB_NAME}] Found {len(symbols)} symbols to process.")
         except Exception as e:

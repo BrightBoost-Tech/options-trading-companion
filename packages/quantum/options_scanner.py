@@ -2401,7 +2401,10 @@ def scan_for_opportunities(
                 # slots, pushing sub-$50 ETFs (XLU, XLB, sector ETFs) out of the
                 # top-30 cut. limit=50 keeps the cheap-ETF candidates reachable
                 # for micro-tier filtering without expanding scan cost much.
-                universe = universe_service.get_scan_candidates(limit=50)
+                universe = universe_service.get_scan_candidates(
+                    limit=50,
+                    caller="options_scanner.scan_for_opportunities",
+                )
                 symbols = [u['symbol'] for u in universe]
                 # Prefill from Universe if available
                 earnings_map = {u["symbol"]: u.get("earnings_date") for u in universe}

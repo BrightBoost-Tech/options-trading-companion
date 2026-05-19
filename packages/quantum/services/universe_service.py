@@ -211,36 +211,189 @@ class UniverseService:
             except Exception as e:
                 print(f"[UniverseService] Error saving metrics: {e}")
 
-    def get_scan_candidates(self, limit: int = 30) -> List[Dict]:
+    def get_scan_candidates(
+        self,
+        limit: int = 30,
+        *,
+        job_run_id: Optional[str] = None,
+        caller: Optional[str] = None,
+    ) -> List[Dict]:
         """
         Returns top candidates for scanning.
         Returns list of dicts: {'symbol': str, 'earnings_date': str | None}
+
+        Every call writes one row to universe_selection_log capturing
+        the full selection decision (selected + dropped, with score
+        thresholds). This closes the H9 silent-decision observability
+        gap discovered 2026-05-19: prior to this surface the top-N
+        truncation made 50-of-70 selection decisions per cycle with
+        zero queryable trace. See docs/loud_error_doctrine.md H9
+        silent-decision generalization.
+
+        The write is fail-soft (selection cannot be blocked by an
+        observability failure) but loud — insert failure fires
+        `universe_selection_log_write_failed` (severity=warning).
         """
+        candidates: List[Dict] = []
+        all_rows: List[Dict] = []
+        fallback_used = False
+        fallback_reason: Optional[str] = None
+
         try:
-            # Query: active, sort by liquidity_score desc, limit
+            # Pull FULL active universe ordered by liquidity_score DESC,
+            # symbol ASC (mirrors PostgREST default tiebreak). We slice
+            # top-N for the return value AND keep the dropped tail for
+            # the selection log. The cost difference vs the previous
+            # `.limit(limit)` query is ~20 extra rows at current
+            # universe size (70 active); negligible.
             res = self.supabase.table("scanner_universe")\
-                .select("symbol, earnings_date")\
+                .select("symbol, earnings_date, liquidity_score")\
                 .eq("is_active", True)\
                 .order("liquidity_score", desc=True)\
-                .limit(limit)\
+                .order("symbol", desc=False)\
                 .execute()
 
-            # Return dicts
-            candidates = []
-            for r in res.data:
+            all_rows = list(res.data or [])
+
+            for r in all_rows[:limit]:
                 candidates.append({
                     "symbol": r["symbol"],
-                    "earnings_date": r.get("earnings_date")
+                    "earnings_date": r.get("earnings_date"),
                 })
-
-            if candidates:
-                return candidates
         except Exception as e:
             print(f"Error getting candidates from DB: {e}")
+            fallback_used = True
+            fallback_reason = f"{type(e).__name__}: {str(e)[:200]}"
 
-        # Fallback to a slice of BASE_UNIVERSE if DB fails or is empty
-        print("Falling back to BASE_UNIVERSE")
-        return [{"symbol": s, "earnings_date": None} for s in self.BASE_UNIVERSE[:limit]]
+        # Fallback to a slice of BASE_UNIVERSE if DB fails or is empty.
+        if not candidates:
+            if not fallback_used:
+                fallback_used = True
+                fallback_reason = fallback_reason or "empty_query_result"
+            print("Falling back to BASE_UNIVERSE")
+            candidates = [
+                {"symbol": s, "earnings_date": None}
+                for s in self.BASE_UNIVERSE[:limit]
+            ]
+
+        # Selection log write (H9 verified-decision). Best-effort, must
+        # not block the caller — but must alert loudly on failure so
+        # the observability surface itself can't silently regress.
+        try:
+            self._log_selection(
+                all_rows=all_rows,
+                selected=candidates,
+                limit=limit,
+                fallback_used=fallback_used,
+                fallback_reason=fallback_reason,
+                job_run_id=job_run_id,
+                caller=caller,
+            )
+        except Exception as log_err:
+            # Per Loud-Error Doctrine valid-pattern 5: alert-write
+            # failure must not undo the primary work (returning the
+            # candidate list). The alert helper itself is fail-soft
+            # to logger; this outer try guards against any further
+            # blow-up so the scanner's universe load is never
+            # blocked by an observability path failure.
+            try:
+                alert(
+                    self.supabase,
+                    alert_type="universe_selection_log_write_failed",
+                    severity="warning",
+                    message=(
+                        f"universe_selection_log write failed: "
+                        f"{type(log_err).__name__}: {str(log_err)[:200]}"
+                    ),
+                    metadata={
+                        "error_class": type(log_err).__name__,
+                        "error_message": str(log_err)[:500],
+                        "function_name": "UniverseService.get_scan_candidates",
+                        "caller": caller,
+                        "limit": limit,
+                        "candidates_returned": len(candidates),
+                        "consequence": (
+                            "Universe selection succeeded; observability "
+                            "row missing for this cycle. Selection itself "
+                            "is unaffected."
+                        ),
+                    },
+                )
+            except Exception as alert_err:
+                logger.exception(
+                    "universe_selection_log_write_failed alert also "
+                    "failed: %s", alert_err,
+                )
+
+        return candidates
+
+    def _log_selection(
+        self,
+        *,
+        all_rows: List[Dict],
+        selected: List[Dict],
+        limit: int,
+        fallback_used: bool,
+        fallback_reason: Optional[str],
+        job_run_id: Optional[str],
+        caller: Optional[str],
+    ) -> None:
+        """Write a universe_selection_log row capturing this call's
+        selection decision (inclusion + exclusion).
+
+        Raises on insert failure; caller fires the H9 alert. Verified-
+        write anchor: PostgREST returns `data` containing inserted rows;
+        a non-1-length response means the insert did not land and we
+        raise so the caller's alert path fires.
+        """
+        selected_symbols = [c["symbol"] for c in selected]
+        total_active = len(all_rows)
+        # Symbols beyond the slice that were active but not selected.
+        dropped_symbols = [
+            r["symbol"] for r in all_rows[limit:]
+        ] if all_rows else []
+
+        score_threshold: Optional[float] = None
+        score_at_cutoff: Optional[float] = None
+        if all_rows:
+            selected_rows = all_rows[:limit]
+            dropped_rows = all_rows[limit:]
+            if selected_rows:
+                score_threshold = selected_rows[-1].get("liquidity_score")
+            if dropped_rows:
+                score_at_cutoff = dropped_rows[0].get("liquidity_score")
+
+        payload = {
+            "job_run_id": job_run_id,
+            "total_active": total_active,
+            "limit_applied": int(limit),
+            "selected_count": len(selected_symbols),
+            "dropped_count": len(dropped_symbols),
+            "selected_symbols": selected_symbols,
+            "dropped_symbols": dropped_symbols,
+            "score_threshold": score_threshold,
+            "score_at_cutoff": score_at_cutoff,
+            "metadata": {
+                "caller": caller,
+                "fallback_used": fallback_used,
+                "fallback_reason": fallback_reason,
+                "sort_order": "liquidity_score DESC, symbol ASC",
+            },
+        }
+
+        res = self.supabase.table("universe_selection_log")\
+            .insert(payload)\
+            .execute()
+
+        # Verified-write anchor (Rule 2): PostgREST insert returns the
+        # inserted row in `data`. Empty `data` with no exception is the
+        # silent-rejection shape (RLS denial, etc.) — raise so the
+        # caller's alert fires.
+        if not getattr(res, "data", None):
+            raise RuntimeError(
+                "universe_selection_log insert returned empty data "
+                "(silent rejection — RLS / constraint / shape mismatch)"
+            )
 
     def get_universe(self, limit: int = 30):
         # Backwards-compatible alias

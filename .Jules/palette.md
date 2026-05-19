@@ -69,3 +69,7 @@
 ## 2025-06-06 - Accessible Disabled Tooltips
 **Learning:** Browsers disable mouse events on `disabled` buttons, preventing tooltips from appearing. Wrapping the disabled button in a focusable `span` (`tabIndex={0}`) allows the tooltip to trigger on hover and focus.
 **Action:** Always wrap disabled buttons in a `span` with `tabIndex={0}` and an explanatory `aria-label` when tooltips are required.
+
+## 2024-05-18 - Generating Unique ARIA Controls IDs
+**Learning:** Hardcoded `aria-controls` IDs like `"staged-list-content"` cause accessibility collisions if the component rendering the list (e.g. `TradeInbox.tsx`) is rendered multiple times, as the IDs will not be unique across the DOM.
+**Action:** Always use React's `useId()` hook (e.g., `const listId = React.useId()`) to dynamically generate unique IDs for `aria-controls` and matching `id` attributes to guarantee unique mappings across component instances.

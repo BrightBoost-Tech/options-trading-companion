@@ -1703,6 +1703,69 @@ architecture-drift, but is not yet codified. Until then: review the
 seam explicitly during architecture review, not just each subsystem
 in isolation.
 
+### H14 — Reference-document freshness: cite-then-verify
+
+Empirical reference documents have implicit freshness requirements.
+A doc that says "HBAN at $15.57 is a Class B fit" was true at the
+named date; it may not be true today. Citing the doc and acting on
+its conclusion without re-verifying against current state is a
+class of bug — the doc is correct as of its snapshot date; the
+**use** of the doc is wrong if it skips the verification step.
+
+This is the fourth doctrinal generalization in the H9 family
+shipped this week (alongside silent-decision PR #970, early-exit
+symmetry PR #972, verified-consumer PR #973). The shape is similar
+to H9 in that it's about an inferred fact going stale silently;
+distinct in that the staleness lives in a markdown file rather
+than in a code/data path.
+
+**Origin instance: 2026-05-21 KHC + HBAN composition addition.**
+`docs/structural_findings.md` Section 2 (dated 2026-05-14) cited
+HBAN at $15.57 as a clean Class B fit (sub-$30 narrow-strike debit
+spread, max_loss ~$75). The composition-addition PR pre-flight
+queried Alpaca for current HBAN chain; price had drifted to ~$38
+in 7 days (+144%). At $38 with $5-wide standard chain and wide
+bid-ask, HBAN was no longer a clean Class B fit. The pre-flight
+caught the drift; HBAN was deferred from the PR (KHC, which had
+drifted only +1% to ~$23.85, proceeded as planned).
+
+**Distinguishing signal:** the doc cites a specific empirical value
+(price, IV rank, ATM bid-ask, max_loss for a particular structure)
+at a named date. The consumer of the doc treats the value as a
+durable structural fact rather than a snapshot.
+
+**Anti-pattern:** "the doc says HBAN is a Class B fit; ship the
+composition addition" without verifying HBAN's current state.
+
+**Pattern (cite-then-verify):** when an empirical doc is cited as
+justification for a code/data change, the change includes a
+pre-flight verification step that re-runs the doc's empirical
+math against current state. If the verification surfaces drift,
+surface the finding to the operator before proceeding.
+
+**Mitigation:**
+- Pre-flight steps in PR prompts that cite empirical docs MUST
+  re-verify the cited values against current market/system state.
+- Empirical-reference docs should include a "Freshness caveat"
+  section explicitly naming the staleness risk (the H14 entry
+  here is the reference; `docs/structural_findings.md` has the
+  worked application).
+- Recurring re-verification mechanism (monthly pass; proposed by
+  the originating PR's `docs/structural_findings.md` update;
+  implementation TBD). Without a mechanism, the next session
+  reading the doc will repeat the surprise.
+
+**Diagnostic:** when a PR's premise rests on a citation from an
+empirical doc, ask: "when was this measured? Has the underlying
+state moved since? What changes if it has?" If the answer is "I
+don't know," verify before acting.
+
+**What this is NOT:** a critique of empirical docs. The docs are
+valuable — they capture hard-won structural understanding. The
+fix is in the **use** of the docs, not the docs themselves. The
+H14 entry codifies a use-time discipline, not a doc-time
+correction.
+
 **Numbering note:** the original #62a-D1 backlog framing called this
 "H12 candidate" before H12 was claimed by the framing-artifact
 discipline doctrine (codified 2026-05-13). Numbered H13 here per

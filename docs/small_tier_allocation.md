@@ -398,8 +398,27 @@ captured for future work:
 
 5. **Allocator-aware H7 pre-check:** allocator could pre-check H7
    per candidate and exclude unsizable candidates from the
-   allocation set, avoiding the post-allocation drop. Deferred
-   until the H7 drop rate is measured.
+   allocation set, avoiding the post-allocation drop.
+
+   **Status as of 2026-05-21:** the original "deferred until H7
+   drop rate is measured" framing was based on an untested
+   assumption that the allocator's output was being consumed by
+   the sizing path. The 2026-05-20 small-tier kill-site
+   investigation revealed PR #958's wiring gap — allocator
+   output written to `_allocator_allocated_budget` on candidate
+   dicts but never read by `calculate_variable_sizing` or
+   `RiskBudgetEngine.compute`. Sizing fell through to the
+   legacy multiplier stack at ~$24.76 per-trade vs. allocator's
+   intended ~$186-$370, and `contracts_by_risk = 0` bit before
+   H7's `contracts_by_round_trip` ever got a chance to bind.
+   PR \<this PR\> completes the wiring; **H7 drop rate at small
+   tier is now actually measurable**. Re-frame: measure H7 drop
+   rate empirically over N=10 small-tier cycles post-PR-\<this PR\>;
+   if H7 still bottlenecks, revisit the allocator-aware pre-check.
+   If H7 drop rate stays near zero (the prediction from yesterday's
+   H7 multi-option diagnostic), the pre-check stays deferred
+   indefinitely — H7 is doing its job downstream and the
+   pre-check would add complexity without measurable benefit.
 
 ---
 

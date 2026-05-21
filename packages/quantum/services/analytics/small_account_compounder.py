@@ -89,6 +89,67 @@ class SmallAccountCompounder:
         """
         score = candidate.get("score", 50)
 
+        # H9 verified-consumer defensive alert
+        # (codified docs/loud_error_doctrine.md H9 verified-consumer
+        # generalization, 2026-05-21). The producer in this chain is
+        # workflow_orchestrator's allocator wire-in, which writes
+        # `_allocator_allocated_budget` on the candidate dict. The
+        # consumer is the small-tier allocation-aware path below
+        # (tier=="small" and allocation_hint is not None). If a future
+        # refactor drops the threading from workflow_orchestrator (the
+        # exact regression that broke production 2026-05-18 → 2026-05-20
+        # before being detected by the 2026-05-20 kill-site investigation),
+        # this alert fires immediately rather than producing another
+        # silent-cycle outage. The legacy path still runs after the alert
+        # so a wiring regression keeps trading at degraded sizing rather
+        # than blocking the cycle.
+        if (
+            allocation_hint is None
+            and tier.name == "small"
+            and candidate.get("_allocator_allocated_budget") is not None
+        ):
+            try:
+                from packages.quantum.observability.alerts import (
+                    alert,
+                    _get_admin_supabase,
+                )
+                _budget = candidate.get("_allocator_allocated_budget")
+                _symbol = candidate.get("symbol") or candidate.get("ticker")
+                alert(
+                    _get_admin_supabase(),
+                    alert_type="allocator_hint_dropped",
+                    severity="high",
+                    symbol=_symbol,
+                    message=(
+                        f"Allocator emitted budget ${_budget} for {_symbol} "
+                        f"but calculate_variable_sizing received "
+                        f"allocation_hint=None — sizing will fall through "
+                        f"to legacy multiplier stack (~3% × score_mult) "
+                        f"and produce a ~6-8x smaller per-trade budget"
+                    ),
+                    metadata={
+                        "allocator_budget": _budget,
+                        "call_site": (
+                            "SmallAccountCompounder.calculate_variable_sizing"
+                        ),
+                        "tier": tier.name,
+                        "candidate_score": score,
+                        "doctrine_ref": (
+                            "H9 verified-consumer (docs/loud_error_doctrine.md)"
+                        ),
+                        "consequence": (
+                            "small-tier candidate sized via legacy "
+                            "multiplier stack; contracts_by_risk likely 0 "
+                            "for most debit-spread max_loss values"
+                        ),
+                    },
+                )
+            except Exception:
+                # Per Loud-Error Doctrine valid-pattern 5: alert-write
+                # failure must not undo the primary work (returning a
+                # sizing budget). Fall through to the legacy path.
+                pass
+
         # Regime Multiplier (applies to all tiers).
         regime_mult = 1.0
         if regime == "suppressed":

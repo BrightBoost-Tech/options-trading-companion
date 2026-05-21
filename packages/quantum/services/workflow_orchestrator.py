@@ -1907,6 +1907,66 @@ async def run_morning_cycle(supabase: Client, user_id: str):
     )
 
 
+def _build_cycle_metadata(
+    *,
+    exit_reason: Optional[str],
+    tier: Optional[str],
+    regime: Optional[str],
+    deployable_capital: Optional[float],
+    open_position_count: Optional[int],
+    available_envelope_dollars: Optional[float],
+) -> dict:
+    """Build cycle_metadata payload for job_runs.result.
+
+    All fields are Optional because pre-funnel early-exits may not
+    have computed budgets or scanner state yet. ``exit_reason`` is
+    None on the happy path, populated on early exits with one of:
+    ``micro_tier_position_open``, ``capital_scan_policy_block``,
+    ``global_risk_budget_exhausted``, ``no_candidates``,
+    ``scanner_failed``, ``no_suggestions_after_gates``.
+
+    Closes the asymmetric-observability gap surfaced by the
+    2026-05-20 verification — see docs/loud_error_doctrine.md
+    H9 silent-decision generalization, "Early-exit observability
+    symmetry" subsection.
+    """
+    return {
+        "exit_reason": exit_reason,
+        "tier": tier,
+        "regime": regime,
+        "deployable_capital": deployable_capital,
+        "open_position_count": open_position_count,
+        "available_envelope_dollars": available_envelope_dollars,
+    }
+
+
+def _build_enriched_counts(
+    *,
+    universe_size: Optional[int],
+    scanner_emitted: Optional[int],
+    trade_suggestions_created: Optional[int],
+    h7_passed: Optional[int],
+    edge_above_minimum: Optional[int],
+    executable: Optional[int],
+    staged: Optional[int],
+) -> dict:
+    """Build the v959 enriched counts payload.
+
+    All fields Optional. Pre-scanner exits emit None for all
+    funnel-stage counts. Post-scanner early-exits emit what was
+    measured before the exit.
+    """
+    return {
+        "universe_size": universe_size,
+        "scanner_emitted": scanner_emitted,
+        "trade_suggestions_created": trade_suggestions_created,
+        "h7_passed": h7_passed,
+        "edge_above_minimum": edge_above_minimum,
+        "executable": executable,
+        "staged": staged,
+    }
+
+
 def _legs_have_valid_nbbo_and_mid(legs: list) -> bool:
     """
     Check if all legs have valid NBBO and mid prices.
@@ -2045,7 +2105,30 @@ async def run_midday_cycle(supabase: Client, user_id: str):
             "tier": _midday_tier.name,
             "open_positions": len(positions),
             "deployable_capital": deployable_capital,
-            "counts": {"candidates": 0, "created": 0},
+            "counts": {
+                # Pre-scanner exit: funnel didn't run; v959 keys are None
+                # (None encodes "not measured", distinct from 0 measured).
+                **_build_enriched_counts(
+                    universe_size=None,
+                    scanner_emitted=None,
+                    trade_suggestions_created=None,
+                    h7_passed=None,
+                    edge_above_minimum=None,
+                    executable=None,
+                    staged=None,
+                ),
+                # Legacy / backward-compat:
+                "candidates": 0,
+                "created": 0,
+            },
+            "cycle_metadata": _build_cycle_metadata(
+                exit_reason="micro_tier_position_open",
+                tier=_midday_tier.name,
+                regime=None,
+                deployable_capital=deployable_capital,
+                open_position_count=len(positions),
+                available_envelope_dollars=None,
+            ),
         }
 
     analytics_service = AnalyticsService(supabase)
@@ -2064,7 +2147,28 @@ async def run_midday_cycle(supabase: Client, user_id: str):
                 "usage": 0,
                 "remaining": 0,
             },
-            "counts": {"candidates": 0, "created": 0},
+            "counts": {
+                # Pre-scanner exit: funnel didn't run.
+                **_build_enriched_counts(
+                    universe_size=None,
+                    scanner_emitted=None,
+                    trade_suggestions_created=None,
+                    h7_passed=None,
+                    edge_above_minimum=None,
+                    executable=None,
+                    staged=None,
+                ),
+                "candidates": 0,
+                "created": 0,
+            },
+            "cycle_metadata": _build_cycle_metadata(
+                exit_reason="capital_scan_policy_block",
+                tier=_midday_tier.name,
+                regime=None,
+                deployable_capital=deployable_capital,
+                open_position_count=len(positions),
+                available_envelope_dollars=None,
+            ),
         }
 
     # Record regime features to decision context (for replay feature store)
@@ -2129,7 +2233,28 @@ async def run_midday_cycle(supabase: Client, user_id: str):
                  "regime": budgets.regime,
                  "diagnostics": budgets.diagnostics,
              },
-             "counts": {"candidates": 0, "created": 0},
+             "counts": {
+                 # Pre-scanner exit (budget computed; scanner didn't run).
+                 **_build_enriched_counts(
+                     universe_size=None,
+                     scanner_emitted=None,
+                     trade_suggestions_created=None,
+                     h7_passed=None,
+                     edge_above_minimum=None,
+                     executable=None,
+                     staged=None,
+                 ),
+                 "candidates": 0,
+                 "created": 0,
+             },
+             "cycle_metadata": _build_cycle_metadata(
+                 exit_reason="global_risk_budget_exhausted",
+                 tier=_midday_tier.name,
+                 regime=budgets.regime,
+                 deployable_capital=deployable_capital,
+                 open_position_count=len(positions),
+                 available_envelope_dollars=remaining_global,
+             ),
          }
 
     # 2. Call Scanner (market-wide)
@@ -2351,7 +2476,34 @@ async def run_midday_cycle(supabase: Client, user_id: str):
                     "remaining": remaining_global,
                     "regime": budgets.regime,
                 },
-                "counts": {"candidates": 0, "created": 0},
+                "counts": {
+                    # Post-scanner exit: scanner ran, emitted nothing.
+                    # scanner_emitted=0 is measured (distinct from None).
+                    # Downstream stages didn't run → None.
+                    **_build_enriched_counts(
+                        universe_size=(
+                            len(scout_results) if scout_results else 0
+                        ),
+                        scanner_emitted=(
+                            len(scout_results) if scout_results else 0
+                        ),
+                        trade_suggestions_created=0,
+                        h7_passed=None,
+                        edge_above_minimum=None,
+                        executable=None,
+                        staged=None,
+                    ),
+                    "candidates": 0,
+                    "created": 0,
+                },
+                "cycle_metadata": _build_cycle_metadata(
+                    exit_reason="no_candidates",
+                    tier=_midday_tier.name,
+                    regime=budgets.regime,
+                    deployable_capital=deployable_capital,
+                    open_position_count=len(positions),
+                    available_envelope_dollars=remaining_global,
+                ),
                 "debug": rejection_stats.to_dict() if rejection_stats else None,
             }
 
@@ -2367,7 +2519,28 @@ async def run_midday_cycle(supabase: Client, user_id: str):
                 "remaining": remaining_global,
                 "regime": budgets.regime,
             },
-            "counts": {"candidates": 0, "created": 0},
+            "counts": {
+                # Scanner-exception exit: measurement interrupted.
+                **_build_enriched_counts(
+                    universe_size=None,
+                    scanner_emitted=None,
+                    trade_suggestions_created=None,
+                    h7_passed=None,
+                    edge_above_minimum=None,
+                    executable=None,
+                    staged=None,
+                ),
+                "candidates": 0,
+                "created": 0,
+            },
+            "cycle_metadata": _build_cycle_metadata(
+                exit_reason="scanner_failed",
+                tier=_midday_tier.name,
+                regime=budgets.regime,
+                deployable_capital=deployable_capital,
+                open_position_count=len(positions),
+                available_envelope_dollars=remaining_global,
+            ),
         }
 
     suggestions = []
@@ -3194,6 +3367,10 @@ async def run_midday_cycle(supabase: Client, user_id: str):
     # Return structured response when no suggestions after filtering
     if not suggestions:
         print("[Midday] No suggestions created after quality gates and filtering.")
+        # Post-funnel exit: scanner ran, candidates emitted, all
+        # failed downstream quality gates. The funnel measurements
+        # are real — emit them, don't discard.
+        _scanner_emitted_count = len(scout_results) if scout_results else 0
         return {
             "skipped": False,
             "reason": "no_suggestions_after_gates",
@@ -3205,9 +3382,26 @@ async def run_midday_cycle(supabase: Client, user_id: str):
                 "regime": budgets.regime,
             },
             "counts": {
+                **_build_enriched_counts(
+                    universe_size=_scanner_emitted_count,
+                    scanner_emitted=_scanner_emitted_count,
+                    trade_suggestions_created=0,
+                    h7_passed=0,
+                    edge_above_minimum=0,
+                    executable=0,
+                    staged=0,
+                ),
                 "candidates": len(candidates),
                 "created": 0,
             },
+            "cycle_metadata": _build_cycle_metadata(
+                exit_reason="no_suggestions_after_gates",
+                tier=_midday_tier.name,
+                regime=budgets.regime,
+                deployable_capital=deployable_capital,
+                open_position_count=len(positions),
+                available_envelope_dollars=remaining_global,
+            ),
             "debug": {
                 "quality_gate_mode": quality_gate_mode,
                 "trust_scanner_quotes": trust_scanner_quotes,
@@ -3499,16 +3693,17 @@ async def run_midday_cycle(supabase: Client, user_id: str):
                 "regime": budgets.regime,
             },
             "counts": {
-                # Spec keys (FIX 1) — every cycle now writes these:
-                "universe_size": _scanner_emitted,
-                "scanner_emitted": _scanner_emitted,
-                "trade_suggestions_created": inserts_count,
-                "h7_passed": inserts_count,
-                "edge_above_minimum": inserts_count - _rejection_counts.get(
-                    "edge_below_minimum", 0
+                **_build_enriched_counts(
+                    universe_size=_scanner_emitted,
+                    scanner_emitted=_scanner_emitted,
+                    trade_suggestions_created=inserts_count,
+                    h7_passed=inserts_count,
+                    edge_above_minimum=inserts_count - _rejection_counts.get(
+                        "edge_below_minimum", 0
+                    ),
+                    executable=inserts_count,
+                    staged=inserts_count,
                 ),
-                "executable": inserts_count,
-                "staged": inserts_count,
                 # Legacy / backward-compat:
                 "candidates": len(candidates),
                 "created": inserts_count,
@@ -3516,17 +3711,20 @@ async def run_midday_cycle(supabase: Client, user_id: str):
                 # Observability (FIX 2 H9 verification):
                 "rejection_persist_failures": _persist_failures,
             },
-            "cycle_metadata": {
-                "regime": budgets.regime,
-                "tier": (
+            "cycle_metadata": _build_cycle_metadata(
+                # Happy path: exit_reason=None signals successful funnel
+                # completion. All fields populated.
+                exit_reason=None,
+                tier=(
                     _midday_tier.name
                     if "_midday_tier" in locals() and _midday_tier is not None
                     else None
                 ),
-                "open_position_count": _open_position_count,
-                "available_envelope_dollars": remaining_global,
-                "deployable_capital": deployable_capital,
-            },
+                regime=budgets.regime,
+                deployable_capital=deployable_capital,
+                open_position_count=_open_position_count,
+                available_envelope_dollars=remaining_global,
+            ),
         }
 
 

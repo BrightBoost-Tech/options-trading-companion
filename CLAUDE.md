@@ -546,6 +546,19 @@ Active priorities are tracked in the ## Backlog section below.
 - Prefer minimal diffs over full rewrites
 - Always check `job_runs` table before assuming a cron ran successfully
 
+### Agent recommendation framing (added 2026-05-21)
+
+When recommending next actions, the agent should:
+
+- Ground recommendations in specific empirical signals (data points, diagnostic findings, observed risks), not in general posture.
+- Avoid framing stopping points as defaults; framing them as options is fine.
+- Avoid repeating "consider stopping" across multiple consecutive turns absent operator request.
+- When the operator signals "we continue," accept the signal and don't re-litigate the cadence.
+- Match the operator's evident bandwidth; if operator is shipping multiple PRs cleanly, write prompts that match that velocity.
+- Reserve push-back for cases where evidence supports pushback (incomplete diagnostic, structural risk, verified contraindication), not for cases where the agent prefers a different cadence.
+
+The agent's role is to make prompts useful and findings rigorous, not to gatekeep operator decisions about cadence. Companion section: "Operational velocity (added 2026-05-21)" under the Backlog → Operating mode block.
+
 ### Design principles
 
 **Strategy availability vs threshold tuning.** Strategy-level pre-filtering at the scanner is not the preferred fix pattern for systemic rejection issues. Tune thresholds (per-tier, per-regime), not strategy availability. The scanner evaluates all strategies; downstream gates (spread, sizing, EV ranking) decide what makes it through. Rejection variety is information — disabling strategies hides signal we'd want to see.
@@ -609,6 +622,27 @@ TREAT WITH CARE:
 - Path A (universe widening to $100, shipped 2026-05-12): valuable for candidate volume to observe, not for activity-maximization
 - Observability / analytics infrastructure: HIGH priority — directly serves learning-mode goal
 - Capital tier inflection at $1,000+: DEFERRED until operator signals readiness
+
+### Operational velocity (added 2026-05-21)
+
+Learning-mode at micro/small tier requires data; data requires cycles; cycles fire on market schedule. Agent recommendations should reflect this constraint:
+
+- Within empirical correctness (H14 cite-then-verify, diagnostic discipline, defensive observability), ship efficiently when evidence supports action.
+- Market hours are finite. A correctly-grounded PR shipped Friday afternoon captures one more cycle of empirical data than the same PR Monday morning.
+- "Wait until Monday" or "let it settle over the weekend" is not a default posture. It's a response to specific signals: operator explicitly requests pause, diagnostic evidence is incomplete, dependent data isn't yet available.
+- "Stop for the day" recommendations are appropriate when operator signals fatigue or when the next move genuinely depends on data that hasn't landed yet. They are NOT appropriate as a default after every PR.
+- Operational momentum matters. Six PRs in five days is sustainable when each is empirically grounded and structurally correct. The cadence shouldn't be second-guessed by the agent absent specific signals from the operator.
+
+This does NOT relax:
+- H14 cite-then-verify (pre-flight verification required)
+- Diagnostic discipline (investigate before acting)
+- H9 verified-consumer pattern (defensive observability)
+- Risk awareness on catastrophic failure modes
+- The 2026-05-12 codification's resistance to activity-maximization framing
+
+Activity-maximization is "ship more to make more trades happen." Operational velocity is "ship the correct fix efficiently when evidence supports it." The distinction is the evidence base, not the pace.
+
+**Origin:** 2026-05-21 operator feedback after a week of six compounding doctrinal PRs (#970, #972, #973, #974, #975, #976). Agent recommendations during the week erred toward excessive caution — repeated "stop for the weekend" framings, multi-day deferral suggestions when Friday cycle data was the operational priority, and "consider stopping" framings imposed without operator request. Doctrinally incorrect: caution should respond to specific risk evidence, not to accumulated work or extended cadence. Brief reference under H14 in `docs/loud_error_doctrine.md` notes operational velocity as the counterweight to excessive caution; H14 remains the empirical floor.
 
 ### Active focus (next 3)
 

@@ -93,3 +93,24 @@ The `iv_handler_accounting_mismatch` alerts that fired 3 times in table history 
 **Fix applied:** test mocks `_get_admin_supabase` directly (primary); `_get_admin_supabase` gained a `PYTEST_CURRENT_TEST` env-guard returning `None` unless `ALERTS_ALLOW_ADMIN_UNDER_PYTEST=1` is set (defense-in-depth).
 
 **Phase 1 readiness CLEAR.** The production pathway was unaffected — Phase 1 trigger via standard `enqueue_job_run` uses real `IVRepository` against production Supabase; `count_rows_for_date` returns actual count; verification works correctly. `iv_historical_backfill` was never at risk (it writes its audit alert via the test-mocked `client` directly, not via the lazy `_get_admin_supabase` pattern).
+
+## 2026-05-21 — data-vs-emission distinction (follow-up to Phase 3)
+
+The 2026-05-21 α Phase 3 strategy-emission diagnostic surfaced an empirical mismatch between α Phase 3's documented scope ("unlocks iron condors and credit spreads") and observed emission behavior. Both classes remained absent from `trade_suggestions` after Phase 3 completion. Investigation traced the gap to two SEPARATE mechanisms downstream of α's data-side delivery:
+
+**Iron condor emission (working as designed):**
+
+- Empirical: 52 ICs emitted at `regime=CHOP` in the 90-day window; 0 ICs at `regime=NORMAL` (zero at the dominant recent regime).
+- Pool-construction logic (`strategy_selector.py:280-370`): IRON_CONDOR enters the candidate pool only for (NEUTRAL OR EARNINGS) + (CHOP OR high-IV) sentiment/regime combinations. For BULLISH/BEARISH sentiment in NORMAL regime, IC is never in the pool regardless of `iv_rank`.
+- Sentiment classifier (`options_scanner.py:2707-2711`): strict SMA-ordering on `closes[-1]`/`sma20`/`sma50` → NEUTRAL is rare. The reliable path to IC emission is `regime=CHOP`.
+- Conclusion: α's data backfill was a NECESSARY prerequisite for IC emission paths that read `iv_rank`, but NOT SUFFICIENT. Emission requires market-regime conditions that recent cycles haven't produced. The system is working as designed; "α unlocks ICs" was overstated.
+
+**Credit spread emission (chain-mechanics formula bug, closed PR \<this PR\>):**
+
+- Empirical: 0 credit spreads in `trade_suggestions` over 90 days (zero in the entire historical record). Every `SHORT_*_CREDIT_SPREAD` attempt in worker logs hit `spread=200.0%` and got rejected as `spread_too_wide_real`.
+- Root cause: chain-mechanics gate around `options_scanner.py:3149` used `combo_spread / entry_cost` as the spread_pct denominator. For credit spreads, `entry_cost` is the small credit received (e.g., $0.25 per share for a $5-wide $0.25-credit put spread), not capital at risk ($4.75 per share = max_loss). Small denominator inflates the ratio to sentinel values.
+- Fix (PR \<this PR\>): for credit spreads, denominator switches to `max_loss_share` (capital-relative; comparable across debit/credit geometry). Debit spread / single-leg long behavior unchanged.
+- Defensive observability: `chain_mechanics_formula_anomaly` alert fires when `spread_pct > 300%` — catches future formula edge cases within one cycle.
+- Conclusion: credit spread emission was blocked at chain-mechanics, NOT at α. α's data delivery was unrelated to this gate.
+
+**Doctrinal correction for this document:** Phase 3's "IV-sensitive strategies (credit spreads, iron condors) are decidable" statement means the IV-rank gate inside `strategy_selector.get_candidates` (which checks `iv_rank > 50` for credit/condor pool entry) is now answerable for 67/70 universe symbols. That's data decidability. **Emission requires both decidability AND a separately-gated chain (pool construction + chain-mechanics gates + downstream H7/edge gates).** Future readers: don't conflate "α makes the strategy decidable" with "α makes the strategy emit."

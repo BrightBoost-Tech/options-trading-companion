@@ -103,7 +103,7 @@ For scanner emission to produce H7-fittable candidates at $50+ underlyings at mi
 - **Class A (1-leg long options at modest deltas):** widely fits (16/22 tested). Lower systematic edge; scanner doesn't currently target this surface.
 - **Class B (sub-$30 narrow-strike debit spreads):** universally fits (8/8 tested). Robust across $0.50, $1, $2-wide.
 - **Class C ($1-wide credit spreads):** fits broadly on both sub-$30 and $50+ names; thin per-contract credit ($9–$46) on $50+ names.
-- **Class D (narrow-wing iron condors):** fits per-contract math on KO and KHC, BUT historically blocked by the `iv_rank` gate in `strategy_selector` until α implementation accumulated historical IV depth. **α directly unlocks this class** (Phase 3 complete 2026-05-17 — see `docs/alpha_iv_history.md`).
+- **Class D (narrow-wing iron condors):** fits per-contract math on KO and KHC. Historically blocked by the `iv_rank` gate in `strategy_selector` until α implementation accumulated historical IV depth. α Phase 3 (2026-05-17, see `docs/alpha_iv_history.md`) makes the data computable for this class; **emission still requires regime conditions** (CHOP / NEUTRAL+high-IV / EARNINGS+high-IV) that have not held in recent cycles (empirical: 0 ICs in 90d at regime=NORMAL; 52 ICs in 90d at regime=CHOP). α was a necessary prerequisite, not a sufficient one — see the 2026-05-21 "data-vs-emission distinction" follow-up in `docs/alpha_iv_history.md`.
 - **Class E (cash-secured puts / covered calls):** excluded — underlying capital reservation ($1,400+ even for HBAN) far exceeds $681 BP.
 
 ## Downstream-gate observation (2026-05-14 midday cycle)
@@ -129,6 +129,7 @@ Preserves: the prior section's specific finding remains accurate (current 2-leg 
 - PR #934 (the prior narrow-scope structural finding; the refinement pairs with it)
 - 2026-05-14 budget-fit diagnostic (empirical evidence base — see `docs/backlog.md` 2026-05-14 entry)
 - Capital scaling framework (`docs/backlog.md` 2026-05-14 framework entry — informs Q1 trigger)
-- PR #935 (α historical IV backfill — directly unlocks Class D; full history at `docs/alpha_iv_history.md`)
+- PR #935 (α historical IV backfill — makes Class D data computable; emission still regime-gated; full history at `docs/alpha_iv_history.md`)
+- PR \<this PR\> 2026-05-21 (credit spread chain-mechanics formula fix — Class C credit spreads were silently blocked by `combo_spread / entry_cost` sentinel; switched denominator to `max_loss_share` for credit spreads. 0 credit spreads in 90d before this fix.)
 - 2026-05-14 cycle-shape diagnostic (Ford F downstream-gate observation — see backlog refinement sub-section)
 - H12 framing-artifact doctrine (`docs/loud_error_doctrine.md`) — the "no strategies fit" over-generalization (instance #5) is what this empirical work corrects; the cycle-shape misread (instance #6) is what surfaced the Ford F observation

@@ -83,19 +83,37 @@ EXECUTION_SPREAD_TAKE_FRAC_MARKET = float(os.getenv("EXECUTION_SPREAD_TAKE_FRAC_
 
 # Spread classification thresholds — split spread_too_wide rejections per #106.
 # The spread_pct formula `combo_spread / entry_cost` produces deceptively-large
-# percentages when entry_cost is tiny (e.g., today's PFE: combo=$0.12 / entry=$0.06
+# percentages when entry_cost is tiny (e.g., PFE 2026-04: combo=$0.12 / entry=$0.06
 # = 200%, but neither value indicates a real liquidity issue). These thresholds
 # distinguish three cases:
 #   - spread_too_wide_real:  combo_spread > ABSOLUTE_SPREAD_THRESHOLD (real wide)
 #   - entry_cost_too_low:    entry_cost   < MIN_ECONOMIC_ENTRY        (uneconomic)
 #   - spread_too_wide:       both absolute checks pass (boundary case)
 # Tune based on post-deploy rejection_counts distribution.
+#
+# PR #<this PR> (2026-05-21): the same entry_cost-amplification shape silently
+# blocked 100% of credit spread emissions for 90+ days (0 credit spreads in
+# trade_suggestions over 90d window). For credit spreads, total_cost is the
+# (small) credit received, not capital at risk. Switched the spread_pct
+# denominator to max_loss for credit spreads; debit spread behavior unchanged.
+# See chain-mechanics gate around line 3149 for the conditional formula.
 ABSOLUTE_SPREAD_THRESHOLD = float(
     os.getenv("ABSOLUTE_SPREAD_THRESHOLD", "0.20")
 )  # dollars; above = real wide spread
 MIN_ECONOMIC_ENTRY = float(
     os.getenv("MIN_ECONOMIC_ENTRY", "0.15")
 )  # dollars; below = trade too tiny to be economic
+
+# PR #<this PR> (2026-05-21): defensive observability for spread_pct formula
+# anomalies. After the credit-spread denominator fix, legitimate spread_pct
+# values cluster in 0-50% (combo_spread / max_loss). Values exceeding this
+# threshold indicate a formula edge case or data anomaly. Fires an alert
+# out-of-band so future regressions of the formula's edge-case behavior are
+# caught within one cycle rather than 90 days. H9 verified-consumer pattern
+# applied to gate behavior.
+SPREAD_PCT_ANOMALY_THRESHOLD = float(
+    os.getenv("SPREAD_PCT_ANOMALY_THRESHOLD", "3.0")
+)  # ratio (3.0 = 300%); above = formula anomaly, fires defensive alert
 
 # EV-aware condor grid search configuration
 CONDOR_TARGET_DELTAS = [float(d) for d in os.getenv("CONDOR_TARGET_DELTAS", "0.06,0.08,0.10,0.12,0.15").split(",")]
@@ -3148,13 +3166,31 @@ def scan_for_opportunities(
             # Keep legacy combo_width_share for backwards compatibility in reporting
             combo_width_share = combo_spread_share
 
-            # Compute option-spread-based pct (relative to entry)
+            # Compute option-spread-based pct (relative to position economics).
+            #
+            # PR #<this PR> (2026-05-21): conditional denominator. For debit
+            # spreads / single-leg longs, entry_cost == max_loss, so
+            # combo_spread / entry_cost is a meaningful liquidity signal.
+            # For credit spreads, entry_cost is the small credit received and
+            # is structurally << max_loss (width - credit). Using entry_cost
+            # as denominator silently rejected 100% of credit spreads for
+            # 90+ days. Switch to max_loss as denominator for credit spreads;
+            # debit spread behavior unchanged. See ABSOLUTE_SPREAD_THRESHOLD
+            # comment block.
             entry_cost_share = abs(float(total_cost or 0.0))
-            legacy_spread_pct = (combo_width_share / entry_cost_share) if entry_cost_share > 1e-9 else 0.0
+            is_credit_spread = (total_cost or 0.0) < 0
+            max_loss_share = (max_loss_contract / 100.0) if max_loss_contract else 0.0
+
+            if is_credit_spread and max_loss_share > 1e-9:
+                legacy_spread_pct = combo_width_share / max_loss_share
+            elif entry_cost_share > 1e-9:
+                legacy_spread_pct = combo_width_share / entry_cost_share
+            else:
+                legacy_spread_pct = 0.0
 
             # Liquidity Gating
             # For condors: spread was already validated by EV-aware builder
-            # For other strategies: use legacy spread_pct (combo_width / entry_cost)
+            # For other strategies: use legacy spread_pct (combo_width / denominator)
             is_condor = len(legs) == 4 and ("condor" in strategy_key or "iron_condor" in strategy_key)
             max_leg_spread_pct = None
 
@@ -3168,6 +3204,38 @@ def scan_for_opportunities(
             else:
                 option_spread_pct = legacy_spread_pct
                 effective_threshold = threshold
+
+                # CHANGE 2 (PR #<this PR>, 2026-05-21): defensive anomaly alert.
+                # If the formula produces an implausibly large value (e.g., from
+                # an edge case we haven't anticipated), fire an out-of-band
+                # warning. The rejection logic continues normally — this alert
+                # is purely observability so future formula regressions surface
+                # within one cycle. H9 verified-consumer doctrine applied to
+                # gate behavior.
+                if option_spread_pct > SPREAD_PCT_ANOMALY_THRESHOLD:
+                    try:
+                        from packages.quantum.observability.alerts import alert
+                        alert(
+                            supabase_client,
+                            alert_type="chain_mechanics_formula_anomaly",
+                            severity="warning",
+                            symbol=symbol,
+                            message=(
+                                f"spread_pct {option_spread_pct:.1%} exceeds anomaly threshold "
+                                f"{SPREAD_PCT_ANOMALY_THRESHOLD:.0%} for {strategy_key}"
+                            ),
+                            metadata={
+                                "spread_pct": round(option_spread_pct, 4),
+                                "strategy_template": strategy_key,
+                                "combo_spread_share": round(combo_width_share, 4),
+                                "entry_cost_share": round(entry_cost_share, 4),
+                                "max_loss_share": round(max_loss_share, 4),
+                                "is_credit_spread": is_credit_spread,
+                                "call_site": "options_scanner.legacy_spread_pct",
+                            },
+                        )
+                    except Exception:
+                        logger.exception("chain_mechanics_formula_anomaly_alert_failed")
 
                 if option_spread_pct > effective_threshold:
                     # REJECT: Illiquid Options - attach debug info

@@ -572,24 +572,33 @@ def _resolve_regime_for_staleness(regime: Optional[str]) -> str:
     try:
         from packages.quantum.jobs.handlers.utils import get_admin_client
         client = get_admin_client()
+        # Post-PR \<cycle-metadata-symmetry\>: cycle_metadata is now
+        # emitted at all 7 return paths of run_midday_cycle, but pre-
+        # budget early-exits (micro_tier_position_open,
+        # capital_scan_policy_block) intentionally leave regime=None
+        # because the budget engine never ran. Iterate the recent
+        # cycles to find one with a populated regime rather than
+        # short-circuiting to 'shock' the moment a pre-budget exit
+        # is the most-recent row. Fail-closed to 'shock' still
+        # applies when no recent cycle has regime data.
         row = (
             client.table("job_runs")
             .select("result")
             .eq("job_name", "suggestions_open")
             .eq("status", "succeeded")
             .order("created_at", desc=True)
-            .limit(1)
+            .limit(5)
             .execute()
         )
-        rows = row.data or []
-        if rows:
-            result = rows[0].get("result") or {}
+        for cycle_row in (row.data or []):
+            result = cycle_row.get("result") or {}
             cycle_results = result.get("cycle_results") or []
-            if cycle_results:
-                meta = cycle_results[0].get("cycle_metadata") or {}
-                last_regime = meta.get("regime")
-                if last_regime:
-                    return str(last_regime).strip().lower()
+            if not cycle_results:
+                continue
+            meta = cycle_results[0].get("cycle_metadata") or {}
+            last_regime = meta.get("regime")
+            if last_regime:
+                return str(last_regime).strip().lower()
     except Exception as e:
         logger.warning(
             f"[FRESHNESS] regime lookup failed; failing closed "

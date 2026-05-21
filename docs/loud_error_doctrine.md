@@ -1151,13 +1151,36 @@ as discovered):
 - 2026-05-20: `universe_service.get_scan_candidates` →
   `universe_selection_log` table; verified-write per Rule 3
   via `universe_selection_log_write_failed` alert. Resolved
-  in PR \<this PR\>.
+  in PR #970.
+- 2026-05-21: `workflow_orchestrator.run_midday_cycle` →
+  `cycle_metadata` + `enriched_counts` emitted at all 7
+  return paths via `_build_cycle_metadata` /
+  `_build_enriched_counts` helpers; `exit_reason` field
+  distinguishes pre-funnel vs. post-funnel exits vs. happy
+  path. See "Early-exit observability symmetry" below.
 - Future instances: add as discovered. Likely surfaces:
   ranker top-N cuts, EV-floor filters, strategy_selector
   emission gates, any `policy_lab` cohort selection step.
   Each is a decision boundary where exclusion is operationally
   important but pre-PR-time observability typically only
   captured inclusion.
+
+**Early-exit observability symmetry (2026-05-21):** when a
+function has multiple return paths, observability surfaces
+should be emitted at all of them, with explicit discriminators
+distinguishing the paths. Asymmetric observability across
+return paths is a silent-decision pattern — the consumer
+cannot tell "field intentionally absent because pre-funnel
+exit" from "field forgotten because the writer skipped this
+return path." Encode partial-state by field *value* (None for
+"not measured", a measured value for "measured"), and add an
+explicit `exit_reason` (or equivalent) field that names which
+return path was taken. The presence/absence of fields should
+not carry semantics; values should. Origin: PR #959's
+`cycle_metadata` writer fired only on `run_midday_cycle`'s
+happy path; 6 early-exit returns went without the surface for
+~2 days until today's 16:00 UTC cycle landed on the
+`no_suggestions_after_gates` early-exit and the gap surfaced.
 
 The doctrine catalog (Anti-pattern 2, Anti-pattern 8) remains
 specific to error-handling shapes. H9 sits above both; the

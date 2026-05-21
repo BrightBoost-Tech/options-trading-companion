@@ -135,6 +135,31 @@ Preserves: the prior section's specific finding remains accurate (current 2-leg 
 
 **Why this matters:** the doc treats the §2 worked examples as a static reference for "what trades at micro/small tier." Future readers (human or AI session) reading "HBAN at $15.57 is a Class B fit" and acting on it without re-verification would push a structurally-unfit symbol into production. The fix is doctrinal, not mechanical: **cite-then-verify**. See `docs/loud_error_doctrine.md` H14 "Reference-document freshness" entry for the generalized doctrine; the entry there is what this section is the application of.
 
+### Verified-current additions (2026-05-21 follow-on composition pass)
+
+After PR #976 added KHC alone (insufficient candidate variance for tomorrow's cycle), a follow-on composition pass verified 4 additional sub-$30 underlyings against current Alpaca chain data per H14 cite-then-verify. **All values verified live, NOT from documentation.**
+
+| Symbol | Spot (2026-05-21) | ATM bid-ask % | IV (ATM) | Strike granularity | Sector | Notes |
+|---|---|---|---|---|---|---|
+| **SNAP** | ~$6.00 | 3.7% | 0.62 | $0.50 | Social media | High option volume (~1826 ATM daily); excellent liquidity for a sub-$10 name |
+| **RIVN** | ~$13.50 | 3.3% | 0.92 | $0.50 | EV (US) | Very high IV but tight ATM bid-ask; greeks populated |
+| **NIO** | ~$5.50 | 11.4% | 0.65 | $0.50 | EV (China) | Highest sub-$10 option volume in sample (5751 ATM daily); China-correlated |
+| **MARA** | ~$13.50 | 5.9% | 0.87 | $0.50 | Crypto mining | Crypto-correlated; high IV; clean chain |
+
+These four are NOT in `underlying_iv_points` (missed α Phase 3 backfill). Debit spreads emit with `iv_rank=50` fallback. IV-sensitive strategies (credit, IC) won't decide cleanly until either backfill is run for them or 60d of `iv_daily_refresh` accumulates naturally.
+
+**Rejected candidates from the same pass** (each with a verification-based reason — not "didn't try"):
+
+| Symbol | Reason rejected |
+|---|---|
+| HOOD | Spot ~$76 (inferred from $40C deep-ITM). Too high for small-tier H7. |
+| PLTR | Spot ~$137 (inferred). Far too high. |
+| PINS | Spot ~$18-19, but ATM bid-ask 11-32% across visible strikes. Borderline; deferred. |
+| WBA | Chain stale — all quotes timestamped 2025-08 (corporate action / delisting). Excluded. |
+| HBAN | Per PR #976 pre-flight: drift from docs $15.57 to ~$38. Same rationale applies here. |
+
+This table demonstrates the H14 doctrine in practice: each candidate was checked against live chain data; the "obvious" choices (HOOD, PLTR, HBAN) failed verification despite documentation/intuition supporting them.
+
 ## Re-verification mechanism (proposed, not implemented)
 
 The HBAN drift surfaced today is going to recur — equity prices move; option chain liquidity shifts; corporate actions reshape underlyings. The doc captures snapshots at named dates; nothing surfaces when a snapshot goes stale.

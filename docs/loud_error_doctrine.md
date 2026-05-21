@@ -1771,6 +1771,19 @@ correction.
 discipline doctrine (codified 2026-05-13). Numbered H13 here per
 codification order, not per discovery order.
 
+**Operational-velocity counterweight (2026-05-21):** H14 establishes
+an empirical floor — cite-then-verify is required before acting on
+a doc-grounded claim. It does NOT establish a ceiling on cadence.
+The "Operational velocity" section in `CLAUDE.md` (Backlog →
+Operating mode → Operational velocity) is the counterweight: within
+H14's verification discipline (and the broader H9/H10/H11 family),
+ship efficiently when evidence supports action. Market hours are
+finite; "wait until Monday" is a response to specific signals
+(operator-requested pause, incomplete evidence, missing dependent
+data), not a default posture imposed by the agent. H14 catches
+acting-on-stale-claims; operational velocity catches acting-too-
+slowly-on-verified-claims. Both apply simultaneously.
+
 ## Valid silent-failure patterns
 
 Not all exception swallowing is a doctrine violation. The following

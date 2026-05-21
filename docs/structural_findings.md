@@ -124,6 +124,32 @@ Preserves: the prior section's specific finding remains accurate (current 2-leg 
 
 3 underlyings tested. Bid-ask spreads run 20–100%+ on OTM wings of sub-$30 names. KO IV at 0.17–0.21 is historically low — a vol spike would shift Class C/D credit collected meaningfully and could re-shape the landscape. Findings phrased as "fits today on names tested at current IV," not "always fits."
 
+## Freshness caveat — empirical examples drift
+
+**Added 2026-05-21, PR \<fix/h7-prefilter-and-khc-composition\>.** The worked examples in §2 ("Empirical examples (2026-05-14 ~late-morning CT snapshot)") cite underlying prices that may not hold against current market state. Two empirical examples relevant to today's universe addition were re-verified pre-composition:
+
+| Symbol | 2026-05-14 price (cited above) | 2026-05-21 price (live chain) | Drift | Class re-classification |
+|---|---|---|---|---|
+| HBAN | $15.57 | ~$38 (inferred from chain) | +144% in 7 days | No longer a clean Class B ($1-wide narrow-strike debit). At $38 with $5-wide chain and wide bid-ask, would be borderline H7-fit and at risk of scanner spread_too_wide rejection. Deferred from PR; revisit on a refreshed structural assessment. |
+| KHC | $23.58 | ~$23.85 (delta-interp) | +1% | Still a clean Class B fit. $0.50 strike increments, Alpaca IV/greeks populated, ATM bid-ask 22-37%. Added to scanner_universe by this PR. |
+
+**Why this matters:** the doc treats the §2 worked examples as a static reference for "what trades at micro/small tier." Future readers (human or AI session) reading "HBAN at $15.57 is a Class B fit" and acting on it without re-verification would push a structurally-unfit symbol into production. The fix is doctrinal, not mechanical: **cite-then-verify**. See `docs/loud_error_doctrine.md` H14 "Reference-document freshness" entry for the generalized doctrine; the entry there is what this section is the application of.
+
+## Re-verification mechanism (proposed, not implemented)
+
+The HBAN drift surfaced today is going to recur — equity prices move; option chain liquidity shifts; corporate actions reshape underlyings. The doc captures snapshots at named dates; nothing surfaces when a snapshot goes stale.
+
+Proposed mechanism (operator decides on shape; tracked separately):
+
+- **Monthly re-verification pass.** Read each cited example in this doc; query current price + ATM chain bid-ask via Alpaca MCP; verify the structural class still holds. Update the table with current values; mark drifted entries explicitly ("stale — current price $X; was $Y at YYYY-MM-DD").
+- **Either:**
+  - **Runbook entry:** a manual checklist invoked monthly (or quarterly) by the operator.
+  - **Scheduled job:** a low-frequency cron that re-verifies, writes findings to `risk_alerts` at severity=info with `alert_type='structural_finding_freshness_check'`. Operator audits results, updates doc.
+- **Drift threshold for action:** >15% price move OR ATM-bid-ask change crossing the 10%-of-mid threshold OR strike granularity change. Any single trigger flags the example as stale.
+- **Cost is small:** ~5-10 minutes per month manual; ~$0 if a scheduled job (uses existing Alpaca MCP quota).
+
+Without this mechanism, the next session that reads §2 and acts on a stale example will repeat today's surprise. The PR that introduces the mechanism should reference H14 and this section.
+
 ## Cross-references
 
 - PR #934 (the prior narrow-scope structural finding; the refinement pairs with it)

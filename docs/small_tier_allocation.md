@@ -400,25 +400,40 @@ captured for future work:
    per candidate and exclude unsizable candidates from the
    allocation set, avoiding the post-allocation drop.
 
-   **Status as of 2026-05-21:** the original "deferred until H7
-   drop rate is measured" framing was based on an untested
-   assumption that the allocator's output was being consumed by
-   the sizing path. The 2026-05-20 small-tier kill-site
-   investigation revealed PR #958's wiring gap — allocator
-   output written to `_allocator_allocated_budget` on candidate
-   dicts but never read by `calculate_variable_sizing` or
-   `RiskBudgetEngine.compute`. Sizing fell through to the
-   legacy multiplier stack at ~$24.76 per-trade vs. allocator's
-   intended ~$186-$370, and `contracts_by_risk = 0` bit before
-   H7's `contracts_by_round_trip` ever got a chance to bind.
-   PR \<this PR\> completes the wiring; **H7 drop rate at small
-   tier is now actually measurable**. Re-frame: measure H7 drop
-   rate empirically over N=10 small-tier cycles post-PR-\<this PR\>;
-   if H7 still bottlenecks, revisit the allocator-aware pre-check.
-   If H7 drop rate stays near zero (the prediction from yesterday's
-   H7 multi-option diagnostic), the pre-check stays deferred
-   indefinitely — H7 is doing its job downstream and the
-   pre-check would add complexity without measurable benefit.
+   **Status as of 2026-05-21 (CLOSED — PR \<fix/h7-prefilter-and-khc-composition\>):**
+   The 2026-05-21 (post-PR-#973) cycles produced empirical data:
+   4-of-4 H7 drops on small-tier candidates (MSFT/COST/NVDA/GOOGL,
+   rt_required 2.3-12× over $1,031 OBP). The deferred-until-measured
+   framing was satisfied; the pre-check is now warranted.
+
+   **Implementation (closed by PR \<fix/h7-prefilter-and-khc-composition\>):**
+   `workflow_orchestrator.run_midday_cycle` filters candidates between
+   `rank_and_select` and `PortfolioAllocator.allocate`. The filter
+   REUSES `sizing_engine.estimate_close_bp` so pre-check ≡ real H7
+   by construction. Modes:
+   - `H7_PREFILTER_ENABLED=false` (default; **shadow mode**) —
+     compute decisions and log; do not filter.
+   - `H7_PREFILTER_ENABLED=true` (**active mode**) — filter and
+     emit `exit_reason='all_candidates_h7_unfit'` when active-mode
+     filter drops everything from a non-empty input set.
+
+   New `cycle_metadata` fields: `h7_prefilter_dropped` (int) and
+   `h7_prefilter_mode` (`'shadow'|'active'|'disabled'|'error'`).
+   Per-decision detail in worker logs.
+
+   Roll-out: ship in shadow mode; flip env flag to active after
+   1-2 cycles of shadow validation confirms pre-check decisions
+   match real-H7 outcomes.
+
+   **Historical context preserved:** the original framing assumed
+   PR #958's allocator output reached the sizing path. The
+   2026-05-20 small-tier kill-site investigation revealed PR #958's
+   wiring gap — allocator output written to
+   `_allocator_allocated_budget` on candidate dicts but never read
+   by `calculate_variable_sizing` or `RiskBudgetEngine.compute`.
+   PR #973 closed that wiring gap. The H7 pre-check became
+   measurable for the first time on 2026-05-21, producing the
+   4-of-4 evidence cited above.
 
 ---
 

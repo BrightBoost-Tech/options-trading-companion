@@ -278,12 +278,34 @@ class TestAllReturnPathsEmitCycleMetadata(unittest.TestCase):
 
     def test_no_suggestions_after_gates_emits_cycle_metadata(self):
         """Today's path (2026-05-20). Post-funnel exit — every field
-        populated, exit_reason='no_suggestions_after_gates'."""
+        populated, exit_reason='no_suggestions_after_gates' (default)
+        OR 'all_candidates_h7_unfit' (when active-mode H7 pre-check
+        filtered all candidates; PR \\<this PR\\> 2026-05-21).
+
+        Source-level guard: the return path uses an _exit_reason
+        variable that defaults to 'no_suggestions_after_gates'
+        and overrides to 'all_candidates_h7_unfit' under the active-
+        mode-filter-dropped-all branch.
+        """
         body = self._slice_function()
-        idx = body.index('"reason": "no_suggestions_after_gates"')
-        window = body[idx:idx + 2000]
+        # The default assignment of the exit_reason variable
+        self.assertIn(
+            '_exit_reason = "no_suggestions_after_gates"',
+            body,
+            "Default _exit_reason must be 'no_suggestions_after_gates'",
+        )
+        # The h7-unfit override branch
+        self.assertIn(
+            '_exit_reason = "all_candidates_h7_unfit"',
+            body,
+            "Active-mode H7 pre-check drop-all branch must override "
+            "_exit_reason to 'all_candidates_h7_unfit'",
+        )
+        # cycle_metadata helper called via the variable
+        idx = body.index('_exit_reason = "no_suggestions_after_gates"')
+        window = body[idx:idx + 2500]
         self.assertIn('"cycle_metadata":', window)
-        self.assertIn('exit_reason="no_suggestions_after_gates"', window)
+        self.assertIn("exit_reason=_exit_reason", window)
 
     def test_happy_path_emits_cycle_metadata_with_none_exit_reason(self):
         body = self._slice_function()
@@ -422,6 +444,11 @@ class TestExitReasonDistinguishesPaths(unittest.TestCase):
         ).read_text(encoding="utf-8")
 
     def test_six_distinct_exit_reasons_present(self):
+        """Six early-exit / happy-path reasons emitted via direct
+        kwarg to the helper. The 7th value ``all_candidates_h7_unfit``
+        is emitted via the ``_exit_reason`` variable at the
+        no_suggestions return site (see
+        test_all_candidates_h7_unfit_exit_reason_present)."""
         for reason in (
             "micro_tier_position_open",
             "capital_scan_policy_block",
@@ -431,11 +458,22 @@ class TestExitReasonDistinguishesPaths(unittest.TestCase):
             "no_suggestions_after_gates",
         ):
             self.assertIn(
-                f'exit_reason="{reason}"', self.src,
-                f"Missing exit_reason='{reason}' helper call — the "
+                f'"{reason}"', self.src,
+                f"Missing exit_reason value '{reason}' in source — the "
                 f"corresponding return path is not emitting "
-                f"cycle_metadata via the helper.",
+                f"cycle_metadata for this reason.",
             )
+
+    def test_all_candidates_h7_unfit_exit_reason_present(self):
+        """PR \\<this PR\\> 2026-05-21: new exit_reason for active-mode
+        H7 pre-check that filtered every candidate from a non-empty
+        input set. Closes docs/small_tier_allocation.md §7 item 5."""
+        self.assertIn(
+            '"all_candidates_h7_unfit"', self.src,
+            "all_candidates_h7_unfit exit_reason must be present — "
+            "the H7 pre-check's active-mode drop-all branch surfaces "
+            "this discriminator.",
+        )
 
     def test_happy_path_uses_none_exit_reason(self):
         self.assertIn(

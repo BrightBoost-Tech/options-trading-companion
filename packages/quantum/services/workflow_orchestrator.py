@@ -1915,6 +1915,8 @@ def _build_cycle_metadata(
     deployable_capital: Optional[float],
     open_position_count: Optional[int],
     available_envelope_dollars: Optional[float],
+    h7_prefilter_dropped: Optional[int] = None,
+    h7_prefilter_mode: Optional[str] = None,
 ) -> dict:
     """Build cycle_metadata payload for job_runs.result.
 
@@ -1923,7 +1925,16 @@ def _build_cycle_metadata(
     None on the happy path, populated on early exits with one of:
     ``micro_tier_position_open``, ``capital_scan_policy_block``,
     ``global_risk_budget_exhausted``, ``no_candidates``,
-    ``scanner_failed``, ``no_suggestions_after_gates``.
+    ``scanner_failed``, ``no_suggestions_after_gates``,
+    ``all_candidates_h7_unfit`` (PR \<this PR\> 2026-05-21).
+
+    h7_prefilter_dropped / h7_prefilter_mode added in PR \<this PR\>
+    (2026-05-21) to surface the H7 allocator-aware pre-check
+    decisions per docs/small_tier_allocation.md §7 item 5. Modes:
+    ``shadow`` (computes but doesn't filter; H7_PREFILTER_ENABLED
+    unset/false), ``active`` (computes and filters), ``disabled``
+    (pre-check did not run, e.g., pre-funnel early-exit before
+    rank_and_select). None means the field was not measured.
 
     Closes the asymmetric-observability gap surfaced by the
     2026-05-20 verification — see docs/loud_error_doctrine.md
@@ -1937,6 +1948,8 @@ def _build_cycle_metadata(
         "deployable_capital": deployable_capital,
         "open_position_count": open_position_count,
         "available_envelope_dollars": available_envelope_dollars,
+        "h7_prefilter_dropped": h7_prefilter_dropped,
+        "h7_prefilter_mode": h7_prefilter_mode,
     }
 
 
@@ -2356,6 +2369,109 @@ async def run_midday_cycle(supabase: Client, user_id: str):
             config=midday_config,
             regime=current_regime
         )
+
+        # H7 allocator-aware pre-check (PR \<this PR\>, 2026-05-21).
+        #
+        # Filter candidates whose round-trip BP requirement exceeds
+        # available OBP BEFORE they enter the allocator. Closes
+        # docs/small_tier_allocation.md §7 item 5 (was deferred pending
+        # empirical evidence; 2026-05-21 cycles produced 4-of-4 H7 drops
+        # at sizing — the evidence).
+        #
+        # The pre-check REUSES estimate_close_bp from sizing_engine, so
+        # pre-check ≡ real H7 by construction. See H7 pre-check design
+        # diagnostic from 2026-05-21.
+        #
+        # Default H7_PREFILTER_ENABLED=false (shadow mode): pre-check
+        # computes decisions and logs them, but does NOT drop candidates.
+        # Shadow mode lets the operator validate pre-check decisions
+        # against real-H7 outcomes before flipping the flag. Flip
+        # H7_PREFILTER_ENABLED=true after 1-2 cycles of shadow validation.
+        h7_prefilter_dropped_count = 0
+        h7_prefilter_mode = "disabled"
+        try:
+            from packages.quantum.services.sizing_engine import (
+                estimate_close_bp as _estimate_close_bp,
+                DEFAULT_ROUND_TRIP_SAFETY_FACTOR as _RT_SAFETY,
+            )
+
+            _h7_filter_enabled = (
+                os.environ.get("H7_PREFILTER_ENABLED", "false").lower()
+                == "true"
+            )
+            h7_prefilter_mode = "active" if _h7_filter_enabled else "shadow"
+
+            _h7_passes: list = []
+            _h7_drops_log: list = []
+            for _cand in candidates:
+                _max_loss = float(_cand.get("max_loss_per_contract") or 0.0)
+                if _max_loss <= 0:
+                    # Defensive: missing max_loss — don't filter,
+                    # let downstream sizing handle.
+                    _h7_passes.append(_cand)
+                    continue
+                _collateral = float(
+                    _cand.get("collateral_required_per_contract")
+                    or _cand.get("collateral_per_contract")
+                    or _max_loss
+                )
+                _strategy = (
+                    _cand.get("strategy")
+                    or _cand.get("strategy_key")
+                    or _cand.get("type")
+                )
+                _close_bp = _estimate_close_bp(_strategy, _max_loss)
+                _rt_required = _collateral + _close_bp * _RT_SAFETY
+                if _rt_required <= deployable_capital:
+                    _h7_passes.append(_cand)
+                else:
+                    _h7_drops_log.append({
+                        "symbol": _cand.get("symbol") or _cand.get("ticker"),
+                        "strategy": _strategy,
+                        "max_loss": _max_loss,
+                        "rt_required": _rt_required,
+                        "available_bp": deployable_capital,
+                    })
+
+            h7_prefilter_dropped_count = len(_h7_drops_log)
+            for _drop in _h7_drops_log:
+                print(
+                    f"[Midday] H7 pre-filter "
+                    f"{'DROPPED' if _h7_filter_enabled else 'SHADOW (would drop)'} "
+                    f"{_drop['symbol']} {_drop['strategy']}: "
+                    f"rt_required=${_drop['rt_required']:.2f} > "
+                    f"available_bp=${_drop['available_bp']:.2f}",
+                    flush=True,
+                )
+
+            if _h7_filter_enabled:
+                # Active mode: actually filter
+                _had_candidates = bool(candidates)
+                candidates = _h7_passes
+                # New exit_reason when active-mode filter drops everything:
+                # set a flag so the downstream no_suggestions_after_gates
+                # return path can override with the more-precise reason.
+                if _had_candidates and not candidates and h7_prefilter_dropped_count > 0:
+                    # Track so the no_suggestions exit can branch on it.
+                    # Use a local sentinel; reads it from locals() at the
+                    # return site (defensive — variable may not exist if
+                    # pre-check path didn't fire).
+                    _all_candidates_h7_unfit = True
+                else:
+                    _all_candidates_h7_unfit = False
+            else:
+                _all_candidates_h7_unfit = False
+        except Exception as _h7_err:
+            # Defensive: any pre-check failure falls back to pre-existing
+            # behavior. The pre-check is observability-shaped; never block
+            # a cycle on it.
+            print(
+                f"[Midday] H7 pre-filter wire-in failed (non-fatal): "
+                f"{_h7_err}",
+                flush=True,
+            )
+            h7_prefilter_mode = "error"
+            _all_candidates_h7_unfit = False
 
         # Small-tier allocation-aware sizing (post-2026-05-18).
         # PortfolioAllocator runs once per cycle, distributes capital
@@ -3398,9 +3514,19 @@ async def run_midday_cycle(supabase: Client, user_id: str):
         # failed downstream quality gates. The funnel measurements
         # are real — emit them, don't discard.
         _scanner_emitted_count = len(scout_results) if scout_results else 0
+        # PR \<this PR\> (2026-05-21): when active-mode H7 pre-check
+        # filtered ALL candidates, surface a more-precise exit_reason
+        # so the operator can distinguish "filtered by pre-check" from
+        # "passed pre-check but died downstream at sizing/edge". Falls
+        # back to the legacy no_suggestions_after_gates when the
+        # pre-check is in shadow/disabled mode or when other candidates
+        # passed it.
+        _exit_reason = "no_suggestions_after_gates"
+        if locals().get("_all_candidates_h7_unfit"):
+            _exit_reason = "all_candidates_h7_unfit"
         return {
             "skipped": False,
-            "reason": "no_suggestions_after_gates",
+            "reason": _exit_reason,
             "budget": {
                 "deployable_capital": deployable_capital,
                 "cap": max_global,
@@ -3422,12 +3548,14 @@ async def run_midday_cycle(supabase: Client, user_id: str):
                 "created": 0,
             },
             "cycle_metadata": _build_cycle_metadata(
-                exit_reason="no_suggestions_after_gates",
+                exit_reason=_exit_reason,
                 tier=_midday_tier.name,
                 regime=budgets.regime,
                 deployable_capital=deployable_capital,
                 open_position_count=len(positions),
                 available_envelope_dollars=remaining_global,
+                h7_prefilter_dropped=h7_prefilter_dropped_count,
+                h7_prefilter_mode=h7_prefilter_mode,
             ),
             "debug": {
                 "quality_gate_mode": quality_gate_mode,
@@ -3751,6 +3879,16 @@ async def run_midday_cycle(supabase: Client, user_id: str):
                 deployable_capital=deployable_capital,
                 open_position_count=_open_position_count,
                 available_envelope_dollars=remaining_global,
+                h7_prefilter_dropped=(
+                    h7_prefilter_dropped_count
+                    if "h7_prefilter_dropped_count" in locals()
+                    else None
+                ),
+                h7_prefilter_mode=(
+                    h7_prefilter_mode
+                    if "h7_prefilter_mode" in locals()
+                    else None
+                ),
             ),
         }
 

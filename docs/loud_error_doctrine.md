@@ -1182,6 +1182,68 @@ happy path; 6 early-exit returns went without the surface for
 ~2 days until today's 16:00 UTC cycle landed on the
 `no_suggestions_after_gates` early-exit and the gap surfaced.
 
+**Verified consumers (2026-05-21):** when a function emits a
+value to a shared structure (candidate dict, result payload,
+mutable arg) that a downstream consumer is expected to read,
+the producer-consumer chain must be verified. A producer that
+writes without a reader is structurally identical to a writer
+that swallows exceptions — both produce a silent default
+behavior the downstream code didn't intend.
+
+Operational instance discovered 2026-05-20: PR #958 (small-tier
+allocator, shipped 2026-05-18) wrote per-candidate budgets to
+`candidate["_allocator_allocated_budget"]`; no code read that
+field. The downstream consumers `SmallAccountCompounder.
+calculate_variable_sizing` and `RiskBudgetEngine.compute` had
+`allocation_hint` parameters that defaulted to None when
+unspecified; both call sites in `workflow_orchestrator.py`
+left them unspecified. Sizing fell through to the legacy
+multiplier stack at ~3% × score_mult ≈ $24.76 per-trade budget
+on $1,031.48 capital — ~8× smaller than the allocator's
+intended ~$186-$370 distribution. The bug existed for 2 days in
+production before the first small-tier cycle (2026-05-20 16:00
+UTC: 4 candidates emitted, 0 created) surfaced it.
+
+**Defensive pattern:** when threading a value across a
+producer→consumer chain, the consumer should detect "value
+present but not consumed by my code path" and alert. The
+`allocator_hint_dropped` alert at
+`small_account_compounder.calculate_variable_sizing` is the
+reference implementation: when the function is called without
+`allocation_hint` BUT the candidate dict has a non-None
+`_allocator_allocated_budget`, it fires
+`allocator_hint_dropped` (severity=high) before falling
+through to the legacy path. The legacy path still runs so
+the cycle keeps trading at degraded sizing rather than
+blocking. Future regression that drops the threading fires
+the alert immediately instead of producing another
+silent-cycle outage.
+
+**Detection signature for verified-consumer regressions:**
+
+- Writer pattern: producer assigns to a shared key
+  (`obj[key] = value`, `dict.update`, etc.) that's not part
+  of the structure's documented schema.
+- Reader pattern: zero reads of that key in the consumer's
+  call chain (verifiable via repo-wide grep for the key
+  literal).
+- Symptom: consumer falls through to a default code path
+  with no alert; downstream behavior differs from operator's
+  mental model.
+
+This shape recurs whenever a refactor adds a new field to
+existing carrier structures without coordinating both ends.
+Tests at the seam (assert the consumer's call site references
+the key) catch it; isolated unit tests on the producer and
+the consumer separately do not.
+
+**Catalog of verified-consumer instances:**
+
+- 2026-05-21: `_allocator_allocated_budget` threading (PR
+  \<this PR\>); allocator wired through to sizing call site +
+  `allocator_hint_dropped` defensive alert at the consumer.
+- Future instances: add as discovered.
+
 The doctrine catalog (Anti-pattern 2, Anti-pattern 8) remains
 specific to error-handling shapes. H9 sits above both; the
 silent-decision generalization extends H9's class without

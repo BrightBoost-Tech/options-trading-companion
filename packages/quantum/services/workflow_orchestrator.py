@@ -2692,21 +2692,48 @@ async def run_midday_cycle(supabase: Client, user_id: str):
         # Defaults to classic logic, overridden if agent is enabled
         QUANT_AGENTS_ENABLED = os.getenv("QUANT_AGENTS_ENABLED", "false").lower() == "true"
 
-        # Use SmallAccountCompounder for variable sizing (classic path)
+        # Use SmallAccountCompounder for variable sizing (classic path).
+        #
+        # PR \<this PR\> completes PR #958's small-tier allocator wiring:
+        # the PortfolioAllocator wire-in at this function's top half (~2429)
+        # attaches `_allocator_allocated_budget` to each candidate dict, and
+        # this call now threads that value as `allocation_hint` so
+        # calculate_variable_sizing takes the allocator-aware path
+        # (small_account_compounder.py:111-131) rather than falling through
+        # to the legacy multiplier stack. See docs/small_tier_allocation.md
+        # §5 and docs/loud_error_doctrine.md H9 verified-consumer
+        # generalization.
         tier = SmallAccountCompounder.get_tier(deployable_capital)
         sizing_vars = SmallAccountCompounder.calculate_variable_sizing(
             candidate=cand,
             capital=deployable_capital,
             tier=tier,
             regime=scoring_regime,
-            compounding=COMPOUNDING_MODE
+            compounding=COMPOUNDING_MODE,
+            allocation_hint=cand.get("_allocator_allocated_budget"),
         )
 
-        # Classic Risk Calculations
+        # Classic Risk Calculations.
+        #
+        # When `sizing_vars["allocation_hint_applied"]` is True (small-tier
+        # allocator-active path), `risk_budget_dollars` is the allocator's
+        # per-candidate budget — already enforces envelope (85% × regime_mult)
+        # + per-trade ceiling (36%) + score skew, all coherent at cycle level.
+        # Don't double-clamp against `budgets.max_risk_per_trade`, which was
+        # computed at cycle-start without the hint (line ~2187) and would
+        # produce the legacy ~3% small-tier value that throttles the
+        # allocator's distribution back to ~$30 per trade — exactly the
+        # silent-default behavior that broke production 2026-05-18 → 2026-05-20.
+        # `clamp_risk_budget(remaining_global)` remains as a defensive
+        # cycle-envelope check; it's redundant when the allocator respects
+        # the envelope itself but harmless when it does.
         risk_budget_dollars = sizing_vars["risk_budget"]
         risk_multiplier = sizing_vars["multipliers"]["score"]
         recommended_risk = budgets.max_risk_per_trade
-        final_risk_dollars = min(risk_budget_dollars, recommended_risk)
+        if sizing_vars.get("allocation_hint_applied"):
+            final_risk_dollars = risk_budget_dollars
+        else:
+            final_risk_dollars = min(risk_budget_dollars, recommended_risk)
         final_risk_dollars = clamp_risk_budget(final_risk_dollars, remaining_global)
 
         max_contracts_limit = 25

@@ -43,17 +43,23 @@ Tests cover:
 """
 
 from pathlib import Path
-import sys
-import types
 import unittest
 from unittest.mock import MagicMock, patch
 
-# Stub alpaca-py so imports resolve in the test venv.
-sys.modules.setdefault("alpaca", types.ModuleType("alpaca"))
-sys.modules.setdefault("alpaca.trading", types.ModuleType("alpaca.trading"))
-sys.modules.setdefault(
-    "alpaca.trading.requests", types.ModuleType("alpaca.trading.requests")
-)
+# NOTE: deliberately does NOT install an alpaca-py stub via
+# sys.modules.setdefault (the pattern used in some other test
+# files in this directory). This test file's alphabetical sort
+# order places it BEFORE test_alpaca_authoritative_equity.py
+# (l < p at position 2 in "al{l,p}..."), so an alpaca-module
+# stub installed here would mask the real alpaca.trading.requests
+# import in equity_state.py and cause downstream
+# test_*_weekly_pnl assertions to fail with NoneType-arithmetic
+# errors. None of this file's tests need alpaca imports — the
+# tests exercise small_account_compounder (pure-Python) and
+# read workflow_orchestrator.py as source text. Repro:
+# pytest test_allocator_hint_threading.py
+#        test_alpaca_authoritative_equity.py — fails without
+# this caveat; passes with it.
 
 
 class _AlertCapture:

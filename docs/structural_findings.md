@@ -175,6 +175,83 @@ Proposed mechanism (operator decides on shape; tracked separately):
 
 Without this mechanism, the next session that reads §2 and acts on a stale example will repeat today's surprise. The PR that introduces the mechanism should reference H14 and this section.
 
+## EV-vs-H7 trade-off at small-tier capital
+
+**Added 2026-05-26.** Empirical work 2026-05-22 through 2026-05-26 (three diagnostics + two cycles). This section names the structural constraint that bounds trade frequency at small-tier OBP and closes the structural arc of PRs #970/#972/#973/#974/#975/#976/#977/#978.
+
+### The constraint
+
+At small-tier OBP ($1,031.48 as of the 2026-05-22 observation baseline), the candidate-generation pipeline produces candidates that fail one of two gates with no candidate shape passing both:
+
+- **High-priced underlyings** (MSFT/COST/NVDA/GOOGL/AAPL class): produce sufficient gross EV ($333 average in normal regime; $574-$683 average in elevated/rebound regimes) but **fail H7 round-trip safety** because max_loss ($1,300-$2,400/contract) exceeds the H7-fittable ceiling of ~$491/contract at $1,031 OBP.
+- **Sub-$30 underlyings** (AAL/F/KHC/SNAP/RIVN/NIO/MARA class): **pass H7** comfortably (max_loss $25-$150/contract) but produce **insufficient gross EV** ($13-$15 typical) that fails `canonical_ranker.MIN_EDGE_AFTER_COSTS=$15` after slippage and fee subtraction.
+
+There is no candidate shape that simultaneously passes H7 and produces sufficient EV at $1,031 OBP. This is **mechanical capital-vs-position-size arithmetic**, not a code problem: fixed costs (fees, per-contract slippage) amortize over expected return. At small position sizes (1-2 contracts of ~$76 entry), fixed costs are a meaningful fraction of expected return and the canonical_ranker correctly classifies the trade as economically marginal.
+
+### Empirical evidence (three diagnostics, week of 2026-05-19)
+
+| Date | Diagnostic | Empirical finding |
+|---|---|---|
+| 2026-05-22 | EV threshold diagnostic | AAL gross EV $13.17; formula slippage $0.66 (5%-of-EV floor); realistic combo bid-ask slippage ~$20 for 2 contracts on the actual chain. Net edge **−$9.43 realistic** vs $9.91 formula. Threshold $15 correctly protects capital. Same pattern on 2026-05-14 Ford (EV $15.44) and 2026-05-19 Ford (EV $13.29) — systemic, not anomalous. |
+| 2026-05-22 | Comparative diagnostic (A/B/C paths) | Three workstreams (OTM strikes, regime classifier tuning, new strategy classes) evaluated against AAL chain data. **None produces decisive EV uplift at $1,031 OBP.** Path A marginally defensible (1-2 emissions/month best case; PoP miscalibration risk). Paths B and C structurally dominated. |
+| 2026-05-26 | Cycle observation | 1 raw opportunity emitted (vs 9 on 5/22). Sub-$30 universe members died at scanner-level gates with chain quality 64-69% bid-ask spread (vs 10-37% on 5/22). AAPL emerged from the high-priced cohort, correctly rejected by H7 at sizing. Confirms intermittent-emission pattern: sub-$30 candidates emit only when chain quality aligns; high-priced candidates emit reliably but never fit H7. |
+
+**Pattern across cycles:** the "low frequency" outcome is the **steady state**, not anomaly. The pipeline is structurally healthy through `canonical_ranker`; the economic gate is correctly enforcing capital safety.
+
+### Historical EV-by-strategy distribution (90d, supporting evidence)
+
+| Strategy | Regime | n | avg EV | avg max_loss |
+|---|---|---|---|---|
+| LONG_CALL_DEBIT_SPREAD | normal | 40 | **$333** | $1,329 |
+| LONG_PUT_DEBIT_SPREAD | normal | 29 | **$381** | $1,700 |
+| LONG_PUT_DEBIT_SPREAD | elevated | 13 | $575 | $1,630 |
+| IRON_CONDOR | chop | 69 | $70 | $1,010 |
+| IRON_CONDOR | elevated | 9 | $49 | $1,254 |
+
+The 90d averages are dominated by high-priced underlyings (avg max_loss $1,000-$2,400). The three sub-$30 emissions reaching `canonical_ranker` in this window (Ford 5-14 EV $15.44, Ford 5-19 EV $13.29, AAL 5-22 EV $13.17) are the LOW outliers of those distributions — empirically confirming that EV distribution is bimodal by underlying price tier.
+
+### Three operational paths (operator decision)
+
+**Path 1: Accept low frequency at small tier.** The pipeline is structurally correct. The economic gate is correctly protecting capital. Low frequency at $1,031 OBP is the system working as designed for the 2026-05-12 learning-mode framework. The marginal trades being filtered out are noise the system correctly rejects, not opportunities being missed.
+
+**Path 2: Capital scaling to standard tier ($5k+).** At standard tier the same gross-EV trade becomes economically viable through size. A $13 gross EV trade at 13 contracts produces ~$170 expected return against ~$20 in fixed costs — easily clears threshold. The candidate distribution from high-priced underlyings maps cleanly onto $5k+ capital (those candidates produce avg EV $333 and have max_loss $1,300-$2,400 which fits standard-tier H7 capacity). Deferred per CLAUDE.md 2026-05-12 codification until operator signals readiness.
+
+**Path 3: Wait for market regime change.** CHOP regime (historically 21-day windows; last 2026-02-24 to 2026-03-17, 66+ days ago) unlocks the iron condor pool — 69 ICs at avg EV $70 emerged during the prior CHOP window. Elevated IV in NORMAL regime produces wider credit spreads with thicker premium. Different regimes produce different candidate distributions; the current sustained normal regime is the worst-case for trade frequency.
+
+### What does NOT resolve this constraint
+
+Six code-side levers have been considered and rejected as ineffective or counter-productive at small tier:
+
+1. **Lowering `MIN_EDGE_AFTER_COSTS`.** Admits trades with negative realistic expected return (realistic slippage on sub-$30 chains is ~$20 for 2 contracts; the threshold-after-formula already understates costs). Opposite of capital protection.
+2. **Tightening the slippage formula** to use `combo_spread_share` instead of the 5%-of-EV floor. Would reject MORE trades, not fewer — formula's $0.66 underestimates realistic ~$20 by ~30×. Not operator-aligned (won't unlock execution).
+3. **Adding more sub-$30 tickers.** Produces more correctly-rejected candidates of the same EV profile. PR #977 already added SNAP/RIVN/NIO/MARA; today's cycles confirm they're emitting the same $13-$15 EV shape when they emit at all.
+4. **Raising allocator per-candidate budget.** Slippage and fees scale linearly with contracts; ratios stay the same. More contracts ≠ better EV-per-cost.
+5. **Adding new strategy classes** (single-leg longs, CSPs). Single-leg longs have worse EV profile (full premium exposed to theta; no offsetting short leg). Cash-secured puts are capital-excluded at small tier ($1,300 collateral on AAL > $1,031 OBP). Verified against AAL chain in 2026-05-22 comparative diagnostic.
+6. **Regime classifier tuning** to surface NEUTRAL/CHOP more often. Sub-$30 underlyings have $0.50 strike granularity too narrow for IC wing economics (estimated AAL IC EV ~−$2 to +$6); higher-priced candidates that DO produce viable IC EV ($70 avg) fail H7 at $1,031 OBP. Path fails on both ends.
+
+### What this finding refines
+
+The 2026-05-14 entry stated (paraphrased) that the H7 fit constraint at micro BP is governed by entry-premium-vs-width ratio. That mechanism remains correct. This entry adds the second-order observation:
+
+> **At small tier, even structures that PASS H7 (sub-$30 narrow-strike debit spreads — Class B per §"Verified-fittable structure classes") often fail the next downstream gate (`edge_below_minimum`) because the gross EV produced by those structures is mechanically too small for the fixed-cost stack.**
+
+H7 fit is necessary; EV sufficiency after costs is the next-most-load-bearing gate. The 2026-05-14 Ford observation (entry 109-115 above) was the first surface of this; the 2026-05-22 / 2026-05-26 work codifies it as a named structural constraint rather than a per-cycle observation.
+
+### Cross-references (this section)
+
+- 2026-05-22 16:00 UTC cycle (AAL emission, `job_runs.id` for that cycle)
+- 2026-05-22 17:29 UTC cycle (post-PR-#974 worker image; same H7 4-of-4 pattern)
+- 2026-05-26 16:00 UTC cycle (AAPL emission; 1 raw opportunity vs Friday's 9; sub-$30 dropped at scanner-level due to wider chain quality)
+- 2026-05-22 EV threshold diagnostic (canonical_ranker math + formula calibration; conversation transcript)
+- 2026-05-22 comparative diagnostic (Paths A/B/C empirical evaluation)
+- 2026-05-26 codification diagnostic (this section)
+- PRs that built the pipeline through `canonical_ranker`: #970 (universe selection log), #972 (early-exit symmetry), #973 (allocator wiring), #974 (chain mechanics defensive observability), #975 (credit-spread formula), #976 (H7 pre-check + KHC), #977 (SNAP/RIVN/NIO/MARA composition), #978 (operational velocity doctrine)
+- `docs/loud_error_doctrine.md` H14 (cite-then-verify) — the doctrinal pattern that captured the HBAN drift during PR #976 pre-flight; complementary to the structural constraint here
+
+### H7_PREFILTER_ENABLED operational note
+
+PR #976 shipped the H7 allocator-aware pre-check in shadow mode (`H7_PREFILTER_ENABLED=false` default). Multi-cycle shadow validation across 2026-05-22 and 2026-05-26 cycles confirmed pre-check decisions match real-H7 outcomes: 4 H7-incompatible high-priced candidates flagged with zero false positives. **The env flag is ready for active flip at operator discretion** (`H7_PREFILTER_ENABLED=true` on the worker service). Flag flip is a Railway env change, not a code change; it changes the `exit_reason` from `no_suggestions_after_gates` to `all_candidates_h7_unfit` on cycles where the pre-check filters all candidates, providing cleaner observability without changing the trade-execution outcome (which is already correctly 0 under both modes given the EV-vs-H7 trade-off codified above).
+
 ## Cross-references
 
 - PR #934 (the prior narrow-scope structural finding; the refinement pairs with it)

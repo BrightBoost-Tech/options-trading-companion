@@ -1784,6 +1784,17 @@ data), not a default posture imposed by the agent. H14 catches
 acting-on-stale-claims; operational velocity catches acting-too-
 slowly-on-verified-claims. Both apply simultaneously.
 
+**Structural-constraint cross-reference (2026-05-26):** the
+EV-vs-H7 trade-off at small-tier capital is the named structural
+constraint that bounds trade frequency at $1,031 OBP. See
+`docs/structural_findings.md` "EV-vs-H7 trade-off at small-tier
+capital" for the empirical record (three diagnostics + two cycles,
+2026-05-22 through 2026-05-26). H14 is the doctrinal pattern that
+caught the HBAN drift during PR #976 pre-flight; the EV-vs-H7
+entry is the operational arithmetic that bounds what trades are
+viable at current capital regardless of doc freshness. Not
+duplicated here; the structural finding lives in its own doc.
+
 ## Valid silent-failure patterns
 
 Not all exception swallowing is a doctrine violation. The following

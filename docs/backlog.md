@@ -58,6 +58,33 @@ convention = operator decision but data strongly favors full-count):
      full-count fixtures; decide whether to retain a per-spread rejection test
      now that creation asserts the convention.
 
+**THIRD INSTANCE of the convention defect — the cohort-clone path (observed
+via PR #990, 2026-05-28).**
+- PR #990's live F-row check observed `legs.quantity=5` IDENTICAL across all
+  three cohort suggestion rows (aggressive 5ct / conservative 12ct / neutral
+  26ct) despite their differing contract counts. The cohort-fork path
+  (`fork.py::_clone_suggestion_for_cohort`) propagates the champion's
+  `legs.quantity` to each clone WITHOUT scaling it to the clone's own contract
+  count → the non-champion cohort rows are convention-wrong (`legs[].quantity`
+  does not match the clone's `pos.quantity`) every cycle.
+- This is a DIFFERENT surface than the audit census: the audit (69/70
+  full-count, 1 per-spread CSX) was on POSITIONS; this is on SUGGESTION/COHORT
+  rows at clone time. The clone defect mints convention-wrong rows
+  systematically, not as a one-off.
+- Scope impact on #3's sequence:
+  * **Step 3 (creation-time assertion at paper_endpoints.py:1465):** must ALSO
+    cover the cohort-clone path — the assertion `legs[].quantity ==
+    |pos.quantity|` has to fire on clones, not just the champion fill.
+  * **fork.py leg-scaling is now an EXPLICIT part of #3** (scale `legs.quantity`
+    to each clone's contract count at fork time), NOT the deferred follow-on it
+    appeared to be during #990.
+  * **Steps 4 (backfill) and 5 (reader-unification)** should account for any
+    convention-wrong cohort rows already persisted, not just the single CSX
+    position row.
+- Known convention-defect surfaces are now THREE: (1) F-shape full-count vs
+  (2) CSX per-spread positions, and (3) fork.py cohort-clone propagation of the
+  champion's `legs.quantity` to clones. #3 must cover all three.
+
 ## Group 3 — Diagnostics pending
 - **DONE 2026-05-28 — Credit-spread force-hydrate verification (verdict recorded).**
   Verdict: the `spread_too_wide_real ≈ 2.0` rejection is an **ARTIFACT**, but

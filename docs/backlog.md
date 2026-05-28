@@ -59,11 +59,27 @@ convention = operator decision but data strongly favors full-count):
      now that creation asserts the convention.
 
 ## Group 3 — Diagnostics pending
-- Credit-spread force-hydrate verification (NEW, from gap map D8): run one cycle
-  with OTM wing quotes force-hydrated, then re-measure spread_too_wide_real.
-  Settles whether credit-spread exclusion is a missing-quote ARTIFACT
-  (recalibratable) or genuine wing illiquidity (structural). Gates the
-  credit-spread reachability roadmap item. Read-only / measurement.
+- **DONE 2026-05-28 — Credit-spread force-hydrate verification (verdict recorded).**
+  Verdict: the `spread_too_wide_real ≈ 2.0` rejection is an **ARTIFACT**, but
+  hydration does **not** make credit spreads broadly tradeable. Decisive: **ZERO
+  outcome-(c)** across the full price spectrum tested (NIO $5.57, KHC $24.50,
+  AMD $518, QCOM $244, ISRG $424) — every wing has a **live two-sided market**;
+  "structurally unreachable / no market" is FALSE. The 2.0 is the strike-width
+  fallback (`options_scanner.py:2041`) firing because the scanner doesn't hydrate
+  the wing NBBO at scan time (`_combo_cost_range_from_legs` → None → falls back to
+  strike width → `width/max_loss ≈ 2.0`). Confirmed by the asymmetry tell:
+  same-cycle call-debit legs hydrated to real 0.15–0.84 spreads while every
+  credit/put-debit alternative logged **exactly 2.0** (13 of 14 rejections) — a
+  measured bid-ask cannot be exactly 2.0 across 13 names from $5.50–$300; the
+  uniformity is the fallback signature. **BUT hydration ≠ tradeability:** real
+  combo spreads are **16–91%, all > 10%**, credits are thin and the combo bid-ask
+  is a large fraction of the credit (NIO combo $0.07 vs credit $0.065 — crossing
+  eats ~the whole credit; KHC $0.12 vs $0.27 ≈ 44%), the same slippage lesson as
+  the F execution; high-IV names (QCOM 91%, ISRG 67%, AMD 30%) are correctly
+  rejected. Caveats: representative strikes (exact scanner strikes not logged →
+  magnitude illustrative; the two-sided-market finding is exact); quotes ~22 min
+  pre-close; 5 names across tiers, 13/14 cycle rejections were the 2.0 fallback.
+  → Re-scoped fix lives in the D8 "Credit spreads" item below.
 - (DONE — reference, do not re-run: P&L corruption diagnostic; writer/convention
   audit; first-execution status; trader-framework gap map.)
 
@@ -92,13 +108,31 @@ Gated on the gap map (done) and #3 (for exit/modeling work).
   item: selector only builds 2/4-leg; the 1-leg branch (options_scanner.py:3120)
   is defensive/unreached. They're the one class that fits H7 broadly (Class A)
   at small tier — potential cheapest path to more trades. Addressable in code.
-- Credit spreads — pending the Group 3 force-hydrate verification. Binding: OTM
-  wing legs lack two-sided NBBO → _combo_cost_range_from_legs returns None →
-  falls back to strike width (options_scanner.py:2041) → width/max_loss ≈ 2.0;
-  plus a uniform 10% threshold applied across mismatched denominators (debit
-  entry_cost vs credit max_loss). Fix candidates: wing quote-hydration +
-  per-strategy spread threshold. Recalibratable ONLY IF the verify shows
-  artifact, not real illiquidity.
+- Credit spreads — **VERDICT IN (2026-05-28 force-hydrate, Group 3): the 2.0 is
+  an ARTIFACT, but hydration does not make credit spreads broadly tradeable.**
+  Mechanism confirmed: OTM wing legs lack two-sided NBBO *in the scan-time
+  snapshot* → `_combo_cost_range_from_legs` returns None → falls back to strike
+  width (`options_scanner.py:2041`) → `width/max_loss ≈ 2.0`. Live, every wing
+  tested ($5.57–$424) HAS a two-sided market (zero outcome-(c)), so the 2.0 is a
+  fetch gap, not "no market." But the *real* hydrated combo spreads are 16–91%
+  (all > 10%) and the combo bid-ask is a large fraction of the thin credit →
+  slippage eats the edge (same as the F execution).
+  - **Fix shape (separate PR, NOT done here): wing quote-hydration in the
+    scanner** — fetch wing-leg NBBO for ALL candidate strategies (not just the
+    primary call-debit) before computing the combo metric, instead of falling
+    back to strike width. Flips ~13/14 recent rejections from a false-200% to an
+    honest spread measurement.
+  - **VALUE = correctness/observability, NOT trade volume.** The fix stops the
+    scanner emitting a false "no market" signal and lets the TRUE spread be
+    measured. Economic payoff is bounded by EV-vs-H7: expect occasional tradeable
+    credit spreads in low-IV regimes, not a flood.
+  - **Per-strategy spread threshold is necessary-but-not-sufficient:** a
+    credit-appropriate threshold (~20%+) only admits the narrowest low-IV wings,
+    and at that width the combo bid-ask ≈ the credit, so it mostly admits bad
+    fills. This is bounded by EV-vs-H7, NOT a contradiction of it.
+  - **PRIORITY: demoted** from "unlock the full registry" to "fix a real fetch
+    bug for observability; modest, IV-regime-dependent trade payoff." Worth
+    doing; don't over-invest expecting volume.
 - Iron condors — STRUCTURAL at small tier. Doubly blocked: NORMAL+directional
   regime → not pooled (last CHOP 2026-03-17); when pooled, condor_ev_not_computed
   (sub-$30 $0.50 strike granularity too narrow for IC wings); high-priced ICs
@@ -211,10 +245,13 @@ First full-pipeline position still exercising never-run-on-real-data machinery:
 - H14 cite-then-verify before any composition change.
 
 ## Highest-leverage items (operator's stated goal lens)
-1. Strategy coverage (D8): single-leg longs (architecture, cheap, fits H7) +
-   credit-spread force-hydrate verify (gates whether credit spreads are
-   recalibratable). Largest gap between "utilize all strategies" intent and
-   debit-spread-only behavior.
+1. Strategy coverage (D8): single-leg longs (architecture, cheap, fits H7) remain
+   the highest-leverage coverage item. Credit-spread force-hydrate verify is DONE
+   (2026-05-28): the 2.0 is an artifact (fix = wing hydration) but payoff is
+   bounded by EV-vs-H7 → the credit-spread fix is now "correctness/observability,
+   modest IV-regime-dependent volume," demoted from "unlock the registry."
+   Single-leg longs are the largest remaining gap between "utilize all strategies"
+   intent and debit-spread-only behavior.
 2. Surfacing quick wins (D1): breakeven, R:R, payoff table, midday column holes
    — cheapest operator-facing improvement.
 3. #3 convention (Group 2): unblocks the exit/modeling roadmap.

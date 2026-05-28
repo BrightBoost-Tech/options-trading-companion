@@ -640,7 +640,24 @@ async def get_suggestions(
             query = query.eq("window", window)
 
         res = query.order("created_at", desc=True).limit(50).execute()
-        return {"suggestions": res.data or []}
+        rows = res.data or []
+
+        # D1 surfacing: attach compute-on-read trade economics (reward:risk,
+        # breakeven, payoff grid). Purely additive/informational; derived from
+        # per-contract leg geometry so it never drifts from the order. Fail-soft
+        # per-row — a non-vertical or malformed row simply gets no economics
+        # block rather than breaking the whole response.
+        from packages.quantum.services.trade_economics import compute_trade_economics
+        for row in rows:
+            try:
+                econ = compute_trade_economics(row)
+                if econ is not None:
+                    row["trade_economics"] = econ
+            except Exception:
+                # Informational surfacing must never break the suggestions list.
+                pass
+
+        return {"suggestions": rows}
     except Exception as e:
         print(f"Error fetching suggestions: {e}")
         return {"suggestions": []}

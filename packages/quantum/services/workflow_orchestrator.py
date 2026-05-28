@@ -483,6 +483,15 @@ DROPPABLE_SUGGESTION_COLUMNS = {
     # 3 execution_cost_* entries removed 2026-05-10 (#62a-D5 Option B);
     # producer assignments at options_scanner.py also removed.
     # Broader doctrine audit of this shim tracked in backlog #117.
+    #
+    # D1 surfacing (2026-05-28): new informational columns. Listed here so a
+    # code-before-migration deploy degrades gracefully (strip-and-retry leaves
+    # the row inserted without the new columns) instead of failing the whole
+    # insert. Once 20260528000000_add_max_profit_and_net_ev.sql is applied the
+    # columns exist and are never stripped. Migrations don't auto-apply on
+    # merge (see CLAUDE.md Migrations) — this is the deploy-ordering guard.
+    "max_profit_total",
+    "net_ev",
 }
 
 
@@ -888,6 +897,71 @@ def normalize_win_rate(value) -> tuple[float, float]:
     if ratio > 1.0:
         ratio = 1.0
     return ratio, ratio * 100.0
+
+def build_midday_surfacing_fields(
+    cand: dict,
+    sizing: dict,
+    order_json: dict,
+    ev,
+    pop,
+    strategy: str,
+    ticker: str,
+    regime,
+    risk_multiplier,
+) -> dict:
+    """
+    D1 surfacing: assemble the informational columns the midday writer previously
+    left NULL on the trade_suggestions row.
+
+    PURELY ADDITIVE — no decision/sizing/ranking code reads these columns (verified
+    2026-05-28: every such consumer reads the sizing_metadata JSONB). Pure function
+    so it is unit-testable in isolation; the midday writer spreads the result into
+    the persisted suggestion dict.
+
+    - max_loss_total / capital_required / risk_multiplier: mirror the values already
+      in sizing_metadata (column was simply never written on the midday path).
+    - rationale: a one-line FACTUAL templated string (D4 "assembled rationale",
+      not narrative) — midday entries previously wrote rationale=NULL.
+    - max_profit_total: contracts × the HONEST bounded per-contract max profit
+      (_compute_risk_primitives_usd), NOT calculate_ev's capped max_gain. See
+      docs/loud_error_doctrine.md H15. Non-finite per-contract values (e.g. inf
+      for a single-leg long call, never emitted today) are dropped to None rather
+      than persisted as junk.
+    - net_ev: edge-after-execution-cost, promoted from the multi_strategy JSONB.
+    """
+    sizing = sizing or {}
+    order_json = order_json or {}
+    cand = cand or {}
+
+    contracts = int(sizing.get("contracts") or 0)
+    max_profit_per_ct = cand.get("max_profit_per_contract")
+    max_profit_total = None
+    if max_profit_per_ct is not None and contracts > 0:
+        mp = float(max_profit_per_ct)
+        # Guard NaN / ±inf (NaN != NaN; explicit inf check).
+        if mp == mp and mp not in (float("inf"), float("-inf")):
+            max_profit_total = round(mp * contracts, 2)
+
+    net_ev = (cand.get("multi_strategy") or {}).get("net_ev")
+
+    limit_price = abs(float(order_json.get("limit_price") or 0.0))
+    rationale = (
+        f"{strategy} on {ticker} — {regime} regime; "
+        f"entry ${round(limit_price, 2)}, "
+        f"EV ${round(float(ev or 0.0), 2)}, "
+        f"PoP {round(float(pop or 0.0) * 100, 1)}%, "
+        f"score {round(float(cand.get('score') or 0.0), 1)}"
+    )
+
+    return {
+        "max_loss_total": sizing.get("max_loss_total"),
+        "capital_required": sizing.get("capital_required"),
+        "risk_multiplier": risk_multiplier,
+        "rationale": rationale,
+        "max_profit_total": max_profit_total,
+        "net_ev": net_ev,
+    }
+
 
 def build_midday_order_json(
     cand: dict,
@@ -3381,6 +3455,23 @@ async def run_midday_cycle(supabase: Client, user_id: str):
                         "error_message": str(cal_err)[:200],
                     })
 
+            # D1 surfacing: promote economics the scanner/sizing already computed
+            # but the midday writer left at column-NULL (values lived only in
+            # sizing_metadata / multi_strategy JSONB). Purely additive — no
+            # decision/sizing/ranking code reads these columns (verified: all
+            # such consumers read sizing_metadata JSONB). See docs/backlog.md D1.
+            _surfacing = build_midday_surfacing_fields(
+                cand=cand,
+                sizing=sizing,
+                order_json=order_json,
+                ev=ev,
+                pop=pop,
+                strategy=strategy,
+                ticker=ticker,
+                regime=effective_regime_str,
+                risk_multiplier=risk_multiplier,
+            )
+
             suggestion = {
                 "user_id": user_id,
                 "created_at": datetime.now(timezone.utc).isoformat(),
@@ -3396,6 +3487,8 @@ async def run_midday_cycle(supabase: Client, user_id: str):
                 "source": "scanner",
                 "ev": ev,
                 "probability_of_profit": pop,
+                # D1 surfacing: midday writer parity + newly-persisted economics.
+                **_surfacing,
                 "internal_cand": cand,
                 "trace_id": ctx.trace_id,
                 "model_version": ctx.model_version,

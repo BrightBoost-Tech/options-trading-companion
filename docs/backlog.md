@@ -38,6 +38,39 @@ over F's lifecycle.
   subtracted from envelope.
 
 ## Group 2 — #3 convention consolidation (the one real correctness fix)
+
+**✅ RESOLVED 2026-05-28 (PR #992).** Pinned `legs.quantity = FULL-COUNT` and
+addressed all THREE defect surfaces; **resolves #2** (intraday double-count) via
+the reader unification, not as a separate fix.
+- **Surface 1 (fork.py cohort-clone):** `_clone_suggestion_for_cohort` now scales
+  each clone's `legs[].quantity` to the clone's own contract count (was copying
+  the champion's). `test_fork_clone_legs_full_count.py`.
+- **Surface 2 (fill seam):** new `risk/legs_convention.coerce_legs_to_full_count`
+  runs at both persisted-legs writers (`_repair_filled_order_commit`,
+  `_commit_fill`) — coerces each leg to `abs(pos.quantity)` and fires a critical
+  `legs_quantity_convention_violation` alert on mismatch; NO-OP for legitimate
+  full-count fills. `test_legs_convention.py`.
+- **Surface 3 (historical):** migration `20260528100000` backfilled the lone
+  per-spread row (CSX `d077c93d` → `[4,4]`). Cohort suggestion rows confirmed
+  transient (only the executed champion becomes a position) → no suggestion
+  backfill.
+- **Reader unification:** single shared `risk/mark_math.py`
+  (`compute_current_value` + `finalize_mark`) consumed by BOTH
+  `paper_mark_to_market_service.refresh_marks` and
+  `intraday_risk_monitor._refresh_marks` (H13; no parallel mark math). Scales
+  `unrealized_pl` exactly once — F: was +$2,070 double-count, now correct +$30.
+- **Guard #987 retained untouched** as the independent catch (removed the cause,
+  kept the net). `TestRefreshMarksScale` updated to full-count and passes; the
+  BUG-A defense was transformed (prevention at the seam + reader-assumes-full-count
+  regression test), not deleted.
+- **DB-side verified:** CSX `[4,4]`, F full-count `[5,5]` +$30 unchanged; unified
+  intraday path computes F correctly in tests. **Deferred:** the runtime
+  alert-quieting confirmation (F's `mark_payoff_bound_violation` going silent on
+  the live intraday cycle) pends the Railway token (Group 1 blocker); DB-side
+  checks prove the fix independently.
+- **Unblocks Group 4** (position-aware / dynamic exits + modeling roadmap), which
+  was gated on #3's corrected marks.
+
 Audit complete: 69/70 positions full-count, 1/70 per-spread (CSX d077c93d,
 closed BUG-A row), F full-count, ZERO live data exposure. #2 (intraday
 double-count) is RESOLVED BY this, not separately. Sequence (own daylight PR;

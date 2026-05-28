@@ -16,6 +16,7 @@ from packages.quantum.risk.payoff_bounds import (
     evaluate_payoff_bound,
     payoff_bound_alert_fields,
 )
+from packages.quantum.risk.mark_math import compute_current_value, finalize_mark
 
 logger = logging.getLogger(__name__)
 
@@ -157,14 +158,14 @@ class PaperMarkToMarketService:
 
                 qty = float(pos.get("quantity") or 1)
                 multiplier = 100
-                entry_value = float(pos["avg_entry_price"]) * abs(qty) * multiplier
-
-                # For short positions (negative qty), value math is inverted:
-                # entry_value = credit received, current_value = cost to close
-                if qty < 0:
-                    unrealized = entry_value - abs(current_value)
-                else:
-                    unrealized = current_value - entry_value
+                # #3 unification: single shared full-count mark math (H13).
+                # finalize_mark scales unrealized_pl exactly once and returns the
+                # per-contract mark. This path already marked correctly at
+                # full-count; routing it through the shared module guarantees the
+                # intraday path (which double-counted) now computes identically.
+                per_contract_mark, unrealized = finalize_mark(
+                    qty, pos["avg_entry_price"], current_value, multiplier
+                )
 
                 # ── Payoff-bound guard (Task 1, 2026-05-28) ───────────────
                 # Layered ON TOP of the mark math above — changes no
@@ -190,10 +191,9 @@ class PaperMarkToMarketService:
                     )
                     unrealized = _bound.clamped_value
 
-                per_contract_mark = current_value / (abs(qty) * multiplier) if qty != 0 else 0.0
-
                 old_mark = pos.get("current_mark")
                 old_upl = pos.get("unrealized_pl")
+                entry_value = float(pos["avg_entry_price"] or 0) * abs(qty) * multiplier
                 mtm_msg = (
                     f"[MTM_DEBUG] position={pos_id} symbol={pos.get('symbol')} "
                     f"qty={qty} entry_value={entry_value} current_value={current_value} "
@@ -496,51 +496,30 @@ class PaperMarkToMarketService:
             qty = abs(float(position.get("quantity") or 1))
             return mid * 100 * qty
 
-        leg_values: List[float] = []
-        failed_legs: List[str] = []
-        priceable_legs = 0
-
-        for leg in legs:
-            if isinstance(leg, str):
-                continue
-
-            occ_symbol = leg.get("occ_symbol") or leg.get("symbol", "")
-            if not occ_symbol:
-                continue
-
-            priceable_legs += 1
+        # #3 unification: shared full-count leg-sum (H13). The per-leg
+        # aggregation formula is identical across both mark readers and is now
+        # the single implementation in risk.mark_math.compute_current_value.
+        def _mid_for(occ_symbol: str) -> Optional[float]:
             norm = normalize_symbol(occ_symbol)
             snap = snapshots.get(norm, {})
-            q = snap.get("quote", snap)  # try nested "quote" dict, fall back to flat
-
+            q = snap.get("quote", snap)  # nested "quote" dict, fall back to flat
             bid = float(q.get("bid") or 0)
             ask = float(q.get("ask") or 0)
-            mid = float(q.get("mid") or 0) if not (bid > 0 and ask > 0) else (bid + ask) / 2.0
+            return (bid + ask) / 2.0 if (bid > 0 and ask > 0) else float(q.get("mid") or 0)
 
-            if mid <= 0:
-                failed_legs.append(occ_symbol)
-                continue
-
-            multiplier = 100
-            leg_qty = float(leg.get("quantity") or position.get("quantity") or 1)
-            action = leg.get("action", "buy")
-            side_mult = 1.0 if action == "buy" else -1.0
-
-            leg_values.append(mid * multiplier * abs(leg_qty) * side_mult)
-
-        if priceable_legs == 0:
-            return None
-
+        failed_legs: List[str] = []
+        current_value = compute_current_value(
+            legs, _mid_for, position.get("quantity"), failed_legs=failed_legs
+        )
         if failed_legs:
             pos_id = position.get("id", "?")
             logger.warning(
                 f"[MARK_TO_MARKET] Skipping position {pos_id}: "
-                f"{len(failed_legs)}/{priceable_legs} legs failed to price "
+                f"{len(failed_legs)} leg(s) failed to price "
                 f"({', '.join(failed_legs)}). Keeping previous mark."
             )
             return None
-
-        return sum(leg_values)
+        return current_value
 
     @staticmethod
     def _compute_position_value_from_broker(
@@ -585,39 +564,23 @@ class PaperMarkToMarketService:
             qty = abs(float(position.get("quantity") or 1))
             return float(current_price) * multiplier * qty
 
-        # Multi-leg position: sum per-leg signed market value.
-        leg_values: List[float] = []
-        failed_legs: List[str] = []
-
-        for leg in legs:
-            if not isinstance(leg, dict):
-                continue
-            occ_symbol = leg.get("occ_symbol") or leg.get("symbol", "")
-            if not occ_symbol:
-                continue
-
+        # Multi-leg position: shared full-count leg-sum (H13), priced from the
+        # broker's current_price as the value SOURCE. Same arithmetic as the
+        # snapshot path — only the price source differs.
+        def _broker_price_for(occ_symbol: str) -> Optional[float]:
             bp = broker_positions_by_symbol.get(occ_symbol)
             if not bp:
-                # Leg present in DB but absent from Alpaca's position
-                # response. True drift case — surface via None return so
-                # caller skips + alerts.
-                failed_legs.append(occ_symbol)
-                continue
+                return None  # leg absent from Alpaca → drift case
+            cp = bp.get("current_price")
+            if cp is None or float(cp) <= 0:
+                return None
+            return float(cp)
 
-            current_price = bp.get("current_price")
-            if current_price is None or float(current_price) <= 0:
-                # Alpaca returned the leg but with no current_price
-                # (rare — usually expired contract or halted trading).
-                failed_legs.append(occ_symbol)
-                continue
-
-            leg_qty = float(leg.get("quantity") or position.get("quantity") or 1)
-            action = leg.get("action", "buy")
-            side_mult = 1.0 if action == "buy" else -1.0
-            leg_values.append(
-                float(current_price) * multiplier * abs(leg_qty) * side_mult
-            )
-
+        failed_legs: List[str] = []
+        current_value = compute_current_value(
+            legs, _broker_price_for, position.get("quantity"),
+            multiplier=multiplier, failed_legs=failed_legs,
+        )
         if failed_legs:
             pos_id = position.get("id", "?")
             logger.warning(
@@ -627,8 +590,4 @@ class PaperMarkToMarketService:
                 f"alerts via PR-1's mtm_refresh_partial path."
             )
             return None
-
-        if not leg_values:
-            return None
-
-        return sum(leg_values)
+        return current_value

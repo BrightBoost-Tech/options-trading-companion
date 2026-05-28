@@ -26,6 +26,10 @@ from packages.quantum.strategy_registry import STRATEGY_REGISTRY, infer_strategy
 from packages.quantum.market_data import PolygonService
 from packages.quantum.strategy_profiles import CostModelConfig
 from packages.quantum.services.options_utils import parse_option_symbol
+from packages.quantum.risk.legs_convention import (
+    coerce_legs_to_full_count,
+    ALERT_TYPE as LEGS_CONVENTION_ALERT_TYPE,
+)
 
 # Execution V3
 from packages.quantum.execution.transaction_cost_model import TransactionCostModel
@@ -1229,6 +1233,43 @@ def _write_commit_fill_critical_alert(
         )
 
 
+def _coerce_position_legs_full_count(
+    supabase, user_id, symbol, signed_qty, legs_list, source: str
+) -> List[Dict[str, Any]]:
+    """#3 fill-seam enforcement of the full-count legs.quantity invariant.
+
+    Coerces each persisted leg's quantity to abs(signed_qty) and, on any
+    mismatch, writes a LOUD critical risk_alert (an upstream emitter — the
+    suggestion seam or a cohort clone — produced a non-full-count value). A
+    NO-OP for legitimate full-count fills (current builders already emit
+    full-count). Coerce-and-alert, never reject the fill. Returns the coerced
+    legs to persist."""
+    coerced, violations = coerce_legs_to_full_count(legs_list, signed_qty)
+    if violations:
+        try:
+            supabase.table("risk_alerts").insert({
+                "user_id": user_id,
+                "alert_type": LEGS_CONVENTION_ALERT_TYPE,
+                "severity": "critical",
+                "symbol": symbol,
+                "message": (
+                    f"legs.quantity convention violation at fill seam "
+                    f"({source}): {len(violations)} leg(s) != contract count "
+                    f"{abs(int(signed_qty)) if signed_qty else 0}; coerced to "
+                    f"full-count before persist."
+                ),
+                "metadata": {
+                    "source": source,
+                    "pos_quantity": signed_qty,
+                    "violations": violations,
+                    "doctrine_ref": "#3 legs.quantity convention; fill-seam coercion",
+                },
+            }).execute()
+        except Exception as alert_err:
+            logger.error(f"legs_convention_alert_error: source={source} error={alert_err}")
+    return coerced
+
+
 def _repair_filled_order_commit(supabase, analytics, user_id, order, portfolio) -> Dict[str, Any]:
     """
     Repair an orphan filled order that has no position_id.
@@ -1429,6 +1470,11 @@ def _repair_filled_order_commit(supabase, analytics, user_id, order, portfolio) 
         else:
             # Create new position
             legs_list = ticket.get("legs", [])
+            # #3: enforce full-count legs.quantity at the persisted-write seam.
+            legs_list = _coerce_position_legs_full_count(
+                supabase, user_id, symbol, signed_qty, legs_list,
+                "paper_endpoints._repair_filled_order_commit",
+            )
             max_credit = avg_fill_price
             nearest_expiry = None
             try:
@@ -1828,6 +1874,11 @@ def _commit_fill(supabase, analytics, user_id, order, fill_res, quote, portfolio
             # signed_incremental_qty is the quantity
             # Compute max_credit and nearest_expiry from legs for exit evaluation
             legs_list = ticket.get("legs", [])
+            # #3: enforce full-count legs.quantity at the persisted-write seam.
+            legs_list = _coerce_position_legs_full_count(
+                supabase, user_id, symbol, signed_incremental_qty, legs_list,
+                "paper_endpoints._commit_fill",
+            )
             max_credit = this_fill_price  # For credit strategies, entry price ≈ credit received
             nearest_expiry = None
             try:

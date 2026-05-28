@@ -1795,6 +1795,44 @@ entry is the operational arithmetic that bounds what trades are
 viable at current capital regardless of doc freshness. Not
 duplicated here; the structural finding lives in its own doc.
 
+### H15 — Context-repurposed value / dormant-path activation
+
+**Codified 2026-05-28.** Sits next to the verification-gate-before-mutation
+and #1/#2/#3 severity-mis-split lessons (the mark/exit-subsystem family):
+all three are about a value being *correct in one context and fiction in
+another*.
+
+A computed value is only valid for the context it was calibrated for.
+**Activating a previously-dormant code path repurposes every value it
+touches, and each one must be re-validated for the new use** — the value
+can be correct for its original purpose and fiction in the new one.
+
+Three confirmed instances:
+
+1. **`legs.quantity` — full-count vs per-spread convention.** Correct for
+   `paper_mark_to_market`, fiction for intraday `_refresh_marks` (the same
+   stored number means different things to the two readers; see the
+   #1/#2/#3 mis-split lesson and Group 2 convention work).
+2. **Credit-spread combo metric — strike-width fallback.** A sane default
+   when the wing NBBO is missing at scan time, a false 200% when read as a
+   *real* measured spread (`options_scanner.py:2041`; 2026-05-28
+   force-hydrate verdict — the `spread_too_wide_real ≈ 2.0` artifact).
+3. **Single-leg EV cap (10× gain / collapse-to-zero / `PoP=delta`).** A
+   correct *bound* to avoid infinite display EV on unbounded structures
+   (`ev_calculator.py:5,184` `UNBOUNDED_GAIN_CAP_MULT=10`), fiction when
+   read as a *ranking* input for a never-before-emitted structure
+   (2026-05-28 single-leg-long DON'T-BUILD verdict — see
+   `docs/backlog.md` D8 strategy-coverage entry).
+
+**Lesson:** before emitting a dormant strategy/path, audit every value it
+will newly feed (EV, risk, gates) for whether it was calibrated for THAT
+use. "The math already exists and is wired" is necessary, not sufficient —
+**wired-but-uncalibrated is the trap.** The single-leg case is the sharpest
+form: the branch is one selector line and all downstream math is wired, yet
+the wired EV model is miscalibrated for ranking, so building it would inject
+*incorrectly-accepted* candidates (one notch worse than the credit-spread
+case, which only produced correctly-rejected candidates).
+
 ## Valid silent-failure patterns
 
 Not all exception swallowing is a doctrine violation. The following

@@ -58,6 +58,33 @@ convention = operator decision but data strongly favors full-count):
      full-count fixtures; decide whether to retain a per-spread rejection test
      now that creation asserts the convention.
 
+**THIRD INSTANCE of the convention defect — the cohort-clone path (observed
+via PR #990, 2026-05-28).**
+- PR #990's live F-row check observed `legs.quantity=5` IDENTICAL across all
+  three cohort suggestion rows (aggressive 5ct / conservative 12ct / neutral
+  26ct) despite their differing contract counts. The cohort-fork path
+  (`fork.py::_clone_suggestion_for_cohort`) propagates the champion's
+  `legs.quantity` to each clone WITHOUT scaling it to the clone's own contract
+  count → the non-champion cohort rows are convention-wrong (`legs[].quantity`
+  does not match the clone's `pos.quantity`) every cycle.
+- This is a DIFFERENT surface than the audit census: the audit (69/70
+  full-count, 1 per-spread CSX) was on POSITIONS; this is on SUGGESTION/COHORT
+  rows at clone time. The clone defect mints convention-wrong rows
+  systematically, not as a one-off.
+- Scope impact on #3's sequence:
+  * **Step 3 (creation-time assertion at paper_endpoints.py:1465):** must ALSO
+    cover the cohort-clone path — the assertion `legs[].quantity ==
+    |pos.quantity|` has to fire on clones, not just the champion fill.
+  * **fork.py leg-scaling is now an EXPLICIT part of #3** (scale `legs.quantity`
+    to each clone's contract count at fork time), NOT the deferred follow-on it
+    appeared to be during #990.
+  * **Steps 4 (backfill) and 5 (reader-unification)** should account for any
+    convention-wrong cohort rows already persisted, not just the single CSX
+    position row.
+- Known convention-defect surfaces are now THREE: (1) F-shape full-count vs
+  (2) CSX per-spread positions, and (3) fork.py cohort-clone propagation of the
+  champion's `legs.quantity` to clones. #3 must cover all three.
+
 ## Group 3 — Diagnostics pending
 - **DONE 2026-05-28 — Credit-spread force-hydrate verification (verdict recorded).**
   Verdict: the `spread_too_wide_real ≈ 2.0` rejection is an **ARTIFACT**, but
@@ -104,10 +131,52 @@ Gated on the gap map (done) and #3 (for exit/modeling work).
   pulling sizing_metadata.
 
 ### Strategy coverage (gap map D8 — per-strategy binding constraint)
-- Single-leg longs — ARCHITECTURE gap, not capital. HIGHEST-LEVERAGE coverage
-  item: selector only builds 2/4-leg; the 1-leg branch (options_scanner.py:3120)
-  is defensive/unreached. They're the one class that fits H7 broadly (Class A)
-  at small tier — potential cheapest path to more trades. Addressable in code.
+- Single-leg longs — **VERDICT IN (2026-05-28 read-only feasibility scope):
+  DON'T BUILD (in current form).** Re-scoped from the gap map's "cheapest path
+  to more trades / fits H7 broadly."
+  - **The mechanical build is genuinely cheap:** ONE `get_candidates` selector
+    change adds `LONG_CALL`/`LONG_PUT` templates; all downstream machinery is
+    already wired — EV math (`ev_calculator.py:181-193`), PoP (`:82-88`), risk
+    primitives (`options_scanner.py:1866-1885`), scanner EV dispatch
+    (`:3120-3134`), strategy mapping (`:1841`), H7 round-trip
+    (`sizing_engine.py:28-60`, single-leg `close_bp=0`), strategy-agnostic
+    ranker (`canonical_ranker.py`). The 1-leg branch (`options_scanner.py:3120`)
+    is unreached ONLY because `get_candidates` never appends a 1-leg template —
+    its pool is exclusively 2-leg (spreads) and 4-leg (iron condors).
+  - **BUT the single-leg EV model is structurally optimistic and was never
+    calibrated as a RANKING input** (single legs have never been emitted):
+    `long_call` uses a 10× unbounded-gain cap (`UNBOUNDED_GAIN_CAP_MULT=10`),
+    `long_put` assumes collapse-to-zero, both use `PoP=delta` with NO theta
+    term. Computed single-leg EV is inflated 1–3 orders of magnitude.
+  - **Consequence:** building the cheap branch now would inject candidates
+    whose EV is fictional; they'd pass the $15 edge gate by enormous margins
+    and OUTRANK the debit spreads that are financially superior (a naked long
+    has worse real EV — no short leg financing it, long theta). NOT "add
+    correctly-rejected candidates" (the credit-spread case) but "add
+    incorrectly-ACCEPTED candidates that pull capital toward worse trades."
+    One notch worse than the credit-spread parallel.
+  - **"Fits H7 broadly" is HALF TRUE:** sub-$30 + mid tiers pass H7 with large
+    headroom (premium $43–$169 vs $1,531 OBP), MORE easily than debit spreads;
+    but high-priced names (QCOM $243 → $2,513 premium, AMD $519 → $4,310) FAIL
+    H7 outright at the system's ~0.60δ preference, and the cheap-deep-OTM escape
+    hatch degenerates to a ~10%-delta lottery ticket the broken gate cannot
+    reject. **Binding constraint is the miscalibrated single-leg EV model,
+    tier-modulated by H7** (which only bites the high tier) — NOT the clean
+    EV-vs-H7 squeeze. Here the gates fail to BIND, which is more dangerous than
+    a legitimate squeeze.
+  - **PRECONDITION to revisit (separate larger PR, NOT queued):** recalibrate
+    single-leg EV into a theta-and-drift-aware expected-return model. Real
+    modeling work, not a multiplier — and there are ZERO historical single-leg
+    outcomes to calibrate against. Even done honestly, the model would likely
+    show single longs failing the $15 gate MORE than spreads at this capital,
+    adding few real candidates. **PARKED:** expected payoff doesn't justify the
+    modeling cost at $1,531 OBP.
+  - **Caveat:** OBP figure varies across docs ($1,531 / $1,031 / $501.61); a
+    lower OBP only tightens H7 (kills the high tier sooner, shrinks the
+    sub-$30/mid pass band) and does NOT change the EV-model finding.
+  - Doctrine: this is instance (3) of H15 "Context-repurposed value /
+    dormant-path activation" in `docs/loud_error_doctrine.md` — the wired EV cap
+    is a correct *bound* but fiction as a *ranking* input for a dormant path.
 - Credit spreads — **VERDICT IN (2026-05-28 force-hydrate, Group 3): the 2.0 is
   an ARTIFACT, but hydration does not make credit spreads broadly tradeable.**
   Mechanism confirmed: OTM wing legs lack two-sided NBBO *in the scan-time
@@ -245,15 +314,20 @@ First full-pipeline position still exercising never-run-on-real-data machinery:
 - H14 cite-then-verify before any composition change.
 
 ## Highest-leverage items (operator's stated goal lens)
-1. Strategy coverage (D8): single-leg longs (architecture, cheap, fits H7) remain
-   the highest-leverage coverage item. Credit-spread force-hydrate verify is DONE
-   (2026-05-28): the 2.0 is an artifact (fix = wing hydration) but payoff is
-   bounded by EV-vs-H7 → the credit-spread fix is now "correctness/observability,
-   modest IV-regime-dependent volume," demoted from "unlock the registry."
-   Single-leg longs are the largest remaining gap between "utilize all strategies"
-   intent and debit-spread-only behavior.
+1. ~~Strategy coverage (D8): single-leg longs~~ — **DEMOTED 2026-05-28: VERDICT
+   DON'T-BUILD (read-only feasibility scope).** The build is cheap (one selector
+   line, all downstream wired) but the single-leg EV model is uncalibrated for
+   ranking (10× gain cap / collapse-to-zero / PoP=delta, no theta) → building it
+   would inject incorrectly-ACCEPTED candidates that outrank superior spreads.
+   Precondition (single-leg EV recalibration) is real modeling work with payoff
+   that doesn't justify the cost at $1,531 OBP → PARKED. See D8 entry above.
+   Credit-spread force-hydrate verify also DONE (2026-05-28): the 2.0 is an
+   artifact (fix = wing hydration) but payoff is bounded by EV-vs-H7 →
+   "correctness/observability, modest IV-regime-dependent volume," demoted from
+   "unlock the registry." Net: both D8 strategy-coverage levers are now
+   re-scoped down; neither is the cheap volume win the gap map implied.
 2. Surfacing quick wins (D1): breakeven, R:R, payoff table, midday column holes
-   — cheapest operator-facing improvement.
+   — cheapest operator-facing improvement. **Now the top remaining leverage item.**
 3. #3 convention (Group 2): unblocks the exit/modeling roadmap.
 
 ---

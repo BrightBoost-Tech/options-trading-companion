@@ -29,6 +29,10 @@ from zoneinfo import ZoneInfo
 from packages.quantum.jobs.handlers.utils import get_admin_client
 from packages.quantum.jobs.handlers.exceptions import PermanentJobError
 from packages.quantum.services import equity_state
+from packages.quantum.risk.payoff_bounds import (
+    evaluate_payoff_bound,
+    payoff_bound_alert_fields,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -440,6 +444,28 @@ class IntradayRiskMonitor:
                     # PL/spread = current - entry.
                     per_spread_pl = per_spread_value - per_spread_entry_value
                 pos["unrealized_pl"] = per_spread_pl * qty_abs
+
+                # ── Payoff-bound guard (Task 1, 2026-05-28) ───────────────
+                # Layered ON TOP of the mark math above — changes no
+                # computation. Bounds the just-finalised unrealized_pl to the
+                # spread's physical payoff envelope and surfaces impossible
+                # marks loudly. Convention-agnostic: the bound is derived from
+                # pos.quantity + strikes + avg_entry (reliable), never from
+                # legs.quantity (the unreliable field — see #3). The
+                # legs.quantity double-count this guard catches (F: +$1,695 vs
+                # max-profit +$520) is NOT fixed here; that is #3.
+                _bound = evaluate_payoff_bound(pos, pos["unrealized_pl"])
+                if _bound.applicable and not _bound.in_bounds:
+                    self._log_alert(
+                        user_id=pos.get("user_id") or "",
+                        position_id=pos.get("id"),
+                        symbol=pos.get("symbol"),
+                        **payoff_bound_alert_fields(
+                            pos, _bound,
+                            "intraday_risk_monitor._refresh_marks",
+                        ),
+                    )
+                    pos["unrealized_pl"] = _bound.clamped_value
             else:
                 # #2026-05-12 MTM-staleness PR-1: multi-leg recompute
                 # short-circuited due to at least one leg returning

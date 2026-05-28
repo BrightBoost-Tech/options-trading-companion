@@ -12,6 +12,10 @@ from datetime import datetime, timezone, date
 from typing import Dict, Any, List, Optional
 
 from packages.quantum.observability.alerts import alert
+from packages.quantum.risk.payoff_bounds import (
+    evaluate_payoff_bound,
+    payoff_bound_alert_fields,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -161,6 +165,30 @@ class PaperMarkToMarketService:
                     unrealized = entry_value - abs(current_value)
                 else:
                     unrealized = current_value - entry_value
+
+                # ── Payoff-bound guard (Task 1, 2026-05-28) ───────────────
+                # Layered ON TOP of the mark math above — changes no
+                # computation. Bounds the just-computed unrealized to the
+                # spread's physical payoff envelope and surfaces impossible
+                # marks loudly before they reach the DB / exit decision.
+                # Convention-agnostic (pos.quantity + strikes + avg_entry,
+                # never legs.quantity). For correctly-marked positions (e.g.
+                # F, which this path marks correctly at full-count) the value
+                # is in-bounds and untouched. The legs.quantity convention
+                # split itself is #3, not fixed here.
+                _bound = evaluate_payoff_bound(pos, unrealized)
+                if _bound.applicable and not _bound.in_bounds:
+                    alert(
+                        self.client,
+                        user_id=user_id,
+                        position_id=pos.get("id"),
+                        symbol=pos.get("symbol"),
+                        **payoff_bound_alert_fields(
+                            pos, _bound,
+                            "paper_mark_to_market_service.refresh_marks",
+                        ),
+                    )
+                    unrealized = _bound.clamped_value
 
                 per_contract_mark = current_value / (abs(qty) * multiplier) if qty != 0 else 0.0
 

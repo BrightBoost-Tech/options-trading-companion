@@ -212,7 +212,11 @@ def _check_target_profit(pos: Dict, tp_pct: float = 0.50) -> bool:
     if mc == 0:
         return False
     upl = float(pos.get("unrealized_pl") or 0)
-    entry_cost = abs(mc) * 100
+    # entry_cost must be POSITION-scale to match unrealized_pl (which
+    # paper_mark_to_market writes as avg_entry × abs(qty) × 100). max_credit
+    # is PER-SPREAD, so scale by abs(quantity). Reduces to the old per-spread
+    # value at qty=1. (2026-05-28: was 5× too tight on multi-contract positions.)
+    entry_cost = abs(mc) * 100 * abs(float(pos.get("quantity") or 1))
 
     if _is_debit_spread(pos):
         # Debit spread: profit target = tp_pct of what we paid
@@ -273,7 +277,11 @@ def _check_stop_loss(pos: Dict, sl_pct: float = 2.0) -> bool:
     if mc == 0:
         return False
     upl = float(pos.get("unrealized_pl") or 0)
-    entry_cost = abs(mc) * 100
+    # entry_cost must be POSITION-scale to match unrealized_pl (see
+    # _check_target_profit). max_credit is PER-SPREAD; scale by abs(quantity).
+    # Reduces to old per-spread value at qty=1. (2026-05-28: was 5× too tight
+    # on multi-contract positions — F 5ct had −$48 stop vs intended −$240.)
+    entry_cost = abs(mc) * 100 * abs(float(pos.get("quantity") or 1))
 
     if _is_debit_spread(pos):
         # Debit spread: stop loss at sl_pct of entry cost (0.5 = lose half)
@@ -475,7 +483,10 @@ def evaluate_position_exit(
         try:
             mc = float(max_credit)
             upl = float(unrealized_pl or 0)
-            entry_cost = abs(mc) * 100
+            # Position-scale to match the decision functions + unrealized_pl
+            # (max_credit is per-spread; × abs(qty)). Keeps this DEBUG line
+            # consistent with _check_target_profit / _check_stop_loss.
+            entry_cost = abs(mc) * 100 * abs(float(qty or 1))
             if is_debit:
                 tp_threshold = entry_cost * _active_tp
                 sl_threshold = -(entry_cost * min(_active_sl, 1.0))

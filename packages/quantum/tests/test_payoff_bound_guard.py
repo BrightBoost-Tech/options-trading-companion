@@ -203,23 +203,24 @@ _F_PRICES = {"O:F260626C00015500": 1.44, "O:F260626C00017500": 0.57}
 
 class TestGuardInRefreshMarks(unittest.TestCase):
 
-    def test_full_count_corruption_fires_and_clamps(self):
-        """F stored full-count (legs=5): the unchanged mark math produces the
-        corrupt +$1,695; the guard clamps it to +$520 and alerts loudly."""
+    def test_full_count_f_computes_correctly_and_guard_quiet(self):
+        """POST-#3: F stored full-count (legs=5) now computes the CORRECT value
+        through the unified mark math — current=(1.44-0.57)*100*5=435,
+        entry=0.96*5*100=480 → -$45, in bounds. The pre-#3 +$1,695 double-count
+        is GONE, so the guard stays QUIET. This is the DB-side proof that #2 is
+        resolved and the source of the deferred alert-quieting runtime signal."""
         monitor = _make_monitor()
         out = _refresh_with_prices(monitor, [_f_position(5, 5)], _F_PRICES)[0]
-        self.assertAlmostEqual(out["unrealized_pl"], 520.0, places=2)
-        alerts = _violation_alerts(monitor.supabase)
-        self.assertEqual(len(alerts), 1)
-        self.assertEqual(alerts[0]["severity"], "critical")
-        self.assertAlmostEqual(
-            alerts[0]["metadata"]["raw_unrealized_pl"], 1695.0, places=2
-        )
+        self.assertAlmostEqual(out["unrealized_pl"], -45.0, places=2)
+        self.assertEqual(_violation_alerts(monitor.supabase), [])
 
-    def test_per_spread_correct_value_passes_untouched(self):
-        """CSX-shaped per-spread position (legs=1, pos.quantity=4): the
-        unchanged mark math produces the CORRECT −$120, which is in-bounds, so
-        the guard does NOT fire and does NOT touch the value."""
+    def test_per_spread_row_wrong_but_in_bounds_guard_quiet(self):
+        """POST-#3: the reader assumes full-count. A per-spread row (legs=1,
+        pos=4) — now prevented at the fill seam — would compute the WRONG value
+        (leg-sum at per-1 = 220, finalized vs per-4 entry 1000 → -$780). -$780 is
+        still in-bounds [-1000, 800], so the guard does NOT catch this under-count
+        direction. That is precisely why the fill-seam coercion (prevention), not
+        the guard, is the load-bearing protection for per-spread rows."""
         monitor = _make_monitor()
         pos = {
             "id": "csx", "user_id": "u1", "symbol": "CSX", "quantity": 4,
@@ -231,12 +232,27 @@ class TestGuardInRefreshMarks(unittest.TestCase):
                  "symbol": "O:CSX260618C00048500", "quantity": 1},
             ],
         }
-        # per-spread mids: long 2.50, short 0.30 → per_spread_value 220,
-        # entry/spread 250, pl/spread -30, *qty 4 = -120 (correct, in bounds).
         prices = {"O:CSX260618C00044000": 2.50, "O:CSX260618C00048500": 0.30}
         out = _refresh_with_prices(monitor, [pos], prices)[0]
-        self.assertAlmostEqual(out["unrealized_pl"], -120.0, places=2)
+        self.assertAlmostEqual(out["unrealized_pl"], -780.0, places=2)
         self.assertEqual(_violation_alerts(monitor.supabase), [])
+
+    def test_out_of_bounds_corruption_still_fires_and_clamps(self):
+        """The guard remains the live net: an impossible mark (a debit spread
+        marked above its own width — a corrupt/crossed quote) still clamps to the
+        payoff bound and alerts. F full-count, long mid 3.00 / short 0.10 → net
+        2.90 > width 2.0 → current=1450, -480 entry = +970 > max_profit 520 →
+        clamp to 520 + critical alert."""
+        monitor = _make_monitor()
+        prices = {"O:F260626C00015500": 3.00, "O:F260626C00017500": 0.10}
+        out = _refresh_with_prices(monitor, [_f_position(5, 5)], prices)[0]
+        self.assertAlmostEqual(out["unrealized_pl"], 520.0, places=2)
+        alerts = _violation_alerts(monitor.supabase)
+        self.assertEqual(len(alerts), 1)
+        self.assertEqual(alerts[0]["severity"], "critical")
+        self.assertAlmostEqual(
+            alerts[0]["metadata"]["raw_unrealized_pl"], 970.0, places=2
+        )
 
 
 if __name__ == "__main__":

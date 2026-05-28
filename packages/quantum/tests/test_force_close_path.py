@@ -46,8 +46,14 @@ from packages.quantum.services import paper_exit_evaluator as pe  # noqa: E402
 # ─────────────────────────────────────────────────────────────────
 
 
-def _csx_debit_spread_position(quantity, avg_entry_price=2.50):
-    """4-contract CSX call debit spread, like the 2026-05-18 incident."""
+def _csx_debit_spread_position(quantity, avg_entry_price=2.50, leg_quantity=None):
+    """4-contract CSX call debit spread, like the 2026-05-18 incident.
+
+    #3 (2026-05-28): legs default to FULL-COUNT (leg.quantity == abs(quantity)),
+    the pinned convention. Pass `leg_quantity` to construct a deliberately
+    non-full-count (per-spread) row for the seam/guard regression tests.
+    """
+    lq = leg_quantity if leg_quantity is not None else abs(int(quantity))
     return {
         "id": "pos-csx",
         "user_id": "user-1",
@@ -65,7 +71,7 @@ def _csx_debit_spread_position(quantity, avg_entry_price=2.50):
                 "expiry": "2026-06-18",
                 "strike": 44,
                 "symbol": "O:CSX260618C00044000",
-                "quantity": 1,
+                "quantity": lq,
             },
             {
                 "type": "call",
@@ -73,14 +79,17 @@ def _csx_debit_spread_position(quantity, avg_entry_price=2.50):
                 "expiry": "2026-06-18",
                 "strike": 48.5,
                 "symbol": "O:CSX260618C00048500",
-                "quantity": 1,
+                "quantity": lq,
             },
         ],
     }
 
 
-def _short_credit_spread_position(quantity, avg_entry_price=0.50):
-    """4-contract short put credit spread (sell higher put, buy lower put)."""
+def _short_credit_spread_position(quantity, avg_entry_price=0.50, leg_quantity=None):
+    """4-contract short put credit spread (sell higher put, buy lower put).
+
+    #3: legs default to full-count (leg.quantity == abs(quantity))."""
+    lq = leg_quantity if leg_quantity is not None else abs(int(quantity))
     return {
         "id": "pos-spy",
         "user_id": "user-1",
@@ -98,7 +107,7 @@ def _short_credit_spread_position(quantity, avg_entry_price=0.50):
                 "expiry": "2026-06-18",
                 "strike": 500,
                 "symbol": "O:SPY260618P00500000",
-                "quantity": 1,
+                "quantity": lq,
             },
             {
                 "type": "put",
@@ -106,7 +115,7 @@ def _short_credit_spread_position(quantity, avg_entry_price=0.50):
                 "expiry": "2026-06-18",
                 "strike": 495,
                 "symbol": "O:SPY260618P00495000",
-                "quantity": 1,
+                "quantity": lq,
             },
         ],
     }
@@ -145,13 +154,26 @@ def _run_refresh_marks(positions, snapshots_map):
 
 
 class TestRefreshMarksScale(unittest.TestCase):
-    """Multi-leg unrealized_pl must be scale-consistent: BOTH sides of
-    the subtraction expressed in per-N-spread dollars."""
+    """Multi-leg unrealized_pl must be scale-consistent and scaled exactly ONCE.
+
+    #3 (2026-05-28): the convention is now pinned FULL-COUNT (legs[].quantity ==
+    contract count) and both mark readers route through the single shared
+    risk.mark_math implementation. These fixtures are full-count; the reader
+    returns the correct value for each. The original BUG-A defense ("the reader
+    handles per-spread") is TRANSFORMED into:
+      (1) the reader is correct on the pinned full-count convention (these tests);
+      (2) a per-spread row is PREVENTED at the fill seam (see
+          test_legs_convention.py / coerce_legs_to_full_count); and
+      (3) the reader assumes full-count — a per-spread row fed to it produces a
+          WRONG value (test_per_spread_row_is_not_silently_corrected below),
+          which is exactly why prevention (2) is load-bearing, and the #987
+          payoff-bound guard remains the catch for out-of-bounds corruption.
+    """
 
     def test_qty_one_debit_baseline_unchanged(self):
-        """qty=1 baseline must match pre-fix output (per-1 == per-N at
-        qty=1). Anchors the regression so the fix doesn't drift the
-        common case."""
+        """qty=1 full-count baseline. Anchors the regression on the common case.
+        leg_qty=1==contracts → current_value=(2.40-0.20)*100*1=$220;
+        entry=2.50*1*100=$250; PL=220-250=-$30."""
         pos = _csx_debit_spread_position(quantity=1.0, avg_entry_price=2.50)
         snaps = _snapshots_for_csx(mid_44=2.40, mid_48_5=0.20)
         # Per-spread leg_total = (2.40 - 0.20) * 100 = $220
@@ -226,6 +248,31 @@ class TestRefreshMarksScale(unittest.TestCase):
         # mid=2.00, qty=3 → current = 2.00 * 100 * 3 = 600; entry = 1.50 * 3 * 100 = 450
         # PL = 600 - 450 = 150
         self.assertAlmostEqual(out[0]["unrealized_pl"], 150.0, places=2)
+
+    def test_per_spread_row_is_not_silently_corrected(self):
+        """BUG-A defense, transformed (#3). The reader assumes the pinned
+        full-count convention; it does NOT silently re-handle a per-spread row.
+
+        A 4-contract position stored per-spread (leg.quantity=1) — the exact
+        invalid shape the 2026-05-18 CSX BUG-A had — produces the FABRICATED
+        value (leg-sum at per-1 = $220, finalized against the per-4 entry $1000
+        → -$780), NOT the correct full-count -$120. This is intentional: the
+        reader must not contain a leg.quantity-convention branch (the abandoned
+        #2 fix re-armed BUG-A by adding one). Correctness instead depends on:
+          - the fill-seam coercion (coerce_legs_to_full_count) PREVENTING any
+            per-spread row from ever being persisted, and
+          - the #987 payoff-bound guard clamping out-of-bounds corruption.
+        If a future change makes this assertion fail (reader "fixes" per-spread),
+        that is the signal it re-introduced the convention branch this guards
+        against — re-read docs/loud_error_doctrine.md (#1/#2/#3 mis-split)."""
+        pos = _csx_debit_spread_position(quantity=4.0, avg_entry_price=2.50, leg_quantity=1)
+        snaps = _snapshots_for_csx(mid_44=2.40, mid_48_5=0.20)
+        out = _run_refresh_marks([pos], snaps)
+        # leg-sum at per-1 = $220; finalize_mark(qty=4) entry=$1000 → -$780.
+        self.assertAlmostEqual(out[0]["unrealized_pl"], -780.0, places=2)
+        # And explicitly NOT the correct full-count value (which only a
+        # full-count row, guaranteed by the seam, would produce).
+        self.assertNotAlmostEqual(out[0]["unrealized_pl"], -120.0, places=2)
 
 
 # ─────────────────────────────────────────────────────────────────

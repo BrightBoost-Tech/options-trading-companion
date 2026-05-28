@@ -33,6 +33,7 @@ from packages.quantum.risk.payoff_bounds import (
     evaluate_payoff_bound,
     payoff_bound_alert_fields,
 )
+from packages.quantum.risk.mark_math import compute_current_value, finalize_mark
 
 logger = logging.getLogger(__name__)
 
@@ -362,98 +363,53 @@ class IntradayRiskMonitor:
         # Update positions with fresh marks
         for pos in positions:
             legs = pos.get("legs") or []
-            if not legs:
-                sym = normalize_symbol(pos.get("symbol", ""))
-                snap = snapshots.get(sym, {})
+
+            # Shared mid resolver over the pre-fetched snapshots (used for both
+            # the leg-less and multi-leg paths via risk.mark_math).
+            def _mid_for(sym: str) -> float:
+                snap = snapshots.get(normalize_symbol(sym), {})
                 q = snap.get("quote", snap)
                 bid = float(q.get("bid") or 0)
                 ask = float(q.get("ask") or 0)
-                mid = (bid + ask) / 2.0 if bid > 0 and ask > 0 else float(q.get("mid") or 0)
+                return (bid + ask) / 2.0 if (bid > 0 and ask > 0) else float(q.get("mid") or 0)
+
+            if not legs:
+                mid = _mid_for(pos.get("symbol", ""))
                 if mid > 0:
-                    qty = abs(float(pos.get("quantity") or 1))
-                    current_value = mid * 100 * qty
-                    entry_value = float(pos.get("avg_entry_price") or 0) * qty * 100
-                    pos["current_mark"] = mid
-                    pos["unrealized_pl"] = current_value - entry_value
+                    qty_signed = float(pos.get("quantity") or 1)
+                    current_value = mid * 100 * abs(qty_signed)
+                    # #3 unification: single shared full-count finalize (H13).
+                    pos["current_mark"], pos["unrealized_pl"] = finalize_mark(
+                        qty_signed, pos.get("avg_entry_price"), current_value
+                    )
                 continue
 
-            # Multi-leg: compute from all legs (all-or-nothing).
+            # Multi-leg: single shared full-count mark math (H13, #3).
             #
-            # Scale-consistency invariant (2026-05-18 BUG-A fix):
-            # The stored `legs` JSON persists each leg's `quantity` as the
-            # per-spread leg unit (typically 1) — NOT scaled by the number
-            # of contracts in the position. `pos.quantity` is the spread
-            # contract count (e.g. 4 for a 4-contract debit spread).
-            #
-            # We therefore compute the PER-SPREAD value from the legs
-            # (each leg priced at its declared per-spread quantity), and
-            # scale BOTH current_value and entry_value by pos.quantity in
-            # the same step. Mixing scales — per-1 leg_total against per-N
-            # entry_value — fabricates large losses on any multi-contract
-            # position and force-closes it within seconds of opening.
-            # Today's CSX 4-contract spread was the forcing example.
-            per_spread_value = 0.0  # dollar value of ONE spread (post-fees-ex)
-            all_priced = True
-            for leg in legs:
-                if not isinstance(leg, dict):
-                    continue
-                sym = normalize_symbol(leg.get("occ_symbol") or leg.get("symbol", ""))
-                snap = snapshots.get(sym, {})
-                q = snap.get("quote", snap)
-                bid = float(q.get("bid") or 0)
-                ask = float(q.get("ask") or 0)
-                mid = (bid + ask) / 2.0 if bid > 0 and ask > 0 else float(q.get("mid") or 0)
-                if mid <= 0:
-                    all_priced = False
-                    break
-                # leg.quantity is the per-spread leg unit. Do NOT mix in
-                # pos.quantity here — that's applied once at the end.
-                leg_qty = float(leg.get("quantity") or 1)
-                action = leg.get("action", "buy")
-                side_mult = 1.0 if action == "buy" else -1.0
-                per_spread_value += mid * 100 * abs(leg_qty) * side_mult
+            # Convention (#3, pinned): legs[].quantity == the position contract
+            # count (full-count). compute_current_value sums the TOTAL signed
+            # value across all contracts; finalize_mark scales unrealized_pl
+            # exactly ONCE. The pre-unification code here treated leg.quantity as
+            # a per-spread unit (1) and then multiplied per-spread P&L by
+            # pos.quantity AGAIN — double-counting (F: +$2,070 vs the correct
+            # +$30). Both readers now route through risk.mark_math so they cannot
+            # diverge. The CSX 4-contract BUG-A shape is prevented at the fill
+            # seam (assertion+coercion) and any per-spread row that still reached
+            # here would be caught loudly by the #987 payoff-bound guard below.
+            current_value = compute_current_value(legs, _mid_for, pos.get("quantity"))
 
-            if all_priced:
+            if current_value is not None:
                 qty_signed = float(pos.get("quantity") or 0)
-                qty_abs = abs(qty_signed)
-                per_spread_entry_value = float(pos.get("avg_entry_price") or 0) * 100
-                # current_mark is the per-spread mark price ($/spread),
-                # independent of pos.quantity. This is what downstream
-                # consumers (paper_eod_snapshots, exit evaluator) expect.
-                pos["current_mark"] = per_spread_value / 100.0
-                # Compute per-spread P&L preserving the pre-fix sign
-                # convention for credit (qty<0) vs debit (qty>0)
-                # structures, THEN scale by qty_abs in the same step.
-                # Pre-fix used qty=1 implicitly (leg_total was per-1 and
-                # entry_value was per-N — only matched at qty=1). Both
-                # branches keep the same per-spread shape; the only
-                # change is that the qty_abs scaling is applied once,
-                # consistently, at the end. avg_entry_price stores the
-                # ABSOLUTE per-spread net premium for both debit and
-                # credit positions, hence the per-spread entry constant
-                # is unsigned and the directional sign comes from which
-                # branch we take below.
-                if qty_signed < 0:
-                    # Short / credit: entry_per_spread is credit received
-                    # (positive); abs(per_spread_value) is current
-                    # liability (positive). PL/spread = entry - liability.
-                    per_spread_pl = per_spread_entry_value - abs(per_spread_value)
-                else:
-                    # Long / debit: per_spread_value is current value
-                    # (positive); entry_per_spread is cost paid (positive).
-                    # PL/spread = current - entry.
-                    per_spread_pl = per_spread_value - per_spread_entry_value
-                pos["unrealized_pl"] = per_spread_pl * qty_abs
+                pos["current_mark"], pos["unrealized_pl"] = finalize_mark(
+                    qty_signed, pos.get("avg_entry_price"), current_value
+                )
 
-                # ── Payoff-bound guard (Task 1, 2026-05-28) ───────────────
-                # Layered ON TOP of the mark math above — changes no
-                # computation. Bounds the just-finalised unrealized_pl to the
-                # spread's physical payoff envelope and surfaces impossible
-                # marks loudly. Convention-agnostic: the bound is derived from
-                # pos.quantity + strikes + avg_entry (reliable), never from
-                # legs.quantity (the unreliable field — see #3). The
-                # legs.quantity double-count this guard catches (F: +$1,695 vs
-                # max-profit +$520) is NOT fixed here; that is #3.
+                # ── Payoff-bound guard (#987, retained) ───────────────────
+                # Layered ON TOP of the unified mark math — changes no
+                # computation. Convention-agnostic (pos.quantity + strikes +
+                # avg_entry, never legs.quantity). With the double-count removed
+                # this should now be in-bounds for F (+$30); it remains the loud
+                # catch if any future per-spread row slips through.
                 _bound = evaluate_payoff_bound(pos, pos["unrealized_pl"])
                 if _bound.applicable and not _bound.in_bounds:
                     self._log_alert(

@@ -269,8 +269,20 @@ def _clone_suggestion_for_cohort(
         scale = config.max_risk_pct_per_trade / 0.05
         contracts = max(1, int(round(original_contracts * scale)))
 
-    # Build cloned order_json with new quantity
-    cloned_order = {**order_json, "contracts": contracts}
+    # Build cloned order_json with new quantity.
+    #
+    # #3 convention (full-count): each leg's quantity must equal the clone's OWN
+    # contract count, not the champion's. Pre-fix, `{**order_json}` copied the
+    # champion's legs verbatim — so a 26ct neutral clone carried the champion's
+    # 5ct legs (PR #990's F-row check observed legs.quantity=5 across the 5/12/26
+    # cohort rows). Rescale every leg's quantity to `contracts` here so cohort
+    # suggestion rows are convention-correct at emission.
+    cloned_legs = [
+        {**leg, "quantity": contracts}
+        for leg in (order_json.get("legs") or [])
+        if isinstance(leg, dict)
+    ]
+    cloned_order = {**order_json, "contracts": contracts, "legs": cloned_legs}
 
     # Build cloned sizing_metadata
     cloned_sizing = {

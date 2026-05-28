@@ -29,6 +29,10 @@ from packages.quantum.services.close_helper import (
     PositionAlreadyClosed,
 )
 from packages.quantum.observability.alerts import alert, _get_admin_supabase
+from packages.quantum.services.exit_geometry import (
+    compute_spread_geometry,
+    evaluate_geometry_rules,
+)
 
 PDT_MAX_DAY_TRADES = int(os.environ.get("PDT_MAX_DAY_TRADES", "3"))
 EXIT_RANKING_ENABLED = os.environ.get("EXIT_RANKING_ENABLED", "1") == "1"
@@ -626,6 +630,10 @@ class PaperExitEvaluator:
         #    If no cohorts exist, falls back to global EXIT_CONDITIONS.
         closes: List[Dict[str, Any]] = []
         holds: List[Dict[str, Any]] = []
+        # D6 Phase 1: (position, actual premium-% decision) captured for the
+        # OBSERVATION-ONLY shadow geometry harness, logged AFTER closes/holds are
+        # finalized so it cannot influence the real exit decision.
+        shadow_inputs: List[tuple] = []
 
         # Build cohort → exit conditions map
         cohort_conditions_cache: Dict[str, Dict] = {}
@@ -671,6 +679,7 @@ class PaperExitEvaluator:
 
             triggered = evaluate_position_exit(position, conditions=pos_conditions)
             active_conditions = pos_conditions or EXIT_CONDITIONS
+            shadow_inputs.append((position, triggered))
             if triggered:
                 closes.append({
                     "position_id": position["id"],
@@ -684,6 +693,16 @@ class PaperExitEvaluator:
                 })
             else:
                 holds.append(position)
+
+        # D6 Phase 1: OBSERVATION-ONLY shadow geometry harness. Runs AFTER the
+        # closes/holds partition is finalized above, so it is structurally
+        # incapable of altering the real exit decision — it only reads positions
+        # and writes shadow_exit_decisions rows. Fail-soft: a harness error must
+        # never break exit evaluation (observability must not undo primary work).
+        try:
+            self._persist_shadow_exit_decisions(user_id, shadow_inputs)
+        except Exception as e:
+            logger.warning(f"[SHADOW_EXIT] harness failed (non-fatal): {e}")
 
         # 4. Rank triggered exits by marginal value (if enabled)
         if EXIT_RANKING_ENABLED and closes:
@@ -859,6 +878,75 @@ class PaperExitEvaluator:
             "close_reasons": close_reasons,
             "pdt_status": pdt_summary,
         }
+
+    def _persist_shadow_exit_decisions(self, user_id: str, shadow_inputs: List[tuple]) -> None:
+        """D6 Phase 1 — OBSERVATION-ONLY shadow geometry harness.
+
+        For each open position at this evaluation, log what each candidate
+        geometry rule (R1-R4) WOULD decide alongside the premium-% champion's
+        ACTUAL decision, to ``shadow_exit_decisions``. Has NO write path to the
+        real exit/close — it only reads positions and inserts shadow rows. The
+        real exit was already determined (premium-% logic) before this runs.
+
+        Fail-soft per row + per cycle: any error is swallowed (observability must
+        not undo primary work). Underlying spot is fetched best-effort; on miss,
+        the row is still written with spot=None and rules recorded n/a.
+        """
+        if not shadow_inputs:
+            return
+
+        # Fetch live underlying spot for each position's ticker (best-effort,
+        # same MarketDataTruthLayer path marks use). Batch the distinct tickers.
+        spot_by_symbol: Dict[str, Optional[float]] = {}
+        try:
+            from packages.quantum.services.market_data_truth_layer import MarketDataTruthLayer
+            truth_layer = MarketDataTruthLayer()
+            symbols = sorted({
+                (pos.get("symbol") or "").upper()
+                for pos, _ in shadow_inputs if pos.get("symbol")
+            })
+            if symbols:
+                snaps = truth_layer.snapshot_many(symbols)
+                from packages.quantum.services.cache_key_builder import normalize_symbol
+                for sym in symbols:
+                    snap = snaps.get(normalize_symbol(sym)) or snaps.get(sym) or {}
+                    q = snap.get("quote", snap) if isinstance(snap, dict) else {}
+                    bid = float(q.get("bid") or 0)
+                    ask = float(q.get("ask") or 0)
+                    mid = (bid + ask) / 2.0 if (bid > 0 and ask > 0) else float(q.get("mid") or 0)
+                    spot_by_symbol[sym] = mid if mid > 0 else None
+        except Exception as e:
+            logger.warning(f"[SHADOW_EXIT] underlying spot fetch failed (non-fatal): {e}")
+
+        rows: List[Dict[str, Any]] = []
+        for pos, triggered in shadow_inputs:
+            try:
+                sym = (pos.get("symbol") or "").upper()
+                spot = spot_by_symbol.get(sym)
+                dte = days_to_expiry(pos)
+                geometry = compute_spread_geometry(pos, spot, dte)
+                rule_decisions = evaluate_geometry_rules(geometry)
+                rows.append({
+                    "user_id": user_id or pos.get("user_id"),
+                    "position_id": pos.get("id"),
+                    "symbol": pos.get("symbol"),
+                    "underlying_spot": spot,
+                    "dte": dte,
+                    "structure": geometry.get("structure", "n/a"),
+                    "geometry": geometry,
+                    "premium_pct_decision": triggered or "hold",
+                    "geometry_decisions": rule_decisions,
+                })
+            except Exception as e:
+                logger.warning(f"[SHADOW_EXIT] row build failed for {pos.get('id')} (non-fatal): {e}")
+
+        if not rows:
+            return
+        try:
+            self.client.table("shadow_exit_decisions").insert(rows).execute()
+            logger.info(f"[SHADOW_EXIT] logged {len(rows)} shadow exit decision row(s)")
+        except Exception as e:
+            logger.warning(f"[SHADOW_EXIT] persist failed (non-fatal): {e}")
 
     def _get_open_positions(self, user_id: str) -> List[Dict[str, Any]]:
         """Get all open paper positions for a user."""

@@ -3511,6 +3511,20 @@ def scan_for_opportunities(
                 "sector": sector_map.get(symbol, "unknown"),
             }
 
+            # D2 Phase 1: attach momentum / extended-move signals (OBSERVE-ONLY).
+            # Computed from the daily `closes` already fetched above — no new data
+            # dependency. NOT consumed by scoring/ranking/selection; logged
+            # downstream (workflow_orchestrator) for the temper harness. Fail-soft:
+            # a signal error must never drop a candidate.
+            try:
+                from packages.quantum.services.momentum_signals import (
+                    compute_momentum_signals, direction_from_strategy,
+                )
+                _mom_dir = direction_from_strategy(candidate_dict.get("strategy"))
+                candidate_dict["momentum_signals"] = compute_momentum_signals(closes, _mom_dir)
+            except Exception as _mom_err:
+                print(f"[D2_MOMENTUM] signal attach failed for {symbol} (non-fatal): {_mom_err}")
+
             # #62a-D5 Option B (2026-05-10): the 3 execution_cost_*
             # observability fields previously assigned here had zero readers
             # and were silently dropped by the DROPPABLE_SUGGESTION_COLUMNS

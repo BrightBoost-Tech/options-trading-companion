@@ -2078,6 +2078,43 @@ def _legs_have_valid_nbbo_and_mid(legs: list) -> bool:
     return True
 
 
+def build_momentum_observation_rows(user_id, cycle_date, inserted_suggestions):
+    """D2 Phase 1 — build OBSERVE-ONLY momentum_observations rows (pure).
+
+    Reads each inserted suggestion's scanner-attached ``momentum_signals`` and
+    computes candidate EV-tempers (T1-T4) alongside the suggestion's ACTUAL
+    (unchanged) ev/score/risk_adjusted_ev/status. Returns rows to insert; never
+    mutates the suggestion or feeds ranking/selection. Suggestions without
+    momentum_signals (e.g. non-scanner sources) are skipped.
+    """
+    from packages.quantum.services.momentum_signals import evaluate_tempers
+
+    rows = []
+    for item in inserted_suggestions or []:
+        s = (item or {}).get("original") or {}
+        cand = s.get("internal_cand") or {}
+        signals = cand.get("momentum_signals")
+        if not signals:
+            continue
+        sizing = s.get("sizing_metadata") or {}
+        ev = s.get("ev")
+        score = sizing.get("score")
+        rows.append({
+            "user_id": user_id,
+            "suggestion_id": item.get("suggestion_id"),
+            "ticker": s.get("ticker"),
+            "cycle_date": cycle_date,
+            "direction": signals.get("direction"),
+            "signals": signals,
+            "actual_ev": ev,
+            "actual_score": score,
+            "actual_risk_adjusted_ev": s.get("risk_adjusted_ev"),
+            "actual_status": s.get("status"),
+            "tempers": evaluate_tempers(ev, score, signals),
+        })
+    return rows
+
+
 async def run_midday_cycle(supabase: Client, user_id: str):
     """
     1. Use CashService.get_deployable_capital.
@@ -3776,6 +3813,22 @@ async def run_midday_cycle(supabase: Client, user_id: str):
                     "consequence": f"{len(_midday_insert_failures)} midday suggestions lost from this cycle (retry shim exhausted)",
                 },
             )
+
+        # === D2 Phase 1: OBSERVE-ONLY momentum harness ===
+        # Logs would-be EV tempers alongside the ACTUAL (unchanged) ev/score/rank
+        # for each inserted suggestion. Reads inserted_suggestions + the scanner-
+        # attached momentum_signals and writes momentum_observations rows. Has NO
+        # write path into ranking/selection — selection was already determined.
+        # Fail-soft: observability must not undo primary work.
+        try:
+            _mom_rows = build_momentum_observation_rows(
+                user_id, cycle_date, inserted_suggestions
+            )
+            if _mom_rows:
+                supabase.table("momentum_observations").insert(_mom_rows).execute()
+                logger.info(f"[D2_MOMENTUM] logged {len(_mom_rows)} momentum observation row(s)")
+        except Exception as _mom_e:
+            logger.warning(f"[D2_MOMENTUM] observation persist failed (non-fatal): {_mom_e}")
 
         # === v4 OBSERVABILITY: Post-insert event emission ===
         try:

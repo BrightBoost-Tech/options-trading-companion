@@ -132,7 +132,7 @@ const StagedList = ({ items }: { items: Suggestion[] }) => {
         <div className="mt-6 mb-6">
             <button
                 type="button"
-                className="w-full flex items-center justify-between py-2 hover:bg-muted/50 rounded px-2 transition-colors select-none"
+                className="w-full flex items-center justify-between py-2 hover:bg-muted/50 rounded px-2 transition-colors select-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
                 onClick={() => setExpanded(!expanded)}
             >
                 <h3 className="text-sm font-medium text-green-700 dark:text-green-400 flex items-center gap-2">
@@ -172,7 +172,7 @@ const BlockedList = ({ items, onDismiss, dismissedIds }: {
         <div className="mt-6 mb-6">
             <button
                 type="button"
-                className="w-full flex items-center justify-between py-2 hover:bg-muted/50 rounded px-2 transition-colors select-none"
+                className="w-full flex items-center justify-between py-2 hover:bg-muted/50 rounded px-2 transition-colors select-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
                 onClick={() => setExpanded(!expanded)}
             >
                 <h3 className="text-sm font-medium text-orange-600 dark:text-orange-400 flex items-center gap-2">
@@ -210,7 +210,7 @@ const CompletedList = ({ items }: { items: Suggestion[] }) => {
         <div className="mt-8">
             <button
                 type="button"
-                className="w-full flex items-center justify-between py-2 hover:bg-muted/50 rounded px-2 transition-colors select-none"
+                className="w-full flex items-center justify-between py-2 hover:bg-muted/50 rounded px-2 transition-colors select-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
                 onClick={() => setExpanded(!expanded)}
             >
                 <h3 className="text-sm font-medium text-muted-foreground flex items-center gap-2">

@@ -42,6 +42,14 @@ CHICAGO_TZ = ZoneInfo("America/Chicago")
 
 # Force-close enforcement: warn-only until RISK_ENVELOPE_ENFORCE=1
 _ENFORCE_FORCE_CLOSE = os.environ.get("RISK_ENVELOPE_ENFORCE", "0") == "1"
+# Intraday target_profit capture (default OFF). When on, the 15-min monitor
+# also closes positions that hit their per-cohort target_profit — the profit-
+# side mirror of the stop_loss it already acts on — closing the multi-hour
+# blind window between the twice-daily paper_exit_evaluate runs (F marked +$30
+# at 13:15Z, realized +$105 on an intraday spike the system wouldn't recheck
+# until ~20:00Z). Enabling is a separate operator decision after tests pass and
+# ideally after observing one cycle correctly HOLD a below-target position.
+_INTRADAY_TARGET_PROFIT_ENABLED = os.environ.get("INTRADAY_TARGET_PROFIT_ENABLED", "0") == "1"
 
 # Alpaca-authoritative equity + weekly P&L were extracted to
 # `packages.quantum.services.equity_state` so that other callers
@@ -177,15 +185,7 @@ class IntradayRiskMonitor:
         #     The envelope check above handles portfolio-level limits.
         #     This catches individual positions that hit their own stop/expiry
         #     between the scheduled 8:15 AM / 3:00 PM exit evaluations.
-        from packages.quantum.services.paper_exit_evaluator import (
-            evaluate_position_exit,
-            EXIT_CONDITIONS,
-        )
-        exit_triggered = []
-        for pos in positions:
-            reason = evaluate_position_exit(pos, conditions=EXIT_CONDITIONS)
-            if reason and reason in ("stop_loss", "expiration_day"):
-                exit_triggered.append((pos, reason))
+        exit_triggered = self._collect_intraday_exit_triggers(positions, user_id)
 
         # 5. Process violations
         force_closes_submitted = 0
@@ -213,8 +213,14 @@ class IntradayRiskMonitor:
             pid = pos.get("id")
             if pid in closed_in_this_cycle:
                 continue
+            # Attribution: target_profit must record close_reason='target_profit_hit'
+            # (the bare reason maps there via _map_close_reason), NOT the
+            # 'envelope_force_close' bucket the 'risk_envelope:' prefix maps to.
+            # stop_loss/expiration keep their existing risk_envelope: mapping
+            # (unchanged) by passing no override.
+            _mapped = "target_profit" if reason == "target_profit" else None
             success = self._execute_force_close(
-                pos, f"intraday_{reason}", user_id
+                pos, f"intraday_{reason}", user_id, mapped_close_reason=_mapped
             )
             if success:
                 force_closes_submitted += 1
@@ -487,12 +493,83 @@ class IntradayRiskMonitor:
 
     # ── Force close ───────────────────────────────────────────────────
 
-    def _execute_force_close(self, position: Dict, reason: str, user_id: str) -> bool:
+    def _collect_intraday_exit_triggers(self, positions: List[Dict], user_id: str) -> List:
+        """Collect position-level intraday exit triggers as (position, reason) pairs.
+
+        - stop_loss / expiration_day: evaluated on the default EXIT_CONDITIONS via
+          the shared evaluate_position_exit — UNCHANGED existing behavior.
+        - target_profit (flag-gated, _INTRADAY_TARGET_PROFIT_ENABLED): the profit-
+          side mirror. Uses the SAME per-cohort _check_target_profit (inside the
+          cohort's build_exit_conditions check) — no parallel decision logic (H13).
+          Marks are the post-#3 unified full-count values (risk.mark_math), so the
+          threshold is evaluated against correct unrealized_pl (not the old
+          double-count). Reuses load_cohort_configs / build_exit_conditions /
+          _resolve_position_cohort — the same machinery the scheduled evaluator uses.
+
+        Fail-safe: if per-cohort params can't be resolved, target_profit is NOT
+        acted on (better to wait for the scheduled run than act on a wrong
+        threshold). stop_loss/expiration are unaffected by that fail-safe.
+        """
+        from packages.quantum.services.paper_exit_evaluator import (
+            evaluate_position_exit,
+            EXIT_CONDITIONS,
+            build_exit_conditions,
+            PaperExitEvaluator,
+        )
+
+        tp_active = _INTRADAY_TARGET_PROFIT_ENABLED
+        tp_conditions_by_cohort: Dict[str, Any] = {}
+        tp_evaluator = None
+        if tp_active:
+            try:
+                from packages.quantum.policy_lab.config import load_cohort_configs
+                tp_evaluator = PaperExitEvaluator(self.supabase)
+                for _cn, _cfg in (load_cohort_configs(user_id, self.supabase) or {}).items():
+                    tp_conditions_by_cohort[_cn] = build_exit_conditions(
+                        target_profit_pct=_cfg.target_profit_pct,
+                        stop_loss_pct=_cfg.stop_loss_pct,
+                        min_dte_to_exit=_cfg.min_dte_to_exit,
+                    )
+            except Exception as e:
+                logger.warning(
+                    f"[RISK_MONITOR] intraday target_profit cohort load failed "
+                    f"(non-fatal; target_profit not acted on this cycle): {e}"
+                )
+                tp_active = False
+
+        exit_triggered = []
+        for pos in positions:
+            reason = evaluate_position_exit(pos, conditions=EXIT_CONDITIONS)
+            if reason and reason in ("stop_loss", "expiration_day"):
+                exit_triggered.append((pos, reason))
+                continue  # stop/expiry take priority; a position can't also be at +target
+            if tp_active:
+                try:
+                    cohort = tp_evaluator._resolve_position_cohort(pos)
+                    conds = tp_conditions_by_cohort.get(cohort) or EXIT_CONDITIONS
+                    if conds["target_profit"]["check"](pos):
+                        exit_triggered.append((pos, "target_profit"))
+                except Exception as e:
+                    logger.warning(
+                        f"[RISK_MONITOR] intraday target_profit check failed for "
+                        f"{pos.get('id')} (non-fatal): {e}"
+                    )
+        return exit_triggered
+
+    def _execute_force_close(
+        self, position: Dict, reason: str, user_id: str,
+        mapped_close_reason: Optional[str] = None,
+    ) -> bool:
         """
         Submit close order for a single position.
 
         Uses the same _close_position path as PaperExitEvaluator — no duplicate logic.
         Returns True if close was submitted, False if skipped or failed.
+
+        mapped_close_reason: optional bare exit reason (e.g. "target_profit") passed
+        straight to _close_position so it maps to the correct close_reason enum
+        (target_profit_hit). When None (stop_loss / envelope breaches), the existing
+        "risk_envelope:{reason}" form is used (→ envelope_force_close), unchanged.
         """
         pos_id = position.get("id", "unknown")
         symbol = position.get("symbol", "?")
@@ -541,10 +618,11 @@ class IntradayRiskMonitor:
         try:
             from packages.quantum.services.paper_exit_evaluator import PaperExitEvaluator
             evaluator = PaperExitEvaluator(self.supabase)
+            _close_reason_arg = mapped_close_reason if mapped_close_reason else f"risk_envelope:{reason}"
             result = evaluator._close_position(
                 user_id=user_id,
                 position_id=pos_id,
-                reason=f"risk_envelope:{reason}",
+                reason=_close_reason_arg,
             )
 
             self._log_alert(

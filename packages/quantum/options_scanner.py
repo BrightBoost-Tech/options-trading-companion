@@ -2132,6 +2132,102 @@ def _sum_leg_spreads_share(legs: List[Dict[str, Any]]) -> Optional[float]:
     return total
 
 
+def build_spread_debug_capture(
+    legs,
+    cost_range,
+    sum_leg_spreads,
+    combo_width_share,
+    fallback_width_share,
+    total_cost,
+    max_loss_contract,
+    max_loss_share,
+):
+    """D8 OBSERVABILITY (2026-05-28): capture the runtime values needed to pin the
+    credit-spread ``combo_width_share = 2×credit`` (``option_spread_pct = 2.0``)
+    artifact on the next live scan cycle.
+
+    Static + DB analysis confirmed the artifact but could NOT pin the assignment:
+    the readable paths (cost_range sum-of-leg-spreads; fallback ``abs*0.05`` /
+    underlying-based) do not produce ``2×credit``, and PEP's ``combo_width_share
+    = 0.38`` disproves the recorded "strike-width fallback" mechanism. The missing
+    evidence is the per-leg quotes the scanner actually saw and which branch
+    produced the logged value — captured here.
+
+    PURE: returns a dict of capture fields; does NOT mutate inputs and changes NO
+    scanner logic. The caller merges this into the already-persisted
+    ``spread_debug`` fail-soft. The rejection decision and every computed value
+    are identical with or without this capture.
+    """
+    def _r(x, n=6):
+        try:
+            return round(float(x), n)
+        except (TypeError, ValueError):
+            return None
+
+    per_leg = []
+    strikes = []
+    for l in (legs or []):
+        if not isinstance(l, dict):
+            continue
+        per_leg.append({
+            "strike": l.get("strike"),
+            "side": l.get("side"),
+            "bid": l.get("bid"),
+            "ask": l.get("ask"),
+            "premium": l.get("premium"),
+        })
+        if l.get("strike") is not None:
+            strikes.append(l.get("strike"))
+
+    if cost_range is None:
+        cost_range_capture = None
+        combo_source = "fallback"  # _combo_cost_range_from_legs returned None
+    else:
+        cost_range_capture = {
+            "cost_min": _r(cost_range.get("cost_min")),
+            "cost_max": _r(cost_range.get("cost_max")),
+            "combo_spread_share": _r(cost_range.get("combo_spread_share")),
+        }
+        combo_source = "cost_range"
+
+    # Candidate values so the EXACT source of combo_width_share is reconstructable
+    # by comparison (cost_range.combo_spread_share vs sum_leg_spreads vs
+    # fallback_width_share). Distinguishing fallback_snapshot vs fallback_default
+    # WITHIN _combo_width_share_from_legs would require instrumenting that
+    # function (mid-function state not in scope here) — deferred; the comparison
+    # below pins it without refactoring.
+    credit = abs(float(total_cost or 0.0))
+    width = None
+    if len(strikes) >= 2:
+        try:
+            width = abs(float(strikes[0]) - float(strikes[1]))
+        except (TypeError, ValueError):
+            width = None
+
+    return {
+        "capture_version": "d8_v1",
+        "per_leg": per_leg,
+        "cost_range": cost_range_capture,
+        "combo_source": combo_source,
+        "candidate_values": {
+            "logged_combo_width_share": _r(combo_width_share),
+            "sum_leg_spreads": _r(sum_leg_spreads),
+            "fallback_width_share": _r(fallback_width_share),
+        },
+        # H-formula test: a credit spread's max_loss should be (width − credit),
+        # so max_loss_share should be (width − credit), NOT credit. If
+        # max_loss_share == credit here, the max_loss derivation is the defect.
+        "max_loss_derivation": {
+            "credit": _r(credit),
+            "strike_width": _r(width),
+            "max_loss_contract": _r(max_loss_contract),
+            "max_loss_share": _r(max_loss_share),
+            "expected_credit_max_loss_share": _r(width - credit) if width is not None else None,
+            "combo_over_credit": _r(combo_width_share / credit, 4) if credit > 1e-9 and combo_width_share is not None else None,
+        },
+    }
+
+
 def _condor_pop_from_legs(legs: List[Dict[str, Any]]) -> Optional[float]:
     """
     Estimate PoP for condor as 1 - (|delta_short_put| + |delta_short_call|).
@@ -3249,6 +3345,23 @@ def scan_for_opportunities(
                         "regime": regime_name,
                         "is_condor": False,
                     }
+                    # D8 OBSERVABILITY: enrich with the runtime values needed to
+                    # pin the credit-spread 2×credit artifact next cycle.
+                    # Fail-soft — capture must never break the scan; on any error
+                    # the rejection proceeds with the base debug_spread above.
+                    try:
+                        debug_spread.update(build_spread_debug_capture(
+                            legs=legs,
+                            cost_range=cost_range,
+                            sum_leg_spreads=sum_leg_spreads,
+                            combo_width_share=combo_width_share,
+                            fallback_width_share=fallback_width_share,
+                            total_cost=total_cost,
+                            max_loss_contract=max_loss_contract,
+                            max_loss_share=max_loss_share,
+                        ))
+                    except Exception as _cap_err:
+                        debug_spread["capture_error"] = str(_cap_err)[:160]
                     print(
                         f"[SCANNER] spread_too_wide: {symbol} {strategy_key} "
                         f"spread={option_spread_pct:.1%} > threshold={effective_threshold:.0%} "

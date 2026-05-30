@@ -4,6 +4,8 @@ import { useState, useEffect } from 'react';
 import DashboardLayout from '@/components/DashboardLayout';
 import { API_URL, TEST_USER_ID } from '@/lib/constants';
 import { supabase } from '@/lib/supabase';
+import { EmptyState } from '@/components/ui/empty-state';
+import { FileText } from 'lucide-react';
 
 export default function JournalPage() {
   const [entries, setEntries] = useState<any[]>([]);
@@ -59,10 +61,11 @@ export default function JournalPage() {
           {loading ? (
             <div className="p-12 text-center text-gray-500">Loading entries...</div>
           ) : entries.length === 0 ? (
-            <div className="p-12 text-center text-gray-500">
-              <p className="text-lg">No trades logged yet.</p>
-              <p className="text-sm mt-2">Use the &quot;Log New Trade&quot; button to get started.</p>
-            </div>
+            <EmptyState
+              icon={FileText}
+              title="No trades logged yet."
+              description="Use the &quot;Log New Trade&quot; button to get started."
+            />
           ) : (
             <div className="overflow-x-auto">
               <table className="w-full">

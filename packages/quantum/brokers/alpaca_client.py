@@ -308,7 +308,19 @@ class AlpacaClient:
         is_multi = len(legs) >= 2
         # Options must always be limit orders — Alpaca rejects market orders
         # outside market hours.
-        if not limit_price or limit_price <= 0:
+        #
+        # MAGNITUDE guard (not sign). For mleg credit closes the parent
+        # limit_price is legitimately NEGATIVE (selling a debit spread to
+        # close receives a credit; Alpaca's mleg convention encodes credit
+        # as negative — see build_alpaca_order_request #101). The original
+        # `limit_price <= 0` SIGN guard (commit d10ecf8, Mar 2026) predated
+        # that convention and rejected exactly the value
+        # build_alpaca_order_request:126 produces, routing every automated
+        # debit-spread close to needs_manual_review. This now mirrors that
+        # upstream guard EXACTLY (same threshold) so the two layers agree:
+        # only a missing / sub-penny |limit| is invalid; a valid credit
+        # (e.g. -1.86) passes through intact.
+        if not limit_price or abs(limit_price) < 0.01:
             raise AlpacaOrderError(
                 f"Cannot submit options order without limit_price (got {limit_price})"
             )

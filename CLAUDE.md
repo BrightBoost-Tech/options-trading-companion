@@ -387,7 +387,19 @@ Full backlog (descriptions, sub-items, audit catalogs) lives in `docs/backlog.md
 
 Learning-mode needs data; data needs cycles; cycles fire on the market schedule. Within empirical correctness (H14 cite-then-verify, diagnostic discipline, defensive observability), ship efficiently when evidence supports it. "Wait until Monday" / "let it settle over the weekend" / "stop for the day" are responses to **specific signals** (operator requests pause, evidence incomplete, dependent data not yet landed), NOT defaults after every PR. Operational momentum matters; the agent shouldn't second-guess a clean cadence absent operator signal.
 
-This does NOT relax: H14 pre-flight verification · diagnostic discipline · H9 verified-consumer · catastrophic-failure risk awareness · the 2026-05-12 resistance to activity-maximization. Distinction: activity-maximization = "ship more to make more trades happen"; operational velocity = "ship the correct fix efficiently when evidence supports it." The difference is the evidence base, not the pace. **Origin:** 2026-05-21 operator feedback after a week of six grounded PRs where agent recommendations erred toward excessive caution.
+This does NOT relax: H14 pre-flight verification · diagnostic discipline · H9 verified-consumer · catastrophic-failure risk awareness (loss exceeding account capital, ghost-position cascades, allocator emitting over-aggregate budgets) · the 2026-05-12 resistance to activity-maximization. Distinction: activity-maximization = "ship more to make more trades happen"; operational velocity = "ship the correct fix efficiently when evidence supports it." The difference is the evidence base, not the pace. **Origin:** 2026-05-21 operator feedback after a week of six grounded PRs where agent recommendations erred toward excessive caution.
+
+**Caution IS warranted when:**
+- Catastrophic failure modes are possible
+- Diagnostic evidence is incomplete (N=1 cycle vs needed N cycles)
+- An action requires verified state that hasn't been verified (PR #976's pre-flight catching HBAN drift)
+- The operator explicitly signals fatigue or wants to pause
+
+**Caution is NOT warranted because:**
+- Multiple PRs have shipped recently
+- The cadence "feels" heavy
+- Defensible inaction is being weighed against verified action
+- The agent prefers a slower pace
 
 ### Active focus (next 3)
 

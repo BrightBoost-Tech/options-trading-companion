@@ -77,7 +77,7 @@ Verified 2026-04-25 by reading alpaca-mcp-server source.
 
 ### Alpaca live key prefix gotcha
 
-Live Trading API keys for this account use the **AK** prefix (public docs say `PK`; some accounts use `AK`). Paper keys use `PKPR…`. Distinguishing rule: endpoint `api.alpaca.markets` = live (key `AK`/`PK`); `paper-api.alpaca.markets` = paper (`PKPR…`). Confirmed working 2026-04-25.
+Live Trading API keys for this account use the **AK** prefix (public docs say `PK`; some accounts use `AK`) — confirmed working 2026-04-25. The reliable live-vs-paper distinction is the **endpoint**, not the key prefix: `api.alpaca.markets` = live, `paper-api.alpaca.markets` = paper. **Paper creds for account `PA3I8CYLXBOS` live in the Railway worker env (`ALPACA_PAPER_API_KEY` / `ALPACA_PAPER_SECRET_KEY`) — Railway is the source of truth for the current values. Do not pin a paper-key prefix here — pinning one is exactly what drifted; the executor's runtime `assert_paper_account` guard verifies the account, not the doc.**
 
 ### Flags in use — single source of truth
 
@@ -431,7 +431,7 @@ Verified-fittable structure classes (derived at $681 micro — **re-derive at th
 
 ## Live State (auto-updated)
 
-- **Last updated:** 2026-05-29 (live figures verified via alpaca-live `get_account_info`).
+- **Last updated:** 2026-05-31 (live figures from 2026-05-29; merged since: #999 credit-close guard fix, #1000 prune, #1001 velocity doctrine, #1003 paper-shadow 1a).
 - **Phase:** micro_live (operator-set label, since 2026-04-25; promotion gate bypassed, continuous-growth model).
 - **Live Alpaca `211900084`:** equity **$1,635.45** · cash $1,635.45 · options BP $1,635.45 · cash multiplier 1, shorting disabled · last_equity $1,550.96 (balance_asof 2026-05-28). **Flat — 0 open positions.** PDT false, daytrade_count 0/3. Pending reg/TAF fees $0.26.
 - **TIER: now SMALL** — `get_tier(deployable_capital)` returns `small` above the $1,000 micro→small cliff (`small_account_compounder.py:24-50`; capital-based, not phase-based). Concrete small-vs-micro deltas:
@@ -442,4 +442,5 @@ Verified-fittable structure classes (derived at $681 micro — **re-derive at th
 - **F closed manually 2026-05-29 (+$105)** via the Alpaca UI — the **system exit path was NOT exercised** (so PR #908 mleg-close validation, Active-focus #1, still waits on a natural system close). Reconcile `paper_positions` per H10 (manual close bypasses our submission chain).
 - **Next position will be SMALL-tier** — a different sizing/concurrency regime than F/micro. The harnesses' next complete cycle will NOT be a micro baseline.
 - **Paper account `PA3I8CYLXBOS`** is wired via the `alpaca-paper` MCP server (separate from `alpaca-live`/`211900084`) for testing — e.g. the 2026-05-29 GTC-mleg resting-order validation (mleg GTC limit orders ARE accepted and rest; the resting-order layer is broker-buildable).
+- **Paper-shadow executor (D6/D2 observation infra):** Phase 1a merged (#1003) — dedicated paper client + `PA3I8CYLXBOS` account guard + `paper_shadow` routing_mode + 3 live-job exclusion filters; flag `PAPER_SHADOW_EXECUTOR_ENABLED` **default OFF** (nothing runs). Worker paper creds provisioned. Phase 1b pending (paired executor + D6 realized; leading safety item: `alpaca_order_sync` Step-2/Step-3 reconcile-loop exclusion). Detail in the `paper-shadow-executor-phases` memory note.
 - **Universe:** 74 active (see Current Phase). **α IV:** 67 at full iv_rank decidability; WBD/XLK at 60-row threshold; BKNG sparse (~mid-July 2026); 4 newest pending backfill.

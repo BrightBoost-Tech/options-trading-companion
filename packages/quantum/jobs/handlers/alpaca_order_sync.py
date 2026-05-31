@@ -68,9 +68,21 @@ def run(payload: Dict[str, Any], ctx: Any = None) -> Dict[str, Any]:
             # have alpaca_order_id post-PR2a (gate blocks submission), but
             # any pre-PR2a phantoms or race-condition orders must not have
             # their Alpaca state synced back into paper_orders.
+            #
+            # Paper-shadow isolation (additive, no-op when off): ALSO exclude
+            # 'paper_shadow' portfolios (the paper-shadow executor's, Phase 1b)
+            # so the live sync never polls/reconciles the executor's paper
+            # orders — the executor self-reconciles its own. Extends this same
+            # shadow_only exclusion (see services/paper_shadow_isolation.py
+            # PAPER_SHADOW_ROUTING_MODE). When no paper_shadow portfolios exist
+            # (always, pre-Phase-1b), the IN-list collects the same ids as
+            # before → identical behavior. NOTE (Phase 1b): the Step-2 orphan
+            # repair and Step-3 stuck-open reconcile loops below also need
+            # paper_shadow exclusion once the executor places real paper orders;
+            # they are no-op for paper_shadow until then (no such rows exist).
             shadow_portfolios_res = client.table("paper_portfolios") \
                 .select("id") \
-                .eq("routing_mode", "shadow_only") \
+                .in_("routing_mode", ["shadow_only", "paper_shadow"]) \
                 .execute()
             shadow_portfolio_ids = [
                 p["id"] for p in (shadow_portfolios_res.data or [])

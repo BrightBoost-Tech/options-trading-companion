@@ -951,9 +951,16 @@ class PaperExitEvaluator:
     def _get_open_positions(self, user_id: str) -> List[Dict[str, Any]]:
         """Get all open paper positions for a user."""
         try:
+            # Paper-shadow isolation (additive, no-op when off): exclude the
+            # paper-shadow executor's portfolios so the live evaluator never
+            # evaluates/closes its observation positions. Extends the existing
+            # shadow_only exclusion precedent (see services/paper_shadow_isolation.py
+            # PAPER_SHADOW_ROUTING_MODE). When no paper_shadow portfolios exist
+            # (always, pre-Phase-1b), .neq matches all rows → identical result.
             port_res = self.client.table("paper_portfolios") \
                 .select("id") \
                 .eq("user_id", user_id) \
+                .neq("routing_mode", "paper_shadow") \
                 .execute()
 
             portfolio_ids = [p["id"] for p in (port_res.data or [])]

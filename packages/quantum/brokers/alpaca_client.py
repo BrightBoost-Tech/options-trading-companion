@@ -223,6 +223,15 @@ class AlpacaClient:
             "paper": self.paper,
         }
 
+    def get_account_number(self) -> str:
+        """Human-readable account number (e.g. 'PA3I8CYLXBOS' paper,
+        '211900084' live) — distinct from get_account()['account_id'], which is
+        the account UUID. Used by the paper-shadow isolation guard
+        (services/paper_shadow_isolation.py) to confirm an order route targets
+        the paper account before any submission. Purely additive; not called by
+        the live trading path."""
+        return str(self._call_with_retry(self._client.get_account).account_number)
+
     def get_buying_power(self) -> float:
         """Available buying power for new trades."""
         return float(self._call_with_retry(self._client.get_account).buying_power)

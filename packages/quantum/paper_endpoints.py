@@ -897,8 +897,16 @@ def _process_orders_for_user(supabase, analytics, user_id, target_order_id=None)
 
     result = {"processed": 0, "errors": [], "total_orders": 0, "diagnostics": []}
 
-    # Get user portfolios
-    p_res = supabase.table("paper_portfolios").select("id, cash_balance").eq("user_id", user_id).execute()
+    # Get user portfolios.
+    # Paper-shadow isolation (1b safety completion, additive, no-op when off):
+    # exclude paper_shadow portfolios so this shared fill-processor never
+    # creates positions from, or commits fills for, the paper-shadow executor's
+    # orders — the executor self-reconciles its own. This is the
+    # user-scoping-proof guard for alpaca_order_sync Step-2 orphan repair, which
+    # calls this fn per user (a query-level filter there alone is insufficient
+    # when a user owns both live and paper_shadow portfolios). When no
+    # paper_shadow portfolio exists, .neq matches all rows → identical result.
+    p_res = supabase.table("paper_portfolios").select("id, cash_balance").eq("user_id", user_id).neq("routing_mode", "paper_shadow").execute()
     if not p_res.data:
         return result
     p_map = {p["id"]: p for p in p_res.data}

@@ -317,6 +317,163 @@ class TestSyntheticCapitalSeam(unittest.TestCase):
 
 
 # ═════════════════════════════════════════════════════════════════════
+# Run loop — idempotent state machine over paper_shadow_pairs
+# ═════════════════════════════════════════════════════════════════════
+class _PairsStore:
+    """In-memory paper_shadow_pairs (+ a stub paper_portfolios) supporting the
+    select/eq/in_/insert/update chains the state machine uses."""
+    def __init__(self):
+        self.rows = []
+        self._n = 0
+
+    # query builder
+    def table(self, name):
+        self._name = name
+        return _PQ(self, name)
+
+
+class _PQ:
+    def __init__(self, store, name, rows=None, filters=None):
+        self.store = store
+        self.name = name
+        self._rows = rows if rows is not None else None
+        self._f = filters or []
+        self._pending_update = None
+        self._pending_insert = None
+
+    def _base(self):
+        if self.name == "paper_portfolios":
+            return [{"id": "port-shadow", "user_id": "U", "routing_mode": "paper_shadow",
+                     "cash_balance": 2500}]
+        return self.store.rows
+
+    def select(self, *a, **k):
+        return _PQ(self.store, self.name, list(self._base()), list(self._f))
+
+    def eq(self, col, val):
+        rows = [r for r in (self._rows if self._rows is not None else self._base()) if r.get(col) == val]
+        q = _PQ(self.store, self.name, rows, self._f + [("eq", col, val)])
+        q._pending_update = self._pending_update
+        return q
+
+    def in_(self, col, vals):
+        s = set(vals)
+        rows = [r for r in (self._rows or []) if r.get(col) in s]
+        return _PQ(self.store, self.name, rows, self._f)
+
+    def limit(self, n):
+        return _PQ(self.store, self.name, (self._rows or [])[:n], self._f)
+
+    def insert(self, payload):
+        self.store._n += 1
+        payload = {"id": f"pair-{self.store._n}", **payload}
+        self.store.rows.append(payload)
+        return _PQ(self.store, self.name, [payload], self._f)
+
+    def update(self, fields):
+        q = _PQ(self.store, self.name, self._rows, self._f)
+        q._pending_update = fields
+        return q
+
+    def single(self):
+        return self
+
+    def execute(self):
+        if self._pending_update is not None:
+            # apply to rows matching the eq filters against the live store
+            for r in self.store.rows:
+                if all(r.get(c) == v for (op, c, v) in self._f if op == "eq"):
+                    r.update(self._pending_update)
+            return _Resp(None)
+        rows = self._rows if self._rows is not None else self._base()
+        return _Resp(list(rows))
+
+
+def _cand(sk):
+    return {"signal_key": sk, "symbol": "SPY", "quantity": 1, "limit_price": 1.0,
+            "legs": _CANDIDATE["legs"]}
+
+
+class TestRunLoopIdempotency(unittest.TestCase):
+    def setUp(self):
+        self.store = _PairsStore()
+        self.port = {"id": "port-shadow"}
+        self.openp = mock.patch.object(
+            ex, "open_pair",
+            side_effect=lambda s, u, c, p: {"arm_a": {"order_id": "oa", "result": {}},
+                                            "arm_b": {"order_id": "ob", "result": {}}})
+        self.openp.start()
+        self.addCleanup(self.openp.stop)
+
+    def test_no_reopen_of_running_candidate(self):
+        ex._step_open(self.store, "U", "2026-06-01", self.port, [_cand("S1")], cap=4)
+        ex._step_open(self.store, "U", "2026-06-01", self.port, [_cand("S1")], cap=4)  # re-run
+        s1 = [r for r in self.store.rows if r["signal_key"] == "S1"]
+        self.assertEqual(len(s1), 1, "re-running must not re-open a running candidate")
+
+    def test_concurrency_cap_respected(self):
+        cands = [_cand(f"S{i}") for i in range(5)]
+        ex._step_open(self.store, "U", "2026-06-01", self.port, cands, cap=2)
+        self.assertEqual(len(self.store.rows), 2, "must not exceed the concurrency cap")
+
+    def test_no_double_close_arm_already_closing(self):
+        # an arm in 'closing' must NOT be closed again by manage
+        self.store.rows.append({
+            "id": "p1", "user_id": "U", "cycle_date": "2026-06-01", "pair_state": "open",
+            "arm_a_state": "closing", "arm_a_position_id": "posA",
+            "arm_b_state": "open", "arm_b_position_id": "posB"})
+        with mock.patch.object(ex, "_get_position", return_value=_POSITION), \
+             mock.patch.object(ex, "manage_arm", return_value=(True, "x")), \
+             mock.patch.object(ex, "close_arm") as close, \
+             mock.patch.object(ex, "_pairs_in", return_value=self.store.rows):
+            ex._step_manage(self.store, "U", "2026-06-01", self.port, lambda p: (1.0, 5, None))
+        # only arm B (state 'open') may be closed; arm A ('closing') must be skipped
+        self.assertEqual(close.call_count, 1)
+
+    def test_record_only_closed_to_recorded_once(self):
+        self.store.rows += [
+            {"id": "p1", "user_id": "U", "cycle_date": "2026-06-01", "pair_state": "closed"},
+            {"id": "p2", "user_id": "U", "cycle_date": "2026-06-01", "pair_state": "recorded"}]
+        n = ex._step_record(self.store, "U", "2026-06-01")
+        self.assertEqual(n, 1)  # only the 'closed' one transitions
+        states = {r["id"]: r["pair_state"] for r in self.store.rows}
+        self.assertEqual(states["p1"], "recorded")
+        self.assertEqual(states["p2"], "recorded")  # unchanged
+        # re-run: no further transitions
+        self.assertEqual(ex._step_record(self.store, "U", "2026-06-01"), 0)
+
+    def test_open_tags_paper_regime_and_synthetic_capital(self):
+        ex._step_open(self.store, "U", "2026-06-01", self.port, [_cand("S1")], cap=4)
+        row = self.store.rows[0]
+        self.assertEqual(row["synthetic_capital"], ex.SYNTHETIC_TIER_CAPITAL)
+        self.assertEqual(row["pair_state"], "pending_open")
+
+
+class TestRunLoopSingleDoorAndFlag(unittest.TestCase):
+    def test_open_routes_through_open_pair_door(self):
+        store = _PairsStore()
+        with mock.patch.object(ex, "open_pair",
+                               return_value={"arm_a": {"order_id": "oa"}, "arm_b": {"order_id": "ob"}}) as door:
+            ex._step_open(store, "U", "2026-06-01", {"id": "p"}, [_cand("S1")], cap=4)
+        door.assert_called_once()  # the open goes through open_pair (the single door)
+
+    def test_cycle_noop_when_flag_off(self):
+        with mock.patch.dict(os.environ, {iso.FLAG_ENV: "0"}, clear=True):
+            out = ex.run_paper_shadow_cycle(
+                mock.MagicMock(), "U", cycle_date="2026-06-01",
+                select_fn=lambda: [], market_fn=lambda p: (None, None, None))
+        self.assertEqual(out, {"ran": False, "reason": "flag_off"})
+
+    def test_run_loop_source_has_no_second_submission_door(self):
+        # the loop reuses open_pair/close_arm only — no broker submit primitive
+        src = (REPO_ROOT / "services" / "paper_shadow_executor.py").read_text(encoding="utf-8")
+        run_start = src.find("def run_paper_shadow_cycle")
+        loop_src = src[run_start:]
+        self.assertNotIn("submit_and_track(", loop_src)
+        self.assertNotIn("import submit_and_track", loop_src)
+
+
+# ═════════════════════════════════════════════════════════════════════
 # Flag default OFF
 # ═════════════════════════════════════════════════════════════════════
 class TestFlagDefaultOff(unittest.TestCase):

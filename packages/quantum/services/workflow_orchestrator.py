@@ -2115,12 +2115,15 @@ def build_momentum_observation_rows(user_id, cycle_date, inserted_suggestions):
     return rows
 
 
-async def run_midday_cycle(supabase: Client, user_id: str):
+async def run_midday_cycle(supabase: Client, user_id: str, deployable_capital_override: Optional[float] = None):
     """
     1. Use CashService.get_deployable_capital.
     2. Call optimizer/scanner to generate candidate trades.
     3. For each candidate, call sizing_engine.calculate_sizing.
     4. Insert trade_suggestions with window='midday_entry' and sizing_metadata.
+
+    deployable_capital_override (additive, default None → byte-identical): see
+    _fetch_capital — the paper-shadow executor's synthetic-tier seam.
     """
     t_cycle_start = time.monotonic()
 
@@ -2165,6 +2168,10 @@ async def run_midday_cycle(supabase: Client, user_id: str):
             return None
 
     async def _fetch_capital():
+        # Synthetic-capital seam (additive, byte-identical when None): the
+        # paper-shadow executor drives selection at a synthetic live-tier figure.
+        if deployable_capital_override is not None:
+            return float(deployable_capital_override)
         return await cash_service.get_deployable_capital(user_id)
 
     async def _fetch_positions():

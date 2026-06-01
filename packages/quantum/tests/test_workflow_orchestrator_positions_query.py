@@ -77,7 +77,10 @@ class TestMiddayCyclePaperPositionsQuery(unittest.TestCase):
             midday_pos, 0,
             "Could not locate run_midday_cycle definition",
         )
-        self.block = self.src[midday_pos:midday_pos + 3500]
+        # Window sized to span run_midday_cycle's parallel-reads block (incl.
+        # _fetch_positions). Bumped 3500→4200 when the additive
+        # deployable_capital_override seam was added to _fetch_capital.
+        self.block = self.src[midday_pos:midday_pos + 4200]
 
     def test_midday_queries_paper_positions(self):
         self.assertIn(

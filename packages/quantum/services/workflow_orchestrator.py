@@ -2689,6 +2689,23 @@ async def run_midday_cycle(supabase: Client, user_id: str, deployable_capital_ov
             # can investigate; do NOT block the cycle.
             print(f"[Midday] PortfolioAllocator wire-in failed (non-fatal): {_alloc_err}")
 
+        # Paper-shadow executor (additive, flag-gated, fail-soft → byte-identical
+        # when OFF). Drives the executor's OWN paired-experiment cycle on the
+        # PAPER account at synthetic-tier capital (re-ranks scout_results at
+        # $2,500 — reuse, no re-scan). Every order it places goes through the
+        # executor's single door (guarded_paper_submit → PA3I8CYLXBOS); it never
+        # touches the live account or this cycle's result. Flag OFF → not called;
+        # any error is swallowed so the live cycle is unaffected.
+        try:
+            from packages.quantum.services import paper_shadow_executor as _pse
+            if _pse.is_enabled():
+                _pse.run_paper_shadow_cycle_default(
+                    supabase, user_id, scout_results,
+                    global_snap.state.value, datetime.now().date().isoformat(),
+                )
+        except Exception as _pse_err:
+            logger.warning(f"[PAPER_SHADOW] executor cycle failed (non-fatal): {_pse_err}")
+
         print(f"Top {len(candidates)} candidates selected for midday:")
         for c in candidates:
             print(f"  {c.get('ticker', c.get('symbol'))} score={c.get('score')} type={c.get('type')}")

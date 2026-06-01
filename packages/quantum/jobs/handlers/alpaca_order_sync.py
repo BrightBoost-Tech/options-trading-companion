@@ -76,10 +76,11 @@ def run(payload: Dict[str, Any], ctx: Any = None) -> Dict[str, Any]:
             # shadow_only exclusion (see services/paper_shadow_isolation.py
             # PAPER_SHADOW_ROUTING_MODE). When no paper_shadow portfolios exist
             # (always, pre-Phase-1b), the IN-list collects the same ids as
-            # before → identical behavior. NOTE (Phase 1b): the Step-2 orphan
-            # repair and Step-3 stuck-open reconcile loops below also need
-            # paper_shadow exclusion once the executor places real paper orders;
-            # they are no-op for paper_shadow until then (no such rows exist).
+            # before → identical behavior. `shadow_portfolio_ids` is reused by
+            # Step 2 (orphan repair) and Step 3 (stuck-open reconcile) below to
+            # exclude paper_shadow from those loops too (the Phase-1b safety
+            # completion — those loops match by status/source_engine, not
+            # routing_mode, so they need the explicit portfolio exclusion).
             shadow_portfolios_res = client.table("paper_portfolios") \
                 .select("id") \
                 .in_("routing_mode", ["shadow_only", "paper_shadow"]) \
@@ -108,12 +109,21 @@ def run(payload: Dict[str, Any], ctx: Any = None) -> Dict[str, Any]:
             # Finds orders with status=filled, position_id=NULL, filled_qty > 0
             # These are fills that were synced but never had positions created,
             # e.g. from before the fix, race conditions, or missed cycles.
-            orphan_res = client.table("paper_orders") \
+            orphan_query = client.table("paper_orders") \
                 .select("user_id") \
                 .eq("status", "filled") \
                 .is_("position_id", "null") \
-                .gt("filled_qty", 0) \
-                .execute()
+                .gt("filled_qty", 0)
+            # Paper-shadow isolation (1b safety completion, additive, no-op when
+            # off): exclude paper_shadow (and shadow_only) orders from orphan
+            # repair so the live sync never creates positions from the executor's
+            # fills — the executor self-reconciles its own. Defense-in-depth with
+            # the _process_orders_for_user portfolio exclusion (which is the
+            # user-scoping-proof guard, since that fn re-resolves the user's
+            # portfolios). Guarded so an empty set leaves the query unchanged.
+            if shadow_portfolio_ids:
+                orphan_query = orphan_query.not_.in_("portfolio_id", shadow_portfolio_ids)
+            orphan_res = orphan_query.execute()
             orphan_user_ids = list({r["user_id"] for r in (orphan_res.data or [])})
 
             if orphan_user_ids:
@@ -149,12 +159,18 @@ def run(payload: Dict[str, Any], ctx: Any = None) -> Dict[str, Any]:
                 from packages.quantum.brokers.alpaca_order_handler import _close_position_on_fill
 
                 # Find filled orders with position_id set
-                stuck_res = client.table("paper_orders") \
+                stuck_query = client.table("paper_orders") \
                     .select("id, position_id, side, alpaca_order_id, filled_qty, avg_fill_price, filled_at, broker_response, order_json") \
                     .eq("status", "filled") \
                     .not_.is_("position_id", "null") \
-                    .gt("filled_qty", 0) \
-                    .execute()
+                    .gt("filled_qty", 0)
+                # Paper-shadow isolation (1b safety completion, additive, no-op
+                # when off): exclude paper_shadow (and shadow_only) from
+                # stuck-open reconcile so the live sync never CLOSES the
+                # executor's positions. Guarded → unchanged query when empty.
+                if shadow_portfolio_ids:
+                    stuck_query = stuck_query.not_.in_("portfolio_id", shadow_portfolio_ids)
+                stuck_res = stuck_query.execute()
 
                 for filled_order in (stuck_res.data or []):
                     pid = filled_order.get("position_id")

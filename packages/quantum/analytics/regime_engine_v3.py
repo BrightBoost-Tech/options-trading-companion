@@ -352,6 +352,22 @@ class RegimeEngineV3:
         if liquidity_issues:
             details["liquidity_issues"] = liquidity_issues
 
+        # D4 regime_filter — OBSERVATION-ONLY (REGIME_FILTER_OBSERVE_ENABLED,
+        # default OFF; fail-soft). Computes a cross-asset rates/credit read from
+        # the already-fetched TLT/HYG basket bars and LOGS its would-be
+        # throttle/sizing vs THIS snapshot's actual decision. It reads `state`/
+        # `risk_score`/`risk_scaler` and `basket_data`; it does NOT modify them
+        # or the snapshot returned below. When the flag is OFF this block is
+        # never entered, so the live regime engine is byte-identical.
+        try:
+            from packages.quantum.analytics import regime_filter as _rf
+            if _rf.is_observe_enabled():
+                _rf.observe_regime_filter(
+                    self.supabase, basket_data, state, risk_score, risk_scaler, as_of_ts,
+                )
+        except Exception:
+            pass  # observation must never affect the live regime cycle
+
         return GlobalRegimeSnapshot(
             as_of_ts=as_of_ts.isoformat(),
             state=state,

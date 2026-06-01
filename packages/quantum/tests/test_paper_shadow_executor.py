@@ -189,6 +189,134 @@ class TestGeometryExitPolicy(unittest.TestCase):
 
 
 # ═════════════════════════════════════════════════════════════════════
+# LEADING INVARIANT — every order routes through the single door
+# ═════════════════════════════════════════════════════════════════════
+class _OrderFetchSupabase:
+    """Minimal supabase whose paper_orders.select().eq().single() returns a row
+    (so _submit_staged can fetch the staged order before the door)."""
+    def __init__(self):
+        self.last_id = None
+
+    def table(self, name):
+        return self
+
+    def select(self, *a, **k):
+        return self
+
+    def eq(self, col, val):
+        self.last_id = val
+        return self
+
+    def single(self):
+        return self
+
+    def execute(self):
+        return _Resp({"id": self.last_id})
+
+
+_CANDIDATE = {
+    "symbol": "SPY", "quantity": 1, "limit_price": 1.30,
+    "legs": [
+        {"symbol": "O:SPY260619C00100000", "action": "buy", "quantity": 1,
+         "type": "call", "strike": 100, "expiry": "2026-06-19"},
+        {"symbol": "O:SPY260619C00105000", "action": "sell", "quantity": 1,
+         "type": "call", "strike": 105, "expiry": "2026-06-19"},
+    ],
+}
+_POSITION = {
+    "id": "pos-1", "symbol": "SPY", "quantity": 1, "avg_entry_price": 1.0,
+    "current_mark": 1.3, "legs": _CANDIDATE["legs"],
+}
+
+
+class TestSingleChokePointInvariant(unittest.TestCase):
+    def test_open_pair_routes_both_arms_through_the_single_door(self):
+        supa = _OrderFetchSupabase()
+        with mock.patch("packages.quantum.paper_endpoints._stage_order_internal",
+                        side_effect=["ord-a", "ord-b"]), \
+             mock.patch("packages.quantum.services.analytics_service.AnalyticsService"), \
+             mock.patch.object(ex, "guarded_paper_submit",
+                               return_value={"status": "submitted"}) as door:
+            out = ex.open_pair(supa, "U", _CANDIDATE, {"id": "port-shadow"})
+        self.assertEqual(door.call_count, 2)  # arm A + arm B, both via the door
+        self.assertEqual(set(out.keys()), {"arm_a", "arm_b"})
+
+    def test_close_arm_routes_through_the_single_door(self):
+        supa = _OrderFetchSupabase()
+        with mock.patch("packages.quantum.paper_endpoints._stage_order_internal",
+                        return_value="ord-close"), \
+             mock.patch("packages.quantum.services.analytics_service.AnalyticsService"), \
+             mock.patch.object(ex, "guarded_paper_submit",
+                               return_value={"status": "submitted"}) as door:
+            ex.close_arm(supa, "U", _POSITION, "premium:target_profit", "port-shadow")
+        door.assert_called_once()
+
+    def test_no_second_submission_door_in_the_module(self):
+        # Source invariant: submit_and_track appears ONLY inside
+        # guarded_paper_submit; the orchestration never calls a broker submit
+        # primitive or acquires a paper client any other way.
+        src = (REPO_ROOT / "services" / "paper_shadow_executor.py").read_text(encoding="utf-8")
+        door_start = src.find("def guarded_paper_submit")
+        door_end = src.find("\ndef ", door_start + 1)
+        door_body = src[door_start:door_end]
+        # the door imports + calls submit_and_track
+        self.assertIn("import submit_and_track", door_body)
+        self.assertIn("submit_and_track(", door_body)
+        # NOTHING outside the door imports or CALLS a broker submit primitive,
+        # nor acquires a paper client any other way (comments may mention the
+        # name; an import/call is the violation).
+        rest = src[:door_start] + src[door_end:]
+        self.assertNotIn("import submit_and_track", rest)
+        self.assertNotIn("submit_and_track(", rest)
+        # never acquires the global live client (the module uses build_paper_client;
+        # the docstring may mention get_alpaca_client to say it is NOT used).
+        self.assertNotIn("import get_alpaca_client", src)
+        self.assertNotIn("get_alpaca_client(", rest)
+
+
+# ═════════════════════════════════════════════════════════════════════
+# Arm management — independent rules (A premium-%, B geometry)
+# ═════════════════════════════════════════════════════════════════════
+class TestArmManagement(unittest.TestCase):
+    def test_arm_a_uses_premium_exit(self):
+        with mock.patch("packages.quantum.services.paper_exit_evaluator.evaluate_position_exit",
+                        return_value="target_profit") as ev:
+            should_close, reason = ex.manage_arm(_POSITION, "A", premium_conditions={})
+        ev.assert_called_once()
+        self.assertTrue(should_close)
+        self.assertIn("premium", reason)
+
+    def test_arm_a_holds_when_no_premium_exit(self):
+        with mock.patch("packages.quantum.services.paper_exit_evaluator.evaluate_position_exit",
+                        return_value=None):
+            should_close, reason = ex.manage_arm(_POSITION, "A", premium_conditions={})
+        self.assertFalse(should_close)
+
+    def test_arm_b_uses_geometry(self):
+        # debit call 100/105 debit 2.0 → R1_frac level 104; spot 104.5 → take_profit
+        pos = {"avg_entry_price": 2.0, "legs": [
+            {"action": "buy", "type": "call", "strike": 100},
+            {"action": "sell", "type": "call", "strike": 105}]}
+        should_close, reason = ex.manage_arm(pos, "B", underlying_spot=104.5, dte=10)
+        self.assertTrue(should_close)
+        self.assertIn("geometry", reason)
+
+    def test_unknown_arm_raises(self):
+        with self.assertRaises(ValueError):
+            ex.manage_arm(_POSITION, "Z")
+
+
+# ═════════════════════════════════════════════════════════════════════
+# Synthetic-capital override seam (run_midday_cycle additive, byte-identical)
+# ═════════════════════════════════════════════════════════════════════
+class TestSyntheticCapitalSeam(unittest.TestCase):
+    def test_override_param_and_honored_branch_present(self):
+        src = (REPO_ROOT / "services" / "workflow_orchestrator.py").read_text(encoding="utf-8")
+        self.assertIn("deployable_capital_override: Optional[float] = None", src)
+        self.assertIn("if deployable_capital_override is not None:", src)
+
+
+# ═════════════════════════════════════════════════════════════════════
 # Flag default OFF
 # ═════════════════════════════════════════════════════════════════════
 class TestFlagDefaultOff(unittest.TestCase):

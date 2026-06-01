@@ -176,3 +176,118 @@ def geometry_exit_decision(
     if rules["R4"]["decision"] == "take_profit":
         return ("take_profit", f"geometry_R4:{rules['R4']['reason']}")
     return ("hold", "geometry_below_profit_and_stop_levels")
+
+
+# ── Order operations — EVERY order routes through the single door ──────────
+# These are the ONLY order-placing functions in the orchestration. There is no
+# direct call to submit_and_track or any broker submit primitive here — every
+# submission goes through guarded_paper_submit (the #1007 choke-point), so no
+# executor order can reach the live account.
+
+def _submit_staged(supabase, order_id: str, user_id: str) -> Dict[str, Any]:
+    """Fetch a staged paper_orders row and submit it through the single door."""
+    row = supabase.table("paper_orders").select("*").eq("id", order_id).single().execute().data
+    return guarded_paper_submit(supabase, row, user_id)
+
+
+def open_pair(supabase, user_id: str, candidate: Dict[str, Any], portfolio: Dict[str, Any]) -> Dict[str, Any]:
+    """Open TWO IDENTICAL paper positions (arm A premium-%, arm B geometry) for
+    one ranked candidate, in the executor's paper_shadow portfolio, each
+    submitted through the single door. Reuses the canonical `_stage_order_internal`
+    stager (H13) — no parallel order-building.
+
+    Returns {arm_a, arm_b} submission results. Both legs of a pair are
+    structurally identical; the only difference is which exit rule manages each
+    (set by the caller's run loop in the next slice)."""
+    from packages.quantum.paper_endpoints import _stage_order_internal
+    from packages.quantum.services.analytics_service import AnalyticsService
+    from packages.quantum.models import TradeTicket
+
+    analytics = AnalyticsService(supabase)
+    portfolio_id = portfolio["id"]
+    out: Dict[str, Any] = {}
+    for arm in ("A", "B"):
+        ticket = TradeTicket(
+            symbol=candidate["symbol"],
+            quantity=int(candidate["quantity"]),
+            order_type="limit",
+            limit_price=round(float(candidate["limit_price"]), 2),
+            strategy_type="custom",
+            source_engine=f"paper_shadow_open_{arm.lower()}",
+            legs=candidate["legs"],
+        )
+        order_id = _stage_order_internal(
+            supabase, analytics, user_id, ticket, portfolio_id_arg=portfolio_id,
+        )
+        out[f"arm_{arm.lower()}"] = _submit_staged(supabase, order_id, user_id)
+    return out
+
+
+def close_arm(supabase, user_id: str, position: Dict[str, Any], reason: str, portfolio_id: str) -> Dict[str, Any]:
+    """Close one arm's paper_shadow position through the single door. Builds the
+    close ticket with the same convention `_close_position` uses (invert legs;
+    is_credit_close when selling a long debit spread → #999's negative-credit
+    sign is applied by build_alpaca_order_request inside guarded_paper_submit),
+    stages via the canonical `_stage_order_internal`, then submits through the
+    single door. Reuses #999's close-sign convention and the core stager (H13)."""
+    from packages.quantum.paper_endpoints import _stage_order_internal
+    from packages.quantum.services.analytics_service import AnalyticsService
+    from packages.quantum.models import TradeTicket
+
+    qty = float(position["quantity"])
+    abs_qty = abs(int(qty))
+    orig_legs = position.get("legs") or []
+    close_legs = []
+    for leg in orig_legs:
+        orig_action = leg.get("action") or leg.get("side") or "buy"
+        inverted = "sell" if orig_action == "buy" else "buy"
+        close_legs.append({
+            "symbol": leg.get("symbol") or leg.get("occ_symbol") or "",
+            "action": inverted,
+            "quantity": abs_qty,
+            "type": leg.get("type", "call"),
+            "strike": leg.get("strike"),
+            "expiry": leg.get("expiry"),
+        })
+    is_credit_close = (qty > 0) and (len(close_legs) >= 2)
+    exit_price = float(position.get("current_mark") or position.get("avg_entry_price") or 0)
+
+    ticket = TradeTicket(
+        symbol=position["symbol"],
+        quantity=abs_qty,
+        order_type="limit",
+        limit_price=round(exit_price, 2),
+        strategy_type="custom",
+        source_engine=f"paper_shadow_close:{reason}",
+        legs=close_legs,
+        is_credit_close=is_credit_close,
+    )
+    order_id = _stage_order_internal(
+        supabase, AnalyticsService(supabase), user_id, ticket,
+        portfolio_id_arg=portfolio_id, position_id=position["id"],
+    )
+    return _submit_staged(supabase, order_id, user_id)
+
+
+def manage_arm(
+    position: Dict[str, Any],
+    arm: str,
+    *,
+    underlying_spot: Optional[float] = None,
+    dte: Optional[int] = None,
+    premium_conditions: Optional[Dict[str, Any]] = None,
+) -> Tuple[bool, str]:
+    """Decide whether an arm should close NOW, by its OWN rule (independent of
+    the other arm — the timing divergence is the D6 data):
+      - arm 'A' → the premium-% champion exit (reuse `evaluate_position_exit`).
+      - arm 'B' → the canonical geometry policy (`geometry_exit_decision`).
+    Returns (should_close, reason). Pure decision — the caller acts via
+    `close_arm` (the single door)."""
+    if arm == "A":
+        from packages.quantum.services.paper_exit_evaluator import evaluate_position_exit
+        reason = evaluate_position_exit(position, conditions=premium_conditions)
+        return (bool(reason), f"premium:{reason}" if reason else "hold")
+    if arm == "B":
+        decision, reason = geometry_exit_decision(position, underlying_spot, dte)
+        return (decision in ("take_profit", "stop"), reason)
+    raise ValueError(f"unknown arm {arm!r} (expected 'A' or 'B')")

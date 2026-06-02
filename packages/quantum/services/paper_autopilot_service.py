@@ -647,10 +647,29 @@ class PaperAutopilotService:
             # Deduplicate
             already = self.get_already_executed_suggestion_ids_today(user_id)
 
-            # Symbol-level dedup: reject suggestions for symbols with open positions
+            # Symbol-level dedup SCOPED TO THIS COHORT'S PORTFOLIO: a cohort
+            # skips a symbol only if IT already holds it.
+            #
+            # Bug fix (2026-06-01): cohort_held was previously built from
+            # get_open_positions(user_id) — the WHOLE account, every cohort
+            # portfolio — so whichever cohort processed a symbol first (e.g. a
+            # shadow_only cohort) starved every LATER cohort of that symbol,
+            # including the live aggressive champion. (BAC 2026-06-01: the
+            # conservative/shadow_only cohort filled BAC internally at 16:30,
+            # so the aggressive/live champion's pending BAC was skipped
+            # "already have open position" and no live entry was placed.)
+            # The variable name + the per-cohort loop show the intent was
+            # per-cohort dedup; the user-wide fetch was the defect. Scoping by
+            # portfolio_id restores cohort independence. Real per-symbol
+            # exposure is still bounded INDEPENDENTLY of this count-based dedup
+            # by the capital_allocator per-symbol concentration cap
+            # (DEFAULT_MAX_SYMBOL_ALLOC_PCT) and the canonical_ranker
+            # concentration penalty — removing the cross-cohort block does not
+            # remove a real exposure guard.
             cohort_open = self.get_open_positions(user_id)
             cohort_held = {
-                p.get("symbol") for p in cohort_open if p.get("symbol")
+                p.get("symbol") for p in cohort_open
+                if p.get("symbol") and p.get("portfolio_id") == portfolio_id
             }
 
             for s in suggestions:

@@ -11,6 +11,7 @@ import os
 from packages.quantum.market_data import PolygonService
 from packages.quantum.services.earnings_calendar_service import EarningsCalendarService
 from packages.quantum.observability.alerts import alert
+from packages.quantum.analytics import option_liquidity as _option_liquidity
 
 logger = logging.getLogger(__name__)
 
@@ -246,14 +247,41 @@ class UniverseService:
             # the selection log. The cost difference vs the previous
             # `.limit(limit)` query is ~20 extra rows at current
             # universe size (70 active); negligible.
+            #
+            # OPTION-liquidity weighting (flag-gated, default OFF — see
+            # analytics.option_liquidity). When OFF this query + order is
+            # byte-identical to the pre-feature behavior AND does not
+            # reference the new option_liquidity_score column (migration-
+            # independent). When ON, the column is selected and the active
+            # universe is RE-ORDERED by a blended priority
+            # (equity liquidity_score × would_be_weight(option_liquidity_score))
+            # so persistently wide-option names are DE-PRIORITIZED (weight,
+            # not hard drop — they still appear, ranked lower; reversible).
+            _ol = _option_liquidity  # module-bound at import time
+            _weighting_on = _ol.is_weighting_enabled()
+
+            _cols = "symbol, earnings_date, liquidity_score"
+            if _weighting_on:
+                _cols += ", option_liquidity_score"
+
             res = self.supabase.table("scanner_universe")\
-                .select("symbol, earnings_date, liquidity_score")\
+                .select(_cols)\
                 .eq("is_active", True)\
                 .order("liquidity_score", desc=True)\
                 .order("symbol", desc=False)\
                 .execute()
 
             all_rows = list(res.data or [])
+
+            if _weighting_on and all_rows:
+                all_rows = sorted(
+                    all_rows,
+                    key=lambda r: (
+                        -(float(r.get("liquidity_score") or 0.0)
+                          * _ol.would_be_weight(r.get("option_liquidity_score"))),
+                        r.get("symbol") or "",
+                    ),
+                )
 
             for r in all_rows[:limit]:
                 candidates.append({

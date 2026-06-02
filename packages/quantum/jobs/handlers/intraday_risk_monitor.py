@@ -144,9 +144,30 @@ class IntradayRiskMonitor:
         # 2. Refresh marks from Alpaca
         positions = self._refresh_marks(positions)
 
-        # 3. Compute portfolio metrics for envelope check
-        equity = self._estimate_equity(user_id, positions)
-        daily_pnl = sum(float(p.get("unrealized_pl") or 0) for p in positions)
+        # 2b. Scope the portfolio-level envelope (concentration / stress / loss)
+        #     to the LIVE book. shadow_only / paper_shadow cohort positions are
+        #     internal/simulated — not live capital — and must not drive
+        #     concentration alerts or loss force-close (the 2026-06-02 phantom
+        #     "BAC 100% of risk" 15-min alerts; twin of the #1011 dedup
+        #     contamination). Per-position exit triggers (5a, below) still run
+        #     over the FULL managed set, so shadow cohorts keep their own
+        #     stop/target/expiration exits — this scopes the live-CAPITAL
+        #     aggregate only, it does not blind any cohort to its own exits.
+        try:
+            from packages.quantum.risk.position_scope import live_routed_portfolio_ids
+            _live_ids = set(live_routed_portfolio_ids(self.supabase, user_id))
+            live_positions = [p for p in positions if p.get("portfolio_id") in _live_ids]
+        except Exception as _scope_err:
+            logger.warning(
+                f"[RISK_MONITOR] user={user_id[:8]}: live-routing scope query failed "
+                f"({type(_scope_err).__name__}); envelope falls back to full managed "
+                f"set this cycle (per-position exits unaffected)"
+            )
+            live_positions = positions
+
+        # 3. Compute portfolio metrics for envelope check (LIVE book)
+        equity = self._estimate_equity(user_id, live_positions)
+        daily_pnl = sum(float(p.get("unrealized_pl") or 0) for p in live_positions)
         weekly_pnl = self._compute_weekly_pnl(user_id, daily_pnl)
 
         # Alpaca-unavailable fallbacks. Do NOT fabricate equity or weekly P&L
@@ -171,10 +192,10 @@ class IntradayRiskMonitor:
             # 0 is benign: 0 / equity = 0, no weekly breach. Daily still runs.
             weekly_pnl = 0.0
 
-        # 4. Run envelope check
+        # 4. Run envelope check (LIVE book only — see 2b)
         config = EnvelopeConfig.from_env()
         result = check_all_envelopes(
-            positions=positions,
+            positions=live_positions,
             equity=equity,
             daily_pnl=daily_pnl,
             weekly_pnl=weekly_pnl,
@@ -185,6 +206,8 @@ class IntradayRiskMonitor:
         #     The envelope check above handles portfolio-level limits.
         #     This catches individual positions that hit their own stop/expiry
         #     between the scheduled 8:15 AM / 3:00 PM exit evaluations.
+        #     Runs over the FULL managed set (not just live) so shadow cohorts
+        #     keep their own intraday exits (2b).
         exit_triggered = self._collect_intraday_exit_triggers(positions, user_id)
 
         # 5. Process violations

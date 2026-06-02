@@ -1100,6 +1100,27 @@ def _select_top_expiry_candidates(
     return result
 
 
+def _chain_has_any_delta(
+    calls: List[Dict[str, Any]], puts: List[Dict[str, Any]]
+) -> bool:
+    """True if ANY contract in either list carries a non-null delta.
+
+    Scans the WHOLE chain — deep-ITM/OTM strikes routinely lack greeks, so a
+    first-element check would false-negative (the #656 regression class). Used
+    by the caller's loud guard to distinguish a genuinely greeks-less chain
+    (zero delta anywhere -> surface, do not silently moneyness-degrade) from the
+    COMMON partial-greeks case (handled silently by the in-selector filter).
+    Schema-agnostic (nested TruthLayer greeks dict OR flat top-level delta).
+    """
+    for lst in (calls or [], puts or []):
+        for c in lst:
+            g = c.get("greeks")
+            d = g.get("delta") if isinstance(g, dict) else c.get("delta")
+            if d is not None:
+                return True
+    return False
+
+
 def _select_legs_from_chain(
     calls: List[Dict[str, Any]],
     puts: List[Dict[str, Any]],
@@ -1153,11 +1174,29 @@ def _select_legs_from_chain(
         if not candidates:
              continue
 
+        # 1b. Drop null-delta contracts before selection (fixes the #656
+        # regression). Providers (Alpaca AND Polygon, verified) omit greeks on
+        # illiquid deep-ITM/OTM strikes, so chains are PARTIAL-greeks. The O(1)
+        # has_delta check below reads candidates[0] (the deepest strike) — which
+        # is exactly the contract that lacks delta — and mis-flagged the WHOLE
+        # chain as delta-less, collapsing every credit/put vertical to the
+        # 3-bucket moneyness fallback (same-strike, width=0) for ~4 months.
+        # Filtering self-corrects has_delta AND removes the `_delta(x) or 0`
+        # contaminants that broke the bisect's strike<->delta monotonicity.
+        # PRESERVE the moneyness fallback only when this type is GENUINELY
+        # greeks-less (filtered list empty) — then fall back to the full list.
+        _delta_bearing = [c for c in candidates if _delta(c) is not None]
+        if _delta_bearing:
+            candidates = _delta_bearing
+
         # 2. Find best contract (Delta or Moneyness)
         # Note: Optimization - candidates are sorted by strike.
 
-        # Bolt Optimization: Check first element (O(1)) instead of scanning all (O(N))
-        # Assumes homogeneity in chain data (if one has greeks, all usually do)
+        # After 1b, candidates[0] is delta-bearing whenever ANY contract of this
+        # type has greeks (the common partial-greeks case) -> has_delta=True and
+        # selection runs over clean, strike-sorted (delta-monotonic) contracts.
+        # Only a genuinely greeks-less type leaves candidates unfiltered -> the
+        # moneyness fallback is then reached correctly, not spuriously.
         has_delta = candidates and _delta(candidates[0]) is not None
 
         if has_delta:
@@ -3210,6 +3249,38 @@ def scan_for_opportunities(
             else:
                 # Non-condor path: use single expiry
                 calls_sorted, puts_sorted = _split_chain_to_calls_puts(chain_subset)
+
+                # LOUD GUARD (H11 anti-silent-degrade): a genuinely greeks-less
+                # chain (zero delta ANYWHERE) must surface, not silently fall to
+                # moneyness selection — that is the #656 outage that degraded
+                # selection for ~4 months unnoticed. SCOPE: fires ONLY on a total
+                # outage. The COMMON partial-greeks case (some strikes have delta)
+                # is handled silently by the in-selector filter and must NOT fire
+                # here. Mirrors the IC path's `no_deltas_in_chain` convention.
+                if chain_subset and not _chain_has_any_delta(calls_sorted, puts_sorted):
+                    try:
+                        from packages.quantum.observability.alerts import alert
+                        alert(
+                            supabase_client,
+                            alert_type="chain_greeks_absent",
+                            severity="warning",
+                            symbol=symbol,
+                            message=(
+                                f"option chain for {symbol} has zero greeks chain-wide; "
+                                f"leg selection would degrade to moneyness — skipping"
+                            ),
+                            metadata={
+                                "strategy_template": strategy_key,
+                                "n_calls": len(calls_sorted),
+                                "n_puts": len(puts_sorted),
+                                "expiry": expiry_selected,
+                            },
+                        )
+                    except Exception:
+                        logger.exception("chain_greeks_absent_alert_failed")
+                    rej_stats.record("no_deltas_in_chain")
+                    return None
+
                 legs, total_cost = _select_legs_from_chain(calls_sorted, puts_sorted, suggestion["legs"], current_price)
 
             if not legs:

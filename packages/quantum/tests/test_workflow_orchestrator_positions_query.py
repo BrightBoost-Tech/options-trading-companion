@@ -78,9 +78,10 @@ class TestMiddayCyclePaperPositionsQuery(unittest.TestCase):
             "Could not locate run_midday_cycle definition",
         )
         # Window sized to span run_midday_cycle's parallel-reads block (incl.
-        # _fetch_positions). Bumped 3500→4200 when the additive
-        # deployable_capital_override seam was added to _fetch_capital.
-        self.block = self.src[midday_pos:midday_pos + 4200]
+        # _fetch_positions). Bumped 3500→4200 (deployable_capital_override seam),
+        # then →5600 when _fetch_positions gained the live-routing scope
+        # (position_scope.live_routed_portfolio_ids — shadow-contamination fix).
+        self.block = self.src[midday_pos:midday_pos + 5600]
 
     def test_midday_queries_paper_positions(self):
         self.assertIn(

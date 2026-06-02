@@ -808,11 +808,21 @@ class PaperAutopilotService:
         return positions
 
     def _get_open_positions_for_risk_check(self, user_id: str) -> List[Dict[str, Any]]:
-        """Fetch open positions with fields needed for risk envelope check."""
+        """Fetch open LIVE-routed positions for the risk envelope check.
+
+        Scoped to live_eligible portfolios (position_scope.LIVE_ROUTING_MODE):
+        this is a LIVE-entry circuit breaker, so shadow_only / paper_shadow
+        cohort positions must not contaminate its concentration/stress math. A
+        shadow_only BAC position blocking live entries on a flat live book was
+        the 2026-06-02 bug (twin of #1011). On a flat live book this returns []
+        -> total_risk=0 -> concentration early-returns -> no block, as intended.
+        """
         try:
+            from packages.quantum.risk.position_scope import LIVE_ROUTING_MODE
             port_res = self.client.table("paper_portfolios") \
                 .select("id") \
                 .eq("user_id", user_id) \
+                .eq("routing_mode", LIVE_ROUTING_MODE) \
                 .execute()
             portfolio_ids = [p["id"] for p in (port_res.data or [])]
             if not portfolio_ids:

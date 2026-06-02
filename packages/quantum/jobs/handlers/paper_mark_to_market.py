@@ -52,13 +52,22 @@ def run(payload: Dict[str, Any], ctx: Any = None) -> Dict[str, Any]:
                 EnvelopeConfig,
             )
 
-            # Fetch open positions with updated marks
-            pos_res = client.table("paper_positions") \
-                .select("id, symbol, quantity, unrealized_pl, avg_entry_price, max_credit, nearest_expiry, sector, status") \
-                .eq("user_id", user_id) \
-                .eq("status", "open") \
-                .execute()
-            open_positions = pos_res.data or []
+            # Fetch open LIVE-routed positions with updated marks. Scoped to
+            # live_eligible portfolios so the (warn-only) envelope here reflects
+            # live-capital exposure, not shadow_only / paper_shadow cohort
+            # positions (#1011 twin; consistent with the autopilot circuit
+            # breaker + intraday monitor live scoping).
+            from packages.quantum.risk.position_scope import live_routed_portfolio_ids
+            _live_ids = live_routed_portfolio_ids(client, user_id)
+            if _live_ids:
+                pos_res = client.table("paper_positions") \
+                    .select("id, symbol, quantity, unrealized_pl, avg_entry_price, max_credit, nearest_expiry, sector, status") \
+                    .in_("portfolio_id", _live_ids) \
+                    .eq("status", "open") \
+                    .execute()
+                open_positions = pos_res.data or []
+            else:
+                open_positions = []
 
             # Equity source — Alpaca-authoritative via the shared
             # equity_state module (PR #780 follow-up). The prior

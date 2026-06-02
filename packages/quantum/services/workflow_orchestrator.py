@@ -2184,10 +2184,24 @@ async def run_midday_cycle(supabase: Client, user_id: str, deployable_capital_ov
             # risk engine is captured as backlog item #80. The current
             # approximation under-counts slightly, which is a safer failure
             # mode than the prior over-counting from stale `positions` data.
-            res = await asyncio.to_thread(
-                lambda: supabase.table("paper_positions").select("*").eq("user_id", user_id).eq("status", "open").execute()
-            )
-            return res.data or []
+            #
+            # LIVE-entry scope: this midday `positions` feeds open_position_count,
+            # the PortfolioAllocator envelope (open cost-basis deduction), and the
+            # pre-entry risk check. Scope to live_eligible portfolios so shadow_only
+            # / paper_shadow cohort positions don't inflate live-entry sizing/risk
+            # (#1011 twin; 2026-06-02 shadow-BAC contamination). The morning (exit)
+            # cycle is intentionally NOT scoped — exits need every cohort's book.
+            from packages.quantum.risk.position_scope import live_routed_portfolio_ids
+
+            def _q():
+                live_ids = live_routed_portfolio_ids(supabase, user_id)
+                if not live_ids:
+                    return []
+                res = supabase.table("paper_positions").select("*") \
+                    .in_("portfolio_id", live_ids).eq("status", "open").execute()
+                return res.data or []
+
+            return await asyncio.to_thread(_q)
         except Exception as e:
             print(f"Error fetching positions for midday risk check: {e}")
             return []

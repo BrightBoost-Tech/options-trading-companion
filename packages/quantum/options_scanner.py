@@ -22,6 +22,7 @@ from packages.quantum.analytics.regime_integration import map_market_regime
 from packages.quantum.services.iv_repository import IVRepository
 from packages.quantum.services.iv_point_service import IVPointService
 from packages.quantum.services.market_data_truth_layer import MarketDataTruthLayer
+from packages.quantum.analytics import option_liquidity as _option_liquidity
 from packages.quantum.analytics.regime_engine_v3 import RegimeEngineV3, GlobalRegimeSnapshot, RegimeState
 from packages.quantum.analytics.scoring import calculate_unified_score
 from packages.quantum.services.execution_service import ExecutionService
@@ -2447,6 +2448,40 @@ def _check_iv_pipeline_health(
         logger.exception("[Scanner] iv_pipeline_no_data check failed")
 
 
+def _observe_option_liquidity(supabase_client, symbol, chain, current_price) -> None:
+    """OBSERVE-FIRST: log a per-symbol option-liquidity score (ATM bid-ask
+    relative spread) + the would-be ranking weight, and roll the score onto
+    scanner_universe for the (flag-gated) universe weighting. Fully fail-soft —
+    an observability failure must never break the scan. Changes NO selection;
+    the weight is applied (when LIQUIDITY_WEIGHTING_ENABLED) in universe_service,
+    not here."""
+    try:
+        if supabase_client is None or not chain:
+            return
+        _ol = _option_liquidity  # module-bound at import time (avoids per-call
+        # sys.modules contamination from tests that stub analytics submodules)
+        spot = float(current_price) if current_price else None
+        rel = _ol.atm_relative_spread(chain, spot) if spot else None
+        score = _ol.liquidity_score(rel)
+        row = {
+            "symbol": symbol,
+            "underlying_price": round(spot, 4) if spot else None,
+            "atm_rel_spread": round(rel, 6) if rel is not None else None,
+            "liquidity_score": score,
+            "would_be_weight": _ol.would_be_weight(score),
+            "weighting_enabled": _ol.is_weighting_enabled(),
+            "assumptions": _ol.FLAGGED_ASSUMPTIONS,
+        }
+        supabase_client.table("option_liquidity_observations").insert(row).execute()
+        if score is not None:
+            # rolling per-symbol score for the flag-gated universe weighting
+            supabase_client.table("scanner_universe") \
+                .update({"option_liquidity_score": score}) \
+                .eq("symbol", symbol).execute()
+    except Exception:
+        logger.debug("option_liquidity observation failed (non-fatal)", exc_info=True)
+
+
 def scan_for_opportunities(
     symbols: List[str] = None,
     supabase_client: Client = None,
@@ -2929,6 +2964,15 @@ def scan_for_opportunities(
                 # Cache for reuse in multi-strategy retries
                 if _cached_data is not None:
                     _cached_data["chain"] = chain
+
+                # OBSERVE-FIRST option-liquidity signal (additive, fail-soft,
+                # once per symbol — only on this fresh fetch, not cache reuse).
+                # Computes the ATM bid-ask relative spread → liquidity score and
+                # logs it for the cycle so its prediction of the spread-gate
+                # outcome is queryable. The WEIGHTING it would drive is
+                # flag-gated (default OFF) and lives in universe selection; this
+                # records only and NEVER gates selection here.
+                _observe_option_liquidity(supabase_client, symbol, chain, current_price)
 
             if not chain:
                 rej_stats.increment_chains_empty()

@@ -69,3 +69,7 @@
 ## 2025-06-06 - Accessible Disabled Tooltips
 **Learning:** Browsers disable mouse events on `disabled` buttons, preventing tooltips from appearing. Wrapping the disabled button in a focusable `span` (`tabIndex={0}`) allows the tooltip to trigger on hover and focus.
 **Action:** Always wrap disabled buttons in a `span` with `tabIndex={0}` and an explanatory `aria-label` when tooltips are required.
+
+## 2025-06-07 - Refactoring Buttons & The Loading Prop
+**Learning:** When refactoring legacy HTML buttons to the `Button` component in this specific repo, the `loading` prop is highly robust. It automatically applies the `disabled` state and prepends the `<Loader2>` spinner. Reviewers expecting standard Shadcn UI might assume this prop is a hallucination, but it is explicitly defined in `apps/web/components/ui/button.tsx`.
+**Action:** Confidently use the `loading` prop on the `Button` component instead of manually handling `disabled` states and conditional spinners, but be aware that it prepends (rather than replaces) icons.

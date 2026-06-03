@@ -42,8 +42,67 @@ class QuoteSnapshot(BaseModel):
     size_bid: Optional[int] = None
     size_ask: Optional[int] = None
 
+def _count_order_legs(order: Dict[str, Any]) -> int:
+    """Number of legs on the order (from order_json). 0 when unknown."""
+    legs = (order.get("order_json") or {}).get("legs") or []
+    return len(legs)
+
+
+def _live_marketability_label(
+    order: Dict[str, Any],
+    bid: Optional[float],
+    ask: Optional[float],
+    limit_price: Optional[float],
+    order_type: str,
+) -> Dict[str, Any]:
+    """Compute the would-be LIVE marketability of this order at this quote.
+
+    Live mid-limit entries empirically fill instantly or never (live fill
+    rate ~12%, all instant; see the 2026-06-04 shadow-fill diagnostic), so
+    "would this have filled live?" reduces to "was the limit marketable on
+    arrival?". This is a pure LABEL for calibration/learning consumers to
+    filter on — it never gates the simulated fill (volume preserved).
+
+    Honesty rules (don't fabricate):
+    - quote missing/invalid → None ("quote_missing") — UNKNOWN, not False.
+    - multi-leg combos → None ("multi_leg_combo_nbbo_unavailable"): the
+      quote passed in is leg-1-only (see _resolve_quote_symbol), and a
+      combo limit cannot be judged against a single leg's NBBO.
+    """
+    if bid is None or ask is None or bid <= 0 or ask <= 0:
+        return {"would_be_live_marketable": None,
+                "marketability_basis": "quote_missing"}
+    if _count_order_legs(order) > 1:
+        return {"would_be_live_marketable": None,
+                "marketability_basis": "multi_leg_combo_nbbo_unavailable"}
+    if order_type == "market":
+        return {"would_be_live_marketable": True,
+                "marketability_basis": "market_order"}
+    if not limit_price:
+        return {"would_be_live_marketable": None,
+                "marketability_basis": "no_limit_price"}
+    side = order.get("side", "buy")
+    if side == "buy":
+        marketable = limit_price >= ask
+    else:
+        marketable = limit_price <= bid
+    return {"would_be_live_marketable": bool(marketable),
+            "marketability_basis": "single_leg_nbbo"}
+
+
 class TransactionCostModel:
-    VERSION = "1.0.0"
+    # 1.1.0: realistic shadow fills — the missing-quote fallback applies the
+    # stored cross cost (fills adverse of mid) and every simulated fill
+    # carries fill_model + would_be_live_marketable. Rows without
+    # `fill_model` in tcm predate this model (mid-filled; segregable).
+    VERSION = "1.1.0"
+    FILL_MODEL = "natural_v1"
+
+    # Degradation bound when expected_spread_cost_usd is absent: the scanner's
+    # 10% combo-width/cost gate caps combo width at 10% of entry cost, so the
+    # cross-to-natural (half-width) is bounded at 5% of the fill price. Never
+    # silently fill at exact mid again.
+    HALF_WIDTH_BOUND_PCT = 0.05
 
     @staticmethod
     def estimate(
@@ -224,23 +283,50 @@ class TransactionCostModel:
                 # Last resort fallback
                 expected_fill_price = 1.0
 
-            # Internal paper trading: always fill at the expected price.
-            # The deterministic draw was causing orders to stay stuck in
-            # "working" when the draw exceeded fill_probability — but
-            # probabilistic rejection is meaningless for paper trading
-            # where there's no real counterparty or liquidity concern.
+            # Internal paper trading: always fill (probabilistic rejection is
+            # meaningless with no real counterparty) — but NOT at exact mid.
+            # Pre-1.1.0 this filled at expected_fill_price (= the combo mid),
+            # which understated entry cost by the cross and contaminated
+            # calibration/learning inputs (learning_feedback_loops trained on
+            # fills live can't achieve). Apply the cross cost the TCM already
+            # estimated at staging: fills are ADVERSE of mid — a buy pays
+            # more, a sell receives less.
+            cross_cost_usd = float(tcm_data.get("expected_spread_cost_usd") or 0.0)
+            if cross_cost_usd > 0 and requested_qty > 0:
+                cross_per_share = cross_cost_usd / (requested_qty * 100.0)
+                cross_source = "tcm_expected_spread_cost"
+            else:
+                # Degradation: half-combo-width estimate bounded by the 10%
+                # spread gate (≤5% of price). Never exact mid.
+                cross_per_share = expected_fill_price * TransactionCostModel.HALF_WIDTH_BOUND_PCT
+                cross_source = "half_width_bound_estimate"
+
+            side = order.get("side", "buy")
+            if side == "buy":
+                adjusted_price = expected_fill_price + cross_per_share
+            else:
+                adjusted_price = max(0.01, expected_fill_price - cross_per_share)
+
+            # Marketability label: quote is missing here by definition →
+            # UNKNOWN (None), never fabricated.
             new_total_qty = requested_qty
-            new_avg_price = expected_fill_price
+            new_avg_price = adjusted_price
 
             return {
                 "status": "filled",
                 "filled_qty": new_total_qty,
                 "avg_fill_price": round(new_avg_price, 4),
-                "last_fill_price": round(expected_fill_price, 4),
+                "last_fill_price": round(adjusted_price, 4),
                 "last_fill_qty": remaining_qty,
                 "reason": "missing_quote_fallback",
                 "fallback_source": reason,
                 "fill_probability_used": fill_probability,
+                "fill_model": TransactionCostModel.FILL_MODEL,
+                "mid_price_basis": round(expected_fill_price, 4),
+                "simulated_cross_per_share": round(cross_per_share, 4),
+                "simulated_cross_source": cross_source,
+                "would_be_live_marketable": None,
+                "marketability_basis": "quote_missing",
             }
 
         if not quote or quote.get("status") == "error":
@@ -323,12 +409,18 @@ class TransactionCostModel:
 
             status = "filled" if new_total_qty >= requested_qty else "partial"
 
+            # Quote-path fills already price off the real NBBO (ask/bid or
+            # probabilistic-at-limit) — no price adjustment. Attach the
+            # marketability label + fill model only (pure label, never gates).
+            label = _live_marketability_label(order, bid, ask, limit_price, order_type)
             return {
                 "status": status,
                 "filled_qty": new_total_qty,
                 "avg_fill_price": round(new_avg_price, 4),
                 "last_fill_price": round(fill_price, 4),
-                "last_fill_qty": this_fill_qty
+                "last_fill_qty": this_fill_qty,
+                "fill_model": TransactionCostModel.FILL_MODEL,
+                **label,
             }
 
         # No fill this tick, but order is actively working

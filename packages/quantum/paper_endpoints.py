@@ -1596,6 +1596,37 @@ def _repair_filled_order_commit(supabase, analytics, user_id, order, portfolio) 
     return result
 
 
+# Realism fields produced by TransactionCostModel.simulate_fill (1.1.0+).
+# Persisted into the order's tcm JSONB at fill commit so calibration/learning
+# consumers can (a) segregate fill models (`fill_model` present = realistic
+# cross-adjusted fill; absent = legacy mid fill) and (b) filter to the
+# live-marketable subset (`would_be_live_marketable`). Pure metadata — never
+# touches requested_price (the shared live/shadow column).
+_FILL_REALISM_KEYS = (
+    "fill_model",
+    "would_be_live_marketable",
+    "marketability_basis",
+    "mid_price_basis",
+    "simulated_cross_per_share",
+    "simulated_cross_source",
+)
+
+
+def _fill_realism_tcm_update(order: dict, fill_res: dict) -> Optional[dict]:
+    """Merge simulate_fill's realism fields into the order's existing tcm blob.
+
+    Returns the merged tcm dict, or None when the fill result carries no
+    fill_model (e.g. a non-TCM caller) — in which case tcm is left untouched.
+    Existing rows are never rewritten; only the row being filled now gains
+    the new fields (old mid-filled rows stay segregable by the absence of
+    `fill_model`).
+    """
+    if "fill_model" not in fill_res:
+        return None
+    realism = {k: fill_res[k] for k in _FILL_REALISM_KEYS if k in fill_res}
+    return {**(order.get("tcm") or {}), **realism}
+
+
 def _commit_fill(supabase, analytics, user_id, order, fill_res, quote, portfolio):
     # D) Use helper to compute deltas
     deltas = _compute_fill_deltas(order, fill_res)
@@ -1621,6 +1652,12 @@ def _commit_fill(supabase, analytics, user_id, order, fill_res, quote, portfolio
         "filled_at": now,
         "quote_at_fill": quote
     }
+
+    # Persist fill-model realism metadata (1.1.0+) — tcm only, never
+    # requested_price (isolation invariant: live submission reads that column).
+    tcm_update = _fill_realism_tcm_update(order, fill_res)
+    if tcm_update is not None:
+        update_payload["tcm"] = tcm_update
 
     supabase.table("paper_orders").update(update_payload).eq("id", order["id"]).execute()
 

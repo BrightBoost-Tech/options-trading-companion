@@ -33,6 +33,16 @@ from packages.quantum.services.close_helper import (
 # Submission retry config
 MAX_SUBMIT_ATTEMPTS = 3
 ACK_TIMEOUT_SECONDS = 10.0
+# Idle THRESHOLD for the entry-order watchdog — NOT the effective cancel
+# time. The watchdog is polled inside poll_pending_orders, which runs on the
+# alpaca_order_sync cadence (5-min cron + ad-hoc post-cycle runs), so an
+# unfilled order is cancelled at the FIRST sync where idle > 90s — in
+# practice up to ~6 minutes (e.g. the 2026-06-03 NFLX entry rested 292s).
+# Cancel-only: there is NO resubmission/reprice after the cancel (that is
+# the deliberately-deferred step-pricing execution layer — see the
+# 2026-06-04 fill-mechanics diagnostic; #1018 changes entry pricing
+# upstream instead). Empirically, live mid-limit entries fill instantly or
+# never, so the precise window matters little — the price does.
 IDLE_WATCHDOG_SECONDS = 90
 
 logger = logging.getLogger(__name__)
@@ -522,7 +532,10 @@ def poll_pending_orders(
     Check status of all submitted Alpaca orders and sync back.
 
     Production features:
-    - 90-second idle watchdog: if order has no status update, cancel and resubmit
+    - Idle watchdog: an unfilled working order is cancelled at the first
+      poll where idle > IDLE_WATCHDOG_SECONDS (effective timing = the
+      order_sync cadence, ~up to 6 min). CANCEL-ONLY — no resubmission;
+      the order ends watchdog_cancelled and its suggestion stays pending.
     - Retry on poll failures (transient)
     - Fill detection with position creation
     """
@@ -573,9 +586,13 @@ def poll_pending_orders(
             }
             internal_status = status_map.get(alpaca_status, "working")
 
-            # === IDLE WATCHDOG (90s) ===
-            # If order is still in a "waiting" state and was submitted > 90s ago
-            # with no fills, cancel and mark for resubmission
+            # === IDLE WATCHDOG (threshold 90s, checked on the sync cadence) ===
+            # If the order is still in a "waiting" state with no fills and has
+            # been idle past IDLE_WATCHDOG_SECONDS, cancel it. CANCEL-ONLY:
+            # nothing resubmits after this — the order terminates in
+            # watchdog_cancelled (resubmission/reprice is the deferred
+            # step-pricing layer; entry pricing is handled upstream by the
+            # flag-gated marketable-entry lever instead).
             if internal_status == "working" and order.get("submitted_at"):
                 try:
                     submitted_at = datetime.fromisoformat(

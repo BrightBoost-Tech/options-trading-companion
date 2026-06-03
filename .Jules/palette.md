@@ -69,3 +69,6 @@
 ## 2025-06-06 - Accessible Disabled Tooltips
 **Learning:** Browsers disable mouse events on `disabled` buttons, preventing tooltips from appearing. Wrapping the disabled button in a focusable `span` (`tabIndex={0}`) allows the tooltip to trigger on hover and focus.
 **Action:** Always wrap disabled buttons in a `span` with `tabIndex={0}` and an explanatory `aria-label` when tooltips are required.
+## 2024-05-15 - Interactive Table Rows Accessibility
+**Learning:** Table rows (`TableRow`) that function as interactive links or buttons (using `onClick`) are not inherently accessible. They lack keyboard focusability and fail to respond to standard keyboard interactions, leaving keyboard and screen reader users unable to use them.
+**Action:** Always add `tabIndex={0}`, an appropriate `role` (e.g., `"link"` or `"button"`), an `onKeyDown` handler for `Enter` and `Space` keys (including `e.preventDefault()`), and `focus-visible` utility classes (like `focus-visible:ring-inset`) to any interactive `TableRow`.

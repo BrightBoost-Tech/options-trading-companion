@@ -4,6 +4,9 @@ import { useState, useEffect } from 'react';
 import DashboardLayout from '@/components/DashboardLayout';
 import { API_URL, TEST_USER_ID } from '@/lib/constants';
 import { supabase } from '@/lib/supabase';
+import { Button } from '@/components/ui/button';
+import { EmptyState } from '@/components/ui/empty-state';
+import { Loader2, BookOpen } from 'lucide-react';
 
 export default function JournalPage() {
   const [entries, setEntries] = useState<any[]>([]);
@@ -47,9 +50,9 @@ export default function JournalPage() {
       <div className="max-w-7xl mx-auto p-8 space-y-8">
         <div className="flex justify-between items-center">
           <h1 className="text-3xl font-bold">Trade Journal</h1>
-          <button className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700">
+          <Button className="bg-blue-600 hover:bg-blue-700 text-white">
             Log New Trade
-          </button>
+          </Button>
         </div>
 
         <div className="bg-white rounded-lg shadow overflow-hidden">
@@ -57,11 +60,17 @@ export default function JournalPage() {
             <h3 className="text-lg font-semibold">All Entries</h3>
           </div>
           {loading ? (
-            <div className="p-12 text-center text-gray-500">Loading entries...</div>
+            <div className="p-12 flex flex-col items-center justify-center text-gray-500 animate-in fade-in duration-300">
+              <Loader2 className="w-8 h-8 animate-spin mb-4 text-blue-600" />
+              <p>Loading entries...</p>
+            </div>
           ) : entries.length === 0 ? (
-            <div className="p-12 text-center text-gray-500">
-              <p className="text-lg">No trades logged yet.</p>
-              <p className="text-sm mt-2">Use the &quot;Log New Trade&quot; button to get started.</p>
+            <div className="p-8">
+              <EmptyState
+                icon={BookOpen}
+                title="No trades logged yet"
+                description="Use the &quot;Log New Trade&quot; button to get started."
+              />
             </div>
           ) : (
             <div className="overflow-x-auto">

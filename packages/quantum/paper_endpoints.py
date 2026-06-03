@@ -777,6 +777,15 @@ def _stage_order_internal(supabase, analytics, user_id, ticket: TradeTicket, por
             try:
                 from packages.quantum.brokers.alpaca_order_handler import submit_and_track
                 from packages.quantum.brokers.alpaca_client import get_alpaca_client
+                # feat(entry): high-EV-gated marketable-from-start pricing.
+                # LIVE entries only (execution_mode=alpaca_live + suggestion-
+                # born — guards inside); flag MARKETABLE_ENTRY_ENABLED default
+                # OFF (would-be decision logged, requested_price untouched).
+                # Fail-soft: any error preserves the passive-mid order.
+                from packages.quantum.execution.marketable_entry import (
+                    maybe_apply_marketable_entry,
+                )
+                order_row = maybe_apply_marketable_entry(supabase, order_row, user_id)
                 alpaca = get_alpaca_client()
                 submit_and_track(alpaca, supabase, order_row, user_id)
             except Exception as e:

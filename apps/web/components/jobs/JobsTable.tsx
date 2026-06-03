@@ -44,8 +44,16 @@ export function JobsTable({ jobs, isLoading }: JobsTableProps) {
           {jobs.map((job) => (
             <TableRow
               key={job.id}
-              className="cursor-pointer"
+              className="cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring"
               onClick={() => router.push(`/jobs/${job.id}`)}
+              tabIndex={0}
+              role="link"
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' || e.key === ' ') {
+                  e.preventDefault();
+                  router.push(`/jobs/${job.id}`);
+                }
+              }}
             >
               <TableCell className="font-medium whitespace-nowrap">
                 {new Date(job.created_at).toLocaleString()}

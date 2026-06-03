@@ -130,19 +130,21 @@ const StagedList = ({ items }: { items: Suggestion[] }) => {
 
     return (
         <div className="mt-6 mb-6">
-            <button
-                type="button"
-                className="w-full flex items-center justify-between py-2 hover:bg-muted/50 rounded px-2 transition-colors select-none"
+            <Button
+                variant="ghost"
+                className="w-full flex items-center justify-between py-2 hover:bg-muted/50 rounded px-2 transition-colors select-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
                 onClick={() => setExpanded(!expanded)}
+                aria-expanded={expanded}
+                aria-controls="staged-paper-list"
             >
                 <h3 className="text-sm font-medium text-green-700 dark:text-green-400 flex items-center gap-2">
                     <FileText className="w-4 h-4" />
                     Staged for Paper ({items.length})
                 </h3>
                 {expanded ? <ChevronUp className="w-4 h-4" /> : <ChevronDown className="w-4 h-4" />}
-            </button>
+            </Button>
             {expanded && (
-                <div className="space-y-2 mt-2 pl-2 border-l-2 border-green-200 dark:border-green-900 ml-2">
+                <div id="staged-paper-list" className="space-y-2 mt-2 pl-2 border-l-2 border-green-200 dark:border-green-900 ml-2">
                     {items.map(item => (
                         <SuggestionCard
                             key={item.id}
@@ -170,10 +172,12 @@ const BlockedList = ({ items, onDismiss, dismissedIds }: {
 
     return (
         <div className="mt-6 mb-6">
-            <button
-                type="button"
-                className="w-full flex items-center justify-between py-2 hover:bg-muted/50 rounded px-2 transition-colors select-none"
+            <Button
+                variant="ghost"
+                className="w-full flex items-center justify-between py-2 hover:bg-muted/50 rounded px-2 transition-colors select-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
                 onClick={() => setExpanded(!expanded)}
+                aria-expanded={expanded}
+                aria-controls="blocked-list"
             >
                 <h3 className="text-sm font-medium text-orange-600 dark:text-orange-400 flex items-center gap-2">
                     <ShieldAlert className="w-4 h-4" />
@@ -183,9 +187,9 @@ const BlockedList = ({ items, onDismiss, dismissedIds }: {
                     </span>
                 </h3>
                 {expanded ? <ChevronUp className="w-4 h-4" /> : <ChevronDown className="w-4 h-4" />}
-            </button>
+            </Button>
             {expanded && (
-                <div className="space-y-2 mt-2 pl-2 border-l-2 border-orange-200 dark:border-orange-900 ml-2">
+                <div id="blocked-list" className="space-y-2 mt-2 pl-2 border-l-2 border-orange-200 dark:border-orange-900 ml-2">
                     {visibleItems.map(item => (
                         <SuggestionCard
                             key={item.id}
@@ -208,19 +212,21 @@ const CompletedList = ({ items }: { items: Suggestion[] }) => {
 
     return (
         <div className="mt-8">
-            <button
-                type="button"
-                className="w-full flex items-center justify-between py-2 hover:bg-muted/50 rounded px-2 transition-colors select-none"
+            <Button
+                variant="ghost"
+                className="w-full flex items-center justify-between py-2 hover:bg-muted/50 rounded px-2 transition-colors select-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
                 onClick={() => setExpanded(!expanded)}
+                aria-expanded={expanded}
+                aria-controls="completed-list"
             >
                 <h3 className="text-sm font-medium text-muted-foreground flex items-center gap-2">
                     <CheckCircle2 className="w-4 h-4" />
                     Completed Today ({items.length})
                 </h3>
                 {expanded ? <ChevronUp className="w-4 h-4" /> : <ChevronDown className="w-4 h-4" />}
-            </button>
+            </Button>
             {expanded && (
-                <div className="space-y-2 mt-2 opacity-75">
+                <div id="completed-list" className="space-y-2 mt-2 pl-2 border-l-2 border-muted ml-2">
                     {items.map(item => (
                         <SuggestionCard
                             key={item.id}
@@ -442,8 +448,8 @@ export default function TradeInbox() {
     if (!data) return null;
 
     // v4: Use new explicit buckets with fallback to legacy fields
-    const activeExecutable = data.active_executable ?? data.queue.filter(s => s.status === 'pending');
-    const activeBlocked = data.active_blocked ?? data.queue.filter(s => isBlocked(s));
+    const activeExecutable = data.active_executable ?? (data.queue || []).filter(s => s.status === 'pending');
+    const activeBlocked = data.active_blocked ?? (data.queue || []).filter(s => isBlocked(s));
     const stagedToday = data.staged_today ?? [];
     const completedToday = data.completed_today ?? data.completed;
     const { hero, meta } = data;
@@ -584,8 +590,8 @@ export default function TradeInbox() {
             {/* Queue Section */}
             {hasQueue && (
                 <div className="mb-6">
-                    <button
-                        type="button"
+                    <Button
+                        variant="ghost"
                         className="w-full flex items-center justify-between py-2 hover:bg-muted/50 rounded px-2 transition-colors select-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
                         onClick={() => setQueueExpanded(!queueExpanded)}
                         aria-expanded={queueExpanded}
@@ -595,7 +601,7 @@ export default function TradeInbox() {
                              Pending Queue ({visibleQueue.length})
                         </span>
                         {queueExpanded ? <ChevronUp className="w-4 h-4" /> : <ChevronDown className="w-4 h-4" />}
-                    </button>
+                    </Button>
 
                     {queueExpanded ? (
                         <div

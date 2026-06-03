@@ -69,3 +69,6 @@
 ## 2025-06-06 - Accessible Disabled Tooltips
 **Learning:** Browsers disable mouse events on `disabled` buttons, preventing tooltips from appearing. Wrapping the disabled button in a focusable `span` (`tabIndex={0}`) allows the tooltip to trigger on hover and focus.
 **Action:** Always wrap disabled buttons in a `span` with `tabIndex={0}` and an explanatory `aria-label` when tooltips are required.
+## 2024-05-14 - WAI-ARIA Disclosure Pattern for Collapsible Sections
+**Learning:** The native `<button>` elements used as toggles for collapsible sections in React were missing WAI-ARIA disclosure attributes (`aria-expanded`, `aria-controls`) and proper `focus-visible` styles, rendering them invisible and confusing to keyboard/screen reader users.
+**Action:** When implementing collapsible sections with native `<button>` tags, always generate a unique `contentId` via `React.useId()`, apply `aria-expanded` and `aria-controls` to the toggle, and add explicit `focus-visible` utility classes.

@@ -69,3 +69,6 @@
 ## 2025-06-06 - Accessible Disabled Tooltips
 **Learning:** Browsers disable mouse events on `disabled` buttons, preventing tooltips from appearing. Wrapping the disabled button in a focusable `span` (`tabIndex={0}`) allows the tooltip to trigger on hover and focus.
 **Action:** Always wrap disabled buttons in a `span` with `tabIndex={0}` and an explanatory `aria-label` when tooltips are required.
+## 2024-04-27 - Added Accessibility to Collapsible Lists
+**Learning:** Collapsible sections in `apps/web` (e.g., `TradeInbox` lists) often use native HTML `<button>` elements that lack proper WAI-ARIA disclosure attributes (`aria-expanded`, `aria-controls`) and visible focus states for keyboard users.
+**Action:** Always ensure native button toggles implement `aria-expanded` reflecting the state, `aria-controls` pointing to the ID of the collapsible content, and explicit `focus-visible` utility classes (e.g., `focus-visible:ring-2 focus-visible:outline-none focus-visible:ring-ring`) so keyboard focus remains clear.

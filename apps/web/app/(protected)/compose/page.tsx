@@ -1,6 +1,7 @@
 'use client';
 
 import { useState } from 'react';
+import { Loader2 } from 'lucide-react';
 
 export default function ComposePage() {
   const [symbol, setSymbol] = useState('');
@@ -54,8 +55,9 @@ export default function ComposePage() {
 
         <form onSubmit={handleValidate} className="bg-white rounded-lg shadow p-6 space-y-4">
           <div>
-            <label className="block text-sm font-medium mb-2">Symbol</label>
+            <label htmlFor="symbol" className="block text-sm font-medium mb-2">Symbol</label>
             <input
+              id="symbol"
               type="text"
               value={symbol}
               onChange={(e) => setSymbol(e.target.value.toUpperCase())}
@@ -66,8 +68,9 @@ export default function ComposePage() {
           </div>
 
           <div>
-            <label className="block text-sm font-medium mb-2">Strategy</label>
+            <label htmlFor="strategy" className="block text-sm font-medium mb-2">Strategy</label>
             <select
+              id="strategy"
               value={strategy}
               onChange={(e) => setStrategy(e.target.value)}
               className="w-full px-3 py-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
@@ -81,8 +84,9 @@ export default function ComposePage() {
           </div>
 
           <div>
-            <label className="block text-sm font-medium mb-2">Expiry (YYYY-MM-DD)</label>
+            <label htmlFor="expiry" className="block text-sm font-medium mb-2">Expiry (YYYY-MM-DD)</label>
             <input
+              id="expiry"
               type="date"
               value={expiry}
               onChange={(e) => setExpiry(e.target.value)}
@@ -92,10 +96,11 @@ export default function ComposePage() {
           </div>
 
           <div>
-            <label className="block text-sm font-medium mb-2">
+            <label htmlFor="strikes" className="block text-sm font-medium mb-2">
               Strikes (comma-separated)
             </label>
             <input
+              id="strikes"
               type="text"
               value={strikes}
               onChange={(e) => setStrikes(e.target.value)}
@@ -108,8 +113,9 @@ export default function ComposePage() {
           <button
             type="submit"
             disabled={validating}
-            className="w-full py-2 px-4 bg-blue-600 text-white rounded-lg hover:bg-blue-700 font-medium disabled:bg-gray-400"
+            className="w-full flex items-center justify-center gap-2 py-2 px-4 bg-blue-600 text-white rounded-lg hover:bg-blue-700 font-medium disabled:bg-gray-400 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 focus-visible:ring-offset-2"
           >
+            {validating && <Loader2 className="w-4 h-4 animate-spin" />}
             {validating ? 'Validating with AI...' : 'Validate Trade'}
           </button>
         </form>

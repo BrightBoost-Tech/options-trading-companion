@@ -7,6 +7,7 @@ import { Progress } from "@/components/ui/progress"
 import { AlertCircle, CheckCircle2, ShieldAlert, Activity, Database, Zap, ServerCrash } from "lucide-react"
 import { fetchWithAuth } from "@/lib/api"
 import { Skeleton } from "@/components/ui/skeleton"
+import { QuantumTooltip } from "@/components/ui/QuantumTooltip"
 
 interface ProviderMetrics {
   state: "CLOSED" | "HALF_OPEN" | "OPEN"
@@ -239,10 +240,13 @@ export function SystemHealthPanel() {
             <div className="space-y-2">
               {data.active_constraints.slice(0, 3).map((c, i) => (
                 <div key={i} className="flex justify-between items-center text-sm">
-                  <span className="text-muted-foreground truncate max-w-[180px]" title={c.constraint}>
-                    {c.constraint}
-                  </span>
-                  <Badge variant="secondary" className="text-xs h-5">
+                  <div className="flex items-center gap-1 min-w-0">
+                    <span className="text-muted-foreground truncate max-w-[160px]">
+                      {c.constraint}
+                    </span>
+                    <QuantumTooltip content={c.constraint} className="shrink-0" />
+                  </div>
+                  <Badge variant="secondary" className="text-xs h-5 shrink-0 ml-2">
                     x{c.count}
                   </Badge>
                 </div>

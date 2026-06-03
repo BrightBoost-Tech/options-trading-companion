@@ -207,7 +207,10 @@ export function SystemEvolutionPanel() {
                 <div className="space-y-2">
                     {significantShifts.map(([key, delta], i) => (
                     <div key={i} className="flex items-center justify-between text-xs p-2 rounded bg-blue-50 dark:bg-blue-900/10 border border-blue-100 dark:border-blue-900/30">
-                        <span className="truncate max-w-[120px]" title={key}>{key.split(':')[0]}</span>
+                        <div className="flex items-center gap-1 min-w-0">
+                            <span className="truncate max-w-[100px]">{key.split(':')[0]}</span>
+                            <QuantumTooltip content={key} className="shrink-0" />
+                        </div>
                         <div className={`flex items-center gap-1 font-mono font-medium ${delta > 0 ? 'text-green-600' : 'text-red-500'}`}>
                              {delta > 0 ? <ArrowUp className="w-3 h-3" /> : <ArrowDown className="w-3 h-3" />}
                              {Math.abs(delta)}%

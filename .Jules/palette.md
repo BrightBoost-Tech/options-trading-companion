@@ -69,3 +69,7 @@
 ## 2025-06-06 - Accessible Disabled Tooltips
 **Learning:** Browsers disable mouse events on `disabled` buttons, preventing tooltips from appearing. Wrapping the disabled button in a focusable `span` (`tabIndex={0}`) allows the tooltip to trigger on hover and focus.
 **Action:** Always wrap disabled buttons in a `span` with `tabIndex={0}` and an explanatory `aria-label` when tooltips are required.
+
+## 2025-06-07 - Empty State Standardization
+**Learning:** Reusable components like `EmptyState` provide a more polished and consistent experience for empty lists or missing data than basic styled `div`s.
+**Action:** Audit pages with list views for missing data states and replace basic HTML placeholders with the design system's `EmptyState` component.

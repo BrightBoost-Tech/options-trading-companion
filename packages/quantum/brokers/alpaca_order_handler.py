@@ -139,13 +139,23 @@ def build_alpaca_order_request(order: Dict[str, Any]) -> Dict[str, Any]:
             f"(got {limit_price}). Order ID: {order.get('id')}"
         )
 
+    # Time-in-force: read from the ticket (order_json), default "day".
+    # Pre-GTC-profit-exit this was hardcoded "day" — every order the system
+    # ever submitted was DAY (the volatility-trap "GTC" was rationale text
+    # only). Only the GTC profit-limit placement (services/gtc_profit_exit)
+    # sets "gtc"; anything else — entries, stop/target closes, force-closes —
+    # still emits DAY (unknown values coerce to "day", never to "gtc").
+    tif = str(order_json.get("time_in_force") or "day").lower()
+    if tif not in ("day", "gtc"):
+        tif = "day"
+
     return {
         "symbol": order_json.get("symbol") or order.get("symbol"),
         "legs": alpaca_legs,
         "qty": qty,  # Contract count on parent order, not on legs
         "order_type": "limit",
         "limit_price": limit_price,
-        "time_in_force": "day",
+        "time_in_force": tif,
     }
 
 
@@ -593,7 +603,18 @@ def poll_pending_orders(
             # watchdog_cancelled (resubmission/reprice is the deferred
             # step-pricing layer; entry pricing is handled upstream by the
             # flag-gated marketable-entry lever instead).
-            if internal_status == "working" and order.get("submitted_at"):
+            #
+            # GTC EXEMPTION (gtc_profit_exit): a GTC resting profit-limit is
+            # SUPPOSED to idle — it parks at the cohort's profit credit until
+            # the market comes to it. Idle-timeout cancellation applies to DAY
+            # orders only; without this exemption every resting GTC would be
+            # killed at the first sync after 90s. Lifecycle for GTC orders is
+            # owned by the close path instead (a competing stop/envelope close
+            # pre-cancels them via cancel_open_orders_for_symbols).
+            _order_tif = str(
+                (order.get("order_json") or {}).get("time_in_force") or "day"
+            ).lower()
+            if internal_status == "working" and order.get("submitted_at") and _order_tif != "gtc":
                 try:
                     submitted_at = datetime.fromisoformat(
                         order["submitted_at"].replace("Z", "+00:00")
@@ -787,6 +808,23 @@ def poll_pending_orders(
                             f"[ALPACA_HANDLER] Open fill committed: order={order_id} "
                             f"repair_processed={repair_result.get('processed', 0)}"
                         )
+
+                        # GTC resting profit-limit placement (flag-gated,
+                        # default OFF — no-op until GTC_PROFIT_EXIT_ENABLED).
+                        # On a LIVE entry fill, park a closing mleg GTC limit
+                        # at the cohort's flat profit credit so the broker
+                        # auto-fires on profit. Fail-soft: placement errors
+                        # never break the poll loop.
+                        try:
+                            from packages.quantum.services.gtc_profit_exit import (
+                                maybe_place_gtc_profit_exit,
+                            )
+                            maybe_place_gtc_profit_exit(supabase, order_id, user_id)
+                        except Exception as gtc_err:
+                            logger.error(
+                                f"[GTC_PROFIT_EXIT] placement hook failed "
+                                f"(non-fatal): order={order_id} err={gtc_err}"
+                            )
                     fills += 1
                 except Exception as fill_err:
                     logger.error(

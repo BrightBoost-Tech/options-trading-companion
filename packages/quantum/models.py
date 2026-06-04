@@ -40,6 +40,13 @@ class TradeTicket(BaseModel):
     order_type: Literal["market", "limit"] = "limit"
     limit_price: Optional[float] = None
     quantity: int = 1  # number of spreads/contracts
+    # Time-in-force. "day" for everything except the GTC resting
+    # profit-limit (services/gtc_profit_exit.py), which parks a closing
+    # mleg limit at the cohort's flat profit credit and lets the broker
+    # auto-fire. Read by build_alpaca_order_request (default "day" —
+    # every pre-existing path is unchanged); GTC orders are exempt from
+    # the idle watchdog (they are SUPPOSED to rest).
+    time_in_force: Literal["day", "gtc"] = "day"
 
     # Metadata for learning / context
     catalyst_window: Optional[str] = None  # "morning_limit", "midday_entry", etc.

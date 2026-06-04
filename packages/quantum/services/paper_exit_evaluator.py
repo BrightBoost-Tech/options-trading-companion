@@ -437,6 +437,29 @@ def build_exit_conditions(
     }
 
 
+def is_gtc_profit_exit_order(order_row: Dict[str, Any]) -> bool:
+    """True when the order row is a GTC resting profit-limit
+    (services/gtc_profit_exit). Used by the close-idempotency guards in
+    _close_position and intraday_risk_monitor._execute_force_close:
+    a resting GTC profit order must NOT satisfy "a close already exists" —
+    otherwise it would permanently disarm stop/envelope force-closes for
+    the position (the guards match close-side orders in ANY status,
+    including working/cancelled). A competing close instead proceeds and
+    pre-cancels the resting GTC at the broker (submit_and_track's
+    cancel_open_orders_for_symbols)."""
+    return (
+        (order_row.get("order_json") or {}).get("source_engine")
+        == "gtc_profit_exit"
+    )
+
+
+def filter_blocking_close_orders(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Close-side order rows that legitimately block a new close attempt —
+    i.e. everything EXCEPT GTC resting profit-limits (see
+    is_gtc_profit_exit_order)."""
+    return [r for r in (rows or []) if not is_gtc_profit_exit_order(r)]
+
+
 def evaluate_position_exit(
     position: Dict[str, Any],
     conditions: Optional[Dict[str, Dict[str, Any]]] = None,
@@ -1231,7 +1254,7 @@ class PaperExitEvaluator:
         # guard and staged a duplicate zero-qty close order.
         try:
             existing_close = supabase.table("paper_orders") \
-                .select("id, status, created_at") \
+                .select("id, status, created_at, order_json") \
                 .eq("position_id", position_id) \
                 .eq("side", side) \
                 .in_("status", [
@@ -1239,10 +1262,15 @@ class PaperExitEvaluator:
                     "needs_manual_review", "filled", "cancelled",
                 ]) \
                 .order("created_at", desc=True) \
-                .limit(1) \
+                .limit(10) \
                 .execute()
-            if existing_close.data:
-                existing = existing_close.data[0]
+            # GTC resting profit-limits do NOT block a competing close —
+            # excluding them here is what lets a stop/envelope force-close
+            # proceed (and pre-cancel the resting GTC at the broker) instead
+            # of being deduped into never firing. See is_gtc_profit_exit_order.
+            _blocking = filter_blocking_close_orders(existing_close.data or [])
+            if _blocking:
+                existing = _blocking[0]
                 logger.info(
                     f"[CLOSE_POSITION] Skipping — close order already exists "
                     f"for position={position_id[:8]}: "

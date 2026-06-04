@@ -626,7 +626,7 @@ class IntradayRiskMonitor:
         close_side = "sell" if position_qty > 0 else "buy"
         try:
             existing = self.supabase.table("paper_orders") \
-                .select("id, status") \
+                .select("id, status, order_json") \
                 .eq("position_id", pos_id) \
                 .eq("side", close_side) \
                 .in_("status", [
@@ -634,11 +634,20 @@ class IntradayRiskMonitor:
                     "needs_manual_review", "filled", "cancelled",
                 ]) \
                 .execute()
-            if existing.data:
+            # GTC resting profit-limits must NOT satisfy this guard — a
+            # parked gtc_profit_exit order would otherwise permanently
+            # disarm stop/envelope force-closes for the position. The
+            # force-close proceeds; submit_and_track's pre-cancel removes
+            # the resting GTC at the broker before submitting.
+            from packages.quantum.services.paper_exit_evaluator import (
+                filter_blocking_close_orders,
+            )
+            _blocking = filter_blocking_close_orders(existing.data or [])
+            if _blocking:
                 logger.info(
                     f"[RISK_MONITOR] Skipping {symbol} — close order already exists "
-                    f"(order_id={existing.data[0]['id'][:8]} "
-                    f"status={existing.data[0]['status']})"
+                    f"(order_id={_blocking[0]['id'][:8]} "
+                    f"status={_blocking[0]['status']})"
                 )
                 return False
         except Exception as e:

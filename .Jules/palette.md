@@ -69,3 +69,7 @@
 ## 2025-06-06 - Accessible Disabled Tooltips
 **Learning:** Browsers disable mouse events on `disabled` buttons, preventing tooltips from appearing. Wrapping the disabled button in a focusable `span` (`tabIndex={0}`) allows the tooltip to trigger on hover and focus.
 **Action:** Always wrap disabled buttons in a `span` with `tabIndex={0}` and an explanatory `aria-label` when tooltips are required.
+
+## 2026-06-04 - Accessible Disclosure Widgets
+**Learning:** Native `<button>` elements acting as collapsibles/accordions often miss the WAI-ARIA disclosure pattern, preventing screen readers from announcing their state and relation to the expanded content.
+**Action:** Always add `aria-expanded` and `aria-controls` (using a stable ID like `React.useId()`) to toggle buttons controlling collapsible regions.

@@ -18,12 +18,12 @@ For new-contributor onboarding, see README.md. For AI session context, this file
 - **Phase:** `micro_live` (operator-set documentation label, flipped 2026-04-25 17:10:36Z). It is **NOT** a valid EXECUTION_MODE value, and it does **NOT** govern capital tier (tier is resolved purely by `get_tier(deployable_capital)`). The `CURRENT_PROGRESSION_PHASE` env only gates the IRON_CONDOR phase-aware exclusion at `strategy_selector.py:375`.
 - **EXECUTION_MODE env:** one of `internal_paper`, `alpaca_paper`, `alpaca_live`, `shadow`. Live trading also requires `LIVE_ENABLED=true` (second-stage safety at `execution_router.py:88-94` falls back to `alpaca_paper` otherwise).
 - **Promotion type:** manual operator-initiated. Green-day gate (1/4) bypassed; continuous-growth model. Audit `risk_alerts.id = 82f1c294-19a4-4c66-8a68-0b0811ef5b24`.
-- **Account:** live Alpaca `211900084`, options Level 3. Starting capital $500 on `v3_go_live_state.paper_baseline_capital` (2026-04-25, audit `c9d87caf-24db-4f7f-842a-748620a5c84f`). **Current equity ~$1,635 → see Live State.**
+- **Account:** live Alpaca `211900084`, options Level 3. Starting capital $500 on `v3_go_live_state.paper_baseline_capital` (2026-04-25, audit `c9d87caf-24db-4f7f-842a-748620a5c84f`). **Current equity ~$2,283 → see Live State.**
 - **daily_progression_eval:** 16:00 CT. alpaca_paper → micro_live gate bypassed (operator-initiated). Future phase transitions deferred under continuous-growth model.
-- **Auto-promotion gates (micro_live → full_auto):** `promotion_check` auto-promotes when ALL pass — (1) broker equity ≥ $1500, (2) cumulative_realized_pl > 0 across Alpaca-real closed trades, (3) alpaca_real_trade_count ≥ 3. Manual override (`ProgressionService.promote(...)`) preserved as bypass. **Note: equity ($1,635) now clears gate (1); gates (2)/(3) still bind.**
+- **Auto-promotion gates (micro_live → full_auto):** `promotion_check` auto-promotes when ALL pass — (1) broker equity ≥ $1500, (2) cumulative_realized_pl > 0 across Alpaca-real closed trades, (3) alpaca_real_trade_count ≥ 3. Manual override (`ProgressionService.promote(...)`) preserved as bypass. **Note: equity (~$2,283) clears gate (1); gates (2)/(3) still bind — the 2026-06-04 live NFLX entry will count toward (2)/(3) when it closes.**
 - **Iron condors:** enabled by pool construction; triggered by `strategy_selector.get_candidates` when regime=CHOP, or sentiment NEUTRAL/EARNINGS with high IV (iv_rank>50 or ELEVATED/SHOCK/REBOUND). Recent regimes NORMAL+directional → IC pool empty → debit spreads dominate (regime-driven natural selection; empirically 52 ICs in 90d at CHOP, 0 at NORMAL — by design). Phase-aware exclusion at `strategy_selector.py:372-387` excludes IRON_CONDOR when `CURRENT_PROGRESSION_PHASE=alpaca_paper`; currently DORMANT (phase=micro_live).
 - **Calibration job:** daily 05:00 CT → `calibration_adjustments`.
-- **Risk profile:** tier-aware, capital-driven (see "Risk per trade math"). Tier is now SMALL (equity ~$1,635 > $1,000 cliff) — see Live State for the concrete small-vs-micro deltas.
+- **Risk profile:** tier-aware, capital-driven (see "Risk per trade math"). Tier is now SMALL (equity ~$2,283 > $1,000 cliff) — see Live State for the concrete small-vs-micro deltas.
 - **Universe:** 74 active. Recent adds: KHC (PR #976), SNAP/RIVN/NIO/MARA (2026-05-21, sub-$30, 4 sectors); FISV deactivated 2026-05-19 (corp action). Audit rows `2c91a730-b4be-4b7e-9433-630be9ddb1d2` (KHC), `a23461cc-3661-45b7-96cb-e7a13dd0779f` (batch). The 4 newest lack α IV backfill (debit spreads emit at `iv_rank=50` default; credit/IC defer).
 - **Pipeline:** full end-to-end validated 2026-04-10.
 - **Phase 2 contract:** enforced — `check_close_reason_enum` (9 values), `check_fill_source_enum`, `close_path_required` constraints intact.
@@ -83,9 +83,19 @@ Live Trading API keys for this account use the **AK** prefix (public docs say `P
 
 **Permanently on** (do not flip without a code change): `TASK_NONCE_PROTECTION=1`, `TASK_NONCE_FAIL_CLOSED_IN_PROD=1`, `SCHEDULER_ENABLED=1`, `ORCHESTRATOR_ENABLED=1`, `CALIBRATION_ENABLED=1`, `RISK_ENVELOPE_ENFORCE=1`, `RANKER_PORTFOLIO_AWARE=1`, `CANONICAL_RANKING_ENABLED=1`, `MULTI_STRATEGY_EVAL=1`, `COMPOUNDING_MODE=true`, `PAPER_AUTOPILOT_ENABLED=1`, `POLICY_LAB_ENABLED=true`, `ALLOCATION_V4_ENABLED=true`, `FORECAST_V4_ENABLED=true`, `OPTIMIZER_V4_ENABLED=true`, `REGIME_V4_ENABLED=true`, `SURFACE_V4_ENABLE=true`, `SHADOW_CHECKPOINT_ENABLED=1`.
 
-**Permanently off:** `AUTOTUNE_ENABLED=false`, `POLICY_LAB_AUTOPROMOTE=false`, `PDT_PROTECTION_ENABLED=0`, `ALPACA_DRY_RUN=0`, `ENABLE_DEV_AUTH_BYPASS=0`.
+**Permanently off:** `AUTOTUNE_ENABLED=false`, `POLICY_LAB_AUTOPROMOTE=false`, `PDT_PROTECTION_ENABLED=0` (PDT rule retired 2026-06-04 — never flip ON), `ALPACA_DRY_RUN=0`, `ENABLE_DEV_AUTH_BYPASS=0`.
 
 **Kill switches** (flip to disable instantly): `SCHEDULER_ENABLED`, `CALIBRATION_ENABLED`, `RISK_ENVELOPE_ENFORCE`.
+
+**Lever / observe flags (operator-flipped; state as of 2026-06-04):**
+- `INTRADAY_TARGET_PROFIT_ENABLED` = **`1` (ON)** — 15-min intraday profit capture, **PROVEN** (closed the shadow BAC `target_profit_hit` 2026-06-04 16:45Z, first run after arming). **⚠️ STRICT `== "1"` parsing — setting it to `true` silently no-ops** (this happened 2026-06-04; re-set to `1`). Most other flags accept `1/true/yes/on`.
+- `H7_PREFILTER_ENABLED` = `true` (active mode, post-shadow-validation).
+- `REGIME_FILTER_OBSERVE_ENABLED` = `true` (D4 observe-logging, flipped 2026-06-03).
+- `GTC_PROFIT_EXIT_ENABLED` = OFF (lenient parse; deliberate watched enable pending — competes with intraday TP).
+- `MARKETABLE_ENTRY_ENABLED` = OFF (observe mode — would-be decisions logged).
+- `LIQUIDITY_WEIGHTING_ENABLED` = OFF/absent (observe-first; graduation pending correlation data).
+- `PAPER_SHADOW_EXECUTOR_ENABLED` = `false` (Phase 1b pending; `paper_shadow_pairs` table still unapplied).
+- `REGIME_V4_ENABLED` = `true` (permanently-on list above; distinct from the D4 observe filter).
 
 ---
 
@@ -260,9 +270,20 @@ The "one trade at a time" rule applies to **acquisition**, not management. A PR 
 
 Under live-equity EXECUTION_MODEs (`alpaca_live`, `alpaca_paper`), the intraday monitor enforces a per-symbol stop = `RISK_MAX_SYMBOL_LOSS` (default `0.03` = 3%). Illustrative: on $500, 3% = $15 / 5% = $25; on current ~$1,635 equity, 3% ≈ $49. **Expected operational behavior:** frequent intraday force-closes on small adverse moves; per-trade losses small; round-trip Alpaca fees ~$1-2; each same-session force-close increments the PDT day-trade counter.
 
-**Day-trade / PDT awareness:** same-session entry+force-close = 1 day-trade. Live `211900084` at 0/3. Three same-session round-trips in 5 business days flips `pattern_day_trader: true` (margin implications). **Operator lever:** `RISK_MAX_SYMBOL_LOSS` — tighter (3%) = more force-closes / smaller losses; looser (5%) = fewer / larger losses but more survival. Observe ~1 week at 3% before adjusting.
+**Day-trade / PDT awareness (OBSOLETE as of 2026-06-04 — see "PDT Regime Change" below):** the 3-in-5 day-trade cap and PDT designation no longer exist; same-session force-close round-trips cost only fees (~$1-2). **Operator lever unchanged:** `RISK_MAX_SYMBOL_LOSS` — tighter (3%) = more force-closes / smaller losses; looser (5%) = fewer / larger losses but more survival.
 
 Full worked examples, global per-tier allocation, universe price-filter rationale, history: `docs/risk_math.md`.
+
+---
+
+## PDT Regime Change (2026-06-04)
+
+SEC-approved FINRA Rule 4210 amendment **eliminated the PDT designation, the $25k minimum, and day-trade counting, effective 2026-06-04**. **Alpaca implemented the same day** (new Intraday Margin Framework) → live `211900084` is **UNCAPPED** on same-day round trips; the constraint is now intraday margin exposure, which a cash-secured defined-risk spread book never strains (H7 round-trip BP + allocator budgets + the BP safety check ARE the relevant guards — no new intraday-margin engine needed at this tier).
+
+- **`pattern_day_trader` / `daytrade_count` API fields are now documented PLACEHOLDERS** (false / 0), **REMOVED entirely by ~2026-07-06**.
+- **⚠️ P0 (deadline 2026-07-06):** None-preserving coercion in `alpaca_client.get_account()` — `:221 int(acct.daytrade_count)` raises `int(None)` when the field is removed, **breaking get_account() for ALL consumers** (equity_state → risk envelopes, progression_service, broker endpoints). Also `get_day_trade_count()` (:245) and `is_pdt_restricted()` (:241). The `options_buying_power` None-preserving pattern at `:203-211` is the in-file precedent. Full audit (PDT-SPECIFIC vs ENTANGLED classification, sequenced retirement plan): 2026-06-04 PDT audit in the session transcript / `docs/backlog.md`.
+- All internal PDT logic is **dormant** (`PDT_PROTECTION_ENABLED=0`, never flip ON — it would enforce a retired rule). Entangled pieces NOT to blanket-delete: `pdt_guard_service.is_emergency_stop` (capital protection) + `is_same_day_close` (generic utility) — both imported unconditionally by the live exit path.
+- **Reframe:** PDT was never the frequency bottleneck — liquidity + the 36% per-trade ceiling are (the EV-vs-H7 finding). The elimination removes a *doctrinal* constraint (day-trade conservation), not a binding one.
 
 ---
 
@@ -314,6 +335,16 @@ Entries >7 days old are appended verbatim to `docs/bugs_fixed_history.md` (PR hy
 
 ### Recent (not yet 7-day-archived)
 
+**2026-06-02→04 PR ledger — the live-fill / exit-mechanics arc:**
+
+- **#1014 risk-scope shadow-contamination fix** — MERGED, **VALIDATED in prod both ways** (alert path: phantom BAC concentration alerts 19→0 at the 06-02 19:09Z deploy; block path: 06-03/04 live entries permitted past the risk layer despite the shadow BAC). `risk/position_scope.py` = the canonical live-book filter for any new live-capital consumer.
+- **#1015 liquidity-aware universe** — MERGED, observe-first, flag `LIQUIDITY_WEIGHTING_ENABLED` OFF. Hook confirmed firing (`option_liquidity_observations`; OPTION-spread liquidity, distinct from equity liquidity; first directional read: low scores line up with `spread_too_wide_real` rejections). **GRADUATION PENDING** — correlation validation → flip flag.
+- **#1017 shadow-fill realism** — MERGED. Cohort shadow books fill via the TCM simulator, which filled 100%-at-exact-mid (price bias ≤5% + DOMINANT selection bias: shadow 100% vs live ~12% fill). Fix: fallback fills adverse-of-mid via stored `expected_spread_cost_usd` + `would_be_live_marketable` label (LABEL not gate — volume preserved). Isolation invariant: writes the fill RESULT only, never `requested_price`. Legacy rows segregable by absent `fill_model`.
+- **#1018 marketable-entry lever** — MERGED, flag `MARKETABLE_ENTRY_ENABLED` OFF (observe mode logs would-be decisions to `tcm.marketable_entry`). High-EV gate (net EV ≥ K× actual cross, K=3 default), cross-toward-natural capped AT natural, budget recheck at the marketable price, **no-quote→passive-mid fallback** (the live NFLX's first real record hit exactly this fallback — Polygon leg-quote failure).
+- **#1019 watchdog honesty** — MERGED, doc-only. `IDLE_WATCHDOG_SECONDS=90` is a threshold polled on the sync cadence (effective ~5-6 min); "cancel and resubmit" was vaporware (cancel-only); and per the GTC diagnostic, **"GTC" existed only as rationale text — no production order had ever been GTC**.
+- **#1021 GTC resting profit-limit** — MERGED, flag `GTC_PROFIT_EXIT_ENABLED` OFF. TIF plumbing (`order_json.time_in_force`, default day) + `services/gtc_profit_exit.py` (close limit = entry × (1 + cohort flat tp)) + **watchdog TIF-exemption** (mandatory — GTC orders are supposed to rest) + OCO both ways (**found+fixed inverse-OCO bug:** a parked GTC close order would have satisfied the close-idempotency guards and permanently disarmed stop/envelope force-closes — guards now exclude `gtc_profit_exit` rows via `filter_blocking_close_orders`). **Closing+credit GTC shape PAPER-VALIDATED 2026-06-04** (#908-adjacent; accepted/rested/cancelled on `PA3I8CYLXBOS`). **Flat-cohort only** (a static resting price cannot time-scale). Competes with poll-side intraday TP — choosing is a pending operator decision.
+- **#1022 fresh-mark close-staging fix** — MERGED-pending-deploy. **The loss-protection fix:** the 15-min monitor decided KEEP/CLOSE on FRESH in-memory marks but `_close_position` re-read the STALE DB `current_mark` (persisted only at 13:15Z/20:00Z/20:30Z → up to ~6.5h stale) for the order limit. Loss side (test-pinned): envelope/stop closes staged ABOVE a falling market → rest → watchdog-cancel → re-stage at the same stale mark → **never fill = protection failure**. Profit side (observed): BAC detected ≥+$255, closed at +$192. Fix: `exit_price_override` passes the decision's exact mark (guarded finite>0; degraded → DB fallback, logged — never fabricate). Part B persists monitor marks 15-min fresh (fixes the DB +$52 vs broker −$34 divergence class). **Scope: price coherence, NOT passive→marketable** (closes still rest if the market isn't at the fresh mid — marketable-close/GTC is the completion).
+
 - **2026-05-26: EV-vs-H7 trade-off codified** as the named structural constraint at small-tier capital (doc-only). At ~$1,031 OBP: high-priced underlyings produce sufficient EV but fail H7; sub-$30 underlyings pass H7 but produce insufficient EV after costs — **no shape passes both at current capital** (mechanical capital-vs-size arithmetic, not a code bug). 3 operational paths + 6 rejected code-side fixes catalogued. Full text: `docs/structural_findings.md` "EV-vs-H7 trade-off at small-tier capital".
 - **2026-05-21: universe expansion** +SNAP/RIVN/NIO/MARA (sub-$30, 4 sectors); 70→74 active. Data-only. Audit `a23461cc-…`.
 - **2026-05-21: H7 allocator-aware pre-check** (PR `fix/h7-prefilter-and-khc-composition`) — `run_midday_cycle` filters candidates between `rank_and_select` and `PortfolioAllocator.allocate` against `sizing_engine.estimate_close_bp`. `H7_PREFILTER_ENABLED=false` (shadow; flip to `true` for active after shadow validation). New `cycle_metadata.{h7_prefilter_dropped, h7_prefilter_mode}`; new `exit_reason='all_candidates_h7_unfit'`. +KHC (69→70). 33 tests in `test_h7_prefilter.py`. Audit `2c91a730-…`.
@@ -362,6 +393,14 @@ The agent makes prompts useful and findings rigorous; it does not gatekeep opera
 - **H13 — Parallel architectures without integration.** Two architectures coexisting without a wired seam is a latent bug (the cohort `promoted_at`/`is_champion` class).
 - **H14 — Reference-document freshness: cite-then-verify.** Before relying on a value in a reference doc, re-verify it against live source — docs drift (e.g. HBAN $15.57 → ~$38). Counterweight: operational velocity below; H14 remains the empirical floor.
 - **H15 — Context-repurposed value / dormant-path activation.** Dormant code/data acquires new load-bearing roles when a path activates; re-audit before relying on it.
+
+**2026-06-04 session themes** (candidates for formal H-numbering in `docs/loud_error_doctrine.md`):
+
+- **EVALUATE-FRESH / EXECUTE-STALE.** A decision and the order it triggers must read the SAME observation — the monitor decided on fresh in-memory marks while `_close_position` priced from the stale DB row (the #1022 class). Trace the full handoff when a decision crosses a function boundary by ID alone.
+- **THE LYING DEBUG LINE.** BAC's "target_profit: True … result=False" was a debug line computing a flat threshold while the real condition was time-scaled — no execution bug, a dishonest log that manufactured a phantom incident. Debug output must compute via the SAME functions as the decision. (target_profit has fired 44× historically; the mechanism works.)
+- **DOC/COMMENT/TEXT ≠ BUILT BEHAVIOR.** "GTC" lived only in rationale strings — no production order was ever GTC; the watchdog's "cancel and resubmit" was vaporware. Grep for the implementation before believing the comment (#1019/#1021 origin).
+- **SILENT-FLAG-PARSE-FAILURE.** `== "1"` vs lenient parsing: set a flag to `true`, it silently no-ops, everything *looks* enabled (INTRADAY_TARGET_PROFIT, 2026-06-04). Normalize flag parsing + log parsed flag states at startup — backlog.
+- **SHADOW-FILL ≠ REAL-BROKER FILL.** TCM-simulator cohorts filled 100%-at-mid vs live's ~12% instant-or-never — shadow data was an upper bound, not an estimate, until #1017's price correction + marketability label.
 
 ---
 
@@ -431,16 +470,17 @@ Verified-fittable structure classes (derived at $681 micro — **re-derive at th
 
 ## Live State (auto-updated)
 
-- **Last updated:** 2026-05-31 (live figures from 2026-05-29; merged since: #999 credit-close guard fix, #1000 prune, #1001 velocity doctrine, #1003 paper-shadow 1a).
+- **Last updated:** 2026-06-04 (end of the live-fill / exit-mechanics session; merged this session: #1017 #1018 #1019 #1021, #1022 merged-pending-deploy — see "PR ledger" in Bugs Fixed).
 - **Phase:** micro_live (operator-set label, since 2026-04-25; promotion gate bypassed, continuous-growth model).
-- **Live Alpaca `211900084`:** equity **$1,635.45** · cash $1,635.45 · options BP $1,635.45 · cash multiplier 1, shorting disabled · last_equity $1,550.96 (balance_asof 2026-05-28). **Flat — 0 open positions.** PDT false, daytrade_count 0/3. Pending reg/TAF fees $0.26.
+- **Live Alpaca `211900084`:** equity **≈ $2,283** · cash ≈ $1,719 · options BP **≈ $6,876** (post-PDT-elimination margin framework — see "PDT Regime Change") · margin multiplier 2. **ONE open live position** (below). PDT designation/day-trade counting ELIMINATED 2026-06-04 (`pattern_day_trader`/`daytrade_count` are placeholder fields, removed ~2026-07-06).
+- **OPEN LIVE POSITION — NFLX bear put debit spread:** buy 7/2 P85 / sell 7/2 P79, **2 contracts @ $3.08 = $616 max loss** (bounded). Aggressive/live-champion cohort, portfolio `814cb84b`, opened 2026-06-04 16:03Z, position `a9f977bf`, `execution_mode=alpaca_live`, filled in 32ms at mid. **The first REAL live multi-leg fill of the arc.** All exits live: aggressive cohort target_profit +$308 (15-min intraday TP armed, flag `=1`), cohort stop −$185 (scheduled), per-symbol envelope ≈ −$70 (15-min, enforce ON), DTE/expiry far. Its eventual system close = the long-awaited **PR #908 live credit-mleg-close validation**.
 - **TIER: now SMALL** — `get_tier(deployable_capital)` returns `small` above the $1,000 micro→small cliff (`small_account_compounder.py:24-50`; capital-based, not phase-based). Concrete small-vs-micro deltas:
   1. **max concurrent positions 1 → 4** — the micro one-at-a-time gate (`micro_tier_position_open`) no longer fires.
   2. **Sizing is allocation-aware** — `PortfolioAllocator` distributes a `0.85 × regime_mult × equity` envelope across up to 4 viable candidates (36% per-trade ceiling, score-skew clamp 0.8–1.2), instead of micro's single `0.90 × regime_mult` trade.
   3. selection_logic unchanged (`rank_select_compound`).
 - **Prior micro-tier assumptions need re-examination at small tier:** the one-position concurrency constraint and the micro EV-vs-H7 boundaries (Class B `edge_below_minimum` at $681) were derived at micro capital. The 2026-05-26 EV-vs-H7 codification was done at small-tier $1,031 OBP (`docs/structural_findings.md`); the structure-class fits should be re-derived at ~$1,635.
-- **F closed manually 2026-05-29 (+$105)** via the Alpaca UI — the **system exit path was NOT exercised** (so PR #908 mleg-close validation, Active-focus #1, still waits on a natural system close). Reconcile `paper_positions` per H10 (manual close bypasses our submission chain).
-- **Next position will be SMALL-tier** — a different sizing/concurrency regime than F/micro. The harnesses' next complete cycle will NOT be a micro baseline.
-- **Paper account `PA3I8CYLXBOS`** is wired via the `alpaca-paper` MCP server (separate from `alpaca-live`/`211900084`) for testing — e.g. the 2026-05-29 GTC-mleg resting-order validation (mleg GTC limit orders ARE accepted and rest; the resting-order layer is broker-buildable).
+- **Shadow book (2026-06-04 EOD):** shadow BAC `043f607e` CLOSED by the newly-armed intraday TP (`target_profit_hit`, 16:45Z, internal fill, realized ≈ +$192) — the first intraday profit capture, proving the 15-min TP branch. Shadow NFLX forks still open: conservative `dd096ef5` (3ct) + neutral `f6d56943` (6ct). Their `ghost_position` order-sync noise persists until Phase-1b exclusion.
+- **PR #908 validation watch (updated):** the credit-mleg-close SHAPE is now broker-validated on paper (#1021 smoke test, 2026-06-04: closing+credit GTC accepted/rested/cancelled). The remaining validation is the first LIVE system close — the open NFLX `a9f977bf` is the candidate.
+- **Paper account `PA3I8CYLXBOS`** is wired via the `alpaca-paper` MCP server (separate from `alpaca-live`/`211900084`) for testing — 2026-05-29 validated OPENING+debit mleg GTC rests; 2026-06-04 validated CLOSING+credit mleg GTC (negative limit per #999) accepts/rests/cancels.
 - **Paper-shadow executor (D6/D2 observation infra):** Phase 1a merged (#1003) — dedicated paper client + `PA3I8CYLXBOS` account guard + `paper_shadow` routing_mode + 3 live-job exclusion filters; flag `PAPER_SHADOW_EXECUTOR_ENABLED` **default OFF** (nothing runs). Worker paper creds provisioned. Phase 1b pending (paired executor + D6 realized; leading safety item: `alpaca_order_sync` Step-2/Step-3 reconcile-loop exclusion). Detail in the `paper-shadow-executor-phases` memory note.
 - **Universe:** 74 active (see Current Phase). **α IV:** 67 at full iv_rank decidability; WBD/XLK at 60-row threshold; BKNG sparse (~mid-July 2026); 4 newest pending backfill.

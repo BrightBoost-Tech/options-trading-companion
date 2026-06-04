@@ -1,0 +1,40 @@
+OPERATOR JOURNAL — options-trading-companion
+(created 2026-06-04; one paragraph per session, newest last; detail lives in
+the Claude Code session transcripts under
+~/.claude/projects/C--options-trading-companion/)
+
+============================================================================
+
+2026-06-04 — The live-fill / exit-mechanics session. First REAL live
+multi-leg fill of the arc: NFLX bear put debit spread (buy 7/2 P85 / sell
+P79, 2 contracts @ $3.08 = $616 max loss, aggressive/live-champion cohort,
+position a9f977bf, filled in 32ms at mid on account 211900084). Intraday
+target-profit polling armed (INTRADAY_TARGET_PROFIT_ENABLED — first set to
+"true" which SILENTLY no-ops against the strict =="1" parse; re-set to "1")
+and PROVEN within 13 minutes: it closed the shadow BAC at target_profit_hit
+(16:45Z, internal fill, ~+$192), the exact position whose +$462→+$192
+round-trip motivated the whole arc. GTC resting profit-limit layer BUILT
+(#1021, flag OFF): TIF plumbing + watchdog GTC-exemption + OCO both ways
+(found+fixed an inverse-OCO bug where a parked GTC would have permanently
+disarmed force-closes), and the previously-unvalidated CLOSING+CREDIT mleg
+GTC shape was paper-validated on PA3I8CYLXBOS (accepted/rested/cancelled,
+#908-adjacent). Fresh-mark close-staging loss-protection fix shipped
+(#1022): the 15-min monitor decided on fresh in-memory marks but priced the
+close from the stale DB mark — loss-side force-closes could stage above a
+falling market and never fill; now the order uses the same mark the
+decision used (guarded), and the monitor persists marks 15-min fresh. PDT
+was ELIMINATED effective today (FINRA 4210 amendment; Alpaca live on the
+new intraday-margin framework) → the account is uncapped on day trades;
+P0 follow-up by 2026-07-06: None-coerce the soon-removed
+pattern_day_trader/daytrade_count readers in get_account(). Session
+findings worth remembering: the "target hit but didn't fire" BAC mystery
+was a LYING DEBUG LINE (flat threshold printed, time-scaled threshold
+decided — no bug); "GTC" had only ever existed as rationale TEXT (no
+production order was ever GTC; the watchdog's "resubmit" was vaporware
+too); and the silent-flag-parse failure class. Also merged this arc:
+#1017 (shadow-fill realism: cohort sims filled 100%-at-mid vs live ~12%),
+#1018 (high-EV-gated marketable entry, OFF, observe mode — its first real
+record exercised the no-quote fallback), #1019 (watchdog honesty docs).
+Detail: session transcript fd7953e0-28ff-4c23-8fc7-9bfefc211e72 (~06-02 →
+06-04), CLAUDE.md "PR ledger — the live-fill / exit-mechanics arc", and
+docs/backlog.md "[2026-06-04] SESSION BATCH".

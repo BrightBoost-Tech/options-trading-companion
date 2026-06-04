@@ -8,7 +8,38 @@ Last migrated from CLAUDE.md: 2026-04-28.
 
 # Options-Trading-Companion — Working Backlog
 
-(last updated 2026-05-28; supersedes prior inline tracking)
+(last updated 2026-06-04; supersedes prior inline tracking)
+
+---
+
+## [2026-06-04] SESSION BATCH — prioritized (live-fill / exit-mechanics arc)
+
+### P0 — deadline 2026-07-06: PDT field-reader None-coercion fix
+Alpaca removes `pattern_day_trader` / `daytrade_count` from the API by ~2026-07-06 (PDT rule retired 2026-06-04; fields are placeholders until removal). `alpaca_client.get_account()` `:221 int(acct.daytrade_count)` → `int(None)` raises → **get_account() breaks for ALL consumers** (equity_state → risk envelopes, progression_service, broker endpoints). Fix: None-preserving coercion (the `options_buying_power` pattern at `:203-211`); also `get_day_trade_count()` (:245, same crash) and `is_pdt_restricted()` (:241, returns None — benign but tidy). Verify the pinned alpaca-py model's field optionality at fix time (floating `>=0.28.0`). Regression test: account payload without the fields → get_account() still returns equity. The wider PDT-retirement sequence (retire dormant PDT-specific logic; extract entangled `is_emergency_stop`/`is_same_day_close` before any `pdt_guard_service` deletion; doc cleanup) is P1+ — full classification in the 2026-06-04 PDT audit.
+
+### Before next live session — deploy verification (merged ≠ deployed, H8)
+Confirm **#1022** (fresh-mark close staging) and **#1021** (GTC layer) are DEPLOYED: worker SUCCESS deploy on/after their merge commits, recycle confirmed. Re-verify flags after any recycle: `GTC_PROFIT_EXIT_ENABLED` stays OFF, `INTRADAY_TARGET_PROFIT_ENABLED` stays `=1` (strict parse — `true` silently no-ops). The open live NFLX `a9f977bf`'s exits depend on the deployed monitor.
+
+### Hygiene (recurring tax — batchable)
+- **sys.modules conftest-level cleanup:** 3 polluter files now bite every new test file (`test_inbox_ranker_comprehensive.py` mocks the TCM module; `test_weekly_report_win_rate.py` mocks `packages.quantum.models`; plus the supabase/market_data mocks in `test_outcome_logic`/others). Three defense fixtures have been written piecemeal (#1017's test, gtc tests, fresh-mark tests) — promote to a shared conftest cleanup or fix the polluters.
+- **Flag-parsing normalization + startup flag-state log:** `== "1"` vs lenient (`1/true/yes/on`) is inconsistent per flag; a wrong-but-plausible value silently no-ops (the 2026-06-04 INTRADAY_TARGET_PROFIT `=true` burn). Normalize via one helper + log parsed flag states at worker boot.
+- **The lying debug line:** `paper_exit_evaluator.evaluate_position_exit`'s `[EXIT_EVAL_DEBUG]` threshold line computes a FLAT default threshold while the real default condition is TIME-SCALED (and never reflects cohort overrides — the dead cohort-extract block). Manufactured the phantom "target hit but didn't fire" incident. Fix: compute the debug threshold via the SAME functions/conditions as the decision; delete the dead block. (#1019-class honesty PR.)
+- **Orchestrator missed-job false positive:** `get_missed_jobs` compares chain names `paper_exit_evaluate_morning/_afternoon` against recorded `job_runs.job_name` = plain `paper_exit_evaluate` — the suffixed names can never match → "2 jobs missed yesterday" fires EVERY day. Name-map the chain entries (or record under scheduler entry names). One day it masks a real miss.
+
+### Strategy / measurement (NEW — design notes)
+Higher-frequency / shorter-hold / diverse-regime exploration: design as a **SHADOW cohort A/B**, not a live threshold change — an alternative-target arm PAIRED with a tighter stop (lowering the target without tightening the stop inverts risk:reward; win-rate ≠ EV), measured against the let-run cohort on EV per trade + EV per day-held; graduate on data (20-30 cycles). **Safe-now sub-item:** concentration / same-direction-same-name cap (today's live book is 100% NFLX bear puts and the shadow forks are the SAME trade — a correlated-exposure cap is sizing-adjacent, small surface). The real frequency+diversity lever already in flight = graduating #1015.
+
+### Graduation queue (observe → live, data-gated)
+- **#1015 `LIQUIDITY_WEIGHTING_ENABLED`:** hook firing; first directional read good (low option-liquidity scores line up with `spread_too_wide_real`). Graduate on correlation across more cycles.
+- **#1010 `REGIME_FILTER_OBSERVE_ENABLED` (D4):** observe rows accumulating since 2026-06-03; graduate to ACT on observed agreement with the live regime engine.
+
+### Deliberate operator decisions (not code work)
+- **Poll-vs-GTC profit capture:** both now exist (intraday TP `=1` proven on BAC; GTC layer built+paper-validated, OFF). Don't race both — choose, or define precedence. GTC wins capture-certainty + immunity to mark staleness; poll-side wins flexibility (cohort/time-scaled targets).
+- **GTC live-enable** (`GTC_PROFIT_EXIT_ENABLED`): watched first placement after deploy verification.
+- **36% per-trade ceiling for defined-risk spreads** (EV-vs-H7 re-derivation at the new ~$2,283 equity).
+- **Close-side fill mechanics:** #1022 makes closes PRICE-CORRECT but still PASSIVE (fresh-mid, not guaranteed fill) — marketable-close pricing / GTC is the completion; #1022 is its prerequisite base.
+
+---
 
 > **Locator caveat:** `file:line` locators in Groups 4–6 are from a read-only
 > diagnostic sweep this session unless otherwise noted. `options_scanner.py:2041`

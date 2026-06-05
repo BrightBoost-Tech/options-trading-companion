@@ -236,6 +236,23 @@ class AlpacaClient:
         """Available buying power for new trades."""
         return float(self._call_with_retry(self._client.get_account).buying_power)
 
+    def get_market_clock(self) -> Dict[str, Any]:
+        """Broker-authoritative market clock — is_open plus session bounds.
+
+        Used by intraday_risk_monitor's market-hours gate (the CT-shifted
+        wall-clock window left the monitor blind for the first hour of every
+        session — the 2026-06-05 −$202 excursion happened unseen in that
+        window). The broker clock also handles holidays and half-days, which
+        no local wall-clock check does.
+        """
+        clk = self._call_with_retry(self._client.get_clock)
+        return {
+            "is_open": bool(clk.is_open),
+            "next_open": str(clk.next_open),
+            "next_close": str(clk.next_close),
+            "timestamp": str(clk.timestamp),
+        }
+
     def is_pdt_restricted(self) -> bool:
         """Check if account has PDT flag set."""
         return self._call_with_retry(self._client.get_account).pattern_day_trader

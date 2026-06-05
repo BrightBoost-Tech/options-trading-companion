@@ -45,14 +45,22 @@ _scheduler: BackgroundScheduler = None
 SCHEDULES = [
     # Morning
     ("suggestions_close",           dict(hour=8,  minute=0),  "/tasks/suggestions/close",        "tasks:suggestions_close",        "Generate exit suggestions"),
-    ("paper_exit_evaluate_morning",  dict(hour=8,  minute=15), "/tasks/paper/exit-evaluate",      "tasks:paper_exit_evaluate",      "Morning exit evaluation"),
+    # 8:35 CT = 9:35 ET — 5 min AFTER the open. Was 8:15 CT (9:15 ET,
+    # pre-open): the mark refresh fetched stale/closing quotes, so every
+    # price-based exit condition was a structural no-op each morning
+    # (2026-06-05 detection diagnostic). DTE/expiry work is unaffected by
+    # the 20-min move; dependency order (after suggestions_close) preserved.
+    ("paper_exit_evaluate_morning",  dict(hour=8,  minute=35), "/tasks/paper/exit-evaluate",      "tasks:paper_exit_evaluate",      "Morning exit evaluation"),
 
     # Midday
     ("suggestions_open",            dict(hour=11, minute=0),  "/tasks/suggestions/open",          "tasks:suggestions_open",         "Generate entry suggestions"),
     ("paper_auto_execute",          dict(hour=11, minute=30), "/tasks/paper/auto-execute",        "tasks:paper_auto_execute",       "Execute top suggestions"),
 
     # Afternoon
-    ("paper_exit_evaluate_afternoon", dict(hour=15, minute=0), "/tasks/paper/exit-evaluate",      "tasks:paper_exit_evaluate",      "Afternoon exit evaluation"),
+    # 14:45 CT = 15:45 ET — 15 min BEFORE the close. Was 15:00 CT (16:00 ET,
+    # exactly AT the closing bell): a staged DAY-limit exit had zero time to
+    # fill. Still precedes paper_mark_to_market (15:30 CT dependency).
+    ("paper_exit_evaluate_afternoon", dict(hour=14, minute=45), "/tasks/paper/exit-evaluate",      "tasks:paper_exit_evaluate",      "Afternoon exit evaluation"),
     ("paper_mark_to_market",        dict(hour=15, minute=30), "/tasks/paper/mark-to-market",      "tasks:paper_mark_to_market",     "Refresh position marks"),
 
     # End of day
@@ -72,9 +80,17 @@ SCHEDULES = [
     ("calibration_update",          dict(hour=5,  minute=0),  "/internal/tasks/calibration/update", "tasks:calibration_update",       "Compute calibration adjustments"),
     ("day_orchestrator",            dict(hour=7,  minute=30), "/internal/tasks/orchestrator/start-day", "tasks:day_orchestrator",    "Day orchestrator boot check"),
 
-    # Frequent
-    ("alpaca_order_sync",           dict(minute="*/5", hour="9-16"), "/internal/tasks/alpaca/order-sync", "tasks:alpaca_order_sync", "Poll Alpaca for fills"),
-    ("intraday_risk_monitor",       dict(minute="*/15", hour="9-16"), "/internal/tasks/risk/intraday-monitor", "tasks:intraday_risk_monitor", "Intraday risk envelope monitor"),
+    # Frequent.
+    # hour="8-15" CT covers the REAL session (8:30 CT / 9:30 ET open →
+    # 15:00 CT / 16:00 ET close) with small harmless tails on both sides.
+    # Was "9-16" CT — the ET session transcribed as CT numbers, so the first
+    # cron fire was 9:00 CT (14:00Z), an hour into the session: combined
+    # with the monitor's old CT in-handler window, the monitor was blind
+    # 13:30-14:30Z every day (the 2026-06-05 −$202 excursion happened there,
+    # unseen) and ran a phantom post-close hour. The monitor's broker-clock
+    # gate (_is_market_open) short-circuits any out-of-session fires.
+    ("alpaca_order_sync",           dict(minute="*/5", hour="8-15"), "/internal/tasks/alpaca/order-sync", "tasks:alpaca_order_sync", "Poll Alpaca for fills"),
+    ("intraday_risk_monitor",       dict(minute="*/15", hour="8-15"), "/internal/tasks/risk/intraday-monitor", "tasks:intraday_risk_monitor", "Intraday risk envelope monitor"),
 
     # Health
     ("ops_health_check",            dict(minute="7,37", hour="8-17"), "/tasks/ops/health_check",  "tasks:ops_health_check",         "System health monitoring"),

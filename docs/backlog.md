@@ -8,7 +8,68 @@ Last migrated from CLAUDE.md: 2026-04-28.
 
 # Options-Trading-Companion — Working Backlog
 
-(last updated 2026-05-28; supersedes prior inline tracking)
+(last updated 2026-06-04; supersedes prior inline tracking)
+
+---
+
+## [2026-06-04] SESSION BATCH — prioritized (live-fill / exit-mechanics arc)
+
+### P0 — deadline 2026-07-06: PDT field-reader None-coercion fix
+Alpaca removes `pattern_day_trader` / `daytrade_count` from the API by ~2026-07-06 (PDT rule retired 2026-06-04; fields are placeholders until removal). `alpaca_client.get_account()` `:221 int(acct.daytrade_count)` → `int(None)` raises → **get_account() breaks for ALL consumers** (equity_state → risk envelopes, progression_service, broker endpoints). Fix: None-preserving coercion (the `options_buying_power` pattern at `:203-211`); also `get_day_trade_count()` (:245, same crash) and `is_pdt_restricted()` (:241, returns None — benign but tidy). Verify the pinned alpaca-py model's field optionality at fix time (floating `>=0.28.0`). Regression test: account payload without the fields → get_account() still returns equity. The wider PDT-retirement sequence (retire dormant PDT-specific logic; extract entangled `is_emergency_stop`/`is_same_day_close` before any `pdt_guard_service` deletion; doc cleanup) is P1+ — full classification in the 2026-06-04 PDT audit.
+
+### Before next live session — deploy verification (merged ≠ deployed, H8)
+Confirm **#1022** (fresh-mark close staging) and **#1021** (GTC layer) are DEPLOYED: worker SUCCESS deploy on/after their merge commits, recycle confirmed. Re-verify flags after any recycle: `GTC_PROFIT_EXIT_ENABLED` stays OFF, `INTRADAY_TARGET_PROFIT_ENABLED` stays `=1` (strict parse — `true` silently no-ops). The open live NFLX `a9f977bf`'s exits depend on the deployed monitor.
+
+### Hygiene (recurring tax — batchable)
+- **sys.modules conftest-level cleanup:** 3 polluter files now bite every new test file (`test_inbox_ranker_comprehensive.py` mocks the TCM module; `test_weekly_report_win_rate.py` mocks `packages.quantum.models`; plus the supabase/market_data mocks in `test_outcome_logic`/others). Three defense fixtures have been written piecemeal (#1017's test, gtc tests, fresh-mark tests) — promote to a shared conftest cleanup or fix the polluters.
+- **Flag-parsing normalization + startup flag-state log:** `== "1"` vs lenient (`1/true/yes/on`) is inconsistent per flag; a wrong-but-plausible value silently no-ops (the 2026-06-04 INTRADAY_TARGET_PROFIT `=true` burn). Normalize via one helper + log parsed flag states at worker boot.
+- **The lying debug line:** `paper_exit_evaluator.evaluate_position_exit`'s `[EXIT_EVAL_DEBUG]` threshold line computes a FLAT default threshold while the real default condition is TIME-SCALED (and never reflects cohort overrides — the dead cohort-extract block). Manufactured the phantom "target hit but didn't fire" incident. Fix: compute the debug threshold via the SAME functions/conditions as the decision; delete the dead block. (#1019-class honesty PR.)
+- **Orchestrator missed-job false positive:** `get_missed_jobs` compares chain names `paper_exit_evaluate_morning/_afternoon` against recorded `job_runs.job_name` = plain `paper_exit_evaluate` — the suffixed names can never match → "2 jobs missed yesterday" fires EVERY day. Name-map the chain entries (or record under scheduler entry names). One day it masks a real miss.
+
+### Strategy / measurement — the "swift" shadow A/B (spec'd 2026-06-04 diagnostic)
+Higher-frequency / shorter-hold / diverse-regime exploration: design as a **SHADOW cohort A/B**, not a live threshold change — an alternative-target arm PAIRED with a tighter stop (lowering the target without tightening the stop inverts risk:reward; win-rate ≠ EV), measured against the let-run cohort. **Spec (from the strategy-optimization diagnostic):**
+- **Arm:** tp **+0.30** / sl **−0.18** (preserves the champion's ~1.67 reward:risk so the variable is hold philosophy, not risk shape; occupies the empty point between conservative 0.25/0.15 and neutral 0.35/0.20), same `min_dte=7`, shadow-routed `is_active` cohort with `promoted_at` NULL (the Policy-Lab fork machinery handles the rest; live champion untouched by construction).
+- **Metric:** realized-EV/trade + **EV/day-held**, computed via the `paper_positions↔learning_feedback_loops` join (lfl has NO cohort column — join through positions; the lfl `wins/losses/avg_return` rollup is win-rate-shaped — do NOT use it; win-rate reported as context only).
+- **Graduation bar (pre-registered):** ≥20–30 closes/arm across **≥2 regime labels**, with a bootstrap CI on EV/day-held excluding 0 — otherwise the let-run baseline stands.
+- **Sequencing — two PRECONDITIONS:** (1) **#1015 graduation first** — the shorter-hold thesis is "redeploy capital faster," but redeployment is universe-gated (spread-gate rejections outnumber EV-gate 560:105 in 30d; the slot limit never binds), so without #1015 the freed capital has nothing to redeploy into AND sample velocity (~2-4 fills/wk → 2-3 months to 20 closes/arm) is too slow; (2) **exit-fill realism** — internal close fills bypass simulate_fill and fill at-mark (entry side is #1017-adjusted, exit side is not); the at-mark optimism **scales with exit frequency**, so it biases the comparison TOWARD the swift arm — de-bias exits before trusting EV/day-held.
+- **Baselines recorded (the control):** aggressive flat 0.50/0.30/dte7; winners already exit fast (median TP hold 0.5-0.9d), losers ride (neutral stops avg 8.5d); cohort-era samples today: aggressive 15 / neutral 5 / conservative 2 closes (90d).
+
+**Safe-now sub-item** (promoted to its own protective task in the 06-04 addendum below): same-name/same-direction concentration cap. The real frequency+diversity lever already in flight = graduating #1015.
+
+### Graduation queue (observe → live, data-gated)
+- **#1015 `LIQUIDITY_WEIGHTING_ENABLED`:** hook firing; first directional read good (low option-liquidity scores line up with `spread_too_wide_real`). Graduate on correlation across more cycles.
+- **#1010 `REGIME_FILTER_OBSERVE_ENABLED` (D4):** observe rows accumulating since 2026-06-03; graduate to ACT on observed agreement with the live regime engine.
+
+### Deliberate operator decisions (not code work)
+- **Poll-vs-GTC profit capture:** both now exist (intraday TP `=1` proven on BAC; GTC layer built+paper-validated, OFF). Don't race both — choose, or define precedence. GTC wins capture-certainty + immunity to mark staleness; poll-side wins flexibility (cohort/time-scaled targets).
+- **GTC live-enable** (`GTC_PROFIT_EXIT_ENABLED`): watched first placement after deploy verification.
+- **36% per-trade ceiling for defined-risk spreads** (EV-vs-H7 re-derivation at the new ~$2,283 equity).
+- **Close-side fill mechanics:** #1022 makes closes PRICE-CORRECT but still PASSIVE (fresh-mid, not guaranteed fill) — marketable-close pricing / GTC is the completion; #1022 is its prerequisite base. **Now ALSO a dependency for trusting the swift A/B:** internal shadow CLOSE fills bypass simulate_fill and fill at-mark (exit-side #1017 gap) — the optimism scales with exit frequency, biasing any shorter-hold arm. De-bias exits (extend #1017 to the internal close fill, or fill closes through simulate_fill) before reading EV/day-held comparisons.
+
+---
+
+## [2026-06-04 addendum] Strategy-optimization + backtest-feasibility diagnostics
+
+### NEW — verify FIRST (read-only check)
+- **Confirm `mode="historical"` is excluded from live learning reads.** `historical_simulation.py` (the zero-spread explorer, `bid=ask=close`) writes synthetic outcomes into `learning_feedback_loops` via its learning hook (`learn_from_cycle`, `mode="historical"`, `ENABLE_HISTORICAL_NESTED_LEARNING` default true). Verify EVERY `learning_feedback_loops` reader that drives live selection/sizing/calibration (calibration_update, post_trade_learning, ConvictionService, paper_learning views) filters these rows out (by `is_paper`/details/mode marker). **If not filtered → mid-fill fantasy is contaminating live learning (#1017 class).** Read-only check; fix only if it fails.
+
+### NEW tasks
+- **[hygiene, small] `cycle_ts` NULL on `option_liquidity_observations`** — the column is written NULL on every row (distinct cycle_ts = 0 over 124 rows); one-line fix at the writer. Unblocks honest cycle-counting for the #1015 graduation assessment.
+- **[protective] Same-name/same-direction concentration cap** — NEW control (does not exist): nothing prevents multiple same-direction books on one name (2026-06-04: live + 2 shadow forks all bearish NFLX — by design for cohorts, but unguarded in general; #1011's dedup is same-cohort/same-cycle only). Sizing-adjacent, small surface.
+- **[forward-build, matures ~mid-June] Replay-with-receipts tape** — the honest alternative to backtesting (which is infeasible today, see closed questions). Components: (a) enable the dormant replay subsystem (`REPLAY_ENABLE=0`; `data_blobs`/`decision_runs` have **0 rows ever**) or an equivalent lean capture; (b) per-leg NBBO on ACCEPTED candidates (see updated item below); (c) optional per-cycle evaluated-strikes chain slice (the scanner already holds it in memory); (d) #1022's 15-min persisted marks as the exit-side tape. **Self-calibrating:** each recorded cycle carries the cohorts' real forward outcomes, so the replay retrodicts known results as N grows. **Use for falsification/ranking of exit-rule variants ONLY — never parameter optimization** (the clean window is 4 days / 1 regime; optimization = guaranteed overfit).
+- **[low-pri] Historical-NBBO tier check** — one authenticated `GET /v3/quotes/{OCC}?timestamp=<past>` with the worker's Polygon key settles whether historical option quotes are on the current plan (likely Advanced-only). Only worth doing if external backtesting is ever revisited.
+- **[hygiene] Relabel/quarantine `backtest_engine.py` + `historical_simulation.py`** as strategy-shape explorers, NOT faithful replay: their fill model constructs `bid_price = ask_price = close` (zero spread, market orders, flat-bps slippage; `backtest_engine.py:485-489`) and steps daily bars — cannot represent the 15-min exit machinery, cohort forks, watchdog, or instant-or-never fills. Docstring/README labels so future selves don't mistake their EVs for forecasts.
+
+### UPDATED existing items
+- **`check_new_position` breaker wiring (the deferred #1014-note behavior) — now ACTIVELY binding:** with one live position, NFLX = 100% > the 40% `RISK_MAX_SYMBOL_PCT` cap → the autopilot circuit breaker (`paper_autopilot_service.py:208-249`, `check_all_envelopes` over existing positions) **blocks ALL new entries — including diversifying ones — while NFLX is open.** `check_new_position` (`risk_envelope.py:567`) exists but is unused; wiring it lets the breaker evaluate whether the CANDIDATE improves concentration → un-blocks diversification at small book sizes. Deliberate behavior change; was deferred, now has a live consequence.
+- **Per-leg NBBO persistence at suggestion build (the #1018 field-drop follow-up) — now TRIPLE-purpose:** (1) hardens the marketable-entry lever against Polygon fetch failures (the live NFLX's first observe record hit `no_quote_no_aggression`); (2) makes #1017's `would_be_live_marketable` label decidable for spreads (currently null for combos); (3) is the foundation of the replay tape's selection-side data. Three consumers → argues for doing it sooner than "hardening follow-up."
+
+### CLOSED QUESTIONS / operational notes (record — not tasks)
+- **PDT throttles: checked, NONE to relax.** Every PDT-motivated cap is already dormant behind `PDT_PROTECTION_ENABLED=0` (autopilot same-day gate, exit-evaluator partition, approval-queue checks, optimizer param inert at 99). The active caps (tier `max_trades=4`, loss envelopes, 36% ceiling) are real capital-risk controls — keep. The only PDT work is the P0 field fix + P1 retirement.
+- **Backtesting: INFEASIBLE today — do not re-investigate building one now.** No point-in-time chains (replay tables empty since inception), no historical option NBBO on the current plan (unverified, likely Advanced-tier; never called in code), clean post-#1012 window = 4 cycle-days / 1 regime, forward ground truth N≈1 (the BAC TP close), and the existing backtester IS the mid-fill fantasy (zero-spread fills). Forward-shadow is the only honest instrument. Re-open when the replay tape matures (~mid-June+, multi-regime).
+- **Operational (until the NFLX closes):** the autopilot circuit breaker blocks ALL new autopilot entries while the live NFLX is open (100% > 40% concentration) — expect `status=blocked, reason=risk_envelope_breach` on entry cycles. Not a bug; the check_new_position wiring above is the fix direction.
+
+---
 
 > **Locator caveat:** `file:line` locators in Groups 4–6 are from a read-only
 > diagnostic sweep this session unless otherwise noted. `options_scanner.py:2041`

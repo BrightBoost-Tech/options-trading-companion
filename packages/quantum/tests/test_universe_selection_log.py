@@ -158,9 +158,12 @@ class TestUniverseSelectionLogShape(unittest.TestCase):
         payload = log_insert.insert.call_args[0][0]
         self.assertEqual(payload["metadata"]["caller"], "test.suite")
         self.assertFalse(payload["metadata"]["fallback_used"])
+        # Updated 2026-06-05: ties at the cut now break on 30d share
+        # volume before the alphabet (the MARA/RIVN-lost-to-KHC-by-
+        # spelling fix); the metadata string reports the real order.
         self.assertEqual(
             payload["metadata"]["sort_order"],
-            "liquidity_score DESC, symbol ASC",
+            "liquidity_score DESC, avg_volume_30d DESC NULLS LAST, symbol ASC",
         )
 
     def test_function_return_value_unchanged_by_logging(self):

@@ -75,6 +75,44 @@ STRONG_NET_EV_THRESHOLD = float(os.getenv("STRONG_NET_EV_THRESHOLD", "200"))
 SCANNER_LIMIT_DEV = int(os.getenv("SCANNER_LIMIT_DEV", "40")) # Limit universe in dev
 SCANNER_MIN_DTE = 25
 SCANNER_MAX_DTE = 45
+
+# Universe scan limit — how many universe symbols get_scan_candidates returns
+# to the scanner each cycle. Default 100 deliberately clears the FULL active
+# universe (74 as of 2026-06-05) so the equity-liquidity_score ranking inside
+# UniverseService never excludes anyone: that ranking awards ETFs 0/40
+# market-cap points, which statically dropped the same 24 symbols (SPY/QQQ/
+# IWM + all sector ETFs) from every top-50 scan while option-dead single
+# names (measured option_liquidity_score=0.0) passed. Bridge for the
+# inverted-selection finding; the principled scoring fix lands separately.
+# Read at call time (not import) so env changes apply without reimport.
+_UNIVERSE_SCAN_LIMIT_DEFAULT = 100
+
+
+def _universe_scan_limit() -> int:
+    """Lenient parse of UNIVERSE_SCAN_LIMIT (default 100, must be >= 1).
+
+    Fail-soft: a garbage or non-positive value logs a warning and falls back
+    to the default rather than killing the scan cycle at env-read time
+    (lesson from the strict `== "1"` flag-parse burn, 2026-06-04).
+    """
+    raw = os.getenv("UNIVERSE_SCAN_LIMIT", "")
+    if not raw.strip():
+        return _UNIVERSE_SCAN_LIMIT_DEFAULT
+    try:
+        value = int(raw.strip())
+    except (TypeError, ValueError):
+        logger.warning(
+            "UNIVERSE_SCAN_LIMIT=%r is not an integer; using default %d",
+            raw, _UNIVERSE_SCAN_LIMIT_DEFAULT,
+        )
+        return _UNIVERSE_SCAN_LIMIT_DEFAULT
+    if value < 1:
+        logger.warning(
+            "UNIVERSE_SCAN_LIMIT=%d is non-positive; using default %d",
+            value, _UNIVERSE_SCAN_LIMIT_DEFAULT,
+        )
+        return _UNIVERSE_SCAN_LIMIT_DEFAULT
+    return value
 # Condor max per-leg spread threshold (default 35%)
 CONDOR_MAX_LEG_SPREAD_PCT = float(os.getenv("CONDOR_MAX_LEG_SPREAD_PCT", "0.35"))
 # Execution slippage fraction for limit orders (default 25% of spread)
@@ -2584,13 +2622,27 @@ def scan_for_opportunities(
     if not symbols:
         if universe_service:
             try:
-                # Raised to 50 (was 30) post-#87b backfill. With liquidity_score
-                # populated for all symbols, mega-caps occupy ~19 of the top
-                # slots, pushing sub-$50 ETFs (XLU, XLB, sector ETFs) out of the
-                # top-30 cut. limit=50 keeps the cheap-ETF candidates reachable
-                # for micro-tier filtering without expanding scan cost much.
+                # UNIVERSE_SCAN_LIMIT (default 100) — the scan-limit BRIDGE
+                # for the inverted-selection finding (2026-06-05 diagnostic).
+                # History: 30 → 50 (post-#87b) specifically "to keep the
+                # cheap-ETF candidates reachable" — and they STILL never
+                # made the cut: the equity liquidity_score awards 0/40
+                # market-cap points to ETFs (no market_cap), hard-capping
+                # SPY/QQQ/IWM/sector-ETFs at 60 below fifty single names —
+                # the SAME 24 symbols (incl. the deepest option markets in
+                # existence) dropped on every scan since the selection log
+                # began, while measured option-dead names (GILD/CSX/PYPL/…
+                # option_liquidity_score=0.0) were scanned and spread-gate
+                # rejected daily. Default 100 clears the full active set
+                # (74 as of 2026-06-05) with headroom, while still capping
+                # a much larger future universe. This BYPASSES the broken
+                # ranking; the principled fixes (ETF market-cap scoring +
+                # #1015 graduation) are separate. Measured cost (2026-06-05):
+                # SPY 5,450 contracts vs NFLX 928 vs XLU 446 in a 6-week
+                # window → ~+65% payload / +48% calls → well inside the
+                # 30-min cycle budget.
                 universe = universe_service.get_scan_candidates(
-                    limit=50,
+                    limit=_universe_scan_limit(),
                     caller="options_scanner.scan_for_opportunities",
                 )
                 symbols = [u['symbol'] for u in universe]

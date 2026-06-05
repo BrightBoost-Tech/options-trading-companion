@@ -22,7 +22,11 @@ class UniverseService:
         "XLP", "XLE", "XLI", "XLB", "XLC", "XLU", "SMH", "HYG", "EEM", "FXI",
         "AAPL", "MSFT", "AMZN", "GOOGL", "GOOG", "META", "TSLA", "NVDA", "AMD",
         "NFLX", "INTC", "CSCO", "CMCSA", "PEP", "AVGO", "TXN", "ADBE", "QCOM",
-        "COST", "TMUS", "AMGN", "CHTR", "SBUX", "PYPL", "INTU", "GILD", "FISV",
+        # FISV removed 2026-06-05: deactivated 2026-05-19 (corp action) but
+        # still listed here — sync_universe upserts is_active=True for every
+        # BASE_UNIVERSE member, so any universe_sync run would have silently
+        # REACTIVATED it. Removal keeps the deactivation durable.
+        "COST", "TMUS", "AMGN", "CHTR", "SBUX", "PYPL", "INTU", "GILD",
         "BKNG", "ADP", "ISRG", "MDLZ", "REGN", "VRTX", "CSX", "MU", "AMAT",
         # micro_live $500 capital additions — cheap-options names with deep ATM OI.
         # Liquidity evidence + rejection rationale for GE/PLTR/NIO in
@@ -47,6 +51,14 @@ class UniverseService:
         "shares_outstanding", "open_interest", "timestamp_ms",
         "liquidity_score"
     }
+
+    # Polygon /v3/reference/tickers `type` values for exchange-traded
+    # products that LEGITIMATELY carry no market_cap (ETF/ETN/trust/
+    # fund shells). For these, the size component scores on notional
+    # dollar volume instead of zeroing — the 2026-06-05 inverted-
+    # selection fix: SPY/QQQ/IWM + all sector ETFs were hard-capped at
+    # 60 (0/40 size points) and statically dropped from every bound cut.
+    FUND_ASSET_TYPES = {"ETF", "ETN", "ETV", "ETS", "FUND"}
 
     @staticmethod
     def sanitize_metrics(payload: Dict) -> Dict:
@@ -122,6 +134,82 @@ class UniverseService:
             )
             logger.error(f"sync_universe: upsert failed: {e}")
 
+    @classmethod
+    def compute_liquidity_score(
+        cls,
+        *,
+        market_cap,
+        avg_vol,
+        iv_rank,
+        asset_type=None,
+        avg_notional=None,
+        details_fetch_failed=False,
+    ):
+        """Equity liquidity score (0-100). Pure — testable without I/O.
+
+        Components (unchanged for the common case):
+        - Size (max 40): market-cap brackets when a cap is present —
+          byte-identical to the pre-fix heuristic for every single-name
+          equity with a successful details fetch.
+        - Volume (max 40): 30d average SHARE volume brackets (unchanged).
+        - IV-rank presence (max 20): unchanged.
+
+        2026-06-05 fixes (size component only):
+        - ETF/fund (legit no market_cap): score size on notional dollar
+          volume (price x share volume) instead of zeroing. Brackets
+          calibrated so deep ETFs land where comparable caps would:
+          >$1B/day=40, >$100M=30, >$10M=20.
+        - Missing cap on a name that SHOULD have one (CS etc.), or a
+          failed details fetch (guardrail returns {}): same notional
+          fallback so ranking stays sane, but flagged as an anomaly so
+          the caller alerts LOUDLY (H9 — a silently-zeroed fetch failure
+          is indistinguishable from an ETF downstream; this makes the
+          two cases distinct).
+
+        Returns (score, meta) where meta carries `size_source`
+        ('market_cap' | 'notional_fund' | 'notional_fallback'),
+        `cap_missing_anomaly` (True only for the should-have-a-cap
+        case), and `details_fetch_failed` (passed through).
+        """
+        l_score = 0
+        cap_missing_anomaly = False
+
+        # Size component (max 40 pts)
+        if market_cap:
+            if market_cap > 100_000_000_000: l_score += 40
+            elif market_cap > 10_000_000_000: l_score += 30
+            elif market_cap > 2_000_000_000: l_score += 20
+            size_source = "market_cap"
+        else:
+            is_fund = (asset_type or "").upper() in cls.FUND_ASSET_TYPES
+            notional = float(avg_notional or 0.0)
+            if notional > 1_000_000_000: l_score += 40
+            elif notional > 100_000_000: l_score += 30
+            elif notional > 10_000_000: l_score += 20
+            if is_fund and not details_fetch_failed:
+                size_source = "notional_fund"
+            else:
+                # Single-name (or unknown type / failed fetch) without a
+                # market cap — the H9 silent-failure class. Score on the
+                # proxy but flag for the loud alert.
+                size_source = "notional_fallback"
+                cap_missing_anomaly = True
+
+        # Volume Score (unchanged)
+        if avg_vol > 10_000_000: l_score += 40
+        elif avg_vol > 1_000_000: l_score += 30
+        elif avg_vol > 200_000: l_score += 10
+
+        # IV Rank Score (unchanged)
+        if iv_rank is not None:
+            l_score += 20
+
+        return min(100, l_score), {
+            "size_source": size_source,
+            "cap_missing_anomaly": cap_missing_anomaly,
+            "details_fetch_failed": details_fetch_failed,
+        }
+
     def update_metrics(self):
         """
         Iterates over active symbols and updates metrics using Polygon.
@@ -135,16 +223,27 @@ class UniverseService:
             return
 
         updates = []
+        cap_anomalies = []  # H9: should-have-a-cap names scored without one
         for sym in symbols:
             try:
-                # 1. Basic Details (Sector, Market Cap)
+                # 1. Basic Details (Sector, Market Cap, Asset Type)
+                # NOTE: the fetch is @guardrail'd with fallback={} — an API
+                # error arrives here as an EMPTY dict, which used to be
+                # indistinguishable from an ETF's legitimately-absent
+                # market_cap (both silently scored 0/40 size points).
+                # `details_fetch_failed` + `type` now split the two cases.
                 details = self.polygon.get_ticker_details(sym)
+                details_fetch_failed = not details
                 market_cap = details.get("market_cap")  # Raw value (float/None)
+                asset_type = details.get("type")  # 'CS', 'ETF', 'ETV', ...
                 sector = details.get("sic_description", "Unknown")
 
                 # 2. Volume (Avg 30d) & IV Rank
-                # We use get_historical_prices which now returns volumes
+                # We use get_historical_prices which now returns volumes.
+                # avg_notional (price x volume) feeds the ETF / failed-cap
+                # size fallback in compute_liquidity_score.
                 avg_vol = 0
+                avg_notional = 0.0
 
                 try:
                     hist = self.polygon.get_historical_prices(sym, days=30)
@@ -152,6 +251,13 @@ class UniverseService:
                         vols = hist['volumes']
                         if vols:
                             avg_vol = int(np.mean(vols))
+                            prices = hist.get('prices') or []
+                            if prices and len(prices) == len(vols):
+                                avg_notional = float(np.mean(
+                                    [p * v for p, v in zip(prices, vols)]
+                                ))
+                            elif prices:
+                                avg_notional = float(np.mean(prices)) * avg_vol
                 except Exception as e:
                     # print(f"Error fetching history for {sym}: {e}")
                     pass
@@ -161,28 +267,33 @@ class UniverseService:
                 # Removed local classify_iv_regime logic.
                 # RegimeEngineV3 is the source of truth.
 
-                # 3. Liquidity Score (0-100)
-                # Heuristic:
-                # - Market Cap (Max 40 pts): >100B=40, >10B=30, >2B=20
-                # - Volume (Max 40 pts): >10M=40, >1M=30, >100k=10
-                # - IV Rank Presence (Max 20 pts): If we have IV rank, data is good.
-
-                l_score = 0
-
-                # Market Cap Score
-                if market_cap:
-                    if market_cap > 100_000_000_000: l_score += 40
-                    elif market_cap > 10_000_000_000: l_score += 30
-                    elif market_cap > 2_000_000_000: l_score += 20
-
-                # Volume Score
-                if avg_vol > 10_000_000: l_score += 40
-                elif avg_vol > 1_000_000: l_score += 30
-                elif avg_vol > 200_000: l_score += 10
-
-                # IV Rank Score
-                if iv_rank is not None:
-                    l_score += 20
+                # 3. Liquidity Score (0-100) — see compute_liquidity_score
+                # for the component breakdown + the 2026-06-05 ETF /
+                # failed-fetch size fixes.
+                l_score, score_meta = self.compute_liquidity_score(
+                    market_cap=market_cap,
+                    avg_vol=avg_vol,
+                    iv_rank=iv_rank,
+                    asset_type=asset_type,
+                    avg_notional=avg_notional,
+                    details_fetch_failed=details_fetch_failed,
+                )
+                if score_meta["cap_missing_anomaly"]:
+                    cap_anomalies.append({
+                        "symbol": sym,
+                        "asset_type": asset_type,
+                        "details_fetch_failed": details_fetch_failed,
+                        "avg_notional": round(avg_notional),
+                        "score": l_score,
+                    })
+                    logger.warning(
+                        "update_metrics: %s has no market_cap but is not a "
+                        "known fund type (type=%r, fetch_failed=%s) — size "
+                        "component scored on notional fallback ($%.0f/day), "
+                        "score=%d",
+                        sym, asset_type, details_fetch_failed,
+                        avg_notional, l_score,
+                    )
 
                 # 4. Earnings Date
                 earnings_date = self.earnings_service.get_earnings_date(sym)
@@ -195,13 +306,45 @@ class UniverseService:
                     "avg_volume_30d": avg_vol,
                     "iv_rank": iv_rank,
                     "iv_regime": None, # Deprecated source of truth
-                    "liquidity_score": min(100, l_score),
+                    "liquidity_score": l_score,
                     "earnings_date": earnings_str,
                     "last_updated": datetime.now().isoformat()
                 })
 
             except Exception as e:
                 print(f"[UniverseService] Error updating {sym}: {e}")
+
+        # H9: the silent-zero class, made LOUD. One aggregate alert per run
+        # (update_metrics is operator-triggered and rare; per-symbol detail
+        # is in the metadata + the per-symbol logger.warning above).
+        if cap_anomalies:
+            try:
+                alert(
+                    self.supabase,
+                    alert_type="market_cap_unavailable",
+                    severity="warning",
+                    message=(
+                        f"{len(cap_anomalies)} non-fund symbol(s) scored "
+                        f"without a market cap (details fetch failed or cap "
+                        f"absent); size component fell back to notional "
+                        f"dollar volume"
+                    ),
+                    metadata={
+                        "symbols": [a["symbol"] for a in cap_anomalies],
+                        "anomalies": cap_anomalies[:50],
+                        "function_name": "UniverseService.update_metrics",
+                        "consequence": (
+                            "Affected symbols ranked on notional dollar "
+                            "volume this run instead of market cap. If the "
+                            "details fetch keeps failing, verify Polygon "
+                            "/v3/reference/tickers for these symbols."
+                        ),
+                    },
+                )
+            except Exception as alert_err:
+                logger.exception(
+                    "market_cap_unavailable alert write failed: %s", alert_err
+                )
 
         if updates:
             try:
@@ -239,6 +382,7 @@ class UniverseService:
         all_rows: List[Dict] = []
         fallback_used = False
         fallback_reason: Optional[str] = None
+        sort_order = "liquidity_score DESC, symbol ASC"  # overwritten below
 
         try:
             # Pull FULL active universe ordered by liquidity_score DESC,
@@ -260,7 +404,11 @@ class UniverseService:
             _ol = _option_liquidity  # module-bound at import time
             _weighting_on = _ol.is_weighting_enabled()
 
-            _cols = "symbol, earnings_date, liquidity_score"
+            # avg_volume_30d feeds the tie-break re-sort below (2026-06-05:
+            # ties at a bound cut used to resolve alphabetically — MARA/RIVN
+            # lost their slot to KHC by spelling). Long-standing column
+            # written by update_metrics; no migration dependency.
+            _cols = "symbol, earnings_date, liquidity_score, avg_volume_30d"
             if _weighting_on:
                 _cols += ", option_liquidity_score"
 
@@ -274,11 +422,37 @@ class UniverseService:
             all_rows = list(res.data or [])
 
             if _weighting_on and all_rows:
+                # #1015 blended priority — sort key deliberately untouched
+                # by the tie-break fix (blended floats effectively never
+                # tie; keeping it byte-identical isolates this PR from the
+                # weighting graduation).
+                sort_order = (
+                    "liquidity_score*would_be_weight(option_liquidity_score)"
+                    " DESC, symbol ASC"
+                )
                 all_rows = sorted(
                     all_rows,
                     key=lambda r: (
                         -(float(r.get("liquidity_score") or 0.0)
                           * _ol.would_be_weight(r.get("option_liquidity_score"))),
+                        r.get("symbol") or "",
+                    ),
+                )
+            elif all_rows:
+                # Tie-break fix (2026-06-05): equal liquidity_scores resolve
+                # on 30d share volume (a liquidity signal), alphabet last.
+                # Done in Python (not a third PostgREST .order) so NULL
+                # volume deterministically sorts LAST within a tie across
+                # postgrest-py versions (DESC default is NULLS FIRST).
+                sort_order = (
+                    "liquidity_score DESC, avg_volume_30d DESC NULLS LAST,"
+                    " symbol ASC"
+                )
+                all_rows = sorted(
+                    all_rows,
+                    key=lambda r: (
+                        -(float(r.get("liquidity_score") or 0.0)),
+                        -(float(r.get("avg_volume_30d") or 0.0)),
                         r.get("symbol") or "",
                     ),
                 )
@@ -316,6 +490,7 @@ class UniverseService:
                 fallback_reason=fallback_reason,
                 job_run_id=job_run_id,
                 caller=caller,
+                sort_order=sort_order,
             )
         except Exception as log_err:
             # Per Loud-Error Doctrine valid-pattern 5: alert-write
@@ -365,6 +540,7 @@ class UniverseService:
         fallback_reason: Optional[str],
         job_run_id: Optional[str],
         caller: Optional[str],
+        sort_order: str = "liquidity_score DESC, symbol ASC",
     ) -> None:
         """Write a universe_selection_log row capturing this call's
         selection decision (inclusion + exclusion).
@@ -405,7 +581,7 @@ class UniverseService:
                 "caller": caller,
                 "fallback_used": fallback_used,
                 "fallback_reason": fallback_reason,
-                "sort_order": "liquidity_score DESC, symbol ASC",
+                "sort_order": sort_order,
             },
         }
 

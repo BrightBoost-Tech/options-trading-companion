@@ -69,3 +69,7 @@
 ## 2025-06-06 - Accessible Disabled Tooltips
 **Learning:** Browsers disable mouse events on `disabled` buttons, preventing tooltips from appearing. Wrapping the disabled button in a focusable `span` (`tabIndex={0}`) allows the tooltip to trigger on hover and focus.
 **Action:** Always wrap disabled buttons in a `span` with `tabIndex={0}` and an explanatory `aria-label` when tooltips are required.
+
+## 2024-06-05 - Disclosure Pattern and Dynamic IDs
+**Learning:** Hardcoding string IDs for ARIA `aria-controls` bindings inside Next.js components leads to duplicate ID collisions when the component is rendered multiple times (e.g., multiple instances of list widgets). Using conditional `aria-expanded` and arbitrary classes without actual ID bindings breaks the WAI-ARIA disclosure pattern for screen readers.
+**Action:** Use `React.useId()` in functional components to generate a guaranteed-unique `id` for expandable containers, and bind the toggle button's `aria-controls` explicitly to that generated ID, ensuring robust accessibility without hydration errors.

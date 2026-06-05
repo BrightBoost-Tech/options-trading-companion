@@ -1117,9 +1117,24 @@ class PaperExitEvaluator:
         user_id: str,
         position_id: str,
         reason: str,
+        exit_price_override: Optional[float] = None,
     ) -> Dict[str, Any]:
         """
         Close a single position using the position's current_mark as exit price.
+
+        exit_price_override (optional): the EXACT mark the caller's decision
+        used. The 15-min intraday monitor evaluates KEEP/CLOSE on fresh
+        in-memory marks (_refresh_marks) that are never persisted, while this
+        function re-reads the DB row — so without the override the close
+        limit staged from a mark up to ~6.5h stale (evaluate-fresh /
+        execute-stale, 2026-06-04: BAC detected >=+$255 on the fresh mark,
+        closed at the stale $3.03 -> +$192; loss-side worse — a stop/envelope
+        close staged ABOVE a falling market rests unfilled, watchdog-cancels,
+        and re-stages at the SAME stale mark until the next persisting job).
+        Passing the decision's mark makes decision-price == order-price by
+        construction. Default None = byte-identical legacy behavior (DB
+        current_mark) for every other caller, incl. the scheduled evaluator
+        (which persists-then-reads and is already coherent).
         """
         from packages.quantum.paper_endpoints import (
             _stage_order_internal,
@@ -1303,7 +1318,18 @@ class PaperExitEvaluator:
                 },
             )
 
-        exit_price = float(position.get("current_mark") or position.get("avg_entry_price") or 0)
+        # Exit price: the caller's decision mark when provided (intraday
+        # monitor — see docstring), else the persisted DB mark (legacy,
+        # byte-identical for all other callers).
+        if exit_price_override is not None:
+            exit_price = float(exit_price_override)
+            logger.info(
+                f"[CLOSE_POSITION] position={position_id[:8]} using caller's "
+                f"decision mark {exit_price} (DB current_mark="
+                f"{position.get('current_mark')})"
+            )
+        else:
+            exit_price = float(position.get("current_mark") or position.get("avg_entry_price") or 0)
         entry_price = float(position.get("avg_entry_price") or 0)
 
         # ── Build close ticket with ALL legs ─────────────────────────

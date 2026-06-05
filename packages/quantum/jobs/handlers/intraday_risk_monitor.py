@@ -395,6 +395,13 @@ class IntradayRiskMonitor:
         # on it. Tracking the skip set so we can emit a loud alert after
         # the loop. H9 wrapper-drift class.
         skipped_positions: List[Dict] = []
+        # Part-B companion (fresh-mark close fix): positions whose marks were
+        # successfully recomputed this cycle — persisted back to the DB below
+        # so current_mark is 15-min fresh for ALL consumers (dashboards, the
+        # 2026-06-04 DB-vs-broker divergence). The CLOSE fix itself does NOT
+        # depend on this persist — _execute_force_close passes the in-memory
+        # mark directly (robust to persist failures). Belt-and-suspenders.
+        refreshed_positions: List[Dict] = []
 
         # Update positions with fresh marks
         for pos in positions:
@@ -418,6 +425,7 @@ class IntradayRiskMonitor:
                     pos["current_mark"], pos["unrealized_pl"] = finalize_mark(
                         qty_signed, pos.get("avg_entry_price"), current_value
                     )
+                    refreshed_positions.append(pos)
                 continue
 
             # Multi-leg: single shared full-count mark math (H13, #3).
@@ -458,6 +466,7 @@ class IntradayRiskMonitor:
                         ),
                     )
                     pos["unrealized_pl"] = _bound.clamped_value
+                refreshed_positions.append(pos)
             else:
                 # #2026-05-12 MTM-staleness PR-1: multi-leg recompute
                 # short-circuited due to at least one leg returning
@@ -503,6 +512,25 @@ class IntradayRiskMonitor:
                     ),
                 },
             )
+
+        # Part-B companion: persist the fresh marks so DB current_mark is
+        # 15-min fresh for every consumer (pre-fix it was only written by the
+        # scheduled jobs at 13:15Z/20:00Z/20:30Z → up to ~6.5h stale; the
+        # 2026-06-04 DB-vs-broker divergence: DB +$52 vs broker −$34).
+        # FAIL-SOFT: a write failure must never break the eval or the close —
+        # both use the in-memory marks. Last-writer-wins vs the daily MTM job
+        # is correct (freshest wins; single-row update is atomic).
+        for pos in refreshed_positions:
+            try:
+                self.supabase.table("paper_positions").update({
+                    "current_mark": pos.get("current_mark"),
+                    "unrealized_pl": pos.get("unrealized_pl"),
+                }).eq("id", pos.get("id")).execute()
+            except Exception as persist_err:
+                logger.warning(
+                    f"[RISK_MONITOR] fresh-mark persist failed (non-fatal) "
+                    f"position={str(pos.get('id'))[:8]}: {persist_err}"
+                )
 
         return positions
 
@@ -658,10 +686,37 @@ class IntradayRiskMonitor:
             from packages.quantum.services.paper_exit_evaluator import PaperExitEvaluator
             evaluator = PaperExitEvaluator(self.supabase)
             _close_reason_arg = mapped_close_reason if mapped_close_reason else f"risk_envelope:{reason}"
+
+            # Evaluate-fresh / execute-fresh: pass the EXACT in-memory mark
+            # this cycle's decision used (_refresh_marks), so the close limit
+            # is staged from the same observation that triggered it — NOT the
+            # DB current_mark, which is only persisted by the scheduled jobs
+            # and can be ~6.5h stale (2026-06-04: BAC detected >=+$255 fresh,
+            # closed at the stale $3.03 -> +$192; loss-side a stale limit
+            # stages ABOVE a falling market and never fills). GUARD: only a
+            # valid finite >0 fresh mark is passed; if this position's
+            # refresh degraded (incomplete leg quotes -> mtm_refresh_partial),
+            # fall back to the legacy DB read and LOG it — never fabricate,
+            # never use a third number. Invariant: the order uses the SAME
+            # mark the decision used (fresh when fresh is good).
+            import math
+            _fresh_mark = position.get("current_mark")
+            try:
+                _fresh_mark = float(_fresh_mark)
+                _mark_ok = math.isfinite(_fresh_mark) and _fresh_mark > 0
+            except (TypeError, ValueError):
+                _mark_ok = False
+            if not _mark_ok:
+                logger.warning(
+                    f"[RISK_MONITOR] fresh mark unavailable/degraded for "
+                    f"{symbol} ({pos_id[:8]}) — close falls back to DB "
+                    f"current_mark (mark={position.get('current_mark')!r})"
+                )
             result = evaluator._close_position(
                 user_id=user_id,
                 position_id=pos_id,
                 reason=_close_reason_arg,
+                exit_price_override=_fresh_mark if _mark_ok else None,
             )
 
             self._log_alert(

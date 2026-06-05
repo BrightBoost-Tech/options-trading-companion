@@ -51,6 +51,25 @@ _ENFORCE_FORCE_CLOSE = os.environ.get("RISK_ENVELOPE_ENFORCE", "0") == "1"
 # ideally after observing one cycle correctly HOLD a below-target position.
 _INTRADAY_TARGET_PROFIT_ENABLED = os.environ.get("INTRADAY_TARGET_PROFIT_ENABLED", "0") == "1"
 
+# The market session, in the MARKET's timezone. Fallback for the broker-clock
+# gate (_is_market_open) when the clock API is unavailable. America/New_York,
+# 9:30-16:00 — NEVER Chicago numbers (the 2026-06-05 first-hour-blind bug was
+# exactly the ET session transcribed as CT). DST-safe: the session is defined
+# in ET, so computing in ET needs no offset arithmetic.
+EASTERN_TZ = ZoneInfo("America/New_York")
+
+
+def _fallback_is_market_open_et(now: Optional[datetime] = None) -> bool:
+    """Correct wall-clock market-hours check in America/New_York (9:30-16:00
+    ET, weekdays). Degraded mode only (no holiday/half-day awareness) — the
+    primary gate is the Alpaca clock."""
+    now_et = (now or datetime.now(EASTERN_TZ)).astimezone(EASTERN_TZ)
+    if now_et.weekday() >= 5:  # Saturday=5, Sunday=6
+        return False
+    market_open = now_et.replace(hour=9, minute=30, second=0, microsecond=0)
+    market_close = now_et.replace(hour=16, minute=0, second=0, microsecond=0)
+    return market_open <= now_et <= market_close
+
 # Alpaca-authoritative equity + weekly P&L were extracted to
 # `packages.quantum.services.equity_state` so that other callers
 # (paper_mark_to_market, paper_autopilot_service) can adopt the same
@@ -316,13 +335,45 @@ class IntradayRiskMonitor:
     # ── Market hours ──────────────────────────────────────────────────
 
     def _is_market_open(self) -> bool:
-        """Return True if current time is within market hours (9:30-4:00 CT, weekdays)."""
-        now = datetime.now(CHICAGO_TZ)
-        if now.weekday() >= 5:  # Saturday=5, Sunday=6
-            return False
-        market_open = now.replace(hour=9, minute=30, second=0, microsecond=0)
-        market_close = now.replace(hour=16, minute=0, second=0, microsecond=0)
-        return market_open <= now <= market_close
+        """Return True if the market is open — broker-authoritative.
+
+        HISTORY (2026-06-05 detection-failure diagnostic): this used a
+        wall-clock window of 9:30-16:00 in CHICAGO time — the ET session
+        transcribed as CT numbers — so the effective window was
+        14:30-21:00Z instead of the real 13:30-20:00Z. The monitor was
+        BLIND for the first hour of every session (the −$202 NFLX
+        excursion happened unseen in that window) and ran a phantom hour
+        after the close. Now: Alpaca's get_clock() (which also knows
+        holidays and half-days), with a CORRECT America/New_York
+        wall-clock fallback — never the old CT numbers — so the monitor
+        stays live through clock-API outages (degraded mode loses only
+        holiday awareness).
+        """
+        # Short TTL cache: one clock call per cycle, not per check.
+        now_mono = time.monotonic()
+        cached = getattr(self, "_clock_cache", None)
+        if cached and (now_mono - cached[0]) < 60:
+            return cached[1]
+
+        try:
+            from packages.quantum.brokers.alpaca_client import get_alpaca_client
+            clock = get_alpaca_client().get_market_clock()
+            is_open = bool(clock["is_open"])
+            logger.info(
+                f"[RISK_MONITOR] market-hours gate: Alpaca clock is_open={is_open} "
+                f"next_open={clock.get('next_open')} next_close={clock.get('next_close')}"
+            )
+            self._clock_cache = (now_mono, is_open)
+            return is_open
+        except Exception as e:
+            is_open = _fallback_is_market_open_et()
+            logger.warning(
+                f"[RISK_MONITOR] market-hours gate: Alpaca clock unavailable "
+                f"({type(e).__name__}) — ET wall-clock fallback says "
+                f"is_open={is_open} (degraded: no holiday awareness)"
+            )
+            self._clock_cache = (now_mono, is_open)
+            return is_open
 
     # ── Position fetching ─────────────────────────────────────────────
 

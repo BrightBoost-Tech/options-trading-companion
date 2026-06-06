@@ -367,7 +367,20 @@ class PaperMarkToMarketService:
     # ------------------------------------------------------------------
 
     def _get_open_positions(self, user_id: str) -> List[Dict[str, Any]]:
-        """Get all open paper positions for a user via portfolio join."""
+        """Get all open paper positions for a user via portfolio join.
+
+        Scope filter (2026-06-06 fix): quantity != 0 alone leaked CLOSED
+        rows with residual quantity into MTM scope forever — the canonical
+        close helper sets status='closed' but does not zero quantity. Two
+        production leakers: an expired-legs CSX row that could never mark
+        again (permanent mtm_refresh_partial alarm = cried-wolf noise) and
+        a manually-closed F row whose unrealized_pl kept mutating post-
+        close. The status predicate mirrors close_helper's liveness check
+        (`status != 'closed'`, see close_helper.py conditional UPDATE)
+        rather than `status == 'open'`, so any future intermediate live
+        state (staging/partial) stays marked; only definitively closed
+        rows leave scope.
+        """
         try:
             port_res = self.client.table("paper_portfolios") \
                 .select("id") \
@@ -381,6 +394,7 @@ class PaperMarkToMarketService:
             pos_res = self.client.table("paper_positions") \
                 .select("*") \
                 .in_("portfolio_id", portfolio_ids) \
+                .neq("status", "closed") \
                 .neq("quantity", 0) \
                 .execute()
 

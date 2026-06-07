@@ -78,6 +78,12 @@ SCHEDULES = [
     # silently fell back to 50.0 across every scan.
     ("iv_daily_refresh",            dict(hour=4,  minute=30), "/internal/tasks/iv/daily-refresh",   "tasks:iv_daily_refresh",         "Daily IV point refresh"),
     ("calibration_update",          dict(hour=5,  minute=0),  "/internal/tasks/calibration/update", "tasks:calibration_update",       "Compute calibration adjustments"),
+    # vol_signal_snapshot runs AFTER iv_daily_refresh (4:30) so today's IV30
+    # points exist in underlying_iv_points when it reads them. OBSERVE-ONLY
+    # (research layer): no-ops unless VOL_SIGNAL_OBSERVE_ENABLED; writes raw
+    # vol_signal_observations components + forward-outcome backfill; touches
+    # no scanner / trading / regime path.
+    ("vol_signal_snapshot",         dict(hour=5,  minute=15), "/internal/tasks/vol-signal/snapshot", "tasks:vol_signal_snapshot",     "Vol-signal observe snapshot"),
     ("day_orchestrator",            dict(hour=7,  minute=30), "/internal/tasks/orchestrator/start-day", "tasks:day_orchestrator",    "Day orchestrator boot check"),
 
     # Frequent.

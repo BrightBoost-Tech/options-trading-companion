@@ -284,6 +284,34 @@ async def iv_daily_refresh_task(
     )
 
 
+@router.post("/vol-signal/snapshot", status_code=202)
+async def vol_signal_snapshot_task(
+    body: Optional[Dict] = Body(default=None),
+    auth: TaskSignatureResult = Depends(verify_task_signature("tasks:vol_signal_snapshot"))
+):
+    """Stage 1 vol-signal OBSERVE snapshot (research only).
+
+    Logs raw synthetic vol-expansion components (SPY/QQQ/IWM IV30,
+    skew/term, VIX-ETP proxies, cross-asset returns) to
+    vol_signal_observations + backfills forward outcomes. Observation
+    only — no scanner / trading / regime coupling; the handler no-ops
+    when VOL_SIGNAL_OBSERVE_ENABLED is off. Dict-body shape with
+    force_rerun forwarding per the iv_daily_refresh pattern.
+    """
+    today = datetime.now().strftime("%Y-%m-%d")
+    force_rerun = bool((body or {}).get("force_rerun", False))
+    return enqueue_job_run(
+        job_name="vol_signal_snapshot",
+        idempotency_key=f"vol_signal_snapshot-{today}",
+        payload={
+            "app_version": APP_VERSION,
+            "trigger_ts": datetime.now().isoformat(),
+            **({"force_rerun": True} if force_rerun else {}),
+        },
+        force_rerun=force_rerun,
+    )
+
+
 @router.post("/iv/historical-backfill", status_code=202)
 async def iv_historical_backfill_task(
     body: Optional[Dict] = Body(default=None),

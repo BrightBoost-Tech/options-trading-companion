@@ -18,8 +18,17 @@ from packages.quantum.observability.feature_flags import is_iv_rank_none_routing
 
 logger = logging.getLogger(__name__)
 
-# V4 Engine Version
-ENGINE_VERSION = "v4"
+# Engine version reported by THIS (v3) engine's snapshots.
+# History (2026-06-07 disambiguation): this was "v4" — a label for the 4th
+# iteration of the snapshot SCHEMA (components/details enrichment, real
+# liquidity z, chain skew/term), applied in-place to the v3 engine. The
+# separate regime_engine_v4.py (continuous-vector engine, unwired) later
+# reused the "V4" name, leaving the v3 file claiming v4 — a naming collision
+# that misled audits. The v3 engine now reports "v3"; "v4" belongs to
+# RegimeEngineV4 ("v4_continuous"). No consumer reads this value back
+# (verified 2026-06-07: write-only into transient diagnostics/jsonb blobs;
+# regime_snapshots persistence removed 2026-05-10 #62a-D3).
+ENGINE_VERSION = "v3"
 
 # Liquidity z-score constants
 LIQUIDITY_BASELINE_SPREAD = 0.002  # 0.2% median spread = neutral (z=0)

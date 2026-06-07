@@ -299,6 +299,93 @@ class TestForwardBackfill(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
+# 5b. Regime-context read — the nested cycle_results path
+# ---------------------------------------------------------------------------
+
+class _FakeJobRunsClient:
+    """Returns a fixed job_runs result blob through the select chain."""
+
+    def __init__(self, rows):
+        self._rows = rows
+
+    def table(self, name):
+        assert name == "job_runs"
+        return self
+
+    def select(self, *a, **k):
+        return self
+
+    def eq(self, *a, **k):
+        return self
+
+    def order(self, *a, **k):
+        return self
+
+    def limit(self, *a, **k):
+        return self
+
+    def execute(self):
+        return types.SimpleNamespace(data=list(self._rows))
+
+
+class TestRegimeContextRead(unittest.TestCase):
+    """The orchestrator nests per-cycle metadata at
+    result.cycle_results[0].cycle_metadata — the flat result.cycle_metadata
+    path never existed, so every first-weekend row recorded
+    live_regime_state: missing (2026-06-07 finding). Pin the nested read +
+    every honest-missing degradation."""
+
+    def _read(self, rows):
+        from packages.quantum.jobs.handlers import vol_signal_snapshot as h
+        return h._read_live_regime_state(_FakeJobRunsClient(rows))
+
+    def test_reads_nested_cycle_results_path(self):
+        rows = [{"result": {
+            "ok": True,
+            "cycle_results": [{"cycle_metadata": {"regime": "NORMAL"}}],
+        }}]
+        self.assertEqual(self._read(rows), "NORMAL")
+
+    def test_flat_cycle_metadata_is_not_consulted(self):
+        # The old (wrong) shape must NOT satisfy the read — if the
+        # orchestrator ever did emit it flat, that's a different contract
+        # and this test forces the conversation.
+        rows = [{"result": {"cycle_metadata": {"regime": "CHOP"},
+                            "cycle_results": []}}]
+        self.assertIsNone(self._read(rows))
+
+    def test_no_rows_returns_none(self):
+        self.assertIsNone(self._read([]))
+
+    def test_empty_cycle_results_returns_none(self):
+        self.assertIsNone(self._read([{"result": {"ok": True, "cycle_results": []}}]))
+
+    def test_missing_cycle_metadata_returns_none(self):
+        self.assertIsNone(self._read([{"result": {"cycle_results": [{}]}}]))
+
+    def test_none_result_returns_none(self):
+        self.assertIsNone(self._read([{"result": None}]))
+
+    def test_db_error_fails_soft_to_none(self):
+        from packages.quantum.jobs.handlers import vol_signal_snapshot as h
+
+        class _Boom:
+            def table(self, *_a):
+                raise RuntimeError("db down")
+
+        self.assertIsNone(h._read_live_regime_state(_Boom()))
+
+    def test_none_threads_to_missing_flag_not_fabrication(self):
+        # The honest-missing contract end-to-end: a None regime state is
+        # flagged 'missing' in input_status with a NULL column.
+        inputs = _full_inputs()
+        inputs["live_regime_state"] = None
+        row = vol_signal.build_observation(**inputs)
+        self.assertIsNone(row["live_regime_state"])
+        self.assertEqual(row["input_status"]["live_regime_state"], "missing")
+
+
+# ---------------------------------------------------------------------------
 # 6. Import boundary — zero trading-path coupling
 # ---------------------------------------------------------------------------
 

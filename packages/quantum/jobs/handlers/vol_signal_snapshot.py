@@ -25,6 +25,39 @@ from packages.quantum.analytics import vol_signal
 JOB_NAME = "vol_signal_snapshot"
 
 
+def _read_live_regime_state(client) -> "str | None":
+    """Latest persisted live regime decision, for the comparison column.
+
+    Reads job_runs.result from the most recent succeeded suggestions_open.
+    The orchestrator nests per-cycle metadata at
+    result.cycle_results[0].cycle_metadata — NOT result.cycle_metadata
+    (the flat path never existed; every first-weekend row recorded
+    live_regime_state: missing because of it — 2026-06-07 finding).
+    Any missing layer → None, which build_observation flags 'missing'
+    honestly; never fabricated. No regime computation here (import-
+    boundary design): a read of an already-persisted decision only.
+    """
+    try:
+        res = client.table("job_runs") \
+            .select("result") \
+            .eq("job_name", "suggestions_open") \
+            .eq("status", "succeeded") \
+            .order("created_at", desc=True) \
+            .limit(1) \
+            .execute()
+        rows = list(res.data or [])
+        if not rows:
+            return None
+        result_blob = rows[0].get("result") or {}
+        cycle_results = result_blob.get("cycle_results") or []
+        if not cycle_results:
+            return None
+        return ((cycle_results[0] or {}).get("cycle_metadata") or {}).get("regime")
+    except Exception as e:
+        print(f"[{JOB_NAME}] regime context read failed: {e}")
+        return None
+
+
 def _adapt_chain(chain: List[Dict]) -> List[Dict]:
     """TruthLayer canonical chain → IVPointService raw-ish schema (same
     adaptation as iv_daily_refresh)."""
@@ -114,21 +147,7 @@ def run(payload: Dict[str, Any], ctx: Any = None) -> Dict[str, Any]:
 
         # 4. Regime context — read the latest persisted decision (comparison
         # only; no regime computation here, by import-boundary design).
-        live_regime_state = None
-        try:
-            res = client.table("job_runs") \
-                .select("result") \
-                .eq("job_name", "suggestions_open") \
-                .eq("status", "succeeded") \
-                .order("created_at", desc=True) \
-                .limit(1) \
-                .execute()
-            rows = list(res.data or [])
-            if rows:
-                live_regime_state = ((rows[0].get("result") or {})
-                                     .get("cycle_metadata") or {}).get("regime")
-        except Exception as e:
-            print(f"[{JOB_NAME}] regime context read failed: {e}")
+        live_regime_state = _read_live_regime_state(client)
 
         # 5. Assemble + write the observation row (fail-soft upsert).
         row = vol_signal.build_observation(

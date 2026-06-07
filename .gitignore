@@ -57,3 +57,10 @@ supabase/.temp/
 # Local MCP and Claude Code config (may contain tokens)
 .mcp.json
 .claude/
+
+# Operator-local workspace files (not project artifacts) — listed explicitly
+# so a broad `git add -A` can't sweep them into an unrelated commit (this
+# nearly happened on the #1030 branch, 2026-06-07; caught pre-PR).
+MASTER_ACTIVATION_GUIDE.md
+scripts/_friday_eod_check_one_off.py
+start.ps1

@@ -1,5 +1,12 @@
 """
-Tests for Regime Engine V4 enhancements.
+Tests for the v3 regime engine's enriched snapshot schema.
+
+(Renamed 2026-06-07 from test_regime_engine_v4.py: these tests pin the
+"V4 schema enhancements" that were applied IN-PLACE to regime_engine_v3.py
+— components/details dicts, liquidity z, chain skew/term. The "V4" label
+collided with the separate, unwired regime_engine_v4.py continuous-vector
+engine; the v3 engine now reports engine_version="v3" and this file's name
+matches what it actually tests. Same coverage, no tests deleted.)
 
 Verifies:
 1. Global snapshot to_dict includes components + engine_version
@@ -32,9 +39,10 @@ class TestGlobalSnapshotV4ToDict:
         with open(file_path, "r", encoding="utf-8") as f:
             content = f.read()
 
-        # Verify ENGINE_VERSION is defined
-        assert 'ENGINE_VERSION = "v4"' in content, \
-            "ENGINE_VERSION should be set to 'v4'"
+        # Verify ENGINE_VERSION is defined — the v3 engine reports v3
+        # (2026-06-07 de-collision; "v4" belongs to RegimeEngineV4).
+        assert 'ENGINE_VERSION = "v3"' in content, \
+            "ENGINE_VERSION should be set to 'v3'"
 
         # Verify to_dict includes components
         assert '"components": components' in content or "'components': components" in content, \
@@ -53,7 +61,8 @@ class TestGlobalSnapshotV4ToDict:
             "components should include liquidity_z"
 
     def test_engine_version_constant(self):
-        """Verify ENGINE_VERSION constant is defined as v4."""
+        """Verify ENGINE_VERSION constant is defined as v3 (the file's own
+        version — the 2026-06-07 naming-collision fix; v4 = RegimeEngineV4)."""
         file_path = os.path.join(
             os.path.dirname(__file__),
             "..",
@@ -64,7 +73,9 @@ class TestGlobalSnapshotV4ToDict:
         with open(file_path, "r", encoding="utf-8") as f:
             content = f.read()
 
-        assert 'ENGINE_VERSION = "v4"' in content
+        assert 'ENGINE_VERSION = "v3"' in content
+        # And the stale v4 label must not come back on the v3 engine.
+        assert 'ENGINE_VERSION = "v4"' not in content
 
 
 class TestLiquidityZComputation:

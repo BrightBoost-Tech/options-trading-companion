@@ -81,7 +81,9 @@ Live Trading API keys for this account use the **AK** prefix (public docs say `P
 
 ### Flags in use — single source of truth
 
-**Permanently on** (do not flip without a code change): `TASK_NONCE_PROTECTION=1`, `TASK_NONCE_FAIL_CLOSED_IN_PROD=1`, `SCHEDULER_ENABLED=1`, `ORCHESTRATOR_ENABLED=1`, `CALIBRATION_ENABLED=1`, `RISK_ENVELOPE_ENFORCE=1`, `RANKER_PORTFOLIO_AWARE=1`, `CANONICAL_RANKING_ENABLED=1`, `MULTI_STRATEGY_EVAL=1`, `COMPOUNDING_MODE=true`, `PAPER_AUTOPILOT_ENABLED=1`, `POLICY_LAB_ENABLED=true`, `ALLOCATION_V4_ENABLED=true`, `FORECAST_V4_ENABLED=true`, `OPTIMIZER_V4_ENABLED=true`, `REGIME_V4_ENABLED=true`, `SURFACE_V4_ENABLE=true`, `SHADOW_CHECKPOINT_ENABLED=1`.
+**Permanently on** (do not flip without a code change): `TASK_NONCE_PROTECTION=1`, `TASK_NONCE_FAIL_CLOSED_IN_PROD=1`, `SCHEDULER_ENABLED=1`, `ORCHESTRATOR_ENABLED=1`, `CALIBRATION_ENABLED=1`, `RISK_ENVELOPE_ENFORCE=1`, `RANKER_PORTFOLIO_AWARE=1`, `CANONICAL_RANKING_ENABLED=1`, `MULTI_STRATEGY_EVAL=1`, `COMPOUNDING_MODE=true`, `PAPER_AUTOPILOT_ENABLED=1`, `POLICY_LAB_ENABLED=true`, `ALLOCATION_V4_ENABLED=true`, `FORECAST_V4_ENABLED=true`, `OPTIMIZER_V4_ENABLED=true`, `SURFACE_V4_ENABLE=true`, `SHADOW_CHECKPOINT_ENABLED=1`.
+
+**Dead / reserved flags:** `REGIME_V4_ENABLED` — **set `true` in the worker env but read by NOTHING in production** (2026-06-07 census: its only reader is `regime_engine_v4.is_regime_v4_enabled()`, which has zero production callers). `RegimeEngineV4` (continuous-vector, accepts vix_data, falls back to SPY RV) is BUILT BUT UNWIRED; the live regime path is `RegimeEngineV3` everywhere. The flag is the reserved activation gate for a future deliberate V4 wiring (likely the vol-signal arc) — until then its env value is a no-op; do NOT infer V4 behavior from it. Pinned by `test_regime_v4_unwired.py` (wiring V4 forces a test+doc update). The env var may be removed from Railway or left — harmless either way.
 
 **Permanently off:** `AUTOTUNE_ENABLED=false`, `POLICY_LAB_AUTOPROMOTE=false`, `PDT_PROTECTION_ENABLED=0` (PDT rule retired 2026-06-04 — never flip ON), `ALPACA_DRY_RUN=0`, `ENABLE_DEV_AUTH_BYPASS=0`.
 
@@ -95,7 +97,7 @@ Live Trading API keys for this account use the **AK** prefix (public docs say `P
 - `MARKETABLE_ENTRY_ENABLED` = OFF (observe mode — would-be decisions logged).
 - `LIQUIDITY_WEIGHTING_ENABLED` = OFF/absent (observe-first; graduation pending correlation data).
 - `PAPER_SHADOW_EXECUTOR_ENABLED` = `false` (Phase 1b pending; `paper_shadow_pairs` table still unapplied).
-- `REGIME_V4_ENABLED` = `true` (permanently-on list above; distinct from the D4 observe filter).
+- `REGIME_V4_ENABLED` = `true` in env but **DEAD — gates nothing** (see "Dead / reserved flags" above; distinct from the D4 observe filter). The v3 engine file reported `ENGINE_VERSION="v4"` until the 2026-06-07 naming-collision fix — it now reports `v3`; `v4_continuous` is the unwired `RegimeEngineV4`.
 
 ---
 

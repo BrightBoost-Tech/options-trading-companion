@@ -12,10 +12,17 @@ RegimeVector dimensions:
 - liquidity_regime: 0-1 (0=thin, 1=deep)
 - event_density: 0-1 (0=quiet, 1=catalyst-heavy)
 
-Runs in parallel with regime_engine_v3 — NOT a replacement.
-Feature flag: REGIME_V4_ENABLED (default false)
+⚠️ STATUS (verified 2026-06-07): BUILT BUT UNWIRED. This engine has ZERO
+production callers — only tests import it. The live regime path is
+regime_engine_v3 everywhere (scanner + orchestrator). The flag below is
+the RESERVED activation gate for a future deliberate wiring decision
+(e.g. the vol-signal observe arc graduating to a vol-aware regime input);
+until that wiring lands, setting REGIME_V4_ENABLED — in any environment —
+changes NOTHING. It is NOT "permanently on"; a set value is a no-op.
+test_regime_v4_unwired.py pins the zero-caller state so wiring it forces
+a deliberate test update.
 
-When disabled, all callers use v3 as before.
+Feature flag: REGIME_V4_ENABLED (default false; currently gates nothing)
 """
 
 import logging
@@ -33,7 +40,12 @@ logger = logging.getLogger(__name__)
 
 
 def is_regime_v4_enabled() -> bool:
-    """Check if v4 regime engine is enabled."""
+    """Check if v4 regime engine is enabled.
+
+    ⚠️ UNWIRED: no production code calls this (2026-06-07 census — the
+    flag gates nothing today). Kept as the reserved activation interface
+    for a future deliberate V4 wiring; consumers of that wiring must call
+    this at the decision boundary."""
     return os.environ.get("REGIME_V4_ENABLED", "").lower() in ("1", "true")
 
 

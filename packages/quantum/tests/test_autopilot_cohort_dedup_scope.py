@@ -87,7 +87,8 @@ def _run(open_positions):
     staged = []
     from packages.quantum.brokers.execution_router import ExecutionMode
 
-    with mock.patch("packages.quantum.policy_lab.config.load_cohort_configs", return_value=configs), \
+    with mock.patch("packages.quantum.services.reentry_cooldown.is_enabled", return_value=False), \
+         mock.patch("packages.quantum.policy_lab.config.load_cohort_configs", return_value=configs), \
          mock.patch("packages.quantum.policy_lab.fork._get_cohort_portfolios", return_value=portfolios), \
          mock.patch("packages.quantum.paper_endpoints.get_analytics_service", return_value=mock.MagicMock()), \
          mock.patch("packages.quantum.paper_endpoints._suggestion_to_ticket", side_effect=lambda s: {"sid": s["id"]}), \

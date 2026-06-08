@@ -71,6 +71,28 @@ class TestComputeCurrentValue(unittest.TestCase):
     def test_empty_legs_returns_none(self):
         self.assertIsNone(compute_current_value([], lambda s: 1.0, 5))
 
+    def test_default_is_fail_closed_without_failed_legs(self):
+        """2026-06-08 default-flip: a dead leg yields None even when the caller
+        did NOT pass failed_legs — no silent partial sum (the :502 footgun)."""
+        mids = {"O:F260626C00015500": 1.10}  # second leg unpriceable
+        cv = compute_current_value(self._legs(5), lambda s: mids.get(s), 5)
+        self.assertIsNone(cv)
+
+    def test_allow_partial_opt_in_restores_best_effort(self):
+        """A caller that genuinely wants best-effort opts in explicitly."""
+        mids = {"O:F260626C00015500": 1.10}  # second leg unpriceable
+        cv = compute_current_value(
+            self._legs(5), lambda s: mids.get(s), 5, allow_partial=True
+        )
+        # only the priceable long leg: 1.10*100*5 = 550
+        self.assertAlmostEqual(cv, 550.0, places=2)
+
+    def test_all_priced_unaffected_by_flip(self):
+        """Byte-identical for the clean case (no dead leg)."""
+        mids = {"O:F260626C00015500": 1.10, "O:F260626C00017500": 0.08}
+        cv = compute_current_value(self._legs(5), lambda s: mids.get(s), 5)
+        self.assertAlmostEqual(cv, 510.0, places=2)
+
 
 if __name__ == "__main__":
     unittest.main()

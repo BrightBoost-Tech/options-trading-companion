@@ -652,6 +652,21 @@ def _stage_order_internal(supabase, analytics, user_id, ticket: TradeTicket, por
         )
         quote = None
 
+    # Entry-side per-leg quote validation (ENTRY_QUOTE_VALIDATION_ENABLED,
+    # default ON). OPEN/entry orders only — see _validate_entry_quotes. A CLOSE
+    # (position_id set) is exempt: a missing quote must NOT block an exit
+    # (#1022 fresh-mark staging + #1035/#1036 fail-closed exits own that — being
+    # trapped in a position is worse than a bad close mark). Validates EACH leg
+    # with a FRESH quote (the combo fetch above is only legs[0]); any unpriceable
+    # leg → REJECT, never fall through to the modeled limit or the fabricating
+    # TCM fallback (the 2026-06-08 P86 no-quote entry).
+    _validate_entry_quotes(
+        ticket,
+        position_id,
+        fetch_fn=lambda s: _fetch_quote_with_retry(poly, s),
+        suggestion_id=suggestion_id,
+    )
+
     # TCM Estimate
     tcm_est = TransactionCostModel.estimate(ticket, quote)
 
@@ -882,6 +897,77 @@ def _is_valid_quote(quote: dict) -> bool:
         pass
 
     return False
+
+
+class EntryQuoteUnpriceable(Exception):
+    """An OPEN/entry order has a leg our feed cannot price at stage time.
+
+    Raised by _validate_entry_quotes to REJECT the entry rather than fall
+    through to the modeled limit / the fabricating TCM missing-quote fallback
+    (the 2026-06-08 NFLX P86 no-quote entry: our Polygon feed was dark on the
+    ITM long leg, yet the order submitted at the modeled price). The autopilot
+    entry loops catch this and count it as an error — NOT executed — so the
+    "executed=N errors=0" line stops lying about fabricated fills.
+    """
+
+    def __init__(self, leg_symbol, quote):
+        self.leg_symbol = leg_symbol
+        self.quote = quote
+        super().__init__(
+            f"entry_quote_unpriceable: leg={leg_symbol} quote={quote}"
+        )
+
+
+def _entry_quote_validation_enabled() -> bool:
+    """ENTRY_QUOTE_VALIDATION_ENABLED — kill-switch, DEFAULT ON (reject-on-
+    invalid). Empty/unset → default ON (NOT off — prior flags silently no-opped
+    on empty strings, e.g. INTRADAY_TARGET_PROFIT 2026-06-04). Only an explicit
+    off value (0/false/no/off) disables it."""
+    raw = os.environ.get("ENTRY_QUOTE_VALIDATION_ENABLED", "")
+    if not raw.strip():
+        return True
+    return raw.strip().lower() not in ("0", "false", "no", "off")
+
+
+def _leg_symbol(leg) -> Optional[str]:
+    """Per-leg OCC symbol from a TradeTicket leg (object or dict)."""
+    sym = getattr(leg, "symbol", None)
+    if sym is None and isinstance(leg, dict):
+        sym = leg.get("symbol")
+    return sym or None
+
+
+def _validate_entry_quotes(ticket, position_id, fetch_fn, suggestion_id=None) -> None:
+    """Reject an OPEN order whose feed cannot price ANY leg at stage time.
+
+    OPEN-only: a non-None ``position_id`` means a CLOSE — exempt, because a
+    missing quote must never block an exit (#1022/#1035/#1036). Validates EACH
+    leg with a FRESH quote via ``fetch_fn`` (the scan-time quote can be stale —
+    the P86 leg was dark at the 16:15Z scan but real at the 16:30Z fill, so a
+    fresh fetch legitimately recovers the transient case). The first leg that
+    is still unpriceable → raise EntryQuoteUnpriceable: NEVER fall through to
+    the modeled limit, NEVER call the fabricating TCM fallback, NEVER submit or
+    shadow-fill. Loud: logs at error before raising. No-op when the flag is off
+    (legacy fall-through behavior).
+    """
+    if position_id is not None:
+        return  # CLOSE order — exempt
+    if not _entry_quote_validation_enabled():
+        return  # kill-switch off → legacy behavior
+    legs = getattr(ticket, "legs", None) or []
+    for leg in legs:
+        sym = _leg_symbol(leg)
+        if not sym:
+            continue
+        leg_quote = fetch_fn(sym)
+        if not _is_valid_quote(leg_quote):
+            logger.error(
+                f"entry_quote_unpriceable: REJECTING open order — leg={sym} "
+                f"quote={leg_quote} suggestion_id={suggestion_id} — feed cannot "
+                f"price this leg at stage time; NOT falling through to the "
+                f"modeled limit or fabricating a fill"
+            )
+            raise EntryQuoteUnpriceable(sym, leg_quote)
 
 
 def _process_orders_for_user(supabase, analytics, user_id, target_order_id=None):

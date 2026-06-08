@@ -27,6 +27,7 @@ from packages.quantum.analytics.regime_engine_v3 import RegimeEngineV3, GlobalRe
 from packages.quantum.analytics.scoring import calculate_unified_score
 from packages.quantum.services.execution_service import ExecutionService
 from packages.quantum.analytics.guardrails import earnings_week_penalty
+from packages.quantum.security.config import is_production
 from packages.quantum.services.earnings_calendar_service import EarningsCalendarService
 from packages.quantum.observability.feature_flags import is_iv_rank_none_routing_enabled
 from packages.quantum.agents.runner import AgentRunner, build_agent_pipeline
@@ -2654,13 +2655,25 @@ def scan_for_opportunities(
         else:
              symbols = ["SPY", "QQQ", "IWM", "AAPL", "MSFT", "TSLA", "NVDA", "AMD"]
 
-    # Bolt Optimization: Normalize and deduplicate symbols upfront
-    # This avoids repeated regex calls inside the hot loop and ensures consistency
+    # Normalize + deduplicate symbols upfront (avoids repeated regex in the hot
+    # loop). ORDER-PRESERVING (dict.fromkeys): get_scan_candidates returns the
+    # #1026/#1027 SCORE-ranked order (deep ETFs / mega-caps on top); the old
+    # sorted(list(set(...))) re-sorted ALPHABETICALLY and destroyed that rank
+    # before any cap applied, so the SCANNER_LIMIT_DEV slice below took the
+    # alphabetically-first 40 — dropping SPY/QQQ/TLT/XL* (late alphabet, all
+    # score 100) while admitting IWM (rank 32). Preserve score order so the
+    # cut, when it applies, takes the top-N by score.
     if hasattr(truth_layer, "normalize_symbol"):
-        symbols = sorted(list(set([truth_layer.normalize_symbol(s) for s in symbols])))
+        symbols = list(dict.fromkeys(truth_layer.normalize_symbol(s) for s in symbols))
 
-    # Dev mode limit
-    if os.getenv("APP_ENV") != "production":
+    # Dev-mode universe cap — keyed off the CANONICAL production check, not a
+    # bare APP_ENV (the 2026-06-08 class bug: the worker sets
+    # RAILWAY_ENVIRONMENT=production but NOT APP_ENV, so `APP_ENV != production`
+    # was True in prod → the dev SCANNER_LIMIT_DEV=40 cap truncated the live
+    # scan, undoing #1026/#1027). In production the full score-ranked universe
+    # (up to UNIVERSE_SCAN_LIMIT) reaches eval; the cap applies only in genuine
+    # dev for speed.
+    if not is_production():
         symbols = symbols[:SCANNER_LIMIT_DEV]
 
     print(f"[Scanner] Processing {len(symbols)} symbols...")

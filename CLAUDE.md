@@ -89,7 +89,9 @@ Live Trading API keys for this account use the **AK** prefix (public docs say `P
 
 **Kill switches** (flip to disable instantly): `SCHEDULER_ENABLED`, `CALIBRATION_ENABLED`, `RISK_ENVELOPE_ENFORCE`.
 
-**Lever / observe flags (operator-flipped; state as of 2026-06-04):**
+**Lever / observe flags (operator-flipped; state as of 2026-06-08):**
+- `ENTRY_QUOTE_VALIDATION_ENABLED` = **default ON (kill-switch)** — #1038 (merged + live 2026-06-08, worker `f220117`). Per-leg fresh-quote validation at stage time in `_stage_order_internal` (`paper_endpoints.py`); rejects an OPEN order if ANY leg is unpriceable (`EntryQuoteUnpriceable`) instead of falling through to the modeled limit + the fabricating TCM `_handle_missing_quote_fallback`. Entry-scoped (closes exempt via `position_id is not None`). **Empty/unset → ON** (only explicit `0/false/no/off` disables; test-pinned — empty-string-no-op lesson baked in). The raise counts as **error, not executed**. ⚠️ Latent edge: a future *add-to-position* entry would carry a `position_id` and be wrongly exempted — revisit when add-to-position lands. See Known Issues + H9 doctrine.
+- `EXIT_MARK_SANITY_OBSERVE_ENABLED` = **`1` (ON, observe-only)** — #1034 Layer-1 exit mark-sanity gate (migration `20260608000000` applied, flag set + recycled 2026-06-08). Logs corroboration verdict (triggering mark vs achievable executable-side close) per mark-derived fire to `exit_mark_corroboration_observations`; asymmetric (`would_suppress` true only for target_profit, never stop_loss); fail-safe (never blocks an exit). NO enforcement (Stage-2). Sparse table by design — post-#1035 a None-mark phantom no longer fires.
 - `INTRADAY_TARGET_PROFIT_ENABLED` = **`1` (ON)** — 15-min intraday profit capture, **PROVEN** (closed the shadow BAC `target_profit_hit` 2026-06-04 16:45Z, first run after arming). **⚠️ STRICT `== "1"` parsing — setting it to `true` silently no-ops** (this happened 2026-06-04; re-set to `1`). Most other flags accept `1/true/yes/on`.
 - `H7_PREFILTER_ENABLED` = `true` (active mode, post-shadow-validation).
 - `REGIME_FILTER_OBSERVE_ENABLED` = `true` (D4 observe-logging, flipped 2026-06-03).
@@ -274,6 +276,11 @@ Under live-equity EXECUTION_MODEs (`alpaca_live`, `alpaca_paper`), the intraday 
 
 **Day-trade / PDT awareness (OBSOLETE as of 2026-06-04 — see "PDT Regime Change" below):** the 3-in-5 day-trade cap and PDT designation no longer exist; same-session force-close round-trips cost only fees (~$1-2). **Operator lever unchanged:** `RISK_MAX_SYMBOL_LOSS` — tighter (3%) = more force-closes / smaller losses; looser (5%) = fewer / larger losses but more survival.
 
+**Two loss limits, and which binds (2026-06-08 trace):**
+- **Per-symbol loss envelope** (`loss_per_symbol`, `risk_envelope.check_loss_envelopes`): `RISK_MAX_SYMBOL_LOSS=0.03` × equity ≈ **−$67** at ~$2,233 equity. This is the binding stop.
+- **Position-level stop_loss** (`paper_exit_evaluator._check_stop_loss`): `EXIT_STOP_LOSS_PCT=0.50` × `entry_cost` (= max_credit × 100 × |qty|, the debit-spread max loss). On the original NFLX (entry 3.08 × 2ct, $616 max loss) = **−$308**.
+- The symbol envelope binds **~4.6× tighter** than the position stop, so the **position stop is effectively vestigial** — trades close at ~**14% of defined risk** (the −$84 NFLX close vs $616 max). Deliberate (tight-stop design, lever `RISK_MAX_SYMBOL_LOSS`), but it **interacts badly with unthrottled re-entry** (see Known Issues → re-entry whipsaw). Do NOT loosen the stop to fix the whipsaw — add a cooldown.
+
 Full worked examples, global per-tier allocation, universe price-filter rationale, history: `docs/risk_math.md`.
 
 ---
@@ -337,6 +344,14 @@ Entries >7 days old are appended verbatim to `docs/bugs_fixed_history.md` (PR hy
 
 ### Recent (not yet 7-day-archived)
 
+**2026-06-05→08 PR ledger — universe-reach / mark-fail-closed / entry-guard arc (all MERGED + live, worker `f220117`):**
+
+- **#1026/#1027 universe reach** — scan-limit bridge (`UNIVERSE_SCAN_LIMIT` default 100) + ETF/failed-fetch liquidity scoring + volume tiebreak. ETFs now score 80-100; `universe_sync` re-ranked 2026-06-05.
+- **#1037 scan admits deep ETFs** — fixed the two gatekeepers undoing #1026/#1027 at `scan_for_opportunities`: (A) `sorted(set())` alphabetical re-sort → order-preserving `dict.fromkeys`; (B) the `SCANNER_LIMIT_DEV=40` dev cap fired in prod because the gate keyed off bare `APP_ENV` (the **worker sets `RAILWAY_ENVIRONMENT=production` but NOT `APP_ENV`** — the BE sets APP_ENV). New canonical `is_production()` in `security/config.py` (recognizes APP_ENV OR RAILWAY signal); `is_production_env()` delegates to it. **Also fixed:** `guardrails.apply_slippage_guardrail` dev-leniency was firing in prod (no-quote trade waved through). Verified post-deploy: scan processes ~74 (SPY/QQQ/TLT/XLE/XLF/XLK reach eval). APP_ENV-bare gates remaining (BE-side, info-disclosure) = backlog.
+- **#1035 monitor fail-closed mark** — `_refresh_marks:502` was the lone `compute_current_value` caller WITHOUT `failed_legs` → a dead leg partial-summed to a fabricated mark (the 2026-06-08 13:30Z phantom +$325 target_profit fire on a 0.0-quote leg). Fix: pass `failed_legs` → any dead leg → None + `_mark_unpriceable` flag; asymmetric `_collect_intraday_exit_triggers` (target_profit never fires on None; stop_loss raises loud `stop_loss_protection_degraded`, never acts on stale; expiration unaffected).
+- **#1036 loss_per_symbol fail-closed + default-flip** — `check_loss_envelopes` skips `_mark_unpriceable` positions (loud `loss_per_symbol_protection_degraded`, never acts on stale/None). **`compute_current_value` default FLIPPED to fail-closed** (any dead leg → None; `allow_partial=True` is the explicit opt-in) — closes the `:502` footgun class for all future callers.
+- **#1038 entry-quote validation** — the **entry-side twin of the exit dead-leg phantom**: `_stage_order_internal` fetched only `legs[0]`'s quote and, on zero/missing, fell through to the modeled limit + TCM `_handle_missing_quote_fallback`, FABRICATING `status:filled` on the internal/shadow path (the 2026-06-08 16:30Z NFLX P86 entry submitted on a leg our feed couldn't price). Fix: `_validate_entry_quotes` — per-leg FRESH fetch at stage time, raises `EntryQuoteUnpriceable` on any unpriceable leg, entry-scoped (closes exempt via `position_id is not None`), reuses `_is_valid_quote`. Flag `ENTRY_QUOTE_VALIDATION_ENABLED` default-ON; raise counts as error not executed. ⚠️ **Latent edge:** a future add-to-position entry carries a `position_id` and would be wrongly exempted.
+
 **2026-06-02→04 PR ledger — the live-fill / exit-mechanics arc:**
 
 - **#1014 risk-scope shadow-contamination fix** — MERGED, **VALIDATED in prod both ways** (alert path: phantom BAC concentration alerts 19→0 at the 06-02 19:09Z deploy; block path: 06-03/04 live entries permitted past the risk layer despite the shadow BAC). `risk/position_scope.py` = the canonical live-book filter for any new live-capital consumer.
@@ -356,6 +371,17 @@ Entries >7 days old are appended verbatim to `docs/bugs_fixed_history.md` (PR hy
 - **2026-05-20: H9 silent-decision generalization** (PR #970) — `universe_service.get_scan_candidates` writes `universe_selection_log` (selected + dropped + thresholds), closing the limit=50 silent-truncation gap. FISV deactivated (corp action). Migration `20260519000001_universe_selection_log.sql`.
 
 ---
+
+## Known Issues (open — 2026-06-08)
+
+- **Re-entry whipsaw — NO cooldown.** There is **no shared just-stopped/cooldown/lockout state** between the intraday risk monitor and the scanner (verified 2026-06-08: zero `cooldown`/`re_entry`/`lockout`/`recently_closed` in production code). A symbol stopped by the loss envelope (`loss_per_symbol`, −$67) is **immediately re-rankable and re-enterable** the same session — and this **executed on LIVE money** (the 14:15Z NFLX −$84 stop → 16:30Z re-entry of the identical bearish structure, aggressive/live cohort, 1ct). The **only** thing that throttled size was the post-close OBP depression (unsettled funds), which **lifts at T+1**. Fix = a shared just-stopped cooldown (hard-block vs soft-penalty: design pending). **Do NOT loosen the stop** to address it.
+- **DB-vs-broker mark divergence (#1022 class).** DB `current_mark` can be **stale and wrong-signed** (e.g. shadow/live NFLX showed DB +$15/+$68 while the broker read −$13 — a put spread can't gain as the underlying rises). **Broker mark + fills are authoritative**; DB unrealized is indicative only. Persisted only by the 15-min monitor + scheduled MTM jobs (#1022 Part B), so it lags between writes.
+- **Per-account-tier funnel → structural NFLX concentration.** At ~$1,880 OBP the constraint stack (OBP-settled → 40% regime envelope → per-symbol cap → per-candidate split → H7 round-trip-BP → per-contract floor) leaves **NFLX-class ~$365 spreads as the only structure that clears envelope + H7 + EV simultaneously**: cheaper names → `execution_cost_exceeds_ev`/`spread_too_wide_real`; pricier names (SMH $9k, MU $22k round-trip) → H7-dropped. The account **structurally concentrates on NFLX** — the EV-vs-H7 trade-off made concrete. Resolves with scale (standard tier) or a CHOP regime.
+- **`trade_builder` slippage guardrail is combo-quote, not per-leg (#1037 gap).** `apply_slippage_guardrail` validates the *combo* quote, so a **single dead leg can still slip the scanner side** even with #1037's prod-reject. #1038 fixes the executor per-leg; the scanner side needs the same per-leg port. Backlog.
+
+### Facts to lock (do not re-litigate)
+
+- **Deployable capital = live Alpaca `options_buying_power`** (`equity_state.get_alpaca_options_buying_power`, #93/PR-864) — the single source of truth for budget/sizing. **60s TTL cache (effectively live); settled-funds-only.** NOT account equity, NOT a DB snapshot, NOT a stale read. The **cash↔OBP gap is the broker's own unsettled funds** (e.g. a same-day close's proceeds), which **resolve at T+1** — not our staleness and not a code buffer.
 
 ## Roadmap Status
 
@@ -395,6 +421,8 @@ The agent makes prompts useful and findings rigorous; it does not gatekeep opera
 - **H13 — Parallel architectures without integration.** Two architectures coexisting without a wired seam is a latent bug (the cohort `promoted_at`/`is_champion` class).
 - **H14 — Reference-document freshness: cite-then-verify.** Before relying on a value in a reference doc, re-verify it against live source — docs drift (e.g. HBAN $15.57 → ~$38). Counterweight: operational velocity below; H14 remains the empirical floor.
 - **H15 — Context-repurposed value / dormant-path activation.** Dormant code/data acquires new load-bearing roles when a path activates; re-audit before relying on it.
+
+**Never-fabricate / fail-loud (H9) — both ends of the trade (2026-06-08):** a value you cannot price must **REJECT or flag, never fabricate**. The mark/quote-missing footgun appeared on BOTH sides and is now closed both ways: **exit side** — `compute_current_value` partial-summed a dead leg into a phantom mark (#1035/#1036, now fail-closed by default); **entry side** — `_stage_order_internal` fell through a no-quote leg to the modeled limit + a fabricated fill (#1038 — a leg you can't price → `EntryQuoteUnpriceable`, counted as error not executed). Companion rule: **flags must be read-back-confirmed** — an empty string silently no-ops (`INTRADAY_TARGET_PROFIT` 2026-06-04); #1038's default is **test-pinned** (empty/unset → ON, only explicit off disables).
 
 **2026-06-04 session themes** (candidates for formal H-numbering in `docs/loud_error_doctrine.md`):
 
@@ -449,6 +477,14 @@ Working backlog: `docs/backlog.md` (grouped + sequenced — Groups 1-7 + highest
 1. **PR #908 empirical validation (waiting on next natural close).** PR #908's mleg sign-flip + clamp is live in the worker (verified 2026-05-12) but untested on a real close — no `paper_positions` opened/closed since 2026-05-12, so the event hasn't been triggerable. (The 2026-05-29 F close was a manual Alpaca-UI close, NOT the system exit path — so it does not count as validation; reconcile per H10.) Read "tomorrow's first close" as "whenever the next position closes via the system path". Capture: `limit_price` sign, `abs(limit_price) ≥ 0.01`, broker response. Also on watch: Tier 1 body-acceptance smoke (`python scripts/run_signed_task.py alpaca_order_sync --force-rerun`). Triage in `docs/backlog.md` → "PR #908 empirical validation".
 2. **H9 Convention Slot 2 — silent-exception grep test (queued).** Slot 1 (AST gate) closed 2026-05-18 (strict mode; allow-list stable at 7, zero non-allow-listed violations on main). Slot 2 = complementary regex/grep test for shapes AST inspection might miss; may consolidate with Slot 1 if its surface proves adequate. Decision pending ~2 weeks of strict-mode CI observation. Slot 3 (literal status returns) already adopted as convention for new wrappers.
 3. **Operator-side decision on small-tier path forward (codified 2026-05-26).** The structural arc through `canonical_ranker` closed (PRs #970/#972/#973/#974/#975/#976/#977/#978 + codification in `docs/structural_findings.md`). Pipeline is structurally healthy through the EV gate; the binding constraint at $1,031 OBP is mechanical and correctly enforced. **Three operator-side paths** (not code workstreams): (a) accept low frequency at small tier; (b) scale to standard tier ($5k+, where the same gross EVs become viable through size); (c) wait for CHOP regime (historically 69 ICs at avg EV $70; last CHOP 2026-02-24→03-17). Six code-side levers catalogued + rejected — `docs/structural_findings.md` "What does NOT resolve this constraint". **Sub-action ready:** flip `H7_PREFILTER_ENABLED=true` on Railway worker (shadow validation 2026-05-22/05-26 confirmed pre-check matches real-H7, zero false positives); changes `exit_reason` `no_suggestions_after_gates` → `all_candidates_h7_unfit`, no execution change. **Note:** at the new ~$1,635 small-tier capital these boundaries should be re-derived — the codification was done at $1,031 OBP.
+
+**New backlog (2026-06-08, open):**
+- **Re-entry cooldown / just-stopped lockout** — the #1 open risk (see Known Issues). Shared state between the intraday monitor and the scanner so a symbol stopped by the loss envelope isn't re-entered the same session. **Design pending: hard-block vs soft-penalty.** Do NOT loosen the stop instead.
+- **Loss-limit coherence decision** — the per-symbol envelope (−$67) binds ~4.6× tighter than the vestigial position stop (−$308); decide whether that asymmetry is intended at compounding small-tier capital (it interacts badly with the unthrottled re-entry above).
+- **Per-leg guard in `trade_builder`** — port #1038's per-leg quote validation to the scanner's `apply_slippage_guardrail` (currently combo-quote; a single dead leg slips the scanner side).
+- **APP_ENV-bare gates (info-disclosure, BE-side)** — `optimizer.py:620/669`, `is_debug_routes_enabled`, etc. route through `is_production()` under a security review (per the #1037 PART-C audit). Lower priority (BE sets APP_ENV, so currently correct).
+
+**Recently completed (2026-06-08, for accuracy — not open):** #1034/#1035/#1036/#1037/#1038 all MERGED + live on worker `f220117`; **#1034 activated** (migration `20260608000000` applied, `EXIT_MARK_SANITY_OBSERVE_ENABLED=1`, recycled). PR #908 live-credit-mleg-close validation still pending the next system close (#1 above).
 
 Full Active-focus block (incl. recently-closed) in `docs/roadmap.md`; full item descriptions + catalogs (#62a schema drift, #72 loud-error doctrine) in `docs/backlog.md`.
 

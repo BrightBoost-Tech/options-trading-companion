@@ -229,6 +229,12 @@ class IntradayRiskMonitor:
             config=config,
         )
 
+        # 4a. loss_per_symbol degraded protection — LOUD, not silent (#1035
+        # asymmetric policy extended to the envelope). Positions whose mark was
+        # unpriceable this pass were SKIPPED from the per-symbol loss decision
+        # (not force-closed on a stale value, not silently coerced to no-breach).
+        self._alert_loss_per_symbol_degraded(result, user_id)
+
         # 4b. Check position-level exit conditions (stop loss, expiration)
         #     The envelope check above handles portfolio-level limits.
         #     This catches individual positions that hit their own stop/expiry
@@ -629,6 +635,41 @@ class IntradayRiskMonitor:
         return equity_state.get_alpaca_weekly_pnl(user_id, supabase=self.supabase)
 
     # ── Force close ───────────────────────────────────────────────────
+
+    def _alert_loss_per_symbol_degraded(self, result, user_id: str) -> int:
+        """Raise a loud high-severity alert for each position whose per-symbol
+        loss could not be evaluated this pass (unpriceable mark). Returns the
+        count alerted. Protection resumes next pass when quotes return; Stage-2
+        is last-good / conservative / marketable. (#1035 asymmetric policy
+        extended to the loss_per_symbol envelope.)"""
+        n = 0
+        for _deg in (getattr(result, "degraded_per_symbol", None) or []):
+            self._log_alert(
+                user_id=user_id,
+                alert_type="loss_per_symbol_protection_degraded",
+                severity="high",
+                message=(
+                    f"loss_per_symbol protection degraded for "
+                    f"{_deg.get('symbol')}: position could not be priced this "
+                    f"pass (unmarkable leg quotes) — NOT acting on a stale mark; "
+                    f"will retry next pass when quotes return"
+                ),
+                position_id=_deg.get("position_id"),
+                symbol=_deg.get("symbol"),
+                metadata={
+                    "stale_unrealized_pl": _deg.get("stale_unrealized_pl"),
+                    "envelope": "loss_per_symbol",
+                    "consequence": (
+                        "Per-symbol loss envelope not evaluated this pass "
+                        "(mark uncorroborated). Protection resumes next pass. "
+                        "Stage-2: last-good / conservative / marketable close."
+                    ),
+                    "doctrine_ref": "H9 loud-not-silent; never act on a "
+                                    "fabricated/uncorroborated mark",
+                },
+            )
+            n += 1
+        return n
 
     def _collect_intraday_exit_triggers(self, positions: List[Dict], user_id: str) -> List:
         """Collect position-level intraday exit triggers as (position, reason) pairs.

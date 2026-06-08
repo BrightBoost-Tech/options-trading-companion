@@ -142,6 +142,15 @@ class EnvelopeCheckResult:
     # mark policy, extended to the loss_per_symbol envelope).
     degraded_per_symbol: List[Dict[str, Any]] = field(default_factory=list)
 
+    # Positions force-closed by the PER-SYMBOL loss envelope this pass — the
+    # structured, unambiguous protective-stop set (one entry per breaching
+    # symbol: {cohort_id, symbol, position_id, realized_loss}). NOT daily/weekly
+    # (those mark ALL positions) and NOT concentration/stress. The monitor reads
+    # this to write a re-entry cooldown keyed on (cohort_id, symbol) — gating
+    # here, at the decision point, avoids the 5b loop's violation→position
+    # conflation (a daily-loss sweep must not bench a symbol per-symbol).
+    symbol_loss_stops: List[Dict[str, Any]] = field(default_factory=list)
+
     def add_violation(self, v: EnvelopeViolation) -> None:
         self.violations.append(v)
         if v.severity in ("block", "force_close"):
@@ -158,6 +167,7 @@ class EnvelopeCheckResult:
             "stress_results": {k: round(v, 4) for k, v in self.stress_results.items()},
             "loss_status": {k: round(v, 4) for k, v in self.loss_status.items()},
             "degraded_per_symbol": self.degraded_per_symbol,
+            "symbol_loss_stops": self.symbol_loss_stops,
         }
 
 
@@ -356,6 +366,7 @@ def check_loss_envelopes(
     positions: List[Dict],
     config: EnvelopeConfig,
     degraded_out: Optional[List[Dict]] = None,
+    symbol_loss_stops_out: Optional[List[Dict]] = None,
 ) -> tuple:
     """Check daily/weekly/per-symbol loss limits.
 
@@ -364,6 +375,11 @@ def check_loss_envelopes(
     appended here and SKIPPED from the per-symbol loss decision — never
     force-closed on a stale/uncorroborated value, never silently treated as
     no-breach. The caller raises the loud degraded alert (#1035 policy).
+
+    `symbol_loss_stops_out` (optional out-param): when provided, each PER-SYMBOL
+    loss breach is appended as {cohort_id, symbol, position_id, realized_loss}
+    — the structured protective-stop set the monitor turns into a re-entry
+    cooldown. Daily/weekly/concentration never enter it.
     """
     violations = []
     force_close_ids = []
@@ -443,6 +459,16 @@ def check_loss_envelopes(
                 severity="force_close",
                 message=f"{symbol} loss ${unrealized:.0f} exceeds ${symbol_max_loss:.0f} limit",
             ))
+            # Structured protective-stop record for the re-entry cooldown writer
+            # (cohort-keyed). Trigger-time loss (the value that tripped the
+            # envelope), not the eventual fill.
+            if symbol_loss_stops_out is not None:
+                symbol_loss_stops_out.append({
+                    "cohort_id": pos.get("cohort_id"),
+                    "symbol": symbol,
+                    "position_id": pos_id,
+                    "realized_loss": unrealized,
+                })
 
     return violations, force_close_ids, loss_status
 
@@ -565,6 +591,7 @@ def check_all_envelopes(
     loss_violations, force_close_ids, loss_status = check_loss_envelopes(
         equity, daily_pnl, weekly_pnl, positions, config,
         degraded_out=result.degraded_per_symbol,
+        symbol_loss_stops_out=result.symbol_loss_stops,
     )
     result.loss_status = loss_status
     result.force_close_ids = force_close_ids

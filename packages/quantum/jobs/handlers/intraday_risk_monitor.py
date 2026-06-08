@@ -328,6 +328,15 @@ class IntradayRiskMonitor:
                 )
                 warnings_logged += 1
 
+        # 5c. Re-entry cooldown WRITER (Option B, intent-based). For each
+        # PER-SYMBOL loss-envelope stop this pass (the structured
+        # result.symbol_loss_stops — never daily/weekly/concentration), bench
+        # (cohort_id, symbol) until next session open so the scanner can't
+        # re-rank/re-enter the symbol it just stopped (the 2026-06-08 NFLX
+        # whipsaw). Written at the stop DECISION (independent of fill); loud on
+        # failure; the stop itself is never rolled back.
+        self._write_reentry_cooldowns(result, user_id)
+
         logger.info(
             f"[RISK_MONITOR] user={user_id[:8]} positions={len(positions)} "
             f"equity=${equity:.0f} daily_pnl=${daily_pnl:.0f} "
@@ -635,6 +644,39 @@ class IntradayRiskMonitor:
         return equity_state.get_alpaca_weekly_pnl(user_id, supabase=self.supabase)
 
     # ── Force close ───────────────────────────────────────────────────
+
+    def _write_reentry_cooldowns(self, result, user_id: str) -> int:
+        """Bench each per-symbol loss-envelope stop (cohort_id, symbol) until
+        next session open — the re-entry cooldown WRITER (Option B, intent at
+        the stop decision). Gated on result.symbol_loss_stops (the structured
+        per-symbol breaches only). Fail-loud per symbol; never rolls back the
+        stop. Returns the number of cooldown rows written."""
+        from packages.quantum.services import reentry_cooldown as rc
+        if not rc.is_enabled():
+            return 0
+        stops = getattr(result, "symbol_loss_stops", None) or []
+        if not stops:
+            return 0
+        cooldown_until = rc.compute_cooldown_until()  # fail-closed inside
+        written = 0
+        for stop in stops:
+            try:
+                if rc.write_cooldown(
+                    self.supabase,
+                    cohort_id=stop.get("cohort_id"),
+                    symbol=stop.get("symbol"),
+                    cooldown_until=cooldown_until,
+                    reason=rc.COOLDOWN_REASON,
+                    triggering_position_id=stop.get("position_id"),
+                    realized_loss=stop.get("realized_loss"),
+                ):
+                    written += 1
+            except Exception as e:  # never let cooldown-writing break the cycle
+                logger.critical(
+                    "[RISK_MONITOR] reentry cooldown write raised for %s "
+                    "(non-fatal; stop unaffected): %s", stop.get("symbol"), e,
+                )
+        return written
 
     def _alert_loss_per_symbol_degraded(self, result, user_id: str) -> int:
         """Raise a loud high-severity alert for each position whose per-symbol

@@ -644,6 +644,37 @@ class PaperAutopilotService:
                 flush=True,
             )
 
+            # Re-entry cooldown — FILTER gate (before ranking/staging): drop any
+            # suggestion whose (cohort, symbol) is benched by a just-stopped
+            # cooldown so it never reaches staging. Best-effort: on a query
+            # error this passes through and the authoritative STAGE gate below
+            # fails closed. cohort_id resolved from the cohort's portfolio.
+            from packages.quantum.services import reentry_cooldown as rc
+            _cooldown_on = rc.is_enabled()
+            cohort_id = rc.resolve_cohort_id(supabase, portfolio_id) if _cooldown_on else None
+            if _cooldown_on and suggestions:
+                try:
+                    _benched = rc.active_symbols(
+                        supabase, cohort_id,
+                        [s.get("ticker") or s.get("symbol") for s in suggestions],
+                    )
+                    if _benched:
+                        _before = len(suggestions)
+                        suggestions = [
+                            s for s in suggestions
+                            if (s.get("ticker") or s.get("symbol")) not in _benched
+                        ]
+                        logger.warning(
+                            "[REENTRY_COOLDOWN] filter gate excluded %s for "
+                            "cohort=%s (%s→%s suggestions)",
+                            sorted(_benched), cohort_id, _before, len(suggestions),
+                        )
+                except rc.CooldownQueryError as _ce:
+                    logger.error(
+                        "[REENTRY_COOLDOWN] filter-gate query failed for cohort=%s "
+                        "(stage gate will fail-closed): %s", cohort_id, _ce,
+                    )
+
             # Deduplicate
             already = self.get_already_executed_suggestion_ids_today(user_id)
 
@@ -683,6 +714,30 @@ class PaperAutopilotService:
                     continue
                 print(f"[AUTO_EXEC] EXECUTING {ticker}/{sid[:8]} cohort={cohort_name}", flush=True)
                 try:
+                    # Re-entry cooldown — STAGE gate (authoritative; mirrors
+                    # #1038's fresh-at-stage check). Re-query just before
+                    # staging to catch the rank→stage gap. Runs BEFORE and
+                    # INDEPENDENT of any entry-vs-add discrimination — an
+                    # add-to-position on a benched symbol MUST be blocked.
+                    # FAIL-CLOSED: a query error skips this stage (a skipped
+                    # cycle is cheap; a missed lockout isn't).
+                    if _cooldown_on:
+                        try:
+                            if rc.is_active(supabase, cohort_id, ticker):
+                                logger.warning(
+                                    "[REENTRY_COOLDOWN] STAGE gate BLOCKED "
+                                    "%s/%s cohort=%s — active cooldown",
+                                    ticker, sid[:8], cohort_id,
+                                )
+                                raise rc.SymbolCooldownActive(cohort_id, ticker)
+                        except rc.CooldownQueryError as _ce:
+                            logger.error(
+                                "[REENTRY_COOLDOWN] STAGE gate query failed for "
+                                "%s cohort=%s — FAIL-CLOSED, skipping stage: %s",
+                                ticker, cohort_id, _ce,
+                            )
+                            raise rc.SymbolCooldownActive(cohort_id, ticker) from _ce
+
                     ticket = _suggestion_to_ticket(s)
                     order_id = _stage_order_internal(
                         supabase, analytics, user_id, ticket,
@@ -707,6 +762,12 @@ class PaperAutopilotService:
                         "processed": proc.get("processed", 0),
                     })
                     total_processed += proc.get("processed", 0)
+                except rc.SymbolCooldownActive:
+                    # Benched by an active re-entry cooldown (or a fail-closed
+                    # query error) — an expected, ENFORCED skip, already logged
+                    # loudly at the gate. NOT an execution failure; don't
+                    # pollute the failure aggregation.
+                    continue
                 except Exception as e:
                     logger.error(f"policy_lab_execute_error: cohort={cohort_name} ticker={ticker} error={e}")
                     all_errors.append({"cohort": cohort_name, "suggestion_id": sid, "error": str(e)})

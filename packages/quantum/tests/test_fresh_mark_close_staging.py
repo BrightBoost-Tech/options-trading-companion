@@ -218,7 +218,7 @@ def _force_close_supabase():
     return sb
 
 
-def _run_force_close(fresh_mark):
+def _run_force_close(fresh_mark, reason="per_symbol_loss"):
     from packages.quantum.jobs.handlers.intraday_risk_monitor import IntradayRiskMonitor
 
     monitor = IntradayRiskMonitor.__new__(IntradayRiskMonitor)
@@ -242,7 +242,7 @@ def _run_force_close(fresh_mark):
         "packages.quantum.services.paper_exit_evaluator.PaperExitEvaluator",
         FakeEvaluator,
     ):
-        ok = monitor._execute_force_close(position, "per_symbol_loss", USER_ID)
+        ok = monitor._execute_force_close(position, reason, USER_ID)
     return ok, captured
 
 
@@ -259,6 +259,81 @@ class TestForceClosePassthrough:
             ok, kwargs = _run_force_close(fresh_mark=bad)
             assert ok is True, f"close must still run for mark={bad!r}"
             assert kwargs["exit_price_override"] is None, f"mark={bad!r}"
+
+
+# ── Layer-1 exit mark-sanity gate: OBSERVE-ONLY at the call site ────────────
+# The gate hook lives in _execute_force_close. These prove the exit is
+# byte-identical whether the observe flag is on or off, that the gate only
+# fires for the two mark-derived reasons, and that a gate exception can NEVER
+# stop the close (the FAIL-SAFE invariant). The verdict-logic tests live in
+# test_exit_mark_corroboration.py.
+class TestExitMarkSanityCallSite:
+    def _close_kwargs(self, reason, flag, gate_side_effect=None):
+        captured = {}
+        env = {"EXIT_MARK_SANITY_OBSERVE_ENABLED": flag} if flag is not None else {}
+        observe_calls = []
+
+        def _fake_observe(*a, **k):
+            observe_calls.append(k)
+            if gate_side_effect:
+                raise gate_side_effect
+
+        from packages.quantum.jobs.handlers.intraday_risk_monitor import IntradayRiskMonitor
+        monitor = IntradayRiskMonitor.__new__(IntradayRiskMonitor)
+        monitor.supabase = _force_close_supabase()
+        monitor._log_alert = MagicMock()
+        position = _position()
+        position["current_mark"] = 2.40
+
+        class FakeEvaluator:
+            def __init__(self, supabase):
+                pass
+
+            def _close_position(self, **kwargs):
+                captured.update(kwargs)
+                return {"order_id": "close-1", "routed_to": "alpaca"}
+
+        with patch.dict(os.environ, env, clear=False):
+            if flag is None:
+                os.environ.pop("EXIT_MARK_SANITY_OBSERVE_ENABLED", None)
+            with patch(
+                "packages.quantum.services.paper_exit_evaluator.PaperExitEvaluator",
+                FakeEvaluator,
+            ), patch(
+                "packages.quantum.analytics.exit_mark_corroboration.observe_exit_mark",
+                _fake_observe,
+            ):
+                ok = monitor._execute_force_close(position, reason, USER_ID)
+        return ok, captured, observe_calls
+
+    def test_flag_on_off_byte_identical_exit(self):
+        """The staged close (exit_price_override) is identical on vs off."""
+        _, off, off_calls = self._close_kwargs("intraday_target_profit", flag=None)
+        _, on, on_calls = self._close_kwargs("intraday_target_profit", flag="1")
+        assert off["exit_price_override"] == on["exit_price_override"] == pytest.approx(2.40)
+        assert off["reason"] == on["reason"]  # same close routing
+        assert len(off_calls) == 0 and len(on_calls) == 1  # only the observe differs
+
+    def test_gate_fires_only_for_mark_derived_reasons(self):
+        for reason, expect in [
+            ("intraday_target_profit", 1),
+            ("intraday_stop_loss", 1),
+            ("intraday_expiration_day", 0),   # date-derived → not logged
+            ("per_symbol_loss", 0),           # envelope (5b) → not logged here
+        ]:
+            ok, _, calls = self._close_kwargs(reason, flag="1")
+            assert ok is True
+            assert len(calls) == expect, reason
+
+    def test_gate_exception_never_stops_the_exit(self):
+        """FAIL-SAFE: inject a gate exception → the close STILL fires."""
+        ok, kwargs, calls = self._close_kwargs(
+            "intraday_target_profit", flag="1",
+            gate_side_effect=RuntimeError("gate boom"),
+        )
+        assert ok is True
+        assert kwargs["exit_price_override"] == pytest.approx(2.40)  # exit unchanged
+        assert len(calls) == 1  # the gate was attempted and threw — exit survived
 
 
 # ── Part B: the monitor persists its fresh marks (fail-soft) ───────────────

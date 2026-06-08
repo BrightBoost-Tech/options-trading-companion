@@ -3,6 +3,7 @@ import os
 from datetime import date, timedelta, datetime
 from typing import Dict, Any, List
 from packages.quantum.market_data import PolygonService
+from packages.quantum.security.config import is_production
 
 def get_next_earnings_date(symbol: str):
     """
@@ -149,13 +150,16 @@ def apply_slippage_guardrail(trade: Dict[str, Any], quote: Dict[str, float]) -> 
     trade: suggestion or candidate (unused in simple logic but kept for context)
     quote: bid/ask data {'bid': float, 'ask': float}
     """
-    app_env = os.getenv("APP_ENV", "development").lower()
-
     bid = quote.get("bid", 0.0) if isinstance(quote, dict) else 0.0
     ask = quote.get("ask", 0.0) if isinstance(quote, dict) else 0.0
 
     # Dev-mode override: if we have no real quote data, don't kill the trade.
-    if app_env == "development" and (bid == 0 or bid is None) and (ask == 0 or ask is None):
+    # Keyed off the CANONICAL production check, not a bare APP_ENV default
+    # (the 2026-06-08 class bug: the worker — where the scan/trade path runs —
+    # sets RAILWAY_ENVIRONMENT=production but NOT APP_ENV, so this leniency
+    # fired in PRODUCTION, waving a no-quote trade through with no slippage
+    # penalty instead of rejecting it). In production a missing quote → reject.
+    if (not is_production()) and (bid == 0 or bid is None) and (ask == 0 or ask is None):
         return 1.0
 
     # STRICT: Reject if bid or ask is missing/zero

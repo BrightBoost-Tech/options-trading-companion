@@ -42,9 +42,37 @@ TRADING_ENV_VARS = [
 # Environment Detection
 # =============================================================================
 
+def is_production() -> bool:
+    """Canonical deployment-environment check (H13 single source of truth).
+
+    Recognizes production from EITHER the app-level signal (APP_ENV) OR the
+    platform signal (RAILWAY_ENVIRONMENT_NAME / RAILWAY_ENVIRONMENT). This
+    closes the 2026-06-08 class bug: the Railway WORKER service sets
+    RAILWAY_ENVIRONMENT(_NAME)=production but NOT APP_ENV, so every gate keyed
+    off a bare `APP_ENV == 'production'` mis-detected the worker as dev — e.g.
+    the scanner's SCANNER_LIMIT_DEV=40 truncation and the slippage guardrail's
+    dev-leniency both fired in production. (The BE service DOES set
+    APP_ENV=production, so its consumers were already correct — this is a
+    strict superset, never weaker.)
+    """
+    if os.getenv("APP_ENV") == "production":
+        return True
+    if os.getenv("RAILWAY_ENVIRONMENT_NAME") == "production":
+        return True
+    if os.getenv("RAILWAY_ENVIRONMENT") == "production":
+        return True
+    return False
+
+
 def is_production_env() -> bool:
-    """Check if we're running in production environment."""
-    return os.getenv("APP_ENV") == "production"
+    """Check if we're running in production environment.
+
+    Delegates to the canonical is_production() (H13). Behavior is unchanged on
+    the BE service (APP_ENV=production already → True); it additionally becomes
+    correct on the worker (platform signal). All current consumers run on the
+    BE, so this delegation is a no-op for them and a correctness fix elsewhere.
+    """
+    return is_production()
 
 
 def is_dev_bypass_enabled() -> bool:

@@ -499,7 +499,21 @@ class IntradayRiskMonitor:
             # diverge. The CSX 4-contract BUG-A shape is prevented at the fill
             # seam (assertion+coercion) and any per-spread row that still reached
             # here would be caught loudly by the #987 payoff-bound guard below.
-            current_value = compute_current_value(legs, _mid_for, pos.get("quantity"))
+            # NEVER FABRICATE (mirrors the #1034 gate fix): pass failed_legs so
+            # a leg that can't price makes compute_current_value all-or-nothing
+            # None — NOT a partial sum over only the priceable legs. The
+            # partial-sum was the 2026-06-08 phantom ROOT: at the open one NFLX
+            # leg quoted 0.0, was silently DROPPED, and the surviving leg's
+            # value finalized to a fabricated +$325 mark the spread never held
+            # (real achievable ~−$36) → target_profit fired on a phantom. The
+            # else-branch comment below long CLAIMED an all-or-nothing
+            # short-circuit but, without failed_legs, never delivered it (the
+            # None path only fired when EVERY leg was unpriceable). Now any one
+            # dead leg → None → the unpriceable path.
+            _failed_legs: List[str] = []
+            current_value = compute_current_value(
+                legs, _mid_for, pos.get("quantity"), failed_legs=_failed_legs
+            )
 
             if current_value is not None:
                 qty_signed = float(pos.get("quantity") or 0)
@@ -527,15 +541,21 @@ class IntradayRiskMonitor:
                     pos["unrealized_pl"] = _bound.clamped_value
                 refreshed_positions.append(pos)
             else:
-                # #2026-05-12 MTM-staleness PR-1: multi-leg recompute
-                # short-circuited due to at least one leg returning
-                # mid <= 0. Position retains its DB-stale unrealized_pl
-                # for the downstream threshold checks — record the skip
-                # so we alert after the loop.
+                # Multi-leg recompute short-circuited: at least one leg could
+                # not be priced this pass (failed_legs non-empty → all-or-
+                # nothing None, post the 2026-06-08 fix above). The position
+                # retains its DB-stale unrealized_pl, but we now FLAG it
+                # unpriceable so the exit-trigger collection refuses to act on
+                # a value it cannot corroborate this pass (target_profit never
+                # fires; stop_loss raises a loud degraded-protection alert
+                # instead of firing on a stale/fabricated mark). Recorded here +
+                # alerted loudly after the loop (mtm_refresh_partial).
+                pos["_mark_unpriceable"] = True
                 skipped_positions.append({
                     "position_id": pos.get("id"),
                     "symbol": pos.get("symbol"),
                     "leg_count": len([l for l in legs if isinstance(l, dict)]),
+                    "failed_legs": list(_failed_legs),
                     "stale_unrealized_pl": float(pos.get("unrealized_pl") or 0),
                 })
 
@@ -656,11 +676,64 @@ class IntradayRiskMonitor:
 
         exit_triggered = []
         for pos in positions:
+            # ASYMMETRIC fail-closed handling of an unpriceable mark (positions
+            # whose legs could not be priced this pass — flagged in
+            # _refresh_marks). A mark we can't corroborate must NOT drive a
+            # mark-derived exit (the 2026-06-08 phantom lesson):
+            #   • target_profit → NEVER fires (you cannot confirm a profit on a
+            #     position you cannot price; this kills the opening-transient
+            #     phantom at its source).
+            #   • stop_loss → does NOT act on the stale/uncorroborated value;
+            #     raises a LOUD H9 alert that protection is degraded this pass,
+            #     then relies on the next pass when quotes return. Strictly
+            #     better than acting on a fabricated mark that could MASK a real
+            #     loss behind a phantom profit.
+            #   • expiration_day → date-derived, UNAFFECTED (a calendar date is
+            #     real regardless of quotes).
+            # Stage-2 (NOT decided here): a robust unpriceable-stop policy —
+            # last-good mark / conservative bound / marketable protective close
+            # — would let stop_loss still protect without a live mark. Do not
+            # silently weaken the stop in the meantime; alert and retry.
+            unpriceable = bool(pos.get("_mark_unpriceable"))
+
             reason = evaluate_position_exit(pos, conditions=EXIT_CONDITIONS)
-            if reason and reason in ("stop_loss", "expiration_day"):
+
+            if reason == "expiration_day":
+                exit_triggered.append((pos, reason))
+                continue
+            if reason == "stop_loss":
+                if unpriceable:
+                    self._log_alert(
+                        user_id=user_id,
+                        alert_type="stop_loss_protection_degraded",
+                        severity="high",
+                        message=(
+                            f"stop_loss protection degraded for "
+                            f"{pos.get('symbol')}: position could not be priced "
+                            f"this pass (unmarkable leg quotes) — NOT acting on "
+                            f"the stale mark; will retry next pass when quotes "
+                            f"return"
+                        ),
+                        position_id=pos.get("id"),
+                        symbol=pos.get("symbol"),
+                        metadata={
+                            "stale_unrealized_pl": float(pos.get("unrealized_pl") or 0),
+                            "consequence": (
+                                "Per-position stop_loss not evaluated this pass "
+                                "(mark uncorroborated). Protection resumes next "
+                                "pass when leg quotes return. Stage-2: last-good "
+                                "/ conservative / marketable protective close."
+                            ),
+                            "doctrine_ref": "H9 loud-not-silent; never act on a "
+                                            "fabricated/uncorroborated mark",
+                        },
+                    )
+                    continue
                 exit_triggered.append((pos, reason))
                 continue  # stop/expiry take priority; a position can't also be at +target
-            if tp_active:
+
+            # target_profit — NEVER on an unpriceable mark.
+            if tp_active and not unpriceable:
                 try:
                     cohort = tp_evaluator._resolve_position_cohort(pos)
                     conds = tp_conditions_by_cohort.get(cohort) or EXIT_CONDITIONS

@@ -51,6 +51,14 @@ _ENFORCE_FORCE_CLOSE = os.environ.get("RISK_ENVELOPE_ENFORCE", "0") == "1"
 # ideally after observing one cycle correctly HOLD a below-target position.
 _INTRADAY_TARGET_PROFIT_ENABLED = os.environ.get("INTRADAY_TARGET_PROFIT_ENABLED", "0") == "1"
 
+# Layer-1 exit mark-sanity gate (OBSERVE-ONLY, default OFF). When on, a
+# mark-derived exit fire (target_profit / stop_loss) ALSO writes a
+# corroboration verdict comparing the triggering mark vs the achievable
+# close from live executable leg quotes — WITHOUT changing the exit. Read at
+# call time (not pinned here) so the observe module owns the lenient parse;
+# this constant is unused for gating and kept only for startup visibility.
+# See analytics.exit_mark_corroboration. No enforcement is built (Stage-2).
+
 # The market session, in the MARKET's timezone. Fallback for the broker-clock
 # gate (_is_market_open) when the clock API is unavailable. America/New_York,
 # 9:30-16:00 — NEVER Chicago numbers (the 2026-06-05 first-hour-blind bug was
@@ -763,6 +771,41 @@ class IntradayRiskMonitor:
                     f"{symbol} ({pos_id[:8]}) — close falls back to DB "
                     f"current_mark (mark={position.get('current_mark')!r})"
                 )
+
+            # ── Layer-1 exit mark-sanity gate — OBSERVE-ONLY ──────────────
+            # For mark-derived fires (target_profit / stop_loss) ONLY, record
+            # a corroboration verdict comparing the mark we're about to stage
+            # against the achievable close from live executable leg quotes.
+            # This writes a row and NOTHING ELSE — the close below is
+            # byte-identical whether the flag is on or off; no branch here
+            # reads the verdict. Triple-guarded fail-safe: the gate's flag
+            # check + its own internal wrapping + this try/except. A gate
+            # error can NEVER stop the exit (the 2026-06-08 phantom-mark
+            # learning loop; enforcement is a deferred Stage-2 decision).
+            _gate_exit_type = None
+            if reason == "intraday_target_profit":
+                _gate_exit_type = "target_profit"
+            elif reason == "intraday_stop_loss":
+                _gate_exit_type = "stop_loss"
+            if _gate_exit_type is not None:
+                try:
+                    from packages.quantum.analytics import exit_mark_corroboration as _emc
+                    if _emc.is_observe_enabled():
+                        _emc.observe_exit_mark(
+                            self.supabase,
+                            position=position,
+                            exit_type=_gate_exit_type,
+                            triggering_mark=_fresh_mark if _mark_ok else position.get("current_mark"),
+                            triggering_implied_pl=float(position.get("unrealized_pl") or 0),
+                            job_run_id=getattr(self, "job_run_id", None),
+                            user_id=user_id,
+                        )
+                except Exception as _gate_err:
+                    logger.warning(
+                        f"[RISK_MONITOR] exit mark-sanity observe failed "
+                        f"(non-fatal; exit proceeds): {_gate_err}"
+                    )
+
             result = evaluator._close_position(
                 user_id=user_id,
                 position_id=pos_id,

@@ -199,17 +199,30 @@ class TestReadChecks(unittest.TestCase):
         with self.assertRaises(rc.CooldownQueryError):
             rc.is_active(sb, LIVE, "NFLX")
 
-    def test_missing_table_fails_open_not_closed(self):
-        # Deploy window (migration not yet applied): a genuinely-missing table
-        # must fail-OPEN (no cooldowns exist) — not block every entry.
-        class _MissingTableSB:
+    def test_missing_table_code_fails_open(self):
+        # Deploy window (migration not yet applied / stale schema cache): a
+        # STRUCTURED UndefinedTable code fails OPEN — keyed on .code, NOT a
+        # message string.
+        for code in ("PGRST205", "42P01"):
+            class _MissingTableSB:
+                def table(self, name):
+                    e = RuntimeError("table missing")
+                    e.code = code  # structured code, as postgrest APIError exposes
+                    raise e
+            self.assertFalse(rc.is_active(_MissingTableSB(), LIVE, "NFLX"), code)
+            self.assertEqual(
+                rc.active_symbols(_MissingTableSB(), LIVE, ["NFLX"]), set(), code)
+
+    def test_codeless_error_fails_closed_not_open(self):
+        # An error WITHOUT an UndefinedTable code (incl. one whose MESSAGE
+        # mentions the table) must fail CLOSED — no string-match fail-open.
+        class _StringySB:
             def table(self, name):
                 raise RuntimeError(
-                    "Could not find the table 'public.reentry_cooldowns' in the "
-                    "schema cache (PGRST205)"
+                    "could not find the table reentry_cooldowns in the schema cache"
                 )
-        self.assertFalse(rc.is_active(_MissingTableSB(), LIVE, "NFLX"))
-        self.assertEqual(rc.active_symbols(_MissingTableSB(), LIVE, ["NFLX"]), set())
+        with self.assertRaises(rc.CooldownQueryError):
+            rc.is_active(_StringySB(), LIVE, "NFLX")
 
     def test_active_symbols_subset(self):
         sb = _FakeSB(rows=[_cd_row(LIVE, "NFLX", _future()),

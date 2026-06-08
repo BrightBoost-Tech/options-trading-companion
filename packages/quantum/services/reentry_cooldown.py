@@ -57,20 +57,24 @@ class CooldownQueryError(Exception):
     as fail-CLOSED (skip staging) — never fail-open into a re-entry."""
 
 
-def _is_missing_table_error(e: Exception) -> bool:
-    """True if the error means `reentry_cooldowns` doesn't exist yet (migration
-    not applied). DISTINCT from a transient error: pre-migration there are no
-    cooldowns to enforce, and a fail-CLOSED block of EVERY entry during the
-    deploy window (worker recycles on merge before the migration lands) is a
-    far worse blast radius than the whipsaw. So a missing table fails OPEN with
-    a loud warning until the migration applies; transient errors fail closed."""
-    msg = str(e).lower()
-    return TABLE in msg and (
-        "does not exist" in msg
-        or "schema cache" in msg
-        or "could not find the table" in msg
-        or "pgrst205" in msg
-    )
+# Structured "table does not exist" error codes — the ONLY signal allowed to
+# trigger the deploy-window fail-open. PGRST205 = PostgREST's UndefinedTable
+# (supabase-py path: the table/schema-cache view doesn't have it yet); 42P01 =
+# the raw Postgres SQLSTATE (UndefinedTable). Keyed on the structured code, NOT
+# a message string and NOT a broad except — any error WITHOUT one of these
+# exact codes falls through to fail-CLOSED (CooldownQueryError).
+_MISSING_TABLE_CODES = frozenset({"PGRST205", "42P01"})
+
+
+def _missing_table_code(e: Exception) -> Optional[str]:
+    """The structured UndefinedTable code on `e`, or None. Checks the error's
+    `.code` (postgrest APIError) / `.pgcode` / `.sqlstate` attributes only —
+    never the message text."""
+    for attr in ("code", "pgcode", "sqlstate"):
+        code = getattr(e, attr, None)
+        if code in _MISSING_TABLE_CODES:
+            return code
+    return None
 
 
 def is_enabled() -> bool:
@@ -166,11 +170,13 @@ def is_active(supabase, cohort_id: Optional[str], symbol: str) -> bool:
         )
         return bool(getattr(res, "data", None))
     except Exception as e:
-        if _is_missing_table_error(e):
+        _code = _missing_table_code(e)
+        if _code is not None:
             logger.warning(
-                "[REENTRY_COOLDOWN] table %s missing (migration not applied?) — "
-                "fail-OPEN (no cooldowns pre-migration): cohort=%s symbol=%s",
-                TABLE, cohort_id, symbol,
+                "[REENTRY_COOLDOWN] table %s missing (code=%s; migration not "
+                "applied / schema cache stale) — fail-OPEN (no cooldowns "
+                "pre-migration): cohort=%s symbol=%s",
+                TABLE, _code, cohort_id, symbol,
             )
             return False
         logger.error(
@@ -273,10 +279,11 @@ def active_symbols(supabase, cohort_id: Optional[str], symbols: List[str]) -> se
         )
         return {r["symbol"] for r in (getattr(res, "data", None) or [])}
     except Exception as e:
-        if _is_missing_table_error(e):
+        _code = _missing_table_code(e)
+        if _code is not None:
             logger.warning(
-                "[REENTRY_COOLDOWN] table %s missing (migration not applied?) — "
-                "fail-OPEN (no cooldowns pre-migration): cohort=%s", TABLE, cohort_id,
+                "[REENTRY_COOLDOWN] table %s missing (code=%s) — fail-OPEN "
+                "(no cooldowns pre-migration): cohort=%s", TABLE, _code, cohort_id,
             )
             return set()
         logger.error(

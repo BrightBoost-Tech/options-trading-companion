@@ -38,10 +38,10 @@ def compute_current_value(
     pos_quantity: Any,
     multiplier: float = MULTIPLIER,
     failed_legs: Optional[List[str]] = None,
+    allow_partial: bool = False,
 ) -> Optional[float]:
     """Signed total current market value across ALL contracts of a multi-leg
-    position, or None if any priceable leg lacks a usable mid (all-or-nothing,
-    matching the pre-existing readers' contract).
+    position, or None if any priceable leg lacks a usable mid.
 
     Full-count: each leg's `quantity` IS the contract count. `pos_quantity` is
     the fallback when a leg omits `quantity` (legacy rows). `side_mult` is +1 for
@@ -50,12 +50,24 @@ def compute_current_value(
 
     `failed_legs`, when provided, is appended with the OCC symbols that could not
     be priced (preserves the readers' per-leg failure observability).
+
+    FAIL-CLOSED BY DEFAULT (2026-06-08, the never-fabricate bug-class fix): if
+    ANY priceable leg lacks a usable mid, returns None — never a silent partial
+    sum over only the legs that quoted. The old default silently partial-summed
+    unless the caller passed `failed_legs` AND checked it; the one caller that
+    forgot (intraday_risk_monitor._refresh_marks) produced the 2026-06-08
+    phantom-mark fire (a dropped leg inflated a spread to a fabricated +$325).
+    Making the safe behavior the DEFAULT closes the footgun for every future
+    caller. A caller that genuinely wants best-effort must opt in explicitly
+    with `allow_partial=True`. (All current callers already pass `failed_legs`
+    and treat its non-emptiness as None — this flip is byte-identical for them.)
     """
     legs = legs or []
     if not legs:
         return None
     leg_values: List[float] = []
     priceable = 0
+    any_failed = False
     for leg in legs:
         if not isinstance(leg, dict):
             continue
@@ -65,6 +77,7 @@ def compute_current_value(
         priceable += 1
         mid = mid_for(occ)
         if mid is None or mid <= 0:
+            any_failed = True
             if failed_legs is not None:
                 failed_legs.append(occ)
             continue
@@ -75,8 +88,9 @@ def compute_current_value(
 
     if priceable == 0:
         return None
-    if failed_legs:
-        # At least one priceable leg could not be priced → all-or-nothing None.
+    if any_failed and not allow_partial:
+        # At least one priceable leg could not be priced → fail-closed None
+        # (never a fabricated partial). Opt into best-effort via allow_partial.
         return None
     return sum(leg_values)
 

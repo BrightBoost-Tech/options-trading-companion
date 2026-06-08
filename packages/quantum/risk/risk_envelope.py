@@ -134,6 +134,14 @@ class EnvelopeCheckResult:
     stress_results: Dict[str, float] = field(default_factory=dict)
     loss_status: Dict[str, float] = field(default_factory=dict)
 
+    # Positions whose per-symbol loss could NOT be evaluated this pass because
+    # their mark was unpriceable (legs couldn't price → _mark_unpriceable, set
+    # by intraday_risk_monitor._refresh_marks). These are NEITHER force-closed
+    # on a stale/uncorroborated value NOR silently skipped — the caller raises
+    # a loud degraded-protection alert and retries next pass (#1035 asymmetric
+    # mark policy, extended to the loss_per_symbol envelope).
+    degraded_per_symbol: List[Dict[str, Any]] = field(default_factory=list)
+
     def add_violation(self, v: EnvelopeViolation) -> None:
         self.violations.append(v)
         if v.severity in ("block", "force_close"):
@@ -149,6 +157,7 @@ class EnvelopeCheckResult:
             "concentration": {k: round(v, 4) for k, v in self.concentration.items()},
             "stress_results": {k: round(v, 4) for k, v in self.stress_results.items()},
             "loss_status": {k: round(v, 4) for k, v in self.loss_status.items()},
+            "degraded_per_symbol": self.degraded_per_symbol,
         }
 
 
@@ -346,8 +355,16 @@ def check_loss_envelopes(
     weekly_pnl: float,
     positions: List[Dict],
     config: EnvelopeConfig,
+    degraded_out: Optional[List[Dict]] = None,
 ) -> tuple:
-    """Check daily/weekly/per-symbol loss limits."""
+    """Check daily/weekly/per-symbol loss limits.
+
+    `degraded_out` (optional out-param, backward-compatible): when provided,
+    positions whose mark was unpriceable this pass (``_mark_unpriceable``) are
+    appended here and SKIPPED from the per-symbol loss decision — never
+    force-closed on a stale/uncorroborated value, never silently treated as
+    no-breach. The caller raises the loud degraded alert (#1035 policy).
+    """
     violations = []
     force_close_ids = []
     loss_status = {}
@@ -399,6 +416,21 @@ def check_loss_envelopes(
     # Per-symbol loss
     symbol_max_loss = equity * config.max_per_symbol_loss_pct
     for pos in positions:
+        # Fail-closed (#1035 asymmetric mark policy): a position we could not
+        # price this pass must NOT have its per-symbol loss decided on a stale
+        # value (act-on-stale) and must NOT be coerced to 0=no-breach by the
+        # _pos_field `or 0` default (silent skip of protection). Record it as
+        # degraded so the caller alerts loudly + retries next pass; do not
+        # force-close on a value we can't trust. (Stage-2 robust policy:
+        # last-good / conservative / marketable protective close.)
+        if _pos_field(pos, "_mark_unpriceable", False):
+            if degraded_out is not None:
+                degraded_out.append({
+                    "position_id": _pos_field(pos, "id", "unknown"),
+                    "symbol": _pos_field(pos, "symbol", "?"),
+                    "stale_unrealized_pl": float(_pos_field(pos, "unrealized_pl", 0)),
+                })
+            continue
         unrealized = float(_pos_field(pos, "unrealized_pl", 0))
         if unrealized < -symbol_max_loss:
             pos_id = _pos_field(pos, "id", "unknown")
@@ -531,7 +563,8 @@ def check_all_envelopes(
 
     # 3. Loss envelopes
     loss_violations, force_close_ids, loss_status = check_loss_envelopes(
-        equity, daily_pnl, weekly_pnl, positions, config
+        equity, daily_pnl, weekly_pnl, positions, config,
+        degraded_out=result.degraded_per_symbol,
     )
     result.loss_status = loss_status
     result.force_close_ids = force_close_ids

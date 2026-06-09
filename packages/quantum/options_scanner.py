@@ -63,6 +63,25 @@ def _get_micro_tier_spread_threshold() -> float:
     except (TypeError, ValueError):
         return 0.30
 
+def _get_price_class_spread_cutoff() -> float:
+    """Underlying price below which the loosened (micro-class) spread
+    threshold applies regardless of account tier. The wider threshold's
+    in-code rationale has always been PRICE-CLASS physics — per-leg bid-ask
+    is fixed in dollars while premiums scale with underlying price — but the
+    carve-out was keyed to account_tier=='micro', so when deployable capital
+    crossed the $1,000 micro→small cliff (2026-05-19→20, $681→$1,031) the
+    gate silently tightened 0.30→0.10 across the whole universe: ADDING
+    capital tightened the entry funnel 3x and killed the sub-$60 class that
+    produced 3 of the account's 5 live fills (audit Area 6, ~250 would-pass
+    rejections in 11 trading days). Re-keying by price restores the original
+    effective behavior — in the micro era the 0.30 threshold de facto
+    applied only to sub-$50 names (the micro universe filter capped price)
+    — without loosening mega-caps."""
+    try:
+        return float(os.getenv("PRICE_CLASS_SPREAD_CUTOFF", "60.0"))
+    except (TypeError, ValueError):
+        return 60.0
+
 def _get_surface_v4_strike_range() -> float:
     """Get Surface V4 strike range as fraction of spot (default 0.20 = ±20%)."""
     return float(os.getenv("SURFACE_V4_STRIKE_RANGE", "0.20"))
@@ -2851,15 +2870,22 @@ def scan_for_opportunities(
                 RegimeState.REBOUND: 0.12,
             }
             threshold = _SPREAD_THRESHOLDS.get(global_snapshot.state, 0.10)
-            # For micro tier, sub-$60 underlyings produce structurally wider
-            # combo bid-ask ratios because per-leg bid-ask is fixed in dollars
-            # while premiums scale with underlying price. The regime-keyed
+            # Sub-$60 underlyings produce structurally wider combo bid-ask
+            # ratios because per-leg bid-ask is fixed in dollars while
+            # premiums scale with underlying price. The regime-keyed
             # threshold (10-20%) is calibrated for mega-caps; cheap names need
             # ~30% to capture liquid candidates like BAC at 13.6% without
             # opening to truly thin markets at 50%+.
+            # Keyed by PRICE CLASS (the physics above), with micro tier kept
+            # for compatibility — keying by tier alone silently tightened the
+            # gate 3x when capital crossed the $1,000 cliff on 2026-05-20
+            # (see _get_price_class_spread_cutoff).
             # Uses max() to preserve regime loosening: if SUPPRESSED gives 20%
-            # and micro override gives 30%, micro stays at 30%.
-            if account_tier == "micro":
+            # and the class override gives 30%, the class override wins.
+            if account_tier == "micro" or (
+                current_price is not None
+                and float(current_price) < _get_price_class_spread_cutoff()
+            ):
                 threshold = max(threshold, _get_micro_tier_spread_threshold())
 
             # Note: We NO LONGER reject here based on underlying spread.

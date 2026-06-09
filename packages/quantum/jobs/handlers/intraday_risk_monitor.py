@@ -51,6 +51,25 @@ _ENFORCE_FORCE_CLOSE = os.environ.get("RISK_ENVELOPE_ENFORCE", "0") == "1"
 # ideally after observing one cycle correctly HOLD a below-target position.
 _INTRADAY_TARGET_PROFIT_ENABLED = os.environ.get("INTRADAY_TARGET_PROFIT_ENABLED", "0") == "1"
 
+
+def _intraday_cohort_stop_enabled() -> bool:
+    """INTRADAY_COHORT_STOP_ENABLED — default ON (empty/unset → ON; only an
+    explicit 0/false/no/off disables — the #1038 convention). When on, the
+    15-min monitor evaluates STOP-LOSS against the position's COHORT
+    conditions (sl 0.15/0.20/0.30) instead of the global default (flat 0.50
+    of entry_cost). Audit Area 7 (2026-06-09): cohort configs were loaded
+    only inside the target_profit flag gate and used only for TP, so the
+    binding cohort stops were checked just 2-3x/day by the scheduled sweeps
+    (one of them pre-open at stale marks) — losers rode 94-143h while
+    winners exited in 22-72h at <=15-min TP latency; the 06-08 shadow NFLX
+    stops closed $211.80 past their configured thresholds at the Monday
+    13:00Z sweep. Fail-safe is the legacy default conditions (looser stop —
+    fires later, never wrongly). Read at call time for testability."""
+    raw = os.environ.get("INTRADAY_COHORT_STOP_ENABLED", "")
+    if not raw.strip():
+        return True
+    return raw.strip().lower() not in ("0", "false", "no", "off")
+
 # Layer-1 exit mark-sanity gate (OBSERVE-ONLY, default OFF). When on, a
 # mark-derived exit fire (target_profit / stop_loss) ALSO writes a
 # corroboration verdict comparing the triggering mark vs the achievable
@@ -178,8 +197,13 @@ class IntradayRiskMonitor:
         #     "BAC 100% of risk" 15-min alerts; twin of the #1011 dedup
         #     contamination). Per-position exit triggers (5a, below) still run
         #     over the FULL managed set, so shadow cohorts keep their own
-        #     stop/target/expiration exits — this scopes the live-CAPITAL
-        #     aggregate only, it does not blind any cohort to its own exits.
+        #     target/expiration exits AND (post audit-Area-7) their own
+        #     cohort-resolved stop_loss — before INTRADAY_COHORT_STOP_ENABLED
+        #     this comment overclaimed: stops were evaluated at the global
+        #     default 0.50, not the cohort values. This scopes the
+        #     live-CAPITAL aggregate only; it does not blind any cohort to
+        #     its own exits. NOTE: shadow books have no envelope backstop by
+        #     design — the cohort stop IS their loss protection.
         try:
             from packages.quantum.risk.position_scope import live_routed_portfolio_ids
             _live_ids = set(live_routed_portfolio_ids(self.supabase, user_id))
@@ -716,19 +740,24 @@ class IntradayRiskMonitor:
     def _collect_intraday_exit_triggers(self, positions: List[Dict], user_id: str) -> List:
         """Collect position-level intraday exit triggers as (position, reason) pairs.
 
-        - stop_loss / expiration_day: evaluated on the default EXIT_CONDITIONS via
-          the shared evaluate_position_exit — UNCHANGED existing behavior.
+        - stop_loss (INTRADAY_COHORT_STOP_ENABLED, default ON): evaluated against
+          the position's COHORT conditions at monitor cadence — the same
+          build_exit_conditions the scheduled evaluator uses (H13: no parallel
+          decision logic). Before audit Area 7 the cohort build lived inside the
+          target_profit flag gate and only TP consumed it, so stops ran at the
+          global default (flat 0.50 of entry_cost) and the binding cohort stops
+          (0.15/0.20/0.30) were checked only 2-3x/day by the scheduled sweeps.
+          Flag off / load failure → legacy default conditions (a LOOSER stop —
+          the fail-safe can only delay a stop to today's behavior, never fire
+          a wrong one).
+        - expiration_day: date-derived, identical under either condition set.
         - target_profit (flag-gated, _INTRADAY_TARGET_PROFIT_ENABLED): the profit-
-          side mirror. Uses the SAME per-cohort _check_target_profit (inside the
-          cohort's build_exit_conditions check) — no parallel decision logic (H13).
-          Marks are the post-#3 unified full-count values (risk.mark_math), so the
-          threshold is evaluated against correct unrealized_pl (not the old
-          double-count). Reuses load_cohort_configs / build_exit_conditions /
-          _resolve_position_cohort — the same machinery the scheduled evaluator uses.
+          side mirror, cohort-resolved as before. Marks are the post-#3 unified
+          full-count values (risk.mark_math).
 
         Fail-safe: if per-cohort params can't be resolved, target_profit is NOT
         acted on (better to wait for the scheduled run than act on a wrong
-        threshold). stop_loss/expiration are unaffected by that fail-safe.
+        threshold) and stop_loss falls back to the default conditions.
         """
         from packages.quantum.services.paper_exit_evaluator import (
             evaluate_position_exit,
@@ -738,24 +767,28 @@ class IntradayRiskMonitor:
         )
 
         tp_active = _INTRADAY_TARGET_PROFIT_ENABLED
-        tp_conditions_by_cohort: Dict[str, Any] = {}
-        tp_evaluator = None
-        if tp_active:
+        cohort_stop_active = _intraday_cohort_stop_enabled()
+        cohort_conditions: Dict[str, Any] = {}
+        cohort_evaluator = None
+        if tp_active or cohort_stop_active:
             try:
                 from packages.quantum.policy_lab.config import load_cohort_configs
-                tp_evaluator = PaperExitEvaluator(self.supabase)
+                cohort_evaluator = PaperExitEvaluator(self.supabase)
                 for _cn, _cfg in (load_cohort_configs(user_id, self.supabase) or {}).items():
-                    tp_conditions_by_cohort[_cn] = build_exit_conditions(
+                    cohort_conditions[_cn] = build_exit_conditions(
                         target_profit_pct=_cfg.target_profit_pct,
                         stop_loss_pct=_cfg.stop_loss_pct,
                         min_dte_to_exit=_cfg.min_dte_to_exit,
                     )
             except Exception as e:
                 logger.warning(
-                    f"[RISK_MONITOR] intraday target_profit cohort load failed "
-                    f"(non-fatal; target_profit not acted on this cycle): {e}"
+                    f"[RISK_MONITOR] intraday cohort-conditions load failed "
+                    f"(non-fatal; target_profit not acted on this cycle, "
+                    f"stop_loss falls back to default conditions): {e}"
                 )
                 tp_active = False
+                cohort_conditions = {}
+                cohort_evaluator = None
 
         exit_triggered = []
         for pos in positions:
@@ -779,7 +812,24 @@ class IntradayRiskMonitor:
             # silently weaken the stop in the meantime; alert and retry.
             unpriceable = bool(pos.get("_mark_unpriceable"))
 
-            reason = evaluate_position_exit(pos, conditions=EXIT_CONDITIONS)
+            # Resolve this position's cohort conditions ONCE — consumed by
+            # both the stop evaluation (when cohort_stop_active) and the
+            # target_profit branch below. Resolution failure → default
+            # conditions (looser stop = today's behavior; never a misfire).
+            conds = EXIT_CONDITIONS
+            if cohort_conditions and cohort_evaluator is not None:
+                try:
+                    _cohort = cohort_evaluator._resolve_position_cohort(pos)
+                    conds = cohort_conditions.get(_cohort) or EXIT_CONDITIONS
+                except Exception as e:
+                    logger.warning(
+                        f"[RISK_MONITOR] cohort resolution failed for "
+                        f"{pos.get('id')} (default conditions this pass): {e}"
+                    )
+                    conds = EXIT_CONDITIONS
+
+            stop_conds = conds if cohort_stop_active else EXIT_CONDITIONS
+            reason = evaluate_position_exit(pos, conditions=stop_conds)
 
             if reason == "expiration_day":
                 exit_triggered.append((pos, reason))
@@ -815,11 +865,10 @@ class IntradayRiskMonitor:
                 exit_triggered.append((pos, reason))
                 continue  # stop/expiry take priority; a position can't also be at +target
 
-            # target_profit — NEVER on an unpriceable mark.
+            # target_profit — NEVER on an unpriceable mark. Uses the SAME
+            # cohort conditions resolved above (one resolution per position).
             if tp_active and not unpriceable:
                 try:
-                    cohort = tp_evaluator._resolve_position_cohort(pos)
-                    conds = tp_conditions_by_cohort.get(cohort) or EXIT_CONDITIONS
                     if conds["target_profit"]["check"](pos):
                         exit_triggered.append((pos, "target_profit"))
                 except Exception as e:

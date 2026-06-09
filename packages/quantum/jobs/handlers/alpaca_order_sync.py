@@ -158,60 +158,73 @@ def run(payload: Dict[str, Any], ctx: Any = None) -> Dict[str, Any]:
             try:
                 from packages.quantum.brokers.alpaca_order_handler import _close_position_on_fill
 
-                # Find filled orders with position_id set
-                stuck_query = client.table("paper_orders") \
-                    .select("id, position_id, side, alpaca_order_id, filled_qty, avg_fill_price, filled_at, broker_response, order_json") \
-                    .eq("status", "filled") \
-                    .not_.is_("position_id", "null") \
-                    .gt("filled_qty", 0)
-                # Paper-shadow isolation (1b safety completion, additive, no-op
-                # when off): exclude paper_shadow (and shadow_only) from
-                # stuck-open reconcile so the live sync never CLOSES the
-                # executor's positions. Guarded → unchanged query when empty.
-                if shadow_portfolio_ids:
-                    stuck_query = stuck_query.not_.in_("portfolio_id", shadow_portfolio_ids)
-                stuck_res = stuck_query.execute()
+                # Set-based reconcile (audit Area 5, 2026-06-09): the prior
+                # shape fetched EVERY historical filled order with a
+                # position_id (no date bound / no limit — 145 rows and
+                # growing +1 per close forever) and then issued one
+                # paper_positions "is it still open" query PER close-engine
+                # row (55/run) — ~59 serial round-trips every 5 minutes,
+                # ~52k queries/14d, all to confirm long-closed positions
+                # were still closed; the job's entire ~6.5s runtime floor.
+                # Scoping the stuck query to the OPEN position set inverts
+                # the complexity to O(open positions): membership in
+                # open_position_ids IS the "still open" check (identical
+                # read-then-act semantics — both versions read position
+                # state once within the same run).
+                open_pos_res = client.table("paper_positions") \
+                    .select("id") \
+                    .eq("status", "open") \
+                    .execute()
+                open_position_ids = [
+                    r["id"] for r in (open_pos_res.data or []) if r.get("id")
+                ]
 
-                for filled_order in (stuck_res.data or []):
-                    pid = filled_order.get("position_id")
-                    if not pid:
-                        continue
+                if open_position_ids:
+                    stuck_query = client.table("paper_orders") \
+                        .select("id, position_id, side, alpaca_order_id, filled_qty, avg_fill_price, filled_at, broker_response, order_json") \
+                        .eq("status", "filled") \
+                        .in_("position_id", open_position_ids) \
+                        .gt("filled_qty", 0)
+                    # Paper-shadow isolation (1b safety completion, additive,
+                    # no-op when off): exclude paper_shadow (and shadow_only)
+                    # from stuck-open reconcile so the live sync never CLOSES
+                    # the executor's positions. Guarded → unchanged query
+                    # when empty.
+                    if shadow_portfolio_ids:
+                        stuck_query = stuck_query.not_.in_("portfolio_id", shadow_portfolio_ids)
+                    stuck_res = stuck_query.execute()
 
-                    # ── Filter: only close orders ──────────────────────
-                    order_json = filled_order.get("order_json") or {}
-                    source_engine = order_json.get("source_engine") or ""
-                    if source_engine not in CLOSE_SOURCE_ENGINES:
-                        continue  # Entry order — do NOT close the position
+                    for filled_order in (stuck_res.data or []):
+                        pid = filled_order.get("position_id")
+                        if not pid:
+                            continue
 
-                    # Check if position is still open
-                    pos_check = client.table("paper_positions") \
-                        .select("id, status") \
-                        .eq("id", pid) \
-                        .eq("status", "open") \
-                        .execute()
-                    if not pos_check.data:
-                        continue  # Already closed
+                        # ── Filter: only close orders ──────────────────────
+                        order_json = filled_order.get("order_json") or {}
+                        source_engine = order_json.get("source_engine") or ""
+                        if source_engine not in CLOSE_SOURCE_ENGINES:
+                            continue  # Entry order — do NOT close the position
 
-                    # Build a minimal alpaca_order dict from stored data
-                    alpaca_data = filled_order.get("broker_response") or {}
-                    alpaca_data.setdefault("filled_avg_price", filled_order.get("avg_fill_price"))
-                    alpaca_data.setdefault("filled_qty", filled_order.get("filled_qty"))
-                    alpaca_data.setdefault("filled_at", filled_order.get("filled_at"))
+                        # Build a minimal alpaca_order dict from stored data
+                        alpaca_data = filled_order.get("broker_response") or {}
+                        alpaca_data.setdefault("filled_avg_price", filled_order.get("avg_fill_price"))
+                        alpaca_data.setdefault("filled_qty", filled_order.get("filled_qty"))
+                        alpaca_data.setdefault("filled_at", filled_order.get("filled_at"))
 
-                    try:
-                        _close_position_on_fill(
-                            client, pid, filled_order, alpaca_data,
-                        )
-                        stuck_open_closed += 1
-                        logger.warning(
-                            f"[ALPACA_SYNC] Reconciled stuck-open position {pid[:8]} "
-                            f"via filled close order {filled_order['id'][:8]} "
-                            f"(source_engine={source_engine})"
-                        )
-                    except Exception as recon_err:
-                        logger.error(
-                            f"[ALPACA_SYNC] Reconcile failed for position {pid[:8]}: {recon_err}"
-                        )
+                        try:
+                            _close_position_on_fill(
+                                client, pid, filled_order, alpaca_data,
+                            )
+                            stuck_open_closed += 1
+                            logger.warning(
+                                f"[ALPACA_SYNC] Reconciled stuck-open position {pid[:8]} "
+                                f"via filled close order {filled_order['id'][:8]} "
+                                f"(source_engine={source_engine})"
+                            )
+                        except Exception as recon_err:
+                            logger.error(
+                                f"[ALPACA_SYNC] Reconcile failed for position {pid[:8]}: {recon_err}"
+                            )
             except Exception as recon_outer_err:
                 logger.error(f"[ALPACA_SYNC] Reconciliation step failed: {recon_outer_err}")
 

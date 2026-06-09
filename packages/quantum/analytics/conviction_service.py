@@ -22,6 +22,41 @@ LEAKAGE_FLOOR = 1.0
 SHRINKAGE_CONST = 30.0
 Z_SCORE_THRESHOLD = 1.0
 
+# Log-once-per-process guard for the V3→legacy fallback (see
+# _log_v3_fallback_once). The fallback fires on every conviction call while the
+# V3 performance-summary source is absent, so the log is rate-limited.
+_V3_FALLBACK_LOGGED = False
+
+
+def _log_v3_fallback_once(error: Optional[Exception]) -> None:
+    """Log (once per process, WARNING+) that conviction dropped from the V3
+    performance-summary source to legacy (strategy, window) multipliers.
+
+    Fires on ANY drop-to-legacy — a missing / erroring source (``error`` set) OR
+    a present-but-empty result (``error`` is None). Replaces the prior bare
+    ``except … pass`` that silently hid the missing learning_performance_summary_v3
+    view (DOC≠BUILT / fail-loud doctrine: a missing PRIMARY source must not be
+    invisible). Control flow is unchanged — this only makes the fallback honest.
+    """
+    global _V3_FALLBACK_LOGGED
+    if _V3_FALLBACK_LOGGED:
+        return
+    _V3_FALLBACK_LOGGED = True
+    if error is not None:
+        logger.warning(
+            "[CONVICTION] V3 performance-summary source unavailable (%s: %s) — "
+            "falling back to legacy (strategy, window) multipliers. Live "
+            "conviction multipliers are DEGRADED until "
+            "learning_performance_summary_v3 is present.",
+            type(error).__name__, error,
+        )
+    else:
+        logger.warning(
+            "[CONVICTION] V3 performance-summary returned no rows — falling back "
+            "to legacy (strategy, window) multipliers (degraded conviction "
+            "signal).",
+        )
+
 
 @dataclass
 class PositionDescriptor:
@@ -242,6 +277,7 @@ class ConvictionService:
         v3_success = False
 
         # Attempt V3 Logic: Query learning_performance_summary_v3
+        v3_error: Optional[Exception] = None
         try:
             response = self.supabase.table("learning_performance_summary_v3")\
                 .select("*")\
@@ -253,13 +289,15 @@ class ConvictionService:
                 v3_success = True
                 multipliers = self._compute_v3_multipliers(rows)
         except Exception as e:
-            # If query fails (e.g. view missing), swallow error and fallback
-            # print(f"[ConvictionService] V3 View Query Failed: {e}")
-            pass
+            # Capture (do NOT swallow silently) — the missing/erroring source is
+            # logged on the drop-to-legacy below. Control flow unchanged.
+            v3_error = e
 
         if not v3_success:
-             # Fallback to legacy logic
-             multipliers = self._get_legacy_multipliers(user_id)
+            # Honesty: log on ANY drop-to-legacy (erroring OR empty source), not
+            # just the view-missing case. Still falls back to legacy logic.
+            _log_v3_fallback_once(v3_error)
+            multipliers = self._get_legacy_multipliers(user_id)
 
         return multipliers
 

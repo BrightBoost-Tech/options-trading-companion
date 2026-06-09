@@ -29,6 +29,10 @@ from packages.quantum.jobs.handlers.utils import get_admin_client, get_active_us
 from packages.quantum.jobs.handlers.exceptions import RetryableJobError, PermanentJobError
 from packages.quantum.jobs.handlers.outcome_normalizer import classify_outcome
 from packages.quantum.services.strategy_loader import load_strategy_config
+from packages.quantum.analytics.learning_read_filter import (
+    partition_trusted_rows,
+    REALIZED_TRADE_OUTCOME_TYPES,
+)
 from packages.quantum.config import ENABLE_PAPER_AUTOTUNE
 
 logger = logging.getLogger(__name__)
@@ -199,7 +203,16 @@ async def _evaluate_and_update(
         .gte("created_at", cutoff) \
         .execute()
 
-    outcomes = result.data or []
+    # Historical-mode quarantine: drop synthetic/aggregate rows
+    # (historical_win/historical_loss/aggregate) before they can drive a
+    # threshold mutation. Uses the REALIZED set (includes the live-ingest
+    # win/loss/breakeven convention, which autotune's classify_outcome consumes)
+    # so real live outcomes are kept while synthetic ones are excluded.
+    # Fail-closed allowlist; logs the excluded-row count.
+    outcomes = partition_trusted_rows(
+        result.data or [], reader="strategy_autotune",
+        allowed=REALIZED_TRADE_OUTCOME_TYPES,
+    )
 
     # Filter to outcomes with PnL data
     outcomes_with_pnl = [o for o in outcomes if o.get("pnl_realized") is not None]

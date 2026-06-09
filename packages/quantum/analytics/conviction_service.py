@@ -14,6 +14,7 @@ from .regime_integration import (
     DEFAULT_LIQUIDITY_SCALAR
 )
 from packages.quantum.observability.feature_flags import is_iv_rank_none_routing_enabled
+from packages.quantum.analytics.learning_read_filter import partition_trusted_rows
 
 logger = logging.getLogger(__name__)
 
@@ -403,7 +404,13 @@ class ConvictionService:
                 .eq("user_id", user_id)\
                 .execute()
 
-            rows = response.data or []
+            # Historical-mode quarantine: drop synthetic/aggregate rows
+            # (historical_win/historical_loss/aggregate) before they can feed a
+            # live conviction multiplier. Fail-closed allowlist; logs the
+            # excluded-row count. See analytics/learning_read_filter.py.
+            rows = partition_trusted_rows(
+                response.data or [], reader="conviction_legacy_multipliers"
+            )
             multiplier_map = {}
 
             for row in rows:

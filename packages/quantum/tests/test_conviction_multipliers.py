@@ -102,11 +102,18 @@ class TestConvictionMultipliers(unittest.TestCase):
     def test_fallback_to_legacy(self):
         """
         Verifies that if V3 table query fails (throws exception), we fall back to learning_feedback_loops.
+
+        Post historical-mode quarantine (analytics/learning_read_filter): the
+        legacy reader filters to the trusted outcome_type allowlist, so the
+        fixture carries outcome_type='trade_closed' (a trusted, non-synthetic
+        row). See test_fallback_excludes_synthetic_aggregate for the exclusion
+        side — a synthetic aggregate row (the historical shape) is dropped.
         """
         legacy_rows = [
              {
                 "strategy": "legacy_strat",
                 "window": "paper_trading",
+                "outcome_type": "trade_closed",
                 "total_trades": 10,
                 "avg_return": 0.5, # +0.5 -> 1.5
             }
@@ -129,6 +136,41 @@ class TestConvictionMultipliers(unittest.TestCase):
         # Verify we got legacy result
         self.assertIn(("legacy_strat", "paper_trading"), multipliers)
         self.assertAlmostEqual(multipliers[("legacy_strat", "paper_trading")], 1.5)
+
+    def test_fallback_excludes_synthetic_aggregate(self):
+        """Historical-mode quarantine: when the V3 source is missing and we fall
+        to the legacy reader, a synthetic aggregate row (outcome_type='aggregate',
+        the historical_cycle shape — total_trades>=5 so it WOULD otherwise build a
+        multiplier) is excluded by the fail-closed allowlist. This is the zero-
+        delta contamination removal: the only aggregate-shaped rows in production
+        are historical, and they no longer reach the legacy map."""
+        synthetic_rows = [
+            {
+                "strategy": "historical_cycle",
+                "window": "historical_sim",
+                "outcome_type": "aggregate",
+                "total_trades": 31,
+                "avg_return": 0.5,
+            }
+        ]
+
+        def side_effect(table_name):
+            mock_builder = MagicMock()
+            if table_name == "learning_performance_summary_v3":
+                mock_builder.select.return_value.eq.return_value.execute.side_effect = Exception("View not found")
+            elif table_name == "learning_feedback_loops":
+                mock_builder.select.return_value.eq.return_value.execute.side_effect = None
+                mock_builder.select.return_value.eq.return_value.execute.return_value = Mock(data=synthetic_rows)
+            return mock_builder
+
+        self.mock_supabase.table.side_effect = side_effect
+
+        multipliers = self.service._get_performance_multipliers(self.user_id)
+
+        self.assertEqual(
+            multipliers, {},
+            "synthetic aggregate row must be quarantined out of the legacy map",
+        )
 
     def test_adjust_suggestion_scores_keys(self):
         """

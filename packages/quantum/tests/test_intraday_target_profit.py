@@ -84,7 +84,12 @@ class TestPerCohortDecision(unittest.TestCase):
 
 class TestCollectIntradayExitTriggers(unittest.TestCase):
     def _run(self, position, flag_on, cohort_tp_pct=0.35):
-        cfg = PolicyConfig(target_profit_pct=cohort_tp_pct)
+        # stop_loss_pct pinned to the global default (0.50) so this file's
+        # stop assertions keep their original arithmetic now that the
+        # monitor evaluates stops COHORT-aware (INTRADAY_COHORT_STOP_ENABLED,
+        # audit Area 7). Cohort-stop behavior itself is pinned in
+        # test_intraday_cohort_stops.py.
+        cfg = PolicyConfig(target_profit_pct=cohort_tp_pct, stop_loss_pct=0.50)
         with patch.object(irm, "_INTRADAY_TARGET_PROFIT_ENABLED", flag_on), patch(
             "packages.quantum.policy_lab.config.load_cohort_configs",
             return_value={"aggressive": cfg},
@@ -119,8 +124,9 @@ class TestCollectIntradayExitTriggers(unittest.TestCase):
         self.assertEqual(out2[0][1], "target_profit")
 
     def test_stop_loss_unchanged_and_takes_priority(self):
-        # A position at a big loss fires stop_loss on the default conditions,
-        # regardless of the flag (existing behavior preserved).
+        # A position at a big loss fires stop_loss (cohort sl pinned = the
+        # 0.50 default above), regardless of the TP flag — priority and
+        # threshold arithmetic preserved from the pre-Area-7 behavior.
         loss_pos = _f_position(-300.0)
         out_on = self._run(loss_pos, flag_on=True)
         out_off = self._run(loss_pos, flag_on=False)

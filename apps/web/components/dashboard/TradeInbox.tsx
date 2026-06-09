@@ -12,6 +12,7 @@ import { Loader2, RefreshCw, ChevronDown, ChevronUp, AlertCircle, CheckCircle2, 
 import { useToast } from '@/components/ui/use-toast';
 import { QuantumTooltip } from '@/components/ui/QuantumTooltip';
 import { useInboxActions } from '@/hooks/useInboxActions';
+import { EmptyState } from '@/components/ui/empty-state';
 
 // --- Helpers ---
 const displaySymbol = (s: Suggestion | { symbol?: string, ticker?: string }) => s.symbol ?? s.ticker ?? "Symbol";
@@ -572,12 +573,12 @@ export default function TradeInbox() {
                         </div>
                     </div>
                 ) : (
-                    <Card className="border-dashed border-2 bg-muted/10">
-                        <CardContent className="py-10 text-center text-muted-foreground">
-                            <p>No high-priority suggestions right now.</p>
-                            <Button variant="link" onClick={() => { setLoading(true); fetchInbox(); }} className="mt-2">Check Again</Button>
-                        </CardContent>
-                    </Card>
+                    <EmptyState
+                        icon={Wand2}
+                        title="No high-priority suggestions"
+                        description="No actionable suggestions are available at this time."
+                        action={<Button variant="outline" onClick={() => { setLoading(true); fetchInbox(); }}>Check Again</Button>}
+                    />
                 )}
             </div>
 

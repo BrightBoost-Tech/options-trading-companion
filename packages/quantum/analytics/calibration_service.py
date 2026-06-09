@@ -6,8 +6,13 @@ learning_feedback_loops → trade_suggestions) and computes
 calibration metrics segmented by strategy, regime, DTE bucket,
 and other dimensions.
 
-Feature flag: CALIBRATION_ENABLED (default "0" — needs data to be useful)
-Minimum sample: MIN_CALIBRATION_TRADES (default 20)
+Feature flag: CALIBRATION_ENABLED (default "1")
+Minimum sample: MIN_CALIBRATION_TRADES (default 8)
+Staleness TTL: CALIBRATION_MAX_AGE_DAYS (default 10) — a cached adjustments
+blob older than this is NOT served (raw predictions are used, the documented
+fallback) and a `calibration_stale` risk_alert fires. Kill switch
+CALIBRATION_STALENESS_TTL_ENABLED (default ON; explicit 0/false/no/off
+disables — empty/unset is ON per the #1038 flag convention).
 """
 
 import logging
@@ -22,6 +27,29 @@ logger = logging.getLogger(__name__)
 
 CALIBRATION_ENABLED = os.environ.get("CALIBRATION_ENABLED", "1") == "1"
 MIN_CALIBRATION_TRADES = int(os.environ.get("MIN_CALIBRATION_TRADES", "8"))
+
+# Maximum age of a served adjustments blob. The 2026-05-15→06-09 incident:
+# the daily job silently no-opped for 25 days (insufficient_data below
+# MIN_CALIBRATION_TRADES) while get_calibration_adjustments kept serving the
+# frozen 05-15 blob — halving LONG_CALL EVs (two recorded edge_below_minimum
+# gate flips: F 05-19, AAL 05-22) while LONG_PUT shipped raw. Design cadence
+# is daily; 10 days of no writes means the loop is broken, not waiting.
+CALIBRATION_MAX_AGE_DAYS = float(os.environ.get("CALIBRATION_MAX_AGE_DAYS", "10"))
+
+
+def _staleness_ttl_enabled() -> bool:
+    """CALIBRATION_STALENESS_TTL_ENABLED — default ON. Empty/unset → ON
+    (the empty-string-no-op lesson); only explicit 0/false/no/off disables."""
+    raw = os.environ.get("CALIBRATION_STALENESS_TTL_ENABLED", "")
+    if not raw.strip():
+        return True
+    return raw.strip().lower() not in ("0", "false", "no", "off")
+
+
+# Reserved top-level key in the adjustments blob carrying the OVERALL
+# (all-segments) multipliers — the fallback for strategy keys with no
+# segment coverage. Underscore prefix cannot collide with strategy names.
+OVERALL_KEY = "_overall"
 
 # Hard floor excluding pre-2026-04-13 outcome rows whose `pnl_realized` values
 # are corrupted. Root cause: internal-paper-era and early Alpaca-paper era
@@ -152,6 +180,19 @@ class CalibrationService:
                         "ev_calibration_error": metrics["ev_calibration_error"],
                         "pop_calibration_error": metrics.get("pop_calibration_error"),
                     }
+
+        # Persist the OVERALL (all-segments) multipliers under the reserved
+        # top-level key so apply_calibration can fall back to them for a
+        # strategy with no segment coverage instead of a SILENT ×1.0 — the
+        # silent default let LONG_PUT_DEBIT_SPREAD ship raw EV/PoP for weeks
+        # while the frozen blob halved only LONG_CALL (H9 silent-default class).
+        overall_metrics = self._compute_segment_metrics(outcomes)
+        adjustments[OVERALL_KEY] = {
+            "ev_multiplier": round(self._compute_ev_multiplier(overall_metrics), 4),
+            "pop_multiplier": round(self._compute_pop_multiplier(overall_metrics), 4),
+            "sample_size": overall_metrics["sample_size"],
+            "ev_calibration_error": overall_metrics["ev_calibration_error"],
+        }
 
         return {
             "status": "ok",
@@ -350,28 +391,92 @@ class CalibrationService:
         return max(0.5, min(1.5, ratio))
 
 
+# Once-per-process-per-day guard so the staleness alert doesn't spam
+# risk_alerts on every suggestion cycle while the blob stays stale.
+_STALE_ALERTED_ON: Optional[str] = None
+
+
 def get_calibration_adjustments(
     user_id: str, supabase: Client
 ) -> Dict[str, Dict[str, Dict[str, float]]]:
     """
-    Convenience function: load cached adjustments from Supabase
-    or compute fresh if none cached.
+    Convenience function: load cached adjustments from Supabase.
 
-    Returns: {strategy: {regime: {ev_multiplier, pop_multiplier}}}
+    Returns {} when none are cached OR when the latest blob is older than
+    CALIBRATION_MAX_AGE_DAYS (the documented "raw predictions are used
+    as-is" fallback) — a stale blob is logged + alerted, never silently
+    served. Returns: {strategy: {regime: {ev_multiplier, pop_multiplier}}}
     """
+    global _STALE_ALERTED_ON
     try:
         result = (
             supabase.table("calibration_adjustments")
-            .select("adjustments")
+            .select("adjustments, computed_at")
             .eq("user_id", user_id)
             .order("computed_at", desc=True)
             .limit(1)
             .execute()
         )
-        if result.data:
-            return result.data[0].get("adjustments") or {}
-    except Exception:
-        pass  # Table may not exist yet — fall through to empty
+        if not result.data:
+            return {}
+
+        row = result.data[0]
+        computed_at_raw = row.get("computed_at")
+        if _staleness_ttl_enabled() and computed_at_raw:
+            try:
+                ts = str(computed_at_raw).replace("Z", "+00:00")
+                # Supabase may emit a space separator instead of 'T'
+                computed_at = datetime.fromisoformat(ts.replace(" ", "T", 1))
+                if computed_at.tzinfo is None:
+                    computed_at = computed_at.replace(tzinfo=timezone.utc)
+                age_days = (
+                    datetime.now(timezone.utc) - computed_at
+                ).total_seconds() / 86400.0
+            except (TypeError, ValueError):
+                age_days = None
+            if age_days is not None and age_days > CALIBRATION_MAX_AGE_DAYS:
+                logger.warning(
+                    "[CALIBRATION] cached adjustments are %.1f days old "
+                    "(> %.0f-day TTL, computed_at=%s) — serving NO adjustments "
+                    "(raw predictions) instead of a frozen blob.",
+                    age_days, CALIBRATION_MAX_AGE_DAYS, computed_at_raw,
+                )
+                today = datetime.now(timezone.utc).date().isoformat()
+                if _STALE_ALERTED_ON != today:
+                    _STALE_ALERTED_ON = today
+                    try:
+                        from packages.quantum.observability.alerts import alert
+                        alert(
+                            supabase,
+                            alert_type="calibration_stale",
+                            severity="warning",
+                            message=(
+                                f"calibration_adjustments is {age_days:.1f} days old "
+                                f"(TTL {CALIBRATION_MAX_AGE_DAYS:.0f}d) — raw predictions "
+                                f"in use; the daily calibration_update is not writing"
+                            ),
+                            user_id=user_id,
+                            metadata={
+                                "computed_at": str(computed_at_raw),
+                                "age_days": round(age_days, 1),
+                                "max_age_days": CALIBRATION_MAX_AGE_DAYS,
+                                "function_name": "get_calibration_adjustments",
+                            },
+                        )
+                    except Exception as alert_err:
+                        logger.warning(
+                            "[CALIBRATION] stale-alert write failed: %s", alert_err
+                        )
+                return {}
+
+        return row.get("adjustments") or {}
+    except Exception as e:
+        # Table may not exist yet (fresh installs) — fall through to empty,
+        # but never silently (the prior bare `except: pass` hid real errors).
+        logger.warning(
+            "[CALIBRATION] get_calibration_adjustments failed (serving no "
+            "adjustments): %s: %s", type(e).__name__, e,
+        )
 
     return {}
 
@@ -390,7 +495,10 @@ def apply_calibration(
     Lookup order:
     1. (strategy, regime, dte_bucket) — most specific
     2. (strategy, regime, "_all") — aggregate for that strategy/regime
-    3. 1.0 — no adjustment
+    3. "_overall" — the blob's all-segments multiplier (LOGGED fallback;
+       closes the silent-×1.0 hole that let an uncovered strategy ship raw
+       while covered strategies were halved)
+    4. 1.0 — no adjustment (only when the blob carries no overall either)
 
     Returns (adjusted_ev, adjusted_pop).
     Logs adjustment when applied.
@@ -411,6 +519,19 @@ def apply_calibration(
             bucket_adj = regime_adj.get(dte_bucket, {})
         if not bucket_adj:
             bucket_adj = regime_adj.get("_all", {})
+
+    if not bucket_adj and adjustments:
+        overall_adj = adjustments.get(OVERALL_KEY) or {}
+        if overall_adj:
+            bucket_adj = overall_adj
+            logger.info(
+                "[CALIBRATION] no segment coverage for %s/%s — using overall "
+                "multiplier (ev×%.3f, pop×%.3f, n=%s)",
+                strategy, regime,
+                overall_adj.get("ev_multiplier", 1.0),
+                overall_adj.get("pop_multiplier", 1.0),
+                overall_adj.get("sample_size"),
+            )
 
     ev_mult = bucket_adj.get("ev_multiplier", 1.0)
     pop_mult = bucket_adj.get("pop_multiplier", 1.0)

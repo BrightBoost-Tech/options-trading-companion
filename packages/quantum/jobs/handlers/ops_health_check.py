@@ -18,6 +18,7 @@ import logging
 from packages.quantum.services.ops_health_service import (
     compute_data_freshness,
     get_expected_jobs,
+    get_output_freshness,
     get_recent_failures,
     get_suggestions_stats,
     get_integrity_stats,
@@ -207,6 +208,56 @@ def run(payload: Dict[str, Any], ctx: Any = None) -> Dict[str, Any]:
                 issues_found.append(f"Job check error: {job.name}")
 
         # ==============================================================
+        # 2.5 Check feedback-loop OUTPUT freshness (job ran ≠ job wrote —
+        #     the distinction that hid the 25-day calibration freeze)
+        # ==============================================================
+        logger.info("[OPS_HEALTH_CHECK] Checking output freshness...")
+        output_freshness = get_output_freshness(client)
+
+        for out in output_freshness:
+            if out.status in ("stale", "never"):
+                issues_found.append(f"Output {out.status}: {out.table}")
+
+                fingerprint = get_alert_fingerprint(
+                    "output_stale", {"table": out.table}
+                )
+                suppressed, last_sent = should_suppress_alert(
+                    client, fingerprint, cooldown_minutes
+                )
+
+                if not suppressed:
+                    alert_result = send_ops_alert_v2(
+                        "output_stale",
+                        f"Feedback-loop output `{out.table}` is {out.status}: "
+                        f"newest row "
+                        f"{f'{out.age_hours:.0f}h old' if out.age_hours is not None else 'absent'} "
+                        f"(max {out.max_age_hours}h). The producing job may be "
+                        f"silently no-opping even if its job_runs are green.",
+                        details={
+                            "table": out.table,
+                            "status": out.status,
+                            "age_hours": out.age_hours,
+                            "max_age_hours": out.max_age_hours,
+                        },
+                        severity="error",
+                        min_severity=min_severity,
+                    )
+                    if alert_result["sent"]:
+                        alerts_sent.append(f"output_stale:{out.table}")
+                        alert_fingerprints.append(fingerprint)
+                    elif alert_result.get("suppressed_reason"):
+                        alerts_suppressed.append({
+                            "type": f"output_stale:{out.table}",
+                            "reason": alert_result["suppressed_reason"],
+                        })
+                else:
+                    alerts_suppressed.append({
+                        "type": f"output_stale:{out.table}",
+                        "reason": "cooldown",
+                        "last_sent": last_sent,
+                    })
+
+        # ==============================================================
         # 3. Check recent failures
         # ==============================================================
         logger.info("[OPS_HEALTH_CHECK] Checking recent failures...")
@@ -285,6 +336,16 @@ def run(payload: Dict[str, Any], ctx: Any = None) -> Dict[str, Any]:
                 ],
                 "failure_count_24h": len(recent_failures),
             },
+            "output_freshness": [
+                {
+                    "table": o.table,
+                    "status": o.status,
+                    "age_hours": o.age_hours,
+                    "max_age_hours": o.max_age_hours,
+                    "latest": o.latest.isoformat() if o.latest else None,
+                }
+                for o in output_freshness
+            ],
             "suggestions": suggestions_stats,
             "integrity": integrity_stats,
             "issues_found": issues_found,

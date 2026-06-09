@@ -41,6 +41,7 @@ ALERT_SEVERITY = {
     "health_unhealthy": "error",
     "job_late": "warning",
     "health_degraded": "warning",
+    "output_stale": "error",
 }
 
 # Expected jobs with their cadences
@@ -49,6 +50,21 @@ EXPECTED_JOBS = [
     ("suggestions_open", "daily"),
     ("learning_ingest", "daily"),
     ("daily_progression_eval", "daily"),
+]
+
+# Output-freshness registry: tables whose newest row proves a feedback loop
+# is actually WRITING, not merely that its job "succeeded". EXPECTED_JOBS
+# checks a job RAN; this checks its OUTPUT is FRESH — the distinction that
+# hid the 2026-05-15→06-09 calibration freeze (daily green job_runs with
+# users_updated=0 for 25 days). Entries: (table, timestamp_column,
+# max_age_hours). Extend as more loops gain durable outputs (e.g.
+# reentry_cooldowns writer health, observe-mode hooks).
+OUTPUT_FRESHNESS = [
+    (
+        "calibration_adjustments",
+        "computed_at",
+        int(os.getenv("OPS_CALIBRATION_MAX_AGE_HOURS", "240")),  # 10 days
+    ),
 ]
 
 
@@ -69,6 +85,16 @@ class ExpectedJob:
     cadence: str  # "daily" | "weekly"
     last_success_at: Optional[datetime]
     status: str  # "ok" | "late" | "never_run" | "error"
+
+
+@dataclass
+class OutputFreshness:
+    """Freshness of a registered feedback-loop output table."""
+    table: str
+    max_age_hours: int
+    latest: Optional[datetime]
+    age_hours: Optional[float]
+    status: str  # "ok" | "stale" | "never" | "error"
 
 
 @dataclass
@@ -266,6 +292,42 @@ def get_expected_jobs(client) -> List[ExpectedJob]:
                 last_success_at=None,
                 status="error"
             ))
+
+    return results
+
+
+def get_output_freshness(client) -> List[OutputFreshness]:
+    """
+    Check every registered feedback-loop output table for freshness.
+
+    "ok" = newest row younger than max_age_hours; "stale" = older; "never" =
+    table empty; "error" = the check itself failed (reported, not swallowed —
+    a broken checker must not read as healthy).
+    """
+    results: List[OutputFreshness] = []
+    now = datetime.now(timezone.utc)
+
+    for table, ts_col, max_age_hours in OUTPUT_FRESHNESS:
+        try:
+            res = client.table(table) \
+                .select(ts_col) \
+                .order(ts_col, desc=True) \
+                .limit(1) \
+                .execute()
+            if not res.data:
+                results.append(OutputFreshness(table, max_age_hours, None, None, "never"))
+                continue
+            raw = str(res.data[0].get(ts_col))
+            ts = raw.replace("Z", "+00:00").replace(" ", "T", 1)
+            latest = datetime.fromisoformat(ts)
+            if latest.tzinfo is None:
+                latest = latest.replace(tzinfo=timezone.utc)
+            age_hours = (now - latest).total_seconds() / 3600.0
+            status = "stale" if age_hours > max_age_hours else "ok"
+            results.append(OutputFreshness(table, max_age_hours, latest, round(age_hours, 1), status))
+        except Exception as e:
+            logger.warning(f"Output freshness check failed for {table}: {e}")
+            results.append(OutputFreshness(table, max_age_hours, None, None, "error"))
 
     return results
 

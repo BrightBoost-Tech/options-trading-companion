@@ -2814,6 +2814,23 @@ async def run_midday_cycle(supabase: Client, user_id: str, deployable_capital_ov
     try:
         from packages.quantum.risk.risk_envelope import check_all_envelopes, EnvelopeConfig
         _envelope_config = EnvelopeConfig.from_env()
+        # #1044: keep this observe-log consistent with the executor's circuit
+        # breaker — at small tier with the utilization gate explicitly enabled,
+        # the symbol-concentration check is WARN, not BLOCK (the pro-forma
+        # utilization gate enforces at stage time instead). Logging-only here;
+        # this site never blocks. Any error → legacy severity retained.
+        try:
+            from packages.quantum.risk import utilization_gate as _ug
+            from packages.quantum.services.analytics.small_account_compounder import (
+                SmallAccountCompounder as _SAC,
+            )
+            if _ug.is_enabled() and _SAC.get_tier(deployable_capital).name == "small":
+                _envelope_config.symbol_concentration_severity = "warn"
+        except Exception as _ug_err:
+            logger.warning(
+                f"[RISK_ENVELOPE] utilization-gate demotion check failed "
+                f"(log-only site, legacy severity retained): {_ug_err}"
+            )
         _envelope_result = check_all_envelopes(
             positions=positions,
             equity=deployable_capital,

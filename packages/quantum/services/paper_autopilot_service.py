@@ -227,6 +227,32 @@ class PaperAutopilotService:
             elif cb_positions:
                 cb_daily_pnl = sum(float(p.get("unrealized_pl") or 0) for p in cb_positions)
                 cb_config = EnvelopeConfig.from_env()
+                # #1044 utilization gate: at small tier with the gate
+                # EXPLICITLY enabled (strict =1), demote the share-of-book
+                # concentration_symbol check BLOCK→WARN — the pro-forma
+                # utilization cap (per-candidate STAGE gate in
+                # _execute_per_cohort) replaces it as the entry-blocking
+                # capital control. Sector/expiry/stress severities and all
+                # loss envelopes are untouched. Fail SAFE: OBP unreadable →
+                # tier unresolved → no demotion; any error in this check →
+                # no demotion (legacy stricter BLOCK retained). Wrapped in
+                # its own try/except so a fault here can never trip the
+                # outer cb_err handler and disable the whole breaker.
+                try:
+                    from packages.quantum.risk import utilization_gate as ug
+                    ug.echo_flag_state()
+                    if ug.is_enabled() and ug.tier_is_small(user_id, supabase=self.client):
+                        cb_config.symbol_concentration_severity = "warn"
+                        logger.info(
+                            "[UTILIZATION_GATE] small tier + gate enabled — "
+                            "concentration_symbol demoted to WARN for this run "
+                            "(utilization gate enforces per-candidate at stage time)"
+                        )
+                except Exception as _ug_err:
+                    logger.warning(
+                        "[UTILIZATION_GATE] demotion check failed — legacy "
+                        "concentration BLOCK retained: %s", _ug_err,
+                    )
                 cb_result = check_all_envelopes(
                     positions=cb_positions,
                     equity=cb_equity,
@@ -584,6 +610,25 @@ class PaperAutopilotService:
         configs = load_cohort_configs(user_id, supabase)
         portfolios = _get_cohort_portfolios(user_id, supabase)
 
+        # #1044 utilization gate — pro-forma total-utilization cap on LIVE-
+        # routed entries (shadow books don't consume real OBP). Live scope
+        # resolved once per run; if resolution fails, ALL cohorts are gated
+        # this run (over-gating a shadow book is cheap; missing the live one
+        # isn't — fail closed).
+        from packages.quantum.risk import utilization_gate as ug
+        _ug_on = ug.is_enabled()
+        _ug_live_portfolio_ids = None
+        if _ug_on:
+            try:
+                from packages.quantum.risk.position_scope import live_routed_portfolio_ids
+                _ug_live_portfolio_ids = set(live_routed_portfolio_ids(supabase, user_id))
+            except Exception as _scope_err:
+                logger.warning(
+                    "[UTILIZATION_GATE] live-routing scope resolution failed — "
+                    "gating ALL cohorts this run (fail-closed): %s", _scope_err,
+                )
+                _ug_live_portfolio_ids = None  # None → gate every cohort
+
         today_str = datetime.now(timezone.utc).date().isoformat()
         all_executed = []
         all_errors = []
@@ -738,6 +783,20 @@ class PaperAutopilotService:
                             )
                             raise rc.SymbolCooldownActive(cohort_id, ticker) from _ce
 
+                    # #1044 utilization gate — STAGE gate (pro-forma): block
+                    # THIS entry if (committed + candidate)/(committed + OBP)
+                    # exceeds the cap. Fresh broker reads inside (positions +
+                    # settled OBP); FAIL-CLOSED on any unreadable input; logs
+                    # every evaluation with the numbers and the decision.
+                    if _ug_on and (
+                        _ug_live_portfolio_ids is None
+                        or portfolio_id in _ug_live_portfolio_ids
+                    ):
+                        ug.evaluate_entry(
+                            user_id, ticker, ug.candidate_cost_usd(s),
+                            supabase=supabase,
+                        )
+
                     ticket = _suggestion_to_ticket(s)
                     order_id = _stage_order_internal(
                         supabase, analytics, user_id, ticket,
@@ -767,6 +826,26 @@ class PaperAutopilotService:
                     # query error) — an expected, ENFORCED skip, already logged
                     # loudly at the gate. NOT an execution failure; don't
                     # pollute the failure aggregation.
+                    continue
+                except ug.EntryUtilizationBlocked as _ub:
+                    # #1044: pro-forma utilization above the cap — an expected,
+                    # ENFORCED block (the evaluation line with the numbers was
+                    # already logged inside evaluate_entry). Not a failure.
+                    logger.warning(
+                        "[UTILIZATION_GATE] STAGE gate BLOCKED %s/%s cohort=%s — %s",
+                        ticker, sid[:8], cohort_name, _ub,
+                    )
+                    continue
+                except ug.UtilizationGateError as _ue:
+                    # #1044 FAIL-CLOSED: an input the gate needs could not be
+                    # read fresh (OBP / broker positions / threshold /
+                    # candidate cost). Block this entry loudly; never fall
+                    # back to a DB snapshot or wave it through.
+                    logger.error(
+                        "[UTILIZATION_GATE] input unreadable for %s/%s "
+                        "cohort=%s — FAIL-CLOSED, skipping stage: %s",
+                        ticker, sid[:8], cohort_name, _ue,
+                    )
                     continue
                 except Exception as e:
                     logger.error(f"policy_lab_execute_error: cohort={cohort_name} ticker={ticker} error={e}")

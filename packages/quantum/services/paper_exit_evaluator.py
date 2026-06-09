@@ -16,7 +16,7 @@ Schedule: 3:00 PM CDT (before mark-to-market at 3:30 PM).
 
 import logging
 import os
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from typing import Dict, Any, List, Tuple, Optional, Callable
 
@@ -453,11 +453,223 @@ def is_gtc_profit_exit_order(order_row: Dict[str, Any]) -> bool:
     )
 
 
-def filter_blocking_close_orders(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    """Close-side order rows that legitimately block a new close attempt —
-    i.e. everything EXCEPT GTC resting profit-limits (see
-    is_gtc_profit_exit_order)."""
-    return [r for r in (rows or []) if not is_gtc_profit_exit_order(r)]
+# ── Close-retry re-arm (terminal-failed close attempts) ─────────────────────
+# The 2026-05-18 BUG-C fix added 'cancelled' to the close-idempotency guards
+# to stop the CSX retry-spam cascade (17 broker-terminal close failures,
+# retried q15min). That overcorrected from infinite-retry to ZERO-RETRY-
+# FOREVER: one close order terminating 'cancelled' at the broker (reject /
+# expire / manual Alpaca-UI cancel all map to it) permanently satisfied
+# "a close already exists", silently disarming EVERY automated exit for the
+# position (stop, target, expiration, envelope force-close) — the loss then
+# bounded only by defined-risk max. The only working retry path was an
+# accident: the watchdog writes the different string 'watchdog_cancelled',
+# absent from the guard lists (audit Area 2, 2026-06-09).
+#
+# Re-arm semantics: a 'cancelled' close blocks only while FRESH
+# (CLOSE_REARM_WINDOW_MINUTES, default 30 — preserves the anti-spam intent)
+# or while the retry budget is tripped (>= CLOSE_REARM_RETRY_BUDGET rows
+# within CLOSE_REARM_BUDGET_WINDOW_HOURS → block + critical
+# exit_protection_disarmed alert + backoff until rows age out). A STALE
+# 'cancelled' row no longer blocks: protection RE-ARMS. 'filled', the
+# active statuses, and 'needs_manual_review' block exactly as before
+# (needs_manual_review now also alerts). Kill switch CLOSE_REARM_ENABLED,
+# default ON (empty/unset → ON; the #1038 convention); explicit
+# 0/false/no/off restores the legacy permanent block.
+
+_TERMINAL_FAILED_STATUS = "cancelled"
+
+
+def _close_rearm_enabled() -> bool:
+    raw = os.environ.get("CLOSE_REARM_ENABLED", "")
+    if not raw.strip():
+        return True
+    return raw.strip().lower() not in ("0", "false", "no", "off")
+
+
+def _close_rearm_window_minutes() -> float:
+    try:
+        return float(os.environ.get("CLOSE_REARM_WINDOW_MINUTES", "30"))
+    except ValueError:
+        return 30.0
+
+
+def _close_rearm_retry_budget() -> int:
+    try:
+        return int(os.environ.get("CLOSE_REARM_RETRY_BUDGET", "3"))
+    except ValueError:
+        return 3
+
+
+def _close_rearm_budget_window_hours() -> float:
+    try:
+        return float(os.environ.get("CLOSE_REARM_BUDGET_WINDOW_HOURS", "4"))
+    except ValueError:
+        return 4.0
+
+
+def _terminal_failed_time(row: Dict[str, Any]) -> Optional[datetime]:
+    """When the close attempt failed: cancelled_at, else created_at.
+    None when neither parses — the caller treats that row as FRESH
+    (conservative: keeps blocking; never re-arms on data it can't read)."""
+    for key in ("cancelled_at", "created_at"):
+        raw = row.get(key)
+        if not raw:
+            continue
+        try:
+            ts = str(raw).replace("Z", "+00:00").replace(" ", "T", 1)
+            parsed = datetime.fromisoformat(ts)
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=timezone.utc)
+            return parsed
+        except (TypeError, ValueError):
+            continue
+    return None
+
+
+# Per-(position, kind) alert throttle: 1/h. Process-local is acceptable —
+# the guards run q15min, so even across recycles the worst case is one
+# extra alert per recycle, not a spam loop.
+_REARM_ALERT_LAST: Dict[str, float] = {}
+_REARM_ALERT_THROTTLE_SECONDS = 3600.0
+
+
+def _rearm_alert(supabase: Any, kind: str, position_id: Optional[str],
+                 symbol: Optional[str], severity: str, message: str,
+                 metadata: Dict[str, Any]) -> None:
+    import time as _time
+    key = f"{position_id or '?'}:{kind}"
+    now_mono = _time.monotonic()
+    last = _REARM_ALERT_LAST.get(key)
+    if last is not None and (now_mono - last) < _REARM_ALERT_THROTTLE_SECONDS:
+        return
+    _REARM_ALERT_LAST[key] = now_mono
+    try:
+        from packages.quantum.observability.alerts import alert as _alert
+        _alert(
+            supabase,
+            alert_type=kind,
+            severity=severity,
+            message=message,
+            position_id=position_id,
+            symbol=symbol,
+            metadata=metadata,
+        )
+    except Exception as alert_err:
+        logger.warning(f"[CLOSE_REARM] alert write failed: {alert_err}")
+
+
+def filter_blocking_close_orders(
+    rows: List[Dict[str, Any]],
+    *,
+    supabase: Any = None,
+    position_id: Optional[str] = None,
+    symbol: Optional[str] = None,
+    now: Optional[datetime] = None,
+) -> List[Dict[str, Any]]:
+    """Close-side order rows that legitimately block a new close attempt.
+
+    Excludes GTC resting profit-limits (is_gtc_profit_exit_order) and —
+    under the re-arm semantics above — STALE terminal-failed ('cancelled')
+    attempts, so a broker-rejected or manually-cancelled close cannot
+    permanently disarm the position's automated exits. Active statuses,
+    'filled', and 'needs_manual_review' block as before.
+    """
+    candidates = [r for r in (rows or []) if not is_gtc_profit_exit_order(r)]
+    if not _close_rearm_enabled():
+        return candidates  # legacy: every status in the query list blocks
+
+    blocking: List[Dict[str, Any]] = []
+    terminal_failed: List[Dict[str, Any]] = []
+    for r in candidates:
+        if (r.get("status") or "") == _TERMINAL_FAILED_STATUS:
+            terminal_failed.append(r)
+        else:
+            blocking.append(r)
+            if (r.get("status") or "") == "needs_manual_review":
+                _rearm_alert(
+                    supabase, "close_blocked_needs_manual_review",
+                    position_id, symbol, "warning",
+                    f"Automated exits for {symbol or position_id or '?'} are "
+                    f"blocked by a needs_manual_review close order "
+                    f"{str(r.get('id'))[:8]} — operator attention required",
+                    {"order_id": r.get("id"), "position_id": position_id},
+                )
+
+    if not terminal_failed:
+        return blocking
+
+    now = now or datetime.now(timezone.utc)
+    window = timedelta(minutes=_close_rearm_window_minutes())
+    budget_window = timedelta(hours=_close_rearm_budget_window_hours())
+    budget = _close_rearm_retry_budget()
+
+    fresh: List[Dict[str, Any]] = []
+    in_budget_window: List[Dict[str, Any]] = []
+    for r in terminal_failed:
+        failed_at = _terminal_failed_time(r)
+        if failed_at is None:
+            # Unreadable timestamp → treat as fresh (block). Conservative:
+            # preserves anti-spam; created_at is NOT NULL so this is rare.
+            logger.error(
+                f"[CLOSE_REARM] cancelled close order {str(r.get('id'))[:8]} "
+                f"has no parseable timestamp — treating as fresh (blocking)"
+            )
+            fresh.append(r)
+            in_budget_window.append(r)
+            continue
+        age = now - failed_at
+        if age <= window:
+            fresh.append(r)
+        if age <= budget_window:
+            in_budget_window.append(r)
+
+    if len(in_budget_window) >= budget:
+        # Retry budget tripped: the broker (or operator) is repeatedly
+        # killing our closes. Keep blocking (backoff until rows age past
+        # the budget window) and say so LOUDLY — this is the disarm STATE
+        # the old code never alerted.
+        blocking.extend(terminal_failed)
+        logger.critical(
+            f"[CLOSE_REARM] {symbol or position_id or '?'}: "
+            f"{len(in_budget_window)} terminal-failed close attempts within "
+            f"{_close_rearm_budget_window_hours():.0f}h (budget {budget}) — "
+            f"close retries SUSPENDED until attempts age out"
+        )
+        _rearm_alert(
+            supabase, "exit_protection_disarmed", position_id, symbol,
+            "critical",
+            f"{symbol or position_id or '?'}: {len(in_budget_window)} "
+            f"terminal-failed close attempts in "
+            f"{_close_rearm_budget_window_hours():.0f}h — automated close "
+            f"retries suspended (backoff); broker/manual interference likely. "
+            f"Position protection is degraded until retries re-arm.",
+            {
+                "position_id": position_id,
+                "terminal_failed_count": len(in_budget_window),
+                "budget": budget,
+                "budget_window_hours": _close_rearm_budget_window_hours(),
+            },
+        )
+    elif fresh:
+        # Inside the anti-spam window — defer, will re-arm shortly.
+        blocking.extend(fresh)
+        logger.warning(
+            f"[CLOSE_REARM] {symbol or position_id or '?'}: close attempt "
+            f"deferred — {len(fresh)} fresh terminal-failed close order(s) "
+            f"within {_close_rearm_window_minutes():.0f}min; retry re-arms "
+            f"when they age out"
+        )
+    else:
+        # Only STALE terminal-failed rows: RE-ARM. Under the pre-fix
+        # semantics these would have blocked forever (the CSX -$161 class).
+        logger.warning(
+            f"[CLOSE_REARM] {symbol or position_id or '?'}: re-arming "
+            f"automated exits — ignoring {len(terminal_failed)} stale "
+            f"terminal-failed close attempt(s) that would previously have "
+            f"blocked forever"
+        )
+
+    return blocking
 
 
 def evaluate_position_exit(
@@ -1269,7 +1481,7 @@ class PaperExitEvaluator:
         # guard and staged a duplicate zero-qty close order.
         try:
             existing_close = supabase.table("paper_orders") \
-                .select("id, status, created_at, order_json") \
+                .select("id, status, created_at, cancelled_at, order_json") \
                 .eq("position_id", position_id) \
                 .eq("side", side) \
                 .in_("status", [
@@ -1283,7 +1495,13 @@ class PaperExitEvaluator:
             # excluding them here is what lets a stop/envelope force-close
             # proceed (and pre-cancel the resting GTC at the broker) instead
             # of being deduped into never firing. See is_gtc_profit_exit_order.
-            _blocking = filter_blocking_close_orders(existing_close.data or [])
+            # STALE terminal-failed ('cancelled') attempts no longer block
+            # either — the close-retry re-arm semantics (see the helper).
+            _blocking = filter_blocking_close_orders(
+                existing_close.data or [],
+                supabase=supabase,
+                position_id=position_id,
+            )
             if _blocking:
                 existing = _blocking[0]
                 logger.info(

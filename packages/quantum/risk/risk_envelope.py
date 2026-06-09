@@ -71,6 +71,17 @@ class EnvelopeConfig:
     stress_vix_spike_pct: float = 0.50    # VIX +50% scenario
     max_stress_loss_pct: float = 0.15     # -15% max under stress
 
+    # Severity of the share-of-book symbol-concentration check. Default
+    # "block" (legacy). Call sites that know deployable capital (the
+    # paper-autopilot circuit breaker; the orchestrator's observe-log) demote
+    # this to "warn" at small tier when the #1044 utilization gate is
+    # explicitly enabled — the pro-forma utilization cap replaces
+    # share-of-book as the entry-blocking control there. NOT read from env
+    # here: the demotion is tier-conditional, and tier needs a per-user OBP
+    # read this pure module must not perform. Sector/expiry/stress severities
+    # are NOT configurable — they keep their hardcoded values.
+    symbol_concentration_severity: str = "block"
+
     @classmethod
     def from_env(cls) -> "EnvelopeConfig":
         """Load config from environment variables."""
@@ -308,7 +319,7 @@ def check_concentration(
                 envelope="concentration_symbol",
                 limit=config.max_single_symbol_pct,
                 actual=pct,
-                severity="block",
+                severity=config.symbol_concentration_severity,
                 message=f"{sym} is {pct:.0%} of risk (limit {config.max_single_symbol_pct:.0%})",
             ))
 

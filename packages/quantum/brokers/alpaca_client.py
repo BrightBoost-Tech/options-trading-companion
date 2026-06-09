@@ -686,6 +686,11 @@ class AlpacaClient:
             "unrealized_pl": float(pos.unrealized_pl) if pos.unrealized_pl else None,
             "unrealized_plpc": float(pos.unrealized_plpc) if pos.unrealized_plpc else None,
             "asset_class": str(pos.asset_class.value) if hasattr(pos.asset_class, "value") else str(pos.asset_class),
+            # None-preserving (NOT `or 0` — the options_buying_power precedent
+            # at get_account): the #1044 utilization gate sums cost_basis as
+            # broker-truth committed capital and must fail closed on absence,
+            # never read a silent 0.
+            "cost_basis": float(pos.cost_basis) if getattr(pos, "cost_basis", None) is not None else None,
         }
 
 

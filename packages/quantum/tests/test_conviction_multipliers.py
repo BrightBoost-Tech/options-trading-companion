@@ -211,5 +211,87 @@ class TestConvictionMultipliers(unittest.TestCase):
         self.assertEqual(adjusted[1]["score"], 11.0)
         self.assertEqual(adjusted[2]["score"], 11.0)
 
+class TestV3FallbackHonesty(unittest.TestCase):
+    """BUILD 2: the V3→legacy drop must LOG (was a bare except…pass that hid the
+    missing learning_performance_summary_v3 view). Pure observability — control
+    flow is unchanged (still falls back). Logs once per process, at WARNING+."""
+
+    _LOGGER = "packages.quantum.analytics.conviction_service"
+
+    # The exact globals dict the running method (and _log_v3_fallback_once)
+    # resolve _V3_FALLBACK_LOGGED from — robust even when another test file
+    # reloads conviction_service into a fresh module object (sys.modules
+    # pollution; the method keeps its original __globals__).
+    _GLOBALS = ConvictionService._get_performance_multipliers.__globals__
+
+    def setUp(self):
+        self._GLOBALS["_V3_FALLBACK_LOGGED"] = False  # reset once-per-process guard
+        self.mock_supabase = MagicMock()
+        self.service = ConvictionService(supabase=self.mock_supabase)
+        self.user_id = "u1"
+
+    def tearDown(self):
+        self._GLOBALS["_V3_FALLBACK_LOGGED"] = False
+
+    def _wire(self, *, v3_raises=False, v3_rows=None, legacy_rows=None):
+        def side_effect(table_name):
+            b = MagicMock()
+            if table_name == "learning_performance_summary_v3":
+                ex = b.select.return_value.eq.return_value.execute
+                if v3_raises:
+                    ex.side_effect = Exception("relation does not exist")
+                else:
+                    ex.side_effect = None
+                    ex.return_value = Mock(data=(v3_rows or []))
+            elif table_name == "learning_feedback_loops":
+                b.select.return_value.eq.return_value.execute.return_value = Mock(data=(legacy_rows or []))
+            return b
+        self.mock_supabase.table.side_effect = side_effect
+
+    def test_logs_warning_when_view_missing(self):
+        self._wire(v3_raises=True)
+        with self.assertLogs(self._LOGGER, level="WARNING") as cm:
+            self.service._get_performance_multipliers(self.user_id)
+        joined = "\n".join(cm.output)
+        self.assertIn("V3 performance-summary source unavailable", joined)
+        self.assertIn("relation does not exist", joined)  # exception detail
+        self.assertIn("legacy", joined)  # which path it fell to
+
+    def test_logs_warning_when_view_empty(self):
+        self._wire(v3_rows=[])  # present but no rows → still a drop-to-legacy
+        with self.assertLogs(self._LOGGER, level="WARNING") as cm:
+            self.service._get_performance_multipliers(self.user_id)
+        self.assertIn("returned no rows", "\n".join(cm.output))
+
+    def test_logs_once_per_process(self):
+        self._wire(v3_raises=True)
+        with self.assertLogs(self._LOGGER, level="WARNING") as cm:
+            self.service._get_performance_multipliers(self.user_id)
+            self.service._get_performance_multipliers(self.user_id)
+            self.service._get_performance_multipliers(self.user_id)
+        fallback_lines = [l for l in cm.output if "performance-summary" in l]
+        self.assertEqual(len(fallback_lines), 1, "fallback must log once per process")
+
+    def test_no_fallback_log_on_happy_path(self):
+        v3_rows = [{
+            "strategy": "debit_call", "window": "midday_entry", "regime": "normal",
+            "total_trades": 30, "avg_ev_leakage": 20.0, "avg_predicted_ev": 100.0,
+            "avg_realized_pnl": 120.0, "std_realized_pnl": 50.0,
+        }]
+        self._wire(v3_rows=v3_rows)
+        with self.assertNoLogs(self._LOGGER, level="WARNING"):
+            mult = self.service._get_performance_multipliers(self.user_id)
+        self.assertTrue(mult, "happy path should still produce multipliers")
+
+    def test_control_flow_unchanged_still_falls_back(self):
+        # The legacy fallback result must still be returned (behavior preserved).
+        self._wire(v3_raises=True, legacy_rows=[{
+            "strategy": "s", "window": "w", "outcome_type": "trade_closed",
+            "total_trades": 10, "avg_return": 0.5,
+        }])
+        mult = self.service._get_performance_multipliers(self.user_id)
+        self.assertIn(("s", "w"), mult)
+
+
 if __name__ == '__main__':
     unittest.main()

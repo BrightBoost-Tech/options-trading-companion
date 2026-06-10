@@ -663,7 +663,10 @@ def _stage_order_internal(supabase, analytics, user_id, ticket: TradeTicket, por
     _validate_entry_quotes(
         ticket,
         position_id,
-        fetch_fn=lambda s: _fetch_quote_with_retry(poly, s),
+        # Phase C (06-10): source-aligned per-leg fetch (truth layer primary,
+        # legacy Polygon as fallback + divergence probe). Rejection semantics
+        # unchanged — see _entry_quote_source_aligned.
+        fetch_fn=_make_entry_quote_fetch_fn(poly),
         suggestion_id=suggestion_id,
     )
 
@@ -927,6 +930,81 @@ def _entry_quote_validation_enabled() -> bool:
     if not raw.strip():
         return True
     return raw.strip().lower() not in ("0", "false", "no", "off")
+
+
+def _entry_quote_source_aligned() -> bool:
+    """ENTRY_QUOTE_SOURCE_ALIGNED — default ON (empty/unset → ON; explicit
+    0/false/no/off reverts to the legacy Polygon-only stage read).
+
+    Phase C of the 06-10 runbook: the 16:30Z XLE rejections were FEED
+    DIVERGENCE, not illiquidity — the scanner priced legs via the truth layer
+    (Alpaca options snapshots primary) while this validator read Polygon only,
+    which returned zeros for a contract OPRA quoted 2.15×428 / 2.39×565 with
+    83 trades on the day. The validator now reads the SAME source set the
+    scanner trusts. Rejection semantics UNCHANGED: a leg unpriceable on ALL
+    sources still raises EntryQuoteUnpriceable."""
+    raw = os.environ.get("ENTRY_QUOTE_SOURCE_ALIGNED", "")
+    if not raw.strip():
+        return True
+    return raw.strip().lower() not in ("0", "false", "no", "off")
+
+
+def _aligned_leg_quote_fetch(poly, symbol: str) -> Optional[Dict[str, Any]]:
+    """Stage-time per-leg quote via the scanner's source set: truth layer
+    (Alpaca options snapshots primary → Polygon snapshot fallback inside
+    snapshot_many), then the legacy Polygon NBBO read as the final fallback.
+
+    The legacy Polygon read is ALWAYS probed so the divergence rate stays on
+    record (C2): Polygon-dark-but-truth-priced logs one WARNING with both
+    quotes. The widened evidence basis never weakens the gate — all-sources-
+    dark returns the invalid quote and the caller raises exactly as before.
+    """
+    truth_quote = None
+    try:
+        from packages.quantum.services.market_data_truth_layer import (
+            MarketDataTruthLayer,
+        )
+        snaps = MarketDataTruthLayer().snapshot_many([symbol]) or {}
+        snap = snaps.get(symbol) or (next(iter(snaps.values())) if snaps else {})
+        q = (snap or {}).get("quote") or {}
+        if q:
+            truth_quote = {
+                "bid": q.get("bid"),
+                "ask": q.get("ask"),
+                "bid_price": q.get("bid"),
+                "ask_price": q.get("ask"),
+                "price": q.get("last") or q.get("mid"),
+            }
+    except Exception as e:
+        logger.warning(
+            f"[ENTRY_QUOTE] truth-layer leg quote failed for {symbol} "
+            f"(falling to Polygon-only): {e}"
+        )
+
+    poly_quote = _fetch_quote_with_retry(poly, symbol)
+
+    truth_valid = _is_valid_quote(truth_quote)
+    poly_valid = _is_valid_quote(poly_quote)
+
+    if truth_valid and not poly_valid:
+        logger.warning(
+            f"[ENTRY_QUOTE] FEED DIVERGENCE on {symbol}: Polygon dark "
+            f"({poly_quote}) but truth-layer priced ({truth_quote}) — using "
+            f"the truth-layer quote (the 06-10 XLE class)"
+        )
+
+    if truth_valid:
+        return truth_quote
+    return poly_quote
+
+
+def _make_entry_quote_fetch_fn(poly):
+    """The per-leg fetch_fn for _validate_entry_quotes: source-aligned by
+    default, legacy Polygon-only when ENTRY_QUOTE_SOURCE_ALIGNED is
+    explicitly off."""
+    if _entry_quote_source_aligned():
+        return lambda s: _aligned_leg_quote_fetch(poly, s)
+    return lambda s: _fetch_quote_with_retry(poly, s)
 
 
 def _leg_symbol(leg) -> Optional[str]:

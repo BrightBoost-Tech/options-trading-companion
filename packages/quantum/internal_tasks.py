@@ -312,6 +312,32 @@ async def vol_signal_snapshot_task(
     )
 
 
+@router.post("/ipo/readiness-monitor", status_code=202)
+async def ipo_readiness_monitor_task(
+    body: Optional[Dict] = Body(default=None),
+    auth: TaskSignatureResult = Depends(verify_task_signature("tasks:ipo_readiness_monitor"))
+):
+    """Daily IPO-watch readiness check (SPCX first; IPO_WATCH_SYMBOLS env).
+
+    OBSERVE-ONLY: probes equity quote + options chain availability, reads the
+    system's own gate verdicts for the day (selection log, rejections,
+    suggestions), and logs first-seen transitions as info alerts. Loosens no
+    gate; trades nothing. State carried in its own job_runs.result.
+    """
+    today = datetime.now().strftime("%Y-%m-%d")
+    force_rerun = bool((body or {}).get("force_rerun", False))
+    return enqueue_job_run(
+        job_name="ipo_readiness_monitor",
+        idempotency_key=f"ipo_readiness_monitor-{today}",
+        payload={
+            "app_version": APP_VERSION,
+            "trigger_ts": datetime.now().isoformat(),
+            **({"force_rerun": True} if force_rerun else {}),
+        },
+        force_rerun=force_rerun,
+    )
+
+
 @router.post("/iv/historical-backfill", status_code=202)
 async def iv_historical_backfill_task(
     body: Optional[Dict] = Body(default=None),

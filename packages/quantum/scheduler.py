@@ -104,6 +104,11 @@ SCHEDULES = [
     # Promotion readiness (after market close, after progression eval)
     ("promotion_check",             dict(hour=17, minute=0),  "/internal/tasks/promotion/check",  "tasks:promotion_check",          "Check for stuck phase transitions"),
 
+    # IPO watch (SPCX 2026-06-12; IPO_WATCH_SYMBOLS env). 11:45 CT = after the
+    # 11:00 scan + 11:30 executor, so the day's full gate verdicts exist.
+    # OBSERVE-ONLY — logs readiness transitions; loosens nothing.
+    ("ipo_readiness_monitor",       dict(hour=11, minute=45), "/internal/tasks/ipo/readiness-monitor", "tasks:ipo_readiness_monitor", "IPO-watch readiness transitions"),
+
     # Scheduler liveness heartbeat — creates a job_run so ops_health_check can detect scheduler death
     ("scheduler_heartbeat",         dict(minute="*/30", hour="8-17"), "/internal/tasks/heartbeat", "tasks:heartbeat", "Scheduler liveness heartbeat"),
 

@@ -64,3 +64,5 @@ supabase/.temp/
 MASTER_ACTIVATION_GUIDE.md
 scripts/_friday_eod_check_one_off.py
 start.ps1
+
+audit/cron.log

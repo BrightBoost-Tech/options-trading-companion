@@ -1,428 +1,129 @@
-# Backlog
+# Backlog — tiered working list
 
-This file is the durable home for backlog items. CLAUDE.md references this file but does not duplicate its contents.
-
-Last migrated from CLAUDE.md: 2026-04-28.
-
----
-
-# Options-Trading-Companion — Working Backlog
-
-(last updated 2026-06-04; supersedes prior inline tracking)
+Reorganized 2026-06-10 (doc-rewrite PR). Every item carries: one-line context ·
+origin (PR/audit/date) · explicit reopen-or-done condition. The pre-tiering
+working head is preserved verbatim in `docs/history.md` (Snapshot 2); the
+pre-2026-05-28 detail archive remains at the bottom of this file. Shipped
+findings live in `audit/ledger.md` — not here.
 
 ---
 
-## [2026-06-04] SESSION BATCH — prioritized (live-fill / exit-mechanics arc)
+## GATED-TONIGHT (pre-approved on a clean 06-11 W2 wrap; build in this order)
 
-### P0 — deadline 2026-07-06: PDT field-reader None-coercion fix
-Alpaca removes `pattern_day_trader` / `daytrade_count` from the API by ~2026-07-06 (PDT rule retired 2026-06-04; fields are placeholders until removal). `alpaca_client.get_account()` `:221 int(acct.daytrade_count)` → `int(None)` raises → **get_account() breaks for ALL consumers** (equity_state → risk envelopes, progression_service, broker endpoints). Fix: None-preserving coercion (the `options_buying_power` pattern at `:203-211`); also `get_day_trade_count()` (:245, same crash) and `is_pdt_restricted()` (:241, returns None — benign but tidy). Verify the pinned alpaca-py model's field optionality at fix time (floating `>=0.28.0`). Regression test: account payload without the fields → get_account() still returns equity. The wider PDT-retirement sequence (retire dormant PDT-specific logic; extract entangled `is_emergency_stop`/`is_same_day_close` before any `pdt_guard_service` deletion; doc cleanup) is P1+ — full classification in the 2026-06-04 PDT audit.
+- **N1 — v5-A2 realized-blind daily brake.** All four `check_all_envelopes` feeders pass
+  open-book unrealized only, so realized stops vanish from the 8% daily envelope and the entry
+  circuit breaker omits weekly entirely. Fix: broker-true daily (`equity − last_equity`) into all
+  four sites + weekly into the breaker + run aggregates on an empty book. TIGHTENS only; never
+  touch the per-symbol envelope or #1040. · Origin: v5 audit A2, 2026-06-10 (confirmed). ·
+  Done when: shipped + a synthetic-feed test pins each feeder; reopen if any feeder regresses to
+  unrealized-only.
+- **N2 — v5-A4 ops-health alert delivery (0% lifetime).** 916 runs / 869 detections / zero alerts
+  ever delivered (webhook unset, suppressed inside status=succeeded; severity map ranks critical
+  below warning; data_stale 30-min threshold false-positives on once-daily jobs). Fix order:
+  threshold + severity map first, then dual-channel to `risk_alerts`, prove with ONE synthetic
+  alert end-to-end, then clean up. The #1045 OUTPUT_FRESHNESS registry inherits the live tail. ·
+  Origin: v5 audit A4, 2026-06-10 (confirmed). · Done when: synthetic alert lands in risk_alerts
+  AND the webhook (or webhook consciously deferred); reopen if a detected condition again produces
+  zero deliveries for >48h.
 
-### Before next live session — deploy verification (merged ≠ deployed, H8)
-Confirm **#1022** (fresh-mark close staging) and **#1021** (GTC layer) are DEPLOYED: worker SUCCESS deploy on/after their merge commits, recycle confirmed. Re-verify flags after any recycle: `GTC_PROFIT_EXIT_ENABLED` stays OFF, `INTRADAY_TARGET_PROFIT_ENABLED` stays `=1` (strict parse — `true` silently no-ops). The open live NFLX `a9f977bf`'s exits depend on the deployed monitor.
+## P1 — NEXT (after the gated pair)
 
-### Hygiene (recurring tax — batchable)
-- **sys.modules conftest-level cleanup:** 3 polluter files now bite every new test file (`test_inbox_ranker_comprehensive.py` mocks the TCM module; `test_weekly_report_win_rate.py` mocks `packages.quantum.models`; plus the supabase/market_data mocks in `test_outcome_logic`/others). Three defense fixtures have been written piecemeal (#1017's test, gtc tests, fresh-mark tests) — promote to a shared conftest cleanup or fix the polluters.
-- **Flag-parsing normalization + startup flag-state log:** `== "1"` vs lenient (`1/true/yes/on`) is inconsistent per flag; a wrong-but-plausible value silently no-ops (the 2026-06-04 INTRADAY_TARGET_PROFIT `=true` burn). Normalize via one helper + log parsed flag states at worker boot.
-- **The lying debug line:** `paper_exit_evaluator.evaluate_position_exit`'s `[EXIT_EVAL_DEBUG]` threshold line computes a FLAT default threshold while the real default condition is TIME-SCALED (and never reflects cohort overrides — the dead cohort-extract block). Manufactured the phantom "target hit but didn't fire" incident. Fix: compute the debug threshold via the SAME functions/conditions as the decision; delete the dead block. (#1019-class honesty PR.)
-- **Orchestrator missed-job false positive:** `get_missed_jobs` compares chain names `paper_exit_evaluate_morning/_afternoon` against recorded `job_runs.job_name` = plain `paper_exit_evaluate` — the suffixed names can never match → "2 jobs missed yesterday" fires EVERY day. Name-map the chain entries (or record under scheduler entry names). One day it masks a real miss.
+- **Close-side Polygon-only quote check.** Entry stage fetch fixed by #1052; the CLOSE path's
+  quote reads are unverified for the same divergence class. Own carefully-scoped PR — close-path
+  blast radius. · Origin: Phase-C note, 2026-06-10; queued to the nightly audit. · Done when: the
+  close path provably reads the aligned source set (or is shown to already); reopen on any
+  close-side zero-quote incident.
+- **EXIT_EVAL_DEBUG honest print.** The threshold debug line computes flat defaults while the
+  decision path is cohort-aware (+ time-scaled) — manufactured one phantom incident and confused
+  the 06-10 A2 diagnostic. Fix: compute the printed thresholds via the SAME functions as the
+  decision; delete the dead cohort-extract block. · Origin: backlog 2026-06-04; re-confirmed
+  Phase A 2026-06-10. · Done when: printed == decided in a pinned test.
+- **v5-A5 head-of-line blocking.** Monitor + order_sync share the serial `otc` worker with the
+  unbudgeted scanner (06-03: 422.7s scan → monitor waited 129s; 16:00Z grid dequeues the monitor
+  LAST with live capital open). Fix: route `intraday_risk_monitor` + `alpaca_order_sync` to the
+  idle `worker-background` (or a dedicated `risk` queue). · Origin: v5 audit A5 runner-up class,
+  2026-06-10 (confirmed). · Done when: monitor p95 queue-wait < 15s across a week of RTH.
+- **Executor cadence increase.** One execution shot/day (16:30Z) while suggestions stay valid to
+  22:00Z; recon (06-09 audit) says design choice, not a rate limit; quantified cost ≈ 1 fill/45d
+  — low but nonzero, and post-#1051 honest-EV scarcity raises the value of not wasting a valid
+  candidate. · Origin: v4 audit A6 runner-up; recon done. · Done when: a second (or hourly)
+  execution window ships with idempotency intact; reopen-or-drop decision after 2 weeks of
+  honest-EV funnel data.
+- **Funnel status transitions.** Execution never moves `trade_suggestions.status` (filled orders
+  reference `dismissed` rows); #1051's blocked_reason stamping closed the rejection half; the
+  status plumbing (pending→executed/expired) is still open. · Origin: v4/v5 audits, 2026-06-09/10.
+  · Done when: the suggested→staged→filled funnel is computable from suggestion rows alone.
 
-### Strategy / measurement — the "swift" shadow A/B (spec'd 2026-06-04 diagnostic)
-Higher-frequency / shorter-hold / diverse-regime exploration: design as a **SHADOW cohort A/B**, not a live threshold change — an alternative-target arm PAIRED with a tighter stop (lowering the target without tightening the stop inverts risk:reward; win-rate ≠ EV), measured against the let-run cohort. **Spec (from the strategy-optimization diagnostic):**
-- **Arm:** tp **+0.30** / sl **−0.18** (preserves the champion's ~1.67 reward:risk so the variable is hold philosophy, not risk shape; occupies the empty point between conservative 0.25/0.15 and neutral 0.35/0.20), same `min_dte=7`, shadow-routed `is_active` cohort with `promoted_at` NULL (the Policy-Lab fork machinery handles the rest; live champion untouched by construction).
-- **Metric:** realized-EV/trade + **EV/day-held**, computed via the `paper_positions↔learning_feedback_loops` join (lfl has NO cohort column — join through positions; the lfl `wins/losses/avg_return` rollup is win-rate-shaped — do NOT use it; win-rate reported as context only).
-- **Graduation bar (pre-registered):** ≥20–30 closes/arm across **≥2 regime labels**, with a bootstrap CI on EV/day-held excluding 0 — otherwise the let-run baseline stands.
-- **Sequencing — two PRECONDITIONS:** (1) **#1015 graduation first** — the shorter-hold thesis is "redeploy capital faster," but redeployment is universe-gated (spread-gate rejections outnumber EV-gate 560:105 in 30d; the slot limit never binds), so without #1015 the freed capital has nothing to redeploy into AND sample velocity (~2-4 fills/wk → 2-3 months to 20 closes/arm) is too slow; (2) **exit-fill realism** — internal close fills bypass simulate_fill and fill at-mark (entry side is #1017-adjusted, exit side is not); the at-mark optimism **scales with exit frequency**, so it biases the comparison TOWARD the swift arm — de-bias exits before trusting EV/day-held.
-- **Baselines recorded (the control):** aggressive flat 0.50/0.30/dte7; winners already exit fast (median TP hold 0.5-0.9d), losers ride (neutral stops avg 8.5d); cohort-era samples today: aggressive 15 / neutral 5 / conservative 2 closes (90d).
+## P2 — QUEUE (unordered; promote with evidence)
 
-**Safe-now sub-item** (promoted to its own protective task in the 06-04 addendum below): same-name/same-direction concentration cap. The real frequency+diversity lever already in flight = graduating #1015.
+- **Conviction v3 view — Gate A/B.** `learning_performance_summary_v3` still missing; the
+  DEGRADED line is designed honesty (#1043). Gate A: ship the view dark + observe. Gate B
+  (owner, data-informed): wire or formally retire — conviction-dark is a valid end state. ·
+  Origin: pre-06-09; honesty log 2026-06-09. · Done when: Gate B decision recorded either way.
+- **scipy Greeks/IV validator — OBSERVE-ONLY.** 3-way triangulation (Alpaca/Polygon/own-solve)
+  verified feasible; additive observability for feed-greeks drift. · Origin: data-quality
+  diagnostics. · Done when: observe table accumulating + one drift alert proven.
+- **EXPECTED_JOBS / OUTPUT_FRESHNESS coverage expansion.** 4 of ~15 jobs monitored; registry
+  (#1045) has one entry. Add: cooldown writer health, liquidity-observe hook, agent_sessions
+  gaps, scheduler_heartbeat watcher. · Origin: v5 audit A4 runner-up. · Done when: each named
+  surface has a freshness entry or an explicit exclusion note.
+- **Startup flag echo (SILENT-FLAG-PARSE).** One helper + boot-time parsed-flag log for every
+  strict-parse flag. · Origin: 2026-06-04 INTRADAY_TARGET_PROFIT burn. · Done when: worker boot
+  logs every registered flag's raw + parsed value.
+- **Loss-limit coherence decision.** Per-symbol envelope (−3% equity) binds before cohort stops
+  binds before the vestigial 0.50 position stop — deliberate but undecided at compounding
+  capital. OPERATOR DECISION, not code. · Origin: 2026-06-08. · Done when: the operator records
+  keep/change with rationale.
+- **Legacy conviction rollups on historical dup rows.** The pre-04-16 duplicate outcomes still
+  feed `_get_legacy_multipliers` win/loss rollups (calibration is epoch-protected; conviction is
+  not). · Origin: v5-A3 residue, 2026-06-10. · Done when: legacy reads dedup or floor-bound.
+- **Dead instrumentation fields.** `entry_mid/exit_mid/pnl_execution_drag/pnl_alpha`: 9/72 rows
+  populated, zero live readers — wire a consumer or drop the fields. · Origin: v5 audit A3
+  runner-up. · Done when: either consumer ships or columns are formally deprecated.
+- **Calibration clamp-range review.** [0.5,1.5] cannot represent negative-realized segments;
+  revisit once ≥8 POST-EPOCH put-spread closes exist (honest-PoP era data only). · Origin: v4
+  A1 caveat. · Done when: reviewed against post-epoch data with a keep/widen decision.
+- **nested_logging FK wart.** Known schema wart; harmless; batch with the next migration. ·
+  Origin: #62a audit. · Done when: migration lands.
+- **Deploy windows / graceful drain.** Every merge recycles the worker mid-whatever-it's-doing;
+  define market-hours merge freeze (doctrine now says don't) + an RQ drain step. · Origin: H8
+  doctrine + 06-10 runbook rule. · Done when: recycle during an in-flight job provably completes
+  or re-queues that job.
+- **PR #908 live credit-mleg-close validation.** Still pending the next live system close (the
+  open NFLX is the candidate). · Origin: 2026-05-12. · Done when: first live close captures
+  limit-price sign + clamp + broker response.
+- **#1035/#1036 stack-state confirmation.** Confirm the unpriceable-mark fail-closed stack on the
+  next genuine dead-leg mark event (no occurrence since deploy). · Origin: 2026-06-08. · Done
+  when: one live event logs the designed degraded-alert path.
 
-### Graduation queue (observe → live, data-gated)
-- **#1015 `LIQUIDITY_WEIGHTING_ENABLED`:** hook firing; first directional read good (low option-liquidity scores line up with `spread_too_wide_real`). Graduate on correlation across more cycles.
-- **#1010 `REGIME_FILTER_OBSERVE_ENABLED` (D4):** observe rows accumulating since 2026-06-03; graduate to ACT on observed agreement with the live regime engine.
+## RESEARCH (additive observability only)
 
-### Deliberate operator decisions (not code work)
-- **Poll-vs-GTC profit capture:** both now exist (intraday TP `=1` proven on BAC; GTC layer built+paper-validated, OFF). Don't race both — choose, or define precedence. GTC wins capture-certainty + immunity to mark staleness; poll-side wins flexibility (cohort/time-scaled targets).
-- **GTC live-enable** (`GTC_PROFIT_EXIT_ENABLED`): watched first placement after deploy verification.
-- **36% per-trade ceiling for defined-risk spreads** (EV-vs-H7 re-derivation at the new ~$2,283 equity).
-- **Close-side fill mechanics:** #1022 makes closes PRICE-CORRECT but still PASSIVE (fresh-mid, not guaranteed fill) — marketable-close pricing / GTC is the completion; #1022 is its prerequisite base. **Now ALSO a dependency for trusting the swift A/B:** internal shadow CLOSE fills bypass simulate_fill and fill at-mark (exit-side #1017 gap) — the optimism scales with exit frequency, biasing any shorter-hold arm. De-bias exits (extend #1017 to the internal close fill, or fill closes through simulate_fill) before reading EV/day-held comparisons.
+- **Stage-0 vol pre-registration brackets.** Pre-register vol-expansion hypotheses; a no-edge
+  result is a win (kills a bad idea cheaply). Observe tables exist (`vol_signal_observations`). ·
+  Done when: 30 trading days of brackets scored either way.
+- **Area-8 counterfactual capture fields.** Add expiry to the d8 rejection capture so scanner
+  rejects become repriceable (currently 0% repriceable; dismissed/blocked suggestion rows already
+  are via order_json). Additive capture only — feeds the audit's negative-decision lens, never a
+  gate. · Origin: audit/area8.md, 2026-06-10. · Done when: capture_version bumps and ≥95% of new
+  reject rows reprice.
 
----
+## RESOLVED — DO NOT RE-INVESTIGATE (dated)
 
-## [2026-06-04 addendum] Strategy-optimization + backtest-feasibility diagnostics
-
-### NEW — verify FIRST (read-only check)
-- **Confirm `mode="historical"` is excluded from live learning reads.** `historical_simulation.py` (the zero-spread explorer, `bid=ask=close`) writes synthetic outcomes into `learning_feedback_loops` via its learning hook (`learn_from_cycle`, `mode="historical"`, `ENABLE_HISTORICAL_NESTED_LEARNING` default true). Verify EVERY `learning_feedback_loops` reader that drives live selection/sizing/calibration (calibration_update, post_trade_learning, ConvictionService, paper_learning views) filters these rows out (by `is_paper`/details/mode marker). **If not filtered → mid-fill fantasy is contaminating live learning (#1017 class).** Read-only check; fix only if it fails.
-
-### NEW tasks
-- **[hygiene, small] `cycle_ts` NULL on `option_liquidity_observations`** — the column is written NULL on every row (distinct cycle_ts = 0 over 124 rows); one-line fix at the writer. Unblocks honest cycle-counting for the #1015 graduation assessment.
-- **[protective] Same-name/same-direction concentration cap** — NEW control (does not exist): nothing prevents multiple same-direction books on one name (2026-06-04: live + 2 shadow forks all bearish NFLX — by design for cohorts, but unguarded in general; #1011's dedup is same-cohort/same-cycle only). Sizing-adjacent, small surface.
-- **[forward-build, matures ~mid-June] Replay-with-receipts tape** — the honest alternative to backtesting (which is infeasible today, see closed questions). Components: (a) enable the dormant replay subsystem (`REPLAY_ENABLE=0`; `data_blobs`/`decision_runs` have **0 rows ever**) or an equivalent lean capture; (b) per-leg NBBO on ACCEPTED candidates (see updated item below); (c) optional per-cycle evaluated-strikes chain slice (the scanner already holds it in memory); (d) #1022's 15-min persisted marks as the exit-side tape. **Self-calibrating:** each recorded cycle carries the cohorts' real forward outcomes, so the replay retrodicts known results as N grows. **Use for falsification/ranking of exit-rule variants ONLY — never parameter optimization** (the clean window is 4 days / 1 regime; optimization = guaranteed overfit).
-- **[low-pri] Historical-NBBO tier check** — one authenticated `GET /v3/quotes/{OCC}?timestamp=<past>` with the worker's Polygon key settles whether historical option quotes are on the current plan (likely Advanced-only). Only worth doing if external backtesting is ever revisited.
-- **[hygiene] Relabel/quarantine `backtest_engine.py` + `historical_simulation.py`** as strategy-shape explorers, NOT faithful replay: their fill model constructs `bid_price = ask_price = close` (zero spread, market orders, flat-bps slippage; `backtest_engine.py:485-489`) and steps daily bars — cannot represent the 15-min exit machinery, cohort forks, watchdog, or instant-or-never fills. Docstring/README labels so future selves don't mistake their EVs for forecasts.
-
-### UPDATED existing items
-- **`check_new_position` breaker wiring (the deferred #1014-note behavior) — now ACTIVELY binding:** with one live position, NFLX = 100% > the 40% `RISK_MAX_SYMBOL_PCT` cap → the autopilot circuit breaker (`paper_autopilot_service.py:208-249`, `check_all_envelopes` over existing positions) **blocks ALL new entries — including diversifying ones — while NFLX is open.** `check_new_position` (`risk_envelope.py:567`) exists but is unused; wiring it lets the breaker evaluate whether the CANDIDATE improves concentration → un-blocks diversification at small book sizes. Deliberate behavior change; was deferred, now has a live consequence.
-- **Per-leg NBBO persistence at suggestion build (the #1018 field-drop follow-up) — now TRIPLE-purpose:** (1) hardens the marketable-entry lever against Polygon fetch failures (the live NFLX's first observe record hit `no_quote_no_aggression`); (2) makes #1017's `would_be_live_marketable` label decidable for spreads (currently null for combos); (3) is the foundation of the replay tape's selection-side data. Three consumers → argues for doing it sooner than "hardening follow-up."
-
-### CLOSED QUESTIONS / operational notes (record — not tasks)
-- **PDT throttles: checked, NONE to relax.** Every PDT-motivated cap is already dormant behind `PDT_PROTECTION_ENABLED=0` (autopilot same-day gate, exit-evaluator partition, approval-queue checks, optimizer param inert at 99). The active caps (tier `max_trades=4`, loss envelopes, 36% ceiling) are real capital-risk controls — keep. The only PDT work is the P0 field fix + P1 retirement.
-- **Backtesting: INFEASIBLE today — do not re-investigate building one now.** No point-in-time chains (replay tables empty since inception), no historical option NBBO on the current plan (unverified, likely Advanced-tier; never called in code), clean post-#1012 window = 4 cycle-days / 1 regime, forward ground truth N≈1 (the BAC TP close), and the existing backtester IS the mid-fill fantasy (zero-spread fills). Forward-shadow is the only honest instrument. Re-open when the replay tape matures (~mid-June+, multi-regime).
-- **Operational (until the NFLX closes):** the autopilot circuit breaker blocks ALL new autopilot entries while the live NFLX is open (100% > 40% concentration) — expect `status=blocked, reason=risk_envelope_breach` on entry cycles. Not a bug; the check_new_position wiring above is the fix direction.
-
----
-
-> **Locator caveat:** `file:line` locators in Groups 4–6 are from a read-only
-> diagnostic sweep this session unless otherwise noted. `options_scanner.py:2041`
-> (combo-width fallback) and `options_scanner.py:3184-3240` (spread gate /
-> uniform threshold) were verified directly this session; the rest are
-> sweep-sourced and may drift. Behavioral conclusions are anchored in DB ground
-> truth (rejection logs, the live F suggestion row) and are authoritative.
-
-**Sequencing note:** Group 1 close-outs and Group 3 diagnostics run
-first/parallel (read-only). Group 2 (#3 convention) is the one remaining
-correctness fix and is the HARD PREREQUISITE for the exit and modeling work in
-Group 4 — designing position-aware exits on convention-ambiguous P&L would
-repeat the abandoned-#2 mistake. Groups 5–6 are fill; Group 7 runs passively
-over F's lifecycle.
-
-## Group 1 — In-flight close-outs (hours)
-- Merge guard PR #987 (payoff-bound guard, shared module, CI-green, awaiting
-  merge — branch protection). On merge → Railway redeploys worker → H8-confirm
-  worker_boot > deploy_SUCCESS before treating live (~5 min image swap).
-- Task 3: confirm fix#1 (#986) at runtime. After 20:00 UTC paper_exit_evaluate,
-  verify EXIT_EVAL_DEBUG for bdbe4d04 reads ~+$168 / −$240, decision=HOLD. If
-  33.60/−48, real surprise — investigate. [pending ~20:06 UTC background timer]
-- Railway token, durable: set RAILWAY_TOKEN (or RAILWAY_API_TOKEN) at User level
-  on Windows; restart terminal + Claude Code + MCP. Keeps expiring; blocks #4
-  confirmation + all log observation.
-- Confirm cost-basis subtraction next cycle: open_positions=1, F's $480
-  subtracted from envelope.
-
-## Group 2 — #3 convention consolidation (the one real correctness fix)
-
-**✅ RESOLVED 2026-05-28 (PR #992).** Pinned `legs.quantity = FULL-COUNT` and
-addressed all THREE defect surfaces; **resolves #2** (intraday double-count) via
-the reader unification, not as a separate fix.
-- **Surface 1 (fork.py cohort-clone):** `_clone_suggestion_for_cohort` now scales
-  each clone's `legs[].quantity` to the clone's own contract count (was copying
-  the champion's). `test_fork_clone_legs_full_count.py`.
-- **Surface 2 (fill seam):** new `risk/legs_convention.coerce_legs_to_full_count`
-  runs at both persisted-legs writers (`_repair_filled_order_commit`,
-  `_commit_fill`) — coerces each leg to `abs(pos.quantity)` and fires a critical
-  `legs_quantity_convention_violation` alert on mismatch; NO-OP for legitimate
-  full-count fills. `test_legs_convention.py`.
-- **Surface 3 (historical):** migration `20260528100000` backfilled the lone
-  per-spread row (CSX `d077c93d` → `[4,4]`). Cohort suggestion rows confirmed
-  transient (only the executed champion becomes a position) → no suggestion
-  backfill.
-- **Reader unification:** single shared `risk/mark_math.py`
-  (`compute_current_value` + `finalize_mark`) consumed by BOTH
-  `paper_mark_to_market_service.refresh_marks` and
-  `intraday_risk_monitor._refresh_marks` (H13; no parallel mark math). Scales
-  `unrealized_pl` exactly once — F: was +$2,070 double-count, now correct +$30.
-- **Guard #987 retained untouched** as the independent catch (removed the cause,
-  kept the net). `TestRefreshMarksScale` updated to full-count and passes; the
-  BUG-A defense was transformed (prevention at the seam + reader-assumes-full-count
-  regression test), not deleted.
-- **DB-side verified:** CSX `[4,4]`, F full-count `[5,5]` +$30 unchanged; unified
-  intraday path computes F correctly in tests. **Deferred:** the runtime
-  alert-quieting confirmation (F's `mark_payoff_bound_violation` going silent on
-  the live intraday cycle) pends the Railway token (Group 1 blocker); DB-side
-  checks prove the fix independently.
-- **Unblocks Group 4** (position-aware / dynamic exits + modeling roadmap), which
-  was gated on #3's corrected marks.
-
-Audit complete: 69/70 positions full-count, 1/70 per-spread (CSX d077c93d,
-closed BUG-A row), F full-count, ZERO live data exposure. #2 (intraday
-double-count) is RESOLVED BY this, not separately. Sequence (own daylight PR;
-convention = operator decision but data strongly favors full-count):
-  1. Pinpoint the per-spread emitter — the scanner-suggestion → order_json.legs
-     seam that wrote quantity=1 for the 4-ct CSX. Authoritative persisted writer
-     is paper_endpoints.py:1465 (fill-commit passthrough); current entry/close
-     builders emit full-count, so the per-spread value enters at the suggestion
-     seam. This is step 1 / the one unfinished audit thread.
-  2. Pin convention = full-count (operator decision; 69/70 + current writers +
-     paper_mark_to_market's assumption favor it).
-  3. Creation-time assertion at paper_endpoints.py:1465 (H9 verified-write):
-     assert legs[].quantity == |pos.quantity| for verticals; alert/reject on
-     mismatch.
-  4. Backfill the 1 closed CSX row, or skip + document.
-  5. Unify the two mark readers (_refresh_marks + paper_mark_to_market) to one
-     shared full-count implementation; update TestRefreshMarksScale to
-     full-count fixtures; decide whether to retain a per-spread rejection test
-     now that creation asserts the convention.
-
-**THIRD INSTANCE of the convention defect — the cohort-clone path (observed
-via PR #990, 2026-05-28).**
-- PR #990's live F-row check observed `legs.quantity=5` IDENTICAL across all
-  three cohort suggestion rows (aggressive 5ct / conservative 12ct / neutral
-  26ct) despite their differing contract counts. The cohort-fork path
-  (`fork.py::_clone_suggestion_for_cohort`) propagates the champion's
-  `legs.quantity` to each clone WITHOUT scaling it to the clone's own contract
-  count → the non-champion cohort rows are convention-wrong (`legs[].quantity`
-  does not match the clone's `pos.quantity`) every cycle.
-- This is a DIFFERENT surface than the audit census: the audit (69/70
-  full-count, 1 per-spread CSX) was on POSITIONS; this is on SUGGESTION/COHORT
-  rows at clone time. The clone defect mints convention-wrong rows
-  systematically, not as a one-off.
-- Scope impact on #3's sequence:
-  * **Step 3 (creation-time assertion at paper_endpoints.py:1465):** must ALSO
-    cover the cohort-clone path — the assertion `legs[].quantity ==
-    |pos.quantity|` has to fire on clones, not just the champion fill.
-  * **fork.py leg-scaling is now an EXPLICIT part of #3** (scale `legs.quantity`
-    to each clone's contract count at fork time), NOT the deferred follow-on it
-    appeared to be during #990.
-  * **Steps 4 (backfill) and 5 (reader-unification)** should account for any
-    convention-wrong cohort rows already persisted, not just the single CSX
-    position row.
-- Known convention-defect surfaces are now THREE: (1) F-shape full-count vs
-  (2) CSX per-spread positions, and (3) fork.py cohort-clone propagation of the
-  champion's `legs.quantity` to clones. #3 must cover all three.
-
-## Group 3 — Diagnostics pending
-- **DONE 2026-05-28 — Credit-spread force-hydrate verification (verdict recorded).**
-  Verdict: the `spread_too_wide_real ≈ 2.0` rejection is an **ARTIFACT**, but
-  hydration does **not** make credit spreads broadly tradeable. Decisive: **ZERO
-  outcome-(c)** across the full price spectrum tested (NIO $5.57, KHC $24.50,
-  AMD $518, QCOM $244, ISRG $424) — every wing has a **live two-sided market**;
-  "structurally unreachable / no market" is FALSE. The 2.0 is the strike-width
-  fallback (`options_scanner.py:2041`) firing because the scanner doesn't hydrate
-  the wing NBBO at scan time (`_combo_cost_range_from_legs` → None → falls back to
-  strike width → `width/max_loss ≈ 2.0`). Confirmed by the asymmetry tell:
-  same-cycle call-debit legs hydrated to real 0.15–0.84 spreads while every
-  credit/put-debit alternative logged **exactly 2.0** (13 of 14 rejections) — a
-  measured bid-ask cannot be exactly 2.0 across 13 names from $5.50–$300; the
-  uniformity is the fallback signature. **BUT hydration ≠ tradeability:** real
-  combo spreads are **16–91%, all > 10%**, credits are thin and the combo bid-ask
-  is a large fraction of the credit (NIO combo $0.07 vs credit $0.065 — crossing
-  eats ~the whole credit; KHC $0.12 vs $0.27 ≈ 44%), the same slippage lesson as
-  the F execution; high-IV names (QCOM 91%, ISRG 67%, AMD 30%) are correctly
-  rejected. Caveats: representative strikes (exact scanner strikes not logged →
-  magnitude illustrative; the two-sided-market finding is exact); quotes ~22 min
-  pre-close; 5 names across tiers, 13/14 cycle rejections were the 2.0 fallback.
-  → Re-scoped fix lives in the D8 "Credit spreads" item below.
-- (DONE — reference, do not re-run: P&L corruption diagnostic; writer/convention
-  audit; first-execution status; trader-framework gap map.)
-
-## Group 4 — Design roadmap (post-diagnostic, by thread)
-Gated on the gap map (done) and #3 (for exit/modeling work).
-
-### Surfacing quick wins (gap map D1 — data computed, not shown)
-- Form + expose reward:risk: max_profit & max_loss per contract are both
-  computed (options_scanner.py:1902-1945) but the ratio is never formed and
-  max_profit is never persisted (no column).
-- Breakeven: long strike + net debit (debit) / short strike − credit (credit).
-  All inputs in legs + limit_price. Computed nowhere.
-- Payoff/scenario table at emission (deterministic; inputs in hand). The
-  trader's single most distinctive artifact. Borderline quick-win/roadmap.
-- Fix midday persistence holes (CONFIRMED NULL on the live F row):
-  probability_of_profit, max_loss_total, capital_required, rationale are NULL at
-  column level with real values buried in sizing_metadata JSONB; net_ev
-  (edge-after-costs) only in multi_strategy metadata. Midday path writes fewer
-  columns than the morning path. Promote to columns.
-- Price-basis note: system surfaces ENTRY $0.96 (order_json.limit_price), not
-  the $0.88 mark; operator cannot derive R:R from what's shown without manually
-  pulling sizing_metadata.
-
-### Strategy coverage (gap map D8 — per-strategy binding constraint)
-- Single-leg longs — **VERDICT IN (2026-05-28 read-only feasibility scope):
-  DON'T BUILD (in current form).** Re-scoped from the gap map's "cheapest path
-  to more trades / fits H7 broadly."
-  - **The mechanical build is genuinely cheap:** ONE `get_candidates` selector
-    change adds `LONG_CALL`/`LONG_PUT` templates; all downstream machinery is
-    already wired — EV math (`ev_calculator.py:181-193`), PoP (`:82-88`), risk
-    primitives (`options_scanner.py:1866-1885`), scanner EV dispatch
-    (`:3120-3134`), strategy mapping (`:1841`), H7 round-trip
-    (`sizing_engine.py:28-60`, single-leg `close_bp=0`), strategy-agnostic
-    ranker (`canonical_ranker.py`). The 1-leg branch (`options_scanner.py:3120`)
-    is unreached ONLY because `get_candidates` never appends a 1-leg template —
-    its pool is exclusively 2-leg (spreads) and 4-leg (iron condors).
-  - **BUT the single-leg EV model is structurally optimistic and was never
-    calibrated as a RANKING input** (single legs have never been emitted):
-    `long_call` uses a 10× unbounded-gain cap (`UNBOUNDED_GAIN_CAP_MULT=10`),
-    `long_put` assumes collapse-to-zero, both use `PoP=delta` with NO theta
-    term. Computed single-leg EV is inflated 1–3 orders of magnitude.
-  - **Consequence:** building the cheap branch now would inject candidates
-    whose EV is fictional; they'd pass the $15 edge gate by enormous margins
-    and OUTRANK the debit spreads that are financially superior (a naked long
-    has worse real EV — no short leg financing it, long theta). NOT "add
-    correctly-rejected candidates" (the credit-spread case) but "add
-    incorrectly-ACCEPTED candidates that pull capital toward worse trades."
-    One notch worse than the credit-spread parallel.
-  - **"Fits H7 broadly" is HALF TRUE:** sub-$30 + mid tiers pass H7 with large
-    headroom (premium $43–$169 vs $1,531 OBP), MORE easily than debit spreads;
-    but high-priced names (QCOM $243 → $2,513 premium, AMD $519 → $4,310) FAIL
-    H7 outright at the system's ~0.60δ preference, and the cheap-deep-OTM escape
-    hatch degenerates to a ~10%-delta lottery ticket the broken gate cannot
-    reject. **Binding constraint is the miscalibrated single-leg EV model,
-    tier-modulated by H7** (which only bites the high tier) — NOT the clean
-    EV-vs-H7 squeeze. Here the gates fail to BIND, which is more dangerous than
-    a legitimate squeeze.
-  - **PRECONDITION to revisit (separate larger PR, NOT queued):** recalibrate
-    single-leg EV into a theta-and-drift-aware expected-return model. Real
-    modeling work, not a multiplier — and there are ZERO historical single-leg
-    outcomes to calibrate against. Even done honestly, the model would likely
-    show single longs failing the $15 gate MORE than spreads at this capital,
-    adding few real candidates. **PARKED:** expected payoff doesn't justify the
-    modeling cost at $1,531 OBP.
-  - **Caveat:** OBP figure varies across docs ($1,531 / $1,031 / $501.61); a
-    lower OBP only tightens H7 (kills the high tier sooner, shrinks the
-    sub-$30/mid pass band) and does NOT change the EV-model finding.
-  - Doctrine: this is instance (3) of H15 "Context-repurposed value /
-    dormant-path activation" in `docs/loud_error_doctrine.md` — the wired EV cap
-    is a correct *bound* but fiction as a *ranking* input for a dormant path.
-- Credit spreads — **VERDICT IN (2026-05-28 force-hydrate, Group 3): the 2.0 is
-  an ARTIFACT, but hydration does not make credit spreads broadly tradeable.**
-  Mechanism confirmed: OTM wing legs lack two-sided NBBO *in the scan-time
-  snapshot* → `_combo_cost_range_from_legs` returns None → falls back to strike
-  width (`options_scanner.py:2041`) → `width/max_loss ≈ 2.0`. Live, every wing
-  tested ($5.57–$424) HAS a two-sided market (zero outcome-(c)), so the 2.0 is a
-  fetch gap, not "no market." But the *real* hydrated combo spreads are 16–91%
-  (all > 10%) and the combo bid-ask is a large fraction of the thin credit →
-  slippage eats the edge (same as the F execution).
-  - **Fix shape (separate PR, NOT done here): wing quote-hydration in the
-    scanner** — fetch wing-leg NBBO for ALL candidate strategies (not just the
-    primary call-debit) before computing the combo metric, instead of falling
-    back to strike width. Flips ~13/14 recent rejections from a false-200% to an
-    honest spread measurement.
-  - **VALUE = correctness/observability, NOT trade volume.** The fix stops the
-    scanner emitting a false "no market" signal and lets the TRUE spread be
-    measured. Economic payoff is bounded by EV-vs-H7: expect occasional tradeable
-    credit spreads in low-IV regimes, not a flood.
-  - **Per-strategy spread threshold is necessary-but-not-sufficient:** a
-    credit-appropriate threshold (~20%+) only admits the narrowest low-IV wings,
-    and at that width the combo bid-ask ≈ the credit, so it mostly admits bad
-    fills. This is bounded by EV-vs-H7, NOT a contradiction of it.
-  - **PRIORITY: demoted** from "unlock the full registry" to "fix a real fetch
-    bug for observability; modest, IV-regime-dependent trade payoff." Worth
-    doing; don't over-invest expecting volume.
-- Iron condors — STRUCTURAL at small tier. Doubly blocked: NORMAL+directional
-  regime → not pooled (last CHOP 2026-03-17); when pooled, condor_ev_not_computed
-  (sub-$30 $0.50 strike granularity too narrow for IC wings); high-priced ICs
-  fail H7. Phase gate (strategy_selector.py:377-378) is dormant/not the binding
-  gate. Not parameter-fixable at this capital/universe.
-- CSP/covered call — STRUCTURAL (capital). Absent from registry + collateral
-  (>$1,300) exceeds BP. Class E.
-
-### Position-aware / dynamic exits (gap map D6 — cheaper than expected)
-- Current model is premium-% only (now qty-scaled to ~+$168/−$240).
-  paper_exit_evaluator.py:206-301 reads only max_credit/unrealized_pl/qty; leg
-  strikes are ON the position but UNREAD; no live underlying plumbed.
-- To enable geometry-aware exits (breakeven-line, distance-to-short-strike,
-  fraction-of-max-profit): plumb live underlying price + read stored leg strikes
-  into the _check_* functions.
-- Per-cohort exit params (stop_loss_pct/target_profit_pct/min_dte_to_exit) are
-  ALREADY wired (paper_exit_evaluator.py:630-648) — dynamic-exit variants can
-  ride existing plumbing. Test in shadow cohorts vs the live champion on real
-  data; never on the live position. PREREQUISITE: #3 corrected marks + ≥ a few
-  realized outcomes.
-
-### Cohort differentiation (gap map D7)
-- Cohorts currently differ in sizing + already-wired per-cohort exit params.
-  Entry-timing is plumbed-but-unused: max_dte_to_enter exists
-  (policy_lab/config.py:14-41) but is unused. Making cohorts encode
-  entry-timing/thesis profiles (early/contrarian vs momentum-continuation) would
-  be new. Natural test venue for the exit-model variants above.
-
-### Modeling / context (gap map D2, D3, D4 — the trader's core critique)
-- D2 momentum / extended-move: FEATURE-ABSENT (not scoped out), HIGH. EV off
-  current price/IV only (ev_calculator.py:145-235); regime on IV/vol primitives
-  only (regime_engine_v3.py:560); RSI computed in factors.py but never consumed;
-  ranker no run-up term (canonical_ranker.py). No "already ran +44–75%" signal
-  anywhere. Tractable at small tier (distance-from-SMA / %run-up / RSI cheap
-  from existing bars) — add as an EV temper or score input.
-- D3 catalyst: PRESENT BUT INVERTED. Earnings consumed defensively only (reject
-  short-premium within 2d, score×0.5 within 7d; options_scanner.py:3389-3447,
-  guardrails.py:85-93). Never asks the trader's question: "is there a forward
-  catalyst before expiry to realize the modeled move?" Modeling-absent in the
-  thesis direction. Needs a catalyst calendar joined to expiry.
-- D4 thesis / "why now": rationale is a templated exit string written only on
-  morning exits; midday entries write rationale=NULL (confirmed F). Structured
-  provenance exists (agent_signals/decision_lineage) but no human-readable
-  directional "why." One-line assembled rationale = surfacing; genuine
-  directional thesis = modeling.
-
-## Group 5 — Low-priority cleanups
-- #4 executed-counter: likely counts shadow placements (possibly skip_no_quote)
-  as "executed" (paper_autopilot_service.py:487,553). Needs Railway logs to
-  confirm skip-path. Fix: separate live_executed / shadow_placed /
-  skipped_no_quote counters.
-- #5 duplicate suggestions each cycle: working as designed (dedup at
-  paper_autopilot_service.py:371-374 + no-quote guard prevent double-open).
-  Optional: dedup at suggestion generation to reduce noise.
-- #6 transient 0/0 Polygon quote: self-resolving; skip_no_quote guard worked.
-  Monitor recurrence only.
-- Shadow orders stuck "working" (conservative/neutral): confirm they don't
-  accumulate across cycles. Cosmetic.
-
-## Group 6 — Doctrine to codify
-- EV-vs-H7 trade-off at small tier: confirm the codification landed
-  (structural_findings entry / PR #979 family); merge if still
-  written-but-unmerged.
-  **[NOTE 2026-05-28 — CONFLICT/STATUS: this appears ALREADY LANDED. `docs/structural_findings.md` contains the "EV-vs-H7 trade-off at small-tier capital" section (added 2026-05-26); CLAUDE.md's Bugs-Fixed lists the 2026-05-26 codification; commit `c4ef365` = "doctrine: codify EV-vs-H7 trade-off … (#983)". The "#979 family" label is approximate — the merged codification PR is #983. Treat as DONE unless a specific gap is found.]**
-- Verification-gate-before-mutation: caught THREE incomplete/wrong fixes on the
-  mark/exit subsystem this thread (eval/execute timing artifact; L478
-  cosmetic-vs-decision mislocation; the #2 fix that would have re-armed BUG-A).
-  Standard practice now: assume both the obvious location AND a clean severity
-  split are suspect until data confirms.
-- #1/#2/#3 mis-split lesson: single root cause (no pinned legs.quantity
-  convention) modeled as separable severities; the "safe-to-patch-now" #2 wasn't
-  safe (mark math conditional on convention). Commit the drafted stub into
-  loud_error_doctrine.md.
-- Parallel-computation smell WITHIN a file (H13 intra-file): cosmetic-vs-decision
-  computations that look alike and sit near each other invite fixing the wrong
-  one (L478 vs L215/276).
-- Late-entry / momentum-following bias (gap map D5): propose as a
-  structural_findings entry. Partitioned: liquidity/IV dependence is INHERENT
-  (can't execute into illiquid pre-move chains — same family as EV-vs-H7);
-  absence of any extension-penalty is a FIXABLE modeling gap that could
-  counterbalance it. Evidence: F suggested after legs ran +44–75%, passed
-  because the post-run chain was liquid, IV stabilized, EV cleared $15. Locators:
-  gates options_scanner.py:2607-2628,3240; canonical_ranker.py
-  MIN_EDGE_AFTER_COSTS.
-- Single-leg-longs-unreachable-by-architecture: worth a structural_findings note
-  (notable because it's the class that DOES fit H7 at small tier, yet is blocked
-  by selector architecture not capital).
-
-## Group 7 — Ongoing observation (passive over F lifecycle; do NOT intervene)
-First full-pipeline position still exercising never-run-on-real-data machinery:
-- Exit pipeline on a real position (now qty-scaled correctly).
-- Hold-period stop scaling (PR #960, sqrt-decay) — never tested on a real debit
-  spread; F is first; needs #3 corrected marks.
-- mleg sign-flip validation (PR #908) — never exercised on a real multi-leg
-  position.
-- post_trade_learning — first realized outcome since the 2026-04-13
-  pnl-corruption cutoff, when F closes.
-- Exit slippage — real test of the 5%-of-EV formula (entry was zero-slippage;
-  the exit fill is the test).
-
-## Standing decisions / constraints
-- FULL strategy set wanted (no credit-spread exclusion — earlier "no more credit
-  spreads" was retracted).
-- Capital scaling to $5k+ is the designed envelope and an OPERATOR decision, not
-  a code task.
-- Never intervene manually on a live position; downstream machinery manages it;
-  value is observation.
-- Agent does not gatekeep cadence; ships what's requested; reserves pushback for
-  evidence-based concerns.
-- H14 cite-then-verify before any composition change.
-
-## Highest-leverage items (operator's stated goal lens)
-1. ~~Strategy coverage (D8): single-leg longs~~ — **DEMOTED 2026-05-28: VERDICT
-   DON'T-BUILD (read-only feasibility scope).** The build is cheap (one selector
-   line, all downstream wired) but the single-leg EV model is uncalibrated for
-   ranking (10× gain cap / collapse-to-zero / PoP=delta, no theta) → building it
-   would inject incorrectly-ACCEPTED candidates that outrank superior spreads.
-   Precondition (single-leg EV recalibration) is real modeling work with payoff
-   that doesn't justify the cost at $1,531 OBP → PARKED. See D8 entry above.
-   Credit-spread force-hydrate verify also DONE (2026-05-28): the 2.0 is an
-   artifact (fix = wing hydration) but payoff is bounded by EV-vs-H7 →
-   "correctness/observability, modest IV-regime-dependent volume," demoted from
-   "unlock the registry." Net: both D8 strategy-coverage levers are now
-   re-scoped down; neither is the cheap volume win the gap map implied.
-2. Surfacing quick wins (D1): breakeven, R:R, payoff table, midday column holes
-   — cheapest operator-facing improvement. **Now the top remaining leverage item.**
-3. #3 convention (Group 2): unblocks the exit/modeling roadmap.
+- **PDT (2026-06-04).** FINRA retired the rule; Alpaca same day; internal machinery dormant
+  behind `PDT_PROTECTION_ENABLED=0` (never flip ON); the field-reader P0 fix is CLOSED. Reopen
+  only if a regulator reinstates pattern-day rules.
+- **Historical option NBBO (2026-06-04).** No affordable source on current entitlements
+  (Advanced-tier likely); forward-shadow is the only honest instrument.
+- **External frameworks/brokers (2026-05).** Rejected; correction on record: NautilusTrader DOES
+  support Python 3.11 — rejection stands on integration cost, not that error.
+- **Retro-recompute of pre-epoch calibration (2026-06-10).** Infeasible: stored order_json legs
+  carry no deltas; historical greeks not on plan. CALIBRATION_EV_EPOCH + prospective relearn is
+  the design.
+- **mode-column assumption (2026-06-09).** The historical-simulation marker is `outcome_type`
+  (allowlisted by #1042), not a `mode` column. Verified.
+- **Backtest rebuild (2026-06-04).** Infeasible today (no point-in-time chains, N≈1 ground truth,
+  zero-spread fill fantasy in the existing engine). Reopen on multi-regime replay-tape maturity
+  (~mid-June+ was the earliest revisit; still not mature).
 
 ---
 

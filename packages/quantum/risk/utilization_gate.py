@@ -107,7 +107,10 @@ def echo_flag_state() -> None:
     an explicit WARNING instead of a silent no-op."""
     raw = os.environ.get(FLAG_ENV, "")
     enabled = is_enabled()
-    logger.info(
+    # WARNING level deliberately: the worker surfaces WARNING+ only, and the
+    # 06-10 first exercise proved INFO is invisible in Railway logs (the
+    # gate's behavior was verifiable only by control-flow inference).
+    logger.warning(
         "[UTILIZATION_GATE] flag %s raw=%r → enabled=%s", FLAG_ENV, raw, enabled
     )
     if raw.strip() and not enabled:
@@ -281,7 +284,9 @@ def evaluate_entry(
 
     utilization = (committed + candidate_cost) / pool
     allowed = utilization <= cap
-    logger.info(
+    # WARNING level deliberately — see echo_flag_state; "log every evaluation"
+    # must mean observable, not muted at the worker's log level.
+    logger.warning(
         "[UTILIZATION_GATE] symbol=%s committed=$%.2f obp=$%.2f "
         "candidate=$%.2f pool=$%.2f utilization=%.4f (%.1f%%) cap=%.2f "
         "decision=%s",

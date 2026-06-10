@@ -158,11 +158,20 @@ def calculate_ev(
 
     Uses strategy-aware PoP via calculate_pop() instead of raw delta.
     """
-    # Use calibrated PoP instead of raw delta
+    # Use calibrated PoP instead of raw delta.
+    # v5-A1 (2026-06-10 ALERT): `credit` must ALSO be passed for debit
+    # spreads — calculate_pop's breakeven interpolation uses it as the net
+    # premium (premium_fraction = |credit|/width). Restricting it to credit
+    # strategies left the debit branch on its delta fallback, so debit-spread
+    # PoP collapsed to abs(long-leg delta) and EV was overstated to the point
+    # of sign flips (NFLX 06-08: +95.67 staged vs ≈ −26 honest). Commit
+    # 9a2cef1 built the interpolation but never made it reachable.
     win_prob = calculate_pop(
         strategy_type=strategy,
         legs=legs,
-        credit=premium if strategy in ("credit_spread", "short_call", "short_put") else None,
+        credit=premium if strategy in (
+            "credit_spread", "short_call", "short_put", "debit_spread",
+        ) else None,
         width=width,
         delta=delta,
     )

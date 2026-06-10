@@ -882,7 +882,10 @@ class PaperExitEvaluator:
                     min_dte_to_exit=cfg.min_dte_to_exit,
                 )
             if cohort_conditions_cache:
-                logger.info(
+                # WARNING deliberately: positive confirmation that cohort
+                # thresholds (not defaults) govern this pass must be visible
+                # at the worker's WARNING+ log level (06-10 A2 diagnostic).
+                logger.warning(
                     f"[EXIT_EVAL] Loaded {len(cohort_conditions_cache)} cohort configs: "
                     + ", ".join(
                         f"{k}(tp={cohort_cfgs[k].target_profit_pct:.0%},sl={cohort_cfgs[k].stop_loss_pct})"

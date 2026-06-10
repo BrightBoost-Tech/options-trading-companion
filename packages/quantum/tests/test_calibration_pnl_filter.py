@@ -39,16 +39,17 @@ class TestCorruptedPnlFloor:
         """CORRUPTED_PNL_FLOOR must be >= 2026-04-13 (the triage cutoff)."""
         assert CORRUPTED_PNL_FLOOR >= "2026-04-13"
 
-    def test_short_window_uses_window_cutoff(self):
+    def test_short_window_uses_window_cutoff(self, monkeypatch):
         """When window_days is short, the rolling cutoff wins over the floor.
 
-        Contract: effective_cutoff = max(now - window_days, floor).
-        When window is short (and current date is past the floor), the
-        rolling cutoff is more recent than the floor, so max() selects
-        the rolling cutoff. We don't pin exact equality — service-side
-        `datetime.now()` and test-side `datetime.now()` differ by
-        microseconds, which flaked the first attempt.
+        Contract (v5-B2 extended): effective_cutoff = max(now - window_days,
+        floor, EV epoch). This test pins the WINDOW-vs-FLOOR precedence, so
+        the EV epoch (a third bound added 2026-06-10 for the PoP-definition
+        change; dominance pinned in test_honest_pop.py) is patched out of
+        the way to a date the floor already covers.
         """
+        from packages.quantum.analytics import calibration_service as cs
+        monkeypatch.setattr(cs, "CALIBRATION_EV_EPOCH", "2026-01-01T00:00:00+00:00")
         client, query = _make_supabase_spy()
         service = CalibrationService(client)
         service._fetch_outcomes(user_id="test-user", window_days=1)
@@ -75,12 +76,20 @@ class TestCorruptedPnlFloor:
 
     def test_long_window_clamps_to_floor(self):
         """When window_days is large enough to reach pre-floor era, floor wins."""
+        from packages.quantum.analytics import calibration_service as cs
         client, query = _make_supabase_spy()
         service = CalibrationService(client)
 
-        # window_days=365 → cutoff ~ now - 1 year, definitely < 2026-04-13
-        # Floor should win.
-        service._fetch_outcomes(user_id="test-user", window_days=365)
+        # window_days=365 → cutoff ~ now - 1 year, definitely < the floor.
+        # Floor should win over the window. The v5-B2 EV epoch (third bound;
+        # see test_honest_pop.py) is patched behind the floor so this test
+        # keeps pinning window-vs-floor precedence.
+        monkeypatch = pytest.MonkeyPatch()
+        monkeypatch.setattr(cs, "CALIBRATION_EV_EPOCH", "2026-01-01T00:00:00+00:00")
+        try:
+            service._fetch_outcomes(user_id="test-user", window_days=365)
+        finally:
+            monkeypatch.undo()
 
         query.gte.assert_called_once()
         call_args = query.gte.call_args

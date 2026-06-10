@@ -3408,13 +3408,24 @@ def scan_for_opportunities(
                     else:
                         delta_for_ev = abs(float(long_leg.get("delta") or 0.0))
 
+                    # v5-A1: pass per-leg deltas (side→action map — calculate_pop
+                    # expects 'action') so the debit-spread breakeven
+                    # interpolation is REACHABLE. Without legs, PoP fell back to
+                    # abs(long delta) — the raw-delta bug commit 9a2cef1 claimed
+                    # to fix but never wired at this call site. Credit-spread
+                    # PoP is unaffected (its primary path uses credit/width,
+                    # not legs; pinned in test_honest_pop.py).
                     ev_obj = calculate_ev(
                         premium=abs(total_cost),
                         strike=long_leg['strike'],
                         current_price=current_price,
                         delta=delta_for_ev,
                         strategy=st_type,
-                        width=width
+                        width=width,
+                        legs=[
+                            {"action": l.get("side"), "delta": l.get("delta")}
+                            for l in legs
+                        ],
                     )
                     total_ev = ev_obj.expected_value
                 else:

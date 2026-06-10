@@ -243,7 +243,7 @@ class PaperAutopilotService:
                     ug.echo_flag_state()
                     if ug.is_enabled() and ug.tier_is_small(user_id, supabase=self.client):
                         cb_config.symbol_concentration_severity = "warn"
-                        logger.info(
+                        logger.warning(
                             "[UTILIZATION_GATE] small tier + gate enabled — "
                             "concentration_symbol demoted to WARN for this run "
                             "(utilization gate enforces per-candidate at stage time)"
@@ -588,6 +588,26 @@ class PaperAutopilotService:
             },
         }
 
+    def _stamp_blocked_reason(self, suggestion_id, reason: str, detail: str = "") -> None:
+        """Stamp blocked_reason/_detail on a suggestion rejected at stage time.
+
+        Closes the 'swept as stale' observability gap (06-10 A3 diagnostic):
+        a #1038-rejected or risk-gated suggestion previously left NO trace on
+        its row — status stayed pending, the morning sweep relabeled it
+        dismissed, and the real cause lived only in logs/job results.
+        Fail-soft: a stamp failure never affects the execution loop.
+        """
+        try:
+            self.client.table(TRADE_SUGGESTIONS_TABLE).update({
+                "blocked_reason": reason,
+                "blocked_detail": str(detail)[:300],
+            }).eq("id", suggestion_id).execute()
+        except Exception as e:
+            logger.warning(
+                f"[STAGE_BLOCK] blocked_reason stamp failed for "
+                f"{str(suggestion_id)[:8]}: {e}"
+            )
+
     def _execute_per_cohort(self, user_id: str) -> Dict[str, Any]:
         """
         Policy Lab path: execute suggestions grouped by cohort.
@@ -603,6 +623,7 @@ class PaperAutopilotService:
             _stage_order_internal,
             _process_orders_for_user,
             get_analytics_service,
+            EntryQuoteUnpriceable,
         )
 
         supabase = self.client
@@ -821,11 +842,12 @@ class PaperAutopilotService:
                         "processed": proc.get("processed", 0),
                     })
                     total_processed += proc.get("processed", 0)
-                except rc.SymbolCooldownActive:
+                except rc.SymbolCooldownActive as _ca:
                     # Benched by an active re-entry cooldown (or a fail-closed
                     # query error) — an expected, ENFORCED skip, already logged
                     # loudly at the gate. NOT an execution failure; don't
                     # pollute the failure aggregation.
+                    self._stamp_blocked_reason(sid, "symbol_cooldown", str(_ca))
                     continue
                 except ug.EntryUtilizationBlocked as _ub:
                     # #1044: pro-forma utilization above the cap — an expected,
@@ -835,6 +857,7 @@ class PaperAutopilotService:
                         "[UTILIZATION_GATE] STAGE gate BLOCKED %s/%s cohort=%s — %s",
                         ticker, sid[:8], cohort_name, _ub,
                     )
+                    self._stamp_blocked_reason(sid, "entry_utilization_blocked", str(_ub))
                     continue
                 except ug.UtilizationGateError as _ue:
                     # #1044 FAIL-CLOSED: an input the gate needs could not be
@@ -846,6 +869,29 @@ class PaperAutopilotService:
                         "cohort=%s — FAIL-CLOSED, skipping stage: %s",
                         ticker, sid[:8], cohort_name, _ue,
                     )
+                    self._stamp_blocked_reason(sid, "utilization_gate_error", str(_ue))
+                    continue
+                except EntryQuoteUnpriceable as _eq:
+                    # #1038 stage-time rejection — preserve the existing error
+                    # accounting (these counted as errors-not-executed before)
+                    # AND stamp the row so the cause survives the morning
+                    # stale-sweep (06-10: 3 XLE forks rejected, rows left
+                    # pending/blocked_reason-null — invisible by the next day).
+                    logger.error(
+                        f"policy_lab_execute_error: cohort={cohort_name} "
+                        f"ticker={ticker} error={_eq}"
+                    )
+                    all_errors.append({
+                        "cohort": cohort_name, "suggestion_id": sid, "error": str(_eq),
+                    })
+                    _cohort_per_suggestion_failures.append({
+                        "cohort_name": cohort_name,
+                        "suggestion_id": sid,
+                        "ticker": ticker,
+                        "error_class": "EntryQuoteUnpriceable",
+                        "error_message": str(_eq)[:200],
+                    })
+                    self._stamp_blocked_reason(sid, "entry_quote_unpriceable", str(_eq))
                     continue
                 except Exception as e:
                     logger.error(f"policy_lab_execute_error: cohort={cohort_name} ticker={ticker} error={e}")

@@ -220,7 +220,16 @@ async def _ingest_paper_outcomes_for_user(
         sid: float(meta["ev"]) for sid, meta in suggestion_meta_map.items() if meta.get("ev") is not None
     }
 
-    # 3. Collect order_ids for dedup check against existing learning records.
+    # 3. Dedup against existing learning records — POSITION-LEVEL (v5-A3).
+    # The old key was the closing-order id alone: a position carrying more
+    # than one filled close row across runs produced one outcome PER ORDER,
+    # each with the FULL position pnl (ADBE f6eee0e9 ×2 / AMD 91d4e119 ×2 —
+    # 76.5% of training dollars were dup-counted). A closed position must
+    # yield exactly ONE trade_closed outcome. Keys, in order:
+    #   (a) suggestion_id — 1:1 with the position (cohort forks carry their
+    #       own suggestion ids, so fork outcomes stay distinct by design);
+    #   (b) source_event_id (order id) — retained for legacy rows / positions
+    #       without a suggestion link.
     order_ids = [o["id"] for o in orders_by_position.values()]
     existing_order_ids: set = set()
     if order_ids:
@@ -234,6 +243,34 @@ async def _ingest_paper_outcomes_for_user(
                      len(existing_order_ids), len(order_ids))
     else:
         logger.debug("No order_ids to dedup — all positions lack closing orders")
+
+    existing_suggestion_ids: set = set()
+    if suggestion_ids:
+        try:
+            sugg_existing = supabase.table("learning_feedback_loops") \
+                .select("suggestion_id") \
+                .eq("user_id", user_id) \
+                .eq("outcome_type", "trade_closed") \
+                .in_("suggestion_id", list(suggestion_ids)) \
+                .execute()
+            existing_suggestion_ids = {
+                r["suggestion_id"] for r in (sugg_existing.data or [])
+                if r.get("suggestion_id")
+            }
+        except Exception as e:
+            # Fail toward the legacy (order-id) dedup only — never block ingest.
+            logger.warning("Suggestion-level dedup query failed (order-id dedup only): %s", e)
+
+    # Live-vs-simulator dimension (v5-A3): is_paper was hardcoded True, making
+    # broker fills indistinguishable from internal/shadow fills in the learning
+    # store. Resolve live-routed portfolios once; failure → everything stays
+    # is_paper=True (the conservative legacy label, never fabricated 'live').
+    live_portfolio_ids: set = set()
+    try:
+        from packages.quantum.risk.position_scope import live_routed_portfolio_ids
+        live_portfolio_ids = set(live_routed_portfolio_ids(supabase, user_id))
+    except Exception as e:
+        logger.warning("live-routing scope failed (all outcomes labeled is_paper=True): %s", e)
 
     # 4. Create outcomes for each closed position that has a closing order.
     outcomes_created = 0
@@ -261,10 +298,25 @@ async def _ingest_paper_outcomes_for_user(
         suggestion_ev = suggestion_ev_map.get(suggestion_id) if suggestion_id else None
         suggestion_meta = suggestion_meta_map.get(suggestion_id) if suggestion_id else None
 
+        # Position-level dedup (v5-A3): this position's outcome already exists
+        # under ANY close order — skip, even if today's picked order id differs
+        # from the one recorded (the cross-run dup mechanism).
+        if suggestion_id and suggestion_id in existing_suggestion_ids:
+            skipped_duplicate += 1
+            logger.info("SKIP %s (pos=%s): dedup — suggestion %s already has a "
+                        "trade_closed outcome", symbol, pos_id_short, str(suggestion_id)[:8])
+            continue
+
+        is_live_fill = (
+            position.get("portfolio_id") in live_portfolio_ids
+            and (order.get("execution_mode") or "") == "alpaca_live"
+        )
+
         outcome = _create_paper_outcome_record(
             user_id, order, target_date, position,
             suggestion_ev=suggestion_ev,
             suggestion_meta=suggestion_meta,
+            is_paper=not is_live_fill,
         )
         logger.info("INSERT %s (pos=%s): pnl_realized=%s pnl_predicted=%s suggestion=%s",
                      symbol, pos_id_short, outcome["pnl_realized"],
@@ -306,6 +358,7 @@ def _create_paper_outcome_record(
     *,
     suggestion_ev: Optional[float] = None,
     suggestion_meta: Optional[Dict] = None,
+    is_paper: bool = True,
 ) -> Dict:
     """
     Create a learning_feedback_loops record from a paper order fill.
@@ -372,9 +425,13 @@ def _create_paper_outcome_record(
         # pnl_predicted: suggestion EV, matching live ingest semantics.
         # Previously this stored tcm.expected_slippage (execution drag, not prediction).
         "pnl_predicted": suggestion_ev,
-        "is_paper": True,
+        # v5-A3: live broker fills are no longer mislabeled as paper — the
+        # caller resolves routing (live-routed portfolio + alpaca_live
+        # execution_mode → False). Default True is the conservative legacy.
+        "is_paper": is_paper,
         "details_json": {
             "order_id": order["id"],
+            "position_id": position.get("id"),
             "portfolio_id": order.get("portfolio_id"),
             "symbol": symbol,
             "side": side,
@@ -391,7 +448,8 @@ def _create_paper_outcome_record(
             "expected_slippage": expected_slippage,
             "date_bucket": target_date,
             "pnl_outcome": pnl_outcome,  # win/loss/breakeven for analytics
-            "is_paper": True,
+            "is_paper": is_paper,
+            "routing": "live" if not is_paper else "shadow_or_internal",
             "reason_codes": ["paper_trade_close"],
             # Calibration fields — prediction-time snapshot for calibration_service
             "predicted_ev": suggestion_ev,

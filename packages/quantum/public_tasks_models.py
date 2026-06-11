@@ -253,6 +253,14 @@ class OpsHealthCheckPayload(TaskPayloadBase):
         default=False,
         description="Force run even if recently completed"
     )
+    synthetic_delivery_test: bool = Field(
+        default=False,
+        description=(
+            "v5-A4 end-to-end delivery proof: send ONE synthetic critical "
+            "alert through the dual-channel path and return immediately. "
+            "Operator-triggered only; never set on scheduled runs."
+        )
+    )
 
 
 # =============================================================================

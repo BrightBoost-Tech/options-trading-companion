@@ -198,5 +198,26 @@ class TestHandlerWiring(unittest.TestCase):
         self.assertIn('"synthetic_delivery_test",', self.src)
 
 
+class TestEndpointWiring(unittest.TestCase):
+    """The signed endpoint must ACCEPT and FORWARD the synthetic flag — the
+    first dispatch attempt 422'd on extra_forbidden, and the endpoint
+    rebuilds job_payload so an accepted-but-unforwarded flag would silently
+    no-op (the dishonest middle state)."""
+
+    def test_payload_model_accepts_flag(self):
+        from packages.quantum.public_tasks_models import OpsHealthCheckPayload
+        p = OpsHealthCheckPayload(synthetic_delivery_test=True)
+        self.assertTrue(p.synthetic_delivery_test)
+        self.assertFalse(OpsHealthCheckPayload().synthetic_delivery_test)
+
+    def test_endpoint_forwards_flag_and_suffixes_idempotency(self):
+        from pathlib import Path
+        src = (
+            Path(__file__).parent.parent / "public_tasks.py"
+        ).read_text(encoding="utf-8")
+        self.assertIn('job_payload["synthetic_delivery_test"] = True', src)
+        self.assertIn('idempotency_key = f"{idempotency_key}-synthetic"', src)
+
+
 if __name__ == "__main__":
     unittest.main()

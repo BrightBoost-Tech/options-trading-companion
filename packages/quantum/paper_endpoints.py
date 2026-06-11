@@ -1116,6 +1116,36 @@ def _net_mid_cost(ticket, leg_quotes: Dict[str, Dict[str, Any]]) -> Optional[flo
     return total
 
 
+def _abs_entry_premium(fill_price) -> float:
+    """ABSOLUTE per-spread entry premium for position writes.
+
+    finalize_mark's contract (risk/mark_math.py:110): avg_entry_price /
+    max_credit store the ABSOLUTE per-spread net premium for BOTH debit and
+    credit positions — the quantity sign carries direction. compute_realized_pl
+    (services/close_math.py) documents the same: entry_price is NEVER signed.
+
+    Broker filled_avg_price is SIGNED on mleg orders (negative = net credit
+    received), and post-#1055 live credit opens legitimately fill at negative
+    prices. 06-11 incident: _commit_fill stored a raw −1.61 → finalize_mark
+    computed phantom −$300 unrealized on a +$10 position → the daily envelope
+    force-closed the entire live book. Normalize at EVERY position-write seam.
+    """
+    return abs(float(fill_price or 0))
+
+
+def _weighted_abs_entry_avg(current_qty, current_avg, inc_qty, fill_price) -> float:
+    """Weighted-average entry premium when adding to a position, computed on
+    ABSOLUTE values throughout — not abs() of a mixed-sign sum. A signed credit
+    fill (−1.55) netted against a stored-positive average (1.61) corrupts the
+    weights; abs at each term keeps the average on the finalize_mark contract."""
+    prior = abs(float(current_avg or 0))
+    added = _abs_entry_premium(fill_price)
+    denom = abs(float(current_qty)) + abs(float(inc_qty))
+    if denom <= 0:
+        return prior
+    return (abs(float(current_qty)) * prior + abs(float(inc_qty)) * added) / denom
+
+
 def _process_orders_for_user(supabase, analytics, user_id, target_order_id=None):
     """
     Process paper orders for a user, attempting fills and updating state.
@@ -1590,16 +1620,19 @@ def _repair_filled_order_commit(supabase, analytics, user_id, order, portfolio) 
 
             new_qty = current_qty + signed_qty
 
-            # Calculate new average price (weighted average for increasing exposure)
+            # Calculate new average price (weighted average for increasing
+            # exposure). 06-11: on ABS values — avg_fill_price is signed for
+            # mleg credit fills; see _abs_entry_premium.
             new_avg = current_avg
             if (current_qty >= 0 and signed_qty > 0) or (current_qty <= 0 and signed_qty < 0):
-                total_cost = (abs(current_qty) * current_avg) + (abs(signed_qty) * avg_fill_price)
                 if abs(new_qty) > 0:
-                    new_avg = total_cost / abs(new_qty)
+                    new_avg = _weighted_abs_entry_avg(
+                        current_qty, current_avg, signed_qty, avg_fill_price
+                    )
 
             # Handle flip case
             if (current_qty > 0 and new_qty < 0) or (current_qty < 0 and new_qty > 0):
-                new_avg = avg_fill_price
+                new_avg = _abs_entry_premium(avg_fill_price)
 
             now = datetime.now(timezone.utc).isoformat()
 
@@ -1724,7 +1757,9 @@ def _repair_filled_order_commit(supabase, analytics, user_id, order, portfolio) 
                 supabase, user_id, symbol, signed_qty, legs_list,
                 "paper_endpoints._repair_filled_order_commit",
             )
-            max_credit = avg_fill_price
+            # ABSOLUTE per the finalize_mark contract — avg_fill_price is
+            # signed for mleg credit fills (06-11 incident class).
+            max_credit = _abs_entry_premium(avg_fill_price)
             nearest_expiry = None
             try:
                 expiry_dates = []
@@ -1754,7 +1789,10 @@ def _repair_filled_order_commit(supabase, analytics, user_id, order, portfolio) 
                 "strategy_key": strategy_key,
                 "symbol": symbol,
                 "quantity": signed_qty,
-                "avg_entry_price": avg_fill_price,
+                "avg_entry_price": _abs_entry_premium(avg_fill_price),
+                # current_mark deliberately stays the RAW signed fill — the
+                # mark convention is signed (negative = net-short structure
+                # value) and the next refresh recomputes it via finalize_mark.
                 "current_mark": avg_fill_price,
                 "unrealized_pl": 0.0,
                 "legs": legs_list,
@@ -2023,10 +2061,13 @@ def _commit_fill(supabase, analytics, user_id, order, fill_res, quote, portfolio
 
             # Case 1: Increasing exposure (Same sign)
             if (current_qty >= 0 and signed_incremental_qty > 0) or (current_qty <= 0 and signed_incremental_qty < 0):
-                # Weighted average of OLD total vs NEW incremental
-                total_cost = (abs(current_qty) * current_avg) + (abs(signed_incremental_qty) * this_fill_price)
+                # Weighted average of OLD total vs NEW incremental — on ABS
+                # values (06-11: this_fill_price is signed for mleg credit
+                # fills; see _abs_entry_premium).
                 if abs(new_qty) > 0:
-                    new_avg = total_cost / abs(new_qty)
+                    new_avg = _weighted_abs_entry_avg(
+                        current_qty, current_avg, signed_incremental_qty, this_fill_price
+                    )
 
             # Case 2: Reducing exposure (Opposite sign, no flip)
             # Avg price stays same (LIFO/FIFO agnostic for avg cost)
@@ -2036,8 +2077,9 @@ def _commit_fill(supabase, analytics, user_id, order, fill_res, quote, portfolio
             if (current_qty > 0 and new_qty < 0) or (current_qty < 0 and new_qty > 0):
                 # The portion that flipped is new_qty.
                 # The cost basis for that portion is this_fill_price.
-                # Simplified: if we flip, new avg is the fill price of the flip.
-                new_avg = this_fill_price
+                # Simplified: if we flip, new avg is the fill price of the flip
+                # — ABSOLUTE per the finalize_mark contract.
+                new_avg = _abs_entry_premium(this_fill_price)
 
             if new_qty == 0:
                 # Closed completely — route through shared pipeline
@@ -2165,7 +2207,10 @@ def _commit_fill(supabase, analytics, user_id, order, fill_res, quote, portfolio
                 supabase, user_id, symbol, signed_incremental_qty, legs_list,
                 "paper_endpoints._commit_fill",
             )
-            max_credit = this_fill_price  # For credit strategies, entry price ≈ credit received
+            # ABSOLUTE per-spread premium (credit received / debit paid) —
+            # this_fill_price is SIGNED for mleg credit fills (06-11: raw
+            # −1.61 here produced the phantom −$300 force-close cascade).
+            max_credit = _abs_entry_premium(this_fill_price)
             nearest_expiry = None
             try:
                 expiry_dates = []
@@ -2195,7 +2240,10 @@ def _commit_fill(supabase, analytics, user_id, order, fill_res, quote, portfolio
                 "strategy_key": strategy_key,
                 "symbol": symbol,
                 "quantity": signed_incremental_qty,
-                "avg_entry_price": this_fill_price,
+                "avg_entry_price": _abs_entry_premium(this_fill_price),
+                # current_mark deliberately stays the RAW signed fill — the
+                # mark convention is signed (negative = net-short structure
+                # value) and the next refresh recomputes it via finalize_mark.
                 "current_mark": this_fill_price,
                 "unrealized_pl": 0.0,
                 "legs": legs_list,

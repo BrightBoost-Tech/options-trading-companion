@@ -154,6 +154,21 @@ def build_alpaca_order_request(order: Dict[str, Any]) -> Dict[str, Any]:
             f"Refusing to submit. Order ID: {order.get('id')}"
         )
 
+    # The inverse guard (06-11 short-condor close incident): a CLOSE not
+    # marked is_credit_close is a net-DEBIT order (buying the structure back)
+    # and must never submit a negative limit. The signed close mark passed
+    # raw produced −1.39 on a buy-to-close: Alpaca rejected the first submit,
+    # then let the retry REST at a price that can never fill — which
+    # satisfied the close-idempotency guards and DISARMED the close path.
+    # Fail-loud beats a resting impossible order.
+    if is_close_order and not is_credit_close and limit_price < 0:
+        raise ValueError(
+            f"Sign-incoherent debit close: limit_price={limit_price} is "
+            f"negative for a close not marked is_credit_close (a buy-to-close "
+            f"pays a debit; Alpaca mleg convention: positive=debit). "
+            f"Refusing to submit. Order ID: {order.get('id')}"
+        )
+
     if not limit_price or abs(limit_price) < 0.01:
         raise ValueError(
             f"Cannot submit options order without limit_price "

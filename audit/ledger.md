@@ -72,6 +72,10 @@ the human flips them to `status:shipped` (with PR#) or `status:rejected`.
 
 ### Pending verifications added 2026-06-10 evening
 
+- ✅ VERIFIED 2026-06-11 10:00Z (M2): raw mode persisting as designed — calibration_update
+  succeeded with users_updated:0, escalation tried 30/60/90d all sample_size 0 (epoch bounds
+  every window; zero pre-epoch leak), last_write_age_days 0.6 (no false stale alert); latest
+  blob still the 06-10 20:27Z empty reset. Consumer serves {} → 16:00Z scan scores raw.
 - 2026-06-11 16:00Z: FIRST HONEST-EV CYCLE — record per-candidate ev_raw/pop_raw deltas vs prior
   days (debit EVs should drop ~2×; entries may drop to zero = CORRECT). Calibration ratio should be
   1.0 (raw mode — empty blob).
@@ -160,6 +164,28 @@ the human flips them to `status:shipped` (with PR#) or `status:rejected`.
   re-read) vs held book ≈−$30. Fix (additive only): expiry in d8_v1 capture + nightly read-only
   counterfactual marker on the 100%-repriceable dismissed/blocked suggestions + per-gate
   reject-vs-accept metric with info alert at ≥3 consecutive inverted windows (never auto-loosen).
+
+## status:reported — 2026-06-11 NIGHTLY run (report `audit/reports/2026-06-11.md`)
+
+- **[N1 2026-06-11] CLOSE/internal-fill quote reads still Polygon-only (#1052 divergence class, close
+  side)** — outcome of the ledger-queued nightly check. Stage-time combo quote (`paper_endpoints.py:645`,
+  feeds TCM staging values for ALL orders incl. closes) and the internal fill engine's fresh-quote read
+  (`:1179`, prices every internal/shadow fill) remain legacy `_fetch_quote_with_retry`; #1052's
+  `_aligned_leg_quote_fetch` is wired ONLY into `_validate_entry_quotes`. A Polygon-dark-but-OPRA-real
+  leg (the 06-10 XLE class) on a shadow CLOSE → TCM missing_quote_fallback fill at a stale
+  staging-derived price (`:1219-1230`) or a stalled close — biases shadow learning outcomes/D6.
+  LIVE path insulated (monitor marks = MarketDataTruthLayer `intraday_risk_monitor.py:462-487`; live
+  fills = broker). Impact prospective (zero close orders since); severity LOW-MEDIUM. Fix: reuse the
+  aligned fetch at both sites, observe-first.
+- **[N2 2026-06-11] Stage-time skip stamping gap (refinement of the dismissed-status gap + #1051
+  rider — changes the action)** — per-cohort symbol-dedup (`paper_autopilot_service.py:746-770`) and
+  user-level dedup/min-edge/min-score filters (`:390-427`) skip with `continue` at logger.INFO and
+  never call `_stamp_blocked_reason` (stamps cover only cooldown/utilization/quote, `:850-894`) —
+  suggestions stay pending/NULL and get swept. Observed: both 06-10 16:30Z NFLX forks (aggressive
+  `ff1f65b7…`, neutral `2c1d7f79…`) unprocessed + unstamped; dedup is the high-probability cause
+  (both cohort books hold NFLX) — per-event attribution HYPOTHESIS (INFO line unretrievable),
+  stamping gap itself code-certain. Severity LOW, observability-only. Fix: stamp
+  `symbol_already_held` / `edge_below_minimum_at_stage` / `below_min_score` at the three skip sites.
 
 ## Pending verifications (not findings — check, then update here)
 

@@ -68,9 +68,13 @@ disagree, the disagreement IS a finding — report it instead of averaging.
   day-over-day (cycle counts + rejection mix), active reentry_cooldowns, and
   any `risk_alerts` critical/high since the prior run (H11 baseline —
   unconditional). Deep-dive ONLY areas whose signals moved vs the prior
-  report; unchanged areas get a one-line UNCHANGED status. Budget cap:
-  **≤8 subagents total**. Always verify the pending-verifications list in the
-  ledger and update it.
+  report; unchanged areas get a one-line UNCHANGED status. **EXCEPTION:
+  AREA 8 runs its COMPLETE protocol every run regardless of signal movement**
+  — the blind-spot re-evaluation plus the adopted lens's full look-at list
+  (audit/area8.md) at full evidence standard; "UNCHANGED" is never a valid
+  Area-8 status (clarified 2026-06-11 after the first nightly under-ran it).
+  Budget cap: **≤8 subagents total**. Always verify the pending-verifications
+  list in the ledger and update it.
 
 ## PRE-AUDIT (shared ground truth — required before any area work)
 

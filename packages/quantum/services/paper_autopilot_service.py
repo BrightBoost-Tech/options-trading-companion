@@ -209,11 +209,12 @@ class PaperAutopilotService:
         try:
             from packages.quantum.risk.risk_envelope import check_all_envelopes, EnvelopeConfig
             cb_positions = self._get_open_positions_for_risk_check(user_id)
-            cb_equity = (
-                self._estimate_equity(user_id, cb_positions)
-                if cb_positions else None
-            )
-            if cb_positions and cb_equity is None:
+            # v5-A2: fetch equity even on an EMPTY book — realized losses
+            # survive force-closes (06-11: the book can empty mid-session on
+            # a real −8% day and the old `if cb_positions` skip would have
+            # waved re-entries straight through the daily-loss cap).
+            cb_equity = self._estimate_equity(user_id, cb_positions)
+            if cb_equity is None:
                 # Alpaca unavailable — skip the circuit-breaker check
                 # rather than fabricating a denominator. The autopilot
                 # run continues; intraday_risk_monitor (15-min cadence)
@@ -224,8 +225,27 @@ class PaperAutopilotService:
                     f"user={user_id[:8]} — skipping envelope check this "
                     f"autopilot run. Entry-gate not enforced this cycle."
                 )
-            elif cb_positions:
-                cb_daily_pnl = sum(float(p.get("unrealized_pl") or 0) for p in cb_positions)
+            else:
+                # Daily: open-book unrealized sum tightened by broker
+                # equity−last_equity (v5-A2 realized-blind brake; min() so
+                # the gate fires on EITHER signal). Weekly: broker-true via
+                # get_portfolio_history — previously NOT fed here at all
+                # (defaulted 0.0), so a losing week never gated entries.
+                from packages.quantum.services import equity_state
+                cb_daily_proxy = sum(float(p.get("unrealized_pl") or 0) for p in cb_positions)
+                cb_daily_pnl = equity_state.tightened_daily_pnl(
+                    user_id, cb_daily_proxy, supabase=self.client,
+                )
+                cb_weekly_pnl = equity_state.get_alpaca_weekly_pnl(
+                    user_id, supabase=self.client,
+                )
+                if cb_weekly_pnl is None:
+                    logger.warning(
+                        f"[CIRCUIT_BREAKER] Alpaca weekly P&L unavailable for "
+                        f"user={user_id[:8]} — weekly envelope skipped this "
+                        f"run (daily envelope still enforced)."
+                    )
+                    cb_weekly_pnl = 0.0
                 cb_config = EnvelopeConfig.from_env()
                 # #1044 utilization gate: at small tier with the gate
                 # EXPLICITLY enabled (strict =1), demote the share-of-book
@@ -257,6 +277,7 @@ class PaperAutopilotService:
                     positions=cb_positions,
                     equity=cb_equity,
                     daily_pnl=cb_daily_pnl,
+                    weekly_pnl=cb_weekly_pnl,
                     config=cb_config,
                 )
                 if not cb_result.passed:

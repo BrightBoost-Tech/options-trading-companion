@@ -10,7 +10,12 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
-_VALID_SEVERITIES = ("info", "warning", "critical")
+# "high" added 2026-06-11 (v5-A4): the table has stored 'high' rows from
+# direct writers (risk_envelope concentration warns) since inception, and
+# the H11 baseline sweep queries severity IN ('critical','high') — this
+# helper silently DOWNGRADING an attempted 'high' to 'warning' was the same
+# severity-map gap class as the ops-health 'critical' omission.
+_VALID_SEVERITIES = ("info", "warning", "high", "critical")
 
 
 def alert(
@@ -42,9 +47,9 @@ def alert(
         alert_type: Snake_case identifier
             (e.g. ``"equity_state_alpaca_account_failed"``).
         message: Human-readable summary, capped at 500 chars.
-        severity: One of ``"info"``, ``"warning"``, ``"critical"``.
-            Invalid values default to ``"warning"`` with a logged
-            warning.
+        severity: One of ``"info"``, ``"warning"``, ``"high"``,
+            ``"critical"``. Invalid values default to ``"warning"``
+            with a logged warning.
         metadata: Optional structured context dict (becomes the
             ``metadata`` jsonb column).
         user_id: Optional UUID for user-scoping the alert.

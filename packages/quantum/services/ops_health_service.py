@@ -30,6 +30,23 @@ DATA_STALE_THRESHOLD_MINUTES = int(os.getenv("OPS_DATA_STALE_MINUTES", "30"))
 MARKET_DATA_STALE_THRESHOLD_MS = int(os.getenv("OPS_MARKET_DATA_STALE_MS", str(20 * 60 * 1000)))  # 20 minutes
 MAX_FRESHNESS_UNIVERSE_SIZE = int(os.getenv("OPS_MAX_FRESHNESS_UNIVERSE", "25"))
 
+
+def is_us_market_hours(now: Optional[datetime] = None) -> bool:
+    """Approximate US equity market hours in UTC: Mon–Fri 13:30–20:00.
+
+    v5-A4: gates the data_stale ALERT only. Market snapshots age past any
+    threshold every evening by construction — alerting on that nightly via
+    the new risk_alerts channel would be steady-state noise (worse than the
+    webhook void it replaces). Holidays read as market hours → at most one
+    benign data_stale alert per holiday, capped by the cooldown. The health
+    SNAPSHOT still records staleness regardless; only the alert is gated.
+    """
+    now = now or datetime.now(timezone.utc)
+    if now.weekday() >= 5:
+        return False
+    minutes = now.hour * 60 + now.minute
+    return (13 * 60 + 30) <= minutes < (20 * 60)
+
 # Alert configuration
 OPS_ALERT_MIN_SEVERITY = os.getenv("OPS_ALERT_MIN_SEVERITY", "warning")
 OPS_ALERT_COOLDOWN_MINUTES = int(os.getenv("OPS_ALERT_COOLDOWN_MINUTES", "30"))
@@ -907,10 +924,17 @@ def send_ops_alert_v2(
     details: Optional[Dict[str, Any]] = None,
     severity: Optional[str] = None,
     webhook_url: Optional[str] = None,
-    min_severity: str = OPS_ALERT_MIN_SEVERITY
+    min_severity: str = OPS_ALERT_MIN_SEVERITY,
+    client: Any = None,
 ) -> Dict[str, Any]:
     """
-    Enhanced alert sender with severity filtering.
+    Enhanced alert sender — DUAL-CHANNEL (v5-A4, 2026-06-11).
+
+    Primary channel: `risk_alerts` via the canonical observability alert()
+    (requires `client`). Secondary, best-effort: the Slack-compatible
+    webhook. `sent` is True if EITHER channel delivered. Severity map for
+    risk_alerts: critical→critical, error→high, warning→warning — critical
+    and high land in every H11 baseline sweep.
 
     Args:
         alert_type: Type of alert
@@ -919,9 +943,12 @@ def send_ops_alert_v2(
         severity: Override severity (defaults to ALERT_SEVERITY mapping)
         webhook_url: Override webhook URL
         min_severity: Minimum severity to send (default from env)
+        client: Supabase client for the risk_alerts channel (None → legacy
+            webhook-only with a loud warning)
 
     Returns:
-        Dict with: sent, suppressed_reason, fingerprint, severity
+        Dict with: sent, suppressed_reason, fingerprint, severity,
+        risk_alert_written, webhook_sent
     """
     import requests
 
@@ -936,20 +963,57 @@ def send_ops_alert_v2(
         "suppressed_reason": None,
         "fingerprint": fingerprint,
         "severity": severity,
+        "risk_alert_written": False,
+        "webhook_sent": False,
     }
 
-    # Check severity threshold
-    severity_order = {"error": 2, "warning": 1}
+    # Check severity threshold. v5-A4 fix: "critical" was MISSING from this
+    # map — severity_order.get("critical", 0) = 0 < warning(1), so the most
+    # severe class (job_never_run) was the only one ALWAYS suppressed.
+    severity_order = {"critical": 3, "error": 2, "warning": 1}
     if severity_order.get(severity, 0) < severity_order.get(min_severity, 0):
         result["suppressed_reason"] = "below_min_severity"
         logger.info(f"[OPS_ALERT] Suppressed {alert_type} (severity {severity} < min {min_severity})")
         return result
 
-    # Get webhook URL
+    # ── Channel 1 (PRIMARY, v5-A4): risk_alerts — the table the operator
+    # and every H11 sweep actually read. Pre-fix, delivery was webhook-only
+    # and OPS_ALERT_WEBHOOK_URL has never been configured on this deploy,
+    # so every detected issue (incl. the 25-day calibration freeze) died
+    # with suppressed_reason="no_webhook" — detected, never delivered.
+    if client is not None:
+        try:
+            from packages.quantum.observability.alerts import alert as _risk_alert
+            _risk_alert(
+                client,
+                alert_type=f"ops_{alert_type}",
+                severity={"critical": "critical", "error": "high"}.get(severity, "warning"),
+                message=f"[OPS_HEALTH] {message[:400]}",
+                user_id=None,
+                metadata={
+                    "source": "ops_health_check",
+                    "ops_alert_type": alert_type,
+                    "ops_severity": severity,
+                    "fingerprint": fingerprint,
+                    **({"details": details} if details else {}),
+                },
+            )
+            result["risk_alert_written"] = True
+            result["sent"] = True
+        except Exception as e:
+            logger.warning(f"[OPS_ALERT] risk_alerts write failed: {e}")
+    else:
+        logger.warning(
+            f"[OPS_ALERT] no supabase client passed — risk_alerts channel "
+            f"skipped for {alert_type} (webhook-only legacy mode)"
+        )
+
+    # ── Channel 2 (secondary, best-effort): Slack-compatible webhook.
     url = webhook_url or os.getenv("OPS_ALERT_WEBHOOK_URL")
     if not url:
-        result["suppressed_reason"] = "no_webhook"
-        logger.info(f"[OPS_ALERT] No webhook configured, skipping: {alert_type}")
+        if not result["sent"]:
+            result["suppressed_reason"] = "no_webhook"
+        logger.info(f"[OPS_ALERT] No webhook configured for: {alert_type}")
         return result
 
     # Build Slack-compatible payload with severity
@@ -999,12 +1063,15 @@ def send_ops_alert_v2(
         response = requests.post(url, json=payload, timeout=10)
         if response.status_code == 200:
             logger.info(f"[OPS_ALERT] Sent {alert_type} ({severity}) alert successfully")
+            result["webhook_sent"] = True
             result["sent"] = True
         else:
             logger.warning(f"[OPS_ALERT] Webhook returned {response.status_code}")
-            result["suppressed_reason"] = f"webhook_error:{response.status_code}"
+            if not result["sent"]:
+                result["suppressed_reason"] = f"webhook_error:{response.status_code}"
     except Exception as e:
         logger.warning(f"[OPS_ALERT] Failed to send alert: {e}")
-        result["suppressed_reason"] = f"exception:{str(e)[:30]}"
+        if not result["sent"]:
+            result["suppressed_reason"] = f"exception:{str(e)[:30]}"
 
     return result

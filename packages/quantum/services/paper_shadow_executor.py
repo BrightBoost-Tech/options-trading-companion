@@ -252,14 +252,20 @@ def close_arm(supabase, user_id: str, position: Dict[str, Any], reason: str, por
             "strike": leg.get("strike"),
             "expiry": leg.get("expiry"),
         })
-    is_credit_close = (qty > 0) and (len(close_legs) >= 2)
+    # Unsigned limit + direction via the canonical helper (06-11: a signed
+    # short-structure mark passed raw produced an unfillable negative-limit
+    # debit close on the live path; the shadow twin keeps the same seam).
+    from packages.quantum.services.paper_exit_evaluator import _close_limit_and_direction
     exit_price = float(position.get("current_mark") or position.get("avg_entry_price") or 0)
+    close_limit, is_credit_close = _close_limit_and_direction(
+        exit_price, qty, len(close_legs)
+    )
 
     ticket = TradeTicket(
         symbol=position["symbol"],
         quantity=abs_qty,
         order_type="limit",
-        limit_price=round(exit_price, 2),
+        limit_price=round(close_limit, 2),
         strategy_type="custom",
         source_engine=f"paper_shadow_close:{reason}",
         legs=close_legs,

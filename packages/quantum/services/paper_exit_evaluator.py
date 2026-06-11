@@ -246,6 +246,46 @@ def _is_iron_condor(position: Dict[str, Any]) -> bool:
     return "IRON_CONDOR" in strategy
 
 
+def _close_limit_and_direction(exit_price, qty, n_legs):
+    """(unsigned_limit, is_credit_close) for a close ticket.
+
+    The Alpaca mleg limit is SIGNED at the broker boundary (positive = net
+    debit, negative = net credit); internally requested_price / limit_price
+    stay UNSIGNED and order_json.is_credit_close carries direction — the
+    #101/#999 convention. build_alpaca_order_request applies the sign.
+
+    Direction: a close inverts every leg, so its net direction is the
+    inversion of the position's — qty > 0 (long, paid a debit to enter)
+    closes for a credit; qty < 0 (short, received a credit) closes by paying
+    a debit. Single-leg orders use unsigned limits (Alpaca infers direction
+    from the leg side), so is_credit_close only applies to multi-leg.
+
+    The signed close mark corroborates the leg math: compute_current_value
+    sums the actual legs, so mark > 0 ⇒ selling the structure back nets a
+    credit. Disagreement (e.g. the unsigned avg_entry_price fallback feeding
+    a short structure) logs LOUD and the structural direction wins.
+
+    06-11 incident: the signed mark (−1.39) was passed RAW as the limit on a
+    short-condor force-close. Alpaca rejected the first submit (negative
+    limit on a net-debit buy-back) and the retry RESTED at a price that can
+    never fill — which satisfied the close-idempotency guards and disarmed
+    the close path. The limit is now always the magnitude.
+    """
+    exit_price = float(exit_price or 0)
+    is_credit_close = (float(qty or 0) > 0) and (n_legs >= 2)
+    if exit_price != 0 and n_legs >= 2:
+        mark_says_credit = exit_price > 0
+        if mark_says_credit != is_credit_close:
+            logger.warning(
+                "[CLOSE_POSITION] close-direction disagreement: structural "
+                "(qty=%s → is_credit_close=%s) vs signed mark (%s → "
+                "mark_says_credit=%s). Using structural; check avg_entry/"
+                "current_mark sign integrity on this position.",
+                qty, is_credit_close, exit_price, mark_says_credit,
+            )
+    return abs(exit_price), is_credit_close
+
+
 def _time_scaled_stop_loss_pct(pos: Dict, base_sl_pct: float) -> float:
     """
     DTE-aware stop-loss for DEBIT SPREADS only (audit/hold-period-asymmetry,
@@ -1589,20 +1629,20 @@ class PaperExitEvaluator:
                 "expiry": orig_leg.get("expiry"),
             }]
 
-        # Alpaca mleg sign convention: SELL-to-close on a long debit-opened
-        # spread (qty>0, multi-leg) produces net credit; the broker boundary
-        # must send NEGATIVE limit_price. We mark the ticket here and let
-        # build_alpaca_order_request apply the sign at translation time so
-        # requested_price stays unsigned for accounting/reporting consumers.
-        # Single-leg orders use unsigned limit_price (Alpaca infers direction
-        # from the leg's side), so the marker only matters for spreads.
-        is_credit_close = (qty > 0) and (len(close_legs) >= 2)
+        # Limit magnitude + direction via _close_limit_and_direction: the
+        # ticket's limit stays UNSIGNED (the 06-11 short-condor close passed
+        # the signed mark −1.39 raw and rested unfillable); is_credit_close
+        # carries direction and build_alpaca_order_request signs at the
+        # broker boundary.
+        close_limit, is_credit_close = _close_limit_and_direction(
+            exit_price, qty, len(close_legs)
+        )
 
         ticket = TradeTicket(
             symbol=position["symbol"],
             quantity=abs_qty,
             order_type="limit",
-            limit_price=round(exit_price, 2),
+            limit_price=round(close_limit, 2),
             strategy_type="custom",
             source_engine="paper_exit_evaluator",
             legs=close_legs,

@@ -59,6 +59,32 @@ def _equity_pos(cost_basis=1234.0):
     }
 
 
+def _optq(cost_basis, qty, symbol="NFLX260710P00086000"):
+    return {**_opt(cost_basis, symbol), "qty": qty}
+
+
+def _todays_book():
+    """The actual 06-11 broker book (10 legs): the NFLX debit spread plus the
+    two live condors whose credit premiums netted committed down to $56 under
+    the old per-leg sum, while Alpaca held $1,000 of condor margin.
+    cost_basis values are the broker's (signed; short legs negative)."""
+    return [
+        # NFLX 7/10 bear-put debit spread — net +365
+        _optq(516.0, 1, "NFLX260710P00086000"),
+        _optq(-151.0, -1, "NFLX260710P00079000"),
+        # QQQ 7/10 iron condor — net −161 credit, 5-wide wings
+        _optq(-646.0, -1, "QQQ260710P00645000"),
+        _optq(584.0, 1, "QQQ260710P00640000"),
+        _optq(-541.0, -1, "QQQ260710C00750000"),
+        _optq(442.0, 1, "QQQ260710C00755000"),
+        # SPY 7/24 iron condor — net −148 credit, 5-wide wings
+        _optq(-539.0, -1, "SPY260724P00681000"),
+        _optq(486.0, 1, "SPY260724P00676000"),
+        _optq(-381.0, -1, "SPY260724C00765000"),
+        _optq(286.0, 1, "SPY260724C00770000"),
+    ]
+
+
 @pytest.fixture
 def gate_on(monkeypatch):
     monkeypatch.setenv(ug.FLAG_ENV, "1")
@@ -188,13 +214,107 @@ class TestCommittedCapital:
         with pytest.raises(ug.UtilizationGateError):
             ug.fetch_committed_capital()
 
-    def test_net_credit_book_clamps_to_zero_with_warning(self, monkeypatch, caplog):
+    def test_lone_short_leg_fails_closed(self, monkeypatch):
+        # DELIBERATE semantic change (06-11): the old behavior clamped a
+        # net-credit book to $0 committed — i.e. it silently UNDERSTATED.
+        # A lone negative-cost-basis option is a naked short whose margin
+        # this gate cannot bound from one leg → fail-closed, block entries
+        # loudly (this book never legitimately holds naked shorts).
         monkeypatch.setattr(
-            ug, "_get_alpaca", lambda: _FakeAlpaca([_opt(-120.0)]),
+            ug, "_get_alpaca", lambda: _FakeAlpaca([_optq(-120.0, -1)]),
         )
-        with caplog.at_level(logging.WARNING):
-            assert ug.fetch_committed_capital() == 0.0
-        assert any("net-credit book" in r.message for r in caplog.records)
+        with pytest.raises(ug.UtilizationGateError, match="no covering long"):
+            ug.fetch_committed_capital()
+
+
+# ---------------------------------------------------------------------------
+# 06-11 — per-structure commitment: credit structures commit MARGIN basis,
+# never the signed premium (the committed=$56 incident)
+# ---------------------------------------------------------------------------
+
+class TestStructureCommitment:
+    def test_todays_book_pins_1365(self):
+        # NFLX net debit $365 + condor margin $500 (max wing, 5-wide × 100
+        # × 1ct) + $500 = $1,365 — matching the broker's $1,000
+        # initial_margin + the $365 debit. NOT $56 (the old signed netting).
+        assert ug.structure_commitment_usd(_todays_book()) == pytest.approx(1365.0)
+
+    def test_old_signed_netting_would_have_said_56(self):
+        # Document the incident arithmetic the fix removes.
+        raw_sum = sum(l["cost_basis"] for l in _todays_book())
+        assert raw_sum == pytest.approx(56.0)
+
+    def test_debit_only_book_identical_to_old_sum(self):
+        legs = [
+            _optq(516.0, 1, "NFLX260710P00086000"),
+            _optq(-151.0, -1, "NFLX260710P00079000"),
+        ]
+        assert ug.structure_commitment_usd(legs) == pytest.approx(365.0)
+
+    def test_credit_vertical_commits_wing_margin(self):
+        legs = [
+            _optq(-646.0, -1, "QQQ260710P00645000"),
+            _optq(584.0, 1, "QQQ260710P00640000"),
+        ]
+        assert ug.structure_commitment_usd(legs) == pytest.approx(500.0)
+
+    def test_multi_qty_condor_scales_margin(self):
+        legs = [
+            _optq(-1292.0, -2, "QQQ260710P00645000"),
+            _optq(1168.0, 2, "QQQ260710P00640000"),
+            _optq(-1082.0, -2, "QQQ260710C00750000"),
+            _optq(884.0, 2, "QQQ260710C00755000"),
+        ]
+        assert ug.structure_commitment_usd(legs) == pytest.approx(1000.0)
+
+    def test_unequal_wings_margin_the_larger(self):
+        # 5-wide put wing, 10-wide call wing → margined on the call wing.
+        legs = [
+            _optq(-646.0, -1, "QQQ260710P00645000"),
+            _optq(584.0, 1, "QQQ260710P00640000"),
+            _optq(-541.0, -1, "QQQ260710C00750000"),
+            _optq(380.0, 1, "QQQ260710C00760000"),
+        ]
+        assert ug.structure_commitment_usd(legs) == pytest.approx(1000.0)
+
+    def test_unparseable_credit_leg_fails_closed(self):
+        with pytest.raises(ug.UtilizationGateError, match="unparseable"):
+            ug.structure_commitment_usd([_optq(-100.0, -1, "NOT_AN_OCC")])
+
+    def test_unparseable_debit_leg_commits_standalone(self):
+        # A debit leg we can't group still commits its own cost basis —
+        # identical to the original per-leg sum (keeps synthetic/legacy
+        # symbols from blocking an all-debit book).
+        assert ug.structure_commitment_usd(
+            [_optq(300.0, 1, "NOT_AN_OCC")]
+        ) == pytest.approx(300.0)
+
+    def test_naked_short_wing_fails_closed(self):
+        with pytest.raises(ug.UtilizationGateError, match="no covering long"):
+            ug.structure_commitment_usd(
+                [_optq(-646.0, -1, "QQQ260710P00645000")]
+            )
+
+    def test_missing_qty_in_credit_group_fails_closed(self):
+        legs = [
+            _opt(-646.0, "QQQ260710P00645000"),  # no qty key
+            _opt(584.0, "QQQ260710P00640000"),
+        ]
+        with pytest.raises(ug.UtilizationGateError, match="qty missing"):
+            ug.structure_commitment_usd(legs)
+
+    def test_fetch_integration_todays_book(self, monkeypatch):
+        monkeypatch.setattr(
+            ug, "_get_alpaca", lambda: _FakeAlpaca(_todays_book() + [_equity_pos()]),
+        )
+        assert ug.fetch_committed_capital() == pytest.approx(1365.0)
+
+    def test_polygon_prefixed_symbols_also_parse(self):
+        legs = [
+            _optq(-646.0, -1, "O:QQQ260710P00645000"),
+            _optq(584.0, 1, "O:QQQ260710P00640000"),
+        ]
+        assert ug.structure_commitment_usd(legs) == pytest.approx(500.0)
 
 
 # ---------------------------------------------------------------------------

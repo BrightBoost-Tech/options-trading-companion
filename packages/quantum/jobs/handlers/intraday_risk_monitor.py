@@ -218,7 +218,14 @@ class IntradayRiskMonitor:
 
         # 3. Compute portfolio metrics for envelope check (LIVE book)
         equity = self._estimate_equity(user_id, live_positions)
-        daily_pnl = sum(float(p.get("unrealized_pl") or 0) for p in live_positions)
+        # v5-A2 realized-blind brake (06-11): the open-book unrealized sum is
+        # blind to realized losses + fees (a closed loser vanishes from it —
+        # real day −8.3% read as ≈−4%). Tightens-only: min(proxy, broker
+        # equity−last_equity); broker unavailable → proxy unchanged.
+        daily_pnl_proxy = sum(float(p.get("unrealized_pl") or 0) for p in live_positions)
+        daily_pnl = equity_state.tightened_daily_pnl(
+            user_id, daily_pnl_proxy, supabase=self.supabase,
+        )
         weekly_pnl = self._compute_weekly_pnl(user_id, daily_pnl)
 
         # Alpaca-unavailable fallbacks. Do NOT fabricate equity or weekly P&L

@@ -2831,9 +2831,19 @@ async def run_midday_cycle(supabase: Client, user_id: str, deployable_capital_ov
                 f"[RISK_ENVELOPE] utilization-gate demotion check failed "
                 f"(log-only site, legacy severity retained): {_ug_err}"
             )
+        # v5-A2 realized-blind brake: feed the daily P&L (open-book proxy
+        # tightened by broker equity−last_equity) instead of the implicit
+        # 0.0 — this observe-only site previously never saw daily losses
+        # at all. NOTE the denominator here is deployable_capital (OBP),
+        # the site's pre-existing convention; warn-only, never blocks.
+        from packages.quantum.services import equity_state as _eqs
+        _daily_proxy = sum(float(p.get("unrealized_pl") or 0) for p in positions)
         _envelope_result = check_all_envelopes(
             positions=positions,
             equity=deployable_capital,
+            daily_pnl=_eqs.tightened_daily_pnl(
+                user_id, _daily_proxy, supabase=_get_admin_supabase(),
+            ),
             config=_envelope_config,
         )
         if _envelope_result.violations:

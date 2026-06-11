@@ -95,15 +95,20 @@ class TestPaperExitEvaluatorSetsMarker(unittest.TestCase):
         cls.src = EVALUATOR_PATH.read_text(encoding="utf-8")
 
     def test_marker_computed_from_qty_and_leg_count(self):
-        # Source-level: rule must reference both qty>0 and len(close_legs)>=2
-        idx = self.src.find("is_credit_close")
+        # Source-level: rule must reference both qty sign and leg count.
+        # 06-11 refactor: the computation moved into _close_limit_and_direction
+        # (unsigned limit + direction at one seam — the signed-mark close-limit
+        # fix); the SEMANTIC pinned here is unchanged: direction derives from
+        # qty > 0 plus multi-leg, and _close_position feeds it len(close_legs).
+        idx = self.src.find("def _close_limit_and_direction")
         self.assertGreater(
-            idx, 0, "is_credit_close marker computation missing from "
+            idx, 0, "_close_limit_and_direction missing from "
             "paper_exit_evaluator.py — Component 1 regressed",
         )
-        block = self.src[idx:idx + 400]
-        self.assertIn("qty > 0", block)
-        self.assertIn("len(close_legs)", block)
+        block = self.src[idx:self.src.find("def ", idx + 10)]
+        self.assertIn("(float(qty or 0) > 0) and (n_legs >= 2)", block)
+        # the call site passes the actual close-leg count
+        self.assertIn("qty, len(close_legs)", self.src)
 
     def test_marker_passed_to_ticket(self):
         # The TradeTicket(...) construction call must include

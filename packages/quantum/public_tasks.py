@@ -766,6 +766,13 @@ async def task_ops_health_check(
         "timestamp": now.isoformat(),
         "force": payload.force,
     }
+    if payload.synthetic_delivery_test:
+        # v5-A4 delivery proof: forward the flag (the endpoint rebuilds
+        # job_payload, so without this line the handler never sees it) and
+        # suffix the idempotency key so the proof doesn't collide with the
+        # hour's scheduled run.
+        job_payload["synthetic_delivery_test"] = True
+        idempotency_key = f"{idempotency_key}-synthetic"
 
     return enqueue_job_run(
         job_name=job_name,

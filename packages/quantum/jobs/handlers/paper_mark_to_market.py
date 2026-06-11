@@ -84,14 +84,12 @@ def run(payload: Dict[str, Any], ctx: Any = None) -> Dict[str, Any]:
             # fabricated equity was the mechanism behind the
             # 2026-04-16 false force-close incident.
             from packages.quantum.services import equity_state
-            equity = (
-                equity_state.get_alpaca_equity(user_id, supabase=client)
-                if open_positions else None
-            )
+            # v5-A2: fetch equity even on an EMPTY book — realized losses
+            # survive force-closes; this (warn-only) check must still see
+            # them instead of going silent the moment the book empties.
+            equity = equity_state.get_alpaca_equity(user_id, supabase=client)
 
-            if not open_positions:
-                pass  # No positions → no envelope to check
-            elif equity is None:
+            if equity is None:
                 logger.warning(
                     f"[RISK_ENVELOPE] MTM: Alpaca equity unavailable "
                     f"for user={user_id[:8]} — skipping envelope check. "
@@ -99,8 +97,13 @@ def run(payload: Dict[str, Any], ctx: Any = None) -> Dict[str, Any]:
                     f"loss envelopes will be re-evaluated next cycle."
                 )
             else:
-                # Sum unrealized P&L as daily proxy (marks just refreshed)
-                daily_pnl = sum(float(p.get("unrealized_pl") or 0) for p in open_positions)
+                # Daily P&L: open-book unrealized sum (marks just refreshed)
+                # tightened by broker equity−last_equity (v5-A2 realized-
+                # blind brake — min() so the envelope fires on EITHER).
+                daily_pnl_proxy = sum(float(p.get("unrealized_pl") or 0) for p in open_positions)
+                daily_pnl = equity_state.tightened_daily_pnl(
+                    user_id, daily_pnl_proxy, supabase=client,
+                )
 
                 config = EnvelopeConfig.from_env()
                 envelope_result = check_all_envelopes(

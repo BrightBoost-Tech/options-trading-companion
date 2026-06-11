@@ -47,6 +47,7 @@ EQUITY_SOURCE = os.environ.get("RISK_EQUITY_SOURCE", "alpaca").lower()
 _ALPACA_EQUITY_CACHE: Dict[str, Tuple[float, float]] = {}      # user_id → (ts, equity)
 _ALPACA_WEEKLY_PNL_CACHE: Dict[str, Tuple[float, float]] = {}  # user_id → (ts, weekly_pnl)
 _ALPACA_OBP_CACHE: Dict[str, Tuple[float, float]] = {}         # user_id → (ts, options_buying_power)
+_ALPACA_DAILY_PNL_CACHE: Dict[str, Tuple[float, float]] = {}   # user_id → (ts, equity−last_equity)
 _ALPACA_STATE_TTL_SECONDS = 60
 
 
@@ -110,6 +111,76 @@ def get_alpaca_weekly_pnl(
     if EQUITY_SOURCE == "legacy":
         return _compute_weekly_pnl_legacy(supabase)
     return _fetch_alpaca_weekly_pnl(user_id, supabase=supabase)
+
+
+def get_alpaca_daily_pnl(user_id: str, supabase: Any = None) -> Optional[float]:
+    """Broker-true day P&L: ``equity − last_equity`` from ``get_account()``.
+
+    Includes REALIZED losses and fees that the open-book unrealized sum is
+    blind to (v5-A2). Empirical 06-11: real day −$188 (−8.3%, broker) while
+    the unrealized-sum proxy read ≈−4% — a closed losing trade simply
+    vanishes from the proxy. Returns ``None`` when Alpaca is unavailable or
+    either field is missing/non-positive — callers fall back to the proxy,
+    never fabricate.
+    """
+    now = time.monotonic()
+    cached = _ALPACA_DAILY_PNL_CACHE.get(user_id)
+    if cached and (now - cached[0]) < _ALPACA_STATE_TTL_SECONDS:
+        return cached[1]
+    try:
+        from packages.quantum.brokers.alpaca_client import get_alpaca_client
+        alpaca = get_alpaca_client()
+        if not alpaca:
+            return None
+        acct = alpaca.get_account()
+        equity_raw = acct.get("equity")
+        last_raw = acct.get("last_equity")
+        if equity_raw is None or last_raw is None:
+            # None-preserving (Anti-pattern 8): a missing field is not 0.
+            return None
+        equity = float(equity_raw)
+        last_equity = float(last_raw)
+        if equity <= 0 or last_equity <= 0:
+            return None
+        daily = equity - last_equity
+        _ALPACA_DAILY_PNL_CACHE[user_id] = (now, daily)
+        return daily
+    except Exception as e:
+        logger.warning(
+            f"[EQUITY_STATE] Alpaca daily P&L fetch failed for {user_id[:8]}: {e}"
+        )
+        return None
+
+
+def tightened_daily_pnl(
+    user_id: str,
+    unrealized_sum: float,
+    supabase: Any = None,
+) -> float:
+    """TIGHTENS-ONLY daily-loss feeder (v5-A2 realized-blind brake):
+    ``min(open-book unrealized sum, broker equity − last_equity)``.
+
+    The min() means the daily envelope fires on EITHER signal — the proxy
+    (which catches intraday open-book drawdown even when broker day-marks
+    lag) or the broker-true delta (which catches realized losses the proxy
+    cannot see). Existing behavior is never loosened: the proxy is always a
+    floor. Broker unavailable → proxy unchanged (legacy behavior, logged).
+    """
+    broker_daily = get_alpaca_daily_pnl(user_id, supabase=supabase)
+    if broker_daily is None:
+        logger.warning(
+            f"[EQUITY_STATE] broker daily P&L unavailable for {user_id[:8]} — "
+            f"daily envelope runs on the open-book proxy only "
+            f"(realized losses invisible this cycle)"
+        )
+        return unrealized_sum
+    if broker_daily < unrealized_sum:
+        logger.warning(
+            f"[EQUITY_STATE] realized-blind gap for {user_id[:8]}: open-book "
+            f"proxy ${unrealized_sum:.2f} vs broker-true day ${broker_daily:.2f} "
+            f"— daily envelope uses the broker-true (tighter) value"
+        )
+    return min(unrealized_sum, broker_daily)
 
 
 # ── Alpaca-authoritative internals ─────────────────────────────────
@@ -311,3 +382,4 @@ def _reset_caches_for_testing() -> None:
     _ALPACA_EQUITY_CACHE.clear()
     _ALPACA_WEEKLY_PNL_CACHE.clear()
     _ALPACA_OBP_CACHE.clear()
+    _ALPACA_DAILY_PNL_CACHE.clear()

@@ -29,6 +29,7 @@ from packages.quantum.services.ops_health_service import (
     get_alert_fingerprint,
     should_suppress_alert,
     send_ops_alert_v2,
+    is_us_market_hours,
     OPS_ALERT_MIN_SEVERITY,
     OPS_ALERT_COOLDOWN_MINUTES,
 )
@@ -77,6 +78,26 @@ def run(payload: Dict[str, Any], ctx: Any = None) -> Dict[str, Any]:
         client = get_admin_client()
         trace_id = str(uuid.uuid4())
 
+        # v5-A4 synthetic end-to-end delivery proof — operator-triggered
+        # only (payload flag). Sends ONE critical alert through the real
+        # dual-channel path so the risk_alerts write can be verified and
+        # then cleaned up. Never fires on scheduled runs.
+        if payload.get("synthetic_delivery_test"):
+            synth = send_ops_alert_v2(
+                "synthetic_delivery_test",
+                "Synthetic ops-alert delivery proof (v5-A4) — verify a "
+                "risk_alerts row exists, then delete it.",
+                details={"requested_at": payload.get("timestamp")},
+                severity="critical",
+                min_severity=min_severity,
+                client=client,
+            )
+            return {
+                "ok": True,
+                "synthetic_delivery_test": synth,
+                "timing_ms": (time.time() - start_time) * 1000,
+            }
+
         # ==============================================================
         # 1. Build expanded freshness universe and check market data
         # ==============================================================
@@ -104,8 +125,13 @@ def run(payload: Dict[str, Any], ctx: Any = None) -> Dict[str, Any]:
             }
             fingerprint = get_alert_fingerprint("data_stale", fingerprint_details)
 
-            # Check cooldown
+            # Check cooldown + market hours (v5-A4: snapshots age past any
+            # threshold every evening by construction — the data_stale ALERT
+            # is market-hours-gated so the new risk_alerts channel doesn't
+            # import nightly noise; the snapshot still records staleness).
             suppressed, last_sent = should_suppress_alert(client, fingerprint, cooldown_minutes)
+            if not is_us_market_hours():
+                suppressed, last_sent = True, "outside_market_hours"
 
             if not suppressed:
                 alert_result = send_ops_alert_v2(
@@ -121,6 +147,7 @@ def run(payload: Dict[str, Any], ctx: Any = None) -> Dict[str, Any]:
                     },
                     severity="error",
                     min_severity=min_severity,
+                    client=client,
                 )
                 if alert_result["sent"]:
                     alerts_sent.append("data_stale")
@@ -133,7 +160,10 @@ def run(payload: Dict[str, Any], ctx: Any = None) -> Dict[str, Any]:
             else:
                 alerts_suppressed.append({
                     "type": "data_stale",
-                    "reason": "cooldown",
+                    "reason": (
+                        "outside_market_hours"
+                        if last_sent == "outside_market_hours" else "cooldown"
+                    ),
                     "last_sent": last_sent,
                 })
 
@@ -158,6 +188,7 @@ def run(payload: Dict[str, Any], ctx: Any = None) -> Dict[str, Any]:
                         details={"job_name": job.name, "cadence": job.cadence},
                         severity="warning",
                         min_severity=min_severity,
+                        client=client,
                     )
                     if alert_result["sent"]:
                         alerts_sent.append(f"job_late:{job.name}")
@@ -188,6 +219,7 @@ def run(payload: Dict[str, Any], ctx: Any = None) -> Dict[str, Any]:
                         details={"job_name": job.name, "cadence": job.cadence},
                         severity="critical",
                         min_severity=min_severity,
+                        client=client,
                     )
                     if alert_result["sent"]:
                         alerts_sent.append(f"job_never_run:{job.name}")
@@ -241,6 +273,7 @@ def run(payload: Dict[str, Any], ctx: Any = None) -> Dict[str, Any]:
                         },
                         severity="error",
                         min_severity=min_severity,
+                        client=client,
                     )
                     if alert_result["sent"]:
                         alerts_sent.append(f"output_stale:{out.table}")
@@ -277,6 +310,7 @@ def run(payload: Dict[str, Any], ctx: Any = None) -> Dict[str, Any]:
                     details={"count": len(recent_failures), "jobs": failure_names},
                     severity="error",
                     min_severity=min_severity,
+                    client=client,
                 )
                 if alert_result["sent"]:
                     alerts_sent.append("job_failure")

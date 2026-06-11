@@ -187,6 +187,69 @@ the human flips them to `status:shipped` (with PR#) or `status:rejected`.
   stamping gap itself code-certain. Severity LOW, observability-only. Fix: stamp
   `symbol_already_held` / `edge_below_minimum_at_stage` / `below_min_score` at the three skip sites.
 
+## status:shipped — 2026-06-11 incident arc + post-close gate (PRs #1055 #1056 #1057 merged; #1058 #1059 at CI)
+
+- **[06-11 incident → #1055] Credit-OPEN mleg sign** — first CHOP condors submitted +1.54/+1.43,
+  live gateway instant-rejected in 4ms (the #101 close class, open side). Stamp `is_credit_open`
+  from `_net_mid_cost` + handler flip + coherence guard. Merged mid-day by operator;
+  LIVE-VALIDATED same session: QQQ filled −1.61 (limit −1.54, +$7 improvement), SPY −1.48
+  (−1.43, +$5), third condor accepted+rested at −1.28; 12/12 legs priced by the #1052 truth
+  layer (Polygon dark on ALL of them).
+- **[06-11 incident → #1056] Fill-commit raw signed entry** — `_commit_fill`/`_repair` stored
+  Alpaca's SIGNED filled_avg_price into avg_entry_price/max_credit (violating mark_math's
+  absolute contract) → phantom −$300 unrealized on a +$10.50 position → 16:30Z phantom −22.8%
+  daily breach force-closed the ENTIRE live book ($0 realized only because the close limits were
+  mis-signed too). `_abs_entry_premium`/`_weighted_abs_entry_avg` at all six write seams +
+  round-trip regression on the day's actual numbers.
+- **[06-11 incident → #1056] Close-path signed limit** — short-structure closes staged the
+  SIGNED mark as the limit (−1.39 buy-to-close): gateway reject + an unfillable RESTING close
+  that satisfied idempotency and DISARMED exit protection. `_close_limit_and_direction`
+  (unsigned magnitude; structural direction; loud disagreement) + handler inverse guard. Also
+  fixes the internal-fill realized-P&L sign — the 19:00Z shadow stop close recorded +$2,369.22
+  on a −$234.78 trade (the signed limit double-negated through the synthetic close leg).
+- **[06-11 V4 gate trail → #1057] Utilization gate signed netting** — `committed=$56` while the
+  broker held $1,365 (condor credits netted against the NFLX debit). Per-structure commitment:
+  net-debit = net cost basis; net-credit = margin basis (max wing width × 100 × qty, matches
+  Alpaca's $1,000 hold); naked/unboundable → fail-closed.
+- **[06-11 trace — fix 06-12] Live close double-submission** — `_stage_order_internal`
+  broker-submits alpaca-mode orders itself AND `_close_position` submits the same row again;
+  the second call's pre-cancel kills the first broker order (2 broker orders per close, first
+  canceled ~0.45s in). Never seen before: no live system close had ever executed. Writeup
+  `docs/double_submit_close_trace.md`; single-submitter staging param + regression queued 06-12.
+- **[v5-A2 → #1058] Realized-blind daily brake** — min(open-book proxy, broker
+  equity−last_equity) into all four feeders + weekly into the circuit breaker + empty-book
+  de-gates (breaker + MTM). Same-day empirical: real −8.3% day (equity 2075.42 vs 2263.85) read
+  as ≈−4% by the proxy. Tightens-only.
+- **[v5-A4 → #1059] Ops alert delivery** — dual-channel: risk_alerts PRIMARY (critical→critical,
+  error→high) + webhook secondary; severity map gains "critical" (was 0 → the most severe class
+  always suppressed); data_stale ALERT market-hours-gated (nightly staleness is structural);
+  canonical alert() accepts "high" (was silently downgrading); synthetic_delivery_test payload
+  hook for the end-to-end proof.
+
+### Data corrections (2026-06-11, operator-"go" precedent; all documented in-session)
+
+- Live QQQ `6798e58f` / SPY `a5393e2b`: avg_entry_price/max_credit ABS-corrected (−1.61/−1.48 →
+  +1.61/+1.48). Applied ~90s after the 16:30Z monitor had already fired on the phantom.
+- Shadow QQQ `85db73c8`: realized_pl +2369.22 → **−234.78** (arithmetic truth: credit 1.5246×7
+  entry, 1.86 buy-back) BEFORE the 21:20Z learning ingest (learning_ingested was false — zero
+  contamination); neutral-cohort cash_balance −$2,604 (the close's fill event credited +1302
+  instead of debiting 1302).
+
+### Pending verifications added 2026-06-11 night
+
+- 06-12 first credit fill row: avg_entry_price/max_credit POSITIVE (the #1056 write-side proof).
+- 06-12 closes: positive limit on credit-position closes, no `Sign-incoherent` raise; the
+  double-submission pattern persists (documented) until the 06-12 single-submitter fix.
+- #1058 signature: `[EQUITY_STATE] realized-blind gap` WARNING whenever broker day < proxy.
+- #1059 signature: `ops_*` rows appearing in risk_alerts (first ops delivery ever); synthetic
+  proof row written + deleted post-deploy.
+- ✅ #1048 VERIFIED 2026-06-11 19:00Z — first real cohort-stop fire: shadow QQQ 7-lot breached
+  the neutral stop (−$235 vs −$213 threshold) and closed intraday at monitor cadence (the
+  realized-P&L sign corruption it exposed is the #1056 internal-fill item above).
+- ⚠️ Railway auto-deploy MISSED bcbfb0c (#1057) — faa425d deployed instantly, the follow-on
+  merge never triggered; forced recycle required (H8: merged ≠ running; verify worker SHA
+  before trusting any 06-12 behavior to #1057).
+
 ## Pending verifications (not findings — check, then update here)
 
 - ✅ VERIFIED 2026-06-10 10:00Z: first calibration write post-#1045. job_runs verbatim:

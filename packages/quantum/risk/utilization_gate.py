@@ -11,10 +11,15 @@ book would look like WITH the candidate:
 
     utilization = (committed + candidate_cost) / (committed + settled_obp)
 
-- ``committed``   = Σ net cost basis of open BROKER option positions (broker
-                    truth, fresh read per evaluation — NEVER DB marks, the
-                    #1022 divergence class). For the defined-risk debit book
-                    this system trades, net cost basis = max loss.
+- ``committed``   = per-STRUCTURE commitment of open BROKER option positions
+                    (broker truth, fresh read per evaluation — NEVER DB marks,
+                    the #1022 divergence class). Net-debit structures commit
+                    their net cost basis (= max loss); net-credit structures
+                    commit the broker MARGIN basis (max wing width × 100 ×
+                    qty) — never the signed premium. 06-11: raw cost-basis
+                    summing let two condor credits (−$161/−$148) NET AGAINST
+                    NFLX's $365 debit → "committed=$56" while the broker held
+                    $1,000 of condor margin. See structure_commitment_usd.
 - ``settled_obp`` = ``equity_state.get_alpaca_options_buying_power`` — the
                     canonical #93/PR-864 settled-funds source (60s TTL,
                     effectively live). Reused, not re-derived.
@@ -49,7 +54,8 @@ untouched.
 
 import logging
 import os
-from typing import Any, Dict, Optional
+import re
+from typing import Any, Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -160,16 +166,126 @@ def _get_obp(user_id: str, supabase: Any = None) -> Optional[float]:
 
 # ── inputs ───────────────────────────────────────────────────────────────────
 
-def fetch_committed_capital() -> float:
-    """Σ net cost basis of open BROKER option positions, in dollars — the
-    capital already committed to the defined-risk book (= max loss for debit
-    structures). Fresh broker read every call; never DB marks.
+_OCC_RE = re.compile(r"^(?:O:)?([A-Z.]{1,6})(\d{6})([CP])(\d{8})$")
 
-    A net-credit book sums negative → clamped to 0 with a loud warning
-    (utilization then understates committed risk for credit structures, but
-    the denominator's OBP already reflects the broker's margin hold for short
-    spreads). Raises :class:`UtilizationGateError` on any read failure.
+
+def _parse_occ(symbol: Any) -> Optional[Tuple[str, str, str, float]]:
+    """(underlying, expiry, type, strike) from an OCC option symbol — accepts
+    both Alpaca (``QQQ260710P00645000``) and Polygon (``O:QQQ…``) forms.
+    None when unparseable."""
+    m = _OCC_RE.match(str(symbol or "").strip().upper())
+    if not m:
+        return None
+    und, exp, typ, strike = m.groups()
+    return und, exp, typ, float(strike) / 1000.0
+
+
+def structure_commitment_usd(option_legs: List[Dict[str, Any]]) -> float:
+    """Committed capital of an option book, computed per STRUCTURE.
+
+    Legs are grouped into structures by (underlying, expiry) from the OCC
+    symbol. Per group:
+
+    - net-DEBIT (Σ cost_basis ≥ 0): commits the net debit paid — its max
+      loss. Identical to the original per-leg sum for an all-debit book.
+    - net-CREDIT (Σ cost_basis < 0): commits the broker MARGIN basis — max
+      wing width × 100 × qty (per type, 1-short/1-long wings; an iron condor
+      is margined on its larger wing, matching Alpaca: $500/condor verified
+      against initial_margin=$1,000 on the 06-11 two-condor book). NEVER the
+      signed premium: raw summing lets credit premiums net against debit
+      costs (06-11: NFLX $365 − $161 − $148 = "$56 committed" vs $1,365
+      true).
+
+    FAIL-CLOSED (:class:`UtilizationGateError`) on anything the margin math
+    cannot bound: unparseable symbol, missing qty in a net-credit group, a
+    short wing with no covering long (naked), or wing shapes this book never
+    holds (≠1 short or ≠1 long per type). This system trades defined-risk
+    structures only — an unboundable book must block entries loudly, not
+    understate.
     """
+    groups: Dict[Tuple[str, str], List[Dict[str, Any]]] = {}
+    committed = 0.0
+    for leg in option_legs:
+        parsed = _parse_occ(leg.get("symbol"))
+        if parsed is None:
+            cb = float(leg.get("cost_basis") or 0)
+            if cb < 0:
+                # A credit leg we cannot group cannot have its margin
+                # bounded — fail-closed.
+                raise UtilizationGateError(
+                    f"unparseable option symbol {leg.get('symbol')!r} on a "
+                    f"negative-cost-basis leg — margin underivable, "
+                    f"fail-closed"
+                )
+            # A debit leg commits its own cost basis standalone — identical
+            # to the original per-leg sum.
+            committed += cb
+            continue
+        und, exp, typ, strike = parsed
+        groups.setdefault((und, exp), []).append(
+            {**leg, "typ": typ, "strike": strike}
+        )
+    for (und, exp), legs in sorted(groups.items()):
+        net_cb = sum(float(l["cost_basis"]) for l in legs)
+        if net_cb >= 0:
+            committed += net_cb
+            continue
+        # net-credit structure → broker margin basis
+        wing_margins = []
+        for typ in ("P", "C"):
+            wing = [l for l in legs if l["typ"] == typ]
+            if not wing:
+                continue
+            shorts, longs = [], []
+            for l in wing:
+                q = l.get("qty")
+                if q is None:
+                    raise UtilizationGateError(
+                        f"qty missing on {l.get('symbol')} in net-credit "
+                        f"group {und} {exp} — margin underivable, fail-closed"
+                    )
+                q = float(q)
+                (shorts if q < 0 else longs).append((l, abs(q)))
+            if not shorts:
+                continue
+            if not longs:
+                raise UtilizationGateError(
+                    f"net-credit group {und} {exp}: short {typ} wing has no "
+                    f"covering long — naked-short margin underivable, "
+                    f"fail-closed"
+                )
+            if len(shorts) != 1 or len(longs) != 1:
+                raise UtilizationGateError(
+                    f"net-credit group {und} {exp}: {len(shorts)} short / "
+                    f"{len(longs)} long {typ} legs — unrecognized wing shape, "
+                    f"fail-closed"
+                )
+            (s_leg, s_qty), (l_leg, l_qty) = shorts[0], longs[0]
+            width = abs(float(s_leg["strike"]) - float(l_leg["strike"]))
+            qty = min(s_qty, l_qty)
+            if width <= 0 or qty <= 0:
+                raise UtilizationGateError(
+                    f"net-credit group {und} {exp}: degenerate {typ} wing "
+                    f"(width={width}, qty={qty}) — fail-closed"
+                )
+            wing_margins.append(width * 100.0 * qty)
+        if not wing_margins:
+            raise UtilizationGateError(
+                f"net-credit group {und} {exp} has no short wings — "
+                f"unrecognized structure, fail-closed"
+            )
+        committed += max(wing_margins)
+    return committed
+
+
+def fetch_committed_capital() -> float:
+    """Committed capital of the open BROKER option book, in dollars — fresh
+    broker read every call; never DB marks. Computed per structure via
+    :func:`structure_commitment_usd`: net-debit structures commit their net
+    cost basis (= max loss); net-credit structures commit the broker margin
+    basis — never the signed premium. Raises
+    :class:`UtilizationGateError` on any read failure or underivable
+    structure (fail-closed)."""
     try:
         alpaca = _get_alpaca()
         if alpaca is None:
@@ -184,7 +300,7 @@ def fetch_committed_capital() -> float:
             f"broker positions read failed: {type(e).__name__}: {e}"
         ) from e
 
-    committed = 0.0
+    legs = []
     for p in positions:
         if (p.get("asset_class") or "") != "us_option":
             continue
@@ -196,17 +312,12 @@ def fetch_committed_capital() -> float:
                 f"cost_basis missing on broker position "
                 f"{p.get('symbol_alpaca') or p.get('symbol')} — fail-closed"
             )
-        committed += float(cb)
-
-    if committed < 0:
-        logger.warning(
-            "[UTILIZATION_GATE] net broker option cost basis is negative "
-            "($%.2f — net-credit book); clamping committed to $0. Utilization "
-            "will understate committed risk for credit structures.",
-            committed,
-        )
-        committed = 0.0
-    return committed
+        legs.append({
+            "symbol": p.get("symbol_alpaca") or p.get("symbol") or "",
+            "cost_basis": float(cb),
+            "qty": p.get("qty"),
+        })
+    return structure_commitment_usd(legs)
 
 
 def candidate_cost_usd(suggestion: Dict[str, Any]) -> float:

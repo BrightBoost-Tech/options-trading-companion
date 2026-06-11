@@ -660,7 +660,7 @@ def _stage_order_internal(supabase, analytics, user_id, ticket: TradeTicket, por
     # with a FRESH quote (the combo fetch above is only legs[0]); any unpriceable
     # leg → REJECT, never fall through to the modeled limit or the fabricating
     # TCM fallback (the 2026-06-08 P86 no-quote entry).
-    _validate_entry_quotes(
+    _entry_leg_quotes = _validate_entry_quotes(
         ticket,
         position_id,
         # Phase C (06-10): source-aligned per-leg fetch (truth layer primary,
@@ -669,6 +669,27 @@ def _stage_order_internal(supabase, analytics, user_id, ticket: TradeTicket, por
         fetch_fn=_make_entry_quote_fetch_fn(poly),
         suggestion_id=suggestion_id,
     )
+
+    # Credit-open sign classification (2026-06-11 incident): the first live
+    # iron condors (CHOP unlocked the pool) submitted with POSITIVE limit
+    # prices and Alpaca's live gateway instant-rejected both in 4ms — the
+    # mleg convention is positive=debit / negative=credit, and the existing
+    # is_credit_close sign-flip (#101) only covers CLOSES. Classify the OPEN
+    # structure's net direction from the just-validated leg mids and stamp
+    # order_json.is_credit_open so build_alpaca_order_request negates the
+    # limit at the broker seam (internal accounting keeps the positive
+    # credit-magnitude convention everywhere else). Quotes missing (flag
+    # off) → no stamp → legacy behavior; never guess a sign.
+    _entry_is_net_credit = False
+    if position_id is None and _entry_leg_quotes:
+        _net_mid = _net_mid_cost(ticket, _entry_leg_quotes)
+        if _net_mid is not None and _net_mid < -0.005:
+            _entry_is_net_credit = True
+            logger.warning(
+                f"[STAGE] net-CREDIT open structure detected (net mid "
+                f"{_net_mid:.2f}) — stamping is_credit_open so the Alpaca "
+                f"limit submits NEGATIVE (suggestion={suggestion_id})"
+            )
 
     # TCM Estimate
     tcm_est = TransactionCostModel.estimate(ticket, quote)
@@ -701,7 +722,12 @@ def _stage_order_internal(supabase, analytics, user_id, ticket: TradeTicket, por
         "staged_at": datetime.now(timezone.utc).isoformat(),
         "trace_id": trace_id,
         "suggestion_id": suggestion_id,
-        "order_json": ticket.model_dump(mode="json"),
+        "order_json": {
+            **ticket.model_dump(mode="json"),
+            # 06-11 credit-open sign fix — consumed by
+            # build_alpaca_order_request (mirrors is_credit_close).
+            **({"is_credit_open": True} if _entry_is_net_credit else {}),
+        },
 
         # V3 Fields
         "requested_qty": ticket.quantity,
@@ -1015,7 +1041,7 @@ def _leg_symbol(leg) -> Optional[str]:
     return sym or None
 
 
-def _validate_entry_quotes(ticket, position_id, fetch_fn, suggestion_id=None) -> None:
+def _validate_entry_quotes(ticket, position_id, fetch_fn, suggestion_id=None) -> Dict[str, Dict[str, Any]]:
     """Reject an OPEN order whose feed cannot price ANY leg at stage time.
 
     OPEN-only: a non-None ``position_id`` means a CLOSE — exempt, because a
@@ -1027,12 +1053,17 @@ def _validate_entry_quotes(ticket, position_id, fetch_fn, suggestion_id=None) ->
     the modeled limit, NEVER call the fabricating TCM fallback, NEVER submit or
     shadow-fill. Loud: logs at error before raising. No-op when the flag is off
     (legacy fall-through behavior).
+
+    Returns the validated per-leg quotes ``{occ_symbol: quote}`` so the stage
+    can classify the structure's net direction (the 06-11 credit-open sign
+    fix) without refetching. Empty dict on the exempt/disabled paths.
     """
     if position_id is not None:
-        return  # CLOSE order — exempt
+        return {}  # CLOSE order — exempt
     if not _entry_quote_validation_enabled():
-        return  # kill-switch off → legacy behavior
+        return {}  # kill-switch off → legacy behavior
     legs = getattr(ticket, "legs", None) or []
+    leg_quotes: Dict[str, Dict[str, Any]] = {}
     for leg in legs:
         sym = _leg_symbol(leg)
         if not sym:
@@ -1046,6 +1077,43 @@ def _validate_entry_quotes(ticket, position_id, fetch_fn, suggestion_id=None) ->
                 f"modeled limit or fabricating a fill"
             )
             raise EntryQuoteUnpriceable(sym, leg_quote)
+        leg_quotes[sym] = leg_quote
+    return leg_quotes
+
+
+def _net_mid_cost(ticket, leg_quotes: Dict[str, Dict[str, Any]]) -> Optional[float]:
+    """Net mid cost of the ticket's structure from validated leg quotes:
+    Σ(buy-leg mids) − Σ(sell-leg mids). Negative ⇒ net CREDIT (you receive).
+    None when any leg lacks a usable mid — never guess a sign."""
+    legs = getattr(ticket, "legs", None) or []
+    total = 0.0
+    for leg in legs:
+        sym = _leg_symbol(leg)
+        if not sym:
+            return None
+        q = leg_quotes.get(sym) or {}
+        try:
+            bid = float(q.get("bid") or q.get("bid_price") or 0)
+            ask = float(q.get("ask") or q.get("ask_price") or 0)
+        except (TypeError, ValueError):
+            return None
+        if bid > 0 and ask > 0:
+            mid = (bid + ask) / 2.0
+        else:
+            try:
+                mid = float(q.get("price") or 0)
+            except (TypeError, ValueError):
+                return None
+            if mid <= 0:
+                return None
+        action = getattr(leg, "action", None)
+        if action is None and isinstance(leg, dict):
+            action = leg.get("action")
+        if str(action).lower() == "sell":
+            total -= mid
+        else:
+            total += mid
+    return total
 
 
 def _process_orders_for_user(supabase, analytics, user_id, target_order_id=None):

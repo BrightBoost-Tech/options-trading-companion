@@ -95,35 +95,35 @@ class TestValidateEntryQuotes(unittest.TestCase):
 
     def test_both_legs_valid_proceeds(self):
         """No regression: both priceable → returns None (no raise)."""
-        self.assertIsNone(_validate_entry_quotes(
+        self.assertIsInstance(_validate_entry_quotes(
             _ticket(P86, P79), position_id=None,
             fetch_fn=_fetch({P86: VALID, P79: VALID}),
-        ))
+        ), dict)
 
     def test_transient_recovers_on_fresh_fetch(self):
         """The 16:30Z case: scan-time quote was dead but the FRESH fetch (what
         this validates) returns a real quote → proceeds, no false reject."""
         # fetch_fn is the FRESH fetch; it returns valid for P86 now.
-        self.assertIsNone(_validate_entry_quotes(
+        self.assertIsInstance(_validate_entry_quotes(
             _ticket(P86, P79), position_id=None,
             fetch_fn=_fetch({P86: VALID, P79: VALID}),
-        ))
+        ), dict)
 
     def test_close_order_is_exempt(self):
         """A CLOSE (position_id set) must NOT be blocked by a dead leg —
         exits own #1022/#1035/#1036; trapped > bad close mark."""
-        self.assertIsNone(_validate_entry_quotes(
+        self.assertIsInstance(_validate_entry_quotes(
             _ticket(P86, P79), position_id="pos-123",
             fetch_fn=_fetch({P86: DEAD, P79: VALID}),
-        ))
+        ), dict)
 
     def test_flag_off_is_legacy_fallthrough(self):
         """Kill-switch off → no validation, no raise (rollback verification)."""
         with patch.dict(os.environ, {"ENTRY_QUOTE_VALIDATION_ENABLED": "0"}):
-            self.assertIsNone(_validate_entry_quotes(
+            self.assertIsInstance(_validate_entry_quotes(
                 _ticket(P86, P79), position_id=None,
                 fetch_fn=_fetch({P86: DEAD, P79: VALID}),
-            ))
+            ), dict)
 
     def test_second_leg_dead_also_rejects(self):
         with self.assertRaises(EntryQuoteUnpriceable) as cm:
@@ -137,9 +137,9 @@ class TestValidateEntryQuotes(unittest.TestCase):
         legs = [types.SimpleNamespace(symbol=None, action="buy"),
                 types.SimpleNamespace(symbol=P79, action="sell")]
         tk = types.SimpleNamespace(legs=legs, symbol="NFLX")
-        self.assertIsNone(_validate_entry_quotes(
+        self.assertIsInstance(_validate_entry_quotes(
             tk, position_id=None, fetch_fn=_fetch({P79: VALID}),
-        ))
+        ), dict)
 
 
 class TestDoesNotReachFabricatingFallback(unittest.TestCase):

@@ -82,6 +82,12 @@ def build_alpaca_order_request(order: Dict[str, Any]) -> Dict[str, Any]:
     # Detect close orders: position_id is set when closing an existing position
     is_close_order = bool(order.get("position_id"))
     is_credit_close = bool(order_json.get("is_credit_close")) if is_close_order else False
+    # 06-11 incident: the sign convention applies to OPENS too. The first live
+    # iron condors (net-credit structures) submitted +1.54/+1.43 and Alpaca's
+    # live gateway instant-rejected both in 4ms — same class the #101 comment
+    # below documents for closes. The stage seam classifies net direction
+    # from validated leg mids and stamps order_json.is_credit_open.
+    is_credit_open = bool(order_json.get("is_credit_open")) and not is_close_order
 
     alpaca_legs = []
     for i, leg in enumerate(legs_data):
@@ -111,10 +117,12 @@ def build_alpaca_order_request(order: Dict[str, Any]) -> Dict[str, Any]:
     # Apply Alpaca mleg credit-close sign BEFORE the worthless-spread clamp,
     # so |signed_price| < 0.01 still trips the clamp (preserving the original
     # protection) but a legitimate $1.86 credit becomes -$1.86 cleanly.
-    if is_credit_close and limit_price > 0:
-        logger.info(
-            f"[ALPACA_HANDLER] Credit-close sign-flip: order={order.get('id')} "
-            f"limit_price={limit_price} → {-limit_price} (Alpaca mleg convention)"
+    if (is_credit_close or is_credit_open) and limit_price > 0:
+        _flip_kind = "Credit-close" if is_credit_close else "Credit-open"
+        logger.warning(
+            f"[ALPACA_HANDLER] {_flip_kind} sign-flip: order={order.get('id')} "
+            f"limit_price={limit_price} → {-limit_price} (Alpaca mleg convention: "
+            f"positive=debit, negative=credit)"
         )
         limit_price = -limit_price
 
@@ -133,6 +141,19 @@ def build_alpaca_order_request(order: Dict[str, Any]) -> Dict[str, Any]:
     # Options must always be limit orders — Alpaca rejects market orders
     # outside market hours. Magnitude check, not sign — credit closes are
     # legitimately negative.
+    # Pre-submit sign-coherence guard (06-11): a known-credit structure must
+    # NEVER leave this function with a positive limit — the live gateway
+    # instant-rejects it (close class: #101; open class: the 06-11 condors).
+    # Unreachable given the flip above; pins the invariant against future
+    # edits. Fail-loud beats a silent broker rejection.
+    if (is_credit_close or is_credit_open) and limit_price > 0:
+        raise ValueError(
+            f"Sign-incoherent credit order: limit_price={limit_price} is "
+            f"positive for a net-credit structure (is_credit_close="
+            f"{is_credit_close}, is_credit_open={is_credit_open}). "
+            f"Refusing to submit. Order ID: {order.get('id')}"
+        )
+
     if not limit_price or abs(limit_price) < 0.01:
         raise ValueError(
             f"Cannot submit options order without limit_price "

@@ -1670,6 +1670,14 @@ class PaperExitEvaluator:
                 position["portfolio_id"],
                 position_id=position_id,
                 trace_id_override=position.get("trace_id"),
+                # Single-submitter rule (06-12): THIS function owns broker
+                # submission for closes (the explicit submit_and_track below,
+                # with its pre-cancel semantics). Staging must not also
+                # submit — that was the double-submission bug
+                # (docs/double_submit_close_trace.md): two broker orders per
+                # live close; #2's pre-cancel killed #1 (06-11), or #2 was
+                # intent-mismatch-rejected after #1 FILLED (06-12 SPY).
+                submit_to_broker=False,
             )
         finally:
             os.environ["EXECUTION_MODE"] = _saved_mode

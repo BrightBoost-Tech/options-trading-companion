@@ -149,8 +149,10 @@ class AlpacaClient:
         """
         last_err = None
         auth_refreshed = False  # Only attempt re-auth once per call chain
+        attempts_made = 0  # honest count — the raise message must never claim MAX_RETRIES on an early break
 
         for attempt in range(self.MAX_RETRIES):
+            attempts_made = attempt + 1
             try:
                 result = fn(*args, **kwargs)
                 return result
@@ -192,7 +194,8 @@ class AlpacaClient:
                     break
 
         raise AlpacaError(
-            f"Alpaca API call failed after {self.MAX_RETRIES} attempts: {last_err}"
+            f"Alpaca API call failed after {attempts_made} attempt(s) "
+            f"(max {self.MAX_RETRIES}): {last_err}"
         )
 
     # ── Account ───────────────────────────────────────────────────────

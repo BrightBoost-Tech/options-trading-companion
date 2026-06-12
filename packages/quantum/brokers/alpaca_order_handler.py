@@ -45,6 +45,25 @@ ACK_TIMEOUT_SECONDS = 10.0
 # never, so the precise window matters little — the price does.
 IDLE_WATCHDOG_SECONDS = 90
 
+# Terminal broker-reject classification (06-12). Rejection reasons that can
+# never succeed by retrying — fail after the FIRST attempt, one alert, never
+# hammer the gateway. NOTE: the 06-12 "30-retry storm" reading was itself a
+# lying message — both retry layers interpolated their MAX constants into
+# "after N attempts" regardless of actual count (fixed below with honest
+# counts); actual behavior was 1 attempt. This classification makes
+# terminal-no-retry explicit rather than incidental.
+_TERMINAL_REJECT_MARKERS = (
+    "42210000", "position intent mismatch",  # duplicate close — prior submission filled
+    "sign-incoherent",                       # our own pre-submit coherence guards
+    "insufficient",                          # buying power / qty available
+    "extra_forbidden",                       # request-shape rejection
+)
+# Subset that means "a prior submission already filled/closed this position":
+# the fill reconciler owns the row — marking needs_manual_review here RACES
+# the reconciler and manufactures a false critical (06-12 SPY: the row was
+# already filled when the duplicate's rejection marked it for review).
+_DUPLICATE_CLOSE_MARKERS = ("42210000", "position intent mismatch")
+
 logger = logging.getLogger(__name__)
 
 
@@ -211,6 +230,7 @@ def submit_and_track(
     order_id = order.get("id")
     num_legs = len((order.get("order_json") or {}).get("legs", []))
     last_error = None
+    attempts_made = 0  # honest count for messages/alerts — never the MAX constant
 
     # Pre-cancel: if this is a close order, cancel any open Alpaca orders
     # for the same contract symbols to avoid held_for_orders rejection.
@@ -247,6 +267,7 @@ def submit_and_track(
                     f"(order={order_id}, attempt={attempt}/{MAX_SUBMIT_ATTEMPTS})"
                 )
                 last_error = "no_alpaca_order_id_returned"
+                attempts_made = attempt
                 if attempt < MAX_SUBMIT_ATTEMPTS:
                     time.sleep(1.0 * attempt)  # Brief backoff before retry
                     continue
@@ -287,20 +308,34 @@ def submit_and_track(
 
         except Exception as e:
             last_error = str(e)
+            attempts_made = attempt
             logger.error(
                 f"[ALPACA_HANDLER] Submit failed (attempt {attempt}/{MAX_SUBMIT_ATTEMPTS}): "
                 f"order={order_id} legs={num_legs} error={last_error}"
             )
-            # Alpaca 42210000 "position intent mismatch" on a close order means
-            # a prior submission already filled and closed the position. Retrying
-            # produces phantom duplicates — break out, let poll_pending_orders
-            # pick up the original fill via alpaca_order_id.
             err_lower = last_error.lower()
-            if "42210000" in err_lower or "position intent mismatch" in err_lower:
+            # Duplicate-close: a prior submission already filled/closed this
+            # position. Return WITHOUT marking needs_manual_review — the fill
+            # reconciler owns the row (poll_pending_orders / order_sync via
+            # the prior alpaca_order_id); marking here races it and produces
+            # a false critical (06-12 SPY).
+            if any(m in err_lower for m in _DUPLICATE_CLOSE_MARKERS):
                 logger.warning(
                     f"[ALPACA_HANDLER] Position-intent-mismatch on order={order_id} — "
-                    f"prior submission likely already filled. Skipping remaining retries; "
-                    f"poll_pending_orders will reconcile via alpaca_order_id."
+                    f"prior submission likely already filled. No retry, no "
+                    f"manual-review mark; the fill reconciler owns this row."
+                )
+                return {
+                    "status": "duplicate_close_prior_fill",
+                    "attempts": attempts_made,
+                    "error": last_error,
+                }
+            # Terminal rejects: will never succeed on retry — stop now; the
+            # post-loop needs_manual_review + single critical alert handles it.
+            if any(m in err_lower for m in _TERMINAL_REJECT_MARKERS):
+                logger.error(
+                    f"[ALPACA_HANDLER] Terminal reject on order={order_id} — "
+                    f"not retrying (reason class matched): {last_error[:160]}"
                 )
                 break
             if attempt < MAX_SUBMIT_ATTEMPTS:
@@ -308,9 +343,14 @@ def submit_and_track(
                 logger.info(f"[ALPACA_HANDLER] Retrying in {backoff}s...")
                 time.sleep(backoff)
 
-    # All attempts exhausted — mark as needs_manual_review (never silently fail)
+    # Attempts exhausted or terminal — mark needs_manual_review (never
+    # silently fail). Honest count: pre-06-12 these messages interpolated
+    # MAX_SUBMIT_ATTEMPTS regardless of how many attempts actually ran (the
+    # lying-message class — "after 3 attempts: ... after 10 attempts" on a
+    # single-attempt terminal reject).
     logger.error(
-        f"[ALPACA_HANDLER] All {MAX_SUBMIT_ATTEMPTS} attempts failed for order={order_id}. "
+        f"[ALPACA_HANDLER] Submission failed after {attempts_made} attempt(s) "
+        f"(max {MAX_SUBMIT_ATTEMPTS}) for order={order_id}. "
         f"Marking needs_manual_review. Last error: {last_error}"
     )
     supabase.table("paper_orders").update({
@@ -318,7 +358,7 @@ def submit_and_track(
         "broker_response": {
             "error": last_error,
             "legs": num_legs,
-            "attempts": MAX_SUBMIT_ATTEMPTS,
+            "attempts": attempts_made,
             "marked_at": datetime.now(timezone.utc).isoformat(),
         },
         "status": "needs_manual_review",
@@ -340,13 +380,13 @@ def submit_and_track(
             alert_type="paper_order_marked_needs_manual_review",
             severity="critical",
             message=(
-                f"Alpaca rejected order after {MAX_SUBMIT_ATTEMPTS} "
-                f"attempts: {str(last_error)[:200]}"
+                f"Alpaca rejected order after {attempts_made} "
+                f"attempt(s): {str(last_error)[:200]}"
             ),
             metadata={
                 "function_name": "submit_and_track",
                 "order_id": str(order_id),
-                "attempts": MAX_SUBMIT_ATTEMPTS,
+                "attempts": attempts_made,
                 "num_legs": num_legs,
                 "last_error": str(last_error)[:500],
                 "broker_status": "needs_manual_review",

@@ -596,7 +596,7 @@ def _get_or_create_portfolio(supabase, user_id, portfolio_id=None):
         raise HTTPException(status_code=500, detail="Failed to create portfolio")
     return new_port.data[0]
 
-def _stage_order_internal(supabase, analytics, user_id, ticket: TradeTicket, portfolio_id_arg=None, position_id=None, trace_id_override=None, suggestion_id_override=None):
+def _stage_order_internal(supabase, analytics, user_id, ticket: TradeTicket, portfolio_id_arg=None, position_id=None, trace_id_override=None, suggestion_id_override=None, submit_to_broker=True):
     portfolio = _get_or_create_portfolio(supabase, user_id, portfolio_id_arg)
     portfolio_id = portfolio["id"]
 
@@ -793,6 +793,21 @@ def _stage_order_internal(supabase, analytics, user_id, ticket: TradeTicket, por
             return order_id
         else:
             order_row = res.data[0]
+            # Single-submitter rule (06-12, docs/double_submit_close_trace.md):
+            # when the caller owns broker submission (the close path — its
+            # explicit submit_and_track carries the pre-cancel semantics),
+            # staging stops here. Pre-fix, BOTH this block and
+            # _close_position submitted the same row: two broker orders per
+            # live close, the second one's pre-cancel killing the first
+            # (06-11), or getting intent-mismatch-rejected after the first
+            # FILLED (06-12 SPY). Routing (shadow gate, dry-run) is the
+            # caller's responsibility on this path.
+            if not submit_to_broker:
+                logger.info(
+                    f"[STAGE] submit_to_broker=False — staged order {order_id} "
+                    f"returned without broker submission (caller owns submit)"
+                )
+                return order_id
             # #62a-D4-PR2a: gate broker submission on portfolio routing_mode.
             # shadow_only portfolios mark execution_mode='shadow_blocked'
             # and skip Alpaca. Fill simulation deferred to PR2b.

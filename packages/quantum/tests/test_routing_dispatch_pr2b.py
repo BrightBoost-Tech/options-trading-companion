@@ -109,11 +109,18 @@ class TestClosePathFallThrough(unittest.TestCase):
         )
 
     def test_internal_fill_block_still_present(self):
-        """Fall-through target must still exist."""
-        self.assertIn("# --- Internal fill at current_mark", self.src,
-                      "Internal-fill block markers (current_mark, fee=0, "
+        """Fall-through target must still exist. (06-12: the header text
+        changed deliberately — internal fills now price at the EXECUTABLE
+        side, not current_mark; the pin tracks the block, not the old
+        pricing claim.)"""
+        self.assertIn("# --- Internal fill (internal_paper or Alpaca fallback)",
+                      self.src,
+                      "Internal-fill block markers (fill update, fee=0, "
                       "ledger emit) must remain — they're the materialization "
                       "path the shadow branch falls through to.")
+        self.assertIn("_select_internal_fill_price(", self.src,
+                      "The executable-side price selection must remain in "
+                      "the fall-through block (06-12 #1017-class fix).")
         self.assertIn("close_position_shared", self.src,
                       "close_position_shared must be reachable — it's the "
                       "function that writes learning_feedback_loops outcomes "

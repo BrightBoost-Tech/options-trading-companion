@@ -1103,16 +1103,21 @@ class IntradayRiskMonitor:
                     f"current_mark (mark={position.get('current_mark')!r})"
                 )
 
-            # ── Layer-1 exit mark-sanity gate — OBSERVE-ONLY ──────────────
+            # ── Layer-1 exit mark-sanity gate (Stage-2 capable) ───────────
             # For mark-derived fires (target_profit / stop_loss) ONLY, record
             # a corroboration verdict comparing the mark we're about to stage
             # against the achievable close from live executable leg quotes.
-            # This writes a row and NOTHING ELSE — the close below is
-            # byte-identical whether the flag is on or off; no branch here
-            # reads the verdict. Triple-guarded fail-safe: the gate's flag
-            # check + its own internal wrapping + this try/except. A gate
-            # error can NEVER stop the exit (the 2026-06-08 phantom-mark
-            # learning loop; enforcement is a deferred Stage-2 decision).
+            # Stage-1 (observe): writes a row, changes nothing. Stage-2
+            # (EXIT_MARK_SANITY_ENFORCE_ENABLED, default OFF): a TARGET_PROFIT
+            # fire whose row says would_suppress=true is SUPPRESSED — the row
+            # is still written as the evidence trail. stop_loss is NEVER
+            # suppressed: compute_corroboration forces would_suppress=False
+            # for it, and this branch additionally fires only for
+            # target_profit (double asymmetry guard). Fail-safe is preserved:
+            # observe_exit_mark forces would_suppress=False on any
+            # corroboration error, and any exception here lets the exit
+            # proceed unchanged (a gate bug can never stop a protective exit;
+            # the 2026-06-08 phantom-mark learning loop).
             _gate_exit_type = None
             if reason == "intraday_target_profit":
                 _gate_exit_type = "target_profit"
@@ -1121,8 +1126,9 @@ class IntradayRiskMonitor:
             if _gate_exit_type is not None:
                 try:
                     from packages.quantum.analytics import exit_mark_corroboration as _emc
-                    if _emc.is_observe_enabled():
-                        _emc.observe_exit_mark(
+                    _enforce = _emc.is_enforce_enabled()
+                    if _emc.is_observe_enabled() or _enforce:
+                        _gate_row = _emc.observe_exit_mark(
                             self.supabase,
                             position=position,
                             exit_type=_gate_exit_type,
@@ -1131,9 +1137,51 @@ class IntradayRiskMonitor:
                             job_run_id=getattr(self, "job_run_id", None),
                             user_id=user_id,
                         )
+                        if (
+                            _enforce
+                            and _gate_exit_type == "target_profit"
+                            and isinstance(_gate_row, dict)
+                            and _gate_row.get("would_suppress") is True
+                        ):
+                            logger.warning(
+                                f"[RISK_MONITOR] TARGET_PROFIT SUPPRESSED for "
+                                f"{symbol} ({pos_id[:8]}): mark not corroborated "
+                                f"on the executable side "
+                                f"(reason={_gate_row.get('suppress_reason')}, "
+                                f"trigger={_gate_row.get('triggering_mark')}, "
+                                f"achievable={_gate_row.get('achievable_close')}, "
+                                f"frac={_gate_row.get('divergence_frac')}) — "
+                                f"no close staged; re-evaluates next cycle"
+                            )
+                            self._log_alert(
+                                user_id=user_id,
+                                alert_type="exit_tp_suppressed_phantom_mark",
+                                severity="high",
+                                message=(
+                                    f"Suppressed target_profit close for {symbol}: "
+                                    f"triggering mark "
+                                    f"{_gate_row.get('triggering_mark')} not "
+                                    f"corroborated (achievable "
+                                    f"{_gate_row.get('achievable_close')}, "
+                                    f"{_gate_row.get('suppress_reason')})"
+                                ),
+                                position_id=pos_id,
+                                symbol=symbol,
+                                metadata={
+                                    "suppress_reason": _gate_row.get("suppress_reason"),
+                                    "divergence_frac": _gate_row.get("divergence_frac"),
+                                    "consequence": (
+                                        "No close order staged on the phantom "
+                                        "mark. Position re-evaluates next cycle "
+                                        "with fresh quotes; a real profit "
+                                        "corroborates and proceeds."
+                                    ),
+                                },
+                            )
+                            return False
                 except Exception as _gate_err:
                     logger.warning(
-                        f"[RISK_MONITOR] exit mark-sanity observe failed "
+                        f"[RISK_MONITOR] exit mark-sanity gate failed "
                         f"(non-fatal; exit proceeds): {_gate_err}"
                     )
 

@@ -416,7 +416,7 @@ def submit_and_track(
         # site 9, H5b site 236, and PR #846 execution_router alert site.
         pass
 
-    return {"status": "needs_manual_review", "error": last_error, "attempts": MAX_SUBMIT_ATTEMPTS}
+    return {"status": "needs_manual_review", "error": last_error, "attempts": attempts_made}
 
 
 def _close_position_on_fill(

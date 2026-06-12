@@ -419,6 +419,10 @@ class PaperAutopilotService:
                 logger.info(
                     f"[DEDUP] Rejected {ticker}: already have open position"
                 )
+                self._stamp_blocked_reason(
+                    sid, "symbol_already_held",
+                    f"open position in {ticker} (user-level dedup)",
+                )
                 continue
 
             # Min-edge check (catches legacy suggestions without risk_adjusted_ev)
@@ -432,6 +436,10 @@ class PaperAutopilotService:
                 logger.info(
                     f"[FILTER] Rejected {s.get('ticker')}: "
                     f"net_edge=${net_edge:.2f} < ${MIN_EDGE_AFTER_COSTS:.0f}"
+                )
+                self._stamp_blocked_reason(
+                    sid, "edge_below_minimum_at_stage",
+                    f"net_edge=${net_edge:.2f} < ${MIN_EDGE_AFTER_COSTS:.0f}",
                 )
                 continue
 
@@ -447,6 +455,10 @@ class PaperAutopilotService:
                 candidates.append(s)
             else:
                 below_min_score_count += 1
+                self._stamp_blocked_reason(
+                    sid, "below_min_score",
+                    f"score={score:.4f} < min_score={min_score:.4f}",
+                )
 
         if not candidates:
             return {
@@ -798,6 +810,13 @@ class PaperAutopilotService:
                 ticker = s.get("ticker") or s.get("symbol") or "?"
                 if ticker in cohort_held:
                     print(f"[AUTO_EXEC] SKIP {ticker}/{sid[:8]}: already have open position", flush=True)
+                    # Cohort forks are separate suggestion rows — stamping this
+                    # fork never masks another cohort's pending copy (ledger N2:
+                    # the 06-10 NFLX forks were swept unprocessed + unstamped).
+                    self._stamp_blocked_reason(
+                        sid, "symbol_already_held",
+                        f"cohort {cohort_name} already holds {ticker}",
+                    )
                     continue
                 print(f"[AUTO_EXEC] EXECUTING {ticker}/{sid[:8]} cohort={cohort_name}", flush=True)
                 try:

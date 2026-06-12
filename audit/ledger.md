@@ -246,9 +246,12 @@ the human flips them to `status:shipped` (with PR#) or `status:rejected`.
 - ✅ #1048 VERIFIED 2026-06-11 19:00Z — first real cohort-stop fire: shadow QQQ 7-lot breached
   the neutral stop (−$235 vs −$213 threshold) and closed intraday at monitor cadence (the
   realized-P&L sign corruption it exposed is the #1056 internal-fill item above).
-- ⚠️ Railway auto-deploy MISSED bcbfb0c (#1057) — faa425d deployed instantly, the follow-on
-  merge never triggered; forced recycle required (H8: merged ≠ running; verify worker SHA
-  before trusting any 06-12 behavior to #1057).
+- ~~Railway auto-deploy MISSED bcbfb0c~~ **ERRATUM (06-12): it self-deployed ~10 min after
+  merge** (SUCCESS 20:18:46Z) — the hook lags up to ~10 min after rapid merges and the
+  listing API lags further; no forced recycle was required (the marker-var attempts errored
+  client-side but one landed harmlessly, same SHA). The durable lesson stands: H8-verify the
+  worker SHA before trusting behavior to a merge — but don't declare a deploy missing inside
+  the lag window.
 
 ## Pending verifications (not findings — check, then update here)
 

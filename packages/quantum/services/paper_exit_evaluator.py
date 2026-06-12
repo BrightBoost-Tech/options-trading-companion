@@ -598,6 +598,44 @@ def _rearm_alert(supabase: Any, kind: str, position_id: Optional[str],
         logger.warning(f"[CLOSE_REARM] alert write failed: {alert_err}")
 
 
+def _select_internal_fill_price(
+    position: Dict[str, Any], exit_price_mid: float, snapshot_fn=None
+) -> tuple:
+    """#1017-class fix (06-12): internal/shadow fills price at the
+    EXECUTABLE side (long→sell at bid, short→buy at ask), via the same
+    computation the #1034 gate corroborates with — never the optimistic mid,
+    which overstates exactly when spreads blow out (06-12 NFLX x3: mid
+    booked +$314.70 vs achievable +$133.35).
+
+    Returns (price, fill_quality). Fail-soft by contract: ANY failure falls
+    back to the mid with an explicit quality flag — this function can never
+    abort a close. fill_quality values:
+      executable               — all legs two-sided; price is the achievable close
+      executable_partial_quote — executable sides present, but some leg's
+                                 non-executable side missing (estimate still
+                                 honest; flagged for learning weighting)
+      mid_fallback_quote_missing — an executable side was missing → mid used
+      mid_fallback_error         — quote fetch/computation failed → mid used
+    """
+    try:
+        from packages.quantum.analytics import exit_mark_corroboration as _emc
+        est = _emc.executable_close_estimate(position, snapshot_fn=snapshot_fn)
+        ach = est.get("achievable_close")
+        if ach is not None:
+            quality = (
+                "executable" if est.get("quote_complete")
+                else "executable_partial_quote"
+            )
+            return float(ach), quality
+        return float(exit_price_mid), "mid_fallback_quote_missing"
+    except Exception as e:
+        logger.warning(
+            f"[INTERNAL_FILL] executable-side pricing failed "
+            f"(mid fallback, flagged): {e}"
+        )
+        return float(exit_price_mid), "mid_fallback_error"
+
+
 def filter_blocking_close_orders(
     rows: List[Dict[str, Any]],
     *,
@@ -1807,7 +1845,22 @@ class PaperExitEvaluator:
                         )
                         # Fall through to internal fill below
 
-        # --- Internal fill at current_mark (internal_paper or Alpaca fallback) ---
+        # --- Internal fill (internal_paper or Alpaca fallback) ---
+        # 06-12 (#1017 class): the fill prices at the EXECUTABLE side, not
+        # the triggering mid. Sign convention unchanged — achievable_close
+        # comes from the same finalize_mark stack as current_mark. Fail-soft:
+        # mid fallback carries an explicit fill_quality flag so learning can
+        # weight or exclude; this step can never abort the close.
+        _mid_reference = float(exit_price)
+        exit_price, _fill_quality = _select_internal_fill_price(
+            position, exit_price
+        )
+        logger.warning(
+            f"[INTERNAL_FILL] position={position_id[:8]} fill_quality="
+            f"{_fill_quality} mid={_mid_reference} executable_fill="
+            f"{round(exit_price, 4)} "
+            f"delta={round((exit_price - _mid_reference), 4)}"
+        )
 
         # 1. Mark order as filled.
         #
@@ -1820,6 +1873,14 @@ class PaperExitEvaluator:
         # in the same call site, so submitted_at == filled_at is the
         # most honest timestamp. Alpaca-path submissions write
         # submitted_at separately upstream.
+        try:
+            _oj_row = supabase.table("paper_orders") \
+                .select("order_json").eq("id", order_id).single().execute().data or {}
+            _order_json = _oj_row.get("order_json") or {}
+        except Exception:
+            _order_json = {}
+        _order_json["fill_quality"] = _fill_quality
+        _order_json["fill_mid_reference"] = _mid_reference
         supabase.table("paper_orders").update({
             "status": "filled",
             "filled_qty": abs_qty,
@@ -1827,6 +1888,7 @@ class PaperExitEvaluator:
             "fees_usd": 0,
             "submitted_at": now,
             "filled_at": now,
+            "order_json": _order_json,
         }).eq("id", order_id).execute()
 
         # 2. Update portfolio cash
@@ -1861,6 +1923,8 @@ class PaperExitEvaluator:
                 "side": side,
                 "qty": abs_qty,
                 "price": exit_price,
+                "fill_quality": _fill_quality,
+                "fill_mid_reference": _mid_reference,
                 "symbol": position["symbol"],
                 "fees": 0,
                 "source": "exit_evaluator",

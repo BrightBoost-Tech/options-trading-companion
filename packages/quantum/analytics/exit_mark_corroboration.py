@@ -301,6 +301,42 @@ def _fetch_leg_quotes(legs: List[Dict[str, Any]], snapshot_fn: Callable) -> Dict
     return out
 
 
+def executable_close_estimate(
+    position_like: Dict[str, Any], snapshot_fn: Optional[Callable] = None
+) -> Dict[str, Any]:
+    """Executable-side (long→sell at bid, short→buy at ask) close estimate
+    for a position-shaped dict — the SAME computation the gate corroborates
+    with, exposed for the internal-fill path (#1017 class: shadow fills must
+    not book the optimistic mid when the executable side is known).
+
+    Returns {achievable_close, achievable_implied_pl, quote_complete,
+    legs_quotes}. achievable_close is None when any priceable leg lacks an
+    executable side (all-or-nothing — never a partial fabrication). May
+    raise on quote-fetch failure; the caller owns the fallback decision."""
+    legs = position_like.get("legs") or []
+    if snapshot_fn is None:
+        from packages.quantum.services.market_data_truth_layer import (
+            MarketDataTruthLayer,
+        )
+        snapshot_fn = MarketDataTruthLayer().snapshot_many
+    leg_quotes = _fetch_leg_quotes(legs, snapshot_fn)
+    v = compute_corroboration(
+        exit_type="target_profit",  # verdict fields unused by this caller
+        triggering_mark=None,
+        triggering_implied_pl=None,
+        quantity=position_like.get("quantity"),
+        avg_entry_price=position_like.get("avg_entry_price"),
+        legs=legs,
+        leg_quotes=leg_quotes,
+    )
+    return {
+        "achievable_close": v["achievable_close"],
+        "achievable_implied_pl": v["achievable_implied_pl"],
+        "quote_complete": v["quote_complete"],
+        "legs_quotes": v["legs_quotes"],
+    }
+
+
 def observe_exit_mark(
     supabase,
     *,

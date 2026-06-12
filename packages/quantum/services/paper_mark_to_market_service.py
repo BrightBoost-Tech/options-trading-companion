@@ -513,13 +513,25 @@ class PaperMarkToMarketService:
         # #3 unification: shared full-count leg-sum (H13). The per-leg
         # aggregation formula is identical across both mark readers and is now
         # the single implementation in risk.mark_math.compute_current_value.
+        # 06-12: mids resolve through usable_mid — a degenerately wide quote
+        # (the 13:30Z C750 0.76×14.09 whose 'mid' fabricated the −0.65 condor
+        # mark) is refused, not averaged. Legs priced WITHOUT a two-sided
+        # quote (one-sided / snapshot-mid fallback — the thin after-hours
+        # class this 20:30Z job runs in) are FLAGGED so the next session
+        # knows the persisted mark is suspect.
+        from packages.quantum.risk.mark_math import usable_mid
+        suspect_fallback_legs: List[str] = []
+
         def _mid_for(occ_symbol: str) -> Optional[float]:
             norm = normalize_symbol(occ_symbol)
             snap = snapshots.get(norm, {})
             q = snap.get("quote", snap)  # nested "quote" dict, fall back to flat
             bid = float(q.get("bid") or 0)
             ask = float(q.get("ask") or 0)
-            return (bid + ask) / 2.0 if (bid > 0 and ask > 0) else float(q.get("mid") or 0)
+            fallback = float(q.get("mid") or 0)
+            if not (bid > 0 and ask > 0) and fallback > 0:
+                suspect_fallback_legs.append(norm)
+            return usable_mid(q.get("bid"), q.get("ask"), fallback)
 
         failed_legs: List[str] = []
         current_value = compute_current_value(
@@ -533,6 +545,15 @@ class PaperMarkToMarketService:
                 f"({', '.join(failed_legs)}). Keeping previous mark."
             )
             return None
+        if suspect_fallback_legs and current_value is not None:
+            logger.warning(
+                f"[MARK_TO_MARKET] SUSPECT mark for position "
+                f"{position.get('id', '?')} ({position.get('symbol')}): "
+                f"{len(suspect_fallback_legs)} leg(s) priced without a "
+                f"two-sided quote ({', '.join(suspect_fallback_legs)}) — "
+                f"persisted mark may be thin/after-hours; the next session's "
+                f"stale-mark guard treats pre-open marks as untrusted."
+            )
         return current_value
 
     @staticmethod

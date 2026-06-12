@@ -33,7 +33,7 @@ from packages.quantum.risk.payoff_bounds import (
     evaluate_payoff_bound,
     payoff_bound_alert_fields,
 )
-from packages.quantum.risk.mark_math import compute_current_value, finalize_mark
+from packages.quantum.risk.mark_math import compute_current_value, finalize_mark, usable_mid
 
 logger = logging.getLogger(__name__)
 
@@ -84,6 +84,38 @@ def _intraday_cohort_stop_enabled() -> bool:
 # exactly the ET session transcribed as CT). DST-safe: the session is defined
 # in ET, so computing in ET needs no offset arithmetic.
 EASTERN_TZ = ZoneInfo("America/New_York")
+
+
+def _mark_is_stale_fallback(pos: Dict[str, Any], now: Optional[datetime] = None) -> bool:
+    """True when the position's persisted mark predates the CURRENT session
+    open — i.e. the unrealized_pl a mark-derived exit would evaluate is
+    yesterday's number (06-12: the values TP/stop consume when the fresh
+    recompute fails come straight from the DB row).
+
+    Boundary = today's 9:30 ET open (a pre-open mark — including a 13:15Z
+    evaluator-refresh mark — is NOT a session price; the Area-7 finding's
+    Monday 13:00Z sweep closed $211.80 past thresholds on exactly that).
+    Missing last_marked_at → stale (no provenance = no trust).
+    EXIT_STALE_MARK_MAX_AGE_MINUTES overrides with a pure age check."""
+    raw = pos.get("last_marked_at")
+    if not raw:
+        return True
+    try:
+        ts = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=ZoneInfo("UTC"))
+    except (ValueError, TypeError):
+        return True
+    now_et = (now or datetime.now(EASTERN_TZ)).astimezone(EASTERN_TZ)
+    override = os.environ.get("EXIT_STALE_MARK_MAX_AGE_MINUTES", "").strip()
+    if override:
+        try:
+            max_age = float(override) * 60.0
+            return (now_et - ts.astimezone(EASTERN_TZ)).total_seconds() > max_age
+        except ValueError:
+            pass  # bad override → fall through to the session boundary
+    session_open_et = now_et.replace(hour=9, minute=30, second=0, microsecond=0)
+    return ts.astimezone(EASTERN_TZ) < session_open_et
 
 
 def _fallback_is_market_open_et(now: Optional[datetime] = None) -> bool:
@@ -313,6 +345,14 @@ class IntradayRiskMonitor:
                 force_closes_submitted += 1
                 if pid:
                     closed_in_this_cycle.add(pid)
+                # A stop is a stop (06-12): cohort stop_loss closes bench the
+                # symbol exactly like per-symbol envelope stops. #1040's
+                # writer covered only result.symbol_loss_stops — the 06-12
+                # SPY cohort stop closed at 15:30Z and was re-rankable at the
+                # 16:00Z scan (manually benched that day; this makes it
+                # permanent). target_profit/expiration do NOT bench.
+                if reason == "stop_loss":
+                    self._write_cohort_stop_cooldown(pos, user_id)
 
         # 5b. Envelope violations
         #     Daily/weekly/per-symbol loss limits are safety-critical — always
@@ -514,22 +554,26 @@ class IntradayRiskMonitor:
 
             # Shared mid resolver over the pre-fetched snapshots (used for both
             # the leg-less and multi-leg paths via risk.mark_math).
-            def _mid_for(sym: str) -> float:
+            def _mid_for(sym: str) -> Optional[float]:
                 snap = snapshots.get(normalize_symbol(sym), {})
                 q = snap.get("quote", snap)
-                bid = float(q.get("bid") or 0)
-                ask = float(q.get("ask") or 0)
-                return (bid + ask) / 2.0 if (bid > 0 and ask > 0) else float(q.get("mid") or 0)
+                # usable_mid (06-12): a degenerately wide quote (the 13:30Z
+                # C750 0.76×14.09) returns None → failed leg → all-or-nothing
+                # unpriceable, never a fabricated mark.
+                return usable_mid(
+                    q.get("bid"), q.get("ask"), float(q.get("mid") or 0)
+                )
 
             if not legs:
                 mid = _mid_for(pos.get("symbol", ""))
-                if mid > 0:
+                if mid is not None and mid > 0:
                     qty_signed = float(pos.get("quantity") or 1)
                     current_value = mid * 100 * abs(qty_signed)
                     # #3 unification: single shared full-count finalize (H13).
                     pos["current_mark"], pos["unrealized_pl"] = finalize_mark(
                         qty_signed, pos.get("avg_entry_price"), current_value
                     )
+                    pos["_mark_fresh"] = True
                     refreshed_positions.append(pos)
                 continue
 
@@ -585,6 +629,7 @@ class IntradayRiskMonitor:
                         ),
                     )
                     pos["unrealized_pl"] = _bound.clamped_value
+                pos["_mark_fresh"] = True
                 refreshed_positions.append(pos)
             else:
                 # Multi-leg recompute short-circuited: at least one leg could
@@ -709,6 +754,32 @@ class IntradayRiskMonitor:
                 )
         return written
 
+    def _write_cohort_stop_cooldown(self, pos: Dict, user_id: str) -> bool:
+        """#1040 extension (06-12): a COHORT stop_loss force-close writes the
+        same reentry_cooldowns row as a per-symbol envelope stop — same
+        duration convention (next session open via compute_cooldown_until),
+        reason 'cohort_stop_force_close'. Fail-loud per symbol; never rolls
+        back the stop itself."""
+        from packages.quantum.services import reentry_cooldown as rc
+        if not rc.is_enabled():
+            return False
+        try:
+            return bool(rc.write_cooldown(
+                self.supabase,
+                cohort_id=pos.get("cohort_id"),
+                symbol=pos.get("symbol"),
+                cooldown_until=rc.compute_cooldown_until(),
+                reason="cohort_stop_force_close",
+                triggering_position_id=pos.get("id"),
+                realized_loss=float(pos.get("unrealized_pl") or 0),
+            ))
+        except Exception as e:  # never let cooldown-writing break the stop
+            logger.critical(
+                "[RISK_MONITOR] cohort-stop cooldown write raised for %s "
+                "(non-fatal; stop unaffected): %s", pos.get("symbol"), e,
+            )
+            return False
+
     def _alert_loss_per_symbol_degraded(self, result, user_id: str) -> int:
         """Raise a loud high-severity alert for each position whose per-symbol
         loss could not be evaluated this pass (unpriceable mark). Returns the
@@ -818,6 +889,46 @@ class IntradayRiskMonitor:
             # — would let stop_loss still protect without a live mark. Do not
             # silently weaken the stop in the meantime; alert and retry.
             unpriceable = bool(pos.get("_mark_unpriceable"))
+
+            # Stale-fallback guard (06-12): a position that did NOT get a
+            # fresh mark this pass (no _mark_fresh) and whose persisted mark
+            # predates the current session is carrying YESTERDAY's numbers —
+            # mark-derived exits must not fire on them. Treated exactly like
+            # unpriceable (TP never fires; stop_loss alerts degraded, never
+            # acts). Belt to the usable_mid degenerate-quote fix: this
+            # covers the refresh-failed-silently / overnight-stale residue.
+            if not unpriceable and not pos.get("_mark_fresh"):
+                if _mark_is_stale_fallback(pos):
+                    logger.warning(
+                        f"[RISK_MONITOR] exit-eval STALE-MARK GUARD: "
+                        f"{pos.get('symbol')} ({str(pos.get('id'))[:8]}) has no "
+                        f"fresh mark this pass and last_marked_at="
+                        f"{pos.get('last_marked_at')!r} predates the session "
+                        f"open — mark-derived exits skipped this cycle"
+                    )
+                    self._log_alert(
+                        user_id=user_id,
+                        alert_type="stale_mark_exit_guard",
+                        severity="warning",
+                        message=(
+                            f"Exit evaluation skipped for {pos.get('symbol')}: "
+                            f"only available mark predates the current session "
+                            f"(last_marked_at={pos.get('last_marked_at')}). "
+                            f"TP/stop not evaluated; expiration unaffected."
+                        ),
+                        position_id=pos.get("id"),
+                        symbol=pos.get("symbol"),
+                        metadata={
+                            "stale_unrealized_pl": float(pos.get("unrealized_pl") or 0),
+                            "last_marked_at": str(pos.get("last_marked_at")),
+                            "consequence": (
+                                "Stale numbers cannot fire TP/stop this pass. "
+                                "If this persists across cycles the quote layer "
+                                "is degraded — investigate."
+                            ),
+                        },
+                    )
+                    unpriceable = True
 
             # Resolve this position's cohort conditions ONCE — consumed by
             # both the stop evaluation (when cohort_stop_active) and the

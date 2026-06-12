@@ -190,9 +190,13 @@ class TestBehavioralAlertFires(unittest.TestCase):
                 user_id="test-user",
             )
 
-            # Return contract preserved
+            # Return contract preserved — 06-12: "insufficient" is a TERMINAL
+            # reject class (retrying buying power never succeeds): exactly ONE
+            # attempt, and the counter is the honest actual count (the old
+            # fixed-3 was the lying-message class behind the phantom
+            # "30-retry storm" reading).
             self.assertEqual(result["status"], "needs_manual_review")
-            self.assertEqual(result["attempts"], 3)
+            self.assertEqual(result["attempts"], 1)
 
             # Alert was emitted once
             self.assertEqual(
@@ -210,7 +214,7 @@ class TestBehavioralAlertFires(unittest.TestCase):
             self.assertEqual(kwargs.get("user_id"), "test-user")
 
             metadata = kwargs.get("metadata", {})
-            self.assertEqual(metadata.get("attempts"), 3)
+            self.assertEqual(metadata.get("attempts"), 1)  # honest count
             self.assertEqual(metadata.get("order_id"), "bac-close-test")
             self.assertIn("operator_action_required", metadata)
             self.assertIn("consequence", metadata)

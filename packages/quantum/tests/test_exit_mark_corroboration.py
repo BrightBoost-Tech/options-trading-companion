@@ -114,10 +114,12 @@ class TestAchievableClose(unittest.TestCase):
         # achievable net = 4.28 − 1.38 = 2.90 → mark 2.90, pl (2.90−3.08)*200 = −36
         self.assertAlmostEqual(v["achievable_close"], 2.90, places=4)
         self.assertAlmostEqual(v["achievable_implied_pl"], -36.0, places=4)
-        # divergence: 325 − (−36) = 361 ; price 4.71−2.90=1.81 over width 6 = .3017
+        # divergence: 325 − (−36) = 361 ; price 4.71−2.90=1.81 normalized by
+        # the ACHIEVABLE price (06-12 fix — was /spread_width, which let the
+        # 7× QQQ condor divergence score 0.06): 1.81/2.90 = 0.6241.
         self.assertAlmostEqual(v["divergence_abs"], 361.0, places=4)
-        self.assertAlmostEqual(v["divergence_frac"], 1.81 / 6.0, places=4)
-        self.assertEqual(v["spread_width"], 6.0)
+        self.assertAlmostEqual(v["divergence_frac"], 1.81 / 2.90, places=4)
+        self.assertEqual(v["spread_width"], 6.0)  # recorded for reference only
 
 
 # ── 3. Asymmetric would_suppress ────────────────────────────────────────────
@@ -190,6 +192,37 @@ class TestNeverFabricate(unittest.TestCase):
         self.assertIsNone(v["achievable_close"])
         self.assertIsNone(v["achievable_implied_pl"])
 
+    def test_rescored_0612_qqq_condor_row_d892c45b(self):
+        """Yesterday's actual observation (row d892c45b) under the fixed
+        normalization: trigger −0.65 vs achievable −7.60 — the OLD
+        /spread_width(115) math scored 0.060 → 'corroborated_allow'; the
+        price-normalized math scores ≈0.914 → divergence_exceeded."""
+        quotes = {
+            "O:QQQ260710P00645000": {"bid": 4.26, "ask": 4.33},
+            "O:QQQ260710P00640000": {"bid": 3.70, "ask": 3.90},
+            "O:QQQ260710C00750000": {"bid": 0.76, "ask": 14.09},
+            "O:QQQ260710C00755000": {"bid": 7.12, "ask": 7.42},
+        }
+        legs = [
+            {"occ_symbol": "O:QQQ260710P00645000", "action": "sell", "strike": 645.0, "quantity": 1},
+            {"occ_symbol": "O:QQQ260710P00640000", "action": "buy", "strike": 640.0, "quantity": 1},
+            {"occ_symbol": "O:QQQ260710C00750000", "action": "sell", "strike": 750.0, "quantity": 1},
+            {"occ_symbol": "O:QQQ260710C00755000", "action": "buy", "strike": 755.0, "quantity": 1},
+        ]
+        v = emc.compute_corroboration(
+            exit_type="target_profit",
+            triggering_mark=-0.65, triggering_implied_pl=96.0,
+            quantity=-1.0, avg_entry_price=1.61,
+            legs=legs, leg_quotes=quotes, tolerance=0.10,
+        )
+        self.assertAlmostEqual(v["achievable_close"], -7.60, places=2)
+        self.assertAlmostEqual(
+            v["divergence_frac"], abs(-0.65 - (-7.60)) / 7.60, places=3
+        )  # ≈ 0.914
+        self.assertGreater(abs(v["divergence_frac"]), 0.9)
+        self.assertTrue(v["would_suppress"])
+        self.assertEqual(v["suppress_reason"], "divergence_exceeded")
+
     def test_single_leg_has_no_spread_width(self):
         v = emc.compute_corroboration(
             exit_type="target_profit",
@@ -199,7 +232,10 @@ class TestNeverFabricate(unittest.TestCase):
             leg_quotes={"X": {"bid": 2.0, "ask": 2.1}},
         )
         self.assertIsNone(v["spread_width"])
-        self.assertIsNone(v["divergence_frac"])  # no width → no frac, not 0
+        # 06-12: the frac no longer depends on strike geometry — a single-leg
+        # position with trigger == achievable (executable bid 2.0) scores 0
+        # divergence (correct), not None-for-missing-width.
+        self.assertAlmostEqual(v["divergence_frac"], 0.0, places=4)
 
 
 # ── 5. observe_exit_mark fail-safe + write ──────────────────────────────────

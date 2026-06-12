@@ -186,18 +186,23 @@ class TestFixB_TerminateOnIntentMismatch(unittest.TestCase):
         result, alpaca, update_sink = self._run_submit(
             "Alpaca returned 42210000 on close order",
         )
-        self.assertEqual(result["status"], "needs_manual_review")
-        # Fix B: single attempt, no retries after 42210000.
+        # 06-12 contract change: 42210000 means a PRIOR submission already
+        # filled/closed this position — the fill reconciler owns the row.
+        # Marking needs_manual_review here RACED the reconciler on the 06-12
+        # SPY close (the row was already filled) and manufactured a false
+        # critical. New contract: graceful duplicate return, row untouched.
+        self.assertEqual(result["status"], "duplicate_close_prior_fill")
         self.assertEqual(
             alpaca.submit_option_order.call_count, 1,
             "42210000 must short-circuit the retry loop",
         )
-        # Order is flagged for manual review with attempts = MAX_SUBMIT_ATTEMPTS
-        # (the existing contract — attempts counter reflects the cap, not the
-        # actual call count, so ops dashboards see a consistent ceiling).
-        self.assertEqual(
-            result["attempts"], alpaca_order_handler.MAX_SUBMIT_ATTEMPTS,
-        )
+        # Honest count (the old pin DOCUMENTED the lying counter — "reflects
+        # the cap, not the actual call count" — which produced the phantom
+        # '30-retry storm' reading on 06-12).
+        self.assertEqual(result["attempts"], 1)
+        # and the row was NOT marked for manual review
+        statuses = [u.get("status") for u in update_sink]
+        self.assertNotIn("needs_manual_review", statuses)
 
     def test_intent_mismatch_phrase_also_short_circuits(self):
         """
@@ -207,7 +212,7 @@ class TestFixB_TerminateOnIntentMismatch(unittest.TestCase):
         result, alpaca, _ = self._run_submit(
             "Order rejected: position intent mismatch",
         )
-        self.assertEqual(result["status"], "needs_manual_review")
+        self.assertEqual(result["status"], "duplicate_close_prior_fill")
         self.assertEqual(alpaca.submit_option_order.call_count, 1)
 
     def test_unrelated_error_still_retries(self):

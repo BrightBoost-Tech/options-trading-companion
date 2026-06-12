@@ -345,6 +345,14 @@ class IntradayRiskMonitor:
                 force_closes_submitted += 1
                 if pid:
                     closed_in_this_cycle.add(pid)
+                # A stop is a stop (06-12): cohort stop_loss closes bench the
+                # symbol exactly like per-symbol envelope stops. #1040's
+                # writer covered only result.symbol_loss_stops — the 06-12
+                # SPY cohort stop closed at 15:30Z and was re-rankable at the
+                # 16:00Z scan (manually benched that day; this makes it
+                # permanent). target_profit/expiration do NOT bench.
+                if reason == "stop_loss":
+                    self._write_cohort_stop_cooldown(pos, user_id)
 
         # 5b. Envelope violations
         #     Daily/weekly/per-symbol loss limits are safety-critical — always
@@ -745,6 +753,32 @@ class IntradayRiskMonitor:
                     "(non-fatal; stop unaffected): %s", stop.get("symbol"), e,
                 )
         return written
+
+    def _write_cohort_stop_cooldown(self, pos: Dict, user_id: str) -> bool:
+        """#1040 extension (06-12): a COHORT stop_loss force-close writes the
+        same reentry_cooldowns row as a per-symbol envelope stop — same
+        duration convention (next session open via compute_cooldown_until),
+        reason 'cohort_stop_force_close'. Fail-loud per symbol; never rolls
+        back the stop itself."""
+        from packages.quantum.services import reentry_cooldown as rc
+        if not rc.is_enabled():
+            return False
+        try:
+            return bool(rc.write_cooldown(
+                self.supabase,
+                cohort_id=pos.get("cohort_id"),
+                symbol=pos.get("symbol"),
+                cooldown_until=rc.compute_cooldown_until(),
+                reason="cohort_stop_force_close",
+                triggering_position_id=pos.get("id"),
+                realized_loss=float(pos.get("unrealized_pl") or 0),
+            ))
+        except Exception as e:  # never let cooldown-writing break the stop
+            logger.critical(
+                "[RISK_MONITOR] cohort-stop cooldown write raised for %s "
+                "(non-fatal; stop unaffected): %s", pos.get("symbol"), e,
+            )
+            return False
 
     def _alert_loss_per_symbol_degraded(self, result, user_id: str) -> int:
         """Raise a loud high-severity alert for each position whose per-symbol

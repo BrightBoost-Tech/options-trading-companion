@@ -43,6 +43,11 @@ def _f_position(unrealized_pl, quantity=5.0, avg_entry=0.96, unpriceable=False):
         "strategy_key": "F_long_call_debit_spread",
         "cohort_id": "cohort-1",
         "nearest_expiry": "2099-06-26",
+        # 06-12 stale-mark guard: these fixtures model positions whose marks
+        # were just recomputed by _refresh_marks — declare the provenance the
+        # real pass would set, or the guard (correctly) refuses to fire
+        # mark-derived exits on an unprovenanced value.
+        "_mark_fresh": True,
         "legs": [
             {"type": "call", "action": "buy", "strike": 15.5, "symbol": "O:F260626C00015500", "quantity": 5},
             {"type": "call", "action": "sell", "strike": 17.5, "symbol": "O:F260626C00017500", "quantity": 5},

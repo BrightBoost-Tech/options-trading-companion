@@ -165,8 +165,12 @@ class TestCollectAsymmetric(unittest.TestCase):
         self.assertEqual(triggered, [])
 
     def test_target_profit_fires_when_priceable(self):
-        """Control: same target_profit check, priceable position → fires."""
+        """Control: same target_profit check, priceable position → fires.
+        06-12: priceable now means FRESH provenance too (_mark_fresh, set by
+        _refresh_marks on success) — the stale-mark guard correctly refuses
+        an unprovenanced value."""
         pos = _nflx_position()  # no _mark_unpriceable flag
+        pos["_mark_fresh"] = True
         triggered, _ = _run_collect(pos, eval_reason=None, tp_check=True)
         self.assertEqual(len(triggered), 1)
         self.assertEqual(triggered[0][1], "target_profit")
@@ -184,6 +188,7 @@ class TestCollectAsymmetric(unittest.TestCase):
 
     def test_stop_loss_fires_normally_when_priceable(self):
         pos = _nflx_position()
+        pos["_mark_fresh"] = True  # 06-12 guard: fresh provenance required
         triggered, alerts = _run_collect(pos, eval_reason="stop_loss")
         self.assertEqual(triggered, [(pos, "stop_loss")])
         self.assertEqual(

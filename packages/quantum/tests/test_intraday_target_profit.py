@@ -36,6 +36,10 @@ def _f_position(unrealized_pl, quantity=5.0, avg_entry=0.96):
         "current_mark": 1.02, "unrealized_pl": unrealized_pl,
         "strategy_key": "F_long_call_debit_spread",
         "cohort_id": "cohort-1",
+        # 06-12 stale-mark guard: declare the fresh-mark provenance the real
+        # _refresh_marks pass sets — the guard (correctly) refuses to fire
+        # mark-derived exits on an unprovenanced value.
+        "_mark_fresh": True,
         "nearest_expiry": "2099-06-26",  # far → dte/expiration never fire
         "legs": [
             {"type": "call", "action": "buy", "strike": 15.5, "symbol": "O:F260626C00015500", "quantity": 5},

@@ -27,9 +27,58 @@ output at each call site and is NOT part of this module — it is the independen
 catch; this module removes the cause.
 """
 
+import logging
+import os
 from typing import Any, Callable, Dict, List, Optional
 
+logger = logging.getLogger(__name__)
+
 MULTIPLIER = 100.0
+
+
+def usable_mid(bid: Any, ask: Any, fallback: float = 0.0) -> Optional[float]:
+    """Mid of a two-sided quote — or ``None`` when the quote is DEGENERATE.
+
+    06-12 QQQ phantom: at the 13:30Z bell C750 quoted **0.76 × 14.09** (true
+    value ~8.8). Its arithmetic 'mid' 7.425 understated the leg by ~$1.37,
+    summed the condor to a fabricated −0.65 mark (true ~−1.9), and
+    target_profit fired on a phantom +$96. A quote that wide isn't a price —
+    treating its midpoint as one is fabrication, the same never-fabricate
+    class as the dead-leg partial sum (#1035).
+
+    Degenerate iff BOTH: width > MARK_DEGENERATE_ABS_WIDTH (default $1.00)
+    AND width/mid > MARK_DEGENERATE_REL_SPREAD (default 1.0 = 100%). The
+    AND keeps legitimately-wide cheap options (0.05×0.15: 200% rel but 10¢
+    wide) and tight expensive ones (6.14×7.23: $1.09 wide but 16% rel)
+    priceable. Returns None → the leg counts as FAILED in
+    compute_current_value → all-or-nothing unpriceable handling (TP never
+    fires; stop alerts degraded).
+
+    One-sided / empty quotes keep the caller's legacy ``fallback`` behavior
+    (typically the snapshot's own mid field, or 0 → failed leg).
+    """
+    try:
+        b = float(bid or 0)
+        a = float(ask or 0)
+    except (TypeError, ValueError):
+        return float(fallback or 0)
+    if b > 0 and a > 0:
+        width = a - b
+        mid = (a + b) / 2.0
+        try:
+            abs_floor = float(os.environ.get("MARK_DEGENERATE_ABS_WIDTH", "1.0"))
+            rel_max = float(os.environ.get("MARK_DEGENERATE_REL_SPREAD", "1.0"))
+        except ValueError:
+            abs_floor, rel_max = 1.0, 1.0
+        if mid > 0 and width > abs_floor and (width / mid) > rel_max:
+            logger.warning(
+                "[MARK_MATH] degenerate quote refused: bid=%.2f ask=%.2f "
+                "(width=%.2f, %.0f%% of mid) — not a price, leg treated as "
+                "unpriceable", b, a, width, 100.0 * width / mid,
+            )
+            return None
+        return mid
+    return float(fallback or 0)
 
 
 def compute_current_value(

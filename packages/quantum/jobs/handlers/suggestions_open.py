@@ -150,8 +150,51 @@ def run(payload: Dict[str, Any], ctx: Any = None) -> Dict[str, Any]:
                     processed += 1
 
                 except Exception as e:
+                    # LOUD (2026-06-12): this except used to swallow a
+                    # full midday-cycle death into a notes[] entry while
+                    # the job recorded 'succeeded' — the MARA candidate
+                    # was selected at 16:00:37Z and vanished with no
+                    # alert, no traceback, no suggestion row
+                    # (UnboundLocalError out of run_midday_cycle, job
+                    # ac2f0c08). A cycle death means NO entry suggestions
+                    # for the session: traceback + risk_alert, always.
+                    import traceback
+                    tb = traceback.format_exc()
+                    print(
+                        f"[suggestions_open] MIDDAY CYCLE DIED for user "
+                        f"{uid[:8]}...: {type(e).__name__}: {e}\n{tb}"
+                    )
                     notes.append(f"Failed for user {uid[:8]}...: {str(e)}")
                     failed += 1
+                    try:
+                        from packages.quantum.observability.alerts import alert
+                        alert(
+                            client,
+                            alert_type="suggestions_open_cycle_died",
+                            severity="critical",
+                            message=(
+                                f"Midday cycle died mid-pipeline: "
+                                f"{type(e).__name__}: {str(e)[:300]}"
+                            ),
+                            user_id=uid,
+                            metadata={
+                                "function_name": "suggestions_open.run",
+                                "error_class": type(e).__name__,
+                                "error_message": str(e)[:500],
+                                "traceback_tail": tb[-1000:],
+                                "consequence": (
+                                    "no entry suggestions generated this "
+                                    "session for this user; paper_auto_execute "
+                                    "will find 0 pending"
+                                ),
+                            },
+                        )
+                    except Exception as alert_err:
+                        # Alert failure must not mask the original error.
+                        print(
+                            f"[suggestions_open] cycle-death alert dispatch "
+                            f"failed (non-fatal): {alert_err}"
+                        )
 
             return processed, failed, synced, skipped, cycle_results
 

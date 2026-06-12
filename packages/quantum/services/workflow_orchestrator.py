@@ -2969,6 +2969,15 @@ async def run_midday_cycle(supabase: Client, user_id: str, deployable_capital_ov
         ev = float(cand.get("ev", 0))
 
         if price <= 0:
+            # LOUD (2026-06-12 doctrine): a candidate that was SELECTED and
+            # then dies must always say why — "selected then vanished" is
+            # how the MARA cycle death hid. This was the only silent
+            # `continue` in the sizing loop.
+            print(
+                f"[Midday] Skipped {ticker}: unpriceable candidate "
+                f"(suggested_entry={cand.get('suggested_entry')!r}) — "
+                f"no suggestion row will be written"
+            )
             continue
 
         # --- SIZING INPUTS (compute BEFORE calling calculate_sizing) ---

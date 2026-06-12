@@ -60,6 +60,16 @@ FLAG_ENV = "GTC_PROFIT_EXIT_ENABLED"
 # Marker used by the watchdog exemption + close-idempotency exemption.
 SOURCE_ENGINE = "gtc_profit_exit"
 
+# Order class stamped into paper_orders.order_json — the explicit
+# "this order is SUPPOSED to rest" marker (06-12 resting-TP pilot). The
+# idle watchdog exempts on it (in addition to tif=gtc), and
+# is_gtc_profit_exit_order recognizes it for the close-guard exemptions.
+ORDER_CLASS = "intentional_resting_exit"
+
+# Pilot scoping (06-12): when set (comma-separated position ids), the sweep
+# ONLY places resting TPs for those positions. Empty/unset → all eligible.
+PILOT_ENV = "GTC_PROFIT_EXIT_PILOT_POSITION_IDS"
+
 
 def is_enabled() -> bool:
     """Lenient truthy parse — accepts 1/true/yes/on (case-insensitive)."""
@@ -97,6 +107,222 @@ def _resolve_flat_cohort_tp(supabase, cohort_id: Optional[str]) -> Optional[floa
     except Exception as e:
         logger.warning(f"[GTC_PROFIT_EXIT] cohort tp resolve failed ({cohort_id}): {e}")
         return None
+
+
+def _build_resting_tp_ticket(position: Dict[str, Any], tp: float):
+    """Closing mleg GTC limit ticket at the cohort's flat tp, both shapes:
+
+      qty > 0 (debit structure): SELL to close at entry × (1 + tp) — net
+        credit; is_credit_close=True (#999 boundary negates at the broker).
+      qty < 0 (credit structure): BUY to close at entry × (1 − tp) — net
+        debit; is_credit_close=False (we pay; no negation). tp ≥ 1 would
+        price below zero → skip (a 100%+ capture target is not a price).
+
+    Returns (ticket, info) — ticket None when the position can't carry a
+    static resting TP, with info["reason"] saying why. entry uses
+    abs(avg_entry_price): #1056 made credit entries positive, but ABS
+    defends against any legacy signed row.
+    """
+    qty = _f(position.get("quantity")) or 0.0
+    legs = position.get("legs") or []
+    entry_price = abs(_f(position.get("avg_entry_price")) or 0.0)
+    if qty == 0 or len(legs) < 2:
+        return None, {"reason": "not_open_multileg"}
+    if entry_price <= 0:
+        return None, {"reason": "entry_price_unavailable"}
+
+    if qty > 0:
+        limit = round(entry_price * (1.0 + tp), 2)
+        is_credit_close = True
+    else:
+        if tp >= 1.0:
+            return None, {"reason": "tp_pct_invalid_for_credit_structure"}
+        limit = round(entry_price * (1.0 - tp), 2)
+        if limit < 0.01:
+            return None, {"reason": "target_debit_below_tick"}
+        is_credit_close = False
+
+    abs_qty = abs(int(qty))
+    close_legs = []
+    for leg in legs:
+        orig_action = leg.get("action") or leg.get("side") or "buy"
+        close_legs.append({
+            "symbol": leg.get("symbol") or leg.get("occ_symbol") or "",
+            "action": "sell" if orig_action == "buy" else "buy",
+            "quantity": abs_qty,
+            "type": leg.get("type", "call"),
+            "strike": leg.get("strike"),
+            "expiry": leg.get("expiry"),
+        })
+
+    ticket = TradeTicket(
+        symbol=position["symbol"],
+        quantity=abs_qty,
+        order_type="limit",
+        limit_price=limit,
+        strategy_type="custom",
+        source_engine=SOURCE_ENGINE,
+        legs=close_legs,
+        is_credit_close=is_credit_close,
+        time_in_force="gtc",
+    )
+    return ticket, {
+        "reason": "ok",
+        "limit_price": limit,
+        "is_credit_close": is_credit_close,
+        "close_side": "sell" if qty > 0 else "buy",
+        "entry_price": entry_price,
+    }
+
+
+def _stamp_order_class(supabase, order_id: str) -> None:
+    """Merge the intentional_resting_exit order class into order_json.
+    Fail-soft: the GTC already rests via tif; the class is the explicit
+    marker for watchdog/guard readability."""
+    try:
+        row = (
+            supabase.table("paper_orders")
+            .select("order_json").eq("id", order_id).single().execute().data
+        ) or {}
+        oj = row.get("order_json") or {}
+        oj["order_class"] = ORDER_CLASS
+        supabase.table("paper_orders").update({"order_json": oj}).eq("id", order_id).execute()
+    except Exception as e:
+        logger.warning(f"[GTC_PROFIT_EXIT] order_class stamp failed ({order_id}): {e}")
+
+
+def _pilot_allowlist() -> Optional[set]:
+    raw = os.environ.get(PILOT_ENV, "").strip()
+    if not raw:
+        return None
+    return {s.strip() for s in raw.split(",") if s.strip()}
+
+
+def place_resting_tp_for_open_positions(
+    supabase, user_id: str, position_ids: Optional[list] = None
+) -> Dict[str, Any]:
+    """Sweep entrypoint (06-12 resting-TP pilot): park a closing mleg GTC
+    limit at the cohort's flat tp for every eligible OPEN LIVE-ROUTED
+    position that doesn't already have one. Idempotent: any existing
+    close-side order in an active/filled status skips placement. Flag-gated
+    (GTC_PROFIT_EXIT_ENABLED) + pilot-scoped (GTC_PROFIT_EXIT_PILOT_
+    POSITION_IDS). Fail-soft per position; never raises.
+
+    Runs from the paper_exit_evaluate handler (8:35 CT slot — after the
+    morning mark refresh, never on the opening auction). Shadow cohorts are
+    structurally excluded via live_routed_portfolio_ids (no broker orders
+    for synthetic books).
+    """
+    out: Dict[str, Any] = {"placed": 0, "skipped": 0, "results": []}
+    try:
+        if not is_enabled():
+            out["reason"] = "flag_off"
+            return out
+        from packages.quantum.risk.position_scope import live_routed_portfolio_ids
+        live_pids = live_routed_portfolio_ids(supabase, user_id)
+        if not live_pids:
+            out["reason"] = "no_live_routed_portfolios"
+            return out
+
+        rows = (
+            supabase.table("paper_positions")
+            .select("*")
+            .eq("status", "open")
+            .in_("portfolio_id", live_pids)
+            .execute()
+        ).data or []
+        allow = _pilot_allowlist()
+
+        for position in rows:
+            pid = str(position.get("id"))
+            entry = {"position_id": pid, "symbol": position.get("symbol")}
+            try:
+                if position_ids and pid not in position_ids:
+                    continue
+                if allow is not None and pid not in allow:
+                    entry["reason"] = "not_in_pilot_allowlist"
+                    out["skipped"] += 1
+                    out["results"].append(entry)
+                    continue
+
+                tp = _resolve_flat_cohort_tp(supabase, position.get("cohort_id"))
+                if tp is None:
+                    entry["reason"] = "no_flat_cohort_target_time_scaled_default"
+                    out["skipped"] += 1
+                    out["results"].append(entry)
+                    continue
+
+                ticket, info = _build_resting_tp_ticket(position, tp)
+                if ticket is None:
+                    entry.update(info)
+                    out["skipped"] += 1
+                    out["results"].append(entry)
+                    continue
+
+                # Idempotency: ANY close-side order in an active/filled
+                # status (incl. an already-resting TP) blocks placement.
+                existing = (
+                    supabase.table("paper_orders")
+                    .select("id, status")
+                    .eq("position_id", pid)
+                    .eq("side", info["close_side"])
+                    .in_("status", [
+                        "staged", "submitted", "working", "partial",
+                        "pending", "needs_manual_review", "filled",
+                    ])
+                    .limit(1)
+                    .execute()
+                )
+                if existing.data:
+                    entry["reason"] = "close_order_already_exists"
+                    entry["existing_order_id"] = existing.data[0].get("id")
+                    out["skipped"] += 1
+                    out["results"].append(entry)
+                    continue
+
+                from packages.quantum.paper_endpoints import (
+                    _stage_order_internal,
+                    get_analytics_service,
+                )
+                order_id = _stage_order_internal(
+                    supabase,
+                    get_analytics_service(),
+                    user_id,
+                    ticket,
+                    position["portfolio_id"],
+                    position_id=pid,
+                    trace_id_override=position.get("trace_id"),
+                )
+                _stamp_order_class(supabase, order_id)
+                entry.update({
+                    "reason": "resting_tp_placed",
+                    "order_id": order_id,
+                    "flat_tp": tp,
+                    "limit_price": info["limit_price"],
+                    "close_side": info["close_side"],
+                })
+                out["placed"] += 1
+                out["results"].append(entry)
+                logger.warning(
+                    f"[GTC_PROFIT_EXIT] resting TP placed: position={pid[:8]} "
+                    f"{position.get('symbol')} side={info['close_side']} "
+                    f"limit={info['limit_price']} tp={tp:.0%} tif=gtc "
+                    f"order={order_id}"
+                )
+            except Exception as e:
+                entry["reason"] = f"error:{type(e).__name__}"
+                entry["error"] = str(e)[:300]
+                out["skipped"] += 1
+                out["results"].append(entry)
+                logger.error(
+                    f"[GTC_PROFIT_EXIT] sweep placement failed for "
+                    f"{pid[:8]} (non-fatal): {e}"
+                )
+        return out
+    except Exception as e:
+        logger.error(f"[GTC_PROFIT_EXIT] sweep failed (non-fatal): {e}")
+        out["reason"] = f"error:{type(e).__name__}"
+        return out
 
 
 def maybe_place_gtc_profit_exit(
@@ -146,8 +372,10 @@ def maybe_place_gtc_profit_exit(
         ) or {}
         qty = _f(position.get("quantity")) or 0.0
         legs = position.get("legs") or []
-        if (position.get("status") or "").lower() != "open" or qty <= 0 or len(legs) < 2:
-            decision["reason"] = "not_open_long_multileg"
+        # 06-12: credit structures (qty < 0) now also carry a resting TP —
+        # buy-to-close at entry × (1 − tp) via _build_resting_tp_ticket.
+        if (position.get("status") or "").lower() != "open" or qty == 0 or len(legs) < 2:
+            decision["reason"] = "not_open_multileg"
             return decision
 
         # ── Flat-cohort gate (static price cannot time-scale) ──────────
@@ -162,7 +390,7 @@ def maybe_place_gtc_profit_exit(
             return decision
 
         # ── Idempotency: any existing close-side order blocks placement ─
-        close_side = "sell"  # qty > 0 guaranteed above
+        close_side = "sell" if qty > 0 else "buy"
         existing = (
             supabase.table("paper_orders")
             .select("id, status")
@@ -179,41 +407,18 @@ def maybe_place_gtc_profit_exit(
             decision["reason"] = "close_order_already_exists"
             return decision
 
-        # ── The resting price: entry × (1 + flat tp), per spread ────────
-        entry_price = _f(order.get("avg_fill_price")) or _f(position.get("avg_entry_price"))
-        if not entry_price or entry_price <= 0:
-            decision["reason"] = "entry_price_unavailable"
+        # ── The resting price + ticket via the shared builder (06-12) ──
+        # Prefer the actual fill price over the position's avg when present.
+        _fill_px = _f(order.get("avg_fill_price"))
+        _pos_for_build = dict(position)
+        if _fill_px and _fill_px > 0:
+            _pos_for_build["avg_entry_price"] = _fill_px
+        ticket, _build_info = _build_resting_tp_ticket(_pos_for_build, tp)
+        if ticket is None:
+            decision["reason"] = _build_info["reason"]
             return decision
-        target_credit = round(entry_price * (1.0 + tp), 2)
-
-        # ── Build the closing ticket (same conventions as _close_position) ─
-        abs_qty = abs(int(qty))
-        close_legs = []
-        for leg in legs:
-            orig_action = leg.get("action") or leg.get("side") or "buy"
-            close_legs.append({
-                "symbol": leg.get("symbol") or leg.get("occ_symbol") or "",
-                "action": "sell" if orig_action == "buy" else "buy",
-                "quantity": abs_qty,
-                "type": leg.get("type", "call"),
-                "strike": leg.get("strike"),
-                "expiry": leg.get("expiry"),
-            })
-
-        ticket = TradeTicket(
-            symbol=position["symbol"],
-            quantity=abs_qty,
-            order_type="limit",
-            limit_price=target_credit,
-            strategy_type="custom",
-            source_engine=SOURCE_ENGINE,
-            legs=close_legs,
-            # #999: selling back a long debit spread produces net credit →
-            # the broker boundary negates the limit. requested_price stays
-            # unsigned for accounting consumers.
-            is_credit_close=True,
-            time_in_force="gtc",
-        )
+        entry_price = _build_info["entry_price"]
+        target_credit = _build_info["limit_price"]
 
         # ── Stage + submit through the canonical path (H13) ────────────
         # Live position → _stage_order_internal resolves the alpaca mode and
@@ -234,6 +439,7 @@ def maybe_place_gtc_profit_exit(
             position_id=position_id,
             trace_id_override=position.get("trace_id"),
         )
+        _stamp_order_class(supabase, gtc_order_id)
 
         decision.update({
             "placed": True,

@@ -487,9 +487,10 @@ def is_gtc_profit_exit_order(order_row: Dict[str, Any]) -> bool:
     including working/cancelled). A competing close instead proceeds and
     pre-cancels the resting GTC at the broker (submit_and_track's
     cancel_open_orders_for_symbols)."""
+    oj = order_row.get("order_json") or {}
     return (
-        (order_row.get("order_json") or {}).get("source_engine")
-        == "gtc_profit_exit"
+        oj.get("source_engine") == "gtc_profit_exit"
+        or oj.get("order_class") == "intentional_resting_exit"
     )
 
 
@@ -1597,6 +1598,39 @@ class PaperExitEvaluator:
                     "note": f"Existing close order {existing['id'][:8]} "
                             f"status={existing['status']}",
                 }
+
+            # ── Resting-TP ownership (06-12): the GTC profit-limit OWNS the
+            # profit side. A target_profit close staged while an intentional
+            # resting exit is live at the broker would be a SECOND submitter
+            # for the same intent — the 06-11/06-12 double-submit class.
+            # Profit-side closes defer to the resting order; stop/envelope
+            # closes proceed unchanged (submit_and_track's pre-cancel removes
+            # the resting GTC before the protective close submits).
+            if _map_close_reason(reason) == "target_profit_hit":
+                _resting_live = [
+                    r for r in (existing_close.data or [])
+                    if is_gtc_profit_exit_order(r)
+                    and (r.get("status") or "") in (
+                        "staged", "submitted", "working", "partial", "pending",
+                    )
+                ]
+                if _resting_live:
+                    _r0 = _resting_live[0]
+                    logger.info(
+                        f"[CLOSE_POSITION] Skipping target_profit close for "
+                        f"position={position_id[:8]} — resting TP "
+                        f"{str(_r0.get('id'))[:8]} (status={_r0.get('status')}) "
+                        f"owns the profit side"
+                    )
+                    return {
+                        "order_id": _r0.get("id"),
+                        "processed": 0,
+                        "routed_to": "skipped_resting_tp_owns_profit_side",
+                        "note": (
+                            f"Resting TP {str(_r0.get('id'))[:8]} owns the "
+                            f"profit side; no second submitter"
+                        ),
+                    }
         except Exception as e:
             logger.warning(
                 f"[CLOSE_POSITION] Idempotency check failed for "

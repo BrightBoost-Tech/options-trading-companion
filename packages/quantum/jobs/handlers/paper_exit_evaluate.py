@@ -48,6 +48,26 @@ def run(payload: Dict[str, Any], ctx: Any = None) -> Dict[str, Any]:
             f"Reasons: {result.get('close_reasons', {})}"
         )
 
+        # ── Resting-TP sweep (06-12 pilot) ────────────────────────────
+        # Flag-gated (GTC_PROFIT_EXIT_ENABLED; OFF → pure no-op) + pilot-
+        # scoped. Runs AFTER evaluate_exits so the 8:35 CT slot places on
+        # post-refresh state, never the opening auction. Fail-soft: a sweep
+        # error can never fail the exit evaluation job.
+        try:
+            from packages.quantum.services.gtc_profit_exit import (
+                place_resting_tp_for_open_positions,
+            )
+            sweep = place_resting_tp_for_open_positions(client, user_id)
+            if sweep.get("placed") or sweep.get("skipped"):
+                logger.info(f"[PAPER_EXIT_EVALUATE] resting-TP sweep: {sweep}")
+            result["resting_tp_sweep"] = sweep
+        except Exception as sweep_err:
+            logger.error(
+                f"[PAPER_EXIT_EVALUATE] resting-TP sweep failed "
+                f"(non-fatal): {sweep_err}"
+            )
+            result["resting_tp_sweep"] = {"error": str(sweep_err)[:200]}
+
         return {"ok": True, **result}
 
     except Exception as e:

@@ -320,14 +320,17 @@ class TestPlacement:
         assert out["placed"] is False
         assert out["reason"] == "not_live_entry"
 
-    def test_skips_short_or_single_leg(self, monkeypatch):
+    def test_skips_single_leg(self, monkeypatch):
+        """DELIBERATE CONTRACT UPDATE (06-12): short structures (qty<0) are
+        no longer skipped — credit positions carry a buy-to-close resting TP
+        (TestCreditStructureTickets). Single-leg still skips; the reason
+        string is now shape-accurate ('not_open_multileg')."""
         monkeypatch.setenv("GTC_PROFIT_EXIT_ENABLED", "1")
-        for pos in (dict(POSITION, quantity=-2.0),
-                    dict(POSITION, legs=[POSITION["legs"][0]])):
-            sb = _placement_supabase(position=pos)
-            out = maybe_place_gtc_profit_exit(sb, "entry-1", USER_ID)
-            assert out["placed"] is False
-            assert out["reason"] == "not_open_long_multileg"
+        pos = dict(POSITION, legs=[POSITION["legs"][0]])
+        sb = _placement_supabase(position=pos)
+        out = maybe_place_gtc_profit_exit(sb, "entry-1", USER_ID)
+        assert out["placed"] is False
+        assert out["reason"] == "not_open_multileg"
 
     def test_fail_soft_on_error(self, monkeypatch):
         monkeypatch.setenv("GTC_PROFIT_EXIT_ENABLED", "1")
@@ -336,6 +339,195 @@ class TestPlacement:
         out = maybe_place_gtc_profit_exit(sb, "entry-1", USER_ID)
         assert out["placed"] is False
         assert out["reason"].startswith("error:")
+
+
+# ── 5. 06-12 resting-TP pilot: credit structures + sweep + ownership ────────
+from packages.quantum.services.gtc_profit_exit import (  # noqa: E402
+    ORDER_CLASS,
+    _build_resting_tp_ticket,
+    place_resting_tp_for_open_positions,
+)
+
+# The live QQQ iron condor pilot shape (position 6798e58f): short structure,
+# entry credit 1.61, aggressive flat tp 0.50 → buy-to-close GTC at
+# round(1.61 × 0.5, 2).
+QQQ_CONDOR = {
+    "id": "6798e58f-7ae9-4024-b7af-9c0fa28712b8",
+    "symbol": "QQQ",
+    "status": "open",
+    "quantity": -1.0,
+    "avg_entry_price": 1.61,
+    "portfolio_id": "port-live",
+    "cohort_id": "cohort-agg",
+    "trace_id": "trace-q",
+    "legs": [
+        {"symbol": "O:QQQ260710P00645000", "action": "sell", "type": "put",
+         "strike": 645, "expiry": "2026-07-10"},
+        {"symbol": "O:QQQ260710P00640000", "action": "buy", "type": "put",
+         "strike": 640, "expiry": "2026-07-10"},
+        {"symbol": "O:QQQ260710C00750000", "action": "sell", "type": "call",
+         "strike": 750, "expiry": "2026-07-10"},
+        {"symbol": "O:QQQ260710C00755000", "action": "buy", "type": "call",
+         "strike": 755, "expiry": "2026-07-10"},
+    ],
+}
+
+
+class TestCreditStructureTickets:
+    def test_condor_buy_to_close_at_debit_target(self):
+        ticket, info = _build_resting_tp_ticket(QQQ_CONDOR, 0.50)
+        assert ticket is not None
+        expected = round(1.61 * 0.5, 2)
+        assert info["limit_price"] == pytest.approx(expected)
+        assert info["close_side"] == "buy"
+        assert ticket.is_credit_close is False      # we PAY the debit; no #999 negation
+        assert ticket.time_in_force == "gtc"
+        assert ticket.source_engine == "gtc_profit_exit"
+        # All four legs inverted
+        actions = {leg.symbol if hasattr(leg, "symbol") else leg["symbol"]:
+                   (leg.action if hasattr(leg, "action") else leg["action"])
+                   for leg in ticket.legs}
+        assert actions["O:QQQ260710P00645000"] == "buy"
+        assert actions["O:QQQ260710P00640000"] == "sell"
+        assert actions["O:QQQ260710C00750000"] == "buy"
+        assert actions["O:QQQ260710C00755000"] == "sell"
+
+    def test_debit_vertical_unchanged_by_refactor(self):
+        ticket, info = _build_resting_tp_ticket(POSITION, 0.50)
+        assert ticket is not None
+        assert info["limit_price"] == pytest.approx(4.62)  # 3.08 × 1.5
+        assert info["close_side"] == "sell"
+        assert ticket.is_credit_close is True
+
+    def test_credit_tp_at_or_above_one_skips(self):
+        ticket, info = _build_resting_tp_ticket(QQQ_CONDOR, 1.0)
+        assert ticket is None
+        assert info["reason"] == "tp_pct_invalid_for_credit_structure"
+
+    def test_signed_legacy_entry_defended_by_abs(self):
+        pos = dict(QQQ_CONDOR, avg_entry_price=-1.61)  # pre-#1056 signed row
+        ticket, info = _build_resting_tp_ticket(pos, 0.50)
+        assert ticket is not None
+        assert info["limit_price"] == pytest.approx(round(1.61 * 0.5, 2))
+
+
+def _sweep_supabase(positions, existing_close=None):
+    def make_chain(name):
+        chain = MagicMock()
+        for m in ("select", "eq", "in_", "limit", "order"):
+            getattr(chain, m).return_value = chain
+        if name == "paper_positions":
+            chain.execute.return_value = MagicMock(data=positions)
+        elif name == "paper_orders":
+            chain.execute.return_value = MagicMock(data=existing_close or [])
+            chain.single.return_value.execute.return_value = MagicMock(
+                data={"order_json": {}}
+            )
+        elif name == "policy_lab_cohorts":
+            chain.execute.return_value = MagicMock(
+                data=[{"policy_config": {"target_profit_pct": 0.50}}]
+            )
+        return chain
+
+    sb = MagicMock()
+    sb.table.side_effect = make_chain
+    return sb
+
+
+class TestSweep:
+    def test_flag_off_pure_noop(self, monkeypatch):
+        monkeypatch.delenv("GTC_PROFIT_EXIT_ENABLED", raising=False)
+        sb = MagicMock()
+        out = place_resting_tp_for_open_positions(sb, USER_ID)
+        assert out["reason"] == "flag_off"
+        sb.table.assert_not_called()
+
+    def test_pilot_allowlist_scopes_placement(self, monkeypatch):
+        monkeypatch.setenv("GTC_PROFIT_EXIT_ENABLED", "1")
+        monkeypatch.setenv("GTC_PROFIT_EXIT_PILOT_POSITION_IDS",
+                           QQQ_CONDOR["id"])
+        other = dict(POSITION, id="pos-other", portfolio_id="port-live")
+        sb = _sweep_supabase([dict(QQQ_CONDOR), other])
+        placed = []
+
+        def capture_stage(supabase, analytics, user_id, ticket, portfolio_id,
+                          position_id=None, trace_id_override=None, **kw):
+            placed.append(position_id)
+            return f"gtc-{position_id[:4]}"
+
+        with patch("packages.quantum.risk.position_scope.live_routed_portfolio_ids",
+                   return_value=["port-live"]), \
+             patch("packages.quantum.paper_endpoints._stage_order_internal",
+                   side_effect=capture_stage), \
+             patch("packages.quantum.paper_endpoints.get_analytics_service",
+                   return_value=MagicMock()):
+            out = place_resting_tp_for_open_positions(sb, USER_ID)
+
+        assert out["placed"] == 1
+        assert placed == [QQQ_CONDOR["id"]]
+        skipped = [r for r in out["results"]
+                   if r.get("reason") == "not_in_pilot_allowlist"]
+        assert len(skipped) == 1 and skipped[0]["position_id"] == "pos-other"
+
+    def test_existing_close_order_skips_idempotently(self, monkeypatch):
+        monkeypatch.setenv("GTC_PROFIT_EXIT_ENABLED", "1")
+        monkeypatch.delenv("GTC_PROFIT_EXIT_PILOT_POSITION_IDS", raising=False)
+        sb = _sweep_supabase(
+            [dict(QQQ_CONDOR)],
+            existing_close=[{"id": "rest-1", "status": "working"}],
+        )
+        with patch("packages.quantum.risk.position_scope.live_routed_portfolio_ids",
+                   return_value=["port-live"]):
+            out = place_resting_tp_for_open_positions(sb, USER_ID)
+        assert out["placed"] == 0
+        assert out["results"][0]["reason"] == "close_order_already_exists"
+
+    def test_no_live_portfolios_noop(self, monkeypatch):
+        monkeypatch.setenv("GTC_PROFIT_EXIT_ENABLED", "1")
+        sb = MagicMock()
+        with patch("packages.quantum.risk.position_scope.live_routed_portfolio_ids",
+                   return_value=[]):
+            out = place_resting_tp_for_open_positions(sb, USER_ID)
+        assert out["reason"] == "no_live_routed_portfolios"
+        assert out["placed"] == 0
+
+
+class TestOwnershipAndWatchdogClass(unittest.TestCase):
+    def test_order_class_recognized_by_guard_exemption(self):
+        row = {"id": "r1", "status": "working",
+               "order_json": {"order_class": ORDER_CLASS}}
+        self.assertTrue(is_gtc_profit_exit_order(row))
+        self.assertEqual(filter_blocking_close_orders([row]), [])
+
+    def test_order_class_exempt_from_idle_watchdog_even_as_day(self):
+        """Belt + suspenders: a (hypothetical) DAY-variant resting order is
+        still watchdog-safe via the explicit order class."""
+        order = _working_order(idle_seconds=6 * 3600)  # no tif → day
+        order["order_json"]["order_class"] = ORDER_CLASS
+        sb, updates = _mock_supabase_for_poll(order)
+        alpaca = MagicMock()
+        alpaca.get_order.return_value = {"status": "new", "filled_qty": 0}
+
+        alpaca_order_handler.poll_pending_orders(alpaca, sb, USER_ID)
+
+        alpaca.cancel_order.assert_not_called()
+        self.assertFalse(
+            [p for p in updates if p.get("status") == "watchdog_cancelled"]
+        )
+
+    def test_close_position_tp_defers_to_resting_order_source_pin(self):
+        """Single-owner doctrine: the profit side belongs to the resting TP.
+        Source pins — the skip exists, keys on target_profit_hit mapping,
+        and returns the dedicated routed_to marker BEFORE staging."""
+        import inspect
+        from packages.quantum.services.paper_exit_evaluator import PaperExitEvaluator
+        src = inspect.getsource(PaperExitEvaluator._close_position)
+        self.assertIn("skipped_resting_tp_owns_profit_side", src)
+        self.assertIn('_map_close_reason(reason) == "target_profit_hit"', src)
+        self.assertLess(
+            src.index("skipped_resting_tp_owns_profit_side"),
+            src.index("_stage_order_internal("),
+        )
 
 
 if __name__ == "__main__":

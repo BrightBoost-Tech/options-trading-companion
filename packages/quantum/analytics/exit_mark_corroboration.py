@@ -193,10 +193,24 @@ def compute_corroboration(
     if triggering_implied_pl is not None and achievable_implied_pl is not None:
         divergence_abs = float(triggering_implied_pl) - float(achievable_implied_pl)
 
+    # 06-12 normalization fix: the original denominator was _spread_width
+    # (max strike − min strike — 115 for the QQQ condor), which scored the
+    # 06-12 13:30Z fire — triggering mark −0.65 vs achievable −7.60, a 7×
+    # mark divergence with implied P&L +$96 vs −$599 — at 0.060 and verdict
+    # 'corroborated_allow'. A divergence is a PRICE disagreement; normalize
+    # by the price (|achievable_close|, floored so near-worthless spreads
+    # don't divide by ~0), never by the strike geometry. Yesterday's row
+    # re-scores to |−0.65 − (−7.60)| / 7.60 ≈ 0.914 → would_suppress under
+    # any sane tolerance. spread_width stays recorded for reference only.
+    # Observe-only is unchanged: this fixes the measurement, not the policy.
     divergence_frac = None
-    if (triggering_mark is not None and achievable_close is not None
-            and spread_width and spread_width > 0):
-        divergence_frac = (float(triggering_mark) - float(achievable_close)) / spread_width
+    if triggering_mark is not None and achievable_close is not None:
+        try:
+            _floor = float(os.environ.get("MARK_DIVERGENCE_DENOM_FLOOR", "0.10"))
+        except ValueError:
+            _floor = 0.10
+        _denom = max(abs(float(achievable_close)), _floor)
+        divergence_frac = (float(triggering_mark) - float(achievable_close)) / _denom
 
     # Verdict — ASYMMETRIC.
     if exit_type == "stop_loss":

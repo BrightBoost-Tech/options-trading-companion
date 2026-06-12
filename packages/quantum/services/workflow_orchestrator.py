@@ -149,8 +149,6 @@ def _record_surface_snapshot(symbol: str, sym_snap) -> None:
         return
 
     try:
-        import time
-
         # Build surface payload from sym_snap fields (no heavy computation)
         surface_payload = {
             "symbol": symbol,
@@ -2645,11 +2643,13 @@ async def run_midday_cycle(supabase: Client, user_id: str, deployable_capital_ov
                 _actual_n = len(_allocator_results)
                 if _actual_n != _expected_n:
                     try:
-                        from packages.quantum.observability.alerts import alert as _alert
-                        from packages.quantum.security.supabase_config import (
-                            get_admin_supabase as _get_admin_supabase,
-                        )
-                        _alert(
+                        # Use the module-level alert/_get_admin_supabase
+                        # (line ~58). A function-local import alias of
+                        # `_get_admin_supabase` here made the name local to
+                        # ALL of run_midday_cycle and raised
+                        # UnboundLocalError at every other reference in this
+                        # function (2026-06-12 MARA cycle death, N1 #1058).
+                        alert(
                             _get_admin_supabase(),
                             alert_type="portfolio_allocator_count_mismatch",
                             severity="warning",

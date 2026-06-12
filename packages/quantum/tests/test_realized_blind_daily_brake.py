@@ -146,6 +146,94 @@ class TestTightenedDailyPnl(unittest.TestCase):
         self.assertTrue(any("realized-blind gap" in m for m in cm.output))
 
 
+class _FakeSdkAccount:
+    """Shape of alpaca-py's TradeAccount as the wrapper consumes it:
+    attribute access, numeric fields as strings (the real API returns
+    JSON strings). Mirrors only the fields get_account() reads."""
+
+    def __init__(self, equity="2075.42", last_equity="2263.85"):
+        self.id = "904837e3-0000-0000-0000-000000000000"
+        self.status = "ACTIVE"
+        self.equity = equity
+        self.last_equity = last_equity
+        self.cash = "500.00"
+        self.buying_power = "1000.00"
+        self.options_buying_power = "525.39"
+        self.portfolio_value = equity
+        self.pattern_day_trader = False
+        self.daytrade_count = 0
+        self.daytrading_buying_power = "0"
+
+
+class TestWrapperPayloadShape(unittest.TestCase):
+    """2026-06-12 regression: the original tests mocked get_account()
+    as a dict CONTAINING last_equity — a shape the real wrapper never
+    produced (AlpacaClient.get_account() returns a curated dict and the
+    key was absent). CI green, production 100% 'unavailable'. These
+    tests route through the REAL wrapper so the payload contract is
+    pinned where it lives."""
+
+    def setUp(self):
+        equity_state._reset_caches_for_testing()
+
+    def tearDown(self):
+        equity_state._reset_caches_for_testing()
+
+    @staticmethod
+    def _real_wrapper(sdk_account):
+        """AlpacaClient with __init__ bypassed (no SDK/network), real
+        get_account()/_call_with_retry code paths."""
+        from packages.quantum.brokers.alpaca_client import AlpacaClient
+        client = object.__new__(AlpacaClient)
+        client.paper = True
+        client._client = MagicMock()
+        client._client.get_account.return_value = sdk_account
+        return client
+
+    def test_get_account_payload_contains_last_equity(self):
+        payload = self._real_wrapper(_FakeSdkAccount()).get_account()
+        self.assertIn("last_equity", payload)
+        self.assertAlmostEqual(payload["last_equity"], 2263.85, places=2)
+        self.assertAlmostEqual(payload["equity"], 2075.42, places=2)
+
+    def test_get_account_last_equity_none_preserving(self):
+        payload = self._real_wrapper(
+            _FakeSdkAccount(last_equity=None)
+        ).get_account()
+        self.assertIn("last_equity", payload)
+        self.assertIsNone(payload["last_equity"])
+
+    def test_daily_pnl_through_real_wrapper_payload(self):
+        """End-to-end pin: wrapper output → get_alpaca_daily_pnl.
+        This exact composition is what was broken in production."""
+        wrapper = self._real_wrapper(_FakeSdkAccount())
+        with patch(
+            "packages.quantum.brokers.alpaca_client.get_alpaca_client",
+            return_value=wrapper,
+        ):
+            self.assertAlmostEqual(
+                equity_state.get_alpaca_daily_pnl("u1"), -188.43, places=2
+            )
+
+    def test_missing_field_logs_contract_violation_not_outage(self):
+        """The silent-None path must name the missing field loudly —
+        a wrapper-contract code bug is not a broker outage."""
+        with patch(
+            "packages.quantum.brokers.alpaca_client.get_alpaca_client",
+            return_value=_mock_alpaca({"equity": "2075.42"}),
+        ):
+            with self.assertLogs(
+                "packages.quantum.services.equity_state", level="WARNING"
+            ) as cm:
+                self.assertIsNone(equity_state.get_alpaca_daily_pnl("u1"))
+        self.assertTrue(
+            any("missing 'last_equity'" in m for m in cm.output)
+        )
+        self.assertTrue(
+            any("contract violation" in m for m in cm.output)
+        )
+
+
 class TestEmptyBookEnvelope(unittest.TestCase):
     def test_daily_envelope_fires_with_no_positions(self):
         """positions=[] must not silence the daily-loss envelope: a real

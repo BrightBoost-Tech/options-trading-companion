@@ -212,10 +212,19 @@ class AlpacaClient:
         # mask the missing-field signal that helper relies on.
         _obp = acct.options_buying_power
         options_buying_power = float(_obp) if _obp is not None else None
+        # `last_equity` (prior trading day's closing equity) is None-preserving
+        # for the same reason: `equity_state.get_alpaca_daily_pnl` (v5-A2,
+        # #1058) computes broker-true day P&L as equity − last_equity and must
+        # see None (→ proxy-only fallback), never a fabricated 0.0. This key
+        # was missing from this curated dict entirely, which made the
+        # realized-blind brake a silent 100% no-op from deploy to 2026-06-12.
+        _last_eq = getattr(acct, "last_equity", None)
+        last_equity = float(_last_eq) if _last_eq is not None else None
         return {
             "account_id": str(acct.id),
             "status": str(acct.status),
             "equity": float(acct.equity),
+            "last_equity": last_equity,
             "cash": float(acct.cash),
             "buying_power": float(acct.buying_power),
             "options_buying_power": options_buying_power,

@@ -137,6 +137,19 @@ def get_alpaca_daily_pnl(user_id: str, supabase: Any = None) -> Optional[float]:
         last_raw = acct.get("last_equity")
         if equity_raw is None or last_raw is None:
             # None-preserving (Anti-pattern 8): a missing field is not 0.
+            # LOUD (2026-06-12): this path returned silently for every
+            # cycle from N1 deploy onward because the wrapper's curated
+            # get_account() dict omitted `last_equity` entirely — a code
+            # bug in OUR payload contract that the caller's generic
+            # "broker daily P&L unavailable" line misreported as a broker
+            # outage. Name the missing field so the two are never
+            # conflated again.
+            _missing = "equity" if equity_raw is None else "last_equity"
+            logger.warning(
+                f"[EQUITY_STATE] get_account() payload missing '{_missing}' "
+                f"for {user_id[:8]} — wrapper/consumer contract violation "
+                f"(code bug, not a broker outage); daily P&L unavailable"
+            )
             return None
         equity = float(equity_raw)
         last_equity = float(last_raw)

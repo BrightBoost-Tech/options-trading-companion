@@ -687,10 +687,19 @@ def poll_pending_orders(
             # killed at the first sync after 90s. Lifecycle for GTC orders is
             # owned by the close path instead (a competing stop/envelope close
             # pre-cancels them via cancel_open_orders_for_symbols).
-            _order_tif = str(
-                (order.get("order_json") or {}).get("time_in_force") or "day"
-            ).lower()
-            if internal_status == "working" and order.get("submitted_at") and _order_tif != "gtc":
+            _order_oj = order.get("order_json") or {}
+            _order_tif = str(_order_oj.get("time_in_force") or "day").lower()
+            # 06-12: intentional_resting_exit is the explicit order-class
+            # marker for orders that are SUPPOSED to rest (resting-TP pilot);
+            # exempt alongside tif=gtc (belt + suspenders — a future DAY-
+            # variant resting order stays watchdog-safe via the class).
+            _order_cls = str(_order_oj.get("order_class") or "")
+            if (
+                internal_status == "working"
+                and order.get("submitted_at")
+                and _order_tif != "gtc"
+                and _order_cls != "intentional_resting_exit"
+            ):
                 try:
                     submitted_at = datetime.fromisoformat(
                         order["submitted_at"].replace("Z", "+00:00")

@@ -284,33 +284,54 @@ class TestObserveFailSafe(unittest.TestCase):
         self.assertEqual(fake.inserted, [])
 
 
-# ── Contract: no exit-execution code reads the verdict ──────────────────────
+# ── Contract: Stage-2 — the verdict is read ONLY under the enforce flag ─────
+# DELIBERATE CONTRACT CHANGE (06-12, Stage-2): Stage-1 pinned that the monitor
+# NEVER reads the gate's return (assertNotIn "= _emc.observe_exit_mark").
+# Stage-2 is precisely the sanctioned change of that contract: the return IS
+# read, but consumed only when EXIT_MARK_SANITY_ENFORCE_ENABLED is truthy and
+# only for target_profit. These pins encode the NEW contract's safety edges.
 
-class TestObserveOnlyContract(unittest.TestCase):
-    def test_monitor_does_not_read_gate_output(self):
-        """The hook must call observe_exit_mark and ignore its return — no
-        branch keys off the verdict. Pin against assignment/branch use."""
+class TestStage2Contract(unittest.TestCase):
+    def _src(self):
         import inspect
         from packages.quantum.jobs.handlers import intraday_risk_monitor as irm
-        src = inspect.getsource(irm.IntradayRiskMonitor._execute_force_close)
-        # The observe call exists...
-        self.assertIn("observe_exit_mark(", src)
-        # ...and its result is never captured into a variable or branched on.
-        self.assertNotIn("= _emc.observe_exit_mark", src)
-        self.assertNotIn("would_suppress", src)  # the monitor never reads the verdict
-        self.assertNotIn("suppress_reason", src)
+        return inspect.getsource(irm.IntradayRiskMonitor._execute_force_close)
 
-    def test_close_position_call_unconditional_on_gate(self):
-        """The exit (_close_position) is not nested under any gate branch."""
-        import inspect
-        from packages.quantum.jobs.handlers import intraday_risk_monitor as irm
-        src = inspect.getsource(irm.IntradayRiskMonitor._execute_force_close)
-        # _close_position appears after the gate block, at the method's base
-        # indentation inside the try — not inside the `if _gate_exit_type` body.
+    def test_suppression_branch_is_double_guarded(self):
+        """The suppression branch must require BOTH the enforce flag AND
+        target_profit — stop_loss can never reach it at this call site
+        (asymmetry guard #2; guard #1 is compute_corroboration itself)."""
+        src = self._src()
+        self.assertIn("is_enforce_enabled()", src)
+        gate_idx = src.index("_enforce")
+        self.assertIn('_gate_exit_type == "target_profit"', src)
+        # The would_suppress read sits strictly inside the gated region,
+        # after both guards are established.
+        ws_idx = src.index('would_suppress") is True')
+        self.assertLess(gate_idx, ws_idx)
+        self.assertLess(src.index('_gate_exit_type == "target_profit"'), ws_idx)
+
+    def test_gate_evaluated_before_close(self):
+        src = self._src()
         self.assertIn("evaluator._close_position(", src)
-        gate_idx = src.index("_gate_exit_type is not None")
-        close_idx = src.index("evaluator._close_position(")
-        self.assertLess(gate_idx, close_idx)  # gate observed first, then close
+        self.assertLess(
+            src.index("_gate_exit_type is not None"),
+            src.index("evaluator._close_position("),
+        )
+
+    def test_enforce_flag_polarity(self):
+        """Behavioral opt-in: default OFF; lenient truthy parse."""
+        on_values = ["1", "true", "yes", "on", "TRUE", " On "]
+        off_values = ["", "0", "false", "no", "off", "2", "banana"]
+        for v in on_values:
+            with patch.dict(os.environ, {emc.ENFORCE_FLAG_ENV: v}):
+                self.assertTrue(emc.is_enforce_enabled(), repr(v))
+        for v in off_values:
+            with patch.dict(os.environ, {emc.ENFORCE_FLAG_ENV: v}):
+                self.assertFalse(emc.is_enforce_enabled(), repr(v))
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop(emc.ENFORCE_FLAG_ENV, None)
+            self.assertFalse(emc.is_enforce_enabled(), "unset must be OFF")
 
 
 if __name__ == "__main__":

@@ -235,6 +235,36 @@ the human flips them to `status:shipped` (with PR#) or `status:rejected`.
   contamination); neutral-cohort cash_balance −$2,604 (the close's fill event credited +1302
   instead of debiting 1302).
 
+### Data corrections (2026-06-12 night, operator-ordered; same precedent as 06-11)
+
+- Shadow NFLX ×3 `1e2dd73f` (conservative): realized_pl **+314.70 → +133.35** at 18:00:58Z,
+  BEFORE the 21:20Z learning ingest (learning_ingested was false — zero contamination).
+  Basis: its OWN 15:15:04Z corroboration row — triggering mid 4.7355 vs achievable 4.131
+  (P86 sell at bid 6.14 − P79 buy at ask 2.009) → (4.131 − 3.6865) × 300 = 133.35. The
+  $181.35 delta was the optimistic-mid fiction; the code-side fix (internal fills at the
+  EXECUTABLE side + fill_quality flag) ships tonight so this is the LAST manual instance
+  of the class. Guarded UPDATE (realized_pl=314.70 AND learning_ingested=false) — idempotent
+  against any concurrent session. paper_orders row 4d175584 left as-is (historical record of
+  what the old fill simulation did; order_json carries no fill_quality — pre-fix row).
+
+### Pending verifications added 2026-06-12 night
+
+- Post-21:20Z TONIGHT: learning ingest consumed realized_pl **133.35** (not 314.70) for
+  `1e2dd73f` — verify learning_trade_outcomes_v3 / learning_feedback_loops row.
+- Morning signatures (06-13): (a) any TP fire writes a corroboration row with the
+  price-normalized divergence; phantom → `exit_tp_suppressed_phantom_mark` alert + NO close
+  staged (Stage-2 live). (b) exactly ONE broker submission per close (single-submitter,
+  745ced4). (c) `[EQUITY_STATE]` successful broker daily fetch on the first monitor cycle —
+  no "broker daily P&L unavailable" line (d68029c). (d) any internal/shadow fill carries
+  order_json.fill_quality + the `[INTERNAL_FILL]` WARNING line. (e) the QQQ resting TP
+  (buy-to-close GTC, limit 0.81) alive at the broker, untouched by the watchdog, visible to
+  the evaluator as `skipped_resting_tp_owns_profit_side` if its TP condition trips.
+- 15:30:08Z `paper_order_marked_needs_manual_review` alert: RESOLVED BENIGN — it was the
+  second submission against the already-filled SPY close (intent-mismatch reject, the
+  double-submit class); 745ced4's terminal-reject classification returns these gracefully
+  without the manual-review mark. No operator action on the order itself (SPY close filled
+  clean at 1.93, realized −45).
+
 ### Pending verifications added 2026-06-11 night
 
 - 06-12 first credit fill row: avg_entry_price/max_credit POSITIVE (the #1056 write-side proof).

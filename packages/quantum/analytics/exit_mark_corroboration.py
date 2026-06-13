@@ -33,10 +33,25 @@ INVARIANTS:
    PRIMARY uncorroborated condition.
 
 NO score, NO weights — raw components + verdict, same philosophy as the
-other observe layers. Enforcement (target_profit only, after the observed
-distribution confirms would_suppress fires only on opening transients and
-the tolerance is calibrated) is a DEFERRED Stage-2 decision — a separate
-ENFORCE flag is deliberately NOT built here.
+other observe layers.
+
+STAGE-2 (2026-06-12): a separate ENFORCE flag now exists —
+EXIT_MARK_SANITY_ENFORCE_ENABLED (default OFF, lenient truthy parse). When
+ON, the monitor call site suppresses a TARGET_PROFIT force-close whose
+observation row says would_suppress=true (the row is still written — the
+suppression is the evidence trail). The asymmetry is enforced TWICE:
+compute_corroboration never sets would_suppress for stop_loss (invariant 3),
+AND the call-site branch only fires for target_profit. stop_loss and the
+date-derived exits are untouchable by this flag. With the flag OFF (or on
+any corroboration error — would_suppress is forced False on the error
+path), behavior is byte-identical to Stage-1 observe-only.
+
+Evidence basis for Stage-2: the 06-12 13:30Z QQQ condor fire — triggering
+mark −0.65 (+$96) vs achievable −7.60 (−$599) on a degenerate C750 quote
+(bid 0.76 / ask 14.09) — re-scores under the 06-12 price normalization to
+divergence_frac ≈ 0.914 → would_suppress=divergence_exceeded. The close it
+staged was unfillable and watchdog-cancelled 5 minutes later; enforcement
+exists so the next one is never staged.
 """
 
 import logging
@@ -48,6 +63,7 @@ from packages.quantum.risk.mark_math import compute_current_value, finalize_mark
 logger = logging.getLogger(__name__)
 
 FLAG_ENV = "EXIT_MARK_SANITY_OBSERVE_ENABLED"
+ENFORCE_FLAG_ENV = "EXIT_MARK_SANITY_ENFORCE_ENABLED"
 OBS_TABLE = "exit_mark_corroboration_observations"
 
 # Only mark-derived exits are corroborated. expiration_day / dte_threshold are
@@ -72,6 +88,12 @@ _REASON_CORROBORATION_ERROR = "corroboration_error"
 
 def is_observe_enabled() -> bool:
     return os.environ.get(FLAG_ENV, "0").strip().lower() in ("1", "true", "yes", "on")
+
+
+def is_enforce_enabled() -> bool:
+    """Stage-2 flag — lenient truthy parse, default OFF. Behavioral opt-in:
+    absent/empty/anything-else → Stage-1 observe-only behavior exactly."""
+    return os.environ.get(ENFORCE_FLAG_ENV, "0").strip().lower() in ("1", "true", "yes", "on")
 
 
 def _leg_action(leg: Dict[str, Any]) -> str:
@@ -277,6 +299,42 @@ def _fetch_leg_quotes(legs: List[Dict[str, Any]], snapshot_fn: Callable) -> Dict
         q = snap.get("quote", snap) if isinstance(snap, dict) else {}
         out[occ] = {"bid": q.get("bid"), "ask": q.get("ask"), "last": q.get("last")}
     return out
+
+
+def executable_close_estimate(
+    position_like: Dict[str, Any], snapshot_fn: Optional[Callable] = None
+) -> Dict[str, Any]:
+    """Executable-side (long→sell at bid, short→buy at ask) close estimate
+    for a position-shaped dict — the SAME computation the gate corroborates
+    with, exposed for the internal-fill path (#1017 class: shadow fills must
+    not book the optimistic mid when the executable side is known).
+
+    Returns {achievable_close, achievable_implied_pl, quote_complete,
+    legs_quotes}. achievable_close is None when any priceable leg lacks an
+    executable side (all-or-nothing — never a partial fabrication). May
+    raise on quote-fetch failure; the caller owns the fallback decision."""
+    legs = position_like.get("legs") or []
+    if snapshot_fn is None:
+        from packages.quantum.services.market_data_truth_layer import (
+            MarketDataTruthLayer,
+        )
+        snapshot_fn = MarketDataTruthLayer().snapshot_many
+    leg_quotes = _fetch_leg_quotes(legs, snapshot_fn)
+    v = compute_corroboration(
+        exit_type="target_profit",  # verdict fields unused by this caller
+        triggering_mark=None,
+        triggering_implied_pl=None,
+        quantity=position_like.get("quantity"),
+        avg_entry_price=position_like.get("avg_entry_price"),
+        legs=legs,
+        leg_quotes=leg_quotes,
+    )
+    return {
+        "achievable_close": v["achievable_close"],
+        "achievable_implied_pl": v["achievable_implied_pl"],
+        "quote_complete": v["quote_complete"],
+        "legs_quotes": v["legs_quotes"],
+    }
 
 
 def observe_exit_mark(

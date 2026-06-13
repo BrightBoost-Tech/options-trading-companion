@@ -336,6 +336,135 @@ class TestExitMarkSanityCallSite:
         assert len(calls) == 1  # the gate was attempted and threw — exit survived
 
 
+# ── Stage-2: EXIT_MARK_SANITY_ENFORCE_ENABLED at the call site ──────────────
+# Stage-1's observe-only contract is deliberately superseded (06-12): under
+# the enforce flag, a target_profit fire whose observation row says
+# would_suppress=true is NOT staged. Every safety edge is pinned here:
+# stop_loss untouchable, flag-off byte-identical, None/error rows fail-open.
+class TestStage2Enforcement:
+    def _run(self, reason, *, enforce, observe="1", gate_row=...):
+        captured = {}
+        alerts = []
+        env = {"EXIT_MARK_SANITY_OBSERVE_ENABLED": observe or "",
+               "EXIT_MARK_SANITY_ENFORCE_ENABLED": enforce or ""}
+
+        def _fake_observe(*a, **k):
+            return None if gate_row is ... else gate_row
+
+        from packages.quantum.jobs.handlers.intraday_risk_monitor import IntradayRiskMonitor
+        monitor = IntradayRiskMonitor.__new__(IntradayRiskMonitor)
+        monitor.supabase = _force_close_supabase()
+        monitor._log_alert = lambda **k: alerts.append(k)
+        position = _position()
+        position["current_mark"] = 2.40
+
+        class FakeEvaluator:
+            def __init__(self, supabase):
+                pass
+
+            def _close_position(self, **kwargs):
+                captured.update(kwargs)
+                return {"order_id": "close-1", "routed_to": "alpaca"}
+
+        with patch.dict(os.environ, env, clear=False):
+            with patch(
+                "packages.quantum.services.paper_exit_evaluator.PaperExitEvaluator",
+                FakeEvaluator,
+            ), patch(
+                "packages.quantum.analytics.exit_mark_corroboration.observe_exit_mark",
+                _fake_observe,
+            ):
+                ok = monitor._execute_force_close(position, reason, USER_ID)
+        return ok, captured, alerts
+
+    _SUPPRESS_ROW = {
+        "would_suppress": True, "suppress_reason": "divergence_exceeded",
+        "triggering_mark": -0.65, "achievable_close": -7.60,
+        "divergence_frac": 0.914,
+    }
+
+    def test_enforce_on_suppresses_target_profit(self):
+        ok, captured, alerts = self._run(
+            "intraday_target_profit", enforce="1", gate_row=self._SUPPRESS_ROW,
+        )
+        assert ok is False
+        assert captured == {}  # _close_position never called
+        assert any(a.get("alert_type") == "exit_tp_suppressed_phantom_mark"
+                   for a in alerts)
+
+    def test_stop_loss_never_suppressed_even_on_malicious_row(self):
+        """Asymmetry guard #2: even a (contractually impossible) stop_loss
+        row with would_suppress=true must not stop the protective close."""
+        ok, captured, _ = self._run(
+            "intraday_stop_loss", enforce="1", gate_row=self._SUPPRESS_ROW,
+        )
+        assert ok is True
+        assert captured["exit_price_override"] == pytest.approx(2.40)
+
+    def test_enforce_off_is_stage1_byte_identical(self):
+        ok, captured, alerts = self._run(
+            "intraday_target_profit", enforce="0", gate_row=self._SUPPRESS_ROW,
+        )
+        assert ok is True
+        assert captured["exit_price_override"] == pytest.approx(2.40)
+        assert not any(a.get("alert_type") == "exit_tp_suppressed_phantom_mark"
+                       for a in alerts)
+
+    def test_none_row_fails_open(self):
+        """observe_exit_mark returns None (db write failed) → close proceeds."""
+        ok, captured, _ = self._run(
+            "intraday_target_profit", enforce="1", gate_row=None,
+        )
+        assert ok is True
+        assert captured["exit_price_override"] == pytest.approx(2.40)
+
+    def test_corroborated_allow_proceeds(self):
+        ok, captured, _ = self._run(
+            "intraday_target_profit", enforce="1",
+            gate_row={"would_suppress": False,
+                      "suppress_reason": "corroborated_allow"},
+        )
+        assert ok is True
+        assert captured["exit_price_override"] == pytest.approx(2.40)
+
+    def test_0612_1330z_phantom_end_to_end_suppresses(self):
+        """The real 06-12 13:30:04Z QQQ condor fire, computed through the
+        FIXED gate (price-normalized divergence) and fed to the enforcing
+        call site: triggering mark −0.65 (+$96 implied) vs achievable −7.60
+        (−$599) on the degenerate C750 book (bid 0.76 / ask 14.09). The
+        verdict must be divergence_exceeded and the close must NOT stage."""
+        from packages.quantum.analytics import exit_mark_corroboration as emc
+        legs = [
+            {"symbol": "O:QQQ260710P00645000", "action": "sell", "strike": 645.0, "quantity": 1},
+            {"symbol": "O:QQQ260710P00640000", "action": "buy", "strike": 640.0, "quantity": 1},
+            {"symbol": "O:QQQ260710C00750000", "action": "sell", "strike": 750.0, "quantity": 1},
+            {"symbol": "O:QQQ260710C00755000", "action": "buy", "strike": 755.0, "quantity": 1},
+        ]
+        quotes = {
+            "O:QQQ260710P00645000": {"bid": 4.26, "ask": 4.33, "last": 4.35},
+            "O:QQQ260710P00640000": {"bid": 3.70, "ask": 3.90, "last": 3.91},
+            "O:QQQ260710C00750000": {"bid": 0.76, "ask": 14.09, "last": 8.79},
+            "O:QQQ260710C00755000": {"bid": 7.12, "ask": 7.42, "last": 7.57},
+        }
+        verdict = emc.compute_corroboration(
+            exit_type="target_profit", triggering_mark=-0.65,
+            triggering_implied_pl=96.0, quantity=-1.0, avg_entry_price=1.61,
+            legs=legs, leg_quotes=quotes,
+        )
+        assert verdict["would_suppress"] is True
+        assert verdict["suppress_reason"] == "divergence_exceeded"
+        assert verdict["achievable_close"] == pytest.approx(-7.60, abs=0.01)
+        assert abs(verdict["divergence_frac"]) > 0.10  # decisively past tolerance
+
+        ok, captured, alerts = self._run(
+            "intraday_target_profit", enforce="1", gate_row=verdict,
+        )
+        assert ok is False
+        assert captured == {}
+        assert any(a.get("alert_type") == "exit_tp_suppressed_phantom_mark"
+                   for a in alerts)
+
+
 # ── Part B: the monitor persists its fresh marks (fail-soft) ───────────────
 def _refresh_supabase(capture_updates, fail=False):
     def table(name):

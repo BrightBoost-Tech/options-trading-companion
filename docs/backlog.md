@@ -124,6 +124,13 @@ slots) · **P2** (real but deferred) · **RESEARCH** (open questions) ·
   live.
 - **Backtest deferral** — no backtest harness this phase; learning-mode
   forward-only is the deliberate choice.
+- **#71 async-dispatch migration sweep** — endpoints moved sync→202+enqueue:
+  PR-1 audit (`rq_dispatch_audit_2026_05_04.md`), PR-2 (/tasks/policy-lab/eval),
+  PR-3 (/tasks/validation/init-window). All shipped; traceability tokens
+  retained here because migration-doc guard tests assert them in this file
+  (`test_policy_lab_eval_async_migration.py`,
+  `test_validation_init_window_async_migration.py`). Do not drop the tokens
+  on future reorgs.
 
 ---
 

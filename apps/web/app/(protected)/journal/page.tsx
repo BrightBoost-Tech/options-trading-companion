@@ -4,6 +4,9 @@ import { useState, useEffect } from 'react';
 import DashboardLayout from '@/components/DashboardLayout';
 import { API_URL, TEST_USER_ID } from '@/lib/constants';
 import { supabase } from '@/lib/supabase';
+import { EmptyState } from '@/components/ui/empty-state';
+import { Button } from '@/components/ui/button';
+import { BookOpen, Plus } from 'lucide-react';
 
 export default function JournalPage() {
   const [entries, setEntries] = useState<any[]>([]);
@@ -47,9 +50,10 @@ export default function JournalPage() {
       <div className="max-w-7xl mx-auto p-8 space-y-8">
         <div className="flex justify-between items-center">
           <h1 className="text-3xl font-bold">Trade Journal</h1>
-          <button className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700">
+          <Button className="gap-2">
+            <Plus className="w-4 h-4" />
             Log New Trade
-          </button>
+          </Button>
         </div>
 
         <div className="bg-white rounded-lg shadow overflow-hidden">
@@ -59,10 +63,11 @@ export default function JournalPage() {
           {loading ? (
             <div className="p-12 text-center text-gray-500">Loading entries...</div>
           ) : entries.length === 0 ? (
-            <div className="p-12 text-center text-gray-500">
-              <p className="text-lg">No trades logged yet.</p>
-              <p className="text-sm mt-2">Use the &quot;Log New Trade&quot; button to get started.</p>
-            </div>
+            <EmptyState
+              icon={BookOpen}
+              title="No trades logged yet."
+              description='Use the "Log New Trade" button to get started.'
+            />
           ) : (
             <div className="overflow-x-auto">
               <table className="w-full">

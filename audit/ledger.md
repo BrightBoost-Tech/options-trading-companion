@@ -235,6 +235,54 @@ the human flips them to `status:shipped` (with PR#) or `status:rejected`.
   contamination); neutral-cohort cash_balance −$2,604 (the close's fill event credited +1302
   instead of debiting 1302).
 
+### 2026-06-13 combined run (week-review + 8-area audit + CLAUDE.md refresh)
+
+WEEK VERDICT (06-08→06-13): live realized **−$109** (a9f977bf NFLX −84,
+7f604f7a NFLX +48, a5393e2b SPY −45, bc399a4f MARA −28), live open = QQQ
+condor 6798e58f broker-unrealized **−$45**; shadow realized −$920 (mark-bias
+caveat). Fees negligible (TAF pending $0.57). Modeled-vs-realized EV gap:
+every staged EV positive (+26…+96), aggregate realized deeply negative;
+post-epoch clean read ≈ −$67/trade optimism (raw-mode, uncalibrated —
+expected, relearn ~06-20). Live MARA round-trip (18:25→18:46Z) confirms the
+N1/UnboundLocalError fix unblocked the 16:00Z funnel.
+
+SETTLED THIS RUN — do not re-find (folded to docs/backlog.md, origin 06-13):
+- A1: post-#1051 EV ordering weakly agrees (2 winners carried the highest
+  staged EV); uniform +EV optimism is raw-mode, not a defect. No action.
+- A2/A4: ghost_position sweep flags shadows (no live-routed filter,
+  `alpaca_order_sync.py:245`) → 73 shadow-noise alerts/wk burying real
+  desync. → P2.
+- A3: calibration healthy in raw mode (job ran 06-11/06-12 `insufficient_data`,
+  last real write 06-10; 5/8 post-epoch closes). is_paper tags ALL learning
+  rows paper incl. live closes → P2.
+- A4: OUTPUT_FRESHNESS watches ONE table (`ops_health_service.py:79`);
+  ingest/mark-refresh stalls silent. → P2.
+- A5: this run respected budgets (≤10 Part-1 SQL, ≤4 broker, 0 web, archived
+  the 240k backlog unread). Largest avoidable cost would have been reading
+  it — avoided.
+- A6: stage deaths dominated by REAL spread_too_wide_real (323) /
+  no_fallback (359), not feed artifacts; #1052 working. chain_mechanics
+  anomaly 24×/wk = legacy spread_pct deep-ITM edge (observability noise) →
+  P2.
+- A7: hold-time bimodal — debit spreads ~94–116h, condors 5–35h, live MARA
+  0.3h (cohort-stop velocity). Next binding velocity constraint = the
+  one-shot/day executor (P1), not fees/cooldowns.
+- A8: XLE dead-leg rejects (#1038, settled 06-10) are UNMARKABLE on the
+  executable side — counterfactual indeterminate by doctrine; GLD reject was
+  an HONEST save (spread_debug total_ev −934). Additive proxy field →
+  RESEARCH.
+- TOP-3: (1) OUTPUT_FRESHNESS expansion, (2) ghost-sweep shadow scoping,
+  (3) close-side quote check. No conflicts; (1)+(2) share the order-sync/ops
+  surface.
+
+PENDING VERIFICATIONS (06-13 night / next session):
+- CLAUDE.md refresh PR merges per the W2 gate (CI green on the doc PR; main's
+  last gate was clean at #1064 23:49Z). After merge: H8-verify both workers
+  recycled to the new SHA; the DEGRADED + raw-mode-reset lines fire once on
+  the new container (designed, not an incident).
+- backlog.md reorg: full pre-0613 history preserved in
+  docs/backlog_archive_2026-06-13.md (move-don't-lose).
+
 ### Data corrections (2026-06-12 night, operator-ordered; same precedent as 06-11)
 
 - Shadow NFLX ×3 `1e2dd73f` (conservative): realized_pl **+314.70 → +133.35** at 18:00:58Z,

@@ -97,6 +97,24 @@ slots) · **P2** (real but deferred) · **RESEARCH** (open questions) ·
 - **#1035/#1036 mark fail-closed** — monitor mark-refresh fail-closed paths;
   verify both fire under partial-quote. · origin pre-0610 · reopen with a
   partial-quote incident.
+- **Cohort-stop cooldown realized_loss from fill** — the writer records
+  trigger-time `unrealized_pl` at force-close-submit (pre-fill), not the
+  actual close fill; minor metadata inaccuracy, no current consumer. LARGELY
+  OBVIATED by the 06-15 structural clamp (impossible marks can't reach the
+  writer now). · origin 06-15 (Phase B commit-4 deferral) · done when: the
+  reconcile path backfills realized_loss from the fill, if ever worth it.
+- **Default-vs-cohort stop divergence (decision-path candidates, 06-15 STEP-4
+  audit — operator decision, NOT auto-fixed)** — two places use the 0.50/0.35
+  defaults in a DECISION path rather than the cohort value: (a)
+  `policy_lab/config.py` DEFAULT_CONFIGS hardcode looser stops (≈0.40/0.50/
+  0.65) than the live DB cohorts (0.15/0.20/0.30), so a cohort-load failure
+  fails to a 2–3× LOOSER stop — intended fail-safe (looser, never wrong) per
+  monitor doctrine, but the divergence is wide; (b)
+  `agents/agents/exit_plan_agent.py:43,50` hardcodes `stop_loss_pct=0.50`,
+  wired live via `workflow_orchestrator.py:3142` ("ExitPlanAgent applied") —
+  verify whether its constraints actually GATE a live exit or are advisory
+  metadata. · origin 06-15 · decide: align config defaults to live DB and/or
+  cohort-resolve the agent, or confirm both are intentionally inert.
 
 ## RESEARCH — open questions, no committed build
 
@@ -107,6 +125,15 @@ slots) · **P2** (real but deferred) · **RESEARCH** (open questions) ·
   conservative proxy for DARK-leg rejects (the XLE dead-leg class is
   unmarkable on the executable side by construction). · origin 06-13 audit
   A8 · done when: rejection rows carry the proxy fields (additive, observe).
+- **Executable-for-stops (OBSERVE-ONLY experiment, not a live change)** — per
+  stop evaluation, log what the stop WOULD do on the executable/achievable
+  side vs what it does on mid, and persist the divergence. Decision gate:
+  after ~2 weeks, review whether executable-basis would have over-fired on
+  noise in wide/illiquid names before considering adoption. Rationale:
+  achievable is always worse than mid → fires stops earlier → more
+  conservative but noise-prone. NOT today's bug (the 06-15 stop fired
+  correctly on mid; the debug line was the only liar). · origin 06-15
+  (Phase B commit-2 deferral).
 
 ## RESOLVED — DO NOT REINVESTIGATE (cite, never re-derive)
 

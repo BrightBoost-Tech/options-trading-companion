@@ -4,6 +4,43 @@ Every finding listed here is EXCLUDED from future audit runs. Re-finding a
 ledger item is a wasted slot. Runs append new findings as `status:reported`;
 the human flips them to `status:shipped` (with PR#) or `status:rejected`.
 
+## 2026-06-15 — Phase B (structural mark-validity) shipped + QQQ phantom-stop saga
+
+- **Phase B MERGED #1067 → main `ad8ce0f`**, live both services (worker
+  `2c8fca1d`, worker-background `b5c05eb1`) container start 20:55:06–07Z, CI
+  green (run 27575798526). Two commits: (1) structural mark clamp
+  (`risk/mark_validity.py` + exit-eval-seam wiring in
+  intraday_risk_monitor + paper_exit_evaluator) — rejects |mark|>wing OR
+  implied_loss>max_loss, fail-closed, NEVER suppresses a real stop; (2)
+  EXIT_EVAL_DEBUG honesty (prints the cohort tp/sl/dte the decision uses, not
+  `_DEFAULT_*`). +18 tests; full-suite zero Phase-B regression (31 pre-existing
+  local fails == baseline). Commit 3 (resting-TP pre-cancel) DROPPED MOOT
+  (broker cancel-ack 14:15:08.884Z before stop submit). Commit-2 executable-
+  rewire DECLINED (false premise: decision is stateless/mid and fired
+  correctly; the −80.5-vs-48.3 was the debug line interpolating
+  `_DEFAULT_STOP_LOSS_PCT` 0.50 vs the cohort 0.30).
+- **QQQ saga (book `6798e58f`, aggressive condor 5-wide/1.61cr/max-loss $339):**
+  13:30Z monitor force-closed on a PHANTOM stop, mark −7.305 / implied
+  −$569.50 (impossible). The 7.30 close order was BROKER-REJECTED → **zero
+  loss booked** (luck, not a control — the new clamp is the control).
+  CLOSE_REARM deferred re-close; mark recovered; QQQ genuinely rallied →
+  **legit corroborated stop filled 14:15 at 2.34 / −$73** (corroboration
+  14:15:07Z divergence_frac 0.089; single broker submission `1bcc6e83`).
+- **Data correction (supervised, operator-GO, like prior corrections):**
+  reentry_cooldowns `3d8a5820` realized_loss **−569.5 → −73.00** (1 row,
+  guarded `AND realized_loss=-569.5`). The bench (QQQ → 06-16 13:30Z) was
+  always correct; only the metadata carried the phantom.
+- **STEP-4 audit (decision-path candidates flagged, NOT auto-fixed → backlog
+  P2):** config.py DEFAULT_CONFIGS stops looser than live DB (fail-open looser
+  on cohort-load failure); `exit_plan_agent.py:43,50` hardcodes 0.50 wired via
+  workflow_orchestrator:3142. CLAUDE.md §5 stop references are ACCURATE (no doc
+  fix). Two deferrals filed: executable-for-stops (observe-only) + cooldown
+  realized_loss-from-fill (low, obviated by the clamp).
+- **PENDING (do not act tonight):** 21:20Z ingest lands the −$73 QQQ close;
+  expect `is_paper=true` (wrong) — the known Phase-1 A3 item, caught by the
+  supervised historical correction, not a surprise. Post-epoch closes 5 → 6
+  after tonight (relearn at ≥8).
+
 ## status:shipped — 2026-06-09 v4 seven-area run (PRs #1044–#1049, all live on worker 4bd5779)
 
 - **[#1044] Pre-entry concentration BLOCK froze sequential accumulation** — share-of-book
@@ -282,6 +319,62 @@ PENDING VERIFICATIONS (06-13 night / next session):
   the new container (designed, not an incident).
 - backlog.md reorg: full pre-0613 history preserved in
   docs/backlog_archive_2026-06-13.md (move-don't-lose).
+
+## status:reported — 2026-06-15 NIGHTLY run (report `audit/reports/2026-06-15.md`)
+
+**NO NEW FINDINGS.** Quiet weekend (markets closed 06-13/06-14); window 06-13
+run → 06-15 05:03Z. Clean operation: both workers on `5778760`/#1065
+(CLAUDE.md refresh, dual-parity deploy 06-13 03:15:47Z — the 06-13-pending
+merge landed); weekend job silence (only `paper_exit_evaluate` 06-13 00:28Z
+[placed the resting TP] + `phase2_precheck` 06-15 05:00Z, 0 failures, 0 stuck
+rows); **H11 risk_alerts critical/high since 06-13 = ZERO**; broker healthy
+(equity $2,179.15, OBP $1,804.15, one live QQQ 07-10 condor −$45 with resting
+TP `550fccc5` GTC 0.81 alive/untouched). Flags clean, no regressions.
+
+- **OVERTURNED CANDIDATE (verify-before-asserting):** SPY `manual_bench` cooldown
+  (06-12 15:46Z, correctly valued −45, until 06-15 13:30Z) looked like a
+  cohort-stops-don't-auto-cooldown gap → **already fixed in deployed code**:
+  `intraday_risk_monitor.py:355` → `_write_cohort_stop_cooldown` (`:757-772`,
+  `reason="cohort_stop_force_close"`), shipped #1062. The manual bench predated
+  the fix (event on worker 5681919). Not a finding.
+
+VERIFICATIONS CLOSED THIS RUN (do not re-find):
+- ✅ **PR #908 live credit-mleg-close** — SPY iron condor close `1f444239`
+  (06-12 15:30:07Z): buy-to-close at POSITIVE limit 1.96, filled POSITIVE 1.93,
+  single order, instant clean fill, no Sign-incoherent raise → realized −45.
+  Credit structure closed correctly. **Pending since the first ledger list — DONE.**
+- ✅ **Double-submit pre-fix confirmed** — QQQ condor close attempts `fc1625f1`
+  (06-12 13:30:07Z submit→cancel 0.6s) + `0675f969` (13:30:08Z, watchdog-cancel
+  13:35Z) = documented pre-cancel double-submit on worker 5681919 (#1064
+  single-submitter deployed 06-13 00:20Z, after). SPY/NFLX/MARA = single orders
+  (instant fills). Single-submitter fix deployed but UNEXERCISED on a resting close.
+- ✅ **#1034 TP fires write price-normalized corroboration rows** —
+  `exit_mark_corroboration_observations`: NFLX TP 06-12 15:15Z (4.7355/+314.70 →
+  4.131/**+133.35**, divergence_frac 0.086, `corroborated_allow`); SPY stop 15:30Z
+  (`stop_loss_never_suppress`); QQQ TP 13:30Z.
+- ✅ **Corrected-NFLX ingest** — `1e2dd73f` realized_pl=133.35; outcomes_v3 LPD pair
+  sums +181.35 = 133.35 + 48.00. The +314.70 fiction did not propagate.
+- ✅ **#1056 write-side** — DB QQQ condor `avg_entry_price=1.61` (positive); coherent.
+
+PENDING VERIFICATIONS (carried — all fire on today's 06-15 RTH, the first
+session on #1062+/#1065 code after the weekend):
+- **#1034 corrected normalization + Stage-2 enforce, FIRST FIRE.** Every
+  corroboration row in-window is PRE-fix (worker 5681919); the QQQ 13:30Z phantom
+  (mark −0.65/+96 vs achievable −7.6/**−599**) scored divergence_frac **0.0604**
+  `would_suppress=false` — the exact value CLAUDE.md says the 06-12 fix re-scores
+  to ~0.91. `EXIT_MARK_SANITY_ENFORCE_ENABLED=1` deployed but never observed on a
+  live fire. A phantom TP today should re-score ~0.91 → SUPPRESS (stops never).
+- **Cohort-stop auto-cooldown FIRST FIRE** (`_write_cohort_stop_cooldown`, #1062) —
+  on the next cohort-stop force-close; should write `reason=cohort_stop_force_close`
+  (no manual bench needed).
+- **Resting-TP exit-evaluator deferral** (`skipped_resting_tp_owns_profit_side`) —
+  first QQQ-condor monitor tick today (resting TP placed post-close 06-13, no RTH
+  monitor since).
+- **#1058 `[EQUITY_STATE] realized-blind gap`** — 06-12 RTH logs aged out of Railway
+  retention; re-check on today's session.
+- **#1065 DEGRADED + raw-mode-reset lines** — fire once on the first CONVICTION read
+  = first scan (16:00Z); no scan since the recycle.
+- **#1059 synthetic-proof wiring** still unmerged (`9c957d9`); webhook still deferred.
 
 ### Data corrections (2026-06-12 night, operator-ordered; same precedent as 06-11)
 

@@ -888,6 +888,65 @@ class IntradayRiskMonitor:
             # last-good mark / conservative bound / marketable protective close
             # — would let stop_loss still protect without a live mark. Do not
             # silently weaken the stop in the meantime; alert and retry.
+            # ── Structural mark-validity clamp (06-15) ────────────────────
+            # Reject an IMPOSSIBLE composed mark BEFORE any exit condition
+            # evaluates, regardless of how it was produced — fresh compute OR
+            # a DB-stale fallback. The 13:30Z QQQ phantom (mark −7.305 /
+            # implied −$569.50 on a 5-wide / 1.61cr condor, max loss $339)
+            # drove a stop the per-leg degenerate-quote rejector did NOT stop,
+            # because the −7.305 came from the DB fallback, not the compute
+            # path. This composed-structure clamp closes that exact gap. On
+            # reject: treat as unpriceable for this cycle (the existing
+            # fail-closed posture — TP never fires, stop alerts degraded,
+            # NEVER suppresses a real stop), loud [STRUCT_CLAMP] + alert. A
+            # real near-max mark (e.g. −$330 < max $339) is NOT rejected.
+            try:
+                from packages.quantum.risk.mark_validity import (
+                    validate_structure_mark,
+                )
+                _clamp_ok, _clamp_reason, _clamp_detail = validate_structure_mark(pos)
+                if not _clamp_ok:
+                    pos["_mark_unpriceable"] = True
+                    pos["_struct_clamp_rejected"] = True
+                    logger.critical(
+                        "[STRUCT_CLAMP] %s (%s) impossible mark rejected "
+                        "(%s): %s — treated unpriceable this cycle, NOT acted on",
+                        pos.get("symbol"), str(pos.get("id"))[:8],
+                        _clamp_reason, _clamp_detail,
+                    )
+                    self._log_alert(
+                        user_id=user_id,
+                        alert_type="struct_clamp_rejected",
+                        severity="high",
+                        message=(
+                            f"Structural mark clamp rejected impossible mark "
+                            f"for {pos.get('symbol')}: {_clamp_reason} "
+                            f"(mark={_clamp_detail.get('per_contract_mark')}, "
+                            f"wing={_clamp_detail.get('wing_width')}, "
+                            f"implied_pl={_clamp_detail.get('implied_pl')}, "
+                            f"max_loss=${_clamp_detail.get('max_loss_dollars')})"
+                        ),
+                        position_id=pos.get("id"),
+                        symbol=pos.get("symbol"),
+                        metadata={
+                            **_clamp_detail,
+                            "reason": _clamp_reason,
+                            "consequence": (
+                                "Mark is structurally impossible; no exit "
+                                "evaluated this cycle. Re-evaluates next cycle "
+                                "with a sane mark. A REAL stop is never "
+                                "suppressed — only impossible marks are."
+                            ),
+                            "doctrine_ref": "stop-side analogue of #1034 "
+                                            "Stage-2; never suppress a real stop",
+                        },
+                    )
+            except Exception as _clamp_err:  # never let the clamp break exits
+                logger.warning(
+                    f"[STRUCT_CLAMP] validation raised (non-fatal; exit "
+                    f"proceeds) for {pos.get('symbol')}: {_clamp_err}"
+                )
+
             unpriceable = bool(pos.get("_mark_unpriceable"))
 
             # Stale-fallback guard (06-12): a position that did NOT get a

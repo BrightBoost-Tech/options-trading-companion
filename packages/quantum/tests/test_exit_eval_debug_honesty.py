@@ -50,6 +50,17 @@ class TestExitEvalDebugHonesty(unittest.TestCase):
         self.assertIn("-48.3", out)        # cohort 0.30 × 161
         self.assertNotIn("-80.5", out)     # the old default-0.50 lie
 
+    def test_debug_tp_uses_cohort_not_default(self):
+        """The honesty fix must cover the PROFIT side too: aggressive tp 0.50 →
+        161×0.50 = 80.50, NOT the _DEFAULT_TARGET_PROFIT_PCT 0.35 → 56.35 the
+        13:00 line showed."""
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            evaluate_position_exit(_pos(20.0), conditions=self.conds)
+        out = buf.getvalue()
+        self.assertIn("80.5", out)         # cohort tp 0.50 × 161
+        self.assertNotIn("56.35", out)     # the old default-0.35 lie
+
     def test_decision_matches_honest_debug(self):
         # −54 is past −48.30 → fires; the honest debug now prints True too.
         self.assertEqual(evaluate_position_exit(_pos(-54.0), conditions=self.conds), "stop_loss")

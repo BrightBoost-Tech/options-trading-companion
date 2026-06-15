@@ -457,18 +457,26 @@ def build_exit_conditions(
     min_dte_to_exit: int = 7,
 ) -> Dict[str, Dict[str, Any]]:
     """Build exit conditions with configurable thresholds (used by Policy Lab)."""
+    # `pct`/`min_dte` carry the ACTUAL configured thresholds so the
+    # EXIT_EVAL_DEBUG line can print the value the decision uses (06-15 fix:
+    # it previously printed _DEFAULT_STOP_LOSS_PCT — 0.50 → −$80.50 — while
+    # the cohort check used 0.30 → −$48.30, the "−54<=−80.5=False but fired"
+    # confusion). Extra keys are inert in the condition loop.
     return {
         "target_profit": {
             "description": f"Position has reached {target_profit_pct:.0%} target profit",
             "check": lambda pos, tp=target_profit_pct: _check_target_profit(pos, tp),
+            "pct": target_profit_pct,
         },
         "stop_loss": {
             "description": f"Position has exceeded {stop_loss_pct}x max loss",
             "check": lambda pos, sl=stop_loss_pct: _check_stop_loss(pos, sl),
+            "pct": stop_loss_pct,
         },
         "dte_threshold": {
             "description": f"Position is within {min_dte_to_exit} DTE (gamma risk)",
             "check": lambda pos, dte_min=min_dte_to_exit: 0 < days_to_expiry(pos) <= dte_min,
+            "min_dte": min_dte_to_exit,
         },
         "expiration_day": {
             "description": "Position expires today — must close",
@@ -785,16 +793,16 @@ def evaluate_position_exit(
     logger.info(fields_msg)
     print(fields_msg, flush=True)
 
-    # Log threshold computations if max_credit is available
-    # Use actual thresholds from conditions (cohort or default), not hardcoded values
-    _active_tp = _DEFAULT_TARGET_PROFIT_PCT
-    _active_sl = _DEFAULT_STOP_LOSS_PCT
-    _active_dte = _DEFAULT_MIN_DTE_TO_EXIT
-    if conditions:
-        # Extract actual thresholds from the condition descriptions
-        tp_desc = conditions.get("target_profit", {}).get("description", "")
-        sl_desc = conditions.get("stop_loss", {}).get("description", "")
-        dte_desc = conditions.get("dte_threshold", {}).get("description", "")
+    # Log threshold computations if max_credit is available.
+    # 06-15 honesty fix: read the ACTUAL pcts the active conditions use (the
+    # cohort-built `pct` keys), NOT _DEFAULT_*. The debug line previously
+    # printed the default 0.50 stop while the cohort check ran 0.30, so it
+    # showed "−54 <= −80.50 = False" while the real decision (−54 <= −48.30)
+    # fired True — the §8 EXIT_EVAL_DEBUG known-liar. Now the printed
+    # threshold equals the threshold the decision computes through.
+    _active_tp = conditions.get("target_profit", {}).get("pct", _DEFAULT_TARGET_PROFIT_PCT)
+    _active_sl = conditions.get("stop_loss", {}).get("pct", _DEFAULT_STOP_LOSS_PCT)
+    _active_dte = conditions.get("dte_threshold", {}).get("min_dte", _DEFAULT_MIN_DTE_TO_EXIT)
 
     is_debit = _is_debit_spread(position)
     if max_credit is not None:
@@ -817,7 +825,7 @@ def evaluate_position_exit(
                 f"[EXIT_EVAL_DEBUG] position={pos_id} type={spread_type} "
                 f"target_profit: {upl} >= {tp_threshold} ? {upl >= tp_threshold} | "
                 f"stop_loss: {upl} <= {sl_threshold} ? {upl <= sl_threshold} | "
-                f"dte_threshold: 0 < {dte} <= 7 ? {0 < dte <= 7} | "
+                f"dte_threshold: 0 < {dte} <= {_active_dte} ? {0 < dte <= _active_dte} | "
                 f"expiration_day: {dte} <= 0 ? {dte <= 0}"
             )
             logger.info(thresh_msg)
@@ -993,6 +1001,28 @@ class PaperExitEvaluator:
             cohort = self._resolve_position_cohort(position)
             if cohort and cohort in cohort_conditions_cache:
                 pos_conditions = cohort_conditions_cache[cohort]
+
+            # Structural mark-validity clamp (06-15): an IMPOSSIBLE composed
+            # mark (|mark| > wing width OR implied loss > max structural loss)
+            # must never reach an exit condition on this path either. Skip the
+            # eval (hold; retry next cycle), loud [STRUCT_CLAMP]. NEVER
+            # suppresses a real stop — only rejects geometrically impossible
+            # marks (the stop-side analogue of the #1034 guard).
+            try:
+                from packages.quantum.risk.mark_validity import validate_structure_mark
+                _clamp_ok, _clamp_reason, _clamp_detail = validate_structure_mark(position)
+            except Exception:
+                _clamp_ok, _clamp_reason, _clamp_detail = True, "unvalidatable", {}
+            if not _clamp_ok:
+                logger.critical(
+                    "[STRUCT_CLAMP] %s (%s) impossible mark rejected (%s): %s "
+                    "— held this cycle, not acted on",
+                    position.get("symbol"), str(position.get("id"))[:8],
+                    _clamp_reason, _clamp_detail,
+                )
+                holds.append(position)
+                shadow_inputs.append((position, None))
+                continue
 
             triggered = evaluate_position_exit(position, conditions=pos_conditions)
             active_conditions = pos_conditions or EXIT_CONDITIONS

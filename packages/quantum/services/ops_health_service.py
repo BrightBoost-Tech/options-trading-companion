@@ -82,6 +82,17 @@ OUTPUT_FRESHNESS = [
         "computed_at",
         int(os.getenv("OPS_CALIBRATION_MAX_AGE_HOURS", "240")),  # 10 days
     ),
+    (
+        # Learning-ingest output: one row per closed position. A multi-week gap
+        # while the system is trading means paper_learning_ingest (or its
+        # upstream close path) silently stalled — the same "job green, output
+        # frozen" class as the 25-day calibration freeze, one loop earlier.
+        # Generous default so a normal low-frequency quiet stretch doesn't
+        # false-alarm; it surfaces a genuine multi-week stall, not a slow week.
+        "learning_feedback_loops",
+        "created_at",
+        int(os.getenv("OPS_LEARNING_INGEST_MAX_AGE_HOURS", "336")),  # 14 days
+    ),
 ]
 
 

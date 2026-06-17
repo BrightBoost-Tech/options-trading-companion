@@ -55,8 +55,10 @@ slots) · **P2** (real but deferred) · **RESEARCH** (open questions) ·
 - **OUTPUT_FRESHNESS registry expansion** — watches ONE table
   (`calibration_adjustments`, `ops_health_service.py:79`); a silent stall of
   learning ingest or mark refresh would not alert. · origin 06-13 audit A4 ·
-  done when: `learning_trade_outcomes_v3` (or `paper_positions.last_marked_at`)
-  is registered with a tuned max-age.
+  **PARTIAL (Phase 1):** `learning_feedback_loops` (created_at, 14d via
+  `OPS_LEARNING_INGEST_MAX_AGE_HOURS`) now registered. · done when: mark
+  refresh (`paper_positions.last_marked_at`) is also registered with a tuned
+  max-age.
 - **ghost_position sweep excludes shadows** — the sweep selects all
   open-position users with no live-routed filter (`alpaca_order_sync.py:245`);
   73 shadow-induced ghost alerts this week bury a real desync. · origin 06-13
@@ -65,8 +67,20 @@ slots) · **P2** (real but deferred) · **RESEARCH** (open questions) ·
 - **is_paper live/shadow discriminator** — every learning row this week
   tagged `is_paper=true` incl. live SPY/MARA/NFLX closes; the routing
   resolver isn't distinguishing live broker fills in learning rows. · origin
-  06-13 audit A3 · done when: live fills are distinguishable in
-  learning_feedback_loops / outcomes_v3.
+  06-13 audit A3 · **FIX LANDED (Phase 1):** ingest now derives is_paper from
+  `order.execution_mode` (`_resolve_is_paper`), immune to the missing
+  portfolio_id column that forced every row paper. · done when: the 4
+  historical live-as-paper rows (SPY/NFLX/MARA 06-12, QQQ 06-15) are corrected
+  (supervised, separate step — operator go).
+- **signal_weight_history epoch/is_paper guard (DORMANT consumer)** — the
+  per-segment multiplier writer (`post_trade_learning._update_segment_calibration`)
+  queries `learning_feedback_loops` with NO epoch (`CALIBRATION_EV_EPOCH`) or
+  is_paper filter; IRON_CONDOR|chop already holds 14 pre-epoch is_paper=true
+  rows. Its only reader is `DynamicWeightService` (`get_weight_overrides`/
+  `apply_to_score`), which has ZERO call sites — so the output is inert today.
+  · origin Phase-1 scope-lock · done when: an epoch + is_paper filter is added
+  to the segment query **IF/BEFORE `DynamicWeightService` is ever activated**
+  (do not guard a dead reader; this is a tripwire, not a build slot).
 - **chain_mechanics_formula_anomaly noise** — legacy `option_spread_pct`
   formula fires >300% on deep-ITM verticals (24×/week, observability-only,
   `options_scanner.py:3528`). · origin 06-13 audit A6 · done when: the legacy

@@ -22,7 +22,7 @@ Safety rules:
 import logging
 import os
 import time
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 from zoneinfo import ZoneInfo
 
@@ -236,6 +236,8 @@ class IntradayRiskMonitor:
         #     live-CAPITAL aggregate only; it does not blind any cohort to
         #     its own exits. NOTE: shadow books have no envelope backstop by
         #     design — the cohort stop IS their loss protection.
+        _live_ids: set = set()
+        _scope_ok = True
         try:
             from packages.quantum.risk.position_scope import live_routed_portfolio_ids
             _live_ids = set(live_routed_portfolio_ids(self.supabase, user_id))
@@ -247,18 +249,88 @@ class IntradayRiskMonitor:
                 f"set this cycle (per-position exits unaffected)"
             )
             live_positions = positions
+            _scope_ok = False
 
-        # 3. Compute portfolio metrics for envelope check (LIVE book)
-        equity = self._estimate_equity(user_id, live_positions)
-        # v5-A2 realized-blind brake (06-11): the open-book unrealized sum is
-        # blind to realized losses + fees (a closed loser vanishes from it —
-        # real day −8.3% read as ≈−4%). Tightens-only: min(proxy, broker
-        # equity−last_equity); broker unavailable → proxy unchanged.
-        daily_pnl_proxy = sum(float(p.get("unrealized_pl") or 0) for p in live_positions)
-        daily_pnl = equity_state.tightened_daily_pnl(
-            user_id, daily_pnl_proxy, supabase=self.supabase,
+        # 3. Compute portfolio metrics for envelope check (LIVE book).
+        #     v5 phantom-mark-safe brake (2026-06-17 incident): the daily/weekly
+        #     loss brake fires on realized (DB-authoritative, trusted, UN-GATED —
+        #     preserves the #1058/06-11 realized protection) + executable-
+        #     corroborated unrealized (#1034), NEVER the raw broker equity delta.
+        #     On 06-17 a phantom broker unrealized of −285 on an incomplete-leg-
+        #     quote window force-closed the live MARA whose executable close
+        #     realized −15. Per-position stops (#1048) are unchanged. NOTE: the
+        #     other tightened_daily_pnl consumers (MTM / autopilot breaker /
+        #     midday) still share the phantom on their GATE paths (block/reduce,
+        #     not force-close) — follow-up. get_alpaca_daily_pnl is now only the
+        #     H10 cross-check below.
+        _now = datetime.now(timezone.utc)
+        _day_start = _now.replace(hour=0, minute=0, second=0, microsecond=0)
+        _week_start = _day_start - timedelta(days=_day_start.weekday())  # Mon 00:00Z
+        realized_today = equity_state.realized_pnl_since(
+            self.supabase, user_id, _live_ids, _day_start.isoformat()
         )
-        weekly_pnl = self._compute_weekly_pnl(user_id, daily_pnl)
+        realized_week = equity_state.realized_pnl_since(
+            self.supabase, user_id, _live_ids, _week_start.isoformat()
+        )
+        if (not _scope_ok) or realized_today is None or realized_week is None:
+            # Fail SAFE: live-routing scope or the realized query is unavailable
+            # this cycle — fall back to the legacy broker-true brake (errs
+            # protective) rather than silently dropping realized protection.
+            logger.warning(
+                f"[RISK_MONITOR] user={user_id[:8]}: corroborated brake inputs "
+                f"unavailable (scope_ok={_scope_ok}, realized_today={realized_today}, "
+                f"realized_week={realized_week}) — legacy broker-true brake this cycle"
+            )
+            equity = self._estimate_equity(user_id, live_positions)
+            daily_pnl_proxy = sum(float(p.get("unrealized_pl") or 0) for p in live_positions)
+            daily_pnl = equity_state.tightened_daily_pnl(
+                user_id, daily_pnl_proxy, supabase=self.supabase,
+            )
+            weekly_pnl = self._compute_weekly_pnl(user_id, daily_pnl)
+        else:
+            # Executable-corroborated unrealized over the OPEN live book, shared
+            # by the daily + weekly horizons. Non-corroborated positions are
+            # EXCLUDED + flagged (H9) — never priced off a phantom broker mark.
+            corroborated_unreal, _uncorroborated = equity_state.corroborated_unrealized(
+                live_positions
+            )
+            for _u in _uncorroborated:
+                self._log_alert(
+                    user_id=user_id,
+                    alert_type="daily_brake_unrealized_uncorroborated",
+                    severity="warning",
+                    position_id=_u.get("position_id"),
+                    symbol=_u.get("symbol"),
+                    message=(
+                        f"Daily/weekly brake EXCLUDED {_u.get('symbol')} "
+                        f"({str(_u.get('position_id'))[:8]}) unrealized: executable "
+                        f"side not corroborated ({_u.get('reason')}). Realized + the "
+                        f"per-position stop still protect it."
+                    ),
+                )
+            daily_pnl = realized_today + corroborated_unreal
+            weekly_pnl = realized_week + corroborated_unreal
+            # Clean %-denominator: last_equity + daily P&L, NOT the phantom-marked
+            # live broker equity (the same bad mark depresses it, inflating the %).
+            last_equity = equity_state.get_alpaca_last_equity(user_id, supabase=self.supabase)
+            equity = (last_equity + daily_pnl) if last_equity is not None else None
+            # H10 reconciliation cross-check (flag-only; no force-close effect).
+            _recon = equity_state.reconcile_realized(
+                user_id, realized_today, supabase=self.supabase
+            )
+            if _recon and _recon.get("divergent"):
+                self._log_alert(
+                    user_id=user_id,
+                    alert_type="daily_brake_realized_reconcile_divergence",
+                    severity="warning",
+                    message=(
+                        f"Realized reconcile divergence: broker-implied "
+                        f"${_recon['broker_implied_realized']} vs DB "
+                        f"${_recon['realized_db']} (diff ${_recon['diff']} > "
+                        f"${_recon['threshold']}); brake uses DB realized (H10)."
+                    ),
+                    metadata=_recon,
+                )
 
         # Alpaca-unavailable fallbacks. Do NOT fabricate equity or weekly P&L
         # from local estimates — that was the 2026-04-16 failure mode

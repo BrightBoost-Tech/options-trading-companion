@@ -261,16 +261,12 @@ async def _ingest_paper_outcomes_for_user(
             # Fail toward the legacy (order-id) dedup only — never block ingest.
             logger.warning("Suggestion-level dedup query failed (order-id dedup only): %s", e)
 
-    # Live-vs-simulator dimension (v5-A3): is_paper was hardcoded True, making
-    # broker fills indistinguishable from internal/shadow fills in the learning
-    # store. Resolve live-routed portfolios once; failure → everything stays
-    # is_paper=True (the conservative legacy label, never fabricated 'live').
-    live_portfolio_ids: set = set()
-    try:
-        from packages.quantum.risk.position_scope import live_routed_portfolio_ids
-        live_portfolio_ids = set(live_routed_portfolio_ids(supabase, user_id))
-    except Exception as e:
-        logger.warning("live-routing scope failed (all outcomes labeled is_paper=True): %s", e)
+    # Live-vs-simulator dimension (v5-A3, fixed Phase 1): is_paper is derived
+    # per-row from the ORDER's execution_mode via _resolve_is_paper (the order
+    # is the routing ground truth). The earlier portfolio-membership conjunct
+    # was silently dead — the closed-positions query above never selects
+    # portfolio_id — so every outcome, live broker fills included, landed
+    # is_paper=True. See _resolve_is_paper for the full rationale.
 
     # 4. Create outcomes for each closed position that has a closing order.
     outcomes_created = 0
@@ -307,16 +303,11 @@ async def _ingest_paper_outcomes_for_user(
                         "trade_closed outcome", symbol, pos_id_short, str(suggestion_id)[:8])
             continue
 
-        is_live_fill = (
-            position.get("portfolio_id") in live_portfolio_ids
-            and (order.get("execution_mode") or "") == "alpaca_live"
-        )
-
         outcome = _create_paper_outcome_record(
             user_id, order, target_date, position,
             suggestion_ev=suggestion_ev,
             suggestion_meta=suggestion_meta,
-            is_paper=not is_live_fill,
+            is_paper=_resolve_is_paper(order),
         )
         logger.info("INSERT %s (pos=%s): pnl_realized=%s pnl_predicted=%s suggestion=%s",
                      symbol, pos_id_short, outcome["pnl_realized"],
@@ -325,6 +316,22 @@ async def _ingest_paper_outcomes_for_user(
         try:
             supabase.table("learning_feedback_loops").insert(outcome).execute()
             outcomes_created += 1
+
+            # N4 honesty fix: flip the learning_ingested marker on the source
+            # position. The column read False "always" because nothing ever set
+            # it (audit 2026-06-12 N4 — a Known-Liar dead column); dedup is
+            # driven by learning_feedback_loops existence, NOT this flag, so
+            # this only restores the marker's meaning. Fail-soft: a marker
+            # write must never break ingest.
+            try:
+                supabase.table("paper_positions").update(
+                    {"learning_ingested": True}
+                ).eq("id", position["id"]).execute()
+            except Exception as _flag_err:
+                logger.warning(
+                    "learning_ingested marker update failed for pos=%s: %s",
+                    pos_id_short, _flag_err,
+                )
 
             # Backfill realized_outcome on policy_decisions if suggestion linked
             if suggestion_id:
@@ -348,6 +355,24 @@ async def _ingest_paper_outcomes_for_user(
         "outcomes_created": outcomes_created,
         "skipped_duplicate": skipped_duplicate,
     }
+
+
+def _resolve_is_paper(order: Dict[str, Any]) -> bool:
+    """Derive is_paper from the ORDER's execution_mode — the routing ground
+    truth: an order reaches the broker iff execution_mode == "alpaca_live"
+    (internal_paper / shadow_blocked / None / missing are simulated).
+
+    Deliberately independent of portfolio_id. The prior derivation AND-ed this
+    execution_mode test with a ``position.portfolio_id in
+    live_routed_portfolio_ids`` membership check, but the closed-positions
+    query never SELECTed portfolio_id (see line ~155), so that conjunct was
+    always False and EVERY outcome — live broker fills included — landed
+    is_paper=True (the v5-A3 contamination: SPY/NFLX/MARA 06-12, QQQ 06-15).
+    Keying on the order alone makes the label immune to which columns the
+    upstream query happens to select, so the missing-column class cannot
+    silently relabel live fills as paper again.
+    """
+    return (order.get("execution_mode") or "") != "alpaca_live"
 
 
 def _create_paper_outcome_record(

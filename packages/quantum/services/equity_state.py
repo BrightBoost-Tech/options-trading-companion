@@ -23,7 +23,7 @@ import logging
 import os
 import time
 from datetime import date, timedelta
-from typing import Any, Dict, Iterable, Optional, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 
 from packages.quantum.observability.alerts import alert
 
@@ -48,6 +48,7 @@ _ALPACA_EQUITY_CACHE: Dict[str, Tuple[float, float]] = {}      # user_id → (ts
 _ALPACA_WEEKLY_PNL_CACHE: Dict[str, Tuple[float, float]] = {}  # user_id → (ts, weekly_pnl)
 _ALPACA_OBP_CACHE: Dict[str, Tuple[float, float]] = {}         # user_id → (ts, options_buying_power)
 _ALPACA_DAILY_PNL_CACHE: Dict[str, Tuple[float, float]] = {}   # user_id → (ts, equity−last_equity)
+_ALPACA_LAST_EQUITY_CACHE: Dict[str, Tuple[float, float]] = {} # user_id → (ts, last_equity)
 _ALPACA_STATE_TTL_SECONDS = 60
 
 
@@ -194,6 +195,208 @@ def tightened_daily_pnl(
             f"— daily envelope uses the broker-true (tighter) value"
         )
     return min(unrealized_sum, broker_daily)
+
+
+# ── v5 phantom-mark-safe daily/weekly brake (2026-06-17 incident) ───
+# tightened_daily_pnl (above) fed the loss envelope the BROKER equity delta,
+# which for an OPEN multi-leg position carries the broker's per-leg last-trade
+# marks (the Alpaca leg-skew phantom, §8). On 2026-06-17 a phantom broker
+# unrealized of −285.52 on an incomplete-leg-quote window force-closed the live
+# MARA whose EXECUTABLE close realized −15.00 (settled −16.02 the next cycle).
+# The phantom-safe brake fires on realized (DB-authoritative, trusted, UN-GATED
+# — preserves the #1058/06-11 realized protection) + executable-corroborated
+# unrealized (#1034 executable_close_estimate), never the raw broker/DB mark. A
+# position whose executable side can't be priced is EXCLUDED + flagged (H9:
+# reject the unpriceable, never fabricate); its per-position stop (#1048)
+# remains the backstop. get_alpaca_daily_pnl is retained only for the H10
+# reconciliation cross-check (reconcile_realized), not the decision.
+
+def realized_pnl_since(
+    supabase: Any,
+    user_id: str,
+    live_portfolio_ids: Iterable[str],
+    since_iso: str,
+) -> Optional[float]:
+    """Σ ``realized_pl`` over LIVE-routed positions closed at/after ``since_iso``
+    (DB row of record — authoritative for realized). The TRUSTED, un-gated
+    component of the daily/weekly brake: a real realized loss must trip with NO
+    corroboration gate.
+
+    Returns 0.0 when there are no live portfolios or no qualifying closes (a
+    fact, not an error). Returns None ONLY when the query itself fails — the
+    caller must then fail SAFE (fall back to the legacy broker-true brake),
+    never silently treat realized as 0 and under-protect.
+    """
+    ids = [pid for pid in (live_portfolio_ids or []) if pid]
+    if not ids:
+        return 0.0
+    try:
+        res = (
+            supabase.table("paper_positions")
+            .select("realized_pl")
+            .eq("user_id", user_id)
+            .eq("status", "closed")
+            .gte("closed_at", since_iso)
+            .in_("portfolio_id", ids)
+            .execute()
+        )
+        return sum(float(r.get("realized_pl") or 0.0) for r in (res.data or []))
+    except Exception as e:
+        logger.warning(
+            "[EQUITY_STATE] realized_pnl_since query failed for %s: %s",
+            user_id[:8], e,
+        )
+        return None
+
+
+def corroborated_unrealized(
+    open_live_positions: Iterable[Dict[str, Any]],
+    snapshot_fn: Optional[Callable] = None,
+) -> Tuple[float, List[Dict[str, Any]]]:
+    """Σ EXECUTABLE-corroborated unrealized over the OPEN live positions, via the
+    #1034 ``executable_close_estimate`` (long→bid, short→ask) — never the broker
+    or DB mark. Returns ``(total_unrealized, uncorroborated)`` where
+    ``uncorroborated`` lists ``{position_id, symbol, reason}`` for positions whose
+    executable side could not be priced (``quote_complete`` False, missing
+    implied P&L, or the estimate raised). Those are EXCLUDED from the total (H9)
+    — never substituted with a phantom mark. Never raises.
+    """
+    from packages.quantum.analytics import exit_mark_corroboration as _emc
+    total = 0.0
+    uncorroborated: List[Dict[str, Any]] = []
+    for p in (open_live_positions or []):
+        pid = p.get("id") if isinstance(p, dict) else None
+        sym = p.get("symbol") if isinstance(p, dict) else None
+        try:
+            est = _emc.executable_close_estimate(p, snapshot_fn=snapshot_fn)
+        except Exception as e:
+            uncorroborated.append(
+                {"position_id": pid, "symbol": sym,
+                 "reason": f"estimate_error:{type(e).__name__}"}
+            )
+            continue
+        impl = est.get("achievable_implied_pl")
+        if est.get("quote_complete") and impl is not None:
+            total += float(impl)
+        else:
+            uncorroborated.append(
+                {"position_id": pid, "symbol": sym, "reason": "quote_incomplete"}
+            )
+    return total, uncorroborated
+
+
+def corroborated_daily_pnl(
+    realized_today: float,
+    open_live_positions: Iterable[Dict[str, Any]],
+    snapshot_fn: Optional[Callable] = None,
+) -> Tuple[float, List[Dict[str, Any]]]:
+    """Phantom-safe daily brake P&L = ``realized_today`` (trusted) + Σ executable-
+    corroborated unrealized. Returns ``(daily_pnl, uncorroborated)``. The weekly
+    horizon reuses the same unrealized component with realized-this-week."""
+    unrealized, uncorroborated = corroborated_unrealized(
+        open_live_positions, snapshot_fn=snapshot_fn
+    )
+    return realized_today + unrealized, uncorroborated
+
+
+def get_alpaca_last_equity(user_id: str, supabase: Any = None) -> Optional[float]:
+    """Broker prior-session closing equity — the realized-blind brake's baseline
+    and the CLEAN %-denominator base (``equity_clean = last_equity +
+    daily_brake_pnl``). Using last_equity instead of the live (phantom-marked)
+    equity stops a bad open-position mark from depressing the denominator and
+    inflating the loss % (06-17: −285/1865 = −15.3% vs −15/2136 = −0.7%). None
+    when Alpaca is unavailable or the field is missing/non-positive."""
+    now = time.monotonic()
+    cached = _ALPACA_LAST_EQUITY_CACHE.get(user_id)
+    if cached and (now - cached[0]) < _ALPACA_STATE_TTL_SECONDS:
+        return cached[1]
+    try:
+        from packages.quantum.brokers.alpaca_client import get_alpaca_client
+        alpaca = get_alpaca_client()
+        if not alpaca:
+            return None
+        acct = alpaca.get_account()
+        raw = acct.get("last_equity")
+        if raw is None:
+            logger.warning(
+                "[EQUITY_STATE] get_account() missing 'last_equity' for %s — "
+                "clean-denominator base unavailable; daily/weekly envelope skips "
+                "this cycle (fail-safe, no force-close on an unknown denominator)",
+                user_id[:8],
+            )
+            return None
+        le = float(raw)
+        if le <= 0:
+            return None
+        _ALPACA_LAST_EQUITY_CACHE[user_id] = (now, le)
+        return le
+    except Exception as e:
+        logger.warning(
+            "[EQUITY_STATE] Alpaca last_equity fetch failed for %s: %s",
+            user_id[:8], e,
+        )
+        return None
+
+
+def broker_unrealized_sum(user_id: str, supabase: Any = None) -> Optional[float]:
+    """Σ broker per-position unrealized P&L from Alpaca ``get_positions()``. Used
+    ONLY for the H10 realized reconciliation cross-check — NOT the brake decision
+    (these are the phantom-prone leg-skew marks the executable estimate
+    corrects). None on any failure (the cross-check then simply skips)."""
+    try:
+        from packages.quantum.brokers.alpaca_client import get_alpaca_client
+        alpaca = get_alpaca_client()
+        if not alpaca:
+            return None
+        positions = alpaca.get_positions()
+        total = 0.0
+        for p in (positions or []):
+            upl = (
+                p.get("unrealized_pl")
+                if isinstance(p, dict)
+                else getattr(p, "unrealized_pl", None)
+            )
+            if upl is not None:
+                total += float(upl)
+        return total
+    except Exception as e:
+        logger.warning(
+            "[EQUITY_STATE] broker_unrealized_sum fetch failed for %s: %s",
+            user_id[:8], e,
+        )
+        return None
+
+
+def reconcile_realized(
+    user_id: str,
+    realized_db: Optional[float],
+    supabase: Any = None,
+    threshold: Optional[float] = None,
+) -> Optional[Dict[str, Any]]:
+    """H10 cross-check (FLAG ONLY — never affects the force-close decision):
+    compare broker-implied realized (``equity_delta − Σ broker_unrealized``)
+    against the DB realized. A large divergence means broker/DB sync drift worth
+    a look. Returns a dict (incl. ``divergent``), or None when the DB realized or
+    a broker input is unavailable."""
+    if realized_db is None:
+        return None
+    equity_delta = get_alpaca_daily_pnl(user_id, supabase=supabase)
+    broker_unreal = broker_unrealized_sum(user_id, supabase=supabase)
+    if equity_delta is None or broker_unreal is None:
+        return None
+    broker_implied = equity_delta - broker_unreal
+    diff = abs(broker_implied - float(realized_db))
+    thr = (
+        threshold if threshold is not None
+        else float(os.environ.get("BRAKE_REALIZED_RECONCILE_THRESHOLD", "25"))
+    )
+    return {
+        "divergent": diff > thr,
+        "broker_implied_realized": round(broker_implied, 2),
+        "realized_db": round(float(realized_db), 2),
+        "diff": round(diff, 2),
+        "threshold": thr,
+    }
 
 
 # ── Alpaca-authoritative internals ─────────────────────────────────

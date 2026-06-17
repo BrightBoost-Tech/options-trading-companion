@@ -72,6 +72,16 @@ slots) · **P2** (real but deferred) · **RESEARCH** (open questions) ·
   portfolio_id column that forced every row paper. · done when: the 4
   historical live-as-paper rows (SPY/NFLX/MARA 06-12, QQQ 06-15) are corrected
   (supervised, separate step — operator go).
+- **Phantom-mark-safe brake — extend to the 3 gate consumers** — the v5
+  fix (06-17) made the intraday_risk_monitor daily/weekly FORCE-CLOSE brake fire
+  on realized + executable-corroborated unrealized (not the raw broker equity
+  delta). The other three `tightened_daily_pnl` consumers still feed the raw
+  broker delta: `paper_mark_to_market.py:104`, `paper_autopilot_service.py:236`
+  (circuit breaker), `workflow_orchestrator.py:2844` (midday). These GATE/REDUCE
+  (block a new entry / shrink size), not force-close — lower harm than the
+  06-17 incident, but the same phantom class. · origin 06-17 incident · done
+  when: the three route through `equity_state.corroborated_daily_pnl` (or a
+  shared corroborated feeder) instead of `tightened_daily_pnl`.
 - **signal_weight_history epoch/is_paper guard (DORMANT consumer)** — the
   per-segment multiplier writer (`post_trade_learning._update_segment_calibration`)
   queries `learning_feedback_loops` with NO epoch (`CALIBRATION_EV_EPOCH`) or

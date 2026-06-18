@@ -209,11 +209,107 @@ class PaperAutopilotService:
         try:
             from packages.quantum.risk.risk_envelope import check_all_envelopes, EnvelopeConfig
             cb_positions = self._get_open_positions_for_risk_check(user_id)
-            # v5-A2: fetch equity even on an EMPTY book — realized losses
-            # survive force-closes (06-11: the book can empty mid-session on
-            # a real −8% day and the old `if cb_positions` skip would have
-            # waved re-entries straight through the daily-loss cap).
-            cb_equity = self._estimate_equity(user_id, cb_positions)
+            # v5 phantom-mark-safe entry-halt brake (P2#6 — mirrors the #1071
+            # force-close fix). The breaker fires on realized (DB-authoritative,
+            # trusted, UN-GATED — preserves the v5-A2/06-11 realized protection,
+            # incl. on an EMPTY book) + executable-corroborated unrealized
+            # (#1034), NEVER the raw broker equity delta / phantom-marked live
+            # equity. On 06-17 a phantom broker unrealized of −285 on an
+            # incomplete-leg-quote window read ~−13-15% and would have BLOCKED
+            # the day's single execution shot on a MARA whose executable close
+            # realized −15. Denominator de-phantomed to last_equity + daily_pnl
+            # (the same bad mark also depresses live equity, inflating the %).
+            # Fail-SAFE: scope or realized query unavailable → legacy broker-true
+            # brake (errs protective). NEVER pass realized=0.0 — that silently
+            # drops realized protection.
+            from packages.quantum.services import equity_state
+            _scope_ok = True
+            _live_ids: set = set()
+            try:
+                from packages.quantum.risk.position_scope import (
+                    live_routed_portfolio_ids,
+                )
+                _live_ids = set(live_routed_portfolio_ids(self.client, user_id))
+            except Exception as _scope_err:
+                logger.warning(
+                    f"[CIRCUIT_BREAKER] user={user_id[:8]}: live-routing scope "
+                    f"query failed ({type(_scope_err).__name__}); corroborated "
+                    f"brake falls back to the legacy broker-true brake this run"
+                )
+                _scope_ok = False
+            _day_start = datetime.now(timezone.utc).replace(
+                hour=0, minute=0, second=0, microsecond=0
+            )
+            realized_today = (
+                equity_state.realized_pnl_since(
+                    self.client, user_id, _live_ids, _day_start.isoformat()
+                )
+                if _scope_ok
+                else None
+            )
+            if (not _scope_ok) or realized_today is None:
+                # Fail SAFE: scope or realized query unavailable — legacy
+                # broker-true brake (errs protective).
+                logger.warning(
+                    f"[CIRCUIT_BREAKER] user={user_id[:8]}: corroborated brake "
+                    f"inputs unavailable (scope_ok={_scope_ok}, "
+                    f"realized_today={realized_today}) — legacy broker-true "
+                    f"brake this run"
+                )
+                cb_daily_proxy = sum(
+                    float(p.get("unrealized_pl") or 0) for p in cb_positions
+                )
+                cb_daily_pnl = equity_state.tightened_daily_pnl(
+                    user_id, cb_daily_proxy, supabase=self.client,
+                )
+                cb_equity = self._estimate_equity(user_id, cb_positions)
+            else:
+                # Executable-corroborated unrealized over the OPEN live book;
+                # positions whose executable side can't be priced are EXCLUDED +
+                # flagged (H9), never priced off a phantom broker mark. Excluding
+                # → less negative → less likely to halt (correct: don't halt the
+                # day on a value you can't corroborate; #1048 per-position stops
+                # + the force-close monitor are the real-loss backstop).
+                corroborated_unreal, _uncorroborated = (
+                    equity_state.corroborated_unrealized(cb_positions)
+                )
+                for _u in _uncorroborated:
+                    alert(
+                        _get_admin_supabase(),
+                        alert_type="daily_brake_unrealized_uncorroborated",
+                        severity="warning",
+                        message=(
+                            f"Entry-halt breaker EXCLUDED {_u.get('symbol')} "
+                            f"({str(_u.get('position_id'))[:8]}) unrealized: "
+                            f"executable side not corroborated "
+                            f"({_u.get('reason')}). Realized + the per-position "
+                            f"stop still protect it."
+                        ),
+                        user_id=user_id,
+                        metadata={
+                            "function_name": "execute_top_suggestions",
+                            "position_id": _u.get("position_id"),
+                            "symbol": _u.get("symbol"),
+                            "reason": _u.get("reason"),
+                            "consequence": (
+                                "entry-halt breaker excluded this position's "
+                                "unrealized from the daily brake; realized and "
+                                "the per-position stop still protect it"
+                            ),
+                        },
+                    )
+                cb_daily_pnl = realized_today + corroborated_unreal
+                # Clean %-denominator: last_equity + daily P&L, NOT the phantom-
+                # marked live broker equity (the same bad mark depresses it,
+                # inflating the loss %).
+                _last_equity = equity_state.get_alpaca_last_equity(
+                    user_id, supabase=self.client,
+                )
+                cb_equity = (
+                    (_last_equity + cb_daily_pnl)
+                    if _last_equity is not None
+                    else None
+                )
             if cb_equity is None:
                 # Alpaca unavailable — skip the circuit-breaker check
                 # rather than fabricating a denominator. The autopilot
@@ -226,16 +322,13 @@ class PaperAutopilotService:
                     f"autopilot run. Entry-gate not enforced this cycle."
                 )
             else:
-                # Daily: open-book unrealized sum tightened by broker
-                # equity−last_equity (v5-A2 realized-blind brake; min() so
-                # the gate fires on EITHER signal). Weekly: broker-true via
+                # Daily P&L was computed above (corroborated + phantom-safe,
+                # or the legacy fail-safe). Weekly: broker-true via
                 # get_portfolio_history — previously NOT fed here at all
-                # (defaulted 0.0), so a losing week never gated entries.
-                from packages.quantum.services import equity_state
-                cb_daily_proxy = sum(float(p.get("unrealized_pl") or 0) for p in cb_positions)
-                cb_daily_pnl = equity_state.tightened_daily_pnl(
-                    user_id, cb_daily_proxy, supabase=self.client,
-                )
+                # (defaulted 0.0), so a losing week never gated entries. Weekly
+                # uses portfolio-history equity, not the per-leg last-trade mark
+                # class, so it is left broker-true; the corroborated weekly
+                # horizon is the 15-min monitor's job (#1071).
                 cb_weekly_pnl = equity_state.get_alpaca_weekly_pnl(
                     user_id, supabase=self.client,
                 )

@@ -46,6 +46,22 @@ def _staleness_ttl_enabled() -> bool:
     return raw.strip().lower() not in ("0", "false", "no", "off")
 
 
+def _train_live_only_enabled() -> bool:
+    """CALIBRATION_TRAIN_LIVE_ONLY — default ON. When ON, live-applied
+    calibration trains ONLY on live (is_paper=false) outcomes, so shadow /
+    internal-fill outcomes cannot drive an EV/PoP multiplier applied to live
+    entries (the 2026-06-18 LONG_PUT ×1.5 incident: 2 shadow NFLX trades,
+    incl. a +662 outlier, outvoted the lone under-performing live trade and
+    inverted the live sign). Empty/unset → ON (the empty-string-no-op lesson);
+    only explicit 0/false/no/off reverts to the legacy is_paper-blind set.
+    Narrowing below MIN_CALIBRATION_TRADES → insufficient_data (raw mode, ×1.0)
+    is the designed do-no-harm posture until live volume matures."""
+    raw = os.environ.get("CALIBRATION_TRAIN_LIVE_ONLY", "")
+    if not raw.strip():
+        return True
+    return raw.strip().lower() not in ("0", "false", "no", "off")
+
+
 # Reserved top-level key in the adjustments blob carrying the OVERALL
 # (all-segments) multipliers — the fallback for strategy keys with no
 # segment coverage. Underscore prefix cannot collide with strategy names.
@@ -62,6 +78,12 @@ OVERALL_KEY = "_overall"
 # preserved for lineage. The floor supplements the rolling window_days
 # cutoff via `max(window_cutoff, CORRUPTED_PNL_FLOOR)` so calibration
 # converges on clean data as the floor ages out of the rolling window.
+#
+# ⚠ LOCKSTEP (v3 view): learning_performance_summary_v3 (conviction's source
+# view, #1043) hardcodes this same floor literal in its WHERE GREATEST(...) wall
+# — a Postgres view can't read this env var. If this default changes, update
+# that view via CREATE OR REPLACE in the same change (the migration drift-guard
+# test pins them equal).
 CORRUPTED_PNL_FLOOR = os.environ.get(
     # v5-A3 (2026-06-10): floor raised 04-13 → 04-16. The 04-13..04-16 band
     # contains the duplicate-ingest-era rows (ADBE/AMD ×2 — 76.5% of training
@@ -79,6 +101,12 @@ CORRUPTED_PNL_FLOOR = os.environ.get(
 # with the deploy-time blob reset (an empty adjustments row superseding the
 # floored pre-fix blob), this prevents the double-correction (~0.48×0.5≈0.24)
 # of applying delta-era multipliers to breakeven-era predictions.
+# ⚠ LOCKSTEP (v3 view): learning_performance_summary_v3 (conviction's source
+# view, #1043) hardcodes this same epoch literal in its WHERE GREATEST(...) wall
+# — a Postgres view can't read this env var. If this default changes, update
+# that view via CREATE OR REPLACE in the same change (the migration drift-guard
+# test pins them equal), or conviction trains on a different epoch than
+# calibration.
 CALIBRATION_EV_EPOCH = os.environ.get(
     "CALIBRATION_EV_EPOCH", "2026-06-11T00:00:00+00:00"
 )
@@ -274,7 +302,7 @@ class CalibrationService:
             # pnl_realized is corrupted by the internal-fill reset
             # (2026-04-04) and close-order bug fixes (2026-04-10,
             # 2026-04-13, 2026-04-15). See CLAUDE.md Bugs Fixed.
-            result = (
+            query = (
                 self.client.table("learning_trade_outcomes_v3")
                 .select(
                     "ev_predicted, pop_predicted, pnl_realized, pnl_predicted, "
@@ -283,8 +311,18 @@ class CalibrationService:
                 )
                 .eq("user_id", user_id)
                 .gte("closed_at", effective_cutoff)
-                .execute()
             )
+            # v5 (2026-06-18): when CALIBRATION_TRAIN_LIVE_ONLY is ON (default),
+            # live-applied calibration trains on LIVE outcomes only. Shadow /
+            # internal-fill outcomes must not drive an EV/PoP multiplier applied
+            # to live entries — the 06-18 LONG_PUT ×1.5 incident (2 shadow NFLX,
+            # incl. a +662 outlier, outvoted the lone under-performing live trade
+            # and inverted the live sign). Explicit falsy reverts to is_paper-
+            # blind. Narrowing below MIN_CALIBRATION_TRADES → insufficient_data
+            # (raw mode) is the designed do-no-harm fallback.
+            if _train_live_only_enabled():
+                query = query.eq("is_paper", False)
+            result = query.execute()
             return result.data or []
         except Exception as e:
             logger.error(f"[CALIBRATION] Failed to fetch outcomes: {e}")
@@ -314,18 +352,28 @@ class CalibrationService:
         ]
         ev_rmse = math.sqrt(sum(ev_sq_errors) / n)
 
-        # PoP calibration (predicted probability vs actual win rate)
-        pop_predicted_vals = [
-            float(o.get("pop_predicted") or 0) for o in outcomes
-            if o.get("pop_predicted") is not None
-        ]
+        # PoP calibration (predicted probability vs actual win rate).
+        # BASIS FIX (2026-06-18): measure the realized win rate over the SAME
+        # rows that inform the predicted average — rows with a non-null
+        # pop_predicted. Pre-fix used wins/n (ALL rows) against a predicted
+        # average computed over only non-null-pop rows — a denominator-basis
+        # mismatch. On the 06-18 LONG_PUT segment it read pred 0.6581 (1 non-null
+        # row) vs realized 3/3 (incl. 2 null-pop shadow wins) → -0.34 error.
+        # win_count/loss_count below stay over ALL rows (the overall win stats).
+        pop_rows = [o for o in outcomes if o.get("pop_predicted") is not None]
+        pop_predicted_vals = [float(o.get("pop_predicted") or 0) for o in pop_rows]
         wins = sum(1 for o in outcomes if float(o.get("pnl_realized") or 0) > 0)
-        pop_realized_rate = wins / n
 
         pop_pred_avg = (
             sum(pop_predicted_vals) / len(pop_predicted_vals)
             if pop_predicted_vals
             else None
+        )
+        pop_realized_rate = (
+            sum(1 for o in pop_rows if float(o.get("pnl_realized") or 0) > 0)
+            / len(pop_rows)
+            if pop_rows
+            else 0.0
         )
         pop_cal_error = (
             (pop_pred_avg - pop_realized_rate)

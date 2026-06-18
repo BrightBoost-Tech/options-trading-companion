@@ -1323,6 +1323,21 @@ class IntradayRiskMonitor:
                 exit_price_override=_fresh_mark if _mark_ok else None,
             )
 
+            # CLOSE_QUOTE_VALIDATION (Phase 2): a DEFER means the close was NOT
+            # staged (executable side uncorroborated — leg dark) and the position
+            # is still OPEN. Treat as not-closed: no "Force-closed" critical (the
+            # close gate already emitted close_stage_uncorroborated + any
+            # escalation), no force_close count, and — critically — no symbol
+            # bench (a deferred stop must not cooldown a position that never
+            # closed). The monitor re-evaluates next cycle.
+            if (result or {}).get("routed_to") == "deferred_uncorroborated":
+                logger.warning(
+                    f"[RISK_MONITOR] close DEFERRED (uncorroborated executable "
+                    f"side) for {symbol} ({str(pos_id)[:8]}) reason={reason} — "
+                    f"position held, re-eval next cycle"
+                )
+                return False
+
             self._log_alert(
                 user_id=user_id,
                 alert_type="force_close",

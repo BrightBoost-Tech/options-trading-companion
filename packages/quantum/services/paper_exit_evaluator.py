@@ -645,6 +645,145 @@ def _select_internal_fill_price(
         return float(exit_price_mid), "mid_fallback_error"
 
 
+# ── Close-side stage-time executable-quote validation (CLOSE_QUOTE_VALIDATION,
+#    Phase 2) ──────────────────────────────────────────────────────────────
+# Entry (#1038/#1052) validates each leg is executable at stage time and HARD-
+# REJECTS; closes are intentionally EXEMPT there (being trapped is worse than a
+# bad close mark). This is the close-specific equivalent: corroborate the LIVE
+# close limit on the EXECUTABLE side and DEFER (re-eval next cycle) instead of
+# staging a mark the broker rejects/rests (the 06-15 degenerate-stage class).
+# Internal/shadow fills already price executable at fill (#1017) → NOT gated
+# here. Reuses executable_close_estimate (the #1034 seam) — one shared
+# "executable" definition. Default-ON; CLOSE_QUOTE_VALIDATION_ENABLED=0 reverts
+# to the legacy mark-limit close.
+
+def _close_quote_validation_enabled() -> bool:
+    """CLOSE_QUOTE_VALIDATION_ENABLED — default ON (empty/unset → ON; only an
+    explicit 0/false/no/off reverts to the legacy mark-limit close). Mirrors
+    ENTRY_QUOTE_VALIDATION_ENABLED's polarity."""
+    raw = os.environ.get("CLOSE_QUOTE_VALIDATION_ENABLED", "")
+    if not raw.strip():
+        return True
+    return raw.strip().lower() not in ("0", "false", "no", "off")
+
+
+def _close_stuck_escalate_cycles(is_stop: bool) -> int:
+    """Consecutive uncorroborated-defer cycles before escalating to a critical
+    stuck-can't-exit alert. STOPS escalate faster than TPs (a deferred stop is a
+    needed exit; a deferred TP only forgoes a profit-take). Env-tunable."""
+    if is_stop:
+        try:
+            return int(os.environ.get("CLOSE_STUCK_ESCALATE_STOP_CYCLES", "2"))
+        except ValueError:
+            return 2
+    try:
+        return int(os.environ.get("CLOSE_STUCK_ESCALATE_TP_CYCLES", "4"))
+    except ValueError:
+        return 4
+
+
+def _corroborate_close_stage(position: Dict[str, Any], exit_price_mid: float,
+                             snapshot_fn=None) -> tuple:
+    """Executable corroboration for a LIVE close limit. Returns one of:
+      ("stage_executable", executable_price, quality) — achievable_close priced;
+          stage the live limit at this value (not the optimistic mid).
+      ("defer", reason)   — a leg's executable side is missing/dark (the 06-15
+          class); caller must HOLD the position (do not stage).
+      ("stage_mark", reason) — transient estimate error → fall back to the mark
+          limit (legacy); a flaky quote must NOT strand a needed exit.
+    NEVER raises."""
+    try:
+        from packages.quantum.analytics import exit_mark_corroboration as _emc
+        est = _emc.executable_close_estimate(position, snapshot_fn=snapshot_fn)
+        ach = est.get("achievable_close")
+        if ach is not None:
+            quality = ("executable" if est.get("quote_complete")
+                       else "executable_partial_quote")
+            return ("stage_executable", float(ach), quality)
+        return ("defer", "executable_side_missing")
+    except Exception as e:
+        logger.warning(
+            f"[CLOSE_STAGE] executable corroboration errored "
+            f"(mark-limit fallback, flagged): {e}"
+        )
+        return ("stage_mark", f"estimate_error:{type(e).__name__}")
+
+
+def _handle_close_stage_defer(supabase: Any, position_id: str,
+                              symbol: Optional[str], reason: str,
+                              user_id: Optional[str]) -> Dict[str, Any]:
+    """Emit the per-cycle close_stage_uncorroborated flag, escalate to a critical
+    close_stuck_uncorroborated once this position has deferred >= the (reason-
+    aware) cycle threshold within the re-arm budget window, and return the DEFER
+    result. NEVER raises — a flag/escalation failure must not break the exit
+    loop, and the position simply stays held for the next cycle."""
+    is_stop = "target_profit" not in (reason or "").lower()
+    threshold = _close_stuck_escalate_cycles(is_stop)
+    # Count PRIOR defers (strictly before this cycle) so (prior+1) == this cycle.
+    prior = 0
+    try:
+        since = (
+            datetime.now(timezone.utc)
+            - timedelta(hours=_close_rearm_budget_window_hours())
+        ).isoformat()
+        cnt = supabase.table("risk_alerts").select("id", count="exact") \
+            .eq("alert_type", "close_stage_uncorroborated") \
+            .eq("position_id", position_id) \
+            .gte("created_at", since) \
+            .execute()
+        prior = getattr(cnt, "count", None)
+        if prior is None:
+            prior = len(getattr(cnt, "data", None) or [])
+    except Exception as e:
+        logger.warning(f"[CLOSE_STAGE] defer-count query failed: {e}")
+    # Per-cycle visibility (the close runs ~once/cycle/position → cycle-cadence,
+    # not spam). Loud by design: a held exit must be visible.
+    try:
+        from packages.quantum.observability.alerts import alert as _alert
+        _alert(
+            supabase,
+            alert_type="close_stage_uncorroborated",
+            severity="warning",
+            message=(
+                f"Close DEFERRED for {symbol or position_id}: executable side not "
+                f"corroborated (leg dark/unpriceable) — position HELD, re-eval next "
+                f"cycle (reason={reason})"
+            ),
+            position_id=position_id,
+            symbol=symbol,
+            metadata={
+                "position_id": position_id, "reason": reason, "is_stop": is_stop,
+                "function_name": "_close_position.close_stage_gate",
+            },
+        )
+    except Exception as e:
+        logger.warning(f"[CLOSE_STAGE] defer-flag write failed: {e}")
+    if (prior + 1) >= threshold:
+        _rearm_alert(
+            supabase, "close_stuck_uncorroborated", position_id, symbol, "critical",
+            (
+                f"{symbol or position_id}: automated close uncorroborated for "
+                f">= {threshold} cycle(s) (reason={reason}, is_stop={is_stop}) — "
+                f"exit BLOCKED on dark/unpriceable legs; position HELD and "
+                f"protection degraded. Manual review: confirm the chain is quotable "
+                f"or close manually."
+            ),
+            {
+                "position_id": position_id, "consecutive_defers": prior + 1,
+                "threshold": threshold, "is_stop": is_stop, "reason": reason,
+            },
+        )
+    return {
+        "order_id": None,
+        "processed": 0,
+        "routed_to": "deferred_uncorroborated",
+        "note": (
+            f"Close deferred — {symbol or position_id} executable side not "
+            f"corroborated; position held, re-eval next cycle"
+        ),
+    }
+
+
 def filter_blocking_close_orders(
     rows: List[Dict[str, Any]],
     *,
@@ -1694,6 +1833,55 @@ class PaperExitEvaluator:
         else:
             exit_price = float(position.get("current_mark") or position.get("avg_entry_price") or 0)
         entry_price = float(position.get("avg_entry_price") or 0)
+
+        # ── CLOSE_QUOTE_VALIDATION (Phase 2, default-ON) ──────────────
+        # Corroborate the LIVE close limit on the EXECUTABLE side BEFORE
+        # staging — and BEFORE submit_and_track's resting-order pre-cancel
+        # below — so a DEFER can never strand a naked position (refinement 2:
+        # the only pre-cancel is inside submit_and_track, which a defer never
+        # reaches). Live only: internal/shadow fills already price executable
+        # at fill (#1017), so they are NOT gated here (shadow path unchanged).
+        # Corroborated → stage the live limit at achievable_close (kills the
+        # 06-15 degenerate-stage class, aligns live PRICING to the executable
+        # basis). Dark leg → DEFER (hold + flag + re-eval; escalate if stuck).
+        # Transient estimate error → mark-limit fallback (legacy; never strand
+        # a needed exit on a flaky quote). Harmonizes with the clamp / Stage-2
+        # / #1062 / #1017 — this is the missing STAGE-time live-limit layer.
+        if position_is_alpaca and _close_quote_validation_enabled():
+            _live_submit = os.environ.get("ALPACA_DRY_RUN", "0") != "1"
+            if _live_submit:
+                try:
+                    from packages.quantum.brokers.execution_router import (
+                        should_submit_to_broker,
+                    )
+                    _live_submit = should_submit_to_broker(
+                        position["portfolio_id"], supabase
+                    )
+                except Exception:
+                    _live_submit = True  # fail toward validating the live path
+            if _live_submit:
+                _decision, _cval, *_q = _corroborate_close_stage(position, exit_price)
+                if _decision == "defer":
+                    logger.warning(
+                        f"[CLOSE_STAGE] DEFER live close for "
+                        f"{position.get('symbol')} ({position_id[:8]}): executable "
+                        f"side not corroborated ({_cval}); holding position, "
+                        f"re-eval next cycle (reason={reason})"
+                    )
+                    return _handle_close_stage_defer(
+                        supabase, position_id, position.get("symbol"),
+                        reason, user_id,
+                    )
+                if _decision == "stage_executable":
+                    logger.warning(
+                        f"[CLOSE_STAGE] live close limit repriced to executable "
+                        f"for {position.get('symbol')} ({position_id[:8]}): "
+                        f"mark={exit_price} → executable={round(_cval, 4)} "
+                        f"(quality={_q[0] if _q else '?'})"
+                    )
+                    exit_price = _cval
+                # "stage_mark": transient error → keep the mark limit (legacy),
+                # already warned inside _corroborate_close_stage.
 
         # ── Build close ticket with ALL legs ─────────────────────────
         orig_legs = position.get("legs") or []

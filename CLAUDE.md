@@ -349,7 +349,14 @@ only on monitor/MTM cadence — broker outranks (#1022).
 RTH order-sync q5min + monitor q15min · 11:00 scan → 11:30 executor (**one
 execution shot/day — known volume bottleneck, backlogged P1**) · 11:45 IPO
 watch · 14:45 exits → 15:30 MTM · 16:00–17:00 learning chain. Weekend
-silence is by design.
+silence is by design. **Queue routing** (RQ, via
+`enqueue_job_run(queue_name=…)`): trading-day pipeline + per-cycle + IV-daily →
+`otc` (worker); the 6-job post-close learning chain (learning_ingest_eod ·
+paper_learning_ingest · policy_lab_eval · post_trade_learning · promotion_check
+· daily_progression_eval) + `iv_historical_backfill` → `background`
+(worker-background) — long/secondary work off the trading queue (A5; the
+2026-05-15 starve class). Full map pinned by
+`test_learning_chain_queue_routing.py`.
 
 ## 7. AUDIT LOOP
 

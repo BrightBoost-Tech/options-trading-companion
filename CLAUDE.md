@@ -209,15 +209,42 @@ exercised-status. Verify current flag VALUES on Railway, never here.
   condor resting GTC accepted at the broker, limit 0.81. Specs for the
   unbuilt detectors: `docs/specs/fast_exit_loop.md`,
   `docs/specs/streaming_exits.md`, `docs/specs/resting_tp_orders.md`.
+- **#1071 phantom-mark-safe brake** — the daily/weekly loss brake fires on
+  realized (DB-authoritative, UN-GATED — preserves #1058) + executable-
+  corroborated unrealized (#1034), NEVER the raw broker equity delta (a 06-17
+  phantom unrealized of -285 force-closed a live MARA that executable-closed
+  -15). Fail-SAFE to the legacy broker-true brake when live-scope/realized is
+  unavailable; per-position stops (#1048) unchanged. Measurement correction →
+  **no behavioral kill switch**; `BRAKE_REALIZED_RECONCILE_THRESHOLD`
+  (default 25) tunes only the H10 reconcile cross-check. Seam: MTM / autopilot
+  breaker / midday GATE paths still share the raw phantom (block/reduce, not
+  force-close — P2). Exercised: deployed 06-17 (`b9b1781`), LIVE-UNEXERCISED
+  (awaiting a losing session).
+- **#1072 close-side quote validation** — at a LIVE close stage, reuses
+  #1034's executable estimate: corroborated → stage at achievable_close,
+  dark/uncorroborated → DEFER (hold + flag + escalate; stop 2 cycles / TP 4)
+  BEFORE staging, so a defer never strands a naked position. Flag
+  `CLOSE_QUOTE_VALIDATION_ENABLED` default-ON. Kill: explicit falsy → legacy
+  mark-limit close. Exercised: deployed 06-18 (`5a1c8a7`), LIVE-UNEXERCISED.
+- **#1073 funnel truthful status** — execution stamps
+  `trade_suggestions.status='executed'` at the position-insert seam (A); the
+  morning sweep reconciles prior-day pending (position → executed, none →
+  dismissed) instead of blanket-dismissing (B); idempotent on the
+  position-exists signal. INDEPENDENT of the relearn (calibration never reads
+  status). Flag `FUNNEL_STATUS_TRUTHFUL_ENABLED` default-ON (data-truth, not
+  live-risk). Kill: explicit falsy → legacy 'staged'-stamp + blanket dismiss.
+  Exercised: merged 06-18 (`d1c8d08`), LIVE-UNEXERCISED; 32-row historical
+  backfill pending (separate supervised mutation).
 
 Sanctioned mid-session kill switches, complete list: the explicit-falsy
-flags above (#1038, #1040, #1046, #1048, #1045-TTL, #1052), unset
+flags above (#1038, #1040, #1046, #1048, #1045-TTL, #1052, #1072, #1073), unset
 `RISK_UTILIZATION_GATE_ENABLED` (reverts to the stricter BLOCK),
 `PRICE_CLASS_SPREAD_CUTOFF=0`, unset `EXIT_MARK_SANITY_ENFORCE_ENABLED`
 (reverts to observe-only), unset `GTC_PROFIT_EXIT_ENABLED` (no new resting
 TPs; existing rest until filled/cancelled), and the global trio
 `SCHEDULER_ENABLED` / `CALIBRATION_ENABLED` / `RISK_ENVELOPE_ENFORCE`.
-The #1051 PoP fix and #1017 fill fix deliberately have no switch.
+The #1051 PoP fix, #1017 fill fix, and #1071 brake correction deliberately
+have no switch.
 
 ## 5. RISK FRAME
 

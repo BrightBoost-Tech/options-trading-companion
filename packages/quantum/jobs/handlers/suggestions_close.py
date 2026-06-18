@@ -82,18 +82,34 @@ def run(payload: Dict[str, Any], ctx: Any = None) -> Dict[str, Any]:
 
             for uid in active_users:
                 try:
-                    # 0. Dismiss stale pending suggestions from previous days
+                    # 0. Reconcile stale prior-day pending suggestions to a
+                    #    truthful TERMINAL status (P1#5). Behind
+                    #    FUNNEL_STATUS_TRUTHFUL_ENABLED (default-ON): a position
+                    #    exists for the suggestion -> 'executed', none ->
+                    #    'dismissed'. Flag-off -> legacy blanket dismiss.
                     today_str = datetime.now(timezone.utc).date().isoformat()
                     try:
-                        stale_res = client.table("trade_suggestions") \
-                            .update({"status": "dismissed"}) \
-                            .eq("user_id", uid) \
-                            .eq("status", "pending") \
-                            .lt("cycle_date", today_str) \
-                            .execute()
-                        dismissed = len(stale_res.data or [])
-                        if dismissed > 0:
-                            notes.append(f"Dismissed {dismissed} stale suggestions for {uid[:8]}...")
+                        from packages.quantum.services.suggestion_status import (
+                            funnel_status_truthful_enabled,
+                            reconcile_stale_pending,
+                        )
+                        if funnel_status_truthful_enabled():
+                            rc = reconcile_stale_pending(client, uid, today_str)
+                            if rc["executed"] or rc["dismissed"]:
+                                notes.append(
+                                    f"Reconciled stale suggestions for {uid[:8]}: "
+                                    f"{rc['executed']} executed, {rc['dismissed']} dismissed"
+                                )
+                        else:
+                            stale_res = client.table("trade_suggestions") \
+                                .update({"status": "dismissed"}) \
+                                .eq("user_id", uid) \
+                                .eq("status", "pending") \
+                                .lt("cycle_date", today_str) \
+                                .execute()
+                            dismissed = len(stale_res.data or [])
+                            if dismissed > 0:
+                                notes.append(f"Dismissed {dismissed} stale suggestions for {uid[:8]}...")
                     except Exception as e:
                         notes.append(f"Stale cleanup error for {uid[:8]}: {e}")
 

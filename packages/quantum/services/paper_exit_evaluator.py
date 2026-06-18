@@ -731,9 +731,12 @@ def _handle_close_stage_defer(supabase: Any, position_id: str,
             .eq("position_id", position_id) \
             .gte("created_at", since) \
             .execute()
-        prior = getattr(cnt, "count", None)
-        if prior is None:
-            prior = len(getattr(cnt, "data", None) or [])
+        _cnt = getattr(cnt, "count", None)
+        if isinstance(_cnt, int):
+            prior = _cnt
+        else:
+            _data = getattr(cnt, "data", None)
+            prior = len(_data) if isinstance(_data, list) else 0
     except Exception as e:
         logger.warning(f"[CLOSE_STAGE] defer-count query failed: {e}")
     # Per-cycle visibility (the close runs ~once/cycle/position → cycle-cadence,

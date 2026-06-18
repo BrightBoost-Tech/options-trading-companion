@@ -18,6 +18,7 @@ from packages.quantum.services.close_helper import (
     close_position_shared,
     PositionAlreadyClosed,
 )
+from packages.quantum.services.suggestion_status import stamp_executed
 
 from packages.quantum.security import get_current_user
 from packages.quantum.models import TradeTicket, OptionLeg
@@ -1838,6 +1839,10 @@ def _repair_filled_order_commit(supabase, analytics, user_id, order, portfolio) 
                 result["position_id"] = new_pos_id
                 # Update order with position_id
                 supabase.table("paper_orders").update({"position_id": new_pos_id}).eq("id", order_id).execute()
+                # Funnel truth (P1#5): a real position now exists for this
+                # suggestion -> stamp it 'executed' (initial-fill insert only;
+                # idempotent, flag-gated). See services/suggestion_status.py
+                stamp_executed(supabase, order.get("suggestion_id"))
 
         # 2. Insert ledger entry only if one doesn't exist for this order_id
         existing_ledger = supabase.table("paper_ledger").select("id").eq("order_id", order_id).execute()
@@ -2287,6 +2292,9 @@ def _commit_fill(supabase, analytics, user_id, order, fill_res, quote, portfolio
             if new_pos.data:
                 new_pos_id = new_pos.data[0]["id"]
                 supabase.table("paper_orders").update({"position_id": new_pos_id}).eq("id", order["id"]).execute()
+                # Funnel truth (P1#5): stamp the suggestion 'executed' on the
+                # initial position insert (idempotent, flag-gated).
+                stamp_executed(supabase, order.get("suggestion_id"))
 
     except Exception as pos_err:
         # Position creation/update failed — roll back order to 'working' so it can be retried

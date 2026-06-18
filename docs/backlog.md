@@ -14,39 +14,64 @@ slots) · **P2** (real but deferred) · **RESEARCH** (open questions) ·
 ## GATED — pre-approved/known, do not re-find (operator owns the go)
 
 - **N1 realized-blind daily brake** (#1058) — broker `equity−last_equity`
-  tightens all four envelope feeders. Wrapper omission fixed 06-12
-  (`d68029c`). · origin 06-11 · done when: operator confirms live behavior
-  over a losing session; reopen only on a NEW brake defect, not to re-derive.
+  tightens all four envelope feeders; phantom-mark-safe rebuild #1071 (06-17)
+  fires on realized + executable-corroborated unrealized, not the raw
+  phantom-mark delta. **DEPLOYED, LIVE-UNEXERCISED** — verified origin/main
+  (`b9b1781`), both workers on `5a1c8a7`. · origin 06-11 · gate: confirm over
+  a losing session (first real run next RTH); reopen only on a NEW brake
+  defect, not to re-derive.
 - **N2 ops-health alert delivery** (#1059) — dual-channel to risk_alerts,
   critical-severity fix, data_stale market-hours gate. · origin 06-11 ·
   done when: operator confirms delivery cadence; do not re-find the delivery
   path.
+- **Close-side stage-time quote validation** (#1072) — the close path reuses
+  #1034's executable estimate: corroborated → stage at achievable_close,
+  uncorroborated/dark → DEFER (hold + flag + escalate; stops faster than TPs),
+  returning before staging so a defer never strands a naked position.
+  `CLOSE_QUOTE_VALIDATION_ENABLED` default-ON (`paper_exit_evaluator.py:660`).
+  **DEPLOYED, LIVE-UNEXERCISED** — verified origin/main (`5a1c8a7`), both
+  workers. · origin pre-0610 (P1) · gate: first live close confirming
+  reprice-to-achievable / defer-flag-escalate behavior.
+- **Funnel status transitions** (#1073) — execution never stamped
+  `trade_suggestions.status`, so executed suggestions stayed `pending` and the
+  sweep relabeled them `dismissed`. Two layers behind
+  `FUNNEL_STATUS_TRUTHFUL_ENABLED` (default-ON): A stamps `executed` at the
+  position-insert seam, B reconciles prior-day pending at the sweep
+  (position→executed, none→dismissed). INDEPENDENT of the relearn (calibration
+  never reads status). **MERGED #1073 (`d1c8d08`, 06-18), deployed default-ON,
+  LIVE-UNEXERCISED** — gate: first live exercise (Layer A at the next fill;
+  Layer B at the 13:00Z sweep). · origin §8 · separate pending: supervised
+  backfill of the 32 historical `dismissed`-with-position rows
+  (dry-run-then-go, not shipped).
 
 ## P1 — next build slots
 
-- **Close-side quote check** — entry has #1038/#1052; the CLOSE path has no
-  equivalent stage-time executable-quote validation independent of #1034
-  observe. · origin pre-0610 · done when: a close stages only on a
-  corroborated executable price or rejects loudly.
-- **EXIT_EVAL_DEBUG honest print** — the debug line prints flat defaults
-  while decisions are cohort-aware/time-scaled; manufactured one phantom
-  incident. · origin §8 · done when: the print computes through the same
-  cohort/time functions as the decision, or is removed.
-- **A5 queue routing** — confirm `otc` vs `background` queue assignment per
-  job; a misrouted long job can starve the q5min/q15min cadence. · origin
-  06-13 audit A5 · done when: each job's queue is asserted in a test +
-  documented in §6.
-- **Executor cadence** — one execution shot/day (11:30 CT) is the known
-  volume bottleneck; the funnel evaluates ~70 symbols/day but stages ≤1×. ·
-  origin pre-0610 · done when: a second sanctioned execution window or
-  event-trigger lands (NOT a loosening of gates).
-- **Funnel status transitions** — suggestion `status` never reflects
-  execution (morning sweep relabels all `dismissed`); `blocked_reason`
-  closed the rejection half only. · origin §8 · done when: a staged/executed
-  suggestion carries a truthful terminal status.
-
+- **A5 queue routing — DIAGNOSED; re-route SPEC'd + GATED** — latent mis-route:
+  the 6-job post-close learning/analytics chain (learning_ingest_eod,
+  paper_learning_ingest, policy_lab_eval, post_trade_learning, promotion_check,
+  daily_progression_eval) runs on `otc`; should be `background` (same starve
+  class as 2026-05-15, but post-close so not yet biting). Existing
+  `test_background_queue_routing.py` covers only the IV jobs, not the chain.
+  Re-route + comprehensive scheduler→queue test + §6 doc are SPEC'd
+  (worker-class `SimpleWorker` folded in). · origin 06-13 audit A5 (diagnosed
+  06-17) · GATED on (a) relearn proving clean [pending] + (b) worker-background
+  provisioning [DONE 06-18 — GO] + operator build-go · done when: the 6 route
+  to background, the full map is test-pinned, and §6 documents it.
+- **Executor cadence — HELD (anti-list: do NOT add capacity yet)** — one
+  execution shot/day (11:30 CT) is the known volume bottleneck, but the
+  one-shot cadence is PROTECTIVE while calibration is unproven — it's the
+  cadence half of the equity/EV+cadence constraint and that premise isn't met
+  (relearn not yet fired clean). · origin pre-0610 · trigger to build: relearn
+  fired + N post-relearn clean closes + predicted-vs-realized EV tracking
+  positive + #1071/#1072 have a clean live exercise → then add ONE window
+  incrementally + observe (NOT a gate loosening).
 ## P2 — real but deferred
 
+- **REGIME_V4_ENABLED env drift** — `worker`=`0` vs `worker-background`=`true`
+  on the same image; a future regime-touching job routed to background would
+  silently diverge from otc behavior. · origin 06-18 provisioning check ·
+  done when: both services carry the same value AND the correct value is
+  decided. NOT part of the queue re-route — do not bundle.
 - **v3 view Gates A/B** — `learning_performance_summary_v3` referenced, never
   shipped; conviction runs DEGRADED-legacy every recycle (#1043). · origin
   pre-0610 · done when: the view ships and the DEGRADED line stops.
@@ -64,14 +89,6 @@ slots) · **P2** (real but deferred) · **RESEARCH** (open questions) ·
   73 shadow-induced ghost alerts this week bury a real desync. · origin 06-13
   audit A2 · done when: the sweep scopes to live_routed or tags shadow ghosts
   distinctly (H10 integrity).
-- **is_paper live/shadow discriminator** — every learning row this week
-  tagged `is_paper=true` incl. live SPY/MARA/NFLX closes; the routing
-  resolver isn't distinguishing live broker fills in learning rows. · origin
-  06-13 audit A3 · **FIX LANDED (Phase 1):** ingest now derives is_paper from
-  `order.execution_mode` (`_resolve_is_paper`), immune to the missing
-  portfolio_id column that forced every row paper. · done when: the 4
-  historical live-as-paper rows (SPY/NFLX/MARA 06-12, QQQ 06-15) are corrected
-  (supervised, separate step — operator go).
 - **Phantom-mark-safe brake — extend to the 3 gate consumers** — the v5
   fix (06-17) made the intraday_risk_monitor daily/weekly FORCE-CLOSE brake fire
   on realized + executable-corroborated unrealized (not the raw broker equity
@@ -127,18 +144,18 @@ slots) · **P2** (real but deferred) · **RESEARCH** (open questions) ·
   OBVIATED by the 06-15 structural clamp (impossible marks can't reach the
   writer now). · origin 06-15 (Phase B commit-4 deferral) · done when: the
   reconcile path backfills realized_loss from the fill, if ever worth it.
-- **Default-vs-cohort stop divergence (decision-path candidates, 06-15 STEP-4
-  audit — operator decision, NOT auto-fixed)** — two places use the 0.50/0.35
-  defaults in a DECISION path rather than the cohort value: (a)
+- **config.py fail-open-looser stop (decision-path, 06-15 STEP-4)** —
   `policy_lab/config.py` DEFAULT_CONFIGS hardcode looser stops (≈0.40/0.50/
   0.65) than the live DB cohorts (0.15/0.20/0.30), so a cohort-load failure
-  fails to a 2–3× LOOSER stop — intended fail-safe (looser, never wrong) per
-  monitor doctrine, but the divergence is wide; (b)
-  `agents/agents/exit_plan_agent.py:43,50` hardcodes `stop_loss_pct=0.50`,
-  wired live via `workflow_orchestrator.py:3142` ("ExitPlanAgent applied") —
-  verify whether its constraints actually GATE a live exit or are advisory
-  metadata. · origin 06-15 · decide: align config defaults to live DB and/or
-  cohort-resolve the agent, or confirm both are intentionally inert.
+  fails to a 2–3× LOOSER stop — make it fail-CLOSED (live-reachable on a
+  cohort-load failure). · origin 06-15 · **(b) RESOLVED 06-18:**
+  `agents/agents/exit_plan_agent.py:43,50` `stop_loss_pct=0.50` confirmed
+  ADVISORY — it only builds candidate metadata (`agent_signals.exit_plan`,
+  scored + lineage) in the midday-scan path
+  (`services/workflow_orchestrator.py:3140-3186`); it does NOT gate the
+  intraday_risk_monitor force-close (cohort conditions drive that). · **(a)
+  open** · done when: config defaults fail-CLOSED — bundle with the
+  ghost-sweep shadow-scoping fix as the higher-value risk pair.
 
 ## RESEARCH — open questions, no committed build
 
@@ -161,6 +178,19 @@ slots) · **P2** (real but deferred) · **RESEARCH** (open questions) ·
 
 ## RESOLVED — DO NOT REINVESTIGATE (cite, never re-derive)
 
+- **EXIT_EVAL_DEBUG honest print** — DONE (#1067, squash `ad8ce0f`, in
+  origin/main; merged ~06-15, operator-confirmed live 06-16). The debug line
+  reads the cohort-built `pct` keys from `conditions`
+  (`paper_exit_evaluator.py:945-947`), not `_DEFAULT_*` — it prints the
+  threshold the decision computes through, retiring the §8 known-liar. (Branch
+  commit `2dac872` is NOT an ancestor of main; content landed via the squash.)
+- **is_paper live/shadow discriminator** — COMPLETE (#1069, `efb9a3a`,
+  origin/main + supervised row corrections, 06-17). Ingest derives is_paper
+  from `order.execution_mode` (`_resolve_is_paper`). Verified: the 4 historical
+  live-as-paper rows are now `is_paper=false` (SPY a5393e2b, NFLX 7f604f7a,
+  MARA bc399a4f, QQQ 6798e58f — joined via suggestion_id); `da446325`
+  `learning_ingested=true`; the 3 remaining post-epoch `is_paper=true` rows are
+  genuine shadow/paper.
 - **PDT** — retired FINRA + Alpaca 2026-06-04; daytrade fields are
   placeholders; never flip `PDT_PROTECTION_ENABLED`.
 - **Historical NBBO** — no historical option-quote endpoint from local

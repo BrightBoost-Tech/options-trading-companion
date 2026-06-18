@@ -21,6 +21,7 @@ fabricated/third number). Part-B companion: _refresh_marks persists the
 fresh marks (fail-soft) so DB current_mark is 15-min fresh for everyone.
 """
 
+import contextlib
 import importlib
 import math
 import os
@@ -124,9 +125,17 @@ def _close_position_supabase(position):
     return sb
 
 
-def _run_close(position, exit_price_override=...):
-    """Drive _close_position with all broker seams patched; return the
-    staged ticket."""
+def _run_close(position, exit_price_override=..., *, gate="0",
+               executable_estimate=None):
+    """Drive _close_position with all broker seams patched; return
+    (staged ticket | None, result).
+
+    CLOSE_QUOTE_VALIDATION defaults OFF here so the TestClosePositionOverride
+    cases pin the #1022 fresh-mark→limit plumbing IN ISOLATION (the gate would
+    otherwise need live quotes this unit test can't supply). The default-ON
+    executable-repricing / dark-leg-defer gate is exercised by the gate="1"
+    cases below (with executable_estimate mocked) and by
+    test_close_stage_quote_validation.py."""
     staged = {}
 
     def capture_stage(supabase, analytics, user_id, ticket, portfolio_id,
@@ -142,21 +151,33 @@ def _run_close(position, exit_price_override=...):
     if exit_price_override is not ...:
         kwargs["exit_price_override"] = exit_price_override
 
-    with patch("packages.quantum.paper_endpoints._stage_order_internal",
-               side_effect=capture_stage), \
-         patch("packages.quantum.paper_endpoints.get_analytics_service",
-               return_value=MagicMock()), \
-         patch("packages.quantum.brokers.execution_router.should_submit_to_broker",
-               return_value=True), \
-         patch("packages.quantum.brokers.alpaca_order_handler.submit_and_track",
-               return_value={}), \
-         patch("packages.quantum.brokers.alpaca_client.get_alpaca_client",
-               return_value=MagicMock()):
+    cms = [
+        patch("packages.quantum.paper_endpoints._stage_order_internal",
+              side_effect=capture_stage),
+        patch("packages.quantum.paper_endpoints.get_analytics_service",
+              return_value=MagicMock()),
+        patch("packages.quantum.brokers.execution_router.should_submit_to_broker",
+              return_value=True),
+        patch("packages.quantum.brokers.alpaca_order_handler.submit_and_track",
+              return_value={}),
+        patch("packages.quantum.brokers.alpaca_client.get_alpaca_client",
+              return_value=MagicMock()),
+        patch.dict(os.environ, {"CLOSE_QUOTE_VALIDATION_ENABLED": gate}, clear=False),
+    ]
+    if executable_estimate is not None:
+        cms.append(patch(
+            "packages.quantum.analytics.exit_mark_corroboration."
+            "executable_close_estimate",
+            return_value=executable_estimate,
+        ))
+    with contextlib.ExitStack() as stack:
+        for cm in cms:
+            stack.enter_context(cm)
         result = evaluator._close_position(
             user_id=USER_ID, position_id=POS_ID, reason="risk_envelope:test",
             **kwargs,
         )
-    return staged["ticket"], result
+    return staged.get("ticket"), result
 
 
 class TestClosePositionOverride:
@@ -200,6 +221,37 @@ class TestClosePositionOverride:
         ticket, _ = _run_close(_position(), exit_price_override=FRESH_PROFIT_MARK)
         assert ticket.is_credit_close is True
         assert ticket.time_in_force == "day"  # closes still DAY (#1021 untouched)
+
+    # ── Phase 2 default-ON gate (CLOSE_QUOTE_VALIDATION) end-to-end ──────────
+    def test_live_gate_on_reprices_to_executable(self):
+        """Default-ON: a corroborated LIVE close stages at the EXECUTABLE
+        achievable_close (2.30), NOT the raw override mark (2.40) — the Phase-2
+        live-pricing change, end-to-end through the real _close_position."""
+        ticket, _ = _run_close(
+            _position(current_mark=STALE_DB_MARK),
+            exit_price_override=FRESH_LOSS_MARK,  # 2.40 decision mark...
+            gate="1",
+            executable_estimate={"achievable_close": 2.30, "quote_complete": True,
+                                 "achievable_implied_pl": None, "legs_quotes": {}},
+        )
+        assert ticket is not None
+        assert ticket.limit_price == pytest.approx(2.30)            # executable
+        assert ticket.limit_price != pytest.approx(FRESH_LOSS_MARK)  # not the mark
+
+    def test_live_gate_on_dark_leg_defers_not_staged(self):
+        """Default-ON: a dark leg (achievable_close None) DEFERS — nothing is
+        staged (so submit_and_track's pre-cancel is never reached → no naked
+        position), and the result is deferred_uncorroborated (the 06-15 class,
+        now caught at staging)."""
+        ticket, result = _run_close(
+            _position(),
+            exit_price_override=FRESH_LOSS_MARK,
+            gate="1",
+            executable_estimate={"achievable_close": None, "quote_complete": False,
+                                 "achievable_implied_pl": None, "legs_quotes": {}},
+        )
+        assert ticket is None  # never staged
+        assert result.get("routed_to") == "deferred_uncorroborated"
 
 
 # ── The monitor seam: _execute_force_close passes the guarded fresh mark ────

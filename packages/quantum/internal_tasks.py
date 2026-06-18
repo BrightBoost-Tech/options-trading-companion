@@ -87,6 +87,7 @@ async def post_trade_learning_task(
         job_name="post_trade_learning",
         idempotency_key=f"post_trade_learning-{today}",
         payload=payload,
+        queue_name=BACKGROUND_QUEUE,  # A5: learning chain -> background (off otc)
     )
 
 
@@ -128,6 +129,7 @@ async def daily_progression_eval_task(
             "trigger_ts": datetime.now().isoformat(),
             **({"force_rerun": True} if force_rerun else {}),
         },
+        queue_name=BACKGROUND_QUEUE,  # A5: learning chain -> background (off otc)
         force_rerun=force_rerun,
     )
 
@@ -174,6 +176,7 @@ async def promotion_check_task(
             "app_version": APP_VERSION,
             "trigger_ts": datetime.now().isoformat(),
         },
+        queue_name=BACKGROUND_QUEUE,  # A5: learning chain -> background (off otc)
     )
 
 

@@ -9,7 +9,7 @@ from datetime import datetime, timedelta, timezone
 logger = logging.getLogger(__name__)
 
 from packages.quantum.observability.canonical import canonical_json_bytes
-from packages.quantum.jobs.rq_enqueue import enqueue_idempotent
+from packages.quantum.jobs.rq_enqueue import enqueue_idempotent, BACKGROUND_QUEUE
 from packages.quantum.jobs.job_runs import JobRunStore
 from packages.quantum.security.task_signing_v4 import verify_task_signature, TaskSignatureResult
 from packages.quantum.policies.go_live_policy import evaluate_go_live_gate
@@ -599,6 +599,7 @@ async def task_learning_ingest(
         job_name=job_name,
         idempotency_key=today,
         payload=job_payload,
+        queue_name=BACKGROUND_QUEUE,  # A5: learning chain -> background (off otc)
         force_rerun=payload.force_rerun,
     )
 
@@ -644,6 +645,7 @@ async def task_policy_lab_eval(
         job_name="policy_lab_eval",
         idempotency_key=today,
         payload=job_payload,
+        queue_name=BACKGROUND_QUEUE,  # A5: learning chain -> background (off otc)
         force_rerun=payload.force_rerun,
     )
 
@@ -687,6 +689,7 @@ async def task_paper_learning_ingest(
         job_name=job_name,
         idempotency_key=idempotency_key,
         payload=job_payload,
+        queue_name=BACKGROUND_QUEUE,  # A5: learning chain -> background (off otc)
         force_rerun=payload.force_rerun,
     )
 

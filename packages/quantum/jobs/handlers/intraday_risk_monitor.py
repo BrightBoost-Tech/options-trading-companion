@@ -354,10 +354,25 @@ class IntradayRiskMonitor:
             # 0 is benign: 0 / equity = 0, no weekly breach. Daily still runs.
             weekly_pnl = 0.0
 
+        # Per-position exit-trigger corroboration (#1035/#1036 triggers 2+3):
+        # the per-symbol loss force-close (loss_per_symbol) and the cohort stop
+        # decide on the EXECUTABLE-corroborated mark, not the raw/mid
+        # unrealized_pl that on an incomplete-leg-quote window is a leg-skew
+        # phantom (06-17 MARA). Reuses THIS cycle's already-fetched leg quotes
+        # (the shared 60s snapshot cache _refresh_marks populated — no extra
+        # fetch). Per-position FAIL-SAFE: uncorroborable → raw mark, fire-if-past
+        # (NEVER a suppressor), exactly as #1071/#1079. _mark_unpriceable
+        # positions keep the existing #1035 skip (check_loss_envelopes + the
+        # cohort guards read the preserved flag). live_positions corroborated
+        # separately so the scope-failed fallback (live_positions = positions)
+        # is preserved.
+        _corr_positions = self._corroborate_exit_marks(positions)
+        _corr_live_positions = self._corroborate_exit_marks(live_positions)
+
         # 4. Run envelope check (LIVE book only — see 2b)
         config = EnvelopeConfig.from_env()
         result = check_all_envelopes(
-            positions=live_positions,
+            positions=_corr_live_positions,
             equity=equity,
             daily_pnl=daily_pnl,
             weekly_pnl=weekly_pnl,
@@ -376,7 +391,7 @@ class IntradayRiskMonitor:
         #     between the scheduled 8:15 AM / 3:00 PM exit evaluations.
         #     Runs over the FULL managed set (not just live) so shadow cohorts
         #     keep their own intraday exits (2b).
-        exit_triggered = self._collect_intraday_exit_triggers(positions, user_id)
+        exit_triggered = self._collect_intraday_exit_triggers(_corr_positions, user_id)
 
         # 5. Process violations
         force_closes_submitted = 0
@@ -886,6 +901,39 @@ class IntradayRiskMonitor:
             )
             n += 1
         return n
+
+    def _corroborate_exit_marks(self, positions: List[Dict]) -> List[Dict]:
+        """Return ``positions`` with ``unrealized_pl`` replaced by the executable-
+        corroborated decision P&L (#1035/#1036) for the per-position exit triggers
+        — the per-symbol loss force-close (``loss_per_symbol``) and the cohort
+        stop — so they fire on the position's TRUE value, not a raw/mid phantom.
+
+        Reuses THIS cycle's leg quotes: ``corroborated_exit_upl`` reads the shared
+        60s snapshot cache that ``_refresh_marks`` already populated this pass, so
+        there is NO extra fetch and no added cadence latency. Per-position
+        FAIL-SAFE: an uncorroborable position keeps its RAW mark (fire-if-past),
+        never suppressed. Non-mutating (``{**p}``); all other fields (greeks,
+        sector, ``_mark_unpriceable``, ``portfolio_id``) are preserved unchanged,
+        so the existing envelope/cohort guards (incl. the #1035 unpriceable skip)
+        and the greeks/concentration/stress checks behave exactly as before. Each
+        raw-fallback is logged so the fallback is never silent."""
+        if not positions:
+            return positions
+        from packages.quantum.analytics import exit_mark_corroboration as _emc
+        out: List[Dict] = []
+        for p in positions:
+            # snapshot_fn=None → default truth layer → the shared 60s cache this
+            # cycle's _refresh_marks already filled (cache hit, no fetch).
+            upl, basis = _emc.corroborated_exit_upl(p)
+            if basis != "corroborated":
+                logger.info(
+                    "[EXIT_CORROBORATE] monitor %s (%s): raw-fallback (%s) — "
+                    "loss_per_symbol/cohort-stop on the raw mark upl=%s, "
+                    "fire-if-past (never suppressed)",
+                    p.get("symbol"), str(p.get("id"))[:8], basis, upl,
+                )
+            out.append({**p, "unrealized_pl": upl})
+        return out
 
     def _collect_intraday_exit_triggers(self, positions: List[Dict], user_id: str) -> List:
         """Collect position-level intraday exit triggers as (position, reason) pairs.

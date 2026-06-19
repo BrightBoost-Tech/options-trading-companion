@@ -182,6 +182,13 @@ class CalibrationService:
         """
         outcomes = self._fetch_outcomes(user_id, window_days)
 
+        if outcomes is None:
+            # Fetch FAILED (not a legit-empty result) — surface status=error so
+            # calibration_update does NOT clear the served blob to raw on a
+            # transient query failure (#1076 point 3: last-good preserved).
+            return {"status": "error", "reason": "fetch_failed",
+                    "window_days": window_days}
+
         if len(outcomes) < MIN_CALIBRATION_TRADES:
             return {
                 "status": "insufficient_data",
@@ -273,7 +280,7 @@ class CalibrationService:
 
     def _fetch_outcomes(
         self, user_id: str, window_days: int
-    ) -> List[Dict[str, Any]]:
+    ) -> Optional[List[Dict[str, Any]]]:
         """Fetch predicted vs realized from learning_trade_outcomes_v3 view.
 
         Applies two floors:
@@ -325,8 +332,13 @@ class CalibrationService:
             result = query.execute()
             return result.data or []
         except Exception as e:
+            # Return None (NOT []) so the caller distinguishes a query FAILURE
+            # from a legitimately-empty result: compute_calibration_adjustments
+            # maps None → status=error and the raw-mode blob-clear (#1076) does
+            # NOT fire on a transient fetch error (point 3 — last-good preserved).
+            # A real empty result still returns [] → insufficient_data.
             logger.error(f"[CALIBRATION] Failed to fetch outcomes: {e}")
-            return []
+            return None
 
     # ── Metrics computation ─────────────────────────────────────────
 

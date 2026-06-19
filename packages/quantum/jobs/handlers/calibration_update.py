@@ -186,6 +186,30 @@ def run(payload: Dict[str, Any], ctx: Any = None) -> Dict[str, Any]:
                             logger.warning(
                                 "[CALIBRATION] stale-alert write failed: %s", alert_err
                             )
+                    # Raw-mode reset (#1076): on insufficient_data ONLY, WRITE an
+                    # empty blob so the served row reflects raw mode.
+                    # get_calibration_adjustments serves the LATEST row, so
+                    # without this the prior (possibly contaminated) blob keeps
+                    # being applied — the 06-18 ×1.5-still-served bug. NOT on
+                    # status=error (a transient fetch failure surfaces as error):
+                    # last-good is left intact (point 3). apply_calibration on an
+                    # empty blob already falls through to ×1.0.
+                    if result.get("status") == "insufficient_data":
+                        try:
+                            client.table("calibration_adjustments").insert({
+                                "user_id": uid,
+                                "adjustments": {},
+                                "total_outcomes": int(result.get("sample_size") or 0),
+                                "computed_at": datetime.now(timezone.utc).isoformat(),
+                            }).execute()
+                            detail["raw_mode_reset_written"] = True
+                        except Exception as reset_err:
+                            logger.warning(
+                                "[CALIBRATION] raw-mode reset write failed for "
+                                "%s: %s", uid[:8], reset_err,
+                            )
+                            detail["raw_mode_reset_written"] = False
+                            detail["reset_error"] = str(reset_err)[:200]
                     user_details.append(detail)
                     continue
 

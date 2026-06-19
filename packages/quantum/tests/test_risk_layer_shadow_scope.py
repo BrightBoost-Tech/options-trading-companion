@@ -145,9 +145,16 @@ class TestConsumerConsistencySourceGuard(unittest.TestCase):
     def test_intraday_scopes_envelope_to_live_keeps_exits_full(self):
         src = self._src("jobs/handlers/intraday_risk_monitor.py")
         self.assertIn("live_routed_portfolio_ids", src)
-        # envelope runs over live_positions; per-position exits over the full set
-        self.assertIn("positions=live_positions", src)
-        self.assertIn("_collect_intraday_exit_triggers(positions", src)
+        # #1035/#1036: the envelope + per-position exits now decide on the
+        # executable-corroborated mark, but the live/full SCOPE split is
+        # UNCHANGED — the envelope runs over the live subset, exits over the full
+        # set. Pin that the corroborated sets derive from the right scope.
+        self.assertIn(
+            "_corr_live_positions = self._corroborate_exit_marks(live_positions)", src)
+        self.assertIn("positions=_corr_live_positions", src)
+        self.assertIn(
+            "_corr_positions = self._corroborate_exit_marks(positions)", src)
+        self.assertIn("_collect_intraday_exit_triggers(_corr_positions", src)
 
     def test_workflow_midday_scopes_live(self):
         src = self._src("services/workflow_orchestrator.py")

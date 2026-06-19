@@ -56,7 +56,7 @@ exists so the next one is never staged.
 
 import logging
 import os
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from packages.quantum.risk.mark_math import compute_current_value, finalize_mark
 
@@ -335,6 +335,42 @@ def executable_close_estimate(
         "quote_complete": v["quote_complete"],
         "legs_quotes": v["legs_quotes"],
     }
+
+
+def corroborated_exit_upl(
+    position_like: Dict[str, Any], snapshot_fn: Optional[Callable] = None
+) -> Tuple[float, str]:
+    """Per-position exit-trigger decision P&L (#1035/#1036).
+
+    PRIMARY: the EXECUTABLE-corroborated unrealized P&L (long→bid, short→ask)
+    via ``executable_close_estimate`` — the position's TRUE achievable value,
+    not the raw persisted/mid ``unrealized_pl`` that on an incomplete-leg-quote
+    window is a leg-skew phantom (06-17 MARA: raw −285 vs executable −15).
+
+    FALLBACK (NEVER a suppressor): when the executable side can't be priced
+    (incomplete/dark quote, or a fetch error), return the RAW ``unrealized_pl``
+    so the stop/TP keeps its current fire-if-past behavior — exactly as #1071
+    fell back to the legacy daily-pnl basis, not to 0.0. The worst case is
+    today's stop (it FIRES), never a suppressed stop. Measurement-correction
+    only; this NEVER raises.
+
+    Returns ``(decision_upl, basis)`` where basis ∈ {``"corroborated"``,
+    ``"raw_fallback"``, ``"raw_fallback_error"``}.
+    """
+    try:
+        raw = float(position_like.get("unrealized_pl") or 0.0)
+    except (TypeError, ValueError):
+        raw = 0.0
+    try:
+        est = executable_close_estimate(position_like, snapshot_fn=snapshot_fn)
+        impl = est.get("achievable_implied_pl")
+        if est.get("quote_complete") and impl is not None:
+            return float(impl), "corroborated"
+        # Executable side incomplete/dark → can't corroborate → raw, fire-if-past.
+        return raw, "raw_fallback"
+    except Exception:
+        # Quote fetch / math error → raw, fire-if-past. Never suppress a stop.
+        return raw, "raw_fallback_error"
 
 
 def observe_exit_mark(

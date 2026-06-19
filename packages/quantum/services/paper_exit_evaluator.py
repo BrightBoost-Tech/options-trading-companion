@@ -1063,6 +1063,14 @@ class PaperExitEvaluator:
 
         # 2. Get enriched open positions
         positions = self._get_open_positions(user_id)
+        # Per-position exit-trigger corroboration (#1035/#1036): evaluate stop/TP
+        # against the EXECUTABLE-corroborated mark (long→bid, short→ask), not the
+        # raw persisted `unrealized_pl`, which on an incomplete-leg-quote window
+        # is a leg-skew phantom (06-17 MARA: raw −285 vs executable −15). Fail-
+        # SAFE: a position whose executable side can't be priced keeps its RAW
+        # mark + current fire-if-past behavior (NEVER a suppressor; worst case =
+        # today's stop), exactly as #1071's brake fell back to the legacy basis.
+        positions = self._corroborate_positions_for_exit(positions)
         logger.info(
             f"[EXIT_EVAL_DEBUG] fetched {len(positions)} open positions for user={user_id}"
         )
@@ -1436,6 +1444,43 @@ class PaperExitEvaluator:
             logger.info(f"[SHADOW_EXIT] logged {len(rows)} shadow exit decision row(s)")
         except Exception as e:
             logger.warning(f"[SHADOW_EXIT] persist failed (non-fatal): {e}")
+
+    def _corroborate_positions_for_exit(
+        self, positions: List[Dict[str, Any]]
+    ) -> List[Dict[str, Any]]:
+        """Return ``positions`` with ``unrealized_pl`` replaced by the executable-
+        corroborated decision P&L (#1035/#1036), so the stop/TP triggers fire on
+        the position's TRUE value, not a raw persisted phantom. Per-position
+        FAIL-SAFE: an uncorroborable position keeps its RAW mark (fire-if-past) —
+        never suppressed. One shared truth-layer snapshot source across the batch
+        (60s TTL); every raw-fallback is logged so the fallback is never silent."""
+        if not positions:
+            return positions
+        from packages.quantum.analytics import exit_mark_corroboration as _emc
+        _snap = None
+        try:
+            from packages.quantum.services.market_data_truth_layer import (
+                MarketDataTruthLayer,
+            )
+            _snap = MarketDataTruthLayer().snapshot_many
+        except Exception:
+            _snap = None  # corroborated_exit_upl self-creates per call / raw-falls back
+        out: List[Dict[str, Any]] = []
+        for p in positions:
+            upl, basis = _emc.corroborated_exit_upl(p, snapshot_fn=_snap)
+            if basis == "corroborated":
+                logger.info(
+                    "[EXIT_CORROBORATE] %s (%s): corroborated upl=%s (raw was %s)",
+                    p.get("symbol"), str(p.get("id"))[:8], upl, p.get("unrealized_pl"),
+                )
+            else:
+                logger.info(
+                    "[EXIT_CORROBORATE] %s (%s): RAW-FALLBACK (%s) — stop/TP "
+                    "evaluates on the raw mark upl=%s, fire-if-past (never suppressed)",
+                    p.get("symbol"), str(p.get("id"))[:8], basis, upl,
+                )
+            out.append({**p, "unrealized_pl": upl})
+        return out
 
     def _get_open_positions(self, user_id: str) -> List[Dict[str, Any]]:
         """Get all open paper positions for a user."""

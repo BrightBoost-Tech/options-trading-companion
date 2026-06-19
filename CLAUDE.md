@@ -216,16 +216,18 @@ exercised-status. Verify current flag VALUES on Railway, never here.
   -15). Fail-SAFE to the legacy broker-true brake when live-scope/realized is
   unavailable; per-position stops (#1048) unchanged. Measurement correction →
   **no behavioral kill switch**; `BRAKE_REALIZED_RECONCILE_THRESHOLD`
-  (default 25) tunes only the H10 reconcile cross-check. Seam: MTM / autopilot
-  breaker / midday GATE paths still share the raw phantom (block/reduce, not
-  force-close — P2). Exercised: deployed 06-17 (`b9b1781`), LIVE-UNEXERCISED
-  (awaiting a losing session).
+  (default 25) tunes only the H10 reconcile cross-check. Seam: autopilot
+  breaker FIXED (#1075, P2#6); MTM / midday GATE paths are warn-only (the raw
+  phantom there only logs, no action). Exercised: **first live RTH 06-18 —
+  evaluated q15min, stayed clear** (the −675.99 loss was shadow_only, correctly
+  excluded from the live brake); no losing LIVE session yet.
 - **#1072 close-side quote validation** — at a LIVE close stage, reuses
   #1034's executable estimate: corroborated → stage at achievable_close,
   dark/uncorroborated → DEFER (hold + flag + escalate; stop 2 cycles / TP 4)
   BEFORE staging, so a defer never strands a naked position. Flag
   `CLOSE_QUOTE_VALIDATION_ENABLED` default-ON. Kill: explicit falsy → legacy
-  mark-limit close. Exercised: deployed 06-18 (`5a1c8a7`), LIVE-UNEXERCISED.
+  mark-limit close. Exercised: deployed 06-18 (`5a1c8a7`), LIVE-UNEXERCISED (no
+  live close 06-18 — the only close was a shadow `internal_paper` stop).
 - **#1073 funnel truthful status** — execution stamps
   `trade_suggestions.status='executed'` at the position-insert seam (A); the
   morning sweep reconciles prior-day pending (position → executed, none →
@@ -233,11 +235,25 @@ exercised-status. Verify current flag VALUES on Railway, never here.
   position-exists signal. INDEPENDENT of the relearn (calibration never reads
   status). Flag `FUNNEL_STATUS_TRUTHFUL_ENABLED` default-ON (data-truth, not
   live-risk). Kill: explicit falsy → legacy 'staged'-stamp + blanket dismiss.
-  Exercised: merged 06-18 (`d1c8d08`), LIVE-UNEXERCISED; 32-row historical
-  backfill pending (separate supervised mutation).
+  Exercised: **Layer B LIVE 06-18** (13:00Z sweep reconciled prior-day pending →
+  dismissed, none-path); Layer A pending a live entry. 32-row historical
+  backfill still pending (separate supervised mutation).
+- **#1076 live-only calibration + v3 conviction view (#1043)** — calibration
+  trains on LIVE outcomes only (`is_paper=false` in `_fetch_outcomes`) so shadow
+  / internal-fill outcomes can't drive a live-applied EV/PoP multiplier (the
+  06-18 LONG_PUT ×1.5 shadow-outvote, +662 outlier). Below MIN_CALIBRATION_TRADES
+  live → insufficient_data → raw mode (×1.0), do-no-harm until live volume
+  matures. Flag `CALIBRATION_TRAIN_LIVE_ONLY` default-ON (empty/unset → ON;
+  explicit falsy → legacy is_paper-blind). + null-pop basis fix (flagless) +
+  `learning_performance_summary_v3` conviction view created DARK (is_paper-blind-
+  match, epoch+floor wall; every bucket <20 → all-1.0). Kill: explicit falsy.
+  Exercised: merged 06-18 (`9e6a719`); served blob keeps the wrong ×1.5 until the
+  10:00Z relearn rewrites it live-scoped (raw). Verify: live-scoped blob 06-19
+  10:00Z; v3 DEGRADED-log gone 06-19 16:00Z scan.
 
 Sanctioned mid-session kill switches, complete list: the explicit-falsy
-flags above (#1038, #1040, #1046, #1048, #1045-TTL, #1052, #1072, #1073), unset
+flags above (#1038, #1040, #1046, #1048, #1045-TTL, #1052, #1072, #1073, #1076
+`CALIBRATION_TRAIN_LIVE_ONLY`), unset
 `RISK_UTILIZATION_GATE_ENABLED` (reverts to the stricter BLOCK),
 `PRICE_CLASS_SPREAD_CUTOFF=0`, unset `EXIT_MARK_SANITY_ENFORCE_ENABLED`
 (reverts to observe-only), unset `GTC_PROFIT_EXIT_ENABLED` (no new resting

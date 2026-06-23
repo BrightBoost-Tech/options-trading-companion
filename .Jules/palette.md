@@ -69,3 +69,7 @@
 ## 2025-06-06 - Accessible Disabled Tooltips
 **Learning:** Browsers disable mouse events on `disabled` buttons, preventing tooltips from appearing. Wrapping the disabled button in a focusable `span` (`tabIndex={0}`) allows the tooltip to trigger on hover and focus.
 **Action:** Always wrap disabled buttons in a `span` with `tabIndex={0}` and an explanatory `aria-label` when tooltips are required.
+
+## 2025-06-07 - Hydration Mismatches with Dynamic ARIA Labels
+**Learning:** Computing dynamic attributes (like `aria-label` or conditional text) based on client-only state (e.g. `document.documentElement.classList.contains('dark')` or `localStorage`) directly during SSR causes React hydration mismatches. This often breaks screen reader accessibility during the initial page load or renders incorrect dynamic labels.
+**Action:** When updating dynamic labels (e.g., changing "Switch to light mode" / "Switch to dark mode") based on client-side state, initialize a `mounted` state to false. Use it to render a static fallback label during SSR (e.g., "Toggle theme") and only compute the dynamic label once `mounted` is true after `useEffect`.

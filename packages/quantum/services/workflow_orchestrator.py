@@ -3615,6 +3615,11 @@ async def run_midday_cycle(supabase: Client, user_id: str, deployable_capital_ov
                 "sector": cand.get("sector", "unknown"),
                 "ev_raw": raw_ev,
                 "pop_raw": raw_pop,
+                # Cluster 3: surface the VRP inputs to top-level so they persist
+                # (internal_cand is stripped on persist). The executor re-ranks
+                # from the DB and needs these to apply the VRP soft down-weight.
+                "iv_rv_spread": cand.get("iv_rv_spread"),
+                "premium_direction": cand.get("premium_direction"),
             }
 
             # --- AGENT FIELDS ---

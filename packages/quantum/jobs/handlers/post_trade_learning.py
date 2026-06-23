@@ -37,6 +37,92 @@ WEIGHT_REDUCE_FACTOR = 0.9
 DRIFT_THRESHOLD = float(os.environ.get("LEARNING_DRIFT_THRESHOLD", "2.0"))
 MIN_SHARPE_THRESHOLD = float(os.environ.get("LEARNING_MIN_SHARPE", "0.3"))
 
+# F5: significance testing is ADDITIVE — it never changes what calibration acts
+# on. A significance CLAIM requires a sample floor strictly HIGHER than
+# MIN_TRADES_CALIBRATE (10): a ~$2k account has few trades, and point estimates
+# over a handful of trades are noise. Below this floor we emit insufficient_n.
+MIN_TRADES_SIGNIFICANCE = int(os.environ.get("LEARNING_MIN_TRADES_SIGNIFICANCE", "25"))
+
+try:  # scipy is a project dependency; degrade gracefully if absent.
+    from scipy import stats as _scipy_stats
+except Exception:  # pragma: no cover
+    _scipy_stats = None
+
+
+def compute_edge_significance(
+    realized_pnls: List[float],
+    predicted_pnls: Optional[List[float]] = None,
+    *,
+    min_n: Optional[int] = None,
+) -> Dict[str, Any]:
+    """ADDITIVE significance metrics for the trade edge. Pure; never raises.
+
+    Returns win-rate with a Wilson 95% CI and, when predicted P&L is supplied,
+    an alpha (realized - predicted) mean with a t-based 95% CI and one-sample
+    t-test p-value vs 0. The interval WIDENS at small n (t critical with n-1 df).
+
+    Below ``min_n`` (default MIN_TRADES_SIGNIFICANCE) NO significance claim is
+    made: returns ``{"insufficient_n": True, ...}``. This function does NOT make
+    any calibration decision — callers log/attach it alongside the existing
+    point estimates without changing what they act on.
+    """
+    min_n = MIN_TRADES_SIGNIFICANCE if min_n is None else min_n
+    n = len(realized_pnls)
+    out: Dict[str, Any] = {"n": n, "min_n": min_n}
+    if n < min_n:
+        out["insufficient_n"] = True
+        return out
+    out["insufficient_n"] = False
+
+    # t critical (two-sided 95%) — widens for small n; normal fallback if no scipy.
+    if _scipy_stats is not None and n > 1:
+        tcrit = float(_scipy_stats.t.ppf(0.975, n - 1))
+    else:
+        tcrit = 1.96
+
+    # Win-rate with Wilson score 95% CI (well-behaved at small n / extreme p).
+    wins = sum(1 for x in realized_pnls if x > 0)
+    p = wins / n
+    z = 1.96
+    denom = 1.0 + z * z / n
+    centre = (p + z * z / (2 * n)) / denom
+    half = (z * math.sqrt(p * (1 - p) / n + z * z / (4 * n * n))) / denom
+    out["win_rate"] = round(p, 4)
+    out["win_rate_ci95"] = [round(max(0.0, centre - half), 4), round(min(1.0, centre + half), 4)]
+
+    # Alpha mean + t-test vs 0 (requires paired predicted values).
+    if predicted_pnls is not None and len(predicted_pnls) == n and n > 1:
+        alphas = [float(r) - float(q) for r, q in zip(realized_pnls, predicted_pnls)]
+        mean = sum(alphas) / n
+        sd = math.sqrt(sum((a - mean) ** 2 for a in alphas) / (n - 1))  # sample std (ddof=1)
+        se = sd / math.sqrt(n)
+        out["alpha_mean"] = round(mean, 4)
+        out["alpha_ci95"] = (
+            [round(mean - tcrit * se, 4), round(mean + tcrit * se, 4)] if se > 0 else None
+        )
+        if se > 0:
+            t_stat = mean / se
+            out["alpha_t"] = round(t_stat, 4)
+            if _scipy_stats is not None:
+                # exact two-sided p-value from Student-t (df = n-1)
+                pval = float(2 * _scipy_stats.t.sf(abs(t_stat), n - 1))
+                out["alpha_p_value"] = round(pval, 6)
+                out["alpha_significant"] = bool(pval < 0.05)
+            else:
+                # closed-form fallback: significant if |t| exceeds the critical value
+                out["alpha_significant"] = bool(abs(t_stat) > tcrit)
+        elif mean != 0:
+            # Zero dispersion but a consistent non-zero edge: degenerate yet
+            # unambiguously significant (every trade beat/missed prediction by
+            # the same amount). Treat as significant rather than undefined.
+            out["alpha_t"] = None
+            out["alpha_p_value"] = 0.0
+            out["alpha_significant"] = True
+        else:
+            out["alpha_t"] = None
+            out["alpha_significant"] = False
+    return out
+
 
 def run(payload: Dict[str, Any], ctx: Any = None) -> Dict[str, Any]:
     """Main entry point — called by the job runner."""
@@ -307,6 +393,17 @@ class PostTradeLearningAgent:
             ]
             alpha_mean = sum(alphas) / len(alphas) if alphas else 0
 
+            # F5 (ADDITIVE): significance for this segment's win-rate / alpha.
+            # The multiplier update above is UNCHANGED — it still runs on the
+            # existing point estimates. This only records significance alongside.
+            seg_realized = [float(o.get("pnl_realized") or 0) for o in outcomes]
+            seg_predicted = [float(o.get("pnl_predicted") or 0) for o in outcomes]
+            significance = compute_edge_significance(seg_realized, seg_predicted)
+            logger.info(
+                "[LEARNING][F5] segment %s significance (additive): %s",
+                segment_key, significance,
+            )
+
             # Write to signal_weight_history
             self.supabase.table("signal_weight_history").insert({
                 "user_id": user_id,
@@ -321,6 +418,7 @@ class PostTradeLearningAgent:
                 "predicted_win_rate": round(predicted_wr, 4),
                 "alpha_mean": round(alpha_mean, 2),
                 "trigger": "calibration_update",
+                "metadata": {"significance": significance},  # F5 additive (JSONB col)
             }).execute()
 
             logger.info(
@@ -386,6 +484,19 @@ class PostTradeLearningAgent:
 
             sharpe = alpha_mean / alpha_std if alpha_std > 0 else 0
 
+            # F5 (ADDITIVE): significance metrics alongside the point estimates.
+            # This NEVER gates the flag/weight actions below — they keep running
+            # on the existing point estimates exactly as before. Below
+            # MIN_TRADES_SIGNIFICANCE this carries insufficient_n instead of a
+            # significance claim.
+            realized_pnls = [float(o.get("pnl_realized") or 0) for o in outcomes]
+            predicted_pnls = [float(o.get("pnl_predicted") or 0) for o in outcomes]
+            significance = compute_edge_significance(realized_pnls, predicted_pnls)
+            logger.info(
+                "[LEARNING][F5] %s edge significance (additive): %s",
+                strategy, significance,
+            )
+
             # Flag if Sharpe too low
             if sharpe < MIN_SHARPE_THRESHOLD:
                 self.supabase.table("strategy_adjustments").insert({
@@ -397,6 +508,7 @@ class PostTradeLearningAgent:
                         "sharpe": round(sharpe, 3),
                         "alpha_mean": round(alpha_mean, 2),
                         "trade_count": len(outcomes),
+                        "significance": significance,  # F5 additive
                     },
                 }).execute()
 
@@ -418,6 +530,7 @@ class PostTradeLearningAgent:
                         "alpha_mean": round(alpha_mean, 2),
                         "sharpe": round(sharpe, 3),
                         "trade_count": len(outcomes),
+                        "significance": significance,  # F5 additive
                     },
                 }).execute()
 

@@ -18,6 +18,7 @@ pnl_predicted semantics (normalized to match live ingest):
 """
 
 import logging
+import os
 import time
 from typing import Any, Dict, List, Optional
 from datetime import datetime, timedelta, timezone
@@ -28,6 +29,63 @@ from packages.quantum.jobs.handlers.exceptions import RetryableJobError, Permane
 logger = logging.getLogger(__name__)
 
 JOB_NAME = "paper_learning_ingest"
+
+# A4: minimum number of daily closes over a trade's hold required to compute an
+# annualized realized vol. A 1-2 day hold yields <2 returns — meaningless when
+# annualized — so we emit NULL rather than garbage. Env-overridable.
+A4_MIN_HOLD_BARS = int(os.getenv("A4_MIN_HOLD_BARS", "3"))
+
+
+def _parse_ts(value: Any) -> Optional[datetime]:
+    """Parse an ISO-8601 timestamp string (or pass through a datetime). None-safe."""
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value
+    try:
+        return datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except Exception:
+        return None
+
+
+def _compute_realized_vol_over_hold(
+    truth_layer: Any,
+    symbol: Optional[str],
+    opened_at: Any,
+    closed_at: Any,
+) -> Optional[float]:
+    """A4 "b" half: annualized realized vol (log returns, ×√252, ddof=0) over a
+    trade's actual hold window [opened_at, closed_at].
+
+    FAILURE-ISOLATED: returns None on ANY problem (no truth layer, missing
+    timestamps, degenerate/inverted hold, fetch error, too-few bars). The caller
+    writes None and the outcome record STILL persists with P&L/EV/entry_iv_rv
+    intact — rv computation can NEVER break the outcome-write path.
+    """
+    try:
+        if truth_layer is None:
+            return None
+        if not symbol or symbol == "UNKNOWN":
+            return None
+        entry_dt = _parse_ts(opened_at)
+        exit_dt = _parse_ts(closed_at)
+        if entry_dt is None or exit_dt is None or exit_dt <= entry_dt:
+            return None
+        bars = truth_layer.daily_bars(symbol, entry_dt, exit_dt)
+        closes = [
+            float(b["close"]) for b in (bars or [])
+            if b.get("close") is not None
+        ]
+        if len(closes) < A4_MIN_HOLD_BARS:
+            return None  # too short to annualize meaningfully
+        from packages.quantum.analytics.vol_math import realized_vol_log_annualized
+        return realized_vol_log_annualized(closes, window=len(closes) - 1)
+    except Exception as e:
+        logger.info(
+            "A4: realized-vol-over-hold compute failed for %s (non-fatal): %s",
+            symbol, e,
+        )
+        return None
 
 
 def run(payload: Dict[str, Any], ctx: Any = None) -> Dict[str, Any]:
@@ -152,7 +210,7 @@ async def _ingest_paper_outcomes_for_user(
     #    Previous code started from paper_ledger, but paper_ledger lacks a
     #    user_id column, so that query always failed silently.
     pos_result = supabase.table("paper_positions") \
-        .select("id, realized_pl, status, closed_at, suggestion_id, trace_id, symbol") \
+        .select("id, realized_pl, status, opened_at, closed_at, suggestion_id, trace_id, symbol") \
         .eq("user_id", user_id) \
         .eq("status", "closed") \
         .gte("closed_at", cutoff_iso) \
@@ -208,10 +266,26 @@ async def _ingest_paper_outcomes_for_user(
 
     suggestion_meta_map: Dict[str, Dict] = {}
     if suggestion_ids:
-        sugg_result = supabase.table("trade_suggestions") \
-            .select("id, ev, probability_of_profit, regime, strategy, risk_adjusted_ev, sizing_metadata") \
-            .in_("id", list(suggestion_ids)) \
-            .execute()
+        # A4: also pull iv_rv_spread (the entry-time VRP proxy) over the EXISTING
+        # suggestion_id join — no new query. The column is added by the pending
+        # VRP migration (20260623000000); until that is applied selecting it
+        # errors, so we try the extended SELECT and fall back to the legacy
+        # column set. A missing iv_rv_spread must NEVER break outcome ingest.
+        _base_cols = "id, ev, probability_of_profit, regime, strategy, risk_adjusted_ev, sizing_metadata"
+        try:
+            sugg_result = supabase.table("trade_suggestions") \
+                .select(_base_cols + ", iv_rv_spread") \
+                .in_("id", list(suggestion_ids)) \
+                .execute()
+        except Exception as e:
+            logger.info(
+                "A4: iv_rv_spread column unavailable on trade_suggestions "
+                "(VRP migration not yet applied?) — falling back: %s", e
+            )
+            sugg_result = supabase.table("trade_suggestions") \
+                .select(_base_cols) \
+                .in_("id", list(suggestion_ids)) \
+                .execute()
         for s in (sugg_result.data or []):
             suggestion_meta_map[s["id"]] = s
         logger.debug("Fetched metadata for %d/%d suggestions", len(suggestion_meta_map), len(suggestion_ids))
@@ -273,6 +347,16 @@ async def _ingest_paper_outcomes_for_user(
     skipped_duplicate = 0
     skipped_no_order = 0
 
+    # A4: market-data client for realized-vol-over-hold (lazy, failure-isolated).
+    # If construction fails, truth_layer stays None and the rv helper returns
+    # None — outcome ingest is never blocked on market data.
+    try:
+        from packages.quantum.services.market_data_truth_layer import MarketDataTruthLayer
+        truth_layer = MarketDataTruthLayer()
+    except Exception as e:
+        logger.info("A4: truth layer unavailable — realized_vol_over_hold will be NULL: %s", e)
+        truth_layer = None
+
     for position in closed_positions:
         pos_id_short = position["id"][:8]
         symbol = position.get("symbol", "?")
@@ -303,11 +387,23 @@ async def _ingest_paper_outcomes_for_user(
                         "trade_closed outcome", symbol, pos_id_short, str(suggestion_id)[:8])
             continue
 
+        # A4: entry-IV (from the suggestion join) + realized-vol-over-hold
+        # (computed once, here, at close — never recomputed on read). Both are
+        # failure-isolated: a NULL on either never blocks the outcome write.
+        entry_iv_rv_spread = (suggestion_meta or {}).get("iv_rv_spread")
+        entry_ts = position.get("opened_at")
+        realized_vol_over_hold = _compute_realized_vol_over_hold(
+            truth_layer, position.get("symbol"), entry_ts, position.get("closed_at")
+        )
+
         outcome = _create_paper_outcome_record(
             user_id, order, target_date, position,
             suggestion_ev=suggestion_ev,
             suggestion_meta=suggestion_meta,
             is_paper=_resolve_is_paper(order),
+            entry_iv_rv_spread=entry_iv_rv_spread,
+            entry_ts=entry_ts,
+            realized_vol_over_hold=realized_vol_over_hold,
         )
         logger.info("INSERT %s (pos=%s): pnl_realized=%s pnl_predicted=%s suggestion=%s",
                      symbol, pos_id_short, outcome["pnl_realized"],
@@ -384,6 +480,9 @@ def _create_paper_outcome_record(
     suggestion_ev: Optional[float] = None,
     suggestion_meta: Optional[Dict] = None,
     is_paper: bool = True,
+    entry_iv_rv_spread: Optional[float] = None,
+    entry_ts: Optional[str] = None,
+    realized_vol_over_hold: Optional[float] = None,
 ) -> Dict:
     """
     Create a learning_feedback_loops record from a paper order fill.
@@ -483,6 +582,14 @@ def _create_paper_outcome_record(
             "regime_at_entry": (suggestion_meta or {}).get("regime"),
             "strategy_at_entry": (suggestion_meta or {}).get("strategy"),
         },
+        # A4 typed columns (added by migration _add_a4_outcome_vol_fields). All
+        # nullable: any of these may be None (entry IV not yet persisted, or rv
+        # un-computable) without affecting the rest of the record. The grading
+        # join is entry_iv_rv_spread (IV at entry) vs realized_vol_over_hold (vol
+        # that actually occurred), self-contained on the row via entry_ts.
+        "entry_iv_rv_spread": entry_iv_rv_spread,
+        "entry_ts": entry_ts,
+        "realized_vol_over_hold": realized_vol_over_hold,
         # Use position's closed_at so the view's COALESCE(updated_at, created_at)
         # reflects the actual close time, not the ingestion time.
         "updated_at": position.get("closed_at"),

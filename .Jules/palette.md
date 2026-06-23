@@ -69,3 +69,7 @@
 ## 2025-06-06 - Accessible Disabled Tooltips
 **Learning:** Browsers disable mouse events on `disabled` buttons, preventing tooltips from appearing. Wrapping the disabled button in a focusable `span` (`tabIndex={0}`) allows the tooltip to trigger on hover and focus.
 **Action:** Always wrap disabled buttons in a `span` with `tabIndex={0}` and an explanatory `aria-label` when tooltips are required.
+
+## 2025-06-07 - Dynamic Toggle Button Feedback
+**Learning:** Icon-only toggle buttons (like theme switchers) with static tooltips or `aria-labels` (e.g., "Toggle theme") don't clearly inform users of the *outcome* of their action, especially for screen reader users. Additionally, relying solely on client state for dynamic labels can cause Next.js hydration mismatches.
+**Action:** Use a dynamic `aria-label` and tooltip that describes the *pending* action (e.g., "Switch to light mode" when dark), and use a `mounted` state (set in `useEffect`) to render a static fallback during server-side rendering to avoid hydration errors.

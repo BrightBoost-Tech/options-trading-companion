@@ -30,6 +30,10 @@ logger = logging.getLogger(__name__)
 
 JOB_NAME = "paper_learning_ingest"
 
+# A4 typed columns added by migration 20260623010000. Listed here so the insert
+# can degrade gracefully if the migration has not been applied yet.
+_A4_OPTIONAL_COLUMNS = ("entry_iv_rv_spread", "entry_ts", "realized_vol_over_hold")
+
 # A4: minimum number of daily closes over a trade's hold required to compute an
 # annualized realized vol. A 1-2 day hold yields <2 returns — meaningless when
 # annualized — so we emit NULL rather than garbage. Env-overridable.
@@ -410,7 +414,7 @@ async def _ingest_paper_outcomes_for_user(
                      outcome.get("pnl_predicted"), str(suggestion_id or "NULL")[:8])
 
         try:
-            supabase.table("learning_feedback_loops").insert(outcome).execute()
+            _insert_outcome_defensive(supabase, outcome)
             outcomes_created += 1
 
             # N4 honesty fix: flip the learning_ingested marker on the source
@@ -469,6 +473,33 @@ def _resolve_is_paper(order: Dict[str, Any]) -> bool:
     silently relabel live fills as paper again.
     """
     return (order.get("execution_mode") or "") != "alpaca_live"
+
+
+def _insert_outcome_defensive(supabase, outcome: Dict) -> None:
+    """Insert the outcome row, surviving the pre-migration schema state.
+
+    If the A4 columns (entry_iv_rv_spread / entry_ts / realized_vol_over_hold)
+    are not yet present in the DB (migration 20260623010000 not applied), the
+    first insert errors on the unknown column; we strip those keys and retry
+    ONCE so the core outcome (P&L/EV) still records. Extends A4's
+    failure-isolation to schema timing and mirrors the missing-column-retry
+    pattern in workflow_orchestrator. Any other error (incl. duplicate) is
+    re-raised unchanged for the caller's existing handling.
+    """
+    try:
+        supabase.table("learning_feedback_loops").insert(outcome).execute()
+        return
+    except Exception as e:
+        has_a4 = any(k in outcome for k in _A4_OPTIONAL_COLUMNS)
+        names_col = any(c in str(e) for c in _A4_OPTIONAL_COLUMNS)
+        if not (has_a4 and names_col):
+            raise  # not a missing-A4-column error → caller handles (e.g. duplicate)
+        stripped = {k: v for k, v in outcome.items() if k not in _A4_OPTIONAL_COLUMNS}
+        logger.warning(
+            "A4 columns absent on learning_feedback_loops (migration 20260623010000 "
+            "not applied?) — retrying outcome insert without them"
+        )
+        supabase.table("learning_feedback_loops").insert(stripped).execute()
 
 
 def _create_paper_outcome_record(

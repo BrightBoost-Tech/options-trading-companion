@@ -12,6 +12,8 @@ import unittest
 from packages.quantum.jobs.handlers.paper_learning_ingest import (
     _create_paper_outcome_record,
     _compute_realized_vol_over_hold,
+    _insert_outcome_defensive,
+    _A4_OPTIONAL_COLUMNS,
 )
 
 
@@ -123,6 +125,72 @@ class TestOutcomeRecordA4Fields(unittest.TestCase):
         self.assertIsNone(rec["entry_iv_rv_spread"])
         self.assertIsNone(rec["realized_vol_over_hold"])
         self.assertIsNone(rec["entry_ts"])
+
+
+class _FakeTable:
+    """Records insert payloads; can be told to reject A4 columns once (to
+    simulate the pre-migration schema)."""
+
+    def __init__(self, reject_a4=False):
+        self.reject_a4 = reject_a4
+        self.payloads = []
+
+    def insert(self, payload):
+        self._pending = payload
+        return self
+
+    def execute(self):
+        payload = self._pending
+        if self.reject_a4 and any(c in payload for c in _A4_OPTIONAL_COLUMNS):
+            raise RuntimeError(
+                "Could not find the 'entry_iv_rv_spread' column of "
+                "'learning_feedback_loops' in the schema cache"
+            )
+        self.payloads.append(payload)
+        return self
+
+
+class _FakeSupabase:
+    def __init__(self, reject_a4=False):
+        self._table = _FakeTable(reject_a4=reject_a4)
+
+    def table(self, name):
+        return self._table
+
+
+class TestDefensiveInsert(unittest.TestCase):
+    def _make_outcome(self):
+        return {
+            "pnl_realized": 50.0, "pnl_predicted": 10.0, "outcome_type": "trade_closed",
+            "entry_iv_rv_spread": 0.04, "entry_ts": ENTRY, "realized_vol_over_hold": 0.27,
+        }
+
+    def test_migrated_schema_writes_a4_columns(self):
+        sb = _FakeSupabase(reject_a4=False)
+        _insert_outcome_defensive(sb, self._make_outcome())
+        self.assertEqual(len(sb._table.payloads), 1)
+        self.assertIn("entry_iv_rv_spread", sb._table.payloads[0])
+
+    def test_premigration_strips_a4_and_still_writes_core(self):  # merge-safety
+        sb = _FakeSupabase(reject_a4=True)
+        _insert_outcome_defensive(sb, self._make_outcome())
+        # retried without A4 columns; core outcome still recorded
+        self.assertEqual(len(sb._table.payloads), 1)
+        written = sb._table.payloads[0]
+        self.assertEqual(written["pnl_realized"], 50.0)
+        self.assertEqual(written["outcome_type"], "trade_closed")
+        for c in _A4_OPTIONAL_COLUMNS:
+            self.assertNotIn(c, written)
+
+    def test_non_a4_error_propagates(self):
+        class _DupTable(_FakeTable):
+            def execute(self):
+                raise RuntimeError("duplicate key value violates unique constraint")
+
+        sb = _FakeSupabase()
+        sb._table = _DupTable()
+        with self.assertRaises(RuntimeError):
+            _insert_outcome_defensive(sb, self._make_outcome())
 
 
 if __name__ == "__main__":

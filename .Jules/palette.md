@@ -69,3 +69,6 @@
 ## 2025-06-06 - Accessible Disabled Tooltips
 **Learning:** Browsers disable mouse events on `disabled` buttons, preventing tooltips from appearing. Wrapping the disabled button in a focusable `span` (`tabIndex={0}`) allows the tooltip to trigger on hover and focus.
 **Action:** Always wrap disabled buttons in a `span` with `tabIndex={0}` and an explanatory `aria-label` when tooltips are required.
+## 2025-06-07 - Mixing Theme-Aware Components with Hardcoded Layouts
+**Learning:** Inserting theme-aware components (like `EmptyState` which uses `text-foreground` internally) into pages with hardcoded background classes (like `bg-white`) creates severe color contrast issues when the application switches to Dark Mode. The component renders light text for dark mode, but the container remains white, making the text unreadable.
+**Action:** When integrating theme-aware shared components, always audit and update the parent container's background classes from static colors (like `bg-white`) to appropriate semantic tokens (`bg-card text-card-foreground`) to preserve contrast across all themes.

@@ -408,10 +408,13 @@ class RegimeEngineV3:
         for i in range(20):
             c_prev = subset[i]
             c_curr = subset[i+1]
-            if c_prev == 0:
+            # IV-integrity (cluster 1): log returns ln(P_t / P_{t-1}) — the
+            # correct continuously-compounded basis for realized vol. Guard
+            # non-positive prices (log undefined) by contributing a 0.0 return.
+            if c_prev <= 0 or c_curr <= 0:
                 rets.append(0.0)
             else:
-                rets.append((c_curr - c_prev) / c_prev)
+                rets.append(math.log(c_curr / c_prev))
 
         # Standard Deviation of returns
         # ddof=0 for population std (matches np.std default)

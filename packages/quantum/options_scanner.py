@@ -2959,23 +2959,27 @@ def scan_for_opportunities(
                 if _cached_data is not None:
                     _cached_data["effective_regime"] = effective_regime_state
 
-            # #115 PR-B-1: explicit iv_rank quality tracking gated on
-            # IV_RANK_NONE_ROUTING_ENABLED. Flag OFF preserves the
-            # pre-PR-A silent fallback. Flag ON keeps the 50.0 numeric
-            # default for downstream math (StrategySelector, scoring,
-            # design agent all expect a float) but tags the candidate
-            # so the exit sort can rank real-iv candidates ahead.
+            # IV-integrity (cluster 1): iv_rank is NEVER fabricated. A symbol
+            # whose IV history is too short to compute a real iv_rank is
+            # EXCLUDED from entry routing rather than defaulted to a synthetic
+            # 50.0 (H9 — a value we cannot price must reject, never fabricate;
+            # applies to entries). Both legacy 50.0 fallbacks (the #115 PR-B-1
+            # flag-on "missing" default and the flag-off "unknown" default) are
+            # removed: null history is now a hard rejection on every path, so
+            # no synthetic iv_rank can reach StrategySelector / scoring / the
+            # design agent. Every routed candidate therefore carries a real
+            # iv_rank, which keeps the flag-gated real-iv sort tier (below)
+            # correct (uniformly "real").
             raw_iv_rank = symbol_snapshot.iv_rank
-            if is_iv_rank_none_routing_enabled():
-                if raw_iv_rank is None:
-                    iv_rank = 50.0
-                    iv_rank_quality = "missing"
-                else:
-                    iv_rank = raw_iv_rank
-                    iv_rank_quality = "real"
-            else:
-                iv_rank = raw_iv_rank or 50.0
-                iv_rank_quality = "unknown"
+            if raw_iv_rank is None:
+                rej_stats.record("iv_rank_insufficient_history")
+                print(
+                    f"[Scanner] {symbol}: iv_rank has insufficient history — "
+                    "excluded from entry routing (no fabricated default)"
+                )
+                return None
+            iv_rank = raw_iv_rank
+            iv_rank_quality = "real"
 
             # Bolt Optimization: Use sum() / len() for small lists (20x faster than np.mean)
             s20 = closes[-20:]

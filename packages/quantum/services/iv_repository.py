@@ -16,6 +16,15 @@ IVREPO_MAX_WORKERS = int(os.getenv("IVREPO_MAX_WORKERS", "4"))
 IVREPO_RETRY_COUNT = int(os.getenv("IVREPO_RETRY_COUNT", "2"))
 IVREPO_RETRY_DELAY = float(os.getenv("IVREPO_RETRY_DELAY", "0.5"))
 
+# IV-integrity (cluster 1): named IV-rank basis. The rank window is a full
+# trading year (252 sessions) and a symbol needs at least MIN_IV_HISTORY_DAYS
+# real observations before a rank is computed at all — below that the rank is
+# None (insufficient history) and the scanner excludes the symbol rather than
+# fabricating a default. Both are env-overridable so the floor can be raised as
+# history matures.
+IV_RANK_WINDOW_DAYS = int(os.getenv("IV_RANK_WINDOW_DAYS", "252"))
+MIN_IV_HISTORY_DAYS = int(os.getenv("MIN_IV_HISTORY_DAYS", "60"))
+
 
 def _sanitize_numeric(value: Any) -> Optional[float]:
     """
@@ -207,7 +216,8 @@ class IVRepository:
                 }
 
             # 2. Get history for Rank
-            # Fetch last 365 days of points where iv_30d is not null
+            # Fetch the IV_RANK_WINDOW_DAYS most recent points where iv_30d is
+            # not null (52-week / 252-session basis by default).
             # Note: Supabase/PostgREST limit might apply, but we need enough samples.
             # Default limit is usually 1000, which covers > 2 years of daily data.
             # Filter where iv_30d IS NOT NULL using proper PostgREST syntax
@@ -216,7 +226,7 @@ class IVRepository:
                 .eq("underlying", underlying)\
                 .not_.is_("iv_30d", "null")\
                 .order("as_of_date", desc=True)\
-                .limit(365)\
+                .limit(IV_RANK_WINDOW_DAYS)\
                 .execute()
 
             # Handle "null" strings and convert to float safely
@@ -236,7 +246,7 @@ class IVRepository:
             iv_rank = None
             iv_regime = None
 
-            if sample_size >= 60: # Min sample size from requirements
+            if sample_size >= MIN_IV_HISTORY_DAYS: # Min sample size: insufficient history -> iv_rank None
                 min_iv = min(history)
                 max_iv = max(history)
 
@@ -367,14 +377,14 @@ class IVRepository:
                     as_of = latest_date
 
                     # Extract history values
-                    # Limit to 365 samples
-                    history_vals = [r[1] for r in rows[:365]]
+                    # Limit to the IV_RANK_WINDOW_DAYS most recent samples (52-week basis)
+                    history_vals = [r[1] for r in rows[:IV_RANK_WINDOW_DAYS]]
                     sample_size = len(history_vals)
 
                     iv_rank = None
                     iv_regime = None
 
-                    if sample_size >= 60:
+                    if sample_size >= MIN_IV_HISTORY_DAYS:
                         # Use min/max on list (fast enough for N=365)
                         min_iv = min(history_vals)
                         max_iv = max(history_vals)

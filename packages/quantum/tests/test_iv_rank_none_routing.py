@@ -291,10 +291,38 @@ class TestScannerSiteWired(unittest.TestCase):
             "iv_rank_quality must be set adjacent to iv_rank in candidate_dict",
         )
 
-    def test_three_quality_states_present(self):
-        # real / missing / unknown — the flag-OFF branch tags "unknown".
-        for tag in ('"real"', '"missing"', '"unknown"'):
-            self.assertIn(tag, self.src, f"missing quality tag {tag}")
+    def test_null_iv_rank_excluded_not_fabricated(self):
+        # IV-integrity (cluster 1) re-pin: the prior invariant asserted three
+        # quality states (real/missing/unknown), two of which depended on a
+        # fabricated 50.0 iv_rank default. The corrected invariant is that a
+        # null iv_rank is EXCLUDED from routing, never defaulted. This is a
+        # strengthened no-re-fabrication regression guard.
+        #
+        # 1. The synthetic-default assignments must be gone entirely.
+        self.assertNotIn(
+            "iv_rank = 50.0", self.src,
+            "flag-on 'missing' 50.0 fabrication must be removed",
+        )
+        self.assertNotIn(
+            "raw_iv_rank or 50.0", self.src,
+            "flag-off 'unknown' 50.0 fabrication must be removed",
+        )
+        # 2. A null raw_iv_rank must hard-reject with the named reason and
+        #    return None (exclude the symbol from entry routing).
+        m = re.search(
+            r"if raw_iv_rank is None:.*?"
+            r'rej_stats\.record\("iv_rank_insufficient_history"\).*?'
+            r"return None",
+            self.src,
+            re.DOTALL,
+        )
+        self.assertIsNotNone(
+            m,
+            "null iv_rank must reject via iv_rank_insufficient_history + return None",
+        )
+        # 3. Routed candidates carry a real iv_rank, so the quality tag is
+        #    uniformly 'real' (keeps the flag-gated sort tier correct).
+        self.assertIn('iv_rank_quality = "real"', self.src)
 
     def test_sort_branches_on_routing_flag(self):
         # Anchor on the sort site itself, not the iv_rank tagging site

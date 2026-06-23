@@ -1,5 +1,6 @@
 
 import math
+import os
 import hashlib
 import json
 import logging
@@ -8,6 +9,43 @@ from packages.quantum.services.replay.canonical import compute_content_hash
 from packages.quantum.observability.feature_flags import is_iv_rank_none_routing_enabled
 
 logger = logging.getLogger(__name__)
+
+# --- Cluster 2: VRP-aware soft down-weight (debit / long-premium only) -------
+# Long debit spreads want IV cheap relative to realized. The volatility-risk-
+# premium proxy iv_rv_spread = atm_iv - rv_20d is already computed once in
+# regime_engine_v3 (log-return rv after Cluster 1) — we REUSE it here, never
+# recompute. A positive spread (IV rich vs realized) SOFTLY reduces the debit
+# score; a non-positive spread (IV cheap/fair) gives a mild boost. This is a
+# soft down-weight ONLY — there is no veto / no-buy logic anywhere in this path.
+VRP_FLOOR = float(os.getenv("VRP_FLOOR", "0.7"))   # strongest down-weight (IV richest)
+VRP_CEIL = float(os.getenv("VRP_CEIL", "1.1"))     # strongest boost (IV cheapest/fairest)
+VRP_SCALE = float(os.getenv("VRP_SCALE", "0.10"))  # spread magnitude (vol pts) mapping to the multiplier; tanh ~saturates near this
+# Log only when the multiplier materially moves a score (|1 - mult| >= this).
+VRP_LOG_THRESHOLD = float(os.getenv("VRP_LOG_THRESHOLD", "0.02"))
+
+
+def vrp_score_multiplier(iv_rv_spread: Optional[float]) -> float:
+    """Map the VRP proxy iv_rv_spread (atm_iv - rv_20d) to a soft debit-score
+    multiplier in [VRP_FLOOR, VRP_CEIL].
+
+    Pure, monotonic, continuous (smooth tanh; no step/cliff at any threshold):
+      - iv_rv_spread > 0  (IV rich vs realized): multiplier < 1.0, decreasing
+        with richness, saturating at VRP_FLOOR.
+      - iv_rv_spread <= 0 (IV cheap/fair):       multiplier >= 1.0, up to VRP_CEIL.
+      - iv_rv_spread is None (unavailable):      1.0 (no-op — never penalize
+        missing data; such names are already excluded upstream by Cluster 1's
+        min-history gate, but we stay defensive).
+
+    Asymmetric amplitude makes each side saturate exactly at its bound while the
+    value stays continuous through the origin (multiplier(0) == 1.0).
+    """
+    if iv_rv_spread is None:
+        return 1.0
+    amp = (1.0 - VRP_FLOOR) if iv_rv_spread > 0 else (VRP_CEIL - 1.0)
+    scale = VRP_SCALE if VRP_SCALE > 0 else 1e-9
+    mult = 1.0 - amp * math.tanh(iv_rv_spread / scale)
+    # Numerical safety clamp (tanh already bounds this to the exact endpoints).
+    return max(VRP_FLOOR, min(VRP_CEIL, mult))
 
 def _fast_norm_cdf(x: float) -> float:
     """
@@ -187,6 +225,27 @@ class OpportunityScorer:
 
             raw_score = ev_score + pop_score + iv_bonus
 
+            # Cluster 2: VRP soft down-weight — applied at the SAME stage as the
+            # (50 - iv_rank) * 0.2 debit bonus above, DEBIT (long-premium) ONLY.
+            # Credit / short-premium scoring is untouched (multiplier forced 1.0).
+            # MULTIPLIES the score (never adds). Reuses the existing iv_rv_spread;
+            # no vol is recomputed. Missing spread -> 1.0 no-op.
+            iv_rv_spread = market_ctx.get('iv_rv_spread')
+            if is_credit:
+                vrp_multiplier = 1.0
+            else:
+                vrp_multiplier = vrp_score_multiplier(iv_rv_spread)
+            pre_vrp_score = raw_score
+            raw_score = raw_score * vrp_multiplier
+            if abs(1.0 - vrp_multiplier) >= VRP_LOG_THRESHOLD:
+                logger.info(
+                    "opportunity_scorer: VRP down-weight %s — iv_rv_spread=%s "
+                    "multiplier=%.3f score %.1f -> %.1f",
+                    symbol,
+                    f"{iv_rv_spread:.4f}" if iv_rv_spread is not None else "None",
+                    vrp_multiplier, pre_vrp_score, raw_score,
+                )
+
             # Apply Penalties
             total_multiplier = (1.0 - liquidity_penalty) * (1.0 - earnings_penalty)
             total_score = max(0.0, min(100.0, raw_score * total_multiplier))
@@ -221,7 +280,13 @@ class OpportunityScorer:
                 "debug": {
                     "raw_score": round(raw_score, 1),
                     "iv_bonus": round(iv_bonus, 1),
-                    "prob_short_itm": round(prob_short_itm, 4)
+                    "prob_short_itm": round(prob_short_itm, 4),
+                    # Cluster 2 VRP observability: pre/post score + multiplier,
+                    # so we can later measure how often and how hard it bit.
+                    "iv_rv_spread": round(iv_rv_spread, 4) if iv_rv_spread is not None else None,
+                    "vrp_multiplier": round(vrp_multiplier, 3),
+                    "pre_vrp_score": round(pre_vrp_score, 1),
+                    "post_vrp_score": round(raw_score, 1)
                 }
             }
 

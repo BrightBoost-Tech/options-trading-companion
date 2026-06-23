@@ -393,36 +393,16 @@ class RegimeEngineV3:
 
     def _calculate_realized_volatility(self, closes: List[float]) -> Optional[float]:
         """
-        Bolt Optimization: Calculates realized volatility using pure Python.
-        This is ~5x faster than numpy for small lists (n~20) due to reduced overhead.
+        Annualized 20-day realized volatility (log returns, ×√252, ddof=0).
+
+        Delegates to the canonical implementation in analytics.vol_math so the
+        20-day regime path and A4's arbitrary-hold-window path share ONE
+        log-return basis (Cluster 1). Output is unchanged for the 20d window:
+        needs 21 prices, uses the last 20 returns.
         """
-        # Need at least 2 points to calculate returns, and we need 20 returns for RV.
-        # So we need 21 price points.
-        if len(closes) < 21:
-            return None
+        from packages.quantum.analytics.vol_math import realized_vol_log_annualized
+        return realized_vol_log_annualized(closes, window=20)
 
-        # Extract only the last 21 points
-        subset = closes[-21:]
-
-        rets = []
-        for i in range(20):
-            c_prev = subset[i]
-            c_curr = subset[i+1]
-            # IV-integrity (cluster 1): log returns ln(P_t / P_{t-1}) — the
-            # correct continuously-compounded basis for realized vol. Guard
-            # non-positive prices (log undefined) by contributing a 0.0 return.
-            if c_prev <= 0 or c_curr <= 0:
-                rets.append(0.0)
-            else:
-                rets.append(math.log(c_curr / c_prev))
-
-        # Standard Deviation of returns
-        # ddof=0 for population std (matches np.std default)
-        mean = sum(rets) / 20.0
-        var = sum((r - mean) ** 2 for r in rets) / 20.0
-
-        # Annualize
-        return math.sqrt(var) * 15.874507866387544 # sqrt(252)
 
     def _adapt_chain_to_raw_schema(self, chain_results: List[Dict]) -> List[Dict]:
         """

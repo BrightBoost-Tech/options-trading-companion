@@ -25,6 +25,29 @@ MIN_EDGE_AFTER_COSTS = float(os.environ.get("MIN_EDGE_AFTER_COSTS", "15"))
 DEFAULT_FEE_PER_CONTRACT = 0.65  # typical options commission per contract
 
 
+def _vrp_live_enabled() -> bool:
+    """Cluster 3 kill switch — gate the live VRP soft down-weight on the
+    ranking path. DEFAULT OFF (behavioral / loosening-class change): only an
+    explicit truthy value activates it, so an env regression fails to the exact
+    pre-Cluster-3 ranking. Read at call time so it can be flipped (and reverted)
+    without a redeploy."""
+    return os.environ.get("VRP_LIVE_ENABLED", "0").strip().lower() in ("1", "true", "yes", "on")
+
+
+def _resolve_vrp_inputs(suggestion: Dict[str, Any]):
+    """Pull the VRP inputs (iv_rv_spread, premium_direction) off a suggestion,
+    falling back to its internal_cand (present on the in-memory midday path,
+    stripped once persisted — the executor reads the persisted top-level
+    columns added by the Cluster 3 migration). Returns (iv_rv_spread,
+    premium_direction); either may be None when unavailable."""
+    cand = suggestion.get("internal_cand") or {}
+    spread = suggestion.get("iv_rv_spread")
+    if spread is None:
+        spread = cand.get("iv_rv_spread")
+    direction = suggestion.get("premium_direction") or cand.get("premium_direction")
+    return spread, direction
+
+
 def compute_risk_adjusted_ev(
     suggestion: Dict[str, Any],
     existing_positions: List[Dict[str, Any]],
@@ -70,7 +93,42 @@ def compute_risk_adjusted_ev(
     )
     concentration_penalty = 1.0 + (existing_exposure / max(portfolio_budget, 1.0))
 
-    return expected_pnl / (marginal_risk * concentration_penalty)
+    raev = expected_pnl / (marginal_risk * concentration_penalty)
+
+    # ── Cluster 3: VRP soft down-weight (live, flag-gated) ──────────────
+    # Reuse the EXISTING vrp_score_multiplier (Cluster 2) — no new math, no new
+    # constants. Applies ONLY when:
+    #   * VRP_LIVE_ENABLED is truthy (default OFF → byte-identical to today),
+    #   * the candidate is a long-debit premium (premium_direction == 'debit';
+    #     credit/short-premium/unknown are left untouched),
+    #   * iv_rv_spread is available (None → 1.0 no-op; never penalize missing
+    #     data — composes with Cluster 1's min-history exclusion),
+    #   * raev > 0 (viable candidates only; the -999 filter already returned
+    #     above, so a <1.0 multiplier can never flip a reject's sign).
+    # MULTIPLIES the rank metric (never adds). Stamps pre/post/multiplier on the
+    # suggestion for observability wherever risk_adjusted_ev is recorded.
+    if _vrp_live_enabled() and raev > 0:
+        iv_rv_spread, premium_direction = _resolve_vrp_inputs(suggestion)
+        if premium_direction == "debit" and iv_rv_spread is not None:
+            from packages.quantum.analytics.opportunity_scorer import vrp_score_multiplier
+            vrp_multiplier = vrp_score_multiplier(iv_rv_spread)
+            pre_vrp_rank = raev
+            raev = raev * vrp_multiplier
+            suggestion["vrp_ranking"] = {
+                "iv_rv_spread": round(iv_rv_spread, 4),
+                "vrp_multiplier": round(vrp_multiplier, 4),
+                "pre_vrp_rank": round(pre_vrp_rank, 6),
+                "post_vrp_rank": round(raev, 6),
+            }
+            if abs(1.0 - vrp_multiplier) >= 0.02:
+                logger.info(
+                    "[RANKING] VRP down-weight %s — iv_rv_spread=%.4f "
+                    "multiplier=%.3f raev %.4f -> %.4f",
+                    suggestion.get("ticker") or "?",
+                    iv_rv_spread, vrp_multiplier, pre_vrp_rank, raev,
+                )
+
+    return raev
 
 
 def _estimate_slippage(suggestion: Dict[str, Any]) -> float:

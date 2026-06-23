@@ -3815,6 +3815,14 @@ def scan_for_opportunities(
                 "unified_score_details": unified_score.components.model_dump(),
                 "iv_rank": iv_rank,
                 "iv_rank_quality": iv_rank_quality,
+                # Cluster 3: VRP inputs for the live ranker (canonical_ranker).
+                # iv_rv_spread reuses the value already computed on the snapshot
+                # (regime_engine_v3; log-return rv after Cluster 1) — no vol is
+                # recomputed. premium_direction lets the ranker apply the soft
+                # down-weight to long-debit candidates ONLY. Both persist via the
+                # migration so the executor's DB re-rank sees them.
+                "iv_rv_spread": getattr(symbol_snapshot, 'iv_rv_spread', None),
+                "premium_direction": "debit" if total_cost > 0 else "credit",
                 "trend": trend,
                 "legs": legs,
                 "badges": unified_score.badges,

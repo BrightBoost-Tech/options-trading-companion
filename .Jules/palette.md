@@ -69,3 +69,6 @@
 ## 2025-06-06 - Accessible Disabled Tooltips
 **Learning:** Browsers disable mouse events on `disabled` buttons, preventing tooltips from appearing. Wrapping the disabled button in a focusable `span` (`tabIndex={0}`) allows the tooltip to trigger on hover and focus.
 **Action:** Always wrap disabled buttons in a `span` with `tabIndex={0}` and an explanatory `aria-label` when tooltips are required.
+## 2025-06-07 - Refactoring Empty States
+**Learning:** Refactoring inline "No data" messages with native HTML to `<EmptyState>` provides significantly better visual feedback and keyboard accessibility (when the action button uses Shadcn `<Button>`). Using semantic tokens (`bg-card`, `text-card-foreground`) is critical to ensure it works beautifully in both dark and light modes.
+**Action:** Always opt for `<EmptyState>` and Shadcn `<Button>` when presenting empty states or calls to action to guarantee accessible focus states.

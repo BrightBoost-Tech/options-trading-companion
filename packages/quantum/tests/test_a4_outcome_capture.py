@@ -75,7 +75,7 @@ class TestOutcomeRecordA4Fields(unittest.TestCase):
     def _pos(self):
         return {
             "id": "p1", "realized_pl": 50.0, "status": "closed",
-            "opened_at": ENTRY, "closed_at": EXIT,
+            "created_at": ENTRY, "closed_at": EXIT,
             "suggestion_id": "s1", "trace_id": "t1", "symbol": "AAPL",
         }
 
@@ -125,6 +125,32 @@ class TestOutcomeRecordA4Fields(unittest.TestCase):
         self.assertIsNone(rec["entry_iv_rv_spread"])
         self.assertIsNone(rec["realized_vol_over_hold"])
         self.assertIsNone(rec["entry_ts"])
+
+
+class TestIngestSelectsRealColumns(unittest.TestCase):
+    """Regression for the 06-23..06-29 silent outage: _ingest_paper_outcomes_for_user
+    SELECTed a phantom ``opened_at`` column (paper_positions' open timestamp is
+    ``created_at`` — there is no ``opened_at``), which 42703'd the ENTIRE per-user
+    ingest every run → zero ``trade_closed`` outcomes written. The other A4 tests
+    cover the record-builder / rv-compute in isolation and never exercise this
+    SELECT, so CI stayed green while production was dark. Pin the real columns."""
+
+    def test_ingest_uses_created_at_not_phantom_opened_at(self):
+        import inspect
+        from packages.quantum.jobs.handlers import paper_learning_ingest as pli
+
+        src = inspect.getsource(pli._ingest_paper_outcomes_for_user)
+        # Pin the SELECT column list specifically (robust to comments that may
+        # mention the column name): paper_positions' open timestamp is created_at.
+        self.assertIn(
+            "status, created_at, closed_at", src,
+            "paper_positions SELECT must use created_at — the phantom opened_at "
+            "does not exist and 42703'd the entire ingest every run 06-23..06-29",
+        )
+        self.assertNotIn(
+            "opened_at, closed_at", src,
+            "paper_positions SELECT must not reference the phantom opened_at column",
+        )
 
 
 class _FakeTable:

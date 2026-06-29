@@ -70,9 +70,17 @@ class TestEntriesOnlyHaltEntryPathBlocks(unittest.TestCase):
         service = PaperAutopilotService(MagicMock())
         service._execute_per_cohort = MagicMock(name="_execute_per_cohort")
 
-        with patch.object(ops, "is_trading_paused", return_value=(False, None)), \
-             patch.object(ops, "are_entries_paused",
-                          return_value=(True, "operator break-glass")):
+        # Patch by STRING target (not patch.object(ops, ...)). The gate does a
+        # function-local `from packages.quantum.ops_endpoints import ...`, which
+        # resolves sys.modules[...] at CALL time. The string form resolves the
+        # same live module object at patch time; the object form binds the
+        # module ref captured at import and goes stale under full-suite ordering
+        # → the patch silently no-ops in CI and the gate reads the REAL fns
+        # (fail-open → 'ok'). Matches the working enqueue test below.
+        with patch("packages.quantum.ops_endpoints.is_trading_paused",
+                   return_value=(False, None)), \
+             patch("packages.quantum.ops_endpoints.are_entries_paused",
+                   return_value=(True, "operator break-glass")):
             result = service.execute_top_suggestions("user-1")
 
         self.assertEqual(result["status"], "entries_paused")
@@ -85,9 +93,10 @@ class TestEntriesOnlyHaltEntryPathBlocks(unittest.TestCase):
         service = PaperAutopilotService(MagicMock())
         service._execute_per_cohort = MagicMock(name="_execute_per_cohort")
 
-        with patch.object(ops, "is_trading_paused",
-                          return_value=(True, "global halt")), \
-             patch.object(ops, "are_entries_paused", return_value=(False, None)):
+        with patch("packages.quantum.ops_endpoints.is_trading_paused",
+                   return_value=(True, "global halt")), \
+             patch("packages.quantum.ops_endpoints.are_entries_paused",
+                   return_value=(False, None)):
             result = service.execute_top_suggestions("user-1")
 
         self.assertEqual(result["status"], "paused")

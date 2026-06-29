@@ -61,12 +61,53 @@ ALERT_SEVERITY = {
     "output_stale": "error",
 }
 
+# Intraday RTH-only job cadences (loss-protection monitors + the scheduler
+# liveness heartbeat). Value = nominal fire interval in minutes, keyed by the
+# cadence label used in EXPECTED_JOBS. Staleness for these is gated on market
+# hours + a session-open warm-up so weekend / overnight / pre-open silence
+# (BY DESIGN) is never flagged. See _rth_job_status().
+_RTH_CADENCE_MINUTES = {
+    "rth_5min": 5,
+    "rth_15min": 15,
+    "rth_30min": 30,
+}
+
+# Extra slack added to the nominal interval before an intraday job is called
+# late — absorbs cycle jitter + execution time so a single slow cycle doesn't
+# flap. Defaults: order_sync 5+15=20m, monitor 15+15=30m, heartbeat
+# 30+15=45m. One env knob tunes all three.
+OPS_INTRADAY_STALENESS_MARGIN_MIN = int(
+    os.getenv("OPS_INTRADAY_STALENESS_MARGIN_MIN", "15")
+)
+
+# Conservative regular-session open (UTC) used ONLY for the start-of-session
+# warm-up anchor. is_us_market_hours()'s 13:30 lower bound is the EDT
+# (summer) open; the EST (winter) open is 14:30Z. Anchoring the warm-up to
+# the later 14:30 means the 13:30–14:30 band — where is_us_market_hours() can
+# read True before the session has actually opened in winter — never yields a
+# false 'late'. Mid-session detection is unaffected (anchor = last_success
+# once the job starts writing).
+_RTH_WARMUP_OPEN_UTC = (14, 30)
+
 # Expected jobs with their cadences
 EXPECTED_JOBS = [
     ("suggestions_close", "daily"),
     ("suggestions_open", "daily"),
     ("learning_ingest", "daily"),
     ("daily_progression_eval", "daily"),
+    # Intraday loss-protection jobs + the scheduler liveness heartbeat.
+    # A monitor / order_sync that simply STOPS being scheduled writes no
+    # job_runs and was previously UNDETECTED — a single in-process scheduler
+    # runs the monitor, the exits, AND its own watchdog (a SPOF). The
+    # heartbeat is PRODUCED by scheduler.py but was never CONSUMED; registering
+    # it here IS the consumer — a silent scheduler stops writing heartbeats and
+    # surfaces through the existing job_late / job_never_run alert path. All
+    # three are RTH-cadence + market-hours gated (see _RTH_CADENCE_MINUTES /
+    # _rth_job_status); closed-market silence is by design and never flagged.
+    # DETECTION ONLY — no restart.
+    ("alpaca_order_sync", "rth_5min"),
+    ("intraday_risk_monitor", "rth_15min"),
+    ("scheduler_heartbeat", "rth_30min"),
 ]
 
 # Output-freshness registry: tables whose newest row proves a feedback loop
@@ -251,18 +292,65 @@ def compute_data_freshness(
     )
 
 
-def get_expected_jobs(client) -> List[ExpectedJob]:
+def _rth_job_status(
+    cadence: str,
+    last_success_at: Optional[datetime],
+    now: datetime,
+) -> str:
+    """Staleness verdict for an intraday RTH-only job (monitor / order_sync /
+    heartbeat). DETECTION ONLY — never restarts anything.
+
+    Closed market / weekend → always 'ok': the scheduler fires these jobs only
+    during the regular session (and each job's own broker-clock gate
+    short-circuits out-of-session fires), so silence then is BY DESIGN and must
+    never alarm.
+
+    Inside the session, the job is stale once it has missed its cadence by a
+    margin. Elapsed time is measured from max(last_success, conservative
+    session open) so the start-of-session warm-up — and the winter DST hour
+    where is_us_market_hours() leads the real open — cannot false-positive:
+    right at the open the prior session's last run is hours stale, but today's
+    open is recent, so nothing fires until the first in-session run could have
+    landed. Returns 'late' when a prior success exists, 'never_run' when none
+    does — matching the existing daily/weekly status vocabulary so the
+    ops_health_check handler alerts through its current job_late /
+    job_never_run path with no change.
+    """
+    if not is_us_market_hours(now):
+        return "ok"
+    interval = _RTH_CADENCE_MINUTES.get(cadence, 15)
+    threshold = timedelta(minutes=interval + OPS_INTRADAY_STALENESS_MARGIN_MIN)
+    open_h, open_m = _RTH_WARMUP_OPEN_UTC
+    session_open = now.replace(
+        hour=open_h, minute=open_m, second=0, microsecond=0
+    )
+    anchor = (
+        last_success_at
+        if (last_success_at is not None and last_success_at > session_open)
+        else session_open
+    )
+    if (now - anchor) <= threshold:
+        return "ok"
+    return "late" if last_success_at is not None else "never_run"
+
+
+def get_expected_jobs(
+    client, now: Optional[datetime] = None
+) -> List[ExpectedJob]:
     """
     Get status of expected scheduled jobs.
 
     Args:
         client: Supabase client
+        now: Optional reference time (UTC) — defaults to wall-clock now.
+            Injectable so the intraday market-hours gating is deterministically
+            testable.
 
     Returns:
         List of ExpectedJob with name, cadence, last_success_at, status.
     """
     results = []
-    now = datetime.now(timezone.utc)
+    now = now or datetime.now(timezone.utc)
 
     for job_name, cadence in EXPECTED_JOBS:
         try:
@@ -274,6 +362,27 @@ def get_expected_jobs(client) -> List[ExpectedJob]:
                 .order("finished_at", desc=True) \
                 .limit(1) \
                 .execute()
+
+            # Intraday RTH-only jobs (monitor / order_sync / heartbeat) use a
+            # market-hours-gated staleness check so closed-market silence is
+            # never flagged; everything else keeps the daily/weekly logic.
+            if cadence in _RTH_CADENCE_MINUTES:
+                last_success = None
+                if result.data and len(result.data) > 0:
+                    fa = result.data[0].get("finished_at")
+                    if fa:
+                        if fa.endswith("Z"):
+                            fa = fa.replace("Z", "+00:00")
+                        last_success = datetime.fromisoformat(fa)
+                        if last_success.tzinfo is None:
+                            last_success = last_success.replace(tzinfo=timezone.utc)
+                results.append(ExpectedJob(
+                    name=job_name,
+                    cadence=cadence,
+                    last_success_at=last_success,
+                    status=_rth_job_status(cadence, last_success, now),
+                ))
+                continue
 
             if result.data and len(result.data) > 0:
                 finished_at_str = result.data[0].get("finished_at")

@@ -315,11 +315,42 @@ def _time_scaled_stop_loss_pct(pos: Dict, base_sl_pct: float) -> float:
 def _check_stop_loss(pos: Dict, sl_pct: float = 2.0) -> bool:
     """Check if position has exceeded stop loss (debit-aware)."""
     mc = pos.get("max_credit")
-    if mc is None:
-        return False
+    # ── FAIL-SAFE: a missing/zero max_credit must NOT silently disable the stop.
+    # The legacy `return False` here was a SILENT fail-OPEN — a position whose
+    # per-spread cost basis (max_credit) was null/0 lost ALL stop protection
+    # with zero signal. Loss-protection is asymmetric (monitor #1035/#1036): the
+    # stop side must never silently weaken. So we (1) log a LOUD data-fault
+    # marker, then (2) recover a position-scale entry-cost basis from
+    # avg_entry_price (same shape as the healthy max_credit basis) so a REAL
+    # loss still triggers WITHOUT forcing a spurious close. Only if NO basis at
+    # all is resolvable do we escalate: fire protectively iff there is a
+    # confirmed loss (upl < 0) — never fabricate a basis (H9 both-ends), and
+    # never silently clear the stop. The healthy (max_credit present) path below
+    # is UNCHANGED.
+    if mc is None or float(mc) == 0:
+        upl = float(pos.get("unrealized_pl") or 0)
+        qty = abs(float(pos.get("quantity") or 1))
+        fallback_basis = abs(float(pos.get("avg_entry_price") or 0)) * 100 * qty
+        logger.error(
+            "[STOP_LOSS_DATA_FAULT] max_credit missing/zero on position %s "
+            "(qty=%s upl=%s avg_entry=%s) — stop NOT silently disabled; "
+            "fallback entry_cost=%s",
+            pos.get("id") or pos.get("position_id"),
+            pos.get("quantity"), upl, pos.get("avg_entry_price"), fallback_basis,
+        )
+        if fallback_basis > 0:
+            # Conservative protective fallback: healthy formula shape, alternate
+            # basis. Mirror the debit clamp; skip time-scaling on this degraded
+            # path (no surprise loosening or tightening).
+            effective_sl = (
+                min(sl_pct, 1.0) if (_is_debit_spread(pos) and sl_pct > 1.0) else sl_pct
+            )
+            return upl <= -(fallback_basis * effective_sl)
+        # No basis at all: cannot quantify the threshold. Do NOT clear the stop —
+        # fire protectively iff there is a confirmed loss (upl < 0). A flat/up
+        # position returns False, so this is never a spurious close.
+        return upl < 0
     mc = float(mc)
-    if mc == 0:
-        return False
     upl = float(pos.get("unrealized_pl") or 0)
     # entry_cost must be POSITION-scale to match unrealized_pl (see
     # _check_target_profit). max_credit is PER-SPREAD; scale by abs(quantity).

@@ -214,7 +214,7 @@ async def _ingest_paper_outcomes_for_user(
     #    Previous code started from paper_ledger, but paper_ledger lacks a
     #    user_id column, so that query always failed silently.
     pos_result = supabase.table("paper_positions") \
-        .select("id, realized_pl, status, opened_at, closed_at, suggestion_id, trace_id, symbol") \
+        .select("id, realized_pl, status, created_at, closed_at, suggestion_id, trace_id, symbol") \
         .eq("user_id", user_id) \
         .eq("status", "closed") \
         .gte("closed_at", cutoff_iso) \
@@ -395,7 +395,7 @@ async def _ingest_paper_outcomes_for_user(
         # (computed once, here, at close — never recomputed on read). Both are
         # failure-isolated: a NULL on either never blocks the outcome write.
         entry_iv_rv_spread = (suggestion_meta or {}).get("iv_rv_spread")
-        entry_ts = position.get("opened_at")
+        entry_ts = position.get("created_at")  # paper_positions open timestamp == created_at
         realized_vol_over_hold = _compute_realized_vol_over_hold(
             truth_layer, position.get("symbol"), entry_ts, position.get("closed_at")
         )

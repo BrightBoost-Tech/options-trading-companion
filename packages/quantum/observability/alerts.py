@@ -17,6 +17,86 @@ logger = logging.getLogger(__name__)
 # severity-map gap class as the ops-health 'critical' omission.
 _VALID_SEVERITIES = ("info", "warning", "high", "critical")
 
+# ── External risk-alert egress (loss-protection, 2026-06-29) ──────────
+# Risk categories whose alert() row ALSO egresses to the external ops
+# webhook so an UNATTENDED loss-protection event reaches the operator
+# off-platform — not merely a DB row that no one is watching. Kept to a
+# TIGHT allowlist so routine high-severity rows (e.g. risk_envelope
+# concentration warns that the table stores as 'high') do NOT spam the
+# channel: only genuine brake/force-close/disarm events egress. Categories
+# already egressed by ops_health_service (the 'ops_' prefixed types it
+# writes via its own webhook channel) are deliberately ABSENT here to avoid
+# double-sends.
+_RISK_EGRESS_ALERT_TYPES = frozenset(
+    {
+        "force_close",  # brake fire / per-symbol loss / cohort stop force-close
+        "exit_protection_disarmed",  # #1046 close re-arm budget tripped
+        "job_dead_lettered",  # scheduler retries exhausted
+        "loss_per_symbol_protection_degraded",  # per-symbol loss unmarkable
+        "stop_loss_protection_degraded",  # position stop unmarkable
+    }
+)
+
+# alert() severity vocabulary → the ops sender's severity vocabulary. The
+# sender's internal severity_order knows only critical/error/warning, so a
+# 'high' MUST map to 'error' or it is suppressed below min-severity.
+_OPS_SEVERITY_MAP = {"critical": "critical", "high": "error"}
+
+
+def _maybe_egress_risk_alert(
+    *,
+    alert_type: str,
+    severity: str,
+    message: str,
+    metadata: dict | None,
+    symbol: str | None,
+    position_id: str | None,
+) -> None:
+    """Best-effort: push a critical/high RISK alert out the ops webhook.
+
+    Fires ONLY for the tight ``_RISK_EGRESS_ALERT_TYPES`` allowlist AND only
+    at severity ``critical``/``high`` (warn/info NEVER egress — anti-spam).
+    Reuses the existing ``send_ops_alert_v2`` sender via a FUNCTION-LOCAL
+    import so there is no import cycle at module load (ops_health_service
+    imports ``alert`` only lazily, inside its own sender). Egress is gated by
+    the sender's own ``OPS_ALERT_WEBHOOK_URL`` check, so this is a safe no-op
+    (``suppressed_reason="no_webhook"``) when the URL is unset — no
+    duplicated suppression logic here. ANY exception is swallowed: egress
+    must never break the risk path, the caller, or the authoritative DB row
+    that was already written before this call.
+    """
+    if alert_type not in _RISK_EGRESS_ALERT_TYPES:
+        return
+    if severity not in ("critical", "high"):
+        return
+    try:
+        from packages.quantum.services.ops_health_service import (
+            send_ops_alert_v2,
+        )
+
+        # client=None → the sender's risk_alerts channel (its Channel 1) is
+        # SKIPPED, so no second/duplicate DB row is written; only the
+        # Slack-compatible webhook (its Channel 2) runs. The row alert()
+        # already inserted remains the single source of truth.
+        send_ops_alert_v2(
+            alert_type=alert_type,
+            message=message,
+            details={
+                **(metadata or {}),
+                **({"symbol": symbol} if symbol else {}),
+                **({"position_id": position_id} if position_id else {}),
+            },
+            severity=_OPS_SEVERITY_MAP.get(severity, "warning"),
+            client=None,
+        )
+    except Exception:
+        # Egress is strictly best-effort; the DB write already happened.
+        logger.warning(
+            "risk_alert_egress_failed",
+            extra={"egress_alert_type": alert_type, "egress_severity": severity},
+            exc_info=True,
+        )
+
 
 def alert(
     supabase: Any,
@@ -98,6 +178,20 @@ def alert(
                 "intended_message": message[:200],
             },
         )
+
+    # AFTER the authoritative DB insert (source of truth): best-effort
+    # external egress for the critical/high RISK loss-protection categories
+    # only. Self-contained + exception-swallowing — never blocks the DB write
+    # nor breaks the caller. No-op for every non-allowlisted / non-critical
+    # alert (anti-spam) and when OPS_ALERT_WEBHOOK_URL is unset.
+    _maybe_egress_risk_alert(
+        alert_type=alert_type,
+        severity=severity,
+        message=message,
+        metadata=metadata,
+        symbol=symbol,
+        position_id=position_id,
+    )
 
 
 # ── Shared admin Supabase singleton ───────────────────────────────

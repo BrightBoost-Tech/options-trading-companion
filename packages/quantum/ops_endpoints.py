@@ -758,3 +758,52 @@ def is_trading_paused() -> tuple[bool, Optional[str]]:
     """
     control = get_global_ops_control()
     return control.get("paused", True), control.get("pause_reason")
+
+
+# Process-once log guard so a missing column / read error logs at most once
+# per worker rather than on every entry cycle.
+_entries_paused_degraded_logged = False
+
+
+def are_entries_paused() -> tuple[bool, Optional[str]]:
+    """
+    Entries-only break-glass halt: blocks NEW position entries while LEAVING
+    the intraday risk monitor + exit/close jobs running. Independent of the
+    global `paused` gate (which halts EVERY job, including loss-protection).
+
+    DB row `ops_control.entries_paused` is the operator interface — flippable
+    with NO deploy. This is a SAFETY-ADDING brake, so it is read DEFENSIVELY
+    and FAILS OPEN: if the column/row is absent (migration not applied yet) or
+    the read errors, entries are treated as NOT halted (a spurious entries-halt
+    would only park the day, whereas halting on a transient read error is the
+    wrong default for a control whose sole purpose is to *add* a halt). The
+    global `paused` gate is read separately and is unaffected by this — it
+    still fails SAFE to paused on its own read path.
+
+    Returns: (entries_paused, reason)
+    """
+    global _entries_paused_degraded_logged
+    try:
+        control = get_global_ops_control()
+        if "entries_paused" not in control:
+            # Column not present yet (migration not applied) or safe-default
+            # row from a DB-read failure inside get_global_ops_control — treat
+            # as NOT halted; log once so the degraded read is visible.
+            if not _entries_paused_degraded_logged:
+                logger.info(
+                    "entries_pause_gate: ops_control.entries_paused absent "
+                    "(migration not applied?) — treating entries as NOT halted"
+                )
+                _entries_paused_degraded_logged = True
+            return False, None
+        return bool(control.get("entries_paused", False)), control.get("entries_pause_reason")
+    except Exception as exc:
+        # Never crash the entry path on this brake; fail OPEN (entries allowed).
+        if not _entries_paused_degraded_logged:
+            logger.warning(
+                "entries_pause_gate: ops_control read failed (%s) — treating "
+                "entries as NOT halted (fail-open for entries-only brake)",
+                type(exc).__name__,
+            )
+            _entries_paused_degraded_logged = True
+        return False, None

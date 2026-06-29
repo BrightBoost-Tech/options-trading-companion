@@ -109,7 +109,14 @@ SCHEDULES = [
     # OBSERVE-ONLY — logs readiness transitions; loosens nothing.
     ("ipo_readiness_monitor",       dict(hour=11, minute=45), "/internal/tasks/ipo/readiness-monitor", "tasks:ipo_readiness_monitor", "IPO-watch readiness transitions"),
 
-    # Scheduler liveness heartbeat — creates a job_run so ops_health_check can detect scheduler death
+    # Scheduler liveness heartbeat — writes a scheduler_heartbeat job_run each
+    # cadence so the in-process scheduler's own silence becomes detectable.
+    # CONSUMER: ops_health_service.EXPECTED_JOBS ("scheduler_heartbeat",
+    # "rth_30min") — if the scheduler goes silent no heartbeat rows appear and
+    # get_expected_jobs flags it through the existing job_late / job_never_run
+    # ops-health alert path (DETECTION ONLY — no auto-restart). SPOF caveat: a
+    # consumer fired by the same dead scheduler can't run, so this catches
+    # job-level / partial stalls while ops_health_check itself still fires.
     ("scheduler_heartbeat",         dict(minute="*/30", hour="8-17"), "/internal/tasks/heartbeat", "tasks:heartbeat", "Scheduler liveness heartbeat"),
 
     # PR #6 Phase 2 observation-window verification. Runs every 6 hours

@@ -7,6 +7,9 @@ import { formatOptionDisplay } from '@/lib/formatters';
 import { fetchWithAuthTimeout, ApiError } from '@/lib/api';
 import { RequireAuth } from '@/components/RequireAuth';
 import { AuthRequired } from '@/components/AuthRequired';
+import { Button } from '@/components/ui/button';
+import { EmptyState } from '@/components/ui/empty-state';
+import { Wallet } from 'lucide-react';
 
 export default function PortfolioPage() {
   const [holdings, setHoldings] = useState<any[]>([]);
@@ -71,39 +74,44 @@ export default function PortfolioPage() {
 
         {/* Risk Metrics / Summary Card */}
         <div className="grid grid-cols-1 md:grid-cols-3 gap-6 mb-8">
-             <div className="bg-white rounded-lg shadow p-6">
-                <h3 className="text-sm font-medium text-gray-500 mb-2">Total Positions</h3>
-                <p className="text-3xl font-bold text-gray-900">{holdings.length}</p>
+             <div className="bg-card text-card-foreground rounded-lg shadow p-6 border border-border">
+                <h3 className="text-sm font-medium text-muted-foreground mb-2">Total Positions</h3>
+                <p className="text-3xl font-bold text-foreground">{holdings.length}</p>
              </div>
-             <div className="bg-white rounded-lg shadow p-6">
-                 <h3 className="text-sm font-medium text-gray-500 mb-2">Data Source</h3>
-                 <p className="text-xl font-semibold text-gray-900 capitalize">
+             <div className="bg-card text-card-foreground rounded-lg shadow p-6 border border-border">
+                 <h3 className="text-sm font-medium text-muted-foreground mb-2">Data Source</h3>
+                 <p className="text-xl font-semibold text-foreground capitalize">
                      {snapshot?.data_source || 'Unknown'}
                  </p>
              </div>
-             <div className="bg-white rounded-lg shadow p-6">
-                 <h3 className="text-sm font-medium text-gray-500 mb-2">Last Updated</h3>
-                 <p className="text-sm text-gray-900">
+             <div className="bg-card text-card-foreground rounded-lg shadow p-6 border border-border">
+                 <h3 className="text-sm font-medium text-muted-foreground mb-2">Last Updated</h3>
+                 <p className="text-sm text-foreground">
                      {snapshot?.created_at ? new Date(snapshot.created_at).toLocaleString() : 'Never'}
                  </p>
              </div>
         </div>
 
-        <div className="bg-white rounded-lg shadow overflow-hidden">
-            <div className="px-6 py-4 border-b">
+        <div className="bg-card text-card-foreground rounded-lg shadow overflow-hidden border border-border">
+            <div className="px-6 py-4 border-b border-border">
               <h3 className="text-lg font-semibold">Current Holdings</h3>
             </div>
 
             {holdings.length === 0 ? (
-              <div className="p-12 text-center text-gray-500">
-                <p className="mb-4 text-lg">No positions found.</p>
-                <p className="text-sm">Positions sync automatically from Alpaca. Check Settings to verify your connection.</p>
-                <button
-                    onClick={() => router.push('/settings')}
-                    className="mt-4 px-4 py-2 bg-blue-600 text-white rounded hover:bg-blue-700"
-                >
-                    Go to Settings
-                </button>
+              <div className="p-12 text-center">
+                <EmptyState
+                  icon={Wallet}
+                  title="No positions found"
+                  description="Positions sync automatically from Alpaca. Check Settings to verify your connection."
+                  action={
+                    <Button
+                      onClick={() => router.push('/settings')}
+                      className="bg-blue-600 text-white hover:bg-blue-700"
+                    >
+                      Go to Settings
+                    </Button>
+                  }
+                />
               </div>
             ) : (
               <div className="overflow-x-auto">

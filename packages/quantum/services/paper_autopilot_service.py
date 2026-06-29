@@ -177,6 +177,26 @@ class PaperAutopilotService:
         except Exception:
             pass  # If ops_control unavailable, continue (fail-open)
 
+        # Entries-only break-glass halt: a DB-level brake (ops_control.
+        # entries_paused) that blocks NEW entries here at the entry seam while
+        # LEAVING the intraday risk monitor + exit/close jobs running — those
+        # never call this path, so loss-protection keeps running. Independent
+        # of the global `paused` gate above. Reads DEFENSIVELY and FAILS OPEN
+        # (a spurious entries-halt only parks the day), so a read error never
+        # blocks entries on its own and never bypasses the global pause.
+        try:
+            from packages.quantum.ops_endpoints import are_entries_paused
+            entries_paused, entries_reason = are_entries_paused()
+            if entries_paused:
+                logger.info(f"paper_auto_execute_entries_paused: reason={entries_reason}")
+                return {
+                    "status": "entries_paused",
+                    "reason": entries_reason,
+                    "executed_count": 0,
+                }
+        except Exception:
+            pass  # Entries-only brake fails OPEN — never block on its own error
+
         # Staleness gate: block new entries if market data is stale
         try:
             from packages.quantum.risk.staleness_gate import check_staleness_gate

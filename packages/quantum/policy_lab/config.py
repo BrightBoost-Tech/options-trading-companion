@@ -6,9 +6,12 @@ set is filtered, sized, and managed. The forecast stack (scoring, regime,
 opportunity ranking) is shared; only the policy layer diverges.
 """
 
+import logging
 import os
-from dataclasses import dataclass, asdict, field
+from dataclasses import dataclass, asdict, field, replace
 from typing import Dict, Optional
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -97,6 +100,28 @@ DEFAULT_CONFIGS: Dict[str, PolicyConfig] = {
 }
 
 
+# ── Fail-SAFE fallback for a LOAD FAULT (NOT an empty seed) ───────────
+# DEFAULT_CONFIGS is the legitimate *empty-seed* baseline (first boot, no
+# cohort rows yet). It is NOT a safe fallback for a DB/load FAULT: its stops
+# are LOOSER than the live champion's (aggressive 0.65 vs live ~0.30), so
+# returning it on a fault SILENTLY WIDENS the live stop — a fail-OPEN that
+# weakens loss protection with zero signal. On a fault we instead fail SAFE:
+# prefer the last-known-good configs cached from the most recent successful
+# load (live-tight); if none exists yet, use TIGHT_FALLBACK, whose stops are
+# clamped <= the live champion (0.30) so they can only be tighter — never
+# looser — than what is actually running.
+_TIGHT_STOP_CEILING = 0.30  # never looser than the live champion's stop
+
+TIGHT_FALLBACK: Dict[str, PolicyConfig] = {
+    name: replace(cfg, stop_loss_pct=min(cfg.stop_loss_pct, _TIGHT_STOP_CEILING))
+    for name, cfg in DEFAULT_CONFIGS.items()
+}
+
+# Last-known-good cache: populated on every SUCCESSFUL non-empty load so a
+# later fault can fail back to live-tight values instead of loose defaults.
+_LAST_KNOWN_GOOD: Optional[Dict[str, PolicyConfig]] = None
+
+
 def get_policy_config(cohort_name: str) -> PolicyConfig:
     """Get default PolicyConfig by cohort name."""
     return DEFAULT_CONFIGS.get(cohort_name, NEUTRAL)
@@ -104,10 +129,22 @@ def get_policy_config(cohort_name: str) -> PolicyConfig:
 
 def load_cohort_configs(user_id: str, supabase) -> Dict[str, PolicyConfig]:
     """
-    Load active cohort configs from DB with fallback to defaults.
+    Load active cohort configs from DB.
 
     Returns dict mapping cohort_name → PolicyConfig.
+
+    Fail-OPEN fix (loss-protection): a load FAULT must be distinguished from a
+    legitimate empty seed. Both used to return the LOOSE DEFAULT_CONFIGS, so a
+    DB/load exception silently widened the live champion's stop (0.65 vs the
+    live ~0.30) with zero signal.
+      • Query SUCCEEDS, rows present  → live configs; cache as last-known-good.
+      • Query SUCCEEDS, zero rows     → legitimate empty seed → DEFAULT_CONFIGS
+        (preserves first-boot semantics; NOT a fault, no fault log).
+      • Exception during load (FAULT) → fail SAFE: last-known-good cache if we
+        have one, else TIGHT_FALLBACK — NEVER the loose DEFAULT_CONFIGS — and
+        log LOUDLY ([CONFIG_FAULT]).
     """
+    global _LAST_KNOWN_GOOD
     try:
         result = supabase.table("policy_lab_cohorts") \
             .select("cohort_name, policy_config") \
@@ -124,9 +161,28 @@ def load_cohort_configs(user_id: str, supabase) -> Dict[str, PolicyConfig]:
             merged = base.to_dict()
             merged.update({k: v for k, v in db_config.items() if k in merged})
             configs[name] = PolicyConfig.from_dict(merged)
-        return configs if configs else DEFAULT_CONFIGS.copy()
-    except Exception:
+        if configs:
+            # Successful, non-empty load → live-tight values. Cache for the
+            # fault fail-safe (store a copy so callers can't mutate the cache).
+            _LAST_KNOWN_GOOD = dict(configs)
+            return configs
+        # Successful but EMPTY → legitimate empty seed (first boot). Preserve
+        # the baseline; do NOT poison the cache with loose defaults.
         return DEFAULT_CONFIGS.copy()
+    except Exception:
+        # LOAD FAULT — must NOT fail OPEN to the loose DEFAULT_CONFIGS (that
+        # would silently widen the live champion's stop). Fail SAFE to the
+        # last-known-good cache (live-tight) or, absent one, TIGHT_FALLBACK.
+        fallback = dict(_LAST_KNOWN_GOOD) if _LAST_KNOWN_GOOD else TIGHT_FALLBACK.copy()
+        source = "last-known-good cache" if _LAST_KNOWN_GOOD else "TIGHT_FALLBACK"
+        logger.exception(
+            "[CONFIG_FAULT] load_cohort_configs failed for user_id=%s — failing "
+            "SAFE to %s (tight stops, never the loose DEFAULT_CONFIGS); "
+            "aggressive stop_loss_pct=%s",
+            user_id, source,
+            getattr(fallback.get("aggressive"), "stop_loss_pct", None),
+        )
+        return fallback
 
 
 def is_policy_lab_enabled() -> bool:

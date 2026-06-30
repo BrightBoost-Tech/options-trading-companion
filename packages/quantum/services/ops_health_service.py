@@ -496,6 +496,62 @@ def get_recent_failures(client, hours: int = 24) -> List[Dict[str, Any]]:
         return []
 
 
+def get_silent_job_failures(client, hours: int = 24) -> List[Dict[str, Any]]:
+    """A4 silent-failure detector: jobs that reported ``status='succeeded'``
+    while their OWN ``result.counts.errors`` was > 0.
+
+    This is the MASKING class that hid ``paper_learning_ingest`` running 5×
+    "succeeded" with ``errors=1`` for 6 days unseen — a job that swallows
+    per-item exceptions, tallies them into ``counts.errors``, and still
+    returns success is INVISIBLE to ``get_recent_failures`` (which keys on the
+    job_runs ``status`` column). This surfaces it through the existing
+    ops-health alert path.
+
+    Best-effort: a query failure is logged and yields ``[]`` (the check must
+    never crash the health cycle). The JSON shape is read defensively — a row
+    whose ``result``/``counts`` is missing or non-numeric is skipped, never
+    counted as an offender.
+
+    Returns:
+        List of ``{job_name, error_count, finished_at, run_id}`` dicts, one per
+        offending run, newest first.
+    """
+    try:
+        since = (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat()
+        result = client.table("job_runs") \
+            .select("id, job_name, finished_at, result") \
+            .eq("status", "succeeded") \
+            .gte("finished_at", since) \
+            .order("finished_at", desc=True) \
+            .limit(200) \
+            .execute()
+
+        offenders: List[Dict[str, Any]] = []
+        for row in result.data or []:
+            res = row.get("result")
+            if not isinstance(res, dict):
+                continue
+            counts = res.get("counts")
+            if not isinstance(counts, dict):
+                continue
+            raw_errors = counts.get("errors")
+            try:
+                error_count = int(raw_errors)
+            except (TypeError, ValueError):
+                continue
+            if error_count > 0:
+                offenders.append({
+                    "job_name": row.get("job_name"),
+                    "error_count": error_count,
+                    "finished_at": row.get("finished_at"),
+                    "run_id": row.get("id"),
+                })
+        return offenders
+    except Exception as e:
+        logger.warning(f"Failed to check silent job failures: {e}")
+        return []
+
+
 def get_suggestions_stats(client) -> Dict[str, Any]:
     """
     Get suggestion generation statistics for today.

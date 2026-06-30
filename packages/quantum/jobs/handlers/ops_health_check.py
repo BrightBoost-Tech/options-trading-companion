@@ -20,6 +20,7 @@ from packages.quantum.services.ops_health_service import (
     get_expected_jobs,
     get_output_freshness,
     get_recent_failures,
+    get_silent_job_failures,
     get_suggestions_stats,
     get_integrity_stats,
     send_ops_alert,
@@ -33,6 +34,7 @@ from packages.quantum.services.ops_health_service import (
     OPS_ALERT_MIN_SEVERITY,
     OPS_ALERT_COOLDOWN_MINUTES,
 )
+from packages.quantum.observability.alerts import alert as _alert
 from packages.quantum.observability.audit_log_service import AuditLogService
 from packages.quantum.jobs.handlers.utils import get_admin_client
 from packages.quantum.jobs.handlers.exceptions import RetryableJobError
@@ -328,6 +330,60 @@ def run(payload: Dict[str, Any], ctx: Any = None) -> Dict[str, Any]:
                 })
 
         # ==============================================================
+        # 3.5 A4 silent-failure detector: jobs that returned
+        #     status='succeeded' while their own result.counts.errors > 0
+        #     (the masking class — paper_learning_ingest ran 5× "succeeded"
+        #     with errors=1 for 6 days, invisible to status-keyed checks).
+        #     Fires via the canonical observability alert() with a NEW
+        #     alert_type that egresses through _RISK_EGRESS_ALERT_TYPES.
+        # ==============================================================
+        logger.info("[OPS_HEALTH_CHECK] Checking silent job failures...")
+        silent_failures = get_silent_job_failures(client)
+
+        for sf in silent_failures:
+            job_name = sf.get("job_name") or "unknown"
+            error_count = sf.get("error_count", 0)
+            issues_found.append(
+                f"Silent failure: {job_name} (errors={error_count})"
+            )
+
+            fingerprint = get_alert_fingerprint(
+                "job_succeeded_with_errors", {"job_name": job_name}
+            )
+            suppressed, last_sent = should_suppress_alert(
+                client, fingerprint, cooldown_minutes
+            )
+            if suppressed:
+                alerts_suppressed.append({
+                    "type": f"job_succeeded_with_errors:{job_name}",
+                    "reason": "cooldown",
+                    "last_sent": last_sent,
+                })
+                continue
+
+            # alert() is the canonical primitive (never raises) and egresses
+            # this high-severity allowlisted type via _maybe_egress_risk_alert.
+            _alert(
+                client,
+                alert_type="job_succeeded_with_errors",
+                severity="high",
+                message=(
+                    f"Job `{job_name}` reported status=succeeded but its "
+                    f"result.counts.errors={error_count} — a silently masked "
+                    f"failure (status-keyed checks miss it)."
+                ),
+                metadata={
+                    "source": "ops_health_check",
+                    "job_name": job_name,
+                    "error_count": error_count,
+                    "run_id": sf.get("run_id"),
+                    "finished_at": sf.get("finished_at"),
+                },
+            )
+            alerts_sent.append(f"job_succeeded_with_errors:{job_name}")
+            alert_fingerprints.append(fingerprint)
+
+        # ==============================================================
         # 4. Get suggestions stats
         # ==============================================================
         suggestions_stats = get_suggestions_stats(client)
@@ -369,6 +425,8 @@ def run(payload: Dict[str, Any], ctx: Any = None) -> Dict[str, Any]:
                     for j in expected_jobs
                 ],
                 "failure_count_24h": len(recent_failures),
+                "silent_failure_count_24h": len(silent_failures),
+                "silent_failures": silent_failures,
             },
             "output_freshness": [
                 {

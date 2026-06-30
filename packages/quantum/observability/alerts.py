@@ -6,6 +6,7 @@ Reference: docs/loud_error_doctrine.md
 
 import logging
 import os
+import time
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -34,6 +35,7 @@ _RISK_EGRESS_ALERT_TYPES = frozenset(
         "job_dead_lettered",  # scheduler retries exhausted
         "loss_per_symbol_protection_degraded",  # per-symbol loss unmarkable
         "stop_loss_protection_degraded",  # position stop unmarkable
+        "job_succeeded_with_errors",  # A4 silent-failure detector (ops_health)
     }
 )
 
@@ -96,6 +98,35 @@ def _maybe_egress_risk_alert(
             extra={"egress_alert_type": alert_type, "egress_severity": severity},
             exc_info=True,
         )
+
+
+# ── risk_alerts insert retry (transient-disconnect only, 2026-06-30) ──────
+# The observed failure signature for the risk_alerts write is a stale-keepalive
+# "Server disconnected" / RemoteProtocolError after the connection has sat idle
+# — NOT pool exhaustion. A right-sized retry-with-backoff recovers that write
+# without any durable buffer/queue (over-engineering for this signature). Only
+# transient disconnects retry; every other exception falls straight through to
+# the unchanged logger.exception fallback so a genuine query/schema error is
+# never silently spun on.
+_ALERT_INSERT_RETRY_BACKOFFS = (0.25, 0.5)  # two retries after the first try
+
+
+def _is_transient_disconnect(exc: BaseException | None) -> bool:
+    """True when ``exc`` looks like a recoverable stale-keepalive server
+    disconnect (httpx/httpcore ``RemoteProtocolError`` or a
+    "Server disconnected"/"RemoteProtocol" message), False otherwise.
+
+    Matched by CLASS NAME across the MRO (so a missing httpx/httpcore import
+    can never break the alert path) plus a message-substring fallback. Pool
+    exhaustion / real PostgREST errors do NOT match and are not retried.
+    """
+    if exc is None:
+        return False
+    for cls in type(exc).__mro__:
+        if cls.__name__ == "RemoteProtocolError":
+            return True
+    text = str(exc)
+    return "Server disconnected" in text or "RemoteProtocol" in text
 
 
 def alert(
@@ -167,17 +198,57 @@ def alert(
     if symbol is not None:
         record["symbol"] = symbol
 
-    try:
-        supabase.table("risk_alerts").insert(record).execute()
-    except Exception:
-        logger.exception(
-            "alert_write_failed",
-            extra={
-                "intended_alert_type": alert_type,
-                "intended_severity": severity,
-                "intended_message": message[:200],
-            },
-        )
+    # Authoritative risk_alerts write with a right-sized retry on transient
+    # stale-keepalive disconnects (loss-protection, 2026-06-30). ONLY transient
+    # disconnects retry; any other exception breaks straight out to the
+    # unchanged logger.exception fallback. On a transient disconnect that
+    # EXHAUSTS the retries, an extra DISTINCT loss marker (alert_lost_after_
+    # retries) makes the dropped row visible — important because, with
+    # OPS_ALERT_WEBHOOK_URL unset on this deploy, a lost insert otherwise
+    # reaches NOWHERE.
+    written = False
+    last_exc: BaseException | None = None
+    retried = False
+    for backoff in (0.0,) + _ALERT_INSERT_RETRY_BACKOFFS:
+        if backoff:
+            retried = True
+            time.sleep(backoff)
+        try:
+            supabase.table("risk_alerts").insert(record).execute()
+            written = True
+            break
+        except Exception as exc:  # noqa: BLE001 — classified below
+            last_exc = exc
+            if not _is_transient_disconnect(exc):
+                break  # non-transient → do not retry; fall to the fallback
+
+    if not written:
+        # FINAL fallback (unchanged behavior): structured exception log of the
+        # intended alert. Re-raise into an ``except`` so logger.exception keeps
+        # the original traceback.
+        try:
+            if last_exc is not None:
+                raise last_exc
+        except Exception:
+            logger.exception(
+                "alert_write_failed",
+                extra={
+                    "intended_alert_type": alert_type,
+                    "intended_severity": severity,
+                    "intended_message": message[:200],
+                },
+            )
+        if retried:
+            logger.error(
+                "alert_lost_after_retries",
+                extra={
+                    "intended_alert_type": alert_type,
+                    "intended_severity": severity,
+                    "intended_message": message[:200],
+                    "retries": len(_ALERT_INSERT_RETRY_BACKOFFS),
+                    "error": str(last_exc)[:200] if last_exc is not None else None,
+                },
+            )
 
     # AFTER the authoritative DB insert (source of truth): best-effort
     # external egress for the critical/high RISK loss-protection categories

@@ -1913,6 +1913,16 @@ class PaperExitEvaluator:
             exit_price = float(position.get("current_mark") or position.get("avg_entry_price") or 0)
         entry_price = float(position.get("avg_entry_price") or 0)
 
+        # ── CLOSE_FILL_GAP instrumentation (ADDITIVE, observe-only) ───
+        # Capture the triggering mark (mid) and the full-cross executable
+        # estimate (cross) at STAGE time so the fill point can record the
+        # slippage gap (Phase-3 precursor). These NEVER affect any close
+        # decision — they are stamped onto order_json and read back at fill.
+        # Default None: an internal/shadow close or a non-corroborated stage
+        # simply logs fill-only (gap_fraction=NA) downstream.
+        _cfg_mid: Optional[float] = None
+        _cfg_cross: Optional[float] = None
+
         # ── CLOSE_QUOTE_VALIDATION (Phase 2, default-ON) ──────────────
         # Corroborate the LIVE close limit on the EXECUTABLE side BEFORE
         # staging — and BEFORE submit_and_track's resting-order pre-cancel
@@ -1940,6 +1950,11 @@ class PaperExitEvaluator:
                     _live_submit = True  # fail toward validating the live path
             if _live_submit:
                 _decision, _cval, *_q = _corroborate_close_stage(position, exit_price)
+                # CLOSE_FILL_GAP: the value handed to corroboration IS the
+                # trigger mark (mid); _cval (on stage_executable) IS the
+                # full-cross executable estimate (cross). Capture both before
+                # exit_price is repriced below. Observe-only.
+                _cfg_mid = exit_price
                 if _decision == "defer":
                     logger.warning(
                         f"[CLOSE_STAGE] DEFER live close for "
@@ -1958,6 +1973,7 @@ class PaperExitEvaluator:
                         f"mark={exit_price} → executable={round(_cval, 4)} "
                         f"(quality={_q[0] if _q else '?'})"
                     )
+                    _cfg_cross = _cval  # CLOSE_FILL_GAP: full-cross estimate
                     exit_price = _cval
                 # "stage_mark": transient error → keep the mark limit (legacy),
                 # already warned inside _corroborate_close_stage.
@@ -2050,6 +2066,20 @@ class PaperExitEvaluator:
             )
         finally:
             os.environ["EXECUTION_MODE"] = _saved_mode
+
+        # ── CLOSE_FILL_GAP: thread stage-time cross/mid onto the close
+        # order's EXISTING order_json (no migration) so the LIVE fill /
+        # reconcile point can read them back and log the slippage gap.
+        # Best-effort; never affects the close. The internal-fill path below
+        # reads these from locals + folds them into its own order_json write.
+        if _cfg_cross is not None or _cfg_mid is not None:
+            try:
+                from packages.quantum.services.close_fill_gap import (
+                    stamp_order_json as _cfg_stamp,
+                )
+                _cfg_stamp(supabase, order_id, _cfg_cross, _cfg_mid)
+            except Exception as _cfg_e:
+                logger.warning(f"[CLOSE_FILL_GAP] stage stamp failed: {_cfg_e}")
 
         now = datetime.now(timezone.utc).isoformat()
 
@@ -2193,6 +2223,23 @@ class PaperExitEvaluator:
             f"delta={round((exit_price - _mid_reference), 4)}"
         )
 
+        # CLOSE_FILL_GAP (internal/shadow + Alpaca-fallback fill): record the
+        # slippage between the stage-time full-cross estimate and the executable
+        # fill. Additive, observe-only; best-effort. cross/mid are the locals
+        # captured at stage (None for a non-corroborated internal close ->
+        # fill-only line, gap_fraction=NA).
+        try:
+            from packages.quantum.services.close_fill_gap import (
+                log_close_fill_gap as _cfg_log,
+            )
+            _cfg_log(
+                position.get("symbol"), position_id,
+                _cfg_cross, _cfg_mid, exit_price,
+                reason=reason, log=logger,
+            )
+        except Exception as _cfg_e:
+            logger.warning(f"[CLOSE_FILL_GAP] internal emit failed: {_cfg_e}")
+
         # 1. Mark order as filled.
         #
         # FIX 3 (2026-05-18 instrumentation gap): also stamp submitted_at
@@ -2212,6 +2259,16 @@ class PaperExitEvaluator:
             _order_json = {}
         _order_json["fill_quality"] = _fill_quality
         _order_json["fill_mid_reference"] = _mid_reference
+        # CLOSE_FILL_GAP P2 persistence (existing JSONB, NO migration): fold
+        # {cross, mid, fill, gap_fraction} into this same write so the
+        # distribution is queryable beyond short log retention. Best-effort.
+        try:
+            from packages.quantum.services.close_fill_gap import (
+                stamp_payload as _cfg_payload,
+            )
+            _order_json.update(_cfg_payload(_cfg_cross, _cfg_mid, exit_price))
+        except Exception:
+            pass
         supabase.table("paper_orders").update({
             "status": "filled",
             "filled_qty": abs_qty,

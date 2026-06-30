@@ -552,6 +552,42 @@ def _close_position_on_fill(
         f"realized_pl=${realized_pl}"
     )
 
+    # ── CLOSE_FILL_GAP (LIVE fill): record the slippage between the stage-time
+    # full-cross executable estimate and the marketable-limit fill obtained.
+    # ADDITIVE / observe-only — never affects the close. cross/mid were stamped
+    # onto order_json at stage time (paper_exit_evaluator); fill is the broker's
+    # net combo fill. Older orders without the stamp log fill-only (NA). The
+    # whole block is best-effort and swallows every exception.
+    try:
+        from packages.quantum.services.close_fill_gap import (
+            read_stamp as _cfg_read,
+            log_close_fill_gap as _cfg_log,
+            stamp_payload as _cfg_payload,
+        )
+        _cfg_cross, _cfg_mid = _cfg_read(order.get("order_json"))
+        _cfg_fill = alpaca_order.get("filled_avg_price")
+        # Same positive-magnitude basis as cross/mid (achievable_close); a
+        # combo's net fill can be reported signed by the broker.
+        _cfg_fill = abs(float(_cfg_fill)) if _cfg_fill is not None else None
+        _cfg_log(
+            position.get("symbol"), position_id,
+            _cfg_cross, _cfg_mid, _cfg_fill,
+            reason="alpaca_fill_reconciler_standard", log=logger,
+        )
+        # P2 persistence (existing order_json JSONB, NO migration): write the
+        # full {cross, mid, fill, gap_fraction} so the LIVE distribution is
+        # self-contained + queryable for the Phase-3 REOPEN gate. Best-effort.
+        try:
+            _oj = dict(order.get("order_json") or {})
+            _oj.update(_cfg_payload(_cfg_cross, _cfg_mid, _cfg_fill))
+            supabase.table("paper_orders").update({"order_json": _oj}).eq(
+                "id", order.get("id")
+            ).execute()
+        except Exception:
+            pass
+    except Exception as _cfg_e:
+        logger.warning(f"[CLOSE_FILL_GAP] live emit failed: {_cfg_e}")
+
 
 def _write_close_path_critical_alert(
     supabase,

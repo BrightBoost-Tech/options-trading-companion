@@ -692,6 +692,20 @@ def _stage_order_internal(supabase, analytics, user_id, ticket: TradeTicket, por
                 f"limit submits NEGATIVE (suggestion={suggestion_id})"
             )
 
+    # Entry round-trip cost gate (ENTRY_ROUNDTRIP_COST_GATE_ENABLED, default
+    # ON). AFTER the per-leg quotes are validated (#1038) and BEFORE any order
+    # row is inserted or submitted: charge the REAL executable round-trip cross
+    # (the same long→bid/short→ask basis the exit corroboration uses, on the
+    # zero-refetch validated quotes) against the suggestion's gross EV and
+    # REJECT pre-broker-submit when honest_ev_after_cost < MIN_EDGE_AFTER_COSTS.
+    # The SOFI 06-30 class: admitted on EV +$30.63, ~$135 of cross made it
+    # underwater-on-executable from entry. OPEN-only; raises
+    # EntryRoundtripCostExceedsEV (clean no-broker-submit reject, mirrors
+    # EntryQuoteUnpriceable) which the autopilot loops count as not-executed.
+    _apply_entry_roundtrip_gate(
+        supabase, ticket, position_id, _entry_leg_quotes, suggestion_id=suggestion_id,
+    )
+
     # TCM Estimate
     tcm_est = TransactionCostModel.estimate(ticket, quote)
 
@@ -1130,6 +1144,167 @@ def _net_mid_cost(ticket, leg_quotes: Dict[str, Dict[str, Any]]) -> Optional[flo
         else:
             total += mid
     return total
+
+
+class EntryRoundtripCostExceedsEV(Exception):
+    """An OPEN/entry order whose gross EV does not survive the EXECUTABLE
+    round-trip cost — the SOFI 2026-06-30 class.
+
+    The first live trade (a SOFI call debit spread) was admitted on EV +$30.63,
+    but its executable round-trip cost (~$135 of bid/ask cross) made it
+    underwater-on-executable from entry; it force-closed at a 100%-spread-cost
+    loss. The ranker's pre-stage cost gate used a 5%-of-EV slippage PROXY
+    (canonical_ranker._estimate_slippage) — far too loose — and waved SOFI
+    through while rejecting 6 tighter names on execution_cost_exceeds_ev.
+
+    This rejection charges the REAL executable cross (Σ per-leg (ask−bid) ×
+    contracts × 100), priced on the SAME executable basis the exit corroboration
+    uses (exit_mark_corroboration — one model both ends, zero refetch), against
+    the suggestion's gross EV. It is raised pre-broker-submit by
+    _stage_order_internal so no order row is inserted and no broker order is
+    sent — the same clean reject shape as EntryQuoteUnpriceable (#1038). The
+    autopilot loops' existing handlers count it as not-executed; the suggestion
+    row is stamped blocked_reason='ev_below_roundtrip_cost' with the numbers.
+    """
+
+    def __init__(self, gross_ev, round_trip, net):
+        self.gross_ev = gross_ev
+        self.round_trip = round_trip
+        self.net = net
+        super().__init__(
+            f"ev_below_roundtrip_cost: gross_ev={gross_ev:.2f} "
+            f"round_trip={round_trip:.2f} net={net:.2f}"
+        )
+
+
+def _entry_roundtrip_cost_gate_enabled() -> bool:
+    """ENTRY_ROUNDTRIP_COST_GATE_ENABLED — kill-switch, DEFAULT ON (safety/
+    tightening polarity, same parse as ENTRY_QUOTE_VALIDATION_ENABLED).
+    Empty/unset → ON (NOT off — an empty string must never silently no-op a
+    safety control); only an explicit 0/false/no/off disables it → legacy
+    behavior (no round-trip reject)."""
+    raw = os.environ.get("ENTRY_ROUNDTRIP_COST_GATE_ENABLED", "")
+    if not raw.strip():
+        return True
+    return raw.strip().lower() not in ("0", "false", "no", "off")
+
+
+def _apply_entry_roundtrip_gate(
+    supabase, ticket, position_id, entry_leg_quotes, suggestion_id=None
+) -> None:
+    """Pre-broker-submit ENTRY rejection on REAL executable round-trip cost.
+
+    Computes the executable round-trip cost — the full per-leg bid/ask cross
+    paid to OPEN and to CLOSE — on the already-validated ``entry_leg_quotes``,
+    reusing the SHARED executable basis the exit uses
+    (``exit_mark_corroboration.executable_roundtrip_cost`` →
+    ``compute_corroboration``; zero refetch, identical long→bid/short→ask).
+    Then ``honest_ev_after_cost = gross_EV − round_trip``; REJECT when it is
+    below ``MIN_EDGE_AFTER_COSTS`` (the same $15 floor the entry EV gate uses).
+
+    OPEN orders only — a CLOSE (``position_id`` set) is never blocked (a missing
+    or adverse quote must not strand an exit). No-op when the flag is off, the
+    validated quotes are empty (flag-off / exempt upstream), or the ticket
+    carries no EV (nothing to price the trade-off against — H9: do not
+    fabricate an EV). When the executable side is incomplete the round-trip is
+    indeterminate → allow (legacy; #1038 already rejects dark legs). WARNING-logs
+    EVERY evaluation (gross_ev · round_trip · net · decision), observable from
+    cycle 1 like the [UTILIZATION_GATE] line. On reject: stamps
+    blocked_reason='ev_below_roundtrip_cost' (fail-soft) then raises
+    EntryRoundtripCostExceedsEV."""
+    if position_id is not None:
+        return  # CLOSE order — exempt
+    if not entry_leg_quotes:
+        return  # validation flag off / nothing validated — legacy fall-through
+    if not _entry_roundtrip_cost_gate_enabled():
+        return  # kill-switch off → legacy behavior
+
+    gross_ev = getattr(ticket, "expected_value", None)
+    if gross_ev is None:
+        logger.warning(
+            "[ENTRY_ROUNDTRIP_GATE] gross_ev=None (no EV on ticket) — SKIP "
+            "(cannot price the EV trade-off) suggestion=%s", suggestion_id,
+        )
+        return
+
+    from packages.quantum.analytics.canonical_ranker import MIN_EDGE_AFTER_COSTS
+    from packages.quantum.analytics.exit_mark_corroboration import (
+        executable_roundtrip_cost,
+    )
+
+    legs = [
+        {
+            "occ_symbol": _leg_symbol(l),
+            "action": getattr(l, "action", None),
+            "quantity": getattr(l, "quantity", None),
+            "strike": getattr(l, "strike", None),
+        }
+        for l in (getattr(ticket, "legs", None) or [])
+    ]
+    # Normalize to {occ: {bid, ask}} — entry quotes carry bid/ask (truth layer)
+    # or bid_price/ask_price (legacy Polygon); mirror _net_mid_cost's read.
+    leg_quotes: Dict[str, Dict[str, Any]] = {}
+    for occ, q in entry_leg_quotes.items():
+        q = q or {}
+        bid = q.get("bid") if q.get("bid") is not None else q.get("bid_price")
+        ask = q.get("ask") if q.get("ask") is not None else q.get("ask_price")
+        leg_quotes[occ] = {"bid": bid, "ask": ask}
+
+    rt = executable_roundtrip_cost(
+        legs=legs, leg_quotes=leg_quotes, quantity=getattr(ticket, "quantity", None),
+    )
+    round_trip = rt.get("round_trip")
+
+    try:
+        gross_ev_f = float(gross_ev)
+    except (TypeError, ValueError):
+        logger.warning(
+            "[ENTRY_ROUNDTRIP_GATE] gross_ev=%r not numeric — SKIP suggestion=%s",
+            gross_ev, suggestion_id,
+        )
+        return
+
+    if round_trip is None:
+        # Executable side incomplete (some leg unpriceable two-sided). #1038
+        # owns the dark-leg reject; never fabricate a cost here.
+        logger.warning(
+            "[ENTRY_ROUNDTRIP_GATE] gross_ev=%.2f round_trip=None "
+            "(incomplete executable quote) net=NA floor=%.2f decision=allow "
+            "suggestion=%s",
+            gross_ev_f, float(MIN_EDGE_AFTER_COSTS), suggestion_id,
+        )
+        return
+
+    net = gross_ev_f - float(round_trip)
+    decision = "reject" if net < float(MIN_EDGE_AFTER_COSTS) else "allow"
+    logger.warning(
+        "[ENTRY_ROUNDTRIP_GATE] gross_ev=%.2f round_trip=%.2f net=%.2f "
+        "floor=%.2f decision=%s suggestion=%s",
+        gross_ev_f, float(round_trip), net, float(MIN_EDGE_AFTER_COSTS),
+        decision, suggestion_id,
+    )
+    if decision != "reject":
+        return
+
+    # Stamp the row so the cause survives the morning stale-sweep (mirrors
+    # paper_autopilot._stamp_blocked_reason). Fail-soft: a stamp failure never
+    # blocks the reject.
+    if suggestion_id:
+        try:
+            supabase.table(TRADE_SUGGESTIONS_TABLE).update({
+                "blocked_reason": "ev_below_roundtrip_cost",
+                "blocked_detail": (
+                    f"gross_ev={gross_ev_f:.2f} round_trip={float(round_trip):.2f} "
+                    f"net={net:.2f} < floor={float(MIN_EDGE_AFTER_COSTS):.2f}"
+                )[:300],
+            }).eq("id", suggestion_id).execute()
+        except Exception as _se:
+            logger.warning(
+                "[ENTRY_ROUNDTRIP_GATE] blocked_reason stamp failed for %s: %s",
+                suggestion_id, _se,
+            )
+
+    raise EntryRoundtripCostExceedsEV(gross_ev_f, float(round_trip), net)
 
 
 def _abs_entry_premium(fill_price) -> float:

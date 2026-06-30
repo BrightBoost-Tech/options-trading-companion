@@ -58,7 +58,11 @@ import logging
 import os
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
-from packages.quantum.risk.mark_math import compute_current_value, finalize_mark
+from packages.quantum.risk.mark_math import (
+    MULTIPLIER,
+    compute_current_value,
+    finalize_mark,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -334,6 +338,85 @@ def executable_close_estimate(
         "achievable_implied_pl": v["achievable_implied_pl"],
         "quote_complete": v["quote_complete"],
         "legs_quotes": v["legs_quotes"],
+    }
+
+
+def executable_roundtrip_cost(
+    *,
+    legs: List[Dict[str, Any]],
+    leg_quotes: Dict[str, Dict[str, Any]],
+    quantity: Any,
+) -> Dict[str, Any]:
+    """Executable round-trip slippage cost for an ENTRY decision — the entry-side
+    counterpart of ``executable_close_estimate``, sharing the SAME executable
+    basis the exit uses so entry and exit price the identical legs (one model
+    both ends).
+
+    The full bid/ask cross is paid TWICE over a complete round trip: at OPEN you
+    cross to the unfavorable side (long → pay ASK, short → receive BID) and at
+    CLOSE you cross back (long → sell at BID, short → buy at ASK — exactly
+    ``compute_corroboration``'s executable side). The net cost per leg is
+    therefore ``(ask − bid) × contracts × 100`` regardless of long/short.
+
+    Reuses ``compute_corroboration``'s per-leg quote record (``legs_quotes``)
+    rather than forking the long→bid/short→ask logic, and resolves per-leg
+    ``contracts`` with the SAME full-count rule ``compute_current_value`` uses
+    (``leg.quantity`` → fallback ``quantity``).
+
+    Returns ``{round_trip, per_leg, quote_complete, legs_quotes}``. ``round_trip``
+    is ``None`` when ANY leg lacks a two-sided quote (all-or-nothing — never a
+    fabricated partial cost; #1038 already rejects dark entry legs upstream).
+    Never raises for ordinary data shapes.
+    """
+    legs = [l for l in (legs or []) if isinstance(l, dict)]
+    verdict = compute_corroboration(
+        exit_type="target_profit",  # verdict fields unused by this caller
+        triggering_mark=None,
+        triggering_implied_pl=None,
+        quantity=quantity,
+        avg_entry_price=None,
+        legs=legs,
+        leg_quotes=leg_quotes,
+    )
+    legs_quotes = verdict["legs_quotes"]
+
+    try:
+        _spread_qty = abs(float(quantity)) if quantity is not None else 1.0
+    except (TypeError, ValueError):
+        _spread_qty = 1.0
+    contracts_by_occ: Dict[str, float] = {}
+    for leg in legs:
+        occ = _leg_occ(leg)
+        # Identical full-count resolution to compute_current_value (mark_math:133).
+        contracts_by_occ[occ] = abs(float(leg.get("quantity") or quantity or 1))
+
+    round_trip = 0.0
+    per_leg: List[Dict[str, Any]] = []
+    complete = bool(legs_quotes)
+    for lq in legs_quotes:
+        occ = lq.get("occ")
+        bid = lq.get("bid")
+        ask = lq.get("ask")
+        contracts = contracts_by_occ.get(occ, _spread_qty)
+        if bid is None or ask is None:
+            complete = False
+            per_leg.append({
+                "occ": occ, "bid": bid, "ask": ask,
+                "contracts": contracts, "cross_cost": None,
+            })
+            continue
+        cross_cost = (float(ask) - float(bid)) * contracts * MULTIPLIER
+        round_trip += cross_cost
+        per_leg.append({
+            "occ": occ, "bid": bid, "ask": ask,
+            "contracts": contracts, "cross_cost": cross_cost,
+        })
+
+    return {
+        "round_trip": round_trip if complete else None,
+        "per_leg": per_leg,
+        "quote_complete": bool(verdict["quote_complete"]) and complete,
+        "legs_quotes": legs_quotes,
     }
 
 

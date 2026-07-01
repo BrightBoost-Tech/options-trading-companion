@@ -69,3 +69,7 @@
 ## 2025-06-06 - Accessible Disabled Tooltips
 **Learning:** Browsers disable mouse events on `disabled` buttons, preventing tooltips from appearing. Wrapping the disabled button in a focusable `span` (`tabIndex={0}`) allows the tooltip to trigger on hover and focus.
 **Action:** Always wrap disabled buttons in a `span` with `tabIndex={0}` and an explanatory `aria-label` when tooltips are required.
+
+## 2025-06-07 - Shadcn Tooltips in Tables
+**Learning:** Adding individual `TooltipProvider`s inside each mapped table row or list item can lead to performance degradation and redundant DOM nesting. Using a single `TooltipProvider` to wrap the entire container (e.g., `<table>`) is more performant and cleaner.
+**Action:** When implementing Shadcn `Tooltip` components in iterated structures like lists or tables, elevate the `TooltipProvider` to wrap the parent container rather than rendering it on every item.

@@ -56,6 +56,7 @@ exists so the next one is never staged.
 
 import logging
 import os
+from datetime import datetime, timezone
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from packages.quantum.risk.mark_math import (
@@ -338,6 +339,57 @@ def executable_close_estimate(
         "achievable_implied_pl": v["achievable_implied_pl"],
         "quote_complete": v["quote_complete"],
         "legs_quotes": v["legs_quotes"],
+    }
+
+
+def corroborated_mark_fields(
+    position_like: Dict[str, Any],
+    snapshot_fn: Optional[Callable] = None,
+    raw_mark: Any = None,
+) -> Dict[str, Any]:
+    """Persistable corroboration fields for a mark WRITE site (P1-C 07-02).
+
+    Companion to ``executable_close_estimate`` for the two places that make a
+    raw mid mark DURABLE (``refresh_marks`` + the monitor's Part-B persist) —
+    the last seam where a phantom mark became a DB fact that governance reads
+    (policy-lab drawdown → champion auto-rollback; go-live checkpoints).
+    ADDITIVE by design: the raw mark keeps its original column untouched;
+    these fields ride alongside. Never raises and never fabricates — dark or
+    incomplete quotes persist NULLs with an ``uncorroborated`` quality stamp
+    (H9 both ends). ``divergence_frac`` is normalized by the achievable
+    PRICE, matching #1034's convention.
+
+    Returns {mark_corroborated, unrealized_pl_corroborated, mark_quality}.
+    """
+    stamped_at = datetime.now(timezone.utc).isoformat()
+    try:
+        est = executable_close_estimate(position_like, snapshot_fn=snapshot_fn)
+    except Exception as exc:
+        return {
+            "mark_corroborated": None,
+            "unrealized_pl_corroborated": None,
+            "mark_quality": {
+                "basis": "uncorroborated",
+                "reason": f"estimate_error:{type(exc).__name__}",
+                "corroborated_at": stamped_at,
+            },
+        }
+
+    achievable = est.get("achievable_close")
+    quality: Dict[str, Any] = {
+        "basis": "corroborated" if achievable is not None else "uncorroborated",
+        "quote_complete": bool(est.get("quote_complete")),
+        "corroborated_at": stamped_at,
+    }
+    raw = _num(raw_mark)
+    if achievable is not None and raw is not None and abs(float(achievable)) > 0:
+        quality["divergence_frac"] = round(
+            abs(raw - float(achievable)) / abs(float(achievable)), 6
+        )
+    return {
+        "mark_corroborated": achievable,
+        "unrealized_pl_corroborated": est.get("achievable_implied_pl"),
+        "mark_quality": quality,
     }
 
 

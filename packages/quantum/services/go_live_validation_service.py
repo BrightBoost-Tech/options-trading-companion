@@ -892,17 +892,28 @@ class GoLiveValidationService:
             return False
 
     def _get_current_unrealized_total(self, user_id: str) -> float:
-        """Sum unrealized_pl from all open paper positions for mark-to-market checkpoint."""
+        """Sum unrealized P&L from all open paper positions for the
+        mark-to-market checkpoint. P1-C (07-02): prefers the EXECUTABLE-
+        corroborated value persisted by the mark writers — the go-live
+        pass/fail streak must not grade on a phantom raw mid; raw is the
+        fallback when corroboration was dark/incomplete (NULL)."""
         try:
             portfolio_ids = self._get_paper_portfolio_ids(user_id)
             if not portfolio_ids:
                 return 0.0
             res = self.supabase.table("paper_positions") \
-                .select("unrealized_pl") \
+                .select("unrealized_pl, unrealized_pl_corroborated") \
                 .in_("portfolio_id", portfolio_ids) \
                 .neq("quantity", 0) \
                 .execute()
-            return sum(float(p.get("unrealized_pl") or 0.0) for p in (res.data or []))
+            total = 0.0
+            for p in (res.data or []):
+                corroborated = p.get("unrealized_pl_corroborated")
+                if corroborated is not None:
+                    total += float(corroborated)
+                else:
+                    total += float(p.get("unrealized_pl") or 0.0)
+            return total
         except Exception as e:
             logger.warning(f"Failed to get unrealized total for {user_id}: {e}")
             return 0.0

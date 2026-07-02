@@ -11,6 +11,9 @@ import logging
 from datetime import datetime, timezone, date
 from typing import Dict, Any, List, Optional
 
+from packages.quantum.analytics.exit_mark_corroboration import (
+    corroborated_mark_fields,
+)
 from packages.quantum.observability.alerts import alert
 from packages.quantum.risk.payoff_bounds import (
     evaluate_payoff_bound,
@@ -203,10 +206,24 @@ class PaperMarkToMarketService:
                 logger.info(mtm_msg)
                 print(mtm_msg, flush=True)
 
+                # P1-C (07-02): corroborate the mark BEFORE it becomes a
+                # durable DB fact. ADDITIVE — current_mark/unrealized_pl
+                # stay the raw mid exactly as computed above (fast paths and
+                # the close-limit read at paper_exit_evaluator are untouched);
+                # governance readers prefer the corroborated fields. The
+                # snapshot_fn shim reuses THIS cycle's pre-fetched snapshots —
+                # zero extra API calls; incomplete quotes (incl. the broker-
+                # fallback branch) persist NULLs + an uncorroborated stamp.
+                corro = corroborated_mark_fields(
+                    pos,
+                    snapshot_fn=lambda occs: snapshots,
+                    raw_mark=per_contract_mark,
+                )
                 batch_updates.append({
                     "id": pos_id,
                     "current_mark": per_contract_mark,
                     "unrealized_pl": unrealized,
+                    **corro,
                     # last_marked_at populated ONLY on the success branch
                     # (#2026-05-12 MTM-staleness PR-1). Skipped positions
                     # intentionally leave this stale so future queries

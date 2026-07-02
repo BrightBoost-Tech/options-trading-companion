@@ -153,11 +153,16 @@ def log_close_fill_gap(
     reason: Any = None,
     log: Optional[logging.Logger] = None,
 ) -> str:
-    """Emit the structured line at INFO and return it. NEVER raises — a logging
-    failure must not break a close."""
+    """Emit the structured line at WARNING and return it. NEVER raises — a
+    logging failure must not break a close.
+
+    WARNING, not INFO (2026-07-01 audit rider): the deployed workers filter
+    INFO, so the first live event's line was invisible in Railway logs while
+    the order_json persistence (the durable channel) worked. Same class as
+    the [UTILIZATION_GATE] observability lines."""
     line = format_close_fill_gap_line(symbol, position_id, cross, mid, fill, reason)
     try:
-        (log or logger).info(line)
+        (log or logger).warning(line)
     except Exception:  # pragma: no cover - logging must never break a close
         pass
     return line

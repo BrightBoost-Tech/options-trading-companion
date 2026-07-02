@@ -178,6 +178,17 @@ def evaluate_cohorts(
     return {"status": "ok", "eval_date": eval_date_str, "results": results}
 
 
+def _position_unrealized(p: dict) -> float:
+    """Per-position unrealized P&L for cohort scoring (P1-C 07-02):
+    the executable-corroborated value when the mark writers persisted one,
+    else the raw mid. NULL corroboration means the quotes were dark or
+    incomplete at write time — fall back to raw rather than fabricate."""
+    corroborated = p.get("unrealized_pl_corroborated")
+    if corroborated is not None:
+        return float(corroborated)
+    return float(p.get("unrealized_pl") or 0)
+
+
 def _compute_cohort_metrics(
     supabase,
     portfolio_id: str,
@@ -205,15 +216,21 @@ def _compute_cohort_metrics(
     avg_loser = (sum(losses) / len(losses)) if losses else 0.0
     symbols_traded = list(set(p.get("symbol", "") for p in closed if p.get("symbol")))
 
-    # Open positions (unrealized P&L)
+    # Open positions (unrealized P&L). P1-C (07-02): prefer the EXECUTABLE-
+    # corroborated value when the mark writers persisted one — this sum feeds
+    # total_pl → max_drawdown → utility scoring AND the HARD_DRAWDOWN_LIMIT
+    # champion auto-rollback below, which must not fire (or stay silent) on a
+    # phantom raw mid (07-01 SOFI: raw +196.52 persisted 30min before the
+    # corroborated close realized −1,044.48). Raw is the fallback when
+    # corroboration was dark/incomplete (NULL — never fabricated).
     open_res = supabase.table("paper_positions") \
-        .select("unrealized_pl") \
+        .select("unrealized_pl, unrealized_pl_corroborated") \
         .eq("portfolio_id", portfolio_id) \
         .eq("status", "open") \
         .neq("quantity", 0) \
         .execute()
     open_positions = open_res.data or []
-    unrealized_pl = sum(float(p.get("unrealized_pl") or 0) for p in open_positions)
+    unrealized_pl = sum(_position_unrealized(p) for p in open_positions)
 
     # Positions opened today
     opened_res = supabase.table("paper_positions") \

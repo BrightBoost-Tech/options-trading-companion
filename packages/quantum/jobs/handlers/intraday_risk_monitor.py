@@ -777,11 +777,27 @@ class IntradayRiskMonitor:
         # FAIL-SOFT: a write failure must never break the eval or the close —
         # both use the in-memory marks. Last-writer-wins vs the daily MTM job
         # is correct (freshest wins; single-row update is atomic).
+        from packages.quantum.analytics.exit_mark_corroboration import (
+            corroborated_mark_fields,
+        )
+
         for pos in refreshed_positions:
             try:
+                # P1-C (07-02): persist corroboration alongside the raw mark
+                # (ADDITIVE — in-memory marks, envelopes, and exit triggers
+                # are untouched; #1079/#1080 already corroborate decisions).
+                # snapshot_fn reuses THIS cycle's pre-fetched snapshots —
+                # zero extra API calls. Incomplete → NULLs + stamp, never
+                # fabricated.
+                corro = corroborated_mark_fields(
+                    pos,
+                    snapshot_fn=lambda occs: snapshots,
+                    raw_mark=pos.get("current_mark"),
+                )
                 self.supabase.table("paper_positions").update({
                     "current_mark": pos.get("current_mark"),
                     "unrealized_pl": pos.get("unrealized_pl"),
+                    **corro,
                 }).eq("id", pos.get("id")).execute()
             except Exception as persist_err:
                 logger.warning(

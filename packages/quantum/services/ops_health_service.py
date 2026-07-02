@@ -142,6 +142,18 @@ OUTPUT_FRESHNESS = [
         "created_at",
         int(os.getenv("OPS_LEARNING_INGEST_MAX_AGE_HOURS", "336")),  # 14 days
     ),
+    (
+        # Mark-refresh output (P1-C 07-02): the newest last_marked_at proves
+        # refresh_marks is actually WRITING — the watcher for the corroborated-
+        # mark seam going stale. Only the MTM/exit-eval success branches stamp
+        # this column. Caveat driving the 7-day default: with a FLAT book no
+        # rows update at all, so a long flat stretch ages past small windows
+        # by construction — 168h tolerates weekend+holiday flat runs while
+        # still surfacing a dead mark-refresh loop within a week of trading.
+        "paper_positions",
+        "last_marked_at",
+        int(os.getenv("OPS_MARK_REFRESH_MAX_AGE_HOURS", "168")),  # 7 days
+    ),
 ]
 
 
@@ -493,9 +505,14 @@ def get_output_freshness(client) -> List[OutputFreshness]:
 
     for table, ts_col, max_age_hours in OUTPUT_FRESHNESS:
         try:
+            # nullsfirst=False: Postgres DESC defaults to NULLS FIRST, so a
+            # table whose ts_col is nullable (paper_positions.last_marked_at —
+            # closed/never-marked rows) would return a NULL row and read as a
+            # checker "error" forever. Explicit NULLS LAST returns the newest
+            # real timestamp; harmless for the never-NULL entries.
             res = client.table(table) \
                 .select(ts_col) \
-                .order(ts_col, desc=True) \
+                .order(ts_col, desc=True, nullsfirst=False) \
                 .limit(1) \
                 .execute()
             if not res.data:

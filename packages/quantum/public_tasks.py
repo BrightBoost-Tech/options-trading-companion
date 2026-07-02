@@ -740,6 +740,21 @@ async def task_strategy_autotune(
 # =============================================================================
 
 
+def _ops_health_idempotency_key(now: datetime) -> str:
+    """Half-hour idempotency bucket for ops_health_check.
+
+    Owner decision 2026-07-02: cadence intent is q30min REAL. The prior
+    hour-granular key ("%Y-%m-%d-%H") deduped the :37 scheduled fire against
+    the :07 run every hour (observed 99/100 runs at :07, zero at :37), which
+    silently halved the health-check AND the A3 alert-relay cadence — a
+    direct-insert force_close waited up to ~60min for egress instead of ~30.
+    Buckets :00-:29 → "00", :30-:59 → "30", so both scheduled fires execute
+    while same-half-hour retries still dedup.
+    """
+    half = "00" if now.minute < 30 else "30"
+    return f"{now.strftime('%Y-%m-%d-%H')}-{half}"
+
+
 @router.post("/ops/health_check", status_code=202)
 @limiter.limit("20/minute")
 async def task_ops_health_check(
@@ -762,8 +777,8 @@ async def task_ops_health_check(
     """
     now = datetime.now()
     job_name = "ops_health_check"
-    # Once per hour max (idempotency by hour)
-    idempotency_key = now.strftime("%Y-%m-%d-%H")
+    # Once per half-hour max — matches the :07/:37 schedule (q30min real).
+    idempotency_key = _ops_health_idempotency_key(now)
 
     job_payload = {
         "timestamp": now.isoformat(),

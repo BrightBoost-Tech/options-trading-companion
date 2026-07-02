@@ -1251,3 +1251,184 @@ def send_ops_alert_v2(
             result["suppressed_reason"] = f"exception:{str(e)[:30]}"
 
     return result
+
+
+# ── Direct-insert alert egress relay (A3 / P1 Window-2, 2026-07-02) ──────
+#
+# 13 production sites insert risk_alerts rows DIRECTLY (force_close in the
+# intraday monitor, order-handler throttles, scanner, policy-lab, scheduler
+# dead-letter, exit evaluator, …) without going through observability
+# alert() — so #1096's egress never sees them: with the webhook armed, a
+# direct-insert critical still reached nobody. This relay polls the TABLE
+# (the one choke point every writer shares) and pushes unseen critical/high
+# rows out the SAME Channel-2 webhook, so egress coverage becomes a property
+# of the table instead of a property of each writer.
+#
+# Double-send boundaries (both sides already own their egress):
+#   - rows written by send_ops_alert_v2 Channel 1: alert_type "ops_*"
+#     (its Channel 2 already ran in the same call) → excluded.
+#   - rows written by alert() for the #1096 allowlist: alert() now
+#     pre-stamps metadata.egress_owner="alert" → excluded.
+#
+# Epoch guard (#1051 pattern): rows created before ALERT_RELAY_EPOCH never
+# relay — the ~1,040 un-acked historical critical/high rows must not fire
+# at the operator on first poll. Verified 0 critical/high rows existed
+# after this epoch at build time.
+ALERT_RELAY_EPOCH_DEFAULT = "2026-07-02T00:00:00+00:00"
+ALERT_RELAY_MAX_PER_POLL = int(os.getenv("ALERT_RELAY_MAX_PER_POLL", "10"))
+_ALERT_RELAY_WINDOW = 100  # newest-first scan window; sent rows drop out via marker
+_RELAY_SEVERITY_TO_OPS = {"critical": "critical", "high": "error"}
+
+
+def _relay_epoch() -> str:
+    return os.getenv("ALERT_RELAY_EPOCH") or ALERT_RELAY_EPOCH_DEFAULT
+
+
+def relay_direct_insert_alerts(
+    client: Any, *, max_per_poll: Optional[int] = None
+) -> Dict[str, Any]:
+    """Egress un-relayed post-epoch critical/high risk_alerts rows.
+
+    Best-effort by contract: every failure mode (query error, webhook down,
+    mark-write error) logs a WARNING and leaves the row unmarked so the next
+    poll retries it; this function never raises. Channel-2-only send
+    (client=None) — the existing row IS the DB record; no duplicate insert.
+    Rate-guarded at ``max_per_poll`` sends per cycle (capped → WARNING).
+    """
+    result: Dict[str, Any] = {
+        "scanned": 0, "sent": 0, "skipped": 0, "failed": 0,
+        "capped": False, "pending_after_cap": 0,
+    }
+    if client is None:
+        result["failed"] += 1
+        logger.warning("[ALERT_RELAY] no supabase client — cycle skipped")
+        return result
+    cap = ALERT_RELAY_MAX_PER_POLL if max_per_poll is None else max_per_poll
+    epoch = _relay_epoch()
+
+    try:
+        res = (
+            client.table("risk_alerts")
+            .select(
+                "id, alert_type, severity, message, symbol, position_id, "
+                "created_at, metadata"
+            )
+            .in_("severity", ["critical", "high"])
+            .gt("created_at", epoch)
+            .order("created_at", desc=True)
+            .limit(_ALERT_RELAY_WINDOW)
+            .execute()
+        )
+        rows = list(res.data or [])
+    except Exception as e:
+        logger.warning(f"[ALERT_RELAY] poll query failed (retry next cycle): {e}")
+        result["failed"] += 1
+        return result
+
+    # Oldest first so a burst drains in arrival order under the cap.
+    rows.reverse()
+    eligible = []
+    for row in rows:
+        meta = row.get("metadata") or {}
+        if not isinstance(meta, dict):
+            meta = {}
+        if meta.get("egressed_at") or meta.get("egress_owner"):
+            result["skipped"] += 1
+            continue
+        if str(row.get("alert_type") or "").startswith("ops_"):
+            result["skipped"] += 1
+            continue
+        eligible.append((row, meta))
+
+    consecutive_failures = 0
+    for row, meta in eligible:
+        if result["sent"] >= cap:
+            result["capped"] = True
+            result["pending_after_cap"] = len(eligible) - result["scanned"]
+            logger.warning(
+                f"[ALERT_RELAY] per-poll cap {cap} reached; "
+                f"{result['pending_after_cap']} row(s) deferred to next poll"
+            )
+            break
+        if consecutive_failures >= 3:
+            # Webhook is clearly down — stop burning 10s timeouts inside the
+            # health-check job; everything unmarked retries next poll.
+            logger.warning(
+                "[ALERT_RELAY] 3 consecutive send failures — webhook likely "
+                "down; deferring remaining rows to next poll"
+            )
+            break
+        result["scanned"] += 1
+        try:
+            send_res = send_ops_alert_v2(
+                alert_type=str(row.get("alert_type") or "unknown"),
+                message=str(row.get("message") or ""),
+                details={
+                    "relayed_from": "risk_alerts",
+                    "risk_alert_id": row.get("id"),
+                    "row_severity": row.get("severity"),
+                    "row_created_at": row.get("created_at"),
+                    **({"symbol": row["symbol"]} if row.get("symbol") else {}),
+                    **(
+                        {"position_id": row["position_id"]}
+                        if row.get("position_id")
+                        else {}
+                    ),
+                },
+                severity=_RELAY_SEVERITY_TO_OPS.get(
+                    str(row.get("severity") or ""), "warning"
+                ),
+                # Channel 2 ONLY: Channel 1 would insert a duplicate DB row.
+                client=None,
+            )
+        except Exception as e:
+            result["failed"] += 1
+            consecutive_failures += 1
+            logger.warning(
+                f"[ALERT_RELAY] send failed for {row.get('id')} "
+                f"(retry next cycle): {e}"
+            )
+            continue
+
+        if send_res.get("webhook_sent"):
+            outcome_meta = {
+                **meta,
+                "egressed_at": datetime.now(timezone.utc).isoformat(),
+                "egress_owner": "relay",
+            }
+            result["sent"] += 1
+            consecutive_failures = 0
+        elif send_res.get("suppressed_reason") == "below_min_severity":
+            # Deterministic suppression under current config — retrying every
+            # poll would spin forever; mark it skipped-with-reason instead.
+            outcome_meta = {
+                **meta,
+                "egress_owner": "relay",
+                "egress_skipped": "below_min_severity",
+            }
+            result["skipped"] += 1
+        else:
+            # no_webhook / webhook error / send exception → unmarked, so the
+            # next poll retries. Deliberate: criticals that landed while the
+            # channel was down/disarmed still reach the operator on recovery
+            # (bounded by the per-poll cap).
+            result["failed"] += 1
+            consecutive_failures += 1
+            logger.warning(
+                f"[ALERT_RELAY] webhook not delivered for {row.get('id')} "
+                f"({send_res.get('suppressed_reason')}); will retry"
+            )
+            continue
+
+        try:
+            client.table("risk_alerts").update({"metadata": outcome_meta}).eq(
+                "id", row["id"]
+            ).execute()
+        except Exception as e:
+            # Sent but unmarked → next poll may re-send this one row. The
+            # duplicate is preferable to silently never marking (best-effort).
+            logger.warning(
+                f"[ALERT_RELAY] mark-write failed for {row.get('id')}: {e}"
+            )
+
+    return result

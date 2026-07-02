@@ -191,6 +191,11 @@ def alert(
         "message": message[:500],
         "metadata": metadata or {},
     }
+    # A3 relay boundary (2026-07-02): rows whose egress THIS function will
+    # attempt (allowlisted + critical/high) are stamped so the direct-insert
+    # relay poller never re-sends them. Copy — never mutate the caller's dict.
+    if alert_type in _RISK_EGRESS_ALERT_TYPES and severity in ("critical", "high"):
+        record["metadata"] = {**(metadata or {}), "egress_owner": "alert"}
     if user_id is not None:
         record["user_id"] = user_id
     if position_id is not None:

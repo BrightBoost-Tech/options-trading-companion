@@ -31,6 +31,7 @@ from packages.quantum.services.ops_health_service import (
     should_suppress_alert,
     send_ops_alert_v2,
     is_us_market_hours,
+    relay_direct_insert_alerts,
     OPS_ALERT_MIN_SEVERITY,
     OPS_ALERT_COOLDOWN_MINUTES,
 )
@@ -45,6 +46,18 @@ JOB_NAME = "ops_health_check"
 
 # System user ID for background jobs
 SYSTEM_USER_ID = "00000000-0000-0000-0000-000000000000"
+
+
+def _run_alert_relay(client: Any) -> Dict[str, Any]:
+    """A3 egress-relay step, fail-isolated: a relay bug must never fail the
+    health check, and the relay itself already never raises — this wrapper
+    guards the seam anyway (double isolation, same as the audit-event step).
+    """
+    try:
+        return relay_direct_insert_alerts(client)
+    except Exception as e:
+        logger.warning(f"[OPS_HEALTH_CHECK] alert relay step failed: {e}")
+        return {"error": str(e)[:200]}
 
 
 def build_data_stale_alert_content(
@@ -171,6 +184,15 @@ def run(payload: Dict[str, Any], ctx: Any = None) -> Dict[str, Any]:
                 "synthetic_delivery_test": synth,
                 "timing_ms": (time.time() - start_time) * 1000,
             }
+
+        # ==============================================================
+        # 0. A3 egress relay — direct-insert critical/high risk_alerts
+        #    rows out the ops webhook. FIRST body step, own isolation:
+        #    delivery of an already-recorded critical must not wait on
+        #    (or die with) the freshness checks below.
+        # ==============================================================
+        logger.info("[OPS_HEALTH_CHECK] Relaying direct-insert alerts...")
+        alert_relay = _run_alert_relay(client)
 
         # ==============================================================
         # 1. Build expanded freshness universe and check market data
@@ -546,6 +568,7 @@ def run(payload: Dict[str, Any], ctx: Any = None) -> Dict[str, Any]:
             "alerts_sent": alerts_sent,
             "alerts_failed": alerts_failed,
             "alerts_suppressed": alerts_suppressed,
+            "alert_relay": alert_relay,  # A3: DB-queryable relay counts
             "alert_fingerprints": alert_fingerprints,  # For cooldown tracking
             "market_freshness": {
                 "is_stale": market_freshness.is_stale,

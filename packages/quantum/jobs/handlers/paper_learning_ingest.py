@@ -584,6 +584,12 @@ def _create_paper_outcome_record(
         # caller resolves routing (live-routed portfolio + alpaca_live
         # execution_mode → False). Default True is the conservative legacy.
         "is_paper": is_paper,
+        # Typed segment columns — post_trade_learning builds its
+        # (strategy, regime, dte) segment keys from THESE, not details_json;
+        # omitting them silently no-oped segment learning (0 typed rows
+        # through 07-01). NULL when no suggestion is linked — never fabricated.
+        "strategy": (suggestion_meta or {}).get("strategy"),
+        "regime": (suggestion_meta or {}).get("regime"),
         "details_json": {
             "order_id": order["id"],
             "position_id": position.get("id"),

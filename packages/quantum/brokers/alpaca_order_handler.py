@@ -1029,12 +1029,35 @@ def ghost_position_sweep(
         if p.get("symbol")
     }
 
-    port_res = supabase.table("paper_portfolios") \
-        .select("id").eq("user_id", user_id).execute()
-    if not port_res.data:
-        return {"status": "no_portfolios", "ghost_count": 0}
+    # Ghost-sweep live-scoping (2026-07-02, ledgered P2→P1): a broker-desync
+    # detector must compare only positions that are SUPPOSED to exist at the
+    # broker. shadow_only/paper_shadow positions never reach Alpaca by design
+    # (execution_router.should_submit_to_broker), so sweeping them emitted one
+    # false "desync" warn per sync cycle for every open shadow (58 warns from
+    # the single 06-30→07-01 shadow SOFI) — burying the H10 signal exactly
+    # when live order flow makes a REAL desync time-critical. Scopes BOTH
+    # halves below (ghost legs + stale needs_manual_review): both detect
+    # broker-side drift, which a shadow cannot have. FAIL-OPEN polarity for a
+    # DETECTOR: if the scope query fails, fall back to the legacy UNSCOPED
+    # sweep (noisy beats blind) with a warning — never a silently narrower
+    # sweep.
+    try:
+        from packages.quantum.risk.position_scope import live_routed_portfolio_ids
 
-    p_ids = [p["id"] for p in port_res.data]
+        p_ids = live_routed_portfolio_ids(supabase, user_id)
+        if not p_ids:
+            return {"status": "no_live_routed_portfolios", "ghost_count": 0}
+    except Exception as scope_err:
+        logger.warning(
+            f"[GHOST_SWEEP] live-routed scope query failed ({scope_err}); "
+            f"falling back to UNSCOPED sweep (may include shadow noise)"
+        )
+        port_res = supabase.table("paper_portfolios") \
+            .select("id").eq("user_id", user_id).execute()
+        if not port_res.data:
+            return {"status": "no_portfolios", "ghost_count": 0}
+        p_ids = [p["id"] for p in port_res.data]
+
     cutoff = (datetime.now(timezone.utc) - timedelta(seconds=min_age_seconds)).isoformat()
 
     open_res = supabase.table("paper_positions") \

@@ -138,6 +138,18 @@ class TestLogEmission(unittest.TestCase):
         self.assertIn("gap_fraction=0.23", joined)
         self.assertIn(returned, joined)
 
+    def test_emits_at_warning_level(self):
+        # 2026-07-01 audit rider: the deployed workers filter INFO, so the
+        # line MUST emit at WARNING to be visible in Railway logs. Pin it.
+        log = logging.getLogger("test_close_fill_gap.level_pin")
+        log.propagate = True
+        with self.assertLogs(log, level="WARNING") as cm:
+            log_close_fill_gap(
+                "SOFI", "pid-1", SOFI_CROSS, SOFI_MID, SOFI_FILL,
+                reason="envelope_force_close", log=log,
+            )
+        self.assertEqual(cm.records[0].levelno, logging.WARNING)
+
     def test_emitter_never_raises_on_bad_logger(self):
         class _BoomLogger:
             def info(self, *_a, **_k):

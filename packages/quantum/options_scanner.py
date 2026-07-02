@@ -1,5 +1,6 @@
 import os
 import math
+import time
 import requests
 import numpy as np
 import operator
@@ -30,6 +31,7 @@ from packages.quantum.analytics.guardrails import earnings_week_penalty
 from packages.quantum.security.config import is_production
 from packages.quantum.services.earnings_calendar_service import EarningsCalendarService
 from packages.quantum.observability.feature_flags import is_iv_rank_none_routing_enabled
+from packages.quantum.observability.alerts import _is_transient_disconnect
 from packages.quantum.agents.runner import AgentRunner, build_agent_pipeline
 
 # Surface V4 integration (optional, gated by env)
@@ -210,6 +212,13 @@ class RejectionStats:
     # separately from strategy-specific filtering.
     PRE_STRATEGY_KEY = "__pre_strategy__"
 
+    # A5 2026-07-01: retry-with-backoff for the suggestion_rejections
+    # insert on TRANSIENT stale-keepalive disconnects ONLY (the 16:00Z
+    # post-scan write burst — 8 rows lost 07-01; same failure signature
+    # #1100 fixed for the risk_alerts insert). Two retries after the
+    # first attempt, mirroring alerts._ALERT_INSERT_RETRY_BACKOFFS.
+    PERSIST_RETRY_BACKOFFS = (0.25, 0.5)
+
     def __init__(
         self,
         supabase: Optional["Client"] = None,
@@ -257,6 +266,11 @@ class RejectionStats:
         # but we DO count so the operator can detect drift.
         self._persist_failures: int = 0
         self._persist_failures_lock = threading.Lock()
+        # A5 2026-07-01: count of inserts that failed transiently but were
+        # RECOVERED by the retry loop (persist_failures stays 0 on a full
+        # recovery). Surfaces via to_dict() → job_runs.result so a
+        # disconnect burst absorbed by the retry is still visible.
+        self._persist_retry_recoveries: int = 0
 
     def set_symbol(self, symbol: Optional[str]) -> None:
         """Set the per-thread symbol context for subsequent record()
@@ -302,7 +316,44 @@ class RejectionStats:
                 payload["job_run_id"] = self._job_run_id
             if sample is not None:
                 payload["spread_debug"] = self._make_json_safe(sample)
-            self._supabase.table("suggestion_rejections").insert(payload).execute()
+            # A5 2026-07-01: right-sized retry on transient stale-keepalive
+            # disconnects, reusing #1100's classifier. ONLY a transient
+            # disconnect retries; every other exception breaks straight out
+            # to the unchanged fail-soft counter + warning below.
+            last_exc: Optional[BaseException] = None
+            recovered_on_retry = False
+            for attempt in range(1 + len(self.PERSIST_RETRY_BACKOFFS)):
+                if attempt:
+                    time.sleep(self.PERSIST_RETRY_BACKOFFS[attempt - 1])
+                try:
+                    self._supabase.table("suggestion_rejections").insert(payload).execute()
+                    recovered_on_retry = attempt > 0
+                    last_exc = None
+                    break
+                except Exception as exc:  # noqa: BLE001 — classified below
+                    last_exc = exc
+                    if not _is_transient_disconnect(exc):
+                        break
+            if last_exc is not None:
+                if _is_transient_disconnect(last_exc):
+                    # DISTINCT loss marker (mirrors alert_lost_after_retries):
+                    # a transient disconnect persisted through every retry and
+                    # the row is gone.
+                    logger.error(
+                        "rejection_row_lost_after_retries (symbol=%s reason=%s retries=%d): %s",
+                        symbol, reason, len(self.PERSIST_RETRY_BACKOFFS), last_exc,
+                    )
+                raise last_exc
+            if recovered_on_retry:
+                # WARNING (not INFO — the deployed worker filters INFO) so a
+                # burst the retry absorbed is still visible in logs; counted
+                # so job_runs.result shows it durably.
+                with self._persist_failures_lock:
+                    self._persist_retry_recoveries += 1
+                logger.warning(
+                    "suggestion_rejections insert recovered after transient-disconnect retry (symbol=%s reason=%s)",
+                    symbol, reason,
+                )
         except Exception as e:  # noqa: BLE001 — observability fail-soft
             # FIX 2 (2026-05-18 H9 verification): increment failure
             # counter in addition to the existing logger.warning so
@@ -427,6 +478,7 @@ class RejectionStats:
             # are surfaced for cycle_metadata consumption.
             with self._persist_failures_lock:
                 _pf = self._persist_failures
+                _prr = self._persist_retry_recoveries
             return {
                 "rejection_counts": dict(self._counts),
                 "counts": dict(self._counts),  # FIX 1 alias for cycle_metadata reads
@@ -439,6 +491,7 @@ class RejectionStats:
                 "emission_counts_by_strategy": dict(self._emission_counts),
                 "rejection_counts_by_strategy_and_reason": per_strategy,
                 "persist_failures": _pf,
+                "persist_retry_recoveries": _prr,
             }
 
     def top_reasons(self, n: int = 5) -> List[Tuple[str, int]]:

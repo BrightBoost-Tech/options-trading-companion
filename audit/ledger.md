@@ -667,3 +667,112 @@ PENDING VERIFICATIONS (added with #1104; valid only after operator merge + H8):
   marker if one outlives the backoff.
 - First live close post-merge: [CLOSE_FILL_GAP] line now VISIBLE at WARNING in Railway logs —
   the "query the DB, not Railway" caveat on the earlier pending item becomes obsolete at this SHA.
+
+## status:reported — 2026-07-02 NIGHTLY (v5.1 first run; report `audit/reports/2026-07-02.md`)
+
+Quiet night: zero market activity since the 07-01 report; movement = #1104 (persist retry,
+shipped) + #1105 (docs) merged 02:39/02:41Z, both workers SUCCESS @ `b6a28e1` (H8 clean,
+mid-night recycle, no orphaned cycles). Broker flat, equity 2,093.74 == last_equity. H11: 1
+critical = the ledgered 07-01 shadow force-close.
+
+- **ONE-TIME CORRECTION (owner, v5.1 contract): the 2026-07-01 A8 swap to Entry-Fill Efficacy
+  was ADOPTED IN ERROR and is REVERTED.** Negative-Decision Efficacy is RESTORED as the A8
+  graduated standing area (audited every run; does not rotate). Entry-Fill Efficacy is
+  RETIRED — not moved to A9; its spec is preserved in `audit/area8.md` under SUPERSEDED
+  (move-don't-lose). Reason of record: A8 is the standing counterfactual area; single-run
+  lens rotation is Area 9's mechanism. EFE's subject matter stays auditable under A1/A6/A7
+  and may compete for the A9 slot on merits, with no incumbency.
+- **[A9 2026-07-02 — FINDING, first audit of the new rotating lens "Alert & Signal
+  Integrity"] `ops_data_stale` alert content lies about its trigger: 57/69 (83%) of 30d
+  firings self-contradictory** ("Market data is stale … Stale: 0 … Reason: ok",
+  `stale_symbols=[]`; one at age_seconds=54). Mechanism: `ops_health_check.py:117` ORs
+  market_freshness | job_freshness, but message (:141-143) + details (:144-149) are built
+  from market_freshness ONLY — every job-arm firing is mislabeled as market-data staleness;
+  the correct `stale_reason` (:120-121) never enters the alert; fingerprint (:124-128) hashes
+  the empty symbol list → all job-arm firings share one fingerprint. The job-arm predicate
+  (30-min threshold vs 1×/day suggestions_open/close, `ops_health_service.py:198-227`) is the
+  LEDGERED 2026-06-10 root cause — cited, not re-found; the mislabel wiring is the new
+  surface. Realized cost: the 07-01 audit itself mislabeled the class ("chronic
+  calibration-freshness artifact"). Projected cost: ~2-4 false highs/RTH-day egress to the
+  ops webhook the day OPS_ALERT_WEBHOOK_URL is set → fix the wiring BEFORE/WITH webhook
+  arming (order-coupled with the standing TOP-3 #1). FIX (additive): message from
+  stale_reason + `trigger_source` + job_freshness fields in details + per-arm fingerprint; no
+  predicate/threshold change (that is the separate ledgered item). RISK zero (content-only).
+  CONF high. Spec: `audit/area9.md` (fresh adoption, no graduation proposed).
+- A1/A2/A6/A7 UNCHANGED (zero fills/scans/closes in window). A3 counter re-verified 6/8 live
+  post-epoch (30d: live n=6 −153; paper n=9, 5 post-epoch, −1,870.80). A5 loop self-audit:
+  11 SQL (3 wasted on column-name misses — introspect information_schema FIRST), 3 broker, 0
+  subagents; prior-session H8/H11 pulls reused. Q9 note: scanner persist-failure key is
+  `result.counts.rejection_persist_failures` (options_scanner.py:311) — use it for the #1104
+  verification query.
+
+PENDING VERIFICATIONS (2026-07-02 session, in addition to the standing 07-01 list):
+- 10:00Z relearn: sample_size=6 live-only (shadow −1,044.48 is_paper=true excluded).
+- 13:30Z SOFI cooldown expiry: FILTER + fail-closed STAGE gates bench a pre-expiry re-emit.
+- 16:00Z scan: #1104 first live test — `counts.rejection_persist_failures=0` (+
+  `persist_retry_recoveries>0` if a disconnect burst occurs); [CLOSE_FILL_GAP] now
+  WARNING-visible on any close.
+- Scheduled 00:23 CT nightly (v5 prompt) collides with report file `2026-07-02.md` — operator
+  to skip or accept overwrite (this run covers the window).
+
+## status:shipped — 2026-07-02 post-close · A9 data_stale content fix (PR #1106 → main `91b1319`, both workers H8 SUCCESS 03:20:55Z)
+
+- **[A9 fix, item 1 of tonight 3] data_stale alert content from the firing arm** — squash
+  `91b1319`. NEW pure helper `ops_health_check.build_data_stale_alert_content(market, job)`:
+  message/details/fingerprint from the arm(s) that FIRED. Job-arm → names the stale source +
+  age vs threshold + true reason (trigger_source="job", job_* detail keys); market-arm →
+  EXACT legacy message AND legacy fingerprint shape (cooldown history survives the deploy);
+  both → both named, " | "-joined. Job-arm fingerprints hash {job_source, job_reason, arms}
+  instead of the empty market symbol list (per-arm dedup buckets). PREDICATE UNTOUCHED
+  (test-pinned) — the 30-min-vs-daily-cadence job-arm threshold stays the separately-ledgered
+  2026-06-10 item (own PR later, per operator 1c). Regression fixture pins the verbatim 07-01
+  production shape: "Market data is stale ... Stale: 0 (). Reason: ok" can never emit again.
+  12 new tests + 57 touched-path regression + CI green first try. One-time cooldown reset for
+  job-arm firings only. Sequencing honored: shipped BEFORE webhook arming.
+
+PENDING VERIFICATION: next RTH inter-scan gap (e.g. ~14:07Z or ~15:07Z ops_health_check) →
+the ops_data_stale row (if the job arm fires) must read "Job-based data freshness is stale.
+Source: job_runs. Age: ~N min ..." with trigger_source="job" and NO market-data language.
+
+## status:armed — 2026-07-02 post-close · egress webhook LIVE (item 2 of tonight 3, operator action)
+
+- **`OPS_ALERT_WEBHOOK_URL` SET on BOTH workers ~03:35Z** (operator; names-only hygiene —
+  value never in transcript). Var-change recycle: worker + worker-background BOTH SUCCESS
+  03:35:44Z, SHA unchanged `91b1319` → running processes carry it. Code reads confirmed:
+  `ops_health_service.py:670/:1188` + `observability/alerts.py` (#1096/#1100 senders).
+  Sequencing honored: #1106 content fix deployed BEFORE arming (no cry-wolf channel).
+  Standing TOP-3 #1 (3 consecutive reports) is CLOSED pending first-egress proof.
+- **⚠ `HEARTBEAT_PING_URL` SET but INERT — NO READER EXISTS.** Grep 07-02: zero code
+  references (`jobs/handlers/heartbeat.py` is only the internal scheduler job_runs
+  heartbeat; no PING_URL/healthchecks reader anywhere). The external dead-man's switch
+  (durable-oversight Window 1, P2 half) was NEVER BUILT — only the A4 detector half shipped
+  (#1100). The var is correct env-first pre-staging, but **monitoring-by-absence is NOT
+  active**; a dead scheduler still alerts nobody externally. DOC≠BUILT instance — do not
+  count the switch as armed until its PR ships and pings are observed at the provider.
+
+PENDING VERIFICATION (egress arm): first egress-eligible alert (critical, or the ~14:07Z
+ops_data_stale job-arm firing if allowlisted) must produce a webhook send — check for the
+sender's egress log line on the worker AND delivery at the operator's channel; a stranded
+critical with the var set = new finding (delivery-path bug, not config).
+
+## status:shipped — 2026-07-02 post-close · ghost-sweep live scoping (item 3 of tonight 3; PR #1107 → main `6898bf9`)
+
+- **[07-01/07-02 TOP-3 #3] ghost_position sweep scoped to live-routed portfolios** — squash
+  `6898bf9`. Recon first (PR was gated on it): ALL 58 warns 06-30→07-01 traced to ONE
+  position — the neutral-cohort shadow SOFI (`08002beb`, `routing_mode=shadow_only`), firing
+  every 5-min sync from open+15min to seconds before its 13:30Z force-close. Sweep correct
+  per code, spurious per intent (a shadow never exists at the broker). Fix: sweep portfolio
+  set through #1014 canonical `position_scope.live_routed_portfolio_ids`, BOTH halves (ghost
+  legs + stale needs_manual_review). **Fail-OPEN polarity, test-pinned**: scope-query failure
+  → legacy unscoped sweep + warning (noisy beats blind — a detector must never silently
+  narrow). Deliberately NO dedup on the ghost half: a real live ghost keeps nagging at full
+  cadence (H10 urgency preserved). Dedup/rate-limit evaluated and REJECTED (would mute real
+  desyncs). 7 new tests (`test_ghost_sweep_live_scope.py`, verbatim 08002beb fixture) + 21
+  existing green; CI green. Closes the ledgered P2→P1 noise item; §8 seam note ("sweep does
+  not exclude shadows") is FIXED at this SHA — CLAUDE.md edit deferred to the next doctrine
+  pass.
+
+PENDING VERIFICATION (ghost scoping): next session with an open SHADOW position → zero
+ghost_position warns from it across sync cycles (the 08002beb class); any LIVE position
+ghost must still alert. H8 VERIFIED 03:44Z: worker + worker-background BOTH SUCCESS @
+`6898bf9` (deploys 4b9fd393/4401e0ba), zero error-level lines post-start.

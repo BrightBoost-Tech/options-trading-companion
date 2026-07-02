@@ -3,9 +3,10 @@
 # any fact that changes (equity, OBP, positions, counts, phase, flag value)
 # is a POINTER to its source of truth, never an embedded number. Stale
 # embedded state caused real phantom reads; this structure is the fix.
-# Rewritten 2026-06-13 (≤40k chars). Pre-rewrite snapshots: docs/history.md
-# (pre-06-10), git history of this file. Running SHA + flags: verify on
-# Railway (§2), never trust this file for a value.
+# Rewritten 2026-06-13; registry/liars/audit synced 2026-07-02 (≤40k chars).
+# Pre-rewrite snapshots: docs/history.md (pre-06-10), git history of this
+# file. Running SHA + flags: verify on Railway (§2), never trust this file
+# for a value.
 
 ---
 
@@ -30,11 +31,12 @@ Four sources, in precedence order (lowest to highest):
    wrapper-exposed since the 06-12 fix — it had been silently None).
 
 Corollaries:
-- **Debug prints and displays lie.** `[EXIT_EVAL_DEBUG]` prints flat default
-  thresholds while the decision path is cohort-aware and time-scaled. The
-  Alpaca portfolio CHART lies too: it marks each option leg at its own last
-  trade, so leg-timestamp skew on a hedged structure prints phantom equity
-  spikes (06-12: a +$180 chart spike whose executable close never crossed any
+- **Debug prints and displays lie.** `[EXIT_EVAL_DEBUG]` printed flat default
+  thresholds for weeks while the decision path was cohort-aware (fixed #1067,
+  live-confirmed 06-16 — the LESSON stands). The Alpaca portfolio CHART lies
+  the same way: it marks each option leg at its own last trade, so
+  leg-timestamp skew on a hedged structure prints phantom equity spikes
+  (06-12: a +$180 chart spike whose executable close never crossed any
   threshold). The decision path / executable side is the only truth; a log
   line or chart that doesn't compute through the same functions as the
   decision is a hypothesis about the code.
@@ -53,8 +55,8 @@ Corollaries:
   `risk_alerts` regardless of the hypothesis being checked.
 - **H10:** on any manual operator intervention (e.g. closing via the Alpaca
   UI), DB reconciliation is the FIRST follow-up. `ghost_position` alerts are
-  urgent, not noise — but the sweep currently also flags shadow positions
-  (§8 seam), so confirm live-routed before treating one as a broker desync.
+  urgent, not noise — the sweep is live-routed-scoped since #1107 (fail-OPEN
+  to the unscoped sweep on a scope-query failure: noisy beats blind).
 
 ## 2. DEPLOY DOCTRINE
 
@@ -130,9 +132,10 @@ exercised-status. Verify current flag VALUES on Railway, never here.
   simulation rows can't feed live multipliers. Flag
   `LEARNING_HISTORICAL_QUARANTINE_ENABLED` default-ON. Exercised: yes.
 - **#1043 conviction fallback honesty** — the V3→legacy drop logs
-  `[CONVICTION] … DEGRADED` once per process. The v3 view
-  (`learning_performance_summary_v3`) is STILL MISSING — the line is designed
-  honesty, not an incident; it reappears once after every recycle. No flag.
+  `[CONVICTION] … DEGRADED` once per process. RESOLVED path: the v3 view
+  exists since #1076 (created dark, epoch+floor wall, all-1.0 below 20 live
+  per bucket) — zero DEGRADED lines is CORRECT now; a reappearance means the
+  view broke. No flag.
 - **#1044 utilization gate** — small-tier entry capital control:
   `(committed + candidate)/(committed + settled OBP) ≤
   RISK_MAX_UTILIZATION_PCT` (pro-forma; broker cost basis, fresh reads,
@@ -172,9 +175,14 @@ exercised-status. Verify current flag VALUES on Railway, never here.
   revert PR + owner sign-off.** `CALIBRATION_EV_EPOCH` (2026-06-11): pre-fix
   prediction/outcome pairs never calibrate the post-fix predictor;
   calibration runs RAW MODE (empty blob, deploy-time reset) until ≥8
-  post-epoch closes — a `calibration_stale` alert ~06-20 is the DESIGNED
-  reminder of raw mode. Status: 5/8 post-epoch closes accrued (06-13).
-  Learning ingest: position-level dedup + `is_paper` resolved from routing.
+  post-epoch LIVE closes (#1076 live-only). **8th-close convergence rule —
+  three things happen at live close #8: (1) calibration exits raw mode
+  (first real multipliers, on clean live-only data); (2) the clamp review
+  opens (0.5 ev/pop floor may mask signal); (3) the winsorize/outlier-cap
+  gate opens. Check all three that night; count via
+  `signal_accuracy_rolling.n` or the relearn's sample_size.** Status:
+  query, don't trust docs. Learning ingest: position-level dedup +
+  `is_paper` resolved from routing.
 - **#1052 stage-quote alignment** — entry-leg validation reads the scanner's
   source set (Alpaca options snapshots primary → Polygon fallback), legacy
   Polygon NBBO probed as final fallback + divergence recorder
@@ -235,9 +243,9 @@ exercised-status. Verify current flag VALUES on Railway, never here.
   position-exists signal. INDEPENDENT of the relearn (calibration never reads
   status). Flag `FUNNEL_STATUS_TRUTHFUL_ENABLED` default-ON (data-truth, not
   live-risk). Kill: explicit falsy → legacy 'staged'-stamp + blanket dismiss.
-  Exercised: **Layer B LIVE 06-18** (13:00Z sweep reconciled prior-day pending →
-  dismissed, none-path); Layer A pending a live entry. 32-row historical
-  backfill still pending (separate supervised mutation).
+  Exercised: **both layers** — Layer B live 06-18, Layer A live 06-30 (2
+  suggestions stamped executed at the position-insert seam); 33-row
+  historical backfill EXECUTED 07-02 (operator-approved).
 - **#1076 live-only calibration + v3 conviction view (#1043)** — calibration
   trains on LIVE outcomes only (`is_paper=false` in `_fetch_outcomes`) so shadow
   / internal-fill outcomes can't drive a live-applied EV/PoP multiplier (the
@@ -247,20 +255,95 @@ exercised-status. Verify current flag VALUES on Railway, never here.
   explicit falsy → legacy is_paper-blind). + null-pop basis fix (flagless) +
   `learning_performance_summary_v3` conviction view created DARK (is_paper-blind-
   match, epoch+floor wall; every bucket <20 → all-1.0). Kill: explicit falsy.
-  Exercised: merged 06-18 (`9e6a719`); served blob keeps the wrong ×1.5 until the
-  10:00Z relearn rewrites it live-scoped (raw). Verify: live-scoped blob 06-19
-  10:00Z; v3 DEGRADED-log gone 06-19 16:00Z scan.
+  Exercised: **empirically confirmed 07-01** — relearn escalation 30/60/90 all
+  sample_size = the live count exactly; shadow outcomes (incl. the −1,044.48
+  SOFI) excluded; raw mode holds until 8 live post-epoch closes.
+- **#1079/#1080 exit-trigger corroboration** — ALL per-position exit triggers
+  (scheduled stop/TP + monitor loss_per_symbol + cohort stop) evaluate on the
+  EXECUTABLE-corroborated UPL via `exit_mark_corroboration.corroborated_exit_upl`
+  (raw fallback when dark; stops never suppressed). Flagless measurement
+  correction. Exercised: **live 07-01** — SOFI cohort stop fired on
+  corroborated −1,044.48 while the raw mid said +26.
+- **#1094–#1097 unattended-readiness quartet** — config fail-CLOSED on cohort
+  load failure (#1094: fault → tightest stops, never the 2–3× looser
+  defaults) · scheduler watchdog registers monitor/order-sync/heartbeat in
+  EXPECTED_JOBS (#1095, detection only) · risk-alert egress for the
+  allowlisted critical types (#1096, `_RISK_EGRESS_ALERT_TYPES`) ·
+  entries-only break-glass `ops_control.entries_paused` (#1097 — blocks the
+  entry seam ONLY, monitor/exits untouched; READ side fails OPEN; flip needs
+  no deploy). Exercised: #1097 live 07-02 via the #1119 trip.
+- **#1100–#1102 oversight phases** — alert() insert retry (transient
+  disconnects) + A4 silent-failure detector (`job_succeeded_with_errors` on
+  green jobs with `result.counts.errors>0`) (#1100) · **#1101 entry
+  round-trip cost gate**: at the stage seam, reject when
+  `suggestion_EV − Σ per-leg (ask−bid)×contracts×100 < $15 floor`;
+  `blocked_reason='ev_below_roundtrip_cost'`; flag
+  `ENTRY_ROUNDTRIP_COST_GATE_ENABLED` default-ON, explicit falsy kills.
+  Exercised: **first live rejection 07-02** (SOFI: gross 30.25, round-trip
+  92.00, net −61.75 — the 06-30 own-goal class blocked pre-broker) ·
+  #1102 close-fill-gap instrumentation (cross/mid/fill/gap_fraction into
+  close order_json; feeds the Phase-3 ≥10–15-fills gate).
+- **#1104/#1106/#1107 observability trio** — scanner rejection-persist
+  retry on transient disconnects (exercised 07-02: persist_failures=0) ·
+  data_stale alert content from the ARM THAT FIRED (#1106; predicate retuned
+  by #1115) · ghost-sweep live-routed scoping (#1107, fail-OPEN to unscoped).
+- **#1109 dead-man's-switch ping** — heartbeat GETs `HEARTBEAT_PING_URL`
+  each run (:00/:30, hours 8–17 CT; 5s timeout; failure = one WARNING, job
+  result byte-identical). Silent check at the provider = APScheduler/BE/RQ/
+  worker died — diagnose job_runs vs Railway. Unset var → silent no-op.
+- **#1110 typed segment columns** — outcome rows carry typed strategy/regime
+  from suggestion_meta (NULL when unlinked, never fabricated); segment
+  learning reads these; 82-row backfill executed 07-02.
+- **#1111 direct-insert alert egress relay** — ops_health_check step 0 polls
+  post-epoch (`ALERT_RELAY_EPOCH` 2026-07-02T00:00Z) critical/high
+  risk_alerts rows that no sender owns and POSTs them out the same webhook.
+  **Route/SLA: allowlisted alert() types (force_close, streak_breaker_*, …)
+  egress IMMEDIATELY at write time; everything else critical/high rides the
+  relay at the :07/:37 poll → ≤~37min worst-case to inbox.** Boundaries:
+  `ops_*` rows + `metadata.egress_owner` rows skipped; 10/poll cap;
+  3-failure circuit. Kill: none needed (best-effort, never blocks).
+- **#1114/#1115 ops-noise pair** — q30min-REAL health-check dedup key (the
+  :37 fire no longer dedupes; owner decision (a)) · data_stale predicate
+  retune: `OPS_DATA_STALE_MINUTES` default 360 (env override) + daily
+  job_late age is WEEKEND-EXCLUDED (Monday-storm fix). Exercised 07-02:
+  0 job-arm false HIGHs (baseline 3.9/day).
+- **#1116 MTM mark-write corroboration** — both durable-mark write sites
+  (refresh_marks + monitor Part-B) persist
+  {mark_corroborated, unrealized_pl_corroborated, mark_quality} ALONGSIDE
+  the raw mid (cycle-cached snapshots, zero extra API calls; dark → NULLs).
+  Governance (policy-lab drawdown/rollback, go-live checkpoints) prefers
+  corroborated, NULL→raw. **The exit evaluator's close-limit price reads RAW
+  `current_mark` — NEVER `mark_corroborated` (source-pinned; #1072 owns
+  live-close repricing).** Flagless measurement correction.
+- **#1118 signal-accuracy telemetry (observe-only)** — view
+  `signal_accuracy_rolling` (live-only, last-20/scope, hit-rate + Brier) →
+  ops_health snapshot + `signal_accuracy_degraded` WARNING at n≥8 AND
+  hit_rate<0.2. Modulates nothing. Baseline 07-02: 1/6 wins, Brier 0.2751.
+- **#1119 consecutive-loss streak breaker** — N consecutive LIVE losing
+  round-trips (`STREAK_BREAKER_N`, default 3) → `entries_paused=true` +
+  `streak_breaker_tripped` critical (immediate egress). FAIL-CLOSED: an
+  evaluation error PAUSES (never skips); the WRITE side is fail-closed while
+  #1097's READ side stays fail-open — deliberate opposite polarities.
+  Recovery is OPERATOR-ONLY, **validated live 07-02** (planned trip on the
+  real 5-loss stream at the 21:20Z ingest; full chain verified):
+  `UPDATE ops_control SET entries_paused=false, entries_pause_reason=NULL
+  WHERE key='global';` then confirm read-back + next 16:30Z cycle stages.
+  Flag `STREAK_BREAKER_ENABLED` default-ON. Tail of paper_learning_ingest;
+  result in `job_runs.result.streak_breaker`.
 
 Sanctioned mid-session kill switches, complete list: the explicit-falsy
-flags above (#1038, #1040, #1046, #1048, #1045-TTL, #1052, #1072, #1073, #1076
-`CALIBRATION_TRAIN_LIVE_ONLY`), unset
+flags above (#1038, #1040, #1046, #1048, #1045-TTL, #1052, #1072, #1073,
+#1076 `CALIBRATION_TRAIN_LIVE_ONLY`, #1101
+`ENTRY_ROUNDTRIP_COST_GATE_ENABLED`, #1119 `STREAK_BREAKER_ENABLED`), unset
 `RISK_UTILIZATION_GATE_ENABLED` (reverts to the stricter BLOCK),
 `PRICE_CLASS_SPREAD_CUTOFF=0`, unset `EXIT_MARK_SANITY_ENFORCE_ENABLED`
 (reverts to observe-only), unset `GTC_PROFIT_EXIT_ENABLED` (no new resting
-TPs; existing rest until filled/cancelled), and the global trio
-`SCHEDULER_ENABLED` / `CALIBRATION_ENABLED` / `RISK_ENVELOPE_ENFORCE`.
-The #1051 PoP fix, #1017 fill fix, and #1071 brake correction deliberately
-have no switch.
+TPs; existing rest until filled/cancelled), the DB lever
+`ops_control.entries_paused` (#1097 — entries-only, no deploy), and the
+global trio `SCHEDULER_ENABLED` / `CALIBRATION_ENABLED` /
+`RISK_ENVELOPE_ENFORCE`. The #1051 PoP fix, #1017 fill fix, #1071 brake,
+#1079/#1080 trigger basis, and #1116 mark-write corroboration deliberately
+have no switch (measurement corrections).
 
 ## 5. RISK FRAME
 
@@ -273,9 +356,11 @@ docs — H14):
    tightens all four envelope feeders (GATED: pre-approved, do not re-find).
 3. **Utilization cap** (#1044, small tier) — pro-forma total-utilization.
 4. **Envelopes** (`risk/risk_envelope.py`): `concentration_symbol` block
-   (WARN at small tier under #1044) · sector/expiry/stress/greeks warn ·
-   earnings-count block · daily/weekly/per-symbol loss **force_close**.
-   `passed=False` only on block/force_close — warns never block.
+   (WARN at small tier under #1044) · sector/expiry/stress warn ·
+   greeks layer DORMANT (§8 — no inputs, no caps; do not cite it as live
+   protection) · earnings-count block · daily/weekly/per-symbol loss
+   **force_close**. `passed=False` only on block/force_close — warns never
+   block.
 5. **Per-symbol $ allocation cap** (RiskBudgetEngine `underlying_allocation`)
    — separate code from the envelope share-of-book check, deliberately.
 6. **Per-candidate allocator split** (small tier: 0.85×regime×equity over ≤4
@@ -376,9 +461,15 @@ paper_learning_ingest · policy_lab_eval · post_trade_learning · promotion_che
 
 ## 7. AUDIT LOOP
 
-- **Nightly v5 audit** at midnight CT via Windows Task Scheduler
+- **Nightly v5.1 audit** at midnight CT via Windows Task Scheduler
   (`\nightly-audit` → `audit/run-nightly.cmd`): NIGHTLY mode diffs vs the
   prior report (≤8 subagents); FULL on Sundays. Prompt: `audit/v5-prompt.md`.
+  v5.1 structure: **A8 = the STANDING graduated area (Negative-Decision
+  Efficacy — audited every run, does not rotate; `audit/area8.md`); A9 = the
+  single ROTATING lens slot (`audit/area9.md`, one lens per adoption —
+  current per the file, not this doc).** Single-run lens rotation is A9's
+  mechanism only; A8 does not swap (the 07-01 swap was reverted by owner
+  contract 07-02).
 - **READ-ONLY contract is absolute**: the loop writes reports
   (`audit/reports/YYYY-MM-DD.md`) and `audit/ALERT-<date>.md` files only — it
   never merges, flips flags, or trades, even on a critical finding. The human
@@ -400,36 +491,44 @@ paper_learning_ingest · policy_lab_eval · post_trade_learning · promotion_che
 
 ## 8. KNOWN LIARS & SEAMS
 
-- `[EXIT_EVAL_DEBUG]` threshold prints compute flat defaults; decisions are
-  cohort-aware + time-scaled (fix ticketed P1). Already manufactured one
-  phantom incident. The Alpaca portfolio CHART is the same class at the
-  display layer (§1).
-- **DOC≠BUILT instances**: `learning_performance_summary_v3` referenced,
-  never shipped (Gate A/B backlogged) · `check_new_position`
-  (risk_envelope) has zero production callers · the `9a2cef1` pattern — a
-  commit that claims a fix without wiring the call site, its test
-  module-skipped; grep for the implementation before believing any claim.
+- **The greeks exposure envelope is DOUBLE-dormant** (verified 07-02): no
+  leg jsonb has EVER carried a `greeks` key (check_greeks sums zeros since
+  inception) AND all four caps default 0 = no-limit. Anything calling it
+  live protection — including old copies of §5 — is lying. Fix path:
+  populate greeks on legs at stage time (snapshots already carry them),
+  THEN decide caps. Backlogged; do not silently populate.
+- **Shadow-cohort ledgers are partly fiction** (quantified 07-02,
+  `docs/specs/shadow_fill_realism.md`): shadows fill 100% by construction
+  at 5–17× live size; live fill rate ≈1/3 (10 of ~54 orders died
+  watchdog-cancelled unfilled). Same-period twin magnitudes ran 3–45×
+  (SOFI −1,044 shadow vs −40 live). Champion promotion compares these
+  ledgers — treat cross-cohort P&L comparisons as basis-broken until
+  gap-3(a) promotion-time normalization ships. Twin pairing is
+  (symbol, cycle), never suggestion_id.
+- **DOC≠BUILT instances**: `check_new_position` (risk_envelope) has zero
+  production callers · the `9a2cef1` pattern — a commit that claims a fix
+  without wiring the call site, its test module-skipped · the greeks
+  envelope above — grep for the implementation AND query for real inputs
+  before believing any claim.
 - **Add-to-position seam**: #1038 exempts and #1040 must NOT exempt orders
   with a position_id; a future add-to-position feature hits both — revisit
   before building it. The resting-TP single-owner skip keys on the
   `intentional_resting_exit` marker + close side; an add-to-position close
   side could collide — revisit there too.
-- **ghost_position sweep does not exclude shadows** (`alpaca_order_sync.py`
-  selects all open-position users, no live-routed filter) — open shadow
-  positions generate recurring ghost alerts that bury a real broker desync.
-  H10 still holds; scope before trusting the count (backlog P2).
-- **OUTPUT_FRESHNESS watches ONE table** (`ops_health_service.py`:
-  calibration_adjustments only). A silent stall of the learning ingest or
-  mark refresh would not alert — expansion backlogged (P2).
-- **is_paper tags every learning row paper** (live SPY/MARA/NFLX closes
-  included) — the routing resolver does not distinguish live broker fills in
-  the learning rows this week; green-day counting reads elsewhere. Confirm
-  before trusting is_paper as a live/shadow discriminator (backlog P2).
+- **OUTPUT_FRESHNESS watches THREE tables** (calibration_adjustments ·
+  learning_feedback_loops · paper_positions.last_marked_at 168h). Caveats:
+  a FLAT book writes no marks (long flat stretch can false-age the mark
+  entry) and the monitor's Part-B persist does NOT stamp last_marked_at
+  (q15min writes invisible to staleness queries — residual).
 - **POLICY_LAB single-champion path**: the champion fallback (`"aggressive"`
   in transition windows) is ungated — known, accepted, on the ledger.
-- The morning suggestions sweep relabels everything `dismissed` — suggestion
-  `status` never reflects execution (funnel plumbing backlogged P1;
-  `blocked_reason` stamping closed the rejection half).
+- **`learning_feedback_loops` has NO typed symbol column** — symbol rides in
+  details_json; a typed select 42703s (the #1098 phantom-column class; it
+  nearly made the streak breaker fail-closed-pause every run). Introspect
+  information_schema BEFORE writing queries against learning tables.
+- RESOLVED liars (cite, don't re-find): EXIT_EVAL_DEBUG print (#1067) ·
+  ghost-sweep shadow noise (#1107) · is_paper mislabeling (#1069/#1076) ·
+  the blanket-dismiss funnel (#1073 + 33-row backfill 07-02).
 
 ## 9. NEVER-DO (carried forward; update only with evidence)
 
@@ -463,6 +562,10 @@ paper_learning_ingest · policy_lab_eval · post_trade_learning · promotion_che
   (recycles reset once-per-process state and orphan in-flight cycles).
 - Never widen the resting-TP pilot allowlist without first confirming the
   sweep's live-routed scoping (shadows must never get broker orders).
+- Never write `entries_paused=false` from code — un-pause is OPERATOR-ONLY
+  (#1119's recovery contract; the breaker never clears its own trip).
+- Never select a typed `symbol`/`strategy` column from a learning table
+  without introspecting information_schema first (§8 phantom-column class).
 
 ---
 

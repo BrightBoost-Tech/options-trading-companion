@@ -860,3 +860,64 @@ PENDING VERIFICATIONS (added 2026-07-02 post-close run #2):
 - Standing 07-01/07-02 list unchanged (10:00Z relearn live-only n=6 · 13:30Z SOFI cooldown
   expiry · 16:00Z scan #1104 first live test · #1101 first roundtrip-gate evaluation ·
   first LIVE close post-#1102 gap_fraction).
+
+## status:shipped — 2026-07-02 pre-market build session (P1-A/B/C + approved backfills)
+
+Operator-directed session (~09:00–09:30Z, market closed; all merges pre-08:00 CT job spin-up).
+Three sequential builds, each CI-green → squash → BOTH workers (+BE for P1-A) H8 SUCCESS at the
+squash SHA, container start > merge. Owner decision of record: ops_health_check cadence intent =
+**(a) q30min REAL**.
+
+- **[P1-A #1114 `e133063` 09:02:33Z] q30min-real idempotency bucket** — the hour-granular key
+  (`public_tasks.py`) deduped the :37 fire against :07 every hour (99/100 observed runs at :07);
+  effective cadence was HOURLY, silently halving the health check AND the A3 relay poll. Key now
+  buckets by half-hour via pure `_ops_health_idempotency_key`; same-half-hour retries still dedup;
+  `-synthetic` suffix composes unchanged. **Relay SLA restated: a direct-insert critical/high
+  reaches the inbox within ~37min worst case** (insert just after :07 → :37 poll + send), vs ~67min
+  before. BE verified at the SHA too (the endpoint lives there). VERIFY: two ops_health_check
+  job_runs per hour from 13:07/13:37Z today.
+- **[P1-B #1115 `0b85de6` 09:12:09Z] data_stale predicate retune** — PREDICATE ONLY (#1106 content
+  pins green): `OPS_DATA_STALE_MINUTES` default 30→360 (wiring unchanged: code default + env
+  override; if the env name is explicitly set on Railway it shadows — operator names-only check);
+  daily `job_late` age is now WEEKEND-EXCLUDED (`_weekend_excluded_age` — Fri-evening→Mon-morning
+  reads ~16h ok; a genuinely missed Monday reads ~40h late by Tuesday; flat ~74h raise rejected as
+  it would delay Tue–Fri detection). Fixture update ledgered: the watchdog daily pin re-anchored on
+  a Thursday (its old 30h window crossed Sunday — reads ~17h effective under the deliberate new
+  semantics; the 26h-absent-weekend intent preserved). **VERIFICATION CONTRACT: next RTH day
+  job-arm false HIGHs 39→0; next Monday job_late storm 20→0; a real dead daily job still alerts
+  same-day (367min > 360 at the 19:07Z check).** The alert channel's last known noise source dies
+  here.
+- **[P1-C #1116 `b18052d` 09:25:52Z] MTM mark-WRITE corroboration (B1 promote)** — both durable-
+  mark write sites (`refresh_marks` + monitor Part-B) now persist
+  {mark_corroborated, unrealized_pl_corroborated, mark_quality} ALONGSIDE the raw mid (raw
+  byte-identical — the load-bearing pin held; the exit evaluator's close-limit read is
+  source-pinned to raw). Design call (owner-delegated): ADDITIVE, not replace — replacing
+  current_mark would leak into the LIVE close-limit path, and #1072 already restages live closes
+  at achievable. Zero extra API calls (cycle-cached snapshots); dark/incomplete → NULLs +
+  uncorroborated stamp (H9). Governance now prefers corroborated: policy-lab cohort unrealized
+  (max_drawdown → utility + HARD_DRAWDOWN_LIMIT champion auto-rollback) + go-live checkpoint sums;
+  breaker/_marginal_ev FALLBACK branches deliberately untouched. OUTPUT_FRESHNESS now watches
+  paper_positions.last_marked_at (168h; flat-book caveat) + generic query NULLS LAST fix.
+  Migration `20260702100000` applied pre-merge via canonical apply_migration (tracked).
+  **BEFORE-BASELINE (do not re-find): 14d = 2/3 closes wrong-signed at last persist; SOFI 07-01
+  raw +196.52 persisted 30min before the corroborated −1,044.48 close (divergence 0.869).**
+  Pinned: the SOFI fixture now reads −1,044.48 into cohort scoring. Residual (filed, not built):
+  Part-B still doesn't stamp last_marked_at; eod snapshots don't carry corroborated fields.
+  VERIFY: first RTH mark cycle writes non-NULL corroborated fields on any open position;
+  policy_daily_scores unrealized reflects the corroborated basis at the next eval.
+- **[Backfills EXECUTED ~09:35Z, operator-approved in-session after fidelity gates]**
+  (a) 82-row typed strategy/regime from linked suggestions (10/10 sample fidelity; exactly 82;
+  the 1 non-qualifying row stays NULL as pre-fix legacy; no updated_at trigger — v3 close-time
+  COALESCE untouched). (b) 33-row funnel dismissed→executed (10/10 sample had real closed
+  positions; exactly 33 = the ledgered 32 + 1 accrued; the trade_suggestions integrity trigger
+  guards lineage fields only — status explicitly allowed). Historical segment learning and funnel
+  stats are now truthful end-to-end.
+- **GATED confirmations (encoded, nothing touched):** executor cadence NOT MET (raw 6/8, #1072
+  unexercised) · clamp/winsorize await the 8th live close · Phase-3 exits await ≥10–15 fills ·
+  paper-shadow migration pair only at the executor-flag flip (RLS at apply). Operator handoff
+  outstanding: healthchecks un-pause + cron */30 8-16 * * 1-5 America/Chicago + Grace 45 +
+  after-hours Grace-to-1-min email test.
+
+PENDING VERIFICATIONS (added this session): two health-check runs/hour from 13:07Z · job-arm
+false-HIGH count = 0 over today's RTH · Monday 07-06 job_late storm = 0 · first mark cycle
+writes corroborated fields · next policy_lab_eval scores on the corroborated basis.

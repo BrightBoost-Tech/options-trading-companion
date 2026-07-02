@@ -36,6 +36,8 @@ _RISK_EGRESS_ALERT_TYPES = frozenset(
         "loss_per_symbol_protection_degraded",  # per-symbol loss unmarkable
         "stop_loss_protection_degraded",  # position stop unmarkable
         "job_succeeded_with_errors",  # A4 silent-failure detector (ops_health)
+        "streak_breaker_tripped",  # gap-1: N consecutive live losses → entries paused
+        "streak_breaker_error",  # gap-1: evaluation/pause-write failure (fail-closed)
     }
 )
 

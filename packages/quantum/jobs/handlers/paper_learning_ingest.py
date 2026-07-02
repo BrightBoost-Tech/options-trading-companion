@@ -168,6 +168,19 @@ def run(payload: Dict[str, Any], ctx: Any = None) -> Dict[str, Any]:
         counts["outcomes_skipped_duplicate"] = skipped
         counts["errors"] = errors
 
+        # Gap-1 (07-02): consecutive-loss streak breaker — tail step so the
+        # streak reads TONIGHT's freshly-ingested closes. evaluate_and_trip
+        # never raises and is FAIL-CLOSED internally (an evaluation error
+        # pauses entries rather than skipping the check); this wrapper only
+        # guards the import/plumbing seam so a packaging fault can't fail
+        # the ingest job itself.
+        try:
+            from packages.quantum.risk.streak_breaker import evaluate_and_trip
+            streak_breaker = evaluate_and_trip(client)
+        except Exception as sb_exc:
+            logger.error(f"[STREAK_BREAKER] wrapper failure: {sb_exc}")
+            streak_breaker = {"error": str(sb_exc)[:200]}
+
         timing_ms = (time.time() - start_time) * 1000
 
         logger.info(f"[paper_learning_ingest] Completed: {counts}")
@@ -178,6 +191,7 @@ def run(payload: Dict[str, Any], ctx: Any = None) -> Dict[str, Any]:
             "timing_ms": timing_ms,
             "lookback_days": lookback_days,
             "target_date": target_date,
+            "streak_breaker": streak_breaker,
             "notes": notes[:20],
         }
 

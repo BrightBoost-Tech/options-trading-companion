@@ -32,6 +32,12 @@ from packages.quantum.security.config import is_production
 from packages.quantum.services.earnings_calendar_service import EarningsCalendarService
 from packages.quantum.observability.feature_flags import is_iv_rank_none_routing_enabled
 from packages.quantum.observability.alerts import _is_transient_disconnect
+
+# A5 2026-07-01: module-owned sleep seam for the rejection-persist retry.
+# Tests patch THIS binding (packages.quantum.options_scanner.
+# _persist_retry_sleep), never the global time.sleep — the full CI suite
+# races on the shared time module (scheduler/watchdog test neighbors).
+_persist_retry_sleep = time.sleep
 from packages.quantum.agents.runner import AgentRunner, build_agent_pipeline
 
 # Surface V4 integration (optional, gated by env)
@@ -324,7 +330,7 @@ class RejectionStats:
             recovered_on_retry = False
             for attempt in range(1 + len(self.PERSIST_RETRY_BACKOFFS)):
                 if attempt:
-                    time.sleep(self.PERSIST_RETRY_BACKOFFS[attempt - 1])
+                    _persist_retry_sleep(self.PERSIST_RETRY_BACKOFFS[attempt - 1])
                 try:
                     self._supabase.table("suggestion_rejections").insert(payload).execute()
                     recovered_on_retry = attempt > 0

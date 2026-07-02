@@ -14,8 +14,11 @@ retry for the risk_alerts insert only — this seam reuses its classifier
 - non-transient exception → NO retry (single attempt), unchanged fallback
 - clean insert → single attempt, zero sleeps (hot path unchanged)
 
-Pure-Python; supabase mocked. ``time.sleep`` patched at the scanner module
-so tests never actually back off.
+Pure-Python; supabase mocked. The scanner's module-owned sleep seam
+(``options_scanner._persist_retry_sleep``) is patched so tests never
+actually back off — NOT the global ``time.sleep``, which the full CI
+suite races on (a neighbor's teardown restoring the real sleep mid-test
+made the first CI run's backoff assertion see zero calls).
 """
 
 from __future__ import annotations
@@ -80,7 +83,7 @@ class TestTransientRetryRecovers(unittest.TestCase):
     """Disconnect ×2 then success → row written, no persist_failure,
     recovery counted + WARNING-visible."""
 
-    @patch("packages.quantum.options_scanner.time.sleep")
+    @patch("packages.quantum.options_scanner._persist_retry_sleep")
     def test_two_transients_then_success_recovers(self, mock_sleep):
         fake = _ScriptedSupabase(failures=[_transient(), _transient()])
         rs = RejectionStats(supabase=fake, cycle_date=date(2026, 7, 1))
@@ -108,7 +111,7 @@ class TestTransientRetryRecovers(unittest.TestCase):
         self.assertIn("recovered after transient-disconnect retry", joined)
         self.assertIn("SOFI", joined)
 
-    @patch("packages.quantum.options_scanner.time.sleep")
+    @patch("packages.quantum.options_scanner._persist_retry_sleep")
     def test_remote_protocol_error_class_is_retried(self, mock_sleep):
         # Class-name (MRO) match, message deliberately unhelpful.
         fake = _ScriptedSupabase(failures=[_RemoteProtocolError("boom")])
@@ -124,7 +127,7 @@ class TestTransientExhaustsRetries(unittest.TestCase):
     """A transient that survives every retry is a counted loss with a
     DISTINCT marker — never an exception into the scan."""
 
-    @patch("packages.quantum.options_scanner.time.sleep")
+    @patch("packages.quantum.options_scanner._persist_retry_sleep")
     def test_exhausted_transient_counts_failure_with_marker(self, mock_sleep):
         n = 1 + len(RejectionStats.PERSIST_RETRY_BACKOFFS)
         fake = _ScriptedSupabase(failures=[_transient() for _ in range(n)])
@@ -152,7 +155,7 @@ class TestNonTransientNotRetried(unittest.TestCase):
     """Every other exception keeps the pre-A5 behavior exactly: one
     attempt, counted, warned, never raised, never slept on."""
 
-    @patch("packages.quantum.options_scanner.time.sleep")
+    @patch("packages.quantum.options_scanner._persist_retry_sleep")
     def test_non_transient_single_attempt(self, mock_sleep):
         fake = _ScriptedSupabase(
             failures=[RuntimeError("simulated db failure")]
@@ -171,7 +174,7 @@ class TestCleanPathUnchanged(unittest.TestCase):
     """Success on the first attempt: no sleep, no recovery count — the
     hot path is byte-for-byte the old behavior."""
 
-    @patch("packages.quantum.options_scanner.time.sleep")
+    @patch("packages.quantum.options_scanner._persist_retry_sleep")
     def test_clean_insert_single_attempt_no_sleep(self, mock_sleep):
         fake = _ScriptedSupabase()
         rs = RejectionStats(supabase=fake, cycle_date=date(2026, 7, 1))

@@ -32,12 +32,6 @@ from packages.quantum.security.config import is_production
 from packages.quantum.services.earnings_calendar_service import EarningsCalendarService
 from packages.quantum.observability.feature_flags import is_iv_rank_none_routing_enabled
 from packages.quantum.observability.alerts import _is_transient_disconnect
-
-# A5 2026-07-01: module-owned sleep seam for the rejection-persist retry.
-# Tests patch THIS binding (packages.quantum.options_scanner.
-# _persist_retry_sleep), never the global time.sleep — the full CI suite
-# races on the shared time module (scheduler/watchdog test neighbors).
-_persist_retry_sleep = time.sleep
 from packages.quantum.agents.runner import AgentRunner, build_agent_pipeline
 
 # Surface V4 integration (optional, gated by env)
@@ -230,6 +224,7 @@ class RejectionStats:
         supabase: Optional["Client"] = None,
         cycle_date: Optional[date] = None,
         job_run_id: Optional[str] = None,
+        retry_sleep: Optional[Any] = None,
     ):
         self._counts: Dict[str, int] = defaultdict(int)
         # #113 PR-6: per-strategy dimension. Outer dict keyed by
@@ -277,6 +272,11 @@ class RejectionStats:
         # recovery). Surfaces via to_dict() → job_runs.result so a
         # disconnect burst absorbed by the retry is still visible.
         self._persist_retry_recoveries: int = 0
+        # Injectable backoff sleep (constructor DI, not @patch: dotted-path
+        # patching on this module is order-fragile in the full suite — see
+        # test_credit_spread_emission._read_anomaly_threshold's note on
+        # MagicMock-shadowed module attributes).
+        self._retry_sleep = retry_sleep if retry_sleep is not None else time.sleep
 
     def set_symbol(self, symbol: Optional[str]) -> None:
         """Set the per-thread symbol context for subsequent record()
@@ -330,7 +330,7 @@ class RejectionStats:
             recovered_on_retry = False
             for attempt in range(1 + len(self.PERSIST_RETRY_BACKOFFS)):
                 if attempt:
-                    _persist_retry_sleep(self.PERSIST_RETRY_BACKOFFS[attempt - 1])
+                    self._retry_sleep(self.PERSIST_RETRY_BACKOFFS[attempt - 1])
                 try:
                     self._supabase.table("suggestion_rejections").insert(payload).execute()
                     recovered_on_retry = attempt > 0

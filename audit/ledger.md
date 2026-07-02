@@ -811,11 +811,14 @@ zero error-level lines post-start.
   ops_health_check (effective cadence HOURLY at :07 — the :37 fire is deduped by the hourly
   idempotency key; contradiction filed P1). **Egress now covers alert() AND direct-insert
   paths.**
-- **[A4 PROPOSED, awaiting operator approval — NOT executed]** hygiene sweep: bulk-ack
-  1,040 pre-epoch un-acked critical/high (385 c / 655 h; warn×580, force_close×356,
-  ops_data_stale×69 dominate) via one UPDATE setting resolved=true + jsonb bulk_ack marker,
-  cutoff = relay epoch 07-02 00:00Z (move-don't-lose; both production readers key on recent
-  created_at windows — behavior-safe). SQL in the 07-02 post-close report.
+- **[A4 EXECUTED 07-02 ~04:45Z, operator-approved in-session]** hygiene sweep: bulk-acked
+  exactly **1,040** pre-epoch un-acked critical/high (385 c / 655 h; warn×580,
+  force_close×356, ops_data_stale×69 dominate) via one UPDATE setting resolved=true +
+  resolved_at + jsonb marker `bulk_ack='hygiene_sweep_2026-07-02'`, cutoff = relay epoch
+  07-02 00:00Z (move-don't-lose; both production readers key on recent created_at windows —
+  behavior-safe). Post-sweep verification: the ONLY remaining un-acked critical/high row is
+  the synthetic relay-e2e row `4d0afb05` (by design, deleted after the 13:07Z proof). H11
+  baselines are clean from tonight forward: un-acked critical/high now means LIVE actionable.
 - **[A5 #1112] docs/backlog.md rewritten** from ledger + recon verdicts; GATED carries the
   executor-cadence trigger verbatim (NOT MET); #71 guard tokens retained (29 guard tests
   green). Final recycle of the night.

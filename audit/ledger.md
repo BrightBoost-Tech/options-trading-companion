@@ -921,3 +921,54 @@ squash SHA, container start > merge. Owner decision of record: ops_health_check 
 PENDING VERIFICATIONS (added this session): two health-check runs/hour from 13:07Z · job-arm
 false-HIGH count = 0 over today's RTH · Monday 07-06 job_late storm = 0 · first mark cycle
 writes corroborated fields · next policy_lab_eval scores on the corroborated basis.
+
+## status:shipped — 2026-07-02 gap-report build session (external-reference audit, operator-approved set)
+
+Operator ran a reference-repo gap analysis (NoFx / flashalpha / TradingAgents / ai-hedge-fund
+patterns); approved set built in order. Both builds CI-green → squash → both workers H8.
+
+- **[Gap-4 recon — DOC≠BUILT FINDING: the greeks exposure envelope is DOUBLE-dormant]** —
+  DB-verified: across 60d (18 positions) NO leg jsonb has ever carried a `greeks` key and
+  paper_positions has no greeks column → `check_greeks` (risk_envelope.py:229) has summed
+  ZEROS since inception; AND all four caps default 0 = no-limit. §5's "greeks warn" listing
+  is a known-liar until fixed (CLAUDE.md edit deferred to the next doctrine pass, #1107
+  precedent). Answers the archived #115b narrowed question on the persisted side. NOT
+  silently populated (operator-directed); follow-up filed: populate greeks on legs at stage
+  time (stage validation already fetches snapshots that carry them), caps decision after
+  inputs are real.
+- **[Gap-2 #1118 `49f3ba9` 10:02:34Z] rolling signal-accuracy telemetry (OBSERVE-ONLY)** —
+  view `signal_accuracy_rolling` (migration 20260702110000, applied+tracked pre-merge):
+  live-only last-20 hit-rate + Brier per scope; ops_health section 3.7 fail-isolated;
+  `signal_accuracy_degraded` WARNING at n≥8 AND hit_rate<0.2 (env-tunable). Modulates
+  nothing. **FIRST BASELINE (do not re-derive): overall 1/6 wins (16.7%), Brier 0.2751;
+  IRON_CONDOR 0/2, LONG_CALL_DEBIT_SPREAD 0/3, LONG_PUT_DEBIT_SPREAD 1/1.** n=6<8 → below
+  the alert sample gate today.
+- **[Gap-1 #1119 `c0268ce` 10:15:31Z] consecutive-loss streak breaker (NoFx pattern)** —
+  N consecutive live losses → `ops_control.entries_paused=true` + critical alert
+  (streak_breaker_tripped/_error added to the #1096 egress allowlist). N=3 env-config
+  (`STREAK_BREAKER_N`); `STREAK_BREAKER_ENABLED` default-ON tightening polarity; FAIL-CLOSED
+  the strong way (evaluation error → PAUSED, never check-skipped — deliberately opposite the
+  fail-open READ gate, which consumes a halt this evaluator sets); recovery operator-only
+  (no code path writes false — source-pinned); idempotent vs existing pauses. Tail step of
+  paper_learning_ingest → job_runs.result.streak_breaker. **Pre-merge bug caught
+  (verify-before-asserting): a typed `symbol` select would have 42703'd (no such column —
+  #1098 class) and, under fail-closed, paused entries EVERY run; symbol now read from
+  details_json, select list source-pinned.** ⚠ **KNOWN TRIP, operator-acknowledged: the live
+  stream already holds 5 consecutive losses (SOFI −40 · MARA −15 · QQQ −73 · MARA −28 ·
+  SPY −45) — the FIRST evaluation (tonight 21:20Z ingest) trips: entries pause + critical
+  alert = free live end-to-end exercise. Operator decision of record: ship, let it trip,
+  then un-pause (`UPDATE ops_control SET entries_paused=false, entries_pause_reason=NULL
+  WHERE key='global'`). A 21:20Z trip is EXPECTED, not an incident.**
+- **[Gap-3 recon + spec — NO build]** `docs/specs/shadow_fill_realism.md`. Recon: live fill
+  rate ≈1/3 (17 filled / ~54 orders; 10 watchdog-cancelled unfilled — the NFLX class ≈1 in
+  5) vs shadow 100%-by-construction; same-period twin magnitudes 3–45× (size-driven, 5–17
+  lots vs 1); only 3 shadow closes carry fill_quality=executable (rest predate #1017);
+  cohort twin pairing is (symbol, cycle), NEVER suggestion_id. Recommendation: interim
+  option (a) per-contract promotion-time normalization + measured fill-discount (one PR)
+  BEFORE the next promotion eval; full post-and-wait model (b) in its own recon-first
+  session. Owner decision pending on (a).
+
+PENDING VERIFICATIONS (gap session): 21:20Z tonight — `job_runs.result.streak_breaker.tripped=true`
++ entries_paused=true + streak_breaker_tripped critical in the inbox (egress) → operator
+un-pauses per decision of record · signal_accuracy view visible in tonight's ops_health
+snapshots · no alert from signal accuracy until n≥8.

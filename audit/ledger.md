@@ -776,3 +776,84 @@ PENDING VERIFICATION (ghost scoping): next session with an open SHADOW position 
 ghost_position warns from it across sync cycles (the 08002beb class); any LIVE position
 ghost must still alert. H8 VERIFIED 03:44Z: worker + worker-background BOTH SUCCESS @
 `6898bf9` (deploys 4b9fd393/4401e0ba), zero error-level lines post-start.
+
+## status:shipped — 2026-07-02 post-close run #2 (operator-directed A1–A5 + B1–B3 recons)
+
+Three builds merged sequentially (one PR / one recycle / H8 each), three read-only recons,
+backlog rewritten. All H8s: both workers SUCCESS at the squash SHA, container start > merge,
+zero error-level lines post-start.
+
+- **[A1 #1109 `97bace3` 04:09:58Z] dead-man's-switch ping** — heartbeat.run() fires one
+  best-effort GET at `HEARTBEAT_PING_URL` (timeout 5s, try/except → single WARNING logging
+  the exception CLASS only — the URL embeds the check token, never logged). Unset/empty →
+  silent no-op. Pin: run() result byte-identical across success/timeout/unset — a
+  healthchecks outage can NEVER fail the heartbeat job. **HEARTBEAT ARMED, end-of-chain
+  semantics**: silent check = one of APScheduler→BE→RQ→worker died; diagnose job_runs vs
+  Railway. RTH-only trade-off accepted (schedule */30, hours 8–17 CT). Env var pre-staged +
+  read back 03:35Z; no var mutation since — recycled containers carry it.
+- **[A2 #1110 `716ba2a` 04:15:23Z] typed strategy/regime on trade_closed outcomes** —
+  the builder carried both only in details_json while the TYPED columns (the ones
+  post_trade_learning._build_segment_key reads) were never written → segment learning
+  silently no-oped (83/98 rows NULL; the 06-29 "0/13" was the narrower window). Values were
+  available-but-unmapped (the metadata SELECT already pulls strategy+regime). No linked
+  suggestion → NULL, never fabricated (H9). Every close from this deploy forward carries
+  segments. 82 of 83 legacy NULL rows backfillable from linked suggestions → supervised-
+  mutation queue (NOT executed).
+- **[A3 #1111 `7bc9927` 04:25:51Z] direct-insert alert egress relay (P1 Window-2)** —
+  13 sites insert risk_alerts without alert() (incl. the monitor's force_close): with the
+  webhook armed they still egressed NOWHERE. relay_direct_insert_alerts polls post-epoch
+  critical/high rows and relays via the SAME Channel-2 sender (client=None, no duplicate
+  row), marks metadata.egressed_at/egress_owner=relay. Boundaries: ops_* Channel-1 rows
+  excluded; alert() pre-stamps egress_owner=alert on its #1096 allowlist. Epoch
+  `ALERT_RELAY_EPOCH` = 2026-07-02T00:00Z (#1051 pattern; 0 post-epoch rows at build —
+  the 1,040-row backlog can never fire). Best-effort: unmarked-on-failure → retry next
+  poll; 3-consecutive-failure circuit; cap 10/poll. Piggybacked as fail-isolated step 0 of
+  ops_health_check (effective cadence HOURLY at :07 — the :37 fire is deduped by the hourly
+  idempotency key; contradiction filed P1). **Egress now covers alert() AND direct-insert
+  paths.**
+- **[A4 PROPOSED, awaiting operator approval — NOT executed]** hygiene sweep: bulk-ack
+  1,040 pre-epoch un-acked critical/high (385 c / 655 h; warn×580, force_close×356,
+  ops_data_stale×69 dominate) via one UPDATE setting resolved=true + jsonb bulk_ack marker,
+  cutoff = relay epoch 07-02 00:00Z (move-don't-lose; both production readers key on recent
+  created_at windows — behavior-safe). SQL in the 07-02 post-close report.
+- **[A5 #1112] docs/backlog.md rewritten** from ledger + recon verdicts; GATED carries the
+  executor-cadence trigger verbatim (NOT MET); #71 guard tokens retained (29 guard tests
+  green). Final recycle of the night.
+- **[B1 recon — MTM mark-write corroboration → PROMOTED P1]** persisted raw marks are
+  DECISION-FEEDING on slow paths: policy-lab champion HARD_DRAWDOWN_LIMIT auto-rollback
+  (evaluator.py:605-621 via max_drawdown), go-live checkpoints, autopilot-breaker +
+  _marginal_ev fallbacks, close-limit seam (mitigated #1072/#1017). Fast loss paths clean
+  (#1071/#1075/#1079/#1080). 14d evidence: 2/3 closes wrong-signed at last persist; SOFI
+  persisted +196.52 30min before the corroborated −1,044.48 close. Fix = reuse
+  exit_mark_corroboration.executable_close_estimate at BOTH write sites
+  (paper_mark_to_market_service.py:206-217 + intraday_risk_monitor.py:780-790, snapshots
+  already fetched — zero extra API calls), ADDITIVE fields only. Side-finding: monitor
+  Part-B persist doesn't stamp last_marked_at.
+- **[B2 recon — migration drift]** the 2-file paper-shadow cluster is the only genuinely
+  unapplied pair → GATED apply-as-unit pre-enable (INERT confirmed, doubly so). Tracking:
+  27/112 by name (82 pre-era, 1 procedure miss `20260426000000` applied-untracked, 2 gated).
+  Process fix (P2): name-normalized drift check vs a checked-in allowlist in the nightly
+  audit.
+- **[B3 recon — data_stale predicate retune table ready]** union arm: max healthy in-gate
+  age 187 min over 10/10 trading days → `OPS_DATA_STALE_MINUTES=360` kills 39/39 job-arm
+  false HIGHs (78% of all data_stale HIGHs); market-hours gate suffices for the union arm
+  (no new weekend guard). Daily job_late arm (NOT market-hours-gated) needs the
+  _rth_job_status warm-up-anchor generalized — 40 Monday warns → 0. Contradictions filed:
+  ops_health_check hourly-vs-q30 dedup; suggestions_open 15 runs/10d untraced extras.
+
+PENDING VERIFICATIONS (added 2026-07-02 post-close run #2):
+- **Heartbeat first ping** at the 08:00 CT slot (13:00Z) — provider dashboard shows it;
+  then the operator handoff (un-pause, cron */30 8-16 * * 1-5 America/Chicago, Grace 45,
+  after-hours Grace-to-1-min email test to prove the last hop, restore).
+- **Relay synthetic e2e** at the 08:07 CT poll (13:07Z): risk_alerts row
+  `4d0afb05-3c9a-4c10-ac40-39f55e292ffb` (relay_synthetic_e2e, critical, 04:26:42Z,
+  clearly-labeled SYNTHETIC) must egress to the operator inbox;
+  job_runs.result.alert_relay.sent=1 + metadata stamped egress_owner=relay. THEN clean up:
+  `DELETE FROM risk_alerts WHERE id='4d0afb05-3c9a-4c10-ac40-39f55e292ffb';`
+  A stranded synthetic with the webhook set = delivery-path bug (new finding).
+- **First typed segment row**: next trade_closed ingest (21:20Z) carries non-NULL
+  strategy+regime; post_trade_learning segment keys build without the suggestion-join
+  fallback.
+- Standing 07-01/07-02 list unchanged (10:00Z relearn live-only n=6 · 13:30Z SOFI cooldown
+  expiry · 16:00Z scan #1104 first live test · #1101 first roundtrip-gate evaluation ·
+  first LIVE close post-#1102 gap_fraction).

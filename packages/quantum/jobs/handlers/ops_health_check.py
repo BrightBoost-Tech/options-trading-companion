@@ -32,6 +32,8 @@ from packages.quantum.services.ops_health_service import (
     send_ops_alert_v2,
     is_us_market_hours,
     relay_direct_insert_alerts,
+    get_signal_accuracy,
+    evaluate_signal_accuracy,
     OPS_ALERT_MIN_SEVERITY,
     OPS_ALERT_COOLDOWN_MINUTES,
 )
@@ -58,6 +60,53 @@ def _run_alert_relay(client: Any) -> Dict[str, Any]:
     except Exception as e:
         logger.warning(f"[OPS_HEALTH_CHECK] alert relay step failed: {e}")
         return {"error": str(e)[:200]}
+
+
+def _check_signal_accuracy(
+    client: Any, min_severity: str, cooldown_minutes: int
+) -> Dict[str, Any]:
+    """Gap-2 (2026-07-02) rolling signal-accuracy telemetry — OBSERVE-ONLY,
+    fail-isolated: reads the live-only rolling view, alerts (warning, with
+    the standard fingerprint cooldown) when the overall hit-rate is degraded
+    at a meaningful sample. Modulates no decision path; a failure here must
+    never fail the health check."""
+    try:
+        rows = get_signal_accuracy(client)
+        verdict = evaluate_signal_accuracy(rows)
+        out: Dict[str, Any] = {
+            "degraded": verdict["degraded"],
+            "reason": verdict["reason"],
+            "scopes": rows,
+            "alerted": False,
+        }
+        if not verdict["degraded"]:
+            return out
+        overall = verdict["overall"] or {}
+        fingerprint = get_alert_fingerprint(
+            "signal_accuracy_degraded", {"scope": "overall"}
+        )
+        suppressed, _last = should_suppress_alert(client, fingerprint, cooldown_minutes)
+        if suppressed:
+            out["suppressed"] = "cooldown"
+            return out
+        alert_result = send_ops_alert_v2(
+            "signal_accuracy_degraded",
+            (
+                f"Rolling live signal accuracy degraded: {verdict['reason']} "
+                f"(wins {overall.get('wins')}/{overall.get('n')}, "
+                f"brier {overall.get('brier')} over n={overall.get('brier_n')}). "
+                f"Observe-only — no decision path reads this."
+            ),
+            details={"overall": overall},
+            severity="warning",
+            min_severity=min_severity,
+            client=client,
+        )
+        out["alerted"] = bool(alert_result.get("sent"))
+        return out
+    except Exception as e:
+        logger.warning(f"[OPS_HEALTH_CHECK] signal-accuracy step failed: {e}")
+        return {"error": str(e)[:200], "degraded": False, "alerted": False}
 
 
 def build_data_stale_alert_content(
@@ -472,6 +521,18 @@ def run(payload: Dict[str, Any], ctx: Any = None) -> Dict[str, Any]:
             alert_fingerprints.append(fingerprint)
 
         # ==============================================================
+        # 3.7 Gap-2: rolling signal-accuracy telemetry (observe-only,
+        #     fail-isolated — reads the live-only rolling view, warns on
+        #     degraded hit-rate at a meaningful sample; modulates nothing)
+        # ==============================================================
+        logger.info("[OPS_HEALTH_CHECK] Checking signal accuracy...")
+        signal_accuracy = _check_signal_accuracy(client, min_severity, cooldown_minutes)
+        if signal_accuracy.get("degraded"):
+            issues_found.append(f"Signal accuracy degraded: {signal_accuracy.get('reason')}")
+            if signal_accuracy.get("alerted"):
+                alerts_sent.append("signal_accuracy_degraded")
+
+        # ==============================================================
         # 4. Get suggestions stats
         # ==============================================================
         suggestions_stats = get_suggestions_stats(client)
@@ -526,6 +587,7 @@ def run(payload: Dict[str, Any], ctx: Any = None) -> Dict[str, Any]:
                 }
                 for o in output_freshness
             ],
+            "signal_accuracy": signal_accuracy,
             "suggestions": suggestions_stats,
             "integrity": integrity_stats,
             "issues_found": issues_found,

@@ -156,6 +156,16 @@ OUTPUT_FRESHNESS = [
     ),
 ]
 
+# Gap-2 (2026-07-02): rolling signal-accuracy telemetry — OBSERVE-ONLY.
+# The alert fires only once the live sample is meaningful (MIN_N) and the
+# rolling hit-rate sits below a floor that is unambiguous at that n (at a
+# fair-coin 50% base rate, ≤1 win in 8 is ~3.5% likely — signal, not noise).
+# These thresholds gate an ALERT, never a decision path.
+OPS_SIGNAL_ACCURACY_MIN_N = int(os.getenv("OPS_SIGNAL_ACCURACY_MIN_N", "8"))
+OPS_SIGNAL_ACCURACY_MIN_HITRATE = float(
+    os.getenv("OPS_SIGNAL_ACCURACY_MIN_HITRATE", "0.2")
+)
+
 
 @dataclass
 class DataFreshnessResult:
@@ -531,6 +541,59 @@ def get_output_freshness(client) -> List[OutputFreshness]:
             results.append(OutputFreshness(table, max_age_hours, None, None, "error"))
 
     return results
+
+
+def get_signal_accuracy(client) -> List[Dict[str, Any]]:
+    """Rolling live-only signal-accuracy rows (Gap-2, observe-only).
+
+    Reads the `signal_accuracy_rolling` view (last 20 live closes per scope:
+    'overall' + 'strategy:<name>'). Returns [] on any failure — the caller
+    treats an unreadable view as "no telemetry", never as healthy or as a
+    reason to fail the health check.
+    """
+    try:
+        res = client.table("signal_accuracy_rolling").select("*").execute()
+        return res.data or []
+    except Exception as e:
+        logger.warning(f"[SIGNAL_ACCURACY] view read failed: {e}")
+        return []
+
+
+def evaluate_signal_accuracy(
+    rows: List[Dict[str, Any]],
+    min_n: Optional[int] = None,
+    min_hit_rate: Optional[float] = None,
+) -> Dict[str, Any]:
+    """Pure threshold verdict over `signal_accuracy_rolling` rows (Gap-2).
+
+    Degraded ⇔ the 'overall' scope has n ≥ min_n AND hit_rate < min_hit_rate.
+    Insufficient sample or missing telemetry → not degraded (an alert about
+    accuracy needs enough closes to mean something; the view being missing is
+    surfaced separately by the caller's logging, not as a false degradation).
+    """
+    min_n = OPS_SIGNAL_ACCURACY_MIN_N if min_n is None else min_n
+    min_hit_rate = (
+        OPS_SIGNAL_ACCURACY_MIN_HITRATE if min_hit_rate is None else min_hit_rate
+    )
+    overall = next((r for r in rows if r.get("scope") == "overall"), None)
+    if not overall:
+        return {"degraded": False, "reason": "no_telemetry", "overall": None}
+    try:
+        n = int(overall.get("n") or 0)
+        hit_rate = float(overall.get("hit_rate")) if overall.get("hit_rate") is not None else None
+    except (TypeError, ValueError):
+        return {"degraded": False, "reason": "unparseable_row", "overall": overall}
+    if n < min_n:
+        return {"degraded": False, "reason": f"insufficient_sample:{n}<{min_n}", "overall": overall}
+    if hit_rate is None:
+        return {"degraded": False, "reason": "no_hit_rate", "overall": overall}
+    if hit_rate < min_hit_rate:
+        return {
+            "degraded": True,
+            "reason": f"hit_rate {hit_rate} < {min_hit_rate} over last {n} live closes",
+            "overall": overall,
+        }
+    return {"degraded": False, "reason": "ok", "overall": overall}
 
 
 def get_recent_failures(client, hours: int = 24) -> List[Dict[str, Any]]:

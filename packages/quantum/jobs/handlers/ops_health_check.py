@@ -47,6 +47,78 @@ JOB_NAME = "ops_health_check"
 SYSTEM_USER_ID = "00000000-0000-0000-0000-000000000000"
 
 
+def build_data_stale_alert_content(
+    market_freshness: Any, job_freshness: Any
+) -> tuple:
+    """Build the data_stale alert (message, details, fingerprint_details)
+    from the freshness arm(s) that actually FIRED.
+
+    A9 2026-07-02: the firing predicate ORs market_freshness |
+    job_freshness, but the alert content was built from market_freshness
+    unconditionally — a job-arm-only firing emitted the self-contradictory
+    "Market data is stale ... Stale: 0 (). Reason: ok" shape (57/69 of the
+    trailing-30d firings). This is content/fingerprint wiring ONLY: when
+    alerts fire is unchanged, and a market-arm-only firing emits the exact
+    legacy message AND the exact legacy fingerprint shape (so its cooldown
+    history survives the deploy). PURE — no I/O, no env reads.
+
+    Returns:
+        (message, details, fingerprint_details)
+    """
+    message_parts: List[str] = []
+    details: Dict[str, Any] = {}
+    fingerprint_details: Dict[str, Any] = {}
+    arms: List[str] = []
+
+    if market_freshness.is_stale:
+        arms.append("market")
+        message_parts.append(
+            f"Market data is stale. Universe: {market_freshness.universe_size} symbols. "
+            f"Stale: {len(market_freshness.stale_symbols)} ({', '.join(market_freshness.stale_symbols[:3])}). "
+            f"Source: {market_freshness.source}. Reason: {market_freshness.reason}"
+        )
+        details.update({
+            "universe_size": market_freshness.universe_size,
+            "stale_symbols": market_freshness.stale_symbols,
+            "source": market_freshness.source,
+            "age_seconds": market_freshness.age_seconds,
+        })
+        fingerprint_details["symbols"] = (
+            sorted(market_freshness.stale_symbols[:5])
+            if market_freshness.stale_symbols else []
+        )
+        fingerprint_details["source"] = market_freshness.source
+
+    if job_freshness.is_stale:
+        arms.append("job")
+        age_min = (
+            round(job_freshness.age_seconds / 60.0, 1)
+            if job_freshness.age_seconds is not None else None
+        )
+        message_parts.append(
+            f"Job-based data freshness is stale. Source: {job_freshness.source}. "
+            f"Age: {age_min} min. Reason: {job_freshness.reason}"
+        )
+        details.update({
+            "job_source": job_freshness.source,
+            "job_age_seconds": job_freshness.age_seconds,
+            "job_reason": job_freshness.reason,
+        })
+        # Per-arm dedup: job-arm firings no longer hash the (empty) market
+        # symbol list — distinct job-side problems get distinct fingerprints.
+        fingerprint_details["job_source"] = job_freshness.source
+        fingerprint_details["job_reason"] = job_freshness.reason
+
+    details["trigger_source"] = "+".join(arms)
+    # Market-arm-only keeps the EXACT legacy fingerprint shape
+    # ({symbols, source}); any firing involving the job arm carries the
+    # arms marker so the shapes can never collide.
+    if arms != ["market"]:
+        fingerprint_details["arms"] = arms
+
+    return " | ".join(message_parts), details, fingerprint_details
+
+
 def run(payload: Dict[str, Any], ctx: Any = None) -> Dict[str, Any]:
     """
     Run ops health check with Phase 1.1 enhancements.
@@ -120,11 +192,12 @@ def run(payload: Dict[str, Any], ctx: Any = None) -> Dict[str, Any]:
             stale_reason = market_freshness.reason if market_freshness.is_stale else job_freshness.reason
             issues_found.append(f"Data stale: {stale_reason}")
 
-            # Build fingerprint based on stale symbols
-            fingerprint_details = {
-                "symbols": sorted(market_freshness.stale_symbols[:5]) if market_freshness.stale_symbols else [],
-                "source": market_freshness.source,
-            }
+            # A9 2026-07-02: message/details/fingerprint from the arm(s)
+            # that FIRED (job-arm firings previously wore a market-data
+            # costume). The predicate above is unchanged.
+            alert_message, alert_details, fingerprint_details = (
+                build_data_stale_alert_content(market_freshness, job_freshness)
+            )
             fingerprint = get_alert_fingerprint("data_stale", fingerprint_details)
 
             # Check cooldown + market hours (v5-A4: snapshots age past any
@@ -138,15 +211,8 @@ def run(payload: Dict[str, Any], ctx: Any = None) -> Dict[str, Any]:
             if not suppressed:
                 alert_result = send_ops_alert_v2(
                     "data_stale",
-                    f"Market data is stale. Universe: {market_freshness.universe_size} symbols. "
-                    f"Stale: {len(market_freshness.stale_symbols)} ({', '.join(market_freshness.stale_symbols[:3])}). "
-                    f"Source: {market_freshness.source}. Reason: {market_freshness.reason}",
-                    details={
-                        "universe_size": market_freshness.universe_size,
-                        "stale_symbols": market_freshness.stale_symbols,
-                        "source": market_freshness.source,
-                        "age_seconds": market_freshness.age_seconds,
-                    },
+                    alert_message,
+                    details=alert_details,
                     severity="error",
                     min_severity=min_severity,
                     client=client,

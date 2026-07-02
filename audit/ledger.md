@@ -972,3 +972,45 @@ PENDING VERIFICATIONS (gap session): 21:20Z tonight — `job_runs.result.streak_
 + entries_paused=true + streak_breaker_tripped critical in the inbox (egress) → operator
 un-pauses per decision of record · signal_accuracy view visible in tonight's ops_health
 snapshots · no alert from signal accuracy until n≥8.
+
+## status:verified — 2026-07-02 post-close wrap (~23:30–23:50Z): the breaker exercise + doc sync
+
+- **[#1119 FIRST TRIP — VERIFIED END-TO-END, planned, NOT an incident]** 21:20Z ingest:
+  errors=0, outcomes_created=0 (flat day; typed-segment FORWARD proof defers to the next real
+  close — the 82 backfilled rows stand). `result.streak_breaker`: enabled/evaluated/tripped/
+  paused_written ALL true; window = SOFI −40 · MARA −15 · QQQ −73 verbatim. Chain: ops_control
+  entries_paused=true + streak reason verbatim → `streak_breaker_tripped` critical 21:20:03Z,
+  `metadata.egress_owner='alert'` (immediate-egress path; relay can never double-send) → zero
+  `streak_breaker_error` rows → worker log `[STREAK_BREAKER] TRIPPED` 21:20:09Z. Egress nuance:
+  the webhook POST attempt is proven and NO failure logged (failures log at WARNING and would
+  show); the success line is INFO (not retained) → final receipt = operator inbox (confirm ④).
+  Design note answered by the exercise: the breaker evaluates the TRAILING stream on EVERY
+  ingest run (it fired with outcomes_created=0) — no fires-only-on-new-outcomes gap.
+- **[RECOVERY EXECUTED ~23:35Z, operator-approved in the wrap]** un-pause UPDATE run;
+  read-back `false / NULL`. Entry-seam read: `paper_autopilot_service.py:187-196`
+  (`are_entries_paused()` → falls through to the staleness gate when false). Staging proof =
+  tomorrow's 16:30Z cycle (PENDING). Breaker critical ACKed (exercise complete).
+- **[CLEANUP]** synthetic relay row `4d0afb05` DELETED (post-inbox-window); post-sweep H11:
+  **un-acked critical/high = 0 — genuinely zero for the first time on record.**
+- **[DOC SYNC]** CLAUDE.md registry #1043→#1119 synced (v3-exists correction, 8th-close
+  convergence rule, relay route/SLA, close-limit-reads-RAW pin, breaker un-pause procedure
+  VALIDATED, §5 greeks layer marked dormant, §7 v5.1 A8-standing/A9-rotating, §8 liars
+  rewritten: greeks double-dormant + shadow-ledger fiction added; EXIT_EVAL_DEBUG/ghost-sweep/
+  is_paper/funnel moved to RESOLVED-cite-only; no-symbol-column trap; §9 + entries_paused
+  operator-only + introspect-before-select). backlog: P1 tier → gap-3(a) normalization +
+  tradeable-universe recon; shipped set retired; supervised-mutation queue closed; new P2s
+  (greeks populate-at-stage, breaker-N revisit at n≥15, mark-write residuals). ~38.4k chars.
+- **Process note (self-caught):** a PowerShell one-liner clobbered docs/backlog.md mid-edit
+  (PS 5.1 kept executing after a Substring exception → Set-Content $null). Recovered via
+  `git checkout --`; only an uncommitted edit was lost and redone via the Edit tool. Lesson:
+  no destructive shell one-liners on tracked docs — Edit tool only.
+
+OPERATOR-CONFIRM (open, answer when back): ① healthchecks handoff + after-hours email test ·
+② relay synthetic email ~08:07 CT · ③ OPS_DATA_STALE_MINUTES unset (names-only glance) ·
+④ breaker critical email ~16:20 CT.
+
+PENDING (tomorrow): 16:30Z post-un-pause staging proof · first typed-segment forward row +
+breaker re-evaluation at the next real close's ingest (NOTE: the 3 most-recent live closes are
+all losses, so the NEXT losing live close re-trips the breaker BY DESIGN — a win resets) ·
+first [CLOSE_FILL_GAP] live gap_fraction · gap-3(a) build + tradeable-universe recon = next
+build window.

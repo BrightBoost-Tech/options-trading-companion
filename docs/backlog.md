@@ -50,65 +50,51 @@ questions) · **RESOLVED — DO NOT REINVESTIGATE**.
   APScheduler→BE→RQ→worker died — diagnose `job_runs` vs Railway. RTH-only
   trade-off accepted. · origin durable-oversight Window 1 · done when: first
   ping observed at the provider + the email test round-trips.
-- **Supervised-mutation queue (operator approves each; move-don't-lose)**:
-  (a) **risk_alerts hygiene sweep** — 1,040 un-acked critical/high (385 c /
-  655 h, 2026-04-09→07-01) bulk-ack'd `resolved=true` + jsonb marker at
-  cutoff = the relay epoch 2026-07-02T00:00Z; SQL proposed in the 07-02
-  post-close report, awaiting approval. Both production readers key on
-  recent created_at windows — behavior-safe. · origin 06-18 (~350 then) ·
-  done when: executed + ledgered with count.
-  (b) **82-row strategy/regime backfill** — 82 of 83 NULL typed-segment
-  `trade_closed` rows have a linked suggestion carrying both fields
-  (`UPDATE … FROM trade_suggestions`); writer fixed forward by #1110.
-  · origin 06-29 diag Part 3 · done when: executed post-approval.
-  (c) **32-row funnel status backfill** — historical `dismissed`-with-position
-  suggestions → `executed` (dry-run-then-go). Layers A+B live and exercised
-  (#1073). · origin §8 funnel · done when: executed post-approval.
+- **Supervised-mutation queue — ALL THREE EXECUTED 07-02 (operator-approved,
+  exact counts, ledgered)**: (a) risk_alerts hygiene sweep 1,040 bulk-acked
+  (H11 un-acked critical/high now means LIVE actionable) · (b) 82-row
+  strategy/regime backfill · (c) 33-row funnel status backfill. Cite, don't
+  re-run; the queue is empty.
 
 ## P1 — next build slots
 
-- **data_stale job-arm predicate retune (recon COMPLETE 07-02, table ready)** —
-  the flat 30-min threshold vs two 1×/day jobs produced 39 job-arm-only false
-  HIGHs in 14d (100% of job-arm firings; content fixed by #1106, predicate
-  untouched). Minimal fix: `OPS_DATA_STALE_MINUTES=360` (max healthy in-gate
-  age observed 187 min; a dead suggestions_open still alerts same-day at
-  19:07Z) — env-first, both workers. Companion: daily `job_late` arm needs the
-  `_rth_job_status` warm-up-anchor pattern generalized (NOT a bigger
-  threshold) — kills the 40-warns-per-Monday storm; that arm has no
-  market-hours gate. Full per-job cadence table: 07-02 post-close report (B3).
-  · origin 2026-06-10 root cause, ledgered · done when: retune PR ships
-  env-first + zero job-arm false HIGHs over a week.
-- **MTM mark-WRITE corroboration (recon COMPLETE 07-02 — decision-feeding,
-  promoted per the display-vs-decision rule)** — `refresh_marks`
-  (`paper_mark_to_market_service.py:206-217`) and the monitor Part-B persist
-  (`intraday_risk_monitor.py:780-790`) persist RAW mid marks into
-  `current_mark`/`unrealized_pl` → `paper_eod_snapshots`. Fast loss paths are
-  clean (#1071/#1075/#1079/#1080); the persisted phantom still feeds
-  DECISIONS on slow paths: policy-lab champion utility + HARD_DRAWDOWN_LIMIT
-  auto-rollback (`policy_lab/evaluator.py:605-621` via max_drawdown), go-live
-  checkpoints (`go_live_validation_service.py:1093`), autopilot-breaker and
-  `_marginal_ev` FALLBACK branches, plus the close-limit price seam
-  (mitigated by #1072/#1017). Severity nuance: daily cadence, error bounded
-  by one day's book. Evidence 14d: 2/3 closes wrong-signed at last persist;
-  SOFI persisted +196.52 thirty minutes before a corroborated −1,044.48 close
-  (divergence 0.869). Fix (no new machinery): reuse
-  `exit_mark_corroboration.executable_close_estimate` over the cycle's
-  already-fetched snapshots (zero extra API calls) and persist ADDITIVE
-  suspect/basis fields (never replace the mid mark, never fabricate when
-  dark); slow-path consumers exclude/downweight suspect rows. Monitor
-  Part-B side-finding: it does not stamp `last_marked_at` (staleness queries
-  miss those writes). · origin 06-17/06-18 incident, unfiled until 07-02
-  recon (B1) · done when: both write sites persist corroboration fields and
-  the policy-lab drawdown path reads them.
-- **ops_health_check effective cadence is hourly, not q30min** — scheduler
-  says `minute="7,37"` but the hourly idempotency key
-  (`public_tasks.py:766`) dedupes every :37 fire (99/100 observed runs at
-  :07). Consequence: alert cooldowns never suppress consecutive firings, the
-  A3 egress relay polls hourly, and the schedule lies. 1-line key fix
-  (include minute) — decide intended cadence first. · origin 07-02 recon
-  (B3) · done when: observed runs match the schedule.
+- **Gap-3(a): shadow-ledger promotion-time normalization** — per-contract
+  (or per-$-risked) cohort scoring + a measured fill-confidence discount
+  (live fill base rate ≈0.33) applied at policy_lab evaluation ONLY (ledger
+  rows untouched); kills the 5–17× size fiction before the next promotion
+  eval. Spec + recon counts: `docs/specs/shadow_fill_realism.md`. · origin
+  07-02 gap-3 recon · done when: cohort scores compare on a normalized
+  basis; the full post-and-wait model (b) stays its own recon-first session.
+- **Tradeable-universe recon (read-only)** — which universe names can
+  actually pass the round-trip cost gate at current spreads (the first live
+  rejection: SOFI round-trip 92 vs gross EV 30.25 — the small-tier universe
+  may be structurally spread-eaten); recon before any threshold/universe
+  reaction, never a gate loosening. · origin 07-02 first #1101 rejection ·
+  done when: a per-symbol executable-spread table exists and the operator
+  has read it.
 
+### Shipped 07-02 from this tier (cite, don't rebuild)
+data_stale predicate retune → #1115 (weekend-excluded job_late + 360 default;
+0 job-arm false HIGHs on day one) · MTM mark-write corroboration → #1116 ·
+ops_health_check q30min-real dedup → #1114 · signal-accuracy telemetry
+(gap-2) → #1118 (baseline 1/6, Brier 0.2751) · streak breaker (gap-1) →
+#1119 (planned first trip exercised + operator-recovered 07-02).
 ## P2 — real but deferred
+
+- **Greeks populate-at-stage (gap-4 follow-up)** — legs have NEVER carried a
+  `greeks` key (envelope double-dormant, §8 doctrine); populate from the
+  stage-time snapshots (already fetched), THEN decide caps (all four default
+  0 = no-limit). Never silently populate without its own PR + tests. ·
+  origin 07-02 gap-4 recon · done when: staged legs persist real greeks and
+  the caps question gets an explicit owner decision.
+- **Streak-breaker N revisit** — N=3 chosen pre-baseline; revisit against
+  gap-2 base rates once n≥15–20 live closes (config change only:
+  `STREAK_BREAKER_N`). · origin 07-02 gap-1 · reopen at n≥15 live closes.
+- **Mark-write residuals (from #1116)** — monitor Part-B doesn't stamp
+  `last_marked_at` (q15min writes invisible to staleness queries);
+  `paper_eod_snapshots` doesn't carry the corroborated fields (vol_signal
+  analytics stay raw-basis). · origin 07-02 P1-C · done when: both residuals
+  closed or explicitly accepted.
 
 - **Migration tracking drift check (process fix, recon COMPLETE 07-02)** —
   27/112 migration files tracked (82 pre-tracking-era, 1 post-era procedure

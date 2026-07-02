@@ -180,13 +180,23 @@ def test_heartbeat_silent_when_closed_not_flagged():
 
 def test_daily_jobs_behavior_unchanged():
     """Regression guard: the daily-cadence path still uses its 26h window —
-    a daily job that ran 2h ago is 'ok', and 30h ago is 'late'."""
+    a daily job that ran 2h ago is 'ok', and 30h ago is 'late'.
+
+    Fixture updated for P1-B (2026-07-02): daily age is now WEEKEND-EXCLUDED
+    (the Monday-storm fix), so the stale case anchors on a Thursday — a 30h
+    gap with no weekend inside. The original fixture's 30h window happened to
+    cross Sunday (RTH_NOW is a Monday), which correctly reads ~17h effective
+    under the new semantics; weekday-gap detection is what this pin protects.
+    """
     fresh = get_expected_jobs(
         _mock_client((RTH_NOW - timedelta(hours=2)).isoformat()), now=RTH_NOW
     )
     assert _status(fresh, "suggestions_close") == "ok"
+    # Thursday 2026-07-02 17:00Z − 30h = Wednesday 11:00Z: no weekend inside.
+    thursday_now = datetime(2026, 7, 2, 17, 0, tzinfo=timezone.utc)
     stale = get_expected_jobs(
-        _mock_client((RTH_NOW - timedelta(hours=30)).isoformat()), now=RTH_NOW
+        _mock_client((thursday_now - timedelta(hours=30)).isoformat()),
+        now=thursday_now,
     )
     assert _status(stale, "suggestions_close") == "late"
 

@@ -26,7 +26,15 @@ from packages.quantum.observability.canonical import compute_content_hash
 logger = logging.getLogger(__name__)
 
 # Configuration
-DATA_STALE_THRESHOLD_MINUTES = int(os.getenv("OPS_DATA_STALE_MINUTES", "30"))
+# Default retuned 30→360 (owner-approved 2026-07-02, P1-B). The job-freshness
+# arm measures the age of two 1×/day jobs (suggestions_close 13:00Z /
+# suggestions_open 16:00Z); against a 30-min threshold every inter-scan gap
+# read as stale — 39 of 39 job-arm firings in 14d were false HIGHs. Max
+# healthy in-gate age observed over 10/10 trading days: 187 min (19:07Z check
+# vs the 16:00Z run). 360 ≈ 2× worst-healthy, and a genuinely dead
+# suggestions_open still alerts SAME-DAY at the 19:07Z check (367 min).
+# Env `OPS_DATA_STALE_MINUTES` overrides (unchanged wiring).
+DATA_STALE_THRESHOLD_MINUTES = int(os.getenv("OPS_DATA_STALE_MINUTES", "360"))
 MARKET_DATA_STALE_THRESHOLD_MS = int(os.getenv("OPS_MARKET_DATA_STALE_MS", str(20 * 60 * 1000)))  # 20 minutes
 MAX_FRESHNESS_UNIVERSE_SIZE = int(os.getenv("OPS_MAX_FRESHNESS_UNIVERSE", "25"))
 
@@ -209,7 +217,8 @@ def compute_data_freshness(
 
     Args:
         client: Supabase client
-        stale_threshold_minutes: Threshold for staleness (default: 30)
+        stale_threshold_minutes: Threshold for staleness (default: 360 via
+            OPS_DATA_STALE_MINUTES — retuned from 30, P1-B 2026-07-02)
 
     Returns:
         DataFreshnessResult with is_stale, as_of, age_seconds, reason, source.
@@ -334,6 +343,38 @@ def _rth_job_status(
     return "late" if last_success_at is not None else "never_run"
 
 
+def _weekend_excluded_age(last_success: datetime, now: datetime) -> timedelta:
+    """Wall-clock age minus UTC-weekend hours inside the window (P1-B).
+
+    The daily jobs are scheduled mon–fri; weekend silence is BY DESIGN
+    (§6). Measured on the wall clock, Friday's run is >26h old from Monday
+    13:07Z until it reruns that evening — 20 false `job_late` warns every
+    Monday (40 observed in 14d). A flat threshold raise (~74h) would instead
+    delay real Tue–Fri detection by days, so the age itself excludes full
+    UTC Sat/Sun hours: Friday-evening→Monday-morning reads ~16h (ok), while
+    a job that actually misses Monday reads ~40h by Tuesday (late).
+
+    UTC weekend vs the CT schedule skews the exclusion by a few evening
+    hours on Friday/Sunday — all four daily jobs run 13:00–22:10Z, well
+    inside UTC weekdays, so the skew never spans a scheduled fire. Windows
+    longer than 30 days skip the exclusion (already unambiguously late).
+    """
+    age = now - last_success
+    if age > timedelta(days=30):
+        return age
+    weekend = timedelta(0)
+    day = last_success.replace(hour=0, minute=0, second=0, microsecond=0)
+    while day < now:
+        nxt = day + timedelta(days=1)
+        if day.weekday() >= 5:  # Saturday=5, Sunday=6
+            start = max(day, last_success)
+            end = min(nxt, now)
+            if end > start:
+                weekend += end - start
+        day = nxt
+    return age - weekend
+
+
 def get_expected_jobs(
     client, now: Optional[datetime] = None
 ) -> List[ExpectedJob]:
@@ -403,7 +444,13 @@ def get_expected_jobs(
                     threshold = timedelta(days=8)
 
                 if finished_at:
-                    age = now - finished_at
+                    # Daily mon–fri jobs: weekend hours don't count against
+                    # the 26h (the Monday-storm fix, P1-B). Weekly cadence
+                    # keeps wall-clock age (8d already tolerates a weekend).
+                    if cadence == "daily":
+                        age = _weekend_excluded_age(finished_at, now)
+                    else:
+                        age = now - finished_at
                     is_late = age > threshold
                 else:
                     is_late = True

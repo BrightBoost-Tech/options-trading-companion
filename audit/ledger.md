@@ -457,3 +457,213 @@ session on #1062+/#1065 code after the weekend):
   correct), rejection_reasons [insufficient_history, no_fallback_strategies_available] — the
   loud zero-history skip on record; no scan poisoning.
 - Next system close: PR #908 live credit-mleg-close validation.
+
+## status:reported — 2026-06-30 NIGHTLY run (report `audit/reports/2026-06-30.md`)
+
+Window 06-15 → 06-30 (15-day gap; parked week 06-18→06-29 = zero trades; resume-armed tonight).
+Infra movement: PRs #1094–#1098 merged + `PAPER_AUTOPILOT_ENABLED` 0→1 (first live-autopilot arm).
+Both workers SUCCESS @ `f7dab1d`. Book FLAT (live + shadow). H11 zero critical.
+
+- **[A4 2026-06-30 — FINDING] Learning-ingest silent in-result-error masking (P2→P1; refines the
+  ledgered "OUTPUT_FRESHNESS watches ONE table").** `paper_learning_ingest` ran 5×/7d all
+  `status=succeeded` while every run 06-23→06-29 carried `result.counts.errors=1,
+  outcomes_created=0` (the `opened_at` 42703, fixed by #1098 tonight). EXPECTED_JOBS checks job
+  STATUS; OUTPUT_FRESHNESS watches `calibration_adjustments` ONLY → a 6-day silent learning-loop
+  death went unalerted. Parked week masked the P&L cost (zero closes); under live autopilot a
+  recurrence silently starves calibration + loses real outcomes. FIX (additive, no infra): alert on
+  `job_runs.result.counts.errors>0` (status-succeeded included) OR add `learning_feedback_loops` to
+  the freshness registry → detection 6d→0d. RISK zero. CONFIDENCE high.
+- A1/A6/A7 UNCHANGED (no new fills since 06-17). A2 — 4c fail-open CLOSED (#1094 live); multi-position
+  / loss-precedence now live-relevant but backlog-P2 (don't fix ad hoc). A3 — relearn 5/8 post-epoch
+  live, raw by #1076 design; ingest break lost ZERO outcomes (flat book that window); path-to-8 now
+  depends on autopilot volume. A5 — this loop's only waste: `get_orders` 109k overflow (use
+  symbols-filter/subagent next time); else within budget.
+- **Four-source disagreement:** −84 NFLX 06-08 LIVE close → paper_positions cohort `3d289dca` (live)
+  vs v3 `is_paper=true` (paper); ledgered is_paper P2, pre-epoch so relearn-count-safe but understates
+  v3 live realized (−113 vs true −197). Reported not averaged.
+- **A8:** lens KEPT (Negative-Decision Efficacy; no data-backed replacement tonight). Named next-run
+  replacement **Entry-Fill Efficacy** (staged-live-order watchdog-cancel blind spot, 06-03 NFLX
+  precedent) — adopt once autopilot generates staged-live data. See area8.md.
+
+PENDING VERIFICATIONS (next session — first live-autopilot session):
+- First 11:30 CT executor cycle on `PAPER_AUTOPILOT_ENABLED=1`: did it stage/fill or pass the EV gate?
+- First post-fix `paper_learning_ingest` run (~21:20Z): `outcomes_created>0` on a close, `errors=0`,
+  A4 cols (entry_iv_rv_spread/realized_vol_over_hold) populate.
+- Entry-Fill Efficacy baseline: of any staged live order, fill vs watchdog-cancel + price vs limit.
+
+## status:shipped — 2026-06-30 post-close runbook · Phase 1 (PR #1100 → main `8faf133`, both workers H8'd)
+
+- **[Phase 1] alert-write resilience + A4 silent-failure detector** (squash `8faf133`; worker +
+  worker-background SUCCESS @ 8faf133 21:55Z). (1a/1b) `observability/alerts.py` risk_alerts insert
+  wrapped in retry-with-backoff (0.25/0.5s) on TRANSIENT stale-keepalive disconnects ONLY
+  (`RemoteProtocolError`/"Server disconnected"); existing `alert_write_failed` log kept as the FINAL
+  fallback; distinct `alert_lost_after_retries` marker when a transient exhausts retries. Right-sized
+  retry, NOT a durable queue (signature = idle-keepalive drop). (1c) `ops_health_service.
+  get_silent_job_failures` + `ops_health_check §3.5` fire a NEW `job_succeeded_with_errors` (high) via
+  canonical `alert()` on any `status=succeeded` job with `result.counts.errors>0` (the masking class
+  that hid the 6-day `opened_at` ingest death), fingerprint+cooldown, added to `_RISK_EGRESS_ALERT_TYPES`;
+  `learning_feedback_loops` already in OUTPUT_FRESHNESS. Detection 6d→0d. 14 new tests + 27+5 regression
+  green; ADDITIVE (ingest/executor/exit/monitor untouched). **SYNTHETIC PROOF PASSED:** inserted a
+  `succeeded`/`errors=1` job_runs row → dispatched `ops_health_check` → `job_succeeded_with_errors`
+  risk_alert fired end-to-end (run_id matched, 22:01:00Z) → both synthetic rows deleted.
+  **Operator flag:** `OPS_ALERT_WEBHOOK_URL` unset → a fully-dropped insert reaches NO external
+  destination; `alert_lost_after_retries` is the only in-process visibility. Closes the ledgered
+  OUTPUT_FRESHNESS / N2-alert-delivery silent-failure gap (the WRITE side; the read-side egress poller
+  remains deferred).
+
+- **[Phase 2] entry executable round-trip cost gate** (PR #1101, squash `0ea6583`; worker +
+  worker-background SUCCESS @ 0ea6583 22:35Z). Fixes the SOFI 06-30 own-goal class: admitted on EV
+  +$30.63 but ~$135 of executable bid/ask cross made it underwater-on-executable from entry →
+  force-closed at a 100%-spread-cost loss; the scanner's 5%-of-EV slippage PROXY
+  (`canonical_ranker._estimate_slippage`) waved it through. NEW `exit_mark_corroboration.
+  executable_roundtrip_cost` (PURE; reuses `compute_corroboration`'s executable basis long→bid/short→ask
+  — UNIFIED with the exit, zero refetch; Σ per-leg (ask−bid)×contracts×100). NEW
+  `paper_endpoints._apply_entry_roundtrip_gate` in `_stage_order_internal` (after #1038's validated
+  `_entry_leg_quotes`, before TCM/insert/submit): `honest_ev_after_cost = ticket.EV − round_trip`,
+  REJECT < `MIN_EDGE_AFTER_COSTS` ($15). OPEN-only (closes exempt), skips no-EV (shadow), allows on
+  incomplete executable quote (#1038 owns dark legs), WARNING-logs every eval, stamps
+  `blocked_reason='ev_below_roundtrip_cost'` (fail-soft), raises `EntryRoundtripCostExceedsEV`
+  (#1038-shaped; autopilot counts not-executed). Flag `ENTRY_ROUNDTRIP_COST_GATE_ENABLED` default-ON
+  (explicit falsy → legacy). 12 tests (incl. SOFI→REJECT, anti-over-reject PASS, UNIFICATION entry==exit
+  basis, flag both ways) + 50+87 regression. ADDITIVE — executor/exit/monitor-force-close/ingest
+  untouched (exit_mark_corroboration change = new sibling helper + import only). Resolves the SOFI
+  own-goal at the ENTRY (NOT by loosening the stop). Verify on tomorrow's first scan.
+
+- **[Phase 3 — status:DEFERRED 2026-06-30, GATED] Exit-trigger basis calibration (full-cross
+  over-pessimism).** The −3% per-symbol envelope force-closes on the FULL-CROSS executable estimate
+  (`exit_mark_corroboration.executable_close_estimate`/`compute_corroboration._executable_for`,
+  long→bid/short→ask; SOFI `c99d8af2` 06-30: −$65 estimate vs −$40 achievable fill, INSIDE the −$62
+  envelope). **WHY DEFERRED:** Phase 2 (#1101) closes the dominant class at ENTRY (SOFI can't be admitted
+  now); the residual (a position admitted with tolerable round-trip whose quote later transiently
+  widens/one-sides enough to trip the full-cross envelope while the achievable close is still in
+  tolerance) is RARE with **N=1 data** — a tuned `k≈0.23` from one fill, on the one stop direction where
+  a mistake MASKS real loss, is over-fit. **REOPEN:** ≥10–15 real close fills accumulated (via the
+  precursor instrumentation, shipped below) → build on the fill-improvement DISTRIBUTION, not a hand-picked
+  constant. **DESIGN (carry forward):** TWO-QUOTE CONFIRMATION — require BOTH the full-cross decision basis
+  AND the achievable marketable-limit to breach before force-closing; floored at cross; ≤ mid; gated on
+  `quote_complete`/non-wide; NO tuned constant. Survival fixtures: SOFI replays to ~−$40 (SURVIVES,
+  −40 > −62) AND a −$200 directional loss STILL fires. **⚠ UNIFICATION TRAP (recon pt 4):** Phase 2's
+  `executable_roundtrip_cost` recomputes (ask−bid) directly at `exit_mark_corroboration.py:408` while the
+  exit reads `achievable_close` from `_executable_for:191-199` — a Phase 3 that changes ONLY the exit
+  primitive makes ENTRY and EXIT diverge, re-creating the entry-admits-what-exit-kills bug this arc fixed.
+  Phase 3 moves BOTH seams onto ONE per-leg executable price or it does not ship.
+
+- **[Phase-3 PRECURSOR — SHIPPED 2026-06-30] Close-fill gap instrumentation.** PR #1102 → main `b3479a8`
+  (off `0ea6583`). ADDITIVE / observe-only — makes the deferred Phase-3 decision data-driven instead of N=1.
+  On EVERY close (force-close AND normal) emits `[CLOSE_FILL_GAP] symbol=… position_id=… cross=<full-cross
+  executable estimate> mid=<trigger mark> fill=<marketable-limit fill> gap_fraction=(fill−cross)/(mid−cross)
+  reason=…`; the quad is also persisted into the EXISTING close `order_json` JSONB (no migration → SQL-queryable
+  for the REOPEN gate beyond short Railway log retention). New pure helper `services/close_fill_gap.py`; cross/mid
+  threaded stage→fill via `order_json` (stamped in `paper_exit_evaluator._close_position` post-submit, read back
+  at `alpaca_order_handler._close_position_on_fill` LIVE reconcile + the internal/shadow fill). Degenerate
+  (mid==cross)→gap None; missing stamp→fill-only NA; every block best-effort try/except — NEVER affects a close.
+  NO close-decision / envelope / trigger-basis / force-close / sizing change; no flag. 16 unit + 41 touched-path
+  regression tests green (SOFI 06-30 fixture → 0.2326 ≈ 0.23). H8 ✅ both workers SUCCESS @ b3479a8
+  (start 23:30Z, prior 0ea6583 REMOVED). First `[CLOSE_FILL_GAP]` line lands on the next live or shadow close.
+
+## status:reported — 2026-07-01 NIGHTLY run (manual; report `audit/reports/2026-07-01.md`)
+
+First session after the live-autopilot arc; verification-first. Both workers @ `b3479a8` all
+day (no recycle). Broker flat, equity 2,093.74 (Δ −41.06 = SOFI −40 + fees). H11: 1 critical
+= the shadow force-close below (functioning control, not an incident).
+
+- **[A5 2026-07-01 — FINDING] Scanner persist seam unprotected against the stale-keepalive
+  disconnect burst (now a 2-day pattern).** 16:00:09Z: 8× "Server disconnected" on
+  suggestion_rejections inserts inside the scheduled scan (job result `persist_failures: 8`);
+  same class + window as 06-30's storm. #1100's retry wraps ONLY `observability/alerts.py`
+  alert() — scanner persists un-retried → 8 rejection rows lost today (observability data, no
+  live-risk surface). FIX (additive): reuse the #1100 transient retry at the scanner persist
+  seam (or pre-ping the connection before the post-scan write burst). RISK zero. CONF high.
+- **[A4 2026-07-01 — REFINEMENT, changes action] Ghost-sweep shadow scoping P2→P1.** 58
+  shadow-ghost warns in 2 days from ONE shadow position (51× 06-30 + 7× 07-01) vs ~73/wk
+  baseline — the unscoped sweep (`alpaca_order_sync.py:245`) floods exactly when autopilot
+  live flow makes a real desync time-critical. Additive scoping only.
+- **[A4 2026-07-01 — instance, no new finding] First stranded critical:** 13:30:09Z critical
+  `force_close` reached the DB and nothing else — `OPS_ALERT_WEBHOOK_URL` UNSET both workers,
+  zero egress lines in logs. Operator owns setting it (+ `HEARTBEAT_PING_URL`, also unset).
+- **[A7 2026-07-01 — note] `[CLOSE_FILL_GAP]` line emits at INFO** → invisible on the
+  WARNING+/print worker (the [UTILIZATION_GATE] observability class). DB persistence (the
+  durable channel) verified working on its first event. Cosmetic rider: bump to WARNING.
+- **A8 lens SWAPPED:** Entry-Fill Efficacy ADOPTED (the SOFI staged-live lifecycle is the
+  06-30-named trigger data); Negative-Decision Efficacy retired after 6 runs — parting
+  datapoint: the conservative SOFI fork's REJECT (edge_below_minimum, EV 19.1) beat both
+  accepting books (−40 live / −1,044.48 shadow). Its standing capture/marker recommendation
+  stays in backlog RESEARCH, not withdrawn. `audit/area8.md` rewritten.
+- Shadow SOFI force-close 07-01 13:30:09Z (−1,044.48; 17 lots; 21h overnight hold; open-
+  rotation full-cross 0.84 vs mid 1.57, divergence 0.869): the **GATED Phase-3 class
+  exercising** — cited, NOT re-found. All controls fired as designed (verifications below).
+  Cohort-comparability caveat: the loss lands on neutral's policy-lab ledger at 26× the live
+  twin (#1017 modeled-fill bias, now with a large concrete instance).
+
+VERIFICATIONS CLOSED THIS RUN (the three 06-30 pendings + bonus — do not re-find):
+- ✅ **First autopilot executor cycle**: 06-30 16:30Z staged + broker-filled SOFI live (fills
+  broker-verified; entry at the 1.44 net limit, ~10s to fill); 07-01 both cycles clean with 0
+  candidates (correct zero-entry day on honest scanner math, 382 rejections).
+- ✅ **First post-fix paper_learning_ingest** (#1098): 06-30 21:20Z errors=0/created=1;
+  07-01 21:20Z errors=0/created=1/dup-skipped=1 (position-level dedup ✓). Live SOFI v3 row
+  **is_paper=FALSE**, pnl −40.0; **post-epoch live closes 5→6**. `entry_iv_rv_spread`
+  populated (0.1166, first ever); `realized_vol_over_hold` NULL (hypothesis: hold too short —
+  verify on a multi-day close before calling it a writer gap).
+- ✅ **#1076 live-only calibration EMPIRICALLY confirmed**: 07-01 10:00Z escalation 30/60/90
+  all sample_size=6 = exactly the live count (11 post-epoch outcomes exist, only 6 live seen)
+  → insufficient_data → raw_mode_reset_written. Raw mode holds until 8.
+- ✅ **#1073 Layer A first exercise**: 2 suggestions stamped `status='executed'` 06-30 at the
+  position-insert seam.
+- ✅ **#1062 first AUTOMATIC cohort-stop cooldown write**: (c8a3a3b0, SOFI) until 07-02
+  13:30Z, reason=cohort_stop_force_close, realized_loss −1044.48. #1040's bench is now armed
+  with a real row.
+- ✅ **#1080 per-position triggers first live fire**: cohort stop evaluated on CORROBORATED
+  UPL (obs row 13:30:05Z: mid 1.57/+26 vs achievable 0.84/−1,044.48, divergence 0.869,
+  quote_complete=true, stop never suppressed); internal fill at executable w/ fill_quality
+  (#1017); [INTERNAL_FILL] WARNING line present.
+- ✅ **#1102 first event**: fill-side persist wrote `close_fill_gap_fill=0.84`, cross/mid/
+  fraction NULL = the DOCUMENTED fill-only design for internal/shadow closes. Informative
+  gap_fraction pends the first LIVE close.
+- ✅ **Phase-B EXIT_EVAL_DEBUG honesty observed live**: printed the cohort threshold
+  −494.496 (= 0.20 × 2,472.48 basis), not the flat default.
+- ✅ **[CONVICTION] DEGRADED**: 0 lines today = CORRECT (v3 view live since #1076) — the
+  once-per-recycle DEGRADED expectation is obsolete; do not re-expect it.
+
+PENDING VERIFICATIONS (added 2026-07-01):
+- First LIVE close post-#1102 → informative gap_fraction (broker fill vs cross) in
+  order_json. The log line is INFO-invisible — query the DB, not Railway.
+- First `ENTRY_ROUNDTRIP_COST_GATE` evaluation (next staged candidate): WARNING eval line +
+  `blocked_reason='ev_below_roundtrip_cost'` on any reject; classify spread-eaten (correct)
+  vs edge-lost (over-reject flag, operator-investigate only).
+- 07-02 10:00Z relearn: sample stays live-only n=6 (the 07-01 shadow −1,044.48 is_paper=true
+  must NOT appear in the count).
+- `realized_vol_over_hold` on the next multi-day close — NULL on short holds is DESIGNED
+  (`A4_MIN_HOLD_BARS=3` daily bars; the 15-min/21-h SOFI holds can't qualify); only a NULL on
+  a ≥3-day hold would be a writer gap.
+- 07-02 13:30Z SOFI cooldown expiry: if SOFI re-emits before expiry, FILTER + fail-closed
+  STAGE gates must bench it (#1040's first full pre-ranking exercise).
+
+## status:built — 2026-07-01 post-close · A5 scanner persist-seam retry (PR #1104, CI GREEN, MERGE PENDING operator)
+
+- **[A5 07-01 fix] scanner rejection-persist transient-disconnect retry** — branch
+  `fix/scanner-rejection-persist-retry` (tip `a955fc2`), PR #1104, CI green on run 3.
+  The 16:00Z post-scan write burst lost 8 `suggestion_rejections` rows to stale-keepalive
+  "Server disconnected" (2-day pattern; #1100 wrapped ONLY alerts.py).
+  `RejectionStats._persist_rejection` now retries with backoff (0.25/0.5s) reusing #1100's
+  classifier (`alerts._is_transient_disconnect`); ONLY transient disconnects retry — any other
+  exception keeps the single-attempt fail-soft path byte-for-byte. Exhausted transient →
+  DISTINCT `rejection_row_lost_after_retries` marker + unchanged fallback; recovered retry →
+  NEW `persist_retry_recoveries` count in the scan job_runs.result (DB-queryable) + WARNING
+  line. Backoff sleep is constructor-injected (`retry_sleep=`, default time.sleep test-pinned):
+  CI runs 1+2 proved dotted-path @patch on options_scanner is order-fragile in the full suite
+  (the MagicMock-shadowing class the suite itself documents at
+  test_credit_spread_emission._read_anomaly_threshold). No flag (observability-only; clean path
+  unchanged: one attempt, zero sleeps). ADDITIVE — scan decisions/aggregate counts/close paths
+  untouched. 9 new tests + 97 touched-path regression local + full CI.
+  **Rider (ledger-named 07-01):** `[CLOSE_FILL_GAP]` emits at WARNING (was INFO-invisible);
+  level test-pinned.
+- **Merge blocked by the session's self-approval gate (correct behavior):** the agent-authored
+  PR merge auto-deploys both live workers; operator merges. AFTER merge: H8 both workers
+  (deployment SUCCESS at the squash SHA, container start > merge time), then the pendings below.
+
+PENDING VERIFICATIONS (added with #1104; valid only after operator merge + H8):
+- Next 16:00Z scan disconnect burst: `persist_failures=0` + `persist_retry_recoveries>0` in the
+  scan job_runs.result (retry absorbed it), or the distinct `rejection_row_lost_after_retries`
+  marker if one outlives the backoff.
+- First live close post-merge: [CLOSE_FILL_GAP] line now VISIBLE at WARNING in Railway logs —
+  the "query the DB, not Railway" caveat on the earlier pending item becomes obsolete at this SHA.

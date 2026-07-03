@@ -1134,3 +1134,35 @@ on the normalized basis (no verdict flip expected at current n). Heartbeat pings
 today regardless → the UP email residual clears today. OWNER DECISIONS OPEN: arm
 UNIVERSE_VIABILITY_BIAS_ENABLED=1 (env, no deploy) · RTH re-screen of MRK/CVX (next trading
 session, read-only) · prune list · DIA/GLD class amendment.
+
+## status:armed — 2026-07-03 ~15:18Z (holiday window) · decision-execution T-phase
+
+- **[T1 — BIAS ARMED]** `UNIVERSE_VIABILITY_BIAS_ENABLED=1` set on BOTH workers; var-change
+  recycles SUCCESS @ `a958fb4` 15:18:27/29Z — running containers created post-set carry =1.
+  EXPECTATION CORRECTED vs the instruction: a correct `=1` emits NO log line by design (§3
+  strict-parse warns ONLY on a non-'1' value) — silence + behavior is the signature.
+  Names-only hygiene forbids a value dump read-back; the behavioral read-back is Monday's
+  pin: **07-06 16:00Z scan → sort-key reorder visible in ranking, stored risk_adjusted_ev
+  byte-identical (the dark-ship pin, now live).**
+- **[T2 — baseline captured; closes at 21:30Z tonight]** 07-02 21:30Z eval (pre-#1124):
+  `no_promotion`, challengers die at GATE 2 (`insufficient_trades`: conservative 0, neutral 1
+  vs required 10) — the utility comparison NEVER RAN at current volume. Tonight's normalized
+  first-eval evidence is therefore: job green + flag-default-ON path executed + same
+  insufficient_trades verdict; **the SOFI-twin magnitude proof only becomes observable when a
+  challenger reaches Gate 4 (≥10 trades + ≥MIN_TRADING_DAYS)** — do not mistake verdict-
+  sameness for the normalization not running.
+- **[T3 — OPERATOR-CONFIRM open]** heartbeat pings fired 8:00 CT today (scheduler mon–fri,
+  holiday-blind) → the check should have flipped UP at the first ping; confirm the UP email
+  arrived (closes the Grace-test residual).
+- **[T4 — FILED]** broker-clock guard on watch→merge automation → backlog P2 (merge chains
+  check `get_clock.is_open`, fail-safe to NOT-merge; no unattended chains near boundaries
+  until built).
+- CLOSED/DO-NOT-REOPEN (recorded): contract-cap (count-invariant algebra) · slot re-flow
+  (future recon only on a demonstrated lost-viable-candidate cycle) · the empty add-list
+  verdict STANDS — no refill re-run without new evidence (tier change or structural change).
+- MONDAY QUEUE (own sessions): M1 MRK/CVX RTH re-screen (read-only, mid-session batch) ·
+  M2 GLD $5-strike feasibility recon (config-vs-surgery verdict) · M3 standing proofs ·
+  M4 post-close universe PR (prune strong tier MINUS SOFI — **SOFI stays as the canonical
+  gate sentinel**: if it ever CLEARS the roundtrip gate, the spread regime, EV math, or a bug
+  changed and we want to see it loudly; DIA → bias tier 1.15 with the one-beta-bucket note;
+  GLD/MRK/CVX per M1/M2 verdicts; adds pair with iv_historical_backfill seeding).

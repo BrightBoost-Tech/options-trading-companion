@@ -1032,3 +1032,48 @@ staging proof (final recovery link) · first typed-segment forward row + breaker
 at the next real close's ingest (NOTE: the 3 most-recent live closes are all losses, so the
 NEXT losing live close re-trips the breaker BY DESIGN — a win resets) · first [CLOSE_FILL_GAP]
 live gap_fraction · gap-3(a) build + tradeable-universe recon = next build window.
+
+## status:shipped — 2026-07-03 build window (~00:45–01:15Z): gap-3(a) + tradeable-universe recon
+
+- **DEADLINE (Step 0):** the champion-vs-shadow comparison runs inside `policy_lab_eval`
+  (scheduler 16:30 CT daily; `check_promotion` at policy_lab/evaluator.py:282); gap-3(a)
+  landed ~15h before the next eval. (`promotion_check` 17:00 CT is phase-transition hygiene,
+  not the comparison.)
+- **[Gap-3(a) #1124 `48ddcd4` 01:10:59Z] shadow-ledger promotion-time normalization** — NEW
+  `policy_lab/promotion_normalization.py`, called ONLY from check_promotion after the daily-
+  scores fetch (governance-only, import-pinned): per-contract division on BOTH sides (daily
+  contract-exposure attribution, floors at 1, never fabricates) + the MEASURED fill-discount
+  on challenger/shadow rows only — `SHADOW_FILL_DISCOUNT` default **0.31 = 17/55 live fills
+  re-measured at build time** (spec said 0.33; fresh count used per instruction; RE-DERIVE
+  from live fill data as volume grows, never hand-tune). Ledger rows and percent fields
+  untouched (rollback semantics preserved); position-fetch failure degrades divisors to 1.0
+  with a WARNING. Flag `SHADOW_PROMOTION_NORMALIZATION_ENABLED` default-ON (measurement-basis
+  correction, #1052 class). SOFI twin fixture pinned: live −40 → −40.00 byte-identical;
+  shadow −1,044.48@17 → **−19.05** expected contribution. 18 tests + 27 touched-path.
+  **BEFORE-STATE: promotion evals compared a real ~31%-fill book to a 100%-fill fiction at
+  3–45× magnitudes.** H8: both workers SUCCESS @ 48ddcd4 (01:11Z deploys). VERIFY: next
+  16:30 CT policy_lab_eval runs the normalized comparison (job green; no verdict flip
+  expected at current n).
+- **[Tradeable-universe recon — READ-ONLY, owner-decision input, NO changes]** headline:
+  **1 of 84 CLEARS the round-trip gate on strict post-epoch evidence (SPY, net ≈ +$16–23 on
+  a single candidacy); 5 MARGINAL (QQQ, NFLX, TSLA, IWM, SLV); ~77 STRUCTURALLY-CANNOT.**
+  Structure: honest per-contract EV density is $7–45/ct; sub-$60 underlyings size to 4–21
+  contracts so per-ct EV collapses to single digits vs $21+/ct minimum round-trip (the
+  SOFI/TLT class — TLT has the tightest spread in the universe, $12/ct, and still cannot);
+  expensive single names carry $60–1,500/ct crossings. Only penny-increment index-class
+  chains get under ~$40/ct. No real-quote row in 1,436 rejections ever printed below $21/ct.
+  Within-universe insight: TSLA/IWM already CLEAR the spread (~$13–14/ct) but die upstream
+  on EV — if regime ever hands them positive EV they clear where SOFI never can (HYPOTHESIS
+  until a post-epoch candidacy). Outside-universe candidates (HYPOTHESIS): GDX/KRE/XBI/EFA
+  penny-program ETFs — but the TLT lesson says tight spread is insufficient without a
+  contract-count cap in the sizer. Detail note: the gate's DB stamp reads round_trip=88.00
+  (4 cts, $22/ct) vs the 16:30Z log line's 92.00 — same verdict either way; likely quote
+  drift between eval and stamp passes (minor, watch on the next rejection).
+- **Universe-reshape question FRAMED FOR OWNER (no action):** the small-tier universe is
+  structurally spread-eaten — options: (a) accept low frequency (learning-mode consistent;
+  gate is doing its job), (b) bias scanner ranking toward the 6 CLEARS/MARGINAL names,
+  (c) add penny-program ETFs + a sizer contract-cap, (d) nothing until EV density grows with
+  equity. Recon is the decision input; no default assumed.
+
+PENDING VERIFICATION (gap-3(a)): 07-03 21:30Z policy_lab_eval green on the normalized basis.
+Gap-3(b) post-and-wait fill model remains its own recon-first session (NOT started).

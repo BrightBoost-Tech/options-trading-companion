@@ -95,6 +95,13 @@ ops_health_check q30min-real dedup → #1114 · signal-accuracy telemetry
   `paper_eod_snapshots` doesn't carry the corroborated fields (vol_signal
   analytics stay raw-basis). · origin 07-02 P1-C · done when: both residuals
   closed or explicitly accepted.
+- **Broker-clock guard on watch→merge automation** — merge chains must check
+  the broker calendar (`get_clock.is_open`, not weekday math) before firing;
+  a CI watch that sleeps across a session boundary must fail-safe to
+  NOT-merge. Until built: no unattended watch→merge chains near session
+  boundaries. · origin 07-03 (the holiday merge false alarm — retract kept
+  the lesson) · done when: the merge step is clock-gated or the practice is
+  codified in tooling.
 
 - **Migration tracking drift check (process fix, recon COMPLETE 07-02)** —
   27/112 migration files tracked (82 pre-tracking-era, 1 post-era procedure

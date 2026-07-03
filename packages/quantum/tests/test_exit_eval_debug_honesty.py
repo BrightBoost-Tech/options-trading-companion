@@ -15,6 +15,7 @@ import sys
 import types
 import unittest
 from contextlib import redirect_stdout
+from datetime import date, timedelta
 
 sys.modules.setdefault("alpaca", types.ModuleType("alpaca"))
 sys.modules.setdefault("alpaca.trading", types.ModuleType("alpaca.trading"))
@@ -26,10 +27,19 @@ from packages.quantum.services.paper_exit_evaluator import (  # noqa: E402
 
 
 def _pos(upl):
-    """QQQ 1.61cr condor, qty 1 → entry_cost 161; cohort stop 0.30 → −48.30."""
+    """QQQ 1.61cr condor, qty 1 → entry_cost 161; cohort stop 0.30 → −48.30.
+
+    nearest_expiry is RELATIVE (today+45d), not the historical 2026-07-10:
+    these pins test stop-threshold honesty and statelessness, NOT dte —
+    the hardcoded date rotted on 2026-07-03 UTC when its dte entered the
+    dte_threshold window (0 < dte <= 7) and 'no trigger' became
+    'dte_threshold' for every CI run until expiry. Keep the expiry far
+    outside min_dte so only the condition under test can fire.
+    """
+    far_expiry = (date.today() + timedelta(days=45)).isoformat()
     return {"id": "6798e58f", "symbol": "QQQ", "quantity": -1.0,
             "max_credit": 1.61, "avg_entry_price": 1.61, "unrealized_pl": upl,
-            "nearest_expiry": "2026-07-10", "strategy": "IRON_CONDOR",
+            "nearest_expiry": far_expiry, "strategy": "IRON_CONDOR",
             "legs": [{"type": "call", "strike": 750, "action": "sell"},
                      {"type": "call", "strike": 755, "action": "buy"},
                      {"type": "put", "strike": 645, "action": "sell"},

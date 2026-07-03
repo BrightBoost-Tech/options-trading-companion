@@ -329,6 +329,22 @@ def check_promotion(
     if not rows:
         return {"status": "no_scores_data"}
 
+    # Gap-3(a) 2026-07-03: normalize the comparison basis at READ time only
+    # (ledger rows untouched). Per-contract on BOTH sides + the measured
+    # fill-discount on challenger (shadow) rows — pre-fix, promotion compared
+    # a real ~1/3-fill book to a 100%-fill fiction at 3–45× magnitudes.
+    from packages.quantum.policy_lab.promotion_normalization import (
+        is_enabled as _norm_enabled,
+        normalize_promotion_rows,
+        fetch_cohort_positions,
+    )
+    if _norm_enabled():
+        rows = normalize_promotion_rows(
+            rows,
+            fetch_cohort_positions(supabase, cohort_ids),
+            champion_id=champion["id"],
+        )
+
     # Group rows by cohort_id
     by_cohort: Dict[str, List[Dict]] = defaultdict(list)
     for r in rows:

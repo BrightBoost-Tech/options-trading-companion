@@ -1217,3 +1217,60 @@ SHA `e0bbe6e` everywhere, H11 = 4 (all today's holiday data_stale highs). READ-O
 PENDING VERIFICATIONS (unchanged + one added): tonight 21:30Z normalized-basis eval
 (baseline captured; expect green + insufficient_trades) · Monday M-queue **with M4
 item 0 = the F1 wiring fix** · heartbeat UP email (operator ③④-class confirm).
+
+## status:plan-encoded — 2026-07-03 post-deep-dive EXECUTION PLAN (owner decisions, verbatim runbook)
+
+Owner encoded the week 07-03 evening. THE RUNBOOK for Mon/Tue sessions — recover from here.
+
+- **DOCTRINE ADDITION (staged for M4's doc rider, not yet in CLAUDE.md):** "Tests for a
+  flag-gated behavior must pin the PRODUCTION CALL PATH, not the function in isolation —
+  an orphan function with green tests is the 9a2cef1/#1126 class." (F1 detection latency
+  <24h via PASS-2 vs 2 months for 9a2cef1.)
+- **MON RTH (read-only):** M1 MRK/CVX re-screen (f1–f5; hypothesis: $52–70/ct compresses
+  <$40/ct) · M2 GLD $5-strike config-vs-surgery verdict (no build) · M3 proofs WITH
+  CORRECTION: **"bias live at 16:00Z" pin STRUCK VOID (F1)** — replaced by: 16:30Z
+  post-un-pause staging proof · typed-segment forward row / first live [CLOSE_FILL_GAP] /
+  breaker re-eval IF a close lands (trailing 3 losses — next losing close re-trips BY
+  DESIGN).
+- **MON POST-CLOSE — M4, ONE PR (item 0 governs):**
+  M4.0 F1 wiring fix — `_viability_rank_key` into `get_executable_suggestions`' sort
+  (paper_autopilot_service.py:118-131), flag-gated (env stays armed). THE test: viable
+  outranks equal-score non-viable IN get_executable_suggestions' OUTPUT; flag-off
+  byte-identical THERE. Orphan-function tests stay but don't count as wiring proof;
+  rank_suggestions_canonical fate noted-not-deleted.
+  M4.1 universe per M1/M2: prune SNAP·NIO·MARA·F·LYFT·AAL·RIVN (SOFI = permanent
+  sentinel, code comment + rationale); DIA → tier 1.15 + one-beta note; GLD per M2;
+  MRK/CVX per M1 (+ iv seeding if added).
+  M4.2 doc riders: §4 corrections (ENTRY_QUOTE_VALIDATION↔#1101 kill-switch coupling;
+  GTC pilot-list unset=all-eligible) · §8 additions (A9-F6 legacy-mode WARNING, A9-F7
+  severity fragmentation 83%, A9-F8 one-convention detector; EXIT_EVAL_DEBUG entry
+  STAYS) · breaker runbook line ("un-pause without a new WIN re-trips on zero new
+  closes") · the doctrine addition above · backlog: F-A1a P2 w/ HARD TRIGGER "ship
+  before any challenger reaches 8 trades"; reaper P2-ELEVATED (this week's spare slot);
+  winter-close → check Tuesday PR carry else CALENDAR TRIGGER 2026-10-01; F-A2b/F-A2c
+  P2 tail (batch w/ reaper if trivial).
+  Tests: pruned absent · SOFI present + still gate-rejecting (sentinel pin) ·
+  executor-path bias green · flag-off byte-identical. New pin on merge: **bias verified
+  ON THE EXECUTOR PATH at Tuesday's 16:00Z scan.**
+- **TUE POST-CLOSE — ALERT-TAXONOMY PR (approved):** split force_close →
+  force_close / force_close_failed / envelope_violation_warn_only · real types for
+  alert_type="warn" · normalize medium/warn severities (extend enforcement beyond
+  alert() or map at write) · honest channel2-only wording for the designed client=None
+  egress. CONSTRAINTS: relay/egress allowlists updated SAME PR (renamed types must not
+  drop off the phone path — pin per-type egress tests) · historical rows untouched
+  (readers map old types) · fingerprint continuity noted (fresh cooldown history
+  acceptable, say so). Ledger line: "the phone channel stops lying."
+- **NEXT SLOT — ONE-BETA BUCKET (recon-then-build):** B1 recon: PREFERRED shape =
+  implement the dead `max_correlation_cluster_pct` knob as a real block-level envelope
+  check with an ETF bucket map ({SPY,DIA,QQQ,IWM}=us_equity_beta), from_env loads it,
+  confirm stage-time sees would-be book; FALLBACK ranker bucket factor. STOP after
+  recon. B2 build: additive-only BLOCK, default-ON safety polarity, tests (2 same-bucket
+  at cap → 3rd BLOCKED stamped; cross-bucket unaffected; flag-off legacy). Must land
+  before the book routinely holds 2+ positions.
+- Also rides any PR: OUTPUT_FRESHNESS `suggestion_rejections` @120h one-liner
+  (no-weekend-exclusion caveat noted).
+- **A7 MERGE + A1/A6 REFRAMES approved** — prompt v5.4 is owner-enacted after M4, not a
+  session task. Retirement counters: all standing areas at 0.
+- Gap-3(b): untouched, own recon-first session.
+- STILL PENDING TONIGHT: 21:30Z policy_lab_eval normalized-basis close (baseline:
+  no_promotion / insufficient_trades 0-and-1 vs 10; expect same verdict, job green).

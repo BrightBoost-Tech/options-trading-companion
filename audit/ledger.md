@@ -1077,3 +1077,60 @@ live gap_fraction · gap-3(a) build + tradeable-universe recon = next build wind
 
 PENDING VERIFICATION (gap-3(a)): 07-03 21:30Z policy_lab_eval green on the normalized basis.
 Gap-3(b) post-and-wait fill model remains its own recon-first session (NOT started).
+
+## status:shipped — 2026-07-03 (July-4th-observed HOLIDAY, market closed all day) · decision (b)+(c)
+
+Owner decision on the universe question: (b) ranking bias BUILT + (c1/c2) recons DELIVERED +
+refill screen DELIVERED + contract-cap CLOSED. Broker clock verified is_open=false, next open
+07-06 — all merges today are closed-market compliant.
+
+- **[Part 1 #1126 `d42d435` 13:38:37Z] universe-viability candidacy bias — SHIPS DARK** —
+  sort-key-only multiplier in rank_suggestions_canonical toward the recon-viable set (SPY 1.30 ·
+  QQQ/TSLA/IWM/SLV 1.15 · NFLX 1.10 marginal-provisional, pre-epoch-EV hypothesis in-code).
+  Never a filter, never a mutation: stored risk_adjusted_ev byte-identical (the allocator's
+  split skew reads it), below-floor stays −999, the stage-seam roundtrip gate reads untouched
+  ev; positive scores only (boosting a negative would invert intent). Flag
+  `UNIVERSE_VIABILITY_BIAS_ENABLED` strict '=1' (behavioral; non-'1' warns once). **ARMING IS
+  AN OPERATOR ENV ACTION (not armed).** 10 tests; H8 both workers @ d42d435.
+- **[Merge-timing note — false alarm, retracted with evidence]** the CI watch→merge chain
+  slept ~7h and merged at 13:38Z "8 minutes into RTH" — flagged as a §2 violation, then
+  RETRACTED against the broker clock (July-4th-observed holiday, is_open=false; the morning
+  ops_data_stale market-arm firings are the documented holiday pattern; the recycle swallowed
+  nothing — 13:40:01Z order_sync tick green). LESSON KEPT: watch→merge automation must
+  clock-check (broker calendar, not weekday) before merging — until a guard exists, don't
+  leave merge chains unattended near session boundaries.
+- **[Part 2A/2B refill screen — READ-ONLY, owner-decision input; all quotes = off-hours
+  holiday snapshot, indicative]** **ADD LIST: EMPTY — zero candidates pass f1–f5.** Best new
+  name (CVX $52/ct) exceeds the $40 ceiling off-hours; every sizing-trap NO (BITO $10/ct but
+  15 lots · GDX A-grade OI but 9 lots · EFA/KRE/XLRE/FXE) is ROBUST to the off-hours caveat —
+  spread compression cannot fix per-ct EV collapse. Conditional shortlist for an RTH
+  re-screen: **MRK + CVX** (OI grade A, 2–3-lot sizing, need <~$25–40/ct at RTH — 40–60%
+  compression on A-grade names is plausible, HYPOTHESIS). **In-universe verdict FLIPS: DIA
+  measured $28/ct (SPY-class-adjacent — amend the 07-03 'structurally cannot' class) and GLD
+  viable ONLY on $5-multiple strikes** (its $1-strikes are OI-dead). PRUNE candidates
+  (owner-gated; cost is scan/API only): strong = SNAP·NIO·MARA·F·LYFT·AAL·RIVN·SOFI (all
+  sub-$20, structurally dead per the sizing trap; ⚠ SOFI = the only name that ever live-filled
+  — owner judgment); second tier = T·CMCSA·PFE·KHC·DKNG·WBD·CCL·FXI·KMI·EWZ. CAUTIONS:
+  (i) iv_rank warm-up — a fresh add is scanner-invisible ~60 trading days
+  (`iv_rank_insufficient_history`, options_scanner.py:3032-3040); **SEEDING EXISTS**:
+  `iv_historical_backfill` accepts payload {symbols, days} (handler :94-100, background
+  queue, idempotent upsert) — pair any add PR with a one-shot seed; thin-contract history may
+  stay sparse; unseeded bulk adds push the iv_pipeline_no_data alert threshold.
+  (ii) CORRELATION — {SPY, DIA, QQQ, IWM} = one US-equity-beta trade in four wrappers; the
+  envelope doesn't know DIA≈SPY; treat as one bucket in any add/prune decision; the
+  diversifying conditionals are MRK (pharma) / CVX (energy, but XOM/XLE overlap) / GLD.
+- **[Part 3 — sizer contract-cap CLOSED, evidence-based]** the roundtrip gate's verdict is
+  contract-count-INVARIANT (both sides scale with n; per-ct terms decide: ev_ct<cost_ct → no
+  n clears; ev_ct>cost_ct → MORE contracts help clear the $15 floor — a cap can only flip
+  passes into fails). The hypothesized crowd-out mechanism is allocator-slot ORDER, which
+  Part 1 addresses. No cap, item closed; slot re-flow-after-reject noted as a possible future
+  recon ONLY if a cycle ever demonstrably loses a viable candidate to a doomed higher-ranked
+  one.
+
+PENDING (holiday-shifted): market closed 07-03 → post-un-pause staging proof, typed-segment
+forward row, [CLOSE_FILL_GAP], and the breaker's next real evaluation all move to MONDAY
+07-06. Today's 21:30Z policy_lab_eval still fires (scheduler is holiday-blind) → verify green
+on the normalized basis (no verdict flip expected at current n). Heartbeat pings run 8–17 CT
+today regardless → the UP email residual clears today. OWNER DECISIONS OPEN: arm
+UNIVERSE_VIABILITY_BIAS_ENABLED=1 (env, no deploy) · RTH re-screen of MRK/CVX (next trading
+session, read-only) · prune list · DIA/GLD class amendment.

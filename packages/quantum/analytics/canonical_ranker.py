@@ -164,6 +164,57 @@ def _compute_correlation_factor(
     return 1.0
 
 
+# ── Universe-viability ranking bias (owner decision (b), 2026-07-03) ─────
+# Origin: the 07-03 tradeable-universe recon — 1 of 84 symbols CLEARS the
+# entry round-trip cost gate on post-epoch evidence (SPY, barely); 5 are
+# MARGINAL; the rest are structurally spread-eaten at this account's EV
+# density. The bias reorders CANDIDACY toward the viable set. It is a
+# SORT-KEY multiplier only, never a filter and never a mutation:
+#   - every symbol still scans, every gate still applies (a biased
+#     candidate still dies on ev_below_roundtrip_cost if it deserves to);
+#   - the stored risk_adjusted_ev is untouched — the allocator's split
+#     skew reads it and must see the raw score;
+#   - only POSITIVE scores are biased (multiplying a negative would rank
+#     viable names WORSE, the opposite of intent).
+_VIABILITY_TIERS = {
+    "SPY": 1.30,  # CLEARS (net ≈ +$16–23 on its one post-epoch candidacy)
+    "QQQ": 1.15, "TSLA": 1.15, "IWM": 1.15, "SLV": 1.15,  # MARGINAL
+    # MARGINAL-PROVISIONAL: NFLX's EV evidence is PRE-#1051-epoch (the
+    # sign-flip-inflated era) — hypothesis until a post-epoch candidacy;
+    # smallest tier weight on purpose.
+    "NFLX": 1.10,
+}
+
+_viability_flag_warned = False
+
+
+def _viability_bias_enabled() -> bool:
+    """Behavioral opt-in per §3: exactly '=1'; absent/empty → legacy
+    ranking; a non-empty non-'1' value logs one WARNING per process."""
+    global _viability_flag_warned
+    raw = (os.environ.get("UNIVERSE_VIABILITY_BIAS_ENABLED") or "").strip()
+    if raw == "1":
+        return True
+    if raw and not _viability_flag_warned:
+        logger.warning(
+            f"UNIVERSE_VIABILITY_BIAS_ENABLED={raw!r} is not '1' — "
+            f"viability bias stays OFF (strict opt-in parse)"
+        )
+        _viability_flag_warned = True
+    return False
+
+
+def _viability_rank_key(suggestion: Dict[str, Any]) -> float:
+    raev = suggestion.get("risk_adjusted_ev", -999)
+    try:
+        raev = float(raev)
+    except (TypeError, ValueError):
+        return -999
+    if raev > 0:
+        return raev * _VIABILITY_TIERS.get(suggestion.get("ticker"), 1.0)
+    return raev
+
+
 def rank_suggestions_canonical(
     suggestions: List[Dict[str, Any]],
     existing_positions: List[Dict[str, Any]],
@@ -174,7 +225,9 @@ def rank_suggestions_canonical(
     Score and sort suggestions by risk_adjusted_ev (descending).
 
     Mutates each suggestion to add risk_adjusted_ev field.
-    Returns the same list, sorted.
+    Returns the same list, sorted. With UNIVERSE_VIABILITY_BIAS_ENABLED=1
+    the SORT ORDER prefers the recon-viable set (sort-key only; stored
+    scores identical either way).
     """
     for s in suggestions:
         raev = compute_risk_adjusted_ev(
@@ -182,5 +235,8 @@ def rank_suggestions_canonical(
         )
         s["risk_adjusted_ev"] = round(raev, 6)
 
-    suggestions.sort(key=lambda s: s.get("risk_adjusted_ev", -999), reverse=True)
+    if _viability_bias_enabled():
+        suggestions.sort(key=_viability_rank_key, reverse=True)
+    else:
+        suggestions.sort(key=lambda s: s.get("risk_adjusted_ev", -999), reverse=True)
     return suggestions

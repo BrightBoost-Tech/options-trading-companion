@@ -1005,12 +1005,30 @@ snapshots · no alert from signal accuracy until n≥8.
   `git checkout --`; only an uncommitted edit was lost and redone via the Edit tool. Lesson:
   no destructive shell one-liners on tracked docs — Edit tool only.
 
-OPERATOR-CONFIRM (open, answer when back): ① healthchecks handoff + after-hours email test ·
-② relay synthetic email ~08:07 CT · ③ OPS_DATA_STALE_MINUTES unset (names-only glance) ·
-④ breaker critical email ~16:20 CT.
+OPERATOR-CONFIRM — **ALL FOUR CONFIRMED with evidence (operator, 07-03 session)**:
+① healthchecks FULLY ARMED — check un-paused; receive-side 20 pings, every :00/:30 from 08:00
+  CT (source = the worker; "new → up" at the first ping, per #1109's prediction); cron
+  `*/30 8-16 * * 1-5` America/Chicago, Grace 45; Grace-to-1-min DOWN-email test DELIVERED
+  18:45 CT, Grace restored. Residual: check reads DOWN overnight post-test — EXPECTED; the
+  08:00 CT ping tomorrow auto-flips UP (the UP email = free second confirmation, pended).
+② relay synthetic email DELIVERED 08:07 CT (full payload incl. risk_alert_id 4d0afb05) — the
+  A3 relay's last hop proven.
+③ OPS_DATA_STALE_MINUTES CONFIRMED UNSET (dashboard names-only) — the 07-02 zero-false-HIGH
+  result is attributable to #1115's code default, not an env shadow. Behavioral pass = real.
+④ breaker critical email DELIVERED 16:20 CT (full window payload, paused_written=true,
+  already_paused=false) — the immediate-egress path proven on a REAL safety event.
+**With ①–④ the oversight chain is proven at every last hop** (doctrine-synced: CLAUDE.md §4
+"Oversight chain" entry). Breaker semantics operator-confirmed from the ④ payload:
+TRAILING-window evaluation on EVERY ingest run — trips can occur on zero-close days (the
+07-02 window spanned closes 06-15→06-30); the stronger design, now doctrine. Recovery
+mutations from the wrap RE-VERIFIED holding at confirm time (entries_paused false/NULL ·
+breaker alert ACKed · synthetic gone · H11 = 0).
 
-PENDING (tomorrow): 16:30Z post-un-pause staging proof · first typed-segment forward row +
-breaker re-evaluation at the next real close's ingest (NOTE: the 3 most-recent live closes are
-all losses, so the NEXT losing live close re-trips the breaker BY DESIGN — a win resets) ·
-first [CLOSE_FILL_GAP] live gap_fraction · gap-3(a) build + tradeable-universe recon = next
-build window.
+PARKED (operator's call, no action): rotate the hc-ping UUID (appeared in screenshots) —
+healthchecks regenerate + one env update + recycle, whenever chosen.
+
+PENDING (tomorrow): 08:00 CT heartbeat UP email (test residual clears) · 16:30Z post-un-pause
+staging proof (final recovery link) · first typed-segment forward row + breaker re-evaluation
+at the next real close's ingest (NOTE: the 3 most-recent live closes are all losses, so the
+NEXT losing live close re-trips the breaker BY DESIGN — a win resets) · first [CLOSE_FILL_GAP]
+live gap_fraction · gap-3(a) build + tradeable-universe recon = next build window.

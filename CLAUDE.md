@@ -291,6 +291,9 @@ exercised-status. Verify current flag VALUES on Railway, never here.
   each run (:00/:30, hours 8–17 CT; 5s timeout; failure = one WARNING, job
   result byte-identical). Silent check at the provider = APScheduler/BE/RQ/
   worker died — diagnose job_runs vs Railway. Unset var → silent no-op.
+  ARMED end-to-end 07-02 (receipt + DOWN-email proven; see oversight-chain
+  entry below). RTH-only trade-off accepted; the check reads DOWN overnight
+  after a test until the next 08:00 CT ping — expected, not an incident.
 - **#1110 typed segment columns** — outcome rows carry typed strategy/regime
   from suggestion_meta (NULL when unlinked, never fabricated); segment
   learning reads these; 82-row backfill executed 07-02.
@@ -321,15 +324,27 @@ exercised-status. Verify current flag VALUES on Railway, never here.
   hit_rate<0.2. Modulates nothing. Baseline 07-02: 1/6 wins, Brier 0.2751.
 - **#1119 consecutive-loss streak breaker** — N consecutive LIVE losing
   round-trips (`STREAK_BREAKER_N`, default 3) → `entries_paused=true` +
-  `streak_breaker_tripped` critical (immediate egress). FAIL-CLOSED: an
-  evaluation error PAUSES (never skips); the WRITE side is fail-closed while
-  #1097's READ side stays fail-open — deliberate opposite polarities.
-  Recovery is OPERATOR-ONLY, **validated live 07-02** (planned trip on the
-  real 5-loss stream at the 21:20Z ingest; full chain verified):
+  `streak_breaker_tripped` critical (immediate egress). **Semantics
+  (operator-confirmed from the live ④ payload): evaluates the TRAILING
+  window on EVERY ingest run — a trip can occur on a zero-close day (the
+  07-02 first trip fired on a window spanning 06-15→06-30 with no close
+  that day). Deliberate: a standing streak never sits unexamined. A win
+  resets; the next losing close after a loss-tail re-trips BY DESIGN.**
+  FAIL-CLOSED: an evaluation error PAUSES (never skips); the WRITE side is
+  fail-closed while #1097's READ side stays fail-open — deliberate opposite
+  polarities. Recovery is OPERATOR-ONLY, **validated live 07-02** (planned
+  trip at the 21:20Z ingest; full chain incl. the inbox hop confirmed):
   `UPDATE ops_control SET entries_paused=false, entries_pause_reason=NULL
   WHERE key='global';` then confirm read-back + next 16:30Z cycle stages.
   Flag `STREAK_BREAKER_ENABLED` default-ON. Tail of paper_learning_ingest;
   result in `job_runs.result.streak_breaker`.
+- **Oversight chain — ALL THREE LAST HOPS PROVEN TO THE OPERATOR 07-02**:
+  dead-man's switch RECEIPT side (20 pings :00/:30 from 08:00 CT at the
+  provider; DOWN-email test delivered 18:45 CT; cron `*/30 8-16 * * 1-5`
+  America/Chicago, Grace 45 — FULLY ARMED) · relay path (synthetic critical
+  → inbox 08:07 CT) · immediate-egress path (breaker critical → inbox
+  16:20 CT, a real safety event). Detection AND delivery are end-to-end;
+  do not re-prove these hops — new work verifies only its own seam.
 
 Sanctioned mid-session kill switches, complete list: the explicit-falsy
 flags above (#1038, #1040, #1046, #1048, #1045-TTL, #1052, #1072, #1073,

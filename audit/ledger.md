@@ -1166,3 +1166,54 @@ session, read-only) · prune list · DIA/GLD class amendment.
   gate sentinel**: if it ever CLEARS the roundtrip gate, the spread regime, EV math, or a bug
   changed and we want to see it loudly; DIA → bias tier 1.15 with the one-beta-bucket note;
   GLD/MRK/CVX per M1/M2 verdicts; adds pair with iv_historical_backfill seeding).
+
+## status:reported — 2026-07-03 v5.3 FULL (weekend deep-dive; report `audit/reports/2026-07-03-FULL.md`)
+
+Budgets: 16/20 SQL · 2/6 broker · 4/12 subagents · 24 files fully read. Broker flat,
+SHA `e0bbe6e` everywhere, H11 = 4 (all today's holiday data_stale highs). READ-ONLY held.
+
+- **A9 GRADUATION RECORDED (owner decision 2026-07-03, first exercise of the rule):**
+  Alert & Signal Integrity is STANDING/PERMANENT (founding finding shipped #1106+#1115,
+  measured 39→0). `audit/area9.md` header frozen as the standing contract. The rotating
+  slot moved to A10, adopted this run: **Calendar & Clock Integrity** (`audit/area10.md`
+  — five time-boundary instances in 72h; first-run NEW finding: the winter-close blind
+  hour, 20:00–21:00Z EST-season staleness+watchdog gap, fix before November).
+- **TOP-3 #1 — #1126 viability bias is BUILT-NOT-WIRED (HIGH; double-confirmed):**
+  `rank_suggestions_canonical` has ZERO production callers; the executor orders
+  candidates via its own local sort (`paper_autopilot_service.py:118-131`). This
+  morning's armed flag is INERT; Monday's "bias live" pin is VOID until wired. The
+  shipped tests pinned the orphan function — the `9a2cef1` class, self-inflicted
+  same-day, caught by PASS-2. Fix = one call site + an executor-path wiring test,
+  item 0 of Monday's M4 window. Env stays set (correct once wired).
+- **TOP-3 #2 — A9 alert-taxonomy cluster (9 findings, 4 MEDIUM):** `force_close` is a
+  costume worn by three realities (31% of rows describe NO close — submitted/FAILED/
+  warn-only share one critical type; post-epoch all three relay under one phone title);
+  `alert_type="warn"` carries zero semantics (706 rows/30d); severity vocabulary
+  fragmented — `medium`+`warn` are the two largest warning-class buckets, invisible to
+  canonical `severity='warning'` readers (**misses 83%**); the designed client=None
+  egress logs a "legacy mode" misconfiguration WARNING on every relayed row. One
+  post-close taxonomy PR fixes the channel before the next live force-close egresses.
+- **TOP-3 #3 — one-beta-bucket uncontrolled (A2, MEDIUM):** {SPY,DIA,QQQ,IWM} has NO
+  block-level control — `max_correlation_cluster_pct` is declared-never-read (config
+  fiction), ranker correlation is same-symbol-only, sector check warn-only with ETFs in
+  an accidental shared bucket; the bias (once wired) steers INTO this. Additive control
+  candidate, owner-gated.
+- Other MEDIUMs: `check_rollback` mis-restores after a "recommended" promotions row +
+  cooldown consumed by recommendations (latent until promotions move; cheap fix) ·
+  promotion utility is structurally single-factor (tail/slippage/concentration inputs
+  never written; drawdown penalty unit-mismatched ≈ ≤$0.40) · stuck-`running` job_runs
+  have NO reaper (mid-run recycle orphans permanently; learning chain overlaps the merge
+  window) · §4 kill-switch coupling: unsetting ENTRY_QUOTE_VALIDATION_ENABLED silently
+  disables the #1101 roundtrip gate · GTC pilot-list UNSET = all-eligible (not
+  pilot-off).
+- Notables: suggestions_open extras RESOLVED benign (operator --force CLI, 5 of 15) ·
+  cooldown-vs-cadence NOT doubled by #1114 (hourly by a 2-second phase margin — thin) ·
+  SLV structurally benched until ~Sept (iv warmup; viable-tier aspirational) ·
+  resting-TP pilot no longer resting (book flat; unexercised) · A8 reconstructability:
+  spread-class 100% quotes/no OCC identity, EV-class 0% legs, spot-at-decision 0%
+  everywhere · A7 proposed MERGED into A1/A3 until ≥10–15 live fills · scorecard + full
+  owner-decision list (10 items) in the report.
+
+PENDING VERIFICATIONS (unchanged + one added): tonight 21:30Z normalized-basis eval
+(baseline captured; expect green + insufficient_trades) · Monday M-queue **with M4
+item 0 = the F1 wiring fix** · heartbeat UP email (operator ③④-class confirm).

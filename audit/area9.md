@@ -1,4 +1,9 @@
-# AREA 9 — ALERT & SIGNAL INTEGRITY (the rotating self-extension slot)
+# AREA 9 — ALERT & SIGNAL INTEGRITY (STANDING, PERMANENT — graduated)
+
+**GRADUATED to standing:** 2026-07-03, by owner decision (first exercise of the
+graduation rule; founding finding shipped #1106 + #1115 with measured impact —
+39→0 job-arm false HIGHs). Does not rotate; the rotating slot moved to Area 10.
+This spec is FROZEN as the standing contract (edit only on owner-recorded change).
 
 **Adopted:** 2026-07-02 (v5.1 run 1; slot was OPEN — prior occupant Entry-Fill Efficacy was
 retired as an erroneous A8 adoption, carrying no incumbency here). **Replaces:** none.

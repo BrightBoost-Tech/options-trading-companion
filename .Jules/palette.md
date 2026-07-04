@@ -69,3 +69,6 @@
 ## 2025-06-06 - Accessible Disabled Tooltips
 **Learning:** Browsers disable mouse events on `disabled` buttons, preventing tooltips from appearing. Wrapping the disabled button in a focusable `span` (`tabIndex={0}`) allows the tooltip to trigger on hover and focus.
 **Action:** Always wrap disabled buttons in a `span` with `tabIndex={0}` and an explanatory `aria-label` when tooltips are required.
+## 2024-05-18 - TradeInbox Disclosure Accessibility
+**Learning:** Collapsible sections using native button elements in \`TradeInbox.tsx\` lack the WAI-ARIA disclosure pattern attributes (\`aria-expanded\`, \`aria-controls\`) and focus visibility classes by default, breaking screen reader experience and keyboard navigation visibility.
+**Action:** Always implement the WAI-ARIA disclosure pattern when building or refactoring custom accordions/collapsibles. Use \`useId()\` to generate unique IDs linking the button (\`aria-controls\`) to its content region, add \`aria-expanded\`, and explicitly define \`focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring\` for keyboard users.

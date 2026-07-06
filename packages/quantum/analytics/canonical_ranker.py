@@ -179,6 +179,14 @@ def _compute_correlation_factor(
 _VIABILITY_TIERS = {
     "SPY": 1.30,  # CLEARS (net ≈ +$16–23 on its one post-epoch candidacy)
     "QQQ": 1.15, "TSLA": 1.15, "IWM": 1.15, "SLV": 1.15,  # MARGINAL
+    # M4 additions (07-06): DIA measured $28/ct (07-03 refill screen —
+    # SPY-class-adjacent; NOTE {SPY,DIA,QQQ,IWM} = ONE us-equity-beta
+    # bucket in four wrappers, uncontrolled until the bucket-envelope PR);
+    # CVX MARGINAL at $25–29/ct on the healthy-OI ATM pair (07-06 RTH
+    # re-screen; flicker-prone off-pair — the spread gate rejecting it on
+    # bad days is the gate working); GLD viable ONLY on $5-multiple strikes
+    # (enforced by the scanner STRIKE_MODULUS filter, same PR).
+    "DIA": 1.15, "CVX": 1.15, "GLD": 1.15,
     # MARGINAL-PROVISIONAL: NFLX's EV evidence is PRE-#1051-epoch (the
     # sign-flip-inflated era) — hypothesis until a post-epoch candidacy;
     # smallest tier weight on purpose.

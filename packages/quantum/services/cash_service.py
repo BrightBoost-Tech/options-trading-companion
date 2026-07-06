@@ -47,11 +47,52 @@ class CashService:
         if obp is not None:
             return max(0.0, float(obp))
 
-        # Fallback: paper baseline (used when Alpaca unreachable, missing
-        # options approval, or in paper-mode operation without a live
-        # connection). Returns 0.0 if no baseline configured — caller's
-        # `CapitalScanPolicy.can_scan` then skips the cycle, which is the
-        # safe failure mode.
+        # ── M4 item 0.2 (2026-07-06) — DESIGN DECISION: FULLY FAIL-CLOSED in
+        # live mode. The broker-truth read failed; sizing against the $500
+        # paper baseline is NOT a smaller version of the same strategy — on
+        # 07-06 it CHANGED THE TIER ($500 → micro) and INVERTED the scanned
+        # universe (56 micro_tier_underlying_too_high rejections price-capped
+        # out every viable name; only structurally-dead sub-$60 names
+        # scanned). Fail-closed can still fail-wrong: a degradation that
+        # changes WHICH universe is scanned is a different strategy.
+        # Live mode → return 0.0 (CapitalScanPolicy.can_scan(0) blocks the
+        # cycle — the pre-existing, test-pinned safe path) + ONE loud
+        # critical. The paper baseline survives ONLY for explicit
+        # ops.mode == "paper" operation (its original purpose).
+        if not self._is_paper_mode():
+            try:
+                from packages.quantum.observability.alerts import (
+                    alert, _get_admin_supabase,
+                )
+                alert(
+                    _get_admin_supabase(),
+                    alert_type="account_unreadable_entries_blocked",
+                    severity="critical",
+                    message=(
+                        "Broker account/OBP read failed in LIVE mode — "
+                        "deployable capital set to 0.0 and this cycle's "
+                        "entries are BLOCKED (fail-closed). NOT sizing "
+                        "against the paper baseline: on 2026-07-06 that "
+                        "fallback changed the tier and inverted the scanned "
+                        "universe. Monitor/exits unaffected."
+                    ),
+                    user_id=user_id,
+                    metadata={
+                        "function_name": "get_deployable_capital",
+                        "design": "M4-0.2 fully-fail-closed (owner decision)",
+                        "consequence": (
+                            "No entries this cycle. Tier/universe NEVER "
+                            "computed from fallback capital in live mode."
+                        ),
+                    },
+                )
+            except Exception:
+                logger.exception("account_unreadable_alert_write_failed")
+            return 0.0
+
+        # Explicit paper-mode operation: the baseline is the legitimate
+        # capital source. A tier change caused by fallback capital must
+        # still be LOUD (owner condition on any retained fallback path).
         paper_baseline = self._read_paper_baseline(user_id)
 
         # Loud-Error Doctrine v1.0 anti-pattern 2 fix (#849 follow-up B).
@@ -105,6 +146,17 @@ class CashService:
             logger.exception("cash_service_obp_fallback_alert_write_failed")
 
         return paper_baseline
+
+    def _is_paper_mode(self) -> bool:
+        """True only for explicit ops.mode == 'paper'. Read defensively:
+        an unreadable ops_control means we CANNOT prove paper mode → treat
+        as live → fail-closed (M4-0.2: the conservative direction here is
+        blocking entries, never sizing on a baseline we can't justify)."""
+        try:
+            from packages.quantum.ops_endpoints import get_global_ops_control
+            return get_global_ops_control().get("mode") == "paper"
+        except Exception:
+            return False
 
     def _read_paper_baseline(self, user_id: str) -> float:
         """Read `paper_baseline_capital` from `v3_go_live_state` regardless

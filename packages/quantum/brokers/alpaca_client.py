@@ -200,8 +200,36 @@ class AlpacaClient:
 
     # ── Account ───────────────────────────────────────────────────────
 
+    @staticmethod
+    def _req_float(field: str, value: Any) -> float:
+        """Coerce a REQUIRED account field, failing LOUD with the field name.
+
+        M4 item 0.1 (2026-07-06): the serializer's bare int()/float()
+        coercions turned a broker-side field removal into an opaque
+        TypeError that killed the whole account read (the OBP incident —
+        Alpaca nulled the retired daytrade fields over the 07-04 weekend and
+        `int(acct.daytrade_count)` took down get_account, inverting the
+        scanned universe via the $500 fallback→micro-tier chain). Required
+        capital fields must still fail on None — but by NAME, not TypeError
+        soup."""
+        if value is None:
+            raise ValueError(
+                f"Alpaca account payload missing required field '{field}'"
+            )
+        return float(value)
+
     def get_account(self) -> Dict[str, Any]:
-        """Account summary: balance, buying power, equity, PDT status."""
+        """Account summary: balance, buying power, equity, PDT status.
+
+        Coercion dispositions (M4 item 0.1 sweep — every optional field is
+        null-tolerant; every required field fails loud by name):
+        - equity/cash/buying_power/portfolio_value: REQUIRED → _req_float.
+        - options_buying_power / last_equity: None-PRESERVING by design
+          (consumers distinguish None from 0.0 — see comments below).
+        - daytrade_count / daytrading_buying_power / pattern_day_trader:
+          RETIRED PDT placeholders (doctrine §5) — broker began returning
+          null 2026-07-04 weekend; null-tolerant defaults (0 / 0.0 / False).
+        """
         acct = self._call_with_retry(self._client.get_account)
         # `options_buying_power` uses None-preserving coercion (rather than
         # the `or 0` style applied to `daytrading_buying_power` above)
@@ -220,17 +248,20 @@ class AlpacaClient:
         # realized-blind brake a silent 100% no-op from deploy to 2026-06-12.
         _last_eq = getattr(acct, "last_equity", None)
         last_equity = float(_last_eq) if _last_eq is not None else None
+        _dtc = getattr(acct, "daytrade_count", None)
         return {
             "account_id": str(acct.id),
             "status": str(acct.status),
-            "equity": float(acct.equity),
+            "equity": self._req_float("equity", acct.equity),
             "last_equity": last_equity,
-            "cash": float(acct.cash),
-            "buying_power": float(acct.buying_power),
+            "cash": self._req_float("cash", acct.cash),
+            "buying_power": self._req_float("buying_power", acct.buying_power),
             "options_buying_power": options_buying_power,
-            "portfolio_value": float(acct.portfolio_value),
-            "pattern_day_trader": acct.pattern_day_trader,
-            "daytrade_count": int(acct.daytrade_count),
+            "portfolio_value": self._req_float(
+                "portfolio_value", acct.portfolio_value
+            ),
+            "pattern_day_trader": bool(acct.pattern_day_trader),
+            "daytrade_count": int(_dtc) if _dtc is not None else 0,
             "daytrading_buying_power": float(acct.daytrading_buying_power or 0),
             "paper": self.paper,
         }

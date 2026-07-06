@@ -80,8 +80,13 @@ class TestDeployableReadsBrokerTruth(unittest.TestCase):
             result = asyncio.run(svc.get_deployable_capital(USER_ID))
             self.assertEqual(result, 500.0)
 
-    def test_falls_back_to_paper_baseline_on_alpaca_failure(self):
-        """When Alpaca unavailable, read paper_baseline_capital."""
+    def test_alpaca_failure_fails_closed_in_live_mode(self):
+        """CONTRACT CHANGED — M4 item 0.2 (2026-07-06, owner decision):
+        live-mode Alpaca failure returns 0.0 (entries blocked via
+        CapitalScanPolicy), NEVER the $500 baseline — the old fallback
+        changed the computed tier and inverted the scanned universe on
+        07-06. The baseline survives only for explicit paper-mode
+        operation (next test)."""
         with patch(
             "packages.quantum.brokers.alpaca_client.get_alpaca_client",
             side_effect=Exception("Alpaca down"),
@@ -90,7 +95,23 @@ class TestDeployableReadsBrokerTruth(unittest.TestCase):
                 v3_go_live_state=[{"paper_baseline_capital": 500}],
             )
             svc = CashService(mock_sb)
-            result = asyncio.run(svc.get_deployable_capital(USER_ID))
+            with patch.object(CashService, "_is_paper_mode", return_value=False):
+                result = asyncio.run(svc.get_deployable_capital(USER_ID))
+            self.assertEqual(result, 0.0)
+
+    def test_paper_mode_still_reads_baseline_on_alpaca_failure(self):
+        """Explicit paper-mode operation keeps its baseline (its original
+        purpose) — the M4-0.2 fail-closed applies to LIVE mode only."""
+        with patch(
+            "packages.quantum.brokers.alpaca_client.get_alpaca_client",
+            side_effect=Exception("Alpaca down"),
+        ):
+            mock_sb = _make_chain_mock(
+                v3_go_live_state=[{"paper_baseline_capital": 500}],
+            )
+            svc = CashService(mock_sb)
+            with patch.object(CashService, "_is_paper_mode", return_value=True):
+                result = asyncio.run(svc.get_deployable_capital(USER_ID))
             self.assertEqual(result, 500.0)
 
     def test_falls_back_to_zero_when_no_baseline(self):

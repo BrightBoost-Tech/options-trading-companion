@@ -154,6 +154,17 @@ OUTPUT_FRESHNESS = [
         "last_marked_at",
         int(os.getenv("OPS_MARK_REFRESH_MAX_AGE_HOURS", "168")),  # 7 days
     ),
+    (
+        # Rejection-ledger output (M4 rider, 07-06 / audit F-A4b): the
+        # highest-frequency durable output — every scan writes rejection
+        # rows, and #1104 is this table's own silent-stall precedent. Also
+        # guards A8's counterfactual data. Caveat: get_output_freshness has
+        # no weekend exclusion, so 120h absorbs a 2-day holiday weekend at
+        # ~1 extra day of detection latency (the deliberate trade).
+        "suggestion_rejections",
+        "created_at",
+        int(os.getenv("OPS_REJECTIONS_MAX_AGE_HOURS", "120")),  # 5 days
+    ),
 ]
 
 # Gap-2 (2026-07-02): rolling signal-accuracy telemetry — OBSERVE-ONLY.

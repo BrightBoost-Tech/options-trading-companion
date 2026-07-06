@@ -115,7 +115,20 @@ class PaperAutopilotService:
                     compute_risk_adjusted_ev(s, positions, budget), 6
                 )
 
-        # Deterministic sorting: risk_adjusted_ev desc, created_at asc, id asc
+        # Deterministic sorting: risk_adjusted_ev desc, created_at asc, id asc.
+        # M4 item 0b (2026-07-06): the #1126 viability bias is applied HERE —
+        # the audit's F1 finding was that the biased sort lived only in
+        # rank_suggestions_canonical, which has zero production callers (the
+        # 9a2cef1 class: green tests on an orphan function). This is the
+        # executor's real candidacy ordering, so the bias must live here.
+        # Sort-KEY only: the stored risk_adjusted_ev is untouched (allocator
+        # split-skew reads it); positive scores only; flag-off byte-identical.
+        from packages.quantum.analytics.canonical_ranker import (
+            _viability_bias_enabled,
+            _viability_rank_key,
+        )
+        bias_on = _viability_bias_enabled()
+
         def sort_key(s):
             score = s.get("risk_adjusted_ev")
             if score is None:
@@ -124,6 +137,10 @@ class PaperAutopilotService:
                 score = float(score)
             except (TypeError, ValueError):
                 score = 0.0
+            if bias_on and score > 0:
+                score = _viability_rank_key(
+                    {"risk_adjusted_ev": score, "ticker": s.get("ticker")}
+                )
             created = s.get("created_at") or ""
             sid = s.get("id") or ""
             return (-score, created, sid)

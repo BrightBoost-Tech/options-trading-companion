@@ -12,13 +12,28 @@ universe, not a smaller one).
 """
 
 import asyncio
+import sys
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
 
+# --- sys.modules de-poisoning (CI 2026-07-06 failure class) ---------------
+# test_weekly_report_win_rate.py replaces whole modules with MagicMocks at
+# import time and never restores them, so a lazy in-test import that runs
+# AFTER its collection binds a mock (green single-file local, red full-suite
+# CI). Bind the REAL modules at THIS module's import, whatever the order.
+for _key in (
+    "packages.quantum.services.cash_service",
+    "packages.quantum.options_scanner",
+):
+    if isinstance(sys.modules.get(_key), MagicMock):
+        del sys.modules[_key]
+
 from packages.quantum.brokers.alpaca_client import AlpacaClient
 from packages.quantum.analytics.capital_scan_policy import CapitalScanPolicy
+from packages.quantum.services.cash_service import CashService
+from packages.quantum import options_scanner as _real_options_scanner
 
 
 def _acct(**over):
@@ -75,7 +90,6 @@ class TestFailClosedCapital:
     """Item 0.2 — owner design: fully fail-closed in live mode."""
 
     def _svc(self):
-        from packages.quantum.services.cash_service import CashService
         return CashService(MagicMock())
 
     def test_live_mode_obp_none_blocks_cycle_loudly(self):
@@ -113,7 +127,6 @@ class TestFailClosedCapital:
         assert out == 500.0  # explicit paper operation keeps its baseline
 
     def test_unreadable_ops_mode_treated_as_live(self):
-        from packages.quantum.services.cash_service import CashService
         svc = CashService(MagicMock())
         with patch("packages.quantum.ops_endpoints.get_global_ops_control",
                    side_effect=RuntimeError("db down")):
@@ -179,7 +192,7 @@ class TestBiasWiringExecutorPath:
 
 class TestStrikeModulus:
     def test_gld_default_and_env_parse(self, monkeypatch):
-        from packages.quantum import options_scanner as sc
+        sc = _real_options_scanner
 
         assert sc._strike_modulus_for("GLD") == 5.0
         assert sc._strike_modulus_for("SPY") == 0.0

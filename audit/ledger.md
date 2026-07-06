@@ -1397,7 +1397,8 @@ PENDING VERIFICATIONS (2026-07-06 — the Monday list, unchanged + one added):
   null→placeholder) · item 0.2 fail-CLOSED capital (live-mode OBP-None → critical
   `account_unreadable_entries_blocked` + deployable 0.0 → CapitalScanPolicy blocks
   the cycle; $500 baseline survives ONLY explicit paper mode; unreadable ops mode
-  = live) · item 0.3 pin tests (18, incl. the CONTRACT-CHANGE rewrite of
+  = live) · item 0.3 pin tests (12 new-file + the CONTRACT-CHANGE rewrite pair in
+  test_capital_basis_consistency replacing
   `test_falls_back_to_paper_baseline_on_alpaca_failure`) · item 0b **#1126 bias
   WIRED into the production path** (`get_executable_suggestions` sort at
   paper_autopilot_service.py; sort-key-only, positive scores only, flag-off
@@ -1423,3 +1424,13 @@ PENDING VERIFICATIONS (2026-07-07, added by the M4 ship):
   roundtrip verdict (expect MARGINAL, watch vs the $15 gate).
 - **21:20Z breaker re-eval (tonight):** expected RE-TRIP (no live win 07-06) —
   critical + email is DESIGNED (runbook); un-pause remains operator-only.
+
+HYGIENE (filed 07-06, from the M4 CI failure): `test_weekly_report_win_rate.py`
+replaces 18 modules (incl. cash_service, options_scanner) with MagicMocks in
+sys.modules at import time and NEVER restores — any later lazy in-test import
+binds a mock (green single-file local, red full-suite CI; cost tonight: one
+red CI round on #1132). M4's test file now binds real modules at import with a
+de-poison guard; the POISONER itself is unfixed and has pre-existing order
+sensitivity (6 capital-basis failures in explicit weekly-first order — never
+CI's alphabetical order). Follow-up: convert to conftest fixture/unpatch;
+grep for siblings doing module-level sys.modules assignment without restore.

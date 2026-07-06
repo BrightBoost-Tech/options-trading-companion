@@ -1274,3 +1274,163 @@ Owner encoded the week 07-03 evening. THE RUNBOOK for Mon/Tue sessions — recov
 - Gap-3(b): untouched, own recon-first session.
 - STILL PENDING TONIGHT: 21:30Z policy_lab_eval normalized-basis close (baseline:
   no_promotion / insufficient_trades 0-and-1 vs 10; expect same verdict, job green).
+
+## status:reported — 2026-07-04 NIGHTLY (report `audit/reports/2026-07-04.md`)
+
+Quiet window (07-03 holiday close-of-day → Saturday): zero scans/fills/failures; both
+workers SUCCESS @ `3689210` (two doc-only merges post-FULL-report, H8 clean, no recycle
+since 17:43Z → env unchanged since the 15:18Z bias arming). Broker FLAT, equity =
+last_equity = $2,093.74. Budgets: 14 SQL · 2 broker · 0 subagents. **NO NEW FINDINGS.**
+
+- **⚠ OPERATOR PRECONDITION FOR MONDAY (M3): `entries_paused=TRUE` right now.** The
+  breaker RE-TRIPPED 07-03 21:20:04Z on ZERO new closes (trailing-3 verbatim SOFI −40 ·
+  MARA −15 · QQQ −73; paused_written=true; critical egressed `egress_owner='alert'`).
+  **F-A2e LIVE-CONFIRMED <24h after being reported** — the trailing-window-every-ingest
+  reading is production truth; the 07-02 PENDING wording ("next losing close re-trips")
+  was the weaker reading. Un-pause any time before Mon 16:30Z buys the full session
+  (breaker only evaluates at the 21:20Z ingest tail, mon–fri); expect a re-trip EVERY
+  ingest night until a live WIN lands. Recovery stays operator-only (§9).
+- ✅ **T2/gap-3(a) verification CLOSED**: 07-03 21:30Z policy_lab_eval GREEN on the
+  normalized basis — `no_promotion`, Gate-2 insufficient_trades (conservative 0, neutral 1
+  vs 10), exactly the encoded baseline. SOFI-twin magnitude proof still pends a Gate-4
+  challenger. Side observation (filed under ledgered F-A1b, cited-not-refound): neutral
+  eval row `capital_deployed 1876.2 / positions_opened 0` — window-artifact HYPOTHESIS;
+  Gate 2 halts before utility consumes it.
+- **A9-F5 rate EXACTLY confirmed**: 7 ops_data_stale highs on 07-03 (4 + 3 at
+  17:37/18:37/19:37Z, halting at the 20:00Z gate) vs the "at most one" docstring. Feeds
+  the Tuesday taxonomy PR context; no new finding.
+- **#1114 re-verified**: 12 ops_health_check runs in 6h = 2/hour. **A3**: ingest dedup
+  held (closed_positions_found=2 → duplicates skipped 2, outcomes_created=0); live
+  post-epoch stays 6/8, raw mode holds. **Cooldowns**: zero active (SOFI expired
+  unexercised). **A8 full protocol**: zero new negative-decision population; 30d ratio
+  ≈5,603:15 (≈373:1); roundtrip-reject class still N=1; capture d8_v1 unchanged; NEW
+  observation — policy_lab `decision_accuracy.rejection_accuracy` (n=7, informational) is
+  the lens's first in-system consumer at cohort grain; per-gate efficacy still unmeasured.
+  **A10**: no new instance (holiday patterns exercised as spec'd); retirement counter 0→1.
+- Heartbeat UP-email confirm still operator-side; weekend cron silence = no false DOWN
+  expected before Mon 08:00 CT.
+
+PENDING VERIFICATIONS (2026-07-04 consolidation — the Monday list, gated on the un-pause):
+- **Operator un-pause + ACK the 21:20:04Z breaker critical BEFORE Mon 16:30Z** (else the
+  staging proof and all downstream M3 proofs silently no-op again).
+- Mon 07-06: 16:30Z staging proof · typed-segment forward row · first live
+  [CLOSE_FILL_GAP] gap_fraction · breaker re-eval at 21:20Z (zero-close day → re-trip
+  EXPECTED) · #1115 job_late Monday storm = 0 · M1 MRK/CVX RTH re-screen · M2 GLD recon ·
+  M4 PR (item 0 = F1 wiring fix; new pin: bias verified ON THE EXECUTOR PATH at Tuesday's
+  16:00Z scan).
+
+## status:reported — 2026-07-06 NIGHTLY (Monday 00:00 CT scheduled run, pre-RTH; report `audit/reports/2026-07-06.md`)
+
+Dead-quiet window (07-04 report → 07-06 05:01Z): the ONLY job_run was `phase2_precheck`
+07-06 05:00:02Z green; zero fills/orders/scans/suggestions/rejections/alerts (any
+severity); zero cooldowns; both workers SUCCESS @ `3689210` = origin/main (no deploys or
+recycles since 07-03 17:43Z → env unchanged since the 15:18Z bias arming, by
+construction). Broker FLAT, equity = last_equity = OBP = $2,093.74. Budgets: 9 SQL ·
+4 broker · 2 Railway · 0 subagents. **NO NEW PRODUCTION FINDINGS.**
+
+- **⚠ OPERATOR PRECONDITION STILL OPEN at run time (05:01Z): `entries_paused=TRUE`**
+  (unchanged since the 07-03 21:20:04Z re-trip; reason verbatim SOFI −40 · MARA −15 ·
+  QQQ −73). Un-acked critical/high = 8, all 07-03 (1 breaker critical `c598eec4` + 7
+  holiday `ops_data_stale` highs). This report is the LAST audit checkpoint before the
+  Mon 16:30Z window — un-pause + ACK first thing.
+- **AUDIT-LOOP OBSERVATION (local tooling, not production): the Sunday 07-05 FULL run
+  never started** — `audit/cron.log` has no start marker between Sat 07-04 00:01 (exit
+  0) and Mon 07-06 00:00:02 (this run); Task Scheduler didn't fire (machine off/asleep
+  HYPOTHESIS). Realized cost $0 (weekend retroactively verified silent); class = the
+  watcher has no watcher. Fix (operator-side, additive): Task Scheduler "run after
+  missed start" + "wake to run" on `\nightly-audit`; optional #1109-symmetric
+  healthchecks ping on report write. Same log shows 3 historical start-without-end
+  markers (06-14, 06-20, 06-30).
+- **A3 window-slide note (not new data):** paper 30d reads n=8 / −2,062.80 (was 9 /
+  −1,870.80) — writer ran 0× in window; one early-June positive paper row aged out of
+  the sliding 30d window. Live unchanged: n=6 / −153.00 all post-epoch; raw mode holds
+  at 6/8.
+- **A5 lesson:** 2 of 9 SQL wasted on 42703s (`job_runs.job_type`→`job_name`,
+  `reentry_cooldowns.expires_at`→`cooldown_until`) — the introspect-first rule applies
+  to EVERY table not queried this session, not just learning tables.
+- A8 full protocol: zero new negative-decision population; 30d ratio ≈5,255:14 ≈375:1
+  (both sides sliding); roundtrip-reject class N=1 all-time; counterfactuals correctly
+  empty (market closed). A9: zero new alert rows → nothing to measure; Tuesday taxonomy
+  PR stands. A10: no new instance; retirement counter 1→2.
+
+PENDING VERIFICATIONS (2026-07-06 — the Monday list, unchanged + one added):
+- Standing Monday list above (un-pause gate · staging proof · typed-segment ·
+  [CLOSE_FILL_GAP] · 21:20Z breaker re-eval · #1115 job_late storm=0 [checkable at
+  Tuesday's nightly] · M1/M2/M4).
+- NEW: operator decision on the missed Sunday FULL — wait for 07-12 vs one mid-week
+  FULL after M4 + taxonomy land (NIGHTLY tonight was contract-correct; the FULL cadence
+  slipped silently).
+
+---
+
+## 2026-07-06 POST-CLOSE — M4 SHIPPED + ERRATUM + INVERTED-UNIVERSE MARKER
+
+- **⚠ INVERTED-UNIVERSE MARKER (07-06 16:00Z scan — EXCLUDE from gate evidence):**
+  Alpaca nulled the retired PDT daytrade fields (weekend 07-04) → `int(None)`
+  TypeError in `alpaca_client.get_account()` serializer → OBP read died → $500
+  `paper_baseline_capital` fallback → `get_tier(500)`=micro → $60 underlying cap →
+  56 `micro_tier_underlying_too_high` rejections → zero candidates at 16:30Z
+  executor. Today's zero is the INCIDENT's zero, not the gates' — classified (c),
+  excluded from honest-economics and gate-behavior baselines (like the 07-03
+  holiday). Scan budget observed deployable=500/cap=450 vs healthy 2093.74/837.50.
+- **ERRATUM (process, 07-06 ~19:10–19:25Z):** a compaction-summary date phantom
+  ("Tue 07-07") + stale context header (07-01) made a 4-minute-old job_runs row
+  (19:05Z) read as a 23h scheduler outage; reported to the operator as a system-wide
+  incident with a fabricated-by-arithmetic healthcheck-email claim. Operator
+  authorized a BE restart on that false report: redeploy `1b3e7dcd`, same SHA
+  `3689210`, swap 19:24:25Z, ZERO missed ticks (19:25:01Z order_sync dispatched by
+  the new container, succeeded end-to-end). No incident existed — 143 jobs green
+  that day. Same class as the 06-11 deploy-lag erratum + 07-03 holiday false alarm.
+  **Fix shipped: STEP 0 clock grounding** (DB `now()` + broker `get_clock` BEFORE
+  any time arithmetic; clocks beat headers/summaries/stated time) — operator
+  directive, now CLAUDE.md §1 first corollary + session memory.
+- **M1 verdict (MRK/CVX RTH re-screen, closed 07-06):** MRK = NO ($41–46/ct
+  round-trip crossing on every pair sampled RTH). CVX = MARGINAL-ADD ($25–29/ct on
+  healthy-OI 170/175 strikes; the $19 headline pair was a dead-OI mirage) → CVX
+  added with iv-seeding (60d) + viability tier 1.15.
+- **M2 verdict (GLD strike modulus, closed 07-06):** built as one-line-config at
+  the `_split_chain_to_calls_puts` seam — `SCANNER_STRIKE_MODULUS` env (default
+  "GLD:5"), subset-or-fallback (never filters to empty). OI-floor generalization
+  filed as follow-up (backlog).
+- **M4 SHIPPED (this squash):** item 0.1 serializer null-tolerance
+  (`_req_float` fail-loud-by-name on required fields; retired daytrade fields
+  null→placeholder) · item 0.2 fail-CLOSED capital (live-mode OBP-None → critical
+  `account_unreadable_entries_blocked` + deployable 0.0 → CapitalScanPolicy blocks
+  the cycle; $500 baseline survives ONLY explicit paper mode; unreadable ops mode
+  = live) · item 0.3 pin tests (12 new-file + the CONTRACT-CHANGE rewrite pair in
+  test_capital_basis_consistency replacing
+  `test_falls_back_to_paper_baseline_on_alpaca_failure`) · item 0b **#1126 bias
+  WIRED into the production path** (`get_executable_suggestions` sort at
+  paper_autopilot_service.py; sort-key-only, positive scores only, flag-off
+  byte-identical; EXECUTOR-PATH wiring test per the new §9 never-do) · item 0.4
+  OBP-failure alert wording (consequence now truthful) · M2 modulus · tiers
+  +DIA/CVX/GLD 1.15 · OUTPUT_FRESHNESS + suggestion_rejections/120h · CLAUDE.md
+  riders (STEP 0 corollary · #1038/#1101 kill-switch coupling · GTC pilot
+  unset=ALL correction · #1119 runbook line · §8 A9 additions · §9 two never-dos)
+  · backlog riders (F-A1a trigger, reaper P2-elevated, winter-close 2026-10-01
+  calendar trigger, OI-floor).
+- **Post-merge DB mutations (operator-approved, executed tonight):**
+  scanner_universe deactivate SNAP/NIO/MARA/F/LYFT/AAL/RIVN (SOFI stays —
+  permanent roundtrip-gate sentinel) + add CVX; `iv_historical_backfill` enqueued
+  {symbols:["CVX"], days:60}.
+
+PENDING VERIFICATIONS (2026-07-07, added by the M4 ship):
+- **Post-fix live proof (first healthy scan):** scan budget deployable≈2093.74 /
+  cap≈837.50, tier=small, ZERO `micro_tier_underlying_too_high` rejections.
+- **Bias first live cycle:** executor log shows viability-biased ordering (flag
+  armed since 07-03); flag-off comparison not required — wiring test pins it.
+- **GLD modulus first scan:** GLD rejections collapse to $5-strike population only.
+- **CVX:** appears in scan; iv history rows ≥60d after backfill; first-pass
+  roundtrip verdict (expect MARGINAL, watch vs the $15 gate).
+- **21:20Z breaker re-eval (tonight):** expected RE-TRIP (no live win 07-06) —
+  critical + email is DESIGNED (runbook); un-pause remains operator-only.
+
+HYGIENE (filed 07-06, from the M4 CI failure): `test_weekly_report_win_rate.py`
+replaces 18 modules (incl. cash_service, options_scanner) with MagicMocks in
+sys.modules at import time and NEVER restores — any later lazy in-test import
+binds a mock (green single-file local, red full-suite CI; cost tonight: one
+red CI round on #1132). M4's test file now binds real modules at import with a
+de-poison guard; the POISONER itself is unfixed and has pre-existing order
+sensitivity (6 capital-basis failures in explicit weekly-first order — never
+CI's alphabetical order). Follow-up: convert to conftest fixture/unpatch;
+grep for siblings doing module-level sys.modules assignment without restore.

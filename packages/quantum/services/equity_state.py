@@ -477,16 +477,20 @@ def _fetch_alpaca_options_buying_power(user_id: str, supabase: Any = None) -> Op
                     "error_class": type(e).__name__,
                     "error_message": str(e)[:500],
                     "consequence": (
-                        "deployable_capital falls back to paper_baseline_capital. "
-                        "Sizing budget may not match live broker buying_power "
-                        "until Alpaca connection recovers."
+                        "LIVE mode: deployable capital fails CLOSED to 0.0 and "
+                        "the cycle's entries are BLOCKED (M4-0.2 design; the "
+                        "old $500 baseline fallback CHANGED THE TIER and "
+                        "INVERTED the scanned universe on 2026-07-06 — a "
+                        "degraded capital read is a different strategy, not a "
+                        "smaller one). Paper mode only: baseline fallback."
                     ),
                     "operator_action_required": (
                         "Verify ALPACA_API_KEY/ALPACA_SECRET_KEY in Railway env. "
                         "Check Alpaca account status via dashboard. If credentials "
-                        "valid and account active, investigate transient API outage. "
-                        "System uses paper_baseline fallback until resolved — no "
-                        "trading risk, but budget may be smaller than actual buying_power."
+                        "valid and account active, investigate transient API outage "
+                        "or a broker payload field change (the 07-06 cause: retired "
+                        "daytrade fields nulled broker-side). Entries stay blocked "
+                        "until the account read recovers."
                     ),
                 },
             )

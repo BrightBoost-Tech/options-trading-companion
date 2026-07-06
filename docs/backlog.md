@@ -98,10 +98,33 @@ ops_health_check q30min-real dedup → #1114 · signal-accuracy telemetry
 - **Broker-clock guard on watch→merge automation** — merge chains must check
   the broker calendar (`get_clock.is_open`, not weekday math) before firing;
   a CI watch that sleeps across a session boundary must fail-safe to
-  NOT-merge. Until built: no unattended watch→merge chains near session
-  boundaries. · origin 07-03 (the holiday merge false alarm — retract kept
-  the lesson) · done when: the merge step is clock-gated or the practice is
+  NOT-merge; the watch must also confirm a CI run EXISTS before watching
+  (the instant-return race). · origin 07-03 · done when: clock-gated or
   codified in tooling.
+- **F-A1a rollback ghost-restore + recommendation-cooldown** (07-03 audit) —
+  `check_rollback`/Gate-7 consume "recommended" promotions rows; an
+  interleaved recommendation nets NO champion. **HARD TRIGGER: must ship
+  BEFORE any challenger reaches 8 trades** (margin ahead of Gate 4's 10). ·
+  origin 07-03 FULL A1 · done when: recommendation rows excluded from
+  rollback/cooldown reads.
+- **F-A4a stuck-`running` job_runs reaper — P2-ELEVATED (this week's spare
+  slot)** — mid-run recycle orphans rows permanently (4 historical fossils
+  named 07-06: validation_eval ×2, promotion_check, order_sync);
+  merge-every-evening × learning-chain overlap = live odds. TTL-based: mark
+  stale `running` → `failed_retryable`. Batch F-A2c (breaker NULL-pnl
+  streak-break) + F-A2b (per-position vs per-symbol envelope wording) here
+  if trivial. · origin 07-03 FULL A4 · done when: the reaper runs scheduled.
+- **Winter-close blind hour (A10 first finding)** — `is_us_market_hours`
+  close side hardcoded 20:00Z; in EST the final session hour has data_stale
+  suppressed AND `_rth_job_status` unconditionally ok. **HARD CALENDAR
+  TRIGGER 2026-10-01** (checked whether the taxonomy PR could carry it —
+  different seam territory, kept separate). · origin 07-03 A10 · done when:
+  close side DST-hardened like the open's warm-up anchor.
+- **Scanner OI-floor strike filter (M2 follow-up)** — the general fix behind
+  the GLD strike-modulus: filter selection candidates on `oi >= floor` at
+  the same `_split_chain_to_calls_puts` seam (`None` → keep; the legacy
+  fallback chain carries no OI). Self-filters every symbol's dead strikes.
+  · origin 07-06 M2 recon · done when: OI floor at the seam, H9-safe.
 
 - **Migration tracking drift check (process fix, recon COMPLETE 07-02)** —
   27/112 migration files tracked (82 pre-tracking-era, 1 post-era procedure

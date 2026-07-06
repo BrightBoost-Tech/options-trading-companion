@@ -31,6 +31,12 @@ Four sources, in precedence order (lowest to highest):
    wrapper-exposed since the 06-12 fix — it had been silently None).
 
 Corollaries:
+- **STEP 0 clock grounding (every session, 07-06 erratum):** ground now()
+  against the DB clock + broker clock BEFORE any time arithmetic. If either
+  disagrees with a prompt header, session summary, or stated time, THE
+  CLOCKS WIN — correct the premise out loud, then proceed. (A
+  session-boundary date phantom read a 4-minute-old job as a 23h outage and
+  triggered an unnecessary mid-RTH BE recycle.)
 - **Debug prints and displays lie.** `[EXIT_EVAL_DEBUG]` printed flat default
   thresholds for weeks while the decision path was cohort-aware (fixed #1067,
   live-confirmed 06-16 — the LESSON stands). The Alpaca portfolio CHART lies
@@ -114,7 +120,10 @@ exercised-status. Verify current flag VALUES on Railway, never here.
 - **#1038 entry-quote rejection** — an OPEN order with ANY leg unpriceable at
   stage time raises `EntryQuoteUnpriceable` (error, never a fabricated
   fill). Closes exempt (position_id set). Flag
-  `ENTRY_QUOTE_VALIDATION_ENABLED`, default-ON. Kill: explicit falsy.
+  `ENTRY_QUOTE_VALIDATION_ENABLED`, default-ON. Kill: explicit falsy —
+  **⚠ KILL-SWITCH COUPLING (07-06 audit): unsetting this flag ALSO silently
+  disables the #1101 roundtrip gate** (it no-ops on empty entry_leg_quotes,
+  paper_endpoints.py:1217-1218) — one switch pulls two controls.
   Exercised: first live rejections 2026-06-10 (3 XLE forks, dead leg
   `O:XLE260717C00058000` bid/ask 0/0 — the counterfactual is unmarkable by
   construction, §7 area8). ⚠ Seam: a future add-to-position entry carries a
@@ -143,24 +152,18 @@ exercised-status. Verify current flag VALUES on Railway, never here.
   (demoted to WARN at small tier when on). Flag
   `RISK_UTILIZATION_GATE_ENABLED` — **explicit =1** (behavioral). Kill:
   unset → legacy concentration BLOCK. Exercised: 06-10; WARNING-level lines.
-- **#1045 calibration circuit** — window escalation 30→60→90 on insufficient
-  data; consumer TTL (`CALIBRATION_MAX_AGE_DAYS`, stale blob → `{}` +
-  `calibration_stale` alert); `_overall` fallback (no silent ×1.0);
-  ops_health OUTPUT_FRESHNESS registry (job RAN ≠ job WROTE). Kill:
-  `CALIBRATION_STALENESS_TTL_ENABLED` falsy → legacy serve-stale. **Partially
-  superseded by #1051's epoch.** Exercised: daily; in raw mode since the
-  epoch (job returns `insufficient_data`, last real write 06-10).
-- **#1046 exit re-arm** — a terminal-'cancelled' close order blocks retries
-  only while fresh (30min) or budget-tripped (≥3/4h → block + critical
-  `exit_protection_disarmed`); stale terminal failures RE-ARM the exits
-  (kills the permanent-disarm class). `filter_blocking_close_orders` also
-  EXCLUDES resting GTC profit-limits (else a parked TP disarms stops). Flag
-  `CLOSE_REARM_ENABLED` default-ON. Exercised: UNEXERCISED (no
-  terminal-cancelled close since).
-- **#1047 spread re-key** — the 0.30 combo spread threshold keys on PRICE
-  CLASS (`micro tier OR underlying < PRICE_CLASS_SPREAD_CUTOFF`, default
-  $60), not account tier. Kill: `PRICE_CLASS_SPREAD_CUTOFF=0` restores
-  tier-only. Exercised: 06-10.
+- **#1045 calibration circuit** — window escalation 30→60→90; consumer TTL
+  (`CALIBRATION_MAX_AGE_DAYS`, stale → `{}` + alert); `_overall` fallback.
+  Kill: `CALIBRATION_STALENESS_TTL_ENABLED` falsy → serve-stale. Partially
+  superseded by #1051's epoch; raw mode since 06-11.
+- **#1046 exit re-arm** — terminal-'cancelled' close blocks retries only
+  while fresh (30min) or budget-tripped (≥3/4h → critical
+  `exit_protection_disarmed`); stale failures RE-ARM; resting GTC TPs
+  excluded from the block filter. Flag `CLOSE_REARM_ENABLED` default-ON.
+  UNEXERCISED.
+- **#1047 spread re-key** — 0.30 combo threshold keys on PRICE CLASS
+  (micro OR underlying < `PRICE_CLASS_SPREAD_CUTOFF` $60). Kill: =0 →
+  tier-only. Exercised 06-10.
 - **#1048 cohort stops intraday** — the 15-min monitor evaluates stop_loss
   against COHORT conditions (not the flat 0.50 default); shadows' only loss
   protection. Flag `INTRADAY_COHORT_STOP_ENABLED` default-ON. Fail-safe →
@@ -188,18 +191,14 @@ exercised-status. Verify current flag VALUES on Railway, never here.
   Polygon NBBO probed as final fallback + divergence recorder
   (`[ENTRY_QUOTE] FEED DIVERGENCE`). All-sources-dark still rejects. Flag
   `ENTRY_QUOTE_SOURCE_ALIGNED` default-ON; explicit falsy → Polygon-only.
-- **#1034 exit-mark corroboration (Stage-2 LIVE 06-13)** — at a mark-derived
-  fire, corroborates the triggering mark against the achievable close on the
-  EXECUTABLE side (sell→bid, buy→ask), writing one
-  `exit_mark_corroboration_observations` row. Divergence normalized by the
-  achievable PRICE, not strike geometry (the 06-12 fix: the QQQ condor
-  phantom re-scores 0.06→~0.91). Stage-2 flag
-  `EXIT_MARK_SANITY_ENFORCE_ENABLED` (behavioral, default-OFF) SUPPRESSES a
-  TARGET_PROFIT fire whose row says `would_suppress` — stop_loss NEVER
-  suppressed (double-guarded: compute layer + call-site). Observe flag
-  `EXIT_MARK_SANITY_OBSERVE_ENABLED` writes the row without acting. Kill:
-  unset either flag. Exercised: observe since 06-08; enforce armed 06-13,
-  awaiting first fire.
+- **#1034 exit-mark corroboration (Stage-2 LIVE 06-13)** — mark-derived
+  fires corroborate against the EXECUTABLE-side achievable close
+  (sell→bid, buy→ask), one observations row per fire; divergence normalized
+  by achievable PRICE. `EXIT_MARK_SANITY_ENFORCE_ENABLED` (behavioral,
+  default-OFF) suppresses `would_suppress` TARGET_PROFIT fires only —
+  stop_loss NEVER suppressed (double-guarded). Observe flag writes the row
+  without acting. Kill: unset either. Enforce armed 06-13, awaiting first
+  fire.
 - **#1017 executable-side internal fills** — internal/shadow/fallback closes
   fill at the executable side via the same corroboration computation, never
   the optimistic mid; mid fallback only with a persisted `fill_quality` flag
@@ -213,10 +212,12 @@ exercised-status. Verify current flag VALUES on Railway, never here.
   evaluator DEFERS the profit side to a live resting order
   (`skipped_resting_tp_owns_profit_side` — single-submitter), stops still
   pre-cancel. Flag `GTC_PROFIT_EXIT_ENABLED` (behavioral) + pilot scope
-  `GTC_PROFIT_EXIT_PILOT_POSITION_IDS`. Exercised: **YES, live 06-13** — QQQ
-  condor resting GTC accepted at the broker, limit 0.81. Specs for the
-  unbuilt detectors: `docs/specs/fast_exit_loop.md`,
-  `docs/specs/streaming_exits.md`, `docs/specs/resting_tp_orders.md`.
+  `GTC_PROFIT_EXIT_PILOT_POSITION_IDS` — **⚠ UNSET pilot list = ALL eligible
+  live-routed positions, NOT pilot-off** (gtc_profit_exit.py:194-198; 07-06
+  audit correction). Exercised: **YES, live 06-13** — QQQ condor resting GTC
+  accepted at the broker, limit 0.81. Specs for the unbuilt detectors:
+  `docs/specs/fast_exit_loop.md`, `docs/specs/streaming_exits.md`,
+  `docs/specs/resting_tp_orders.md`.
 - **#1071 phantom-mark-safe brake** — the daily/weekly loss brake fires on
   realized (DB-authoritative, UN-GATED — preserves #1058) + executable-
   corroborated unrealized (#1034), NEVER the raw broker equity delta (a 06-17
@@ -264,25 +265,19 @@ exercised-status. Verify current flag VALUES on Railway, never here.
   (raw fallback when dark; stops never suppressed). Flagless measurement
   correction. Exercised: **live 07-01** — SOFI cohort stop fired on
   corroborated −1,044.48 while the raw mid said +26.
-- **#1094–#1097 unattended-readiness quartet** — config fail-CLOSED on cohort
-  load failure (#1094: fault → tightest stops, never the 2–3× looser
-  defaults) · scheduler watchdog registers monitor/order-sync/heartbeat in
-  EXPECTED_JOBS (#1095, detection only) · risk-alert egress for the
-  allowlisted critical types (#1096, `_RISK_EGRESS_ALERT_TYPES`) ·
-  entries-only break-glass `ops_control.entries_paused` (#1097 — blocks the
-  entry seam ONLY, monitor/exits untouched; READ side fails OPEN; flip needs
-  no deploy). Exercised: #1097 live 07-02 via the #1119 trip.
-- **#1100–#1102 oversight phases** — alert() insert retry (transient
-  disconnects) + A4 silent-failure detector (`job_succeeded_with_errors` on
-  green jobs with `result.counts.errors>0`) (#1100) · **#1101 entry
-  round-trip cost gate**: at the stage seam, reject when
-  `suggestion_EV − Σ per-leg (ask−bid)×contracts×100 < $15 floor`;
-  `blocked_reason='ev_below_roundtrip_cost'`; flag
-  `ENTRY_ROUNDTRIP_COST_GATE_ENABLED` default-ON, explicit falsy kills.
-  Exercised: **first live rejection 07-02** (SOFI: gross 30.25, round-trip
-  92.00, net −61.75 — the 06-30 own-goal class blocked pre-broker) ·
-  #1102 close-fill-gap instrumentation (cross/mid/fill/gap_fraction into
-  close order_json; feeds the Phase-3 ≥10–15-fills gate).
+- **#1094–#1097 unattended-readiness quartet** — config fail-CLOSED on
+  cohort-load failure (#1094) · scheduler watchdog in EXPECTED_JOBS (#1095,
+  detection only) · risk-alert egress for allowlisted critical types
+  (#1096) · entries-only break-glass `ops_control.entries_paused` (#1097 —
+  entry seam ONLY, monitor/exits untouched; READ fails OPEN; no deploy to
+  flip). #1097 exercised live 07-02 via the #1119 trip.
+- **#1100–#1102 oversight phases** — alert() insert retry + A4 silent-
+  failure detector (`job_succeeded_with_errors`) (#1100) · **#1101 entry
+  round-trip cost gate**: stage-seam reject when `EV − Σ(ask−bid)×contracts
+  ×100 < $15`; `blocked_reason='ev_below_roundtrip_cost'`; flag
+  `ENTRY_ROUNDTRIP_COST_GATE_ENABLED` default-ON. First live rejection
+  07-02 (SOFI net −57.75) · #1102 close-fill-gap instrumentation (feeds the
+  Phase-3 ≥10–15-fills gate).
 - **#1104/#1106/#1107 observability trio** — scanner rejection-persist
   retry on transient disconnects (exercised 07-02: persist_failures=0) ·
   data_stale alert content from the ARM THAT FIRED (#1106; predicate retuned
@@ -336,15 +331,16 @@ exercised-status. Verify current flag VALUES on Railway, never here.
   trip at the 21:20Z ingest; full chain incl. the inbox hop confirmed):
   `UPDATE ops_control SET entries_paused=false, entries_pause_reason=NULL
   WHERE key='global';` then confirm read-back + next 16:30Z cycle stages.
-  Flag `STREAK_BREAKER_ENABLED` default-ON. Tail of paper_learning_ingest;
-  result in `job_runs.result.streak_breaker`.
-- **Oversight chain — ALL THREE LAST HOPS PROVEN TO THE OPERATOR 07-02**:
-  dead-man's switch RECEIPT side (20 pings :00/:30 from 08:00 CT at the
-  provider; DOWN-email test delivered 18:45 CT; cron `*/30 8-16 * * 1-5`
-  America/Chicago, Grace 45 — FULLY ARMED) · relay path (synthetic critical
-  → inbox 08:07 CT) · immediate-egress path (breaker critical → inbox
-  16:20 CT, a real safety event). Detection AND delivery are end-to-end;
-  do not re-prove these hops — new work verifies only its own seam.
+  **RUNBOOK (07-04 live-confirmed): un-pausing without a NEW WIN in the
+  window re-trips on the next ingest — even a zero-close day. Un-pause buys
+  exactly one session of entries; expect the nightly critical until a live
+  win lands. Not an incident.** Flag `STREAK_BREAKER_ENABLED` default-ON.
+  Tail of paper_learning_ingest; result in `job_runs.result.streak_breaker`.
+- **Oversight chain — ALL THREE LAST HOPS PROVEN 07-02**: dead-man's-switch
+  receipt (pings + DOWN-email test; cron `*/30 8-16 * * 1-5` Chicago, Grace
+  45 — FULLY ARMED) · relay path (synthetic → inbox) · immediate-egress
+  path (breaker critical → inbox, real event). Do not re-prove these hops;
+  new work verifies only its own seam.
 
 Sanctioned mid-session kill switches, complete list: the explicit-falsy
 flags above (#1038, #1040, #1046, #1048, #1045-TTL, #1052, #1072, #1073,
@@ -479,12 +475,10 @@ paper_learning_ingest · policy_lab_eval · post_trade_learning · promotion_che
 - **Nightly v5.1 audit** at midnight CT via Windows Task Scheduler
   (`\nightly-audit` → `audit/run-nightly.cmd`): NIGHTLY mode diffs vs the
   prior report (≤8 subagents); FULL on Sundays. Prompt: `audit/v5-prompt.md`.
-  v5.1 structure: **A8 = the STANDING graduated area (Negative-Decision
-  Efficacy — audited every run, does not rotate; `audit/area8.md`); A9 = the
-  single ROTATING lens slot (`audit/area9.md`, one lens per adoption —
-  current per the file, not this doc).** Single-run lens rotation is A9's
-  mechanism only; A8 does not swap (the 07-01 swap was reverted by owner
-  contract 07-02).
+  Structure: **A8 (Negative-Decision Efficacy) and A9 (Alert & Signal
+  Integrity, graduated 07-03) are STANDING; A10 is the rotating lens slot**
+  — specs live in `audit/area8/9/10.md`, current lens per the file, never
+  this doc.
 - **READ-ONLY contract is absolute**: the loop writes reports
   (`audit/reports/YYYY-MM-DD.md`) and `audit/ALERT-<date>.md` files only — it
   never merges, flips flags, or trades, even on a critical finding. The human
@@ -530,20 +524,35 @@ paper_learning_ingest · policy_lab_eval · post_trade_learning · promotion_che
   before building it. The resting-TP single-owner skip keys on the
   `intentional_resting_exit` marker + close side; an add-to-position close
   side could collide — revisit there too.
-- **OUTPUT_FRESHNESS watches THREE tables** (calibration_adjustments ·
-  learning_feedback_loops · paper_positions.last_marked_at 168h). Caveats:
-  a FLAT book writes no marks (long flat stretch can false-age the mark
-  entry) and the monitor's Part-B persist does NOT stamp last_marked_at
-  (q15min writes invisible to staleness queries — residual).
+- **OUTPUT_FRESHNESS watches FOUR tables** (calibration_adjustments ·
+  learning_feedback_loops · paper_positions.last_marked_at 168h ·
+  suggestion_rejections 120h). Caveats: a FLAT book writes no marks (long
+  flat stretch can false-age the mark entry); the monitor's Part-B persist
+  does NOT stamp last_marked_at (q15min writes invisible — residual); no
+  weekend exclusion in the checker.
 - **POLICY_LAB single-champion path**: the champion fallback (`"aggressive"`
   in transition windows) is ungated — known, accepted, on the ledger.
 - **`learning_feedback_loops` has NO typed symbol column** — symbol rides in
   details_json; a typed select 42703s (the #1098 phantom-column class; it
   nearly made the streak breaker fail-closed-pause every run). Introspect
   information_schema BEFORE writing queries against learning tables.
-- RESOLVED liars (cite, don't re-find): EXIT_EVAL_DEBUG print (#1067) ·
-  ghost-sweep shadow noise (#1107) · is_paper mislabeling (#1069/#1076) ·
-  the blanket-dismiss funnel (#1073 + 33-row backfill 07-02).
+- **A9 07-06 additions:** the `[OPS_ALERT] no supabase client — webhook-only
+  legacy mode` WARNING fires on every DESIGNED client=None egress (relay +
+  allowlist path) — it reads as pipeline degradation when the pipeline
+  worked · **severity vocabulary is fragmented**: `medium` + `warn` are the
+  two LARGEST warning-class buckets (direct-insert writers bypass
+  `_VALID_SEVERITIES`) — a `severity='warning'` filter misses ~83% of the
+  class · the A4 silent-failure detector reads ONE result convention
+  (`counts.errors` — only paper_learning_ingest emits it); executor
+  `status:'partial'` errors are invisible to it. Taxonomy PR ledger-queued.
+- **EXIT_EVAL_DEBUG is only PARTIALLY fixed** (un-retired 07-06, A9-F9):
+  cohort-built conditions print honestly (#1067), but the DEFAULT path
+  prints flat 0.35 while the decision time-scales (±43% of entry cost) —
+  the original phantom class survives on no-cohort positions.
+- RESOLVED liars (cite, don't re-find): ghost-sweep shadow noise (#1107) ·
+  is_paper mislabeling (#1069/#1076) · the blanket-dismiss funnel (#1073 +
+  33-row backfill 07-02) · the 07-06 OBP int(None)/universe inversion
+  (M4 item 0: serializer null-tolerant, live-mode capital fail-closed).
 
 ## 9. NEVER-DO (carried forward; update only with evidence)
 
@@ -581,6 +590,16 @@ paper_learning_ingest · policy_lab_eval · post_trade_learning · promotion_che
   (#1119's recovery contract; the breaker never clears its own trip).
 - Never select a typed `symbol`/`strategy` column from a learning table
   without introspecting information_schema first (§8 phantom-column class).
+- **Never pin a flag-gated behavior with tests that bypass the production
+  call path** — an orphan function with green tests is the 9a2cef1/#1126
+  class (detection: 2 months then; <24h via audit PASS-2 now). The wiring
+  test must exercise the seam production actually calls.
+- **Never treat a fail-closed degradation as automatically safe: fail-closed
+  can still fail-WRONG.** A degradation that changes WHICH universe is
+  scanned (the 07-06 $500→micro inversion) is a different strategy, not a
+  smaller one. Degraded inputs must block the decision or preserve its
+  shape — never silently re-parameterize it. Null-tolerate every optional
+  field in external API parses; fail loud BY NAME on required ones.
 
 ---
 

@@ -165,6 +165,34 @@ MIN_ECONOMIC_ENTRY = float(
     os.getenv("MIN_ECONOMIC_ENTRY", "0.15")
 )  # dollars; below = trade too tiny to be economic
 
+# M4/M2 (2026-07-06): per-symbol strike-increment preference. GLD is viable
+# ONLY on $5-multiple strikes (its $1-increment strikes are OI-dead — 07-03
+# refill screen). Format: "SYM:MOD,SYM:MOD"; code default carries GLD. The
+# filter PREFERS the grid (falls back to the full chain rather than filter
+# to empty); applied at _split_chain_to_calls_puts, the single seam covering
+# all selection paths.
+def _parse_strike_modulus(raw: str) -> dict:
+    out = {}
+    for part in (raw or "").split(","):
+        if ":" in part:
+            sym, _, mod = part.partition(":")
+            try:
+                m = float(mod)
+                if m > 0:
+                    out[sym.strip().upper()] = m
+            except ValueError:
+                logger.warning(f"SCANNER_STRIKE_MODULUS: unparseable entry {part!r}")
+    return out
+
+
+STRIKE_MODULUS_MAP = _parse_strike_modulus(
+    os.getenv("SCANNER_STRIKE_MODULUS", "GLD:5")
+)
+
+
+def _strike_modulus_for(symbol: str) -> float:
+    return STRIKE_MODULUS_MAP.get((symbol or "").upper(), 0.0)
+
 # PR #<this PR> (2026-05-21): defensive observability for spread_pct formula
 # anomalies. After the credit-spread denominator fix, legitimate spread_pct
 # values cluster in 0-50% (combo_spread / max_loss). Values exceeding this
@@ -3278,12 +3306,30 @@ def scan_for_opportunities(
             # Initialize hydration_meta for both condor and non-condor paths
             hydration_meta = None
 
-            # Helper function to split chain_subset into calls/puts
+            # Helper function to split chain_subset into calls/puts.
+            # M4/M2 (2026-07-06): per-symbol STRIKE MODULUS filter applied at
+            # this single seam (covers condor, non-condor, and the winner
+            # re-split). GLD's $1-increment strikes are OI-dead (07-03 refill
+            # screen: OI 2–21 on $1s vs 1,364–3,704 on $5-multiples) — the
+            # scanner must only select from the liquid $5 grid there. Delta/
+            # nearest-strike selection degrades gracefully on the subset; an
+            # over-filtered chain hits the EXISTING loud rejection paths
+            # (legs_not_found / condor_empty_chain), never a fabricated pick.
+            _strike_mod = _strike_modulus_for(symbol)
+
             def _split_chain_to_calls_puts(subset):
                 calls_list = []
                 puts_list = []
                 if not subset:
                     return [], []
+                if _strike_mod:
+                    subset = [
+                        c for c in subset
+                        if abs(float(c.get('strike') or 0) % _strike_mod) < 1e-6
+                    ] or subset  # never filter to EMPTY: fall back to the
+                    # full grid rather than manufacture a no-chain state
+                    # from a config entry (H9-adjacent: the filter prefers,
+                    # the rejection paths decide).
                 type_key = 'type'
                 if 'right' in subset[0]:
                     type_key = 'right'

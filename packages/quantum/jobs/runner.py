@@ -10,6 +10,29 @@ from packages.quantum.jobs.registry import discover_handlers
 
 logger = logging.getLogger(__name__)
 
+def _fold_alert_write_failures(final_result: Dict[str, Any], before: int) -> Dict[str, Any]:
+    """A9-F8 (2026-07-07): fold alert-insert losses that occurred DURING this
+    handler into the job's result counts, so a run that silently lost alerts
+    is visible to the A4 detector (``counts.errors``). Zero-delta runs return
+    the result byte-identical. Never raises — a fold bug must not fail a job
+    that succeeded."""
+    try:
+        from packages.quantum.observability.alerts import (
+            get_alert_write_failure_count,
+        )
+        delta = get_alert_write_failure_count() - before
+        if delta > 0 and isinstance(final_result, dict):
+            counts = final_result.setdefault("counts", {})
+            if isinstance(counts, dict):
+                counts["alert_write_failures"] = (
+                    int(counts.get("alert_write_failures") or 0) + delta
+                )
+                counts["errors"] = int(counts.get("errors") or 0) + delta
+    except Exception:
+        logger.warning("alert-write-failure fold failed (non-fatal)", exc_info=True)
+    return final_result
+
+
 class RetryableJobError(Exception):
     """
     Raised when a job should be retried.
@@ -76,6 +99,16 @@ def run_job_run(payload: Dict[str, Any], ctx: Optional[Any] = None) -> Dict[str,
         store.mark_dead_letter(job_run_id, error_info)
         return {"status": "dead_lettered", "error": error_info["error"], "job_run_id": job_run_id}
 
+    # A9-F8: snapshot the process-wide lost-alert counter around the handler
+    # so losses DURING this run surface in its result counts.
+    try:
+        from packages.quantum.observability.alerts import (
+            get_alert_write_failure_count,
+        )
+        _alert_failures_before = get_alert_write_failure_count()
+    except Exception:
+        _alert_failures_before = None
+
     try:
         # Execute handler
         # Safely dispatch to handler, supporting both new (payload-aware) and legacy (no-arg) signatures
@@ -91,6 +124,10 @@ def run_job_run(payload: Dict[str, Any], ctx: Optional[Any] = None) -> Dict[str,
 
         # 4. Success or Partial Failure
         final_result = result if isinstance(result, dict) else {"result": str(result)}
+        if _alert_failures_before is not None:
+            final_result = _fold_alert_write_failures(
+                final_result, _alert_failures_before
+            )
 
         # Check for partial failures reported by the handler
         # e.g. {"users_failed": 5, "users_total": 10}

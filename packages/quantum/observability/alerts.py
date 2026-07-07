@@ -38,8 +38,23 @@ _RISK_EGRESS_ALERT_TYPES = frozenset(
         "job_succeeded_with_errors",  # A4 silent-failure detector (ops_health)
         "streak_breaker_tripped",  # gap-1: N consecutive live losses → entries paused
         "streak_breaker_error",  # gap-1: evaluation/pause-write failure (fail-closed)
+        "force_close_failed",  # A9-F1 (2026-07-07): close SUBMIT failed — position
+        # still open on a breached control; must reach the operator immediately,
+        # not on the ≤37-min relay poll.
     }
 )
+
+# A9-F8 (2026-07-07): process-wide count of alert() inserts that exhausted
+# every retry and fell to the logger.exception fallback. The job runner
+# snapshots this around each handler and folds the delta into the job's
+# result counts so the A4 silent-failure detector can SEE lost alerts
+# (the 18:45Z 2026-07-07 specimen: a scan read ok:true through a lost row).
+_ALERT_WRITE_FAILURES = 0
+
+
+def get_alert_write_failure_count() -> int:
+    """Monotonic per-process counter of alert rows lost after retries."""
+    return _ALERT_WRITE_FAILURES
 
 # alert() severity vocabulary → the ops sender's severity vocabulary. The
 # sender's internal severity_order knows only critical/error/warning, so a
@@ -55,24 +70,35 @@ def _maybe_egress_risk_alert(
     metadata: dict | None,
     symbol: str | None,
     position_id: str | None,
+    supabase: Any = None,
+    row_id: str | None = None,
+    row_lost: bool = False,
 ) -> None:
     """Best-effort: push a critical/high RISK alert out the ops webhook.
 
-    Fires ONLY for the tight ``_RISK_EGRESS_ALERT_TYPES`` allowlist AND only
-    at severity ``critical``/``high`` (warn/info NEVER egress — anti-spam).
-    Reuses the existing ``send_ops_alert_v2`` sender via a FUNCTION-LOCAL
-    import so there is no import cycle at module load (ops_health_service
-    imports ``alert`` only lazily, inside its own sender). Egress is gated by
-    the sender's own ``OPS_ALERT_WEBHOOK_URL`` check, so this is a safe no-op
-    (``suppressed_reason="no_webhook"``) when the URL is unset — no
-    duplicated suppression logic here. ANY exception is swallowed: egress
-    must never break the risk path, the caller, or the authoritative DB row
-    that was already written before this call.
+    Fires for the tight ``_RISK_EGRESS_ALERT_TYPES`` allowlist AND only at
+    severity ``critical``/``high`` (warn/info NEVER egress — anti-spam) —
+    PLUS, regardless of allowlist, any critical/high alert whose DB insert
+    was LOST (``row_lost=True``, A9-F3 minimal fail-safe 2026-07-07): the
+    webhook message carries a ``[DB-ROW-LOST]`` marker so the inbox is the
+    durable trace a pooler bounce cannot erase. Reuses ``send_ops_alert_v2``
+    via a FUNCTION-LOCAL import (no import cycle). Egress is gated by the
+    sender's own ``OPS_ALERT_WEBHOOK_URL`` check. ANY exception is swallowed:
+    egress must never break the risk path or the caller.
+
+    A9 RECEIPT (2026-07-07): after the send, the row this function egressed
+    is stamped with a delivery receipt (``metadata.egress_receipt`` +
+    ``egressed_at`` on success) and a WARNING-visible ``[ALERT_RECEIPT]``
+    line is logged on BOTH outcomes — delivery disputes become one SQL, not
+    a forensic session. FAIL-OPEN PIN: the receipt write runs strictly AFTER
+    the send inside its own try/except; a receipt failure can never throw
+    into, retry into, or block the send path.
     """
-    if alert_type not in _RISK_EGRESS_ALERT_TYPES:
-        return
     if severity not in ("critical", "high"):
         return
+    if alert_type not in _RISK_EGRESS_ALERT_TYPES and not row_lost:
+        return
+    result = None
     try:
         from packages.quantum.services.ops_health_service import (
             send_ops_alert_v2,
@@ -82,13 +108,14 @@ def _maybe_egress_risk_alert(
         # SKIPPED, so no second/duplicate DB row is written; only the
         # Slack-compatible webhook (its Channel 2) runs. The row alert()
         # already inserted remains the single source of truth.
-        send_ops_alert_v2(
+        result = send_ops_alert_v2(
             alert_type=alert_type,
-            message=message,
+            message=("[DB-ROW-LOST] " + message) if row_lost else message,
             details={
                 **(metadata or {}),
                 **({"symbol": symbol} if symbol else {}),
                 **({"position_id": position_id} if position_id else {}),
+                **({"db_row_lost": True} if row_lost else {}),
             },
             severity=_OPS_SEVERITY_MAP.get(severity, "warning"),
             client=None,
@@ -98,6 +125,41 @@ def _maybe_egress_risk_alert(
         logger.warning(
             "risk_alert_egress_failed",
             extra={"egress_alert_type": alert_type, "egress_severity": severity},
+            exc_info=True,
+        )
+
+    # ── Delivery receipt (STRICTLY after the send; fail-open) ────────────
+    try:
+        _sent = bool(result and result.get("sent"))
+        _webhook = bool(result and result.get("webhook_sent"))
+        _suppressed = result.get("suppressed_reason") if result else "egress_exception"
+        logger.warning(
+            "[ALERT_RECEIPT] type=%s severity=%s sent=%s webhook_sent=%s "
+            "suppressed=%s row=%s%s",
+            alert_type, severity, _sent, _webhook, _suppressed,
+            (row_id or "none")[:8] if row_id else "none",
+            " row_lost=True" if row_lost else "",
+        )
+        if supabase is not None and row_id and not row_lost:
+            receipt = {
+                "webhook_sent": _webhook,
+                "sent": _sent,
+                "suppressed_reason": _suppressed,
+                "receipted_at": time.strftime(
+                    "%Y-%m-%dT%H:%M:%S+00:00", time.gmtime()
+                ),
+            }
+            new_meta = {**(metadata or {}), "egress_owner": "alert",
+                        "egress_receipt": receipt}
+            if _webhook:
+                new_meta["egressed_at"] = receipt["receipted_at"]
+            supabase.table("risk_alerts").update(
+                {"metadata": new_meta}
+            ).eq("id", row_id).execute()
+    except Exception:
+        # FAIL-OPEN: a broken receipt must never disturb the send or caller.
+        logger.warning(
+            "[ALERT_RECEIPT] receipt write failed (fail-open, send unaffected)",
             exc_info=True,
         )
 
@@ -124,11 +186,19 @@ def _is_transient_disconnect(exc: BaseException | None) -> bool:
     """
     if exc is None:
         return False
+    # WriteError/ConnectError added 2026-07-07 (A9-F3): the 18:45Z pooler
+    # bounce surfaced as httpx.WriteError "[Errno 104] Connection reset by
+    # peer" — a recoverable one-shot disconnect that the pre-fix matcher
+    # missed, so the alert insert never retried and the row was lost.
     for cls in type(exc).__mro__:
-        if cls.__name__ == "RemoteProtocolError":
+        if cls.__name__ in ("RemoteProtocolError", "WriteError", "ConnectError"):
             return True
     text = str(exc)
-    return "Server disconnected" in text or "RemoteProtocol" in text
+    return (
+        "Server disconnected" in text
+        or "RemoteProtocol" in text
+        or "Connection reset by peer" in text
+    )
 
 
 def alert(
@@ -216,13 +286,18 @@ def alert(
     written = False
     last_exc: BaseException | None = None
     retried = False
+    _row_id: str | None = None
     for backoff in (0.0,) + _ALERT_INSERT_RETRY_BACKOFFS:
         if backoff:
             retried = True
             time.sleep(backoff)
         try:
-            supabase.table("risk_alerts").insert(record).execute()
+            _ins = supabase.table("risk_alerts").insert(record).execute()
             written = True
+            try:
+                _row_id = (_ins.data or [{}])[0].get("id")
+            except Exception:
+                _row_id = None  # receipt degrades to log-only; insert stands
             break
         except Exception as exc:  # noqa: BLE001 — classified below
             last_exc = exc
@@ -230,6 +305,10 @@ def alert(
                 break  # non-transient → do not retry; fall to the fallback
 
     if not written:
+        # A9-F8: count the loss so the job runner can surface it in the
+        # run's result counts (the A4 detector's view).
+        global _ALERT_WRITE_FAILURES
+        _ALERT_WRITE_FAILURES += 1
         # FINAL fallback (unchanged behavior): structured exception log of the
         # intended alert. Re-raise into an ``except`` so logger.exception keeps
         # the original traceback.
@@ -258,10 +337,12 @@ def alert(
             )
 
     # AFTER the authoritative DB insert (source of truth): best-effort
-    # external egress for the critical/high RISK loss-protection categories
-    # only. Self-contained + exception-swallowing — never blocks the DB write
-    # nor breaks the caller. No-op for every non-allowlisted / non-critical
-    # alert (anti-spam) and when OPS_ALERT_WEBHOOK_URL is unset.
+    # external egress for the critical/high RISK loss-protection categories —
+    # and, F3 fail-safe, for ANY critical/high whose insert was lost (the
+    # webhook becomes the durable trace, marked [DB-ROW-LOST]). Self-contained
+    # + exception-swallowing — never blocks the DB write nor breaks the
+    # caller. No-op for non-allowlisted/non-critical alerts with a healthy
+    # insert, and when OPS_ALERT_WEBHOOK_URL is unset.
     _maybe_egress_risk_alert(
         alert_type=alert_type,
         severity=severity,
@@ -269,6 +350,9 @@ def alert(
         metadata=metadata,
         symbol=symbol,
         position_id=position_id,
+        supabase=supabase,
+        row_id=_row_id,
+        row_lost=not written,
     )
 
 

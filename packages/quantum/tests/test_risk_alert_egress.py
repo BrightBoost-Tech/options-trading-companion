@@ -76,9 +76,13 @@ class TestRiskEventEgresses(unittest.TestCase):
                 symbol="AAPL",
             )
 
-        # DB row still written (source of truth).
-        supabase.table.assert_called_once_with("risk_alerts")
+        # DB row still written (source of truth). CONTRACT CHANGED — A9
+        # receipt (2026-07-07): after the send, alert() stamps a delivery
+        # receipt back onto the row, so table("risk_alerts") is now touched
+        # twice (insert + receipt UPDATE). The insert stays exactly once.
+        supabase.table.assert_called_with("risk_alerts")
         supabase.table.return_value.insert.return_value.execute.assert_called_once()
+        supabase.table.return_value.update.assert_called_once()
 
         # Egress happened: the EXISTING sender was called once.
         sender.assert_called_once()

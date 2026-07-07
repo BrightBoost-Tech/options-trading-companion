@@ -465,11 +465,16 @@ class IntradayRiskMonitor:
                                 force_closes_submitted += 1
                                 closed_in_this_cycle.add(pos_id)
                 else:
-                    # Warn-only mode for non-loss envelopes
+                    # Warn-only mode for non-loss envelopes. A9-F1 2026-07-07:
+                    # was alert_type="force_close" severity=critical — a
+                    # nothing-was-closed row wearing the real force-close's
+                    # costume (31% of historical force_close rows). Honest
+                    # type + high (visible in every H11 sweep, no false
+                    # "position closed" scare).
                     self._log_alert(
                         user_id=user_id,
-                        alert_type="force_close",
-                        severity="critical",
+                        alert_type="envelope_violation_warn_only",
+                        severity="high",
                         message=f"[WARN-ONLY] {violation.message} (enforcement disabled)",
                         position_id=None,
                         symbol=None,
@@ -477,10 +482,14 @@ class IntradayRiskMonitor:
                     )
                     warnings_logged += 1
             elif violation.severity in ("warn", "block"):
+                # A9-F2/F7 2026-07-07: was the untyped 'warn' alert type at
+                # severity high|medium — a costume plus a severity outside
+                # the vocabulary ('medium' is invisible to severity='warning'
+                # filters). Envelope name rides in metadata.envelope.
                 self._log_alert(
                     user_id=user_id,
-                    alert_type="warn",
-                    severity="high" if violation.severity == "block" else "medium",
+                    alert_type="envelope_violation",
+                    severity="high" if violation.severity == "block" else "warning",
                     message=violation.message,
                     metadata=violation.to_dict(),
                 )
@@ -1428,9 +1437,13 @@ class IntradayRiskMonitor:
                 f"[RISK_MONITOR] Force close FAILED for {symbol}: {e}. "
                 f"Will retry next cycle."
             )
+            # A9-F1 2026-07-07: was alert_type="force_close" — the FAILED
+            # submit shared the successful close's type. Split type; on the
+            # immediate-egress allowlist (a position still open on a breached
+            # control must reach the operator now, not at the relay poll).
             self._log_alert(
                 user_id=user_id,
-                alert_type="force_close",
+                alert_type="force_close_failed",
                 severity="critical",
                 message=f"Force close FAILED for {symbol}: {e} — retrying next cycle",
                 position_id=pos_id,
@@ -1451,17 +1464,34 @@ class IntradayRiskMonitor:
         symbol: Optional[str] = None,
         metadata: Optional[Dict] = None,
     ):
-        """Write a risk alert to the risk_alerts table."""
+        """Write a risk alert via the canonical observability ``alert()``.
+
+        A9 2026-07-07: was a bare direct insert — no severity-vocabulary
+        enforcement, no insert retry (#1100), no immediate egress, no
+        egress_owner stamp (today's REAL force_close rode the ≤37-min relay
+        because THIS writer wrote it). Delegating to alert() gives every
+        monitor alert the retry stack, the allowlisted immediate egress +
+        receipt, and the F3 row-lost fail-safe. Severities are normalized
+        into the vocabulary first (medium/warn → warning, error → high) so a
+        severity='warning' query catches the whole warning class. alert()
+        never raises; the outer guard covers the import seam only.
+        """
+        _SEVERITY_NORMALIZE = {
+            "medium": "warning", "warn": "warning", "error": "high",
+        }
+        severity = _SEVERITY_NORMALIZE.get(severity, severity)
         try:
-            self.supabase.table("risk_alerts").insert({
-                "user_id": user_id,
-                "alert_type": alert_type,
-                "severity": severity,
-                "position_id": position_id,
-                "symbol": symbol,
-                "message": message,
-                "metadata": metadata or {},
-            }).execute()
+            from packages.quantum.observability.alerts import alert as _alert
+            _alert(
+                self.supabase,
+                alert_type=alert_type,
+                message=message,
+                severity=severity,
+                metadata=metadata or {},
+                user_id=user_id,
+                position_id=position_id,
+                symbol=symbol,
+            )
         except Exception as e:
             logger.error(f"[RISK_MONITOR] Failed to write risk_alert: {e}")
 

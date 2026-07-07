@@ -22,6 +22,24 @@ from packages.quantum.jobs.db import _to_jsonable
 
 JOB_NAME = "suggestions_open"
 
+
+def _persist_error_rollup(cycle_results) -> int:
+    """A9-F8 (2026-07-07): sum ``counts.rejection_persist_failures`` across
+    cycle results so persistence failures surface at the TOP-LEVEL job result
+    (``counts.errors``) instead of dying buried one level down. Pure; never
+    raises on malformed cycle shapes."""
+    total = 0
+    for cr in (cycle_results or []):
+        try:
+            total += int(
+                ((cr or {}).get("counts") or {}).get(
+                    "rejection_persist_failures"
+                ) or 0
+            )
+        except (AttributeError, TypeError, ValueError):
+            continue
+    return total
+
 # Replay feature store integration (lazy import to avoid circular deps)
 def _get_decision_context_class():
     """Lazy import DecisionContext to avoid circular imports."""
@@ -204,11 +222,18 @@ def run(payload: Dict[str, Any], ctx: Any = None) -> Dict[str, Any]:
         counts["synced"] = synced
         counts["skipped"] = skipped
 
+        # A9-F8 2026-07-07: roll cycle-level persistence failures up to the
+        # TOP-LEVEL result. The 18:45Z 2026-07-07 scan read ok:true /
+        # counts.failed:0 through 11 failed suggestion_rejections inserts —
+        # the failure was buried in cycle_results[].counts where the A4
+        # silent-failure detector (which reads counts.errors) cannot see it.
+        counts["errors"] = _persist_error_rollup(cycle_results)
+
         timing_ms = (time.time() - start_time) * 1000
 
         # Ensure all values are JSON-serializable (datetime -> isoformat, etc.)
         return _to_jsonable({
-            "ok": failed == 0,
+            "ok": failed == 0 and counts["errors"] == 0,
             "counts": counts,
             "timing_ms": timing_ms,
             "strategy_name": strategy_name,

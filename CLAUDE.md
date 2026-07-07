@@ -331,10 +331,16 @@ exercised-status. Verify current flag VALUES on Railway, never here.
   trip at the 21:20Z ingest; full chain incl. the inbox hop confirmed):
   `UPDATE ops_control SET entries_paused=false, entries_pause_reason=NULL
   WHERE key='global';` then confirm read-back + next 16:30Z cycle stages.
-  **RUNBOOK (07-04 live-confirmed): un-pausing without a NEW WIN in the
-  window re-trips on the next ingest — even a zero-close day. Un-pause buys
-  exactly one session of entries; expect the nightly critical until a live
-  win lands. Not an incident.** Flag `STREAK_BREAKER_ENABLED` default-ON.
+  **RUNBOOK (EDGE-TRIGGER since 07-07, replacing the 07-04 level-trigger
+  behavior): the breaker re-trips ONLY when the trailing window CHANGES —
+  window identity is the CONTENT fingerprint (sorted outcome row ids)
+  stamped into `ops_control.streak_breaker_state` AT TRIP TIME. Your manual
+  un-pause SQL is UNCHANGED and is sufficient review (the window you were
+  paged for was recorded when it tripped). A standing reviewed window no
+  longer re-pauses nightly; a NEW loss still trips instantly; un-pause →
+  new loss re-trips; evaluation errors still fail-closed-pause. Flag
+  `STREAK_BREAKER_EDGE_TRIGGER_ENABLED` default-ON; explicit falsy →
+  legacy nightly re-trip.** Flag `STREAK_BREAKER_ENABLED` default-ON.
   Tail of paper_learning_ingest; result in `job_runs.result.streak_breaker`.
 - **Oversight chain — ALL THREE LAST HOPS PROVEN 07-02**: dead-man's-switch
   receipt (pings + DOWN-email test; cron `*/30 8-16 * * 1-5` Chicago, Grace

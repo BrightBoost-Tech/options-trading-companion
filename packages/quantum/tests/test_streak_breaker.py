@@ -97,8 +97,20 @@ class _FakeClient:
 
 
 def _pause_writes(client):
+    # CONTRACT ADDITION (edge-trigger, 2026-07-07): a trip now ALSO writes a
+    # streak_breaker_state fingerprint stamp to ops_control. This helper
+    # keeps its original meaning — PAUSE writes only — so the idempotency
+    # pin ("existing pause never clobbered") still guards exactly what it
+    # always guarded.
     return [u for u in client.updates
-            if u["table"] == "ops_control" and "update" in u]
+            if u["table"] == "ops_control" and "update" in u
+            and "entries_paused" in u["update"]]
+
+
+def _stamp_writes(client):
+    return [u for u in client.updates
+            if u["table"] == "ops_control" and "update" in u
+            and "streak_breaker_state" in u["update"]]
 
 
 def _alerts(client):

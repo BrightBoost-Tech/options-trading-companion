@@ -1317,9 +1317,15 @@ def send_ops_alert_v2(
         except Exception as e:
             logger.warning(f"[OPS_ALERT] risk_alerts write failed: {e}")
     else:
-        logger.warning(
-            f"[OPS_ALERT] no supabase client passed — risk_alerts channel "
-            f"skipped for {alert_type} (webhook-only legacy mode)"
+        # A9-F6 2026-07-07: this is the DESIGNED channel-2-only mode (the
+        # caller — e.g. alert()'s immediate egress — already wrote the
+        # risk_alerts row and passes client=None precisely so no duplicate
+        # row is inserted). The old "webhook-only legacy mode" WARNING read
+        # as pipeline degradation on every healthy egress; say it honestly,
+        # at info.
+        logger.info(
+            f"[OPS_ALERT] channel-2(webhook)-only egress for {alert_type} "
+            f"(designed: risk_alerts row already written by the caller)"
         )
 
     # ── Channel 2 (secondary, best-effort): Slack-compatible webhook.

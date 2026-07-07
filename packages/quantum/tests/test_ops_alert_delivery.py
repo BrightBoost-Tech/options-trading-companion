@@ -110,16 +110,27 @@ class TestDualChannel(unittest.TestCase):
                 )
             self.assertEqual(captured["severity"], risk_sev, ops_sev)
 
-    def test_no_client_is_legacy_webhook_only_with_loud_warning(self):
+    def test_no_client_is_designed_channel2_only_at_info(self):
+        """CONTRACT CHANGED — A9-F6 (2026-07-07): client=None is the DESIGNED
+        channel-2-only mode (the caller already wrote the risk_alerts row and
+        passes None precisely to avoid a duplicate). The old loud 'webhook-only
+        legacy mode' WARNING read as pipeline degradation on every healthy
+        immediate egress; it is now an honest INFO line and must NOT log at
+        WARNING or above."""
         with self.assertLogs(
-            "packages.quantum.services.ops_health_service", level="WARNING"
+            "packages.quantum.services.ops_health_service", level="INFO"
         ) as cm:
             res = ohs.send_ops_alert_v2(
                 "job_failure", "m", severity="error",
                 min_severity="warning", client=None,
             )
         self.assertFalse(res["risk_alert_written"])
-        self.assertTrue(any("no supabase client" in m for m in cm.output))
+        self.assertTrue(any("channel-2" in m for m in cm.output))
+        self.assertFalse(any(
+            m.startswith(("WARNING", "ERROR", "CRITICAL"))
+            and "no supabase client" in m
+            for m in cm.output
+        ))
 
     def test_risk_alert_failure_does_not_crash(self):
         with patch(

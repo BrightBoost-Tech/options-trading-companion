@@ -1420,10 +1420,82 @@ PENDING VERIFICATIONS (2026-07-07, added by the M4 ship):
 - **Bias first live cycle:** executor log shows viability-biased ordering (flag
   armed since 07-03); flag-off comparison not required — wiring test pins it.
 - **GLD modulus first scan:** GLD rejections collapse to $5-strike population only.
-- **CVX:** appears in scan; iv history rows ≥60d after backfill; first-pass
-  roundtrip verdict (expect MARGINAL, watch vs the $15 gate).
+- **CVX:** IV-integrity-ELIGIBLE as of 07-06 20:28Z — days:90 top-up
+  (job f5f7b8be, 111s) after the days:60 seed (a06c143d): 84 distinct
+  non-null iv_30d days (2026-03-02→06-30), 0 dup (underlying,as_of_date),
+  idempotency held (skipped_existing=55/ok=29/failed=0). Gate rule cited:
+  iv_repository.py:26 MIN_IV_HISTORY_DAYS=60; :224-249 sample COUNT of
+  non-null iv_30d rows (≤252 recent) — contiguity irrelevant; scanner
+  rejection seam options_scanner.py:3060-3067. PIN (16:00Z scan, 11:00 CT):
+  CVX in the scanned set, iv_rank computed (sample_size 84+), NO
+  iv_rank_insufficient_history rejection for CVX; if it candidates, first
+  roundtrip-gate evaluation with verbatim numbers (expect MARGINAL vs $15).
 - **21:20Z breaker re-eval (tonight):** expected RE-TRIP (no live win 07-06) —
   critical + email is DESIGNED (runbook); un-pause remains operator-only.
+
+2026-07-06 POSTCLOSE AUDIT (v5.4 first run, operator-invoked; report
+`audit/reports/2026-07-06-postclose.md`) — status:reported:
+- **A9 FINDING — egress delivery-receipt gap**: `_maybe_egress_risk_alert`
+  discards send_ops_alert_v2's result (alerts.py:85-95); success logs at
+  invisible info (ops_health_service.py:1379); `egressed_at` never stamped
+  by inline sends — safety-trip delivery disputes close on inference, not
+  fact (tonight's breaker-email triage = 4 evidence hops). FIX (additive):
+  capture insert id → post-send metadata UPDATE {webhook_sent, egressed_at,
+  suppressed_reason} + warning-visible receipt log both outcomes. RIDES THE
+  TAXONOMY PR (same files, one recycle).
+- Pins P1–P5 all PENDING → converge on 07-07 16:00–16:30Z + first close.
+- Free-look: broker 0 open orders / 0 positions on flat book (no orphaned
+  GTC); fossils unchanged (22 queued / 4 stuck-running).
+- Counters: A9→0, others →3 (A7 dormant). No retirement candidates.
+
+## 2026-07-07 POST-CLOSE — #1134 TAXONOMY + ALERT-INTEGRITY — status:SHIPPED
+
+**H8 VERIFIED (the shipped bar): squash `5809505`
+(58095053c10eb76607552355acb1aecc0c2a8a9a) = origin/main; BE + worker +
+worker-background all deployment SUCCESS at that SHA; container start
+21:10:18Z > merge ~21:08Z; post-recycle job flow confirmed (21:10:01Z
+learning_ingest succeeded).** CI green first try (run 28898768862).
+
+**Old→new alert-type map (readers map old→new; historical rows untouched):**
+- `force_close` + real submitted close → `force_close` (unchanged, critical,
+  immediate egress)
+- `force_close` + "Force close FAILED" → **`force_close_failed`** (critical,
+  ADDED to immediate-egress allowlist)
+- `force_close` + "[WARN-ONLY] … enforcement disabled" →
+  **`envelope_violation_warn_only`** (high — was critical; relay path)
+- `warn` (envelope block) → **`envelope_violation`** (high; relay)
+- `warn` (envelope warn) → **`envelope_violation`** (warning — was the
+  out-of-vocab 'medium'; no egress, anti-spam unchanged)
+- Writer unification: monitor `_log_alert` now delegates to canonical
+  `alert()` (severity normalize medium/warn→warning, error→high; #1100
+  retry; owner stamp; receipt) — the which-writer-wrote-it egress lottery
+  (today's real force_close on the ≤37-min relay) is closed.
+
+**A9 receipt live**: `metadata.egress_receipt` {webhook_sent, sent,
+suppressed_reason, receipted_at} + `egressed_at` stamped post-send;
+`[ALERT_RECEIPT]` WARNING both outcomes; FAIL-OPEN test-pinned. **F8 live**:
+suggestions_open rolls `rejection_persist_failures` → top-level
+`counts.errors` + ok:false; runner folds alert-write-failure deltas into
+every job's `counts.errors` (A4-visible; zero-delta byte-identical).
+
+**F3 PATH TAKEN — UNAMBIGUOUS: F3-MINIMAL SHIPPED / F3-FULL FILED.**
+Shipped: transient matcher now catches the 18:45Z specimen (httpx
+WriteError / "Connection reset by peer" → retries), and a critical/high
+whose insert is STILL lost force-egresses the webhook marked
+`[DB-ROW-LOST]` (inbox = durable trace; test-pinned). NOT built: the
+all-severities durable buffer — warning-class rows still degrade to
+logger.exception only; filed as its own item (the critical-class hard
+trigger is satisfied by the fail-safe).
+
+PENDING VERIFICATION (tonight/tomorrow): 21:20Z ingest runs on `5809505` —
+today's −$15 QQQ close makes the window MARA −15 / QQQ −73 / QQQ −15 →
+expected RE-TRIP = **first live exercise of the new immediate-egress path**:
+the `streak_breaker_tripped` critical should carry
+`metadata.egress_receipt.webhook_sent=true` + `egressed_at` + an
+`[ALERT_RECEIPT]` worker-background log line. Also watch: first
+`envelope_violation`-typed rows at the next violation; the designed
+channel-2 INFO replacing the legacy-mode WARNING; morning un-pause ritual
+unchanged.
 
 HYGIENE (filed 07-06, from the M4 CI failure): `test_weekly_report_win_rate.py`
 replaces 18 modules (incl. cash_service, options_scanner) with MagicMocks in

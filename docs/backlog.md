@@ -125,6 +125,13 @@ ops_health_check q30min-real dedup → #1114 · signal-accuracy telemetry
   the same `_split_chain_to_calls_puts` seam (`None` → keep; the legacy
   fallback chain carries no OI). Self-filters every symbol's dead strikes.
   · origin 07-06 M2 recon · done when: OI floor at the seam, H9-safe.
+- **Nightly-audit dead-man ping (audit-loop ③, 07-06 night triage)** — a
+  healthchecks.co cron check on the local nightly-audit schedule (report
+  write → ping), same pattern as the worker's #1109. Root cause of the
+  07-05 miss was machine-side (30-min sleep + WakeToRun/StartWhenAvailable
+  both False — operator fixing task settings); the ping makes the NEXT miss
+  visible in email regardless of cause. · origin 07-06 C3 · done when: a
+  missed nightly run emails within Grace.
 
 - **Migration tracking drift check (process fix, recon COMPLETE 07-02)** —
   27/112 migration files tracked (82 pre-tracking-era, 1 post-era procedure

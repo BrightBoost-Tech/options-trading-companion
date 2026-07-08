@@ -251,6 +251,21 @@ class IntradayRiskMonitor:
             live_positions = positions
             _scope_ok = False
 
+        # ── One-beta exposure TRIPWIRE (2026-07-08, meta-audit gap #3) ────
+        # ADDITIVE ALARM ONLY — never blocks, closes, or mutates a position.
+        # The real bucket-correlation control (B1/B2) is filed; until it
+        # ships, nothing mechanical watches concurrent live exposure while
+        # the allocator can select ≤4 candidates in one cycle. Fires a
+        # critical (immediate-egress + receipt via _log_alert→alert()) at
+        # ≥2 open LIVE-routed positions. Fail-isolated: a tripwire bug must
+        # never touch the monitor's protective path.
+        try:
+            self._one_beta_tripwire(user_id, live_positions, _scope_ok)
+        except Exception as _trip_err:
+            logger.warning(
+                f"[RISK_MONITOR] one-beta tripwire failed (non-fatal): {_trip_err}"
+            )
+
         # 3. Compute portfolio metrics for envelope check (LIVE book).
         #     v5 phantom-mark-safe brake (2026-06-17 incident): the daily/weekly
         #     loss brake fires on realized (DB-authoritative, trusted, UN-GATED —
@@ -1458,6 +1473,91 @@ class IntradayRiskMonitor:
                 metadata={"error": str(e)},
             )
             return False
+
+    # ── One-beta exposure tripwire (meta-audit gap #3, 2026-07-08) ────
+
+    def _one_beta_tripwire(
+        self, user_id: str, live_positions: List[Dict], scope_ok: bool
+    ) -> None:
+        """ALARM — never act — when ≥2 LIVE-routed positions are open while
+        the bucket-correlation control (B1/B2) remains unbuilt.
+
+        Simplest-correct version (owner decision 07-08): ANY 2 concurrent
+        live positions is the uncontrolled case at this account size —
+        per-bucket refinement is B1/B2's job, deliberately not built here.
+        Semantics: alarm-on-onset, deduped on the sorted open-position-id
+        SET — an unchanged standing pair does NOT re-alarm every q15 cycle;
+        a 3rd position (new set) re-alarms. Skips when the live-routing
+        scope query failed this cycle (counting shadows would be noise; the
+        scope failure already warned loudly and the next clean cycle
+        re-evaluates). Flag CONCURRENT_POSITION_ALARM_ENABLED default-ON
+        (safety polarity: unset/empty → ON; only explicit falsy disables).
+        This method READS risk_alerts and emits via _log_alert — it never
+        writes positions, orders, or ops_control.
+        """
+        raw = (
+            os.environ.get("CONCURRENT_POSITION_ALARM_ENABLED") or ""
+        ).strip().lower()
+        if raw in ("0", "false", "no", "off"):
+            return
+        if not scope_ok:
+            return
+        open_live = [
+            p for p in live_positions
+            if str(p.get("status") or "open").lower() == "open"
+        ]
+        if len(open_live) < 2:
+            return
+        position_set = ",".join(sorted(str(p.get("id")) for p in open_live))
+        symbols = sorted({str(p.get("symbol")) for p in open_live})
+        # Onset dedup: one alarm per distinct open-set (7-day window so an
+        # ancient identical set can never suppress a fresh onset).
+        try:
+            recent = (
+                self.supabase.table("risk_alerts")
+                .select("id, metadata")
+                .eq("alert_type", "concurrent_live_positions_uncontrolled")
+                .gte(
+                    "created_at",
+                    (datetime.now(timezone.utc) - timedelta(days=7)).isoformat(),
+                )
+                .limit(20)
+                .execute()
+            )
+            for row in (recent.data or []):
+                meta = row.get("metadata") or {}
+                if isinstance(meta, dict) and meta.get("position_set") == position_set:
+                    return  # this exact exposure set already alarmed
+        except Exception as dedup_err:
+            # Dedup read failure → alarm anyway (fail-toward-alarming; a
+            # duplicate alert beats a silent uncontrolled exposure).
+            logger.warning(
+                f"[RISK_MONITOR] tripwire dedup read failed — alarming anyway: {dedup_err}"
+            )
+        self._log_alert(
+            user_id=user_id,
+            alert_type="concurrent_live_positions_uncontrolled",
+            severity="critical",
+            message=(
+                f"{len(open_live)} concurrent LIVE positions open "
+                f"({', '.join(symbols)}) with NO bucket-correlation control "
+                f"built (B1/B2 filed). Additive alarm only — nothing was "
+                f"blocked or closed; operator decides."
+            ),
+            metadata={
+                "position_set": position_set,
+                "count": len(open_live),
+                "symbols": symbols,
+                "consequence": (
+                    "Concurrent live exposure is uncontrolled at block level "
+                    "until B1/B2 ships; correlated names can stack."
+                ),
+                "operator_action": (
+                    "Review the open set; close/hold is your call. The "
+                    "alarm re-fires only if the set changes."
+                ),
+            },
+        )
 
     # ── Alert logging ─────────────────────────────────────────────────
 

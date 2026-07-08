@@ -806,6 +806,13 @@ class IntradayRiskMonitor:
                 self.supabase.table("paper_positions").update({
                     "current_mark": pos.get("current_mark"),
                     "unrealized_pl": pos.get("unrealized_pl"),
+                    # False-ager fix (2026-07-08): this path MARKS the
+                    # position — stamp the provenance field it was starving.
+                    # Pre-fix only the scheduled MTM stamped last_marked_at,
+                    # so OUTPUT_FRESHNESS false-aged paper_positions past its
+                    # 168h ceiling (7× ops_output_stale highs today) and the
+                    # stale-mark exit guard saw q15min marks as provenance-less.
+                    "last_marked_at": datetime.now(timezone.utc).isoformat(),
                     **corro,
                 }).eq("id", pos.get("id")).execute()
             except Exception as persist_err:

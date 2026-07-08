@@ -563,12 +563,15 @@ def _close_position_on_fill(
             read_stamp as _cfg_read,
             log_close_fill_gap as _cfg_log,
             stamp_payload as _cfg_payload,
+            broker_fill_to_mark_basis as _cfg_basis,
         )
         _cfg_cross, _cfg_mid = _cfg_read(order.get("order_json"))
-        _cfg_fill = alpaca_order.get("filled_avg_price")
-        # Same positive-magnitude basis as cross/mid (achievable_close); a
-        # combo's net fill can be reported signed by the broker.
-        _cfg_fill = abs(float(_cfg_fill)) if _cfg_fill is not None else None
+        # SIGN FIX (2026-07-08): cross/mid are stamped SIGNED (credit
+        # structures are negative); the broker's net combo fill maps onto
+        # that basis by NEGATION (credit fills negative / debit positive at
+        # the broker). The old abs() here corrupted every credit close
+        # (QQQ 07-07 stored gap_fraction 15.08; true 1.42).
+        _cfg_fill = _cfg_basis(alpaca_order.get("filled_avg_price"))
         _cfg_log(
             position.get("symbol"), position_id,
             _cfg_cross, _cfg_mid, _cfg_fill,

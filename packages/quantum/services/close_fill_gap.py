@@ -78,6 +78,27 @@ def compute_gap_fraction(
     return (f - c) / denom
 
 
+def broker_fill_to_mark_basis(broker_fill: Any) -> Optional[float]:
+    """Map an Alpaca mleg net CLOSE fill onto the SIGNED mark basis that
+    cross/mid are stamped in (sign fix, 2026-07-08 audit finding).
+
+    Broker convention: net CREDIT fills are NEGATIVE, net DEBIT fills
+    POSITIVE. Internal mark convention: a structure's mark is its signed
+    liquidation value — positive for net-long/debit structures, negative for
+    net-short/credit structures (closing costs a debit). The close fill in
+    mark basis is therefore the NEGATION of the broker fill, for BOTH shapes:
+
+      debit close  (SOFI 06-30): broker −1.36 credit → +1.36 vs +1.31/+1.525 → 0.23
+      credit close (QQQ 07-07):  broker +1.64 debit  → −1.64 vs −1.98/−1.74  → 1.42
+
+    The pre-fix ``abs()`` coincidentally matched for debit closes and
+    corrupted every CREDIT close (QQQ 07-07 stored 15.08 instead of 1.42).
+    Never raises; None/garbage → None.
+    """
+    f = _coerce(broker_fill)
+    return -f if f is not None else None
+
+
 def read_stamp(order_json: Optional[Dict[str, Any]]) -> Tuple[Optional[float], Optional[float]]:
     """Read the stage-stamped (cross, mid) back off a close order's order_json.
 

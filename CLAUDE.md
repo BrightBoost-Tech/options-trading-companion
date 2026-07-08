@@ -488,7 +488,12 @@ paper_learning_ingest · policy_lab_eval · post_trade_learning · promotion_che
 - **READ-ONLY contract is absolute**: the loop writes reports
   (`audit/reports/YYYY-MM-DD.md`) and `audit/ALERT-<date>.md` files only — it
   never merges, flips flags, or trades, even on a critical finding. The human
-  acts in the morning.
+  acts in the morning. **Sweep convention (07-08, meta-audit gap #9): the
+  loop never commits, so untracked reports hide findings from the committed
+  view — every build session sweeps any untracked `audit/reports/*.md` into
+  its PR; the morning ritual checks `git status audit/`.** The nightly's
+  dead-man ping fires only after the dated report file exists
+  (run-nightly.cmd; unset `NIGHTLY_AUDIT_PING_URL` = logged no-op).
 - `audit/ledger.md` = exclusion memory (shipped/reported findings — re-
   finding is a wasted slot) **+ pending-verifications list = the recoverable
   runbook if a session drops**. `audit/area8.md` = the single self-extension

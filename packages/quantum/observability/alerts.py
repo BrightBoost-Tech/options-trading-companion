@@ -41,6 +41,9 @@ _RISK_EGRESS_ALERT_TYPES = frozenset(
         "force_close_failed",  # A9-F1 (2026-07-07): close SUBMIT failed — position
         # still open on a breached control; must reach the operator immediately,
         # not on the ≤37-min relay poll.
+        "concurrent_live_positions_uncontrolled",  # one-beta tripwire
+        # (2026-07-08, meta-audit gap #3): ≥2 live positions with no bucket
+        # control — time-sensitive exposure alarm, operator decides.
     }
 )
 

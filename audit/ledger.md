@@ -1448,6 +1448,121 @@ PENDING VERIFICATIONS (2026-07-07, added by the M4 ship):
   GTC); fossils unchanged (22 queued / 4 stuck-running).
 - Counters: A9→0, others →3 (A7 dormant). No retirement candidates.
 
+## 2026-07-08 META-AUDIT (chat-run, gap register) + TIER-1 PROCESS FIXES — status:SHIPPED (PR-A)
+
+**Meta-audit verdict (full register in session 07-08 ~22:15Z): ship-side
+TRUSTWORTHY (ledger↔git 1:1 over 22 commits; 4 spot-checked fixes verified
+against RUNNING behavior; zero built-not-wired in the shipped set); intake
+side LEAKY (9 goes-silent findings, concentrated pre-ledger 06-10 runners;
+2 re-verified STILL REAL); charter side STALE (disk prompt was v5.0/06-12;
+scheduled cadence 6 reports/27 nights; 3 silent-empty runs 06-13/14/20).**
+
+PR-A ships: **v5.4 TO DISK** (audit/v5-prompt.md — gap #7; adds A1(iv)
+sizing/allocation custody [gap #10] + expected-state: suppression-is-
+designed, headless-broker-blind, breaker ritual) · **ping-after-file-exists**
+in run-nightly.cmd (gap #8; NO ping existed at all — first wiring;
+PowerShell date because %DATE% is locale-formatted and would never match;
+gate dry-run verified both directions; operator: create the healthchecks
+check + set machine env NIGHTLY_AUDIT_PING_URL, Grace ~26h) · **sweep
+convention** (gap #9, CLAUDE.md §7; 07-08 report swept in this PR) ·
+**#1104 CLOSED**: operator confirmed reset ~13:45 CT → 18:45:26Z burst =
+C1 rotation artifact CONFIRMED; pool-config reopen stays SHUT.
+
+Meta-audit open register (dispositions pending owner triage): expiry-day ×
+unpriceable defer seam (live$, own recon) · compounder greedy-stop BREAK
+:286 (live$, Tier-2 fix) · EV-basis ∪ fee-unit recon (merged charter,
+pre-market session) · F-A1a mechanical guard · one-beta tripwire (PR-B
+TONIGHT) · PoP-denom/DTE segmentation (fold into clamp review) · smaller
+silents batch (envelope re-egress 13/3h · A9-F4 · F-A2d · N4 · universe_size
+mislabel · time-stop/eod-phantoms · N1/N2 · 06-10 A5/A6 partials) · A6
+executor-4× question ANSWERED (operator manual cycles, no scheduler change).
+
+## 2026-07-08 POST-CLOSE — #1137 SIGN FIX + FALSE-AGER — status:SHIPPED · THE TRIPLE-GATE POOL SEALED (8/8)
+
+**H8 VERIFIED: squash `2a83174` (2a83174ed78080e329626297d1c9eaab8d8c6bb1)
+= origin/main; all three services SUCCESS; worker-background container
+20:51:29Z > merge 20:50:03Z — 29 min settle margin before the 21:20Z
+ingest (race deadline CI-green-by-21:05Z beaten at 20:49:38Z).**
+
+- **Sign fix live**: `broker_fill_to_mark_basis` (negation, not abs) at the
+  live-fill reconciler; QQQ credit pin 1.4167 + SOFI debit 0.2326 + corrupt
+  -15.08-shape regression + call-site wiring all test-pinned. **Both
+  poisoned rows RE-DERIVED (supervised, read-back)**: bd25cc9d 15.083→
+  **1.4167**, 3139842b 3.076→**0.9635**. The live Phase-3 gap dataset (3
+  rows: SOFI 0.23 · QQQ 1.42 · QQQ 0.96) is now honest.
+- **False-ager fixed**: monitor Part-B persist stamps `last_marked_at`;
+  **9** ops_output_stale highs ACKed cause-fixed (2 more had fired since
+  the mid-session count of 7; ids in session log).
+- **BREAKER — edge-trigger case 2 FIRST LIVE PROOF (21:20:02Z on
+  `2a83174`)**: new loss → new window [QQQ −10 bd895160 · QQQ −15 7dd459f8
+  · SOFI −40 055ead84] → `edge_trigger:true, tripped:true, paused_written:
+  true, fingerprint_stamped:true` — the NEW fingerprint REPLACED the old
+  stamp (read-back ✓; MARA 0c54ead8 aged out). Critical receipt:
+  webhook_sent=true 21:20:05Z. **Tomorrow's suppression test compares
+  against THIS window** — morning un-pause, then a no-close Thursday must
+  yield `suppressed_standing_window:true`, no re-pause, no critical.
+- **CLOSE #9 INGESTED**: outcomes_created=1, errors=0; typed
+  strategy=IRON_CONDOR / regime=normal ✓; gap datapoint born clean
+  (its order row was re-derived pre-ingest). **Post-epoch live pool = 8/8.**
+- **⚠ TRIPLE-GATE BOUNDARY MARKER — EV numbers change at 2026-07-09
+  10:00Z, not tonight**: the pool sealed at 21:20Z tonight, but the relearn
+  executes at the scheduled calibration_update (05:00 CT / 10:00Z). First
+  real multipliers print then; consumers from that run onward:
+  `apply_calibration` → scanner EV/PoP scoring → `risk_adjusted_ev`
+  (executor sort) AND `ticket.expected_value` = the #1101 roundtrip gate's
+  gross_ev — every gate decision after 10:00Z is on calibrated numbers.
+  Training pool: {+48, −45, −28, −73, −15, −40, −15, −10} (1W/7L) — expect
+  a SHRINK; whether the 0.5 clamp floor binds is the clamp-review question,
+  answerable when the multiplier prints. Winsorize: no extreme outlier in
+  the live-only pool (max |x|=73) — likely no-action, owner-gated.
+- **Accuracy alert**: expected at the first post-ingest health check
+  (21:37Z; n=8, hit 12.5% < 0.2) — observe-only; verify in the morning
+  ritual.
+- **FILED: 06-08 NFLX pre-epoch live close missing from
+  learning_feedback_loops** (broker+champion ledger=9 all-time, outcome
+  table=8 post-tonight) — pre-epoch-flagged backfill, rides any future PR;
+  no effect on the calibration pool (pre-epoch excluded by design).
+- Untouched, confirmed: roundtrip gate (EV-basis recon own session — now
+  MORE important: the new multiplier flows into that same comparison) ·
+  one-beta B1/B2 · reaper · gap-3(b) · #1104 (pending reset-time).
+
+## 2026-07-07 POST-CLOSE — #1135 EDGE-TRIGGER BREAKER — status:SHIPPED
+
+**H8 VERIFIED: squash `be13733` (be137338ac1e89299cc18034bc04c6201427e47f)
+= origin/main; BE + worker + worker-background all SUCCESS at that SHA;
+container start 22:18:03Z > merge ~22:16Z.** CI green first try. Migration
+`20260707221500` (ops_control.streak_breaker_state jsonb, additive
+nullable) applied + tracked PRE-merge, read-back verified.
+
+**Semantics live**: re-trip ONLY on window CHANGE. Fingerprint =
+CONTENT-based sorted trailing-N outcome row ids, stamped at TRIP time —
+**the operator un-pause SQL is UNCHANGED and is sufficient review** (the
+window identity was recorded when it paged them). Suppression needs a
+POSITIVE match; no-stamp/NULL/malformed/read-error/stamp-failure all
+degrade toward tripping. A NEW loss trips instantly (protection intact —
+framed in the PR: not loosening, operator-override-respect added). **Flag
+`STREAK_BREAKER_EDGE_TRIGGER_ENABLED` DEFAULT-ON** (explicit falsy →
+legacy level-trigger byte-identical); wiring test-pinned in
+evaluate_and_trip (no #1126-class inert flag). CLAUDE.md §4 runbook
+REPLACED (the nightly-re-trip paragraph is retired).
+
+**Baseline + stamp (tomorrow's before/after)**: tonight's 21:20:02Z trip
+ran on `5809505` (level-trigger era, PRE-#1135) — window by ingest order =
+QQQ −15 (7dd459f8) / SOFI −40 (055ead84) / MARA −15 (0c54ead8); the trip
+critical carries the #1134 receipt: webhook_sent=true, egressed_at
+21:20:06Z, owner=alert — **#1134's receipt FIRST LIVE EXERCISE, PASS**.
+One-time operator-approved stamp EXECUTED post-H8 (tonight's window
+fingerprint backfilled via the breaker's own ordering; read-back
+confirmed) because the trip predated the stamping code.
+entries_paused=TRUE now (tonight's trip — morning un-pause ritual
+unchanged).
+
+**TOMORROW'S PIN (first suppression test)**: morning un-pause → 21:20Z
+ingest on an UNCHANGED window → expect `suppressed_standing_window: true`
+in job_runs.result.streak_breaker, NO re-pause, NO nightly critical,
+entries stay armed. A NEW loss instead → trips (also correct). Attribution
+clean: #1135 is the only behavioral change in its recycle.
+
 ## 2026-07-07 POST-CLOSE — #1134 TAXONOMY + ALERT-INTEGRITY — status:SHIPPED
 
 **H8 VERIFIED (the shipped bar): squash `5809505`
@@ -1506,3 +1621,78 @@ de-poison guard; the POISONER itself is unfixed and has pre-existing order
 sensitivity (6 capital-basis failures in explicit weekly-first order — never
 CI's alphabetical order). Follow-up: convert to conftest fixture/unpatch;
 grep for siblings doing module-level sys.modules assignment without restore.
+
+## status:reported — 2026-07-08 NIGHTLY run (report `audit/reports/2026-07-08.md`)
+
+Window 07-06 05:01Z → 07-08 05:01Z — the 15-day flat stretch ENDED. Both workers
+SUCCESS @ `be137338` (#1135) = origin/main HEAD (H8 clean; start 07-07 22:17:35Z).
+**First LIVE fill since 06-30:** QQQ iron condor `386a39fe` (aggressive cohort
+`3d289dca`), entry 14:37Z (off-schedule executor run, filled 1.49 credit vs 1.41 limit,
++$8 improvement, 76ms), force-closed 17:45Z on `intraday_stop_loss`, realized −$15.00.
+`entries_paused=TRUE` since 07-07 21:20Z (breaker re-trip; **operator un-pause required**).
+Live champion now 1 win / 7 post-epoch closes, −$168, hit-rate 14.3% (Brier 0.296).
+⚠ **RUN LIMITATION:** alpaca MCP tools absent — broker not snapshot-read; live trade
+DB-corroborated (execution_mode=alpaca_live + reconciler + is_paper=false), not
+broker-confirmed. Equity/OBP not re-read (last $2,093.74 07-06, −15 QQQ ⇒ ≈$2,078.7 DB-derived).
+
+- **[A4 2026-07-08 — FINDING] `close_fill_gap` sign-convention bug corrupts every
+  live-close gap_fraction (poisons the deferred Phase-3 reopen gate).** The #1102
+  instrumentation computes `gap_fraction=(fill−cross)/(mid−cross)` with NO sign normalization
+  (`services/close_fill_gap.py:62-78`). On the LIVE/reconciler path
+  `brokers/alpaca_order_handler.py:571` forces `fill=abs(filled_avg_price)` (+1.64) while
+  `cross`/`mid` are stamped SIGNED (`paper_exit_evaluator.py:1913,1976` from `current_mark`
+  −1.74 / corroboration −1.98). QQQ 07-07, the FIRST live full-quad close, stored
+  fraction **15.0833** (=3.62/0.24) vs the correct-sign **1.417**. Internal/shadow exit
+  path passes signed fill → self-consistent; only the LIVE path is wrong. Test fixture
+  (`tests/test_close_fill_gap.py:44-47`) uses consistent-positive signs (SOFI→0.2326) → CI
+  green while production is corrupt = the #1126/9a2cef1 test-green-production-wrong class
+  (§9 never-do). Since #1102 shipped: 0 usable live gap_fractions (QQQ corrupt, SOFI-07-01
+  shadow null). FIX: one line — sign-match fill at `:571` (drop `abs()`) or abs cross/mid at
+  `:567`; add a mixed-sign fixture. RISK zero (observe-only, best-effort try/except).
+  CONFIDENCE high (DB arithmetic + code both dispositive). Blast-radius note: the deferred
+  Phase-3 "two-quote confirmation" safety fix (reduces over-pessimistic premature
+  force-closes: QQQ −49-est/−15-fill, SOFI −65/−40) is GATED on this now-broken distribution.
+- **[A5 2026-07-08 — FINDING] Standing-envelope alerts re-egress to the operator phone
+  every 15-min monitor cycle (no content-dedup) — cry-wolf burying criticals.** While one
+  live QQQ was held, "QQQ is 100% of risk (limit 40%)" was re-written HIGH and relay-egressed
+  every cycle → **13 phone egresses in 3h** (14:45–17:45Z) + 26 non-egressed medium
+  expiry/sector; the `force_close` critical egressed 18:07Z, AFTER them.
+  `risk/risk_envelope.py:316-354` appends fresh each check; `intraday_risk_monitor.py:449-496`
+  no changed-since-last-cycle guard (concentration severity default `"block"`→HIGH); relay
+  poller `ops_health_service.py:1431` suppresses only per-row already-egressed stamps
+  (`:1479`), NO type+symbol+content fingerprint. **Confirmed persists post-#1134** (rename
+  kept concentration→high→relay). FIX (additive): apply #1135's edge-trigger principle to
+  egress — suppress re-egress of an unchanged (type,symbol,bucket) standing condition within
+  a hold. RISK zero (egress-only). CONFIDENCE high.
+- **A1/A3/A7 UNCHANGED** (raw mode holds at 7/8 post-epoch live; ingest clean errors=0;
+  QQQ condor hold 3h07m = ledgered cohort-stop-dominates-condors). **A2** — GATED Phase-3
+  over-pessimism class exercised a 2nd time (QQQ −49 corroborated est vs −15 fill; cited,
+  not re-found); its reopen data is the A4 bug. **A6** — binding constraint = EV-after-cost
+  ($15 roundtrip floor rejected aggressive `38d57d55` at net +14.45), not cadence; OPEN Q:
+  executor ran 4× on 07-07 (14:37 exec-1, 16:30/17:59/18:47 exec-0) vs one-shot/day — likely
+  operator retries around the un-pause, confirm.
+- **A8** roundtrip-reject class now exercised LIVE (aggressive +14.45 = edge-lost;
+  neutral/conservative = spread-eaten); reject-was-a-win again (QQQ passed→−15). Per-gate
+  marker still backlog RESEARCH. **A9** no new integrity finding (all alerts honest; the
+  egress noise is honest→A5; ops_data_stale silent — market open). **A10** no new instance;
+  winter-close blind hour (Nov) still queued; no fixture inside 45d.
+
+VERIFICATIONS CLOSED THIS RUN:
+- ✅ **M4 post-fix healthy scan** (07-07): 0 `micro_tier_underlying_too_high`, 76 syms, 0
+  `alpaca_options_buying_power_query_failed`. The 07-06 inverted-universe incident's zero was
+  the incident's, not the gates' — M4 (#1132) HELD on the next RTH day.
+- ✅ **CVX IV-eligibility**: scanned 07-07, `iv_rank_insufficient_history`=0, rejected on
+  real `spread_too_wide_real`. **GLD**: scanned clean (no strike/IV errors). M1/M2/CVX closed.
+- ✅ **Breaker re-eval**: 07-06 21:20Z re-tripped; 07-07 21:20Z re-tripped on NEW QQQ−15
+  (window rolled QQQ−73→QQQ−15). #1134 streak-breaker critical carried `egressed_at`
+  21:20:06Z (receipt partial-confirm).
+
+PENDING VERIFICATIONS (2026-07-08 → next session):
+- **⚠ OPERATOR: `entries_paused=TRUE`** (07-07 21:20Z, QQQ−15/SOFI−40/MARA−15). Un-pause
+  before the next RTH else the 16:30Z staging proof no-ops.
+- **#1135 edge-trigger FIRST SUPPRESSION test — STILL PENDING**: 07-07 21:20Z ran on #1134
+  (pre-#1135 deploy 22:17Z) AND a new loss landed (window changed→tripped). The distinctive
+  `suppressed_standing_window` path fires 07-08 21:20Z IFF operator un-pauses and no new loss.
+- **#1134 first `envelope_violation` typed rows + egress receipt** on the next position-hold.
+- **First CORRECTED `[CLOSE_FILL_GAP]`** once the A4 sign fix ships (expect ~1.4, not 15.08).
+- **A6 executor-cadence**: confirm whether 4×/day is scheduled or operator-driven.

@@ -702,8 +702,16 @@ def _stage_order_internal(supabase, analytics, user_id, ticket: TradeTicket, por
     # underwater-on-executable from entry. OPEN-only; raises
     # EntryRoundtripCostExceedsEV (clean no-broker-submit reject, mirrors
     # EntryQuoteUnpriceable) which the autopilot loops count as not-executed.
+    # Option-A cohort split (2026-07-09): SHADOW portfolios (routing_mode
+    # 'paper_shadow') get the fixed per-contract decision; anything else is
+    # treated as live-routed and stays observe-only unless
+    # GATE_QTY_FIX_LIVE_ENABLED. Unknown routing → protected (live) path.
+    _is_shadow_portfolio = str(
+        (portfolio or {}).get("routing_mode") or ""
+    ).strip().lower() == "paper_shadow"
     _apply_entry_roundtrip_gate(
-        supabase, ticket, position_id, _entry_leg_quotes, suggestion_id=suggestion_id,
+        supabase, ticket, position_id, _entry_leg_quotes,
+        suggestion_id=suggestion_id, is_shadow=_is_shadow_portfolio,
     )
 
     # TCM Estimate
@@ -1189,8 +1197,23 @@ def _entry_roundtrip_cost_gate_enabled() -> bool:
     return raw.strip().lower() not in ("0", "false", "no", "off")
 
 
+def _gate_qty_fix_live_enabled() -> bool:
+    """GATE_QTY_FIX_LIVE_ENABLED — Option-A flag (2026-07-09). DEFAULT OFF
+    (observe-only on the LIVE path): the qty-scaling fix's correct
+    per-contract basis is COMPUTED and LOGGED for live-routed cohorts, but the
+    live DECISION stays on the legacy (buggy) sized-vs-unscaled result — a
+    data-gathering window before opening live qty>1 entries (Option B). SHADOW
+    cohorts always get the fixed decision regardless of this flag. LOOSENING
+    polarity (flipping ON opens more live entries) → explicit opt-in only:
+    1/true/yes/on. Absent/empty/anything-else → OFF (observe-only)."""
+    return os.environ.get("GATE_QTY_FIX_LIVE_ENABLED", "").strip().lower() in (
+        "1", "true", "yes", "on",
+    )
+
+
 def _apply_entry_roundtrip_gate(
-    supabase, ticket, position_id, entry_leg_quotes, suggestion_id=None
+    supabase, ticket, position_id, entry_leg_quotes, suggestion_id=None,
+    is_shadow=False,
 ) -> None:
     """Pre-broker-submit ENTRY rejection on REAL executable round-trip cost.
 
@@ -1254,6 +1277,7 @@ def _apply_entry_roundtrip_gate(
         legs=legs, leg_quotes=leg_quotes, quantity=getattr(ticket, "quantity", None),
     )
     round_trip = rt.get("round_trip")
+    round_trip_pc = rt.get("round_trip_per_contract")
 
     try:
         gross_ev_f = float(gross_ev)
@@ -1264,7 +1288,7 @@ def _apply_entry_roundtrip_gate(
         )
         return
 
-    if round_trip is None:
+    if round_trip is None or round_trip_pc is None:
         # Executable side incomplete (some leg unpriceable two-sided). #1038
         # owns the dark-leg reject; never fabricate a cost here.
         logger.warning(
@@ -1275,14 +1299,51 @@ def _apply_entry_roundtrip_gate(
         )
         return
 
-    net = gross_ev_f - float(round_trip)
-    decision = "reject" if net < float(MIN_EDGE_AFTER_COSTS) else "allow"
+    floor = float(MIN_EDGE_AFTER_COSTS)
+    # ── qty-scaling fix (2026-07-09), OPTION A ─────────────────────────────
+    # gross_ev is PER-STRUCTURE (per 1-lot). The correct comparison is
+    # per-contract: gross_ev − round_trip_per_contract, floor $15 PER CONTRACT
+    # (at qty>1 the sized bar is $15×qty). The legacy comparison used gross_ev
+    # (unscaled) against round_trip (qty-scaled) — for qty>1 it false-rejected
+    # economic trades (07-07 live qty-4: applied −net<15 vs true +35.45/ct).
+    # At qty=1 round_trip == round_trip_per_contract, so old_net == new_net and
+    # every qty-1 decision is BYTE-IDENTICAL to the legacy gate.
+    old_net = gross_ev_f - float(round_trip)        # legacy sized-vs-unscaled
+    new_net = gross_ev_f - float(round_trip_pc)      # correct per-contract
+    # SHADOW cohorts always apply the fixed decision. LIVE-routed cohorts stay
+    # on the LEGACY decision (observe-only) unless GATE_QTY_FIX_LIVE_ENABLED is
+    # explicitly ON — the data-gathering window before Option B. is_shadow is
+    # resolved at the call site from portfolio.routing_mode; unknown/live
+    # defaults to the protected (observe-only) path.
+    _use_fixed = bool(is_shadow) or _gate_qty_fix_live_enabled()
+    applied_net = new_net if _use_fixed else old_net
+    applied_round_trip = float(round_trip_pc) if _use_fixed else float(round_trip)
+    _basis = "per_contract" if _use_fixed else "legacy_sized"
+    decision = "reject" if applied_net < floor else "allow"
+    old_decision = "reject" if old_net < floor else "allow"
+    new_decision = "reject" if new_net < floor else "allow"
+
     logger.warning(
-        "[ENTRY_ROUNDTRIP_GATE] gross_ev=%.2f round_trip=%.2f net=%.2f "
-        "floor=%.2f decision=%s suggestion=%s",
-        gross_ev_f, float(round_trip), net, float(MIN_EDGE_AFTER_COSTS),
-        decision, suggestion_id,
+        "[ENTRY_ROUNDTRIP_GATE] gross_ev=%.2f round_trip=%.2f "
+        "round_trip_per_contract=%.2f old_net=%.2f new_net=%.2f applied_net=%.2f "
+        "floor=%.2f decision=%s basis=%s suggestion=%s",
+        gross_ev_f, float(round_trip), float(round_trip_pc), old_net, new_net,
+        applied_net, floor, decision, _basis, suggestion_id,
     )
+    # Observe-only trail: when the FIXED basis would decide differently from
+    # what was APPLIED (a live-routed candidate the fix would flip), log it
+    # loudly — the operator counts how many live entries Option B would open,
+    # at what qty/name, before flipping GATE_QTY_FIX_LIVE_ENABLED.
+    if new_decision != old_decision and not _use_fixed:
+        logger.warning(
+            "[GATE_QTY_SCALED_SHADOW] cohort=live qty=%s old_decision=%s "
+            "new_decision=%s old_net=%.2f new_net=%.2f delta=%.2f gross_ev=%.2f "
+            "suggestion=%s — live decision UNCHANGED (observe-only); "
+            "GATE_QTY_FIX_LIVE_ENABLED=1 would apply the per-contract fix",
+            getattr(ticket, "quantity", None), old_decision, new_decision,
+            old_net, new_net, new_net - old_net, gross_ev_f, suggestion_id,
+        )
+
     if decision != "reject":
         return
 
@@ -1294,8 +1355,8 @@ def _apply_entry_roundtrip_gate(
             supabase.table(TRADE_SUGGESTIONS_TABLE).update({
                 "blocked_reason": "ev_below_roundtrip_cost",
                 "blocked_detail": (
-                    f"gross_ev={gross_ev_f:.2f} round_trip={float(round_trip):.2f} "
-                    f"net={net:.2f} < floor={float(MIN_EDGE_AFTER_COSTS):.2f}"
+                    f"gross_ev={gross_ev_f:.2f} round_trip={applied_round_trip:.2f} "
+                    f"net={applied_net:.2f} < floor={floor:.2f} basis={_basis}"
                 )[:300],
             }).eq("id", suggestion_id).execute()
         except Exception as _se:
@@ -1304,7 +1365,7 @@ def _apply_entry_roundtrip_gate(
                 suggestion_id, _se,
             )
 
-    raise EntryRoundtripCostExceedsEV(gross_ev_f, float(round_trip), net)
+    raise EntryRoundtripCostExceedsEV(gross_ev_f, applied_round_trip, applied_net)
 
 
 def _abs_entry_premium(fill_price) -> float:

@@ -443,6 +443,13 @@ def executable_roundtrip_cost(
         contracts_by_occ[occ] = abs(float(leg.get("quantity") or quantity or 1))
 
     round_trip = 0.0
+    # 2026-07-09 qty-scaling fix: the PER-CONTRACT (per-1-lot / per-structure)
+    # round-trip — the basis gross_ev is natively in. For a uniform-qty
+    # structure this equals round_trip / qty; for a mixed-qty one it is the
+    # "one of each leg" cost (the correct per-structure cost). The entry gate
+    # compares per-structure EV against THIS, not the qty-scaled total. ADDITIVE
+    # return field — the gate is the only caller; existing readers ignore it.
+    round_trip_per_contract = 0.0
     per_leg: List[Dict[str, Any]] = []
     complete = bool(legs_quotes)
     for lq in legs_quotes:
@@ -457,8 +464,10 @@ def executable_roundtrip_cost(
                 "contracts": contracts, "cross_cost": None,
             })
             continue
-        cross_cost = (float(ask) - float(bid)) * contracts * MULTIPLIER
+        spread = (float(ask) - float(bid)) * MULTIPLIER
+        cross_cost = spread * contracts
         round_trip += cross_cost
+        round_trip_per_contract += spread  # contracts = 1 basis
         per_leg.append({
             "occ": occ, "bid": bid, "ask": ask,
             "contracts": contracts, "cross_cost": cross_cost,
@@ -466,6 +475,9 @@ def executable_roundtrip_cost(
 
     return {
         "round_trip": round_trip if complete else None,
+        "round_trip_per_contract": (
+            round_trip_per_contract if complete else None
+        ),
         "per_leg": per_leg,
         "quote_complete": bool(verdict["quote_complete"]) and complete,
         "legs_quotes": legs_quotes,

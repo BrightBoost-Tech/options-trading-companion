@@ -1448,6 +1448,292 @@ PENDING VERIFICATIONS (2026-07-07, added by the M4 ship):
   GTC); fossils unchanged (22 queued / 4 stuck-running).
 - Counters: A9→0, others →3 (A7 dormant). No retirement candidates.
 
+## 2026-07-09 EOD — BUILD #1143 SHIPPED (shadow-detection + calibration fail-loud) + ⭐ OPTION-B CLOCK-RESET MARKER
+
+**#1143 `655c9aa` — MERGED + H8 VERIFIED.** Post-close (merge 22:54:19Z;
+STEP-0 grounded: broker 18:45 ET market-closed, DB 22:45Z). Two fail-safe
+fixes:
+- **Shadow-detection value match (E2 residue):** `_is_shadow_routing()`
+  (`paper_endpoints.py`) now whitelists the REAL production value
+  `shadow_only`. The prior check matched `paper_shadow`, which production never
+  emits → the #1141 Option-A shadow branch was INERT (all cohorts fell to the
+  observe-only legacy-sized basis, `basis=legacy_sized`). Unknown/None routing
+  → False → observe-only (fail-safe: an unknown value never flips a live
+  decision). Live path still behind `GATE_QTY_FIX_LIVE_ENABLED` default-OFF.
+- **Calibration fail-loud:** once-per-scan WARNING at the midday apply site
+  (`workflow_orchestrator.py`) + a write-side WARNING when a blob is stored
+  while apply is disabled (`calibration_update.py`) + an import-time-flag
+  caveat comment (`calibration_service.py`). Logs only; the flag itself was
+  re-enabled by env flip earlier this session (a Railway flip needs a recycle
+  — exactly what the import-time comment documents).
+- **H8:** BE `d1fe9f87` / worker `74f3c83d` / worker-background `dad9b9e0` —
+  all SUCCESS at `655c9aa`, created 22:54:22–23Z > merge 22:54:19Z; prior
+  `907d4cd` deploys REMOVED. No new flags → no read-back beyond confirming
+  `GATE_QTY_FIX_LIVE_ENABLED` OFF + `CALIBRATION_ENABLED=1` (both unchanged).
+- **Tests:** `test_shadow_routing_fix.py` (13) pin `_is_shadow_routing` on the
+  exact production strings + the routing→gate-decision chain (shadow PASS /
+  live REJECT+observe / unknown observe-only / qty=1 invariant) + the two
+  fail-loud source sites. CI green (run 29055518433, 1m42s).
+
+**⭐ OPTION-B CLOCK-RESET MARKER — STAMPED AT `655c9aa` (recycle 22:54:22–23Z).**
+Both preconditions are now met ON THE RUNNING PROCESS: (1) calibration APPLYING
+(`CALIBRATION_ENABLED=1`, re-enabled this session) and (2) shadow-detection
+CORRECT (`shadow_only` matched). **The Option-B (live gate-qty apply) observe
+window's evidence clock RESETS here: the 9 `[GATE_QTY_SCALED_SHADOW]` observe
+lines logged before this recycle are DISCARDED** — they were counted on the
+inert-shadow + inert-calibration basis and are not clean. **Clean observe
+evidence counts only from the first scan after this recycle (07-10 16:00Z scan
+onward).** `GATE_QTY_FIX_LIVE_ENABLED` stays OFF — Option B remains an operator
+decision, now to be made on clean data.
+
+**B4 — EXTERNAL-REVIEWER SCORECARD (so future sessions weight their input
+correctly):** external Q1 (calibration computes/stores but returns ×1.0 =
+a runtime-flag/mapping issue) **CONFIRMED-RIGHT-FOR-THE-RIGHT-REASON** by
+internal recon — root cause was `CALIBRATION_ENABLED='0'`, stale since the
+06-11 epoch, never restored. Their A7 ("stops saved money") **REFUTED on broker
+truth** — the stops mostly force-closed thesis-favorable positions early (B1's
+downstream finding); an honest data limitation on their side (no broker
+access), not a reasoning error. Net: a **calibration-proven** external — high
+weight on their future findings.
+
+## 2026-07-09 EOD — EXTERNAL-REVIEW ADJUDICATION (read-only; verdicts + B1 headline + A6 corrections)
+
+**B1 — THE HEADLINE (the number the external couldn't compute): thesis
+hit-rate ≈ 7/9 (~78%) vs P&L hit-rate 1/9 (~11%). THE PROBLEM IS
+DOWNSTREAM (execution/exits/costs), NOT the signal.** Scored each live
+close's entry thesis against the underlying's path to its INTENDED horizon
+(strikes + exp vs 07-09 prices): NFLX(down, hit), NFLX(down, hit, +48),
+QQQ-IC 06-15 (QQQ 723 inside 645-750 → hit but force-closed −73), SPY-IC
+(751 inside 681-765, on-track, −45), SOFI(18.6>17, on-track, −40),
+QQQ-IC 07-07 (inside, −15), QQQ-IC 07-08 (inside, −10) = 7 thesis-
+favorable; MARA×2 (13.2<13.5/14, didn't rise) = 2 miss. **6 of 9 were
+thesis-RIGHT-but-lost-money** — the underlying was in/toward the profit
+zone but the position was force-closed early at a loss (the premature-stop
+/ Phase-3 over-pessimism pattern, now quantified). CAVEAT: 5 of 9 expiries
+are FUTURE (07-24→08-21) → "on-track" not "hit"; labeled in-progress.
+**INSTRUMENTATION GAP FILED: no shadow-to-expiry tracker — positions
+force-closed in minutes leave nothing following the underlying to the
+original expiry, so thesis quality is only spot-scoreable. This is the #1
+missing measurement.**
+
+**A6 — LEDGER CORRECTIONS (broker=truth; the realized P&L was always
+RIGHT, the EXIT-PRICE DISPLAY used the MARK not the FILL — mid-vs-fill
+confusion, recurring class):**
+- QQQ 07-07: exit shown 1.74 (mark) → **broker FILL 1.64**; realized −$15 ✓.
+- SOFI 06-30: exit shown 1.53 (mark) → **broker FILL 1.36**; entry 1.44 →
+  1.36 = −0.08 ×5×100 = **−$40 ✓ (reconciles the "impossible" row)**.
+- QQQ 07-08: exit shown 1.535 (mark) → **broker FILL 1.59**; credit 1.49 −
+  1.59 = −0.10 ×1×100 = **−$10 ✓ (the "−5" was the mark)**.
+  → The external packet §2a exit-price column reads MARKS; correct to these
+  fills on its next revision (packet is committed #1142 — annotate there,
+  not erase). P&L rows unchanged.
+
+**A1-A7 VERDICTS (cites in the session):** A1 credit-spread PoP=credit/width
+= max_gain/(max_gain+max_loss) (ev_calculator.py:42) — **CONFIRMED inverted
+(≈P(loss)); but LATENT** — IRON_CONDOR + debit strategies (the whole live
+book) are NOT in that branch's strategy_type list; blocks the 2-leg-vertical
+cohort. A2 stop = pct × max_CREDIT (policy_lab/config.py:33), cohorts
+0.40/0.50/0.65 — **CONFIRMED credit-relative** (~17% of max loss at 0.40),
+naming-clear in config but the basis is credit not max-loss. A3 ranker fee
+= fee×contracts×2, NO ×leg-count (canonical_ranker.py:69) + slippage =
+5%-of-EV proxy (:145) vs the gate's executable cross — **CONFIRMED
+multi-basis; ranker under-costs 4-leg → ordering distortion (small $, but
+real)**. A4 score clamped min(100) (guardrails.py:138) — **saturation
+CONFIRMED**; but compute_conviction_score DOES use iv_rank conditionally
+(:118-123) → "IV not in score" **PARTIAL** (the roi×500 production score not
+located). A5 compounder legacy path ~3%×score (~$60) with a self-alert of
+"~6-8× smaller budget" — **CONFIRMED sizing-model gap** (production uses the
+allocator ≈ max_loss; the legacy fit-test tests a fiction). A6 above. A7
+the stops fired on OVER-pessimistic corroborated UPL and the positions were
+in-profit-zone at horizon → **"stops saved money" REFUTED** — they mostly
+stopped WINNING theses early (= B1's downstream finding + Phase-3).
+**External Q1 (runtime flag) CONFIRMED — weight their findings accordingly.**
+
+## 2026-07-09 ~21:29Z — CALIBRATION RE-ENABLED (env flip + recycle, supervised)
+
+**ROOT CAUSE (recon-proven by execution): `CALIBRATION_ENABLED='0'` stale
+kill-switch, off since the 06-11 epoch, never restored.** Calibration was
+LIVE 04-13→06-10 (38 rows, ev≠ev_raw), then disabled at the epoch to stop
+pre-epoch sign-flipped multipliers applying to post-epoch predictions —
+correct then, but the master apply switch was never flipped back when the
+pool matured (07-09). The apply sites (`workflow_orchestrator.py:3554`
+midday scan / `:1740` morning) are gated on the module-level flag; both
+skipped. `get_calibration_adjustments` returned the correct 0.5 blob and
+`apply_calibration(real blob)` → 19.85 in positive control — **the code was
+never broken; the flag was off.** **NEW CLASS LINE: disabled-and-never-
+restored** — a deliberate temporary disable with NO re-enable trigger; kin
+to dead-triggers (§backlog) and prescribed-not-applied (WakeToRun). The
+disable was FAIL-QUIET (no per-scan log; the write job kept computing +
+storing a blob nothing read).
+
+**SEQUENCE (all gates cleared before the flip):**
+- STEP 1 — 21:20Z SUPPRESSION TEST **PASSED** (edge-trigger case 3, first
+  live proof): `suppressed_standing_window:true`, tripped:false,
+  paused_written:false, reason "standing_window_already_reviewed —
+  fingerprint matches the last trip"; window unchanged, entries stay
+  unpaused, 0 trips. #1135 fully validated.
+- STEP 2 — pre-flight cleared: the only `MIN_POP=0.60` gate
+  (`guardrails.SmallAccountCompounder.apply`) is **DORMANT** (not called by
+  the scan; field-name `prob_profit` vs prod `probability_of_profit`;
+  superseded by `services/analytics/small_account_compounder.py`) → a halved
+  PoP breaks nothing live. Epoch off-reason moot (blob is post-epoch by
+  construction).
+- STEP 3 — **`CALIBRATION_ENABLED` set 0→1 on worker + worker-background**
+  (BE is not an apply site). Recycle → both SUCCESS at `907d4cdd` (= the
+  running `03e11d8` apply code + #1142 docs packet the operator merged;
+  **zero code change**, H8-verified by diff). **Read-back: env=1, module
+  CALIBRATION_ENABLED=True on the worker.**
+- STEP 4 — **PRODUCTION PROOF: PARTIAL tonight, FULL pending 16:00Z
+  tomorrow.** The forced post-close scan (job cb2db12c) short-circuited on
+  the market-data **staleness gate** (age 94.8min, fast_path, processed 0)
+  BEFORE scoring — so no scanned ev and no apply-site log tonight. Confirmed
+  tonight: flag flipped + module True + `apply_calibration(blob)`→0.5
+  (function). **NOT YET CONFIRMED (the built-not-wired class is NOT fully
+  closed until this lands): a real scanned `ev == ev_raw × 0.5`** — rides
+  tomorrow's 16:00Z scheduled scan on fresh quotes. Verify then.
+
+**⚠ TRUE BOUNDARY MARKER (supersedes the annotated-false 07-09 10:00Z
+marker): the apply path is ENABLED from 2026-07-09 ~21:29Z (907d4cdd,
+CALIBRATION_ENABLED=1), but NO production ev has been calibrated yet
+(tonight's scan was staleness-gated). The FIRST calibrated production ev is
+2026-07-10 16:00Z. Every EV ever stamped before that moment was RAW except
+the 38 pre-epoch rows (04-13→06-10).** Direction: TIGHTENING (EV×0.5 →
+gate rejects more) — doctrine-clean, not a loosening.
+
+**Option-B observe window: reset condition HALF-MET** (calibration now
+enabled); fully resets when the shadow-detection one-liner ships. 07-09's 9
+observe lines stay discarded (computed on un-halved EV).
+
+**FILED (small PR, tomorrow / with the shadow one-liner): fail-loud
+hardening** — log once-per-scan when `CALIBRATION_ENABLED` gates apply off +
+flag the compute-but-never-apply waste; optionally move the flag read from
+import-time to call-time (so it takes effect without a recycle). A
+month-long silent recurrence must be impossible.
+
+**PENDING-VERIFY (tomorrow morning): (1) 16:00Z scan produces ev=ev_raw×0.5
+on a real suggestion [closes the class]; (2) the PoP ×0.5 lands only on
+display (no live consumer) — confirm no regression; (3) the 21:45Z/22:00Z
+learning chain ran clean post-recycle.**
+
+## 2026-07-09 EOD — FIRST-CALIBRATED-SCAN-DAY FINDINGS (doc-only; fix-queue for tomorrow)
+
+Flat day (0 trades, equity $2,067.86, −$0 P&L). First full day on the
+supposed ×0.5 calibration + the gate-fix observe-log armed. Two findings,
+both Claude Code's own, both fail-safe, both self-caught same day.
+
+- **FINDING #1 (HIGH, headline) — CALIBRATION COMPUTED-NOT-APPLIED**: the
+  0.5 multiplier stores at 10:00Z but `apply_calibration` returns ×1.0 at
+  the scan — champion first calibrated scan verbatim `ev==ev_raw==39.71`
+  (halved would be 19.86). Insert path stamps ev_raw then overwrites
+  ev=apply_calibration(...) (workflow_orchestrator.py:1745-1755); equal
+  values ⇒ ×1.0 returned. Suspect: `get_calibration_adjustments` fails to
+  map an `_overall`-only blob into the `{strategy:{regime}}` return shape,
+  so the documented `_overall` fallback (calibration_service.py:577) never
+  fires and application silently falls to ×1.0. **CLASS: built-not-wired
+  (#1126 family — computes/stores but doesn't reach the decision path).**
+  RECON-THEN-FIX, own session, FIRST work tomorrow. Cross-ref: flagged to
+  the external reviewer as §1 question (1) — do not double-drive; whoever
+  moves first claims it.
+- **FINDING #2 (one-liner + test) — OPTION-A SHADOW-DETECTION MISS**:
+  #1141's gate keyed `routing_mode == "paper_shadow"`, but production
+  values are aggressive=`live_eligible`, neutral/conservative=`shadow_only`
+  → matched nothing → ALL cohorts ran `basis=legacy_sized` (observe-only),
+  the shadow-side fix INERT, observe-log mislabeled shadows as `cohort=live`.
+  FAIL-SAFE (zero live change; the miss defaults to the protected path) but
+  promotion-un-biasing didn't happen. FIX: match `shadow_only` (or
+  `!= live_eligible`) + pin the test on PRODUCTION routing values (the bug
+  was test-fixture `paper_shadow` vs reality `shadow_only` — a test-vs-truth
+  value mismatch, adjacent to the 9a2cef1 class). Ships after/with #1.
+- **OPTION-B OBSERVE-WINDOW — EVIDENCE INVALIDATED, CLOCK RESET**: 07-09's 9
+  `[GATE_QTY_SCALED_SHADOW]` lines are CONTAMINATED — the "would-open"
+  new_net was computed on the UN-halved EV (39.71); with the real ×0.5
+  (finding #1) new_net ≈ 19.86 − 12 = +7.86 < $15 → would NOT open. And the
+  qty7/qty15 lines are shadows mislabeled live (finding #2). **The ~1–2wk
+  Option-B observation clock counts ONLY from the SHA where BOTH #1 (calib
+  applies) AND #2 (shadow-detection correct) are live. Discard 07-09's 9
+  lines.** Re-arm marker to be stamped at that SHA.
+- **ERRATA (annotation #6)**: this morning's ritual assertion "every EV
+  number is now calibrated ×0.5" was a **verify-before-asserting miss** —
+  overturned same day by ev==ev_raw. Pattern line: **TWO Claude-Code errata
+  today (this + the recon's "champion always qty-1" caught by the SOFI qty-5
+  fixture), both fail-safe, both self-caught within the day.** The standing
+  boundary marker (07-08 postclose entry) is annotated in place, not erased.
+- **NOISE-CLASS PRESSURE (reinforces the TOP-3 3-in-1)**: the observability
+  PR was FIX-TODAY in the morning triage and DID NOT ship (the gate-fix took
+  the slot). Carried to tomorrow's 2nd build slot. Today's reinforcement:
+  ops_output_stale +7, job_succeeded_with_errors +5, **signal_accuracy_
+  degraded ×14 (observe-only warning firing ~2/hr on the losing pool — a NEW
+  cry-wolf; ADD a once-per-day / condition-dedup sub-item to the 3-in-1).**
+
+**TOMORROW'S BUILD ORDER (operator's word, post-close, sequential deltas):
+① calibration recon-then-fix (#1) · ② shadow one-liner + prod-value test
+(#2) · ③ 3-in-1 observability PR (flat-book stale + re-egress dedup + #1104
+writer-hardening + accuracy-warn dedup) · ④ stamp the Option-B clock-reset
+marker at the #1+#2 SHA.**
+
+## 2026-07-09 MORNING TRIAGE — dispositions recorded (doc-only)
+
+First v5.4-from-disk nightly ran + dead-man pinged GREEN (first live night).
+Calibration PRINTED 10:00:03Z: `_overall ev_multiplier 0.5 / pop_multiplier
+0.5` (BOTH clamp-floored; ev_calibration_error 65.34 — raw wanted lower;
+single _overall bucket, 30d window at n=8) — **raw mode EXITED; EV/PoP now
+calibrated ×0.5, the ledgered boundary is CROSSED.** Un-paused + acked the
+21:20Z breaker trip + 3 accuracy warnings; fingerprint survived (holds the
+QQQ−10 window bd895160 — tonight's suppression test armed).
+
+Dispositions:
+- **FILED-TRIGGERED**: #1104 writer-hardening (6/677 rows lost 07-08;
+  bundle w/ today's 3-in-1 or next burst) → backlog P2 · reentry_cooldowns
+  realized_loss=estimate → FOLDED into the 06-15 backlog item (2-for-2
+  live, no new line).
+- **ACK-NO-ACTION** (recorded so no re-raise): A6 executor 4×/day = operator
+  manual mid-session/post-close cycles, NOT a scheduler defect (scheduled
+  cadence is the one-shot) · phase2_precheck = paper-shadow phase-2 gate,
+  operator to name it in the scheduler doc.
+- **GATED-REOPEN counter: Phase-3 exit over-pessimism now 3rd instance,
+  15.5× worst yet** (cohort stop −155 vs broker −10, 07-08). Counter
+  **3/[10-15 reopen gate]**. ⚠ **PATTERN NOTE for the reopen session: three
+  instances (QQQ 3.3× · SOFI 1.6× · QQQ 15.5×) — the reopen's HEADLINE
+  question is "is the cohort stop systematically over-pessimistic on
+  defined-risk structures?" (same question SOFI stop-tightness raised).**
+  Do NOT act now — gated, outcome-bias-protected; recorded so the reopen
+  opens on the pattern.
+- **⚠ META-AUDIT DRIFT CAUGHT LIVE (the exact class the 07-08 meta-audit
+  targeted): 4 items were ledger-only / prompt-KNOWN-PENDING and had FALLEN
+  OFF the actionable backlog.md** — EV-basis recon (LIVE), B1/B2 bucket
+  control (LIVE), compounder greedy-stop (LIVE), the #12 06-10-runner batch;
+  gap-3(b) existed only as a sub-note. **All re-added to backlog.md this
+  session** (P1 for the two live-money, P2 for the rest). Process note: the
+  ledger narrative is NOT the actionable list — filed items must land in
+  backlog.md or they silently vanish from build-planning.
+- **FIX-TODAY queue (pending-today, NOT built)**: the 3-in-1 observability
+  PR — flat-book guard on ops_output_stale (A9) + re-egress cross-owner
+  dedup (A5) + #1104 writer-hardening (A4). Post-close, one recycle. All
+  three health-check/observability-side; zero decision-path risk.
+- CONFIRM list checked: F-A1a · reaper · winter-close 2026-10-01 present ✓;
+  one-beta tripwire SHIPPED #1139 ✓ (B1/B2 the only open bucket item);
+  gap-3(a) SHIPPED #1124 present ✓.
+
+## 2026-07-08 PR-B #1139 ONE-BETA TRIPWIRE — status:SHIPPED
+
+**H8 VERIFIED: squash `7db5a36` (7db5a36dcd4fc1bf58eb67878e387ce2f3c3a2bd)
+= origin/main; all three services SUCCESS at that SHA (22:29:35Z);
+new-container work flowing by 22:30:04Z (heartbeat OK on the recycled
+worker).** PR-A #1138 (`e26bcfe`) merged immediately before — tonight's
+midnight nightly runs the v5.4 charter from disk for the first time.
+
+Tripwire live: `concurrent_live_positions_uncontrolled` critical at ≥2 open
+LIVE-routed positions, q15 monitor, immediate-egress + receipt.
+**VERSION SHIPPED: simplest-correct (ANY 2 live positions), per owner
+rationale — bucket refinement stays B1/B2's (still FILED; the alarm is not
+the control).** Semantics: alarm-on-onset (position-set dedup; a 3rd
+position re-alarms; dedup-read failure alarms anyway; scope-failed cycle
+skips). Flag CONCURRENT_POSITION_ALARM_ENABLED default-ON. Disaster-pinned:
+never mutates positions/orders/ops_control (test). 12 tests incl. the
+production-call-path wiring pin. OPERATOR REMAINING: create the
+healthchecks check + set machine env NIGHTLY_AUDIT_PING_URL (PR-A's ping
+gate is a logged no-op until then).
+
 ## 2026-07-08 META-AUDIT (chat-run, gap register) + TIER-1 PROCESS FIXES — status:SHIPPED (PR-A)
 
 **Meta-audit verdict (full register in session 07-08 ~22:15Z): ship-side
@@ -1511,6 +1797,12 @@ ingest (race deadline CI-green-by-21:05Z beaten at 20:49:38Z).**
   `apply_calibration` → scanner EV/PoP scoring → `risk_adjusted_ev`
   (executor sort) AND `ticket.expected_value` = the #1101 roundtrip gate's
   gross_ev — every gate decision after 10:00Z is on calibrated numbers.
+  **⚠⚠ ANNOTATION 2026-07-09 EOD (do NOT erase this marker — correct it):
+  this boundary is FALSE. The multiplier COMPUTED + STORED 0.5 at 10:00Z but
+  apply_calibration returns ×1.0 at the scan (ev==ev_raw==39.71 verbatim
+  07-09) — see the 07-09 EOD entry, fix-queue #1. "Every EV after 10:00Z is
+  calibrated" holds only from the SHA where finding #1 ships; re-mark the
+  TRUE boundary there.**
   Training pool: {+48, −45, −28, −73, −15, −40, −15, −10} (1W/7L) — expect
   a SHRINK; whether the 0.5 clamp floor binds is the clamp-review question,
   answerable when the multiplier prints. Winsorize: no extreme outlier in
@@ -1696,3 +1988,88 @@ PENDING VERIFICATIONS (2026-07-08 → next session):
 - **#1134 first `envelope_violation` typed rows + egress receipt** on the next position-hold.
 - **First CORRECTED `[CLOSE_FILL_GAP]`** once the A4 sign fix ships (expect ~1.4, not 15.08).
 - **A6 executor-cadence**: confirm whether 4×/day is scheduled or operator-driven.
+
+## status:reported — 2026-07-09 NIGHTLY run (report `audit/reports/2026-07-09.md`)
+
+Window 07-08 05:01Z → 07-09 05:01Z. Clocks grounded (DB 05:01:23Z = broker 01:02 ET ✓).
+**Broker READ DIRECTLY this run** (MCP present): equity $2,067.87 = cash = OBP (settled,
+flat, 0 positions); 07-08 day −$10.43. H8 CLEAN: all THREE services SUCCESS @ `7db5a36`
+(#1139) 22:29:35Z; movers off the prompt pin: `e26bcfe` #1138, `7db5a36` #1139.
+**POOL SEALED 8/8** (1W/7L, −$178): live QQQ IC `305e476a` staged 17:41Z (ev 41.75 / pop
+0.6425 raw), force-closed 18:00:11Z after ~15min — cohort stop on corroborated −$155 vs
+broker fill −$10 (15.5×; Phase-3 class instance #3, counter 3/10-15). Breaker: designed
+edge-trigger case-2 trip 21:20Z (window CHANGED: QQQ−10 in / MARA−15 out; fingerprint
+stamped; receipt egressed). `entries_paused=TRUE` — **operator un-pause required**.
+**CALIBRATION BOUNDARY: first calibrated multipliers print 07-09 10:00Z** (07-08 run was
+sample 7 insufficient) — the three 8th-close checks are DUE.
+
+- **[A9 2026-07-09 — FINDING] `ops_output_stale` paper_positions arm = standing HIGH
+  false alarm, UNCLEARABLE while the book is flat + paused; the v5.4 STATE "RESOLVED"
+  verdict is half-true.** 11 HIGH rows 07-08 (13:07→22:07Z, self-superseding; latest 2
+  unresolved, 176→177h and climbing) assert a dead mark-refresh loop while Part-B wrote
+  `mark_corroborated −3.04` the same hour. Root: `MAX(last_marked_at)` = 07-01 13:00Z —
+  BOTH July QQQ holds ran pre-#1137 code (deploy 20:50Z 07-08 was post-close; QQQ 07-08
+  row `last_marked_at=NULL`), and a flat book gives the live fix nothing to stamp. The
+  §8 flat-book caveat is DOCUMENTED at `ops_health_service.py:149-152` but UNGUARDED
+  (`:527-548` has no open-positions check). Projected ~48 HIGH rows/day for the whole
+  pause (0 egressed — ops_* relay-skipped; poisons H11 triage). FIX (additive): flat-book
+  guard — `open_n=0` → status `flat`/INFO, never `stale`/HIGH. RISK zero. CONF high.
+- **[A5 2026-07-09 — FINDING, broadens the ledgered 07-08 re-egress item] the
+  duplicate-egress class includes `egress_owner='alert'` writers, not just the relay.**
+  `job_succeeded_with_errors` for the ONE 19:02Z scan run (`run_id ef8a2d4e`) re-wrote +
+  re-egressed at 19:07/20:07/21:07/22:07Z — 4 receipted phone hits for one condition.
+  The queued dedup fix must fingerprint the CONDITION (run_id / type+symbol+bucket)
+  across BOTH owners or it fixes half the class. Watch, same shape:
+  `ops_signal_accuracy_degraded` re-writes ~2/hr while hit<0.2 (designed first fire
+  07-08 21:37Z at n=8 hit 0.125; warning-only, not egressed — row noise).
+- **[A4 2026-07-09 — FINDING, small] rejection-persist retry loses rows when the retry
+  hits the same dead connection — first data loss since #1104.** 19:02Z broken-pipe
+  burst: 7 inserts recovered, **6 lost for good** (SLV/ISRG/C/HOOD/PLTR/AMGN, broken pipe
+  on retry too); `counts.errors=6` with `result.errors=NULL` (count surfaced, items only
+  in Railway logs). The #1100 detector caught it and it reached the phone with receipt —
+  the chain WORKED; the residual is the writer. FIX (additive): reconnect-then-retry or
+  ×2 backoff + stamp failed symbols into `result.errors`. Impact 6/677 (0.9%) of A8's
+  counterfactual data. CONF high (logs + counts agree).
+- **[A2 2026-07-09 — refinement of the 06-15 deferred cooldown item; metadata-only]**
+  `reentry_cooldowns.realized_loss` stores the trigger-time corroborated ESTIMATE, not
+  the fill — now 2-for-2 on live closes post-#1080 (−48.99 recorded vs −15 realized
+  07-07; −155 vs −10 07-08). Bench durations unaffected; magnitude readers misled.
+- **A1** EV-basis recon item (KNOWN-PENDING) reproduced with dispositive numbers on the
+  LIVE cohort: aggressive QQQ 16:00Z stamped `net_ev +35.62` but gate-BLOCKED; gate log
+  basis `gross_ev 42.14 − round_trip 154.00 = −111.86` (neutral twin; stamped net_ev
+  NULL). Two bases disagree on the same candidate; it demonstrably timed the live entry
+  (16:00 block → 17:41 pass). Urgency ↑ post-boundary. **A6** unchanged (677 rejections,
+  mix stable; iv-seasoning 40/10syms = 06-17 adds, eligible ~mid-Aug; Polygon DARK on 8
+  liquid QQQ legs 19:03Z, truth-layer priced — #1052 saved staging). **A8** SOFI sentinel
+  quiet; gate discriminated (aggressive edge-passed, shadows spread-eaten). **A10** no
+  new instance (counter 2). **A7** dormant, fills 3/10.
+
+VERIFICATIONS CLOSED THIS RUN:
+- ✅ **#1134 typed rows + delivery receipt — BOTH egress owners**: 2 `envelope_violation`
+  HIGH (17:45/18:00Z) relay-egressed with `egressed_at`; `job_succeeded_with_errors`
+  carried full `egress_receipt {sent, receipted_at, webhook_sent}` (alert-owner).
+- ✅ **Cooldown bench post-stop**: 19:02Z pending aggressive QQQ NOT staged at the 19:03Z
+  executor run (benched until 07-09 13:30Z) — the bench gate exercised, correct.
+- ✅ **#1071/#1058 brake line**: `[EQUITY_STATE]` used broker-true −10.43 over the $0
+  open-book proxy — tighter value chosen, correct.
+
+PENDING VERIFICATIONS (2026-07-09 → next session):
+- **⚠ OPERATOR: `entries_paused=TRUE`** (07-08 21:20Z window QQQ−10/QQQ−15/SOFI−40);
+  un-pause is operator-only.
+- **CALIBRATION BOUNDARY 07-09 10:00Z**: expect raw-mode EXIT (first real multipliers on
+  8 live closes); run the clamp(0.5-floor) + winsorize reviews (owner-gated). Attribute
+  any post-10:00Z scoring/gate shift to the multiplier FIRST.
+- **#1135 FIRST SUPPRESSION — decisive test 07-09 21:20Z**: book flat + paused + no new
+  close ⇒ expect `suppressed_standing_window: true` and NO new critical. A re-pause/
+  critical on the UNCHANGED window = edge-trigger FAILURE (flag hard).
+- **First NATIVE post-#1137 `[CLOSE_FILL_GAP]` stamp** on the next live close (the 07-08
+  quad was corrected in-DB, not code-native).
+- **First post-#1137 hold stamps `last_marked_at`** (currently MAX=07-01 13:00Z; the fix
+  is live but UNEXERCISED — this is the condition the A9 finding's "RESOLVED" verdict
+  hangs on).
+- **#1139 one-beta tripwire**: live but unexercisable at ≤1 position; fires only if 2+
+  concurrent live positions ever exist (that event ALSO reopens A2's settled condition).
+- **A6 executor cadence** (3rd ask): scans 16:00/17:41/19:02Z + execs 16:30/17:43/19:03Z
+  on 07-08 — scheduled multi-cycle or operator-driven?
+- **phase2_precheck naming**: 4×/day green job outside the doctrine's scheduler map
+  (free-look, no anomaly) — one-line operator naming requested.

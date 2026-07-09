@@ -58,6 +58,102 @@ questions) · **RESOLVED — DO NOT REINVESTIGATE**.
 
 ## P1 — next build slots
 
+<!-- ── 2026-07-09 EOD fix-queue (tomorrow, in order, operator's word) ── -->
+- **① CALIBRATION-NOT-APPLYING (HIGH, headline; recon-then-fix, FIRST)** —
+  the ×0.5 multiplier computes + stores 0.5-floored at 10:00Z but
+  `apply_calibration` returns ×1.0 at the scan (`ev==ev_raw==39.71` verbatim
+  07-09). Suspect: `get_calibration_adjustments` fails to map an
+  `_overall`-only blob into the `{strategy:{regime}}` return shape → the
+  `_overall` fallback (`calibration_service.py:577`) never fires; consumer
+  `workflow_orchestrator.py:1745-1755`. **CLASS: built-not-wired (#1126
+  family).** Cross-ref: external-reviewer §1 Q(1) — whoever moves first
+  claims it, don't double-drive. · origin 07-09 EOD · done when: a stored
+  multiplier ≠1.0 verifiably changes scan `ev` vs `ev_raw`.
+- **② OPTION-A SHADOW-DETECTION MISS (one-liner + prod-value test)** —
+  #1141 keyed `routing_mode == "paper_shadow"`; real values are
+  `live_eligible` / `shadow_only` → shadow fix INERT (fail-safe to
+  observe-only). Fix: match `shadow_only` (or `!= live_eligible`); pin the
+  test on PRODUCTION routing values (the bug was test-fixture-vs-reality).
+  · origin 07-09 EOD · done when: shadow qty>1 candidates evaluate on the
+  per-contract basis. Ships after/with ①.
+- **③ 3-in-1 OBSERVABILITY PR (carried from 07-09 morning FIX-TODAY; slipped
+  the slot to the gate-fix)** — flat-book stale-ager guard (ops_output_stale
+  on a flat book) + re-egress cross-owner dedup + #1104 writer-hardening
+  (reconnect-then-retry; 6/677 lost 07-08) **+ NEW sub-item: accuracy-warn
+  dedup** — `signal_accuracy_degraded` fired ×14 on 07-09 (~2/hr, observe-
+  only, on the losing pool) = a fresh cry-wolf; add once-per-day /
+  condition-fingerprint dedup. · origin 07-09 morning A9/A5/A4 · done when:
+  H11 stops carrying the false/repeat HIGH classes.
+- **④ OPTION-B OBSERVE-WINDOW CLOCK RESET (marker, at the ①+② SHA)** —
+  07-09's 9 `[GATE_QTY_SCALED_SHADOW]` lines are INVALID (would-open on
+  un-halved EV; shadows mislabeled live). The ~1–2wk observation counts
+  ONLY from the SHA where calibration applies AND shadow-detection is
+  correct. · origin 07-09 EOD · done when: the re-arm marker is stamped at
+  that SHA and Option-B evidence accrues cleanly.
+
+<!-- ── 2026-07-09 external-review adjudication integration ── -->
+- **★ SHADOW-TO-EXPIRY THESIS TRACKER (NEW, P1 — the #1 missing
+  measurement, from B1)** — force-closed positions leave NOTHING following
+  the underlying to its ORIGINAL expiry, so thesis quality (signal) can't be
+  separated from execution. B1 spot-scored **~78% thesis-hit vs 11% P&L →
+  the loss is DOWNSTREAM, not signal.** Build: a lightweight tracker that,
+  per closed position, records the underlying's path to `nearest_expiry`
+  and scores in/out of profit-zone — observe-only, no decision impact.
+  · origin 07-09 B1 · done when: thesis hit-rate is a standing metric.
+- **Phase-3 exit-basis MEASUREMENT reopen (NEW, P1 — their #3; NOT a stop
+  change)** — synchronized combo NBBO / order-preview capture ALONGSIDE the
+  full-cross corroborated UPL + quote age + realized fill, at each stop
+  fire; shadow noise-band rule observe-only. Quantifies the over-pessimism
+  (A7/B1: stops fired on corroborated UPL worse than realized, closing
+  winning theses early — QQQ-IC 06-15 inside its range, stopped −73).
+  Explicitly instrumentation, not relaxation. · origin 07-09 A7/B1 ·
+  TRIGGER: next session after the observability 3-in-1.
+- **Multi-basis cost cleanup — RE-ELEVATED P2→P1 (A3 confirmed the ordering
+  distortion)** — ranker fee = fee×contracts×2 (NO ×leg-count) + 5%-of-EV
+  slippage proxy vs the gate's executable cross; under-costs 4-leg vs 2-leg
+  in RANKING. Magnitude small ($ few on tiny EVs) but real; given B1's
+  "downstream is the problem," cost coherence matters. Fold in: A4
+  score-saturation (min(100) clamp, guardrails.py:138) + the SOFI perpetual-
+  100 artifact. · origin 06-10 A1-runner ∪ 07-09 A3.
+- **A1 PoP-semantics fix (NEW, HIGH-for-credit-work, LATENT now)** —
+  credit-spread PoP = credit/width is INVERTED (≈P(loss); ev_calculator.py
+  :42). Unexercised on the live book (IRON_CONDOR + debit spreads not in the
+  branch) but **BLOCKS the 2-leg vertical / credit-spread cohort**. · origin
+  07-09 A1 · done when: credit-spread PoP = 1 − credit/width (or a proper
+  delta-based PoP) + a test on a far-OTM spread (low credit/width → HIGH
+  PoP). GATES: the two-leg-vertical shadow cohort waits on this.
+- **greedy-stop (Tier-2) — AMENDED (their #2): READ-ONLY REPLAY FIRST** —
+  quantify blast radius before any build; staged observe-first. Rider (A5):
+  the legacy compounder fit-test uses ~3%×score (~$60) not structure
+  max-loss ($372) — a self-alerted 6-8× gap; the "fit" test tests a fiction.
+  → **REPLAY DONE 2026-07-09 EOD (Lane A) → DOWNGRADE (tail always-empty at
+  this scale).** Replayed the last 4 scan/execute cycles (07-02/07-07/07-08/
+  07-09). The greedy stop is `small_account_compounder.py:280-286` (a `break`
+  on first budget-non-fit; the count-cap at :258 and quality-floor `continue`
+  at :266 are separate). Aggressive (live) candidates/cycle = 1 / 5 / 3 / 1;
+  busiest was 07-07 (5 distinct structures, 4 QQQ + 1 SOFI; the DB's "10" is
+  cohort-suffix fan-out on `legs_fingerprint`). **The budget BREAK never fired
+  in any cycle:** its fit test is `current_risk_usage + estimated_risk >
+  risk_budget` where `estimated_risk` is the legacy ~$40–60 stack, and ≤5
+  candidates × ~$60 never exceeds `remaining_global_budget`; `risk_budget`
+  column is NULL on every suggestion row. **Every non-executed candidate died
+  DOWNSTREAM** — `ev_below_roundtrip_cost` ×14 + `symbol_already_held` ×1 +
+  EOD dismiss — none by a budget break. Blast radius = **ZERO recovered
+  executable candidates on BOTH bases**: legacy (budget never binds) and
+  allocator-real (any candidate the break could spare immediately hits the
+  roundtrip gate, net-EV-negative). The binding constraints are UPSTREAM
+  (scanner yield ~1–2 names/cycle) and the DOWNSTREAM roundtrip cost gate — the
+  greedy break is not on the critical path at ~$2k. **Reopen only if** a cycle
+  ever presents >4 fitting candidates AND the roundtrip gate starts passing a
+  tail (i.e. tier/scale change or spread-regime shift). The cosmetic
+  `break`→`continue` fix (P2 item below) is still correct-in-principle but
+  buys nothing measurable now.
+  · origin 06-10 A6-runner ∪ 07-09 A5.
+- **Capital-adequacy honest note (doc line, NOT a deposit rec)** — divisible
+  1-lot 4-leg structures clearing real per-contract cost imply ~$7.5-8k
+  equity; the ~$2k book is structurally cost-bound (§1 of the external
+  packet). Record as a design constraint, not advice. · origin 07-09 §1.
+
 - **Gap-3(a): shadow-ledger promotion-time normalization** — per-contract
   (or per-$-risked) cohort scoring + a measured fill-confidence discount
   (live fill base rate ≈0.33) applied at policy_lab evaluation ONLY (ledger
@@ -65,6 +161,64 @@ questions) · **RESOLVED — DO NOT REINVESTIGATE**.
   eval. Spec + recon counts: `docs/specs/shadow_fill_realism.md`. · origin
   07-02 gap-3 recon · done when: cohort scores compare on a normalized
   basis; the full post-and-wait model (b) stays its own recon-first session.
+
+<!-- ── 2026-07-09 backlog reconciliation: items that were ledger-only /
+     prompt-KNOWN-PENDING only and had FALLEN OFF this actionable list
+     (the report→action drift the 07-08 meta-audit exists to catch —
+     re-added here so a "what's next to build" scan actually finds them). -->
+- **EV-basis / fee-unit recon (LIVE-MONEY, P1, recon-first)** — the gate's
+  `gross_ev` (unscaled scan-time EV) is compared against a
+  quantity-scaled `round_trip` cost; the 06-10 A1-runner fee-unit finding
+  and the 07-08/07-09 gate mismatch are the same class. **07-09 nightly
+  proved it TIMES LIVE ENTRIES**: aggressive QQQ blocked at stamped
+  `net_ev +35.62` (16:00Z) while an equivalent structure passed (17:41Z);
+  gate log `net −111.86` vs stamp `net_ev NULL/+35.62` on near-identical
+  candidates. **URGENCY ↑: the 07-09 10:00Z calibration boundary (EV/PoP
+  ×0.5) now flows into this same comparison.** · origin 06-10 A1-runner ∪
+  07-08/07-09 · done when: one basis end-to-end; per-decision NO
+  reconstructable. TRIGGER: pre-market recon session (do NOT touch the gate
+  from a status sweep). **⚠ 07-09 UPDATE: the DECISION-FLIPPING qty-scaling
+  portion SHIPPED as #1141 (Option A, `03e11d8`, gate now per-contract for
+  shadows / observe-only for live). What REMAINS here is the COSMETIC
+  multi-basis unification only — the three cost models that don't flip a
+  decision (scanner modeled ~$5.60 · ranker per-structure · gate
+  executable). Demoted P1→P2 (cosmetic). Note the calibration ×0.5 does NOT
+  currently reach this gate anyway — see the 07-09 EOD fix-queue #1.**
+- **NFLX 06-08 pre-epoch live close backfill (P3, data completeness)** — the
+  06-08 NFLX −$84 live close is on the broker + champion ledger (9 all-time)
+  but absent from `learning_feedback_loops`; pre-epoch so it never feeds
+  calibration. Filed in the ledger (07-08); promoted to a backlog line so it
+  doesn't fall off (meta-audit lesson). · origin 07-08 shadow-vs-live census
+  · done when: rides any future supervised backfill, or explicitly declined.
+- **B1/B2 real one-beta bucket control (LIVE-MONEY, P1)** — the per-bucket
+  correlation cap; the #1139 tripwire ALARMS on ≥2 live positions but does
+  not CONTROL. · origin 07-03 F-A2a · TRIGGER: before the book routinely
+  holds 2+ live positions · done when: block-level per-bucket % enforced.
+- **Compounder greedy-stop BREAK (LIVE-MONEY volume, P2)** — first candidate
+  that doesn't fit zeroes the whole cycle's selection
+  (`small_account_compounder.py:286`; the comment self-doubts "skip and see
+  if smaller fit? Greedy: stop"). Re-verified still real 07-08. · origin
+  06-10 A6-runner · done when: `continue` not `break` (+ test); pairs with
+  the A1 volume charter.
+- **#1104 writer-hardening (MED, observability)** — reconnect-then-retry
+  (fresh client) so a same-connection burst doesn't lose rows; 6/677
+  rejection rows lost 07-08 (broken pipe on the retry too); also stamp the
+  failed symbols into `result.errors` (F8 surfaced the COUNT, not the
+  items). · origin 07-09 A4 · TRIGGER: bundle with today's 3-in-1
+  observability PR OR next connection-burst (if it ships in the 3-in-1,
+  move to SHIPPED — do not double-track).
+- **06-10 runner-finding triage batch (#12, P2, one session)** — the
+  goes-silent runners from the meta-audit: expiry-day×unpriceable defer
+  seam (own recon, LIVE) · PoP-denominator asymmetry + dead DTE segmentation
+  · funnel `universe_size`=scanner_emitted mislabel · time-stop/eod-phantom
+  rows (A7-dormant territory) · A9-F4 stored-vs-recomputed fingerprint ·
+  F-A2d wrapper-import-seam fail-closed skip · N4 `learning_ingested` dead
+  column · N1/N2 backlog orphans · 06-10 A5 queue-HOL + A6 budget-blindness
+  (verify partially-superseded). · origin 07-08 meta-audit · done when: each
+  gets shipped / filed-with-trigger / acked.
+- **gap-3(b) post-and-wait fill model** — promoted from the sub-note above
+  to its own line (it had no standalone entry). · origin 07-02 gap-3 ·
+  TRIGGER: own recon-first session, after gap-3(a)/#1124 observed at Gate 4.
 - **Tradeable-universe recon (read-only)** — which universe names can
   actually pass the round-trip cost gate at current spreads (the first live
   rejection: SOFI round-trip 92 vs gross EV 30.25 — the small-tier universe
@@ -197,8 +351,12 @@ ops_health_check q30min-real dedup → #1114 · signal-accuracy telemetry
   partial-quote incident.
 - **Cohort-stop cooldown realized_loss from fill** — writer records
   trigger-time UPL, not the close fill; minor metadata inaccuracy, no
-  consumer; largely obviated by the 06-15 structural clamp. · origin 06-15 ·
-  done when: reconcile backfills from the fill, if ever worth it.
+  consumer; largely obviated by the 06-15 structural clamp. **07-09 triage:
+  now 2-for-2 on live closes post-#1080 (−48.99 stored vs −15 realized;
+  −155 vs −10) — the magnitude gap widens with the Phase-3 over-pessimism
+  pattern; anything reading this column for magnitude is misled, bench
+  durations unaffected. Refinement folded here, no new line.** · origin
+  06-15 · done when: reconcile backfills from the fill, if ever worth it.
 - **IRON_CONDOR/chop structural suppression (WATCH)** — live-only→raw forgoes
   the old ×0.5 deflate; if IC/chop keeps losing, suppress STRUCTURALLY
   (StrategyPolicy ban / min-edge), never via thin calibration. · origin

@@ -5,6 +5,27 @@
 
 ---
 
+## ⚠ ERRATUM (added 2026-07-09 EOD — annotate, don't erase)
+
+**§2a's exit-price column shows position MARKS, not broker FILLS** (a
+mid-vs-fill display artifact, a recurring class). **Every realized-P&L figure
+in §2a is broker-true and unchanged** — only the displayed *Exit* price on
+three mark-derived closes was wrong. Broker-fill corrections:
+
+| # | Date | Underlying | §2a *Exit* shown (mark) | Broker FILL | Realized (unchanged) |
+|---|------|-----------|-------------------------|-------------|----------------------|
+| 7 | 06-30 | SOFI | 1.53 | **1.36** | −$40 ✓ (1.44 → 1.36 × 5 × 100) |
+| 8 | 07-07 | QQQ | −1.74 | **1.64** | −$15 ✓ |
+| 9 | 07-08 | QQQ | −1.54 | **1.59** | −$10 ✓ (the "−1.54" was the mark) |
+
+The other negative "Exit" values in the §2a table are the same artifact (a
+net-position mark, not a tradeable fill price). **Do not recompute P&L from the
+Exit column — the Realized column is the broker truth.** (Root cause: the exit
+evaluator's display path read `current_mark`; the executable-side close price
+is the fill. Packet committed as #1142 — this annotates it in place.)
+
+---
+
 ## §1 — EXECUTIVE BRIEF
 
 **What this is.** A fully-automated options income system running on a **~$2,000 live margin account (options L3), in explicit "learning mode" (correctness > deployment)**. Pipeline: scan the universe → score EV/PoP → rank → **entry gates** (quote validation, utilization, round-trip cost) → per-cohort executor → 15-min intraday monitor (marks, envelopes, cohort stops, force-close) → post-close learning/calibration loop. It trades defined-risk structures — **iron condors and vertical debit spreads** — at 1–7 contracts. Three "cohorts" run the same signal: **champion** (live, real money) plus **neutral** and **conservative** (shadow, internal fills, no capital) for policy comparison.

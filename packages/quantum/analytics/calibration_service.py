@@ -25,6 +25,12 @@ from supabase import Client
 
 logger = logging.getLogger(__name__)
 
+# ⚠ IMPORT-TIME flag (2026-07-09 EOD note): this is evaluated once at module
+# import, so a Railway env flip does NOT take effect until the worker RECYCLES
+# (tonight's re-enable needed a recycle for exactly this). 2c refactor to a
+# call-time read was assessed non-trivial (multiple import sites read this as a
+# module constant) and deferred — see the fail-loud logs at the apply/write
+# sites which now make a disabled state visible from either side.
 CALIBRATION_ENABLED = os.environ.get("CALIBRATION_ENABLED", "1") == "1"
 MIN_CALIBRATION_TRADES = int(os.environ.get("MIN_CALIBRATION_TRADES", "8"))
 

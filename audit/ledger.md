@@ -1448,6 +1448,123 @@ PENDING VERIFICATIONS (2026-07-07, added by the M4 ship):
   GTC); fossils unchanged (22 queued / 4 stuck-running).
 - Counters: A9→0, others →3 (A7 dormant). No retirement candidates.
 
+## 2026-07-09 EOD (late) — EXTERNAL AUDIT v1.1 ADJUDICATION (P0/P1 verified vs code+DB+broker)
+
+STEP-0: broker 19:15 ET (closed) / DB 23:15Z — agreed. READ-ONLY + the one
+pre-authorized security commit. Book FLAT now (0 open, 0 live-routed).
+
+**P0-1 CREDENTIAL (F-FREE-1) → LOCAL-ONLY-FAKE (NOT a live compromise).**
+`.env.example` (git-tracked since the 2025-11-19 initial commit `82e8ef8`)
+carried real-shaped Supabase anon + `service_role` + S3 keys. Fingerprint:
+URL is `http://127.0.0.1:54321`, keys are modern `sb_publishable_`/`sb_secret_`
+format; production `etdlladeorfgdmsopzmz` exposes a legacy JWT anon key at its
+cloud URL — different host/format/value. **No production credential exposed →
+no live rotation warranted.** Pre-authorized scrub SHIPPED as placeholders
+(PR #1145, `95d3bb5`, NOT merged — left for operator). OPERATOR ITEMS (not
+done): git-history cleanup (BFG/filter-repo of the pre-scrub blob) + GitHub
+secret-scanning/push-protection enablement. Even LOCAL keys public 8 months
+= rotate the local stack at leisure.
+
+**P0-2 LIVE-CLOSE CUSTODY (F-A2-1) → LATENT (chain real, NEVER fired).**
+All four sub-claims CONFIRMED at the deployed SHA (d45ad63):
+(i) `paper_exit_evaluator.py:1700` `position_is_alpaca=False` default +
+`:1712-1727` routing-query failure only WARNs (`paper_exit_routing_query_failed`,
+no raise); (ii) `:2162` `submit_and_track` result discarded, `:2172-2177`
+returns `routed_to='alpaca'` unconditionally; (iii) `:2178-2207` a RAISED
+submit exception (from `get_alpaca_client`/order fetch/imports/the pre-cancel
+`cancel_open_orders_for_symbols` at `alpaca_order_handler.py:245`, OUTSIDE the
+retry-try) falls through to an INTERNAL FILL — `:2272-2280` writes
+`status='filled'` on a LIVE position with no broker ack (fires
+`paper_exit_alpaca_submit_fallback_to_internal` critical first); (iv)
+`intraday_risk_monitor.py:1428-1434` treats ONLY `deferred_uncorroborated` as
+not-closed, so the internal-fill return (no `routed_to`) logs as a SUCCESSFUL
+`force_close`. **RUNTIME: never fired on a live position.** All 9 post-epoch
+live closes are `close_reason='alpaca_fill_reconciler_standard'` (broker-
+reconciled); 42 filled close orders carry a broker id; the 10
+`submission_failed`+filled internal-fill rows are all PRE-LIVE alpaca-paper era
+(latest 2026-04-06); ZERO `submit_fallback_to_internal` alerts ever (the 3
+`paper_order_marked_needs_manual_review`, latest 06-12, are the ordinary
+broker-reject path that leaves the position OPEN, not internal-filled).
+**→ E6 exclusion-integrity FAIL:** the live-close-custody closure claim fails
+as written — the fallthrough hole is real and unclosed, merely un-triggered.
+**→ NEW #1 BUILD: the broker-acknowledged-close invariant** (a live close may
+NOT record `status='filled'` without a broker ack; raise→retry/needs-manual-
+review, never internal-fill). Supersedes strategy work + Phase-3.
+
+**P0-3 RISK CUSTODY (F-A1-1/A1-2) → CONFIRMED book-blind + PREMISE CORRECTED.**
+(a) `paper_positions` has NO `cost_basis`/`current_value`/`max_loss`/
+`collateral` columns at all → the allocator (`portfolio_allocator.py:116-144`
+`_sum_open_cost_basis`) and RBE (`risk_budget_engine.py:99-208`
+`_estimate_risk_usage_usd`) read those keys and get None→0, so the OPEN book
+contributes ~$0 to utilization/envelope; writer omits them too (both true).
+(b) Utilization gate (`utilization_gate.py:323-341`): candidate cost =
+`limit_price*contracts*100` = ~$149 for a 1.49-credit IC, NOT the ~$351 max
+loss — AND asymmetric with the already-open side (`structure_commitment_usd`
+uses `width*100`=margin). **PREMISE CORRECTION (four-source: packet/registry
+said "book ≤1 always"; DB says peak 3):** 3 concurrent real-money live
+positions ran **2026-06-11 16:20Z → 06-12** (NFLX+QQQ+SPY; again 06-12
+18:30-18:45 NFLX+QQQ+MARA). So the book-blind sizing + credit-basis gate + the
+one-beta exposure were ALL live-reached, BEFORE the #1139 tripwire shipped
+(07-08). Grade: latent-critical **that has already occurred** (no realized harm
+— positions were small — but the aggregate cap was un-enforced across that
+window). Merges with B1/B2 into ONE "book-scaling readiness" epic.
+
+**P1 VERDICTS:**
+- **(d) F-A1-3 calibration ORDERING → CONFIRMED.** `apply_calibration` at
+  `workflow_orchestrator.py:3562-3569`, AFTER select(`:2495`)/allocate(`:2634`)/
+  size(`:3241`); score/selection/sizing consume RAW ev; only persisted `ev`
+  (`:3609`) + post-selection `risk_adjusted_ev` recompute (`:3669-3674`) reflect
+  the multiplier. Morning path stamps `risk_adjusted_ev`/`status` on RAW then
+  overwrites `ev` (`:1753-1755`) — raw/calibrated divergence on one row.
+  **RE-SCOPES tomorrow's 16:00Z proof** (below). NEW P1 (design, not one-liner).
+- **(e) F-A3-1 PoP → CONFIRMED-but-LATENT (our adjudication upheld).** The
+  inverted `credit/width` branch (`ev_calculator.py:34-42`) accepts ONLY 2-leg
+  credit verticals (`credit_spread` et al.); IRON_CONDOR (condor precomp +
+  delta-tail) and debit spreads (delta interp) never enter. DB: strategies ever
+  stored = IRON_CONDOR/LONG_CALL_DEBIT/LONG_PUT_DEBIT/take_profit_limit — ZERO
+  credit verticals ever → branch never reached. (FREE-LOOK: stored PoP > 1.0 on
+  debit-spread + take_profit_limit rows (max 1.0704) — impossible probability,
+  delta-PoP overshoot; additive one-liner filed.)
+- **(f) F-A4-1/A4-2 → both CONFIRMED.** `iv_daily_refresh` returns
+  `status:ok` on all-missing (accounting `0==0`); it is ABSENT from
+  `EXPECTED_JOBS`, and the watched `learning_ingest` is an explicit NO-OP STUB
+  while the real producer `paper_learning_ingest` is unwatched. Observability
+  → the carried 3-in-1 PR (recommend SPLIT into a 2nd observability PR, below).
+- **(g) F-A9-1 → CONFIRMED.** `signal_accuracy_rolling` win = `pnl_realized>0`
+  (realized win-rate), not thesis accuracy. Relabel → `realized_trade_win_rate`
+  rides the thesis-tracker build; B1 ≈78% thesis vs this view's 12.5% is the
+  exhibit.
+- **(h) F-A8-1 → CONFIRMED.** Rejection over-count: inner `process_symbol`
+  reason + outer wrapper `no_fallback_strategies_available`/
+  `all_strategies_rejected` both `record()` (`options_scanner.py:4106/4141`),
+  so `total_rejections` > distinct rejections. Annotate the packet's ~916.
+  (Lane A greedy replay used `trade_suggestions`, NOT the 916 figure — Lane A
+  unaffected; future rejection-based analysis must dedupe.)
+- **(i) F-A2-2 → CONFIRMED (nuance).** `quote_complete=False` requires BOTH
+  sides of EVERY leg (`exit_mark_corroboration.py:172-178`); when a non-
+  executable side is missing it discards a COMPUTED executable-side divergence
+  and force-suppresses — but ONLY for TARGET_PROFIT (`:246-253`); stop_loss is
+  NEVER suppressed (`:243-245`). So it's a named mechanism for MISSED profit-
+  takes (→ held longer → more stop exposure), NOT direct stop over-pessimism.
+  Feeds Phase-3 instrumentation as a specific thing to measure.
+- **(j) A10 import-time flags → CONFIRMED, no NEW class.** Module-scope env
+  reads: `MIDDAY_TEST_MODE`/`COMPOUNDING_MODE` (`workflow_orchestrator.py:179-180`),
+  `CALIBRATION_ENABLED` (`calibration_service.py:34`) — added to the inventory.
+
+**RE-SCOPED "tomorrow 16:00Z proof" language (per d):** a persisted scan row
+with `ev == ev_raw × 0.5` proves E1's flag — the multiplier reaches the
+PERSISTED ev and therefore the final-stage round-trip gate. It does NOT prove
+the calibrated value influenced SCORE, SELECTION, or SIZING — those consume raw
+ev by construction (apply runs post-sizing). State it exactly: raw = score /
+selection / sizing; calibrated = final-stage gate reading persisted ev +
+persisted `risk_adjusted_ev`.
+
+**EXTERNAL v1.1 SCORECARD (exclusion-integrity E1-E9 as graded):** E6 FAIL
+(headline — custody closure claim false-as-written); the rest of their P0/P1
+CONFIRMED at the line (their runtime-flag/mapping method vindicated again, Q1-
+class). Weight: high. 11 packet/prompt disagreements → annotate move-don't-
+erase (the ≤1-position premise correction is the load-bearing one).
+
 ## 2026-07-09 EOD — BUILD #1143 SHIPPED (shadow-detection + calibration fail-loud) + ⭐ OPTION-B CLOCK-RESET MARKER
 
 **#1143 `655c9aa` — MERGED + H8 VERIFIED.** Post-close (merge 22:54:19Z;

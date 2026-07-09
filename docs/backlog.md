@@ -12,6 +12,82 @@ questions) · **RESOLVED — DO NOT REINVESTIGATE**.
 
 ---
 
+## P0 — IMMEDIATE NEXT BUILD (07-09 external-audit v1.1 adjudication)
+
+- **P0-A · Broker-acknowledged live-close invariant (F-A2-1) — THE NEXT BUILD,
+  supersedes strategy work + Phase-3.** A LIVE close must NOT record
+  `paper_orders.status='filled'` / close the position without a broker
+  acknowledgement. Today (verified d45ad63) a RAISED exception around the live
+  submit (`paper_exit_evaluator.py:2178-2207`; sources incl. `get_alpaca_client`,
+  the order-row fetch, imports, and the pre-cancel
+  `alpaca_order_handler.py:245` OUTSIDE the retry-try) falls through to an
+  INTERNAL FILL (`:2272-2280` writes `status='filled'`) on a live position, and
+  the monitor logs it as a successful `force_close` (`intraday_risk_monitor.py:
+  1428-1434`, only `deferred_uncorroborated` counts as failure). Charter: on a
+  live-routed close, a submit exception must route to retry / needs_manual_review
+  / deferred — NEVER internal-fill; the internal-fill path is paper/shadow ONLY.
+  Add a regression test at the seam + keep the existing
+  `paper_exit_alpaca_submit_fallback_to_internal` critical. · origin 07-09 v1.1
+  F-A2-1 · STATUS: **LATENT** (never fired on a live position — all 9 post-epoch
+  closes broker-reconciled; the 10 internal-fill rows are pre-live alpaca-paper,
+  latest 04-06). E6 exclusion-integrity FAIL noted in ledger. · done when: the
+  invariant is enforced in code + tested.
+
+- **P0-B · "Book-scaling readiness" epic (MERGE: F-A1-1 + F-A1-2 + B1/B2 one-
+  beta control + same-run reservation).** The risk stack is book-blind for
+  ordinary spreads: `paper_positions` has no `cost_basis`/`current_value`/
+  `max_loss`/`collateral` columns, so the allocator (`portfolio_allocator.py:
+  116-144`) and RBE (`risk_budget_engine.py:99-208`) see the open book as ~$0,
+  and the utilization gate costs a candidate at premium (~$149) not max-loss
+  (~$351) (`utilization_gate.py:323-341`), inconsistent with its own open-side
+  margin basis. **TRIGGER CORRECTED — already occurred, not hypothetical:** 3
+  concurrent real-money live positions ran 2026-06-11→06-12 (before the #1139
+  tripwire shipped 07-08). Package: (1) persist per-position cost/max-loss (add
+  columns + writer), (2) allocator/RBE read them, (3) utilization candidate cost
+  on max-loss basis, (4) the B1/B2 per-bucket correlation cap. The #1139 tripwire
+  ALARM is the interim guard only. · origin 07-09 v1.1 F-A1-1/A1-2 + 07-03
+  F-A2a · do BEFORE routine 2-position operation resumes.
+
+- **P0/P1 · Calibration-ordering fix (F-A1-3) — design session, not a one-liner.**
+  `apply_calibration` runs post-sizing (`workflow_orchestrator.py:3562-3569`),
+  so SCORE / SELECTION / SIZING all consume RAW ev; only the persisted `ev` +
+  final-stage round-trip gate + persisted `risk_adjusted_ev` are calibrated.
+  Either move apply before ranking/sizing OR recompute the derived score/rank
+  after apply. **Re-scopes the 07-10 16:00Z "proof":** `ev==0.5×ev_raw` proves
+  the multiplier reaches the persisted ev + the gate, NOT that scoring/selection/
+  sizing used it. · origin 07-09 v1.1 F-A1-3.
+
+## 07-09 v1.1 adjudication — AMENDMENTS to existing items
+
+- **Observability PR → SPLIT (recommended).** The carried 3-in-1 (ops_output_
+  stale false-ager · job_succeeded_with_errors re-egress · re-egress dedup) gains
+  F-A4-1 (`iv_daily_refresh` returns ok on all-missing) + F-A4-2 (`iv_daily_refresh`
+  absent from `EXPECTED_JOBS`; the watched `learning_ingest` is a no-op STUB
+  while real `paper_learning_ingest` is unwatched). Recommend TWO PRs: (1) the
+  alert-noise 3-in-1 as-is; (2) a watchdog-coverage PR (EXPECTED_JOBS: add
+  `iv_daily_refresh` + `paper_learning_ingest`, drop/replace the stub;
+  iv all-missing → non-ok). Different surfaces, cleaner attribution.
+- **Thesis-tracker build gains F-A9-1 relabel:** `signal_accuracy_rolling.win =
+  pnl_realized>0` is a realized win-rate, mislabeled as signal accuracy → rename
+  to `realized_trade_win_rate`; the tracker becomes the real thesis_accuracy
+  source. Exhibit: B1 ≈78% thesis vs the view's 12.5% realized.
+- **Phase-3 instrumentation gains F-A2-2 named mechanism:** TARGET_PROFIT
+  suppression on `quote_complete=False` (`exit_mark_corroboration.py:246-253`)
+  discards a computed executable-side divergence when a NON-executable leg side
+  is missing (stop_loss never suppressed). Measure how often TP is suppressed on
+  quote-incompleteness (→ positions held longer → more stop exposure).
+- **Greedy replay gains F-A8-1 dedupe requirement:** rejection totals over-count
+  (inner `process_symbol` reason + outer wrapper reason both `record()`); any
+  future rejection-figure analysis must dedupe. (Lane A's 07-09 replay used
+  `trade_suggestions`, not the ~916 rejection figure — unaffected.)
+- **A11 SECURITY LENS → recommended as the next A10 rotation** (owner-gated).
+  Credential/secret-scanning/history-hygiene as a standing audit lens; the
+  incumbent (Calendar & Clock) rotates out only by the owner stating what it
+  structurally misses. · recommended-pending.
+- **FREE-LOOK filed:** stored PoP > 1.0 on debit-spread + take_profit_limit rows
+  (max 1.0704) — impossible probability; delta-based PoP overshoot, additive
+  one-liner clamp to [0,1].
+
 ## GATED — pre-approved/known, do not re-find (operator/trigger owns the go)
 
 - **Executor cadence — DO NOT BUILD until the trigger is met** — one execution

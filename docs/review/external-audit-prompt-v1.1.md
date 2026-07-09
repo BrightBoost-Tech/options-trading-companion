@@ -3,16 +3,19 @@
 > **PROVENANCE / READ FIRST.** This file is the *methodology* prompt an
 > external reviewer (or model) runs against the platform, paired with the
 > data briefing in [`2026-07-09-external-packet.md`](2026-07-09-external-packet.md).
+> **Version: external prompt v1.1 · aligned to internal `audit/v5-prompt.md`
+> v5.5 (eleven-area) · date 2026-07-09 · supersedes: none (first external cut).**
 > The body below is assembled from the in-repo nightly-audit framework
-> (`audit/v5-prompt.md` v5.4 + `audit/area8.md`/`area9.md`/`area10.md`),
+> (`audit/v5-prompt.md` v5.5 + `audit/area8.md`/`area9.md`/`area10.md`),
 > reframed and **redacted for an outside reader with full code access but no
 > DB / Railway / broker access.** If the operator holds a canonical v1.1 text
-> that differs, that text wins — reconcile before external handoff.
+> that differs, that text wins — reconcile before external handoff (this
+> reconstruction stands until then; no canonical text was supplied at v5.5).
 >
-> **STATE block stamped 2026-07-09 21:40Z.** ⚠ REFRESH the STATE section after
-> the **2026-07-10 16:00Z** first-calibrated-scan proof (the ev == ev_raw×0.5
-> confirmation) before handing this to an external reviewer — several STATE
-> facts flip that morning.
+> **STATE block re-stamped 2026-07-09 EOD** (to match v5.5's refresh). ⚠ REFRESH
+> the STATE section again after the **2026-07-10 16:00Z** first-calibrated-scan
+> proof before handing this to an external reviewer — several STATE facts flip
+> that morning.
 >
 > **Redaction rules (applied):** the live brokerage account is "the live
 > account"; the operator identity is "the owner"; the three books are
@@ -145,24 +148,35 @@ central tension the review exists to pressure-test.
    return-shape the apply path consumes). Is the protection inert?
 2. **Structural viability at ~$2k** (= A11).
 
-## STATE (stamped 2026-07-09 21:40Z — verify cheaply; REFRESH after 07-10 16:00Z)
+## STATE (stamped 2026-07-09 EOD — verify cheaply; REFRESH after 07-10 16:00Z)
 
 - Live edge dataset: **9 real closes all-time (1W/8L, −$262); post-epoch 8
   (1W/7L, −$178)**; equity ≈ **$2,068**. This is the entire real-money edge
   sample — small and currently losing, by design of learning mode.
-- Calibration **exited raw-mode 07-09 10:00Z** at the 0.5 clamp floor; **the
-  stored multiplier was NOT reaching the live scan** (headline finding #1) —
-  status pending the 07-10 16:00Z proof. *After 07-10 16:00Z this flips:
-  either ev == ev_raw×0.5 (fixed) or still ×1.0 (open).*
-- Entry funnel correctly near-zero at ~$2k (round-trip cost ≈ EV). Zero
-  entries most days is the gate working.
-- The entry-gate qty-scaling fix is **shadow-only / observe on live** behind a
-  default-OFF flag (Option A). A shadow-detection value-match fix + calibration
-  fail-loud logging shipped 07-09 EOD; the Option-B (live-apply) decision is
-  deferred pending clean observe evidence.
+- **Calibration is now ENABLED (`CALIBRATION_ENABLED=1` since 07-09 21:29Z).**
+  Root cause of "the multiplier isn't reaching the scan" was a stale
+  `CALIBRATION_ENABLED=0` (since the 06-11 epoch — RAW EV served for ~a month;
+  fail-loud logs added). First calibrated PRODUCTION scan pends **07-10 16:00Z**.
+  ⚠ **RE-SCOPE:** a persisted `ev == ev_raw×0.5` proves the multiplier reaches
+  the persisted ev + the final round-trip gate ONLY — apply is downstream of
+  selection/sizing, so SCORE/SELECTION/SIZING consume RAW ev regardless. Do not
+  read the proof as "calibration changed which trades were selected."
+- **Live-close custody has a LATENT hole (queued #1 build):** a raised submit
+  exception can fall through to an internal fill on a live position (never fired
+  — all 9 closes broker-reconciled). The broker-acknowledged-close invariant is
+  the next build.
+- **Risk stack is book-blind** (no per-position cost/max-loss columns → the
+  allocator/RBE see the open book as ~$0; utilization costs candidates at premium
+  not max-loss). Reached in practice: **3 concurrent** live positions ran
+  06-11→06-12 (not the once-assumed ≤1).
+- Entry funnel correctly near-zero at ~$2k (round-trip cost ≈ EV). The entry-gate
+  qty-scaling fix is **observe-only on live** (default-OFF flag); shadow-detection
+  value-match + calibration fail-loud shipped 07-09 EOD.
+- Greedy-stop candidate loop DOWNGRADED (replay: the budget break never fired).
 - Breaker: N=3 consecutive live losses pause entries; an **edge-trigger content
   fingerprint** means a standing already-reviewed window does NOT re-pause —
-  only a NEW loss re-trips. Recovery is operator-only.
+  only a NEW loss re-trips (suppression proven live 07-09). Recovery is
+  operator-only.
 
 ## OUTPUT
 

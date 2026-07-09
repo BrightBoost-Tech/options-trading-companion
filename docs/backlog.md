@@ -12,6 +12,177 @@ questions) · **RESOLVED — DO NOT REINVESTIGATE**.
 
 ---
 
+## P0 — IMMEDIATE NEXT BUILD (07-09 external-audit v1.1 adjudication)
+
+- **P0-A · Broker-acknowledged live-close invariant (F-A2-1) — THE NEXT BUILD,
+  supersedes strategy work + Phase-3.** A LIVE close must NOT record
+  `paper_orders.status='filled'` / close the position without a broker
+  acknowledgement. Today (verified d45ad63) a RAISED exception around the live
+  submit (`paper_exit_evaluator.py:2178-2207`; sources incl. `get_alpaca_client`,
+  the order-row fetch, imports, and the pre-cancel
+  `alpaca_order_handler.py:245` OUTSIDE the retry-try) falls through to an
+  INTERNAL FILL (`:2272-2280` writes `status='filled'`) on a live position, and
+  the monitor logs it as a successful `force_close` (`intraday_risk_monitor.py:
+  1428-1434`, only `deferred_uncorroborated` counts as failure). Charter: on a
+  live-routed close, a submit exception must route to retry / needs_manual_review
+  / deferred — NEVER internal-fill; the internal-fill path is paper/shadow ONLY.
+  Add a regression test at the seam + keep the existing
+  `paper_exit_alpaca_submit_fallback_to_internal` critical.
+  **DESIGN — recon #4 state-machine MERGED here (A1b verdict: MERGE, 07-09 v1.2).**
+  F-A2-1 as charter-only lacked an explicit reconciling state; the recon's
+  order-lifecycle spec supplies it: a typed close-order status enum with an
+  **`UNKNOWN_RECONCILING`** state (submit raised → we do NOT know if the broker
+  got it) + typed transitions; on `UNKNOWN_RECONCILING`, do a **targeted broker
+  order lookup by client_order_id** before any DB write, and only then resolve to
+  filled (broker-acked) / retry / needs_manual_review — never a blind internal
+  fill. Enforce the **fill+position-closure invariant** (a position may flip to
+  closed ONLY paired with a broker-acked fill on a live route). Cites: Nautilus /
+  Hummingbot order-state machines (design reference, not a dependency). · origin
+  07-09 v1.1 F-A2-1 + v1.2 recon #4 · STATUS: **LATENT** (never fired on a live
+  position — all 9 post-epoch closes broker-reconciled; the 10 internal-fill rows
+  are pre-live alpaca-paper, latest 04-06). E6 exclusion-integrity FAIL noted in
+  ledger. · done when: the invariant + the UNKNOWN_RECONCILING lookup are enforced
+  in code + tested.
+
+- **P0-B · "Book-scaling readiness" epic (MERGE: F-A1-1 + F-A1-2 + B1/B2 one-
+  beta control + same-run reservation).** The risk stack is book-blind for
+  ordinary spreads: `paper_positions` has no `cost_basis`/`current_value`/
+  `max_loss`/`collateral` columns, so the allocator (`portfolio_allocator.py:
+  116-144`) and RBE (`risk_budget_engine.py:99-208`) see the open book as ~$0,
+  and the utilization gate costs a candidate at premium (~$149) not max-loss
+  (~$351) (`utilization_gate.py:323-341`), inconsistent with its own open-side
+  margin basis. **TRIGGER CORRECTED — already occurred, not hypothetical:** 3
+  concurrent real-money live positions ran 2026-06-11→06-12 (before the #1139
+  tripwire shipped 07-08). Package: (1) persist per-position cost/max-loss (add
+  columns + writer), (2) allocator/RBE read them, (3) utilization candidate cost
+  on max-loss basis, (4) the B1/B2 per-bucket correlation cap. The #1139 tripwire
+  ALARM is the interim guard only. · origin 07-09 v1.1 F-A1-1/A1-2 + 07-03
+  F-A2a · do BEFORE routine 2-position operation resumes.
+
+- **P0/P1 · Calibration-ordering + prequential validation (F-A1-3 + recon #2) —
+  design session, not a one-liner.**
+  `apply_calibration` runs post-sizing (`workflow_orchestrator.py:3562-3569`),
+  so SCORE / SELECTION / SIZING all consume RAW ev; only the persisted `ev` +
+  final-stage round-trip gate + persisted `risk_adjusted_ev` are calibrated.
+  Either move apply before ranking/sizing OR recompute the derived score/rank
+  after apply. **Re-scopes the 07-10 16:00Z "proof":** `ev==0.5×ev_raw` proves
+  the multiplier reaches the persisted ev + the gate, NOT that scoring/selection/
+  sizing used it.
+  **ABSORB recon #2 — prequential validation** so the multiplier is earned, not
+  assumed: 4-close warm-up, fit on closes 1..k-1 and score close k (never fit on
+  the point being scored); prefix-invariance (adding a close never rewrites past
+  scores); knowledge-time fields (`known_at <= decision_at`); append-only
+  calibration runs (each run a new immutable row).
+  **A1a FIELD-CONTRACT FIX (CONFIRMED IN SCOPE):** `walkforward_validate_learning_v3.py`
+  reads `learning_trade_outcomes_v3` expecting `ev`/`expected_value` +
+  `realized_pnl`/`pnl`, but the table exposes `ev_predicted` / `pnl_realized`
+  (+ `pnl_predicted`/`pop_predicted`) — the script `KeyError`s at `df['ev']`
+  (`:101`). Fix the read to the real columns before the script can honestly
+  validate anything.
+  **FALSIFIER (GOLD — this is the retirement condition, keep verbatim):** *"if
+  calibrated fails to beat raw over the next 15–20 forward closes on EV error /
+  Brier, retain raw and stop spending complexity on the multiplier."*
+  · origin 07-09 v1.1 F-A1-3 + v1.2 recon #2.
+
+## 07-09 v1.1 adjudication — AMENDMENTS to existing items
+
+- **Observability PR → SPLIT (recommended).** The carried 3-in-1 (ops_output_
+  stale false-ager · job_succeeded_with_errors re-egress · re-egress dedup) gains
+  F-A4-1 (`iv_daily_refresh` returns ok on all-missing) + F-A4-2 (`iv_daily_refresh`
+  absent from `EXPECTED_JOBS`; the watched `learning_ingest` is a no-op STUB
+  while real `paper_learning_ingest` is unwatched). Recommend TWO PRs: (1) the
+  alert-noise 3-in-1 as-is; (2) a watchdog-coverage PR (EXPECTED_JOBS: add
+  `iv_daily_refresh` + `paper_learning_ingest`, drop/replace the stub;
+  iv all-missing → non-ok). Different surfaces, cleaner attribution.
+- **Thesis-tracker build gains F-A9-1 relabel:** `signal_accuracy_rolling.win =
+  pnl_realized>0` is a realized win-rate, mislabeled as signal accuracy → rename
+  to `realized_trade_win_rate`; the tracker becomes the real thesis_accuracy
+  source. Exhibit: B1 ≈78% thesis vs the view's 12.5% realized.
+- **Phase-3 instrumentation gains F-A2-2 named mechanism:** TARGET_PROFIT
+  suppression on `quote_complete=False` (`exit_mark_corroboration.py:246-253`)
+  discards a computed executable-side divergence when a NON-executable leg side
+  is missing (stop_loss never suppressed). Measure how often TP is suppressed on
+  quote-incompleteness (→ positions held longer → more stop exposure).
+- **Greedy replay gains F-A8-1 dedupe requirement:** rejection totals over-count
+  (inner `process_symbol` reason + outer wrapper reason both `record()`); any
+  future rejection-figure analysis must dedupe. (Lane A's 07-09 replay used
+  `trade_suggestions`, not the ~916 rejection figure — unaffected.)
+- **A11 SECURITY LENS → recommended as the next A10 rotation** (owner-gated).
+  Credential/secret-scanning/history-hygiene as a standing audit lens; the
+  incumbent (Calendar & Clock) rotates out only by the owner stating what it
+  structurally misses. · recommended-pending.
+- **FREE-LOOK filed:** stored PoP > 1.0 on debit-spread + take_profit_limit rows
+  (max 1.0704) — impossible probability; delta-based PoP overshoot, additive
+  one-liner clamp to [0,1].
+
+## 07-09 v1.2 comparative-recon integration (verified before backlogging)
+
+- **NEW P1 · Deterministic decision replay (recon #1).** A runner over the
+  existing capture substrate: freeze clock / SHA / config / equity / positions,
+  inject `ReplayTruthLayer`, byte-compare decision outputs. **DECISION replay,
+  NOT a P&L backtest** — fill evidence stays gap-3b's. Substrate grade ~55%
+  CONFIRMED: `ReplayTruthLayer.from_decision_id` has ZERO production callers
+  (docstrings + one test only); capture tables (`decision_runs`/`decision_inputs`/
+  `decision_features`) EXIST. **⚠ PREREQ / DROP-CONDITION FIRED (verified 07-09):
+  those tables have 0 ROWS** — capture is schema-only, nothing writes it. So the
+  item is bigger than "runner over existing rows": step 1 is a **capture-WRITE
+  path** (wire decision capture to persist runs/inputs/features), THEN the byte-
+  compare runner. Prereq rider (recon's own): the runner is blocked until
+  production capture rows exist. Effort: capture-write ~3-5 evenings + runner ~3-5
+  evenings (recon's "3-5" assumed rows existed). · origin 07-09 v1.2 recon #1.
+
+- **NEW P2 · Versioned earnings-event cohort (recon #3).** Replace the
+  static-2025 / filing+90d earnings estimates with a **versioned feed**
+  (`known_at`, `source`, `raw_hash`); classify **ETF-exempt / earnings_overlap /
+  `event_unknown`-never-silently-safe**; **fix the gate to event-before-EXPIRY**
+  (A1c(ii) CONFIRMED: `options_scanner.py:3866-3879` gates ONLY on
+  `days_to_earnings<=2`/`<=7`, so an earnings event inside the hold window but
+  >2 days out passes — the event-in-hold-window risk is unscreened). OBSERVE-ONLY
+  first; a hard skip is an operator decision after source-reliability observation.
+  Falsifier/guard: `event_unknown` must never resolve to "safe". 1-2 evenings.
+  · origin 07-09 v1.2 recon #3.
+
+- **NEW P2 · Per-leg quote envelope at entry staging (recon #5).** A timestamped
+  `OptionLegQuote` threaded through to the final stage with identity / executable /
+  age / skew invariants; **unknown age → one refresh → `quote_age_unknown`, never
+  "fresh"**. Extends the Phase-3 quote-age plumbing to the ENTRY side (today entry
+  staging has no per-leg quote-age guard). 1-2 evenings. · origin 07-09 v1.2
+  recon #5.
+
+- *(recon #4 → MERGED into P0-A above per A1b; not a separate item.)*
+
+## DO-NOT-RE-LITIGATE — rejected/settled gaps (stop next month's re-derivation)
+
+Standing exclusion list. Each line is a gap CONSIDERED and REJECTED (or settled)
+with why — re-proposing one is a wasted slot. Verified this session unless noted.
+
+- **Full P&L backtest engine** — REJECTED in favor of *decision* replay (recon
+  #1); fill realism is gap-3b's job, not a backtester's. Don't build a P&L
+  backtester to "validate edge" at single-digit live closes.
+- **Compounder greedy-stop `break`→`continue` build** — DOWNGRADED (Lane A
+  replay 07-09): the budget break never fired in the last 4 cycles; blast radius
+  zero on both risk bases. Reopen ONLY if a cycle presents >4 fitting candidates
+  AND the roundtrip gate starts passing a tail. Don't re-file as a volume fix.
+- **Credit-spread PoP inversion (F-A3-1)** — LATENT, NO FIX: the inverted
+  `credit/width` branch (`ev_calculator.py:34-42`) accepts only 2-leg credit
+  verticals; DB shows ZERO ever stored (only condors + debit spreads). Fix only
+  if/when a credit vertical is actually produced.
+- **Loosening any stop / envelope / gate on outcome or hindsight** — PERMANENTLY
+  REJECTED (doctrine). A losing trade that passed every gate is not a gate bug; a
+  proven arithmetic error is the only basis for passing more trades.
+- **Shadow-cohort ledgers as EDGE evidence** — REJECTED: fill-fiction (100% fill
+  at 5-17× live size; `SHADOW_FILL_DISCOUNT=0.31`). Mechanism evidence only until
+  gap-3b normalization is observable.
+- **"Position-management conventions missing" (21-DTE / 50%-credit / DTE gates)** —
+  CORRECTED/REJECTED (A2.7): the recon confirmed these already ~85% EXIST in
+  cohort policy; the earlier deep-dive's "missing" impression was wrong. Don't
+  re-derive them as a new build.
+- **⚠ PROVENANCE NOTE:** the comparative recon's OWN rejected-gaps appendix
+  (its Nautilus/Hummingbot comparison rejections) was produced in a prior session
+  and is NOT recoverable from this session's context. The items above are the
+  rejections VERIFIED this session; the operator should paste the recon's full
+  appendix here verbatim to complete the standing list.
+
 ## GATED — pre-approved/known, do not re-find (operator/trigger owns the go)
 
 - **Executor cadence — DO NOT BUILD until the trigger is met** — one execution

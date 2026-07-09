@@ -2883,6 +2883,16 @@ async def run_midday_cycle(supabase: Client, user_id: str, deployable_capital_ov
         get_calibration_adjustments,
         CalibrationService,
     )
+    if not _CAL_ENABLED:
+        # FAIL-LOUD (2026-07-09 EOD): a live-money control silently serving raw
+        # EV/PoP for ~a month (CALIBRATION_ENABLED=0 stale since the 06-11
+        # epoch) must be impossible to repeat. Once per scan, WARNING level.
+        logger.warning(
+            "[CALIBRATION] DISABLED (CALIBRATION_ENABLED falsy) — this scan "
+            "ranks/gates on RAW EV/PoP; the daily calibration_update still "
+            "computes a multiplier blob that NOTHING reads. To enable: set "
+            "CALIBRATION_ENABLED=1 on the worker + recycle (import-time flag)."
+        )
     if _CAL_ENABLED:
         try:
             _cal_adj_cache = get_calibration_adjustments(user_id, supabase)

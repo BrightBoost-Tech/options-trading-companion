@@ -223,6 +223,25 @@ def run(payload: Dict[str, Any], ctx: Any = None) -> Dict[str, Any]:
                     }).execute()
                     users_updated += 1
                     detail["total_outcomes"] = result["total_outcomes"]
+                    # FAIL-LOUD compute-side (2026-07-09 EOD): make the
+                    # split-brain visible from the WRITE side too — a real
+                    # multiplier was just stored, but if the apply gate is off
+                    # nothing will read it.
+                    try:
+                        from packages.quantum.analytics.calibration_service import (
+                            CALIBRATION_ENABLED as _CAL_EN,
+                        )
+                        if not _CAL_EN:
+                            logger.warning(
+                                "[CALIBRATION] wrote a multiplier blob for %s "
+                                "(n=%s) but APPLY is DISABLED "
+                                "(CALIBRATION_ENABLED falsy) — computed-but-not-"
+                                "applied split-brain; no scan will use it until "
+                                "the flag is set + workers recycle.",
+                                uid[:8], result.get("total_outcomes"),
+                            )
+                    except Exception:
+                        pass
                 except Exception as e:
                     print(f"[CALIBRATION] Failed to cache for {uid[:8]}: {e}")
                     users_skipped += 1

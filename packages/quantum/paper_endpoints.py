@@ -702,13 +702,11 @@ def _stage_order_internal(supabase, analytics, user_id, ticket: TradeTicket, por
     # underwater-on-executable from entry. OPEN-only; raises
     # EntryRoundtripCostExceedsEV (clean no-broker-submit reject, mirrors
     # EntryQuoteUnpriceable) which the autopilot loops count as not-executed.
-    # Option-A cohort split (2026-07-09): SHADOW portfolios (routing_mode
-    # 'paper_shadow') get the fixed per-contract decision; anything else is
-    # treated as live-routed and stays observe-only unless
-    # GATE_QTY_FIX_LIVE_ENABLED. Unknown routing → protected (live) path.
-    _is_shadow_portfolio = str(
-        (portfolio or {}).get("routing_mode") or ""
-    ).strip().lower() == "paper_shadow"
+    # Option-A cohort split (fixed 2026-07-09 EOD): SHADOW portfolios get the
+    # fixed per-contract decision; live-routed stay observe-only unless
+    # GATE_QTY_FIX_LIVE_ENABLED. See _is_shadow_routing (whitelist on the REAL
+    # production value 'shadow_only'; unknown → observe-only, fail-safe).
+    _is_shadow_portfolio = _is_shadow_routing((portfolio or {}).get("routing_mode"))
     _apply_entry_roundtrip_gate(
         supabase, ticket, position_id, _entry_leg_quotes,
         suggestion_id=suggestion_id, is_shadow=_is_shadow_portfolio,
@@ -1209,6 +1207,17 @@ def _gate_qty_fix_live_enabled() -> bool:
     return os.environ.get("GATE_QTY_FIX_LIVE_ENABLED", "").strip().lower() in (
         "1", "true", "yes", "on",
     )
+
+
+def _is_shadow_routing(routing_mode) -> bool:
+    """Option-A cohort split (fixed 2026-07-09 EOD, E2 residue). A portfolio is
+    SHADOW iff its routing_mode is exactly 'shadow_only' — the value production
+    emits (live champions are 'live_eligible'). WHITELIST by design: any
+    unknown/future routing value → False → observe-only / live-decision-
+    UNCHANGED, never decision-changed (fail-safe direction). The prior check
+    matched 'paper_shadow', which production never emits, so the whole shadow
+    fix was inert (all cohorts fell to observe-only, basis=legacy_sized)."""
+    return str(routing_mode or "").strip().lower() == "shadow_only"
 
 
 def _apply_entry_roundtrip_gate(

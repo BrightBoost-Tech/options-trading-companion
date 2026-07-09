@@ -1448,6 +1448,59 @@ PENDING VERIFICATIONS (2026-07-07, added by the M4 ship):
   GTC); fossils unchanged (22 queued / 4 stuck-running).
 - Counters: A9→0, others →3 (A7 dormant). No retirement candidates.
 
+## 2026-07-09 EOD (latest) — COMPARATIVE-RECON INTEGRATION (v1.2) + v5.5 CANONICAL
+
+STEP-0: broker 19:35 ET (closed) / DB 23:35Z — agreed. Doc/prompt writes only,
+runtime-inert (prompt files read by `run-nightly.cmd` + humans, not services).
+
+**A1 VERIFICATIONS (the recon's two falsifiable code claims + two gated grades):**
+- **A1a field contract → CONFIRMED.** `walkforward_validate_learning_v3.py`
+  reads `learning_trade_outcomes_v3` expecting `ev`/`expected_value` +
+  `realized_pnl`/`pnl`; the table exposes `ev_predicted`/`pnl_realized`
+  (+`pnl_predicted`/`pop_predicted`) → `KeyError` at `df['ev'].fillna` (`:101`).
+  Script cannot honestly validate the view → field-contract fix folded into the
+  calibration-ordering item.
+- **A1b F-A2-1 vs recon #4 → MERGE.** F-A2-1's charter had the invariant but no
+  explicit reconciling state; the recon supplies `UNKNOWN_RECONCILING` + typed
+  transitions + targeted client_order_id lookup + fill+closure invariant
+  (Nautilus/Hummingbot cites). Merged into P0-A (what it lacked: the state
+  machine + the targeted lookup).
+- **A1c(i) replay substrate → CONFIRMED ~55%, but WORSE than graded.**
+  `from_decision_id` = ZERO production callers (docstrings + 1 test); capture
+  tables `decision_runs`/`decision_inputs`/`decision_features` EXIST **but hold 0
+  ROWS** — schema-only, nothing writes them. The replay item's prereq (capture
+  rows) is UNMET → its drop-condition fired → item rescoped to include a
+  capture-WRITE path first.
+- **A1c(ii) earnings gate → CONFIRMED.** `options_scanner.py:3866-3879` gates on
+  `days_to_earnings<=2` (hard) / `<=7` (penalty) only — NO event-before-expiry
+  check. Grade holds.
+
+**RECON SCORECARD:** claims spot-checked where falsifiable were evidence-verified
+(A1a field mismatch, A1c earnings gate, replay caller/schema); coverage grades
+materially correct (replay ~55% — adjusted down for the 0-row capture);
+falsifiers carried verbatim into the items as retirement conditions (the GOLD
+prequential falsifier especially). Recon method: sound; one grade optimistic
+(assumed capture rows existed).
+
+**CORRECTION to OUR earlier framing (A2.7, move-don't-lose):** the recon
+confirmed **21-DTE / 50%-credit / DTE gates already ~85% EXIST in cohort
+policy** — the earlier deep-dive's "position-management conventions missing"
+impression is WRONG and is corrected here + filed in the DO-NOT-RE-LITIGATE
+backlog section. Do not re-derive them as a new build.
+
+**BACKLOG DIFF:** P0-A absorbed recon #4 state machine; calibration-ordering item
+absorbed recon #2 (prequential + A1a field-contract fix + GOLD falsifier); NEW P1
+deterministic replay (+ 0-row capture prereq); NEW P2 versioned earnings cohort
+(fix gate to event-before-expiry, observe-first); NEW P2 per-leg entry quote
+envelope; DO-NOT-RE-LITIGATE standing section seeded.
+
+**v5.5 CANONICAL ON DISK:** `audit/v5-prompt.md` upgraded to v5.5 ELEVEN AREAS
+(A1-A9 + A10 rotating Calendar&Clock + A11 permanent Self-Extension) at this SHA;
+STATE refreshed to tonight; external prompt STATE re-stamped. **Prompt-drift class
+CLOSED: the invoked file (`run-nightly.cmd:8` → `audit/v5-prompt.md`) IS the
+version of record; session-prompt changes MUST land here same-day.** Tonight's
+midnight run is the first eleven-area (v5.5) nightly.
+
 ## 2026-07-09 EOD (late) — EXTERNAL AUDIT v1.1 ADJUDICATION (P0/P1 verified vs code+DB+broker)
 
 STEP-0: broker 19:15 ET (closed) / DB 23:15Z — agreed. READ-ONLY + the one

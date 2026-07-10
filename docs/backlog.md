@@ -14,8 +14,8 @@ questions) · **RESOLVED — DO NOT REINVESTIGATE**.
 
 ## P0 — IMMEDIATE NEXT BUILD (07-09 external-audit v1.1 adjudication)
 
-- **P0-A · Broker-acknowledged live-close invariant (F-A2-1) — THE NEXT BUILD,
-  supersedes strategy work + Phase-3.** A LIVE close must NOT record
+- **P0-A · Broker-acknowledged live-close invariant (F-A2-1) — PR1 BUILT #1149
+  (`e45290f`, 07-10); PR2 remaining (submit-path client_order_id).** A LIVE close must NOT record
   `paper_orders.status='filled'` / close the position without a broker
   acknowledgement. Today (verified d45ad63) a RAISED exception around the live
   submit (`paper_exit_evaluator.py:2178-2207`; sources incl. `get_alpaca_client`,
@@ -41,8 +41,14 @@ questions) · **RESOLVED — DO NOT REINVESTIGATE**.
   07-09 v1.1 F-A2-1 + v1.2 recon #4 · STATUS: **LATENT** (never fired on a live
   position — all 9 post-epoch closes broker-reconciled; the 10 internal-fill rows
   are pre-live alpaca-paper, latest 04-06). E6 exclusion-integrity FAIL noted in
-  ledger. · done when: the invariant + the UNKNOWN_RECONCILING lookup are enforced
-  in code + tested.
+  ledger. · **PR1 BUILT #1149 (07-10):** structural guard makes internal-fill
+  unreachable for live · submit-exception + routing-query-failure fail-closed ·
+  monitor success-costume fixed · force_close_failed first producer · E6
+  remediated. **PR2 remaining (own session):** set a deterministic
+  `client_order_id` at submit (touches the submit path) + reconciler
+  `get_order_by_client_id` auto-resolution of the response-lost
+  `UNKNOWN_RECONCILING` edge — until then that edge holds OPEN + alarmed
+  (operator-resolved). · done when: PR2 ships the targeted auto-resolution.
 
 - **P0-B · "Book-scaling readiness" epic (MERGE: F-A1-1 + F-A1-2 + B1/B2 one-
   beta control + same-run reservation).** The risk stack is book-blind for

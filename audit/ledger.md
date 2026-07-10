@@ -1448,6 +1448,55 @@ PENDING VERIFICATIONS (2026-07-07, added by the M4 ship):
   GTC); fossils unchanged (22 queued / 4 stuck-running).
 - Counters: A9→0, others →3 (A7 dormant). No retirement candidates.
 
+## 2026-07-10 (post-close ~16:21 ET) — BUILT: P0-A broker-acknowledged live-close invariant (#1149) [PR1 of 2]
+
+STEP-0: broker 16:21 ET CLOSED (re-confirmed pre-merge) / DB 20:21Z. Post-close;
+the live close path — no RTH exceptions. **#1149 `e45290f` MERGED + H8 VERIFIED**
+(all three services SUCCESS @ `e45290f`, created 20:21:39–41Z > merge 20:21:37Z).
+
+**E6 EXCLUSION-INTEGRITY FAIL → REMEDIATED (PR1).** Closure claim rewritten to
+match the code: *"a live-routed close requires a broker acknowledgement; the
+internal-fill block is STRUCTURALLY UNREACHABLE for live routing; every failure
+lands in an explicit alarmed non-terminal state (`unknown_reconciling`),
+position OPEN — never a silent internal fill."* The 2026-04-16 ghost-position
+class is closed in code.
+
+**RECON (STOP-IF-SURPRISED — no surprise in the chain):** the 4 cites re-verified
+(routing default False + warn-proceed `:1700-1727` · submit result discarded,
+`routed_to='alpaca'` unconditional `:2154-2177` · raised-submit → internal fill
+`:2178-2280` · monitor costume `:1428`). ENTRYPOINT MAP: only entrypoints **1**
+(scheduled exit evaluator) + **2** (monitor force-close) reach the fallthrough;
+resting-TP/GTC (3,5), reconciler (6), orphan-repair (7), `_commit_fill` (8)
+close on broker truth or are paper-only; manual endpoint (4) branches on process
+`EXECUTION_MODE`, no internal-fill-on-exception. **THE MATERIAL FINDING (→ PR2):**
+`client_order_id` is NEVER set at submit — the only broker handle (`alpaca_order_id`)
+is lost exactly in the response-lost case; the charter's targeted lookup needs a
+submit-path change (PR2). PR1 holds the response-lost case OPEN + alarmed —
+invariant still fully held.
+
+**BUILD (PR1):** STRUCTURAL GUARD before the internal-fill block —
+`should_submit_to_broker` True → held open (needs_manual_review +
+`force_close_failed` critical + `routed_to='unknown_reconciling'`); internal-fill
+UNREACHABLE for live; fail-closed on a routing exception; shadow/paper unchanged.
+Submit-exception "fall back to internal fill" REMOVED → same held-open. Routing-
+query-failure fail-CLOSED (`position_is_alpaca=True` → authoritative portfolio
+gate). Monitor success-costume fixed — only a COMPLETED close = success;
+`unknown_reconciling` → not-closed, no bench. **`force_close_failed` gets its
+FIRST real close-path producer** (allowlisted immediate-egress since #1134).
+Reconciler's existing targeted `get_order(alpaca_order_id)` resolves case-(a)
+pending closes; case-(b) `client_order_id` auto-resolution is PR2. Additive
+(status TEXT, no migration). Tests: `TestAlpacaSubmitFallbackCriticalAlert` (pinned
+the REMOVED fallback) → `TestP0ABrokerAckCloseInvariant` + new
+`test_p0a_broker_ack_close.py` (guard decision behavioral + 4 seams pinned on
+production); 120 exit/monitor tests green; full `_close_position` integration
+deferred to PR2.
+
+**CHARTER: BUILT (PR1).** Remaining (PR2, own session): deterministic
+`client_order_id` at submit + reconciler `get_order_by_client_id` auto-resolution
+of the response-lost `UNKNOWN_RECONCILING` edge. Untouched: stop TRIGGER logic
+(what fires a close = Phase-3's territory) — PR1 changes only what happens AFTER
+the decision to close.
+
 ## 2026-07-10 (early, ~00:1x ET post-close) — BUILD: PoP clamp-AND-log + walk-forward field contract (#1147)
 
 STEP-0: broker 00:08 ET (closed) / DB 04:08Z — agreed. Combined Tier-1 PR per operator GO.
@@ -2314,3 +2363,58 @@ PENDING VERIFICATIONS (2026-07-09 → next session):
   on 07-08 — scheduled multi-cycle or operator-driven?
 - **phase2_precheck naming**: 4×/day green job outside the doctrine's scheduler map
   (free-look, no anomaly) — one-line operator naming requested.
+
+## status:reported — 2026-07-10 NIGHTLY run (report `audit/reports/2026-07-10.md`; first v5.5 eleven-area nightly)
+
+Window 07-09 05:01Z → 07-10 05:01Z. DB clock grounded 05:01:05Z; **broker-blind run** (Alpaca
+MCP absent — equity ≈$2,067.86 DB-derived, hypothesis). ZERO criticals (H11 clean). Zero-trade
+day: 3 SOFI forks (ev_raw 39.71) all blocked `ev_below_roundtrip_cost`; book flat; pool stays
+8/8 (1W/7L, −$178); gap counter 3/10–15. H8: HEAD moved `655c9aa`→`d275d28` (4 movers named —
+#1144/#1145 docs, **#1147 `168a752` code**, `d275d28` doc-wrap runtime-inert, deployed 05:03:37Z
+DURING the audit); all 3 services SUCCESS @ `d275d28`; 5 recycles 22:54→05:03Z, 0 orphaned jobs.
+
+- **VERIFICATIONS CLOSED**: ✅ **#1135 FIRST SUPPRESSION DB-PROVEN** — 21:20:03Z ingest result
+  verbatim `suppressed_standing_window:true, tripped:false, paused_written:false` on the
+  unchanged 07-08 window; `entries_paused=false` (operator un-pause 11:53:33Z); fingerprint
+  intact. Edge-trigger case 3 exercised — breaker fully validated, entries ARMED. ·
+  ✅ **EDGE-TRIGGER FULLY PROVEN IN PRODUCTION; the morning un-pause ritual is RETIRED**
+  (07-10 AM confirmation — all four silence conditions held: no streak_breaker email overnight ·
+  `entries_paused=false` · `streak_breaker_state.last_tripped_fingerprint` intact
+  [055ead84/7dd459f8/bd895160, tripped_at 07-08 21:20Z] · 21:20Z 07-09 ingest
+  `suppressed_standing_window:true`). This was the last morning it needed checking as a ritual
+  item; future mornings assume armed unless a flag-condition fires. ·
+  ✅ post-recycle learning chain clean (21:00–22:00Z all green, errors=0) · ✅ universe 78 ·
+  ✅ A6-cadence + phase2_precheck = ACK'd dispositions observed again, closed. ·
+  ⚠ STATE CHANGE: F-FREE-1 scrub MERGED via #1145 `f6b204c` (was "PR pending"); operator items
+  (history cleanup + secret-scanning) still open.
+- **[A5 2026-07-10 — quantified continuation, urgency ↑, no new class]** ZERO-trade day wrote
+  ~53 warning+ alert rows; `job_succeeded_with_errors` re-egressed the SAME stale run
+  `ef8a2d4e` 6 more times (13:07→18:07Z) = **10 cumulative phone hits/2 days for one condition**,
+  self-terminating only at the detector's ~24h lookback; ops_output_stale ×10 HIGH (unclearable,
+  `MAX(last_marked_at)` still 07-01); accuracy ×20; chain_mechanics ×14; autopilot costume ×3
+  (`distinct_error_classes=["EntryRoundtripCostExceedsEV"]` — 100% designed NOs as "failed",
+  metadata-proven). **The 3-in-1 observability PR slipped a 2nd consecutive build day.** A9
+  rider: the alert text "silently masked failure" is self-falsifying by its 10th delivery —
+  message-honesty fix rides the dedup PR.
+- **[A1/A3 2026-07-10 — structural arithmetic, exhibit for the OWNER-GATED clamp review; no
+  action, no loosening]** From 07-10 16:00Z gate-pass requires `ev_raw ≥ 2×(15 + roundtrip)`:
+  QQQ-IC class (cost ≈4.8, ev_raw 41.75) passes barely (thr ≈39.6); SOFI class (cost >24.7)
+  needs >79. Expected entry volume ≈ zero-to-rare = do-no-harm working, BUT couples: multiplier
+  rises only via pool improvement → pool grows only via closes → closes need entries. Not a
+  strict deadlock (30d window ages June losses out ~early-Aug; 0.5-floor review is the owner
+  lever). Hand to the clamp review as one exhibit with the funnel arithmetic.
+- **[A11 2026-07-10 — proposal]** Run-boundary integrity: pin running SHA at audit START and
+  END, name mid-run movers as a header field (tonight's `d275d28` landed 2 min into the run;
+  caught only by late deployment listing). Also recorded: scheduled session has NO shell
+  (subagents included) — git verified via `.git` metadata only.
+
+PENDING VERIFICATIONS (2026-07-10 → next session):
+- **FIRST CALIBRATED PRODUCTION EV — 07-10 16:00Z scan**: persisted `ev == ev_raw × 0.5`
+  (re-scoped claim: proves persisted-ev + final gate ONLY; selection/sizing RAW). Option-B clean
+  observe lines start counting at the same scan. `POP_CLAMP_ENGAGED` never firing is
+  dormant-by-arithmetic, NOT broken (pop_mult ≤ 1.0).
+- **First native [CLOSE_FILL_GAP] + first post-#1137 `last_marked_at` stamp** — need a live
+  close / held book (none this window).
+- **#1139 one-beta tripwire** — unexercisable at 0 positions; fires only at 2+ concurrent live
+  (that event also reopens A2's settled condition).
+- **3-in-1(+accuracy-dedup) observability PR** — TOP-1 again; verify IF shipped, don't re-find.

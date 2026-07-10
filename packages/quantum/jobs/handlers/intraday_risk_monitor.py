@@ -1425,11 +1425,21 @@ class IntradayRiskMonitor:
             # escalation), no force_close count, and — critically — no symbol
             # bench (a deferred stop must not cooldown a position that never
             # closed). The monitor re-evaluates next cycle.
-            if (result or {}).get("routed_to") == "deferred_uncorroborated":
+            # P0-A (2026-07-10): a LIVE close that could not confirm a broker
+            # fill returns 'unknown_reconciling' — position still OPEN, never
+            # internally filled. Treat exactly like a deferred close: NOT closed,
+            # no "Force-closed" success critical, no cooldown bench (a close that
+            # never completed must not bench the symbol). force_close_failed
+            # already fired inside _close_position; the reconciler/operator
+            # resolves it. Counting only a COMPLETED close as success fixes the
+            # :1428 success-costume (internal-fill fallthrough is now impossible
+            # for live).
+            _rt_p0a = (result or {}).get("routed_to")
+            if _rt_p0a in ("deferred_uncorroborated", "unknown_reconciling"):
                 logger.warning(
-                    f"[RISK_MONITOR] close DEFERRED (uncorroborated executable "
-                    f"side) for {symbol} ({str(pos_id)[:8]}) reason={reason} — "
-                    f"position held, re-eval next cycle"
+                    f"[RISK_MONITOR] close NOT completed ({_rt_p0a}) for {symbol} "
+                    f"({str(pos_id)[:8]}) reason={reason} — position held OPEN, "
+                    f"re-eval next cycle"
                 )
                 return False
 

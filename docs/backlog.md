@@ -82,7 +82,14 @@ questions) · **RESOLVED — DO NOT REINVESTIGATE**.
   **FALSIFIER (GOLD — this is the retirement condition, keep verbatim):** *"if
   calibrated fails to beat raw over the next 15–20 forward closes on EV error /
   Brier, retain raw and stop spending complexity on the multiplier."*
-  · origin 07-09 v1.1 F-A1-3 + v1.2 recon #2.
+  **A1a PREREQUISITE CLOSED (#1147, 07-10):** the walk-forward field contract is
+  fixed (reads `ev_predicted`/`pop_predicted`/`pnl_realized`; H9 0.5-fabrication
+  deleted; loud zero-row/missing-col guard; ISO8601 timestamp fix; smoke-run
+  ran clean on n=99). REMAINING for the prequential build: add the
+  `is_paper=false` live-only filter (smoke-run used 99 mixed paper+live rows)
+  and confirm `ev_predicted` is the RAW (pre-calibration) EV, else the
+  walk-forward validates calibration on calibrated inputs (circular).
+  · origin 07-09 v1.1 F-A1-3 + v1.2 recon #2 + 07-10 #1147.
 
 ## 07-09 v1.1 adjudication — AMENDMENTS to existing items
 
@@ -111,9 +118,14 @@ questions) · **RESOLVED — DO NOT REINVESTIGATE**.
   Credential/secret-scanning/history-hygiene as a standing audit lens; the
   incumbent (Calendar & Clock) rotates out only by the owner stating what it
   structurally misses. · recommended-pending.
-- **FREE-LOOK filed:** stored PoP > 1.0 on debit-spread + take_profit_limit rows
-  (max 1.0704) — impossible probability; delta-based PoP overshoot, additive
-  one-liner clamp to [0,1].
+- **FREE-LOOK — RESOLVED #1147 (attribution CORRECTED).** stored PoP > 1.0
+  (16 rows, max 1.0704) was NOT "delta-based overshoot" — the delta composition
+  is bounded ≤1 (raw pop max 0.7945). It was the calibration MULTIPLIER
+  (`pop × pop_mult`), already silently clamped since 2026-04-16
+  (`calibration_service.py:629`). #1147 made that clamp LOUD (`POP_CLAMP_ENGAGED`,
+  dormant-by-arithmetic while pop_mult ≤ 1.0) and annotated the 16 stale rows
+  (annotate-not-rederive, pop preserved). Do not re-file a clamp. Re-attribution
+  ledgered 07-10 as a premise-check catch.
 
 ## 07-09 v1.2 comparative-recon integration (verified before backlogging)
 
@@ -285,7 +297,18 @@ with why — re-proposing one is a wasted slot. Verified this session unless not
   in RANKING. Magnitude small ($ few on tiny EVs) but real; given B1's
   "downstream is the problem," cost coherence matters. Fold in: A4
   score-saturation (min(100) clamp, guardrails.py:138) + the SOFI perpetual-
-  100 artifact. · origin 06-10 A1-runner ∪ 07-09 A3.
+  100 artifact.
+  **PoP-UNIFICATION CENSUS (rider, #1147 07-10, hard-gate before the 2-leg
+  cohort):** SEVEN base PoP computations exist (ev_calculator.calculate_pop ·
+  calculate_exit_metrics `abs(delta)` [take_profit_limit source] ·
+  calculate_condor_ev · options_scanner `_estimate_probability_of_profit` ·
+  `_condor_pop_from_legs` · opportunity_scorer `_calculate_ev_pop` ·
+  forecast_interface `forecast_ev_pop`) + 2 transforms (apply_calibration,
+  conviction) — the multi-basis disease extends to probabilities. The inverted
+  credit/width one (F-A1 PoP-semantics, below) is calculate_pop's credit
+  branch. **A unified PoP MUST bound-assert [0,1] at the compute site** (the
+  insurance the #1147 clamp-log defers to the right place — do NOT scatter
+  per-site clamps). · origin 06-10 A1-runner ∪ 07-09 A3 ∪ 07-10 #1147 census.
 - **A1 PoP-semantics fix (NEW, HIGH-for-credit-work, LATENT now)** —
   credit-spread PoP = credit/width is INVERTED (≈P(loss); ev_calculator.py
   :42). Unexercised on the live book (IRON_CONDOR + debit spreads not in the

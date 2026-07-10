@@ -69,3 +69,7 @@
 ## 2025-06-06 - Accessible Disabled Tooltips
 **Learning:** Browsers disable mouse events on `disabled` buttons, preventing tooltips from appearing. Wrapping the disabled button in a focusable `span` (`tabIndex={0}`) allows the tooltip to trigger on hover and focus.
 **Action:** Always wrap disabled buttons in a `span` with `tabIndex={0}` and an explanatory `aria-label` when tooltips are required.
+
+## 2025-06-07 - [Tooltips in Lists and Grids]
+**Learning:** When adding tooltips to repetitive elements in list views or tables (like copy buttons), the native `title` attribute lacks styling consistency and can cause double-readouts for screen readers. Furthermore, tooltips in lists can cause performance and DOM bloat if a new `TooltipProvider` is created for each row.
+**Action:** Replace `title` with the Shadcn UI `Tooltip` component. Ensure the `TooltipContent` contains `whitespace-nowrap` to prevent awkward wrapping, and wrap the entire list/table container with a single `TooltipProvider` rather than placing it inside the row iteration.

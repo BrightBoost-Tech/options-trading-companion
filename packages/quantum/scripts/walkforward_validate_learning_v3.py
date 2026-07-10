@@ -19,6 +19,13 @@ if repo_root not in sys.path:
 from packages.quantum.security.secrets_provider import SecretsProvider
 from packages.quantum.services.analytics_service import AnalyticsService
 
+
+class WalkForwardContractError(RuntimeError):
+    """Raised when learning_trade_outcomes_v3 fails its field contract or returns
+    zero rows. The script MUST fail loud rather than 'validate' on empty/absent
+    data (the lying-success class). Fixed 2026-07-10 (Lane-2 field contract)."""
+
+
 def get_supabase_client() -> Optional[Client]:
     try:
         secrets = SecretsProvider().get_supabase_secrets()
@@ -43,16 +50,14 @@ class WalkForwardValidator:
         print(f"Fetching data for user {self.user_id} (last {self.lookback_days} days)...")
         cutoff = (datetime.utcnow() - timedelta(days=self.lookback_days)).isoformat()
 
-        # Assume learning_trade_outcomes_v3 has standard fields based on context
-        # We need: closed_at, score/probability, pnl_realized, ev_estimated
-        # If columns differ, we might need to adjust.
-        # Common pattern:
-        #   score (0-100) or probability (0-1)
-        #   realized_pnl (float)
-        #   ev (float)
-        #   closed_at (timestamp)
-        #   is_win (boolean) or derive from pnl > 0
-
+        # FIELD CONTRACT (fixed 2026-07-10, Lane 2). learning_trade_outcomes_v3
+        # is a VIEW exposing ev_predicted / pop_predicted / pnl_realized /
+        # strategy / regime / closed_at — NOT ev / realized_pnl / score. Read
+        # the REAL columns; never fabricate a probability (H9). A zero-row result
+        # or a missing required column FAILS LOUD (WalkForwardContractError): the
+        # script must never emit a plausible validation on empty/absent data
+        # (the lying-success class — a future view change could otherwise flip
+        # the honest crash into a silent empty-pass).
         try:
             res = self.client.table("learning_trade_outcomes_v3") \
                 .select("*") \
@@ -60,54 +65,47 @@ class WalkForwardValidator:
                 .gte("closed_at", cutoff) \
                 .order("closed_at") \
                 .execute()
-
-            if not res.data:
-                print("No data found.")
-                self.data = pd.DataFrame()
-                return
-
-            df = pd.DataFrame(res.data)
-            df['closed_at'] = pd.to_datetime(df['closed_at'])
-
-            # Normalize column names if needed
-            # Assuming 'score' is the uncalibrated probability-like metric (0-100 or 0-1)
-            # Assuming 'realized_pnl' is the outcome
-            # Assuming 'ev' or 'expected_value' is the initial expectation
-
-            # Map columns if necessary (defensive)
-            if 'score' in df.columns:
-                # normalize to 0-1 if it looks like 0-100
-                if df['score'].max() > 1.0:
-                    df['prob_raw'] = df['score'] / 100.0
-                else:
-                    df['prob_raw'] = df['score']
-            elif 'confidence_score' in df.columns:
-                 if df['confidence_score'].max() > 1.0:
-                    df['prob_raw'] = df['confidence_score'] / 100.0
-                 else:
-                    df['prob_raw'] = df['confidence_score']
-            else:
-                 # Fallback mock for testing if column missing, but likely should fail
-                 print("Warning: 'score' or 'confidence_score' column missing. Using 0.5.")
-                 df['prob_raw'] = 0.5
-
-            if 'realized_pnl' not in df.columns and 'pnl' in df.columns:
-                df['realized_pnl'] = df['pnl']
-
-            if 'ev' not in df.columns and 'expected_value' in df.columns:
-                df['ev'] = df['expected_value']
-
-            # Fill NaNs
-            df['ev'] = df['ev'].fillna(0.0)
-            df['realized_pnl'] = df['realized_pnl'].fillna(0.0)
-            df['is_win'] = (df['realized_pnl'] > 0).astype(int)
-
-            self.data = df
-            print(f"Loaded {len(df)} records.")
-
         except Exception as e:
             print(f"Error fetching data: {e}")
-            raise e
+            raise
+
+        if not res.data:
+            raise WalkForwardContractError(
+                f"learning_trade_outcomes_v3 returned ZERO rows for "
+                f"user={self.user_id} since {cutoff}. Refusing to 'validate' on "
+                f"empty data (wrong user_id / cutoff window, or empty view) — "
+                f"this is a loud failure by design."
+            )
+
+        df = pd.DataFrame(res.data)
+
+        required = {"closed_at", "pop_predicted", "ev_predicted", "pnl_realized"}
+        missing = required - set(df.columns)
+        if missing:
+            raise WalkForwardContractError(
+                f"learning_trade_outcomes_v3 is missing required column(s) "
+                f"{sorted(missing)} — the field contract changed. Present "
+                f"columns: {sorted(df.columns)}."
+            )
+
+        # ISO8601 (not the default inferred format): the view mixes microsecond
+        # and whole-second timestamps ("...:00.826844+00" vs "...:00+00:00"),
+        # which the single-format inference rejects. Surfaced by the 07-10
+        # smoke-run — the rename alone would still have crashed here.
+        df['closed_at'] = pd.to_datetime(df['closed_at'], format='ISO8601')
+        # pop_predicted is already a probability in [0, 1] — use directly (no /100).
+        df['prob_raw'] = df['pop_predicted']
+        df['ev'] = df['ev_predicted'].fillna(0.0)
+        df['realized_pnl'] = df['pnl_realized'].fillna(0.0)
+        df['is_win'] = (df['realized_pnl'] > 0).astype(int)
+        # strategy / regime resolved and carried for per-segment walk-forward
+        # (present on the view; read, not required).
+        for _seg in ("strategy", "regime"):
+            if _seg not in df.columns:
+                df[_seg] = None
+
+        self.data = df
+        print(f"Loaded {len(df)} records.")
 
     def calibrate_platt(self, probs: np.array, labels: np.array) -> Tuple[float, float]:
         """

@@ -1711,6 +1711,15 @@ class PaperExitEvaluator:
                 position_is_alpaca = entry_res.data[0].get("alpaca_order_id") is not None
         except Exception as e:
             entry_order_id = f"error:{e}"
+            # P0-A FAIL-CLOSED (2026-07-10, F-A2-1 / E6): a routing-query failure
+            # must NEVER default a LIVE position to the internal-fill route (the
+            # prior `position_is_alpaca=False` was fail-WRONG — it internally
+            # filled a live close on a lookup error). Treat unknown routing as
+            # ALPACA; the authoritative should_submit_to_broker portfolio gate
+            # downstream makes the real live/shadow decision (a paper portfolio
+            # still routes to shadow_blocked→internal correctly). A live position
+            # can no longer be internally filled on a query failure.
+            position_is_alpaca = True
             alert(
                 _get_admin_supabase(),
                 alert_type="paper_exit_routing_query_failed",
@@ -1722,7 +1731,7 @@ class PaperExitEvaluator:
                     "position_id": position_id,
                     "error_class": type(e).__name__,
                     "error_message": str(e)[:500],
-                    "consequence": "close path defaulted (may use wrong execution route)",
+                    "consequence": "P0-A fail-closed: routed to the broker-submit gate (never defaulted to internal fill); portfolio routing_mode makes the real decision.",
                 },
             )
 
@@ -2176,16 +2185,23 @@ class PaperExitEvaluator:
                             "note": "Fill pending — will be synced by alpaca_order_sync",
                         }
                     except Exception as e:
-                        # #72-H5a SAFETY-CRITICAL: 2026-04-16 ghost-position bug shape.
-                        # Alpaca submit failed; code falls through to internal fill,
-                        # marking the position filled when broker order may not have
-                        # submitted. Alert fires BEFORE the fall-through so operator
-                        # awareness precedes phantom-fill accumulation.
+                        # P0-A INVARIANT (2026-07-10, F-A2-1 / E6): a LIVE submit
+                        # that raises must NEVER be internally filled (this is the
+                        # 2026-04-16 ghost-position class — closed here). Hold the
+                        # position OPEN in an explicit alarmed state; the fill
+                        # reconciler (targeted lookup) or the operator resolves it.
+                        # No phantom internal fill can accumulate.
+                        try:
+                            supabase.table("paper_orders").update({
+                                "status": "needs_manual_review",
+                            }).eq("id", order_id).execute()
+                        except Exception:
+                            pass
                         alert(
                             _get_admin_supabase(),
-                            alert_type="paper_exit_alpaca_submit_fallback_to_internal",
+                            alert_type="force_close_failed",
                             severity="critical",
-                            message=f"Alpaca submit failed during close, falling back to internal fill: {type(e).__name__}",
+                            message=f"LIVE close submit raised — position HELD OPEN, no internal fill: {position.get('symbol')} ({type(e).__name__})",
                             user_id=user_id,
                             symbol=position.get("symbol"),
                             position_id=position_id,
@@ -2196,15 +2212,67 @@ class PaperExitEvaluator:
                                 "symbol": position.get("symbol"),
                                 "error_class": type(e).__name__,
                                 "error_message": str(e)[:500],
-                                "consequence": "Alpaca order may not have submitted; position will be marked filled internally regardless. Risk: phantom internal fill while real broker state diverges (2026-04-16 ghost-position pattern).",
-                                "operator_action_required": "Verify Alpaca order status manually for this position before treating internal fill as authoritative. Check for ghost-position pattern from 2026-04-16 incident. If broker order did not submit, manually reconcile position state.",
+                                "state": "unknown_reconciling",
+                                "consequence": "Broker submit outcome unknown; position remains OPEN (P0-A invariant). Resolved by the fill reconciler or operator — NEVER internally filled (2026-04-16 ghost-position class closed).",
+                                "operator_action_required": "Verify the broker order state; the position is safely OPEN. Re-evaluate next cycle or close manually.",
                             },
                         )
-                        logger.error(
-                            f"[EXIT_EVAL] Alpaca submit failed for close order {order_id}: {e}. "
-                            f"Falling back to internal fill."
+                        logger.critical(
+                            f"[EXIT_EVAL] P0-A: Alpaca close submit raised for {order_id}: {e}. "
+                            f"Position HELD OPEN (unknown_reconciling) — NO internal fill."
                         )
-                        # Fall through to internal fill below
+                        return {
+                            "order_id": order_id,
+                            "processed": 0,
+                            "routed_to": "unknown_reconciling",
+                            "note": "LIVE close submit raised — held open for broker reconciliation (P0-A); no internal fill",
+                        }
+
+        # ── STRUCTURAL INVARIANT GUARD (P0-A / E6, 2026-07-10) ─────────────
+        # The internal-fill block below is UNREACHABLE for a LIVE-routed close.
+        # A live close requires a BROKER ACKNOWLEDGEMENT; it may NEVER be filled
+        # internally (the 2026-04-16 ghost-position class). Any live position
+        # that reaches here (a routing edge, an unexpected path) is HELD OPEN in
+        # an explicit alarmed state — never internally filled. Paper/shadow
+        # closes (should_submit_to_broker False, incl. the shadow_blocked
+        # fall-through above) fill internally exactly as before.
+        try:
+            from packages.quantum.brokers.execution_router import (
+                should_submit_to_broker as _p0a_should_submit,
+            )
+            _p0a_is_live_close = _p0a_should_submit(position["portfolio_id"], supabase)
+        except Exception:
+            _p0a_is_live_close = True  # fail-closed: unknown routing → treat as live
+        if _p0a_is_live_close:
+            try:
+                supabase.table("paper_orders").update({
+                    "status": "needs_manual_review",
+                }).eq("id", order_id).execute()
+            except Exception:
+                pass
+            alert(
+                _get_admin_supabase(),
+                alert_type="force_close_failed",
+                severity="critical",
+                message=f"LIVE close reached the internal-fill guard — HELD OPEN, no internal fill: {position.get('symbol')}",
+                user_id=user_id,
+                symbol=position.get("symbol"),
+                position_id=position_id,
+                metadata={
+                    "function_name": "_close_position",
+                    "position_id": position_id,
+                    "order_id": order_id,
+                    "reason": reason,
+                    "state": "unknown_reconciling",
+                    "consequence": "A live-routed close reached the internal-fill path; blocked by the P0-A structural guard. Position remains OPEN; resolved by the reconciler or operator — never internally filled.",
+                },
+            )
+            return {
+                "order_id": order_id,
+                "processed": 0,
+                "routed_to": "unknown_reconciling",
+                "note": "LIVE close blocked at the internal-fill guard — held open (P0-A invariant)",
+            }
 
         # --- Internal fill (internal_paper or Alpaca fallback) ---
         # 06-12 (#1017 class): the fill prices at the EXECUTABLE side, not

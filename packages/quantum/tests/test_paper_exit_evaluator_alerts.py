@@ -316,71 +316,58 @@ class TestAlpacaDryRunBuildFailedAlert(unittest.TestCase):
         self.assertIn('"consequence"', self.block)
 
 
-class TestAlpacaSubmitFallbackCriticalAlert(unittest.TestCase):
-    """Site 1039 (SAFETY-CRITICAL): Alpaca submit failure → falls back
-    to internal fill. This is the 2026-04-16 ghost-position bug shape.
-    Alert fires BEFORE the fall-through with severity='critical' and
-    operator_action_required metadata."""
+class TestP0ABrokerAckCloseInvariant(unittest.TestCase):
+    """P0-A (2026-07-10, F-A2-1 / E6). REPLACES TestAlpacaSubmitFallbackCritical-
+    Alert, which pinned the REMOVED behavior (a live Alpaca-submit failure fell
+    through to an internal fill — the 2026-04-16 ghost-position shape). That
+    fallthrough is now gone: a live submit failure fires force_close_failed
+    critical, holds the position OPEN (unknown_reconciling), and NEVER internally
+    fills; the internal-fill block is structurally unreachable for live routes."""
 
     @classmethod
     def setUpClass(cls):
         cls.src = _load_evaluator_source()
-        cls.block = _block_around_alert_type(cls.src, "paper_exit_alpaca_submit_fallback_to_internal")
 
-    def test_alert_present(self):
-        self.assertGreater(len(self.block), 0,
-                           "Could not locate paper_exit_alpaca_submit_fallback_to_internal alert.")
+    def test_old_fallback_alert_type_removed(self):
+        self.assertNotIn(
+            'alert_type="paper_exit_alpaca_submit_fallback_to_internal"', self.src,
+            "P0-A removes the fall-back-to-internal-fill for live closes; the "
+            "old alert type must be gone.",
+        )
 
-    def test_alert_type_correct(self):
-        self.assertIn('alert_type="paper_exit_alpaca_submit_fallback_to_internal"', self.block)
+    def test_fallthrough_language_removed(self):
+        for phrase in ("Falling back to internal fill", "Fall through to internal fill below"):
+            self.assertNotIn(
+                phrase, self.src,
+                f"P0-A removes the internal-fill fallthrough — {phrase!r} must be gone.",
+            )
 
-    def test_uses_admin_supabase(self):
-        self.assertIn("_get_admin_supabase()", self.block)
+    def test_submit_failure_fires_force_close_failed_critical(self):
+        block = _block_around_alert_type(self.src, "force_close_failed")
+        self.assertGreater(len(block), 0,
+                           "Submit failure must fire force_close_failed (its first close-path producer).")
+        self.assertIn('severity="critical"', block)
+        self.assertIn('"operator_action_required"', block)
 
-    def test_severity_is_critical(self):
+    def test_failed_close_returns_unknown_reconciling(self):
         self.assertIn(
-            'severity="critical"', self.block,
-            "Site 1039 alert MUST be severity='critical' (not 'warning'). "
-            "This is the 2026-04-16 ghost-position bug shape requiring "
-            "operator intervention to verify broker state.",
+            '"routed_to": "unknown_reconciling"', self.src,
+            "A failed/ambiguous LIVE close returns unknown_reconciling — held "
+            "open, never internally filled.",
         )
 
-    def test_operator_action_required_metadata_field(self):
+    def test_structural_guard_gates_on_should_submit(self):
+        self.assertIn("STRUCTURAL INVARIANT GUARD (P0-A", self.src)
         self.assertIn(
-            '"operator_action_required"', self.block,
-            "Critical alerts must include operator_action_required field "
-            "with explicit runbook text. Pattern introduced by H5a site 9.",
+            "_p0a_should_submit(", self.src,
+            "The internal-fill guard must gate on should_submit_to_broker.",
         )
 
-    def test_consequence_references_ghost_position(self):
-        self.assertIn(
-            "ghost-position", self.block,
-            "Consequence/metadata must reference 2026-04-16 ghost-position "
-            "incident so triage can find the prior context.",
-        )
-
-    def test_consequence_present(self):
-        self.assertIn('"consequence"', self.block)
-
-    def test_includes_position_id_and_symbol(self):
-        self.assertIn('"position_id"', self.block)
-        self.assertIn('"symbol"', self.block)
-
-    def test_alert_fires_before_fall_through(self):
-        """The alert call must appear BEFORE the
-        'Falling back to internal fill' log line — operator awareness
-        precedes phantom-fill accumulation."""
-        alert_pos = self.src.find('alert_type="paper_exit_alpaca_submit_fallback_to_internal"')
-        fallthrough_pos = self.src.find("Falling back to internal fill")
-        self.assertGreater(alert_pos, 0,
-                           "Could not locate the critical alert.")
-        self.assertGreater(fallthrough_pos, 0,
-                           "Could not locate the fall-through log line.")
-        self.assertLess(
-            alert_pos, fallthrough_pos,
-            "Alert MUST appear before the fall-through log line so "
-            "operator awareness precedes phantom-fill accumulation.",
-        )
+    def test_guard_precedes_internal_fill_block(self):
+        gi = self.src.find("STRUCTURAL INVARIANT GUARD (P0-A")
+        fi = self.src.find("--- Internal fill (internal_paper or Alpaca fallback) ---")
+        self.assertGreater(gi, 0, "structural guard missing.")
+        self.assertGreater(fi, gi, "guard must sit BEFORE the internal-fill block.")
 
 
 class TestModuleSyntaxValid(unittest.TestCase):

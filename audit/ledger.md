@@ -1448,6 +1448,77 @@ PENDING VERIFICATIONS (2026-07-07, added by the M4 ship):
   GTC); fossils unchanged (22 queued / 4 stuck-running).
 - Counters: A9→0, others →3 (A7 dormant). No retirement candidates.
 
+## 2026-07-10 (early, ~00:1x ET post-close) — BUILD: PoP clamp-AND-log + walk-forward field contract (#1147)
+
+STEP-0: broker 00:08 ET (closed) / DB 04:08Z — agreed. Combined Tier-1 PR per operator GO.
+**#1147 `168a752` MERGED + H8 VERIFIED** (BE `5e1d241b` / worker `8a913217` /
+worker-background `ca1da3cb`, all SUCCESS at `168a752`, created 04:57:01-02Z >
+merge 04:56:59Z). Item 1 rides the recycle via calibration_service; Item 2 is
+in zero live paths.
+
+**ITEM 1 — PoP clamp-AND-log (fork verdict: MULTIPLIER overshoot; clamp, not
+formula).** The delta-PoP composition (`ev_calculator`, convex combination) is
+bounded ≤1 — raw `pop_raw` max 0.7945, 0 rows >1. The >1.0 originated ONLY at
+`apply_calibration` (`pop × pop_mult`), already SILENTLY clamped since
+2026-04-16 (`calibration_service.py:629`; last >1 row 04-16 16:00Z, zero after).
+Made LOUD: `POP_CLAMP_ENGAGED` WARNING (raw pop · mult · product · clamped ·
+strategy/regime/dte). **DORMANT-BY-ARITHMETIC:** pop_mult floored at 0.5 and
+currently at the floor → pop×0.5 can never breach 1.0, so the log CANNOT fire
+today — insurance for the day the multiplier climbs >1.0, NOT dead/broken code
+(recorded so a future session doesn't misread "never fires" as broken). Legs
+out of scope at the apply site. NO delta-path clamp (would be unreachable —
+SKIP per operator).
+
+**ITEM 2 — walk-forward field contract (fork verdict: HONEST CRASH, never
+run).** `walkforward_validate_learning_v3.py` read `ev`/`realized_pnl`/`score`;
+the VIEW `learning_trade_outcomes_v3` exposes `ev_predicted`/`pop_predicted`/
+`pnl_realized` (+strategy/regime). Full rename — the recon's TWO-field diff was
+actually FIVE (ev_predicted + pop_predicted + pnl_realized + strategy + regime
+resolution; contract-audit catch). DELETED the H9-violating `0.5` prob
+fabrication → fail loud. Added `WalkForwardContractError` on zero rows OR a
+missing required column (closes the lying-empty class). NO view migration —
+strategy/regime already exist + 99/99 populated. **SMOKE-RUN (read-only, n=99)
+surfaced a SECOND real bug:** mixed microsecond/whole-second timestamps broke
+`pd.to_datetime` → fixed `format='ISO8601'`. Script now runs to completion
+honestly (exit 0; tiny-sample NaN Brier; no fabrication) — the rename is DONE,
+the script has read the real columns once.
+
+**RECONCILIATION 34→22→16.** The pollution has ONE home:
+`trade_suggestions.probability_of_profit` (16 rows). The v3 VIEW's
+`pop_predicted` is a JOIN-projection of `ts.probability_of_profit` (view def
+confirmed); `learning_feedback_loops` stores no own pop. So 34 AND the earlier
+22 were both view+base double-counts of the same 16. **DISPOSITION = ANNOTATE
+(not re-derive), supervised, base table:** all 16 `trade_suggestions` rows
+annotated (`marketdata_quality.pop_gt1_annotation`, `disposition=
+annotate_not_rederive`, `original_pop` recorded), `probability_of_profit`
+PRESERVED unchanged; before+after read-backs shown. All pre-04-16, paper,
+consumed by nothing live.
+
+**ERRATUM (the premise-check doctrine working).** The 07-10 build spec's ITEM-1
+fork verdict placed the overshoot at the delta-cushion composition path; the
+pre-build premise check re-confirmed the actual site (calibration multiplier,
+already clamped 04-16) and prevented shipping a dead-code clamp. The
+fork-verdict METHOD held; the SITE (in the spec AND in the original v1.2
+free-look "delta-based overshoot; one-liner clamp") was wrong — corrected here
++ in backlog.
+
+**RIDERS FILED.** (i) PoP CENSUS — verified **7 base PoP computations**
+(ev_calculator.calculate_pop; calculate_exit_metrics `abs(delta)` = the
+take_profit_limit source; calculate_condor_ev; options_scanner
+`_estimate_probability_of_profit`; `_condor_pop_from_legs`;
+opportunity_scorer `_calculate_ev_pop`; forecast_interface `forecast_ev_pop`)
++ 2 transforms (apply_calibration, conviction) — NOT "5" (the spec undercounted).
+The inverted credit/width one (F-A3-1, latent) is calculate_pop's credit branch.
+Rider on the multi-basis/PoP-unification item: **"the unified PoP MUST
+bound-assert [0,1] at the compute site"** — the insurance lands once, at the
+right place, when that work runs. I touched only the calibration-apply clamp (a
+transform), NO base computation. (ii) Clamp boundary-log review trigger:
+frequent `POP_CLAMP_ENGAGED` → cushion/multiplier revision, WITH the dormancy
+note (can't fire while pop_mult ≤ 1.0). (iii) Prequential UNBLOCKED — the A1a
+field-contract prerequisite is CLOSED; remaining for that build: add the
+`is_paper=false` live-only filter (smoke-run used 99 mixed rows) + confirm
+`ev_predicted` is RAW not calibrated.
+
 ## 2026-07-09 EOD (latest) — COMPARATIVE-RECON INTEGRATION (v1.2) + v5.5 CANONICAL
 
 STEP-0: broker 19:35 ET (closed) / DB 23:35Z — agreed. Doc/prompt writes only,

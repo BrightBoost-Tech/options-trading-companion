@@ -13,7 +13,7 @@ if script_dir not in sys.path:
     sys.path.append(script_dir)
 
 # Import the class from the script
-from walkforward_validate_learning_v3 import WalkForwardValidator
+from walkforward_validate_learning_v3 import WalkForwardValidator, WalkForwardContractError
 
 class TestWalkForwardValidator(unittest.TestCase):
 
@@ -96,6 +96,61 @@ class TestWalkForwardValidator(unittest.TestCase):
         self.validator.data = pd.DataFrame() # Empty
         folds = self.validator.run_walkforward()
         self.assertEqual(len(folds), 0)
+
+    # --- fetch_data field-contract tests (Lane 2, 2026-07-10) ---
+    # These exercise the REAL seam (fetch_data against the view's real columns),
+    # NOT the synthetic-injection path the calibration test uses.
+
+    def _mock_view_rows(self, rows):
+        chain = (self.mock_client.table.return_value.select.return_value
+                 .eq.return_value.gte.return_value.order.return_value)
+        chain.execute.return_value = MagicMock(data=rows)
+
+    def test_fetch_data_reads_real_columns(self):
+        # Real view columns: ev_predicted / pop_predicted / pnl_realized (+ strategy/regime).
+        self._mock_view_rows([
+            {"closed_at": "2026-06-12T18:45:00+00:00", "pop_predicted": 0.62,
+             "ev_predicted": 40.0, "pnl_realized": 48.0, "strategy": "IRON_CONDOR",
+             "regime": "normal", "user_id": "test-user"},
+            {"closed_at": "2026-06-15T14:16:00+00:00", "pop_predicted": 0.55,
+             "ev_predicted": 30.0, "pnl_realized": -73.0, "strategy": "IRON_CONDOR",
+             "regime": "normal", "user_id": "test-user"},
+        ])
+        self.validator.fetch_data()
+        df = self.validator.data
+        self.assertEqual(len(df), 2)
+        # prob_raw sourced directly from pop_predicted (already 0-1, no /100)
+        self.assertAlmostEqual(df['prob_raw'].iloc[0], 0.62)
+        self.assertAlmostEqual(df['ev'].iloc[0], 40.0)
+        self.assertAlmostEqual(df['realized_pnl'].iloc[1], -73.0)
+        self.assertEqual(df['is_win'].tolist(), [1, 0])
+        self.assertIn('strategy', df.columns)
+        self.assertIn('regime', df.columns)
+
+    def test_fetch_data_zero_rows_raises_loud(self):
+        # The lying-empty class: zero rows must RAISE, not benign-return.
+        self._mock_view_rows([])
+        with self.assertRaises(WalkForwardContractError):
+            self.validator.fetch_data()
+
+    def test_fetch_data_missing_required_column_raises(self):
+        # pop_predicted absent -> contract failure, loud.
+        self._mock_view_rows([
+            {"closed_at": "2026-06-12T18:45:00+00:00", "ev_predicted": 40.0,
+             "pnl_realized": 48.0, "user_id": "test-user"},
+        ])
+        with self.assertRaises(WalkForwardContractError):
+            self.validator.fetch_data()
+
+    def test_fetch_data_never_fabricates_probability(self):
+        # H9: a missing probability column must FAIL, never silently become 0.5.
+        self._mock_view_rows([
+            {"closed_at": "2026-06-12T18:45:00+00:00", "ev_predicted": 40.0,
+             "pnl_realized": 48.0, "strategy": "IRON_CONDOR", "regime": "normal",
+             "user_id": "test-user"},
+        ])
+        with self.assertRaises(WalkForwardContractError):
+            self.validator.fetch_data()
 
 if __name__ == '__main__':
     unittest.main()

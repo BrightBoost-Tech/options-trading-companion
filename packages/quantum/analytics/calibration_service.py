@@ -626,7 +626,30 @@ def apply_calibration(
     # calibration multiplier is clamped to [0.5, 1.5], so without an explicit
     # clamp on the output, a raw PoP of 0.7 × 1.5 = 1.05 leaks into downstream
     # EV math as if the trade wins >100% of the time.
-    adj_pop = max(0.0, min(1.0, pop * pop_mult))
+    _pre_clamp_pop = pop * pop_mult
+    adj_pop = max(0.0, min(1.0, _pre_clamp_pop))
+    # BOUNDARY-LOG (2026-07-10): clamp-AND-LOG so the >1.0 overshoot the
+    # free-look caught is never silently erased. ATTRIBUTION (corrected): the
+    # overshoot originates HERE — the calibration MULTIPLIER (pop × pop_mult),
+    # silently clamped since 2026-04-16 — NOT the delta-cushion composition
+    # path (ev_calculator's convex-combination PoP is bounded ≤ 1 by
+    # construction; raw pre-calibration pop has never exceeded 0.7945). Legs
+    # are out of scope at this apply site — strategy/regime/dte only.
+    # Queryable marker: grep "[CALIBRATION] POP_CLAMP_ENGAGED". Reopen trigger:
+    # frequent engagement → probability-space-aware multiplier/cushion revision.
+    # DORMANT-BY-ARITHMETIC in the present regime: pop_mult is floored at 0.5
+    # and currently sits at that floor, so pop × 0.5 ≤ 0.5 can never breach 1.0
+    # — this log CANNOT fire today. It is insurance for the day the multiplier
+    # climbs back above 1.0, NOT dead/broken code. Do not read "never fires" as
+    # "broken".
+    if _pre_clamp_pop > 1.0 or _pre_clamp_pop < 0.0:
+        logger.warning(
+            "[CALIBRATION] POP_CLAMP_ENGAGED raw_pop=%.4f pop_mult=%.3f "
+            "product=%.4f clamped=%.4f seg=%s/%s/%s — a probability exceeded "
+            "[0,1] at the calibration apply site (boundary signal).",
+            pop, pop_mult, _pre_clamp_pop, adj_pop,
+            strategy, regime, dte_bucket or "_all",
+        )
 
     if ev_mult != 1.0 or pop_mult != 1.0:
         bucket_label = dte_bucket or "_all"

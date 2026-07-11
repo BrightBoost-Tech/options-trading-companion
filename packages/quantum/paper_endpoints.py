@@ -2089,14 +2089,29 @@ def _repair_filled_order_commit(supabase, analytics, user_id, order, portfolio) 
                 "cohort_id": _resolve_cohort_id_for_portfolio(supabase, portfolio["id"]),
             }
 
+            # P0-B book-scaling: persist per-position risk basis as TOTALS
+            # (mirrors _commit_fill). cost_basis_total always; max_loss_total from
+            # the suggestion below (NULL when unlinked — H9).
+            from packages.quantum.services.risk_basis_shadow import compute_position_risk_basis
+            _cbt, _ = compute_position_risk_basis(
+                _abs_entry_premium(avg_fill_price), signed_qty, None, None)
+            pos_payload["cost_basis_total"] = _cbt
+
             # Enrich with model metadata from suggestion if available
             if order.get("suggestion_id"):
                 try:
                     s_res = supabase.table(TRADE_SUGGESTIONS_TABLE).select(
-                        "model_version, features_hash, strategy, window, regime, sector"
+                        "model_version, features_hash, strategy, window, regime, sector, max_loss_total, sizing_metadata"
                     ).eq("id", order.get("suggestion_id")).single().execute()
                     if s_res.data:
-                        pos_payload.update(s_res.data)
+                        _sd = dict(s_res.data)
+                        _sugg_ml = _sd.pop("max_loss_total", None)
+                        _sugg_meta = _sd.pop("sizing_metadata", None) or {}
+                        pos_payload.update(_sd)  # model fields only (NOT sizing_metadata)
+                        _, _mlt = compute_position_risk_basis(
+                            _abs_entry_premium(avg_fill_price), signed_qty,
+                            _sugg_ml, (_sugg_meta or {}).get("contracts"))
+                        pos_payload["max_loss_total"] = _mlt
                 except Exception as e:
                     logger.warning(f"paper_order_repair_suggestion_error: order_id={order_id} error={e}")
 
@@ -2545,12 +2560,28 @@ def _commit_fill(supabase, analytics, user_id, order, fill_res, quote, portfolio
                 "cohort_id": _resolve_cohort_id_for_portfolio(supabase, portfolio["id"]),
             }
 
+            # P0-B book-scaling: persist per-position risk basis as TOTALS.
+            # cost_basis_total (premium basis) is always computable; max_loss_total
+            # reuses the suggestion's defined-risk total scaled to filled contracts
+            # (set in the enrichment block below; NULL when unlinked — H9).
+            from packages.quantum.services.risk_basis_shadow import compute_position_risk_basis
+            _cbt, _ = compute_position_risk_basis(
+                _abs_entry_premium(this_fill_price), signed_incremental_qty, None, None)
+            pos_payload["cost_basis_total"] = _cbt
+
             # Enrich with model metadata from suggestion if available
             if order.get("suggestion_id"):
                 try:
-                    s_res = supabase.table(TRADE_SUGGESTIONS_TABLE).select("model_version, features_hash, strategy, window, regime, sector").eq("id", order.get("suggestion_id")).single().execute()
+                    s_res = supabase.table(TRADE_SUGGESTIONS_TABLE).select("model_version, features_hash, strategy, window, regime, sector, max_loss_total, sizing_metadata").eq("id", order.get("suggestion_id")).single().execute()
                     if s_res.data:
-                        pos_payload.update(s_res.data)
+                        _sd = dict(s_res.data)
+                        _sugg_ml = _sd.pop("max_loss_total", None)
+                        _sugg_meta = _sd.pop("sizing_metadata", None) or {}
+                        pos_payload.update(_sd)  # model fields only (NOT sizing_metadata)
+                        _, _mlt = compute_position_risk_basis(
+                            _abs_entry_premium(this_fill_price), signed_incremental_qty,
+                            _sugg_ml, (_sugg_meta or {}).get("contracts"))
+                        pos_payload["max_loss_total"] = _mlt
                 except Exception as e:
                     logging.warning(f"Failed to fetch suggestion metadata for position: {e}")
 

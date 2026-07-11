@@ -331,7 +331,25 @@ def candidate_cost_usd(suggestion: Dict[str, Any]) -> float:
         contracts = float(oj.get("contracts") or 0)
     except (TypeError, ValueError):
         limit_price, contracts = 0.0, 0.0
-    cost = limit_price * contracts * 100.0
+    cost = limit_price * contracts * 100.0   # current (premium) basis
+    # P0-B shadow: the honest candidate cost is its defined-risk max_loss_total
+    # (for a DEBIT structure premium == max_loss; for a CREDIT structure/IC the
+    # premium UNDER-states max loss — the QQQ-IC ~$149 vs ~$372 case). Observe-
+    # only; honest becomes decisive only under RISK_BASIS_MAX_LOSS_ENABLED.
+    _honest = suggestion.get("max_loss_total")
+    if _honest is None:
+        _honest = (suggestion.get("sizing_metadata") or {}).get("max_loss_total")
+    try:
+        _honest = float(_honest) if _honest is not None else None
+    except (TypeError, ValueError):
+        _honest = None
+    from packages.quantum.services.risk_basis_shadow import (
+        log_risk_basis_shadow, choose_basis,
+    )
+    log_risk_basis_shadow(
+        "utilization_candidate", cost, _honest,
+        context={"symbol": suggestion.get("ticker") or suggestion.get("symbol")})
+    cost = choose_basis(cost, _honest)
     if cost <= 0:
         raise UtilizationGateError(
             f"candidate cost not derivable from order_json "

@@ -328,6 +328,8 @@ class RiskBudgetEngine:
         # 1. Calculate Total Equity & Current Usage
         positions_value = 0.0
         current_risk_usage = 0.0
+        honest_risk_usage = 0.0   # P0-B: sum of max_loss_total (defined-risk basis)
+        honest_any = False
 
         # Usage trackers
         strategy_usage = {}
@@ -349,6 +351,16 @@ class RiskBudgetEngine:
 
             positions_value += val
             current_risk_usage += risk
+            # P0-B shadow: honest per-position basis is max_loss_total (a TOTAL —
+            # NEVER × qty; the double-scaling trap). honest_position_risk IS the
+            # guard. NULL → fall back to the current row's risk so the SUM stays
+            # comparable.
+            from packages.quantum.services.risk_basis_shadow import honest_position_risk as _hpr
+            _ml = _hpr(p)
+            if _ml is not None:
+                honest_risk_usage += _ml; honest_any = True
+            else:
+                honest_risk_usage += risk
 
             # Granular
             st = _get_strategy_type(p)
@@ -377,6 +389,18 @@ class RiskBudgetEngine:
         if total_equity <= 0: total_equity = 1.0
 
         # Guardrail: detect capital basis mismatch (positions sized for higher capital)
+        # P0-B risk-basis shadow (observe-only): current risk usage (premium/
+        # cost basis) vs the honest defined-risk sum (max_loss_total). The honest
+        # basis becomes decisive ONLY under RISK_BASIS_MAX_LOSS_ENABLED (default
+        # OFF → byte-identical). honest_any flags real max_loss_total coverage.
+        from packages.quantum.services.risk_basis_shadow import (
+            log_risk_basis_shadow as _rb_log, choose_basis as _rb_choose,
+        )
+        _honest_ru = honest_risk_usage if honest_any else None
+        _rb_log("rbe_open_book", current_risk_usage, _honest_ru,
+                context={"n_positions": len(positions)})
+        current_risk_usage = _rb_choose(current_risk_usage, _honest_ru)
+
         if current_risk_usage > deployable_capital * 2 and deployable_capital > 0:
             diagnostics.append(
                 f"capital_mismatch:usage={current_risk_usage:.2f},deployable={deployable_capital:.2f}"

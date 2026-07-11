@@ -74,6 +74,54 @@ def _map_close_reason(raw_reason: str) -> Optional[str]:
     return _REASON_MAP.get(s)
 
 
+# F-A3-1 Part B (2026-07-11): the GRANULAR thesis close-reason ("_detail").
+# Rides JSONB (order_json.close_reason_detail → details_json.close_reason_detail),
+# UN-constrained by the 9-value check_close_reason_enum that governs the coarse
+# paper_positions.close_reason. It de-collapses envelope_force_close into WHICH
+# envelope fired and lets a monitor stop and a scheduled stop land identically.
+# The thesis tracker (I5) reads this. Closed enum — entry gates (streak_breaker,
+# reentry_cooldown) are EXCLUDED because they never close a position:
+_CLOSE_REASON_DETAIL_ENUM = (
+    "take_profit", "stop_loss", "symbol_envelope", "daily_brake", "weekly_brake",
+    "concentration", "stress", "dte_threshold", "expiration_day", "manual",
+    "orphan_repair", "reconciler_unknown",
+)
+
+
+def _close_reason_detail(raw_reason: Optional[str]) -> str:
+    """Map any raw close signal (a bare condition, a ``risk_envelope:*`` string,
+    or an envelope name passed via ``reason_detail``) to the granular thesis
+    enum. Substring-matched, ORDER-SENSITIVE (specific envelopes before the
+    generic loss tokens: ``loss_per_symbol`` must beat ``stop_loss``). Unknowns
+    → ``reconciler_unknown`` — never fabricates, never raises."""
+    s = (str(raw_reason) if raw_reason is not None else "").strip().lower()
+    if not s:
+        return "reconciler_unknown"
+    if "target_profit" in s:
+        return "take_profit"
+    if "per_symbol" in s:
+        return "symbol_envelope"
+    if "concentration" in s:
+        return "concentration"
+    if "stress" in s:
+        return "stress"
+    if "daily" in s:
+        return "daily_brake"
+    if "weekly" in s:
+        return "weekly_brake"
+    if "stop_loss" in s:
+        return "stop_loss"
+    if "expiration" in s:
+        return "expiration_day"
+    if "dte" in s:
+        return "dte_threshold"
+    if "manual" in s:
+        return "manual"
+    if "orphan" in s:
+        return "orphan_repair"
+    return "reconciler_unknown"
+
+
 def _write_exit_eval_critical_alert(
     supabase,
     position: Dict[str, Any],
@@ -1660,6 +1708,7 @@ class PaperExitEvaluator:
         position_id: str,
         reason: str,
         exit_price_override: Optional[float] = None,
+        reason_detail: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         Close a single position using the position's current_mark as exit price.
@@ -2089,6 +2138,31 @@ class PaperExitEvaluator:
                 _cfg_stamp(supabase, order_id, _cfg_cross, _cfg_mid)
             except Exception as _cfg_e:
                 logger.warning(f"[CLOSE_FILL_GAP] stage stamp failed: {_cfg_e}")
+
+        # F-A3-1 Part B (2026-07-11): stamp the close reason onto the close
+        # order's EXISTING order_json (no migration) so it survives to BOTH the
+        # LIVE reconciler (Death B — which otherwise hardcodes
+        # 'alpaca_fill_reconciler_standard') and the learning ingest (Death C).
+        # Runs for live AND internal closes (before the branch below). Coarse
+        # (9-value check_close_reason_enum) is stamped only when mappable —
+        # else left unset so the reconciler keeps its safe fallback; the
+        # granular thesis detail (JSONB, unconstrained) is always stamped.
+        # Best-effort: a stamp failure never blocks the close.
+        try:
+            _cr_coarse = _map_close_reason(reason)
+            _cr_detail = _close_reason_detail(reason_detail or reason)
+            _cr_row = supabase.table("paper_orders").select("order_json") \
+                .eq("id", order_id).single().execute().data
+            _cr_oj = dict((_cr_row or {}).get("order_json") or {})
+            _cr_oj["close_reason_detail"] = _cr_detail
+            if _cr_coarse:
+                _cr_oj["close_reason"] = _cr_coarse
+            supabase.table("paper_orders").update({"order_json": _cr_oj}) \
+                .eq("id", order_id).execute()
+        except Exception as _cr_e:
+            logger.warning(
+                f"[CLOSE_REASON] stage stamp failed order_id={order_id}: {_cr_e}"
+            )
 
         now = datetime.now(timezone.utc).isoformat()
 

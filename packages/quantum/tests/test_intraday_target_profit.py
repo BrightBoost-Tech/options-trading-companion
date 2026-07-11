@@ -158,11 +158,13 @@ class TestExecuteForceCloseAttribution(unittest.TestCase):
         captured = {}
 
         def _fake_close(self_eval, user_id, position_id, reason,
-                        exit_price_override=None):
+                        exit_price_override=None, reason_detail=None):
             # exit_price_override added by the fresh-mark close-staging fix
-            # (the monitor now passes its decision mark through) — accepted
-            # here so the attribution capture keeps working.
+            # (the monitor now passes its decision mark through); reason_detail
+            # added by F-A3-1 Part B (the granular thesis close-reason) —
+            # accepted here so the attribution capture keeps working.
             captured["reason"] = reason
+            captured["reason_detail"] = reason_detail
             return {"routed_to": "submitted", "position_id": position_id}
 
         m = _monitor()

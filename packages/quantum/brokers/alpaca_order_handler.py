@@ -28,6 +28,7 @@ from packages.quantum.services.close_math import (
 from packages.quantum.services.close_helper import (
     close_position_shared,
     PositionAlreadyClosed,
+    _VALID_CLOSE_REASONS,
 )
 
 # Submission retry config
@@ -601,19 +602,27 @@ def _close_position_on_fill(
 
     # Step 3: atomic close via shared helper.
     #
-    # close_reason='alpaca_fill_reconciler_standard' for all new
-    # reconciler closes. The historical value
-    # 'alpaca_fill_reconciler_sign_corrected' is preserved in the
-    # enum for the one existing row (PYPL cfe69b28, manual UPDATE
-    # 2026-04-20) but not written here — compute_realized_pl
-    # handles sign conventions automatically post-PR #790.
+    # F-A3-1 Part B (2026-07-11, Death B): read the coarse close_reason the
+    # exit evaluator stamped onto this order's order_json at stage time
+    # (_close_position), instead of hardcoding 'alpaca_fill_reconciler_standard'
+    # for every LIVE fill (which erased the actual WHY — stop vs TP vs
+    # envelope). Fall back to the reconciler-standard value only when the stamp
+    # is absent (legacy orders) or not a valid enum member. The granular thesis
+    # detail rides order_json.close_reason_detail and is read by the ingest.
+    # 'alpaca_fill_reconciler_sign_corrected' remains the one historical row's
+    # value (PYPL cfe69b28) — compute_realized_pl handles signs post-PR #790.
+    _stamped_cr = (order.get("order_json") or {}).get("close_reason")
+    _resolved_cr = (
+        _stamped_cr if _stamped_cr in _VALID_CLOSE_REASONS
+        else "alpaca_fill_reconciler_standard"
+    )
     try:
         closed_at_dt = _parse_iso_timestamp(filled_at_iso)
         close_position_shared(
             supabase=supabase,
             position_id=position_id,
             realized_pl=realized_pl,
-            close_reason="alpaca_fill_reconciler_standard",
+            close_reason=_resolved_cr,
             fill_source="alpaca_fill_reconciler",
             closed_at=closed_at_dt,
         )

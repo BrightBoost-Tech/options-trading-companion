@@ -228,7 +228,7 @@ async def _ingest_paper_outcomes_for_user(
     #    Previous code started from paper_ledger, but paper_ledger lacks a
     #    user_id column, so that query always failed silently.
     pos_result = supabase.table("paper_positions") \
-        .select("id, realized_pl, status, created_at, closed_at, suggestion_id, trace_id, symbol") \
+        .select("id, realized_pl, status, created_at, closed_at, suggestion_id, trace_id, symbol, close_reason") \
         .eq("user_id", user_id) \
         .eq("status", "closed") \
         .gte("closed_at", cutoff_iso) \
@@ -626,6 +626,15 @@ def _create_paper_outcome_record(
             "is_paper": is_paper,
             "routing": "live" if not is_paper else "shadow_or_internal",
             "reason_codes": ["paper_trade_close"],
+            # F-A3-1 Part B (2026-07-11, Death C): carry the close reason into
+            # the LFL row so the thesis tracker (I5) can separate WHY a trade
+            # closed from its P&L. `close_reason` = the coarse 9-value enum from
+            # paper_positions (now in the SELECT); `close_reason_detail` = the
+            # granular thesis enum stamped on the closing ORDER's order_json by
+            # the exit evaluator. Both ride details_json (no LFL column), exactly
+            # as `symbol` does. NULL when unstamped (legacy) — never fabricated.
+            "close_reason": position.get("close_reason"),
+            "close_reason_detail": (order.get("order_json") or {}).get("close_reason_detail"),
             # Calibration fields — prediction-time snapshot for calibration_service
             "predicted_ev": suggestion_ev,
             "predicted_pop": (suggestion_meta or {}).get("probability_of_profit"),

@@ -722,7 +722,9 @@ class TestFullCycleNoSpuriousAlerts(unittest.TestCase):
         # Track force_close invocations against this position
         force_close_calls = []
 
-        def fake_execute_force_close(pos, reason, user_id):
+        def fake_execute_force_close(pos, reason, user_id,
+                                     mapped_close_reason=None, reason_detail=None):
+            # reason_detail added by F-A3-1 Part B (5b threads violation.envelope).
             force_close_calls.append((pos.get("id"), reason))
             return True  # Always succeed on first call; closed-set then dedups
 

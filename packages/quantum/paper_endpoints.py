@@ -780,6 +780,29 @@ def _stage_order_internal(supabase, analytics, user_id, ticket: TradeTicket, por
 
     order_id = res.data[0]["id"]
 
+    # PR2 (2026-07-11): stamp a deterministic client_order_id so a response-lost
+    # resubmit is a broker-side duplicate REJECT (recoverable by lookup) instead
+    # of a phantom second order. Derived from the row PK (globally unique) — the
+    # id is DB-generated, so it must be written AFTER the insert. Persisted here
+    # (exists even if submit never runs → the reconciler's Step-1.5 query finds
+    # it; the partial-unique index guards against collisions) AND hydrated onto
+    # the in-memory row so this cycle's submit attaches the same value. Best
+    # effort: a stamp failure must never block staging — build_alpaca_order_
+    # request recomputes the same id from the PK as a fallback.
+    from packages.quantum.brokers.alpaca_order_handler import deterministic_client_order_id
+    _coid = deterministic_client_order_id(res.data[0])
+    if _coid:
+        try:
+            supabase.table("paper_orders").update(
+                {"client_order_id": _coid}
+            ).eq("id", order_id).execute()
+            res.data[0]["client_order_id"] = _coid
+        except Exception as _coid_err:
+            logger.warning(
+                f"[PR2] client_order_id stamp failed order_id={order_id}: "
+                f"{_coid_err} (submit will recompute from the row PK)"
+            )
+
     # Telemetry
     ctx = TradeContext(
         trace_id=trace_id,

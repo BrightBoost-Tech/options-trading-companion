@@ -23,6 +23,67 @@ logger = logging.getLogger(__name__)
 JOB_NAME = "alpaca_order_sync"
 
 
+def _client_order_id_reconcile_enabled() -> bool:
+    """PR2 resolve action — default-ON safety flag (§3): unset/empty → ON;
+    only an explicit falsy value disables it."""
+    raw = (os.environ.get("CLIENT_ORDER_ID_RECONCILE_ENABLED") or "").strip().lower()
+    return raw not in ("0", "false", "no", "off")
+
+
+def _resolve_lost_submit(alpaca, client, row: Dict[str, Any]) -> str:
+    """Resolve ONE response-lost order (client_order_id set, alpaca_order_id
+    NULL) by broker lookup. Returns 'backfilled' | 'rearmed' | 'noop'.
+
+    FOUND → the prior submit reached the broker: backfill the alpaca_order_id
+    (Step 1/3 then manage it normally). NOT FOUND (404) → the broker never
+    received it → re-arm to the terminal 'cancelled' state
+    (paper_exit_evaluator._TERMINAL_FAILED_STATUS): for a CLOSE, #1046's
+    close-re-arm treats a STALE 'cancelled' attempt as re-armable so a fresh
+    close is staged on the still-open position; for an ENTRY, 'cancelled' makes
+    the suggestion re-executable (the dedup set excludes cancelled). This is the
+    auto-resolution of the P0-A needs_manual_review hold
+    (paper_exit_evaluator.py:2196) that previously required the operator.
+    """
+    coid = row.get("client_order_id")
+    oid = row.get("id")
+    if not coid or not oid:
+        return "noop"
+    try:
+        found = alpaca.get_order_by_client_id(coid)
+    except Exception as e:
+        logger.error(f"[ALPACA_SYNC] Step 1.5 lookup failed client_order_id={coid}: {e}")
+        return "noop"
+    if found and found.get("alpaca_order_id"):
+        client.table("paper_orders").update({
+            "alpaca_order_id": found.get("alpaca_order_id"),
+            "broker_status": found.get("status"),
+            "broker_response": found,
+            "status": "submitted",
+            "submitted_at": datetime.now(timezone.utc).isoformat(),
+        }).eq("id", oid).execute()
+        logger.warning(
+            f"[ALPACA_SYNC] Step 1.5 backfilled alpaca_order_id for "
+            f"order={str(oid)[:8]} via client_order_id={coid} "
+            f"(response-lost submit recovered)"
+        )
+        return "backfilled"
+    # 404 → broker never received it → re-arm to terminal 'cancelled' (#1046).
+    client.table("paper_orders").update({
+        "status": "cancelled",
+        "broker_status": "client_order_id_not_at_broker",
+        "cancelled_at": datetime.now(timezone.utc).isoformat(),
+        "cancelled_reason": (
+            "PR2 step1.5: broker has no order for the deterministic "
+            "client_order_id — the submit never landed; re-armed"
+        ),
+    }).eq("id", oid).execute()
+    logger.warning(
+        f"[ALPACA_SYNC] Step 1.5 re-armed order={str(oid)[:8]} to 'cancelled' "
+        f"(client_order_id={coid} not found at broker — never received)"
+    )
+    return "rearmed"
+
+
 def run(payload: Dict[str, Any], ctx: Any = None) -> Dict[str, Any]:
     """
     Sync Alpaca order statuses for all submitted orders.
@@ -104,6 +165,37 @@ def run(payload: Dict[str, Any], ctx: Any = None) -> Dict[str, Any]:
                     result = poll_pending_orders(alpaca, client, uid)
                     for key in ("total_polled", "fills", "partials", "cancels", "unchanged"):
                         totals[key] += result.get(key, 0)
+
+            # ── Step 1.5: Targeted resolve of response-lost submits (PR2) ─
+            # A submit that raised BEFORE returning an alpaca_order_id (network
+            # drop AFTER the broker accepted it) leaves a row with a
+            # client_order_id but NO alpaca_order_id — invisible to Step 1
+            # (which requires alpaca_order_id NOT NULL) and to the watchdog.
+            # Look each up by its deterministic client_order_id: FOUND →
+            # backfill; 404 → the broker never got it → re-arm. Flag
+            # CLIENT_ORDER_ID_RECONCILE_ENABLED (default-ON). Legacy rows
+            # (client_order_id NULL) are excluded by the query, so this is inert
+            # until PR2 ids exist.
+            if _client_order_id_reconcile_enabled():
+                try:
+                    lost_q = client.table("paper_orders") \
+                        .select("id, client_order_id, status, position_id") \
+                        .in_("status", ["needs_manual_review", "submitted", "working"]) \
+                        .is_("alpaca_order_id", "null") \
+                        .not_.is_("client_order_id", "null")
+                    if shadow_portfolio_ids:
+                        lost_q = lost_q.not_.in_("portfolio_id", shadow_portfolio_ids)
+                    lost_rows = lost_q.execute().data or []
+                    for _row in lost_rows:
+                        _res = _resolve_lost_submit(alpaca, client, _row)
+                        if _res == "backfilled":
+                            totals["client_id_backfilled"] = totals.get("client_id_backfilled", 0) + 1
+                        elif _res == "rearmed":
+                            totals["client_id_rearmed"] = totals.get("client_id_rearmed", 0) + 1
+                except Exception as _step15_err:
+                    logger.error(
+                        f"[ALPACA_SYNC] Step 1.5 client_order_id resolve failed: {_step15_err}"
+                    )
 
             # ── Step 2: Repair orphaned fills (ALWAYS runs) ─────────────
             # Finds orders with status=filled, position_id=NULL, filled_qty > 0

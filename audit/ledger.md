@@ -1448,6 +1448,37 @@ PENDING VERIFICATIONS (2026-07-07, added by the M4 ship):
   GTC); fossils unchanged (22 queued / 4 stuck-running).
 - Counters: A9→0, others →3 (A7 dormant). No retirement candidates.
 
+## 2026-07-11 (Sat ~02:2x ET) — BUILT: observability remainder — 5 noise classes (#1156)
+
+STEP-0: broker 02:27 ET CLOSED (Sat). **#1156 `cb82692` MERGED + H8 VERIFIED**
+(BE `15ac9053` / worker `4c648035` / worker-background `0aed1f7a`, all SUCCESS @
+`cb82692`, created 06:45:38–39Z > merge 06:45:36Z). Queue ② — the five items
+left after F-A4-1 absorbed the A4-detector half.
+
+1. **Flat-book stale guard** (`get_output_freshness`): count open positions
+   once; a flat book (0 open) → `paper_positions.last_marked_at` reads `flat`
+   (no alert), not `stale` (~48/day false-HIGH). A HELD position past TTL still
+   fires; fail-safe on count error. Both directions tested.
+2. **Condition re-emit dedup** (`job_succeeded_with_errors`): **RECON
+   CORRECTION** — cross-owner ROW dedup already works (`egress_owner`); the real
+   4× was same-condition re-emit. Fingerprint by RUN_ID + 24h cooldown → once
+   per run, not 14×. Genuine safety trips (force_close / streak_breaker_* /
+   force_close_failed) UNAFFECTED (they keep the shared cooldown).
+3. **Accuracy-warn dedup**: fold `wins/n` into the fingerprint (re-alert on
+   VALUE CHANGE) + 24h cooldown. Stays observe-only.
+4. **IV all-missing → PARTIAL** (chosen per the F-A4-1 contract): `ok==0` with
+   symbols present → `counts.errors` → the runner records `partial`.
+   Some-missing (ok>0) stays green (individual seasoning is normal).
+5. **Stub-vs-real watch**: `EXPECTED_JOBS` now watches `paper_learning_ingest`
+   (the real EOD producer, scheduler.py:69), not the `learning_ingest` no-op
+   stub. test `DAILY_JOBS` + the `.eq→.in_` mock updated.
+
+Expected H11 delta: **~60+/day quieter** (48 stale + 10–14 accuracy + the
+condition re-emits). **⭐ v1.2 report file now ON DISK** (operator dropped it
+via #1155, `docs/review/external-full-audit-v1.2-2026-07-10.md`) — the standing
+sweep is CLOSED; the I6 wording-fix-inside-the-file remains a pending one-liner.
+Untouched: E7 (queue ③, spec on file) · PR2 · F-A3-1 · trading logic.
+
 ## 2026-07-11 (Sat ~01:1x ET) — BUILT: F-A4-1 typed job-outcome contract + fossil reap (#1153)
 
 STEP-0: broker 01:54 ET CLOSED (Sat) / DB ~05:5xZ. **#1153 `2478845` MERGED +

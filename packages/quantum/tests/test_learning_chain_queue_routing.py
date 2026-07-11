@@ -36,6 +36,8 @@ EXPECTED = {
     "daily_progression_eval_task": (INTERNAL, BG),
     # ── BACKGROUND: original long-run split (not a learning job) ──
     "iv_historical_backfill_task": (INTERNAL, BG),
+    # ── BACKGROUND: thesis tracker (I5), learning-chain-adjacent (07-11) ──
+    "thesis_score_task":           (INTERNAL, BG),
     # ── OTC: trading-day pipeline + per-cycle + IV-daily ──
     "task_universe_sync":          (PUBLIC, OTC),
     "task_morning_brief":          (PUBLIC, OTC),
@@ -106,17 +108,19 @@ class TestSchedulerQueueRoutingMap(unittest.TestCase):
                 f"{name} must reference BACKGROUND_QUEUE (no inline 'background').",
             )
 
-    def test_exactly_seven_background_routes_total(self):
-        """Backstop against silent drift: exactly 7 enqueue sites route to
-        background — the 6 learning-chain jobs + iv_historical_backfill. A new
-        background route OR an accidental trading-job re-route breaks this until
-        the map above is updated deliberately."""
+    def test_exactly_eight_background_routes_total(self):
+        """Backstop against silent drift: exactly 8 enqueue sites route to
+        background — the 6 learning-chain jobs + iv_historical_backfill +
+        thesis_tracker (I5, learning-chain-adjacent, 07-11). A new background
+        route OR an accidental trading-job re-route breaks this until the map
+        above is updated deliberately."""
         total = (PUBLIC.count("queue_name=BACKGROUND_QUEUE")
                  + INTERNAL.count("queue_name=BACKGROUND_QUEUE"))
         self.assertEqual(
-            total, 7,
-            f"expected 7 background routes (6 learning + iv_historical_backfill), "
-            f"found {total} — update EXPECTED + the §6 queue map deliberately.",
+            total, 8,
+            f"expected 8 background routes (6 learning + iv_historical_backfill "
+            f"+ thesis_tracker), found {total} — update EXPECTED + the §6 queue "
+            f"map deliberately.",
         )
 
     def test_no_inline_background_string_at_call_sites(self):

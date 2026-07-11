@@ -59,7 +59,7 @@ def _status(results, name):
 
 DAILY_JOBS = (
     "suggestions_close", "suggestions_open",
-    "learning_ingest", "daily_progression_eval",
+    "paper_learning_ingest", "daily_progression_eval",  # 07-11: real EOD producer (was the learning_ingest stub)
 )
 
 # Anchors: Friday 2026-06-26 21:15Z (post-learning-chain success) and the

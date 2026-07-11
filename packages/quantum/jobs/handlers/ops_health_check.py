@@ -82,10 +82,16 @@ def _check_signal_accuracy(
         if not verdict["degraded"]:
             return out
         overall = verdict["overall"] or {}
+        # ACCURACY-WARN DEDUP (2026-07-11): observe-only, was re-firing ~14-20×/
+        # day (constant fingerprint + 30-min cooldown on a stable degraded value).
+        # Fold wins/n into the fingerprint (re-alert only when the value CHANGES)
+        # + a 24h cooldown (a stable value alerts at most once/day). Stays
+        # observe-only — modulates nothing.
         fingerprint = get_alert_fingerprint(
-            "signal_accuracy_degraded", {"scope": "overall"}
+            "signal_accuracy_degraded",
+            {"scope": "overall", "wins": overall.get("wins"), "n": overall.get("n")},
         )
-        suppressed, _last = should_suppress_alert(client, fingerprint, cooldown_minutes)
+        suppressed, _last = should_suppress_alert(client, fingerprint, 1440)
         if suppressed:
             out["suppressed"] = "cooldown"
             return out
@@ -484,11 +490,20 @@ def run(payload: Dict[str, Any], ctx: Any = None) -> Dict[str, Any]:
                 f"Silent failure: {job_name} (errors={error_count})"
             )
 
+            # CONDITION RE-EMIT DEDUP (2026-07-11): the SAME stale run re-detects
+            # every :07/:37 poll for the detector's ~24h lookback, writing a fresh
+            # (independently-egressed) row each time — the 4×/10-per-2-days class.
+            # Fingerprint by RUN_ID (not job_name) + a 24h cooldown (> lookback)
+            # so a given run alerts ONCE. Row-identity cross-owner dedup
+            # (egress_owner) already stops inline+relay double-send. This is a
+            # NOISE type only — the genuine safety trips (force_close /
+            # streak_breaker_* / force_close_failed) keep the shared cooldown.
+            _run_id = sf.get("run_id") or job_name
             fingerprint = get_alert_fingerprint(
-                "job_succeeded_with_errors", {"job_name": job_name}
+                "job_succeeded_with_errors", {"run_id": _run_id}
             )
             suppressed, last_sent = should_suppress_alert(
-                client, fingerprint, cooldown_minutes
+                client, fingerprint, 1440
             )
             if suppressed:
                 alerts_suppressed.append({

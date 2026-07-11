@@ -4,6 +4,98 @@ Every finding listed here is EXCLUDED from future audit runs. Re-finding a
 ledger item is a wasted slot. Runs append new findings as `status:reported`;
 the human flips them to `status:shipped` (with PR#) or `status:rejected`.
 
+## 2026-07-11 (Sat ~18:0x ET) — BUILT: shadow-to-expiry THESIS TRACKER (I5) + F-A9-1 (#1164)
+
+STEP-0: DB 22:35:56Z / broker 22:35:57Z, dow=6, is_open=false — Saturday
+CLOSED. **#1164 `8ffc214` MERGED + H8 VERIFIED** (BE `bdee5e44` / worker
+`68103dff` / worker-background `b4ddeb4a`, all @ `8ffc214`, created 23:05:45–46Z
+> merge 23:05:43Z). **"The #1 missing measurement."** OBSERVE-ONLY (own table,
+alerts nothing, modulates nothing).
+
+**RECON (no surprise):** underlying-at-expiry = `truth_layer.daily_bars`
+(Polygon historical → Alpaca fallback), covers all expiries. Storage = OWN
+table `position_thesis_outcomes` (migration `20260711224226`, keyed on the
+position PK) — only 13/83 closes carry a joinable position_id on their LFL row,
+so riding LFL would strand 70. Structure split: 42 two-leg + 41 four-leg.
+
+**Build:** `analytics/thesis_scoring.py` (pure classify + score; strict
+inequalities, AT-a-strike = MISS; IC HIT=inside the SHORT strikes, credit
+vertical HIT=short not breached, debit vertical HIT=ITM through the LONG strike,
+directional=ITM held side, unknown=unresolvable/H9) · `thesis_tracker.py` daily
+job (idempotent: terminal never re-scored; in_progress+unknown re-scored;
+**FIRST job under the F-A4-1 typed contract** — unscorable → counts.errors →
+PARTIAL) · endpoint `/internal/tasks/thesis/score` (background) + SCHEDULES
+17:00 CT + EXPECTED_JOBS + the 8th-background-route pin. **F-A9-1** (migration
+`20260711225359`): `signal_accuracy_rolling.hit_rate → realized_trade_win_rate`
+(it counts pnl>0, NOT thesis — the 12.5%-vs-~78% confusion DIES; thesis accuracy
+is now its own measure). Tests: scoring per structure + handler contract, 33+.
+
+**⭐ THE HEADLINE — first honest thesis table (16 post-epoch closes; legacy-paper
+era ~61 quarantined; 6 Aug-21 ICs = IN_PROGRESS). PREVIEW basis: Alpaca daily
+closes (SIP Jun / iex Jul — SIP blocks recent dates, same reason daily_bars uses
+Polygon primary); the job's authoritative Polygon backfill lands Mon 17:00 CT.
+None of the 16 sat near a strike boundary, so the source choice flips no
+verdict.**
+
+| symbol/exp | fill | structure | close_reason | P&L | thesis |
+|---|---|---|---|---|---|
+| BAC 06-05 | live-broker | debit call ≥51 | manual | −82 | **HIT** |
+| CSX 06-05 | live-broker | debit call ≥43 | manual | −161 | **HIT** |
+| F 06-26 | live-broker | debit call ≥15.5 | manual | +105 | miss |
+| NFLX 07-02 | live-broker | debit put ≤85 | reconciler | −84 | **HIT** |
+| MARA 07-10 | live-broker | debit call ≥13.5 | reconciler | −28 | miss |
+| NFLX 07-10 | live-broker | debit put ≤86 | reconciler | +48 | **HIT** |
+| QQQ 07-10 | live-broker | IC [645,750] | reconciler | −73 | **HIT** |
+| BAC 06-05 | live-internal | debit call ≥51 | envelope | 0 | **HIT** |
+| CSX 06-18 | shadow | debit call ≥44 | envelope | 0 | **HIT** |
+| BAC 06-26 | shadow | debit call ≥49 | target_profit | +192 | **HIT** |
+| NFLX 07-02 | shadow | debit put ≤85 | stop_loss | −273 | **HIT** |
+| NFLX 07-02 | shadow | debit put ≤85 | stop_loss | −546 | **HIT** |
+| MARA 07-10 | shadow | debit call ≥13.5 | stop_loss | −675.99 | miss |
+| NFLX 07-10 | shadow | debit put ≤86 | target_profit | +133.35 | **HIT** |
+| NFLX 07-10 | shadow | debit put ≤86 | target_profit | +662.10 | **HIT** |
+| QQQ 07-10 | shadow | IC [645,750] | envelope | −234.78 | **HIT** |
+
+**THESIS HIT-RATE = 13/16 = 81%** (LIVE broker fills 5/7 = 71% · shadow/internal
+8/9 = 89%) — the formalized B1 ~78%, now a standing metric. **THE FINDING that
+justifies the whole build: of the 13 thesis HITs, only 4 were profitable — SEVEN
+were losses or force-flat.** The signal was right 81% of the time; execution +
+stops converted most right-theses into losses. Exhibits: QQQ 07-10 finished
+725.6 INSIDE [645,750] (thesis dead-on) yet stopped −73/−234; NFLX 07-02 expired
+77.59 BELOW the 78/79 short puts = MAX PROFIT at expiry, yet the shadows were
+stopped −273/−546 on an intraday spike. **The loss is DOWNSTREAM of the signal,
+not in it** — the exact thing the tracker exists to measure. (Note: this is a
+PREVIEW I computed via the scorer; `position_thesis_outcomes` is populated by
+the job's own first run Mon 17:00 CT — I did NOT hand-write the table, so
+Monday's authoritative rows are idempotent-clean.)
+
+**⏳ PENDING PINS (Mon 07-13):** thesis_tracker first run 17:00 CT populates the
+table + lands the 6 Aug-21 ICs in_progress + the job records `partial` iff any
+close is unscorable (F-A4-1 contract's first live exercise on this job).
+
+**Lane deliverables (READ-ONLY):**
+- **L1 calibration-ordering prereqs:** (a) training pool LIVE-ONLY CONFIRMED &
+  WIRED (`calibration_service.py:336-337`, flag `CALIBRATION_TRAIN_LIVE_ONLY`;
+  8 live vs 91 paper excluded). (b) **CIRCULAR-RISK:** `ev_predicted` maps to
+  the CALIBRATED `ts.ev` (view def), and the `COALESCE(ev_raw,…)` guard was
+  **REVERTED 06-23** (`20260623010000:58-59`, undoing `20260411000000`). Masked
+  ONLY by raw mode — the instant calibration leaves raw mode the prequential
+  validator trains on its own output. **Epic's #1 remaining task: restore the
+  `COALESCE(ev_raw,ev)` view + a drift-guard test (2nd regression).**
+- **L2 F-A1a trigger distance:** **PARKED** — both challengers (neutral,
+  conservative) at 0 closed round-trips in the trailing-7d Gate-2 window
+  (`evaluator.py:318,408`); structurally can't approach 8 at ~1 close/wk. No
+  queue jump; cheap standing re-check before each build session.
+- **L3 book-scaling spec (P0-B):** **max_loss ALREADY EXISTS** at
+  `trade_suggestions.max_loss_total` (from `_compute_risk_primitives_usd`,
+  options_scanner.py:2042 — reuse, don't reconstruct). Write sites:
+  `paper_endpoints.py` `_commit_fill` (:2525-2546) + orphan-repair (:2070-2090),
+  enrich the existing suggestion SELECT (+max_loss_total, /contracts × filled).
+  Migration: +cost_basis +max_loss NUMERIC (nullable, no backfill/H9).
+  Consumers: PortfolioAllocator :133-135, RBE :160 (**⚠ UNITS TRAP — RBE keys
+  max_loss PER-CONTRACT ×qty; persist a TOTAL and it double-scales**),
+  utilization candidate-side :330 (separable). Effort ~0.5-1d. Filed for P0-B.
+
 ## 2026-07-11 (Sat ~11:1x ET) — BUILT: F-A3-1 Part B close_reason persistence — QUEUE ⑤ COMPLETE (#1162)
 
 STEP-0: DB 14:53:35Z / broker 14:53:35Z, dow=6, is_open=false — Saturday

@@ -42,6 +42,17 @@ CHICAGO_TZ = ZoneInfo("America/Chicago")
 
 # Force-close enforcement: warn-only until RISK_ENVELOPE_ENFORCE=1
 _ENFORCE_FORCE_CLOSE = os.environ.get("RISK_ENVELOPE_ENFORCE", "0") == "1"
+
+# F-A3-1 Part B (2026-07-11): bare-reason override for monitor position-level
+# (5a) exits, so a stop / TP / expiration records its OWN coarse close_reason
+# (stop_loss_hit / target_profit_hit / expiration_day) instead of collapsing to
+# the generic envelope_force_close. Single source of truth (unit-tested); a
+# reason absent here keeps the legacy risk_envelope: form.
+_STAGE5A_REASON_MAP = {
+    "target_profit": "target_profit",
+    "stop_loss": "stop_loss",
+    "expiration_day": "expiration_day",
+}
 # Intraday target_profit capture (default OFF). When on, the 15-min monitor
 # also closes positions that hit their per-cohort target_profit — the profit-
 # side mirror of the stop_loss it already acts on — closing the multi-hour
@@ -435,12 +446,15 @@ class IntradayRiskMonitor:
             pid = pos.get("id")
             if pid in closed_in_this_cycle:
                 continue
-            # Attribution: target_profit must record close_reason='target_profit_hit'
-            # (the bare reason maps there via _map_close_reason), NOT the
-            # 'envelope_force_close' bucket the 'risk_envelope:' prefix maps to.
-            # stop_loss/expiration keep their existing risk_envelope: mapping
-            # (unchanged) by passing no override.
-            _mapped = "target_profit" if reason == "target_profit" else None
+            # Attribution (F-A3-1 Part B, 2026-07-11): map target_profit,
+            # stop_loss AND expiration_day to their bare reasons so
+            # _map_close_reason resolves the correct coarse enum
+            # (target_profit_hit / stop_loss_hit / expiration_day). This
+            # DE-COLLAPSES the monitor's stop from the generic
+            # 'envelope_force_close' bucket so a monitor-driven stop records
+            # IDENTICALLY to the scheduled evaluator's stop (Death A). A reason
+            # not in the map keeps the legacy risk_envelope: form (None).
+            _mapped = _STAGE5A_REASON_MAP.get(reason)
             success = self._execute_force_close(
                 pos, f"intraday_{reason}", user_id, mapped_close_reason=_mapped
             )
@@ -474,8 +488,16 @@ class IntradayRiskMonitor:
                             continue
                         pos = next((p for p in positions if p.get("id") == pos_id), None)
                         if pos:
+                            # F-A3-1 Part B: keep violation.message as the reason
+                            # (preserves the force_close alert text + numbers) but
+                            # thread the STRUCTURED envelope name so the close
+                            # reason detail resolves to WHICH envelope
+                            # (symbol_envelope / daily_brake / weekly_brake /
+                            # concentration / stress), de-collapsing the coarse
+                            # envelope_force_close.
                             success = self._execute_force_close(
-                                pos, violation.message, user_id
+                                pos, violation.message, user_id,
+                                reason_detail=violation.envelope,
                             )
                             if success:
                                 force_closes_submitted += 1
@@ -1226,6 +1248,7 @@ class IntradayRiskMonitor:
     def _execute_force_close(
         self, position: Dict, reason: str, user_id: str,
         mapped_close_reason: Optional[str] = None,
+        reason_detail: Optional[str] = None,
     ) -> bool:
         """
         Submit close order for a single position.
@@ -1417,6 +1440,7 @@ class IntradayRiskMonitor:
                 position_id=pos_id,
                 reason=_close_reason_arg,
                 exit_price_override=_fresh_mark if _mark_ok else None,
+                reason_detail=reason_detail,
             )
 
             # CLOSE_QUOTE_VALIDATION (Phase 2): a DEFER means the close was NOT

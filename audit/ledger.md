@@ -4,6 +4,72 @@ Every finding listed here is EXCLUDED from future audit runs. Re-finding a
 ledger item is a wasted slot. Runs append new findings as `status:reported`;
 the human flips them to `status:shipped` (with PR#) or `status:rejected`.
 
+## 2026-07-11 (Sat ~10:4x ET) — BUILT: PR2 client_order_id + targeted reconcile (P0-A COMPLETE, #1160)
+
+STEP-0: DB 14:24:13Z / broker 14:24:14Z, dow=6, is_open=false — Saturday
+CLOSED. **#1160 `2dc5b0d` MERGED + H8 VERIFIED** (BE `6c5f95cc` / worker
+`c7df25bb` / worker-background `bfa6544a`, all @ `2dc5b0d`, created 14:42:52–53Z
+> merge 14:42:50Z).
+
+**Migration FIRST (order-of-ops honored):** `20260711143151
+paper_orders_client_order_id` — `client_order_id text` + PARTIAL UNIQUE index —
+applied + TRACKED + read-back (type=text, unique partial index confirmed)
+BEFORE the code merge. Repo file mirrors the tracked version by name.
+
+**P0-A COMPLETE.** PR1 = the invariant (a LIVE submit that raises never
+internally fills — holds OPEN in needs_manual_review). PR2 = the targeted
+resolution: **the response-lost edge now auto-resolves; operator-manual is the
+FALLBACK, not the mechanism.**
+- **ATTACH** (additive, one funnel): `deterministic_client_order_id =
+  otc1-<l|p>-<paper_orders.id>` (~43 chars, [a-z0-9-]). Persisted at insert
+  (paper_endpoints; id is DB-generated → written post-insert) + recomputed from
+  the PK in `build_alpaca_order_request` as a bulletproof fallback → threaded
+  into `submit_option_order`'s LimitOrderRequest (exclude_none → absent =
+  byte-identical). Entry + close + resting-TP GTC through the one
+  `submit_and_track` funnel. STABLE across in-function retries (dedup), FRESH on
+  re-stage (new row → new PK).
+- **DUPLICATE-422 CLASSIFIER** (`submit_and_track`): `client_order_id must be
+  unique` → `get_order_by_client_id` → backfill → return submitted; NEVER
+  needs_manual_review (kills the false-critical-on-every-legitimate-retry).
+- **RECONCILER STEP 1.5** (`alpaca_order_sync`, flag
+  `CLIENT_ORDER_ID_RECONCILE_ENABLED` default-ON): NULL alpaca_order_id +
+  non-NULL client_order_id → FOUND backfill; 404 → re-arm to `'cancelled'`
+  (`_TERMINAL_FAILED_STATUS`, paper_exit_evaluator.py:559 → #1046 re-arms a
+  fresh close for closes; dedup-exclusion re-executes for entries). Legacy NULL
+  rows excluded by the query → inert until ids exist.
+
+Tests T1–T6 (production paths, no real SDK dep): 14 pass. Regression across
+every touched module: 147+4 pass, all compile.
+
+**⚠ DEVIATION (surfaced, not silent):** the ATTACH is UNGATED per the L1 spec
+(harmless-additive; exclude_none). Blast radius is every live order, but a
+broken attach fails **LOUD + SAFE** (needs_manual_review + critical, no phantom
+fill, P0-A holds) and reverts by code. Followed the spec over adding a second
+kill-switch; the operator can request `CLIENT_ORDER_ID_ENABLED` if preferred.
+**⏳ PENDING PIN — first live submit Mon 07-13:** verify the first live
+entry/close carries `otc1-*` AND Alpaca accepts it. If it 422s the
+`client_order_id` param → revert #1160.
+
+**⚠ SDK verification gap:** `get_order_by_client_id` (TradingClient) +
+`client_order_id` (OrderRequest field) verified by RECON against the installed
+SDK source, NOT locally runnable (alpaca absent local + CI; tests mock the
+client). Standard long-standing alpaca-py API — high confidence, but Monday's
+first submit is the empirical proof.
+
+**PR1 integration-test debt (RESTATED with trigger, not paid here):** the
+deferred `_close_position` P0-A hold integration test (drive a LIVE-submit
+raise → assert the position is HELD OPEN, needs_manual_review, no internal
+fill, then Step 1.5 resolves it) is NOT paid in PR2 — PR2's tests cover the
+attach/classifier/reconcile SEAMS, not the `_close_position` hold end-to-end.
+**TRIGGER:** pay it the next time `_close_position`'s LIVE-submit branch is
+touched, OR on the first real response-lost event (whichever first).
+
+Carried forward: L4 `time_in_force` typed-column caveat (audit GTC via
+order_json/broker, not the column) · L5 Monday-partial watchlist
+(paper_learning_ingest / iv_daily_refresh all-missing / intraday_risk_monitor) ·
+E7 first-ordering-effect pin (Mon scan with ≥2 survivors). Queue after ④:
+⑤ F-A3-1 close_reason (L2 spec ready) · latents F-A4-2 / F-A10-1 / F-A2-1.
+
 ## 2026-07-11 (Sat ~09:5x ET) — BUILT: E7 viability re-wire on the ACTIVE route (#1158)
 
 STEP-0: DB 13:39:06Z / broker 13:39:11Z, dow=6, is_open=false — Saturday

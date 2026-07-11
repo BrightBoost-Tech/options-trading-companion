@@ -4,6 +4,68 @@ Every finding listed here is EXCLUDED from future audit runs. Re-finding a
 ledger item is a wasted slot. Runs append new findings as `status:reported`;
 the human flips them to `status:shipped` (with PR#) or `status:rejected`.
 
+## 2026-07-11 (Sat ~11:1x ET) — BUILT: F-A3-1 Part B close_reason persistence — QUEUE ⑤ COMPLETE (#1162)
+
+STEP-0: DB 14:53:35Z / broker 14:53:35Z, dow=6, is_open=false — Saturday
+CLOSED. **#1162 `a5cabd3` MERGED + H8 VERIFIED** (BE `7bb2c9a3` / worker
+`3e30bf87` / worker-background `6bbe69a4`, all @ `a5cabd3`, created 15:14:49–50Z
+> merge 15:14:47Z). **NO migration** (rides existing JSONB — order_json +
+details_json). The thesis-tracker (I5) prerequisite.
+
+**Three deaths fixed FORWARD-ONLY:**
+- **Death B** (LIVE closes lost the reason): the exit evaluator stamps the
+  mapped close_reason + granular detail onto the close order's `order_json` at
+  stage time (`_close_position`, beside the CLOSE_FILL_GAP stamp); the
+  reconciler `_close_position_on_fill` READS it back with a
+  `_VALID_CLOSE_REASONS` fallback — replacing the hardcoded
+  `alpaca_fill_reconciler_standard`. Coarse ∈ the 9-value
+  `check_close_reason_enum`; unmappable → left unset → safe fallback.
+- **Death A** (monitor collapsed all to envelope_force_close): 5a maps
+  stop_loss / expiration via `_STAGE5A_REASON_MAP` (monitor stop ==
+  scheduled stop = `stop_loss_hit`); 5b threads `violation.envelope` →
+  `reason_detail`; new `_close_reason_detail()` → thesis enum. New OPTIONAL
+  `reason_detail` param on `_close_position` + `_execute_force_close`
+  (additive; existing callers unchanged).
+- **Death C/D** (ingest never carried it): `+close_reason` in the SELECT
+  (fixes `policy_decisions.exit_reason` always-"") + `details_json.close_reason`
+  + `close_reason_detail` (from the closing order's order_json), mirroring how
+  `symbol` rides.
+
+**Thesis enum** (JSONB-only `close_reason_detail`, UNCOUPLED from the 9-value
+CHECK): take_profit, stop_loss, symbol_envelope, daily_brake, weekly_brake,
+concentration, stress, dte_threshold, expiration_day, manual, orphan_repair,
+reconciler_unknown. Entry gates (streak_breaker, reentry_cooldown) EXCLUDED —
+they never close a position.
+
+**Backfill (SUPERVISED — shown SQL + read-back):** true count is **100
+trade_closed / 0 had close_reason** (CORRECTS the ledger's stale "~71"). 5
+annotate-if-derivable via `details_json->>'position_id'` → semantic
+`paper_positions.close_reason` (2 target_profit_hit + 2 envelope_force_close +
+1 stop_loss_hit) — stamped `close_reason_provenance=backfilled_from_position_row`.
+95 stay HONESTLY BLANK (87 no join key, 8 lost at Death B). Read-back: 5 filled
+/ 95 blank / 5 provenance-stamped.
+
+Tests T1–T6 (production routes — reconciler + ingest record builder + the real
+mapping fns/constant): 13 pass. Regression 285 pass / 54 skip. Two existing
+fakes updated for the new `reason_detail` param (contract).
+
+**⭐ I5 THESIS TRACKER UNBLOCKED** — its charter now reads
+`details_json.close_reason` (coarse) + `close_reason_detail` (granular) going
+forward.
+
+**⏳ NEW PENDING PIN (Mon 07-13):** the FIRST close after #1162 carries an
+honest close_reason END-TO-END (`paper_positions.close_reason` semantic +
+`details_json.close_reason`/`_detail` populated) — the single pin that proves
+all three deaths fixed at once.
+
+**QUEUE ⑤ COMPLETE — the adjudication queue is EMPTY except LATENTS** (all
+filed with triggers): F-A4-2 (retry re-enqueue + reaper, one package) ·
+F-A10-1 (999-DTE fabrication + equity-assignment filter — CONFIRMED-but-inert,
+`docs/backlog.md:149-154`) · F-A2-1 (GTC pilot scope — CLEAN; audit GTC via
+order_json/broker, not the `time_in_force` typed column). Monday pins:
+PR2 first-submit (otc1-* accepted) · E7 first-ordering (≥2 survivors) · L5
+partial watchlist · F-A3-1 first-honest-close.
+
 ## 2026-07-11 (Sat ~10:4x ET) — BUILT: PR2 client_order_id + targeted reconcile (P0-A COMPLETE, #1160)
 
 STEP-0: DB 14:24:13Z / broker 14:24:14Z, dow=6, is_open=false — Saturday

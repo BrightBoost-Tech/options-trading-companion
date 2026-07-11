@@ -4,6 +4,71 @@ Every finding listed here is EXCLUDED from future audit runs. Re-finding a
 ledger item is a wasted slot. Runs append new findings as `status:reported`;
 the human flips them to `status:shipped` (with PR#) or `status:rejected`.
 
+## 2026-07-11 (Sat ~18:4x ET) — BUILT: P0-B book-scaling PR-A (#1166) + COALESCE restore PR-B (#1167)
+
+STEP-0: DB 23:26:51Z / broker 23:26:51Z, dow=6, is_open=false — Saturday
+CLOSED. Two sequential PRs (PR-A H8 before PR-B started).
+
+**PR-A — book-scaling readiness `6044c77` MERGED + H8 VERIFIED** (BE `1af4ef75`
+/ worker `e8f315b6` / worker-background `f1f79ab6`, all @ `6044c77`, created
+23:41:18–19Z > merge 23:41:16Z). Migration `20260711233113`: paper_positions
++cost_basis_total +max_loss_total (TOTALS, nullable, forward-only, legacy NULL =
+H9). **⚠ units-trap** guarded (column comment + `honest_position_risk()` reads
+the total, never ×qty). Write sites (`_commit_fill` + orphan-repair) reuse
+`trade_suggestions.max_loss_total` scaled to filled contracts. **Observe-only
+shadow** (`services/risk_basis_shadow.py`, flag `RISK_BASIS_MAX_LOSS_ENABLED`
+default OFF — third Option-A observe→enforce): RBE / allocator / utilization each
+compute BOTH bases, DECIDE current, log `[RISK_BASIS_SHADOW]` + would_flip;
+`choose_basis()` swaps to honest only when armed (byte-identical off). Tests
+17/17 incl. the units-trap (qty-4 → total as-is).
+- **⭐ WORKED EXAMPLE (owner-decision input) at $2,068 equity, real recent QQQ
+  IC:** premium basis ~$149 (7.2% of book) vs honest max-loss ~$372 (**18%**).
+  The 85% utilization gate + 36% allocator ceiling bind on NEITHER at this
+  equity → the honest basis flips NO single-trade decision today. BUT it reveals
+  each IC risks 18% of equity (not 7%), and **2 concurrent = 36%** ($744 honest
+  vs $298 premium) — the real magnitude the #1139 tripwire alarms on. A
+  per-trade cap anywhere in 8–18% would block honest / pass premium. **THE FLIP
+  IS THE OWNER'S DECISION on a week of `[RISK_BASIS_SHADOW]` logs.** #1139
+  remains the interim guard. B1/B2 bucket control + same-run reservation = the
+  epic's NEXT PR, now unblocked by the persisted fields.
+
+**PR-B — COALESCE restore `c069f56` MERGED + H8 VERIFIED** (BE `13413919` /
+worker `97f519e5` / worker-background `b08de991`, all @ `c069f56`, created
+23:47:43–44Z > merge 23:47:41Z). Migration `20260711234336`:
+`learning_trade_outcomes_v3.ev_predicted` → `COALESCE(ts.ev_raw, ts.ev)` (+
+pop_raw). The guard was added 04-11 and **silently reverted 06-23**
+(20260623010000) → the validator/calibrator would train on their own calibrated
+output (circular), masked only by raw mode. **CONTAMINATION VERDICT (verified,
+not assumed): NO row annotation needed** — 40 diverged rows all have ev_raw to
+fall back to (healed); 175 NULL-ev_raw rows were raw-mode (ev==raw, coalesce→ev
+correct); 8 live training rows already clean (0 diverged). Fix is PREVENTIVE for
+when calibration leaves raw mode; pre-epoch rows walled off by the epoch +
+live-only filter. **Drift guard** (`test_ev_raw_coalesce_drift_guard.py`): a DB
+view has no Python route in DB-less CI, so it asserts the LATEST committed
+migration coalesces ev_raw — a 4th silent revert (3rd occurrence of this bug)
+fails loudly. **Prequential-validator prereq CLOSED.**
+
+**Lane deliverables (READ-ONLY, filed):**
+- **L1 PoP-semantics spec:** the inversion is at `ev_calculator.py:42` — one-token
+  swap `max_gain`→`max_loss` (= `1 − credit/width` = P(win)); recommend the
+  width-bound over delta (H9-robust, minimal diff); add a terminal
+  `max(0,min(1,pop))` clamp (the canonical [0,1] bound-assert home). 7-way census:
+  fold #5 (`_condor_pop_from_legs`, dup of #3), #2/#3/#6 into canonical
+  `calculate_pop`; #7 (forecast) + #4 (score-sigmoid fallback) stay. Ship PR-0
+  (inversion + clamp + un-pin the 2 bug-pinning tests) ALONE, non-RTH. Gates the
+  2-leg credit cohort.
+- **L2 replay capture-write:** **PREMISE CORRECTED — the writer is fully BUILT +
+  WIRED, just `REPLAY_ENABLE=0`-gated** (`decision_context.py:34-45`; entrypoints
+  suggestions_open/close). Phase-0 = flip the flag env-first + validate (NO code);
+  Phase-1 = 3 gaps (config blob · applied-multiplier feature · decision-output +
+  decision_id linkage); Phase-2 = the byte-compare runner (ReplayTruthLayer
+  exists). ~4–6 evenings, not the ~6–10 backlogged. Suggestion-decision only;
+  execution-decision (equity/OBP/positions) is a separate 2nd hook.
+- **L3 winter-close:** `ops_health_service.py:56` hardcodes `20*60` (20:00Z)
+  close. Fix = ET wall-clock via zoneinfo, mirroring
+  `intraday_risk_monitor.py:132-141` (`ZoneInfo("America/New_York")`); do NOT
+  wire broker get_clock (network). ~2–4 hrs. Calendar trigger 2026-10-01.
+
 ## 2026-07-11 (Sat ~18:0x ET) — BUILT: shadow-to-expiry THESIS TRACKER (I5) + F-A9-1 (#1164)
 
 STEP-0: DB 22:35:56Z / broker 22:35:57Z, dow=6, is_open=false — Saturday

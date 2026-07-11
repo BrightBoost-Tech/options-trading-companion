@@ -4,6 +4,72 @@ Every finding listed here is EXCLUDED from future audit runs. Re-finding a
 ledger item is a wasted slot. Runs append new findings as `status:reported`;
 the human flips them to `status:shipped` (with PR#) or `status:rejected`.
 
+## 2026-07-11 (Sat ~09:5x ET) — BUILT: E7 viability re-wire on the ACTIVE route (#1158)
+
+STEP-0: DB 13:39:06Z / broker 13:39:11Z, dow=6, is_open=false — Saturday
+CLOSED. **#1158 `723f9f5` MERGED + H8 VERIFIED** (BE `b8ed41d7` / worker
+`b0513f93` / worker-background `bf3a13dd`, all SUCCESS @ `723f9f5`, created
+13:50:49–50Z > merge 13:50:47Z). **Third #1126 instance — closed HONESTLY.**
+
+**What was wrong.** M4 item-0b (07-06) wired the viability bias into
+`get_executable_suggestions` — but policy-lab mode returns `_execute_per_cohort`
+at the `is_policy_lab_enabled()` early-return (paper_autopilot_service.py:452),
+BEFORE that method (:506). With `UNIVERSE_VIABILITY_BIAS_ENABLED=1` armed on the
+workers since 07-06, **the bias steered NOTHING 07-06→07-11** (the M4 wiring was
+INERT). My M4 tests pinned the orphan — the #1126 class in test form.
+
+**Fix (bias re-wired at the ACTIVE route).** In `_execute_per_cohort`'s
+per-cohort fetch: re-rank the pending set with `_viability_rank_key` when armed
+(sort-KEY only, positive scores only, stored raev untouched; flag-off
+byte-identical). **⚠ SEAM disposition:** `.limit(max_suggestions_per_day)`
+MOVED off the DB query to a post-re-rank Python slice — a server-side LIMIT
+truncated by RAW EV BEFORE the re-rank, which would strand a biased winner
+(SPY ×1.30) below the cut (a 4th #1126 in the fix's clothes). Fetch now: full
+pending set ordered raw-EV-desc → Python re-rank → slice to cap. Also corrected
+the now-false "executor's real candidacy ordering" comment in the dead
+`get_executable_suggestions` (retained for the legacy non-policy-lab path only).
+
+**Route-driving test (first CLAUDE.md §9 application).**
+`test_e7_viability_rewire_executor_route.py` DRIVES `_execute_per_cohort`
+end-to-end (fake Supabase, assert staged ORDER): armed → [SPY, BAC]
+(SPY 20×1.30=26 > BAC 25); flag-off → [BAC, SPY]; seam pin → cap=1 armed stages
+the RE-RANKED winner (SPY) AND the DB query is never `.limit()`'d. **RETIRED**
+the two M4 source-pin tests: `test_executor_sort_applies_bias_when_armed`
+(reimplemented the sort in-test) + `test_production_call_path_is_wired`
+(`inspect.getsource` string-pin) — both green while the active route bypassed
+the wired method. Kept `test_new_tier_members_present` (real data assertion).
+
+**⏳ PENDING PIN (first-live-observation — NOT shipped-proven):** the flag is
+armed AND now wired, so the first REAL ordering effect lands on the next live
+scan where ≥2 positive-score candidates survive to the executor — earliest
+Mon 07-13 (11:00 CT scan → 11:30 executor). Given the current
+1/84-clears-roundtrip reality (SPY only), a ≥2-survivor cohort is itself
+uncommon — the pin may not fire for days. Verify then; do not claim proven.
+
+docs: I6 one-liner correction applied to the v1.2 report (rides this PR).
+
+**Latents verified this session (READ-ONLY lanes — filed backlog lines STAND):**
+- **F-A10-1 CONFIRMED-but-INERT:** 999-DTE fabricate-on-missing at
+  `paper_exit_evaluator.py:158` (0/83 positions carry it; `nearest_expiry`
+  typed-date always populated; legs fallback always resolves) · option-only
+  sync filter at `alpaca_client.py:540` (broker: 0 equity positions ever, 0
+  OPASN/OPEXC/JNLS events). Neither needs more than `docs/backlog.md:149-154`.
+  H9 fix (reject/flag unpriceable expiry vs `return 999`) stays correct-to-do,
+  no signal demanding it.
+- **F-A2-1 CLEAN:** 6 GTC orders EVER, 100% on the live-routed promoted
+  champion (QQQ×3 / MARA / SOFI), 0 on any shadow cohort. ⚠ data-fidelity
+  caveat filed: `paper_orders.time_in_force` typed column reads `DAY` for all 6
+  (broker + `order_json->>'time_in_force'` say `gtc`) — future GTC audits query
+  `order_json`/broker, NOT the typed column.
+
+**HYGIENE MISS (self-logged):** confirmed the flag via `list_variables` (full
+var dump incl. secrets into the transcript) — the 07-06 ledger already recorded
+it armed; should have trusted that record. env-check-secrets-hygiene STANDS;
+this MCP has no single-var read → do NOT call `list_variables` for one flag.
+
+Queue after ③: ④ PR2 client_order_id (L1 spec ready) · ⑤ F-A3-1 part-B
+close_reason (L2 spec ready) · latents F-A4-2 / F-A10-1 / F-A2-1 (filed).
+
 ## 2026-06-15 — Phase B (structural mark-validity) shipped + QQQ phantom-stop saga
 
 - **Phase B MERGED #1067 → main `ad8ce0f`**, live both services (worker

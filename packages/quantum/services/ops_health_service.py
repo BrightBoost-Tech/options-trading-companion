@@ -103,6 +103,8 @@ EXPECTED_JOBS = [
     ("suggestions_open", "daily"),
     ("paper_learning_ingest", "daily"),  # STUB-VS-REAL (07-11): watch the real EOD producer (scheduler.py:69), not the learning_ingest no-op stub
     ("daily_progression_eval", "daily"),
+    ("thesis_tracker", "daily"),  # I5 observe-only thesis scorer (scheduler.py 17:00 CT); registered so a silent scorer surfaces as job_late
+
     # Intraday loss-protection jobs + the scheduler liveness heartbeat.
     # A monitor / order_sync that simply STOPS being scheduled writes no
     # job_runs and was previously UNDETECTED — a single in-process scheduler
@@ -607,17 +609,23 @@ def evaluate_signal_accuracy(
         return {"degraded": False, "reason": "no_telemetry", "overall": None}
     try:
         n = int(overall.get("n") or 0)
-        hit_rate = float(overall.get("hit_rate")) if overall.get("hit_rate") is not None else None
+        # F-A9-1: the view column is now realized_trade_win_rate (renamed from
+        # the mislabeled hit_rate — it counts pnl>0, NOT thesis accuracy). Read
+        # the new name; tolerate the old one on a pre-rename cached row.
+        _wr = overall.get("realized_trade_win_rate")
+        if _wr is None:
+            _wr = overall.get("hit_rate")
+        win_rate = float(_wr) if _wr is not None else None
     except (TypeError, ValueError):
         return {"degraded": False, "reason": "unparseable_row", "overall": overall}
     if n < min_n:
         return {"degraded": False, "reason": f"insufficient_sample:{n}<{min_n}", "overall": overall}
-    if hit_rate is None:
-        return {"degraded": False, "reason": "no_hit_rate", "overall": overall}
-    if hit_rate < min_hit_rate:
+    if win_rate is None:
+        return {"degraded": False, "reason": "no_win_rate", "overall": overall}
+    if win_rate < min_hit_rate:
         return {
             "degraded": True,
-            "reason": f"hit_rate {hit_rate} < {min_hit_rate} over last {n} live closes",
+            "reason": f"realized_trade_win_rate {win_rate} < {min_hit_rate} over last {n} live closes",
             "overall": overall,
         }
     return {"degraded": False, "reason": "ok", "overall": overall}

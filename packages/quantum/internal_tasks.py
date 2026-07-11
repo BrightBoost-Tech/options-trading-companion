@@ -315,6 +315,33 @@ async def vol_signal_snapshot_task(
     )
 
 
+@router.post("/thesis/score", status_code=202)
+async def thesis_score_task(
+    body: Optional[Dict] = Body(default=None),
+    auth: TaskSignatureResult = Depends(verify_task_signature("tasks:thesis_tracker"))
+):
+    """Shadow-to-expiry THESIS TRACKER (I5) — OBSERVE-ONLY daily job.
+
+    Scores every tracked closed position's ENTRY THESIS against the underlying
+    at its ORIGINAL expiry (hit/miss/unknown/in_progress) into
+    position_thesis_outcomes — independent of fills / P&L. Modulates nothing.
+    Background queue (learning-chain-adjacent, off the trading queue).
+    """
+    today = datetime.now().strftime("%Y-%m-%d")
+    force_rerun = bool((body or {}).get("force_rerun", False))
+    return enqueue_job_run(
+        job_name="thesis_tracker",
+        idempotency_key=f"thesis_tracker-{today}",
+        payload={
+            "app_version": APP_VERSION,
+            "trigger_ts": datetime.now().isoformat(),
+            **({"force_rerun": True} if force_rerun else {}),
+        },
+        queue_name=BACKGROUND_QUEUE,  # A5: learning-chain-adjacent -> background
+        force_rerun=force_rerun,
+    )
+
+
 @router.post("/ipo/readiness-monitor", status_code=202)
 async def ipo_readiness_monitor_task(
     body: Optional[Dict] = Body(default=None),

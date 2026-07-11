@@ -69,6 +69,10 @@ SCHEDULES = [
     ("paper_learning_ingest",       dict(hour=16, minute=20), "/tasks/paper/learning-ingest",      "tasks:paper_learning_ingest",    "Paper outcomes → learning"),
     ("policy_lab_eval",             dict(hour=16, minute=30), "/tasks/policy-lab/eval",             "tasks:policy_lab_eval",          "Evaluate cohort performance"),
     ("post_trade_learning",         dict(hour=16, minute=45), "/internal/tasks/learning/post-trade", "tasks:post_trade_learning",     "Post-trade learning agent"),
+    # Thesis tracker runs AFTER the learning chain so post-#1162 close_reason is
+    # ingested. OBSERVE-ONLY: scores each closed position's entry thesis to its
+    # original expiry (position_thesis_outcomes). Background queue.
+    ("thesis_tracker",              dict(hour=17, minute=0),  "/internal/tasks/thesis/score",       "tasks:thesis_tracker",           "Shadow-to-expiry thesis scoring"),
 
     # Pre-dawn calibration + orchestrator
     # iv_daily_refresh runs first (4:30) so iv_30d points are available

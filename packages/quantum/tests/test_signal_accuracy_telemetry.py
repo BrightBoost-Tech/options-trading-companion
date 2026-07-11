@@ -15,8 +15,11 @@ from packages.quantum.services.ops_health_service import (
 
 
 def _row(scope="overall", n=10, wins=1, hit_rate=0.1, brier=0.41, brier_n=10):
+    # F-A9-1: the view column is realized_trade_win_rate (renamed from the
+    # mislabeled hit_rate). The param name stays for brevity; the emitted key
+    # reflects the real view.
     return {
-        "scope": scope, "n": n, "wins": wins, "hit_rate": hit_rate,
+        "scope": scope, "n": n, "wins": wins, "realized_trade_win_rate": hit_rate,
         "brier": brier, "brier_n": brier_n,
         "window_start": "2026-06-01T00:00:00+00:00",
         "window_end": "2026-07-01T00:00:00+00:00",
@@ -27,7 +30,7 @@ class TestEvaluate:
     def test_degraded_at_meaningful_sample(self):
         v = evaluate_signal_accuracy([_row(n=10, hit_rate=0.1)], min_n=8, min_hit_rate=0.2)
         assert v["degraded"] is True
-        assert "hit_rate" in v["reason"]
+        assert "realized_trade_win_rate" in v["reason"]
 
     def test_insufficient_sample_never_degraded(self):
         v = evaluate_signal_accuracy([_row(n=7, hit_rate=0.0)], min_n=8, min_hit_rate=0.2)

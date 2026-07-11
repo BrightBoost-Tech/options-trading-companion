@@ -134,8 +134,12 @@ class JobRunStore:
 
     def mark_partial_failure(self, job_run_id: str, result: Dict[str, Any]) -> None:
         """
-        Marks the job as failed_retryable, but without scheduling an immediate retry.
-        This state indicates the job completed but some items failed (e.g. some users).
+        Marks the job 'partial' (F-A4-1 typed outcome, 2026-07-11): the job RAN
+        to completion but some units failed (users_failed>0 or counts.errors>0).
+        This is a TERMINAL, honest label — NOT a retry (the whole job must not be
+        re-run; that would redo the succeeded units). Was 'failed_retryable',
+        which the scheduler wrongly tried to retry and the dependency filter
+        missed (phantom enum). finished_at is set (the run finished).
         """
         now = datetime.now().isoformat()
         job = self.get_job(job_run_id)
@@ -148,7 +152,7 @@ class JobRunStore:
                 pass
 
         self.client.table("job_runs").update({
-            "status": "failed_retryable",
+            "status": "partial",
             "result": _to_jsonable(result),
             "finished_at": now,
             "completed_at": now,

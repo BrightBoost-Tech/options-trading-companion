@@ -53,7 +53,7 @@ class JobDependencyService:
                 .select("status") \
                 .eq("job_name", dep) \
                 .like("idempotency_key", f"%{trade_date}%") \
-                .in_("status", ["succeeded", "partial_failure"]) \
+                .in_("status", ["succeeded", "partial"]) \
                 .limit(1) \
                 .execute()
             return bool(res.data)
@@ -74,7 +74,7 @@ class JobDependencyService:
             res = self.supabase.table("job_runs") \
                 .select("job_name") \
                 .like("idempotency_key", f"%{trade_date}%") \
-                .in_("status", ["succeeded", "partial_failure"]) \
+                .in_("status", ["succeeded", "partial"]) \
                 .execute()
 
             completed = {r["job_name"] for r in (res.data or [])}

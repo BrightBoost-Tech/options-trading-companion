@@ -33,6 +33,35 @@ def _fold_alert_write_failures(final_result: Dict[str, Any], before: int) -> Dic
     return final_result
 
 
+def _classify_handler_return(result: Any) -> str:
+    """F-A4-1 typed outcome contract (2026-07-11). Classify a handler's RETURN
+    (non-raising path) into a terminal job status. Fatals RAISE and are owned by
+    run_job_run's except paths — this only sees returns. Returns 'partial' iff
+    the handler reports failed units: users_failed>0 OR counts.errors>0 OR a
+    truthy top-level 'error' key (a swallowed-fatal RETURN — the 3 known monitors
+    now RAISE, so this future-proofs a new one). Designed-false handlers
+    (ops_health_check ok:False→now True, paper_auto_execute status:'partial',
+    policy_lab_eval status:'error') carry NONE of these → 'succeeded'. 'partial'
+    is a REAL terminal status (was mislabeled 'failed_retryable')."""
+    if not isinstance(result, dict):
+        return "succeeded"
+    try:
+        if int(result.get("users_failed") or 0) > 0:
+            return "partial"
+    except (TypeError, ValueError):
+        pass
+    counts = result.get("counts")
+    if isinstance(counts, dict):
+        try:
+            if int(counts.get("errors") or 0) > 0:
+                return "partial"
+        except (TypeError, ValueError):
+            pass
+    if result.get("error"):
+        return "partial"
+    return "succeeded"
+
+
 class RetryableJobError(Exception):
     """
     Raised when a job should be retried.
@@ -71,7 +100,7 @@ def run_job_run(payload: Dict[str, Any], ctx: Optional[Any] = None) -> Dict[str,
         return {"status": "error", "error": "job_not_found", "job_run_id": job_run_id}
 
     # If already succeeded or cancelled, skip
-    if job["status"] in ("succeeded", "cancelled", "dead_lettered"):
+    if job["status"] in ("succeeded", "partial", "cancelled", "dead_lettered"):
         logger.info(f"Job {job_run_id} is already in terminal state: {job['status']}")
         return {"status": job["status"], "job_run_id": job_run_id, "skipped": True}
 
@@ -129,12 +158,16 @@ def run_job_run(payload: Dict[str, Any], ctx: Optional[Any] = None) -> Dict[str,
                 final_result, _alert_failures_before
             )
 
-        # Check for partial failures reported by the handler
-        # e.g. {"users_failed": 5, "users_total": 10}
-        if isinstance(final_result, dict) and final_result.get("users_failed", 0) > 0:
-            logger.warning(f"Job {job_run_id} completed with partial failures: {final_result}")
+        # F-A4-1 typed outcome contract (2026-07-11): derive the terminal status
+        # from the handler's return via _classify_handler_return. Fatals RAISE
+        # (owned by the except paths below); 'partial' is a REAL terminal status
+        # (was mislabeled 'failed_retryable', which the scheduler wrongly retried
+        # and the dependency filter missed via a phantom enum).
+        _outcome = _classify_handler_return(final_result)
+        if _outcome == "partial":
+            logger.warning(f"Job {job_run_id} PARTIAL (units failed): {final_result}")
             store.mark_partial_failure(job_run_id, final_result)
-            return {"status": "partial_failure", "job_run_id": job_run_id, "result": final_result}
+            return {"status": "partial", "job_run_id": job_run_id, "result": final_result}
         else:
             store.mark_succeeded(job_run_id, final_result)
             return {"status": "succeeded", "job_run_id": job_run_id, "result": final_result}

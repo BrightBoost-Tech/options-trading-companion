@@ -411,6 +411,9 @@ def _compute_health(
     failed_jobs = [name for name, state in pipeline.items() if state.status in failed_statuses]
     error_jobs = [name for name, state in pipeline.items() if state.status == "error"]
     running_jobs = [name for name, state in pipeline.items() if state.status == "running"]
+    # F-A4-1 (2026-07-11): 'partial' = the job RAN but some units failed —
+    # degraded (a warning), NOT a full failure and NOT silently ok.
+    partial_jobs = [name for name, state in pipeline.items() if state.status == "partial"]
 
     if error_jobs:
         issues.append(f"Pipeline fetch error: {', '.join(error_jobs)}")
@@ -418,6 +421,9 @@ def _compute_health(
     elif failed_jobs:
         issues.append(f"Failed jobs: {', '.join(failed_jobs)}")
         checks["pipeline"] = "failed"
+    elif partial_jobs:
+        issues.append(f"Partial jobs (ran, some units failed): {', '.join(partial_jobs)}")
+        checks["pipeline"] = "partial"
     elif running_jobs:
         checks["pipeline"] = "running"
     else:
@@ -428,7 +434,7 @@ def _compute_health(
         checks.get("market_data") == "stale" or
         checks.get("pipeline") in ("failed", "error")
     )
-    has_warning = checks.get("market_data") == "warn"
+    has_warning = checks.get("market_data") == "warn" or checks.get("pipeline") == "partial"
     is_paused = control.paused
 
     if has_critical:

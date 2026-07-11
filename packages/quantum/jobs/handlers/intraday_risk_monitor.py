@@ -150,12 +150,13 @@ def run(payload: Dict[str, Any], ctx: Any = None) -> Dict[str, Any]:
         result["duration_ms"] = int((time.time() - start_time) * 1000)
         return result
     except Exception as e:
+        # F-A4-1 (2026-07-11): do NOT swallow a fatal into an ok:False RETURN —
+        # that is recorded 'succeeded' and is INVISIBLE (a protection cycle that
+        # failed green). RAISE so the runner's exception path records it
+        # (failed_retryable) and the A4/dashboard readers see it. The next q15
+        # cron re-runs the monitor regardless.
         logger.error(f"[RISK_MONITOR] Fatal error: {e}", exc_info=True)
-        return {
-            "ok": False,
-            "error": str(e),
-            "duration_ms": int((time.time() - start_time) * 1000),
-        }
+        raise
 
 
 class IntradayRiskMonitor:

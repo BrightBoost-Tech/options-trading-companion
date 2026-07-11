@@ -299,7 +299,7 @@ def enqueue_job_run(
     # Skip RQ enqueue if job is already in a terminal state (idempotency guard)
     # Belt-and-suspenders: check status regardless of completed_at, so stale
     # jobs with completed_at=NULL never block fresh runs from being recognized.
-    TERMINAL_STATES = ("succeeded", "failed", "failed_retryable", "dead_lettered", "cancelled")
+    TERMINAL_STATES = ("succeeded", "partial", "failed", "failed_retryable", "dead_lettered", "cancelled")
     if job_run["status"] in TERMINAL_STATES:
         print(f"[DISPATCH_DEBUG] {job_name}: SKIPPED — terminal status={job_run['status']}")
         return {

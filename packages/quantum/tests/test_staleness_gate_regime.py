@@ -160,7 +160,7 @@ class TestFailClosedDefault(unittest.TestCase):
         normal regime applied → vendor clause skipped."""
         snaps = {"SPY": _make_snap(is_stale=True, freshness_ms=60_000)}
         admin_client = MagicMock()
-        admin_client.table.return_value.select.return_value.eq.return_value.eq.return_value.order.return_value.limit.return_value.execute.return_value.data = [
+        admin_client.table.return_value.select.return_value.eq.return_value.in_.return_value.order.return_value.limit.return_value.execute.return_value.data = [
             {
                 "result": {
                     "cycle_results": [
@@ -273,7 +273,7 @@ class TestResolveRegimeHelper(unittest.TestCase):
 
     def test_none_with_lookup_returning_last_regime(self):
         admin_client = MagicMock()
-        admin_client.table.return_value.select.return_value.eq.return_value.eq.return_value.order.return_value.limit.return_value.execute.return_value.data = [
+        admin_client.table.return_value.select.return_value.eq.return_value.in_.return_value.order.return_value.limit.return_value.execute.return_value.data = [
             {
                 "result": {
                     "cycle_results": [
@@ -290,7 +290,7 @@ class TestResolveRegimeHelper(unittest.TestCase):
 
     def test_none_with_lookup_returning_no_rows_falls_back_to_shock(self):
         admin_client = MagicMock()
-        admin_client.table.return_value.select.return_value.eq.return_value.eq.return_value.order.return_value.limit.return_value.execute.return_value.data = []
+        admin_client.table.return_value.select.return_value.eq.return_value.in_.return_value.order.return_value.limit.return_value.execute.return_value.data = []
         with patch(
             "packages.quantum.jobs.handlers.utils.get_admin_client",
             return_value=admin_client,

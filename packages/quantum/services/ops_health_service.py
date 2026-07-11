@@ -263,7 +263,7 @@ def compute_data_freshness(
         result = client.table("job_runs") \
             .select("finished_at, job_name") \
             .in_("job_name", ["suggestions_close", "suggestions_open"]) \
-            .eq("status", "succeeded") \
+            .in_("status", ["succeeded", "partial"]) \
             .order("finished_at", desc=True) \
             .limit(1) \
             .execute()
@@ -432,7 +432,7 @@ def get_expected_jobs(
             result = client.table("job_runs") \
                 .select("finished_at, status") \
                 .eq("job_name", job_name) \
-                .eq("status", "succeeded") \
+                .in_("status", ["succeeded", "partial"]) \
                 .order("finished_at", desc=True) \
                 .limit(1) \
                 .execute()
@@ -658,7 +658,7 @@ def get_silent_job_failures(client, hours: int = 24) -> List[Dict[str, Any]]:
         since = (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat()
         result = client.table("job_runs") \
             .select("id, job_name, finished_at, result") \
-            .eq("status", "succeeded") \
+            .in_("status", ["succeeded", "partial"]) \
             .gte("finished_at", since) \
             .order("finished_at", desc=True) \
             .limit(200) \
@@ -978,7 +978,7 @@ def _resolve_regime_for_staleness(regime: Optional[str]) -> str:
             client.table("job_runs")
             .select("result")
             .eq("job_name", "suggestions_open")
-            .eq("status", "succeeded")
+            .in_("status", ["succeeded", "partial"])
             .order("created_at", desc=True)
             .limit(5)
             .execute()
@@ -1214,7 +1214,7 @@ def should_suppress_alert(
         result = client.table("job_runs") \
             .select("result, finished_at") \
             .eq("job_name", "ops_health_check") \
-            .eq("status", "succeeded") \
+            .in_("status", ["succeeded", "partial"]) \
             .gte("finished_at", since) \
             .order("finished_at", desc=True) \
             .limit(5) \

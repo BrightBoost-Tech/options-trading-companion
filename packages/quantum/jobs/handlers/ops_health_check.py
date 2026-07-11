@@ -625,7 +625,12 @@ def run(payload: Dict[str, Any], ctx: Any = None) -> Dict[str, Any]:
         )
 
         return {
-            "ok": is_healthy,
+            # F-A4-1 (2026-07-11): the health CHECK ran successfully — issues
+            # found are its PAYLOAD, not a job failure. Was ok=is_healthy, which
+            # recorded ~332 designed-false 'succeeded+ok:false' rows (noise in
+            # the false-green query). The real health is in `healthy`/issues.
+            "ok": True,
+            "healthy": is_healthy,
             "issues_found": issues_found,
             "alerts_sent": alerts_sent,
             "alerts_failed": alerts_failed,

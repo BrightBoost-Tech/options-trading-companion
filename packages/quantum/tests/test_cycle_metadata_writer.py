@@ -356,6 +356,7 @@ class TestStalenessGateConsumerIteratesPastNullRegime(unittest.TestCase):
         chain = MagicMock()
         chain.select.return_value = chain
         chain.eq.return_value = chain
+        chain.in_.return_value = chain  # F-A4-1: status filter is now .in_(succeeded,partial)
         chain.order.return_value = chain
         chain.limit.return_value = chain
         chain.execute.return_value = MagicMock(data=rows)

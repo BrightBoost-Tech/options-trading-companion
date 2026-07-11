@@ -28,7 +28,7 @@ def _freshness_client(finished_at_iso):
         client.table.return_value
         .select.return_value
         .in_.return_value
-        .eq.return_value
+        .in_.return_value
         .order.return_value
         .limit.return_value
         .execute.return_value
@@ -45,7 +45,7 @@ def _jobs_client(last_success_iso):
         client.table.return_value
         .select.return_value
         .eq.return_value
-        .eq.return_value
+        .in_.return_value
         .order.return_value
         .limit.return_value
         .execute.return_value

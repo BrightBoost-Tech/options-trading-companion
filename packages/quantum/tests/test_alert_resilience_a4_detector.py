@@ -373,8 +373,9 @@ class TestSilentFailureHandlerWiring(unittest.TestCase):
         self.assertEqual(kwargs["severity"], "high")
         self.assertEqual(kwargs["metadata"]["job_name"], "paper_learning_ingest")
         self.assertEqual(kwargs["metadata"]["error_count"], 1)
-        # The handler surfaces the issue and is no longer "ok".
-        self.assertFalse(result["ok"])
+        # The handler surfaces the issue: F-A4-1 moved the health signal from
+        # `ok` (now always True — the CHECK ran) to `healthy`.
+        self.assertFalse(result["healthy"])
         self.assertTrue(
             any("Silent failure" in i for i in result["issues_found"])
         )

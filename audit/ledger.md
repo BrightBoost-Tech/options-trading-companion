@@ -1448,6 +1448,106 @@ PENDING VERIFICATIONS (2026-07-07, added by the M4 ship):
   GTC); fossils unchanged (22 queued / 4 stuck-running).
 - Counters: A9→0, others →3 (A7 dormant). No retirement candidates.
 
+## 2026-07-11 (Sat ~01:04 ET) — EXTERNAL AUDIT v1.2 ADJUDICATION (verified vs code@e45290f + DB + broker)
+
+STEP-0: broker 01:04 ET CLOSED (Sat) / DB 05:04Z — agreed. READ-ONLY + doc
+writes. ⚠ The v1.2 report file is NOT on disk (`docs/review/` has only the
+07-09 packet + v1.1 prompt) — adjudicated from the operator's inline cites;
+sweep pending the file at `docs/review/external-full-audit-v1_2-2026-07-10.md`.
+
+**P0 — F-A4-1 (fatal handler results persisted as succeeded) → CONFIRMED
+STRUCTURAL, 0 FATAL INSTANCES (bounded).** Chain verified: `runner.py:134`
+success keys SOLELY on `users_failed>0` — `ok:false` / `status:partial` /
+`counts.errors` all fall to `mark_succeeded` (`job_runs.py:125` writes
+`status='succeeded'` blind to the body); `intraday_risk_monitor.py:152-158`
+RETURNS `{"ok":False,"error":...}` on a FATAL exception (no `users_failed`, no
+`counts`) → recorded succeeded; the A4 detector `ops_health_service.py:669-681`
+reads ONLY `counts.errors` → the fatal return is doubly invisible. **No
+normalization layer exists (confirmed).** HEADLINE QUERY (45d): 356
+`succeeded`+`ok=false` rows BUT **fatal_masked_green = 0 on every job**
+(`result ? 'error'` = 0) — the 356 are DESIGNED ok=false (ops_health_check ×332
+detecting alerts · paper_auto_execute ×21 gate-rejects · suggestions_open ×3);
+**ZERO intraday_risk_monitor false-green rows** — no protection cycle has ever
+failed green. So the finding is real-but-unexercised: critical as a CLASS (the
+plane beneath all job monitoring), blast radius bounded, rollout won't expose a
+hidden backlog (0 current fatals). NEW HEADLINE BUILD (typed outcome contract).
+
+**P1 — E7 (viability bias bypassed) → CLOSURE FALSE = THIRD #1126 INSTANCE.**
+The active executor route is `_execute_per_cohort` (`paper_autopilot_service.py
+:864-865`), which sorts via a Supabase `.order("risk_adjusted_ev").order("ev")`
+on the STORED column. The M4/#1132 viability bias is sort-KEY-only (never
+persisted) and lives in `get_executable_suggestions` (`:130,141`), reachable
+only at `:506` — AFTER the `:452` early `return self._execute_per_cohort(...)`
+when policy-lab is on (the live 3-cohort arch). The wiring test
+(`test_m4_obp_failclosed_and_wiring.py:174`) source-string-asserts the DEAD
+route — the exact #1126 tell. **The bias is armed + green-tested but INERT on
+the live route.** Fix: re-rank the fetched `suggestions` list in Python inside
+`_execute_per_cohort` + a test that drives THAT route. (rank_suggestions_canonical
+still has ZERO production callers.)
+
+**P1 — F-STATE-I6 → RESOLVED (prompt-wording artifact).** "merged package" =
+merged into ONE EPIC (P0-B book-scaling readiness, backlog-level), never
+claimed code-shipped; the substantive point (unbuilt, tripwire-only guard) was
+already our STATE. Nothing else read "merged" as shipped. Fix the language in
+the canonical v1.2 file when placed.
+
+**P2 — HIGH-CONSEQUENCE LATENTS:**
+- **F-A10-1 → CONFIRMED (split), LATENT.** (a) missing/unparseable expiry →
+  `paper_exit_evaluator.py:158` returns 999 DTE → DTE-based exit conditions
+  silently skipped (fail-OPEN; only on absent/corrupt expiry). (b)
+  assignment-created EQUITY filtered out of the option sync
+  (`alpaca_client.py:540-543`, `len(symbol)>10` heuristic) → unmanaged stock;
+  both reconcile paths consume the option-only set. Book flat now → unexercised.
+  Assignment-adjacent (A2 charter).
+- **F-A2-1 → CONFIRMED (code), likely-not-live-exercised.** The POST-FILL hook
+  `maybe_place_gtc_profit_exit` (`gtc_profit_exit.py:328-464`, wired at
+  `alpaca_order_handler.py:944`) NEVER checks the pilot allowlist — it parks a
+  GTC for any eligible live multileg entry; only `GTC_PROFIT_EXIT_ENABLED`
+  (default OFF) gates it (the sweep path DOES check the allowlist). DB: 6
+  `intentional_resting_exit` orders (all cancelled, 06-13→07-08) — consistent
+  with the pilot sweep; no confirmed out-of-pilot placement (flag OFF). Priority
+  jumps only if the flag goes ON before the allowlist is enforced on the hook.
+- **F-A3-1 → CONFIRMED (both), NEW loss paths.** Outcome ingest NOT conserved:
+  window filter (`:230-235`, 7d roll-off) + silent no-filled-closing-order drop
+  (`:382-386`, `skipped_no_order` local-only). Exit cause ERASED: the LFL row
+  (`_create_paper_outcome_record`) writes a static `reason_codes:
+  ["paper_trade_close"]`, never `position.close_reason` — the learning chain
+  never sees WHY a trade closed (close_reason IS carried, but only to
+  `policy_decisions.realized_outcome`, a different table, policy-lab-gated).
+  Mechanism is DISTINCT from the NFLX-06-08 epoch exclusion (new paths). Feeds
+  the thesis-tracker (I5) — amend its charter.
+- **F-A4-2 → CONFIRMED (silent-zero).** The automatic retry
+  (`runner.py:142-176` → `mark_retryable` → `requeue_job_run` RPC) only FLIPS DB
+  state; no `q.enqueue`, no RQ push. DB residue: 22 `queued` (latest 06-22) + 5
+  `failed_retryable` (04-10) that never re-ran — the known 22-fossil class, now
+  mechanism-explained. Live workers are RQ (no DB-poller in repo). Fix: re-enqueue
+  on mark_retryable (or a DB-poll re-dispatcher).
+
+**P3 — REGISTER SWEEP (one-liners):** F-A6-2 REFUTED (counters increment AFTER
+eligibility) · F-A3-2 PARTIAL (autotune versions ARE read; but AUTOPROMOTE off
++ unscheduled → logged-not-applied, flag-gated compute-not-apply) · F-A9-1
+CONFIRMED ("Confidence N%" from `overall_score`, a 0-100 rank not a probability
+— mislabel; `SuggestionCard.tsx:683`) · F-A9-2 REFUTED (UI statuses still
+emitted) · F-A8-1/2 PARTIAL (`suggestion_rejections` stores flat reason, no
+economics/error category — conflated, not mis-assigned) · F-A10-2/3 PARTIAL
+(weekday-only holiday-blind ops checks, BUT execution/monitor defer to broker
+`get_clock` which knows holidays; session hours correct; no native calendar) ·
+F-A5-1 CONFIRMED (`phase2_precheck` past its 48h self-expiry → `window_expired`
+no-op every run; machine-consumed by nothing — dead precheck).
+
+**ECONOMICS (their sharpening):** re-verified on today's live candidate — QQQ
+16:00Z calibrated `ev 18.73` (=37.46×0.5), `net −15.27 < floor 15` → does NOT
+clear; SOFI `edge_below_minimum`. STRENGTHENS the A6 SETTLED 1-of-N verdict
+(does not contradict). Their 78%-thesis caution (5/9 horizons incomplete, n=8)
+→ the thesis figure is a directional estimate on a tiny, partly-open sample;
+the thesis tracker (I5) is the resolution path.
+
+**EXTERNAL v1.2 SCORECARD (their 3rd engagement):** high hit rate — F-A4-1
+(structural CONFIRMED, the class fix), E7 (a real 3rd #1126 instance we missed),
+F-A3-1/F-A4-2/F-A5-1/F-A9-1 all CONFIRMED; the rest PARTIAL/REFUTED with the
+distinction named. Q1-class method holds; weight high. Two calibrations: F-A4-1's
+DANGEROUS manifestation is unexercised (0 fatal); F-A2-1 is flag-gated-off.
+
 ## 2026-07-10 (post-close ~16:21 ET) — BUILT: P0-A broker-acknowledged live-close invariant (#1149) [PR1 of 2]
 
 STEP-0: broker 16:21 ET CLOSED (re-confirmed pre-merge) / DB 20:21Z. Post-close;

@@ -605,6 +605,14 @@ paper_learning_ingest · policy_lab_eval · post_trade_learning · promotion_che
   call path** — an orphan function with green tests is the 9a2cef1/#1126
   class (detection: 2 months then; <24h via audit PASS-2 now). The wiring
   test must exercise the seam production actually calls.
+- **A wiring test must EXECUTE the production route, not REFERENCE the
+  production function.** A source-string / `inspect.getsource` assertion (or a
+  test that reimplements the logic locally) is the #1126 costume in test form:
+  it stays green while the active route bypasses the wired code. (E7, 07-11: the
+  M4 viability test source-pinned `get_executable_suggestions` while the live
+  executor `_execute_per_cohort` sorted on the stored column — the bias was
+  inert for days behind a green test.) Drive the entrypoint end-to-end and
+  assert on the OUTPUT.
 - **Never treat a fail-closed degradation as automatically safe: fail-closed
   can still fail-WRONG.** A degradation that changes WHICH universe is
   scanned (the 07-06 $500→micro inversion) is a different strategy, not a

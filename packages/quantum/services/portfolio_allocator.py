@@ -129,6 +129,8 @@ def _sum_open_cost_basis(open_positions: Sequence[Dict[str, Any]]) -> float:
     safe but the operator gets fewer fills than expected.
     """
     total = 0.0
+    honest_total = 0.0   # P0-B: sum of max_loss_total (defined-risk basis)
+    honest_any = False
     for pos in open_positions or []:
         cb = pos.get("cost_basis")
         if cb is None:
@@ -141,7 +143,26 @@ def _sum_open_cost_basis(open_positions: Sequence[Dict[str, Any]]) -> float:
                 "portfolio_allocator: skipping malformed open_position "
                 "row (cost_basis=%r)", cb,
             )
-    return total
+        # P0-B shadow: honest basis is max_loss_total (a TOTAL, no × qty). NULL
+        # → fall back to this row's cost basis so the honest SUM is comparable.
+        ml = pos.get("max_loss_total")
+        try:
+            if ml is not None:
+                honest_total += abs(float(ml)); honest_any = True
+            else:
+                honest_total += abs(float(cb or 0.0))
+        except (TypeError, ValueError):
+            pass
+    # Observe-only: log current (premium/null-blind — cost_basis is unpopulated
+    # today so the open book reads ~$0) vs honest (max_loss_total). Honest becomes
+    # decisive only under RISK_BASIS_MAX_LOSS_ENABLED (default OFF → byte-identical).
+    from packages.quantum.services.risk_basis_shadow import (
+        log_risk_basis_shadow, choose_basis,
+    )
+    _honest = honest_total if honest_any else None
+    log_risk_basis_shadow("allocator_open_book", total, _honest,
+                          context={"n_open": len(open_positions or [])})
+    return choose_basis(total, _honest)
 
 
 def _median(values: Sequence[float]) -> float:

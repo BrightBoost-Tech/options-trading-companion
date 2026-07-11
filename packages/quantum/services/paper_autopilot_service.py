@@ -116,11 +116,12 @@ class PaperAutopilotService:
                 )
 
         # Deterministic sorting: risk_adjusted_ev desc, created_at asc, id asc.
-        # M4 item 0b (2026-07-06): the #1126 viability bias is applied HERE —
-        # the audit's F1 finding was that the biased sort lived only in
-        # rank_suggestions_canonical, which has zero production callers (the
-        # 9a2cef1 class: green tests on an orphan function). This is the
-        # executor's real candidacy ordering, so the bias must live here.
+        # M4 item 0b (2026-07-06) applied the #1126 viability bias here — BUT
+        # E7 (2026-07-11) found this method is ITSELF dead on the live route:
+        # policy-lab mode returns _execute_per_cohort at the is_policy_lab_
+        # enabled() early-return, before this path. The bias now lives (and
+        # acts) in _execute_per_cohort's fetch. This copy is retained for the
+        # legacy non-policy-lab path only and kept in sync deliberately.
         # Sort-KEY only: the stored risk_adjusted_ev is untouched (allocator
         # split-skew reads it); positive scores only; flag-off byte-identical.
         from packages.quantum.analytics.canonical_ranker import (
@@ -854,7 +855,21 @@ class PaperAutopilotService:
                 print(f"[AUTO_EXEC] SKIP cohort={cohort_name}: no portfolio", flush=True)
                 continue
 
-            # Fetch this cohort's pending suggestions
+            # Fetch this cohort's pending suggestions.
+            #
+            # E7 (2026-07-11) — viability re-rank on the ACTIVE executor route.
+            # The M4 wiring (07-06) put the bias in get_executable_suggestions,
+            # which policy-lab mode NEVER calls: execute_top_suggestions returns
+            # _execute_per_cohort at the is_policy_lab_enabled() early-return,
+            # BEFORE the get_executable_suggestions path — so the armed flag has
+            # steered nothing since 07-06 (the #1126 class, third instance).
+            #
+            # SEAM (load-bearing): .limit() must NOT run on the DB query. A
+            # server-side LIMIT truncates by RAW risk_adjusted_ev BEFORE the
+            # re-rank sees the set, which would strand a biased winner (e.g.
+            # SPY ×1.30) below the cut and leave the re-wire PARTIALLY INERT (a
+            # fourth #1126 wearing the fix's clothes). Fetch the FULL pending
+            # set ordered by raw EV, re-rank in Python, THEN slice to the cap.
             res = supabase.table(TRADE_SUGGESTIONS_TABLE) \
                 .select("*") \
                 .eq("user_id", user_id) \
@@ -863,9 +878,23 @@ class PaperAutopilotService:
                 .eq("cycle_date", today_str) \
                 .order("risk_adjusted_ev", desc=True) \
                 .order("ev", desc=True) \
-                .limit(config.max_suggestions_per_day) \
                 .execute()
             suggestions = res.data or []
+
+            # Sort-KEY only, POSITIVE scores only; flag-off is byte-identical to
+            # the DB order above (_viability_rank_key returns the raw raev when
+            # the flag is off or the score ≤ 0, and .order() already gave
+            # raw-EV-desc, so skipping the sort preserves it exactly). Stored
+            # risk_adjusted_ev is untouched — the allocator's split-skew reads
+            # it. Mirrors rank_suggestions_canonical's sort. The slice is the
+            # per-day cap moved off the DB query (the seam above).
+            from packages.quantum.analytics.canonical_ranker import (
+                _viability_bias_enabled,
+                _viability_rank_key,
+            )
+            if _viability_bias_enabled():
+                suggestions.sort(key=_viability_rank_key, reverse=True)
+            suggestions = suggestions[: config.max_suggestions_per_day]
 
             print(
                 f"[AUTO_EXEC] cohort={cohort_name}: query returned {len(suggestions)} "

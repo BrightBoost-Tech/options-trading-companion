@@ -141,46 +141,17 @@ class TestFailClosedCapital:
 
 
 class TestBiasWiringExecutorPath:
-    """Item 0b — the F1 fix. The bias must act in get_executable_suggestions'
-    OUTPUT (the production candidacy ordering), not the orphan function."""
+    """Viability-tier membership (real data). The bias's WIRING is now pinned
+    by test_e7_viability_rewire_executor_route.py, which DRIVES the production
+    route (_execute_per_cohort) end-to-end.
 
-    def test_executor_sort_applies_bias_when_armed(self, monkeypatch):
-        """Behavioral pin on the executor's sort semantics: equal stored
-        scores, viable ticker wins iff the flag is armed."""
-        monkeypatch.setenv("UNIVERSE_VIABILITY_BIAS_ENABLED", "1")
-        from packages.quantum.analytics.canonical_ranker import (
-            _viability_bias_enabled, _viability_rank_key,
-        )
-        assert _viability_bias_enabled() is True
-
-        def executor_sort_key(s, bias_on):
-            score = s.get("risk_adjusted_ev")
-            if score is None:
-                score = s.get("ev") or 0.0
-            score = float(score)
-            if bias_on and score > 0:
-                score = _viability_rank_key(
-                    {"risk_adjusted_ev": score, "ticker": s.get("ticker")}
-                )
-            return (-score, s.get("created_at") or "", s.get("id") or "")
-
-        a = {"ticker": "BAC", "risk_adjusted_ev": 25.0, "created_at": "a", "id": "1"}
-        b = {"ticker": "SPY", "risk_adjusted_ev": 25.0, "created_at": "b", "id": "2"}
-        ordered = sorted([a, b], key=lambda s: executor_sort_key(s, True))
-        assert ordered[0]["ticker"] == "SPY"
-        ordered_off = sorted([a, b], key=lambda s: executor_sort_key(s, False))
-        assert ordered_off[0]["ticker"] == "BAC"  # stable/legacy order
-
-    def test_production_call_path_is_wired(self):
-        """THE WIRING PIN (the 9a2cef1/#1126 lesson): the executor's
-        get_executable_suggestions source must consult the viability bias —
-        not the orphan ranker function."""
-        import inspect
-        from packages.quantum.services import paper_autopilot_service as pas
-
-        src = inspect.getsource(pas.PaperAutopilotService.get_executable_suggestions)
-        assert "_viability_rank_key" in src
-        assert "_viability_bias_enabled" in src
+    RETIRED here 2026-07-11 (E7): test_executor_sort_applies_bias_when_armed
+    (it REIMPLEMENTED the sort in-test, never touching the route) and
+    test_production_call_path_is_wired (an inspect.getsource string-pin). Both
+    were the #1126 costume in test form — green while the ACTIVE route
+    (_execute_per_cohort) bypassed the wired method entirely (07-06→07-11). Per
+    CLAUDE.md §9: a wiring test EXECUTES the production route, it does not
+    REFERENCE the production function."""
 
     def test_new_tier_members_present(self):
         from packages.quantum.analytics.canonical_ranker import _VIABILITY_TIERS

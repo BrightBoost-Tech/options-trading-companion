@@ -105,7 +105,7 @@ A two-leg structure could lower leg friction, but it must independently produce 
 
 ### F-STATE-I6 — High, latent: the book-scaling package is not merged
 
-**What.** The supplied v1.2 state calls I6’s risk custody, utilization basis, bucket control and same-run reservation a “merged package.” Current `main` and the backlog do not.
+**What.** The supplied v1.2 state calls I6’s risk custody, utilization basis, bucket control and same-run reservation a “merged package.” Current `main` and the backlog do not. [Operator correction 2026-07-11 (E7 PR): the accurate status is “merged into one epic, backlog-level; unbuilt” — “merged” referred to backlog-epic consolidation, never a code merge; this audit’s finding stands.]
 
 **Where.** `docs/backlog.md:47-60` still lists P0-B as open. [`portfolio_allocator.py:116-144`](https://github.com/BrightBoost-Tech/options-trading-companion/blob/e45290fe77ca1b9a3c630c76f7267e17aacfa020/packages/quantum/services/portfolio_allocator.py#L116-L144) still reads `paper_positions.cost_basis/current_value`; [`20250101000009_paper_trading.sql:25-36`](https://github.com/BrightBoost-Tech/options-trading-companion/blob/e45290fe77ca1b9a3c630c76f7267e17aacfa020/supabase/migrations/20250101000009_paper_trading.sql#L25-L36) does not define those columns.
 

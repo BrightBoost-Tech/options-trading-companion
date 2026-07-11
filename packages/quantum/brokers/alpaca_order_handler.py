@@ -64,7 +64,41 @@ _TERMINAL_REJECT_MARKERS = (
 # already filled when the duplicate's rejection marked it for review).
 _DUPLICATE_CLOSE_MARKERS = ("42210000", "position intent mismatch")
 
+# PR2 (2026-07-11): Alpaca 422 when a resubmit reuses a client_order_id that
+# already exists on the account — a PRIOR attempt (this loop, or a prior run
+# that died response-lost) actually reached the broker. Resolve by lookup;
+# NEVER needs_manual_review (that manufactured a false critical on every
+# legitimate in-function retry).
+_DUPLICATE_ORDER_ID_MARKERS = (
+    "client_order_id must be unique",
+    "client_order_id already exists",
+)
+
 logger = logging.getLogger(__name__)
+
+
+def deterministic_client_order_id(order: Dict[str, Any]) -> Optional[str]:
+    """Stable broker client_order_id for a paper_orders row.
+
+    Scheme ``otc1-<l|p>-<paper_orders.id>`` (~43 chars, charset [a-z0-9-],
+    well under Alpaca's 128 limit). Derived purely from the row PK (globally
+    unique) so it is IDENTICAL across in-function retries: a lost-ack resubmit
+    reuses the id and Alpaca rejects the duplicate (recoverable via
+    get_order_by_client_id) instead of creating a phantom second order. A
+    re-STAGE creates a NEW row → NEW PK → NEW id, which Alpaca accepts.
+
+    ``otc1`` is the scheme version (bump on any derivation change so the
+    reconciler can distinguish old ids). The l/p discriminator is cosmetic —
+    uniqueness is per-account and the PK is already globally unique. Returns
+    None only when the row has no id (never, for a persisted row), so callers
+    fall back to legacy (no client_order_id → Alpaca auto-generates one).
+    """
+    oid = order.get("id")
+    if not oid:
+        return None
+    mode = (order.get("execution_mode") or "").lower()
+    disc = "p" if "paper" in mode else "l"
+    return f"otc1-{disc}-{oid}"
 
 
 def build_alpaca_order_request(order: Dict[str, Any]) -> Dict[str, Any]:
@@ -211,6 +245,11 @@ def build_alpaca_order_request(order: Dict[str, Any]) -> Dict[str, Any]:
         "order_type": "limit",
         "limit_price": limit_price,
         "time_in_force": tif,
+        # PR2: attach the deterministic client_order_id (prefer the persisted
+        # column; recompute from the row PK if absent — legacy rows / an
+        # in-memory dict that never round-tripped the column). Always present
+        # for a real row, so every submit now carries our id.
+        "client_order_id": order.get("client_order_id") or deterministic_client_order_id(order),
     }
 
 
@@ -330,6 +369,49 @@ def submit_and_track(
                     "attempts": attempts_made,
                     "error": last_error,
                 }
+            # PR2 duplicate client_order_id (422): a PRIOR attempt actually
+            # reached the broker under our deterministic id (response-lost).
+            # The resubmit is a broker-side no-op REJECT, NOT a new order.
+            # Resolve by lookup — backfill the alpaca_order_id the prior attempt
+            # created; NEVER mark needs_manual_review (that manufactured a false
+            # critical on every legitimate in-function retry).
+            _coid = order.get("client_order_id") or deterministic_client_order_id(order)
+            if _coid and any(m in err_lower for m in _DUPLICATE_ORDER_ID_MARKERS):
+                found = None
+                try:
+                    found = alpaca.get_order_by_client_id(_coid)
+                except Exception as _lookup_err:
+                    logger.error(
+                        f"[ALPACA_HANDLER] duplicate client_order_id={_coid} but "
+                        f"lookup failed: {_lookup_err}"
+                    )
+                if found and found.get("alpaca_order_id"):
+                    supabase.table("paper_orders").update({
+                        "alpaca_order_id": found.get("alpaca_order_id"),
+                        "execution_mode": "alpaca_paper" if alpaca.paper else "alpaca_live",
+                        "broker_status": found.get("status"),
+                        "broker_response": found,
+                        "status": "submitted",
+                        "submitted_at": datetime.now(timezone.utc).isoformat(),
+                    }).eq("id", order_id).execute()
+                    logger.info(
+                        f"[ALPACA_HANDLER] Resolved duplicate client_order_id={_coid}: "
+                        f"backfilled alpaca={found.get('alpaca_order_id')} "
+                        f"(response-lost prior attempt reached the broker)"
+                    )
+                    return {
+                        "status": "submitted",
+                        "resolved_by_client_order_id": True,
+                        "alpaca_order_id": found.get("alpaca_order_id"),
+                        "broker_status": found.get("status"),
+                    }
+                # Duplicate reported but no findable order → anomalous. Fall
+                # through to standard terminal/retry handling (loud), never a
+                # silent swallow.
+                logger.error(
+                    f"[ALPACA_HANDLER] duplicate client_order_id={_coid} but no "
+                    f"order found by lookup — falling through to standard handling"
+                )
             # Terminal rejects: will never succeed on retry — stop now; the
             # post-loop needs_manual_review + single critical alert handles it.
             if any(m in err_lower for m in _TERMINAL_REJECT_MARKERS):

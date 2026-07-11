@@ -401,6 +401,10 @@ class AlpacaClient:
             order_class=OrderClass.MLEG if is_multi else None,
             symbol=alpaca_legs[0].symbol if not is_multi else None,
             side=alpaca_legs[0].side if not is_multi else None,
+            # PR2 (2026-07-11): deterministic client_order_id for response-lost
+            # resolution. None → to_request_fields() drops it (exclude_none),
+            # so an order without one is byte-identical to legacy submits.
+            client_order_id=order_request.get("client_order_id"),
         )
 
         req = LimitOrderRequest(
@@ -433,6 +437,28 @@ class AlpacaClient:
         """Get order status by Alpaca order ID."""
         order = self._call_with_retry(self._client.get_order_by_id, order_id)
         return self._serialize_order(order)
+
+    def get_order_by_client_id(self, client_order_id: str) -> Optional[Dict[str, Any]]:
+        """Look up an order by OUR deterministic client_order_id.
+
+        Returns the serialized order dict, or None when the broker has no
+        order with that client_order_id (404). Drives PR2 response-lost
+        resolution: a deterministic client_order_id makes a lost-ack resubmit
+        a broker-side duplicate REJECT, and this lookup recovers the
+        alpaca_order_id the prior (broker-accepted) attempt created. Any
+        non-404 error (auth, network) re-raises so the caller fails LOUD
+        rather than mis-resolving a live order.
+        """
+        try:
+            order = self._call_with_retry(
+                self._client.get_order_by_client_id, client_order_id
+            )
+        except Exception as e:
+            msg = str(e).lower()
+            if "404" in msg or "not found" in msg or "does not exist" in msg:
+                return None
+            raise
+        return self._serialize_order(order) if order else None
 
     def get_orders(
         self,

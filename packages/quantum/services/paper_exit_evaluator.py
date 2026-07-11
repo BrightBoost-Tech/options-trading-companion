@@ -2188,9 +2188,14 @@ class PaperExitEvaluator:
                         # P0-A INVARIANT (2026-07-10, F-A2-1 / E6): a LIVE submit
                         # that raises must NEVER be internally filled (this is the
                         # 2026-04-16 ghost-position class — closed here). Hold the
-                        # position OPEN in an explicit alarmed state; the fill
-                        # reconciler (targeted lookup) or the operator resolves it.
-                        # No phantom internal fill can accumulate.
+                        # position OPEN in an explicit alarmed state; no phantom
+                        # internal fill can accumulate.
+                        # PR2 (2026-07-11): the targeted lookup now EXISTS — the
+                        # order carries a deterministic client_order_id, so
+                        # alpaca_order_sync Step 1.5 auto-resolves this hold
+                        # (FOUND → backfill the broker id; 404 → re-arm to
+                        # 'cancelled', which #1046 re-arms into a fresh close).
+                        # The operator is now the fallback, not the mechanism.
                         try:
                             supabase.table("paper_orders").update({
                                 "status": "needs_manual_review",

@@ -161,8 +161,16 @@ def run(payload: Dict[str, Any], ctx: Any = None) -> Dict[str, Any]:
 
         print(f"[{JOB_NAME}] Finished. Stats: {stats}, "
               f"actual_rows={actual_rows}, match={accounting_match}")
+        # ALL-MISSING → NOT GREEN (2026-07-11, F-A4-1 cousin): a refresh where
+        # EVERY symbol produced no IV (ok==0 with symbols present) is a producer
+        # failure, not a healthy no-op. Emit counts.errors so the runner's typed
+        # contract records it PARTIAL (visible). Some-missing (ok>0) stays green —
+        # individual symbols lacking IV history (new adds seasoning to 60d) is
+        # normal and must not alarm.
+        _all_missing = stats["ok"] == 0 and len(symbols) > 0
         return {
             "status": "ok",
+            "counts": {"errors": stats["missing_data"] if _all_missing else 0},
             "stats": stats,
             "failed_symbols": failed_symbols[:20],  # truncate huge payloads
             "actual_rows_written": actual_rows,

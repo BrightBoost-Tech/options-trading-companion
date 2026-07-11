@@ -101,7 +101,7 @@ _RTH_WARMUP_OPEN_UTC = (14, 30)
 EXPECTED_JOBS = [
     ("suggestions_close", "daily"),
     ("suggestions_open", "daily"),
-    ("learning_ingest", "daily"),
+    ("paper_learning_ingest", "daily"),  # STUB-VS-REAL (07-11): watch the real EOD producer (scheduler.py:69), not the learning_ingest no-op stub
     ("daily_progression_eval", "daily"),
     # Intraday loss-protection jobs + the scheduler liveness heartbeat.
     # A monitor / order_sync that simply STOPS being scheduled writes no
@@ -524,6 +524,19 @@ def get_output_freshness(client) -> List[OutputFreshness]:
     results: List[OutputFreshness] = []
     now = datetime.now(timezone.utc)
 
+    # FLAT-BOOK GUARD (A9, 2026-07-11): paper_positions.last_marked_at is only
+    # stamped when a position is marked; a FLAT book (0 open) writes nothing, so
+    # the timestamp ages past TTL by construction → the ~48/day false-HIGH. Count
+    # open positions once; suppress ONLY paper_positions staleness when flat. A
+    # HELD position past TTL still fires (a real dead mark-refresh loop).
+    # Fail-SAFE: a count error → open_n=-1 → do not suppress.
+    try:
+        _open_n = (client.table("paper_positions").select("id", count="exact")
+                   .eq("status", "open").execute().count) or 0
+    except Exception as _e:
+        logger.warning(f"[OUTPUT_FRESHNESS] open-position count failed (not suppressing): {_e}")
+        _open_n = -1
+
     for table, ts_col, max_age_hours in OUTPUT_FRESHNESS:
         try:
             # nullsfirst=False: Postgres DESC defaults to NULLS FIRST, so a
@@ -537,7 +550,8 @@ def get_output_freshness(client) -> List[OutputFreshness]:
                 .limit(1) \
                 .execute()
             if not res.data:
-                results.append(OutputFreshness(table, max_age_hours, None, None, "never"))
+                _st = "flat" if (table == "paper_positions" and _open_n == 0) else "never"
+                results.append(OutputFreshness(table, max_age_hours, None, None, _st))
                 continue
             raw = str(res.data[0].get(ts_col))
             ts = raw.replace("Z", "+00:00").replace(" ", "T", 1)
@@ -546,6 +560,8 @@ def get_output_freshness(client) -> List[OutputFreshness]:
                 latest = latest.replace(tzinfo=timezone.utc)
             age_hours = (now - latest).total_seconds() / 3600.0
             status = "stale" if age_hours > max_age_hours else "ok"
+            if table == "paper_positions" and _open_n == 0 and status == "stale":
+                status = "flat"  # flat book: the aged mark is expected, not a failure
             results.append(OutputFreshness(table, max_age_hours, latest, round(age_hours, 1), status))
         except Exception as e:
             logger.warning(f"Output freshness check failed for {table}: {e}")

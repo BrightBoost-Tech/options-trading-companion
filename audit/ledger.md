@@ -1448,6 +1448,58 @@ PENDING VERIFICATIONS (2026-07-07, added by the M4 ship):
   GTC); fossils unchanged (22 queued / 4 stuck-running).
 - Counters: A9→0, others →3 (A7 dormant). No retirement candidates.
 
+## 2026-07-11 (Sat ~01:1x ET) — BUILT: F-A4-1 typed job-outcome contract + fossil reap (#1153)
+
+STEP-0: broker 01:54 ET CLOSED (Sat) / DB ~05:5xZ. **#1153 `2478845` MERGED +
+H8 VERIFIED** (BE `423bec81` / worker `f0b6b0f2` / worker-background `88f466a7`,
+all SUCCESS @ `2478845`, created 06:16:08–09Z > merge 06:16:06Z). ROLLOUT
+INVENTORY (post-recycle): **fatal_masked_green=0** (clean — no hidden failures
+exposed; the danger was 0-instance pre-build), fossils_remaining=0,
+partial_rows=0 (weekend — Monday's runs first exercise the contract), reaped=27.
+
+**PRE-STEP — FOSSIL REAP (supervised):** 27 stranded rows (22 queued + 5
+failed_retryable, 19–179d, none needing replay) dead-lettered with a
+move-don't-lose annotation (prior_status / days_stale / reason). Before 27,
+after 0.
+
+**THE CONTRACT.** The runner recorded a handler's RETURNED failure as
+'succeeded' (keyed success solely on `users_failed>0`); a fatal monitor that
+returned `{ok:False}` (intraday_risk_monitor / post_trade_learning /
+day_orchestrator) was recorded succeeded + invisible to the A4 detector.
+- **DESIGN — RAISE-not-return:** the 3 swallow-fatal handlers DELETE their
+  catch-all `{ok:False}` returns and RAISE; the runner's exception path owns
+  fatals (→ failed_retryable, visible; the next cron re-runs regardless).
+- **`_classify_handler_return`** (module-level, testable): derives a REAL
+  terminal `partial` from the return — `users_failed>0` OR `counts.errors>0` OR
+  a truthy top-level `error` key (future-proofs a new swallow-return).
+  Designed-false handlers (ops_health_check `ok:False`→now `ok:True`+`healthy`;
+  executor `status:partial`; policy_lab `status:error`) carry none → succeeded.
+- **`partial` is a real status** (was mislabeled `failed_retryable`, which the
+  scheduler WRONGLY retried + the dependency filter MISSED). EVERY job_runs.status
+  consumer from the B2 list migrated: ops_health_service liveness/freshness/
+  regime/A4 (`.in_ succeeded,partial`), runner terminal-skip + public_tasks
+  TERMINAL_STATES + JobStatus enum, **JobDependencyService phantom
+  `partial_failure`→`partial` FIXED**, dashboard (partial→degraded). Scheduler
+  retry keys on `failed_retryable` only → partials no longer wrongly retried.
+  8 consumer tests updated (mock `.eq`→`.in_`; `ok`→`healthy`) — contract-update
+  discipline, not a defect.
+- **⚠ `failed_retryable` is now an HONEST LABEL, not a working retry** —
+  re-dispatch lands with the **F-A4-2 + reaper** package. **The `mark_retryable`
+  finished_at fix is DEFERRED to F-A4-2** (coupling: setting it now + the broken
+  re-dispatch would create fossils via the scheduler's flip). C3 verdict: TWO
+  builds.
+- **ABSORBED obs-PR-#1's A4-detector half** (the `partial` status IS the
+  silent-failure signal now). **obs-remainder (queue ②) = flat-book stale
+  guard · cross-owner re-egress dedup · accuracy-warn dedup · iv-refresh
+  all-missing→ok · stub-vs-real-producer watch.**
+- RESIDUAL (cosmetic follow-up): paper_auto_execute still emits `ok:false` on
+  gate-rejects (exact return literal not located; the runner ignores `ok`, so
+  it is correctly `succeeded` — just ~21 designed-false rows of false-green-query
+  noise; ops_health_check's 332 were relabeled).
+
+Untouched: E7 re-wire (queue ③, spec on file) · PR2 client_order_id · F-A3-1 ·
+all trading logic. ⚠ The v1.2 report file is STILL not on disk — sweep pending.
+
 ## 2026-07-11 (Sat ~01:04 ET) — EXTERNAL AUDIT v1.2 ADJUDICATION (verified vs code@e45290f + DB + broker)
 
 STEP-0: broker 01:04 ET CLOSED (Sat) / DB 05:04Z — agreed. READ-ONLY + doc

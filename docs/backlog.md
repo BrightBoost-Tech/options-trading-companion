@@ -97,6 +97,84 @@ questions) · **RESOLVED — DO NOT REINVESTIGATE**.
   walk-forward validates calibration on calibrated inputs (circular).
   · origin 07-09 v1.1 F-A1-3 + v1.2 recon #2 + 07-10 #1147.
 
+## 07-11 v1.2 adjudication — NEW ITEMS + RE-SEQUENCED QUEUE
+
+- **NEW P0 (headline) · F-A4-1 typed job-outcome contract.** The runner
+  (`runner.py:134`) decides `succeeded` on `users_failed>0` ONLY; a handler that
+  RETURNS a failure (`intraday_risk_monitor.py:152-158` → `{"ok":False}`) is
+  recorded `succeeded` and is invisible to the A4 detector (reads only
+  `counts.errors`). FIX (doctrine-clean): a typed outcome contract at the runner
+  boundary — job status DERIVED from the normalized result
+  (ok/status/counts.errors/users_failed); ops-health reasons from the normalized
+  status, not raw producer JSON. Rollout WITH an inventory. **FALSIFIER (theirs):
+  "a deployed normalization layer absent from the repo" — NONE exists
+  (confirmed).** Absorbs the A4-detector half of obs PR #1. · origin 07-11 v1.2 ·
+  STATUS: confirmed-structural, **0 fatal-masked-green instances** (356 designed
+  ok=false; 0 intraday_risk_monitor false-green) — bounded · done when: no
+  handler-returned failure is ever persisted `succeeded` (+ a test on the
+  risk-monitor fatal-return path).
+- **NEW P1 · E7 viability-bias re-wire (3rd #1126 instance).** Active
+  `_execute_per_cohort` (`paper_autopilot_service.py:864`) sorts by DB
+  `.order(risk_adjusted_ev)` on the STORED column; the M4 bias (sort-key-only,
+  in `get_executable_suggestions`) is UNREACHABLE past the `:452` early-return.
+  FIX: re-rank the fetched suggestions in Python inside `_execute_per_cohort` +
+  a test that DRIVES that route (not a source-string pin on the dead function).
+  **FALSIFIER: does any production cohort cycle traverse
+  get_executable_suggestions? — No (dead past :452).** · origin 07-11 v1.2 E7.
+- **NEW P1 · F-A3-1 outcome conservation + exit-cause propagation.** Ingest
+  drops closes (7d window roll-off + no-filled-closing-order silent skip) and
+  ERASES the exit cause (LFL writes static `reason_codes`, never `close_reason`).
+  FIX: conserve (widen/backfill + surface `skipped_no_order` in counts) + carry
+  `close_reason` into LFL details. **Thesis-tracker (I5) PREREQUISITE — the
+  learning chain can't see WHY trades closed until this ships.** CONSERVATION
+  COUNT (07-11): of 74 live-portfolio closes, **3 missing from LFL** (MSFT
+  04-15, META 02-24, AVGO 02-18) — ALL pre-live PAPER era; the 9 real post-epoch
+  closes are 100% conserved. So the CONSERVATION half is LOW urgency (old paper
+  data); the **exit-cause ERASURE is the real driver** (all 71 in-LFL outcomes
+  lack close_reason → the thesis tracker is blind to WHY). Prioritise part (b).
+  · origin 07-11 v1.2 F-A3-1.
+- **NEW P2 · F-A4-2 retry re-enqueue.** `mark_retryable` flips DB state without
+  an RQ `q.enqueue`; 22 `queued` + 5 `failed_retryable` fossils never re-ran.
+  FIX: re-enqueue on mark_retryable (or a DB-poll re-dispatcher). **FALSIFIER (a
+  deploy read): worker start cmd RQ-only vs DB-poll — RQ-only CONFIRMED →
+  silent-zero.** **MERGE with the stuck-running reaper — ONE work package
+  (re-dispatch + fossil disposition), same mechanism.** Fossil census (07-11):
+  27 stranded rows (22 queued + 5 failed_retryable), age 19–179d, ALL STALE —
+  validation_eval is deprecated, the rest are stale recurring instances; NONE
+  needs replay → disposition = **reap/dead-letter, not re-run**. **FOLLOWS the
+  typed-outcome build (C3 verdict: TWO builds — F-A4-1 is result-derivation,
+  F-A4-2 is re-dispatch; orthogonal).** The reap is a PREREQUISITE to reading
+  F-A4-1's new output (else the fossils skew the A4/dashboard baselines the
+  contract surfaces). · origin 07-11 v1.2 F-A4-2 ∪ reaper.
+- **NEW P2 · F-A10-1 expiry/assignment safety.** 999-DTE default on missing
+  expiry (`paper_exit_evaluator.py:158`, silently disables DTE exits) +
+  assignment EQUITY filtered out of the option sync (`alpaca_client.py:540`,
+  `len>10` heuristic → unmanaged stock). Assignment-adjacent; latent (flat book).
+  FIX: reject/flag unpriceable-expiry (H9) not 999; add an equity/assignment sync
+  path. · origin 07-11 v1.2 F-A10-1.
+- **NEW P2 · F-A2-1 GTC post-fill allowlist.** `maybe_place_gtc_profit_exit`
+  (`gtc_profit_exit.py:328`, wired `alpaca_order_handler.py:944`) NEVER checks
+  `GTC_PROFIT_EXIT_PILOT_POSITION_IDS` (the sweep does; the post-fill hook
+  doesn't); gated only by `GTC_PROFIT_EXIT_ENABLED` (OFF). FIX: enforce the
+  allowlist on the post-fill hook. **FALSIFIER: any GTC placed outside pilot in
+  broker history — none confirmed (flag off; 6 resting orders all pilot-sweep).**
+  · origin 07-11 v1.2 F-A2-1.
+- **NEW P3 (cosmetic/rider):** F-A5-1 dead `phase2_precheck` (past its 48h
+  self-expiry, no machine consumer — retire/re-scope) · F-A9-1 "Confidence N%"
+  mislabel (`SuggestionCard.tsx:683`, a 0-100 score shown as confidence —
+  relabel) · F-A8-1/2 rejection CATEGORY dimension (flat reason; economics/error
+  conflated — rides the taxonomy PR) · F-A3-2 autotune logged-not-applied
+  (flag-gated compute-not-apply — rides the E1 family).
+- **RE-SEQUENCED POST-CLOSE QUEUE (recommended; verdict-driven — the operator
+  decides):** ① **F-A4-1 typed-outcome contract** (headline — the plane beneath
+  job monitoring; cheap now, 0 fatals to expose) + absorbs obs-PR-#1's
+  A4-detector half · ② **obs PRs (rest)** — flat-book stale guard · cross-owner
+  re-egress dedup · accuracy-warn dedup · iv-refresh all-missing→ok · stub watch ·
+  ③ **E7 viability re-wire** (small) · ④ **PR2 client_order_id** (P0-A
+  completion) · ⑤ **F-A3-1** (thesis-tracker prereq) → remaining latents (F-A4-2
+  · F-A10-1 · F-A2-1) + P3 cosmetics. REFUTED (no item): F-A6-2, F-A9-2, I6,
+  most of F-A10-2/3 (broker get_clock covers holidays).
+
 ## 07-09 v1.1 adjudication — AMENDMENTS to existing items
 
 - **Observability PR → SPLIT (recommended).** The carried 3-in-1 (ops_output_

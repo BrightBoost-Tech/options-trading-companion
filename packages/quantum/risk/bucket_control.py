@@ -45,19 +45,21 @@ def bucket_max_pct() -> float:
 
 
 def _risk_from_fields(max_loss_total, cost_basis_total):
-    """(usd, is_legacy_premium): honest max_loss_total if present, else premium
-    (cost_basis_total) WITH the legacy caveat, else 0.0 (never fabricated)."""
+    """(usd, is_legacy_premium, is_unknown): honest max_loss_total if present, else
+    premium (cost_basis_total) WITH the legacy caveat, else (0.0, True, True) —
+    UNKNOWN risk is flagged EXPLICITLY (W3), never silently a $0 that hides missing
+    exposure. Callers must treat is_unknown as not-armable, not as zero risk."""
     try:
         if max_loss_total is not None:
-            return abs(float(max_loss_total)), False
+            return abs(float(max_loss_total)), False, False
     except (TypeError, ValueError):
         pass
     try:
         if cost_basis_total is not None:
-            return abs(float(cost_basis_total)), True
+            return abs(float(cost_basis_total)), True, False
     except (TypeError, ValueError):
         pass
-    return 0.0, True
+    return 0.0, True, True
 
 
 def position_risk_usd(pos):
@@ -65,8 +67,9 @@ def position_risk_usd(pos):
 
 
 def candidate_risk_usd(suggestion):
-    """(usd, is_legacy_premium) for a CANDIDATE. Honest max_loss_total if the
-    suggestion carries it; else the premium basis (limit×contracts×100)."""
+    """(usd, is_legacy_premium, is_unknown) for a CANDIDATE. Honest max_loss_total
+    if the suggestion carries it; else the premium basis (limit×contracts×100);
+    else UNKNOWN (0.0, True, True) — flagged, never a silent zero (W3)."""
     ml = suggestion.get("max_loss_total")
     if ml is None:
         ml = (suggestion.get("sizing_metadata") or {}).get("max_loss_total")
@@ -76,10 +79,10 @@ def candidate_risk_usd(suggestion):
     try:
         prem = abs(float(oj.get("limit_price") or 0)) * float(oj.get("contracts") or 0) * 100.0
         if prem > 0:
-            return prem, True
+            return prem, True, False
     except (TypeError, ValueError):
         pass
-    return 0.0, True
+    return 0.0, True, True
 
 
 class BucketReservations:
@@ -99,25 +102,37 @@ class BucketReservations:
 
 
 def evaluate_bucket(candidate_ticker, candidate_risk, open_positions,
-                    reservations, equity_usd):
-    """Compute bucket exposure and would_block. Pure; observe-only unless the
-    caller enforces. exposure = Σ(open positions in the bucket) + reserved +
-    the candidate, vs BUCKET_MAX_PCT × equity. cap ≤ 0 (equity unreadable) →
-    never blocks (fail-safe)."""
+                    reservations, equity_usd, candidate_unknown=False):
+    """Compute bucket exposure + would_block + the W3 not-armable signals. Pure;
+    observe-only unless the caller enforces. exposure = Σ(open positions in the
+    bucket) + reserved + the candidate, vs BUCKET_MAX_PCT × equity.
+
+    W3 (2026-07-12): UNKNOWN open/candidate risk is COUNTED and surfaced
+    (`unknown_risk_present`, `unknown_open_count`), NEVER folded into $0 silently;
+    and `equity_readable` (cap>0) is exposed. `not_armable` = unknown risk present
+    OR equity unreadable — the state where an ARMED enforcement cannot safely
+    decide and must fail-CLOSED (see bucket_enforcement_action). Observe behavior
+    is byte-identical (would_block unchanged)."""
     bucket = bucket_for(candidate_ticker)
     open_sum = 0.0
     legacy_any = False
+    unknown_open = 0
     for p in open_positions or []:
         if bucket_for(p.get("symbol")) != bucket:
             continue
-        v, legacy = position_risk_usd(p)
+        v, legacy, unknown = position_risk_usd(p)
         open_sum += v
         legacy_any = legacy_any or (legacy and v > 0)
+        if unknown:
+            unknown_open += 1
     reserved = reservations.reserved(bucket) if reservations else 0.0
     cand = max(0.0, float(candidate_risk or 0))
     total = open_sum + reserved + cand
     cap = bucket_max_pct() * float(equity_usd or 0)
     would_block = cap > 0 and total > cap
+    equity_readable = cap > 0
+    unknown_risk_present = bool(candidate_unknown) or unknown_open > 0
+    not_armable = unknown_risk_present or not equity_readable
     return {
         "bucket": bucket,
         "open_exposure": round(open_sum, 2),
@@ -129,7 +144,33 @@ def evaluate_bucket(candidate_ticker, candidate_risk, open_positions,
         "bucket_max_pct": bucket_max_pct(),
         "would_block": would_block,
         "legacy_premium_basis": legacy_any,
+        "unknown_open_count": unknown_open,
+        "candidate_unknown": bool(candidate_unknown),
+        "unknown_risk_present": unknown_risk_present,
+        "equity_readable": equity_readable,
+        "not_armable": not_armable,
     }
+
+
+def bucket_enforcement_action(decision, armed):
+    """(action, reason). action ∈ {'block','alarm','proceed'} — the SINGLE
+    enforcement seam (testable without driving the executor).
+
+    ARMED: a cap breach → block('bucket_exposure_cap'); a not-armable state
+    (unknown risk / unreadable equity) → block('bucket_not_armable_unknown_risk')
+    — the W3 NON-NEGOTIABLE: an armed unknown-risk case is NEVER a silent-zero
+    proceed. OBSERVE: a cap breach → alarm('bucket_exposure_would_block') +
+    proceed; everything else proceeds (the not-armable state is logged in the
+    shadow line, no observe-time block)."""
+    if armed:
+        if decision.get("would_block"):
+            return "block", "bucket_exposure_cap"
+        if decision.get("not_armable"):
+            return "block", "bucket_not_armable_unknown_risk"
+        return "proceed", None
+    if decision.get("would_block"):
+        return "alarm", "bucket_exposure_would_block"
+    return "proceed", None
 
 
 def log_bucket_shadow(decision):

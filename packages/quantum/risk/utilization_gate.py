@@ -346,9 +346,15 @@ def candidate_cost_usd(suggestion: Dict[str, Any]) -> float:
     from packages.quantum.services.risk_basis_shadow import (
         log_risk_basis_shadow, choose_basis,
     )
+    # W2 (2026-07-12): stable identity so a shadow line joins to its decision /
+    # cohort / cycle. The would_flip THRESHOLD (utilization headroom) needs
+    # committed+OBP from evaluate_entry, not this cost-computation site — the
+    # log-relocation is the W2b rider; identity lands here now.
     log_risk_basis_shadow(
         "utilization_candidate", cost, _honest,
-        context={"symbol": suggestion.get("ticker") or suggestion.get("symbol")})
+        context={"symbol": suggestion.get("ticker") or suggestion.get("symbol"),
+                 "suggestion_id": suggestion.get("id") or suggestion.get("suggestion_id"),
+                 "cohort": suggestion.get("cohort_name")})
     cost = choose_basis(cost, _honest)
     if cost <= 0:
         raise UtilizationGateError(

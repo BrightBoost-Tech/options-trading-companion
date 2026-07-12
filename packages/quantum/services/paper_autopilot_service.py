@@ -970,6 +970,17 @@ class PaperAutopilotService:
             _bucket_equity = self._estimate_equity(user_id, cohort_open)
             _bucket_reservations = _bkt.BucketReservations()
             _bucket_open = [p for p in cohort_open if p.get("portfolio_id") == portfolio_id]
+            # Shadow-window liveness (W-heartbeat): one line per cohort cycle EVEN
+            # AT 0 candidates, so [BUCKET_SHADOW]/[RISK_BASIS_SHADOW] silence is
+            # diagnosable (ran-saw-nothing vs did-not-run / logging lost).
+            try:
+                from packages.quantum.services.risk_basis_shadow import log_shadow_heartbeat
+                log_shadow_heartbeat("EXECUTOR_SHADOW", len(suggestions or []),
+                                     cycle=cohort_name,
+                                     equity_readable=bool(_bucket_equity and _bucket_equity > 0),
+                                     open_in_bucket=len(_bucket_open))
+            except Exception:
+                pass
 
             for s in suggestions:
                 sid = s.get("id")
@@ -1035,25 +1046,38 @@ class PaperAutopilotService:
                     # NULL rows count at premium WITH a caveat (H9). Armed →
                     # reject with a bucket_exposure_cap stamp; off → the entry
                     # PROCEEDS and the #1139-class alarm fires.
-                    _cand_risk, _cand_legacy = _bkt.candidate_risk_usd(s)
+                    _cand_risk, _cand_legacy, _cand_unknown = _bkt.candidate_risk_usd(s)
                     _bkt_decision = _bkt.evaluate_bucket(
                         ticker, _cand_risk, _bucket_open,
-                        _bucket_reservations, _bucket_equity)
+                        _bucket_reservations, _bucket_equity,
+                        candidate_unknown=_cand_unknown)
                     _bkt_decision["candidate_legacy_premium"] = _cand_legacy
                     _bkt.log_bucket_shadow(_bkt_decision)
-                    if _bkt_decision["would_block"]:
-                        if _bkt.is_bucket_enforce_enabled():
-                            logger.warning(
-                                "[BUCKET_CONTROL] ENFORCED reject %s/%s bucket=%s "
-                                "exposure=%.0f > cap=%.0f",
-                                ticker, sid[:8], _bkt_decision["bucket"],
-                                _bkt_decision["total_with_candidate"], _bkt_decision["cap"])
-                            self._stamp_blocked_reason(
-                                sid, "bucket_exposure_cap",
-                                f"bucket {_bkt_decision['bucket']} exposure "
-                                f"{_bkt_decision['total_with_candidate']:.0f} > cap "
-                                f"{_bkt_decision['cap']:.0f}")
-                            continue
+                    # W3 (2026-07-12): single enforcement seam. ARMED + not-armable
+                    # (unknown risk / unreadable equity) → fail-CLOSED block, NEVER
+                    # a silent-zero proceed. OBSERVE → alarm on a cap breach only.
+                    _bkt_action, _bkt_reason = _bkt.bucket_enforcement_action(
+                        _bkt_decision, _bkt.is_bucket_enforce_enabled())
+                    if _bkt_action == "block":
+                        logger.warning(
+                            "[BUCKET_CONTROL] ENFORCED reject (%s) %s/%s bucket=%s "
+                            "exposure=%.0f cap=%.0f not_armable=%s unknown_risk=%s "
+                            "equity_readable=%s",
+                            _bkt_reason, ticker, sid[:8], _bkt_decision["bucket"],
+                            _bkt_decision["total_with_candidate"], _bkt_decision["cap"],
+                            _bkt_decision["not_armable"], _bkt_decision["unknown_risk_present"],
+                            _bkt_decision["equity_readable"])
+                        if _bkt_reason == "bucket_exposure_cap":
+                            _detail = (f"bucket {_bkt_decision['bucket']} exposure "
+                                       f"{_bkt_decision['total_with_candidate']:.0f} > cap "
+                                       f"{_bkt_decision['cap']:.0f}")
+                        else:
+                            _detail = (f"bucket {_bkt_decision['bucket']} NOT ARMABLE: "
+                                       f"unknown_risk={_bkt_decision['unknown_risk_present']} "
+                                       f"equity_readable={_bkt_decision['equity_readable']}")
+                        self._stamp_blocked_reason(sid, _bkt_reason, _detail)
+                        continue
+                    if _bkt_action == "alarm":
                         try:
                             from packages.quantum.observability.alerts import (
                                 alert as _bkt_alert, _get_admin_supabase as _bkt_sup,

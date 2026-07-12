@@ -31,21 +31,22 @@ class TestBucketMapAndBasis(unittest.TestCase):
         self.assertEqual(bkt.bucket_for("MARA"), "MARA")
 
     def test_position_risk_honest(self):
-        v, legacy = bkt.position_risk_usd({"max_loss_total": 372.0, "cost_basis_total": 149.0})
-        self.assertEqual((v, legacy), (372.0, False))
+        # W3 (2026-07-12): 3-tuple (usd, legacy, is_unknown)
+        v, legacy, unknown = bkt.position_risk_usd({"max_loss_total": 372.0, "cost_basis_total": 149.0})
+        self.assertEqual((v, legacy, unknown), (372.0, False, False))
 
     def test_position_risk_legacy_premium_caveat(self):
-        v, legacy = bkt.position_risk_usd({"max_loss_total": None, "cost_basis_total": 149.0})
-        self.assertEqual((v, legacy), (149.0, True))
+        v, legacy, unknown = bkt.position_risk_usd({"max_loss_total": None, "cost_basis_total": 149.0})
+        self.assertEqual((v, legacy, unknown), (149.0, True, False))
 
     def test_position_risk_null_never_fabricated(self):
-        v, legacy = bkt.position_risk_usd({"max_loss_total": None, "cost_basis_total": None})
-        self.assertEqual(v, 0.0)  # nothing to price → 0, not a guess
+        v, legacy, unknown = bkt.position_risk_usd({"max_loss_total": None, "cost_basis_total": None})
+        self.assertEqual((v, unknown), (0.0, True))  # nothing to price → UNKNOWN, not a guess
 
     def test_candidate_risk_honest_then_premium(self):
         self.assertEqual(bkt.candidate_risk_usd({"max_loss_total": 372.0})[0], 372.0)
         prem = bkt.candidate_risk_usd({"order_json": {"limit_price": 1.49, "contracts": 1}})
-        self.assertEqual(prem, (149.0, True))
+        self.assertEqual(prem, (149.0, True, False))
 
 
 class TestExposureMath(unittest.TestCase):

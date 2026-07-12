@@ -55,6 +55,21 @@ def log_risk_basis_shadow(consumer, current_usd, honest_usd, *,
         logger.warning("[RISK_BASIS_SHADOW] log failed consumer=%s: %s", consumer, e)
 
 
+def log_shadow_heartbeat(window, evaluated, *, cycle=None, **fields):
+    """Per-cycle LIVENESS line for an observe window — fires EVEN WHEN evaluated=0
+    so a health check can distinguish 'ran, saw nothing' from 'did not run / logging
+    lost' (the marker-silence ambiguity the arm notebooks had no answer for). window
+    is a short tag e.g. 'RISK_BASIS' / 'BUCKET' / 'APPLY_ORDER' / 'EXECUTOR_SHADOW'.
+    Observe-only; never raises."""
+    try:
+        extra = " ".join(f"{k}={v}" for k, v in fields.items()) if fields else ""
+        logger.info("[%s_HEARTBEAT] cycle=%s evaluated=%d %s",
+                    window, cycle if cycle is not None else "-",
+                    int(evaluated or 0), extra)
+    except Exception:  # observe-only must never break a cycle
+        pass
+
+
 def choose_basis(current_usd, honest_usd):
     """Return the value the DECISION should use: the honest basis when the flag
     is ARMED and honest is a usable positive number, else the current basis.

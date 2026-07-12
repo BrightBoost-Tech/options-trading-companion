@@ -4,6 +4,109 @@ Every finding listed here is EXCLUDED from future audit runs. Re-finding a
 ledger item is a wasted slot. Runs append new findings as `status:reported`;
 the human flips them to `status:shipped` (with PR#) or `status:rejected`.
 
+## 2026-07-11 (Sat ~20:3x ET) — BUILT: calibration apply-move PR-1 (#1174) + replay gap-(c) PR-2 (#1175) + prequential validator PR-3 (#1176)
+
+STEP-0 (premise correction): the prompt/summary said "Sunday"; DB `01:21Z`
+(America/Chicago `20:21`, Sat) + broker `21:21 ET` agree to the second → it is
+**Saturday 2026-07-11**, market CLOSED, next open Mon 07-13 09:30 ET. The Sunday
+FULL nightly fires 00:00 CT tonight — all three recycles landed by ~20:40 CT,
+clear of it. Builds STRICTLY SEQUENTIAL, H8 between each.
+
+**PR-1 — calibration apply-move + score recompute, observe-first `6f6a549`
+MERGED + H8 VERIFIED** (BE `45eabc07` / worker `f1bb2c68` / worker-background
+`8c98b9b9`, all @ `6f6a549`). Closes the L1-flagged real cost: SELECTION sorts on
+`score` (frozen from RAW ev inside the scanner), so moving `apply_calibration`
+earlier is INERT unless `score` is RECOMPUTED from calibrated ev. New
+`analytics/calibration_apply_ordering.py`: `snapshot_pre_conviction_scores`
+stamps `_scanner_score` before conviction → EXACT recompute (`soft_earn =
+inner_raw − scanner_score` additive penalties; `conv_w = post_score /
+scanner_score` multiplicative conviction; `new_score = max(0, clamp(base×ev_mult
+− cost − regime − greek) − soft_earn) × conv_w`; de-saturation correct). TO-seam
+`workflow_orchestrator.py:2441` (after conviction, before rank). Flag
+`CALIBRATION_APPLY_AT_SCORING` default OFF → compute both orderings, log
+`[APPLY_ORDER_SHADOW] … would_differ=`, mutate NOTHING (flag-off byte-identical);
+armed → apply+recompute + `_calibration_applied` sentinel (the `:3564` legacy
+post-sizing apply skips it → SINGLE application) + `_ev_raw_true` stamped.
+Fail-safe per candidate + caller-wrapped. Tests 11/11.
+
+**PR-2 — replay decision-output + `decision_id` linkage `057e11a` MERGED + H8
+VERIFIED** (BE `a63bc95d` / worker `04f36525` / worker-background `24fd31c6`, all
+@ `057e11a`, created 01:25:43–44Z; prior `6f6a549` → REMOVED confirms
+supersession). **Replay Phase-1 gap-(c) — the unconditional blocker — CLOSED.**
+Migration `20260712011627` `trade_suggestions.decision_id uuid` (nullable,
+forward-only; in DROPPABLE_SUGGESTION_COLUMNS → code-before-migration = no-op
+drop) applied + tracked + read-back (`col_uuid=1, mig_tracked=1`).
+`run_midday_cycle`: fetch the active decision_id once, stamp each suggestion
+(linkage); after the insert loop capture the ranked set (accepted +
+rejected+reason, sorted by risk_adjusted_ev) as
+`record_feature("__decision__","ranked_candidates")` — the decision OUTPUT a
+byte-compare replay diffs against. BOTH blocks fail-soft
+(`get_current_decision_context()` None when replay off → both no-op → replay-off
+byte-identical; capture failure swallowed; `logger` is a module global so the
+except branch is safe). Tests 3/3.
+
+**PR-3 — prequential (out-of-sample) validator = the FALSIFIER `d554904` MERGED +
+H8 VERIFIED** (BE `9dec42d1` / worker `2a348058` / worker-background `7399ad18`,
+all @ `d554904`, created 01:38:00–01Z). Backward calibration-error is circular
+(scores the fit on its own fit rows). This scores prequentially: for each live
+close k (closed_at order, k≥warmup) fit on PREFIX [0..k-1], apply to close k's
+RAW ev_predicted, compare calibrated-vs-raw. `calibration_service`: extracted
+`build_adjustments_from_outcomes(outcomes, min_trades)` — a PURE fit (list→blob,
+no DB round-trip); `compute_calibration_adjustments` delegates (byte-identical
+for the prod default; `min_trades` is a study knob prod never passes; uses no
+self.client → fits on `CalibrationService(None)`). New
+`analytics/prequential_validator.py`: reuses prod math EXACTLY, reports raw-vs-cal
+EV-RMSE/MAE + Brier; HEADLINE `ev_rmse_improvement = raw_rmse − cal_rmse` (≤0
+with calibration having fired → FALSIFIED_CALIBRATION_DOES_NOT_HELP; never-fired
+→ INCONCLUSIVE; >0 → HELPS); prefix-invariance checked (fit = function of the
+SET, not order — order dependence = leakage); zero-row/too-short →
+insufficient_data, never raises; `main()` on-demand only (schedules nothing,
+changes no live behavior). Non-circular as of #1167 (ev_predicted =
+COALESCE(ev_raw, ev) = RAW). Tests 10/10; existing calibration suite 58/58
+(extraction backward-compatible).
+
+**Lane deliverables (READ-ONLY, filed):**
+- **L1 PoP census → 5-PR map — ⚠ CORRECTS the 07-11 census above (`:64`):** #6
+  `_calculate_ev_pop` is NOT a trivial zero-caller delete — its caller is
+  `OpportunityScorer.score()` (`opportunity_scorer.py:174`), dead-in-prod only
+  transitively (its sole prod caller `enrich_trade_suggestions`,
+  `trade_builder.py:14`, has ZERO call sites) yet exercised by 4 test files → a
+  CLUSTER retire, not a one-liner. Only **#7 `forecast_ev_pop`**
+  (`forecast/forecast_interface.py:129`) is a clean zero-caller delete (tests
+  only; no re-export). **PR-0 terminal `[0,1]` clamp STILL NEEDED** — only the
+  credit branch clamps (`ev_calculator.py:49`); every other branch + the
+  `calculate_ev` consumer (`:176`→`:251`) is unclamped. Map: PR-0 clamp (inert)
+  · PR-1 delete #7 (trivial) · PR-2 retire #6 CLUSTER (inert-to-live, medium
+  blast) · PR-3 condor fold #3+#5 (boundary, observe) · PR-4 fallback narrow #4
+  (observe). #2 STAYS (live exit path `workflow_orchestrator.py:1404`).
+- **L2 replay retention TTL spec:** blob table is `data_blobs` (not
+  decision_data_blobs); 4 tables in migration `20260120000000`. Growth ≈
+  **70 MB/mo ≈ 0.85 GB/yr**, dominated by `data_blobs.payload` (option-chain
+  blobs; 2–5× if chains carry per-contract greeks). Recommend **14-day**
+  retention + daily fail-open `replay_reaper` ~03:00 CT: (1) `DELETE FROM
+  decision_runs WHERE created_at < now()-'14 days'` (cascades inputs+features)
+  then (2) orphan-blob anti-join delete (blobs are content-addressed/deduped →
+  a pure age-delete would FK-violate). Flags: `trade_suggestions.decision_id`
+  has NO FK → dangling after reap (expected; the window must exceed the
+  replay-lookback need); `REPLAY_MAX_BLOB_BYTES` 2 MB cap is NOT enforced (warns
+  only, still stores); no standalone `decision_runs.created_at` index (tiny
+  table → low-pri; it's a migration, out of scope).
+- **L3 bucket-control layering check (operator: confirm + flag, DON'T fix):**
+  ordering CONFIRMED — utilization gate (`paper_autopilot_service.py:1021`,
+  fail-CLOSED on unreadable input) precedes the bucket check (`:1039`). BUT the
+  equity-unreadable backstop is CONDITIONAL: the bucket's cap-0-never-blocks
+  (equity unreadable → would_block=False, by design at evaluate_bucket) is only
+  caught upstream when `_ug_on` (RISK_UTILIZATION_GATE_ENABLED=1). **With that
+  flag unset AND BUCKET_CONTROL_ENFORCE=1, an equity-unreadable read makes the
+  bucket cap silently never-block — UNBACKSTOPPED.** Deferred polarity fix
+  filed: bucket_control fail-CLOSED on equity-unreadable when enforce armed
+  (independent of the utilization flag). NOT fixed tonight (per operator).
+
+**Deferred (filed, not built):** L1 PoP 5-PR sequence (PR-1 delete #7 = clean
+tomorrow-post-close candidate; #6 is a cluster, re-scope) · L2 `replay_reaper`
+job + 14-day TTL (+ optional `decision_runs.created_at` index) · L3
+bucket-control equity-unreadable fail-closed polarity.
+
 ## 2026-07-11 (Sat ~19:4x ET) — BUILT: B1/B2 bucket control PR-1 (#1171) + winter-close PR-2 (#1172)
 
 STEP-0: DB 00:27Z (dow=0) / broker 20:27 ET — consistent, market CLOSED.

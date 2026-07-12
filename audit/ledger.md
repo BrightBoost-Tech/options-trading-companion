@@ -4,6 +4,136 @@ Every finding listed here is EXCLUDED from future audit runs. Re-finding a
 ledger item is a wasted slot. Runs append new findings as `status:reported`;
 the human flips them to `status:shipped` (with PR#) or `status:rejected`.
 
+## 2026-07-12 (Sat ~21:3x CT) — ADJUDICATED: external full audit v1.3 (4th engagement) — READ-ONLY, doc writes only
+
+STEP-0: DB `02:35Z` (America/Chicago `21:35`, Sat) / broker `22:35 ET` = `21:35
+CT`, agree to the second; `dow=0` is the UTC date (rolled to Sun) — CT wall-clock
+is SATURDAY 07-11. Market CLOSED. Report swept to
+`docs/review/external-full-audit-v1.3-2026-07-12.md` (was dropped to Downloads,
+not docs/review — noted). Build NOTHING; verdicts + census + backlog diff only.
+
+**SCORECARD — v1.3 is the strongest engagement yet** (their self-grade, verified
+sound): A1 A+ (killed the 2-leg profit premise + 2 corrupt arm notebooks) · A4 A+
+(2nd E8 false-green seam + replay-not-decision-grade) · A6 A+ (credit-zero
+identity is underlying-independent) · A2/A8/A9/A10 A · A3 A− · A5 B+ · A7 dormant
+9/10. Free-look produced the headline (the E8 per-user seam). Audited against the
+correct HEADs (start `17f84d9`; runtime code `1b8217b`; E18 PASS at final HEAD).
+
+**PROMOTED EXCLUSION FAILs — all VERIFIED against code + this DB:**
+- **E8 (F-A4-E8, CRITICAL, promoted FAIL).** `intraday_risk_monitor.execute()`
+  catches every `_check_user` exception → appends `{user_id,error}` to `results`
+  → returns hardcoded `ok:true,status:completed` with NO users_failed/counts.errors
+  (`intraday_risk_monitor.py:198-216`); `run()` raises only on an OUTER exception
+  (the F-A4-1 #1153 fix), so a PER-USER failure never propagates. The runner's
+  `_classify_handler_return` only reads top-level keys → classifies `succeeded`
+  (faithful, not a runner bug). On the ONE-user account a `_check_user` throw masks
+  a COMPLETE protection-cycle failure as green. The E8 test
+  (`test_typed_job_outcome.py:60-67`) is a SOURCE-STRING pin of the outer raise —
+  the #1126 costume in test form, one layer up from the bug. **CENSUS: 671
+  succeeded rows / 30d, 0 with a nested `results[].error`** → structural-unexercised,
+  STILL CRITICAL (bounded/latent, exactly F-A4-1's 0-instance posture). F-A4-1 closed
+  only the outer seam. → queue ①.
+- **E12 (F-A1/A6-E12, HIGH, promoted FAIL).** Credit-spread EV is IDENTICALLY $0,
+  dispositive algebra (no runtime): `calculate_pop` returns the fair-odds
+  `win_prob=1−c/w`; `calculate_ev` (`ev_calculator.py:282`) then computes
+  `win_prob·(c·100) − (1−win_prob)·((w−c)·100)` = `100·[(c−c²/w)−(c−c²/w)]` ≡ 0 for
+  ALL c,w (payoff-circular). Their pinned $1.49/$5 case: p=0.702, gain 149, loss
+  351, both terms 104.598, EV=$0, misses the $15 floor by $15. #1169 fixed the PoP
+  LABEL only; the cohort is NOT evaluable. **CLOSURE CLAIM CORRECTED**: "#1169
+  cleared the 2-leg credit gate" → FALSE (label fixed; EV payoff-circular).
+  **CENSUS: 0 credit verticals stored in 120d** (only debit spreads + condors) →
+  CONFIRMED-but-LATENT. → queue ⑤; **GATES decision ④** (2-leg cohort experiment).
+- **E14 (F-A9-E14, HIGH, PARTIAL-FAIL promoted).** Policy-Lab fork copies source
+  `sizing_metadata.max_loss_total` unchanged even when clone contracts differ, and
+  omits top-level `max_loss_total`; fill/orphan consumers read only the typed
+  field (`policy_lab/fork.py:254-333`). **CENSUS (their exact predicate):
+  non-champion clones typed-null-but-JSON-present = neutral 23/23 + conservative
+  10/10 = 33 rows, 100%.** The shadow cohorts that feed W2/W3 evidence are entirely
+  typed-risk-blind → W2/W3 evidence contaminated. Champion path unaffected. →
+  queue ④ (PRECONDITION of trusting W2/W3).
+- **E16 (F-A4-E16, HIGH, promoted FAIL) — includes a fair critique of my own PR-2
+  (#1175).** Four replay seams: (1) `run_midday_cycle` no-trade early return
+  (`:3771-3826`) precedes my `__decision__/ranked_candidates` capture → a ZERO-
+  suggestion cycle (the dominant near-zero funnel) has NO output; (2) my capture
+  serializes only the accepted `suggestions` list, NOT the rejected `continue`d
+  tail — my PR framing "accepted + rejected+reason" was aspirational, the code
+  captures accepted only; (3) cache-hit inputs omitted (chain cache returns before
+  record, `market_data_truth_layer.py:1434-1438`); (4) commit failure swallowed,
+  no manifest/health. OWNED: PR-2 shipped a partial capture. → queue ③; **Monday's
+  capture pin RE-SCOPED to "rows exist + timing OK" ONLY — completeness is
+  KNOWN-DEFECTIVE until the terminal-manifest PR ships.**
+- **E18 PASS at final HEAD** (clamp `aca743a` + dead-forecast delete `1b8217b`).
+
+**P0 CUSTODY (verified):**
+- **F-A2-1 (HIGH).** Partial multileg closes don't reconcile residual into
+  `paper_positions` (closure runs only on parent `filled`); a later cancel/expiry
+  → 30-min re-arm can stage the FULL stale DB qty (`alpaca_order_handler.py:795-
+  924`). Plus: parent-filled-but-legs-disagree → `_close_position_on_fill` alerts +
+  returns without closing (`:580-601`) yet caller logs "Position closed" +
+  increments fills (`:1002-1010`). **CENSUS: 0 orders with filled_qty<requested_qty**
+  → structural/latent. → queue ⑥ (HARD TRIGGER before routine qty>1 credit OR any
+  position ≤~10 DTE).
+- **F-A8/E6-edge (MED-HIGH).** `submit_and_track` return is DISCARDED
+  (`paper_exit_evaluator.py:2245`, not assigned) → unconditional
+  `routed_to:'alpaca',Fill pending` (`:2255-2260`); a `needs_manual_review` RETURN
+  (terminal submit failure, not a raise) is costumed as routed success → monitor
+  emits "Force-closed", increments counts, may write cooldown, suppresses same-
+  cycle retry. E6's narrow no-phantom-fill invariant still holds. → rides the E8 PR
+  territory.
+
+**BROKER/DB GROUNDING (ALPACA authoritative):** live book is FLAT — Alpaca
+`get_all_positions`=[], DB `paper_positions` 0 open. The "6 Aug-21 ICs" are
+thesis-tracker rows (CLOSED positions tracked to expiry, I5/#1164), NOT open
+custody exposure — a framing correction to F-A2-1's DTE trigger (nothing open to
+trigger on today; the trigger is a standing guard for when qty>1 credit or a
+near-DTE position returns).
+
+**OBSERVE-WINDOW VERDICTS (W1 PASS, W2–W5 FAIL) + CLOCK RESET:**
+- W1 (live gate qty basis) — **PASS in code**, runtime pending (all gate lines
+  carry both bases + floor + applied basis + suggestion id). ITS CLOCK STANDS.
+- W2 (max-loss risk basis) — **FAIL/not-armable.** All 3 callers
+  (`utilization_gate.py:349`, `portfolio_allocator.py:163`,
+  `risk_budget_engine.py:400`) omit `threshold_usd` → `would_flip` ALWAYS None
+  (`risk_basis_shadow.py:45-49`); context lacks suggestion/cohort/decision id. The
+  ledger's "each consumer logs would_flip" DISAGREES with code.
+- W3 (bucket enforcement) — **FAIL/not-armable, TWO fail-open preconditions.**
+  `_risk_from_fields` returns `(0,true)` when both totals unknown; `evaluate_bucket`
+  adds zero + sets the caveat only when `v>0` → the log HIDES unknown open
+  exposure; armed caller sees `would_block=false` and proceeds
+  (`paper_autopilot_service.py:1038-1056`). This is the SECOND precondition on top
+  of last night's L3 unreadable-equity polarity.
+- W4 (calibration at scoring) — **FAIL/not-armable.** `_top_n` serializes ticker
+  only (`calibration_apply_ordering.py:72-74`) → same-ticker structure swaps log
+  `would_differ=False`; line omits strategy/expiry/id/scores/magnitude. (My own
+  #1174 code.)
+- W5 (composed W2+W3) — **FAIL** (both components defective).
+- **⚠ LEDGER THE CLOCK RESET: W2/W3/W4/W5 arm decisions RESTART from the
+  arm-evidence-repair SHA; THIS WEEK'S shadow logs are EVIDENCE-DEFECTIVE for those
+  decisions. W1 alone passed — its clock stands.**
+
+**DOCTRINE SHARPENING (adopted, extends the "drive the production route"
+NEVER-DO):** "drive the production route" means the FULL route to the FAILURE
+SEAM — an outer-layer test of an inner-layer bug (E8: source-pinning `run()`'s
+raise while the bug is in `execute()`'s per-user loop) is the source-pin costume
+one level down. A route-driving test must exercise the entrypoint END-TO-END to
+the seam and assert on the OUTPUT.
+
+**10 PACKET/LEDGER/CODE DISAGREEMENTS (move-don't-lose, annotated):** (1) E8
+closure overstates the route [→①] · (2) E12 "cohort evaluable" false [→⑤] · (3)
+E16 "output+linkage shipped" incomplete [→③, own PR-2] · (4) E14 persistence
+path-dependent [→④] · (5) ledger "W2 logs would_flip" vs code None [→②] · (6) W4
+ticker-lists aren't structure identities [→②] · (7) E6 invariant true but
+close-state narrative too strong [→ E8 territory] · (8) E15 winter closed but
+summer-open health still wrong [→ P2 F-A10-1] · (9) no matched 3-structure same-
+underlying example — refused to fabricate; credit-zero proof is universal instead
+[accepted] · (10) HEAD moved during audit (17f84d9→aca743a→1b8217b→b761a3f), E18
+closed at final HEAD [accepted].
+
+**REFUTED / NOT-PROMOTED (cite, don't re-derive):** direction='long' liar
+(`workflow_orchestrator.py:3633`) — evidentiary, no proved live-decision consumer
+(typed-column-lies inventory member #4, A9 hunt) · quarantined ~61 legacy rows —
+no cleanup justified · no new credential instance in the current tree.
+
 ## 2026-07-11 (Sat ~21:1x CT) — BUILT: PoP census PR-0 terminal clamp (#1178) + PR-1 delete #7 (#1179)
 
 STEP-0: DB `02:03Z` (America/Chicago `21:03`, Sat) / broker `22:03 ET` = `21:03

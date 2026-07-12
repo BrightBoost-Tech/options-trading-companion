@@ -15,6 +15,7 @@ Used by:
 
 from dataclasses import dataclass
 from datetime import datetime, timezone, timedelta
+from zoneinfo import ZoneInfo
 from typing import Dict, Any, Optional, List, Tuple
 import os
 import json
@@ -39,21 +40,33 @@ MARKET_DATA_STALE_THRESHOLD_MS = int(os.getenv("OPS_MARKET_DATA_STALE_MS", str(2
 MAX_FRESHNESS_UNIVERSE_SIZE = int(os.getenv("OPS_MAX_FRESHNESS_UNIVERSE", "25"))
 
 
-def is_us_market_hours(now: Optional[datetime] = None) -> bool:
-    """Approximate US equity market hours in UTC: Mon–Fri 13:30–20:00.
+_MARKET_TZ = ZoneInfo("America/New_York")
 
-    v5-A4: gates the data_stale ALERT only. Market snapshots age past any
-    threshold every evening by construction — alerting on that nightly via
-    the new risk_alerts channel would be steady-state noise (worse than the
-    webhook void it replaces). Holidays read as market hours → at most one
-    benign data_stale alert per holiday, capped by the cooldown. The health
-    SNAPSHOT still records staleness regardless; only the alert is gated.
+
+def is_us_market_hours(now: Optional[datetime] = None) -> bool:
+    """US equity regular session, computed as ET WALL-CLOCK (Mon–Fri
+    9:30–16:00 America/New_York) so it is DST-correct year-round.
+
+    A10 fix (2026-07-12): was a hardcoded UTC window 13:30–20:00 — that is ONLY
+    the EDT session. In EST (winter) the market runs to 21:00Z, so the final
+    session hour (20:00–21:00Z) read as CLOSED all winter → data_stale
+    suppressed AND _rth_job_status unconditionally ok (the blind hour). Mirrors
+    intraday_risk_monitor._fallback_is_market_open_et (ZoneInfo, no offset
+    arithmetic). For EDT dates this is byte-identical to the old UTC window.
+
+    v5-A4: gates the data_stale ALERT only. Holidays read as market hours → at
+    most one benign data_stale per holiday, cooldown-capped; the SNAPSHOT still
+    records staleness regardless, and the broker clock is the holiday-aware
+    primary gate elsewhere. A naive `now` is read as UTC (test-compat).
     """
     now = now or datetime.now(timezone.utc)
-    if now.weekday() >= 5:
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=timezone.utc)
+    now_et = now.astimezone(_MARKET_TZ)
+    if now_et.weekday() >= 5:
         return False
-    minutes = now.hour * 60 + now.minute
-    return (13 * 60 + 30) <= minutes < (20 * 60)
+    minutes = now_et.hour * 60 + now_et.minute
+    return (9 * 60 + 30) <= minutes < (16 * 60)
 
 # Alert configuration
 OPS_ALERT_MIN_SEVERITY = os.getenv("OPS_ALERT_MIN_SEVERITY", "warning")

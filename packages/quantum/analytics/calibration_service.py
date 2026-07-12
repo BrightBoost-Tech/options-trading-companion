@@ -195,11 +195,30 @@ class CalibrationService:
             return {"status": "error", "reason": "fetch_failed",
                     "window_days": window_days}
 
-        if len(outcomes) < MIN_CALIBRATION_TRADES:
+        return self.build_adjustments_from_outcomes(outcomes)
+
+    def build_adjustments_from_outcomes(
+        self,
+        outcomes: List[Dict[str, Any]],
+        min_trades: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        """PURE fit: an outcomes LIST → the adjustments blob, no DB round-trip.
+
+        Extracted from compute_calibration_adjustments (2026-07-12) so the
+        prequential validator can fit calibration on an arbitrary PREFIX of
+        closes (1..k-1) to score close k out-of-sample without re-querying.
+        Behavior-identical for the production default (min_trades=None →
+        MIN_CALIBRATION_TRADES): compute_calibration_adjustments now delegates
+        here. `min_trades` is a study knob ONLY — the validator lowers it to
+        exercise calibration on the small live sample; production never passes it.
+        Uses no self.client — safe to call on a CalibrationService(None)."""
+        min_trades = MIN_CALIBRATION_TRADES if min_trades is None else min_trades
+
+        if len(outcomes) < min_trades:
             return {
                 "status": "insufficient_data",
                 "sample_size": len(outcomes),
-                "minimum_required": MIN_CALIBRATION_TRADES,
+                "minimum_required": min_trades,
             }
 
         adjustments: Dict[str, Dict[str, Dict[str, Any]]] = {}
@@ -218,7 +237,7 @@ class CalibrationService:
             groups.setdefault(all_key, []).append(o)
 
         for key, group in groups.items():
-            if len(group) < max(3, MIN_CALIBRATION_TRADES // 4):
+            if len(group) < max(3, min_trades // 4):
                 continue
 
             strategy, regime, dte_bucket = key.split("|", 2)

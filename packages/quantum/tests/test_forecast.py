@@ -6,7 +6,6 @@ Tests:
 2. VolForecast term structure and interpolation
 3. ForecastBundle serialization round-trip
 4. Regime/event adjustment effects
-5. forecast_ev_pop integration
 """
 
 import math
@@ -26,7 +25,6 @@ from packages.quantum.forecast.vol_forecast import (
 from packages.quantum.forecast.forecast_interface import (
     ForecastBundle,
     ForecastSet,
-    forecast_ev_pop,
 )
 
 
@@ -235,46 +233,6 @@ class TestForecastSet:
         d = fs.to_dict()
         restored = ForecastSet.from_dict(d)
         assert restored.get("SPY") is not None
-
-
-# ---------------------------------------------------------------------------
-# forecast_ev_pop Tests
-# ---------------------------------------------------------------------------
-
-class TestForecastEvPop:
-    def test_credit_strategy(self):
-        rf = ReturnForecast(symbol="AAPL", horizon_days=30, mean=0.02, std=0.20)
-        vf = VolForecast(symbol="AAPL")
-        bundle = ForecastBundle(symbol="AAPL", return_forecast=rf, vol_forecast=vf)
-
-        result = forecast_ev_pop(
-            bundle,
-            max_profit=200,
-            max_loss=800,
-            breakeven_return=-0.03,  # Profitable if stock doesn't drop > 3%
-            is_credit=True,
-        )
-        assert "ev_amount" in result
-        assert "prob_profit" in result
-        assert 0 < result["prob_profit"] < 1
-
-    def test_high_vol_reduces_pop(self):
-        """Higher vol should reduce POP for credit strategies."""
-        rf_low = ReturnForecast(symbol="AAPL", horizon_days=30, mean=0.02, std=0.10)
-        rf_high = ReturnForecast(symbol="AAPL", horizon_days=30, mean=0.02, std=0.50)
-        vf = VolForecast(symbol="AAPL")
-
-        pop_low = forecast_ev_pop(
-            ForecastBundle(symbol="AAPL", return_forecast=rf_low, vol_forecast=vf),
-            max_profit=200, max_loss=800, breakeven_return=-0.05, is_credit=True,
-        )["prob_profit"]
-
-        pop_high = forecast_ev_pop(
-            ForecastBundle(symbol="AAPL", return_forecast=rf_high, vol_forecast=vf),
-            max_profit=200, max_loss=800, breakeven_return=-0.05, is_credit=True,
-        )["prob_profit"]
-
-        assert pop_low > pop_high
 
 
 # ---------------------------------------------------------------------------

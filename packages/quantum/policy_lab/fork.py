@@ -8,6 +8,7 @@ adjusted sizing and filtering per PolicyConfig.
 
 import logging
 import math
+import os
 import uuid
 from datetime import datetime, timezone, date
 from typing import Dict, List, Optional, Any
@@ -239,6 +240,21 @@ def _filter_for_cohort(
     return filtered
 
 
+def _is_shadow_raw_ev_enabled() -> bool:
+    """D② (2026-07-12): shadow cohorts (neutral/conservative — every clone; the
+    champion is tagged in place, never cloned) score on RAW ev (source.ev_raw), not
+    the champion's calibrated ev, so the experiment layer breathes on unclamped EV.
+    The honest cross-cohort comparison lives at OUTCOMES (closes, thesis accuracy,
+    per-contract-normalized promotion gates), which are basis-independent — not at
+    entry EV. DECIDED design; SHADOW_RAW_EV_ENABLED is a REVERT lever (default ON:
+    empty/unset → ON; explicit 0/false/no/off → inherit calibrated). Shadows are
+    simulated — no live money — so this is a lever, not an observe gate."""
+    raw = os.environ.get("SHADOW_RAW_EV_ENABLED", "")
+    if not raw.strip():
+        return True
+    return raw.strip().lower() not in ("0", "false", "no", "off")
+
+
 def _clone_suggestion_for_cohort(
     source: Dict,
     cohort_name: str,
@@ -316,6 +332,16 @@ def _clone_suggestion_for_cohort(
     source_fp = source.get("legs_fingerprint") or ""
     cohort_fp = f"{source_fp}_{cohort_name}" if source_fp else cohort_name
 
+    # D② (2026-07-12): shadow cohorts score on RAW ev, not the champion's calibrated
+    # ev. Fallback to calibrated when ev_raw is absent (older rows) or the revert
+    # flag is off. (risk_adjusted_ev inheritance unchanged — the decided basis
+    # change is the entry EV; outcome-side comparisons are basis-independent.)
+    _clone_ev = source.get("ev")
+    if _is_shadow_raw_ev_enabled():
+        _raw_ev = source.get("ev_raw")
+        if _raw_ev is not None:
+            _clone_ev = _raw_ev
+
     return {
         "user_id": source["user_id"],
         "window": source.get("window"),
@@ -323,7 +349,7 @@ def _clone_suggestion_for_cohort(
         "strategy": source.get("strategy"),
         "direction": source.get("direction"),
         "status": "pending",
-        "ev": source.get("ev"),
+        "ev": _clone_ev,
         "risk_adjusted_ev": source.get("risk_adjusted_ev"),
         # E14: typed top-level risk — rescaled to THIS clone's contracts, or an
         # explicit NULL (never fabricated) — so fill/orphan consumers stop reading

@@ -73,7 +73,34 @@ synthetic sizing). Read-back: `still_contaminated=0` (was 33) · `backfilled=33`
 `typed_equals_json=33`. **⭐ SHADOW RISK EVIDENCE TRUSTWORTHY FROM THIS SHA** — the
 pending clock-reset line (D② sequencing) COMPLETES: W2/W3 shadow-cohort risk
 evidence + D②'s shadow un-mute may count from here (forward clones are born
-correct; the 33 historical rows are backfilled). H8 recorded at PR-D②'s entry.
+correct; the 33 historical rows are backfilled). **MERGED #1189 `74b7170` + H8
+VERIFIED** (BE `9d621ced` / worker `f7b4e586` / worker-background `785ce053`, all @
+`74b7170`, created 14:59:07Z).
+
+**PR-D② — SHADOW UN-MUTE ON RAW EV BUILT (this PR).** The decision D② implementation:
+`_clone_suggestion_for_cohort` (fork.py) now sets a shadow clone's `ev` to the
+source's RAW `ev_raw` (not the champion's calibrated `ev`), gated by
+`_is_shadow_raw_ev_enabled()`. Flag `SHADOW_RAW_EV_ENABLED` **default ON** (empty/
+unset → ON; explicit 0/false/no/off → inherit calibrated) — a REVERT lever, not an
+observe gate (shadows are simulated, no live money; the flag defaults to the
+active state, so no env pre-staging needed). Every clone is a shadow (the champion
+is tagged in place, never cloned) → raw applies to all clones. Fallback to the
+calibrated `ev` when `ev_raw` is absent (H9 — no fabrication). `risk_adjusted_ev`
+inheritance unchanged (the decided basis change is the ENTRY EV; the champion path
+is untouched — it is the source, not a clone). Tests 4/4 (default-ON→raw · empty→ON
+· explicit-off→calibrated · missing-ev_raw→honest-fallback) + normalizer 3/3 +
+fork 2/2 green.
+**DECISION D② ANNOTATIONS (verbatim):** shadows score on RAW ev from `74b7170`
+(PR-④'s SHA is the trustworthy-from anchor; this PR is the un-mute itself);
+promotion ENTRY-RATE comparisons carry the different-EV-bases caveat; OUTCOME /
+thesis comparisons are basis-INDEPENDENT; the experiment layer breathes from
+Monday's first 11:00 CT scan (fork runs post-scan; the neutral/conservative clones
+emit raw-EV rows).
+
+**SESSION STATE:** ⓪①②③④D② all shipped + H8 (this session ⓪①② Sat/Sun, ③④D② Sun
+AM). PR-①b (F-A8/E6-edge) is OPTIONAL — see the next entry if built, else it holds
+to Monday post-close (stated). Lanes L1 (8/8 SETTLED) + L3 (W2b two-PR spec)
+filed; L2 (backlog rewrite) pending this session.
 
 ## 2026-07-12 (Sun) — GOs RECORDED + Part-3 BUILD QUEUE (⓪ thesis-basis shipped; ①②③④ sequential)
 

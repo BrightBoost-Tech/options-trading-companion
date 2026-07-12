@@ -4,6 +4,55 @@ Every finding listed here is EXCLUDED from future audit runs. Re-finding a
 ledger item is a wasted slot. Runs append new findings as `status:reported`;
 the human flips them to `status:shipped` (with PR#) or `status:rejected`.
 
+## 2026-07-12 (Sun ~10:xx CT) — BUILDS ③→④→D② (+①b optional) + lanes L1/L2/L3
+
+STEP-0 (premise correction): prompt said "Sunday-evening"; DB `14:41Z` = Sunday
+`09:41 CT` / broker `10:41 ET` = `09:41 CT` agree — it is Sunday MORNING. Nightly
+00:00 CT Monday → ~14h20m runway (sleep-hold NOT yet set — finish well clear).
+
+**LANE L1 — 8/8 TRIGGER CORRECTION (SETTLED, not newly-actionable).** Verified by
+query: calibration is OUT of raw mode — `ev = 0.5 × ev_raw` (ratio 0.5000) on 07-10
+(IRON_CONDOR 18.73/37.46 + LONG_CALL_DEBIT 19.94/39.88); 07-07→09 were ratio
+1.0000 (raw). So the ×0.5 floor clamp APPLIES since 07-10. The 8/8 milestone's two
+gate-questions are ALREADY DECIDED (07-09): floor-HOLD (revisit at ~15-20 live
+closes — 8 closes / 1W-7L is too thin+loss-heavy to trust un-clamping) + winsorize
+NO-ACTION (live-only #1076 already excludes the shadow outliers). **The 07-12
+FULL's "newly-actionable" flag is CORRECTED → SETTLED.** → prompt v5.5 STATE line
+so no future nightly re-flags it (L2 carries it into the backlog; the prompt edit
+is the operator's, flagged).
+
+**LANE L3 — W2b SITE MAP (spec filed, TWO PRs).** Utilization: the flip threshold
+is `cap*pool − committed` (= `cap*(committed+obp) − committed`), a CLEAN binary at
+`utilization_gate.py:420` (verified vs the boundary tests: cap 0.85, committed 600,
+obp 400 → thr 250; premium 149 ALLOW vs honest 372 BLOCK = the QQQ-IC case).
+Minimal diff: a `candidate_cost_bases()` splitter + two optional kwargs on
+`evaluate_entry` + relocate the log after `:414` + one caller update — effort M,
+ship ALONE. Allocator (`portfolio_allocator.py`): the open-book is a CONTINUOUS
+sizing input (used_dollars re-slices remaining_envelope, `:276-333`) — **would_flip
+is NOT the right primitive**; instrument dual-basis instead (n_funded_current vs
+_honest + available_envelope pair), keep would_flip None. → **W2b = two PRs**
+(utilization threshold first, allocator instrumentation follow-up). Filed.
+
+**PR-③ — REPLAY TERMINAL-CAPTURE CONTRACT (E16 correction) BUILT (this PR).** Four
+seams closed: (1) a shared `_capture_decision_manifest()` fires at EVERY return of
+run_midday_cycle — the NO-TRADE/zero path (`:~3790`) now emits the manifest with
+honest zeros + exit_reason + `is_zero_cycle`; (2) rejected tail via
+`rejected_summary` = rejection_stats.to_dict() (reason→count) in the manifest; (3)
+cache-HIT inputs recorded at the consumption boundary — chain
+(`market_data_truth_layer.py:1437`, `_record_option_chain_to_context` before the
+cached return) + snapshot v4-quality-cache (`:~1008`, `_record_snapshot_to_context`
+on hit; blob store dedups); (4) commit health — `suggestions_open` captures
+`ctx.commit()`'s return and surfaces an error into `counts.errors` +
+`replay_commit_error` (the F-A4-1 contract, never silence). Fail-soft throughout
+(capture failure cannot break the cycle; the manifest helper + cache-hit records
+are try-wrapped). Keeps the `ranked_candidates` feature key (PR-2 #1175 test +
+byte-compare continuity). Tests 4/4 (zero-cycle honest-zeros, accepted-ranked +
+rejects, replay-off no-op, capture-failure fail-soft) + PR-2 replay 3/3 +
+truth-layer/replay-store 28/139-skip green. **E16 corrected at this SHA; Monday's
+tape is COMPLETE from the first scan** (yesterday's rows annotated known-partial;
+the Monday capture pin un-re-scopes from "rows+timing only" to full completeness).
+H8 recorded at PR-④'s entry.
+
 ## 2026-07-12 (Sun) — GOs RECORDED + Part-3 BUILD QUEUE (⓪ thesis-basis shipped; ①②③④ sequential)
 
 **FOUR OWNER DECISIONS — CONFIRMED GO (verbatim):**

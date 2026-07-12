@@ -1006,7 +1006,16 @@ class MarketDataTruthLayer:
         # Check cache for exact ticker set
         cache_key = frozenset(raw_snapshots.keys())
         if cache_key in self._v4_quality_cache:
-            return self._v4_quality_cache[cache_key]
+            # E16 (2026-07-12): record consumed snapshots on the quality-cache HIT
+            # too (the per-ticker record hook below runs only on a miss) — the blob
+            # store dedups, so this fills decision_inputs without double-storing.
+            _cached_v4 = self._v4_quality_cache[cache_key]
+            try:
+                for _t, _v4 in _cached_v4.items():
+                    _record_snapshot_to_context(_t, raw_snapshots.get(_t, {}), _v4)
+            except Exception:
+                pass
+            return _cached_v4
 
         v4_results: Dict[str, TruthSnapshotV4] = {}
         received_ts = int(time.time() * 1000)
@@ -1435,6 +1444,12 @@ class MarketDataTruthLayer:
         cache_key = f"{underlying}_{expiration_date}_{min_expiry}_{max_expiry}_{right}_{strike_range}"
         cached = self.cache.get("option_chain", cache_key)
         if cached:
+            # E16 (2026-07-12): record cache HITS at the consumption boundary too —
+            # the process-global chain cache (TTL 300s) served most reads within a
+            # scan, so a cache-hit chain was consumed but absent from decision_inputs
+            # (blob store is content-addressed → the re-record dedups). Mirrors the
+            # daily-bars pattern that already records on hit.
+            _record_option_chain_to_context(underlying, expiration_date, cached)
             return cached
 
         # 2. Get spot price if not provided (for strike filtering)

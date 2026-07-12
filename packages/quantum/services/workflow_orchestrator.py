@@ -2437,8 +2437,38 @@ async def run_midday_cycle(supabase: Client, user_id: str, deployable_capital_ov
         for c in scout_results:
             c["window"] = "midday_entry"
 
+        # F-A1-3 apply-move (observe-first): snapshot the PRE-conviction score so
+        # the calibrated recompute can separate additive scanner penalties from
+        # the multiplicative conviction.
+        from packages.quantum.analytics.calibration_apply_ordering import (
+            snapshot_pre_conviction_scores, apply_calibration_at_scoring,
+        )
+        snapshot_pre_conviction_scores(scout_results)
         conviction_service = ConvictionService(supabase=supabase)
         scout_results = conviction_service.adjust_suggestion_scores(scout_results, user_id)
+
+        # F-A1-3 apply-move (observe-first, flag CALIBRATION_APPLY_AT_SCORING):
+        # calibrate ev/pop + RECOMPUTE score BEFORE rank_and_select (armed), or
+        # log [APPLY_ORDER_SHADOW] frozen-vs-calibrated top-5 (observe, default).
+        # Selection sorts on `score` (scanner-frozen from raw ev), so moving the
+        # apply is only correct WITH the score recompute. Fail-safe; never breaks
+        # the cycle. Armed → the legacy post-sizing apply (~:3562) skips via the
+        # _calibration_applied sentinel (move-not-add: exactly one application).
+        try:
+            from packages.quantum.analytics.calibration_service import (
+                get_calibration_adjustments as _amv_getcache,
+                apply_calibration as _amv_apply,
+                CalibrationService as _amv_svc,
+                CALIBRATION_ENABLED as _amv_cal_on,
+            )
+            _amv_cache = _amv_getcache(user_id, supabase) if _amv_cal_on else None
+            scout_results = apply_calibration_at_scoring(
+                scout_results, _amv_cache, global_snap.state.value,
+                apply_calibration=_amv_apply, classify_dte=_amv_svc._classify_dte,
+                cal_enabled=_amv_cal_on,
+            )
+        except Exception as _amv_err:
+            logger.warning("[APPLY_ORDER] apply-move seam failed (non-fatal): %s", _amv_err)
 
         # NEW: Rank and Select Pipeline using SmallAccountCompounder
         # Detect capital tier
@@ -3559,9 +3589,12 @@ async def run_midday_cycle(supabase: Client, user_id: str, deployable_capital_ov
             lineage_dict = lineage.build()
             sig_result = LineageSigner.sign(lineage_dict)
 
-            # Apply calibration adjustments if enabled (using pre-fetched cache)
+            # Apply calibration adjustments if enabled (using pre-fetched cache).
+            # F-A1-3: SKIP when the apply-move seam already applied it at scoring
+            # (armed) — the _calibration_applied sentinel makes this move-not-add
+            # (exactly one application). Off → this legacy site applies as before.
             raw_ev, raw_pop = ev, pop
-            if _CAL_ENABLED and _cal_adj_cache:
+            if _CAL_ENABLED and _cal_adj_cache and not cand.get("_calibration_applied"):
                 try:
                     regime_str = ctx.regime or ""
                     cand_dte = cand.get("dte") or 30
@@ -3623,8 +3656,12 @@ async def run_midday_cycle(supabase: Client, user_id: str, deployable_capital_ov
                 "code_sha": get_code_sha(),
                 "data_hash": ctx.features_hash,  # For now, same as features_hash
                 "sector": cand.get("sector", "unknown"),
-                "ev_raw": raw_ev,
-                "pop_raw": raw_pop,
+                # F-A1-3: when the apply-move armed, cand carries the TRUE raw
+                # (before the at-scoring calibration overwrote cand["ev"]); the
+                # local raw_ev would be the already-calibrated value. Off →
+                # _ev_raw_true is absent → the legacy raw_ev is used (unchanged).
+                "ev_raw": cand.get("_ev_raw_true", raw_ev),
+                "pop_raw": cand.get("_pop_raw_true", raw_pop),
                 # Cluster 3: surface the VRP inputs to top-level so they persist
                 # (internal_cand is stripped on persist). The executor re-ranks
                 # from the DB and needs these to apply the VRP soft down-weight.

@@ -1,8 +1,39 @@
 from typing import Optional, Literal, Dict, Any, List
 from pydantic import BaseModel, Field
+import logging
 import math
 
+logger = logging.getLogger(__name__)
+
 UNBOUNDED_GAIN_CAP_MULT = 10.0
+
+
+def _clamp_pop(pop: Any, branch: str, strategy_type: str) -> float:
+    """Terminal [0,1] bound-assert for calculate_pop — the H9 bound-assert home.
+
+    The clamp lives ONCE here; every branch of calculate_pop returns THROUGH it
+    (no per-branch copies). A probability is out of [0,1] only when a branch was
+    fed a malformed input (e.g. |delta|>1) — the clamp catches it AND logs the
+    raw value + branch + structure (#1147 POP_CLAMP pattern) so the overshoot
+    signal stays observable, never silently laundered. In-range values pass
+    through byte-identical (max(0,min(1,x))==x), so this is a no-op on the live
+    book. Non-finite (NaN/inf from a garbage input) → 0.5 neutral + logged."""
+    try:
+        raw = float(pop)
+    except (TypeError, ValueError):
+        raw = float("nan")
+    if not math.isfinite(raw):
+        bounded = 0.5
+    else:
+        bounded = max(0.0, min(1.0, raw))
+    if bounded != raw:  # NaN != NaN is True → non-finite always logs too
+        logger.warning(
+            "[POP_BOUND_ENGAGED] calculate_pop branch=%s strategy=%s raw=%s "
+            "clamped=%.4f — a PoP branch produced an out-of-[0,1] probability "
+            "(malformed input signal, not a valid probability).",
+            branch, strategy_type, raw, bounded,
+        )
+    return bounded
 
 
 def calculate_pop(
@@ -46,13 +77,13 @@ def calculate_pop(
             # blocked. The width-implied bound is max_loss/(max_gain+max_loss)
             # = 1 − credit/width. Terminal [0,1] clamp = the H9 bound-assert.
             pop = max_loss / (max_gain + max_loss)
-            return max(0.0, min(1.0, pop))
+            return _clamp_pop(pop, "credit_width", strategy_type)
         # Fallback: credit spreads profit when short leg stays OTM → 1 - delta
         if delta is not None:
-            return 1.0 - abs(float(delta))
+            return _clamp_pop(1.0 - abs(float(delta)), "credit_delta_fallback", strategy_type)
         sell_leg = next((l for l in legs if l.get("action") == "sell"), None)
         if sell_leg and sell_leg.get("delta"):
-            return 1.0 - abs(float(sell_leg["delta"]))
+            return _clamp_pop(1.0 - abs(float(sell_leg["delta"])), "credit_sell_leg", strategy_type)
 
     # Debit spreads: PoP = probability of exceeding breakeven
     # breakeven = long_strike + net_debit, so PoP < delta of long leg.
@@ -70,35 +101,35 @@ def calculate_pop(
             # If credit/width available, interpolate to breakeven delta
             if credit is not None and width is not None and width > 0:
                 premium_fraction = abs(credit) / width  # 0=free, 1=full width
-                return long_delta - (long_delta - short_delta) * premium_fraction
+                return _clamp_pop(long_delta - (long_delta - short_delta) * premium_fraction, "debit_interp", strategy_type)
             # Fallback: midpoint of long and short deltas
             if short_delta > 0:
-                return (long_delta + short_delta) / 2.0
-            return long_delta
+                return _clamp_pop((long_delta + short_delta) / 2.0, "debit_midpoint", strategy_type)
+            return _clamp_pop(long_delta, "debit_long_only", strategy_type)
 
     # Short single-leg: PoP = 1 - delta
     if strategy_type in ("short_call", "short_put", "naked_call", "naked_put"):
         if delta is not None:
-            return 1.0 - abs(float(delta))
+            return _clamp_pop(1.0 - abs(float(delta)), "short_single_delta", strategy_type)
         if legs:
             leg_delta = legs[0].get("delta")
             if leg_delta is not None:
-                return 1.0 - abs(float(leg_delta))
+                return _clamp_pop(1.0 - abs(float(leg_delta)), "short_single_leg", strategy_type)
 
     # Long single-leg: PoP ≈ delta
     if strategy_type in ("long_call", "long_put"):
         if delta is not None:
-            return abs(float(delta))
+            return _clamp_pop(abs(float(delta)), "long_single_delta", strategy_type)
         if legs:
             leg_delta = legs[0].get("delta")
             if leg_delta is not None:
-                return abs(float(leg_delta))
+                return _clamp_pop(abs(float(leg_delta)), "long_single_leg", strategy_type)
 
     # Fallback: use raw delta if provided
     if delta is not None:
-        return abs(float(delta))
+        return _clamp_pop(abs(float(delta)), "raw_delta_fallback", strategy_type)
 
-    return 0.5  # Unknown — neutral
+    return _clamp_pop(0.5, "neutral_unknown", strategy_type)  # Unknown — neutral
 
 class EVResult(BaseModel):
     expected_value: float

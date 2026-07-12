@@ -51,7 +51,29 @@ rejects, replay-off no-op, capture-failure fail-soft) + PR-2 replay 3/3 +
 truth-layer/replay-store 28/139-skip green. **E16 corrected at this SHA; Monday's
 tape is COMPLETE from the first scan** (yesterday's rows annotated known-partial;
 the Monday capture pin un-re-scopes from "rows+timing only" to full completeness).
-H8 recorded at PR-④'s entry.
+**MERGED #1188 `9be25c4` + H8 VERIFIED** (BE `108f5b6c` / worker `d1148556` /
+worker-background `922db44e`, all @ `9be25c4`, created 14:52:04Z).
+
+**PR-④ — CLONE RISK NORMALIZER + 33-ROW BACKFILL BUILT (this PR).** E14: the
+Policy-Lab clone (`_clone_suggestion_for_cohort`, fork.py:242 — VERIFIED the ONLY
+cloner; the autopilot cohort refs are reads) copied the SOURCE's max_loss_total
+unchanged into sizing_metadata (mis-scaled) and omitted the top-level column
+(→ NULL). FIX: compute `clone_max_loss_total = round(max_loss_per × contracts, 2)`
+(max_loss_per = source_total/source_contracts) and emit it as BOTH the typed
+top-level `max_loss_total` AND `sizing_metadata.max_loss_total` + a
+`max_loss_total_basis` provenance ('rescaled_from_source_per_contract'). UNKNOWN
+stays EXPLICIT (None + 'unknown_source_no_max_loss_total') — never a fabricated 0,
+never a NULL typed column beside a lying JSON total. Tests 3/3 (rescaled typed==JSON
+· unknown→explicit-None · scales-with-clone-contracts) + existing fork 2/2 green.
+**SUPERVISED BACKFILL — 33 rows (neutral 23 + conservative 10), ALL derivable,
+EXECUTED + read-back**: typed = round(sizing.max_loss_total / original_contracts ×
+contracts, 2), JSON set consistent, basis='backfilled_from_source_suggestion'
+(e.g. conservative 588/4×8 = 1176 — the large totals reflect honest shadow-cohort
+synthetic sizing). Read-back: `still_contaminated=0` (was 33) · `backfilled=33` ·
+`typed_equals_json=33`. **⭐ SHADOW RISK EVIDENCE TRUSTWORTHY FROM THIS SHA** — the
+pending clock-reset line (D② sequencing) COMPLETES: W2/W3 shadow-cohort risk
+evidence + D②'s shadow un-mute may count from here (forward clones are born
+correct; the 33 historical rows are backfilled). H8 recorded at PR-D②'s entry.
 
 ## 2026-07-12 (Sun) — GOs RECORDED + Part-3 BUILD QUEUE (⓪ thesis-basis shipped; ①②③④ sequential)
 

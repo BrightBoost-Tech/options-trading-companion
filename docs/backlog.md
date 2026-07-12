@@ -12,6 +12,25 @@ questions) · **RESOLVED — DO NOT REINVESTIGATE**.
 
 ---
 
+## 2026-07-11/12 WEEKEND SHIPS — DONE (cite the ledger, do not rebuild)
+
+Full detail in `audit/ledger.md` (07-11/12 entries). Shipped this weekend:
+- **F-A4-1 typed job-outcome contract** #1153 · **observability remainder** #1156
+  (5 noise classes) · **E7 viability re-wire** #1158 (3rd #1126, active route) ·
+  **PR2 client_order_id + reconcile** #1160 (P0-A complete) · **F-A3-1 close_reason
+  persistence** #1162 (thesis prereq).
+- **★ Shadow-to-expiry THESIS TRACKER (I5)** #1164 + **F-A9-1** relabel — the #1
+  missing measurement; first honest number 13/16=81% (live 5/7, shadow 8/9); only
+  4/13 hits profitable (loss is downstream of the signal).
+- **P0-B book-scaling PR-A** #1166 (persist cost_basis_total/max_loss_total +
+  observe-only [RISK_BASIS_SHADOW]) · **COALESCE ev_raw restore PR-B** #1167
+  (prequential prereq closed + drift guard) · **PoP inversion PR-0** #1169
+  (credit PoP 0.298→0.702; 2-leg credit cohort gate cleared) · **REPLAY_ENABLE
+  Phase-0** flip (capture live from Mon 07-13's 11:00 CT scan; validation pending).
+- **B1/B2 bucket control + same-run reservation** #1171 — observe-first.
+
+---
+
 ## P0 — IMMEDIATE NEXT BUILD (07-09 external-audit v1.1 adjudication)
 
 - **P0-A · Broker-acknowledged live-close invariant (F-A2-1) — PR1 BUILT #1149
@@ -50,20 +69,21 @@ questions) · **RESOLVED — DO NOT REINVESTIGATE**.
   `UNKNOWN_RECONCILING` edge — until then that edge holds OPEN + alarmed
   (operator-resolved). · done when: PR2 ships the targeted auto-resolution.
 
-- **P0-B · "Book-scaling readiness" epic (MERGE: F-A1-1 + F-A1-2 + B1/B2 one-
-  beta control + same-run reservation).** The risk stack is book-blind for
-  ordinary spreads: `paper_positions` has no `cost_basis`/`current_value`/
-  `max_loss`/`collateral` columns, so the allocator (`portfolio_allocator.py:
-  116-144`) and RBE (`risk_budget_engine.py:99-208`) see the open book as ~$0,
-  and the utilization gate costs a candidate at premium (~$149) not max-loss
-  (~$351) (`utilization_gate.py:323-341`), inconsistent with its own open-side
-  margin basis. **TRIGGER CORRECTED — already occurred, not hypothetical:** 3
-  concurrent real-money live positions ran 2026-06-11→06-12 (before the #1139
-  tripwire shipped 07-08). Package: (1) persist per-position cost/max-loss (add
-  columns + writer), (2) allocator/RBE read them, (3) utilization candidate cost
-  on max-loss basis, (4) the B1/B2 per-bucket correlation cap. The #1139 tripwire
-  ALARM is the interim guard only. · origin 07-09 v1.1 F-A1-1/A1-2 + 07-03
-  F-A2a · do BEFORE routine 2-position operation resumes.
+- **P0-B · "Book-scaling readiness" epic — BUILD HALF COMPLETE (observe-first);
+  ARM DECISION PENDING.** **STATUS 07-12:** (1) persist cost_basis_total +
+  max_loss_total LIVE (#1166) · (2) allocator/RBE/utilization compute BOTH bases
+  + log [RISK_BASIS_SHADOW] (#1166, observe) · (3) utilization candidate honest
+  basis wired behind the flag (#1166) · (4) B1/B2 one-beta bucket control +
+  same-run reservation BUILT observe-first (#1171, [BUCKET_SHADOW] + #1139-
+  class alarm). **The build half is done. Enforcement = ONE composed owner
+  decision after ~1 week of [RISK_BASIS_SHADOW] + [BUCKET_SHADOW] logs: arming
+  `RISK_BASIS_MAX_LOSS_ENABLED=1` + `BUCKET_CONTROL_ENFORCE=1` together (with
+  `BUCKET_MAX_PCT`, default 0.25 — one IC ≈18% of a $2k book fits, two same-
+  bucket ≈36% do not).** Worked example (ledger): a real QQQ IC is ~$149 premium
+  (7.2%) vs ~$372 honest (18%) at $2,068. The #1139 tripwire remains the armed
+  guard meanwhile. · origin 07-09 v1.1 F-A1-1/A1-2 + 07-03 F-A2a · **NEXT: the
+  arm decision (owner), not a build.** Legacy note: the pre-build book-blindness
+  (allocator ~$0, utilization premium-not-max-loss) is what #1166 addresses.
 
 - **P0/P1 · Calibration-ordering + prequential validation (F-A1-3 + recon #2) —
   design session, not a one-liner.**
@@ -91,10 +111,22 @@ questions) · **RESOLVED — DO NOT REINVESTIGATE**.
   **A1a PREREQUISITE CLOSED (#1147, 07-10):** the walk-forward field contract is
   fixed (reads `ev_predicted`/`pop_predicted`/`pnl_realized`; H9 0.5-fabrication
   deleted; loud zero-row/missing-col guard; ISO8601 timestamp fix; smoke-run
-  ran clean on n=99). REMAINING for the prequential build: add the
-  `is_paper=false` live-only filter (smoke-run used 99 mixed paper+live rows)
-  and confirm `ev_predicted` is the RAW (pre-calibration) EV, else the
-  walk-forward validates calibration on calibrated inputs (circular).
+  ran clean on n=99).
+  **RAW-BASIS PREREQ CLOSED (#1167 PR-B, 07-12):** `ev_predicted` now
+  `COALESCE(ts.ev_raw, ts.ev)` — the 06-23 silent revert to bare (calibrated)
+  `ts.ev` is undone + drift-guarded (`test_ev_raw_coalesce_drift_guard.py`).
+  Contamination verdict: no annotation needed (raw-mode + ev_raw fallback).
+  Remaining for the prequential build: add the `is_paper=false` live-only filter.
+  **⚠ L1 RECON (07-12, reshapes the apply-move fix):** SELECTION sorts on
+  `score`, NOT `ev` — and `score` is frozen from RAW ev INSIDE the scanner
+  (`options_scanner.py:3751,3919`; `rank_and_select` reads `cand["score"]` at
+  `small_account_compounder.py:242-246`). So moving `apply_calibration` earlier
+  is NOT enough — the fix MUST also RECOMPUTE `score` from the calibrated ev
+  (the real cost). TO-seam = right after conviction at
+  `workflow_orchestrator.py:2441` (before rank :2495); DELETE the midday
+  :3562-3569 apply (move-not-add — a left-behind site → ev×mult²) + an
+  idempotency sentinel; hash `ev_raw` for features_hash continuity. Effort ~M
+  (half-full day, dominated by score-recompute). Full spec in the 07-12 ledger.
   · origin 07-09 v1.1 F-A1-3 + v1.2 recon #2 + 07-10 #1147.
 
 ## 07-11 v1.2 adjudication — NEW ITEMS + RE-SEQUENCED QUEUE

@@ -38,26 +38,33 @@ def _parse_date(v) -> Optional[date]:
             return None
 
 
-def _underlying_at_expiry(truth, symbol: str, expiry: date) -> Optional[float]:
-    """Close of the underlying on the expiry date (or the last bar on/before it,
-    for a holiday-shifted expiry). None on any failure — caller scores unknown."""
+def _underlying_at_expiry(truth, symbol: str, expiry: date):
+    """(close, price_basis, bar_date) for the underlying at the ORIGINAL expiry.
+
+    F-A9-THESIS-BASIS (2026-07-12): a TERMINAL thesis verdict must never hide that
+    it was graded off a stale bar. price_basis discloses the source:
+      'expiry_close'       — the exact expiry-date bar (authoritative),
+      'fallback_prior_bar' — the last bar within 7d ON/BEFORE expiry (holiday/gap),
+      None                 — no bar found (caller scores unknown; H9 non-fabricated).
+    Returns (None, None, None) on empty/failure."""
     try:
         start = datetime(expiry.year, expiry.month, expiry.day, tzinfo=timezone.utc) - timedelta(days=7)
         end = datetime(expiry.year, expiry.month, expiry.day, tzinfo=timezone.utc) + timedelta(days=1)
         bars = truth.daily_bars(symbol, start, end)
         if not bars:
-            return None
+            return None, None, None
         exp_str = expiry.isoformat()
         exact = [b for b in bars if b.get("date") == exp_str and b.get("close") is not None]
         if exact:
-            return float(exact[-1]["close"])
+            return float(exact[-1]["close"]), "expiry_close", exp_str
         # holiday / no bar on the exact date → last bar on or before expiry
         on_or_before = [b for b in bars if b.get("date") and b["date"] <= exp_str and b.get("close") is not None]
         if on_or_before:
-            return float(on_or_before[-1]["close"])
-        return None
+            last = on_or_before[-1]
+            return float(last["close"]), "fallback_prior_bar", last.get("date")
+        return None, None, None
     except Exception:
-        return None
+        return None, None, None
 
 
 def run(payload: Dict[str, Any], ctx: Any = None) -> Dict[str, Any]:
@@ -120,12 +127,22 @@ def run(payload: Dict[str, Any], ctx: Any = None) -> Dict[str, Any]:
         legs = pos.get("legs") or []
 
         if expiry is None:
-            outcome, U, basis = "unknown", None, "no original expiry on position"
+            outcome, U, basis, price_basis = "unknown", None, "no original expiry on position", "no_expiry"
         elif expiry >= today:
-            outcome, U, basis = "in_progress", None, f"expiry {expiry.isoformat()} not yet passed"
+            outcome, U, basis, price_basis = "in_progress", None, f"expiry {expiry.isoformat()} not yet passed", "in_progress"
         else:
-            U = _underlying_at_expiry(truth, pos.get("symbol"), expiry) if truth else None
+            if truth:
+                U, price_basis, price_date = _underlying_at_expiry(truth, pos.get("symbol"), expiry)
+            else:
+                U, price_basis, price_date = None, None, None
             outcome, basis = score_thesis(legs, U)
+            # F-A9: surface the price source in the human basis (the disclosure).
+            if U is None:
+                price_basis = "unknown"
+            elif price_basis == "fallback_prior_bar":
+                basis = f"{basis} [price: fallback_prior_bar@{price_date}]"
+            else:
+                basis = f"{basis} [price: expiry_close]"
 
         row = {
             "position_id": pid,
@@ -140,6 +157,7 @@ def run(payload: Dict[str, Any], ctx: Any = None) -> Dict[str, Any]:
             "close_reason": pos.get("close_reason"),
             "realized_pl": pos.get("realized_pl"),
             "underlying_at_expiry": U,
+            "price_basis": price_basis,  # F-A9: which price source graded this row
             "thesis_outcome": outcome,
             "thesis_basis": basis,
             "scored_at": datetime.now(timezone.utc).isoformat(),

@@ -11,6 +11,52 @@ import time
 
 logger = logging.getLogger(__name__)
 
+
+def _capture_decision_manifest(accepted, rejection_stats, counts, exit_reason, cycle_date):
+    """E16 (2026-07-12): emit a TERMINAL decision manifest to the active
+    DecisionContext at EVERY return of the midday cycle — INCLUDING the
+    zero-candidate / no-trade path (the dominant shape at the ×0.5 floor) — so a
+    byte-compare replay always has a left-hand side with honest zeros + the reject
+    reasons, not silence. Fires only when REPLAY_ENABLE=1
+    (get_current_decision_context() is not None); FAIL-SOFT — a capture failure can
+    NEVER break the cycle."""
+    try:
+        from packages.quantum.services.replay.decision_context import (
+            get_current_decision_context as _gdc,
+        )
+        _dc = _gdc()
+        if _dc is None:
+            return
+        _acc = sorted(
+            accepted or [],
+            key=lambda s: -(float(s.get("risk_adjusted_ev")
+                                  if s.get("risk_adjusted_ev") is not None
+                                  else (s.get("score") or -1e9))),
+        )
+        _dc.record_feature("__decision__", "ranked_candidates", {
+            "count": len(_acc),
+            "cycle_date": cycle_date,
+            "exit_reason": exit_reason,
+            "is_zero_cycle": len(_acc) == 0,
+            "rejected_summary": (rejection_stats.to_dict() if rejection_stats else None),
+            "counts": counts,
+            "candidates": [{
+                "ticker": s.get("ticker"),
+                "strategy": s.get("strategy"),
+                "ev": s.get("ev"),
+                "pop": s.get("probability_of_profit"),
+                "score": s.get("score"),
+                "risk_adjusted_ev": s.get("risk_adjusted_ev"),
+                "status": s.get("status"),
+                "blocked_reason": s.get("blocked_reason"),
+                "legs_fingerprint": s.get("legs_fingerprint"),
+            } for s in _acc],
+        })
+        logger.info("[REPLAY_DECISION] terminal manifest captured (accepted=%d zero=%s reason=%s)",
+                    len(_acc), len(_acc) == 0, exit_reason)
+    except Exception as _e:  # fail-soft: capture never breaks the cycle
+        logger.warning("[REPLAY_DECISION] manifest capture failed (non-fatal): %s", _e)
+
 if TYPE_CHECKING:
     from packages.quantum.services.market_data_truth_layer import TruthSnapshotV4
 
@@ -3784,6 +3830,13 @@ async def run_midday_cycle(supabase: Client, user_id: str, deployable_capital_ov
         _exit_reason = "no_suggestions_after_gates"
         if locals().get("_all_candidates_h7_unfit"):
             _exit_reason = "all_candidates_h7_unfit"
+        # E16 (2026-07-12): terminal manifest on the ZERO/no-trade path — honest
+        # zeros + reject reasons, so this (the dominant shape at ×0.5) is replayable.
+        _capture_decision_manifest(
+            [], rejection_stats,
+            {"scanner_emitted": _scanner_emitted_count,
+             "candidates": len(candidates), "created": 0},
+            _exit_reason, datetime.now(timezone.utc).date().isoformat())
         return {
             "skipped": False,
             "reason": _exit_reason,
@@ -3938,42 +3991,14 @@ async def run_midday_cycle(supabase: Client, user_id: str, deployable_capital_ov
 
         print(f"Midday suggestions: {inserts_count} inserted, {existing_count} existing (unchanged)")
 
-        # Replay Phase-1 gap-(c): capture the DECISION OUTPUT — the ranked
-        # suggestion set (accepted + rejected+reason) — as a feature linked by
-        # decision_id to the captured inputs/features, so a byte-compare replay
-        # has a left-hand side. Only fires when a DecisionContext is active
-        # (REPLAY_ENABLE=1); record_feature no-ops otherwise. Fail-soft — a
-        # capture failure must never break the cycle (same as the D2 block).
-        try:
-            from packages.quantum.services.replay.decision_context import (
-                get_current_decision_context as _gdc2,
-            )
-            _dc_out = _gdc2()
-            if _dc_out is not None:
-                _ranked = sorted(
-                    suggestions,
-                    key=lambda s: -(float(s.get("risk_adjusted_ev")
-                                          if s.get("risk_adjusted_ev") is not None
-                                          else (s.get("score") or -1e9))),
-                )
-                _dc_out.record_feature("__decision__", "ranked_candidates", {
-                    "count": len(_ranked),
-                    "cycle_date": cycle_date,
-                    "candidates": [{
-                        "ticker": s.get("ticker"),
-                        "strategy": s.get("strategy"),
-                        "ev": s.get("ev"),
-                        "pop": s.get("probability_of_profit"),
-                        "score": s.get("score"),
-                        "risk_adjusted_ev": s.get("risk_adjusted_ev"),
-                        "status": s.get("status"),
-                        "blocked_reason": s.get("blocked_reason"),
-                        "legs_fingerprint": s.get("legs_fingerprint"),
-                    } for s in _ranked],
-                })
-                logger.info(f"[REPLAY_DECISION] captured {len(_ranked)} ranked candidates")
-        except Exception as _rdc_e:
-            logger.warning(f"[REPLAY_DECISION] output capture failed (non-fatal): {_rdc_e}")
+        # E16 (2026-07-12): terminal manifest on the suggestions-created path
+        # (accepted + rejected-summary + counts), via the SHARED helper that both
+        # return paths call — so every cycle, zero or not, has a decision output.
+        _capture_decision_manifest(
+            suggestions, rejection_stats,
+            {"created": inserts_count, "existing": existing_count,
+             "candidates": len(candidates)},
+            "suggestions_created", cycle_date)
 
         # #72-H4c: aggregated alert for midday per-suggestion insert failures
         if _midday_insert_failures:

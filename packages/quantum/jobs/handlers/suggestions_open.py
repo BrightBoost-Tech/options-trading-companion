@@ -141,7 +141,16 @@ def run(payload: Dict[str, Any], ctx: Any = None) -> Dict[str, Any]:
                         ctx.__enter__()
                         try:
                             cycle_result = await run_midday_cycle(client, uid)
-                            ctx.commit(client, status="ok")
+                            _commit_res = ctx.commit(client, status="ok")
+                            # E16 seam 4 (2026-07-12): surface a swallowed capture-
+                            # commit failure into the cycle result so it reads as
+                            # counts.errors (the F-A4-1 contract), never silence.
+                            if isinstance(_commit_res, dict) and _commit_res.get("error"):
+                                cycle_result = cycle_result or {}
+                                _cc = cycle_result.setdefault("counts", {})
+                                _cc["errors"] = int(_cc.get("errors") or 0) + 1
+                                cycle_result["replay_commit_error"] = str(_commit_res.get("error"))[:300]
+                                notes.append(f"replay commit error for {uid[:8]}: {_commit_res.get('error')}")
                         except Exception as cycle_err:
                             ctx.commit(client, status="failed", error_summary=str(cycle_err)[:500])
                             raise

@@ -195,6 +195,7 @@ class IntradayRiskMonitor:
                 return result
 
             all_results = []
+            users_failed = 0
             for user_id in user_ids:
                 try:
                     user_result = self._check_user(user_id)
@@ -202,14 +203,34 @@ class IntradayRiskMonitor:
                 except Exception as e:
                     logger.error(f"[RISK_MONITOR] Error for user {user_id[:8]}: {e}")
                     all_results.append({"user_id": user_id[:8], "error": str(e)})
+                    users_failed += 1
+
+            # F-A4-E8 (2026-07-12): a caught _check_user failure is a PROTECTION
+            # failure and must NOT persist green. The F-A4-1 outer-raise fixed only
+            # an execute()-level fatal; this inner per-user loop still returned
+            # ok:true,completed with the errors buried in results[] (invisible to
+            # _classify_handler_return, which reads only top-level users_failed /
+            # counts.errors). ALL users failed → RAISE (the runner records it
+            # failed_retryable; on the normal ONE-user account a single failure IS
+            # a complete cycle failure). A MIXED result → typed PARTIAL
+            # (users_failed + counts.errors populated → classifier returns
+            # 'partial'). Zero failures → succeeded (classification byte-identical).
+            if user_ids and users_failed == len(user_ids):
+                session.summary = {"ok": False, "status": "all_users_failed",
+                                   "users_failed": users_failed, "results": all_results}
+                raise RuntimeError(
+                    f"[RISK_MONITOR] ALL {users_failed} user risk check(s) failed — "
+                    f"complete protection-cycle failure (no green persist)")
 
             total_violations = sum(r.get("violations", 0) for r in all_results)
             total_force_closes = sum(r.get("force_closes_submitted", 0) for r in all_results)
 
             result = {
-                "ok": True,
-                "status": "completed",
+                "ok": users_failed == 0,
+                "status": "completed" if users_failed == 0 else "partial",
                 "users_checked": len(user_ids),
+                "users_failed": users_failed,
+                "counts": {"errors": users_failed},
                 "total_violations": total_violations,
                 "total_force_closes": total_force_closes,
                 "results": all_results,

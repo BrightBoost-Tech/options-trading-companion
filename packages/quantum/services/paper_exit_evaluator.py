@@ -2242,7 +2242,28 @@ class PaperExitEvaluator:
                         order_row = supabase.table("paper_orders") \
                             .select("*").eq("id", order_id).single().execute().data
 
-                        submit_and_track(alpaca, supabase, order_row, user_id)
+                        _st_res = submit_and_track(alpaca, supabase, order_row, user_id)
+
+                        # F-A8/E6-edge (2026-07-12): a needs_manual_review RETURN
+                        # (terminal/exhausted submit failure — submit_and_track has
+                        # already fired the critical alert) must NOT read as a routed
+                        # success. Return a NOT-completed sentinel so the monitor
+                        # counts no force-close, writes no cooldown, and does NOT
+                        # suppress the same-cycle retry. Position stays OPEN; no
+                        # phantom fill (the E6 no-internal-fill invariant is intact).
+                        if isinstance(_st_res, dict) and _st_res.get("status") == "needs_manual_review":
+                            logger.warning(
+                                f"[EXIT_EVAL] submit_and_track needs_manual_review "
+                                f"order_id={order_id} symbol={position['symbol']} — "
+                                f"NOT a routed success; position held OPEN for review"
+                            )
+                            return {
+                                "order_id": order_id,
+                                "processed": 0,
+                                "routed_to": "needs_manual_review",
+                                "error": _st_res.get("error"),
+                                "note": "Terminal submit failure — manual review required",
+                            }
 
                         logger.info(
                             f"[EXIT_EVAL] Submitted close to Alpaca: order_id={order_id} "

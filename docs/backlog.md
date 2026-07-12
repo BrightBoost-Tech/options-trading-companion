@@ -12,6 +12,54 @@ questions) · **RESOLVED — DO NOT REINVESTIGATE**.
 
 ---
 
+## 2026-07-12 (Sun PM) — POST-BUILD STATUS (authoritative; supersedes stale details below)
+
+The v1.3 re-sequenced queue is mostly cleared. Full detail: `audit/ledger.md` 07-11/07-12 entries.
+
+**SHIPPED Sun (cite, do NOT rebuild):** ⓪ #1185 thesis price-basis (`27715ee`) ·
+① #1186 E8 per-user seam (`3ef3c83`) · ② #1187 arm-evidence repair /clock-reset
+(`d5edd50`) · ③ #1188 replay terminal contract (`9be25c4`) · ④ #1189 clone
+normalizer + 33-row backfill (`74b7170`) · D② #1190 shadow raw-EV (`9a540ce`) ·
+①b #1191 F-A8/E6-edge (`a6e0cb9`). (Sat shipped #1153-#1184 — see the weekend block.)
+
+**v1.3 QUEUE REMAINING:**
+- **⑤ P1 · Independent credit-spread probability source (GATES decision ④).** Credit
+  EV ≡ $0 (payoff-circular; E12). Next week's strategy-side build; un-muting the
+  2-leg cohort cannot produce a qualifying entry until it ships.
+- **⑥ P0 · Residual partial-close custody (F-A2-1).** HARD TRIGGER: before routine
+  qty>1 credit OR any open position ≤~10 DTE. Latent today (book FLAT).
+- **⑦ P2 tail:** F-A10-1 summer warm-up blind · F-A3-1 fallback-discarded-at-insert
+  · F-A3-2 DTE-always-unknown · F-A3-3 runtime view-identity check · F-A10-2
+  Monday-holiday · F-A10-3 import-flag inventory · direction='long' liar · F-A5-1
+  replay TTL (start measuring Monday).
+- **W2b (TWO PRs, L3-spec'd in the 07-12 ledger):** (a) utilization would_flip
+  threshold `cap*pool−committed` at `utilization_gate.py:420` — ship-alone M ·
+  (b) allocator dual-basis instrumentation (continuous input → NOT would_flip).
+  Follows PR-② (W-clocks already reset at `d5edd50`).
+
+**⭐ DECISION / ARM CLOCKS:**
+- **Book-scaling arm** (`RISK_BASIS_MAX_LOSS_ENABLED=1` + `BUCKET_CONTROL_ENFORCE=1`)
+  — evidence clock reset to PR-②'s `d5edd50`; ~1 week of clean shadow logs from
+  there (W3 now fails-closed on armed-unknown, W2 threshold real at RBE). Owner call.
+- **Shadow un-mute on raw EV** — SHIPPED #1190 (default ON); shadow risk evidence
+  trustworthy from PR-④'s `74b7170`; experiment breathes from Monday's scan.
+  Promotion ENTRY-RATE comparisons carry the different-bases caveat; OUTCOME/thesis
+  are basis-independent.
+- **A10 rotation (D①)** — Security lens QUEUED for the next rotation; Calendar &
+  Clock kept one cycle (F-A10-1 still earning).
+- **Executor cadence (GATED)** — one-shot/day; trigger (clean relearn + positive EV
+  tracking + #1071/#1072 exercised) NOT met.
+- **8/8 clamp review + winsorize — SETTLED (not newly-actionable):** calibration is
+  OUT of raw mode (ev=0.5×ev_raw since 07-10, L1-verified). Floor-HOLD (revisit
+  ~15-20 live closes) + winsorize NO-ACTION were decided 07-09. Prompt v5.5 STATE
+  line pending (operator edit) so the nightly stops re-flagging it.
+
+**⚠ STALE-LINE CORRECTION:** the weekend-ships note below "#1169 … 2-leg credit
+cohort gate CLEARED" is FALSE (v1.3 E12) — #1169 fixed the PoP LABEL only; credit
+EV ≡ $0, cohort NOT evaluable until queue-⑤.
+
+---
+
 ## 2026-07-12 v1.3 EXTERNAL-AUDIT ADJUDICATION — re-sequenced queue (verdicts + census in the ledger 07-12 entry)
 
 Full report: `docs/review/external-full-audit-v1.3-2026-07-12.md`. All items below
@@ -127,7 +175,8 @@ Full detail in `audit/ledger.md` (07-11/12 entries). Shipped this weekend:
 - **P0-B book-scaling PR-A** #1166 (persist cost_basis_total/max_loss_total +
   observe-only [RISK_BASIS_SHADOW]) · **COALESCE ev_raw restore PR-B** #1167
   (prequential prereq closed + drift guard) · **PoP inversion PR-0** #1169
-  (credit PoP 0.298→0.702; 2-leg credit cohort gate cleared) · **REPLAY_ENABLE
+  (credit PoP 0.298→0.702; LABEL only — ⚠ gate NOT cleared: EV≡$0 per v1.3 E12,
+  cohort needs queue-⑤) · **REPLAY_ENABLE
   Phase-0** flip (capture live from Mon 07-13's 11:00 CT scan; validation pending).
 - **B1/B2 bucket control + same-run reservation** #1171 — observe-first.
 

@@ -120,9 +120,14 @@ needs_manual_review→False · deferred/unknown→False · alpaca+5 others→Tru
 byte-identical · None/missing→True) + E8 4/4 + force-close 16/16 green. MERGED +
 H8 recorded in the session summary.
 
-**SESSION STATE:** ⓪①②③④D②+①b all shipped + H8 (⓪①② Sat/Sun; ③④D②①b Sun AM). Lanes
-L1 (8/8 SETTLED) + L3 (W2b two-PR spec) filed; L2 (backlog rewrite) = the final
-doc PR this session.
+**SESSION STATE (CLOSED):** ⓪①②③④D②+①b all shipped + H8 (⓪①② Sat/Sun; ③④D²①b Sun
+AM — SHAs `27715ee`/`3ef3c83`/`d5edd50`/`9be25c4`/`74b7170`/`9a540ce`/`a6e0cb9`).
+Lanes: L1 (8/8 SETTLED — calibration out of raw mode) + L3 (W2b two-PR site-map
+spec) filed; **L2 (backlog rewrite) SHIPPED** — post-build status block prepended,
+stale #1169 "gate cleared" line corrected, decision/arm-clocks section added.
+REMAINING (Monday+): ⑤ credit-probability source (gates D④) · ⑥ partial-close
+custody (trigger-gated) · ⑦ P2 tail · W2b (two PRs) · the prompt v5.5 STATE edit
+for the 8/8-SETTLED line (operator). Sleep-hold is the operator's action tonight.
 
 ## 2026-07-12 (Sun) — GOs RECORDED + Part-3 BUILD QUEUE (⓪ thesis-basis shipped; ①②③④ sequential)
 

@@ -578,12 +578,11 @@ ops_health_check q30min-real dedup → #1114 · signal-accuracy telemetry
   stale `running` → `failed_retryable`. Batch F-A2c (breaker NULL-pnl
   streak-break) + F-A2b (per-position vs per-symbol envelope wording) here
   if trivial. · origin 07-03 FULL A4 · done when: the reaper runs scheduled.
-- **Winter-close blind hour (A10 first finding)** — `is_us_market_hours`
-  close side hardcoded 20:00Z; in EST the final session hour has data_stale
-  suppressed AND `_rth_job_status` unconditionally ok. **HARD CALENDAR
-  TRIGGER 2026-10-01** (checked whether the taxonomy PR could carry it —
-  different seam territory, kept separate). · origin 07-03 A10 · done when:
-  close side DST-hardened like the open's warm-up anchor.
+- **Winter-close blind hour (A10) — SHIPPED #1172 (07-12).** `is_us_market_hours`
+  now ET wall-clock (9:30–16:00 America/New_York) via zoneinfo (mirrors
+  intraday_risk_monitor._fallback_is_market_open_et); byte-identical for EDT, the
+  EST 20:00–21:00Z blind hour is fixed. **The 2026-10-01 hard trigger is RETIRED.**
+  Cite, don't rebuild.
 - **Scanner OI-floor strike filter (M2 follow-up)** — the general fix behind
   the GLD strike-modulus: filter selection candidates on `oi >= floor` at
   the same `_split_chain_to_calls_puts` seam (`None` → keep; the legacy

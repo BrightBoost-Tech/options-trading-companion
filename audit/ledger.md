@@ -4,6 +4,72 @@ Every finding listed here is EXCLUDED from future audit runs. Re-finding a
 ledger item is a wasted slot. Runs append new findings as `status:reported`;
 the human flips them to `status:shipped` (with PR#) or `status:rejected`.
 
+## 2026-07-11 (Sat ~19:4x ET) — BUILT: B1/B2 bucket control PR-1 (#1171) + winter-close PR-2 (#1172)
+
+STEP-0: DB 00:27Z (dow=0) / broker 20:27 ET — consistent, market CLOSED.
+
+**PR-1 — B1/B2 one-beta bucket control + same-run reservation `d86a270` MERGED +
+H8 VERIFIED** (BE `b6e0324e` / worker `ab1c8e0e` / worker-background `2c28a8e1`,
+all @ `d86a270`, created 00:39:36–37Z > merge 00:39:34Z). **Completes the BUILD
+half of the book-scaling epic** (persist+observe = #1166). `risk/bucket_control.py`:
+buckets as DATA ({SPY,DIA,QQQ,IWM}=us_equity_beta, else own). Wired into
+`_execute_per_cohort`'s staging loop (after the utilization gate): exposure =
+Σ max_loss_total of in-bucket open positions (+ same-run reservations + the
+candidate) vs BUCKET_MAX_PCT × equity; honest basis, legacy-NULL at premium WITH
+caveat (H9), equity-unreadable → cap 0 → never blocks. **Observe-first** (flag
+`BUCKET_CONTROL_ENFORCE` default OFF): log [BUCKET_SHADOW] + fire the #1139-class
+alarm (`bucket_exposure_would_block`) on a would-block that PROCEEDS; armed →
+reject with a `bucket_exposure_cap` stamp. Same-run reservation accumulates as
+each candidate stages (byte-identical for a ≤1-candidate cycle). Tests 14/14
+(exposure per basis + NULL-never-fabricated · reservation · fail-safe · polarity
+· executor 2-candidate off/armed + ≤1 byte-identical + cross-bucket).
+- **⭐ BUCKET_MAX_PCT arithmetic (owner-tunes):** at $2,068, one IC ≈$372 = 18%,
+  so **0.25** allows one IC + nothing same-bucket; 0.40 allows two. **Recommend
+  0.25.** **ENFORCEMENT = ONE composed owner decision after ~1 week of
+  [RISK_BASIS_SHADOW] + [BUCKET_SHADOW] logs: arm `RISK_BASIS_MAX_LOSS_ENABLED=1`
+  + `BUCKET_CONTROL_ENFORCE=1` together.** #1139 tripwire is the armed guard
+  meanwhile. **The book-scaling epic's BUILD is done; enforcement is a decision,
+  not a build.** backlog.md updated (weekend-ships block + P0-B status).
+
+**PR-2 — winter-close blind hour `bd6046a` MERGED + H8 VERIFIED** (BE `12f104e6`
+/ worker `ce2764d2` / worker-background `90d918a5`, all @ `bd6046a`, created
+00:45:00–01Z > merge 00:44:58Z). `is_us_market_hours` (ops_health_service.py:42)
+hardcoded UTC 13:30–20:00 = ONLY the EDT session → in EST the 20:00–21:00Z hour
+read CLOSED all winter (data_stale suppressed + `_rth_job_status` ok = the A10
+blind hour). Fix: ET wall-clock (9:30–16:00 America/New_York) via zoneinfo,
+mirroring `intraday_risk_monitor._fallback_is_market_open_et` (reuse). BYTE-
+IDENTICAL for EDT (existing June assertions pass). Winter tests: Nov 20:30/20:59Z
+now OPEN, 21:00Z=close. **Retires the 2026-10-01 hard trigger ~3 months early.**
+
+**Lane deliverables (READ-ONLY, filed):**
+- **L1 calibration-apply-ordering:** ⚠ **SELECTION sorts on `score`, NOT `ev`** —
+  and `score` is frozen from RAW ev INSIDE the scanner (`options_scanner.py:3751,
+  3919`). So moving `apply_calibration` earlier is insufficient; the fix MUST
+  RECOMPUTE `score` from calibrated ev (the real cost). TO-seam = after
+  conviction at `workflow_orchestrator.py:2441` (before rank :2495); DELETE the
+  midday :3562-3569 apply (move-not-add → else ev×mult²) + idempotency sentinel;
+  hash `ev_raw` for features_hash continuity. Effort ~M (half-full day). Raw-basis
+  prereq already closed by PR-B #1167. Filed in backlog's calibration item.
+- **L2 replay Phase-1 gaps:** (a) config blob — write at suggestions_open.py:141 /
+  close:135, `record_input(snapshot_type="config")`, PARTIAL blocker (code pinned
+  by git_sha). (b) applied calibration+conviction — capture at
+  `workflow_orchestrator.py:2441`+`:2898`, YES-blocker but LATENT (raw-mode ×1.0
+  captures trivially match; breaks the day multipliers turn non-trivial). (c)
+  decision OUTPUT + `decision_id` linkage — the UNCONDITIONAL blocker + the only
+  gap needing a MIGRATION (`trade_suggestions.decision_id`); ranked-list via
+  `record_feature("__decision__","ranked_candidates")`. Sequence: (c) critical
+  path → (a) → (b before the 8th live close). ~4–6 evenings on Monday's captures.
+- **L3 PoP census (7→canonical):** FOLD #3 (`calculate_condor_ev` p_win) + #5
+  (`_condor_pop_from_legs`, dup) into a new `calculate_pop` condor branch; DELETE
+  #6 (`_calculate_ev_pop`, dead — enrich_trade_suggestions uncalled) + #7
+  (`forecast_ev_pop`, dead — tests only); #4 (score-sigmoid fallback) + #2
+  (exit-metrics abs-delta) STAY. **Bound-assert [0,1] home = a single terminal
+  clamp in `calculate_pop`** (today only the credit branch clamps). Migration
+  order: PR-0 terminal clamp (no live change) · PR-1 dead-code delete · PR-2
+  condor fold (boundary-only, observe-first) · PR-3 fallback narrow (observe) ·
+  PR-4 exit fold (observe). Live-number-change flags: #5 boundary, #4 fallback,
+  #2 short-legs → Option-A, not silent swap.
+
 ## 2026-07-11 (Sat ~19:0x ET) — BUILT: PoP inversion fix PR-0 (#1169) + REPLAY_ENABLE Phase-0
 
 STEP-0: DB 00:01Z (dow=0) / broker 20:01 ET — consistent (UTC rolled to Sunday),

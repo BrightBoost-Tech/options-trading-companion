@@ -12,6 +12,108 @@ questions) · **RESOLVED — DO NOT REINVESTIGATE**.
 
 ---
 
+## 2026-07-12 v1.3 EXTERNAL-AUDIT ADJUDICATION — re-sequenced queue (verdicts + census in the ledger 07-12 entry)
+
+Full report: `docs/review/external-full-audit-v1.3-2026-07-12.md`. All items below
+VERIFIED against code + this DB (censuses in the ledger). **Build NOTHING was done
+this session** — read-only + these doc writes.
+
+**RE-SEQUENCED QUEUE (operator decides; verdict-driven):**
+①  E8 per-user seam · ②  arm-evidence repair package (W2/W3/W4 + heartbeat) ·
+③  replay terminal-capture contract · ④  clone risk normalizer ·
+⑤  credit-probability source (GATES decision ④) · ⑥  partial-close custody
+(hard trigger) · ⑦  the P2 tail.
+
+- **① P0 · E8 per-user typed-outcome seam (CRITICAL, <1 evening).** `intraday_
+  risk_monitor.execute()` swallows a `_check_user` exception into `ok:true,
+  completed` (`:198-216`); on the 1-user account a COMPLETE q15 protection cycle
+  fails green. FIX: mixed user results → typed `partial`; all-user failure →
+  raise/failed; a **route-driving test around `execute()` driving the PER-USER
+  loop** (NOT a source pin of the outer `run()` raise — the #1126 costume one
+  level down). CENSUS 0/671 succeeded rows in 30d = structural-unexercised, still
+  critical. **FALSIFIER (theirs): a deployed layer absent from GitHub that
+  rewrites nested user errors before runner classification — none.** · origin
+  v1.3 F-A4-E8 (promoted exclusion FAIL) · done when: no handler-caught per-user
+  failure is ever persisted `succeeded` + the execute()-route test.
+- **② P1 · ARM-EVIDENCE REPAIR PACKAGE (one work package, ~1-2 evenings) — resets
+  the W-clocks.** The observe logs can't justify their arm decisions. (a) **W2**:
+  pass `threshold_usd` + suggestion/cycle/cohort identity at all 3 callers
+  (`utilization_gate.py:349`, `portfolio_allocator.py:163`,
+  `risk_budget_engine.py:400`) so `would_flip` is ever non-null. (b) **W4**: full-
+  tuple serialization in `_top_n`/shadow log (ticker,strategy,expiry/legs,id,
+  raw/cal scores, magnitude) — `calibration_apply_ordering.py:72-74`. (c) **W3**:
+  explicit-unknown (count + fail-CLOSED/not-armable when armed) — folds WITH last
+  night's L3 unreadable-equity polarity into ONE PR (`bucket_control.py:47-60,
+  101-131`). (d) a shadow-log **expected-cycle HEARTBEAT** for [BUCKET_SHADOW]/
+  [RISK_BASIS_SHADOW]/[APPLY_ORDER_SHADOW] (nothing watches liveness → marker
+  silence is ambiguous). **⚠ CLOCK RESET: W2/W3/W4/W5 arm decisions restart from
+  THIS SHA; this week's logs are evidence-defective. W1's clock stands.** · origin
+  v1.3 W2/W3/W4/W5 + A4 liveness · done when: each shadow line carries stable
+  identity + a heartbeat, and W3 fails-closed on unknown when armed.
+- **③ P1 · REPLAY TERMINAL-CAPTURE CONTRACT (E16, ~1-2 evenings).** Four seams:
+  no-trade early return (`workflow_orchestrator.py:3771-3826`) precedes the
+  `__decision__/ranked_candidates` capture → ZERO-suggestion cycles (the dominant
+  funnel) have no output; rejected `continue`d tail omitted (PR-2 #1175 captured
+  ACCEPTED only — owned); cache-hit inputs omitted
+  (`market_data_truth_layer.py:1434-1438`); commit failure swallowed, no manifest/
+  health. FIX: terminal manifest BEFORE every return (incl. zero/reject) · capture
+  at the consumption boundary for cache+fetch · commit counts/error in the job
+  result · manifest freshness/completeness health-check. · origin v1.3 F-A4-E16
+  (promoted FAIL) · **Monday's capture pin RE-SCOPED: grades "rows exist + timing"
+  ONLY; completeness known-defective until this ships.** · done when: every run
+  (incl. zero/reject) has a terminal manifest + commit health.
+- **④ P1 · CLONE RISK NORMALIZER (E14, PRECONDITION for W2/W3 trust).** Policy-Lab
+  fork copies source `sizing_metadata.max_loss_total` unchanged across a contract
+  change + omits the top-level typed field (`policy_lab/fork.py:254-333`). CENSUS:
+  33 non-champion clones (neutral 23/23 + conservative 10/10) typed-null-but-JSON-
+  present. FIX: one normalizer rescales per-contract truth → emits the canonical
+  top-level total + consistent JSON provenance; **unknown stays explicit, never
+  silently zero.** · origin v1.3 F-A9-E14 (partial-FAIL promoted) · done when:
+  clone fills persist a rescaled typed total or an explicit unknown.
+- **⑤ P1 · INDEPENDENT CREDIT-SPREAD PROBABILITY SOURCE (GATES decision ④).**
+  Credit EV ≡ $0 because PoP is the payoff-implied fair-odds ratio (dispositive
+  algebra; census 0 credit verticals in 120d). FIX: source probability
+  INDEPENDENTLY of the payoff ratio — a validated terminal/breakeven distribution
+  — then drive the real scanner→cost→rank route in observe/replay; a production-
+  route test asserting NONZERO EV + ALL gates unchanged; observe/replay-only start.
+  **⚠ decision ④ (2-leg credit cohort experiment) is GATED on this — un-muting
+  cannot produce a qualifying entry until it ships.** ~1-2 evenings + observation.
+  · origin v1.3 F-A1/A6-E12 (promoted FAIL; corrects the #1169 closure claim) ·
+  done when: a credit vertical can carry a nonzero honest EV through the gates.
+- **⑥ P0 · RESIDUAL PARTIAL-CLOSE CUSTODY (F-A2-1, 2-3 evenings).** Partial
+  multileg closes don't reconcile residual into `paper_positions`
+  (`alpaca_order_handler.py:795-924`); a cancel/expiry → 30-min re-arm can stage
+  the full stale DB qty; parent-filled-legs-disagree logs "closed" without closing
+  (`:580-601` vs `:1002-1010`). Add partial fills as first-class residual states in
+  the E6 machine + DTE-aware terminal escalation on the 404 re-arm loop
+  (`alpaca_order_sync.py:33-84`). CENSUS 0 partial fills = structural/latent; live
+  book FLAT today. **HARD TRIGGER: before routine qty>1 credit use OR any position
+  ≤~10 DTE** (the 6 Aug-21 thesis-tracker rows are CLOSED, not open — watch for
+  the next real open near-DTE position). · origin v1.3 F-A2-1 + A10 expiry seq ·
+  done when: residual qty is reconciled before any close is authorized for it.
+- **⑦ P2 TAIL (one-line each):** F-A10-1 summer warm-up blind — derive session-open
+  from the ET/broker session object, `_RTH_WARMUP_OPEN_UTC=(14,30)` is fixed →
+  80-105min EDT first-hour blind (`ops_health_service.py:46-69`); pairs with any
+  A10 PR · F-A3-1 resolved-suggestion fallback discarded at insertion
+  (`paper_learning_ingest.py:273-313` collects order|position id, `_create_paper_
+  outcome_record` re-reads order-only) → a real close vanishes from calibration ·
+  F-A3-2 DTE bucket always-`unknown` (fetch/v3 select none of the dte fields;
+  feeds the validator's labeling) · F-A3-3 drift-guard sees committed migration
+  syntax not deployed view identity — add the `pg_get_viewdef` runtime attestation
+  as a periodic check · F-A10-2 Monday-holiday false-late (conditional; verify at
+  the next holiday) · F-A10-3 `A4_MIN_HOLD_BARS` import-time flag → import-flag
+  inventory (recycle to change) · direction='long' liar
+  (`workflow_orchestrator.py:3633`) → the typed-column-lies inventory (member #4;
+  no proved live consumer, NOT promoted) · F-A5-1 replay `data_blobs` TTL — 2MB cap
+  warns-only + retention unbuilt; start the P2 growth measurement Monday (their SQL:
+  daily count + sum(size_bytes) + sum(octet_length(payload))).
+
+**MONDAY PINS (re-scoped):** (1) replay capture first-exercise → grades **rows-
+exist + timing ONLY** (E16 completeness known-defective) · (2) E8 P0 census re-run
+after any monitor incident · (3) replay TTL growth baseline (start measuring) ·
+(4) thesis_tracker first authoritative run 17:00 CT (unchanged). The W2/W3/W4/W5
+arm clocks do NOT start until ② ships.
+
 ## 2026-07-11/12 WEEKEND SHIPS — DONE (cite the ledger, do not rebuild)
 
 Full detail in `audit/ledger.md` (07-11/12 entries). Shipped this weekend:

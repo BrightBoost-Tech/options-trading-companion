@@ -25,10 +25,11 @@ class TestCalculatePop:
     """Tests for calculate_pop function."""
 
     def test_credit_spread_with_credit_width(self):
-        """Credit spread PoP = credit / width (max_gain / total)."""
+        """Credit spread PoP = 1 − credit/width = max_loss/total (P(win))."""
         pop = calculate_pop("credit_spread", credit=1.50, width=5.0)
-        # max_gain = 150, max_loss = 350, PoP = 150 / 500 = 0.30
-        assert abs(pop - 0.30) < 0.01
+        # PR-0 (07-12): max_gain=150, max_loss=350, PoP = 350/500 = 0.70
+        # (was the inverted 150/500 = 0.30 = P(loss)).
+        assert abs(pop - 0.70) < 0.01
 
     def test_credit_spread_fallback_to_delta(self):
         """Credit spread without credit/width should use 1 - delta."""
@@ -38,8 +39,9 @@ class TestCalculatePop:
     def test_credit_put_spread(self):
         """Credit put spread PoP from credit/width."""
         pop = calculate_pop("credit_put_spread", credit=2.0, width=5.0)
-        # max_gain = 200, max_loss = 300, PoP = 200 / 500 = 0.40
-        assert abs(pop - 0.40) < 0.01
+        # PR-0 (07-12): max_gain=200, max_loss=300, PoP = 300/500 = 0.60
+        # (was the inverted 200/500 = 0.40 = P(loss)).
+        assert abs(pop - 0.60) < 0.01
 
     def test_debit_spread_uses_long_leg_delta(self):
         """Debit spread PoP ≈ long leg delta."""
@@ -134,8 +136,8 @@ class TestCalculateEvIntegration:
             strategy="credit_spread",
             width=5.0,
         )
-        # PoP = 1.50/5.0 = 0.30 (from credit/width ratio)
-        assert abs(ev_result.win_probability - 0.30) < 0.01
+        # PR-0 (07-12): PoP = 1 − 1.50/5.0 = 0.70 (P(win); was the inverted 0.30)
+        assert abs(ev_result.win_probability - 0.70) < 0.01
 
     def test_long_call_uses_delta_directly(self):
         """Long call should use delta as PoP, unchanged."""

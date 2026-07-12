@@ -15,7 +15,7 @@ def calculate_pop(
     """
     Calculate strategy-aware probability of profit (PoP).
 
-    For credit spreads: PoP ≈ max_gain / (max_gain + max_loss)
+    For credit spreads: PoP ≈ max_loss / (max_gain + max_loss) = 1 − credit/width
     For debit spreads: PoP ≈ delta of the long leg
     For single legs: PoP ≈ delta (buy) or 1 - delta (sell)
 
@@ -31,7 +31,7 @@ def calculate_pop(
     """
     legs = legs or []
 
-    # Credit spreads: PoP = max_gain / (max_gain + max_loss)
+    # Credit spreads: PoP = P(WIN) = max_loss/(max_gain+max_loss) = 1 − credit/width
     if strategy_type in (
         "credit_spread", "credit_put_spread", "credit_call_spread",
         "short_call_spread", "short_put_spread",
@@ -39,7 +39,14 @@ def calculate_pop(
         if credit and width and credit > 0 and width > credit:
             max_gain = credit * 100  # per contract
             max_loss = (width - credit) * 100
-            return max_gain / (max_gain + max_loss)
+            # FIX (2026-07-12): P(WIN), not P(LOSS). The prior
+            # max_gain/(max_gain+max_loss) reduces to credit/width = P(LOSS) —
+            # inverted, which drove credit-vertical EV strongly negative → the
+            # −999 MIN_EDGE ranker gate → the 2-leg credit cohort was silently
+            # blocked. The width-implied bound is max_loss/(max_gain+max_loss)
+            # = 1 − credit/width. Terminal [0,1] clamp = the H9 bound-assert.
+            pop = max_loss / (max_gain + max_loss)
+            return max(0.0, min(1.0, pop))
         # Fallback: credit spreads profit when short leg stays OTM → 1 - delta
         if delta is not None:
             return 1.0 - abs(float(delta))

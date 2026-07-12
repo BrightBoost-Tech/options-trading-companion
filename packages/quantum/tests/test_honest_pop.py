@@ -92,8 +92,11 @@ class TestCreditSpreadUnchanged:
         ]
         without_legs = calculate_pop("credit_spread", credit=0.70, width=2.0, delta=0.30)
         with_legs = calculate_pop("credit_spread", legs=legs, credit=0.70, width=2.0, delta=0.30)
+        # invariant preserved: the credit/width primary path ignores legs.
         assert with_legs == pytest.approx(without_legs, abs=1e-12)
-        assert with_legs == pytest.approx(70.0 / 200.0, abs=1e-9)
+        # PR-0 inversion fix: PoP = max_loss/(max_gain+max_loss) = 130/200 = 0.65
+        # (P(win)); was the inverted 70/200 = 0.35 (P(loss)).
+        assert with_legs == pytest.approx(130.0 / 200.0, abs=1e-9)
 
     def test_credit_ev_unchanged(self):
         kwargs = dict(

@@ -90,7 +90,15 @@ class TestClosePathWiring:
         assert "position_is_alpaca = True" in src
 
     def test_monitor_treats_reconciling_as_not_closed(self):
-        src = self._mon()
-        assert 'in ("deferred_uncorroborated", "unknown_reconciling")' in src
-        # counted-as-success only for a completed close — the costume is fixed
-        assert "success-costume" in src
+        # PR-①b (2026-07-12): the inline routed_to tuple was extracted into the
+        # testable _close_completed() seam — assert the BEHAVIOR, not the source
+        # string (the #1126 costume this file otherwise risks). deferred /
+        # unknown_reconciling / needs_manual_review are NOT completed closes → no
+        # force_close count; a real alpaca route IS.
+        from packages.quantum.jobs.handlers.intraday_risk_monitor import _close_completed
+        assert _close_completed({"routed_to": "unknown_reconciling"}) is False
+        assert _close_completed({"routed_to": "deferred_uncorroborated"}) is False
+        assert _close_completed({"routed_to": "needs_manual_review"}) is False  # PR-①b
+        assert _close_completed({"routed_to": "alpaca"}) is True
+        # the surrounding fail-loud comment remains
+        assert "success-costume" in self._mon()

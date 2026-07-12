@@ -182,6 +182,31 @@ class TestMarketHoursGate(unittest.TestCase):
         self.assertFalse(ohs.is_us_market_hours(
             datetime(2026, 6, 13, 15, 0, tzinfo=timezone.utc)))
 
+    # A10 winter-close fix (2026-07-12): ET wall-clock, DST-correct.
+    def test_winter_close_is_21z_not_20z(self):
+        # EST: market closes 16:00 ET = 21:00Z. The 20:00–21:00Z hour that the
+        # old hardcoded 20:00Z window read as CLOSED is now correctly OPEN.
+        self.assertTrue(ohs.is_us_market_hours(   # 20:30Z EST = 15:30 ET (the blind hour)
+            datetime(2026, 11, 17, 20, 30, tzinfo=timezone.utc)))
+        self.assertTrue(ohs.is_us_market_hours(   # 20:59Z EST = 15:59 ET (last minute)
+            datetime(2026, 11, 17, 20, 59, tzinfo=timezone.utc)))
+        self.assertFalse(ohs.is_us_market_hours(  # 21:00Z EST = 16:00 ET (close)
+            datetime(2026, 11, 17, 21, 0, tzinfo=timezone.utc)))
+
+    def test_summer_close_still_20z(self):
+        # EDT: market closes 16:00 ET = 20:00Z (byte-identical to the old window).
+        self.assertTrue(ohs.is_us_market_hours(   # 19:59Z EDT = 15:59 ET
+            datetime(2026, 7, 15, 19, 59, tzinfo=timezone.utc)))
+        self.assertFalse(ohs.is_us_market_hours(  # 20:00Z EDT = 16:00 ET (close)
+            datetime(2026, 7, 15, 20, 0, tzinfo=timezone.utc)))
+
+    def test_winter_open_is_1430z(self):
+        # EST open: 9:30 ET = 14:30Z (vs EDT 13:30Z).
+        self.assertTrue(ohs.is_us_market_hours(
+            datetime(2026, 11, 17, 14, 30, tzinfo=timezone.utc)))
+        self.assertFalse(ohs.is_us_market_hours(  # 14:29Z EST = 9:29 ET (pre-open)
+            datetime(2026, 11, 17, 14, 29, tzinfo=timezone.utc)))
+
 
 class TestHandlerWiring(unittest.TestCase):
     """Source pins on the handler: every send passes client=, the data_stale

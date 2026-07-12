@@ -269,6 +269,20 @@ def _clone_suggestion_for_cohort(
         scale = config.max_risk_pct_per_trade / 0.05
         contracts = max(1, int(round(original_contracts * scale)))
 
+    # E14 (2026-07-12): rescale the honest risk to the CLONE's contracts and emit
+    # it as BOTH the typed top-level total AND consistent JSON provenance. Pre-fix
+    # the clone copied the SOURCE's max_loss_total unchanged (mis-scaled) into
+    # sizing_metadata and omitted the top-level column (→ NULL) — so fill/orphan
+    # consumers read a NULL while the JSON lied. UNKNOWN stays EXPLICIT (None):
+    # never a fabricated 0, never a stale JSON total next to a NULL typed column.
+    # max_loss_per is the source per-contract truth (source_total/source_contracts).
+    if max_loss_per > 0:
+        clone_max_loss_total = round(max_loss_per * contracts, 2)
+        _max_loss_basis = "rescaled_from_source_per_contract"
+    else:
+        clone_max_loss_total = None
+        _max_loss_basis = "unknown_source_no_max_loss_total"
+
     # Build cloned order_json with new quantity.
     #
     # #3 convention (full-count): each leg's quantity must equal the clone's OWN
@@ -291,6 +305,9 @@ def _clone_suggestion_for_cohort(
         "cohort_name": cohort_name,
         "original_contracts": original_contracts,
         "policy_max_risk_pct": config.max_risk_pct_per_trade,
+        # E14: the clone's OWN rescaled total (or explicit None), never the source's.
+        "max_loss_total": clone_max_loss_total,
+        "max_loss_total_basis": _max_loss_basis,
     }
 
     now_iso = datetime.now(timezone.utc).isoformat()
@@ -308,6 +325,10 @@ def _clone_suggestion_for_cohort(
         "status": "pending",
         "ev": source.get("ev"),
         "risk_adjusted_ev": source.get("risk_adjusted_ev"),
+        # E14: typed top-level risk — rescaled to THIS clone's contracts, or an
+        # explicit NULL (never fabricated) — so fill/orphan consumers stop reading
+        # a NULL beside a lying JSON total.
+        "max_loss_total": clone_max_loss_total,
         "order_json": cloned_order,
         "sizing_metadata": cloned_sizing,
         "cohort_name": cohort_name,

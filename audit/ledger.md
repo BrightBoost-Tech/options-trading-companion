@@ -4,6 +4,62 @@ Every finding listed here is EXCLUDED from future audit runs. Re-finding a
 ledger item is a wasted slot. Runs append new findings as `status:reported`;
 the human flips them to `status:shipped` (with PR#) or `status:rejected`.
 
+## 2026-07-11 (Sat ~21:1x CT) — BUILT: PoP census PR-0 terminal clamp (#1178) + PR-1 delete #7 (#1179)
+
+STEP-0: DB `02:03Z` (America/Chicago `21:03`, Sat) / broker `22:03 ET` = `21:03
+CT`, agree to the second; market CLOSED. Sunday FULL nightly at 00:00 CT — PR-0
+H8 landed ~21:12 CT, PR-1 H8 ~21:19 CT, both clear of the ~23:00 CT hold gate
+(margin ~2h40m). Sequential, H8 between.
+
+**PR-0 — terminal [0,1] clamp in calculate_pop `aca743a` MERGED + H8 VERIFIED**
+(BE `70f3f755` / worker `19307182` / worker-background `7f02521d`, all @
+`aca743a`, created 02:09:15–16Z). calculate_pop clamped [0,1] on the CREDIT
+branch ONLY (`ev_calculator.py:49`); every other branch (debit interp/midpoint/
+long-only, short/long single-leg, raw-delta + neutral fallbacks) returned
+UNCLAMPED and the `calculate_ev` consumer (`:176`→win_prob) fed them into EV
+math. Fix: ONE clamp at the exit (`_clamp_pop`), every branch returns THROUGH it
+(credit's inline clamp folds in — no double-clamp); LOG on engagement
+(`[POP_BOUND_ENGAGED]` raw+branch+strategy, #1147 pattern) so an out-of-range
+value is caught AND observable; non-finite → 0.5 neutral + logged. NO LIVE CHANGE
+(max(0,min(1,x))==x for x∈[0,1]; in-range byte-identical, the clamp never engages
+on the live book). Tests 15/15 (11 in-range cases bounded + assertNoLogs = the
+no-op proof; clamp binds+logs on >1/<0/non-finite; end-to-end |delta|=1.3 → 1.0
+long / 0.0 short + branch-tagged). **SATISFIES the PoP-unification "bound-assert
+at the compute site" backlog line — the single terminal clamp IS the home; do
+NOT scatter per-site clamps.**
+
+**PR-1 — delete dead #7 `forecast_ev_pop` `1b8217b` MERGED + H8 VERIFIED**
+(BE `242f7668` / worker `97b71557` / worker-background `285ab979`, all @
+`1b8217b`, created 02:16:28–29Z). Zero-caller RE-VERIFIED at HEAD (`aca743a`, NOT
+the census): only the def (`forecast_interface.py:129`) + test_forecast.py
+(import + 2 tests); no prod caller, no re-export (`forecast/__init__.py` bare
+docstring), no getattr/registry indirection. Deleted the function + orphaned test
+import + the TestForecastEvPop class; no imports orphaned. Inert.
+test_forecast.py 30 passed (was 32). Zero residual refs in packages/.
+
+**PoP 7-way census — UPDATED MAP (canonical = calculate_pop, now terminally
+clamped):**
+- **#1 `calculate_pop`** (`ev_calculator.py:8`) = CANONICAL; PR-0 added the single
+  terminal [0,1] clamp (the bound-assert home).
+- **#7 `forecast_ev_pop`** = **DELETED** (#1179).
+- **#6 `_calculate_ev_pop`** (`opportunity_scorer.py:316`) = **CLUSTER-RETIRE
+  FILED** — NOT a trivial delete (caller `OpportunityScorer.score()` exercised by
+  4 test files; dead-in-prod only transitively via the never-called
+  `enrich_trade_suggestions`, `trade_builder.py:14`). Own PR: retire
+  score/_calculate_ev_pop/_calculate_liquidity_penalty + enrich_trade_suggestions
+  + the `optimizer.py:24` dead import + the 4 scorer test files together.
+- **#3 `calculate_condor_ev` p_win** + **#5 `_condor_pop_from_legs`** (dup) =
+  **FOLD into a calculate_pop condor branch** — the NEXT PoP PRs, boundary-only
+  (observe-first; #5 clamps [0.01,0.99] vs canonical [0,1]), Option-A not a silent
+  swap.
+- **#4 score-sigmoid fallback** (`options_scanner.py:2134`) + **#2 exit-metrics
+  abs-delta** (`ev_calculator.py:405`, live exit path) = **KEEP** (#4 narrow-only;
+  #2 stays — folding touches the live take-profit path).
+- **2-leg credit cohort's remaining PoP gate = the fold PRs** (#3/#5), sequenced
+  after the #6 cluster-retire.
+
+Untouched: everything else. Night ends here.
+
 ## 2026-07-11 (Sat ~20:3x ET) — BUILT: calibration apply-move PR-1 (#1174) + replay gap-(c) PR-2 (#1175) + prequential validator PR-3 (#1176)
 
 STEP-0 (premise correction): the prompt/summary said "Sunday"; DB `01:21Z`

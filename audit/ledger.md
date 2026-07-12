@@ -65,8 +65,25 @@ thesis_outcomes_price_basis` (ALTER … ADD COLUMN price_basis text) applied +
 tracked (version `20260712120301`, col_ok=1) + read-back BEFORE merge; table 0
 rows (no backfill; born-honest before the Mon 17:00 CT first authoritative fill).
 Observe-only, modulates nothing. Tests 5/5 (exact / fallback+date / post-expiry-
-bar-excluded / unknown-not-fabricated / feed-failure→unknown). H8 recorded at
-PR-①'s entry.
+bar-excluded / unknown-not-fabricated / feed-failure→unknown). **MERGED #1185
+`27715ee` + H8 VERIFIED** (BE `341a5f7e` / worker `f4efe582` / worker-background
+`81d48f7c`, all @ `27715ee`, created 12:10:01Z).
+
+**PR-① — E8 per-user seam BUILT (this PR).** F-A4-E8: `execute()` now COUNTS
+per-user failures (`users_failed`) — ALL users failed → RAISE (runner records
+failed_retryable; on the 1-user account a single failure IS a complete cycle
+failure); MIXED → typed PARTIAL (`users_failed` + `counts.errors` populated →
+`_classify_handler_return` returns 'partial', was 'succeeded'); zero-failure
+classification byte-identical (succeeded). The route-driving test drives
+`execute()` END-TO-END through a `_check_user` failure (NOT the source-pin of the
+outer raise — the sharpened doctrine line). Tests 4/4 route + existing
+typed-outcome 15/15 + force-close/intraday 39/39 green. **RIDER DECISION:
+F-A8/E6-edge is OWN PR (PR-①b), NOT same-PR** — `submit_and_track` cleanly returns
+`{status:needs_manual_review}` (+ already fires a critical alert) but making it
+not-read-as-success spans 3 functions across 2 files (`_close_position` return →
+`_execute_force_close` success mapping → the monitor's force_closes_submitted/
+cooldown/closed_in_this_cycle accounting) — a distinct seam; entangling it would
+broaden the critical fix's blast radius. H8 recorded at PR-①b's entry.
 
 ## 2026-07-12 (Sun ~06:3x CT) — FULL-REPORT TRIAGE + OWNER DECISIONS PRESENTED (awaiting operator confirmation before any build)
 

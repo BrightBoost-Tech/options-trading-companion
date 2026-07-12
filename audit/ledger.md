@@ -4,6 +4,143 @@ Every finding listed here is EXCLUDED from future audit runs. Re-finding a
 ledger item is a wasted slot. Runs append new findings as `status:reported`;
 the human flips them to `status:shipped` (with PR#) or `status:rejected`.
 
+## 2026-07-12 (Sun ~06:3x CT) — FULL-REPORT TRIAGE + OWNER DECISIONS PRESENTED (awaiting operator confirmation before any build)
+
+STEP-0: DB `11:31Z` = Sunday `06:31 CT` / broker `07:31 ET` = `06:31 CT`, agree to
+the second; NO UTC-roll bite (both are 07-12). Market CLOSED.
+
+**PART 1 — the FULL ran correctly.** cron.log: 07-12 `start 0:00:18 → end (exit 0)
+0:17:51 → ping sent (curl exit 0)` = scheduled ✅ FULL mode ✅ (header "three
+passes per area") all 11 areas ✅ ping GREEN ✅. Expected-state handling WORKED:
+breaker 2nd designed suppression, flat book (0 positions), four-source agreement
+everywhere — the inverted block is functioning. The FULL respected the v1.3
+exclusion floor: **E8/E12/E14/E16/W2-W5/F-A2-1 CONVERGED (cited, NOT re-found)** →
+the ①-④ queue owns them.
+
+**TRIAGE TABLE (NEW findings only; CONVERGED = above):**
+| Finding | Sev | Path | Decision |
+|---|---|---|---|
+| F-A9-THESIS-BASIS — thesis_tracker `_underlying_at_expiry` (thesis_tracker.py:55-57) grades a ≤7d-stale fallback bar as the expiry price + persists a TERMINAL hit/miss with NO price-basis field; thesis_basis prints it as expiry price while claiming "NEVER fabricated H9" (thesis_scoring.py:20,88-121) | MED | Evidence — the standing thesis-hit metric the owner steers by; NOT live capital; 0 rows yet | **FIX-TODAY (recommend), PENDING OWNER GO** — time-sensitive: first authoritative fill Mon 17:00 CT; 1 field + 1 line, observe-only, born-honest if shipped first; same 2 files as F-A9-1. NOT in the ①-④ queue → a PR-⓪ insertion candidate. |
+| F-A4-SLEEP-DEATH — 07-11 nightly machine-sleep kill (start-no-end; end-marker unconditional so external kill); 4th weekend (06-14·06-20·06-30·07-11); WakeToRun holds no wake-lock | — | Evidence-integrity (audit coverage); NO repo code | **ESCALATE (operator)** — (1) confirm the 07-11 healthchecks DOWN email ARRIVED (else dead-man unarmed); (2) ES_SYSTEM_REQUIRED sleep-hold or mid-run-safe schedule. |
+| A5 observability noise — 07-10 14:02Z 5-row loss (#1104 residual, 2nd occ, 11 cumulative) re-egressed hourly ×9; `ops_output_stale` ×10 flat-book false HIGH | MED | Alert-hygiene | **FILE (already filed) — ⚠ slipped THREE build days** (07-08→07-12); the only found item not converging. Owner: give it a slot (fold iv_daily_refresh EXPECTED_JOBS half). |
+| `bucket_exposure_would_block` severity='warning' → no egress/relay despite the "#1139-class alarm" comment (paper_autopilot_service.py:1063-64) | LOW-MED | Evidence (observe-week relies on it) | **FILE** — fold into the composed observe→enforce packet (D③); owner READs logs meanwhile. |
+
+**A11 FULL-FORMAT DEBUT — GRADE: STRONG, well-formed (all 4 components present).**
+Proposed lens = **SECURITY & CREDENTIAL HYGIENE** (secret scanning · git-history
+exposure · key rotation · RLS/permission surfaces · MCP/tool allow-lists).
+Examines: credential/permission-surface drift nothing else owns. Ten miss: the
+incumbent watches TIME boundaries only. Concrete finding-shaped example: F-FREE-1
+checked-in Supabase keys (found by an UN-lensed free look, not a charter) + its 2
+operator tails (history cleanup + secret-scanning) still OPEN/unaudited + the
+nightly's own allow/deny list is a growing security surface with no reviewer.
+Replace-vs-queue: argues the incumbent "completed its headline (winter-close),
+look-list in maintenance, marginal yield falling." **My grade:** a genuinely
+uncovered surface + a real finding-example → QUEUE-worthy. BUT the replace half is
+WEAK — F-A10-1 (summer warm-up blind, HIGH) shows Calendar & Clock is STILL
+finding, and A10 still guards DST 11-01. Not a clean retirement. → feeds D①.
+
+**A7 COUNTER RECONCILIATION (corrects the prompt's "9/10"):** two different
+counters — all-time live closes = 9 (v1.3's "9/10") vs the #1102-instrumented
+close-fill-gap counter = **3/10-15** (the meaningful A7-reinstatement gate, needs
+the fill-quality instrumentation). By the correct counter A7 is FAR from
+reinstatement (3/10-15), NOT near. The causal close-quality charter reshape
+happened in v1.3, not tonight (tonight A7 = one dormant line). PASS-3: all EARNING
+except A5 SLIPPING; NO area at 6, NO retirement proposed. **Anti-drift:** Saturday's
+FIX-TODAYs all shipped (#1174-#1182, ledgered); the ONE item pending >2 days = the
+3-in-1 observability PR (07-08→07-12).
+
+**PART 2 — FOUR OWNER DECISIONS PRESENTED (my recommendations; AWAITING operator
+confirmation — NOTHING built until the GOs are recorded):**
+- **D① A10 ROTATION.** REC: **KEEP Calendar & Clock one more cycle** (F-A10-1 HIGH
+  proves it's still earning; A10 counter=4 not 6; DST 11-01 still to guard) +
+  **QUEUE the SECURITY lens** (A11's proposal, strong) for the next rotation.
+  Owner's call.
+- **D② SHADOW UN-MUTING.** REC: **un-mute at queue-④'s SHA** (after the clone
+  normalizer) — until then new shadow evidence is born risk-contaminated (E14
+  census 33/33 non-champion typed-null). Promotion-comparison caveat, owner picks:
+  shared calibration = honest cross-cohort comparison; split = the experiment
+  breathes.
+- **D③ THE COMPOSED ARM (W2+W3).** RESHAPE: clocks are RESET → NO arm this week
+  regardless. Decision = **GO on the arm-evidence-repair PACKAGE (queue ②) + the
+  W3 double-polarity fix as its precondition**; clocks restart at that SHA. GO on
+  the package, not the arm.
+- **D④ 2-LEG CREDIT COHORT.** RESHAPE: GATED on the credit-probability source
+  (queue ⑤; E12 algebra means un-muting cannot produce a qualifying entry).
+  Decision = **approve queue-⑤'s spec** (independent terminal/breakeven
+  probability source, production-route test asserting NONZERO EV + unchanged
+  gates, observe/replay-only start; ~1-2 evenings + observation) as next week's
+  strategy build. GO on the spec.
+
+**STOP for operator confirmation. Part 3 (PR-① E8 seam → PR-② arm-evidence → PR-③
+replay terminal → PR-④ clone normalizer, + the possible PR-⓪ thesis-basis) builds
+ONLY on the recorded GOs. ①② are the must-lands if the day runs long; ③④ hold to
+Monday post-close at no cost (capture completeness already known-defective).**
+
+## 2026-07-12 (Sun 00:01 CT) — FULL NIGHTLY AUDIT (v5.5, scheduled) — report audit/reports/2026-07-12.md
+
+STEP-0: DB 05:01:47Z = Sunday 00:01 CT / broker 01:02 ET — agree to the minute; FULL mode.
+Broker READ (not blind): equity=cash=OBP $2,067.86, book FLAT. H8: all 3 services @ `a120c5f`
+= origin/main; run-START = run-END SHA (first run under the run-boundary pin). H11: 0 critical.
+Budgets: 15 SQL · 2 broker · 6 Railway · 6 subagents.
+
+**NEW FINDINGS (status:reported):**
+- **F-A9-THESIS-BASIS (MED, observe-only surface, TIME-SENSITIVE for Mon 17:00 CT):**
+  thesis_tracker `_underlying_at_expiry` silently falls back to the last bar ≤7d before expiry
+  (thesis_tracker.py:55-57) and persists a TERMINAL hit/miss (never re-scored, :84-88/:117) with
+  NO price-source/date field; thesis_basis prints the price as the expiry price
+  (thesis_scoring.py:88-121) while the module claims "NEVER fabricated (H9)" (:20). Table still
+  0 rows — first authoritative fill Mon 17:00 CT. Fix: persist price_basis(_date) + surface in
+  thesis_basis (or strict-mode: unknown when no exact-expiry bar). Born-honest if shipped first.
+- **F-A4-SLEEP-DEATH (operator-side, no repo code):** the 07-11 nightly start-with-no-end is
+  PROVEN external kill — run-nightly.cmd's end marker is UNCONDITIONAL (fires even on claude
+  errors, cf. cron.log 06-13), so the cmd process died: machine re-slept moments after the
+  00:00:02 start. 4th occurrence, ALL weekends (06-14 · 06-20 · 06-30 · 07-11). WakeToRun wakes
+  to START but holds no wake-lock for the run; ping-after-file is positive-only and never ran.
+  Operator: (1) confirm the healthchecks DOWN email for the missed 07-11 ping ARRIVED (if not,
+  the nightly dead-man is unarmed); (2) add a sleep-hold (ES_SYSTEM_REQUIRED wrapper) or
+  equivalent.
+- Shared A2/A9 one-liner: `bucket_exposure_would_block` writes severity='warning' → unpaged
+  (paper_autopilot_service.py:1063-1064) though the comment says "#1139-class alarm" — fold the
+  severity choice into the composed observe→enforce owner decision, not a separate PR.
+
+**VERIFICATIONS CLOSED:**
+- ★ **First calibrated PRODUCTION ev — PROVEN + persisted:** 07-10 16:00Z QQQ IC
+  `ev 18.73 = ev_raw 37.46 × 0.5000` (+ SOFI 14:02Z ×0.5), blocked ev_below_roundtrip_cost /
+  edge_below_minimum. F-A1-3 re-scope honored (persisted ev + final gate only; selection RAW).
+  **The composed floor×gate ZERO-ENTRY regime is live-exercised** — the A1 clamp-review exhibit
+  now has a production data point (QQQ-IC missed by ~2.1 EV pts). 16:00Z scan LOSSLESS.
+- Breaker suppression #2 (07-10 21:20Z): `suppressed_standing_window:true` on unchanged
+  fingerprint; entries stayed armed. Designed case-3, second live proof.
+- Weekend-PR content verification (subagent reads @ a120c5f): #1178 all-10-branch terminal
+  clamp + no double-clamp + zero forecast_ev_pop refs · #1171 seam order (utilization→bucket),
+  strict =1 parse, reservation-per-cohort, no unit mix · #1174 flag-off path mutates NOTHING
+  (byte-identical claim holds; legacy :3601 single-apply guarded) · #1172 winter-close ET
+  wall-clock VERIFIED + repo-wide sweep: NO remaining winter-blind arithmetic (heartbeat crons
+  CHICAGO_TZ) — **2026-11-01 trigger retired** · all 6 new flags CALL-TIME reads (no import-time
+  growth) · #1164 Monday wiring complete (17:00 CT → background queue → EXPECTED_JOBS → typed
+  PARTIAL contract) · E12 / E6-edge (submit_and_track discard :2245) / W2 / W3 / W4 all
+  UNCHANGED (cited, clocks stay reset) · zero stale `hit_rate` readers post-F-A9-1.
+- A5 continuation counts: 07-10 14:02Z scan lost 5 rejection rows (#1104 residual, 2nd
+  occurrence, 11 cumulative) → 9 hourly phone egresses for the one condition; ops_output_stale
+  ×10 flat-book HIGHs. **3-in-1(+1) observability PR slipped a 3rd build day** — TOP-2.
+- M4 quarantine held: all 168 micro_tier rejects confined to excluded 07-06; zero recurrence.
+
+**PROMPT-STATE CORRECTIONS for v5.6 (movers = 07-11 builds; loop does not edit the prompt):**
+(1) iv_daily_refresh ok-on-all-missing FIXED (iv_daily_refresh.py:170-173) — EXPECTED_JOBS half
+still open, ride the 3-in-1 PR; (2) watchdog now watches real paper_learning_ingest
+(ops_health_service.py:117) — stub-watch claim stale; (3) P0-B BUILD half COMPLETE
+(#1166+#1171 observe-off) — enforcement is a composed owner decision on ~1wk of shadow logs.
+
+**A11 FULL-form proposal (owner-gated):** rotate A10 → SECURITY & CREDENTIAL HYGIENE lens
+(incumbent's headline shipped+verified; F-FREE-1 tails unaudited; the nightly allow-list is
+itself an unreviewed security surface). Decision remains the owner's.
+
+**PENDING (Mon 07-13):** 16:00Z replay capture rows-EXIST + timing (E16 re-scope: completeness
+known-defective) · first [APPLY_ORDER_SHADOW]/[GATE_QTY]/[RISK_BASIS_SHADOW]/[BUCKET_SHADOW]
+clean lines · 17:00 CT first thesis run (0 rows tonight — ledger's 16-row table was preview) ·
+native [CLOSE_FILL_GAP] + last_marked_at stamp still gated on a live close · healthchecks DOWN
+confirm (above). Retirement counters: A1/A3/A6/A10 at 4 · A8 3 · A2/A5 2 · A4/A9 reset 0.
+
 ## 2026-07-12 (Sat ~21:3x CT) — ADJUDICATED: external full audit v1.3 (4th engagement) — READ-ONLY, doc writes only
 
 STEP-0: DB `02:35Z` (America/Chicago `21:35`, Sat) / broker `22:35 ET` = `21:35

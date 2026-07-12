@@ -147,6 +147,23 @@ def _fallback_is_market_open_et(now: Optional[datetime] = None) -> bool:
 # the RISK_EQUITY_SOURCE rip-cord.
 
 
+# F-A8/E6-edge (2026-07-12): a close result that routed to one of these is NOT a
+# completed close — no force_close count, no cooldown, no same-cycle suppression.
+# `needs_manual_review` (terminal submit failure) was previously invisible here, so
+# a known-failed submit read as a routed success ("Force-closed" + counts + cooldown).
+_NOT_COMPLETED_CLOSE_ROUTES = frozenset({
+    "deferred_uncorroborated", "unknown_reconciling", "needs_manual_review",
+})
+
+
+def _close_completed(result) -> bool:
+    """A close COUNTS as completed (→ force_close count / cooldown / same-cycle
+    bench) only when it did NOT route to a not-completed sentinel — deferred (dark
+    executable side), unknown_reconciling (broker ack lost), or needs_manual_review
+    (terminal submit failure)."""
+    return (result or {}).get("routed_to") not in _NOT_COMPLETED_CLOSE_ROUTES
+
+
 def run(payload: Dict[str, Any], ctx: Any = None) -> Dict[str, Any]:
     """
     Main entry point — called by the job runner.
@@ -1481,7 +1498,7 @@ class IntradayRiskMonitor:
             # :1428 success-costume (internal-fill fallthrough is now impossible
             # for live).
             _rt_p0a = (result or {}).get("routed_to")
-            if _rt_p0a in ("deferred_uncorroborated", "unknown_reconciling"):
+            if not _close_completed(result):
                 logger.warning(
                     f"[RISK_MONITOR] close NOT completed ({_rt_p0a}) for {symbol} "
                     f"({str(pos_id)[:8]}) reason={reason} — position held OPEN, "

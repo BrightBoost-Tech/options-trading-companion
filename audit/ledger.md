@@ -97,10 +97,32 @@ thesis comparisons are basis-INDEPENDENT; the experiment layer breathes from
 Monday's first 11:00 CT scan (fork runs post-scan; the neutral/conservative clones
 emit raw-EV rows).
 
-**SESSION STATE:** ⓪①②③④D② all shipped + H8 (this session ⓪①② Sat/Sun, ③④D② Sun
-AM). PR-①b (F-A8/E6-edge) is OPTIONAL — see the next entry if built, else it holds
-to Monday post-close (stated). Lanes L1 (8/8 SETTLED) + L3 (W2b two-PR spec)
-filed; L2 (backlog rewrite) pending this session.
+**PR-D② — MERGED #1190 `9a540ce` + H8 VERIFIED** (BE `25ef4d5d` / worker
+`b1a6c13c` / worker-background `50b85631`, all @ `9a540ce`, created 15:05:47Z).
+
+**PR-①b — F-A8/E6-edge (needs_manual_review costumed as routed success) BUILT (this
+PR).** The runway held → the optional fourth build shipped. `_close_position`
+(paper_exit_evaluator.py:2245) DISCARDED submit_and_track's return and
+unconditionally reported `routed_to='alpaca'`; a terminal `needs_manual_review`
+submit failure therefore read as a routed success → the monitor emitted
+"Force-closed", counted force_closes_submitted, could write cooldown, and
+suppressed the same-cycle retry (E6's no-phantom-fill invariant still held — this
+is a telemetry/accounting lie, not a ghost fill). FIX (2 sites, the operator's 3
+functions): (1) `_close_position` captures the return; on `status==
+needs_manual_review` returns a NOT-completed sentinel `routed_to='needs_manual_
+review'` (position held OPEN for review); (2) the monitor's success accounting is
+now the extracted, testable `_close_completed(result)` — `needs_manual_review`
+joins `deferred_uncorroborated`/`unknown_reconciling` in the not-completed set, so
+no force_close count / cooldown / same-cycle suppression. BYTE-IDENTICAL for every
+other route (only needs_manual_review changed). The evaluator's own scheduled-exit
+path (:1385) is routed_to-agnostic → no regression. Tests 4/4 (`_close_completed`:
+needs_manual_review→False · deferred/unknown→False · alpaca+5 others→True
+byte-identical · None/missing→True) + E8 4/4 + force-close 16/16 green. MERGED +
+H8 recorded in the session summary.
+
+**SESSION STATE:** ⓪①②③④D②+①b all shipped + H8 (⓪①② Sat/Sun; ③④D②①b Sun AM). Lanes
+L1 (8/8 SETTLED) + L3 (W2b two-PR spec) filed; L2 (backlog rewrite) = the final
+doc PR this session.
 
 ## 2026-07-12 (Sun) — GOs RECORDED + Part-3 BUILD QUEUE (⓪ thesis-basis shipped; ①②③④ sequential)
 

@@ -160,8 +160,12 @@ def _sum_open_cost_basis(open_positions: Sequence[Dict[str, Any]]) -> float:
         log_risk_basis_shadow, choose_basis,
     )
     _honest = honest_total if honest_any else None
+    # W2 (2026-07-12): the open-book value is a CONTINUOUS budget input, not a
+    # binary gate — would_flip is not well-defined here (the logged basis DELTA is
+    # the signal); identity + the unknown-coverage flag carry the join key.
     log_risk_basis_shadow("allocator_open_book", total, _honest,
-                          context={"n_open": len(open_positions or [])})
+                          context={"n_open": len(open_positions or []),
+                                   "honest_coverage": honest_any})
     return choose_basis(total, _honest)
 
 

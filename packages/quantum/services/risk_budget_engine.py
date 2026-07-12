@@ -397,8 +397,12 @@ class RiskBudgetEngine:
             log_risk_basis_shadow as _rb_log, choose_basis as _rb_choose,
         )
         _honest_ru = honest_risk_usage if honest_any else None
+        # W2 (2026-07-12): pass the DECISION threshold (the capital-mismatch trip at
+        # `current_risk_usage > deployable_capital*2` below) so would_flip is REAL,
+        # not None — records whether switching premium→max_loss basis crosses it.
         _rb_log("rbe_open_book", current_risk_usage, _honest_ru,
-                context={"n_positions": len(positions)})
+                context={"n_positions": len(positions)},
+                threshold_usd=(deployable_capital * 2 if deployable_capital > 0 else None))
         current_risk_usage = _rb_choose(current_risk_usage, _honest_ru)
 
         if current_risk_usage > deployable_capital * 2 and deployable_capital > 0:

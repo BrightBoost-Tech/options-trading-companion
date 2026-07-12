@@ -83,7 +83,44 @@ F-A8/E6-edge is OWN PR (PR-①b), NOT same-PR** — `submit_and_track` cleanly r
 not-read-as-success spans 3 functions across 2 files (`_close_position` return →
 `_execute_force_close` success mapping → the monitor's force_closes_submitted/
 cooldown/closed_in_this_cycle accounting) — a distinct seam; entangling it would
-broaden the critical fix's blast radius. H8 recorded at PR-①b's entry.
+broaden the critical fix's blast radius. **MERGED #1186 `3ef3c83` + H8 VERIFIED**
+(BE `f1184417` / worker `7fcd9f82` / worker-background `b8f35a7b`, all @ `3ef3c83`,
+created 12:17:54Z).
+
+**PR-② — ARM-EVIDENCE REPAIR (the clock-reset PR) BUILT (this PR).**
+- **W3 (safety non-negotiable, DONE):** bucket_control unknown-risk is EXPLICIT —
+  `_risk_from_fields`/`position_risk_usd`/`candidate_risk_usd` now return
+  `(usd, legacy, is_unknown)` (never a silent $0); `evaluate_bucket` surfaces
+  `unknown_risk_present`/`unknown_open_count`/`equity_readable`/`not_armable`; a new
+  pure `bucket_enforcement_action(decision, armed)` is the single seam — **ARMED +
+  not-armable (unknown risk OR unreadable equity) → BLOCK** (`bucket_not_armable_
+  unknown_risk`), the L3 equity-unreadable polarity folded in; OBSERVE → alarm on a
+  cap breach only. Caller (`paper_autopilot_service.py:1038`) rewired through it.
+  **The non-negotiable test is explicit** (armed+unknown → block; observe+unknown →
+  proceed-logged; armed+cap → block; armed+unreadable-equity → block).
+- **W4 (DONE):** `_top_n` serializes the full identity tuple (ticker, strategy, id,
+  legs/expiry fingerprint, score); `_order_key` compares STRUCTURAL ordering (score
+  dropped) so a same-ticker structure swap flips `would_differ` (the QQQ ×4 blind
+  spot). Test proves ticker-only agrees while the structural key differs.
+- **W2 (PARTIAL — clean parts DONE, one rider):** stable identity (suggestion_id/
+  cohort) added at all 3 callers; the DECISION threshold passed at the RBE site
+  (`deployable_capital*2`, in scope) → would_flip REAL there. ⚠ **W2b RIDER
+  (deferred, documented):** the utilization would_flip threshold (headroom) needs
+  committed+OBP from `evaluate_entry`, a log-RELOCATION to the decision site; the
+  allocator open-book value is a CONTINUOUS budget input (would_flip is not a
+  binary concept there — the delta is the signal). Not entangled into this
+  safety-critical PR.
+- **Heartbeat (DONE):** `log_shadow_heartbeat(window, evaluated, …)` fires per-cycle
+  EVEN AT 0 — wired at the APPLY_ORDER scoring seam (every scan, pre-early-return)
+  + the executor per-cohort loop (`EXECUTOR_SHADOW`, covers BUCKET+RISK_BASIS). Marker
+  silence is now diagnosable (ran-saw-nothing vs did-not-run).
+- Tests: 13 new (arm_evidence_repair) + calibration_apply_ordering 11/11 +
+  bucket_control (4 arity-updated) + consumers 162/4-skip green.
+- **⚠ CLOCK RESET (ledgered): W2/W3/W4/W5 arm clocks RESTART at PR-②'s SHA.** This
+  week's shadow logs are evidence-defective for the arm decisions; W1's clock
+  stands. W2b (utilization/allocator would_flip) + the F-A8/E6-edge rider (PR-①b) +
+  PR-③ replay-terminal + PR-④ clone-normalizer HOLD to Monday post-close (operator
+  sanctioned; ⓪①② were the must-lands). H8 recorded in the session summary.
 
 ## 2026-07-12 (Sun ~06:3x CT) — FULL-REPORT TRIAGE + OWNER DECISIONS PRESENTED (awaiting operator confirmation before any build)
 

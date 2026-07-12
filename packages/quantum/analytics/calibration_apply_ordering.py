@@ -69,9 +69,41 @@ def recompute_score(candidate, ev_mult):
         return candidate.get("score")
 
 
+def _cand_identity(c):
+    """Structural identity for a candidate (W4, 2026-07-12). Ticker ALONE collides
+    on same-ticker multi-structure cycles (the packet-observed QQQ ×4 case), so a
+    reorder among them read as would_differ=False. Include strategy + a legs/expiry
+    fingerprint + id so a structural swap is visible."""
+    fp = c.get("legs_fingerprint")
+    if not fp:
+        legs = c.get("legs") or (c.get("order_json") or {}).get("legs") or []
+        try:
+            fp = "|".join(sorted(
+                f"{l.get('type', l.get('right', ''))}{l.get('strike', '')}"
+                f"{l.get('expiry', '')}{l.get('action', l.get('side', ''))}"
+                for l in legs)) or None
+        except (TypeError, AttributeError):
+            fp = None
+    return (c.get("ticker"), c.get("strategy"),
+            c.get("suggestion_id") or c.get("id"), fp)
+
+
 def _top_n(candidates, score_of, n=5):
+    """Ranked full-tuple identities (ticker, strategy, id, fp, score) — the score
+    is carried for magnitude but is NOT part of the ordering-comparison key (frozen
+    vs calibrated scores differ by construction; _order_key drops it)."""
     ranked = sorted(candidates, key=lambda c: -(score_of(c) if score_of(c) is not None else -1e9))
-    return [c.get("ticker") for c in ranked[:n]]
+    out = []
+    for c in ranked[:n]:
+        s = score_of(c)
+        out.append(_cand_identity(c) + (round(float(s), 4) if s is not None else None,))
+    return out
+
+
+def _order_key(ranked_tuples):
+    """The structural ordering, score dropped — a same-ticker STRUCTURE swap
+    changes this even though the ticker list is unchanged (the W4 fix)."""
+    return [t[:-1] for t in ranked_tuples]
 
 
 def apply_calibration_at_scoring(candidates, cal_adj_cache, regime, *,
@@ -81,6 +113,15 @@ def apply_calibration_at_scoring(candidates, cal_adj_cache, regime, *,
     `_pop_raw_true`). OBSERVE (off): compute the calibrated ordering on the side
     + log [APPLY_ORDER_SHADOW], mutate NOTHING. Fail-safe per candidate; a
     failure of the whole seam must never break the cycle (caller wraps too)."""
+    # Heartbeat FIRST — fires every scan even when this seam no-ops (empty cache /
+    # 0 candidates / disabled), so [APPLY_ORDER_SHADOW] silence is diagnosable.
+    try:
+        from packages.quantum.services.risk_basis_shadow import log_shadow_heartbeat
+        log_shadow_heartbeat("APPLY_ORDER", len(candidates or []),
+                             armed=is_apply_at_scoring_enabled(),
+                             cache=bool(cal_adj_cache), enabled=bool(cal_enabled))
+    except Exception:
+        pass
     if not cal_enabled or not cal_adj_cache or not candidates:
         return candidates
     armed = is_apply_at_scoring_enabled()
@@ -111,9 +152,12 @@ def apply_calibration_at_scoring(candidates, cal_adj_cache, regime, *,
         try:
             frozen = _top_n(candidates, lambda c: c.get("score"))
             cal = _top_n(candidates, lambda c: recomputed.get(id(c)))
+            # W4: compare STRUCTURAL ordering (ticker+strategy+id+fp), not the
+            # ticker-only list — a same-ticker structure swap now flips would_differ.
+            would_differ = _order_key(frozen) != _order_key(cal)
             logger.info(
                 "[APPLY_ORDER_SHADOW] n=%d frozen_top5=%s calibrated_top5=%s would_differ=%s",
-                len(candidates), frozen, cal, frozen != cal)
+                len(candidates), frozen, cal, would_differ)
         except Exception as e:
             logger.warning("[APPLY_ORDER_SHADOW] log failed: %s", e)
     return candidates

@@ -490,6 +490,10 @@ DROPPABLE_SUGGESTION_COLUMNS = {
     # merge (see CLAUDE.md Migrations) — this is the deploy-ordering guard.
     "max_profit_total",
     "net_ev",
+    # gap-(c) 2026-07-12: decision_id linkage. Droppable so a code-before-
+    # migration deploy strips-and-retries instead of failing the insert (the
+    # 20260712*_trade_suggestions_decision_id migration adds the column).
+    "decision_id",
 }
 
 
@@ -3827,6 +3831,17 @@ async def run_midday_cycle(supabase: Client, user_id: str, deployable_capital_ov
         inserts_count = 0
         existing_count = 0
 
+        # gap-(c): the DecisionContext id, for linking each suggestion to the
+        # decision that produced it (None when REPLAY_ENABLE off).
+        try:
+            from packages.quantum.services.replay.decision_context import (
+                get_current_decision_context as _gdc,
+            )
+            _dc_link = _gdc()
+            _decision_id = str(_dc_link.decision_id) if _dc_link is not None else None
+        except Exception:
+            _decision_id = None
+
         # Map to track suggestion_id by original trace_id (for post-insert events)
         inserted_suggestions = []
         # #72-H4c: aggregation list for midday per-suggestion insert failures
@@ -3836,6 +3851,8 @@ async def run_midday_cycle(supabase: Client, user_id: str, deployable_capital_ov
 
         for s in suggestions:
             s["cycle_date"] = cycle_date
+            if _decision_id:
+                s["decision_id"] = _decision_id  # gap-(c) linkage
             # PR3.2: Preserve NOT_EXECUTABLE status from quality gate
             if s.get("status") != "NOT_EXECUTABLE":
                 s["status"] = "pending"
@@ -3920,6 +3937,43 @@ async def run_midday_cycle(supabase: Client, user_id: str, deployable_capital_ov
                     })
 
         print(f"Midday suggestions: {inserts_count} inserted, {existing_count} existing (unchanged)")
+
+        # Replay Phase-1 gap-(c): capture the DECISION OUTPUT — the ranked
+        # suggestion set (accepted + rejected+reason) — as a feature linked by
+        # decision_id to the captured inputs/features, so a byte-compare replay
+        # has a left-hand side. Only fires when a DecisionContext is active
+        # (REPLAY_ENABLE=1); record_feature no-ops otherwise. Fail-soft — a
+        # capture failure must never break the cycle (same as the D2 block).
+        try:
+            from packages.quantum.services.replay.decision_context import (
+                get_current_decision_context as _gdc2,
+            )
+            _dc_out = _gdc2()
+            if _dc_out is not None:
+                _ranked = sorted(
+                    suggestions,
+                    key=lambda s: -(float(s.get("risk_adjusted_ev")
+                                          if s.get("risk_adjusted_ev") is not None
+                                          else (s.get("score") or -1e9))),
+                )
+                _dc_out.record_feature("__decision__", "ranked_candidates", {
+                    "count": len(_ranked),
+                    "cycle_date": cycle_date,
+                    "candidates": [{
+                        "ticker": s.get("ticker"),
+                        "strategy": s.get("strategy"),
+                        "ev": s.get("ev"),
+                        "pop": s.get("probability_of_profit"),
+                        "score": s.get("score"),
+                        "risk_adjusted_ev": s.get("risk_adjusted_ev"),
+                        "status": s.get("status"),
+                        "blocked_reason": s.get("blocked_reason"),
+                        "legs_fingerprint": s.get("legs_fingerprint"),
+                    } for s in _ranked],
+                })
+                logger.info(f"[REPLAY_DECISION] captured {len(_ranked)} ranked candidates")
+        except Exception as _rdc_e:
+            logger.warning(f"[REPLAY_DECISION] output capture failed (non-fatal): {_rdc_e}")
 
         # #72-H4c: aggregated alert for midday per-suggestion insert failures
         if _midday_insert_failures:

@@ -4,6 +4,70 @@ Every finding listed here is EXCLUDED from future audit runs. Re-finding a
 ledger item is a wasted slot. Runs append new findings as `status:reported`;
 the human flips them to `status:shipped` (with PR#) or `status:rejected`.
 
+## 2026-07-12 (Sun) — GOs RECORDED + Part-3 BUILD QUEUE (⓪ thesis-basis shipped; ①②③④ sequential)
+
+**FOUR OWNER DECISIONS — CONFIRMED GO (verbatim):**
+- **D① — GO as recommended:** KEEP Calendar & Clock one more cycle (F-A10-1 proves
+  it's earning; counter 4/6; DST 11-01 pending). QUEUE A11's Security & Credential
+  Hygiene lens for the NEXT rotation (strong debut, weak replace-half — queue,
+  don't replace).
+- **D② — GO:** un-mute shadows at queue-④'s SHA; basis DECIDED = **SHADOWS SCORE
+  ON RAW EV (the simple split).** Rationale: evidence volume is the binding
+  constraint; the honest cross-cohort comparison happens at OUTCOMES (closes,
+  thesis accuracy, per-contract-normalized promotion gates) which are
+  basis-independent — NOT at entry EV. Promotion annotation: cohorts run different
+  EV bases from that SHA; ENTRY-RATE comparisons carry the caveat, OUTCOME
+  comparisons don't.
+- **D③ — GO the PACKAGE, not the arm:** queue-② (arm-evidence repair) + the W3
+  double-polarity fix as its precondition, ONE PR; W2/W3/W4/W5 clocks restart at
+  that SHA. No arm this week.
+- **D④ — GO queue-⑤'s spec:** independent terminal/breakeven probability source;
+  production-route test asserting NONZERO EV + all gates unchanged; observe/
+  replay-only start. Next week's strategy-side build. The 2-leg cohort stays gated
+  on it.
+
+**ESCALATION RESOLVED — F-A4-SLEEP-DEATH → DEAD-MAN'S FIRST LIVE CATCH.** The
+Saturday 07-11 healthchecks DOWN email ARRIVED — the dead-man is ARMED and
+WORKING. Saturday's sequence was the design executing: run died mid-sleep → no
+report file → no ping → DOWN fired. The control built after the silent-empty class
+caught the very next miss. Remaining fix = SLEEP-HOLD only (operator action
+tonight: AC sleep→Never or the task execution-time request; WakeToRun starts the
+run, the sleep-hold lets it finish). FILED P3: the DOWN email can't distinguish
+never-started from died-mid-run (cron.log start-no-end answers it on inspection —
+nice-to-have, not a gap). FILED response-layer note: a DOWN email is a same-day
+look, operational habit, no build.
+
+**TWO LEDGER CORRECTIONS (operator-supplied):**
+- **A7 counter = 3/10-15 INSTRUMENTED fills** (NOT 9/10 — the v1.3 external prompt
+  conflated all-time closes with #1102-instrumented fills). Fix the v1.3 prompt's
+  A7 line when it's next touched.
+- **A5 noise names its dropped item precisely: the #1104 writer-hardening NEVER
+  SHIPPED** — orphaned when F-A4-1 absorbed the A4-half and the obs-remainder
+  re-scoped to five items; it lost 5 MORE rows this week. Provenance =
+  the-re-scoping-drops-an-item failure mode; file it with that so it stops
+  slipping.
+
+**BUILD ORDER (confirmed):** ⓪ thesis-basis → ① E8 per-user seam (+ F-A8/E6-edge
+rider, same-PR-if-clean/own-PR-if-not) → ② arm-evidence repair + W3
+double-polarity (clock-reset PR; **test matrix NON-NEGOTIABLE: armed-state
+unknown-risk → blocked/not-armable, NEVER silent-zero-proceed**) → ③ replay
+terminal contract → ④ clone normalizer + 33-row supervised backfill. ⓪①② =
+must-lands today; ③④ hold to Monday post-close at no cost. Strictly sequential, H8
+between each.
+
+**PR-⓪ — thesis price-basis disclosure BUILT (this PR).** F-A9-THESIS-BASIS:
+`_underlying_at_expiry` (thesis_tracker.py) now returns
+`(close, price_basis, bar_date)` — `expiry_close` (authoritative) / `fallback_
+prior_bar` (≤7d stale, DISCLOSED with the bar date inline in thesis_basis) /
+`unknown` (H9 non-fabricated); run() threads it into the new `price_basis` column
++ the non-scoring states (`no_expiry`/`in_progress`). Migration `20260712123000_
+thesis_outcomes_price_basis` (ALTER … ADD COLUMN price_basis text) applied +
+tracked (version `20260712120301`, col_ok=1) + read-back BEFORE merge; table 0
+rows (no backfill; born-honest before the Mon 17:00 CT first authoritative fill).
+Observe-only, modulates nothing. Tests 5/5 (exact / fallback+date / post-expiry-
+bar-excluded / unknown-not-fabricated / feed-failure→unknown). H8 recorded at
+PR-①'s entry.
+
 ## 2026-07-12 (Sun ~06:3x CT) — FULL-REPORT TRIAGE + OWNER DECISIONS PRESENTED (awaiting operator confirmation before any build)
 
 STEP-0: DB `11:31Z` = Sunday `06:31 CT` / broker `07:31 ET` = `06:31 CT`, agree to

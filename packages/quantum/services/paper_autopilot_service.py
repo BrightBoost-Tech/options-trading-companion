@@ -961,6 +961,16 @@ class PaperAutopilotService:
                 if p.get("symbol") and p.get("portfolio_id") == portfolio_id
             }
 
+            # B1/B2 bucket control (observe-first): per-cohort equity (read once)
+            # + a same-run reservation accumulator. Exposure is scoped to THIS
+            # cohort's portfolio (live-routed capital for the champion; shadow
+            # cohorts deploy none, so the log is informational there). Equity
+            # unreadable → cap 0 → never blocks (fail-safe).
+            from packages.quantum.risk import bucket_control as _bkt
+            _bucket_equity = self._estimate_equity(user_id, cohort_open)
+            _bucket_reservations = _bkt.BucketReservations()
+            _bucket_open = [p for p in cohort_open if p.get("portfolio_id") == portfolio_id]
+
             for s in suggestions:
                 sid = s.get("id")
                 if sid in already:
@@ -1017,6 +1027,51 @@ class PaperAutopilotService:
                             supabase=supabase,
                         )
 
+                    # B1/B2 one-beta bucket control + same-run reservation
+                    # (observe-first; BUCKET_CONTROL_ENFORCE default OFF). Sum
+                    # this cohort-book's defined-risk exposure in the candidate's
+                    # bucket (+ same-run reservations + the candidate) vs
+                    # BUCKET_MAX_PCT × equity. Honest max_loss_total basis; legacy
+                    # NULL rows count at premium WITH a caveat (H9). Armed →
+                    # reject with a bucket_exposure_cap stamp; off → the entry
+                    # PROCEEDS and the #1139-class alarm fires.
+                    _cand_risk, _cand_legacy = _bkt.candidate_risk_usd(s)
+                    _bkt_decision = _bkt.evaluate_bucket(
+                        ticker, _cand_risk, _bucket_open,
+                        _bucket_reservations, _bucket_equity)
+                    _bkt_decision["candidate_legacy_premium"] = _cand_legacy
+                    _bkt.log_bucket_shadow(_bkt_decision)
+                    if _bkt_decision["would_block"]:
+                        if _bkt.is_bucket_enforce_enabled():
+                            logger.warning(
+                                "[BUCKET_CONTROL] ENFORCED reject %s/%s bucket=%s "
+                                "exposure=%.0f > cap=%.0f",
+                                ticker, sid[:8], _bkt_decision["bucket"],
+                                _bkt_decision["total_with_candidate"], _bkt_decision["cap"])
+                            self._stamp_blocked_reason(
+                                sid, "bucket_exposure_cap",
+                                f"bucket {_bkt_decision['bucket']} exposure "
+                                f"{_bkt_decision['total_with_candidate']:.0f} > cap "
+                                f"{_bkt_decision['cap']:.0f}")
+                            continue
+                        try:
+                            from packages.quantum.observability.alerts import (
+                                alert as _bkt_alert, _get_admin_supabase as _bkt_sup,
+                            )
+                            _bkt_alert(
+                                _bkt_sup(), user_id=user_id,
+                                alert_type="bucket_exposure_would_block",
+                                severity="warning",
+                                message=(
+                                    f"Bucket {_bkt_decision['bucket']} would exceed "
+                                    f"{_bkt_decision['bucket_max_pct']:.0%} cap "
+                                    f"({_bkt_decision['total_with_candidate']:.0f} > "
+                                    f"{_bkt_decision['cap']:.0f}) — entry {ticker} PROCEEDS "
+                                    f"(BUCKET_CONTROL_ENFORCE off)"),
+                                metadata=_bkt_decision)
+                        except Exception as _bkt_alert_err:
+                            logger.warning("[BUCKET_CONTROL] alarm emit failed: %s", _bkt_alert_err)
+
                     ticket = _suggestion_to_ticket(s)
                     order_id = _stage_order_internal(
                         supabase, analytics, user_id, ticket,
@@ -1025,6 +1080,14 @@ class PaperAutopilotService:
                     )
                     if not order_id:
                         continue
+
+                    # B1/B2 same-run reservation: this candidate committed —
+                    # reserve its bucket exposure so a LATER candidate in THIS
+                    # cycle sees it (the allocator-overspend fix). Always
+                    # accumulates (observe); only BINDS a decision when armed. A
+                    # cycle selecting ≤1 candidate never consults a reservation →
+                    # byte-identical.
+                    _bucket_reservations.add(_bkt.bucket_for(ticker), _cand_risk)
 
                     from packages.quantum.brokers.execution_router import get_execution_mode, ExecutionMode
                     _exec_mode = get_execution_mode()

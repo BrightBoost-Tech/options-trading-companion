@@ -4,6 +4,58 @@ Every finding listed here is EXCLUDED from future audit runs. Re-finding a
 ledger item is a wasted slot. Runs append new findings as `status:reported`;
 the human flips them to `status:shipped` (with PR#) or `status:rejected`.
 
+## 2026-07-11 (Sat ~19:0x ET) — BUILT: PoP inversion fix PR-0 (#1169) + REPLAY_ENABLE Phase-0
+
+STEP-0: DB 00:01Z (dow=0) / broker 20:01 ET — consistent (UTC rolled to Sunday),
+market CLOSED, weekend premise holds.
+
+**PART 1 — PoP inversion `aaa8431` MERGED + H8 VERIFIED** (BE `61c01ea7` /
+worker `e52b8ae2` / worker-background `c02bd0bd`, all @ `aaa8431`, created
+00:08:32–33Z > merge 00:08:30Z). `ev_calculator.py:42` one-token swap
+`max_gain`→`max_loss`: credit PoP was `max_gain/(max_gain+max_loss)` =
+`credit/width` = **P(LOSS)** (inverted → credit-vertical EV negative → −999
+MIN_EDGE gate → 2-leg credit cohort silently blocked). Now
+`max_loss/(max_gain+max_loss)` = `1 − credit/width` = **P(WIN)** + terminal
+`[0,1]` clamp (H9 bound-assert; width-bound recommended over delta — H9-robust).
+Arithmetic: credit 1.49/width 5 → **0.298 → 0.702**. **Byte-identical for the
+live book:** only the 5 credit-vertical types hit that branch; ICs RAISE in
+calculate_ev (:187 → calculate_condor_ev), debits take the delta branch — both
+pinned untouched. Book = ICs + debits today → NO live score change; unblocks the
+latent credit cohort. Tests (new RUNNING file — legacy test_calculate_pop.py is
+#775-skipped): 12 + the updated test_honest_pop pin (130/200). **The 2-leg
+credit cohort PoP gate is CLEARED**; the 7-way PoP census consolidation stays
+its own filed item.
+
+**PART 2 — REPLAY_ENABLE Phase-0 (supervised env flip, AFTER Part-1 H8).**
+**PRE-FLIGHT CLEAN (the load-bearing check):** `is_replay_enabled()` reads
+`REPLAY_ENABLE` at RUNTIME (decision_context.py:34-45); record_input/feature
+STAGE in memory and `commit()` flushes ONCE at cycle-end (atomic RPC) — NOT
+per-symbol-synchronous in the scan hot path. **AND commit() is FAIL-SAFE**:
+wraps everything in try/except (`:297/:366`) that logs + marks-failed +
+RETURNS stats WITHOUT re-raising, so `ctx.commit()` at
+suggestions_open.py:144 CANNOT break the suggestions cycle (a capture failure
+writes a failed decision_run, nothing more). Capture tables were 0/0/0/0 (never
+run). **FLIP DONE:** `REPLAY_ENABLE=1` set on BOTH RQ workers (worker
+`9b0ffca8` + worker-background `ec49427f`; the otc worker runs
+suggestions_open/close), recycled to SUCCESS (worker `816bfaac` / worker-bg
+`bfe26936`, same SHA aaa8431, env-only). Env value NOT read back via
+list_variables (secrets-hygiene) — the set-success + recycle + Monday capture
+rows are the read-back chain.
+- **⏳ VALIDATION PENDING (Mon 07-13 11:00 CT scan):** capture rows written
+  (decision_runs header + inputs/config/clock/SHA per the replay contract) +
+  scan timing not degraded + the job green under the F-A4-1 typed contract. I
+  cannot sign a manual weekend scan trigger, and Monday's 11:00 CT
+  suggestions_open is the first capture either way, so flipping tonight only
+  pre-positions the flag. Replay Phase-1 (the byte-compare runner —
+  ReplayTruthLayer.from_decision_id exists) now has data ACCUMULATING from
+  Monday; ~4–6-evening estimate stands (writer was already built + wired, per
+  the L2 recon).
+- **⚠ RETENTION LINE FILED (item 7):** ~2 wrapped cycles/day (suggestions_open
+  11:00 + suggestions_close 08:00 CT), each ~a few hundred decision_inputs +
+  features + deduped blobs (2 MB soft cap per blob — a full multi-expiry chain
+  is the volume risk). Modest rows/day but UNBOUNDED — file an N-day TTL /
+  archive before this becomes the next unbounded table. **NEW P2 backlog line.**
+
 ## 2026-07-11 (Sat ~18:4x ET) — BUILT: P0-B book-scaling PR-A (#1166) + COALESCE restore PR-B (#1167)
 
 STEP-0: DB 23:26:51Z / broker 23:26:51Z, dow=6, is_open=false — Saturday

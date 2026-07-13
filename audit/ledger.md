@@ -4,6 +4,118 @@ Every finding listed here is EXCLUDED from future audit runs. Re-finding a
 ledger item is a wasted slot. Runs append new findings as `status:reported`;
 the human flips them to `status:shipped` (with PR#) or `status:rejected`.
 
+## 2026-07-12 (Sun ~22:1x CT) — ADJUDICATED: external full audit v1.4 (5th engagement) — READ-ONLY, doc writes only
+
+STEP-0: DB `03:11Z` = Sunday `22:11 CT` / broker `23:11 ET` = `22:11 CT`, agree
+(UTC rolled to Mon `dow=1`, CT wall-clock Sunday night — the roll, flagged). Market
+CLOSED. Report swept to `docs/review/external-full-audit-v1.4-2026-07-12.md`. Build
+NOTHING; verdicts + tonight-runnable checks + Monday pins + backlog diff.
+
+**SCORECARD — v1.4 is the sharpest adversarial pass on OUR OWN work: THREE
+same-day seam kills (E8-3 / E16-3 / E19-2), ALL one layer below this weekend's
+route-driving tests.** Free-look precedent extended (retry provenance + typed-column
+#5 near-miss, neither promoted). Owned honestly below.
+
+**SHARPENED DOCTRINE (→ CLAUDE.md §9, landed this session):** "Inject the failure
+at its ORIGIN, assert the truth at the TOP — a test spanning all layers cannot be
+beaten by the layer below; mock-replacing an intermediate function forfeits every
+layer beneath the mock." All three kills are this class: E8-3 mocked `_check_user`
+(inner `_fetch_open_positions` []-swallow survived); E16-3 tested the manifest
+helper (not the 5 uncovered returns + classifier); E19-2 called the cloner with an
+already-eligible source (never crossed the calibrated gate).
+
+**PROMOTED FAILs — VERIFIED against code + this DB:**
+- **F-E8-3 (CRITICAL, promoted; 3rd E8 layer).** `_fetch_open_positions`
+  (`intraday_risk_monitor.py:646-675`) wraps both the portfolio + position queries
+  in one try; `except → logger.error("[RISK_MONITOR] Failed to fetch positions") +
+  return []` — a DB failure is indistinguishable from an empty book. `_check_user`
+  consumes [] as authoritative-empty; `_get_active_user_ids` (`:1680-1692`) has the
+  same `except: return []` (→ green `status=no_users`). My #1186 typed the OUTER
+  loop; this INNER read swallows one layer below → one Supabase failure skips
+  marks/stops/loss-envelopes/force-close/two-position-tripwire for the WHOLE
+  account while q15 reports green. **CENSUS: 639 succeeded intraday rows/30d, book
+  FLAT throughout → the []-sentinel is UN-disambiguated in job_runs (a failed read
+  and an empty book both show positions:0); only the Railway error-string
+  correlation disambiguates, and 30d isn't tool-runnable (per-deployment logs).
+  Structural-latent, STILL CRITICAL — the flat book bounds today's exposure; the
+  moment a position opens Monday, a failed read = blind protection that afternoon.**
+  → queue P0-①.
+- **F-E16-3 (HIGH, promoted; 3rd exclusion-integrity note on E16).** `_capture_
+  decision_manifest` reaches only 2 of the 7 semantic terminal returns (the reasons
+  are enumerated at `workflow_orchestrator.py:2048-2050`): covered =
+  `no_suggestions_after_gates` + created; MISSING = `micro_tier_position_open`,
+  `capital_scan_policy_block`, `global_risk_budget_exhausted`, `no_candidates`,
+  `scanner_failed` (the early-return helper at `:2034` was the single wiring point
+  I missed). The morning cycle (`suggestions_close`) emits NO terminal feature.
+  And `_persist_error_rollup` (`suggestions_open.py:26-40`) sums ONLY
+  `rejection_persist_failures`, NOT the generic `counts.errors` where my #1188
+  `replay_commit_error` lands → the runner still classifies succeeded.
+  **CENSUS: commit-err-green = 0 (no commit failures yet).** **CORRECTION: #1188's
+  "EVERY return / COMPLETE / Monday's tape is COMPLETE" language is FALSE — the
+  tape is complete only from queue-②'s SHA.** → queue P1-②.
+- **F-E19-2 (HIGH, promoted; the selection-biased un-mute).** The fork runs
+  post-cycle (`suggestions_open.py:159-170`) and queries only champion rows
+  `status IN ('pending','staged')` (`fork.py:44-56`); a calibrated-rejected
+  candidate has `status=NOT_EXECUTABLE` (`workflow_orchestrator.py:3750-3767`) →
+  never reaches `_clone_suggestion_for_cohort`. So my #1190 raw-EV un-mute breathes
+  ONLY for champion-eligible candidates and SYSTEMATICALLY EXCLUDES the divergence
+  cases (SOFI raw 39.88/cal 19.94 dies at `edge_below_minimum` → 0 clones; QQQ raw
+  37.46/cal 18.73 survives → up-to-2 clones). Surviving clones mix bases (raw `ev`
+  + inherited calibrated `risk_adjusted_ev` + calibrated pre-clone snapshot; no
+  `ev_raw`/`ev_basis` persisted). **CORRECTION: D②'s un-mute is PARTIAL until
+  queue-③ — entry-rate evidence excludes the divergence cases; the 07-12 un-mute
+  SHA `9a540ce` stamps the FLAG, ③'s SHA stamps the FULL experiment.** → queue P1-③.
+
+**OTHER VERDICTS:**
+- **F-A3-4 (HIGH-evidence, CONFIRMED-structural, NIL current impact).**
+  `fetch_live_outcomes` (`prequential_validator.py:190-239`) ignores `window_days`,
+  applies neither `CALIBRATION_EV_EPOCH` nor the corrupted-P&L floor, and returns
+  [] on failure → green `insufficient_data` (the SAME []-sentinel disease as E8-3 —
+  note the class link). **CENSUS: all_live=8, pre_epoch=0, pre_corruption_floor=0 →
+  the missing filters have ZERO current numerical impact (refutes the report's
+  "12.5% flip" for now); the structural mismatch + []-green disease stand.** →
+  queue P1-④ (small).
+- **F-A9-5 (MED, CONFIRMED-by-cite).** `_log_cohort_decisions` compares dollar `ev`
+  to the score threshold (`fork.py:466-477`) while the real filter compares
+  `sizing_metadata.score` (`:233-236`) → `ev_below_min` is an evidentiary lie
+  (routing byte-correct). policy_decisions = 57 rows/30d; the join check is
+  Monday-runnable. → queue P2 (rides ③'s fork territory if clean).
+- **F-WINDOW-1 (MED, CONFIRMED-by-cite).** Heartbeat coverage: only W4
+  (APPLY_ORDER) + a generic post-portfolio EXECUTOR_SHADOW; W1 no gate-site beat,
+  W2 no per-consumer zero-eval beat, W3 pre-portfolio miss + no candidate/
+  reservation identity, no shared cycle ID → W5 unjoinable. → queue P2 (the
+  arm-evidence repair's OWN second-pass repair; **the W-clocks do NOT reset again
+  for observability-only additions, but the ARM decisions wait on joinable
+  evidence** — stated in the clocks section).
+- **F-A10-4 (LOW, CONFIRMED-by-cite).** `expiry >= today` → `in_progress` until the
+  next weekday run (Friday expiry → terminal Monday 17:00 CT, ~72h); evidence
+  latency only (Monday still scores the exact expiry close). → queue P2; the Aug-21
+  rows are the live test (Fri-vs-Mon check filed).
+
+**EXCLUSION TABLE:** E8 FAIL (3rd layer) pending-①; E16 FAIL pending-②; E19
+partial-FAIL pending-③; E14 PASS (trust from `74b7170`); E6/①b code-PASS at
+`a6e0cb9` (runtime first-occurrence pin remains); E17 narrow-PASS + fresh adjacent
+F-A3-4; E1-E5/E7/E9-E13/E15/E18 as prior.
+
+**VERDICT PARAGRAPH (quoted):** "downstream conversion/evidence-integrity problem,
+amplified by capital friction" — predictions directionally promising (13/16 theses
+81%), live 1W/7L −$178; execution/exit measurement + 4-leg economics at ~$2,068
+fail to convert. Stop territory stays Phase-3's (3/10-15 instrumented fills). E8's
+failed-read typing is the single first change.
+
+**TONIGHT-RUNNABLE RESULTS:** E8 census 639/flat (un-disambiguated) · E16
+commit-err-green 0 · A3-4 pre_epoch 0 (nil impact) · A9-5 policy_decisions 57/30d
+(join Monday). **MONDAY PINS (verbatim, filed):** (h/E19) first post-`9a540ce` scan
+— rows `ev_raw≠ev`+`NOT_EXECUTABLE`+`edge_below_minimum` producing NO shadow verdict
+(SOFI predicted); clones carry `ev_raw` NULL + no basis stamp + calibrated rank; QQQ
+≤2-clone upper bound — grade the prediction · (e/E16) post-#1188 `decision_runs` ↔
+exactly one terminal `decision_features(ranked_candidates)` per run, group misses by
+cycle reason (predicts the 5 midday + all morning) + succeeded jobs with nested
+`replay_commit_error` & top-level `counts.errors=0` · (b/E8) Railway
+`"Failed to fetch positions"`/`"Error fetching active users"` ↔ same-cycle succeeded
+job_runs (needs log retention) · (F-A10-4) Aug-21 Fri-after-17:00 `in_progress` vs
+Mon-after-17:00 terminal+`expiry_close`.
+
 ## 2026-07-12 (Sun ~10:xx CT) — BUILDS ③→④→D② (+①b optional) + lanes L1/L2/L3
 
 STEP-0 (premise correction): prompt said "Sunday-evening"; DB `14:41Z` = Sunday

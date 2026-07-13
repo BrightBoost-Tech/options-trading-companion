@@ -1,0 +1,22 @@
+// LOCAL PREVIEW ONLY — Claude Code Desktop Browser launch target for local
+// UI acceptance (CLAUDE.md "BROWSER USE"; operator procedures:
+// docs/runbooks/browser-verification.md).
+// This config NEVER points at production. Runtime-inert: no deployed service
+// reads this file (verified 2026-07-12 — zero code references to this path).
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "web-local-preview",
+      // apps/web/package.json "dev": "next dev" — port 3000 is the next-dev
+      // default; no port override anywhere in the repo (next.config.js clean).
+      "runtimeExecutable": "pnpm",
+      "runtimeArgs": ["dev"],
+      "cwd": "apps/web",
+      "port": 3000,
+      // If 3000 is taken, auto-pick a free port; the EFFECTIVE URL still gets
+      // recorded in the evidence artifact (URL field is required either way).
+      "autoPort": true
+    }
+  ]
+}

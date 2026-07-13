@@ -64,6 +64,21 @@ Corollaries:
   urgent, not noise — the sweep is live-routed-scoped since #1107 (fail-OPEN
   to the unscoped sweep on a scope-query failure: noisy beats blind).
 
+## BROWSER USE
+
+Use Claude Code Desktop Browser only for local UI acceptance,
+interaction-dependent source research, or comparing authoritative
+API/receipt evidence with operator-facing rendering. Record URL, timestamp,
+authentication state, screenshot, DOM result, console/network errors, and
+expected-versus-observed behavior. Browser evidence is secondary to
+Supabase, Railway, Alpaca MCP, and direct APIs. Prefer connectors, APIs,
+web retrieval, or CLI for structured facts. Never place, modify, exercise,
+replace, or cancel broker orders; change production configuration; persist
+an Alpaca login; or add Browser requirements to the unattended nightly
+audit.
+Pointers: local preview target `.claude/launch.json` (localhost only);
+operator procedures `docs/runbooks/browser-verification.md`.
+
 ## 2. DEPLOY DOCTRINE
 
 - **Merged ≠ running (H8).** Verify against `origin/main`, not local (the

@@ -24,6 +24,12 @@ import traceback
 env_path = Path(__file__).resolve().parent / ".env"
 load_dotenv(dotenv_path=env_path)
 
+# PR-0 (F-LOG-INFO-DROP): configure process logging immediately after env load
+# (OTC_LOG_LEVEL is respected) and before the rest of the app imports. The BE
+# canary INFO line lands at container start.
+from packages.quantum.logging_setup import setup_logging
+setup_logging()
+
 from packages.quantum.security import encrypt_token, decrypt_token, get_current_user, get_supabase_user_client, is_localhost
 from packages.quantum.security.config import (
     validate_security_config,

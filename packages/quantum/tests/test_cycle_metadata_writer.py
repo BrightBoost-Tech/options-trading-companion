@@ -258,7 +258,9 @@ class TestAllReturnPathsEmitCycleMetadata(unittest.TestCase):
         (was not in yesterday's investigation report)."""
         body = self._slice_function()
         idx = body.index('"reason": "global_risk_budget_exhausted"')
-        window = body[idx:idx + 1500]
+        # Window widened 1500→2200 (PR-② 2026-07-13): the E16-3 terminal
+        # manifest call now sits between the veto-log marker and the return.
+        window = body[idx:idx + 2200]
         self.assertIn('"cycle_metadata":', window)
         self.assertIn('exit_reason="global_risk_budget_exhausted"', window)
 

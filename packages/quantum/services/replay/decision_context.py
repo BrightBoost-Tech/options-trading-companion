@@ -298,14 +298,52 @@ class DecisionContext:
             # 1. Commit blobs first (must succeed before decision commit)
             stats["blobs_committed"] = self._blob_store.commit(supabase)
 
-            # 2. Compute aggregate hashes
+            # 1b. ATOMICITY GATE (PR-②, F-REPLAY-FK): decision_inputs must
+            # NEVER reference a blob hash that is not confirmed persisted —
+            # that FK-orphan class broke all five of 2026-07-13's tapes. A
+            # shortfall (failed batch, oversize drop) downgrades the run to a
+            # TYPED capture_partial: the run row + features + the persisted
+            # subset of inputs still commit (maximal evidence), the missing
+            # hashes are named in error_summary, and the caller folds
+            # stats["blobs_missing"] into its job counts (F-A4-1 contract).
+            expected_hashes = {inp.blob_hash for inp in self.inputs.values()}
+            missing = self._blob_store.unpersisted_of(expected_hashes)
+            missing_set = set(missing)
+            oversize = [h for h in missing
+                        if self._blob_store.was_dropped_oversize(h)]
+            tape_integrity = "complete"
+            if missing:
+                tape_integrity = "capture_partial"
+                if status == "ok":
+                    status = "capture_partial"
+                miss_note = (
+                    f"capture_partial: {len(missing)}/{len(expected_hashes)} "
+                    f"input blob(s) unpersisted (oversize={len(oversize)}): "
+                    + ",".join(h[:16] for h in missing[:4])
+                )
+                error_summary = (
+                    f"{error_summary} | {miss_note}" if error_summary
+                    else miss_note
+                )
+                stats["blobs_missing"] = len(missing)
+                stats["blobs_oversize_dropped"] = len(oversize)
+                logger.warning(f"DecisionContext {miss_note} "
+                               f"decision_id={self.decision_id}")
+            stats["tape_integrity"] = tape_integrity
+            self._tape_integrity = tape_integrity
+            stats["status"] = status
+
+            # 2. Compute aggregate hashes (over ATTEMPTED inputs — the
+            # decision's true input set; the persisted subset is what the
+            # decision_inputs rows carry)
             input_hashes = sorted([inp.blob_hash for inp in self.inputs.values()])
             input_hash = compute_aggregate_hash(input_hashes) if input_hashes else None
 
             feature_hashes = sorted([f.features_hash for f in self.features])
             features_hash = compute_aggregate_hash(feature_hashes) if feature_hashes else None
 
-            # 3. Build inputs/features JSONB arrays for RPC
+            # 3. Build inputs/features JSONB arrays for RPC — persisted-blob
+            # rows ONLY (the gate's guarantee)
             inputs_jsonb = [
                 {
                     "blob_hash": inp.blob_hash,
@@ -314,6 +352,7 @@ class DecisionContext:
                     "metadata": inp.metadata,
                 }
                 for inp in self.inputs.values()
+                if inp.blob_hash not in missing_set
             ]
 
             features_jsonb = [
@@ -342,8 +381,19 @@ class DecisionContext:
                 stats["inputs_count"] = len(inputs_jsonb)
                 stats["features_count"] = len(features_jsonb)
                 stats["commit_method"] = "rpc"
+                # The RPC's signature predates tape_integrity — stamp it with
+                # a follow-up update (best effort; the column is annotation).
+                try:
+                    supabase.table("decision_runs").update(
+                        {"tape_integrity": tape_integrity}
+                    ).eq("decision_id", str(self.decision_id)).execute()
+                except Exception as ti_err:
+                    logger.warning(
+                        f"tape_integrity stamp failed (non-fatal): {ti_err}")
             else:
-                # Fallback to sequential inserts if RPC fails
+                # Fallback to sequential inserts if RPC fails. Pass the
+                # FILTERED inputs (gate guarantee) — rebuilding from
+                # self.inputs here would resurrect the FK-orphan class.
                 self._commit_sequential(
                     supabase,
                     input_hash=input_hash,
@@ -351,9 +401,12 @@ class DecisionContext:
                     duration_ms=duration_ms,
                     status=status,
                     error_summary=error_summary,
+                    inputs_jsonb=inputs_jsonb,
+                    features_jsonb=features_jsonb,
+                    tape_integrity=tape_integrity,
                 )
-                stats["inputs_count"] = len(self.inputs)
-                stats["features_count"] = len(self.features)
+                stats["inputs_count"] = len(inputs_jsonb)
+                stats["features_count"] = len(features_jsonb)
                 stats["commit_method"] = "sequential"
 
             logger.info(
@@ -423,8 +476,16 @@ class DecisionContext:
         duration_ms: Optional[int],
         status: str,
         error_summary: Optional[str],
+        inputs_jsonb: Optional[List[Dict]] = None,
+        features_jsonb: Optional[List[Dict]] = None,
+        tape_integrity: str = "complete",
     ) -> None:
-        """Fallback sequential commit (non-atomic)."""
+        """Fallback sequential commit (non-atomic).
+
+        PR-②: consumes the caller's FILTERED ``inputs_jsonb`` (persisted-blob
+        rows only). Rebuilding from ``self.inputs`` here would reintroduce the
+        FK-orphan class the atomicity gate exists to kill.
+        """
         # Insert decision_runs header
         decision_run = {
             "decision_id": str(self.decision_id),
@@ -439,36 +500,37 @@ class DecisionContext:
             "inputs_count": len(self.inputs),
             "features_count": len(self.features),
             "duration_ms": duration_ms,
+            "tape_integrity": tape_integrity,
         }
 
         supabase.table("decision_runs").insert(decision_run).execute()
 
-        # Insert decision_inputs
-        if self.inputs:
-            input_rows = [
-                {
-                    "decision_id": str(self.decision_id),
-                    "blob_hash": inp.blob_hash,
-                    "key": inp.key,
-                    "snapshot_type": inp.snapshot_type,
-                    "metadata": inp.metadata,
-                }
-                for inp in self.inputs.values()
-            ]
+        # Insert decision_inputs (persisted-blob rows only — gate guarantee)
+        input_rows = [
+            {
+                "decision_id": str(self.decision_id),
+                "blob_hash": row["blob_hash"],
+                "key": row["key"],
+                "snapshot_type": row["snapshot_type"],
+                "metadata": row["metadata"],
+            }
+            for row in (inputs_jsonb or [])
+        ]
+        if input_rows:
             supabase.table("decision_inputs").insert(input_rows).execute()
 
         # Insert decision_features
-        if self.features:
-            feature_rows = [
-                {
-                    "decision_id": str(self.decision_id),
-                    "symbol": f.symbol,
-                    "namespace": f.namespace,
-                    "features": f.features,
-                    "features_hash": f.features_hash,
-                }
-                for f in self.features
-            ]
+        feature_rows = [
+            {
+                "decision_id": str(self.decision_id),
+                "symbol": row["symbol"],
+                "namespace": row["namespace"],
+                "features": row["features"],
+                "features_hash": row["features_hash"],
+            }
+            for row in (features_jsonb or [])
+        ]
+        if feature_rows:
             supabase.table("decision_features").insert(feature_rows).execute()
 
     def _try_mark_failed(self, supabase, error_msg: str) -> None:
@@ -478,6 +540,7 @@ class DecisionContext:
             supabase.table("decision_runs").update({
                 "status": "failed",
                 "error_summary": f"Commit failed: {error_msg[:450]}",
+                "tape_integrity": "commit_failed",
             }).eq("decision_id", str(self.decision_id)).execute()
         except Exception:
             # If update fails, try insert
@@ -491,6 +554,7 @@ class DecisionContext:
                     "error_summary": f"Commit failed: {error_msg[:450]}",
                     "inputs_count": 0,
                     "features_count": 0,
+                    "tape_integrity": "commit_failed",
                 }).execute()
             except Exception:
                 pass  # Best effort

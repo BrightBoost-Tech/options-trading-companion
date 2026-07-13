@@ -135,7 +135,22 @@ def run(payload: Dict[str, Any], ctx: Any = None) -> Dict[str, Any]:
                         ctx.__enter__()
                         try:
                             await run_morning_cycle(client, uid)
-                            ctx.commit(client, status="ok")
+                            _commit_res = ctx.commit(client, status="ok")
+                            # E16-3 seam-4 (PR-②, F-REPLAY-FK live 07-13): the
+                            # morning commit result was DISCARDED — the 13:00Z
+                            # broken tape rode a green job. Surface a commit
+                            # failure OR a capture_partial into counts.errors
+                            # (the F-A4-1 contract → runner classifies partial).
+                            if isinstance(_commit_res, dict):
+                                _cc_err = _commit_res.get("error")
+                                _cc_partial = _commit_res.get("tape_integrity") not in (None, "complete")
+                                if _cc_err or _cc_partial:
+                                    counts["errors"] = int(counts.get("errors") or 0) + 1
+                                    notes.append(
+                                        f"replay commit degraded for {uid[:8]}: "
+                                        f"error={_cc_err} tape_integrity="
+                                        f"{_commit_res.get('tape_integrity')}"
+                                    )
                         except Exception as cycle_err:
                             ctx.commit(client, status="failed", error_summary=str(cycle_err)[:500])
                             raise
@@ -173,7 +188,7 @@ def run(payload: Dict[str, Any], ctx: Any = None) -> Dict[str, Any]:
 
         # Ensure all values are JSON-serializable (datetime -> isoformat, etc.)
         return _to_jsonable({
-            "ok": failed == 0,
+            "ok": failed == 0 and int(counts.get("errors") or 0) == 0,
             "counts": counts,
             "timing_ms": timing_ms,
             "strategy_name": strategy_name,

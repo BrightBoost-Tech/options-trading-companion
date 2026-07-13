@@ -4,6 +4,385 @@ Every finding listed here is EXCLUDED from future audit runs. Re-finding a
 ledger item is a wasted slot. Runs append new findings as `status:reported`;
 the human flips them to `status:shipped` (with PR#) or `status:rejected`.
 
+## 2026-07-13 (Mon ~13:0x CT, RTH read-only) — ② PRE-BUILD DIAGNOSIS: F-REPLAY-FK ROOT CAUSE + ★ NEW F-LOG-INFO-DROP · status:reported
+
+STEP-0: DB 17:37Z / broker 13:37 ET agree; read-only + doc writes (repro script
+scratchpad-only, not committed).
+
+**F-REPLAY-FK ROOT CAUSE (CORRECTS both prior framings — the morning entry's
+"partial batch" and the midday grade's "one deterministic blob"):** `data_blobs`
+has **ZERO rows, all-time**. Every blob batch fails; smoking gun 5/5 cycles in
+worker logs: `BlobStore batch commit failed: Object of type bytes is not JSON
+serializable`. Mechanism: `blob_store.py:158` stages raw gzip BYTES as
+`payload`; `commit()` (`:289-292`) upserts via supabase-py, which JSON-serializes
+the row batch → TypeError on EVERY batch (~5 blobs/run ride ONE batch,
+COMMIT_BATCH_SIZE=200) → all hashes failed → `decision_context` inserts
+decision_inputs referencing never-persisted hashes → FK 23503 → run failed, job
+green. `82b5be18…` is merely the FIRST violating row in stable insert order (the
+input shared by close + open cycles), not a special blob. The 2MB cap is
+warn-only AND never triggered — unrelated. REPRODUCED locally
+(scratchpad/repro_blob_fk.py): json.dumps of the staged row → the exact
+TypeError; fix shape PROVEN: payload as PostgREST bytea hex-string (`\x`+hex)
+serializes and round-trips. HOW IT SHIPPED GREEN:
+`test_replay_feature_store.py:202-203` MagicMock supabase client — a mock AT the
+failing layer (the client serialization boundary); 4th instance of the
+inject-at-origin class (§9).
+**② FIX SHAPE (tonight):** (a) hex-encode payload at commit + decode `\x`-hex on
+`get()`/`get_many()` (the read path `:184-189` expects bytes and would fail on
+the string PostgREST returns — fix BOTH sides); (b) atomicity gate:
+blobs_committed == expected BEFORE the decision_inputs insert — shortfall →
+typed `capture_partial`, never an FK-orphaned insert attempt; (c) oversize →
+the same typed capture_partial, never staged-and-referenced; (d) the test drives
+the REAL serialization boundary (json.dumps of the batch at minimum), not a
+MagicMock. Annotation sweep: 5 runs today (13:00 close + 14:05/15:02/16:00/
+17:29 opens), ALL unrecoverable (no blobs exist), same first-FK hash.
+
+**★ F-LOG-INFO-DROP (NEW, HIGH, instrumentation-integrity) — the worker process
+DROPS every `logger.info` in the app.** No logging config exists ANYWHERE in the
+repo (basicConfig/dictConfig/addHandler: test-local only); workers are bare RQ
+SimpleWorker → root logger unconfigured → Python lastResort handler = stderr at
+WARNING. So print() and warning+ reach Railway; EVERY info line in
+packages/quantum is destroyed IN-PROCESS (never emitted — not a Railway filter).
+Proof: intraday_risk_monitor ran 17:30/17:45Z (RQ "Job OK" wrapper lines) but
+its `[RISK_MONITOR]` info summary (`:583`) is absent; utilization_gate logs at
+WARNING only (`utilization_gate.py:119-424`) — exactly why its lines are the
+ones we see.
+- **Shadow-window verdicts — all three = CONFIG (not gated-behind-arm, not
+  unreached-path):** [APPLY_ORDER_SHADOW] (`calibration_apply_ordering.py:158`,
+  info) · [RISK_BASIS_SHADOW] (`risk_basis_shadow.py:40/:50`, info) ·
+  [BUCKET_SHADOW] (`bucket_control.py:177`, info). All emit at info on paths that
+  RAN today (gate evaluated, executor processed 4 candidates, scan ranked). The
+  observe guards are CORRECT — each logs when the arm flag is OFF; no window
+  logs-only-when-armed.
+- **The heartbeats ALREADY EXIST and ride the same dead channel:**
+  `log_shadow_heartbeat` (`risk_basis_shadow.py:58-70`, info) is wired at the
+  apply seam (`calibration_apply_ordering.py:118-124`) and the executor
+  (`paper_autopilot_service.py:976-983`) — built by #1187 PRECISELY to
+  disambiguate "ran-saw-nothing vs logging lost", and killed by the exact
+  logging loss it exists to detect. F-WINDOW-1 reframed: not "build heartbeats"
+  — "give the channel a handler".
+- **⚠ W-CLOCK ANNOTATION: the arm-evidence stream since d5edd50 (07-12) has
+  produced ZERO collectible lines** — [RISK_BASIS_SHADOW] has NEVER appeared in
+  Railway (4d search; the current deployment covers the whole window; no market
+  cycles before Monday). Day-1/day-2 evidence LOST; the ~1wk observation clock
+  was never running; **it restarts at tonight's logging-fix SHA.** (The one
+  shadow marker ever observed — 07-09's [GATE_QTY_SCALED_SHADOW] ×9 — is
+  logger.WARNING, `paper_endpoints.py:1370`: consistent, and explains why the
+  v1.3 W2/W4 analyses were code-reads, not log-reads.)
+- **② RIDER (small, tonight per operator): worker logging config at startup** —
+  root INFO, or a targeted INFO level for the shadow/heartbeat/monitor loggers
+  (owner's call on noise; scanner info is voluminous) + confirm RQ noise stays
+  bounded. Supersedes the F-WINDOW-1 P2-tail build item (heartbeats exist; the
+  fix is the channel).
+
+## 2026-07-13 (Mon ~12:5x CT, RTH read-only) — SCORING/GAP-REPORT ADJUDICATION (the doctrinal audit's 64/100 companion) — reconciliation + adoptions · status:reported
+
+STEP-0: DB `17:48Z` / broker `13:48 ET` agree (Mon 07-13, market OPEN — read-only
++ doc writes; tonight's ②③④ UNCHANGED). Source document NOT on disk (same as the
+~12:1x doctrinal entry); adjudicated against the operator's restated gap set.
+H11: only the known `ops_job_never_run` thesis_tracker arm (×5, latest 17:07Z;
+self-resolves at the 17:00 CT first run per the morning entry).
+
+**RECONCILIATION (10 ranked gaps → backlog): ALL TEN HAVE HOMES; queue order
+UNCHANGED.** 1→canonical-position-representation (07-13 P1) · 2→queue-⑤ (charter
+enriched 07-13) · 3→⑥ partial-close (trigger-gated P0) · 4→multi-basis cost P1
+(incl. the ranker 4× worst case) · 5→tonight's ②+③ (② already expanded by
+F-REPLAY-FK this morning) · 6→④ F-A3-4 + ③ E19-2 + the NEW segment-n line
+(below) · 7→Phase-3 gate — **3/10-15 VERIFIED**: 3 stamped live fills
+07-01→07-08 in `paper_orders.order_json` (`close_fill_gap_*` keys), all with
+gap_fraction; the 07-08 SIGN FIX is IN CODE (`alpaca_order_handler.py:660-665`)
+so the accruing evidence basis is clean — the stale "first gap_fraction still
+pending" backlog line corrected · 8→versioned-earnings + per-leg quote envelope
+(+ the r/q rider, below) · 9→vertical-before-IC (07-13 GATED) · 10→throughput
+tail (greedy-stop DOWNGRADE stands · reaper∪F-A4-2 · W2b · F-A10-1 DST/warm-up
++ the A10 winter-close note).
+
+**NEW CLAIM 2a — CONFIRMED (LATENT): segment calibration admits at n=3.**
+`calibration_service.py:240` `if len(group) < max(3, min_trades // 4)` with
+MIN_CALIBRATION_TRADES=8 → per-segment floor **3**, while the OVERALL gate
+requires 8 (`:217`); `apply_calibration` (`:610-641`) applies the most-specific
+segment multiplier with NO sample-size re-check at apply time; and the >5%
+deviation filter (`:250`) preferentially persists small-n noise (small samples
+deviate more). LATENT today: the live blob is `_overall`-only (n=8, ev/pop ×0.5
+floor — DB-verified this session); it fires as live segments reach 3-4 closes.
+→ NEW backlog line (07-13 section).
+
+**NEW CLAIM 2b — PARTIALLY BUILT: r/q basis captured on ONE path only.**
+`bs_inversion.py` prices with caller-supplied r/q; the sole production caller
+family assumes FIXED r=0.045 (`BACKFILL_RISK_FREE_RATE` default,
+`iv_historical_backfill.py:41`) and q=0.0 (`HistoricalIVService` default, never
+overridden — the handler doesn't pass dividend_yield at all). The BACKFILL path
+DOES persist both (`historical_iv_service.py:359-361` →
+`underlying_iv_points.inputs` jsonb, `iv_repository.py:116`). NOT captured: the
+daily snapshot path (feed-provided IV — the provider's r/q assumptions unknown)
+and decision-stage per-leg quotes/greeks. → one-line rider on the per-leg
+quote-envelope item (cheap; replay fidelity).
+
+**CORRECTIONS CARRIED (annotated, not adopted):** (3a) gap 1's "feeds active
+monitoring and entry breakers" is OVERSTATED — the ~12:1x verdict stands:
+CONFIRMED-LATENT, P1 with the re-arming seam as the trigger (greeks doubly
+dormant · stress warn-only · concentration demoted-to-WARN with the flag
+live-echoed). Not P0-live. (3b) gap 10's "greedy-stop removed" done-criterion
+CONTRADICTS the Lane-A replay DOWNGRADE (the budget break never fired in any
+replayed cycle); the standing done-criterion is "downgrade verdict stands with
+its mechanical reopen (>4 fitting candidates AND the roundtrip gate passing a
+tail)," not "removed."
+
+**MILESTONE SCALE — ADOPTED as the standing convention (theirs, verbatim):**
+**85** = no known critical correctness defect, decisions reproducible · **90** =
+canonical risk/EV/costs/replay/partial-close complete · **95** = repeated
+runtime proof + Phase-3 evidence + failure-injection exercises · **100** =
+reference ceiling only. **Realistic goal: 90-95.** Adopted closing line: "a
+genuinely excellent design may correctly conclude that none of today's
+candidates has positive net edge" — the capital-adequacy note's doctrine twin.
+
+**POINTS-AS-CROSS-CHECK:** their point-weighting independently converges on our
+queue — their #1/#2/#5 = our canonical-position / ⑤ / tonight's ②③, and their
+cost-basis (+3) above partial-close (+2) effectively matches our ⑥
+trigger-gating (both orderings say cost coherence binds before partial-close
+custody while the book is flat). No divergence demands an owner look; NO queue
+changes from scoring alone. Only the +3/+2 values were restated by the operator
+— rubric weights are opinions, not adjudicable facts.
+
+**SCORECARD (filed as CONTEXT, not a verified quantity):** 64/100, stated range
+62-68, on their stricter rubric. Epistemics worth paying externals for: they
+retracted their own "28.1% growth" figure as false precision — the
+self-correction is the value; the number itself is context only.
+
+## 2026-07-13 (Mon ~12:1x CT, RTH read-only) — DOCTRINAL-AUDIT ADJUDICATION (Sinclair/Natenberg) — scorecard + verdicts · status:reported
+
+STEP-0: DB `17:11Z` / broker `13:11 ET` agree (Mon 07-13, market OPEN — sanctioned
+read-only doc session, no builds/recycles). Source document NOT on disk (Downloads
+swept, repo grepped — no Sinclair/Natenberg artifact); adjudicated against the
+operator's restated claim set, fully specified per sub-claim. Their blind spot
+honored: every live-path claim got the runtime check they couldn't run. Tonight's
+queue (② E16-3 → ③ E19-2 → ④ F-A3-4 → tail) **UNCHANGED** — the P0 gate condition
+(CONFIRMED-ARMED) did not obtain.
+
+**F-RISK-ENV (their #3) — VERDICT: CONFIRMED-LATENT (all four sub-claims CONFIRMED
+in code; NO defective number can flip a live decision as deployed today) + a NAMED
+RE-ARMING SEAM.**
+- (i) CONFIRMED `risk_envelope.py:200-201` — `_pos_risk` returns
+  `max_credit×qty×100` (the credit RECEIVED = max GAIN) as "risk" for credit
+  structures; true defined-risk basis is width−credit. Feeds all concentration
+  ratios + `total_risk`.
+- (ii) CONFIRMED `:230-233` (stress twin `:519-520`) — leg greeks ×
+  `abs(position_qty)`×100: no buy/sell sign, per-leg quantity ignored entirely.
+- (iii) CONFIRMED `:524` — `spy_loss = total_delta × 0.05` treats −5% SPY as a
+  −$0.05 move (underlying price missing; ~600× understated). Same-family bonus
+  `:530`: the VIX leg treats "+50%" as +50 vol points (overstated).
+- (iv) CONFIRMED `:535` — correlation-one = −`total_risk` = Σ of (i)'s basis.
+- RUNTIME (the check they couldn't run): consumers at HEAD = autopilot breaker
+  (`paper_autopilot_service.py:407-427`, blocks ONLY on passed=False =
+  block/force_close) · monitor 5b (`intraday_risk_monitor.py:517-572` —
+  force_close only ever from LOSS envelopes, whose basis is unrealized_pl, NOT
+  `_pos_risk`; warn/block → `envelope_violation` alert rows, no action) · MTM +
+  orchestrator log-only · `check_new_position` still zero production callers.
+  Greeks DOUBLY dormant RE-VERIFIED TODAY: 0 legs (of 83 positions ever) carry a
+  `greeks` key + RISK_MAX_DELTA/GAMMA/VEGA/THETA unset (default 0 = no-limit) —
+  (ii)+(iii) SPY-side compute only zeros, and are severity=warn regardless.
+  Stress = warn → alert-noise ceiling. The ONLY block-capable defective-basis
+  path is `concentration_symbol` (basis = (i)) — DEMOTED to WARN in the sole
+  blocking consumer, read back on the RUNNING worker today
+  (`[UTILIZATION_GATE] flag RISK_UTILIZATION_GATE_ENABLED raw='1' → enabled=True`
+  + small-tier demotion lines at 14:06/16:09/16:30Z). Armed envelope env
+  (worker; names+values non-secret): SYMBOL_PCT=.4 · DAILY=.08 · WEEKLY=.1 ·
+  SYMBOL_LOSS=.03 · utilization =1 cap .85 · RISK_ENVELOPE_ENFORCE=1; stress
+  thresholds at defaults.
+- THE RE-ARMING SEAM (why this is P1, not P3): unsetting
+  RISK_UTILIZATION_GATE_ENABLED (a §4 SANCTIONED kill switch — "reverts to the
+  stricter BLOCK" — i.e. reverts to a block ON THE WRONG BASIS), any
+  demotion-check failure (fail-safe retains BLOCK), or tier growth past small
+  → `concentration_symbol` blocks entries on credit-received ratios. Alert-noise
+  is DEMONSTRATED, not hypothetical: 6 `envelope_violation` rows 07-07/07-08
+  (symbol high ×2 / sector ×2 / expiry ×2) fired off this basis. Book FLAT
+  (broker + DB) at adjudication; QQQ candidates ALLOWed today, so the basis
+  becomes computable on the next fill — still non-blocking under demotion.
+- DISPOSITION: MERGED into the NEW canonical-position-representation P1
+  (backlog 07-13 section) with the book-scaling family (#1166's persisted
+  max_loss_total is the same truth — reuse, don't recompute).
+
+**IC EV BASIS (their #2) — CONFIRMED, with a runtime CORRECTION.** Deployed model
+is `tail` (CONDOR_EV_MODEL=tail on worker): `calculate_condor_ev_tail`
+(`ev_calculator.py:632-712`) = |shortΔ|×prob_mult as breach prob, |longΔ| as
+max-loss prob, fixed partial-loss severity — but the deployed constants are
+severity **0.35** (not the 0.50 default they read) and CONDOR_TAIL_PROB_MULT
+**0.6** (an ad-hoc 40% delta haircut they didn't see — which REINFORCES their
+point: this is a tuned modeled EV, not a physical forecast). The scanner stamps it
+(`options_scanner.py:1800-1823` → `:3505-3506` → suggestion ev_raw; 22 IC
+suggestions/30d, latest today 16:00Z QQQ), calibration halves it (ev = 0.5×ev_raw
+exactly — floor engaged, live rows verified), and the #1101 roundtrip gate
+compares costs against THAT number. Honest framing: the known "modeled EV" made
+precise — NOT a new gate bug. → queue-⑤ charter ENRICHED (backlog): ONE
+independent terminal distribution, TWO payoff integrations (credit verticals E12
++ condor EV); their ensemble spec + falsifier attached verbatim.
+
+**CALIBRATION CLAMP (their #4) — CONFIRMED; floor-HOLD annotation only.**
+`calibration_service.py:466-479`: ratio = realized_avg/predicted_avg clamped
+[0.5,1.5]; a NEGATIVE realized average floors at ×0.5 — multiplicative, so it
+can only shrink a positive predicted edge, never flip its sign. ANNOTATION on the
+SETTLED floor-HOLD decision (07-09; stands): **the 0.5 floor bounds shrink but
+cannot correct a sign-wrong edge — the falsifier (E17/prequential, F-A1-3) and
+queue-⑤ are the actual defenses.** No action.
+
+**RV BASIS FORKS — CONFIRMED.** `vol_math.py` correct (log, √252, ddof=0);
+per-symbol rv_20d/iv_rv_spread path clean. LIVE simple-return forks: ①
+`regime_engine_v3.py:204-205` — the GLOBAL SPY regime vol is an inline
+SIMPLE-return calc in the very file whose per-symbol path uses the log helper
+(rv_20d→vol_z→global regime state, stamped on every suggestion) · ②
+`factors.py:197-244` + `market_data.py:267-269,368` HV-proxy iv_rank (simple) on
+the universe/enrichment fallback path · ③ `market_data.py:1060`
+calculate_portfolio_inputs (simple returns, np.cov ddof=1) → optimizer endpoints.
+Dormant forks (truth_layer iv_context · factors indicators/calculate_volatility ·
+vol_signal observe-only · regime v4) inventoried, no action. → backlog
+RV-unification line (rides the multi-basis family).
+
+**SURFACE — CONFIRMED; KEEP OBSERVE-ONLY (their recommendation = ours).**
+Runtime: SURFACE_V4_ENABLE=true + SURFACE_V4_POLICY unset → default "observe" →
+the skip/reject branches (`options_scanner.py:3284-3299`) never fire. Skew fork:
+`iv_surface.py:155-177` "25-delta skew" is FIXED k=±0.35 log-moneyness
+(e^0.35 ≈ 42% OTM), raw put−call difference — vs `iv_point_service.py:192-268`
+actual ±0.25-delta contracts, ATM-NORMALIZED. Term-slope fork: `iv_surface.py:220`
+front/back RATIO vs `iv_point_service.py:277-283` 90d−30d DIFFERENCE (different
+functional form AND opposite sign convention). arb_free: butterfly enforced as
+convexity-in-w via slope monotonicity (`surface_geometry_v4.py:461-530`) —
+necessary-not-sufficient (their Gatheral note) → doc-level rename/annotate filed
+in backlog.
+
+**RANKER FEES (their cost case) — CONFIRMED, ALREADY-KNOWN (A3 07-09), worst case
+sharpened.** `canonical_ranker.py:69` `fee_per_contract × contracts × 2` is
+leg-blind: an IC round trip is 8 leg-contracts ≈ $5.20 at $0.65 vs $1.30 computed
+(4× understate; verticals 2×). Folded into the multi-basis cost item.
+
+**EARNINGS — CONFIRMED; enriches the versioned-earnings item (recon #3).** Stub
+map is 2025-dated fixture rot (`earnings_calendar_service.py:27-42`; LATENT — only
+active if POLYGON_API_KEY unset) · filing+90d stepped estimate served as a bare
+date, no confidence class (`:75-88`) · hard-reject only ≤2d short-premium +
+penalty ≤7d, NO event-before-expiry check (`options_scanner.py:3871-3886`;
+A1c(ii) already confirmed this). Point-in-time schema (status enum
+confirmed/estimated/implied/unknown + known_at + before-expiry flag) attached to
+the backlog item.
+
+**SCORECARD CONVERGENCES:** "richer forecast modules dormant" CONFIRMED and
+SHARPENED — the forecast package (`return_forecast`/`vol_forecast`/
+`forecast_interface`) has ZERO production consumers while FORECAST_V4_ENABLED=true
+sits SET on the worker: an INERT armed flag on an orphan module (#1126-family
+inventory member; no urgency, nothing reads it) · "score recomputation defaults
+off" = W4 CONFIRMED at code (`calibration_apply_ordering.py:32-34`, strict =1) AND
+runtime (unset on worker → observe). Their independent read converging on our
+observe-window state + their independent re-derivation of E12 = calibration
+signal: their STATIC reads are trustworthy on algebra; their live-path claims
+correctly self-flagged as unprovable without runtime access (this session closed
+that gap; verdicts above).
+
+**THEIR OVERALL VERDICT (quoted, adopted):** "strongest at measurement, weakest at
+converting volatility information into independent probability and net EV — fixing
+that + risk units + costs beats any new strike rule."
+
+**H11 side observation (not theirs):** `ops_job_never_run` CRITICAL firing hourly
+since 13:07Z today for `thesis_tracker` (daily) — the job entered EXPECTED_JOBS
+with the weekend #1164 ship and its first scheduled run is 17:00 CT TODAY (the
+morning entry's P9 pin). Expected to self-resolve after that run; still firing
+tomorrow morning = real finding. No action taken (RTH read-only).
+
+## 2026-07-13 (Mon ~08:0x CT) — MORNING RITUAL v2 triage (READ-ONLY) — ★ NEW: F-REPLAY-FK
+
+STEP-0: DB `13:04Z` = Mon `08:04 CT` / broker `09:04 ET` = `08:04 CT` agree; market
+CLOSED, opens 13:30Z (08:30 CT, ~26 min). READ-ONLY + acks. **Sleep-hold's FIRST
+NIGHT PROVEN:** cron.log `Mon 07/13 0:00:02 start → 0:10:23 end (exit 0) → report +
+ping (curl 0)` — the AC-standby=Never hold held; nightly survived (no sleep-death).
+Report `audit/reports/2026-07-13.md` (NIGHTLY, zero findings/zero alerts) untracked
+→ sweep into tonight's ②. All three services @ `8d93621` (#1197 doc mover past
+af1c5be, benign). H11 48h = 0 critical/high. entries_paused=false, fingerprint
+intact (breaker tripped_at 07-08). Jobs since 05Z ALL succeeded incl.
+intraday_risk_monitor ×1 — **the E8-3 fix's first night produced NO false failed/
+partial; green is honest.**
+
+**★ F-REPLAY-FK (NEW, MED-HIGH, evidence-integrity) — the first complete-tape day
+opened with a BROKEN morning tape that stayed GREEN.** Today's morning
+`suggestions_close` decision_run `2612fe81` status=**failed**, error =
+`Commit failed: insert on decision_inputs violates FK decision_inputs_blob_hash_fkey
+— blob_hash 82b5be18… not present in data_blobs` — a decision_inputs row references
+a blob that was never stored. **The JOB stayed green** (`ok:true, processed:1,
+failed:0`, no error). This is the LIVE composition of **F-E16-3 seam-4** (swallowed
+replay-commit failure → job green; suggestions_close's `ctx.commit` result is NOT
+surfaced — my #1188 patched only suggestions_open/midday) + the **v1.4 A5 note**
+(`BlobStore.commit` permits partial batch failures → a blob batch partial-failure
+leaves the input's blob absent → FK violation → the whole commit fails, tape lost).
+**IMPACT:** the "complete tape" goal is broken at the DATA layer, not just coverage
+— the morning capture is unrecoverable. **DECISION: FILE → EXPANDS tonight's ②** —
+② surfacing the commit error turns this green→partial (VISIBLE, good) but does NOT
+fix the FK root cause; ② must ALSO (or a paired item) fix blob-commit atomicity
+(blobs committed before/atomically with inputs; no silent partial-batch). Likely
+RECURS on today's 11:00 CT + 16:00Z scans — P1 tape pin is PREDICTED-TO-FAIL its
+commit; watch it. · origin Mon 07-13 morning ritual (live).
+
+**P10 (E16-3 before-picture) CONFIRMED LIVE:** today's only decision_run
+(suggestions_close) = status failed, terminal_manifests **0** (the morning cycle
+emits no `__decision__/ranked_candidates` feature, per L1) — the 2-of-7 + morning
+gap is visible in today's data. The exact before-picture tonight's ② fixes.
+
+**ANTI-DRIFT:** the v1.4 post-close queue (② E16-3 → ③ E19-2 → ④ F-A3-4 → tail) is
+ledgered as TONIGHT'S build (07-12 v1.4 entry). The night-cap lanes (L1 honest-reds
+· L2 migration/query drafts · L3 pin manifest) show NO artifacts I can find (only
+doc #1197 reported) → **fold L1 (honest-reds: 14d succeeded rows carrying dropped
+nested errors — the green→partial blast radius + dedup rider) into tonight's ② as
+its opening step; L2/L3 absorbed into this ritual + the already-filed L1/L2 v1.4
+specs.** TOOL-LIMITED (noted, not gaps): the E8-3 30d Railway correlation (2d) +
+the [RISK_BASIS_SHADOW]/[BUCKET_SHADOW] line counts since d5edd50 (3a) are
+per-deployment logs across ~7 recycles — not retrievable via the MCP; E8-3 is
+structural-latent-confirmed (fix preventive; no intraday failed/partial last night).
+
+**INTRADAY PIN CHECK-TIMES (grade at time):** P1 11:00 CT replay tape (⚠ predicted
+FK-fail per F-REPLAY-FK) · P2 16:00Z E19-2 prediction (QQQ ≤2 clones / SOFI 0 /
+clones ev_raw-NULL+no-basis+inherited-cal-raev) · P3 16:00Z un-muted shadows' first
+breath · P4 16:00Z window heartbeats (F-WINDOW-1 silence check) · P5 E7 first real
+ordering (if ≥2 survivors) · P6 PR2 first otc1-* (if entry) · P7 first typed-partial
+watchlist · P8 close_reason e2e (if close) · P9 17:00 CT thesis tracker first
+authoritative run (price_basis distribution + 6 Aug-21 in_progress + 81% held/
+updated). A8 SOFI sentinel is now PER-TRACK (shadow-raw SOFI clear = DESIGNED; only
+champion/calibrated clear alarms).
+
+## 2026-07-13 (Mon 00:01 CT) — NIGHTLY AUDIT (v5.5, scheduled) — report audit/reports/2026-07-13.md
+
+STEP-0: DB `05:01:16Z` = Mon `00:01 CT` / broker `01:01 ET` = `00:01 CT`, agree to
+the second; market CLOSED, next open Mon 09:30 ET. Broker MCP surfaced (not blind).
+Budgets: 6/12 SQL (1 counted 42703 miss) · 2/4 broker · 0/8 subagents.
+
+**NO NEW FINDINGS — zero-alert night** (H11 48h critical+high = ZERO rows; weekend
+scheduler silence is designed — `day_of_week="mon-fri"` applied to ALL SCHEDULES,
+scheduler.py:250-255, verified). status:reported items: NONE.
+
+**VERIFICATIONS CLOSED (status:verified, cite don't re-check):**
+- H8: run-START = run-END = `8d93621` on all 3 services (SUCCESS, created 04:21:36Z
+  > merge); ~12 Sunday movers all ledger-named; ~7 idle-weekend recycles, zero
+  orphaned jobs (only job in window: phase2_precheck 05:00:04Z succeeded, post-recycle).
+- F-E8-3 #1195 content-verified at deployed SHA (raise-not-empty,
+  intraday_risk_monitor.py:673-683). ①b `_close_completed` (:159, wired :1509),
+  ② W3 `bucket_enforcement_action` (wired paper_autopilot_service.py:1059), D②
+  call-time flag read (fork.py:243-252, applied :340), ⓪ thesis `price_basis`
+  threading (thesis_tracker.py:130-160; table 0 rows, born-honest) — ALL verified.
+- Broker: equity=cash=OBP $2,067.86, book FLAT, unchanged to the cent from 07-12.
+  Pool 8/8 (1W/7L) + fills 3/10-15 unchanged by construction (market closed).
+- Breaker armed-quiet: entries_paused=false since 07-09 11:53Z; fingerprint stamp
+  intact (`streak_breaker_state.last_tripped_fingerprint`, 3 ids, 07-08 trip).
+  NOTE for future queries: the JSON key is `last_tripped_fingerprint`, NOT
+  `window_fingerprint` (tonight's null-read was a wrong key guess, not a change).
+- decision_runs=0 ✓ (pre-Mon-16:00Z correct) · position_thesis_outcomes=0 ✓ ·
+  universe=78 ✓ · suggestions in window=0 ✓.
+- FREE LOOK resolved-designed: phase2_precheck Mon-00:00-CT-only weekend pattern =
+  `hour="*/6"` × the global mon-fri gate; handler self-expires >48h post-deploy.
+
+**CARRIED (unchanged):** Mon 16:00Z pins (shadow heartbeats · decision_runs
+rows-exist w/ 2-of-7 completeness caveat until queue-② · E19 clone-prediction grade)
+· Mon 17:00 CT first thesis fill (expect price_basis) · queue ②③④ + tail ·
+**A5 3-in-1(+1)+#1104 writer-hardening = 4th consecutive build-day slip** (meter
+resumes 08:07 CT) · sleep-hold operator confirmation (next weekend night = live
+test) · E6 runtime first-occurrence pin · prompt-STATE drift list for v5.6
+(F-E8-3 shipped · ①b code-PASS · L1 8/8-SETTLED · W-clock restart SHA `d5edd50` ·
+A7 3/10-15 wording). **Retirement watch: A1/A3/A6/A10 at 5 consecutive — a quiet
+07-14 puts them at 6 (proposal territory, owner-gated).**
+
 ## 2026-07-12 (Sun ~22:4x CT, after PR-①) — DOC: browser doctrine encoded, 3 layers (PR #1197)
 
 STEP-0: DB `03:36Z` = Sun `22:36 CT` / broker `23:36 ET` agree; market closed

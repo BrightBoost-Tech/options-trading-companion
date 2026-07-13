@@ -24,18 +24,23 @@ JOB_NAME = "suggestions_open"
 
 
 def _persist_error_rollup(cycle_results) -> int:
-    """A9-F8 (2026-07-07): sum ``counts.rejection_persist_failures`` across
-    cycle results so persistence failures surface at the TOP-LEVEL job result
-    (``counts.errors``) instead of dying buried one level down. Pure; never
-    raises on malformed cycle shapes."""
+    """A9-F8 (2026-07-07) + E16-3 roll-up fix (PR-②, 2026-07-13): sum BOTH
+    ``counts.rejection_persist_failures`` AND the generic nested
+    ``counts.errors`` across cycle results, so ANY cycle-level error class
+    reaches the TOP-LEVEL ``counts.errors`` the runner classifier reads.
+
+    The 07-13 exhibit: #1188's replay_commit_error incremented the CYCLE's
+    counts.errors, but this roll-up summed only rejection_persist_failures —
+    the top-level overwrite erased it and all five broken tapes rode green
+    jobs. Cycle producers today keep the two classes DISJOINT
+    (rejection_persist_failures is never folded into cycle counts.errors), so
+    summing both never double-counts. Pure; never raises on malformed shapes."""
     total = 0
     for cr in (cycle_results or []):
         try:
-            total += int(
-                ((cr or {}).get("counts") or {}).get(
-                    "rejection_persist_failures"
-                ) or 0
-            )
+            counts = ((cr or {}).get("counts") or {})
+            total += int(counts.get("rejection_persist_failures") or 0)
+            total += int(counts.get("errors") or 0)
         except (AttributeError, TypeError, ValueError):
             continue
     return total
@@ -142,15 +147,29 @@ def run(payload: Dict[str, Any], ctx: Any = None) -> Dict[str, Any]:
                         try:
                             cycle_result = await run_midday_cycle(client, uid)
                             _commit_res = ctx.commit(client, status="ok")
-                            # E16 seam 4 (2026-07-12): surface a swallowed capture-
-                            # commit failure into the cycle result so it reads as
-                            # counts.errors (the F-A4-1 contract), never silence.
-                            if isinstance(_commit_res, dict) and _commit_res.get("error"):
-                                cycle_result = cycle_result or {}
-                                _cc = cycle_result.setdefault("counts", {})
-                                _cc["errors"] = int(_cc.get("errors") or 0) + 1
-                                cycle_result["replay_commit_error"] = str(_commit_res.get("error"))[:300]
-                                notes.append(f"replay commit error for {uid[:8]}: {_commit_res.get('error')}")
+                            # E16 seam 4 (2026-07-12) + PR-② (2026-07-13):
+                            # surface a swallowed capture-commit failure OR a
+                            # typed capture_partial (the atomicity gate's
+                            # degrade) into the cycle result so it reads as
+                            # counts.errors (the F-A4-1 contract), never
+                            # silence. The roll-up now carries generic nested
+                            # counts.errors to the top level.
+                            if isinstance(_commit_res, dict):
+                                _cc_err = _commit_res.get("error")
+                                _cc_partial = _commit_res.get("tape_integrity") not in (None, "complete")
+                                if _cc_err or _cc_partial:
+                                    cycle_result = cycle_result or {}
+                                    _cc = cycle_result.setdefault("counts", {})
+                                    _cc["errors"] = int(_cc.get("errors") or 0) + 1
+                                    cycle_result["replay_commit_error"] = (
+                                        str(_cc_err)[:300] if _cc_err
+                                        else f"tape_integrity={_commit_res.get('tape_integrity')}"
+                                    )
+                                    notes.append(
+                                        f"replay commit degraded for {uid[:8]}: "
+                                        f"error={_cc_err} tape_integrity="
+                                        f"{_commit_res.get('tape_integrity')}"
+                                    )
                         except Exception as cycle_err:
                             ctx.commit(client, status="failed", error_summary=str(cycle_err)[:500])
                             raise

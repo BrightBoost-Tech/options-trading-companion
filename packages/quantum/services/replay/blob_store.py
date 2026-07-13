@@ -71,6 +71,28 @@ class LRUCache:
         return len(self._cache)
 
 
+def _decode_bytea(payload) -> Optional[bytes]:
+    """Decode a data_blobs.payload value to raw bytes.
+
+    PostgREST returns BYTEA as a hex STRING (``\\x`` + hex) — the read half of
+    the PR-② fix (encode-only would have moved the breakage to replay time,
+    ``get()`` previously assumed bytes/memoryview). Direct-driver paths that
+    hand back bytes/memoryview keep working. Unknown shape → None (loud at the
+    caller, never a fabricated payload — H9).
+    """
+    if isinstance(payload, memoryview):
+        return bytes(payload)
+    if isinstance(payload, (bytes, bytearray)):
+        return bytes(payload)
+    if isinstance(payload, str):
+        s = payload[2:] if payload.startswith("\\x") else payload
+        try:
+            return bytes.fromhex(s)
+        except ValueError:
+            return None
+    return None
+
+
 class BlobStore:
     """
     Content-addressable blob storage with deduplication.
@@ -104,6 +126,13 @@ class BlobStore:
         self._pending: Dict[str, Dict[str, Any]] = {}
         self._pending_lock = Lock()
 
+        # Hashes dropped for exceeding REPLAY_MAX_BLOB_BYTES — the typed
+        # oversize degrade (PR-②, 2026-07-13): an oversize payload is NEVER
+        # staged (so it can never be half-referenced); the commit-side gate in
+        # DecisionContext sees the hash as unpersisted and downgrades the run
+        # to capture_partial instead of letting decision_inputs FK-orphan.
+        self._dropped_oversize: set = set()
+
     def put(
         self,
         obj: Any,
@@ -134,12 +163,18 @@ class BlobStore:
         # Compute hash
         blob_hash = sha256_hex(canonical_bytes)
 
-        # Check size limit
+        # Size limit — typed degrade (PR-②): an oversize blob is NOT staged.
+        # The hash is still returned (content addressing is real), but the
+        # commit-side gate will see it unpersisted and downgrade the run to
+        # capture_partial — never an FK-orphaned decision_inputs row.
         if uncompressed_size > REPLAY_MAX_BLOB_BYTES:
             logger.warning(
-                f"Blob exceeds size limit: {uncompressed_size} bytes > "
-                f"{REPLAY_MAX_BLOB_BYTES} bytes (hash: {blob_hash[:16]}...)"
+                f"Blob exceeds size limit — DROPPED (typed capture_partial): "
+                f"{uncompressed_size} bytes > {REPLAY_MAX_BLOB_BYTES} bytes "
+                f"(hash: {blob_hash[:16]}...)"
             )
+            self._dropped_oversize.add(blob_hash)
+            return blob_hash, b"", uncompressed_size
 
         # Compress
         if compression == "gzip":
@@ -181,12 +216,14 @@ class BlobStore:
                 logger.warning(f"Blob not found: {blob_hash[:16]}...")
                 return None
 
-            payload_bytes = result.data["payload"]
+            payload_bytes = _decode_bytea(result.data["payload"])
             compression = result.data.get("compression", "gzip")
-
-            # Handle memoryview/bytes from Postgres BYTEA
-            if isinstance(payload_bytes, memoryview):
-                payload_bytes = bytes(payload_bytes)
+            if payload_bytes is None:
+                logger.error(
+                    f"Blob payload undecodable (unexpected type/format) for "
+                    f"{blob_hash[:16]}..."
+                )
+                return None
 
             # Decompress
             if compression == "gzip":
@@ -229,11 +266,13 @@ class BlobStore:
 
             for row in (response.data or []):
                 blob_hash = row["hash"]
-                payload_bytes = row["payload"]
+                payload_bytes = _decode_bytea(row["payload"])
                 compression = row.get("compression", "gzip")
-
-                if isinstance(payload_bytes, memoryview):
-                    payload_bytes = bytes(payload_bytes)
+                if payload_bytes is None:
+                    logger.warning(
+                        f"Blob payload undecodable for {blob_hash[:16]}..."
+                    )
+                    continue
 
                 try:
                     if compression == "gzip":
@@ -285,9 +324,18 @@ class BlobStore:
                 batch = pending_list[i:i + self.COMMIT_BATCH_SIZE]
 
                 try:
+                    # PR-② (F-REPLAY-FK root cause): the payload is raw gzip
+                    # BYTES, which supabase-py's JSON layer cannot serialize —
+                    # every batch threw `Object of type bytes is not JSON
+                    # serializable` and data_blobs stayed empty forever.
+                    # PostgREST bytea input format is a hex string: \x + hex.
+                    encoded_batch = [
+                        {**info, "payload": "\\x" + info["payload"].hex()}
+                        for info in batch
+                    ]
                     # Single upsert call for the batch
                     result = supabase.table("data_blobs").upsert(
-                        batch,
+                        encoded_batch,
                         on_conflict="hash"
                     ).execute()
 
@@ -328,6 +376,17 @@ class BlobStore:
     def is_persisted(self, blob_hash: str) -> bool:
         """Check if a blob hash is confirmed persisted (for testing)."""
         return self._persisted_cache.contains(blob_hash)
+
+    def was_dropped_oversize(self, blob_hash: str) -> bool:
+        """True if this hash was refused staging for exceeding the size cap
+        (typed capture_partial input for the commit-side gate)."""
+        return blob_hash in self._dropped_oversize
+
+    def unpersisted_of(self, blob_hashes) -> list:
+        """The subset of ``blob_hashes`` NOT confirmed persisted — the
+        commit-side atomicity gate (PR-②): decision_inputs must never
+        reference a hash in this list."""
+        return sorted(h for h in blob_hashes if not self._persisted_cache.contains(h))
 
     def clear_pending(self) -> None:
         """Clear pending blobs without committing."""

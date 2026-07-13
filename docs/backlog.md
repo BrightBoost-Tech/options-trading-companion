@@ -12,6 +12,95 @@ questions) · **RESOLVED — DO NOT REINVESTIGATE**.
 
 ---
 
+## 2026-07-13 (Mon RTH, read-only) — DOCTRINAL-AUDIT ADJUDICATION (Sinclair/Natenberg)
+
+Adjudicated at `8d93621` vs repo + DB + runtime; full verdicts + scorecard in the
+ledger 07-13 (~12:1x CT) entry. Doc writes only. **Tonight's queue (② E16-3 →
+③ E19-2 → ④ F-A3-4 → tail) UNCHANGED** — F-RISK-ENV returned CONFIRMED-LATENT,
+not CONFIRMED-ARMED (the demotion flag is live-verified ON; the defective
+concentration basis cannot block today).
+
+- **NEW P1 · CANONICAL POSITION REPRESENTATION (absorbs the risk-envelope
+  unit/sign fixes; ~1-2 evenings).** One typed position/structure model consumed
+  by risk_envelope + stress: signed per-leg quantity + ratio · multiplier-aware
+  dollar greeks · exact defined-risk max loss (vertical: width−credit; IC:
+  max(side_width)−credit) replacing `_pos_risk`'s credit-received basis
+  (`risk_envelope.py:200-201`) · payoff-CAPPED stress (a defined-risk book cannot
+  lose more than Σ max-loss; SPY stress needs Δ×S×pct, `:524`) · broker position
+  reconciliation. MERGES: the book-scaling family (#1166's persisted
+  `max_loss_total` is the same truth — REUSE it, don't recompute) + greeks
+  populate-at-stage (P2 below) as the input feed. The envelope's four confirmed
+  defects (ledger 07-13) are the acceptance tests. URGENCY = the re-arming seam:
+  unsetting RISK_UTILIZATION_GATE_ENABLED (sanctioned kill) or any demotion-check
+  failure re-arms the `concentration_symbol` BLOCK on the credit-received basis.
+  · origin doctrinal audit #3 + their #2 rec · done when: envelope + stress
+  consume the canonical model and a credit-structure book computes width−credit
+  risk end-to-end (test drives check_all_envelopes on a credit book, asserts the
+  ratio basis).
+- **NEW GATED · Score-each-vertical-before-IC (their #4 structure-selection
+  insight).** An IC = two tail forecasts; each side must independently clear the
+  ⑤-sourced probability bar + the unified cost bar before combining. GATED on
+  queue-⑤ + the multi-basis cost unification — do NOT build against the current
+  delta/fair-odds EV. · origin doctrinal audit · done when: IC assembly requires
+  two independently-cleared verticals.
+- **RV-basis unification (small; rides the multi-basis family).** `vol_math.py`
+  (log, √252, ddof=0) is the standard; LIVE simple-return forks to convert (or
+  annotate deliberately-simple): `regime_engine_v3.py:204-205` (the GLOBAL SPY
+  regime vol — inline simple-return calc in the same file whose per-symbol path
+  uses the log helper) · `factors.py:197-244` + `market_data.py:267-269,368`
+  (HV-proxy iv_rank fallback) · `market_data.py:1060` calculate_portfolio_inputs
+  (optimizer endpoints; np.cov ddof=1). Dormant forks inventoried in the ledger
+  07-13 entry — no action there. · origin doctrinal audit RV claim.
+- **Surface honesty annotations (doc-level; KEEP OBSERVE-ONLY — their rec =
+  ours, runtime-verified policy=observe).** Rename/annotate
+  `build_arb_free_surface`: convexity-in-w is necessary-not-sufficient for
+  butterfly-freeness (cite their Gatheral note in the comment). Label
+  `iv_surface.skew()` honestly (FIXED k=±0.35 raw put−call diff — not 25-delta;
+  `iv_point_service.compute_skew_25d_from_chain` is the delta-true
+  ATM-normalized one) and pick ONE term_slope form (`iv_surface.py:220`
+  front/back RATIO vs `iv_point_service.py:277-283` 90−30 DIFFERENCE — opposite
+  sign conventions). · origin doctrinal audit surface claims.
+- **NEW P2 · Minimum segment-n for calibration admission (scoring-report §2a,
+  verified 07-13).** Segment multipliers are admitted at
+  `max(3, min_trades // 4)` = **3** observations (`calibration_service.py:240`,
+  MIN_CALIBRATION_TRADES=8) while the overall gate requires 8 (`:217`);
+  `apply_calibration` applies the most-specific segment with NO sample-size
+  re-check (`:610-641`); the >5% deviation filter (`:250`) selects FOR small-n
+  noise. A multiplier fit on 3 closes is noise wearing a coefficient. LATENT
+  today (live blob `_overall`-only, n=8, ×0.5 floor — DB-verified); fires as
+  live segments reach 3-4 closes. FIX: raise the per-segment admission floor
+  (env-config, e.g. match the overall 8) OR serve overall-only until segment
+  n ≥ threshold. Interacts with the 0.5 floor's known limits (the floor bounds
+  shrink but cannot correct a noise-driven sign — ledger 07-13 clamp
+  annotation). · origin scoring/gap report gap 6 · done when: no segment
+  multiplier below the floor can reach apply_calibration.
+
+### 07-13 ~13:0x CT — TONIGHT'S ② ADDENDUM + RIDER (root-caused pre-build; ledger 13:0x entry is truth)
+
+- **② ADDENDUM — F-REPLAY-FK root cause is SERIALIZATION, fix both sides + the
+  atomicity gate.** `data_blobs` = 0 rows ALL-TIME: every blob batch throws
+  `Object of type bytes is not JSON serializable` (raw gzip bytes staged at
+  `blob_store.py:158`, upserted through supabase-py's JSON layer at `:289-292`).
+  NOT oversize (2MB cap warn-only, never hit), NOT one blob (82b5be18… is just
+  the first FK reported). Fix: (a) bytea hex-encode on write + `\x`-hex decode
+  on `get()`/`get_many()` (read path `:184-189` would fail on PostgREST's
+  string); (b) blobs_committed == expected gate BEFORE decision_inputs insert →
+  typed `capture_partial`; (c) oversize → same typed degrade; (d) test drives
+  the REAL serialization boundary — the shipped MagicMock
+  (`test_replay_feature_store.py:202-203`) is the 4th mock-at-failing-layer
+  instance. Today's 5 tapes (13:00 close + 4 opens) unrecoverable — annotate,
+  don't chase.
+- **② RIDER (PROMOTED into tonight, operator instruction) — F-LOG-INFO-DROP:
+  worker logging config.** No logging config exists anywhere in the repo → root
+  logger unconfigured on both workers → EVERY `logger.info` dropped in-process
+  (lastResort stderr = WARNING). All three shadow windows silent by CONFIG
+  (guards correct, paths ran); the F-WINDOW-1 heartbeats are ALREADY BUILT
+  (#1187, `log_shadow_heartbeat`) and ride the same dead channel — the fix is a
+  handler/level at worker startup (root INFO vs targeted loggers = owner call),
+  not new heartbeats. **⚠ W-clocks: [RISK_BASIS_SHADOW] has NEVER emitted; the
+  d5edd50 arm-evidence window collected nothing; clocks restart at tonight's
+  fix SHA.** Supersedes the F-WINDOW-1 P2-tail item in the 07-12 section.
+
 ## 2026-07-12 (Sun night) — v1.4 EXTERNAL-AUDIT ADJUDICATION — 3 seam kills of our own weekend work
 
 Report: `docs/review/external-full-audit-v1.4-2026-07-12.md`. Verdicts + census in
@@ -195,7 +284,18 @@ this session** — read-only + these doc writes.
   route test asserting NONZERO EV + ALL gates unchanged; observe/replay-only start.
   **⚠ decision ④ (2-leg credit cohort experiment) is GATED on this — un-muting
   cannot produce a qualifying entry until it ships.** ~1-2 evenings + observation.
-  · origin v1.3 F-A1/A6-E12 (promoted FAIL; corrects the #1169 closure claim) ·
+  **⑤ CHARTER ENRICHED (doctrinal audit 07-13): ONE terminal distribution, TWO
+  payoff integrations** — the same independent distribution must serve credit
+  VERTICALS (E12) **and CONDOR EV** (today: `calculate_condor_ev_tail` =
+  |Δshort|×0.6 breach / |Δlong| max-loss / fixed 0.35 severity,
+  CONDOR_EV_MODEL=tail deployed — delta-as-probability plus two tuned constants,
+  a modeled EV, not a forecast). Ensemble spec (theirs, attach verbatim to the
+  build charter): IV-anchored baseline + EWMA/GARCH + HAR + earnings-jump
+  component + uncertainty buffer. FALSIFIER (theirs, keep verbatim): **locked
+  prequential cohorts must beat the delta/fair-odds baseline on Brier / EV-RMSE /
+  net-P&L rank — else retain the baseline and stop.**
+  · origin v1.3 F-A1/A6-E12 (promoted FAIL; corrects the #1169 closure claim)
+  ∪ doctrinal audit #2 ·
   done when: a credit vertical can carry a nonzero honest EV through the gates.
 - **⑥ P0 · RESIDUAL PARTIAL-CLOSE CUSTODY (F-A2-1, 2-3 evenings).** Partial
   multileg closes don't reconcile residual into `paper_positions`
@@ -488,14 +588,25 @@ Full detail in `audit/ledger.md` (07-11/12 entries). Shipped this weekend:
   >2 days out passes — the event-in-hold-window risk is unscreened). OBSERVE-ONLY
   first; a hard skip is an operator decision after source-reliability observation.
   Falsifier/guard: `event_unknown` must never resolve to "safe". 1-2 evenings.
-  · origin 07-09 v1.2 recon #3.
+  **ENRICHED (doctrinal audit 07-13) with their point-in-time schema: per-row
+  status enum {confirmed / estimated / implied / unknown} + `known_at` +
+  before-expiry flag** — today's filing+90d stepped projection
+  (`earnings_calendar_service.py:75-88`) is served as a bare date with no
+  confidence class, and the stub fallback map is 2025-dated fixture rot
+  (`:27-42`; latent, only active if POLYGON_API_KEY unset).
+  · origin 07-09 v1.2 recon #3 ∪ doctrinal audit.
 
 - **NEW P2 · Per-leg quote envelope at entry staging (recon #5).** A timestamped
   `OptionLegQuote` threaded through to the final stage with identity / executable /
   age / skew invariants; **unknown age → one refresh → `quote_age_unknown`, never
   "fresh"**. Extends the Phase-3 quote-age plumbing to the ENTRY side (today entry
-  staging has no per-leg quote-age guard). 1-2 evenings. · origin 07-09 v1.2
-  recon #5.
+  staging has no per-leg quote-age guard). 1-2 evenings. **RIDER (scoring-report
+  §2b, verified 07-13): capture the IV/greeks RATE + DIVIDEND basis per leg** —
+  feed-provided IV carries unknown provider assumptions, and our own inversion
+  assumes fixed r=0.045 / q=0.0 (`bs_inversion.py`; persisted ONLY on the
+  historical-backfill path via `underlying_iv_points.inputs` — the daily
+  snapshot + decision-stage paths capture nothing). Cheap; replay fidelity.
+  · origin 07-09 v1.2 recon #5 ∪ scoring/gap report gap 8.
 
 - *(recon #4 → MERGED into P0-A above per A1b; not a separate item.)*
 
@@ -525,6 +636,13 @@ with why — re-proposing one is a wasted slot. Verified this session unless not
   CORRECTED/REJECTED (A2.7): the recon confirmed these already ~85% EXIST in
   cohort policy; the earlier deep-dive's "missing" impression was wrong. Don't
   re-derive them as a new build.
+- **Doctrinal-audit reject/defer list (07-13, adopted verbatim — re-proposing any
+  is a wasted slot):** dynamic hedging at $2k · Kelly sizing at n=8 ·
+  Heston/rough-vol/deep-learning vol models · SVI promotion before the risk-unit
+  + cost fixes · universal 21-DTE/50%-credit exits as DOCTRINE (cohort policy
+  already covers ~85%, per the A2.7 line above) · "high IV rank means sell
+  premium" as a rule · OPRA historical tick purchases · more symbols / more
+  frequency as an edge fix.
 - **⚠ PROVENANCE NOTE:** the comparative recon's OWN rejected-gaps appendix
   (its Nautilus/Hummingbot comparison rejections) was produced in a prior session
   and is NOT recoverable from this session's context. The items above are the
@@ -546,9 +664,12 @@ with why — re-proposing one is a wasted slot. Verified this session unless not
   closes; 6/8 as of 07-01. · origin pre-0610 + 06-18 · do when: 8th live
   post-epoch close lands; NOT before (raw mode makes both moot).
 - **Durable-oversight Phase 3 (fill-quality-informed exits)** — precursor
-  instrumentation shipped (#1102 close_fill_gap; first LIVE-close
-  gap_fraction still pending). · origin 06-30 approved queue · do when:
-  ≥10–15 live close fills accumulated; the #1102 fields are the evidence base.
+  instrumentation shipped (#1102 close_fill_gap); evidence accruing **3 of the
+  10–15 gate** (stamped live fills 07-01→07-08 in `paper_orders.order_json`,
+  all with gap_fraction; the 07-08 sign fix at `alpaca_order_handler.py:660-665`
+  means the basis is clean — verified 07-13). · origin 06-30 approved queue ·
+  do when: ≥10–15 live close fills accumulated; the #1102 fields are the
+  evidence base.
 - **Paper-shadow migration pair — APPLY AS A UNIT, pre-enable gate** —
   `20260531000000_add_paper_shadow_routing_mode` (CHECK-constraint widen) +
   `20260601000000_paper_shadow_pairs` (state-machine table, lands RLS-off:
@@ -631,7 +752,12 @@ with why — re-proposing one is a wasted slot. Verified this session unless not
   distortion)** — ranker fee = fee×contracts×2 (NO ×leg-count) + 5%-of-EV
   slippage proxy vs the gate's executable cross; under-costs 4-leg vs 2-leg
   in RANKING. Magnitude small ($ few on tiny EVs) but real; given B1's
-  "downstream is the problem," cost coherence matters. Fold in: A4
+  "downstream is the problem," cost coherence matters. **Worst case quantified
+  (doctrinal audit 07-13): an IC round trip is 8 leg-contracts ≈ $5.20 at
+  $0.65/ct vs $1.30 computed at `canonical_ranker.py:69` — 4× understate
+  (verticals 2×). Their one-basis spec adopted: a single executable cost model
+  (per-LEG-contract fees + executable spread) shared by scanner, ranker, and
+  gate.** Fold in: A4
   score-saturation (min(100) clamp, guardrails.py:138) + the SOFI perpetual-
   100 artifact.
   **PoP-UNIFICATION CENSUS (rider, #1147 07-10, hard-gate before the 2-leg
@@ -682,7 +808,10 @@ with why — re-proposing one is a wasted slot. Verified this session unless not
 - **Capital-adequacy honest note (doc line, NOT a deposit rec)** — divisible
   1-lot 4-leg structures clearing real per-contract cost imply ~$7.5-8k
   equity; the ~$2k book is structurally cost-bound (§1 of the external
-  packet). Record as a design constraint, not advice. · origin 07-09 §1.
+  packet). Record as a design constraint, not advice. **Rider (doctrinal audit
+  07-13, their Chicago Fed citation): the edge must be PROVEN conditional,
+  never assumed structural — small-account survival math compounds the cost
+  bound.** · origin 07-09 §1 ∪ doctrinal audit.
 
 - **Gap-3(a): shadow-ledger promotion-time normalization** — per-contract
   (or per-$-risked) cohort scoring + a measured fill-confidence discount

@@ -1252,6 +1252,13 @@ async def run_morning_cycle(supabase: Client, user_id: str):
     )
 
     if positions is None:
+        # E16-3 (PR-②): the morning cycle previously emitted NO terminal
+        # feature on ANY path — manifest both terminals so the 08:00 tape has
+        # a left-hand side.
+        _capture_decision_manifest(
+            [], None, {"positions": None},
+            "positions_read_failed",
+            datetime.now(timezone.utc).date().isoformat())
         return
 
     # ── Tier observation (morning cycle) ─────────────────────────────
@@ -2028,6 +2035,14 @@ async def run_morning_cycle(supabase: Client, user_id: str):
         f"(user={user_id[:8]}, spreads={len(spreads)}, suggestions={len(suggestions)})"
     )
 
+    # E16-3 (PR-②): morning terminal manifest — the 08:00 close/manage cycle
+    # emits its decision set (or honest zeros on a flat book) like every
+    # midday return does.
+    _capture_decision_manifest(
+        suggestions, None,
+        {"spreads": len(spreads), "suggestions": len(suggestions)},
+        None, datetime.now(timezone.utc).date().isoformat())
+
 
 def _build_cycle_metadata(
     *,
@@ -2292,6 +2307,12 @@ async def run_midday_cycle(supabase: Client, user_id: str, deployable_capital_ov
             f"[Midday] Skipped: micro tier with {len(positions)} "
             f"open position(s); one-at-a-time policy"
         )
+        # E16-3 (PR-②): terminal manifest at EVERY return — pre-scanner exit,
+        # rejection_stats not bound yet, honest zeros.
+        _capture_decision_manifest(
+            [], None, {"candidates": 0, "created": 0},
+            "micro_tier_position_open",
+            datetime.now(timezone.utc).date().isoformat())
         return {
             "skipped": True,
             "reason": "micro_tier_position_open",
@@ -2331,6 +2352,11 @@ async def run_midday_cycle(supabase: Client, user_id: str, deployable_capital_ov
     can_scan, scan_reason = CapitalScanPolicy.can_scan(deployable_capital)
     if not can_scan:
         print(f"Skipping scan: {scan_reason}")
+        # E16-3 (PR-②): terminal manifest — pre-scanner exit, honest zeros.
+        _capture_decision_manifest(
+            [], None, {"candidates": 0, "created": 0},
+            "capital_scan_policy_block",
+            datetime.now(timezone.utc).date().isoformat())
         return {
             "skipped": True,
             "reason": scan_reason,
@@ -2415,6 +2441,12 @@ async def run_midday_cycle(supabase: Client, user_id: str, deployable_capital_ov
              )
          except Exception as e:
              print(f"Error logging global veto: {e}")
+         # E16-3 (PR-②): terminal manifest — pre-scanner exit (budget computed,
+         # scanner never ran), honest zeros.
+         _capture_decision_manifest(
+             [], None, {"candidates": 0, "created": 0},
+             "global_risk_budget_exhausted",
+             datetime.now(timezone.utc).date().isoformat())
          return {
              "skipped": True,
              "reason": "global_risk_budget_exhausted",
@@ -2811,6 +2843,14 @@ async def run_midday_cycle(supabase: Client, user_id: str, deployable_capital_ov
                 top_reasons = rejection_stats.top_reasons(5)
                 if top_reasons:
                     print(f"[Midday] Top rejection reasons: {top_reasons}")
+            # E16-3 (PR-②): terminal manifest — post-scanner zero-emission
+            # exit; rejection_stats IS bound here, carry it.
+            _capture_decision_manifest(
+                [], rejection_stats,
+                {"scanner_emitted": len(scout_results) if scout_results else 0,
+                 "candidates": 0, "created": 0},
+                "no_candidates",
+                datetime.now(timezone.utc).date().isoformat())
             return {
                 "skipped": False,
                 "reason": "no_candidates",
@@ -2854,6 +2894,13 @@ async def run_midday_cycle(supabase: Client, user_id: str, deployable_capital_ov
 
     except Exception as e:
         print(f"Scanner failed: {e}")
+        # E16-3 (PR-②): terminal manifest — scanner-exception exit;
+        # rejection_stats may not be bound (exception can precede it).
+        _capture_decision_manifest(
+            [], locals().get("rejection_stats"),
+            {"candidates": 0, "created": 0, "scanner_error": str(e)[:200]},
+            "scanner_failed",
+            datetime.now(timezone.utc).date().isoformat())
         return {
             "skipped": True,
             "reason": f"scanner_failed: {e}",

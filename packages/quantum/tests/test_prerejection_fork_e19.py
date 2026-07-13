@@ -307,6 +307,59 @@ class TestPrerejectionCloneInvariants(_EnvRawOn):
         self.assertNotEqual(c["trace_id"],
                             _prerejected_sofi().get("trace_id"))
 
+    def test_routing_and_execution_semantics_explicit_and_separate(self):
+        """Invariant 4+5: the clone is explicitly shadow_only /
+        internal_paper — routing and execution are SEPARATE labels, neither
+        inferred from the other — and carries the full provenance triple
+        (ev_raw / ev_calibrated / ev_basis) + calibration identity +
+        experiment version."""
+        _, c = self._clone()
+        sz = c["sizing_metadata"]
+        self.assertEqual(sz["routing_mode"], "shadow_only")
+        self.assertEqual(sz["execution_mode"], "internal_paper")
+        self.assertEqual(sz["ev_basis"], "raw")
+        self.assertEqual(c["ev_raw"], 30.73)
+        self.assertEqual(sz["ev_calibrated"], 15.37)
+        self.assertIn("calibration_identity", sz)
+        self.assertEqual(sz["experiment_version"], "e19_prerejection_v1")
+
+    def test_fork_leaves_decision_tape_untouched(self):
+        """Test 13: the fork must not add, remove, or mutate decision-tape
+        features — tape completeness (PR-② E16-3) is a different layer.
+        Driven with an ACTIVE DecisionContext exactly as suggestions_open
+        wraps the cycle."""
+        os.environ["REPLAY_ENABLE"] = "1"
+        try:
+            from datetime import datetime, timezone
+            from packages.quantum.services.replay.blob_store import BlobStore
+            from packages.quantum.services.replay.decision_context import (
+                DecisionContext,
+            )
+            ctx = DecisionContext(
+                strategy_name="suggestions_open",
+                as_of_ts=datetime.now(timezone.utc),
+                user_id=UID, git_sha="testsha",
+                _blob_store=BlobStore(),
+            )
+            ctx.__enter__()
+            try:
+                ctx.record_feature("__decision__", "ranked_candidates",
+                                   {"count": 1})
+                features_before = [(f.symbol, f.namespace, f.features_hash)
+                                   for f in ctx.features]
+                inputs_before = dict(ctx.inputs)
+                client = FakeSupabase()
+                _seed(client, _pending_qqq(), _prerejected_sofi())
+                _run_fork(client)
+                self.assertEqual(
+                    [(f.symbol, f.namespace, f.features_hash) for f in ctx.features],
+                    features_before)
+                self.assertEqual(ctx.inputs, inputs_before)
+            finally:
+                ctx.__exit__(None, None, None)
+        finally:
+            os.environ.pop("REPLAY_ENABLE", None)
+
 
 # ---------------------------------------------------------------------------
 # Exclusions: what must NOT be resurrected / cloned

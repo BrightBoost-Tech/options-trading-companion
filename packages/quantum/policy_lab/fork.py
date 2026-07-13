@@ -531,7 +531,20 @@ def _clone_prerejection_for_cohort(
     sizing.update({
         "ev_basis": "raw",
         "raev_basis": "raw_portfolio_blind" if raw_raev is not None else "unknown_recompute_failed",
+        # Full provenance triple: the raw number the clone decides on, the
+        # calibrated number the champion rejected on, and the basis label —
+        # plus the calibration identity available at source (model_version).
+        # Never inferred downstream; comparisons that need a basis and find
+        # it missing must refuse, typed (the caller's missing_ev_basis path).
+        "ev_calibrated": source.get("ev"),
+        "calibration_identity": source.get("model_version"),
+        # Routing/execution semantics are SEPARATE and both explicit — a
+        # pre-rejection clone is a simulated shadow observation and must
+        # never be read as (or become) a broker-filled outcome.
+        "routing_mode": "shadow_only",
+        "execution_mode": "internal_paper",
         "prerejection_fork": True,
+        "experiment_version": "e19_prerejection_v1",
         "champion_blocked_reason": source.get("blocked_reason"),
         "source_suggestion_id": source.get("id"),
     })

@@ -38,8 +38,13 @@ def get_active_user_ids(client: Client) -> List[str]:
         res = client.table("user_settings").select("user_id").execute()
         return [r["user_id"] for r in res.data or []]
     except Exception as e:
-        print(f"Error fetching active users: {e}")
-        return []
+        # F-E8-3 (2026-07-12): a FAILED discovery read must RAISE, not return [].
+        # []-as-no-users silently no-ops the job for ALL users (a DB failure looks
+        # like "nobody to process"). Callers propagate → the runner records
+        # failed_retryable. A genuinely-empty user_settings (query succeeds) still
+        # returns [] — only FAILED reads go non-green.
+        print(f"Error fetching active users (raising, not empty): {e}")
+        raise
 
 def is_market_day() -> Tuple[bool, str]:
     """

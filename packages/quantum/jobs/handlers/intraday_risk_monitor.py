@@ -671,8 +671,16 @@ class IntradayRiskMonitor:
 
             return pos_res.data or []
         except Exception as e:
-            logger.error(f"[RISK_MONITOR] Failed to fetch positions: {e}")
-            return []
+            # F-E8-3 (2026-07-12): a FAILED read must NOT become an empty book.
+            # []-as-empty made #1186's outer typed loop see no error and persist
+            # GREEN, blinding the whole q15 protection cycle (marks/stops/envelopes/
+            # force-close/tripwire). RAISE so the per-user loop counts users_failed
+            # (typed partial) / all-fail raises (failed_retryable). A genuinely-empty
+            # book (query SUCCEEDS, returns []) stays healthy — only FAILED reads go
+            # non-green. Sentinel-disease class: get_active_user_ids (utils) +
+            # F-A3-4's validator fetch share this fix shape.
+            logger.error(f"[RISK_MONITOR] Failed to fetch positions (raising, not empty): {e}")
+            raise
 
     # ── Mark refresh ──────────────────────────────────────────────────
 
@@ -1684,9 +1692,8 @@ class IntradayRiskMonitor:
         if uid:
             return [uid]
 
-        # Discover from open positions
-        try:
-            from packages.quantum.jobs.handlers.utils import get_active_user_ids
-            return get_active_user_ids(self.supabase)
-        except Exception:
-            return []
+        # Discover from open positions. F-E8-3: a discovery read failure now RAISES
+        # at the util origin (never green status=no_users) — do NOT re-swallow it
+        # here to []. An import error is not a DB sentinel; let it surface too.
+        from packages.quantum.jobs.handlers.utils import get_active_user_ids
+        return get_active_user_ids(self.supabase)

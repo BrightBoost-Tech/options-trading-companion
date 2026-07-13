@@ -4,6 +4,62 @@ Every finding listed here is EXCLUDED from future audit runs. Re-finding a
 ledger item is a wasted slot. Runs append new findings as `status:reported`;
 the human flips them to `status:shipped` (with PR#) or `status:rejected`.
 
+## 2026-07-12 (Sun ~22:4x CT) — BUILT: F-E8-3 sentinel typing PR-① (clock-gated) + L1/L2 Monday specs
+
+STEP-0: DB `03:32Z` = Sun `22:32 CT` / broker `23:32 ET` agree; **~87 min to 00:00
+CT nightly, ~57 to the 23:30 gate** — build settled ~22:5x CT, clear (sleep-hold
+still operator-pending; doc/code recycle finished well before the nightly).
+
+**PR-① — F-E8-3 []-sentinel TYPED at both origins (this PR).** `_fetch_open_positions`
+(`intraday_risk_monitor.py:673`) `except → RAISE` (was `return []`) — the
+safety-critical fix (a failed position read was becoming a green flat-book cycle,
+blind to marks/stops/envelopes/force-close/tripwire). `get_active_user_ids`
+(`utils.py:40-42`) `except → RAISE` (was `return []`) — the DISCOVERY origin (a
+15-caller shared util; a discovery DB failure SHOULD fail the job, not no-op for
+all users; its error string is the v1.4 Railway cite); the monitor's
+`_get_active_user_ids` un-swallowed (removed the `except: return []` that would
+re-catch the util's raise). Wires into #1186: all-users-unreadable → job raises →
+failed_retryable; a per-user read failing → users_failed → typed partial. A
+genuinely-empty book (query SUCCEEDS → []) STAYS green — only FAILED reads go
+non-green. **ORIGIN-TO-TOP TEST (first §9-doctrine application): the Supabase query
+THROWS in the fixture; `_check_user` + `_fetch_open_positions` +
+`get_active_user_ids` are REAL (NO intermediate mock); assert `execute()` RAISES /
+the util raises. Both directions pinned by ORIGIN (throw vs empty-SUCCESS), not
+intermediate inspection.** Tests 7 new + E8 seam 4/4 green. **⚠ SENTINEL-DISEASE
+CLASS inventory: members = `_fetch_open_positions` + `get_active_user_ids` (both
+closed here) + F-A3-4's `fetch_live_outcomes` ([]-on-failure → green
+insufficient_data, SAME fix shape, pending queue-④).** E8's 3rd layer closed at the
+origin. H8 SHAs recorded in the session summary.
+
+**L1 — E16-3 ② IMPLEMENT-SPEC (filed).** NO shared `_early_return` helper —
+`_build_cycle_metadata` (`:2032`) doesn't receive accepted/rejection_stats/counts.
+Wire 5 explicit `_capture_decision_manifest` calls before the returns at `:2295`
+(micro_tier), `:2334` (capital-policy), `:2418` (risk-budget), `:2814`
+(no_candidates), `:2857` (scanner_failed, in the except); `rejection_stats` bound
+only at sites 4/5 (else `None`). Roll-up: `_persist_error_rollup`
+(`suggestions_open.py:32-40`) += `int(counts.get("errors") or 0)` — carries #1188's
+`replay_commit_error`; the runner classifier reads top-level `counts.errors` →
+partial. Morning: `run_morning_cycle` emits NO `__decision__` feature → add one
+after the insert block + hoist `cycle_date`. Size M; **riskiest = the roll-up
+green→partial blast radius — validate recent `cycle_results[].counts` before
+shipping.**
+
+**L2 — E19-2 ③ DESIGN-SPEC (filed).** **Option B** — widen the fork source read
+(`fork.py:56`) with a SEPARATE query `status='NOT_EXECUTABLE' AND
+blocked_reason='edge_below_minimum' AND ev_raw IS NOT NULL` (NOT_EXECUTABLE rows
+ARE inserted at `workflow_orchestrator.py:3909-3927`, only invisible to the fork's
+pending/staged filter) + raw-side viability recompute in
+`_clone_suggestion_for_cohort`; **recompute `risk_adjusted_ev` on the clone basis
+(`fork.py:353` currently INHERITS calibrated = the bug)** + stamp `ev_basis`.
+**Migration: YES — one column `trade_suggestions.ev_basis text` (backfill
+'calibrated' for the v3 `COALESCE(ev_raw,ev)` honesty).** Champion blast radius ZERO
+IFF the widened rows stay OUT of the `:81-87` champion-tag loop (**the named trap** —
+a distinct variable, never entering the tag loop / champion decision-log). Option B
+touches no workflow_orchestrator scoring line → champion byte-identical. ~2 evenings.
+
+**QUEUE (Monday post-close):** ② E16-3 → ③ E19-2 → ④ F-A3-4 (prequential fetch,
+same sentinel fix shape) → tail (A9-5 · F-WINDOW-1 · F-A10-4). Ritual pins filed.
+
 ## 2026-07-12 (Sun ~22:1x CT) — ADJUDICATED: external full audit v1.4 (5th engagement) — READ-ONLY, doc writes only
 
 STEP-0: DB `03:11Z` = Sunday `22:11 CT` / broker `23:11 ET` = `22:11 CT`, agree

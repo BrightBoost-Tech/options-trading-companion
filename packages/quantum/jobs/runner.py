@@ -7,6 +7,13 @@ from typing import Any, Dict, Optional
 
 from packages.quantum.jobs.job_runs import JobRunStore
 from packages.quantum.jobs.registry import discover_handlers
+from packages.quantum.logging_setup import setup_logging
+
+# PR-0 (F-LOG-INFO-DROP): the workers start as a bare `rq worker` CLI, so this
+# module import — every job routes through run_job_run — is the earliest hook
+# our code gets in a worker process. Idempotent; the canary INFO line lands on
+# the first job after each recycle.
+setup_logging()
 
 logger = logging.getLogger(__name__)
 

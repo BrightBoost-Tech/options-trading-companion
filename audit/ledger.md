@@ -4,6 +4,36 @@ Every finding listed here is EXCLUDED from future audit runs. Re-finding a
 ledger item is a wasted slot. Runs append new findings as `status:reported`;
 the human flips them to `status:shipped` (with PR#) or `status:rejected`.
 
+## 2026-07-12 (Sun ~22:4x CT, after PR-①) — DOC: browser doctrine encoded, 3 layers (PR #1197)
+
+STEP-0: DB `03:36Z` = Sun `22:36 CT` / broker `23:36 ET` agree; market closed
+(Sunday). Doc + local-config only — runtime-inert (verified: zero code
+references to `.claude/launch.json` or `docs/runbooks/`; merge recycle is a
+behavioral no-op).
+
+- **Layer 1 — CLAUDE.md `## BROWSER USE`** (verbatim assessment block, after §1):
+  browser = local UI acceptance · interaction-dependent research · API/receipt-
+  vs-rendering comparison ONLY; evidence secondary to Supabase/Railway/Alpaca-
+  MCP/direct APIs; never broker orders / prod config / persisted Alpaca login /
+  nightly-audit browser requirements.
+- **Layer 2 — `.claude/launch.json`**: local preview target, `apps/web`
+  `pnpm dev` → `next dev`, port 3000 (verified: no override in repo), localhost
+  only. `.gitignore` narrowed `.claude/*` + `!.claude/launch.json`
+  (settings.local.json stays ignored, check-ignore-verified).
+- **Layer 3 — `docs/runbooks/browser-verification.md`**: four operator-triggered
+  procedures (morning page-truth check [ritual Part 2 extension; weekly +
+  on-anomaly, NOT the nightly] · queue-⑤ make-vs-fetch recon [pre-build of the
+  credit-probability build] · earnings-source evaluation [~1h; unblocks the P2
+  versioned-earnings cohort] · broker-render spot-check [first-of-class only;
+  session NEVER persisted]), each TRIGGER · STEPS · EVIDENCE ARTIFACT · EXTENDS.
+- **Guards:** `audit/v5-prompt.md` UNTOUCHED — zero browser mentions confirmed
+  (the assessment's explicit exclusion). No untracked `audit/reports/*.md` to
+  sweep this session. **Evidence-artifact discipline (URL · timestamp · auth
+  state · screenshot · DOM result · console/network errors · expected-vs-
+  observed) applies to EVERY browser claim from here.**
+- Marker: CLAUDE.md was ALREADY over its stated ≤40k header budget pre-PR
+  (43,214 → 44,025 chars) — next doc-sync's item, not this PR's.
+
 ## 2026-07-12 (Sun ~22:4x CT) — BUILT: F-E8-3 sentinel typing PR-① (clock-gated) + L1/L2 Monday specs
 
 STEP-0: DB `03:32Z` = Sun `22:32 CT` / broker `23:32 ET` agree; **~87 min to 00:00

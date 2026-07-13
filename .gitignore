@@ -56,7 +56,10 @@ supabase/.temp/
 
 # Local MCP and Claude Code config (may contain tokens)
 .mcp.json
-.claude/
+.claude/*
+# launch.json is the shared local-preview target (no tokens; CLAUDE.md
+# "BROWSER USE") — the ONLY tracked file under .claude/
+!.claude/launch.json
 
 # Operator-local workspace files (not project artifacts) — listed explicitly
 # so a broad `git add -A` can't sweep them into an unrelated commit (this

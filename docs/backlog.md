@@ -12,6 +12,75 @@ questions) · **RESOLVED — DO NOT REINVESTIGATE**.
 
 ---
 
+## 2026-07-12 (Sun night) — v1.4 EXTERNAL-AUDIT ADJUDICATION — 3 seam kills of our own weekend work
+
+Report: `docs/review/external-full-audit-v1.4-2026-07-12.md`. Verdicts + census in
+the ledger 07-12 v1.4 entry. All one layer BELOW this weekend's route-driving tests
+(doctrine sharpened → CLAUDE.md §9). **Build NOTHING done this session** — read-only
++ doc writes. Monday post-close BUILD QUEUE: ① E8-3 → ② E16-3 → ③ E19-2 → ④ F-A3-4
+→ tail (A9-5 · F-WINDOW-1 · F-A10-4).
+
+- **P0-① · E8-3 typed sentinel (CRITICAL, <1 eve).** `_fetch_open_positions`
+  (`intraday_risk_monitor.py:646-675`) + `_get_active_user_ids` (`:1691`) catch DB
+  failures → `[]`, which `_check_user` reads as authoritative-empty → #1186's outer
+  typed loop never fires → a failed book read = green q15 cycle blind to
+  marks/stops/envelopes/force-close/tripwire. FIX: type BOTH reads — failed read →
+  raise/typed failure, NEVER []-as-empty. **TEST (sharpened doctrine): inject the
+  failure AT ORIGIN (the Supabase query throws) and assert AT TOP (the job records
+  failed/partial) — spanning all layers; NO mock of `_check_user` or any
+  intermediate.** CENSUS: 639/30d succeeded, book FLAT → un-disambiguated in
+  job_runs; structural-latent, still critical. **LEDGER RIDER: if any position
+  fills Monday before ① ships, the latent risk is live that afternoon — accepted,
+  one day.** · origin v1.4 F-E8-3 (promoted; 3rd E8 layer) · done when: a failed
+  read is never persisted `succeeded`, both sites, origin-to-top test.
+- **P1-② · E16-3 manifest at ALL SEVEN returns + morning + roll-up (~1 eve).**
+  `_capture_decision_manifest` covers 2 of 7 midday returns (missing
+  `micro_tier_position_open`/`capital_scan_policy_block`/`global_risk_budget_
+  exhausted`/`no_candidates`/`scanner_failed` — wire it into the `:2034` early-return
+  helper) + the morning `suggestions_close` cycle emits NO terminal feature + the
+  roll-up (`suggestions_open.py:26-40`) sums only `rejection_persist_failures`, not
+  the generic `counts.errors` (my #1188 `replay_commit_error` never reaches the
+  classifier). FIX: manifest at all 7 + morning terminal contract + roll-up carries
+  generic nested errors. Test DRIVES each production return + the classifier.
+  **CORRECTION: #1188 "EVERY return / COMPLETE" is FALSE — tape complete only from
+  ②'s SHA** (3rd exclusion-integrity note on E16). · origin v1.4 F-E16-3 (promoted).
+- **P1-③ · E19-2 pre-rejection cohort branching + coherent basis (design-care,
+  MED fix-risk, ~1-2 eve).** The fork queries only `status IN ('pending','staged')`
+  (`fork.py:44-56`), so calibrated-rejected candidates (`NOT_EXECUTABLE`,
+  `workflow_orchestrator.py:3750-3767`) never reach the raw-EV cloner → SOFI-class
+  divergence cases excluded. FIX: move raw-shadow eligibility BEFORE the calibrated
+  rejection (the fork must see calibrated-rejected candidates) + persist `ev_raw` +
+  explicit `ev_basis` on every clone + recompute `risk_adjusted_ev`/rank on the
+  clone's basis + the decision snapshot from the clone's basis. Champion path
+  byte-identical; clones stay simulated. Test: drive scan→calibrated-reject→fork,
+  REQUIRE the shadow verdict. **D② ledger annotation gains: un-mute PARTIAL until ③
+  — entry-rate evidence excludes divergence cases; `9a540ce` stamps the FLAG, ③'s
+  SHA stamps the FULL experiment.** · origin v1.4 F-E19-2 (partial-FAIL promoted).
+- **P1-④ · F-A3-4 prequential cohort parity (small).** `fetch_live_outcomes`
+  (`prequential_validator.py:190-239`) ignores `window_days`, skips the epoch +
+  corruption floor, and returns [] on failure → green `insufficient_data` (the
+  E8-3 []-sentinel class — LINKED). FIX: share the production fetch predicate
+  (reuse/import the calibration_service query builder — don't reconstruct) + typed
+  fetch failure + honor `window_days`. CENSUS: pre_epoch=0 → NIL current numerical
+  impact (structural only). · origin v1.4 F-A3-4.
+- **P2 tail:** **F-A9-5** — `_log_cohort_decisions` compares dollar `ev` to a
+  0-100 score threshold (`fork.py:466-477` vs the real score filter `:233-236`) →
+  `ev_below_min` lies; the logger must CONSUME the routing predicate's result, not
+  re-derive (join check = the test; rides ③'s fork territory if clean) · **F-WINDOW-1**
+  — per-decision-site heartbeats sharing ONE cycle/decision ID + W3 reservation-order
+  identity (the arm-evidence repair's OWN second pass; W-clocks do NOT reset for
+  observability-only additions, but the ARM decisions wait on joinable evidence) ·
+  **F-A10-4** — expiry-day 72h tracker lag; LOW (recommend: accept the documented
+  lag, OR `expiry < today+1` at a post-close run; the Aug-21 rows are the live test).
+
+**MONDAY RITUAL PINS += the three prediction checks:** (h) E19 first-scan
+divergence grade · (e) E16 decision_runs↔manifest completeness + commit-err-green ·
+(b) E8 Railway error-string ↔ job_runs correlation. Standing unchanged: ⑤
+credit-probability (next-week strategy build; v1.4 A1 notes a dormant lognormal
+terminal kernel in `opportunity_scorer.py:143-180,318-381` — reuse the probability
+math only, H9-strict call/put-aware) · W2b (two PRs) · **sleep-hold = operator
+tonight**.
+
 ## 2026-07-12 (Sun PM) — POST-BUILD STATUS (authoritative; supersedes stale details below)
 
 The v1.3 re-sequenced queue is mostly cleared. Full detail: `audit/ledger.md` 07-11/07-12 entries.

@@ -613,6 +613,18 @@ paper_learning_ingest · policy_lab_eval · post_trade_learning · promotion_che
   executor `_execute_per_cohort` sorted on the stored column — the bias was
   inert for days behind a green test.) Drive the entrypoint end-to-end and
   assert on the OUTPUT.
+- **Inject the failure at its ORIGIN, assert the truth at the TOP** — a test
+  spanning all layers cannot be beaten by the layer below; mock-replacing an
+  INTERMEDIATE function forfeits every layer beneath the mock. (v1.4 07-12: the
+  three same-day seam kills all sat ONE layer below their route-driving tests —
+  E8-3 #1186's test mocked `_check_user`, so the inner `_fetch_open_positions`
+  `[]`-swallow survived green; E16-3 #1188 tested the manifest HELPER, not the 5
+  uncovered production returns + the runner classifier; E19-2 #1190 called the
+  cloner with an already-eligible source, never crossing the calibrated status
+  gate.) Drive the entrypoint through a failure injected at the DEEPEST callee
+  (the DB query throws / the upstream gate rejects) and assert the top-level
+  outcome (the job records failed/partial; the manifest exists; the shadow verdict
+  is produced). A green test on a helper is not a green closure on the route.
 - **Never treat a fail-closed degradation as automatically safe: fail-closed
   can still fail-WRONG.** A degradation that changes WHICH universe is
   scanned (the 07-06 $500→micro inversion) is a different strategy, not a

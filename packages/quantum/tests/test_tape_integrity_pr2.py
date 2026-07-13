@@ -369,7 +369,9 @@ class _MiddayRouteHarness(unittest.TestCase):
         )
         ctx.__enter__()
         try:
-            result = asyncio.get_event_loop().run_until_complete(
+            # asyncio.run: a FRESH loop — get_event_loop() has no current loop
+            # in CI's main thread (the local pass rode a leftover loop).
+            result = asyncio.run(
                 wo.run_midday_cycle(_PosClient(), "u-test-user-id"))
         finally:
             ctx.__exit__(None, None, None)

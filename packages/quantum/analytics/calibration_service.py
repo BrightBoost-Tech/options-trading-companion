@@ -327,9 +327,11 @@ class CalibrationService:
 
         The live-only (is_paper=false) predicate is applied when
         CALIBRATION_TRAIN_LIVE_ONLY is ON (default). `is_paper`'s provenance is
-        execution-mode-derived (paper_learning_ingest._resolve_is_paper: True iff
-        the closing order's execution_mode == 'alpaca_live') — so "live" here
-        means broker-filled, never a routing-eligibility label (F-A3-4 D2).
+        execution-mode-derived (paper_learning_ingest._resolve_is_paper returns
+        `execution_mode != 'alpaca_live'` — so is_paper is FALSE iff the closing
+        order's execution_mode == 'alpaca_live', and True for internal_paper /
+        shadow / missing / any other simulated mode) — so "live" here means
+        broker-filled, never a routing-eligibility label (F-A3-4 D2).
 
         Returns:
           None  — the query FAILED (caller MUST surface an error and MUST NOT

@@ -234,50 +234,121 @@ class TestPopulationSummary(unittest.TestCase):
     rows as broker-live."""
 
     def _pinned_population(self):
-        # alpaca_live 5/7, alpaca_paper 6/21, live_eligible/internal_paper 19/41,
-        # shadow_only/internal_paper 7/8 + 1 in_progress.
+        # THE authoritative 2026-07-13 broker-live reconciliation census
+        # (ledger cohort-reconciliation entry):
+        #   alpaca_live               5 hit / 2 miss = 7 scored, +5 in_progress = 12
+        #   alpaca_paper              6 hit / 15 miss = 21 scored               = 21
+        #   live_eligible/internal    19 hit / 22 miss = 41 scored              = 41
+        #   shadow_only/internal      7 hit / 1 miss = 8 scored, +1 in_progress = 9
+        #   pooled                    37 hit / 40 miss = 77 scored, +6 ip       = 83
         return (
-            _pop_rows("live_eligible", "alpaca_live", scored=5, hits=3,
-                      in_progress=1, unknown=1)            # 7 rows
-            + _pop_rows("live_eligible", "alpaca_paper", scored=6,
-                        in_progress=10, unknown=5)         # 21 rows
-            + _pop_rows("live_eligible", "internal_paper", scored=19,
-                        in_progress=15, unknown=7)         # 41 rows
-            + _pop_rows("shadow_only", "internal_paper", scored=7,
-                        in_progress=1)                     # 8 rows
+            _pop_rows("live_eligible", "alpaca_live", scored=7, hits=5,
+                      in_progress=5)                       # 12 rows
+            + _pop_rows("live_eligible", "alpaca_paper", scored=21, hits=6)  # 21 rows
+            + _pop_rows("live_eligible", "internal_paper", scored=41,
+                        hits=19)                           # 41 rows
+            + _pop_rows("shadow_only", "internal_paper", scored=8, hits=7,
+                        in_progress=1)                     # 9 rows
         )
+
+    def test_pinned_population_matches_authoritative_07_13_census(self):
+        """The fixture MUST encode the authoritative 2026-07-13 broker-live
+        reconciliation census (the ledger's cohort-reconciliation entry), not a
+        synthetic stand-in. execution_mode is the broker-truth discriminator;
+        routing_mode='live_eligible' pools alpaca_live + alpaca_paper +
+        internal_paper eras and must NOT relabel them broker-live."""
+        summ = tt._summarize_population(self._pinned_population())
+        be = summ["population_by_execution_mode"]
+        cross = summ["population_by_routing_x_execution"]
+        pooled = summ["pooled_all_modes"]
+
+        # alpaca_live: 5 hit / 2 miss = 7 scored, +5 in_progress = 12 rows
+        self.assertEqual(be["alpaca_live"]["hit"], 5)
+        self.assertEqual(be["alpaca_live"]["miss"], 2)
+        self.assertEqual(be["alpaca_live"]["scored"], 7)
+        self.assertEqual(be["alpaca_live"]["in_progress"], 5)
+        self.assertEqual(_bucket_total(be["alpaca_live"]), 12)
+        self.assertEqual(be["alpaca_live"]["hit_rate"], round(5 / 7, 4))
+        # alpaca_paper: 6/21
+        self.assertEqual(be["alpaca_paper"]["hit"], 6)
+        self.assertEqual(be["alpaca_paper"]["scored"], 21)
+        self.assertEqual(_bucket_total(be["alpaca_paper"]), 21)
+        self.assertEqual(be["alpaca_paper"]["hit_rate"], round(6 / 21, 4))
+        # internal_paper pooled across BOTH routing modes: 19+7=26 / 41+8=49,
+        # +1 in_progress → 50 rows
+        self.assertEqual(be["internal_paper"]["hit"], 26)
+        self.assertEqual(be["internal_paper"]["scored"], 49)
+        self.assertEqual(be["internal_paper"]["in_progress"], 1)
+        self.assertEqual(_bucket_total(be["internal_paper"]), 50)
+        self.assertEqual(be["internal_paper"]["hit_rate"], round(26 / 49, 4))
+        # routing×execution cross-tabs: the two internal cohorts stay SEPARATE
+        self.assertEqual(cross["live_eligible/internal_paper"]["hit"], 19)
+        self.assertEqual(cross["live_eligible/internal_paper"]["scored"], 41)
+        self.assertEqual(_bucket_total(cross["live_eligible/internal_paper"]), 41)
+        self.assertEqual(cross["shadow_only/internal_paper"]["hit"], 7)
+        self.assertEqual(cross["shadow_only/internal_paper"]["scored"], 8)
+        self.assertEqual(cross["shadow_only/internal_paper"]["in_progress"], 1)
+        self.assertEqual(_bucket_total(cross["shadow_only/internal_paper"]), 9)
+        # routing totals: live_eligible 74 rows / 69 scored; shadow 9 / 8.
+        live_elig = {k: v for k, v in cross.items()
+                     if k.startswith("live_eligible/")}
+        self.assertEqual(sum(_bucket_total(v) for v in live_elig.values()), 74)
+        self.assertEqual(sum(v["scored"] for v in live_elig.values()), 69)
+        # broker-live scored is 7, NEVER the 69 live_eligible-routed scored:
+        # naive routing-based "live" would overcount by 62.
+        self.assertEqual(be["alpaca_live"]["scored"], 7)
+        self.assertEqual(69 - be["alpaca_live"]["scored"], 62)
+        # pooled_all_modes: 37 hit / 40 miss = 77 scored, +6 in_progress = 83
+        self.assertEqual(pooled["hit"], 37)
+        self.assertEqual(pooled["miss"], 40)
+        self.assertEqual(pooled["scored"], 77)
+        self.assertEqual(pooled["in_progress"], 6)
+        self.assertEqual(pooled["unknown"], 0)
+        self.assertEqual(pooled["hit_rate"], round(37 / 77, 4))
+        # CONSERVATION: total rows == sum of all buckets == 83
+        total_rows = len(self._pinned_population())
+        self.assertEqual(total_rows, 83)
+        self.assertEqual(
+            pooled["hit"] + pooled["miss"] + pooled["in_progress"]
+            + pooled["unknown"], 83)
+        self.assertEqual(total_rows,
+                         pooled["hit"] + pooled["miss"]
+                         + pooled["in_progress"] + pooled["unknown"])
 
     def test_pinned_population_by_execution_mode(self):
         summ = tt._summarize_population(self._pinned_population())
         be = summ["population_by_execution_mode"]
 
-        self.assertEqual(be["alpaca_live"]["scored"], 5)
-        self.assertEqual(_bucket_total(be["alpaca_live"]), 7)
-        self.assertEqual(be["alpaca_paper"]["scored"], 6)
+        self.assertEqual(be["alpaca_live"]["scored"], 7)
+        self.assertEqual(_bucket_total(be["alpaca_live"]), 12)
+        self.assertEqual(be["alpaca_paper"]["scored"], 21)
         self.assertEqual(_bucket_total(be["alpaca_paper"]), 21)
-        # internal_paper pools BOTH internal cohorts: 19 + 7 scored, 41 + 8 rows.
-        self.assertEqual(be["internal_paper"]["scored"], 26)
-        self.assertEqual(_bucket_total(be["internal_paper"]), 49)
+        # internal_paper pools BOTH internal cohorts: 19 + 7 = 26 scored,
+        # 41 + 8 = 49 scored... (live_eligible/internal 41 scored + shadow 8
+        # scored = 49 scored; 41 + 9 = 50 rows incl. the shadow in_progress).
+        self.assertEqual(be["internal_paper"]["scored"], 49)
+        self.assertEqual(be["internal_paper"]["hit"], 26)
+        self.assertEqual(_bucket_total(be["internal_paper"]), 50)
         # nothing stray → the unknown bucket is empty and carries NO hit_rate.
         self.assertEqual(be["unknown_execution_mode"]["scored"], 0)
         self.assertNotIn("hit_rate", be["unknown_execution_mode"])
 
     def test_hit_rate_only_when_scored(self):
         be = tt._summarize_population(self._pinned_population())["population_by_execution_mode"]
-        # alpaca_live: 3 hit / 5 scored → 0.6.
-        self.assertEqual(be["alpaca_live"]["hit"], 3)
+        # alpaca_live: 5 hit / 7 scored → 0.7143.
+        self.assertEqual(be["alpaca_live"]["hit"], 5)
         self.assertEqual(be["alpaca_live"]["miss"], 2)
-        self.assertEqual(be["alpaca_live"]["hit_rate"], 0.6)
+        self.assertEqual(be["alpaca_live"]["hit_rate"], round(5 / 7, 4))
 
     def test_routing_x_execution_cross_tabs(self):
         cross = tt._summarize_population(
             self._pinned_population())["population_by_routing_x_execution"]
 
-        self.assertEqual(cross["live_eligible/internal_paper"]["scored"], 19)
+        self.assertEqual(cross["live_eligible/internal_paper"]["scored"], 41)
         self.assertEqual(_bucket_total(cross["live_eligible/internal_paper"]), 41)
-        self.assertEqual(cross["shadow_only/internal_paper"]["scored"], 7)
+        self.assertEqual(cross["shadow_only/internal_paper"]["scored"], 8)
         self.assertEqual(cross["shadow_only/internal_paper"]["in_progress"], 1)
-        self.assertEqual(_bucket_total(cross["shadow_only/internal_paper"]), 8)
+        self.assertEqual(_bucket_total(cross["shadow_only/internal_paper"]), 9)
         # the two internal cohorts stay SEPARATE — routing distinguishes them.
         self.assertNotEqual(cross["live_eligible/internal_paper"],
                             cross["shadow_only/internal_paper"])
@@ -286,13 +357,13 @@ class TestPopulationSummary(unittest.TestCase):
         summ = tt._summarize_population(self._pinned_population())
         be = summ["population_by_execution_mode"]
         # broker-live scored is ONLY the 7 true alpaca_live rows — NOT the
-        # 5 + 6 + 19 = 30 that also carry routing_mode='live_eligible'.
-        self.assertEqual(be["alpaca_live"]["scored"], 5)
-        self.assertNotEqual(be["alpaca_live"]["scored"], 30)
+        # 7 + 21 + 41 = 69 that also carry routing_mode='live_eligible'.
+        self.assertEqual(be["alpaca_live"]["scored"], 7)
+        self.assertNotEqual(be["alpaca_live"]["scored"], 69)
         # pooled totals live ONLY under the literal pooled label, never "live".
         pooled = summ["pooled_all_modes"]
-        self.assertEqual(pooled["scored"], 5 + 6 + 19 + 7)   # 37
-        self.assertEqual(_bucket_total(pooled), 77)
+        self.assertEqual(pooled["scored"], 7 + 21 + 41 + 8)   # 77
+        self.assertEqual(_bucket_total(pooled), 83)
         self.assertIn("hit_rate", pooled)                    # scored > 0
         self.assertNotIn("live", summ["population_by_execution_mode"])
 

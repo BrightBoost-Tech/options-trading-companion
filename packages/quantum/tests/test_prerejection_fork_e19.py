@@ -458,9 +458,14 @@ class TestCloneInvariants(_EnvRawOn):
         sz = c["sizing_metadata"]
         self.assertNotIn("execution_mode", sz)
         self.assertNotIn("routing_mode", sz)
+        self.assertNotIn("calibration_identity", sz)  # B20: no false identity
         self.assertEqual(sz["execution_state"], "not_executed")
         self.assertEqual(sz["execution_intent"], "internal_paper_only")
-        self.assertEqual(sz["observation_scope"], "entry_selection_only")
+        self.assertEqual(sz["observation_scope"], "raw_candidate_eligibility_only")
+        self.assertEqual(sz["decision_semantics"], "raw_candidate_eligibility")
+        self.assertIs(sz["selected_for_entry"], False)
+        self.assertIs(sz["capacity_evaluated"], False)
+        self.assertIs(sz["joint_rank_evaluated"], False)
         self.assertEqual(sz["routing_intent"], "shadow_only")
 
     def test_raw_basis_provenance_and_finite_raev(self):
@@ -477,7 +482,10 @@ class TestCloneInvariants(_EnvRawOn):
         self.assertEqual(sz["clone_contracts"], c["order_json"]["contracts"])
         self.assertEqual(sz["eligibility_cost_basis"],
                          fork_mod._ELIGIBILITY_COST_BASIS)
-        self.assertEqual(sz["calibration_identity"], "spy_opt_autolearn_v6@86")
+        self.assertEqual(sz["source_model_version"], "spy_opt_autolearn_v6@86")
+        self.assertEqual(sz["calibration_provenance_status"],
+                         "not_persisted_on_source")
+        self.assertNotIn("calibration_identity", sz)
         self.assertEqual(sz["experiment_version"], fork_mod.EXPERIMENT_VERSION)
         self.assertEqual(sz["champion_blocked_reason"], "edge_below_minimum")
         self.assertEqual(sz["source_suggestion_id"], sofi["id"])
@@ -613,7 +621,9 @@ class TestRecoverableOrder(_EnvRawOn):
         self.assertEqual(fs["champion_blocked_reason"], "edge_below_minimum")
         self.assertEqual(fs["routing_intent"], "shadow_only")
         self.assertEqual(fs["execution_state"], "not_executed")
-        self.assertEqual(fs["calibration_identity"], "spy_opt_autolearn_v6@86")
+        self.assertEqual(fs["source_model_version"], "spy_opt_autolearn_v6@86")
+        self.assertEqual(fs["calibration_provenance_status"],
+                         "not_persisted_on_source")
         self.assertEqual(fs["experiment_version"], fork_mod.EXPERIMENT_VERSION)
         self.assertEqual(fs["cohort_name"], "neutral")
         self.assertEqual(fs["clone_fingerprint"], clone["legs_fingerprint"])
@@ -933,13 +943,19 @@ class TestPersistedCloneIdentity(_EnvRawOn):
             c["source_cohort_attempts"],
             c["accepted"] + c["refused"] + c["clone_failed"]
             + c["identity_mismatch"] + c["accepted_verdict_failed"]
-            + c["cohort_identity_missing"])
+            + c["cohort_binding_unavailable"] + c["cohort_identity_missing"]
+            + c["cohort_portfolio_missing"] + c["cohort_capital_invalid"])
+        self.assertEqual(c["source_cohort_attempts"],
+                         res["expected_source_cohort_attempts"])
+        self.assertTrue(res["coverage_complete"])
         # single non-champion cohort (neutral) × 2 sources = 2 attempts
         self.assertEqual(c["source_cohort_attempts"], 2)
-        self.assertEqual(c["source_rows"] if "source_rows" in c else c["source"], 2)
+        self.assertEqual(c["source"], 2)
         self.assertEqual(c["accepted"], 1)
         self.assertEqual(c["refused"], 1)
-        self.assertEqual(c["verdicts"], 1)
+        self.assertEqual(c["accepted_verdicts"], 1)
+        self.assertEqual(c["rejected_verdicts"], 1)
+        self.assertEqual(res["prerejection_total_verdict_count"], 2)
         self.assertEqual(c["accepted_verdict_failed"], 0)
 
     def test_reject_verdict_write_failure_is_secondary_not_double_counted(self):
@@ -955,13 +971,15 @@ class TestPersistedCloneIdentity(_EnvRawOn):
         self.assertEqual(res["status"], "partial")
         self.assertEqual(c["refused"], 1)
         self.assertEqual(c["reject_verdict_write_failed"], 1)
+        self.assertEqual(c["rejected_verdicts"], 0)  # write failed → not counted
         self.assertEqual(c["accepted_verdict_failed"], 0)
         # invariant still holds: refused counts the terminal disposition once
         self.assertEqual(
             c["source_cohort_attempts"],
             c["accepted"] + c["refused"] + c["clone_failed"]
             + c["identity_mismatch"] + c["accepted_verdict_failed"]
-            + c["cohort_identity_missing"])
+            + c["cohort_binding_unavailable"] + c["cohort_identity_missing"]
+            + c["cohort_portfolio_missing"] + c["cohort_capital_invalid"])
         self.assertGreaterEqual(res["errors"], 1)
         stages = {e["stage"] for e in res["error_details"]}
         self.assertIn("reject_verdict_upsert_failed", stages)
@@ -1365,27 +1383,28 @@ class TestMissingCohortId(_EnvRawOn):
         stages = {e["stage"] for e in res["error_details"]}
         self.assertIn("cohort_identity_missing", stages)
 
-    def test_cohort_ids_query_failure_distinct_from_empty(self):
-        """B16: a fetch failure must NOT become an authoritative empty {}.
-        Inject at the REAL ids-query origin only (the SECOND policy_lab_cohorts
-        select — portfolios fetch first, succeeds, so neutral keeps its
-        portfolio and the missing-id is genuinely the ids failure, not a
-        skipped no-portfolio cohort)."""
+    def test_binding_query_failure_distinct_from_empty(self):
+        """B19-F / B16: a binding-read fault must NOT become an authoritative
+        empty result. Inject at the REAL binding-query origin (the
+        policy_lab_cohorts select reading id+portfolio_id); every expected
+        pair records cohort_binding_unavailable (non-green), never a silent
+        skip or a fabricated empty."""
         client = FakeSupabase()
         sofi = _prerejected_sofi()
         _seed(client, _pending_qqq(), sofi)
-        # inject at the REAL ids-query origin: the select that reads the `id`
-        # column (portfolios reads cohort_name,portfolio_id — never `id`)
         client.raise_when(
             "policy_lab_cohorts", "select",
-            predicate=lambda q: q._select_cols.startswith("id"))
+            predicate=lambda q: "portfolio_id" in q._select_cols
+            and q._select_cols.startswith("id"))
         res = _run_fork(client)
         self.assertEqual(res["status"], "partial")
         stages = {e["stage"] for e in res["error_details"]}
-        self.assertIn("cohort_ids_fetch_failed", stages)
-        # the prerejection attempt lands cohort_identity_missing (non-green)
-        self.assertGreaterEqual(
-            res["prerejection_counts"]["cohort_identity_missing"], 1)
+        self.assertIn("cohort_bindings_fetch_failed", stages)
+        c = res["prerejection_counts"]
+        self.assertEqual(c["cohort_binding_unavailable"], 1)
+        self.assertEqual(c["source_cohort_attempts"], 1)
+        self.assertFalse(res["coverage_complete"] is True and c["accepted"] > 0)
+        self.assertEqual(_clones(client, ticker="SOFI"), [])
         self.assertEqual(_verdicts(client, sofi["id"], "accepted"), [])
 
 
@@ -1427,7 +1446,8 @@ class TestThreeCohortConservation(_EnvRawOn):
         return (c["source_cohort_attempts"] ==
                 c["accepted"] + c["refused"] + c["clone_failed"]
                 + c["identity_mismatch"] + c["accepted_verdict_failed"]
-                + c["cohort_identity_missing"])
+                + c["cohort_binding_unavailable"] + c["cohort_identity_missing"]
+                + c["cohort_portfolio_missing"] + c["cohort_capital_invalid"])
 
     def test_three_cohort_dispositions_and_reconciliation(self):
         # both_ok: score 65 → accepted by neutral(0) AND conservative(64)
@@ -1451,7 +1471,7 @@ class TestThreeCohortConservation(_EnvRawOn):
         # accepted: both_ok×2 + split×neutral = 3 ; refused: split×conservative = 1
         self.assertEqual(c["accepted"], 3)
         self.assertEqual(c["refused"], 1)
-        self.assertEqual(c["verdicts"], 3)
+        self.assertEqual(c["accepted_verdicts"], 3)
         # prerejection clones: both_ok in neutral+conservative, split in
         # neutral = 3 (the NORMAL-clone path also mints QQQ champion clones,
         # counted separately — assert the prerej set specifically)
@@ -1480,6 +1500,7 @@ class TestThreeCohortConservation(_EnvRawOn):
         self.assertEqual(c2["repaired"], 2)
         self.assertEqual(c2["existing"], 2)          # no duplicate clones
         self.assertEqual(len(_verdicts(client, both_ok["id"], "accepted")), 2)
+        self.assertEqual(c2["accepted_verdicts"], 2)
         self.assertTrue(self._invariant(c2), c2)
 
 

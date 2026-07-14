@@ -85,11 +85,17 @@ def fork_suggestions_for_cohorts(
     fork_errors: List[Dict[str, Any]] = []
     prerej_counts: Dict[str, int] = {
         "source": 0, "eligible": 0, "created": 0, "existing": 0,
-        "refused": 0, "clone_failed": 0,
-        "accepted": 0, "accepted_verdict_failed": 0,
-        "reject_verdict_write_failed": 0, "cohort_identity_missing": 0,
-        "source_cohort_attempts": 0,
-        "repaired": 0, "verdicts": 0, "identity_mismatch": 0,
+        # terminal dispositions (exactly one per source×challenger attempt):
+        "accepted": 0, "refused": 0, "clone_failed": 0,
+        "identity_mismatch": 0, "accepted_verdict_failed": 0,
+        "cohort_binding_unavailable": 0, "cohort_identity_missing": 0,
+        "cohort_portfolio_missing": 0, "cohort_capital_invalid": 0,
+        # secondary / observability (NOT terminal dispositions):
+        "reject_verdict_write_failed": 0, "repaired": 0,
+        # honest verdict counters (B22):
+        "accepted_verdicts": 0, "rejected_verdicts": 0,
+        # coverage:
+        "source_cohort_attempts": 0, "expected_source_cohort_attempts": 0,
     }
 
     prerejection_sources: List[Dict] = []
@@ -260,24 +266,10 @@ def fork_suggestions_for_cohorts(
                     # Valid 5 (alert-write recursion prevention).
                     logger.exception("cohort_clone_alert_write_failed")
 
-        # ── E19-2: PRE-REJECTION PIPELINE (per source, recoverable order —
-        # Blockers 2/3/4/10). For each calibrated-rejected source:
-        # validate raw basis → build + raw-gate the clone → fail-CLOSED
-        # lookup → insert (race-reconciled) → READ BACK the persisted row →
-        # only then write the accepted verdict FROM the persisted clone.
-        # Every failure is typed into fork_errors; a verdict-less clone is
-        # repaired on the next run.
-        for ps in prerejection_sources:
-            _process_prerejection_source(
-                supabase, user_id, cohort_name, cohort_id, ps,
-                config, deployable, prerej_counts, fork_errors,
-            )
-
         created[cohort_name] = cloned
         logger.info(
             f"policy_lab_fork: cohort={cohort_name} "
-            f"source={len(source_suggestions)} filtered={len(filtered)} cloned={cloned} "
-            f"prerejection={prerej_counts}"
+            f"source={len(source_suggestions)} filtered={len(filtered)} cloned={cloned}"
         )
 
     # Log decisions for the champion cohort too (all accepted by default —
@@ -292,8 +284,181 @@ def fork_suggestions_for_cohorts(
             0,  # champion doesn't filter by open positions at fork time
         )
 
+    # ── E19-2A: PRE-REJECTION RAW-ELIGIBILITY COVERAGE (B19) ─────────────
+    # SEPARATE from the champion-visible normal-clone loop above (which stays
+    # byte-identical to the frozen baseline). This loop guarantees COMPLETE
+    # coverage of every source×challenger pair with fail-closed binding +
+    # capital, and enforces the count invariants before returning.
+    _run_prerejection_coverage(
+        supabase, user_id, prerejection_sources, champion_name,
+        configs, prerej_counts, fork_errors)
+
+    logger.info(
+        f"policy_lab_fork: user={user_id[:8]} prerejection={prerej_counts}")
+
     return _fork_result("ok", created, prerej_counts, fork_errors,
                         champion_tagged=len(source_suggestions))
+
+
+def _run_prerejection_coverage(
+    supabase,
+    user_id: str,
+    prerejection_sources: List[Dict],
+    champion_name: str,
+    configs: Dict[str, Any],
+    counts: Dict[str, int],
+    errors: List[Dict[str, Any]],
+) -> None:
+    """B19 complete-coverage loop: every source × challenger pair increments
+    source_cohort_attempts BEFORE any binding/portfolio/capital guard and
+    terminates in exactly one bucket. One strict binding read (raises → every
+    pair records cohort_binding_unavailable). Capital fails closed (no
+    $100,000 fabrication). Runtime invariants enforced at the end."""
+    challenger_names = [n for n in configs.keys() if n != champion_name]
+    expected = len(prerejection_sources) * len(challenger_names)
+    counts["expected_source_cohort_attempts"] = expected
+    if expected == 0:
+        return
+
+    # One strict binding read for ALL challengers (B19-A). A failure is TYPED;
+    # every expected pair then records cohort_binding_unavailable.
+    bindings: Optional[Dict[str, Dict[str, Any]]] = None
+    try:
+        bindings = _get_active_cohort_bindings(user_id, supabase)
+    except Exception as be:
+        errors.append({
+            "stage": "cohort_bindings_fetch_failed",
+            "error_class": type(be).__name__, "error": str(be)[:200],
+        })
+
+    for cohort_name in challenger_names:
+        config = configs.get(cohort_name) or PolicyConfig()
+        for ps in prerejection_sources:
+            counts["source_cohort_attempts"] += 1  # BEFORE any guard (B19-D)
+
+            if bindings is None:
+                counts["cohort_binding_unavailable"] += 1
+                continue
+            binding = bindings.get(cohort_name)
+            if binding is None:
+                counts["cohort_binding_unavailable"] += 1
+                errors.append({
+                    "stage": "cohort_binding_unavailable",
+                    "cohort": cohort_name, "ticker": ps.get("ticker"),
+                    "source_suggestion_id": ps.get("id")})
+                continue
+            cohort_id = binding.get("cohort_id")
+            portfolio_id = binding.get("portfolio_id")
+            if not cohort_id:
+                counts["cohort_identity_missing"] += 1
+                errors.append({
+                    "stage": "cohort_identity_missing",
+                    "cohort": cohort_name,
+                    "source_suggestion_id": ps.get("id")})
+                continue
+            if not portfolio_id:
+                counts["cohort_portfolio_missing"] += 1
+                errors.append({
+                    "stage": "cohort_portfolio_missing",
+                    "cohort": cohort_name,
+                    "source_suggestion_id": ps.get("id")})
+                continue
+
+            # Capital fails CLOSED (B19-I) — no $100,000 default.
+            deployable, cap_reason = _normalize_capital(
+                _read_portfolio_row(supabase, portfolio_id))
+            if cap_reason is not None:
+                counts["cohort_capital_invalid"] += 1
+                errors.append({
+                    "stage": "cohort_capital_invalid",
+                    "cohort": cohort_name, "reason": cap_reason,
+                    "source_suggestion_id": ps.get("id")})
+                continue
+
+            _process_prerejection_source(
+                supabase, user_id, cohort_name, cohort_id, ps,
+                config, deployable, counts, errors)
+
+    # B19-K runtime invariants (NOT python assert — typed error, sets partial).
+    terminal = (counts["accepted"] + counts["refused"] + counts["clone_failed"]
+                + counts["identity_mismatch"] + counts["accepted_verdict_failed"]
+                + counts["cohort_binding_unavailable"]
+                + counts["cohort_identity_missing"]
+                + counts["cohort_portfolio_missing"]
+                + counts["cohort_capital_invalid"])
+    actual = counts["source_cohort_attempts"]
+    if actual != expected or actual != terminal:
+        errors.append({
+            "stage": "prerejection_count_invariant_failed",
+            "expected_attempts": expected, "actual_attempts": actual,
+            "terminal_sum": terminal,
+            "buckets": {k: counts[k] for k in (
+                "accepted", "refused", "clone_failed", "identity_mismatch",
+                "accepted_verdict_failed", "cohort_binding_unavailable",
+                "cohort_identity_missing", "cohort_portfolio_missing",
+                "cohort_capital_invalid")},
+        })
+
+
+def _read_portfolio_row(supabase, portfolio_id: str) -> Optional[Dict]:
+    """Read one portfolio row (net_liq, cash_balance). Returns None on any
+    fault — the caller's capital normalizer fails closed on None."""
+    try:
+        res = supabase.table("paper_portfolios") \
+            .select("cash_balance, net_liq") \
+            .eq("id", portfolio_id) \
+            .single() \
+            .execute()
+        return res.data or None
+    except Exception:
+        return None
+
+
+def _normalize_capital(portfolio_row: Optional[Dict]) -> tuple:
+    """B19-I pure capital normalizer — FAIL CLOSED. Returns (value, None) on
+    a usable positive finite float, else (None, typed_reason). No $100,000
+    default. net_liq is authoritative when present (even if invalid → do NOT
+    fall back to cash_balance); cash_balance only when net_liq is
+    absent/null."""
+    if not isinstance(portfolio_row, dict):
+        return None, "portfolio_row_missing"
+    if "net_liq" in portfolio_row and portfolio_row.get("net_liq") is not None:
+        chosen = portfolio_row.get("net_liq")           # authoritative
+    elif portfolio_row.get("cash_balance") is not None:
+        chosen = portfolio_row.get("cash_balance")
+    else:
+        return None, "capital_absent"
+    try:
+        val = float(chosen)
+    except (TypeError, ValueError):
+        return None, "capital_non_numeric"
+    if not math.isfinite(val):
+        return None, "capital_non_finite"
+    if val <= 0:
+        return None, "capital_not_positive"
+    return val, None
+
+
+def _get_active_cohort_bindings(user_id: str, supabase) -> Dict[str, Dict[str, Any]]:
+    """B19-A strict single-read binding of active cohorts. RAISES on
+    query/shape failure — never returns {} as a substitute for failure.
+    {cohort_name: {"cohort_id": id, "portfolio_id": pid}}."""
+    res = supabase.table("policy_lab_cohorts") \
+        .select("id, cohort_name, portfolio_id") \
+        .eq("user_id", user_id) \
+        .eq("is_active", True) \
+        .execute()
+    rows = res.data
+    if rows is None:
+        raise RuntimeError("policy_lab_cohorts binding read returned no data attr")
+    out: Dict[str, Dict[str, Any]] = {}
+    for r in rows:
+        name = r.get("cohort_name")
+        if name is None:
+            raise RuntimeError("policy_lab_cohorts binding row missing cohort_name")
+        out[name] = {"cohort_id": r.get("id"),
+                     "portfolio_id": r.get("portfolio_id")}
+    return out
 
 
 def _fork_result(
@@ -329,13 +494,35 @@ def _fork_result(
         "error_details": fork_errors[:10],
         "prerejection_source_count": prerej_counts.get("source", 0),
         "prerejection_source_rows": prerej_counts.get("source", 0),
+        # B19 coverage:
         "prerejection_source_cohort_attempts": prerej_counts.get(
             "source_cohort_attempts", 0),
+        "expected_source_cohort_attempts": prerej_counts.get(
+            "expected_source_cohort_attempts", 0),
+        "coverage_shortfall": (
+            prerej_counts.get("expected_source_cohort_attempts", 0)
+            - prerej_counts.get("source_cohort_attempts", 0)),
+        "coverage_complete": (
+            prerej_counts.get("expected_source_cohort_attempts", 0)
+            == prerej_counts.get("source_cohort_attempts", 0)
+            and not any(e.get("stage") == "prerejection_count_invariant_failed"
+                        for e in fork_errors)),
         "prerejection_eligible_count": prerej_counts.get("eligible", 0),
         "prerejection_clone_count": (
             prerej_counts.get("created", 0) + prerej_counts.get("existing", 0)
         ),
-        "prerejection_verdict_count": prerej_counts.get("verdicts", 0),
+        # B22 honest verdict counters. total = accepted + rejected.
+        "prerejection_eligible_verdict_count": prerej_counts.get(
+            "accepted_verdicts", 0),
+        "prerejection_ineligible_verdict_count": prerej_counts.get(
+            "rejected_verdicts", 0),
+        "prerejection_total_verdict_count": (
+            prerej_counts.get("accepted_verdicts", 0)
+            + prerej_counts.get("rejected_verdicts", 0)),
+        # `prerejection_verdict_count` retained as an ALIAS of the total (B22).
+        "prerejection_verdict_count": (
+            prerej_counts.get("accepted_verdicts", 0)
+            + prerej_counts.get("rejected_verdicts", 0)),
         "prerejection_counts": dict(prerej_counts),
     }
 
@@ -649,7 +836,11 @@ def _process_prerejection_source(
     exists without a verdict is REPAIRED on re-run; nothing here can raise
     out (the champion path is never at risk)."""
     ticker = source.get("ticker")
-    counts["source_cohort_attempts"] += 1
+    # NOTE (B19): source_cohort_attempts + the binding/portfolio/capital guards
+    # are owned by _run_prerejection_coverage; this function is only reached for
+    # a fully-bound, capital-valid pair and owns the remaining terminal buckets
+    # (accepted / refused / clone_failed / identity_mismatch /
+    # accepted_verdict_failed).
 
     def _err(stage: str, e: Exception) -> None:
         errors.append({
@@ -659,15 +850,6 @@ def _process_prerejection_source(
         })
 
     try:
-        # 0. B16 — a configured cohort with no cohort_id cannot produce
-        #    auditable evidence: typed, terminal, non-green; no orphan clone,
-        #    no verdict of any kind, champion untouched.
-        if not cohort_id:
-            counts["cohort_identity_missing"] += 1
-            _err("cohort_identity_missing",
-                 RuntimeError(f"cohort {cohort_name!r} has no cohort_id"))
-            return
-
         # 1. Raw basis present? (typed refusal, never a silent default)
         if source.get("ev_raw") is None:
             counts["refused"] += 1
@@ -780,8 +962,8 @@ def _process_prerejection_source(
         try:
             _write_prerejection_verdict(
                 supabase, user_id, cohort_id, source, persisted)
-            counts["verdicts"] += 1
-            counts["accepted"] += 1
+            counts["accepted"] += 1          # terminal disposition
+            counts["accepted_verdicts"] += 1  # B22 honest verdict counter
             if was_existing and not already_verdicted:
                 counts["repaired"] += 1
         except Exception as ve:
@@ -843,11 +1025,8 @@ def _build_prerejection_clone(
     sizing = dict(base.get("sizing_metadata") or {})
     clone_contracts = int((base.get("order_json") or {}).get("contracts") or 1)
     sizing.update({
-        # EV provenance triple + identities (Blockers 3/5A): the basis is
-        # explicit; execution is described by what ACTUALLY happened
-        # (nothing) — never a claim about an intended event. The 07-13
-        # cohort-semantics lesson: execution_mode is the broker-truth
-        # discriminator, so this artifact does not carry one at all.
+        # EV provenance triple: the basis is explicit; execution is described
+        # by what ACTUALLY happened (nothing).
         "ev_basis": "raw",
         "raev_basis": "raw_per_contract_normalized",
         # B12 stamps — the unit contract of the eligibility decision:
@@ -856,11 +1035,23 @@ def _build_prerejection_clone(
         "clone_contracts": clone_contracts,
         "eligibility_cost_basis": _ELIGIBILITY_COST_BASIS,
         "ev_calibrated": source.get("ev"),
-        "calibration_identity": source.get("model_version"),
+        # B20 — TRUTHFUL provenance: source.model_version is populated from
+        # APP_VERSION, NOT from the calibration_adjustments blob that actually
+        # scaled ev. It is therefore NOT a calibration identity. We carry the
+        # source's model_version verbatim and mark that no calibration
+        # identity is persisted on the source.
+        "source_model_version": source.get("model_version"),
+        "calibration_provenance_status": "not_persisted_on_source",
+        # B23 — NARROW CLAIM: this is candidate-level raw eligibility, NOT
+        # entry selection (no capacity / joint-rank / slot accounting).
+        "observation_scope": "raw_candidate_eligibility_only",
+        "decision_semantics": "raw_candidate_eligibility",
+        "selected_for_entry": False,
+        "capacity_evaluated": False,
+        "joint_rank_evaluated": False,
         "routing_intent": "shadow_only",
         "execution_state": "not_executed",
         "execution_intent": "internal_paper_only",
-        "observation_scope": "entry_selection_only",
         "prerejection_fork": True,
         "experiment_version": EXPERIMENT_VERSION,
         "champion_blocked_reason": source.get("blocked_reason"),
@@ -873,7 +1064,7 @@ def _build_prerejection_clone(
         "blocked_reason": "shadow_prerejection_fork",
         "blocked_detail": (
             f"champion rejected: {source.get('blocked_reason')}; "
-            f"raw-basis entry-selection observation only"
+            f"raw-candidate-eligibility observation only"
         ),
         "ev": raw_ev,
         "ev_raw": raw_ev,
@@ -901,31 +1092,49 @@ def _validate_persisted_clone(persisted: Dict, expected: Dict, source: Dict) -> 
     p_order = persisted.get("order_json") or {}
     e_order = expected.get("order_json") or {}
 
-    # B18 — COMPLETE identity/semantics binding: strings/enums exact.
+    # B21 — COMPLETE consumer-driven binding. EVERY field the verdict emits
+    # (identity, provenance, economics, AND the legs) is validated before an
+    # accepted verdict is written. Strings/enums exact; numerics at tolerance.
     identity_checks = [
         ("user_id", persisted.get("user_id"), expected.get("user_id")),
         ("source_suggestion_id", p_sz.get("source_suggestion_id"), source.get("id")),
         ("cohort_name", persisted.get("cohort_name"), expected.get("cohort_name")),
+        ("ticker", persisted.get("ticker"), expected.get("ticker")),
+        ("strategy", persisted.get("strategy"), expected.get("strategy")),
+        ("window", persisted.get("window"), expected.get("window")),
+        ("cycle_date", persisted.get("cycle_date"), expected.get("cycle_date")),
         ("experiment_version", p_sz.get("experiment_version"), EXPERIMENT_VERSION),
         ("legs_fingerprint", persisted.get("legs_fingerprint"),
          expected.get("legs_fingerprint")),
         ("status", persisted.get("status"), "NOT_EXECUTABLE"),
         ("blocked_reason", persisted.get("blocked_reason"),
          "shadow_prerejection_fork"),
-        ("observation_scope", p_sz.get("observation_scope"), "entry_selection_only"),
+        ("observation_scope", p_sz.get("observation_scope"),
+         "raw_candidate_eligibility_only"),
+        ("decision_semantics", p_sz.get("decision_semantics"),
+         "raw_candidate_eligibility"),
+        ("selected_for_entry", p_sz.get("selected_for_entry"), False),
         ("execution_state", p_sz.get("execution_state"), "not_executed"),
         ("execution_intent", p_sz.get("execution_intent"), "internal_paper_only"),
         ("routing_intent", p_sz.get("routing_intent"), "shadow_only"),
-        ("calibration_identity", p_sz.get("calibration_identity"),
-         e_sz.get("calibration_identity")),
+        ("source_model_version", p_sz.get("source_model_version"),
+         e_sz.get("source_model_version")),
+        ("calibration_provenance_status",
+         p_sz.get("calibration_provenance_status"),
+         "not_persisted_on_source"),
         ("champion_blocked_reason", p_sz.get("champion_blocked_reason"),
          e_sz.get("champion_blocked_reason")),
+        # source provenance (retained on the verdict snapshot):
+        ("source_trace_id", p_sz.get("source_trace_id"),
+         e_sz.get("source_trace_id")),
+        ("source_lineage_hash", p_sz.get("source_lineage_hash"),
+         e_sz.get("source_lineage_hash")),
     ]
     for field, got, want in identity_checks:
         if got != want:
             return "clone_identity_mismatch", field
 
-    # B18 — basis/eligibility enums exact.
+    # basis/eligibility enums exact.
     basis_enum_checks = [
         ("ev_basis", p_sz.get("ev_basis"), "raw"),
         ("raev_basis", p_sz.get("raev_basis"), e_sz.get("raev_basis")),
@@ -944,7 +1153,7 @@ def _validate_persisted_clone(persisted: Dict, expected: Dict, source: Dict) -> 
         except (TypeError, ValueError):
             return True
 
-    # B18 — economic coherence (numeric fields, documented tolerance).
+    # economic coherence (numeric fields, documented tolerance).
     if persisted.get("ev_raw") is None or _num_neq(persisted.get("ev_raw"),
                                                    expected.get("ev_raw")):
         return "clone_basis_mismatch", "ev_raw"
@@ -959,22 +1168,56 @@ def _validate_persisted_clone(persisted: Dict, expected: Dict, source: Dict) -> 
     except (TypeError, ValueError):
         return "clone_basis_mismatch", "risk_adjusted_ev"
     if _num_neq(p_raev, expected.get("risk_adjusted_ev")):
-        # expected.risk_adjusted_ev IS the freshly recomputed normalized
-        # eligibility value — a persisted row that disagrees is stale or
-        # foreign.
         return "clone_basis_mismatch", "risk_adjusted_ev"
-    # contract-count coherence: sizing == order_json == expected clone qty
+    # contract-count coherence: sizing.contracts == sizing.clone_contracts ==
+    # order_json.contracts == expected clone qty
     try:
+        p_sizing_ct = int(p_sz.get("contracts"))
         p_clone_ct = int(p_sz.get("clone_contracts"))
         p_order_ct = int(p_order.get("contracts"))
         e_clone_ct = int(e_order.get("contracts"))
     except (TypeError, ValueError):
         return "clone_basis_mismatch", "clone_contracts"
-    if not (p_clone_ct == p_order_ct == e_clone_ct):
+    if not (p_sizing_ct == p_clone_ct == p_order_ct == e_clone_ct):
         return "clone_basis_mismatch", "clone_contracts"
+    # both max-loss locations the verdict may read, both validated:
     if _num_neq(persisted.get("max_loss_total"), expected.get("max_loss_total")):
         return "clone_basis_mismatch", "max_loss_total"
+    if _num_neq(p_sz.get("max_loss_total"), expected.get("max_loss_total")):
+        return "clone_basis_mismatch", "sizing_max_loss_total"
+    # limit_price is OPTIONAL: both-None is a legitimate match (a shadow clone
+    # carries no limit); exactly-one-None or differing numbers is a mismatch.
+    p_lp, e_lp = p_order.get("limit_price"), e_order.get("limit_price")
+    if p_lp is None or e_lp is None:
+        if p_lp is not e_lp:  # one None, one not
+            return "clone_basis_mismatch", "limit_price"
+    elif _num_neq(p_lp, e_lp):
+        return "clone_basis_mismatch", "limit_price"
+    # legs: canonicalized per-leg comparison (symbol/side/type/strike/expiry/qty)
+    if _canon_legs(p_order.get("legs")) != _canon_legs(e_order.get("legs")):
+        return "clone_basis_mismatch", "order_legs"
     return None, None
+
+
+def _canon_legs(legs) -> list:
+    """Canonicalize order legs for exact comparison (B21-F): sort by a stable
+    key and bind symbol/side|action/type|right/strike/expiry/quantity."""
+    if not isinstance(legs, list):
+        return []
+    canon = []
+    for leg in legs:
+        if not isinstance(leg, dict):
+            canon.append(("__nonleg__", str(leg)))
+            continue
+        canon.append((
+            str(leg.get("symbol")),
+            str(leg.get("side") if leg.get("side") is not None else leg.get("action")),
+            str(leg.get("type") if leg.get("type") is not None else leg.get("right")),
+            str(leg.get("strike")),
+            str(leg.get("expiry")),
+            str(leg.get("quantity")),
+        ))
+    return sorted(canon)
 
 
 def _find_existing_clone(supabase, clone: Dict) -> Optional[Dict]:
@@ -1050,8 +1293,15 @@ def _write_prerejection_verdict(
             "champion_blocked_reason": p_sizing.get("champion_blocked_reason"),
             "routing_intent": p_sizing.get("routing_intent"),
             "execution_state": p_sizing.get("execution_state"),
-            "calibration_identity": p_sizing.get("calibration_identity"),
+            # B20 — TRUTHFUL provenance (no false calibration identity):
+            "source_model_version": p_sizing.get("source_model_version"),
+            "calibration_provenance_status":
+                p_sizing.get("calibration_provenance_status"),
             "experiment_version": p_sizing.get("experiment_version"),
+            # B23 — narrow-claim semantics:
+            "observation_scope": p_sizing.get("observation_scope"),
+            "decision_semantics": p_sizing.get("decision_semantics"),
+            "selected_for_entry": p_sizing.get("selected_for_entry"),
             # B12 — the eligibility unit contract, from the PERSISTED row:
             "eligibility_ev_unit": p_sizing.get("eligibility_ev_unit"),
             "eligibility_contracts": p_sizing.get("eligibility_contracts"),
@@ -1063,11 +1313,13 @@ def _write_prerejection_verdict(
             "ticker": persisted_clone.get("ticker"),
             "window": persisted_clone.get("window"),
         },
-        # simulated_fill describes the CLONE's own sizing, never the source's
+        # simulated_fill describes the CLONE's own sizing, from VALIDATED
+        # values (B21-C): prefer the validated top-level max_loss_total over
+        # the JSON duplicate.
         "simulated_fill": {
             "contracts": p_order.get("contracts"),
             "limit_price": p_order.get("limit_price"),
-            "max_loss_total": p_sizing.get("max_loss_total"),
+            "max_loss_total": persisted_clone.get("max_loss_total"),
             "expected_fill_price": None,
             "expected_slippage": None,
             "spread_width": None,
@@ -1101,9 +1353,18 @@ def _write_prerejection_reject(
             "decision": "rejected",
             "rank_at_decision": 1,
             "reason_codes": [reason],
-            "features_snapshot": _build_features_snapshot(source),
+            "features_snapshot": {
+                **_build_features_snapshot(source),
+                # B23 — a raw-INELIGIBLE observation keeps the same scope +
+                # selected_for_entry=false as an eligible one; only the reason
+                # differs.
+                "observation_scope": "raw_candidate_eligibility_only",
+                "decision_semantics": "raw_candidate_eligibility",
+                "selected_for_entry": False,
+            },
             "simulated_fill": _build_simulated_fill(source),
         }], on_conflict="cohort_id,suggestion_id").execute()
+        counts["rejected_verdicts"] += 1   # B22 successful rejected verdict
     except Exception as e:
         counts["reject_verdict_write_failed"] += 1
         errors.append({

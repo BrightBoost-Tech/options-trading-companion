@@ -357,7 +357,15 @@ class TestFullProductionRoute(unittest.TestCase):
                              fork_mod._ELIGIBILITY_COST_BASIS)
             self.assertEqual(fs["raev_basis"], "raw_per_contract_normalized")
             self.assertEqual(fs["experiment_version"], fork_mod.EXPERIMENT_VERSION)
-            self.assertEqual(fs["calibration_identity"], src.get("model_version"))
+            # B20 truthful provenance (no false calibration identity)
+            self.assertEqual(fs["source_model_version"], src.get("model_version"))
+            self.assertEqual(fs["calibration_provenance_status"],
+                             "not_persisted_on_source")
+            self.assertNotIn("calibration_identity", fs)
+            # B23 narrow-claim semantics stamped on the verdict
+            self.assertEqual(fs["observation_scope"],
+                             "raw_candidate_eligibility_only")
+            self.assertIs(fs["selected_for_entry"], False)
             # no executable suggestion; no broker table touched
             self.assertNotIn("paper_orders", client.tables)
 

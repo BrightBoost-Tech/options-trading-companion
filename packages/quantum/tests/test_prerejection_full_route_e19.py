@@ -206,7 +206,15 @@ class TestFullProductionRoute(unittest.TestCase):
         rows = client.tables["trade_suggestions"]
         sources = [r for r in rows
                    if r.get("ticker") == "SOFI" and r.get("cohort_name") is None]
-        self.assertEqual(len(sources), 1, f"rows={[(r.get('ticker'), r.get('status'), r.get('cohort_name')) for r in rows]}")
+        import json as _json
+        self.assertEqual(
+            len(sources), 1,
+            "rows="
+            + str([(r.get("ticker"), r.get("status"), r.get("cohort_name"))
+                   for r in rows])
+            + " || cycle_results="
+            + _json.dumps(result.get("cycle_results"), default=str)[:1200]
+            + " || notes=" + _json.dumps(result.get("notes"), default=str)[:800])
         src = sources[0]
         self.assertEqual(src["status"], "NOT_EXECUTABLE")
         self.assertEqual(src["blocked_reason"], "edge_below_minimum")

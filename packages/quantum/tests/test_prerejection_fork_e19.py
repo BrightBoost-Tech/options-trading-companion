@@ -52,10 +52,12 @@ class _Q:
         self._limit = None
         self._single = False
         self._count = None
+        self._select_cols = ""
 
-    def select(self, *_a, **kw):
+    def select(self, *cols, **kw):
         self._op = self._op or "select"
         self._count = kw.get("count")
+        self._select_cols = ",".join(str(c) for c in cols)
         return self
 
     def insert(self, rows):
@@ -629,7 +631,7 @@ class TestRecoverableOrder(_EnvRawOn):
         res1 = _run_fork(client)
         self.assertEqual(res1["status"], "partial")
         self.assertGreaterEqual(res1["errors"], 1)
-        self.assertEqual(res1["prerejection_counts"]["verdict_failed"], 1)
+        self.assertEqual(res1["prerejection_counts"]["accepted_verdict_failed"], 1)
         self.assertEqual(len(_clones(client, ticker="SOFI")), 1)   # clone persisted
         self.assertEqual(_verdicts(client, sofi["id"]), [])        # no verdict yet
         stages = {e["stage"] for e in res1["error_details"]}
@@ -780,9 +782,24 @@ class TestEvUnitContract(_EnvRawOn):
             src = _prerejected_sofi()
             src["sizing_metadata"] = {**src["sizing_metadata"], **sz_patch}
             src.pop("max_loss_total", None)
+            # keep sizing & order contract counts aligned so this exercises the
+            # normalization guard, not the B17 mismatch guard
+            if "contracts" in sz_patch:
+                src["order_json"] = {**src["order_json"],
+                                     "contracts": sz_patch["contracts"]}
             view, reason = fork_mod.build_raw_eligibility_view(src)
             self.assertIsNone(view)
             self.assertEqual(reason, "max_loss_not_normalizable", sz_patch)
+
+    def test_contract_count_basis_mismatch_typed(self):
+        """B17: sizing.contracts != order_json.contracts → never chosen
+        silently; typed refusal, no clone."""
+        src = _prerejected_sofi()
+        src["sizing_metadata"] = {**src["sizing_metadata"], "contracts": 1}
+        src["order_json"] = {**src["order_json"], "contracts": 3}
+        view, reason = fork_mod.build_raw_eligibility_view(src)
+        self.assertIsNone(view)
+        self.assertEqual(reason, "contract_count_basis_mismatch")
 
 
 # ---------------------------------------------------------------------------
@@ -898,10 +915,11 @@ class TestPersistedCloneIdentity(_EnvRawOn):
         self.assertEqual(len(_verdicts(client, sofi["id"], "accepted")), 1)
 
     def test_counts_reconcile_with_dispositions(self):
-        """source == refused + clone_failed + identity_mismatch +
-        accepted-verdict failures + verdicts (each source exactly one
-        terminal disposition; reject-write failures overlap refused by
-        documented design and are excluded from this identity)."""
+        """B15 invariant: source_cohort_attempts == accepted + refused +
+        clone_failed + identity_mismatch + accepted_verdict_failed +
+        cohort_identity_missing (one terminal disposition per attempt).
+        reject_verdict_write_failed is a SECONDARY error on an already-refused
+        attempt and does NOT enter this identity."""
         client = FakeSupabase()
         good = _prerejected_sofi()
         no_basis = _prerejected_sofi(ev_raw=None)
@@ -911,22 +929,23 @@ class TestPersistedCloneIdentity(_EnvRawOn):
         _seed(client, _pending_qqq(), good, no_basis)
         res = _run_fork(client)
         c = res["prerejection_counts"]
-        # exactly one terminal disposition per source (accepted-verdict
-        # failures would appear as verdict_failed with verdicts absent;
-        # none here). reject-write failures overlap refused by documented
-        # design and are covered by their own test.
         self.assertEqual(
-            c["source"],
-            c["refused"] + c["clone_failed"] + c["identity_mismatch"]
-            + c["verdicts"])
-        self.assertEqual(c["source"], 2)
+            c["source_cohort_attempts"],
+            c["accepted"] + c["refused"] + c["clone_failed"]
+            + c["identity_mismatch"] + c["accepted_verdict_failed"]
+            + c["cohort_identity_missing"])
+        # single non-champion cohort (neutral) × 2 sources = 2 attempts
+        self.assertEqual(c["source_cohort_attempts"], 2)
+        self.assertEqual(c["source_rows"] if "source_rows" in c else c["source"], 2)
+        self.assertEqual(c["accepted"], 1)
         self.assertEqual(c["refused"], 1)
         self.assertEqual(c["verdicts"], 1)
-        self.assertEqual(c["verdict_failed"], 0)
+        self.assertEqual(c["accepted_verdict_failed"], 0)
 
-    def test_reject_verdict_write_failure_counts_and_partial(self):
-        """Contract cleanup: a rejected-verdict UPSERT failure increments
-        verdict_failed AND errors and degrades the fork to partial."""
+    def test_reject_verdict_write_failure_is_secondary_not_double_counted(self):
+        """B15: a rejected-verdict UPSERT failure increments
+        reject_verdict_write_failed AND errors, degrades to partial, but the
+        terminal disposition stays `refused` (not double-counted)."""
         client = FakeSupabase()
         no_basis = _prerejected_sofi(ev_raw=None)
         _seed(client, _pending_qqq(), no_basis)
@@ -935,7 +954,14 @@ class TestPersistedCloneIdentity(_EnvRawOn):
         c = res["prerejection_counts"]
         self.assertEqual(res["status"], "partial")
         self.assertEqual(c["refused"], 1)
-        self.assertEqual(c["verdict_failed"], 1)
+        self.assertEqual(c["reject_verdict_write_failed"], 1)
+        self.assertEqual(c["accepted_verdict_failed"], 0)
+        # invariant still holds: refused counts the terminal disposition once
+        self.assertEqual(
+            c["source_cohort_attempts"],
+            c["accepted"] + c["refused"] + c["clone_failed"]
+            + c["identity_mismatch"] + c["accepted_verdict_failed"]
+            + c["cohort_identity_missing"])
         self.assertGreaterEqual(res["errors"], 1)
         stages = {e["stage"] for e in res["error_details"]}
         self.assertIn("reject_verdict_upsert_failed", stages)
@@ -1060,7 +1086,8 @@ class TestTopLevelFailurePropagation(_EnvRawOn):
         client.raise_when("policy_decisions", "upsert")
         result = _drive_suggestions_open(client)
         cr = result["cycle_results"][0]
-        self.assertEqual(cr["fork_champion_status"], "ok")
+        # B18 honest non-claim: the legacy champion path is not measured.
+        self.assertEqual(cr["fork_champion_status"], "legacy_unmeasured")
         self.assertEqual(cr["fork_status"], "partial")
 
 
@@ -1227,6 +1254,233 @@ class TestExecutorIsolation(_EnvRawOn):
                          if w[0] == "update" and
                          isinstance(w[1], dict) and w[1].get("status") == "staged"]
         self.assertEqual(staged_writes, [])
+
+
+# ---------------------------------------------------------------------------
+# Blocker 14 — active-clone lookup (archived twins ignored)
+# ---------------------------------------------------------------------------
+
+class TestActiveCloneLookup(_EnvRawOn):
+    def _make_persisted_clone(self, status="NOT_EXECUTABLE",
+                              blocked_reason="shadow_prerejection_fork"):
+        """Seed one archived clone shape directly, then run the fork and
+        return (client, sofi)."""
+        client = FakeSupabase()
+        sofi = _prerejected_sofi()
+        _seed(client, _pending_qqq(), sofi)
+        return client, sofi
+
+    def _archived_clone_row(self, sofi, status):
+        """A row sharing the clone's unique-index key but in an ARCHIVED /
+        wrong-reason state (must never be picked up as THE active clone)."""
+        clone, _ = fork_mod._build_prerejection_clone(
+            copy.deepcopy(sofi), "neutral",
+            PolicyConfig(min_score_threshold=0.0), 10000.0)
+        clone["id"] = str(uuid.uuid4())
+        clone["status"] = status
+        return clone
+
+    def test_dismissed_twin_ignored_new_active_clone_created(self):
+        client, sofi = self._make_persisted_clone()
+        client.tables["trade_suggestions"].append(
+            self._archived_clone_row(sofi, "dismissed"))
+        res = _run_fork(client)
+        active = _clones(client, ticker="SOFI",
+                         blocked_reason="shadow_prerejection_fork")
+        active = [r for r in active if r["status"] == "NOT_EXECUTABLE"]
+        self.assertEqual(len(active), 1)               # a fresh active clone
+        self.assertEqual(res["prerejection_counts"]["created"], 1)
+        v = _verdicts(client, sofi["id"], "accepted")[0]
+        self.assertEqual(v["features_snapshot"]["clone_suggestion_id"],
+                         active[0]["id"])              # verdict → the active one
+
+    def test_cancelled_twin_ignored(self):
+        client, sofi = self._make_persisted_clone()
+        client.tables["trade_suggestions"].append(
+            self._archived_clone_row(sofi, "cancelled"))
+        res = _run_fork(client)
+        self.assertEqual(res["prerejection_counts"]["created"], 1)
+        self.assertEqual(len(_verdicts(client, sofi["id"], "accepted")), 1)
+
+    def test_active_plus_archived_returns_active_deterministically(self):
+        client, sofi = self._make_persisted_clone()
+        _run_fork(client)  # creates the real active clone
+        active_id = _clones(client, ticker="SOFI",
+                            blocked_reason="shadow_prerejection_fork")[0]["id"]
+        # add an archived twin AFTER the active one
+        client.tables["trade_suggestions"].append(
+            self._archived_clone_row(sofi, "dismissed"))
+        # wipe verdict → repair path
+        client.tables["policy_decisions"] = []
+        res = _run_fork(client)
+        self.assertEqual(res["prerejection_counts"]["existing"], 1)
+        v = _verdicts(client, sofi["id"], "accepted")[0]
+        self.assertEqual(v["features_snapshot"]["clone_suggestion_id"], active_id)
+
+    def test_active_row_wrong_blocked_reason_rejected_by_lookup_and_validator(self):
+        """A row active + sharing the fingerprint key but carrying a foreign
+        blocked_reason is NOT this clone. The active-clone LOOKUP filters it
+        out (status+reason clauses) and the VALIDATOR independently rejects
+        it. (A real foreign row can't share the _prerej_ fingerprint, so this
+        is tested at the two component boundaries, not via a route that would
+        require an impossible unique-key collision.)"""
+        client, sofi = self._make_persisted_clone()
+        expected, _ = fork_mod._build_prerejection_clone(
+            copy.deepcopy(sofi), "neutral",
+            PolicyConfig(min_score_threshold=0.0), 10000.0)
+        foreign = copy.deepcopy(expected)
+        foreign["id"] = str(uuid.uuid4())
+        foreign["blocked_reason"] = "some_other_reason"
+        client.tables["trade_suggestions"].append(foreign)
+        # LOOKUP: the active-clone query must NOT return the foreign row
+        found = fork_mod._find_existing_clone(client, expected)
+        self.assertIsNone(found)
+        # VALIDATOR: independent hard reject on blocked_reason
+        kind, field = fork_mod._validate_persisted_clone(foreign, expected, sofi)
+        self.assertEqual((kind, field),
+                         ("clone_identity_mismatch", "blocked_reason"))
+
+
+# ---------------------------------------------------------------------------
+# Blocker 16 — missing cohort id is non-green
+# ---------------------------------------------------------------------------
+
+class TestMissingCohortId(_EnvRawOn):
+    def test_configured_cohort_without_id_is_partial_no_orphan(self):
+        client = FakeSupabase()
+        sofi = _prerejected_sofi()
+        _seed(client, _pending_qqq(), sofi)
+        # neutral cohort has a portfolio but NO id row
+        client.tables["policy_lab_cohorts"] = [
+            r for r in client.tables["policy_lab_cohorts"]
+            if r["cohort_name"] != "neutral"]
+        client.tables["policy_lab_cohorts"].append(
+            {"id": None, "user_id": UID, "cohort_name": "neutral",
+             "portfolio_id": "pf-neu", "is_active": True})
+        res = _run_fork(client)
+        self.assertEqual(res["status"], "partial")
+        self.assertEqual(res["prerejection_counts"]["cohort_identity_missing"], 1)
+        self.assertEqual(_clones(client, ticker="SOFI"), [])  # no orphan clone
+        self.assertEqual(_verdicts(client, sofi["id"], "accepted"), [])
+        stages = {e["stage"] for e in res["error_details"]}
+        self.assertIn("cohort_identity_missing", stages)
+
+    def test_cohort_ids_query_failure_distinct_from_empty(self):
+        """B16: a fetch failure must NOT become an authoritative empty {}.
+        Inject at the REAL ids-query origin only (the SECOND policy_lab_cohorts
+        select — portfolios fetch first, succeeds, so neutral keeps its
+        portfolio and the missing-id is genuinely the ids failure, not a
+        skipped no-portfolio cohort)."""
+        client = FakeSupabase()
+        sofi = _prerejected_sofi()
+        _seed(client, _pending_qqq(), sofi)
+        # inject at the REAL ids-query origin: the select that reads the `id`
+        # column (portfolios reads cohort_name,portfolio_id — never `id`)
+        client.raise_when(
+            "policy_lab_cohorts", "select",
+            predicate=lambda q: q._select_cols.startswith("id"))
+        res = _run_fork(client)
+        self.assertEqual(res["status"], "partial")
+        stages = {e["stage"] for e in res["error_details"]}
+        self.assertIn("cohort_ids_fetch_failed", stages)
+        # the prerejection attempt lands cohort_identity_missing (non-green)
+        self.assertGreaterEqual(
+            res["prerejection_counts"]["cohort_identity_missing"], 1)
+        self.assertEqual(_verdicts(client, sofi["id"], "accepted"), [])
+
+
+# ---------------------------------------------------------------------------
+# Blocker 15 — three-cohort count conservation
+# ---------------------------------------------------------------------------
+
+class TestThreeCohortConservation(_EnvRawOn):
+    def _seed_three(self, client, sources):
+        client.tables["trade_suggestions"] = [copy.deepcopy(s) for s in sources]
+        client.tables["policy_lab_cohorts"] = [
+            {"id": "c-agg", "user_id": UID, "cohort_name": "aggressive",
+             "portfolio_id": "pf-agg", "is_active": True},
+            {"id": "c-neu", "user_id": UID, "cohort_name": "neutral",
+             "portfolio_id": "pf-neu", "is_active": True},
+            {"id": "c-con", "user_id": UID, "cohort_name": "conservative",
+             "portfolio_id": "pf-con", "is_active": True},
+        ]
+        client.tables["paper_portfolios"] = [
+            {"id": "pf-agg", "cash_balance": 2000, "net_liq": 2000},
+            {"id": "pf-neu", "cash_balance": 10000, "net_liq": 10000},
+            {"id": "pf-con", "cash_balance": 10000, "net_liq": 10000},
+        ]
+        client.tables["paper_positions"] = []
+
+    def _run_three(self, client):
+        cfgs = {
+            "aggressive": PolicyConfig(),
+            "neutral": PolicyConfig(min_score_threshold=0.0),
+            "conservative": PolicyConfig(min_score_threshold=64.0),
+        }
+        with patch.object(fork_mod, "is_policy_lab_enabled", lambda: True), \
+             patch.object(fork_mod, "load_cohort_configs", lambda *_a, **_k: cfgs), \
+             patch.object(fork_mod, "get_current_champion",
+                          lambda *_a, **_k: "aggressive"):
+            return fork_mod.fork_suggestions_for_cohorts(UID, client)
+
+    def _invariant(self, c):
+        return (c["source_cohort_attempts"] ==
+                c["accepted"] + c["refused"] + c["clone_failed"]
+                + c["identity_mismatch"] + c["accepted_verdict_failed"]
+                + c["cohort_identity_missing"])
+
+    def test_three_cohort_dispositions_and_reconciliation(self):
+        # both_ok: score 65 → accepted by neutral(0) AND conservative(64)
+        both_ok = _prerejected_sofi()
+        both_ok["sizing_metadata"]["score"] = 65.0
+        # split: score 60 → accepted by neutral, refused by conservative
+        split = _prerejected_sofi()
+        split.update({"id": str(uuid.uuid4()), "ticker": "PLTR",
+                      "legs_fingerprint": "fp-pltr",
+                      "trace_id": str(uuid.uuid4())})
+        split["sizing_metadata"]["score"] = 60.0
+        client = FakeSupabase()
+        self._seed_three(client, [_pending_qqq(), both_ok, split])
+        res = self._run_three(client)
+        c = res["prerejection_counts"]
+
+        # 2 non-champion cohorts × 2 sources = 4 attempts
+        self.assertEqual(c["source_cohort_attempts"], 4)
+        self.assertEqual(res["prerejection_source_rows"], 2)
+        self.assertTrue(self._invariant(c), c)
+        # accepted: both_ok×2 + split×neutral = 3 ; refused: split×conservative = 1
+        self.assertEqual(c["accepted"], 3)
+        self.assertEqual(c["refused"], 1)
+        self.assertEqual(c["verdicts"], 3)
+        # prerejection clones: both_ok in neutral+conservative, split in
+        # neutral = 3 (the NORMAL-clone path also mints QQQ champion clones,
+        # counted separately — assert the prerej set specifically)
+        prerej_clones = [r for r in client.tables["trade_suggestions"]
+                         if r.get("blocked_reason") == "shadow_prerejection_fork"]
+        self.assertEqual(len(prerej_clones), 3)
+        self.assertEqual(res["status"], "ok")
+
+    def test_three_cohort_verdict_failure_then_repair(self):
+        both_ok = _prerejected_sofi()
+        both_ok["sizing_metadata"]["score"] = 65.0
+        client = FakeSupabase()
+        self._seed_three(client, [_pending_qqq(), both_ok])
+        client.raise_when("policy_decisions", "upsert")
+        res1 = self._run_three(client)
+        self.assertEqual(res1["status"], "partial")
+        c1 = res1["prerejection_counts"]
+        self.assertEqual(c1["accepted_verdict_failed"], 2)  # neutral + conservative
+        self.assertTrue(self._invariant(c1), c1)
+        self.assertEqual(_verdicts(client, both_ok["id"], "accepted"), [])
+
+        client.clear_hooks()
+        res2 = self._run_three(client)
+        self.assertEqual(res2["status"], "ok")
+        c2 = res2["prerejection_counts"]
+        self.assertEqual(c2["repaired"], 2)
+        self.assertEqual(c2["existing"], 2)          # no duplicate clones
+        self.assertEqual(len(_verdicts(client, both_ok["id"], "accepted")), 2)
+        self.assertTrue(self._invariant(c2), c2)
 
 
 if __name__ == "__main__":

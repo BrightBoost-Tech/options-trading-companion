@@ -85,7 +85,10 @@ def fork_suggestions_for_cohorts(
     fork_errors: List[Dict[str, Any]] = []
     prerej_counts: Dict[str, int] = {
         "source": 0, "eligible": 0, "created": 0, "existing": 0,
-        "refused": 0, "clone_failed": 0, "verdict_failed": 0,
+        "refused": 0, "clone_failed": 0,
+        "accepted": 0, "accepted_verdict_failed": 0,
+        "reject_verdict_write_failed": 0, "cohort_identity_missing": 0,
+        "source_cohort_attempts": 0,
         "repaired": 0, "verdicts": 0, "identity_mismatch": 0,
     }
 
@@ -143,9 +146,20 @@ def fork_suggestions_for_cohorts(
         except Exception:
             pass  # Non-critical
 
-    # Get cohort portfolio mapping and cohort IDs
+    # Get cohort portfolio mapping and cohort IDs. B16: an ids-fetch
+    # failure is TYPED (never an authoritative-empty {}) — downstream every
+    # prerejection attempt records cohort_identity_missing and the job goes
+    # partial; champion tagging above is already complete and unaffected.
     cohort_portfolios = _get_cohort_portfolios(user_id, supabase)
-    cohort_ids = _get_cohort_ids(user_id, supabase)
+    try:
+        cohort_ids = _get_cohort_ids(user_id, supabase)
+    except Exception as ci_err:
+        cohort_ids = {}
+        fork_errors.append({
+            "stage": "cohort_ids_fetch_failed",
+            "error_class": type(ci_err).__name__,
+            "error": str(ci_err)[:200],
+        })
 
     created = {}
     for cohort_name, config in configs.items():
@@ -303,7 +317,10 @@ def _fork_result(
     return {
         "status": status,
         "reason": result_reason,
-        "champion_status": "ok",
+        # B18 honest non-claim: the LEGACY champion-tagging/normal-clone path
+        # still swallows its own failures (pre-existing behavior, untouched
+        # by this PR) — 'ok' would be a claim nothing measures.
+        "champion_status": "legacy_unmeasured",
         "champion_tagged": champion_tagged,
         "created": created,
         "existing": prerej_counts.get("existing", 0),
@@ -311,6 +328,9 @@ def _fork_result(
         "errors": len(fork_errors),
         "error_details": fork_errors[:10],
         "prerejection_source_count": prerej_counts.get("source", 0),
+        "prerejection_source_rows": prerej_counts.get("source", 0),
+        "prerejection_source_cohort_attempts": prerej_counts.get(
+            "source_cohort_attempts", 0),
         "prerejection_eligible_count": prerej_counts.get("eligible", 0),
         "prerejection_clone_count": (
             prerej_counts.get("created", 0) + prerej_counts.get("existing", 0)
@@ -518,6 +538,7 @@ _REJECT_RAW_RECOMPUTE = "raw_raev_recompute_failed"
 _REJECT_RAW_INVALID = "raw_raev_invalid"
 _REJECT_RAW_EV_INVALID = "raw_ev_invalid"
 _REJECT_MAX_LOSS_NOT_NORMALIZABLE = "max_loss_not_normalizable"
+_REJECT_CONTRACT_COUNT_MISMATCH = "contract_count_basis_mismatch"
 
 # B12 — the EXACT canonical cost assumption the eligibility computation
 # inherits from canonical_ranker at one contract: fees = 0.65 × 1 × 2 (open +
@@ -569,9 +590,19 @@ def build_raw_eligibility_view(row: Dict) -> tuple:
 
     sizing = row.get("sizing_metadata") or {}
     order_json = row.get("order_json") or {}
-    contracts_raw = sizing.get("contracts")
+    sizing_ct = sizing.get("contracts")
+    order_ct = order_json.get("contracts")
+    if sizing_ct is not None and order_ct is not None:
+        try:
+            if int(sizing_ct) != int(order_ct):
+                # B17: two disagreeing canonical contract counts — never
+                # choose silently.
+                return None, _REJECT_CONTRACT_COUNT_MISMATCH
+        except (TypeError, ValueError):
+            return None, _REJECT_MAX_LOSS_NOT_NORMALIZABLE
+    contracts_raw = sizing_ct
     if contracts_raw is None:  # explicit 0 must NOT fall through (typed refusal)
-        contracts_raw = order_json.get("contracts")
+        contracts_raw = order_ct
     try:
         contracts = int(contracts_raw)
     except (TypeError, ValueError):
@@ -618,6 +649,7 @@ def _process_prerejection_source(
     exists without a verdict is REPAIRED on re-run; nothing here can raise
     out (the champion path is never at risk)."""
     ticker = source.get("ticker")
+    counts["source_cohort_attempts"] += 1
 
     def _err(stage: str, e: Exception) -> None:
         errors.append({
@@ -627,6 +659,15 @@ def _process_prerejection_source(
         })
 
     try:
+        # 0. B16 — a configured cohort with no cohort_id cannot produce
+        #    auditable evidence: typed, terminal, non-green; no orphan clone,
+        #    no verdict of any kind, champion untouched.
+        if not cohort_id:
+            counts["cohort_identity_missing"] += 1
+            _err("cohort_identity_missing",
+                 RuntimeError(f"cohort {cohort_name!r} has no cohort_id"))
+            return
+
         # 1. Raw basis present? (typed refusal, never a silent default)
         if source.get("ev_raw") is None:
             counts["refused"] += 1
@@ -740,10 +781,11 @@ def _process_prerejection_source(
             _write_prerejection_verdict(
                 supabase, user_id, cohort_id, source, persisted)
             counts["verdicts"] += 1
+            counts["accepted"] += 1
             if was_existing and not already_verdicted:
                 counts["repaired"] += 1
         except Exception as ve:
-            counts["verdict_failed"] += 1
+            counts["accepted_verdict_failed"] += 1
             _err("verdict_upsert_failed", ve)
             # The clone persists; identity (fingerprint + source id) is
             # sufficient for the next run to repair the missing verdict.
@@ -856,21 +898,45 @@ def _validate_persisted_clone(persisted: Dict, expected: Dict, source: Dict) -> 
     noise; all compared magnitudes ≥ 0.01)."""
     p_sz = persisted.get("sizing_metadata") or {}
     e_sz = expected.get("sizing_metadata") or {}
+    p_order = persisted.get("order_json") or {}
+    e_order = expected.get("order_json") or {}
 
+    # B18 — COMPLETE identity/semantics binding: strings/enums exact.
     identity_checks = [
+        ("user_id", persisted.get("user_id"), expected.get("user_id")),
         ("source_suggestion_id", p_sz.get("source_suggestion_id"), source.get("id")),
         ("cohort_name", persisted.get("cohort_name"), expected.get("cohort_name")),
         ("experiment_version", p_sz.get("experiment_version"), EXPERIMENT_VERSION),
         ("legs_fingerprint", persisted.get("legs_fingerprint"),
          expected.get("legs_fingerprint")),
+        ("status", persisted.get("status"), "NOT_EXECUTABLE"),
+        ("blocked_reason", persisted.get("blocked_reason"),
+         "shadow_prerejection_fork"),
         ("observation_scope", p_sz.get("observation_scope"), "entry_selection_only"),
         ("execution_state", p_sz.get("execution_state"), "not_executed"),
         ("execution_intent", p_sz.get("execution_intent"), "internal_paper_only"),
         ("routing_intent", p_sz.get("routing_intent"), "shadow_only"),
+        ("calibration_identity", p_sz.get("calibration_identity"),
+         e_sz.get("calibration_identity")),
+        ("champion_blocked_reason", p_sz.get("champion_blocked_reason"),
+         e_sz.get("champion_blocked_reason")),
     ]
     for field, got, want in identity_checks:
         if got != want:
             return "clone_identity_mismatch", field
+
+    # B18 — basis/eligibility enums exact.
+    basis_enum_checks = [
+        ("ev_basis", p_sz.get("ev_basis"), "raw"),
+        ("raev_basis", p_sz.get("raev_basis"), e_sz.get("raev_basis")),
+        ("eligibility_ev_unit", p_sz.get("eligibility_ev_unit"), "per_contract"),
+        ("eligibility_contracts", p_sz.get("eligibility_contracts"), 1),
+        ("eligibility_cost_basis", p_sz.get("eligibility_cost_basis"),
+         _ELIGIBILITY_COST_BASIS),
+    ]
+    for field, got, want in basis_enum_checks:
+        if got != want:
+            return "clone_basis_mismatch", field
 
     def _num_neq(a, b):
         try:
@@ -878,11 +944,12 @@ def _validate_persisted_clone(persisted: Dict, expected: Dict, source: Dict) -> 
         except (TypeError, ValueError):
             return True
 
-    if p_sz.get("ev_basis") != "raw":
-        return "clone_basis_mismatch", "ev_basis"
+    # B18 — economic coherence (numeric fields, documented tolerance).
     if persisted.get("ev_raw") is None or _num_neq(persisted.get("ev_raw"),
-                                                  expected.get("ev_raw")):
+                                                   expected.get("ev_raw")):
         return "clone_basis_mismatch", "ev_raw"
+    if _num_neq(persisted.get("ev"), persisted.get("ev_raw")):
+        return "clone_basis_mismatch", "ev_equals_ev_raw"
     if _num_neq(p_sz.get("ev_calibrated"), e_sz.get("ev_calibrated")):
         return "clone_basis_mismatch", "ev_calibrated"
     p_raev = persisted.get("risk_adjusted_ev")
@@ -896,14 +963,31 @@ def _validate_persisted_clone(persisted: Dict, expected: Dict, source: Dict) -> 
         # eligibility value — a persisted row that disagrees is stale or
         # foreign.
         return "clone_basis_mismatch", "risk_adjusted_ev"
+    # contract-count coherence: sizing == order_json == expected clone qty
+    try:
+        p_clone_ct = int(p_sz.get("clone_contracts"))
+        p_order_ct = int(p_order.get("contracts"))
+        e_clone_ct = int(e_order.get("contracts"))
+    except (TypeError, ValueError):
+        return "clone_basis_mismatch", "clone_contracts"
+    if not (p_clone_ct == p_order_ct == e_clone_ct):
+        return "clone_basis_mismatch", "clone_contracts"
+    if _num_neq(persisted.get("max_loss_total"), expected.get("max_loss_total")):
+        return "clone_basis_mismatch", "max_loss_total"
     return None, None
 
 
 def _find_existing_clone(supabase, clone: Dict) -> Optional[Dict]:
-    """Idempotency lookup mirroring the REAL active-row unique index
-    (unique_suggestion_per_cycle_v3: user_id, window, cycle_date, ticker,
-    strategy, legs_fingerprint WHERE status NOT IN dismissed/cancelled).
-    RAISES on lookup failure — the caller fails CLOSED (Blocker 10)."""
+    """Idempotency lookup for the EXACT ACTIVE prerejection-clone shape
+    (B14): the unique-index key (user, window, cycle_date, ticker, strategy,
+    fingerprint — unique_suggestion_per_cycle_v3, which ignores dismissed/
+    cancelled) PLUS status='NOT_EXECUTABLE' AND
+    blocked_reason='shadow_prerejection_fork'. An ARCHIVED (dismissed/
+    cancelled) twin or an active row wearing a foreign status/reason is NOT
+    this clone and must never receive its verdict. Standard chained
+    PostgREST .eq() filters (the same verified syntax every other query in
+    this module uses). RAISES on lookup failure — the caller fails CLOSED
+    (Blocker 10)."""
     res = supabase.table("trade_suggestions") \
         .select("*") \
         .eq("user_id", clone.get("user_id")) \
@@ -912,6 +996,8 @@ def _find_existing_clone(supabase, clone: Dict) -> Optional[Dict]:
         .eq("ticker", clone.get("ticker")) \
         .eq("strategy", clone.get("strategy")) \
         .eq("legs_fingerprint", clone.get("legs_fingerprint")) \
+        .eq("status", "NOT_EXECUTABLE") \
+        .eq("blocked_reason", "shadow_prerejection_fork") \
         .limit(1) \
         .execute()
     rows = res.data or []
@@ -1002,9 +1088,9 @@ def _write_prerejection_reject(
     errors: List[Dict[str, Any]],
 ) -> None:
     """Typed REJECTED verdict for a pre-rejection source that did not clone.
-    A write failure increments verdict_failed AND errors (contract cleanup) —
-    note the source's terminal disposition remains the refusal; the
-    verdict_failed increment here marks the RECORDING failure on top of it."""
+    A write failure increments reject_verdict_write_failed AND errors — a
+    SECONDARY error on an already-refused attempt (B15): the terminal
+    disposition remains the refusal and is never double-counted."""
     if not cohort_id:
         return
     try:
@@ -1019,7 +1105,7 @@ def _write_prerejection_reject(
             "simulated_fill": _build_simulated_fill(source),
         }], on_conflict="cohort_id,suggestion_id").execute()
     except Exception as e:
-        counts["verdict_failed"] += 1
+        counts["reject_verdict_write_failed"] += 1
         errors.append({
             "stage": "reject_verdict_upsert_failed",
             "ticker": source.get("ticker"),
@@ -1042,16 +1128,18 @@ def _get_cohort_portfolios(user_id: str, supabase) -> Dict[str, str]:
 
 
 def _get_cohort_ids(user_id: str, supabase) -> Dict[str, str]:
-    """Map cohort_name → cohort id (UUID) from policy_lab_cohorts."""
-    try:
-        res = supabase.table("policy_lab_cohorts") \
-            .select("id, cohort_name") \
-            .eq("user_id", user_id) \
-            .eq("is_active", True) \
-            .execute()
-        return {r["cohort_name"]: r["id"] for r in (res.data or [])}
-    except Exception:
-        return {}
+    """Map cohort_name → cohort id (UUID) from policy_lab_cohorts.
+
+    B16: RAISES on query failure — a fetch failure must stay distinguishable
+    from a legitimately empty mapping; the caller types it into fork_errors
+    so every prerejection attempt lands cohort_identity_missing (non-green)
+    instead of silently reading an authoritative-empty {}."""
+    res = supabase.table("policy_lab_cohorts") \
+        .select("id, cohort_name") \
+        .eq("user_id", user_id) \
+        .eq("is_active", True) \
+        .execute()
+    return {r["cohort_name"]: r["id"] for r in (res.data or [])}
 
 
 def _build_features_snapshot(suggestion: Dict) -> Dict:

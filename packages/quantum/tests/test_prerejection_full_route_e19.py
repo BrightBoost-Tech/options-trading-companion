@@ -206,7 +206,7 @@ class TestFullProductionRoute(unittest.TestCase):
                           lambda *_a, **_k: "aggressive"):
             return so.run({"date": "2026-07-13", "type": "open"})
 
-    def _seed(self, client):
+    def _seed(self, client, neutral_net_liq=10000):
         client.tables["trade_suggestions"] = []
         client.tables["paper_positions"] = []
         client.tables["policy_lab_cohorts"] = [
@@ -217,7 +217,8 @@ class TestFullProductionRoute(unittest.TestCase):
         ]
         client.tables["paper_portfolios"] = [
             {"id": "pf-agg", "cash_balance": 2000, "net_liq": 2000},
-            {"id": "pf-neu", "cash_balance": 10000, "net_liq": 10000},
+            {"id": "pf-neu", "cash_balance": neutral_net_liq,
+             "net_liq": neutral_net_liq},
         ]
 
     def test_calibration_rejection_created_by_route_then_forked(self):
@@ -280,6 +281,95 @@ class TestFullProductionRoute(unittest.TestCase):
         self.assertFalse(result["ok"])
         self.assertGreaterEqual(int(result["counts"]["errors"]), 1)
         self.assertEqual(_classify_handler_return(result), "partial")
+
+    # -----------------------------------------------------------------------
+    # B17 — REAL-ROUTE UNIT PROOF: assert the values the route ACTUALLY
+    # produced, computed dynamically from route artifacts + canonical
+    # constants. No hardcoded 60 or 0.464892 (those were the SYNTHETIC unit
+    # fixture, whose max_loss_total=60 at contracts=1; the route produces
+    # max_loss_total/contracts = 720/24 = 30). Two challenger sizes.
+    # -----------------------------------------------------------------------
+    def _route_artifacts(self, client, result):
+        rows = client.tables["trade_suggestions"]
+        src = [r for r in rows
+               if r.get("ticker") == "SOFI" and r.get("cohort_name") is None][0]
+        clone = [r for r in rows
+                 if r.get("cohort_name") == "neutral"
+                 and r.get("blocked_reason") == "shadow_prerejection_fork"][0]
+        return src, clone
+
+    def test_real_route_unit_proof_two_sizes(self):
+        from packages.quantum.analytics.canonical_ranker import (
+            DEFAULT_FEE_PER_CONTRACT,
+        )
+        results = []
+        for neutral_net_liq in (3000, 12000):
+            client = FakeSupabase()
+            self._seed(client, neutral_net_liq=neutral_net_liq)
+            result = self._drive(client)
+            self.assertTrue(result["ok"], result.get("notes"))
+            src, clone = self._route_artifacts(client, result)
+
+            # --- source contract-count basis (report + coherence) ---
+            src_sizing_ct = int(src["sizing_metadata"]["contracts"])
+            src_order_ct = int(src["order_json"]["contracts"])
+            self.assertEqual(src_sizing_ct, src_order_ct,
+                             "route source has a contract-count basis mismatch")
+            src_mlt = float(src["sizing_metadata"]["max_loss_total"])
+            per_contract_denom = round(src_mlt / src_sizing_ct, 6)
+
+            # --- expected eligibility values from ARTIFACTS + constants ---
+            ev_raw = float(src["ev_raw"])
+            expected_slippage = abs(ev_raw) * 0.05
+            expected_fee = DEFAULT_FEE_PER_CONTRACT * 2
+            expected_net = ev_raw - expected_slippage - expected_fee
+            expected_raev = round(expected_net / per_contract_denom, 6)
+
+            self.assertAlmostEqual(clone["risk_adjusted_ev"], expected_raev,
+                                   places=6)
+            # NOT the synthetic 60/0.464892
+            self.assertNotAlmostEqual(clone["risk_adjusted_ev"], 0.464892,
+                                      places=6)
+            self.assertNotEqual(per_contract_denom, 60.0)
+
+            # clone qty + risk scaling
+            clone_ct = int(clone["order_json"]["contracts"])
+            self.assertEqual(clone["sizing_metadata"]["clone_contracts"], clone_ct)
+            self.assertAlmostEqual(float(clone["max_loss_total"]),
+                                   per_contract_denom * clone_ct, places=2)
+
+            # source row byte-identical across runs (captured for cross-check)
+            src_snapshot = {k: src[k] for k in
+                            ("ev", "ev_raw", "risk_adjusted_ev", "status",
+                             "blocked_reason")}
+            src_snapshot["contracts"] = src_order_ct
+            src_snapshot["max_loss_total"] = src_mlt
+
+            # verdict stamps
+            v = [r for r in client.tables["policy_decisions"]
+                 if r.get("suggestion_id") == src["id"]
+                 and r.get("decision") == "accepted"][0]
+            fs = v["features_snapshot"]
+            self.assertEqual(fs["eligibility_ev_unit"], "per_contract")
+            self.assertEqual(fs["eligibility_contracts"], 1)
+            self.assertEqual(fs["clone_contracts"], clone_ct)
+            self.assertEqual(fs["eligibility_cost_basis"],
+                             fork_mod._ELIGIBILITY_COST_BASIS)
+            self.assertEqual(fs["raev_basis"], "raw_per_contract_normalized")
+            self.assertEqual(fs["experiment_version"], fork_mod.EXPERIMENT_VERSION)
+            self.assertEqual(fs["calibration_identity"], src.get("model_version"))
+            # no executable suggestion; no broker table touched
+            self.assertNotIn("paper_orders", client.tables)
+
+            results.append((clone_ct, clone["risk_adjusted_ev"],
+                            per_contract_denom, expected_raev, src_snapshot))
+
+        # two sizes → different clone quantities, SAME normalized decision + raev
+        c0, c1 = results
+        self.assertNotEqual(c0[0], c1[0], f"clone qty must differ: {c0[0]} vs {c1[0]}")
+        self.assertEqual(c0[1], c1[1])          # same normalized raev
+        self.assertEqual(c0[2], c1[2])          # same per-contract denominator
+        self.assertEqual(c0[4], c1[4])          # source row byte-identical
 
 
 if __name__ == "__main__":

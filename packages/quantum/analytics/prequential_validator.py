@@ -189,24 +189,54 @@ def run_prequential_validation(
 
 # ── On-demand fetch + runner (no scheduler wiring — study tool) ──────────────
 
-def fetch_live_outcomes(client, user_id: str, window_days: int = 120) -> List[Dict[str, Any]]:
-    """Live (is_paper=false) closes from learning_trade_outcomes_v3, closed_at
-    ASC. `ev_predicted` is COALESCE(ev_raw, ev) at the view (#1167) → RAW; the
-    validator's non-circularity rests on that. Returns [] on empty/failure."""
-    try:
-        res = (
-            client.table("learning_trade_outcomes_v3")
-            .select("ev_predicted, pop_predicted, pnl_realized, strategy, regime, "
-                    "window, ticker, closed_at, is_paper")
-            .eq("user_id", user_id)
-            .eq("is_paper", False)
-            .order("closed_at", desc=False)
-            .execute()
-        )
-        return res.data or []
-    except Exception as e:  # noqa: BLE001 - study tool, degrade to empty loudly
-        logger.error("[PREQUENTIAL] fetch failed: %s", e)
-        return []
+def fetch_live_outcomes(
+    client, user_id: str, window_days: int = 120
+) -> Optional[List[Dict[str, Any]]]:
+    """Eligible live closes for prequential scoring, via the SHARED production
+    cohort contract (`CalibrationService.fetch_eligible_outcomes`) — the SAME
+    effective floor (rolling window / CORRUPTED_PNL_FLOOR / CALIBRATION_EV_EPOCH)
+    AND the SAME CALIBRATION_TRAIN_LIVE_ONLY live-only (is_paper=false) predicate
+    production calibration trains on, sorted closed_at ASC.
+
+    F-A3-4: no second is_paper / epoch / floor predicate lives here — the
+    validator scores the EXACT rows production would fit on. `ev_predicted` is
+    COALESCE(ev_raw, ev) at the view (#1167) → RAW; the non-circularity rests
+    on that.
+
+    Returns Optional[List]:
+      None  → the query FAILED (caller surfaces status=error/fetch_failed;
+              NEVER insufficient_data, NEVER green-on-vacuum),
+      []    → success with ZERO eligible rows (legitimate insufficiency),
+      [...] → eligible closes, closed_at ASC.
+    """
+    from packages.quantum.analytics.calibration_service import CalibrationService
+    svc = CalibrationService(client)
+    return svc.fetch_eligible_outcomes(user_id, window_days, order_by_closed_at=True)
+
+
+def run_live_prequential(
+    client,
+    user_id: str,
+    *,
+    warmup: int = DEFAULT_WARMUP,
+    window_days: int = 120,
+) -> Dict[str, Any]:
+    """PUBLIC entrypoint: fetch via the shared contract, then run the falsifier.
+
+    The failure origin (the DB `.execute()`) propagates as `None` up through
+    `fetch_live_outcomes`; here it becomes a typed `status=error/fetch_failed`
+    result — NEVER `insufficient_data`, NEVER a green vacuum (F-A3-4 D1). A
+    genuinely-empty cohort (success, zero rows) still returns
+    `insufficient_data`, the honest small-sample state."""
+    outcomes = fetch_live_outcomes(client, user_id, window_days)
+    if outcomes is None:
+        return {
+            "status": "error",
+            "reason": "fetch_failed",
+            "window_days": window_days,
+            "warmup": warmup,
+        }
+    return run_prequential_validation(outcomes, warmup=warmup)
 
 
 def main() -> int:
@@ -222,13 +252,22 @@ def main() -> int:
         return 2
 
     client = _get_admin_supabase()
-    outcomes = fetch_live_outcomes(client, user_id)
-    report = run_prequential_validation(outcomes, warmup=warmup)
+    report = run_live_prequential(client, user_id, warmup=warmup)
+
+    status = report.get("status")
+    if status == "error":
+        # Fetch FAILED — fail loud, non-zero. A DB failure must never read as a
+        # benign "not enough data yet" green (F-A3-4 D1).
+        print("=" * 68)
+        print(f"  PREQUENTIAL FETCH ERROR: {report.get('reason', 'fetch_failed')}")
+        print("=" * 68)
+        print(json.dumps(report, indent=2, default=str))
+        return 1
 
     fals = report.get("falsifier", {})
     print("=" * 68)
-    print(f"  PREQUENTIAL FALSIFIER: {fals.get('verdict', report.get('status'))}")
-    if report.get("status") == "ok":
+    print(f"  PREQUENTIAL FALSIFIER: {fals.get('verdict', status)}")
+    if status == "ok":
         print(f"  ev_rmse_improvement = {fals.get('value')} "
               f"(raw {report['ev_rmse']['raw']} → cal {report['ev_rmse']['calibrated']})")
         print(f"  scored={report['n_scored']}  fired={report['n_calibration_fired']}  "

@@ -167,6 +167,18 @@ def fork_suggestions_for_cohorts(
             "error": str(ci_err)[:200],
         })
 
+    # ── E19-2A: PRE-REJECTION RAW-ELIGIBILITY COVERAGE (B19 + B26) ───────
+    # Runs HERE — after champion resolution + tagging, and BEFORE any legacy
+    # normal-challenger portfolio/open-position query — so the B19 per-pair
+    # accounting and count invariants are always computed and can never be
+    # erased by a legacy state-read fault below. Separate from and never
+    # perturbing the champion-visible normal-clone loop.
+    _run_prerejection_coverage(
+        supabase, user_id, prerejection_sources, champion_name,
+        configs, prerej_counts, fork_errors)
+    logger.info(
+        f"policy_lab_fork: user={user_id[:8]} prerejection={prerej_counts}")
+
     created = {}
     for cohort_name, config in configs.items():
         if cohort_name == champion_name:
@@ -179,22 +191,39 @@ def fork_suggestions_for_cohorts(
             logger.warning(f"policy_lab_fork: no portfolio for cohort={cohort_name}")
             continue
 
-        # Get cohort's current portfolio for capital-aware sizing
-        port_res = supabase.table("paper_portfolios") \
-            .select("cash_balance, net_liq") \
-            .eq("id", portfolio_id) \
-            .single() \
-            .execute()
-        portfolio = port_res.data or {}
-        deployable = float(portfolio.get("net_liq") or portfolio.get("cash_balance") or 100000)
+        # B26 exception containment: a legacy state-read fault (portfolio /
+        # open-position) must NOT raise out of the fork and erase the
+        # already-computed B19 result. Contain it per challenger, type it,
+        # and continue. This changes NOTHING about successful-path normal-clone
+        # behavior — it only adds isolation of the read exceptions.
+        try:
+            # Get cohort's current portfolio for capital-aware sizing.
+            # NOTE: the legacy `net_liq or cash_balance or 100000` fallback is
+            # UNTOUCHED here (frozen-path contract); the $100,000 fabrication
+            # removal is E19-2A-only. See F-POLICY-CAPITAL-FALLBACK backlog.
+            port_res = supabase.table("paper_portfolios") \
+                .select("cash_balance, net_liq") \
+                .eq("id", portfolio_id) \
+                .single() \
+                .execute()
+            portfolio = port_res.data or {}
+            deployable = float(portfolio.get("net_liq") or portfolio.get("cash_balance") or 100000)
 
-        # Count existing open positions for this cohort's portfolio
-        open_pos_res = supabase.table("paper_positions") \
-            .select("id", count="exact") \
-            .eq("portfolio_id", portfolio_id) \
-            .eq("status", "open") \
-            .execute()
-        open_count = open_pos_res.count or 0
+            # Count existing open positions for this cohort's portfolio
+            open_pos_res = supabase.table("paper_positions") \
+                .select("id", count="exact") \
+                .eq("portfolio_id", portfolio_id) \
+                .eq("status", "open") \
+                .execute()
+            open_count = open_pos_res.count or 0
+        except Exception as _state_err:
+            fork_errors.append({
+                "stage": "legacy_normal_clone_state_failed",
+                "cohort": cohort_name,
+                "error_class": type(_state_err).__name__,
+                "error": str(_state_err)[:200],
+            })
+            continue
 
         # Filter source suggestions by cohort policy
         filtered = _filter_for_cohort(source_suggestions, config, open_count)
@@ -284,18 +313,7 @@ def fork_suggestions_for_cohorts(
             0,  # champion doesn't filter by open positions at fork time
         )
 
-    # ── E19-2A: PRE-REJECTION RAW-ELIGIBILITY COVERAGE (B19) ─────────────
-    # SEPARATE from the champion-visible normal-clone loop above (which stays
-    # byte-identical to the frozen baseline). This loop guarantees COMPLETE
-    # coverage of every source×challenger pair with fail-closed binding +
-    # capital, and enforces the count invariants before returning.
-    _run_prerejection_coverage(
-        supabase, user_id, prerejection_sources, champion_name,
-        configs, prerej_counts, fork_errors)
-
-    logger.info(
-        f"policy_lab_fork: user={user_id[:8]} prerejection={prerej_counts}")
-
+    # (E19-2A coverage already ran ABOVE, before the legacy loop — B26.)
     return _fork_result("ok", created, prerej_counts, fork_errors,
                         champion_tagged=len(source_suggestions))
 
@@ -742,6 +760,44 @@ _ELIGIBILITY_COST_BASIS = "leg_blind_fee_0.65_per_contract_x2_plus_5pct_ev_slipp
 _IDENTITY_NUM_TOL = 1e-6
 
 
+def _finite_num(value):
+    """B25 strict finite-number normalizer. Returns (float, True) only for a
+    real finite number; (None, False) for bool / NaN / ±inf / non-numeric.
+    Booleans are rejected explicitly (bool is an int subclass)."""
+    if isinstance(value, bool):
+        return None, False
+    try:
+        f = float(value)
+    except (TypeError, ValueError):
+        return None, False
+    if not math.isfinite(f):
+        return None, False
+    return f, True
+
+
+def _num_neq_strict(actual, expected) -> bool:
+    """B25 — MISMATCH iff either side is non-finite (fail closed: a NaN can
+    never 'pass') OR |actual − expected| > tol."""
+    a, aok = _finite_num(actual)
+    e, eok = _finite_num(expected)
+    if not aok or not eok:
+        return True
+    return abs(a - e) > _IDENTITY_NUM_TOL
+
+
+def _pos_int(value):
+    """B25 strict positive-integer normalizer for contract quantities.
+    Returns (int, True) only for a finite, >0, integer-valued number
+    (accepts 1, 1.0, "1", "1.0"); (None, False) for bool / 0 / negative /
+    1.9 / NaN / inf / non-numeric."""
+    if isinstance(value, bool):
+        return None, False
+    f, ok = _finite_num(value)
+    if not ok or f <= 0 or not float(f).is_integer():
+        return None, False
+    return int(f), True
+
+
 def build_raw_eligibility_view(row: Dict) -> tuple:
     """B12 — the EV QUANTITY-UNIT CONTRACT for E19 raw eligibility.
 
@@ -752,8 +808,8 @@ def build_raw_eligibility_view(row: Dict) -> tuple:
     resized clone into the ranker therefore mixes per-contract EV with
     quantity-scaled costs — eligibility would depend on clone size.
 
-    E19-2 is ENTRY-SELECTION-ONLY, so eligibility is decided on an explicit
-    ONE-CONTRACT NORMALIZED VIEW:
+    E19-2A is RAW-CANDIDATE-ELIGIBILITY-ONLY, so eligibility is decided on an
+    explicit ONE-CONTRACT NORMALIZED VIEW:
 
         ev              = per-contract ev_raw          (as stored)
         contracts       = 1
@@ -1114,6 +1170,9 @@ def _validate_persisted_clone(persisted: Dict, expected: Dict, source: Dict) -> 
         ("decision_semantics", p_sz.get("decision_semantics"),
          "raw_candidate_eligibility"),
         ("selected_for_entry", p_sz.get("selected_for_entry"), False),
+        # B24 — the narrow-scope no-selection markers are IDENTITY-bound:
+        ("capacity_evaluated", p_sz.get("capacity_evaluated"), False),
+        ("joint_rank_evaluated", p_sz.get("joint_rank_evaluated"), False),
         ("execution_state", p_sz.get("execution_state"), "not_executed"),
         ("execution_intent", p_sz.get("execution_intent"), "internal_paper_only"),
         ("routing_intent", p_sz.get("routing_intent"), "shadow_only"),
@@ -1147,51 +1206,42 @@ def _validate_persisted_clone(persisted: Dict, expected: Dict, source: Dict) -> 
         if got != want:
             return "clone_basis_mismatch", field
 
-    def _num_neq(a, b):
-        try:
-            return abs(float(a) - float(b)) > _IDENTITY_NUM_TOL
-        except (TypeError, ValueError):
-            return True
-
-    # economic coherence (numeric fields, documented tolerance).
-    if persisted.get("ev_raw") is None or _num_neq(persisted.get("ev_raw"),
-                                                   expected.get("ev_raw")):
+    # B25 — economic coherence, FAIL CLOSED. _num_neq_strict flags a mismatch
+    # if EITHER side is non-finite (NaN/inf) — a NaN can never "pass".
+    if _num_neq_strict(persisted.get("ev_raw"), expected.get("ev_raw")):
         return "clone_basis_mismatch", "ev_raw"
-    if _num_neq(persisted.get("ev"), persisted.get("ev_raw")):
+    if _num_neq_strict(persisted.get("ev"), persisted.get("ev_raw")):
         return "clone_basis_mismatch", "ev_equals_ev_raw"
-    if _num_neq(p_sz.get("ev_calibrated"), e_sz.get("ev_calibrated")):
+    if _num_neq_strict(p_sz.get("ev_calibrated"), e_sz.get("ev_calibrated")):
         return "clone_basis_mismatch", "ev_calibrated"
-    p_raev = persisted.get("risk_adjusted_ev")
-    try:
-        if p_raev is None or not math.isfinite(float(p_raev)):
-            return "clone_basis_mismatch", "risk_adjusted_ev"
-    except (TypeError, ValueError):
+    if _num_neq_strict(persisted.get("risk_adjusted_ev"),
+                       expected.get("risk_adjusted_ev")):
         return "clone_basis_mismatch", "risk_adjusted_ev"
-    if _num_neq(p_raev, expected.get("risk_adjusted_ev")):
-        return "clone_basis_mismatch", "risk_adjusted_ev"
-    # contract-count coherence: sizing.contracts == sizing.clone_contracts ==
-    # order_json.contracts == expected clone qty
-    try:
-        p_sizing_ct = int(p_sz.get("contracts"))
-        p_clone_ct = int(p_sz.get("clone_contracts"))
-        p_order_ct = int(p_order.get("contracts"))
-        e_clone_ct = int(e_order.get("contracts"))
-    except (TypeError, ValueError):
+    # contract-count coherence: EXACT positive integers (B25 — 1.9 must NOT
+    # truncate-match). sizing.contracts == sizing.clone_contracts ==
+    # order_json.contracts == expected clone qty.
+    p_sizing_ct, ok1 = _pos_int(p_sz.get("contracts"))
+    p_clone_ct, ok2 = _pos_int(p_sz.get("clone_contracts"))
+    p_order_ct, ok3 = _pos_int(p_order.get("contracts"))
+    e_clone_ct, ok4 = _pos_int(e_order.get("contracts"))
+    if not (ok1 and ok2 and ok3 and ok4):
         return "clone_basis_mismatch", "clone_contracts"
     if not (p_sizing_ct == p_clone_ct == p_order_ct == e_clone_ct):
         return "clone_basis_mismatch", "clone_contracts"
     # both max-loss locations the verdict may read, both validated:
-    if _num_neq(persisted.get("max_loss_total"), expected.get("max_loss_total")):
+    if _num_neq_strict(persisted.get("max_loss_total"),
+                       expected.get("max_loss_total")):
         return "clone_basis_mismatch", "max_loss_total"
-    if _num_neq(p_sz.get("max_loss_total"), expected.get("max_loss_total")):
+    if _num_neq_strict(p_sz.get("max_loss_total"),
+                       expected.get("max_loss_total")):
         return "clone_basis_mismatch", "sizing_max_loss_total"
     # limit_price is OPTIONAL: both-None is a legitimate match (a shadow clone
-    # carries no limit); exactly-one-None or differing numbers is a mismatch.
+    # carries no limit); exactly-one-None or differing/non-finite is a mismatch.
     p_lp, e_lp = p_order.get("limit_price"), e_order.get("limit_price")
     if p_lp is None or e_lp is None:
         if p_lp is not e_lp:  # one None, one not
             return "clone_basis_mismatch", "limit_price"
-    elif _num_neq(p_lp, e_lp):
+    elif _num_neq_strict(p_lp, e_lp):
         return "clone_basis_mismatch", "limit_price"
     # legs: canonicalized per-leg comparison (symbol/side/type/strike/expiry/qty)
     if _canon_legs(p_order.get("legs")) != _canon_legs(e_order.get("legs")):
@@ -1277,8 +1327,9 @@ def _write_prerejection_verdict(
         "suggestion_id": source.get("id"),
         "user_id": user_id,
         "decision": "accepted",
-        "rank_at_decision": 1,
-        "reason_codes": ["prerejection_shadow_observation"],
+        # B24 — NULL is the truthful value: no ranking occurred.
+        "rank_at_decision": None,
+        "reason_codes": ["raw_candidate_eligible_observation"],
         "features_snapshot": {
             "source_suggestion_id": source.get("id"),
             "clone_suggestion_id": persisted_clone.get("id"),
@@ -1293,6 +1344,10 @@ def _write_prerejection_verdict(
             "champion_blocked_reason": p_sizing.get("champion_blocked_reason"),
             "routing_intent": p_sizing.get("routing_intent"),
             "execution_state": p_sizing.get("execution_state"),
+            # B24 — complete no-execution / no-selection contract on the verdict:
+            "execution_intent": p_sizing.get("execution_intent"),
+            "capacity_evaluated": p_sizing.get("capacity_evaluated"),
+            "joint_rank_evaluated": p_sizing.get("joint_rank_evaluated"),
             # B20 — TRUTHFUL provenance (no false calibration identity):
             "source_model_version": p_sizing.get("source_model_version"),
             "calibration_provenance_status":
@@ -1351,16 +1406,25 @@ def _write_prerejection_reject(
             "suggestion_id": source.get("id"),
             "user_id": user_id,
             "decision": "rejected",
-            "rank_at_decision": 1,
-            "reason_codes": [reason],
+            # B24 — NULL rank: no ranking occurred.
+            "rank_at_decision": None,
+            "reason_codes": [reason],   # the specific typed refusal reason
             "features_snapshot": {
                 **_build_features_snapshot(source),
-                # B23 — a raw-INELIGIBLE observation keeps the same scope +
-                # selected_for_entry=false as an eligible one; only the reason
-                # differs.
+                # B24 — the ineligible verdict has NO clone, so it constructs
+                # the SAME narrow-scope + provenance contract directly from the
+                # source + constants.
                 "observation_scope": "raw_candidate_eligibility_only",
                 "decision_semantics": "raw_candidate_eligibility",
                 "selected_for_entry": False,
+                "capacity_evaluated": False,
+                "joint_rank_evaluated": False,
+                "execution_state": "not_executed",
+                "execution_intent": "internal_paper_only",
+                "routing_intent": "shadow_only",
+                "source_model_version": source.get("model_version"),
+                "calibration_provenance_status": "not_persisted_on_source",
+                "experiment_version": EXPERIMENT_VERSION,
             },
             "simulated_fill": _build_simulated_fill(source),
         }], on_conflict="cohort_id,suggestion_id").execute()

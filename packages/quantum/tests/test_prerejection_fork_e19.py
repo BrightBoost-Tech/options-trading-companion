@@ -448,7 +448,7 @@ class TestCloneInvariants(_EnvRawOn):
         return client, sofi, _clones(client, ticker="SOFI")[0]
 
     def test_not_executable_and_honest_execution_state(self):
-        """Blocker 5A (adjudicated: ENTRY-SELECTION-ONLY): the clone claims
+        """Blocker 5A (adjudicated: RAW-CANDIDATE-ELIGIBILITY-ONLY): the clone claims
         NO execution_mode — execution is described by what happened
         (nothing); routing INTENT and observation scope are separate,
         explicit labels."""
@@ -1146,7 +1146,7 @@ def _champion_view(client):
     decisions = []
     for r in sorted(client.tables.get("policy_decisions", []),
                     key=lambda x: str(x.get("suggestion_id"))):
-        if "prerejection_shadow_observation" in (r.get("reason_codes") or []) \
+        if "raw_candidate_eligible_observation" in (r.get("reason_codes") or []) \
                 or set(r.get("reason_codes") or []) & {
                     "missing_ev_basis", "raw_edge_below_minimum",
                     "raw_raev_recompute_failed", "raw_raev_invalid",

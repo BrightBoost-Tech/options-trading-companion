@@ -362,10 +362,24 @@ class TestFullProductionRoute(unittest.TestCase):
             self.assertEqual(fs["calibration_provenance_status"],
                              "not_persisted_on_source")
             self.assertNotIn("calibration_identity", fs)
-            # B23 narrow-claim semantics stamped on the verdict
+            # B23/B24 complete narrow-claim contract on the accepted verdict
             self.assertEqual(fs["observation_scope"],
                              "raw_candidate_eligibility_only")
+            self.assertEqual(fs["decision_semantics"], "raw_candidate_eligibility")
             self.assertIs(fs["selected_for_entry"], False)
+            self.assertIs(fs["capacity_evaluated"], False)
+            self.assertIs(fs["joint_rank_evaluated"], False)
+            self.assertEqual(fs["execution_state"], "not_executed")
+            self.assertEqual(fs["execution_intent"], "internal_paper_only")
+            self.assertEqual(fs["routing_intent"], "shadow_only")
+            self.assertNotIn("calibration_identity", fs)
+            # B24 accepted reason + NULL rank (no ranking occurred)
+            acc = [r for r in client.tables["policy_decisions"]
+                   if r.get("suggestion_id") == src["id"]
+                   and r.get("decision") == "accepted"][0]
+            self.assertEqual(acc["reason_codes"],
+                             ["raw_candidate_eligible_observation"])
+            self.assertIsNone(acc["rank_at_decision"])
             # no executable suggestion; no broker table touched
             self.assertNotIn("paper_orders", client.tables)
 

@@ -86,7 +86,7 @@ def fork_suggestions_for_cohorts(
     prerej_counts: Dict[str, int] = {
         "source": 0, "eligible": 0, "created": 0, "existing": 0,
         "refused": 0, "clone_failed": 0, "verdict_failed": 0,
-        "repaired": 0, "verdicts": 0,
+        "repaired": 0, "verdicts": 0, "identity_mismatch": 0,
     }
 
     prerejection_sources: List[Dict] = []
@@ -289,18 +289,21 @@ def _fork_result(
     fork_errors: List[Dict[str, Any]],
     champion_tagged: int = 0,
 ) -> Dict[str, Any]:
-    """The explicit fork-result contract (Blocker 1). status degrades to
-    'partial' whenever ANY experimental-path failure occurred — the champion
-    outcome is reported separately so a green champion + broken experiment is
-    visible as exactly that, never as 'ok'."""
-    status = base_status
-    if fork_errors and base_status == "ok":
-        status = "partial"
-    elif fork_errors and base_status == "no_source_suggestions":
-        status = "partial"
+    """The explicit fork-result contract (Blocker 1 + contract cleanup).
+
+    STATUS VOCABULARY (stable enum): status ∈ {ok, partial, failed} — always.
+    'no_source_suggestions' is a REASON, not a status (rides the `reason`
+    field). The two pre-existing early returns above this machinery
+    ('disabled', 'no_cohorts') predate the contract and keep their legacy
+    shapes — documented consumers: none beyond logs (verified by grep); left
+    untouched deliberately. status degrades to 'partial' whenever ANY
+    experimental-path failure occurred; champion outcome is separate."""
+    status = "partial" if fork_errors else "ok"
+    result_reason = None if base_status == "ok" else base_status
     return {
         "status": status,
-        "champion_status": base_status if base_status != "partial" else "ok",
+        "reason": result_reason,
+        "champion_status": "ok",
         "champion_tagged": champion_tagged,
         "created": created,
         "existing": prerej_counts.get("existing", 0),
@@ -508,11 +511,93 @@ def _clone_suggestion_for_cohort(
 # not taken here).
 EXPERIMENT_VERSION = "e19_prerejection_v1"
 
-# Raw-gate typed reject reasons (Blocker 4).
+# Raw-gate typed reject reasons (Blocker 4 + B12).
 _REJECT_MISSING_BASIS = "missing_ev_basis"
 _REJECT_RAW_EDGE = "raw_edge_below_minimum"
 _REJECT_RAW_RECOMPUTE = "raw_raev_recompute_failed"
 _REJECT_RAW_INVALID = "raw_raev_invalid"
+_REJECT_RAW_EV_INVALID = "raw_ev_invalid"
+_REJECT_MAX_LOSS_NOT_NORMALIZABLE = "max_loss_not_normalizable"
+
+# B12 — the EXACT canonical cost assumption the eligibility computation
+# inherits from canonical_ranker at one contract: fees = 0.65 × 1 × 2 (open +
+# close, LEG-BLIND — the ranker does not scale by leg count; the multi-basis
+# unification is its own backlog item) + slippage floor = 5% of |ev| when no
+# TCM estimate exists. Stamped on every verdict so nobody later assumes
+# leg-aware costs were applied.
+_ELIGIBILITY_COST_BASIS = "leg_blind_fee_0.65_per_contract_x2_plus_5pct_ev_slippage"
+
+# B13 — tolerant numeric comparison bound for persisted-clone identity checks.
+# Values round-trip Python float → JSONB → Python; 1e-6 absolute covers that
+# representation noise while catching any real basis drift (the quantities
+# compared are dollars/ratios ≥ 0.01 in magnitude).
+_IDENTITY_NUM_TOL = 1e-6
+
+
+def build_raw_eligibility_view(row: Dict) -> tuple:
+    """B12 — the EV QUANTITY-UNIT CONTRACT for E19 raw eligibility.
+
+    The scanner's ev/ev_raw is the economics of ONE structure-contract
+    (options_scanner computes total_ev from a single-structure combo and the
+    orchestrator never multiplies it by sized contracts), while
+    canonical_ranker subtracts fees × sizing_metadata.contracts × 2. Feeding a
+    resized clone into the ranker therefore mixes per-contract EV with
+    quantity-scaled costs — eligibility would depend on clone size.
+
+    E19-2 is ENTRY-SELECTION-ONLY, so eligibility is decided on an explicit
+    ONE-CONTRACT NORMALIZED VIEW:
+
+        ev              = per-contract ev_raw          (as stored)
+        contracts       = 1
+        max_loss_total  = row max_loss_total / row contracts   (per contract)
+        costs           = _ELIGIBILITY_COST_BASIS at contracts=1
+
+    Leg/order quantity CANNOT influence the decision. Returns (view, None) or
+    (None, typed_reason): non-finite/zero ev_raw → raw_ev_invalid;
+    missing/zero/non-finite normalized max loss → max_loss_not_normalizable —
+    never inferred, never silently defaulted.
+    """
+    raw_ev = row.get("ev_raw")
+    if raw_ev is None:
+        return None, _REJECT_MISSING_BASIS
+    try:
+        raw_ev_f = float(raw_ev)
+    except (TypeError, ValueError):
+        return None, _REJECT_RAW_EV_INVALID
+    if not math.isfinite(raw_ev_f) or raw_ev_f == 0.0:
+        return None, _REJECT_RAW_EV_INVALID
+
+    sizing = row.get("sizing_metadata") or {}
+    order_json = row.get("order_json") or {}
+    contracts_raw = sizing.get("contracts")
+    if contracts_raw is None:  # explicit 0 must NOT fall through (typed refusal)
+        contracts_raw = order_json.get("contracts")
+    try:
+        contracts = int(contracts_raw)
+    except (TypeError, ValueError):
+        return None, _REJECT_MAX_LOSS_NOT_NORMALIZABLE
+    mlt = sizing.get("max_loss_total")
+    if mlt is None:
+        mlt = row.get("max_loss_total")
+    try:
+        mlt_f = float(mlt)
+    except (TypeError, ValueError):
+        return None, _REJECT_MAX_LOSS_NOT_NORMALIZABLE
+    if contracts <= 0 or not math.isfinite(mlt_f) or mlt_f <= 0.0:
+        return None, _REJECT_MAX_LOSS_NOT_NORMALIZABLE
+    per_contract_max_loss = round(mlt_f / contracts, 6)
+    if not math.isfinite(per_contract_max_loss) or per_contract_max_loss <= 0:
+        return None, _REJECT_MAX_LOSS_NOT_NORMALIZABLE
+
+    view = {
+        "ev": raw_ev_f,
+        "ticker": row.get("ticker"),
+        "sizing_metadata": {
+            "contracts": 1,
+            "max_loss_total": per_contract_max_loss,
+        },
+    }
+    return view, None
 
 
 def _process_prerejection_source(
@@ -547,17 +632,18 @@ def _process_prerejection_source(
             counts["refused"] += 1
             _write_prerejection_reject(
                 supabase, user_id, cohort_id, source,
-                _REJECT_MISSING_BASIS, errors)
+                _REJECT_MISSING_BASIS, counts, errors)
             return
 
-        # 2. Cohort policy (score) filter — not a divergence candidate for
-        #    this cohort; typed rejected verdict, not an error.
+        # 2. Cohort policy (score) filter — a typed POLICY refusal (counted
+        #    in `refused` exactly once, like every economic/policy refusal).
         sizing_md = source.get("sizing_metadata") or {}
         score_value = sizing_md.get("score")
         if score_value is None or float(score_value) < config.min_score_threshold:
+            counts["refused"] += 1
             _write_prerejection_reject(
                 supabase, user_id, cohort_id, source,
-                "filtered_by_policy", errors)
+                "filtered_by_policy", counts, errors)
             return
 
         # 3. Build the sized raw-basis clone + RAW ELIGIBILITY GATE
@@ -569,7 +655,7 @@ def _process_prerejection_source(
             counts["refused"] += 1
             _write_prerejection_reject(
                 supabase, user_id, cohort_id, source,
-                reject_reason, errors)
+                reject_reason, counts, errors)
             return
         counts["eligible"] += 1
 
@@ -629,13 +715,18 @@ def _process_prerejection_source(
                 return
             counts["created"] += 1
 
-        # 7. Verdict FROM the persisted clone. An accepted verdict with a
-        #    missing or incompatible basis is forbidden.
-        p_sizing = persisted.get("sizing_metadata") or {}
-        if p_sizing.get("ev_basis") != "raw" or persisted.get("ev_raw") is None:
-            counts["verdict_failed"] += 1
-            _err("verdict_basis_incompatible",
-                 RuntimeError(f"persisted basis={p_sizing.get('ev_basis')!r}"))
+        # 7. B13 — PERSISTED CLONE IDENTITY + BASIS VALIDATION. The verdict
+        #    of record may only be written from a persisted row PROVEN to be
+        #    the expected clone: identity fields exact, numeric basis fields
+        #    within _IDENTITY_NUM_TOL. Any mismatch → typed error, NO
+        #    accepted verdict, job goes partial, champion untouched.
+        mismatch_kind, mismatch_field = _validate_persisted_clone(
+            persisted, clone, source)
+        if mismatch_kind is not None:
+            counts["identity_mismatch"] += 1
+            _err(mismatch_kind,
+                 RuntimeError(f"persisted clone field {mismatch_field!r} "
+                              f"does not match expected"))
             return
 
         already_verdicted = False
@@ -670,29 +761,29 @@ def _build_prerejection_clone(
     deployable_capital: float,
 ) -> tuple:
     """Build the sized raw-basis observational clone, applying the RAW
-    ELIGIBILITY GATE (Blocker 4). Returns (clone, None) on pass or
-    (None, typed_reject_reason) on refusal.
+    ELIGIBILITY GATE on the ONE-CONTRACT NORMALIZED VIEW (Blockers 4 + 12).
 
-    Raw gate: canonical compute_risk_adjusted_ev on the clone's OWN sized
-    view with ev = ev_raw (the same cost/edge semantics as the champion
-    ranker, portfolio-blind: positions=[], budget=0.0 -> concentration
-    penalty 1.0). -999 sentinel -> raw fails the edge too (NOT a divergence
-    case); exception -> typed recompute failure; None/non-finite -> typed
-    invalid. No clone and no accepted verdict for any of those.
+    B12 unit contract: eligibility is decided on build_raw_eligibility_view —
+    per-contract ev_raw against contracts=1 costs and per-contract max loss —
+    so the decision and the normalized raw RAeV are IDENTICAL at every clone
+    quantity. The OBSERVATIONAL clone itself keeps its cohort-sized quantity
+    and honestly rescaled risk fields; only eligibility is normalized.
+
+    Gate: canonical compute_risk_adjusted_ev(view, [], 0.0) — portfolio-blind,
+    concentration penalty 1.0, the exact leg-blind canonical cost assumption
+    (_ELIGIBILITY_COST_BASIS). -999 sentinel -> raw fails the edge too;
+    exception -> typed recompute failure; None/non-finite -> typed invalid;
+    non-normalizable inputs -> typed refusal. No clone, no accepted verdict,
+    for any of those.
     """
-    raw_ev = source.get("ev_raw")
-    if raw_ev is None:
-        return None, _REJECT_MISSING_BASIS
-
-    base = _clone_suggestion_for_cohort(
-        source, cohort_name, config, deployable_capital)
-    if not base:
-        return None, _REJECT_RAW_INVALID
+    view, view_reason = build_raw_eligibility_view(source)
+    if view_reason is not None:
+        return None, view_reason
+    raw_ev = view["ev"]
 
     from packages.quantum.analytics.canonical_ranker import compute_risk_adjusted_ev
-    raev_view = {**base, "ev": raw_ev}
     try:
-        raw_raev = compute_risk_adjusted_ev(raev_view, [], 0.0)
+        raw_raev = compute_risk_adjusted_ev(view, [], 0.0)
     except Exception:
         return None, _REJECT_RAW_RECOMPUTE
     if raw_raev is None or not isinstance(raw_raev, (int, float)) \
@@ -702,7 +793,13 @@ def _build_prerejection_clone(
     if raw_raev <= -999.0:
         return None, _REJECT_RAW_EDGE
 
+    base = _clone_suggestion_for_cohort(
+        source, cohort_name, config, deployable_capital)
+    if not base:
+        return None, _REJECT_RAW_INVALID
+
     sizing = dict(base.get("sizing_metadata") or {})
+    clone_contracts = int((base.get("order_json") or {}).get("contracts") or 1)
     sizing.update({
         # EV provenance triple + identities (Blockers 3/5A): the basis is
         # explicit; execution is described by what ACTUALLY happened
@@ -710,7 +807,12 @@ def _build_prerejection_clone(
         # cohort-semantics lesson: execution_mode is the broker-truth
         # discriminator, so this artifact does not carry one at all.
         "ev_basis": "raw",
-        "raev_basis": "raw_portfolio_blind",
+        "raev_basis": "raw_per_contract_normalized",
+        # B12 stamps — the unit contract of the eligibility decision:
+        "eligibility_ev_unit": "per_contract",
+        "eligibility_contracts": 1,
+        "clone_contracts": clone_contracts,
+        "eligibility_cost_basis": _ELIGIBILITY_COST_BASIS,
         "ev_calibrated": source.get("ev"),
         "calibration_identity": source.get("model_version"),
         "routing_intent": "shadow_only",
@@ -743,6 +845,58 @@ def _build_prerejection_clone(
         ),
     })
     return base, None
+
+
+def _validate_persisted_clone(persisted: Dict, expected: Dict, source: Dict) -> tuple:
+    """B13 — prove the persisted row IS the expected clone before any
+    accepted verdict is written or repaired. Returns (None, None) on match,
+    else (typed_kind, field): identity fields → 'clone_identity_mismatch';
+    EV/basis fields → 'clone_basis_mismatch'. Numeric comparisons use
+    _IDENTITY_NUM_TOL (1e-6 absolute — float→JSONB→float representation
+    noise; all compared magnitudes ≥ 0.01)."""
+    p_sz = persisted.get("sizing_metadata") or {}
+    e_sz = expected.get("sizing_metadata") or {}
+
+    identity_checks = [
+        ("source_suggestion_id", p_sz.get("source_suggestion_id"), source.get("id")),
+        ("cohort_name", persisted.get("cohort_name"), expected.get("cohort_name")),
+        ("experiment_version", p_sz.get("experiment_version"), EXPERIMENT_VERSION),
+        ("legs_fingerprint", persisted.get("legs_fingerprint"),
+         expected.get("legs_fingerprint")),
+        ("observation_scope", p_sz.get("observation_scope"), "entry_selection_only"),
+        ("execution_state", p_sz.get("execution_state"), "not_executed"),
+        ("execution_intent", p_sz.get("execution_intent"), "internal_paper_only"),
+        ("routing_intent", p_sz.get("routing_intent"), "shadow_only"),
+    ]
+    for field, got, want in identity_checks:
+        if got != want:
+            return "clone_identity_mismatch", field
+
+    def _num_neq(a, b):
+        try:
+            return abs(float(a) - float(b)) > _IDENTITY_NUM_TOL
+        except (TypeError, ValueError):
+            return True
+
+    if p_sz.get("ev_basis") != "raw":
+        return "clone_basis_mismatch", "ev_basis"
+    if persisted.get("ev_raw") is None or _num_neq(persisted.get("ev_raw"),
+                                                  expected.get("ev_raw")):
+        return "clone_basis_mismatch", "ev_raw"
+    if _num_neq(p_sz.get("ev_calibrated"), e_sz.get("ev_calibrated")):
+        return "clone_basis_mismatch", "ev_calibrated"
+    p_raev = persisted.get("risk_adjusted_ev")
+    try:
+        if p_raev is None or not math.isfinite(float(p_raev)):
+            return "clone_basis_mismatch", "risk_adjusted_ev"
+    except (TypeError, ValueError):
+        return "clone_basis_mismatch", "risk_adjusted_ev"
+    if _num_neq(p_raev, expected.get("risk_adjusted_ev")):
+        # expected.risk_adjusted_ev IS the freshly recomputed normalized
+        # eligibility value — a persisted row that disagrees is stale or
+        # foreign.
+        return "clone_basis_mismatch", "risk_adjusted_ev"
+    return None, None
 
 
 def _find_existing_clone(supabase, clone: Dict) -> Optional[Dict]:
@@ -812,6 +966,11 @@ def _write_prerejection_verdict(
             "execution_state": p_sizing.get("execution_state"),
             "calibration_identity": p_sizing.get("calibration_identity"),
             "experiment_version": p_sizing.get("experiment_version"),
+            # B12 — the eligibility unit contract, from the PERSISTED row:
+            "eligibility_ev_unit": p_sizing.get("eligibility_ev_unit"),
+            "eligibility_contracts": p_sizing.get("eligibility_contracts"),
+            "clone_contracts": p_sizing.get("clone_contracts"),
+            "eligibility_cost_basis": p_sizing.get("eligibility_cost_basis"),
             "cohort_name": persisted_clone.get("cohort_name"),
             "clone_fingerprint": persisted_clone.get("legs_fingerprint"),
             "strategy": persisted_clone.get("strategy"),
@@ -839,10 +998,13 @@ def _write_prerejection_reject(
     cohort_id: Optional[str],
     source: Dict,
     reason: str,
+    counts: Dict[str, int],
     errors: List[Dict[str, Any]],
 ) -> None:
     """Typed REJECTED verdict for a pre-rejection source that did not clone.
-    Write failure is typed into errors (never silent)."""
+    A write failure increments verdict_failed AND errors (contract cleanup) —
+    note the source's terminal disposition remains the refusal; the
+    verdict_failed increment here marks the RECORDING failure on top of it."""
     if not cohort_id:
         return
     try:
@@ -857,6 +1019,7 @@ def _write_prerejection_reject(
             "simulated_fill": _build_simulated_fill(source),
         }], on_conflict="cohort_id,suggestion_id").execute()
     except Exception as e:
+        counts["verdict_failed"] += 1
         errors.append({
             "stage": "reject_verdict_upsert_failed",
             "ticker": source.get("ticker"),

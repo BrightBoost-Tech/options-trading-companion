@@ -468,7 +468,13 @@ class TestCloneInvariants(_EnvRawOn):
         self.assertEqual(c["ev_raw"], 30.73)
         self.assertEqual(sz["ev_basis"], "raw")
         self.assertEqual(sz["ev_calibrated"], 15.37)
-        self.assertEqual(sz["raev_basis"], "raw_portfolio_blind")
+        self.assertEqual(sz["raev_basis"], "raw_per_contract_normalized")
+        # B12 unit-contract stamps
+        self.assertEqual(sz["eligibility_ev_unit"], "per_contract")
+        self.assertEqual(sz["eligibility_contracts"], 1)
+        self.assertEqual(sz["clone_contracts"], c["order_json"]["contracts"])
+        self.assertEqual(sz["eligibility_cost_basis"],
+                         fork_mod._ELIGIBILITY_COST_BASIS)
         self.assertEqual(sz["calibration_identity"], "spy_opt_autolearn_v6@86")
         self.assertEqual(sz["experiment_version"], fork_mod.EXPERIMENT_VERSION)
         self.assertEqual(sz["champion_blocked_reason"], "edge_below_minimum")
@@ -596,7 +602,12 @@ class TestRecoverableOrder(_EnvRawOn):
         self.assertEqual(fs["ev_calibrated"], 15.37)
         self.assertEqual(fs["ev_basis"], "raw")
         self.assertEqual(fs["risk_adjusted_ev"], clone["risk_adjusted_ev"])
-        self.assertEqual(fs["raev_basis"], "raw_portfolio_blind")
+        self.assertEqual(fs["raev_basis"], "raw_per_contract_normalized")
+        self.assertEqual(fs["eligibility_ev_unit"], "per_contract")
+        self.assertEqual(fs["eligibility_contracts"], 1)
+        self.assertEqual(fs["clone_contracts"], clone["order_json"]["contracts"])
+        self.assertEqual(fs["eligibility_cost_basis"],
+                         fork_mod._ELIGIBILITY_COST_BASIS)
         self.assertEqual(fs["champion_blocked_reason"], "edge_below_minimum")
         self.assertEqual(fs["routing_intent"], "shadow_only")
         self.assertEqual(fs["execution_state"], "not_executed")
@@ -685,6 +696,249 @@ class TestRecoverableOrder(_EnvRawOn):
         self.assertEqual(len(client.tables["trade_suggestions"]), n)
         self.assertEqual(res["prerejection_counts"]["existing"], 1)
         self.assertEqual(res["prerejection_counts"]["created"], 0)
+
+
+# ---------------------------------------------------------------------------
+# Blocker 12 — the EV quantity-unit contract
+# ---------------------------------------------------------------------------
+
+class TestEvUnitContract(_EnvRawOn):
+    """Eligibility is decided on the one-contract normalized view: identical
+    decisions and identical normalized raw RAeV at EVERY clone quantity."""
+
+    def _clone_at(self, deployable, ev_raw=30.73, src=None):
+        src = src or _prerejected_sofi(ev_raw=ev_raw)
+        clone, reason = fork_mod._build_prerejection_clone(
+            copy.deepcopy(src), "neutral",
+            PolicyConfig(min_score_threshold=0.0), deployable)
+        return clone, reason
+
+    def test_invariance_across_clone_quantities(self):
+        results = []
+        for deployable in (400.0, 900.0, 2500.0, 10000.0):
+            clone, reason = self._clone_at(deployable)
+            self.assertIsNone(reason)
+            results.append((clone["order_json"]["contracts"],
+                            clone["risk_adjusted_ev"],
+                            clone["max_loss_total"]))
+        quantities = [r[0] for r in results]
+        self.assertGreater(len(set(quantities)), 1,
+                           f"fixture must vary clone qty, got {quantities}")
+        # same eligibility RAeV at every quantity
+        self.assertEqual(len({r[1] for r in results}), 1, results)
+        # clone risk STILL scales with clone quantity (per-ct 60.0)
+        for qty, _raev, mlt in results:
+            self.assertAlmostEqual(mlt, 60.0 * qty, places=2)
+        # the normalized value itself: net = 30.73 − 5%·30.73 − 1.30 = 27.8935;
+        # raev = 27.8935 / 60 (per-contract max loss)
+        self.assertAlmostEqual(results[0][1], round(27.8935 / 60.0, 6), places=6)
+
+    def test_below_15_per_contract_refuses_at_every_quantity(self):
+        # net = 0.95×16 − 1.30 = 13.90 < 15 → refuse regardless of clone size
+        for deployable in (400.0, 900.0, 2500.0, 10000.0):
+            clone, reason = self._clone_at(deployable, ev_raw=16.0)
+            self.assertIsNone(clone)
+            self.assertEqual(reason, "raw_edge_below_minimum")
+
+    def test_above_15_per_contract_accepts_at_every_quantity(self):
+        # net = 0.95×18 − 1.30 = 15.80 ≥ 15 → accept regardless of clone size
+        for deployable in (400.0, 900.0, 2500.0, 10000.0):
+            clone, reason = self._clone_at(deployable, ev_raw=18.0)
+            self.assertIsNone(reason)
+            self.assertAlmostEqual(clone["risk_adjusted_ev"],
+                                   round((0.95 * 18.0 - 1.30) / 60.0, 6),
+                                   places=6)
+
+    def test_sofi_fixture_no_longer_uses_mixed_units(self):
+        """The literal SOFI shape must be judged at contracts=1 — never the
+        old '30.73 minus ten-contract fees' mixed calculation."""
+        clone, reason = self._clone_at(10000.0)
+        self.assertIsNone(reason)
+        old_mixed = round((30.73 - 0.05 * 30.73
+                           - 0.65 * clone["order_json"]["contracts"] * 2)
+                          / clone["max_loss_total"], 6)
+        self.assertNotEqual(clone["risk_adjusted_ev"], old_mixed)
+        self.assertAlmostEqual(clone["risk_adjusted_ev"],
+                               round(27.8935 / 60.0, 6), places=6)
+
+    def test_invalid_ev_and_max_loss_typed_refusals(self):
+        cases = [
+            ({"ev_raw": None}, "missing_ev_basis"),
+            ({"ev_raw": 0.0}, "raw_ev_invalid"),
+            ({"ev_raw": float("nan")}, "raw_ev_invalid"),
+            ({"ev_raw": float("inf")}, "raw_ev_invalid"),
+        ]
+        for patch_fields, want in cases:
+            src = _prerejected_sofi()
+            src.update(patch_fields)
+            view, reason = fork_mod.build_raw_eligibility_view(src)
+            self.assertIsNone(view)
+            self.assertEqual(reason, want, patch_fields)
+        # per-contract max-loss failures
+        for sz_patch in ({"max_loss_total": None}, {"max_loss_total": 0},
+                         {"max_loss_total": float("nan")}, {"contracts": 0}):
+            src = _prerejected_sofi()
+            src["sizing_metadata"] = {**src["sizing_metadata"], **sz_patch}
+            src.pop("max_loss_total", None)
+            view, reason = fork_mod.build_raw_eligibility_view(src)
+            self.assertIsNone(view)
+            self.assertEqual(reason, "max_loss_not_normalizable", sz_patch)
+
+
+# ---------------------------------------------------------------------------
+# Blocker 13 — persisted clone identity validation
+# ---------------------------------------------------------------------------
+
+class TestPersistedCloneIdentity(_EnvRawOn):
+    MISMATCH_PARAMS = [
+        ("source_suggestion_id", "sizing", "source_suggestion_id", "other-id",
+         "clone_identity_mismatch"),
+        ("cohort_name", "row", "cohort_name", "conservative",
+         "clone_identity_mismatch"),
+        ("experiment_version", "sizing", "experiment_version", "v999",
+         "clone_identity_mismatch"),
+        # legs_fingerprint is a LOOKUP KEY — a tampered row cannot be found,
+        # so it is covered by dedicated tests below, not this route matrix.
+        ("observation_scope", "sizing", "observation_scope", "outcome",
+         "clone_identity_mismatch"),
+        ("execution_state", "sizing", "execution_state", "filled",
+         "clone_identity_mismatch"),
+        ("execution_intent", "sizing", "execution_intent", "live",
+         "clone_identity_mismatch"),
+        ("routing_intent", "sizing", "routing_intent", "live_eligible",
+         "clone_identity_mismatch"),
+        ("ev_basis", "sizing", "ev_basis", "calibrated",
+         "clone_basis_mismatch"),
+        ("ev_raw", "row", "ev_raw", 99.99, "clone_basis_mismatch"),
+        ("ev_calibrated", "sizing", "ev_calibrated", 1.23,
+         "clone_basis_mismatch"),
+        ("risk_adjusted_ev", "row", "risk_adjusted_ev", 0.42,
+         "clone_basis_mismatch"),
+    ]
+
+    def _run_with_preexisting(self, tamper=None):
+        """Seed the EXACT persisted clone (by running once), optionally tamper
+        one field, wipe the verdict, and re-run → the repair path must
+        validate identity before writing."""
+        client = FakeSupabase()
+        sofi = _prerejected_sofi()
+        _seed(client, _pending_qqq(), sofi)
+        _run_fork(client)
+        # wipe the verdict so the rerun takes the repair path
+        client.tables["policy_decisions"] = [
+            r for r in client.tables["policy_decisions"]
+            if r.get("suggestion_id") != sofi["id"]]
+        if tamper:
+            where, field, value = tamper
+            row = _clones(client, ticker="SOFI")[0]
+            if where == "row":
+                row[field] = value
+            else:
+                row["sizing_metadata"][field] = value
+        res = _run_fork(client)
+        return client, sofi, res
+
+    def test_each_identity_field_mismatch_blocks_verdict(self):
+        for name, where, field, value, want_kind in self.MISMATCH_PARAMS:
+            client, sofi, res = self._run_with_preexisting(
+                tamper=(where, field, value))
+            self.assertEqual(
+                _verdicts(client, sofi["id"], "accepted"), [],
+                f"accepted verdict written despite {name} mismatch")
+            self.assertEqual(res["status"], "partial", name)
+            self.assertEqual(
+                res["prerejection_counts"]["identity_mismatch"], 1, name)
+            stages = {e["stage"] for e in res["error_details"]}
+            self.assertIn(want_kind, stages, name)
+
+    def test_fingerprint_mismatch_at_validator_level(self):
+        """legs_fingerprint is one of the idempotency lookup keys, so a
+        route-level tamper is unfindable by construction; the validator
+        itself must still reject a foreign-fingerprint row."""
+        client = FakeSupabase()
+        sofi = _prerejected_sofi()
+        _seed(client, _pending_qqq(), sofi)
+        _run_fork(client)
+        persisted = copy.deepcopy(_clones(client, ticker="SOFI")[0])
+        expected = copy.deepcopy(persisted)
+        persisted["legs_fingerprint"] = "fp-tampered"
+        kind, field = fork_mod._validate_persisted_clone(
+            persisted, expected, sofi)
+        self.assertEqual((kind, field),
+                         ("clone_identity_mismatch", "legs_fingerprint"))
+
+    def test_tampered_fingerprint_row_never_receives_verdict(self):
+        """Route-level: a fingerprint-tampered row is simply not the clone —
+        the system mints a fresh CORRECT clone and the accepted verdict binds
+        to the new clone's id, never the tampered row's."""
+        client, sofi, res = self._run_with_preexisting(
+            tamper=("row", "legs_fingerprint", "fp-tampered"))
+        self.assertEqual(res["status"], "ok")
+        sofi_rows = _clones(client, ticker="SOFI")
+        self.assertEqual(len(sofi_rows), 2)  # tampered orphan + fresh clone
+        tampered = [r for r in sofi_rows
+                    if r["legs_fingerprint"] == "fp-tampered"][0]
+        clean = [r for r in sofi_rows
+                 if r["legs_fingerprint"] != "fp-tampered"][0]
+        v = _verdicts(client, sofi["id"], "accepted")
+        self.assertEqual(len(v), 1)
+        self.assertEqual(v[0]["features_snapshot"]["clone_suggestion_id"],
+                         clean["id"])
+        self.assertNotEqual(v[0]["features_snapshot"]["clone_suggestion_id"],
+                            tampered["id"])
+
+    def test_exact_match_repairs_and_rerun_idempotent(self):
+        client, sofi, res = self._run_with_preexisting(tamper=None)
+        self.assertEqual(res["status"], "ok")
+        self.assertEqual(res["prerejection_counts"]["repaired"], 1)
+        self.assertEqual(len(_verdicts(client, sofi["id"], "accepted")), 1)
+        res2 = _run_fork(client)
+        self.assertEqual(res2["status"], "ok")
+        self.assertEqual(len(_clones(client, ticker="SOFI")), 1)
+        self.assertEqual(len(_verdicts(client, sofi["id"], "accepted")), 1)
+
+    def test_counts_reconcile_with_dispositions(self):
+        """source == refused + clone_failed + identity_mismatch +
+        accepted-verdict failures + verdicts (each source exactly one
+        terminal disposition; reject-write failures overlap refused by
+        documented design and are excluded from this identity)."""
+        client = FakeSupabase()
+        good = _prerejected_sofi()
+        no_basis = _prerejected_sofi(ev_raw=None)
+        no_basis.update({"id": str(uuid.uuid4()), "ticker": "XPEV",
+                         "legs_fingerprint": "fp-xpev",
+                         "trace_id": str(uuid.uuid4())})
+        _seed(client, _pending_qqq(), good, no_basis)
+        res = _run_fork(client)
+        c = res["prerejection_counts"]
+        # exactly one terminal disposition per source (accepted-verdict
+        # failures would appear as verdict_failed with verdicts absent;
+        # none here). reject-write failures overlap refused by documented
+        # design and are covered by their own test.
+        self.assertEqual(
+            c["source"],
+            c["refused"] + c["clone_failed"] + c["identity_mismatch"]
+            + c["verdicts"])
+        self.assertEqual(c["source"], 2)
+        self.assertEqual(c["refused"], 1)
+        self.assertEqual(c["verdicts"], 1)
+        self.assertEqual(c["verdict_failed"], 0)
+
+    def test_reject_verdict_write_failure_counts_and_partial(self):
+        """Contract cleanup: a rejected-verdict UPSERT failure increments
+        verdict_failed AND errors and degrades the fork to partial."""
+        client = FakeSupabase()
+        no_basis = _prerejected_sofi(ev_raw=None)
+        _seed(client, _pending_qqq(), no_basis)
+        client.raise_when("policy_decisions", "upsert")
+        res = _run_fork(client)
+        c = res["prerejection_counts"]
+        self.assertEqual(res["status"], "partial")
+        self.assertEqual(c["refused"], 1)
+        self.assertEqual(c["verdict_failed"], 1)
+        self.assertGreaterEqual(res["errors"], 1)
+        stages = {e["stage"] for e in res["error_details"]}
+        self.assertIn("reject_verdict_upsert_failed", stages)
 
 
 # ---------------------------------------------------------------------------

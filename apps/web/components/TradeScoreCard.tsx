@@ -2,6 +2,7 @@
 
 import { useState, useEffect, useCallback } from 'react';
 import { API_URL } from '@/lib/constants';
+import { Button } from '@/components/ui/button';
 
 interface EVMetrics {
   expected_value: number;
@@ -134,12 +135,12 @@ export const TradeScoreCard = ({
   const { score, color, label } = getScoreAndColor(expected_value, max_loss);
 
   return (
-    <div className="bg-white rounded-lg shadow-md border border-gray-200 p-4 w-full">
+    <div className="bg-card text-card-foreground rounded-lg shadow-md border border-border p-4 w-full">
       {/* Header */}
       <div className="flex justify-between items-start mb-3">
         <div>
-          <h3 className="text-lg font-bold text-gray-900">{symbol}</h3>
-          <p className="text-sm text-gray-600">{strategy}</p>
+          <h3 className="text-lg font-bold">{symbol}</h3>
+          <p className="text-sm text-muted-foreground">{strategy}</p>
         </div>
         <div className="text-right">
           <div className="flex items-center gap-2">
@@ -151,7 +152,7 @@ export const TradeScoreCard = ({
       {/* Score Meter */}
       <div className="mb-4">
           <div
-            className="w-full bg-gray-200 rounded-full h-2.5"
+            className="w-full bg-secondary rounded-full h-2.5"
             role="progressbar"
             aria-valuenow={score}
             aria-valuemin={0}
@@ -163,7 +164,7 @@ export const TradeScoreCard = ({
               style={{ width: `${score}%` }}
             />
           </div>
-          <p className="text-xs text-center mt-1 text-gray-600" aria-hidden="true">
+          <p className="text-xs text-center mt-1 text-muted-foreground" aria-hidden="true">
             Trade Score: {score}/100
           </p>
       </div>
@@ -182,29 +183,30 @@ export const TradeScoreCard = ({
 
       {/* Action Buttons */}
       <div className="flex gap-3">
-        <button
+        <Button
           onClick={onExecute}
           aria-label={`Execute trade for ${symbol}`}
-          className="flex-1 bg-blue-600 text-white font-semibold py-2 px-4 rounded-lg hover:bg-blue-700 transition focus-visible:ring-2 focus-visible:ring-offset-2 focus-visible:ring-blue-600 outline-none"
+          className="flex-1"
         >
           Execute
-        </button>
-        <button
+        </Button>
+        <Button
+          variant="secondary"
           onClick={onAddToWatchlist}
           aria-label={`Add ${symbol} to watchlist`}
-          className="flex-1 bg-gray-200 text-gray-800 font-semibold py-2 px-4 rounded-lg hover:bg-gray-300 transition focus-visible:ring-2 focus-visible:ring-offset-2 focus-visible:ring-gray-400 outline-none"
+          className="flex-1"
         >
           Watchlist
-        </button>
+        </Button>
       </div>
     </div>
   );
 };
 
 const Metric = ({ label, value, isPositive }: { label: string; value: string; isPositive?: boolean }) => (
-  <div className="bg-gray-50 p-2 rounded-lg border border-gray-200">
-    <p className="text-xs text-gray-500">{label}</p>
-    <p className={`font-bold text-base ${isPositive === true ? 'text-green-600' : isPositive === false ? 'text-red-600' : 'text-gray-900'}`}>
+  <div className="bg-muted/50 p-2 rounded-lg border border-border">
+    <p className="text-xs text-muted-foreground">{label}</p>
+    <p className={`font-bold text-base ${isPositive === true ? 'text-green-600 dark:text-green-400' : isPositive === false ? 'text-red-600 dark:text-red-400' : 'text-foreground'}`}>
       {value}
     </p>
   </div>

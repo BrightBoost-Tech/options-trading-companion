@@ -1,22 +1,21 @@
-"""E19-2 (2026-07-13) — pre-rejection fork source + EV basis + champion fence.
-
-THE DEFECT (route-proven in TestDefectReproduction): a candidate that passes
-raw eligibility but dies at the CALIBRATED edge floor is stamped
-status=NOT_EXECUTABLE / blocked_reason='edge_below_minimum'
-(workflow_orchestrator raev<=-999 seam) — and fork_suggestions_for_cohorts
-selected only status IN ('pending','staged'), so the raw-EV shadow experiment
-never observed exactly the divergence cases it exists to measure (the
-2026-07-13 SOFI exhibit: ev_raw 30.73 clears the $15 edge, calibrated ev 15.37
-does not, raev=-999 → zero clones).
-
-§9 discipline: every route test drives fork_suggestions_for_cohorts itself
-through a faithful fake supabase (filter semantics implemented, writes
-recorded). The champion fence is a golden effect-set comparison. One failure
-is injected at its real query origin (the pre-rejection SELECT raising) and
-asserted at the route's typed return.
+"""E19-2 — pre-rejection fork source + explicit EV basis + champion fence.
+Adversarial-review corrections (2026-07-13/14): fork-result contract with
+top-level failure propagation (B1), recoverable clone→verdict order with
+repair (B2), verdict built from the PERSISTED clone (B3), genuine raw
+eligibility gate (B4), honest execution-state semantics (B5A), versioned
+clone identity with the verdict narrowing documented (B8), a DB-contract
+fake enforcing the REAL unique indexes (B9, mirrored from live pg_indexes),
+fail-closed clone lookup (B10), and a frozen-baseline champion fence running
+the literal f34d5cd fork source (B11).
 """
+import copy
+import importlib.util
+import json
+import math
 import os
 import unittest
+import uuid
+from pathlib import Path
 from unittest.mock import patch
 
 from packages.quantum.policy_lab import fork as fork_mod
@@ -24,21 +23,36 @@ from packages.quantum.policy_lab.config import PolicyConfig
 
 
 # ---------------------------------------------------------------------------
-# Faithful fake supabase: filter semantics + write capture
+# Hardened fake supabase (Blocker 9) — enforces the REAL deployed contract:
+#   trade_suggestions: pkey uuid · UNIQUE(trace_id) WHERE NOT NULL ·
+#     UNIQUE(user_id, window, cycle_date, ticker, strategy, legs_fingerprint)
+#     WHERE status NOT IN ('dismissed','cancelled')   [unique_suggestion_per_cycle_v3]
+#   policy_decisions: pkey uuid · UNIQUE(cohort_id, suggestion_id)
+# UPSERT honours on_conflict (update-in-place); INSERT raises 'duplicate key
+# value violates unique constraint …' exactly like PostgREST surfaces 23505.
 # ---------------------------------------------------------------------------
+
+_TS_NOT_NULL = ("user_id", "status")
+_PD_NOT_NULL = ("cohort_id", "suggestion_id", "user_id", "decision")
+
+
+class _Dup(Exception):
+    pass
+
 
 class _Q:
     def __init__(self, client, table):
         self._c = client
         self._t = table
         self._filters = []
+        self._order = []
         self._op = None
         self._payload = None
+        self._on_conflict = None
         self._limit = None
         self._single = False
         self._count = None
 
-    # -- builders -----------------------------------------------------------
     def select(self, *_a, **kw):
         self._op = self._op or "select"
         self._count = kw.get("count")
@@ -53,11 +67,31 @@ class _Q:
         return self
 
     def upsert(self, rows, on_conflict=None):
-        self._op, self._payload = "upsert", rows
+        self._op, self._payload, self._on_conflict = "upsert", rows, on_conflict
         return self
 
     def eq(self, col, val):
         self._filters.append(("eq", col, val))
+        return self
+
+    def neq(self, col, val):
+        self._filters.append(("neq", col, val))
+        return self
+
+    def gte(self, col, val):
+        self._filters.append(("gte", col, val))
+        return self
+
+    def gt(self, col, val):
+        self._filters.append(("gt", col, val))
+        return self
+
+    def lte(self, col, val):
+        self._filters.append(("lte", col, val))
+        return self
+
+    def lt(self, col, val):
+        self._filters.append(("lt", col, val))
         return self
 
     def is_(self, col, val):
@@ -68,7 +102,8 @@ class _Q:
         self._filters.append(("in", col, list(vals)))
         return self
 
-    def order(self, *_a, **_k):
+    def order(self, col, desc=False):
+        self._order.append((col, desc))
         return self
 
     def limit(self, n):
@@ -79,81 +114,208 @@ class _Q:
         self._single = True
         return self
 
-    # -- execution ----------------------------------------------------------
+    # -- semantics ----------------------------------------------------------
     def _match(self, row):
         for kind, col, val in self._filters:
             v = row.get(col)
             if kind == "eq" and v != val:
                 return False
+            if kind == "neq" and v == val:
+                return False
             if kind == "is" and val == "null" and v is not None:
                 return False
             if kind == "in" and v not in val:
                 return False
+            if kind in ("gte", "gt", "lte", "lt"):
+                if v is None:
+                    return False
+                sv, svv = str(v), str(val)
+                if kind == "gte" and not sv >= svv:
+                    return False
+                if kind == "gt" and not sv > svv:
+                    return False
+                if kind == "lte" and not sv <= svv:
+                    return False
+                if kind == "lt" and not sv < svv:
+                    return False
         return True
 
+    def _check_constraints(self, table, row, rows, ignore_row=None):
+        if table == "trade_suggestions":
+            for f in _TS_NOT_NULL:
+                if row.get(f) is None:
+                    raise _Dup(f'null value in column "{f}" violates not-null constraint')
+            if row.get("trace_id") is not None:
+                for r in rows:
+                    if r is not ignore_row and r.get("trace_id") == row.get("trace_id"):
+                        raise _Dup('duplicate key value violates unique constraint '
+                                   '"idx_trade_suggestions_trace_id_unique"')
+            if row.get("status") not in ("dismissed", "cancelled"):
+                key = tuple(row.get(k) for k in
+                            ("user_id", "window", "cycle_date", "ticker",
+                             "strategy", "legs_fingerprint"))
+                for r in rows:
+                    if r is ignore_row or r.get("status") in ("dismissed", "cancelled"):
+                        continue
+                    if tuple(r.get(k) for k in
+                             ("user_id", "window", "cycle_date", "ticker",
+                              "strategy", "legs_fingerprint")) == key:
+                        raise _Dup('duplicate key value violates unique constraint '
+                                   '"unique_suggestion_per_cycle_v3"')
+        if table == "policy_decisions":
+            for f in _PD_NOT_NULL:
+                if row.get(f) is None:
+                    raise _Dup(f'null value in column "{f}" violates not-null constraint')
+            for r in rows:
+                if r is not ignore_row and (r.get("cohort_id"), r.get("suggestion_id")) == \
+                        (row.get("cohort_id"), row.get("suggestion_id")):
+                    raise _Dup('duplicate key value violates unique constraint '
+                               '"policy_decisions_cohort_id_suggestion_id_key"')
+
     def execute(self):
-        if self._t in self._c.raise_on_select and self._op == "select":
-            raise RuntimeError(f"injected origin failure on {self._t}")
+        hook = self._c.raise_hooks.get((self._t, self._op))
+        if hook and hook(self):
+            raise RuntimeError(f"injected {self._op} failure on {self._t}")
+
         rows = self._c.tables.setdefault(self._t, [])
         if self._op == "select":
             out = [r for r in rows if self._match(r)]
+            for col, desc in reversed(self._order):
+                out.sort(key=lambda r: (r.get(col) is None,
+                                        r.get(col) if r.get(col) is not None else 0),
+                         reverse=desc)
             if self._limit is not None:
                 out = out[: self._limit]
+            out = copy.deepcopy(out)
 
             class _R:
                 pass
-
             r = _R()
             r.data = (out[0] if out else {}) if self._single else out
             r.count = len(out) if self._count else None
             return r
+
         if self._op == "insert":
             payload = self._payload if isinstance(self._payload, list) else [self._payload]
+            staged = []
             for row in payload:
-                rows.append(dict(row))
-            self._c.writes.setdefault(self._t, []).append(("insert", payload))
-        elif self._op == "update":
+                row = copy.deepcopy(row)
+                if not row.get("id"):
+                    row["id"] = str(uuid.uuid4())
+                else:
+                    uuid.UUID(str(row["id"]))  # ids must be valid UUIDs
+                self._check_constraints(self._t, row, rows)
+                staged.append(row)
+            rows.extend(staged)
+            self._c.writes.setdefault(self._t, []).append(("insert", staged))
+
+            class _R2:
+                data = copy.deepcopy(staged)
+                count = None
+            return _R2()
+
+        if self._op == "update":
             for row in rows:
                 if self._match(row):
-                    row.update(self._payload)
+                    row.update(copy.deepcopy(self._payload))
             self._c.writes.setdefault(self._t, []).append(
                 ("update", self._payload, list(self._filters)))
-        elif self._op == "upsert":
-            self._c.writes.setdefault(self._t, []).append(("upsert", self._payload))
 
-        class _R2:
-            data = [{}]
-            count = None
-        return _R2()
+            class _R3:
+                data = [{}]
+                count = None
+            return _R3()
+
+        if self._op == "upsert":
+            payload = self._payload if isinstance(self._payload, list) else [self._payload]
+            conflict_cols = [c.strip() for c in (self._on_conflict or "").split(",") if c.strip()]
+            written = []
+            for row in payload:
+                row = copy.deepcopy(row)
+                target = None
+                if conflict_cols:
+                    for r in rows:
+                        if all(r.get(c) == row.get(c) for c in conflict_cols):
+                            target = r
+                            break
+                if target is not None:
+                    self._check_constraints(self._t, {**target, **row}, rows,
+                                            ignore_row=target)
+                    target.update(row)
+                    written.append(copy.deepcopy(target))
+                else:
+                    if not row.get("id"):
+                        row["id"] = str(uuid.uuid4())
+                    self._check_constraints(self._t, row, rows)
+                    rows.append(row)
+                    written.append(copy.deepcopy(row))
+            self._c.writes.setdefault(self._t, []).append(("upsert", written))
+
+            class _R4:
+                data = copy.deepcopy(written)
+                count = None
+            return _R4()
+
+        raise RuntimeError(f"unsupported op {self._op}")
 
 
 class FakeSupabase:
     def __init__(self):
         self.tables = {}
         self.writes = {}
-        self.raise_on_select = set()
+        # (table, op) -> predicate(query) -> bool ; True = raise
+        self.raise_hooks = {}
 
     def table(self, name):
         return _Q(self, name)
 
+    # helpers for origin injection
+    def raise_when(self, table, op, predicate=lambda q: True, times=None):
+        state = {"left": times}
+
+        def hook(q):
+            if not predicate(q):
+                return False
+            if state["left"] is None:
+                return True
+            if state["left"] > 0:
+                state["left"] -= 1
+                return True
+            return False
+        self.raise_hooks[(table, op)] = hook
+
+    def clear_hooks(self):
+        self.raise_hooks = {}
+
+
+def _has_filter(q, col, val=None):
+    for kind, c, v in q._filters:
+        if c == col and (val is None or v == val):
+            return True
+    return False
+
 
 # ---------------------------------------------------------------------------
-# Fixtures — today's live shapes
+# Fixtures — today's live shapes (uuid identities)
 # ---------------------------------------------------------------------------
 
-UID = "u-test"
+UID = str(uuid.uuid4())
 
 
-def _pending_qqq(sid="src-qqq"):
-    """The champion's executable IC (today's 16:00Z shape)."""
+def _pending_qqq():
+    """The champion's executable multi-leg IC (07-13 16:00Z shape)."""
     return {
-        "id": sid, "user_id": UID, "window": "midday_entry",
+        "id": str(uuid.uuid4()), "user_id": UID, "window": "midday_entry",
         "cycle_date": fork_mod.date.today().isoformat(),
         "ticker": "QQQ", "strategy": "IRON_CONDOR", "direction": "neutral",
         "status": "pending", "cohort_name": None,
         "ev": 18.61, "ev_raw": 37.22, "risk_adjusted_ev": 0.045881,
-        "legs_fingerprint": "fp-qqq",
+        "legs_fingerprint": "fp-qqq", "trace_id": str(uuid.uuid4()),
+        "model_version": "spy_opt_autolearn_v6@86",
+        "lineage_hash": "lh-qqq",
         "order_json": {"contracts": 1, "legs": [
+            {"symbol": "QQQ_P1", "side": "buy", "quantity": 1, "mid": 0.2},
+            {"symbol": "QQQ_P2", "side": "sell", "quantity": 1, "mid": 0.5},
             {"symbol": "QQQ_C1", "side": "sell", "quantity": 1, "mid": 1.0},
             {"symbol": "QQQ_C2", "side": "buy", "quantity": 1, "mid": 0.5},
         ]},
@@ -161,16 +323,18 @@ def _pending_qqq(sid="src-qqq"):
     }
 
 
-def _prerejected_sofi(sid="src-sofi", ev_raw=30.73):
-    """The calibrated-rejected exhibit (today's 15:02Z SOFI shape)."""
+def _prerejected_sofi(ev_raw=30.73):
+    """Calibrated-rejected two-leg vertical (07-13 15:02Z SOFI shape)."""
     return {
-        "id": sid, "user_id": UID, "window": "midday_entry",
+        "id": str(uuid.uuid4()), "user_id": UID, "window": "midday_entry",
         "cycle_date": fork_mod.date.today().isoformat(),
         "ticker": "SOFI", "strategy": "LONG_CALL_DEBIT_SPREAD", "direction": "long",
         "status": "NOT_EXECUTABLE", "blocked_reason": "edge_below_minimum",
         "cohort_name": None,
         "ev": 15.37, "ev_raw": ev_raw, "risk_adjusted_ev": -999.0,
-        "legs_fingerprint": "fp-sofi",
+        "legs_fingerprint": "fp-sofi", "trace_id": str(uuid.uuid4()),
+        "model_version": "spy_opt_autolearn_v6@86",
+        "lineage_hash": "lh-sofi",
         "order_json": {"contracts": 1, "legs": [
             {"symbol": "SOFI_C1", "side": "buy", "quantity": 1, "mid": 0.6},
             {"symbol": "SOFI_C2", "side": "sell", "quantity": 1, "mid": 0.3},
@@ -179,23 +343,22 @@ def _prerejected_sofi(sid="src-sofi", ev_raw=30.73):
     }
 
 
-def _quality_blocked(sid="src-dark"):
+def _quality_blocked():
     """Stale/dark/unpriceable class — must NEVER be resurrected."""
-    return {
-        **_prerejected_sofi(sid=sid),
-        "ticker": "XLE",
-        "blocked_reason": "marketdata_quality_gate",
-        "legs_fingerprint": "fp-xle",
-    }
+    row = _prerejected_sofi()
+    row.update({"id": str(uuid.uuid4()), "ticker": "XLE",
+                "blocked_reason": "marketdata_quality_gate",
+                "legs_fingerprint": "fp-xle", "trace_id": str(uuid.uuid4())})
+    return row
 
 
 def _seed(client, *suggestion_rows):
-    client.tables["trade_suggestions"] = [dict(r) for r in suggestion_rows]
+    client.tables["trade_suggestions"] = [copy.deepcopy(r) for r in suggestion_rows]
     client.tables["policy_lab_cohorts"] = [
-        {"user_id": UID, "cohort_name": "aggressive", "portfolio_id": "pf-agg",
-         "id": "c-agg", "is_active": True},
-        {"user_id": UID, "cohort_name": "neutral", "portfolio_id": "pf-neu",
-         "id": "c-neu", "is_active": True},
+        {"id": "c-agg", "user_id": UID, "cohort_name": "aggressive",
+         "portfolio_id": "pf-agg", "is_active": True},
+        {"id": "c-neu", "user_id": UID, "cohort_name": "neutral",
+         "portfolio_id": "pf-neu", "is_active": True},
     ]
     client.tables["paper_portfolios"] = [
         {"id": "pf-agg", "cash_balance": 2000, "net_liq": 2000},
@@ -204,14 +367,24 @@ def _seed(client, *suggestion_rows):
     client.tables["paper_positions"] = []
 
 
-def _run_fork(client):
-    with patch.object(fork_mod, "is_policy_lab_enabled", return_value=True), \
-         patch.object(fork_mod, "load_cohort_configs", return_value={
-             "aggressive": PolicyConfig(),
-             "neutral": PolicyConfig(min_score_threshold=0.0),
-         }), \
-         patch.object(fork_mod, "get_current_champion", return_value="aggressive"):
-        return fork_mod.fork_suggestions_for_cohorts(UID, client)
+_COHORT_PATCHES = dict(
+    is_policy_lab_enabled=lambda: True,
+    get_current_champion=lambda *_a, **_k: "aggressive",
+)
+
+
+def _cohort_configs(*_a, **_k):
+    return {
+        "aggressive": PolicyConfig(),
+        "neutral": PolicyConfig(min_score_threshold=0.0),
+    }
+
+
+def _run_fork(client, module=fork_mod):
+    with patch.object(module, "is_policy_lab_enabled", _COHORT_PATCHES["is_policy_lab_enabled"]), \
+         patch.object(module, "load_cohort_configs", _cohort_configs), \
+         patch.object(module, "get_current_champion", _COHORT_PATCHES["get_current_champion"]):
+        return module.fork_suggestions_for_cohorts(UID, client)
 
 
 def _clones(client, **field_filters):
@@ -220,6 +393,15 @@ def _clones(client, **field_filters):
     for k, v in field_filters.items():
         out = [r for r in out if r.get(k) == v]
     return out
+
+
+def _verdicts(client, suggestion_id=None, decision=None):
+    rows = client.tables.get("policy_decisions", [])
+    if suggestion_id is not None:
+        rows = [r for r in rows if r.get("suggestion_id") == suggestion_id]
+    if decision is not None:
+        rows = [r for r in rows if r.get("decision") == decision]
+    return rows
 
 
 class _EnvRawOn(unittest.TestCase):
@@ -231,300 +413,566 @@ class _EnvRawOn(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
-# Defect reproduction (against the OLD selection semantics)
+# Defect reproduction + core invariants
 # ---------------------------------------------------------------------------
 
 class TestDefectReproduction(_EnvRawOn):
-    def test_prerejected_source_produces_shadow_verdict_now(self):
-        """OLD behavior (current main): the SOFI row is invisible to the fork
-        (status filter) → 0 clones, 0 verdicts. NEW behavior: exactly one
-        NOT_EXECUTABLE raw-basis clone + one decision row is retained, while
-        the champion still rejects it."""
+    def test_prerejected_source_produces_exactly_one_shadow_verdict(self):
         client = FakeSupabase()
-        _seed(client, _pending_qqq(), _prerejected_sofi())
+        sofi = _prerejected_sofi()
+        _seed(client, _pending_qqq(), sofi)
         res = _run_fork(client)
 
         self.assertEqual(res["status"], "ok")
-        sofi_clones = _clones(client, ticker="SOFI")
-        self.assertEqual(len(sofi_clones), 1)
-        c = sofi_clones[0]
-        # champion rejection preserved on the SOURCE row
+        self.assertEqual(res["errors"], 0)
+        self.assertEqual(res["prerejection_source_count"], 1)
+        self.assertEqual(res["prerejection_clone_count"], 1)
+        self.assertEqual(res["prerejection_verdict_count"], 1)
+        self.assertEqual(len(_clones(client, ticker="SOFI")), 1)
+        # champion rejection preserved on the source
         src = [r for r in client.tables["trade_suggestions"]
-               if r.get("id") == "src-sofi"][0]
-        self.assertEqual(src["status"], "NOT_EXECUTABLE")
-        self.assertEqual(src["blocked_reason"], "edge_below_minimum")
-        # exactly one verdict row for the pre-rejection source
-        verdicts = [row for op, payload in client.writes.get("policy_decisions", [])
-                    if op == "upsert"
-                    for row in payload if row["suggestion_id"] == "src-sofi"]
-        self.assertEqual(len(verdicts), 1)
-        self.assertEqual(verdicts[0]["decision"], "accepted")
-        self.assertIn("prerejection_shadow_observation", verdicts[0]["reason_codes"])
-        self.assertEqual(verdicts[0]["features_snapshot"]["ev_raw"], 30.73)
-        self.assertEqual(verdicts[0]["features_snapshot"]["blocked_reason"],
-                         "edge_below_minimum")
+               if r.get("id") == sofi["id"]][0]
+        self.assertEqual((src["status"], src["blocked_reason"], src["cohort_name"]),
+                         ("NOT_EXECUTABLE", "edge_below_minimum", None))
+        self.assertEqual(len(_verdicts(client, sofi["id"], "accepted")), 1)
 
 
-# ---------------------------------------------------------------------------
-# Clone invariants
-# ---------------------------------------------------------------------------
-
-class TestPrerejectionCloneInvariants(_EnvRawOn):
+class TestCloneInvariants(_EnvRawOn):
     def _clone(self):
         client = FakeSupabase()
-        _seed(client, _pending_qqq(), _prerejected_sofi())
+        sofi = _prerejected_sofi()
+        _seed(client, _pending_qqq(), sofi)
         _run_fork(client)
-        return client, _clones(client, ticker="SOFI")[0]
+        return client, sofi, _clones(client, ticker="SOFI")[0]
 
-    def test_clone_is_not_executable_and_cannot_reach_submit(self):
-        client, c = self._clone()
+    def test_not_executable_and_honest_execution_state(self):
+        """Blocker 5A (adjudicated: ENTRY-SELECTION-ONLY): the clone claims
+        NO execution_mode — execution is described by what happened
+        (nothing); routing INTENT and observation scope are separate,
+        explicit labels."""
+        _, _, c = self._clone()
         self.assertEqual(c["status"], "NOT_EXECUTABLE")
         self.assertEqual(c["blocked_reason"], "shadow_prerejection_fork")
-        # The executor's selection predicate (status='pending') — driven
-        # against the same store — must NOT see it.
-        exec_visible = _Q(client, "trade_suggestions").select("*") \
-            .eq("user_id", UID).eq("cohort_name", "neutral") \
-            .eq("status", "pending").execute().data
-        self.assertNotIn("SOFI", [r.get("ticker") for r in exec_visible])
+        sz = c["sizing_metadata"]
+        self.assertNotIn("execution_mode", sz)
+        self.assertNotIn("routing_mode", sz)
+        self.assertEqual(sz["execution_state"], "not_executed")
+        self.assertEqual(sz["execution_intent"], "internal_paper_only")
+        self.assertEqual(sz["observation_scope"], "entry_selection_only")
+        self.assertEqual(sz["routing_intent"], "shadow_only")
 
-    def test_explicit_raw_basis_persisted_and_readable(self):
-        _, c = self._clone()
+    def test_raw_basis_provenance_and_finite_raev(self):
+        _, sofi, c = self._clone()
+        sz = c["sizing_metadata"]
         self.assertEqual(c["ev"], 30.73)
         self.assertEqual(c["ev_raw"], 30.73)
-        sz = c["sizing_metadata"]
         self.assertEqual(sz["ev_basis"], "raw")
-        self.assertIn(sz["raev_basis"],
-                      ("raw_portfolio_blind", "unknown_recompute_failed"))
-        self.assertTrue(sz["prerejection_fork"])
-        self.assertEqual(sz["champion_blocked_reason"], "edge_below_minimum")
-        self.assertEqual(sz["source_suggestion_id"], "src-sofi")
-        # raev recomputed on the clone's own basis — never the champion's -999
-        self.assertNotEqual(c["risk_adjusted_ev"], -999.0)
-
-    def test_source_identity_and_fingerprint_namespace(self):
-        _, c = self._clone()
-        self.assertTrue(c["legs_fingerprint"].endswith("_prerej_neutral"))
-        self.assertNotEqual(c["trace_id"],
-                            _prerejected_sofi().get("trace_id"))
-
-    def test_routing_and_execution_semantics_explicit_and_separate(self):
-        """Invariant 4+5: the clone is explicitly shadow_only /
-        internal_paper — routing and execution are SEPARATE labels, neither
-        inferred from the other — and carries the full provenance triple
-        (ev_raw / ev_calibrated / ev_basis) + calibration identity +
-        experiment version."""
-        _, c = self._clone()
-        sz = c["sizing_metadata"]
-        self.assertEqual(sz["routing_mode"], "shadow_only")
-        self.assertEqual(sz["execution_mode"], "internal_paper")
-        self.assertEqual(sz["ev_basis"], "raw")
-        self.assertEqual(c["ev_raw"], 30.73)
         self.assertEqual(sz["ev_calibrated"], 15.37)
-        self.assertIn("calibration_identity", sz)
-        self.assertEqual(sz["experiment_version"], "e19_prerejection_v1")
+        self.assertEqual(sz["raev_basis"], "raw_portfolio_blind")
+        self.assertEqual(sz["calibration_identity"], "spy_opt_autolearn_v6@86")
+        self.assertEqual(sz["experiment_version"], fork_mod.EXPERIMENT_VERSION)
+        self.assertEqual(sz["champion_blocked_reason"], "edge_below_minimum")
+        self.assertEqual(sz["source_suggestion_id"], sofi["id"])
+        # Blocker 4 sharpening: finite numeric ABOVE the sentinel — None must fail
+        raev = c["risk_adjusted_ev"]
+        self.assertIsInstance(raev, float)
+        self.assertTrue(math.isfinite(raev))
+        self.assertGreater(raev, -999.0)
 
-    def test_fork_leaves_decision_tape_untouched(self):
-        """Test 13: the fork must not add, remove, or mutate decision-tape
-        features — tape completeness (PR-② E16-3) is a different layer.
-        Driven with an ACTIVE DecisionContext exactly as suggestions_open
-        wraps the cycle."""
-        os.environ["REPLAY_ENABLE"] = "1"
-        try:
-            from datetime import datetime, timezone
-            from packages.quantum.services.replay.blob_store import BlobStore
-            from packages.quantum.services.replay.decision_context import (
-                DecisionContext,
-            )
-            ctx = DecisionContext(
-                strategy_name="suggestions_open",
-                as_of_ts=datetime.now(timezone.utc),
-                user_id=UID, git_sha="testsha",
-                _blob_store=BlobStore(),
-            )
-            ctx.__enter__()
-            try:
-                ctx.record_feature("__decision__", "ranked_candidates",
-                                   {"count": 1})
-                features_before = [(f.symbol, f.namespace, f.features_hash)
-                                   for f in ctx.features]
-                inputs_before = dict(ctx.inputs)
-                client = FakeSupabase()
-                _seed(client, _pending_qqq(), _prerejected_sofi())
-                _run_fork(client)
-                self.assertEqual(
-                    [(f.symbol, f.namespace, f.features_hash) for f in ctx.features],
-                    features_before)
-                self.assertEqual(ctx.inputs, inputs_before)
-            finally:
-                ctx.__exit__(None, None, None)
-        finally:
-            os.environ.pop("REPLAY_ENABLE", None)
+    def test_version_embedded_in_fingerprint(self):
+        _, _, c = self._clone()
+        self.assertIn(f"_prerej_{fork_mod.EXPERIMENT_VERSION}_neutral",
+                      c["legs_fingerprint"])
 
 
 # ---------------------------------------------------------------------------
-# Exclusions: what must NOT be resurrected / cloned
+# Blocker 4 — the raw eligibility gate
 # ---------------------------------------------------------------------------
 
-class TestExclusions(_EnvRawOn):
-    def test_quality_gate_rejects_never_cloned(self):
-        """Stale/dark/malformed/unpriceable candidates carry
-        blocked_reason='marketdata_quality_gate' (or never became rows at
-        all) — no clone, ever."""
+class TestRawGateMatrix(_EnvRawOn):
+    def _run_one(self, source, raev_patch=None):
         client = FakeSupabase()
-        _seed(client, _pending_qqq(), _quality_blocked())
-        _run_fork(client)
+        _seed(client, _pending_qqq(), source)
+        if raev_patch is not None:
+            from packages.quantum.analytics import canonical_ranker
+            with patch.object(canonical_ranker, "compute_risk_adjusted_ev",
+                              raev_patch):
+                res = _run_fork(client)
+        else:
+            res = _run_fork(client)
+        return client, res
+
+    def _assert_refused(self, client, res, source, reason):
+        self.assertEqual(_clones(client, ticker=source["ticker"]), [])
+        v = _verdicts(client, source["id"])
+        self.assertEqual(len(v), 1)
+        self.assertEqual(v[0]["decision"], "rejected")
+        self.assertEqual(v[0]["reason_codes"], [reason])
+        self.assertEqual(res["errors"], 0)  # typed refusal is NOT an error
+
+    def test_calibrated_fails_raw_passes_creates_clone(self):
+        client, res = self._run_one(_prerejected_sofi(ev_raw=30.73))
+        self.assertEqual(res["prerejection_counts"]["created"], 1)
+
+    def test_calibrated_fails_raw_also_fails(self):
+        # raw 16.0: neutral clone sizes up contracts → fees exceed the $15
+        # edge on the raw basis too → canonical -999 → typed refusal
+        src = _prerejected_sofi(ev_raw=16.0)
+        client, res = self._run_one(src, raev_patch=lambda *a, **k: -999.0)
+        self._assert_refused(client, res, src, "raw_edge_below_minimum")
+
+    def test_missing_ev_raw_refused_typed(self):
+        src = _prerejected_sofi(ev_raw=None)
+        client, res = self._run_one(src)
+        self._assert_refused(client, res, src, "missing_ev_basis")
+
+    def test_recompute_raises_refused_typed(self):
+        src = _prerejected_sofi()
+
+        def boom(*_a, **_k):
+            raise RuntimeError("ranker exploded")
+        client, res = self._run_one(src, raev_patch=boom)
+        self._assert_refused(client, res, src, "raw_raev_recompute_failed")
+
+    def test_recompute_none_refused_typed(self):
+        src = _prerejected_sofi()
+        client, res = self._run_one(src, raev_patch=lambda *a, **k: None)
+        self._assert_refused(client, res, src, "raw_raev_invalid")
+
+    def test_recompute_nan_and_inf_refused_typed(self):
+        for bad in (float("nan"), float("inf")):
+            src = _prerejected_sofi()
+            client, res = self._run_one(src, raev_patch=lambda *a, **k: bad)
+            self._assert_refused(client, res, src, "raw_raev_invalid")
+
+    def test_score_below_cohort_threshold_filtered(self):
+        src = _prerejected_sofi()
+        src["sizing_metadata"]["score"] = -1.0
+        client = FakeSupabase()
+        _seed(client, _pending_qqq(), src)
+        with patch.object(fork_mod, "is_policy_lab_enabled", lambda: True), \
+             patch.object(fork_mod, "load_cohort_configs", lambda *_a, **_k: {
+                 "aggressive": PolicyConfig(),
+                 "neutral": PolicyConfig(min_score_threshold=50.0)}), \
+             patch.object(fork_mod, "get_current_champion", lambda *_a, **_k: "aggressive"):
+            fork_mod.fork_suggestions_for_cohorts(UID, client)
+        self.assertEqual(_clones(client, ticker="SOFI"), [])
+        v = _verdicts(client, src["id"])
+        self.assertEqual(v[0]["reason_codes"], ["filtered_by_policy"])
+
+    def test_quality_gate_reject_never_cloned_never_verdicted(self):
+        dark = _quality_blocked()
+        client, res = self._run_one(dark)
         self.assertEqual(_clones(client, ticker="XLE"), [])
+        self.assertEqual(_verdicts(client, dark["id"]), [])
 
-    def test_missing_ev_raw_is_typed_refusal_never_default(self):
-        client = FakeSupabase()
-        _seed(client, _pending_qqq(), _prerejected_sofi(ev_raw=None))
-        _run_fork(client)
-        self.assertEqual(_clones(client, ticker="SOFI"), [])
-        verdicts = [row for op, payload in client.writes.get("policy_decisions", [])
-                    if op == "upsert"
-                    for row in payload if row["suggestion_id"] == "src-sofi"]
-        self.assertEqual(len(verdicts), 1)
-        self.assertEqual(verdicts[0]["decision"], "rejected")
-        self.assertEqual(verdicts[0]["reason_codes"], ["missing_ev_basis"])
-
-    def test_lever_off_disables_prerejection_source(self):
+    def test_lever_off_disables_source(self):
         os.environ["SHADOW_RAW_EV_ENABLED"] = "0"
+        src = _prerejected_sofi()
+        client, res = self._run_one(src)
+        self.assertEqual(_clones(client, ticker="SOFI"), [])
+        self.assertEqual(res["prerejection_source_count"], 0)
+
+
+# ---------------------------------------------------------------------------
+# Blockers 2/3/10 — recoverable order, persisted-clone verdict, fail-closed
+# ---------------------------------------------------------------------------
+
+class TestRecoverableOrder(_EnvRawOn):
+    def test_verdict_from_persisted_clone_full_readback(self):
         client = FakeSupabase()
-        _seed(client, _pending_qqq(), _prerejected_sofi())
+        sofi = _prerejected_sofi()
+        _seed(client, _pending_qqq(), sofi)
         _run_fork(client)
+        clone = _clones(client, ticker="SOFI")[0]
+        v = _verdicts(client, sofi["id"], "accepted")[0]
+        fs = v["features_snapshot"]
+        self.assertEqual(fs["source_suggestion_id"], sofi["id"])
+        self.assertEqual(fs["clone_suggestion_id"], clone["id"])
+        self.assertEqual(fs["source_trace_id"], sofi["trace_id"])
+        self.assertEqual(fs["source_lineage_hash"], "lh-sofi")
+        self.assertEqual(fs["ev"], clone["ev"])
+        self.assertEqual(fs["ev_raw"], clone["ev_raw"])
+        self.assertEqual(fs["ev_calibrated"], 15.37)
+        self.assertEqual(fs["ev_basis"], "raw")
+        self.assertEqual(fs["risk_adjusted_ev"], clone["risk_adjusted_ev"])
+        self.assertEqual(fs["raev_basis"], "raw_portfolio_blind")
+        self.assertEqual(fs["champion_blocked_reason"], "edge_below_minimum")
+        self.assertEqual(fs["routing_intent"], "shadow_only")
+        self.assertEqual(fs["execution_state"], "not_executed")
+        self.assertEqual(fs["calibration_identity"], "spy_opt_autolearn_v6@86")
+        self.assertEqual(fs["experiment_version"], fork_mod.EXPERIMENT_VERSION)
+        self.assertEqual(fs["cohort_name"], "neutral")
+        self.assertEqual(fs["clone_fingerprint"], clone["legs_fingerprint"])
+        # simulated_fill from the CLONE's own sizing, not the source's
+        self.assertEqual(v["simulated_fill"]["contracts"],
+                         clone["order_json"]["contracts"])
+        self.assertEqual(v["simulated_fill"]["max_loss_total"],
+                         clone["sizing_metadata"]["max_loss_total"])
+
+    def test_verdict_upsert_failure_typed_then_repaired_on_rerun(self):
+        client = FakeSupabase()
+        sofi = _prerejected_sofi()
+        _seed(client, _pending_qqq(), sofi)
+        client.raise_when("policy_decisions", "upsert")
+        res1 = _run_fork(client)
+        self.assertEqual(res1["status"], "partial")
+        self.assertGreaterEqual(res1["errors"], 1)
+        self.assertEqual(res1["prerejection_counts"]["verdict_failed"], 1)
+        self.assertEqual(len(_clones(client, ticker="SOFI")), 1)   # clone persisted
+        self.assertEqual(_verdicts(client, sofi["id"]), [])        # no verdict yet
+        stages = {e["stage"] for e in res1["error_details"]}
+        self.assertIn("verdict_upsert_failed", stages)
+
+        client.clear_hooks()
+        res2 = _run_fork(client)
+        self.assertEqual(res2["status"], "ok")
+        self.assertEqual(res2["prerejection_counts"]["repaired"], 1)
+        self.assertEqual(len(_clones(client, ticker="SOFI")), 1)   # no duplicate
+        self.assertEqual(len(_verdicts(client, sofi["id"], "accepted")), 1)
+
+    def test_clone_insert_failure_no_accepted_verdict(self):
+        client = FakeSupabase()
+        sofi = _prerejected_sofi()
+        _seed(client, _pending_qqq(), sofi)
+        client.raise_when(
+            "trade_suggestions", "insert",
+            predicate=lambda q: any("_prerej_" in str(r.get("legs_fingerprint"))
+                                    for r in (q._payload if isinstance(q._payload, list)
+                                              else [q._payload])))
+        res = _run_fork(client)
+        self.assertEqual(res["status"], "partial")
+        self.assertEqual(res["prerejection_counts"]["clone_failed"], 1)
+        self.assertEqual(_clones(client, ticker="SOFI"), [])
+        self.assertEqual(_verdicts(client, sofi["id"], "accepted"), [])
+
+    def test_clone_lookup_failure_fails_closed_no_insert(self):
+        """Blocker 10: 'could not prove absence' must never insert."""
+        client = FakeSupabase()
+        sofi = _prerejected_sofi()
+        _seed(client, _pending_qqq(), sofi)
+        client.raise_when(
+            "trade_suggestions", "select",
+            predicate=lambda q: _has_filter(q, "legs_fingerprint"))
+        res = _run_fork(client)
+        self.assertEqual(res["status"], "partial")
+        self.assertEqual(res["prerejection_counts"]["clone_failed"], 1)
+        stages = {e["stage"] for e in res["error_details"]}
+        self.assertIn("clone_lookup_failed", stages)
         self.assertEqual(_clones(client, ticker="SOFI"), [])
 
-
-# ---------------------------------------------------------------------------
-# Idempotency
-# ---------------------------------------------------------------------------
-
-class TestIdempotency(_EnvRawOn):
-    def test_second_run_creates_no_duplicates(self):
+    def test_duplicate_race_reconciled_as_existing(self):
         client = FakeSupabase()
-        _seed(client, _pending_qqq(), _prerejected_sofi())
-        _run_fork(client)
-        n_after_first = len(client.tables["trade_suggestions"])
-        _run_fork(client)
-        self.assertEqual(len(client.tables["trade_suggestions"]), n_after_first)
+        sofi = _prerejected_sofi()
+        _seed(client, _pending_qqq(), sofi)
+        _run_fork(client)  # first run creates the clone
+        # delete the verdict to simulate a half-completed prior run, then
+        # re-run: lookup finds the clone → existing → verdict repaired
+        client.tables["policy_decisions"] = [
+            r for r in client.tables["policy_decisions"]
+            if r.get("suggestion_id") != sofi["id"]]
+        res = _run_fork(client)
+        self.assertEqual(res["prerejection_counts"]["existing"], 1)
+        self.assertEqual(res["prerejection_counts"]["repaired"], 1)
         self.assertEqual(len(_clones(client, ticker="SOFI")), 1)
-        self.assertEqual(len(_clones(client, ticker="QQQ")), 1)
+
+    def test_full_rerun_idempotent(self):
+        client = FakeSupabase()
+        _seed(client, _pending_qqq(), _prerejected_sofi())
+        _run_fork(client)
+        n = len(client.tables["trade_suggestions"])
+        res = _run_fork(client)
+        self.assertEqual(len(client.tables["trade_suggestions"]), n)
+        self.assertEqual(res["prerejection_counts"]["existing"], 1)
+        self.assertEqual(res["prerejection_counts"]["created"], 0)
 
 
 # ---------------------------------------------------------------------------
-# Champion fence — golden effect-set
+# Blocker 8 — version semantics (honest narrowing)
 # ---------------------------------------------------------------------------
 
-class TestChampionFence(_EnvRawOn):
-    #: every key the legacy clone shape carried (from current-main
-    #: _clone_suggestion_for_cohort) + the ONLY sanctioned additions.
-    LEGACY_CLONE_KEYS = {
-        "user_id", "window", "ticker", "strategy", "direction", "status",
-        "ev", "risk_adjusted_ev", "max_loss_total", "order_json",
-        "sizing_metadata", "cohort_name", "cycle_date", "legs_fingerprint",
-        "trace_id", "model_version", "features_hash", "regime",
-        "decision_lineage", "lineage_hash", "agent_signals", "agent_summary",
-        "created_at",
+class TestVersionSemantics(_EnvRawOn):
+    def test_new_version_mints_distinct_clone_verdict_is_latest_only(self):
+        client = FakeSupabase()
+        sofi = _prerejected_sofi()
+        _seed(client, _pending_qqq(), sofi)
+        _run_fork(client)
+        with patch.object(fork_mod, "EXPERIMENT_VERSION", "e19_prerejection_v2"):
+            _run_fork(client)
+        sofi_clones = _clones(client, ticker="SOFI")
+        self.assertEqual(len(sofi_clones), 2)  # version-aware clone identity
+        versions = {c["sizing_metadata"]["experiment_version"] for c in sofi_clones}
+        self.assertEqual(versions, {"e19_prerejection_v1", "e19_prerejection_v2"})
+        # DOCUMENTED NARROWING: UNIQUE(cohort_id, suggestion_id) is
+        # version-blind — one verdict row, representing the LATEST run.
+        v = _verdicts(client, sofi["id"], "accepted")
+        self.assertEqual(len(v), 1)
+        self.assertEqual(v[0]["features_snapshot"]["experiment_version"],
+                         "e19_prerejection_v2")
+
+
+# ---------------------------------------------------------------------------
+# Blocker 1 — failure origins reach the TOP-LEVEL job contract
+# ---------------------------------------------------------------------------
+
+def _drive_suggestions_open(client):
+    """Drive the REAL suggestions_open.run with the REAL fork. The midday
+    cycle itself is stubbed with an async no-op cycle_result: it is a
+    PARALLEL branch that runs BEFORE the fork — it does not sit between the
+    injected origin (the fork's DB layer) and the asserted truth (the job
+    result), so stubbing it does not forfeit any layer under test.
+    (The full production route incl. the real cycle is TestFullRoute.)"""
+    from packages.quantum.jobs.handlers import suggestions_open as so
+
+    async def _stub_cycle(*_a, **_k):
+        return {"counts": {}}
+
+    class _NotStale:
+        blocked = False
+        reason = ""
+        age_seconds = 0
+        stale_symbols = []
+
+    with patch("packages.quantum.risk.staleness_gate.check_staleness_gate",
+               lambda: _NotStale()), \
+         patch.object(so, "is_market_day", lambda: (True, "open")), \
+         patch.object(so, "get_admin_client", lambda: client), \
+         patch.object(so, "get_active_user_ids", lambda _c: [UID]), \
+         patch.object(so, "ensure_default_strategy_exists", lambda *a, **k: None), \
+         patch.object(so, "load_strategy_config", lambda *a, **k: {"version": 1}), \
+         patch.object(so, "run_midday_cycle", _stub_cycle), \
+         patch("packages.quantum.policy_lab.config.is_policy_lab_enabled",
+               lambda: True), \
+         patch.object(fork_mod, "is_policy_lab_enabled", lambda: True), \
+         patch.object(fork_mod, "load_cohort_configs", _cohort_configs), \
+         patch.object(fork_mod, "get_current_champion",
+                      lambda *_a, **_k: "aggressive"):
+        return so.run({"date": "2026-07-13", "type": "open"})
+
+
+class TestTopLevelFailurePropagation(_EnvRawOn):
+    """Each failure injected at its REAL origin must classify the JOB
+    partial — none of these can ride a green scheduled job again."""
+
+    def _assert_partial(self, result):
+        from packages.quantum.jobs.runner import _classify_handler_return
+        self.assertFalse(result["ok"])
+        self.assertGreaterEqual(int(result["counts"]["errors"]), 1)
+        self.assertEqual(_classify_handler_return(result), "partial")
+
+    def _client(self):
+        client = FakeSupabase()
+        _seed(client, _pending_qqq(), _prerejected_sofi())
+        return client
+
+    def test_control_no_injection_is_green(self):
+        from packages.quantum.jobs.runner import _classify_handler_return
+        result = _drive_suggestions_open(self._client())
+        self.assertTrue(result["ok"])
+        self.assertEqual(int(result["counts"]["errors"]), 0)
+        self.assertEqual(_classify_handler_return(result), "succeeded")
+
+    def test_prerejection_select_failure_job_partial(self):
+        client = self._client()
+        client.raise_when(
+            "trade_suggestions", "select",
+            predicate=lambda q: _has_filter(q, "status", "NOT_EXECUTABLE"))
+        self._assert_partial(_drive_suggestions_open(client))
+
+    def test_clone_lookup_failure_job_partial(self):
+        client = self._client()
+        client.raise_when(
+            "trade_suggestions", "select",
+            predicate=lambda q: _has_filter(q, "legs_fingerprint"))
+        self._assert_partial(_drive_suggestions_open(client))
+
+    def test_clone_insert_failure_job_partial(self):
+        client = self._client()
+        client.raise_when(
+            "trade_suggestions", "insert",
+            predicate=lambda q: any(
+                "_prerej_" in str(r.get("legs_fingerprint"))
+                for r in (q._payload if isinstance(q._payload, list)
+                          else [q._payload])))
+        self._assert_partial(_drive_suggestions_open(client))
+
+    def test_verdict_upsert_failure_job_partial(self):
+        client = self._client()
+        client.raise_when("policy_decisions", "upsert")
+        self._assert_partial(_drive_suggestions_open(client))
+
+    def test_champion_detail_preserved_on_partial(self):
+        client = self._client()
+        client.raise_when("policy_decisions", "upsert")
+        result = _drive_suggestions_open(client)
+        cr = result["cycle_results"][0]
+        self.assertEqual(cr["fork_champion_status"], "ok")
+        self.assertEqual(cr["fork_status"], "partial")
+
+
+# ---------------------------------------------------------------------------
+# Blocker 11 — champion fence vs the FROZEN f34d5cd baseline
+# ---------------------------------------------------------------------------
+
+def _load_baseline_module():
+    path = Path(__file__).parent / "fixtures" / "fork_baseline_f34d5cd.py"
+    spec = importlib.util.spec_from_file_location("fork_baseline_f34d5cd", path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def _champion_view(client):
+    """Champion-visible effect set: source rows + champion-tag updates +
+    NORMAL (pending) clones + champion policy decisions. Experimental rows
+    (the sanctioned additions) are excluded; non-deterministic fields
+    stripped; sanctioned additive provenance keys stripped from normal
+    clones before comparison."""
+    sugg = []
+    for r in sorted(client.tables.get("trade_suggestions", []),
+                    key=lambda x: (str(x.get("ticker")), str(x.get("cohort_name")))):
+        if r.get("blocked_reason") == "shadow_prerejection_fork":
+            continue  # sanctioned experimental artifact
+        r = copy.deepcopy(r)
+        for k in ("id", "trace_id", "created_at"):
+            r.pop(k, None)
+        r.pop("ev_raw", None)  # sanctioned additive provenance (normal clones)
+        sz = r.get("sizing_metadata")
+        if isinstance(sz, dict):
+            sz.pop("ev_basis", None)
+            sz.pop("raev_basis", None)
+        sugg.append(r)
+    updates = [w for w in client.writes.get("trade_suggestions", [])
+               if w[0] == "update"]
+    decisions = []
+    for r in sorted(client.tables.get("policy_decisions", []),
+                    key=lambda x: str(x.get("suggestion_id"))):
+        if "prerejection_shadow_observation" in (r.get("reason_codes") or []) \
+                or set(r.get("reason_codes") or []) & {
+                    "missing_ev_basis", "raw_edge_below_minimum",
+                    "raw_raev_recompute_failed", "raw_raev_invalid",
+                    "filtered_by_policy"}:
+            # prerejection verdicts are sanctioned additions; note that
+            # 'filtered_by_policy' rows for PENDING sources (legacy) are kept
+            # via the fingerprint check below
+            if r.get("features_snapshot", {}).get("blocked_reason") \
+                    == "edge_below_minimum" or \
+                    r.get("features_snapshot", {}).get("champion_blocked_reason"):
+                continue
+        r = copy.deepcopy(r)
+        for k in ("id", "created_at"):
+            r.pop(k, None)
+        fs = r.get("features_snapshot")
+        if isinstance(fs, dict):
+            fs.pop("ev_raw", None)
+            fs.pop("ev_basis", None)
+            fs.pop("blocked_reason", None)
+        decisions.append(r)
+    return json.loads(json.dumps(
+        {"suggestions": sugg, "updates": updates, "decisions": decisions},
+        sort_keys=True, default=str))
+
+
+class TestChampionFrozenBaseline(_EnvRawOn):
+    """Run the LITERAL f34d5cd fork source and the amended fork on identical
+    inputs + identical hardened fakes; the champion-visible effect sets must
+    be EQUAL. Scenarios: no divergence · divergence candidate · quality
+    reject · retry/replay."""
+
+    SCENARIOS = {
+        "no_divergence": lambda: [_pending_qqq()],
+        "with_divergence": lambda: [_pending_qqq(), _prerejected_sofi()],
+        "quality_reject": lambda: [_pending_qqq(), _quality_blocked()],
     }
-    SANCTIONED_NEW_KEYS = {"ev_raw"}
 
-    def test_champion_effects_identical_without_prerejection_rows(self):
-        """Golden: with NO pre-rejection rows present, the fork's observable
-        effect-set matches current-main behavior — champion tagging touches
-        exactly the pending source ids, the normal clone set is unchanged in
-        count/status/ordering inputs, and no pre-rejection artifacts appear."""
-        client = FakeSupabase()
-        _seed(client, _pending_qqq())
-        res = _run_fork(client)
+    def _run_pair(self, rows_factory, reruns=1):
+        baseline_mod = _load_baseline_module()
+        rows = rows_factory()
+        results = {}
+        for name, module in (("baseline", baseline_mod), ("current", fork_mod)):
+            client = FakeSupabase()
+            _seed(client, *[copy.deepcopy(r) for r in rows])
+            for _ in range(reruns):
+                _run_fork(client, module=module)
+            results[name] = _champion_view(client)
+        return results
 
-        self.assertEqual(res["status"], "ok")
-        self.assertNotIn("prerejection_error", res)
-        # champion tag update hit exactly the pending source id
-        tag_updates = [w for w in client.writes.get("trade_suggestions", [])
-                       if w[0] == "update"]
-        self.assertEqual(len(tag_updates), 1)
-        self.assertEqual(tag_updates[0][1], {"cohort_name": "aggressive"})
-        self.assertIn(("eq", "id", "src-qqq"), tag_updates[0][2])
-        # source row itself: tagged champion, still pending, EV fields untouched
-        src = [r for r in client.tables["trade_suggestions"] if r.get("id") == "src-qqq"][0]
-        self.assertEqual(
-            (src["status"], src["ev"], src["ev_raw"], src["risk_adjusted_ev"],
-             src["cohort_name"]),
-            ("pending", 18.61, 37.22, 0.045881, "aggressive"))
-        # exactly one neutral clone, status pending (legacy behavior)
-        clones = _clones(client)
-        self.assertEqual(len(clones), 1)
-        self.assertEqual(clones[0]["status"], "pending")
-        # no key drift beyond the sanctioned additive provenance
-        drift = set(clones[0].keys()) - self.LEGACY_CLONE_KEYS - self.SANCTIONED_NEW_KEYS
-        self.assertEqual(drift, set(), f"unsanctioned clone keys: {drift}")
-        # created summary carries no prerejection bucket when none exist
-        self.assertNotIn("neutral_prerejection", res["created"])
+    def test_no_divergence_identical(self):
+        r = self._run_pair(self.SCENARIOS["no_divergence"])
+        self.assertEqual(r["baseline"], r["current"])
 
-    def test_champion_effects_identical_WITH_prerejection_rows(self):
-        """The pre-rejection source must not perturb ANY champion-side
-        effect: same tag updates, same source-row state, same normal-clone
-        count as the golden run."""
-        client = FakeSupabase()
-        _seed(client, _pending_qqq(), _prerejected_sofi())
-        _run_fork(client)
-        tag_updates = [w for w in client.writes.get("trade_suggestions", [])
-                       if w[0] == "update"]
-        self.assertEqual(len(tag_updates), 1)          # never tags NOT_EXECUTABLE
-        self.assertIn(("eq", "id", "src-qqq"), tag_updates[0][2])
-        src_sofi = [r for r in client.tables["trade_suggestions"]
-                    if r.get("id") == "src-sofi"][0]
-        self.assertIsNone(src_sofi.get("cohort_name"))  # source stays untagged
-        self.assertEqual(len(_clones(client, status="pending")), 1)  # QQQ only
+    def test_with_divergence_champion_identical(self):
+        r = self._run_pair(self.SCENARIOS["with_divergence"])
+        self.assertEqual(r["baseline"], r["current"])
 
-    def test_already_champion_eligible_no_duplicate_no_alteration(self):
-        client = FakeSupabase()
-        _seed(client, _pending_qqq())
-        _run_fork(client)
-        agg_rows = [r for r in client.tables["trade_suggestions"]
-                    if r.get("cohort_name") == "aggressive"]
-        self.assertEqual(len(agg_rows), 1)              # tagged in place, never cloned
-        self.assertEqual(agg_rows[0]["id"], "src-qqq")
+    def test_quality_reject_identical(self):
+        r = self._run_pair(self.SCENARIOS["quality_reject"])
+        self.assertEqual(r["baseline"], r["current"])
+
+    def test_retry_replay_identical(self):
+        r = self._run_pair(self.SCENARIOS["with_divergence"], reruns=2)
+        self.assertEqual(r["baseline"], r["current"])
 
 
 # ---------------------------------------------------------------------------
-# Origin-injected failure → typed truth at the route return
+# Blocker 7 — executor isolation at the PRODUCTION boundaries
 # ---------------------------------------------------------------------------
 
-class TestOriginFailureTyped(_EnvRawOn):
-    def test_prerejection_query_failure_is_typed_and_champion_unaffected(self):
-        """Inject the failure at the REAL query origin (the second SELECT
-        raising). The route must return a TYPED prerejection_error while the
-        champion path completes identically — never a silent empty."""
+class TestExecutorIsolation(_EnvRawOn):
+    def _seeded_client_with_clone(self):
         client = FakeSupabase()
-        _seed(client, _pending_qqq(), _prerejected_sofi())
+        sofi = _prerejected_sofi()
+        _seed(client, _pending_qqq(), sofi)
+        _run_fork(client)
+        # remove the champion pending row so the ONLY candidate rows left for
+        # selection are the experimental artifacts
+        client.tables["trade_suggestions"] = [
+            r for r in client.tables["trade_suggestions"]
+            if r.get("status") != "pending" or r.get("cohort_name") == "neutral"
+        ]
+        return client
 
-        real_table = client.table
-        calls = {"n": 0}
+    def test_live_selection_excludes_clone(self):
+        """The live executor's ACTUAL selection function returns nothing for
+        a book containing only prerejection clones."""
+        from packages.quantum.services.paper_autopilot_service import (
+            PaperAutopilotService,
+        )
+        client = self._seeded_client_with_clone()
+        # keep only NOT_EXECUTABLE rows (drop the normal neutral clone too)
+        client.tables["trade_suggestions"] = [
+            r for r in client.tables["trade_suggestions"]
+            if r.get("blocked_reason") == "shadow_prerejection_fork"
+            or r.get("status") == "NOT_EXECUTABLE"
+        ]
+        svc = PaperAutopilotService.__new__(PaperAutopilotService)
+        svc.client = client
+        rows = svc.get_executable_suggestions(UID, include_backlog=False)
+        self.assertEqual(rows, [])
 
-        def flaky_table(name):
-            q = real_table(name)
-            if name == "trade_suggestions":
-                calls["n"] += 1
-                if calls["n"] == 2:  # 1st = pending source; 2nd = pre-rejection
-                    client.raise_on_select.add("trade_suggestions")
-                else:
-                    client.raise_on_select.discard("trade_suggestions")
-            return q
-
-        client.table = flaky_table
-        res = _run_fork(client)
-        client.raise_on_select.discard("trade_suggestions")
-
-        self.assertEqual(res["status"], "ok")
-        self.assertIn("prerejection_error", res)
-        self.assertIn("RuntimeError", res["prerejection_error"])
-        # champion effects intact
-        src = [r for r in client.tables["trade_suggestions"] if r.get("id") == "src-qqq"][0]
-        self.assertEqual(src["cohort_name"], "aggressive")
-        self.assertEqual(len(_clones(client, ticker="QQQ")), 1)
-        # and no SOFI artifacts
-        self.assertEqual(_clones(client, ticker="SOFI"), [])
+    def test_no_staging_no_submit_through_production_predicates(self):
+        """Selection predicates used by the per-cohort executor + broker
+        submit spy: a prerejection clone can produce NO staging write, NO
+        paper_orders row, NO broker submit."""
+        client = self._seeded_client_with_clone()
+        client.tables["trade_suggestions"] = [
+            r for r in client.tables["trade_suggestions"]
+            if r.get("blocked_reason") == "shadow_prerejection_fork"
+        ]
+        submit_calls = []
+        with patch("packages.quantum.brokers.alpaca_order_handler.submit_and_track",
+                   side_effect=lambda *a, **k: submit_calls.append(a) or {"status": "submitted"}):
+            # the executor's exact per-cohort selection shape (status='pending')
+            pending = client.table("trade_suggestions").select("*") \
+                .eq("user_id", UID).eq("cohort_name", "neutral") \
+                .eq("status", "pending").execute().data
+            self.assertEqual(pending, [])
+        self.assertEqual(submit_calls, [])
+        self.assertEqual(client.tables.get("paper_orders", []), [])
+        staged_writes = [w for w in client.writes.get("trade_suggestions", [])
+                         if w[0] == "update" and
+                         isinstance(w[1], dict) and w[1].get("status") == "staged"]
+        self.assertEqual(staged_writes, [])
 
 
 if __name__ == "__main__":

@@ -77,8 +77,19 @@ def fork_suggestions_for_cohorts(
     # NEVER resurrected. Keyed on the SAME revert lever as the raw-EV basis
     # (SHADOW_RAW_EV_ENABLED): lever explicitly off → this source is off.
     # A fetch failure is TYPED into the return — never a silent empty.
+    # Fork-result contract accumulators (adversarial-review Blocker 1): every
+    # experimental-path failure INCREMENTS errors and lands in error_details as
+    # a typed entry — the handler folds `errors` into the job's counts.errors,
+    # so a broken experiment can never ride a green scheduled job. The champion
+    # path's own success/failure is reported separately (champion_* fields).
+    fork_errors: List[Dict[str, Any]] = []
+    prerej_counts: Dict[str, int] = {
+        "source": 0, "eligible": 0, "created": 0, "existing": 0,
+        "refused": 0, "clone_failed": 0, "verdict_failed": 0,
+        "repaired": 0, "verdicts": 0,
+    }
+
     prerejection_sources: List[Dict] = []
-    prerejection_error: Optional[str] = None
     if _is_shadow_raw_ev_enabled():
         try:
             prerej_res = supabase.table("trade_suggestions") \
@@ -92,19 +103,22 @@ def fork_suggestions_for_cohorts(
                 .order("ev_raw", desc=True) \
                 .execute()
             prerejection_sources = prerej_res.data or []
+            prerej_counts["source"] = len(prerejection_sources)
         except Exception as pr_err:
-            prerejection_error = f"{type(pr_err).__name__}: {str(pr_err)[:200]}"
+            fork_errors.append({
+                "stage": "prerejection_source_select",
+                "error_class": type(pr_err).__name__,
+                "error": str(pr_err)[:200],
+            })
             logger.warning(
                 f"policy_lab_fork: pre-rejection source fetch failed (typed, "
-                f"champion path unaffected): {prerejection_error}"
+                f"champion path unaffected): {type(pr_err).__name__}"
             )
 
     if not source_suggestions and not prerejection_sources:
         logger.info(f"policy_lab_fork: no source suggestions for user={user_id}")
-        result = {"status": "no_source_suggestions", "created": {}}
-        if prerejection_error:
-            result["prerejection_error"] = prerejection_error
-        return result
+        return _fork_result(
+            "no_source_suggestions", {}, prerej_counts, fork_errors)
 
     # Tag source suggestions with the currently-promoted champion cohort.
     #
@@ -172,31 +186,6 @@ def fork_suggestions_for_cohorts(
             source_suggestions, filtered_ids, config, open_count,
         )
 
-        # E19-2: pre-rejection sources — decide + clone AFTER the normal set
-        # (they can only ADD observational rows; they never displace a normal
-        # clone, never consume its slots, and the resulting clones are
-        # NOT_EXECUTABLE by construction). Decision rows are the verdict of
-        # record; a source with no ev_raw is REFUSED with a typed reason,
-        # never silently defaulted to the calibrated basis.
-        prerej_filtered: List[Dict] = []
-        prerej_refused: List[Dict] = []
-        if prerejection_sources:
-            for ps in prerejection_sources:
-                if ps.get("ev_raw") is None:
-                    prerej_refused.append(ps)
-                    continue
-                sizing_md = ps.get("sizing_metadata") or {}
-                score_value = sizing_md.get("score")
-                if score_value is None or float(score_value) < config.min_score_threshold:
-                    continue
-                prerej_filtered.append(ps)
-            _log_prerejection_decisions(
-                supabase, user_id, cohort_name, cohort_id,
-                prerejection_sources,
-                {p["id"] for p in prerej_filtered},
-                {p["id"] for p in prerej_refused},
-            )
-
         # Clone with adjusted sizing
         cloned = 0
         for s in filtered:
@@ -205,7 +194,7 @@ def fork_suggestions_for_cohorts(
                 clone = _clone_suggestion_for_cohort(
                     s, cohort_name, config, deployable,
                 )
-                if clone and not _clone_already_exists(supabase, clone):
+                if clone:
                     supabase.table("trade_suggestions").insert(clone).execute()
                     cloned += 1
             except Exception as e:
@@ -257,32 +246,24 @@ def fork_suggestions_for_cohorts(
                     # Valid 5 (alert-write recursion prevention).
                     logger.exception("cohort_clone_alert_write_failed")
 
-        # E19-2: clone the pre-rejection set — NOT_EXECUTABLE observational
-        # rows on the RAW basis, full provenance, idempotent.
-        prerej_cloned = 0
-        for ps in prerej_filtered:
-            pclone = None
-            try:
-                pclone = _clone_prerejection_for_cohort(
-                    ps, cohort_name, config, deployable,
-                )
-                if pclone and not _clone_already_exists(supabase, pclone):
-                    supabase.table("trade_suggestions").insert(pclone).execute()
-                    prerej_cloned += 1
-            except Exception as pe:
-                logger.warning(
-                    f"policy_lab_fork_prerejection_clone_error: "
-                    f"cohort={cohort_name} ticker={ps.get('ticker')} error={pe}"
-                )
+        # ── E19-2: PRE-REJECTION PIPELINE (per source, recoverable order —
+        # Blockers 2/3/4/10). For each calibrated-rejected source:
+        # validate raw basis → build + raw-gate the clone → fail-CLOSED
+        # lookup → insert (race-reconciled) → READ BACK the persisted row →
+        # only then write the accepted verdict FROM the persisted clone.
+        # Every failure is typed into fork_errors; a verdict-less clone is
+        # repaired on the next run.
+        for ps in prerejection_sources:
+            _process_prerejection_source(
+                supabase, user_id, cohort_name, cohort_id, ps,
+                config, deployable, prerej_counts, fork_errors,
+            )
 
         created[cohort_name] = cloned
-        if prerejection_sources:
-            created[f"{cohort_name}_prerejection"] = prerej_cloned
         logger.info(
             f"policy_lab_fork: cohort={cohort_name} "
             f"source={len(source_suggestions)} filtered={len(filtered)} cloned={cloned} "
-            f"prerejection_source={len(prerejection_sources)} "
-            f"prerejection_cloned={prerej_cloned}"
+            f"prerejection={prerej_counts}"
         )
 
     # Log decisions for the champion cohort too (all accepted by default —
@@ -297,12 +278,43 @@ def fork_suggestions_for_cohorts(
             0,  # champion doesn't filter by open positions at fork time
         )
 
-    result: Dict[str, Any] = {"status": "ok", "created": created}
-    if prerejection_error:
-        # Typed, never silent: the champion path completed; the experimental
-        # source fetch did not.
-        result["prerejection_error"] = prerejection_error
-    return result
+    return _fork_result("ok", created, prerej_counts, fork_errors,
+                        champion_tagged=len(source_suggestions))
+
+
+def _fork_result(
+    base_status: str,
+    created: Dict[str, int],
+    prerej_counts: Dict[str, int],
+    fork_errors: List[Dict[str, Any]],
+    champion_tagged: int = 0,
+) -> Dict[str, Any]:
+    """The explicit fork-result contract (Blocker 1). status degrades to
+    'partial' whenever ANY experimental-path failure occurred — the champion
+    outcome is reported separately so a green champion + broken experiment is
+    visible as exactly that, never as 'ok'."""
+    status = base_status
+    if fork_errors and base_status == "ok":
+        status = "partial"
+    elif fork_errors and base_status == "no_source_suggestions":
+        status = "partial"
+    return {
+        "status": status,
+        "champion_status": base_status if base_status != "partial" else "ok",
+        "champion_tagged": champion_tagged,
+        "created": created,
+        "existing": prerej_counts.get("existing", 0),
+        "refused": prerej_counts.get("refused", 0),
+        "errors": len(fork_errors),
+        "error_details": fork_errors[:10],
+        "prerejection_source_count": prerej_counts.get("source", 0),
+        "prerejection_eligible_count": prerej_counts.get("eligible", 0),
+        "prerejection_clone_count": (
+            prerej_counts.get("created", 0) + prerej_counts.get("existing", 0)
+        ),
+        "prerejection_verdict_count": prerej_counts.get("verdicts", 0),
+        "prerejection_counts": dict(prerej_counts),
+    }
 
 
 def _filter_for_cohort(
@@ -487,153 +499,370 @@ def _clone_suggestion_for_cohort(
     }
 
 
-def _clone_prerejection_for_cohort(
+# E19-2 experiment identity. The clone fingerprint embeds this version, so a
+# future v2 produces DISTINCT clone rows. HONEST NARROWING (Blocker 8): the
+# policy_decisions verdict conflicts on UNIQUE(cohort_id, suggestion_id) —
+# verified live schema — which is VERSION-BLIND; the stored verdict therefore
+# represents the LATEST experiment version only. Making verdict history
+# version-aware would require a migration (operator adjudication required —
+# not taken here).
+EXPERIMENT_VERSION = "e19_prerejection_v1"
+
+# Raw-gate typed reject reasons (Blocker 4).
+_REJECT_MISSING_BASIS = "missing_ev_basis"
+_REJECT_RAW_EDGE = "raw_edge_below_minimum"
+_REJECT_RAW_RECOMPUTE = "raw_raev_recompute_failed"
+_REJECT_RAW_INVALID = "raw_raev_invalid"
+
+
+def _process_prerejection_source(
+    supabase,
+    user_id: str,
+    cohort_name: str,
+    cohort_id: Optional[str],
+    source: Dict,
+    config: PolicyConfig,
+    deployable_capital: float,
+    counts: Dict[str, int],
+    errors: List[Dict[str, Any]],
+) -> None:
+    """One calibrated-rejected source through the RECOVERABLE order
+    (Blocker 2): validate -> build+raw-gate clone -> fail-closed lookup ->
+    insert (race-reconciled) -> read back the persisted row -> verdict FROM
+    the persisted clone. Failures are typed into ``errors``; a clone that
+    exists without a verdict is REPAIRED on re-run; nothing here can raise
+    out (the champion path is never at risk)."""
+    ticker = source.get("ticker")
+
+    def _err(stage: str, e: Exception) -> None:
+        errors.append({
+            "stage": stage, "cohort": cohort_name, "ticker": ticker,
+            "source_suggestion_id": source.get("id"),
+            "error_class": type(e).__name__, "error": str(e)[:200],
+        })
+
+    try:
+        # 1. Raw basis present? (typed refusal, never a silent default)
+        if source.get("ev_raw") is None:
+            counts["refused"] += 1
+            _write_prerejection_reject(
+                supabase, user_id, cohort_id, source,
+                _REJECT_MISSING_BASIS, errors)
+            return
+
+        # 2. Cohort policy (score) filter — not a divergence candidate for
+        #    this cohort; typed rejected verdict, not an error.
+        sizing_md = source.get("sizing_metadata") or {}
+        score_value = sizing_md.get("score")
+        if score_value is None or float(score_value) < config.min_score_threshold:
+            _write_prerejection_reject(
+                supabase, user_id, cohort_id, source,
+                "filtered_by_policy", errors)
+            return
+
+        # 3. Build the sized raw-basis clone + RAW ELIGIBILITY GATE
+        #    (Blocker 4): the divergence claim requires raw to GENUINELY
+        #    pass the canonical edge semantics, not merely exist.
+        clone, reject_reason = _build_prerejection_clone(
+            source, cohort_name, config, deployable_capital)
+        if reject_reason is not None:
+            counts["refused"] += 1
+            _write_prerejection_reject(
+                supabase, user_id, cohort_id, source,
+                reject_reason, errors)
+            return
+        counts["eligible"] += 1
+
+        # 4. Fail-CLOSED idempotency lookup (Blocker 10): "could not prove
+        #    absence" must never become "insert another row".
+        try:
+            existing = _find_existing_clone(supabase, clone)
+        except Exception as le:
+            counts["clone_failed"] += 1
+            _err("clone_lookup_failed", le)
+            return
+
+        persisted: Optional[Dict] = None
+        was_existing = existing is not None
+        if was_existing:
+            counts["existing"] += 1
+            persisted = existing
+        else:
+            # 5. Insert; a uniqueness race is reconciled by re-lookup and
+            #    counted as existing, never as success-by-assumption.
+            try:
+                supabase.table("trade_suggestions").insert(clone).execute()
+            except Exception as ie:
+                msg = str(ie).lower()
+                if "duplicate" in msg or "unique" in msg:
+                    try:
+                        persisted = _find_existing_clone(supabase, clone)
+                    except Exception as re_le:
+                        counts["clone_failed"] += 1
+                        _err("clone_race_relookup_failed", re_le)
+                        return
+                    if persisted is None:
+                        counts["clone_failed"] += 1
+                        _err("clone_race_unreconciled", ie)
+                        return
+                    counts["existing"] += 1
+                    was_existing = True
+                else:
+                    counts["clone_failed"] += 1
+                    _err("clone_insert_failed", ie)
+                    return
+
+        # 6. READ BACK the persisted clone — the verdict is built from what
+        #    the database actually holds (Blocker 3), never from in-memory
+        #    intent.
+        if persisted is None:
+            try:
+                persisted = _find_existing_clone(supabase, clone)
+            except Exception as rb:
+                counts["clone_failed"] += 1
+                _err("clone_readback_failed", rb)
+                return
+            if persisted is None:
+                counts["clone_failed"] += 1
+                _err("clone_readback_missing",
+                     RuntimeError("insert reported success but read-back is empty"))
+                return
+            counts["created"] += 1
+
+        # 7. Verdict FROM the persisted clone. An accepted verdict with a
+        #    missing or incompatible basis is forbidden.
+        p_sizing = persisted.get("sizing_metadata") or {}
+        if p_sizing.get("ev_basis") != "raw" or persisted.get("ev_raw") is None:
+            counts["verdict_failed"] += 1
+            _err("verdict_basis_incompatible",
+                 RuntimeError(f"persisted basis={p_sizing.get('ev_basis')!r}"))
+            return
+
+        already_verdicted = False
+        try:
+            already_verdicted = _verdict_exists(
+                supabase, cohort_id, source.get("id"))
+        except Exception:
+            already_verdicted = False  # the upsert below is idempotent anyway
+
+        try:
+            _write_prerejection_verdict(
+                supabase, user_id, cohort_id, source, persisted)
+            counts["verdicts"] += 1
+            if was_existing and not already_verdicted:
+                counts["repaired"] += 1
+        except Exception as ve:
+            counts["verdict_failed"] += 1
+            _err("verdict_upsert_failed", ve)
+            # The clone persists; identity (fingerprint + source id) is
+            # sufficient for the next run to repair the missing verdict.
+            return
+
+    except Exception as ue:  # belt-and-braces: nothing may escape per-source
+        counts["clone_failed"] += 1
+        _err("prerejection_unexpected", ue)
+
+
+def _build_prerejection_clone(
     source: Dict,
     cohort_name: str,
     config: PolicyConfig,
     deployable_capital: float,
-) -> Optional[Dict]:
-    """E19-2: clone a CALIBRATED-REJECTED champion candidate as a shadow
-    OBSERVATIONAL row on the RAW basis.
+) -> tuple:
+    """Build the sized raw-basis observational clone, applying the RAW
+    ELIGIBILITY GATE (Blocker 4). Returns (clone, None) on pass or
+    (None, typed_reject_reason) on refusal.
 
-    Invariants (tested):
-    - status is NOT_EXECUTABLE with a typed blocked_reason — no executor
-      (live OR shadow) selects it; it can never reach allocation, submit,
-      or the broker (every executor path filters status='pending').
-    - ev/ev_raw carry the RAW number; risk_adjusted_ev is RECOMPUTED on the
-      clone's own basis, portfolio-blind (positions=[], budget=0.0 →
-      concentration penalty 1.0) — stamped raev_basis so it is never
-      compared against a champion raev unknowingly.
-    - the champion's rejection reason and the source row identity are
-      preserved in sizing_metadata.
-    - caller REFUSES sources with ev_raw=None before reaching here (typed
-      'missing_ev_basis' decision) — this function requires the raw basis.
+    Raw gate: canonical compute_risk_adjusted_ev on the clone's OWN sized
+    view with ev = ev_raw (the same cost/edge semantics as the champion
+    ranker, portfolio-blind: positions=[], budget=0.0 -> concentration
+    penalty 1.0). -999 sentinel -> raw fails the edge too (NOT a divergence
+    case); exception -> typed recompute failure; None/non-finite -> typed
+    invalid. No clone and no accepted verdict for any of those.
     """
     raw_ev = source.get("ev_raw")
     if raw_ev is None:
-        # Defense in depth — the caller filters these into prerej_refused.
-        return None
+        return None, _REJECT_MISSING_BASIS
 
-    base = _clone_suggestion_for_cohort(source, cohort_name, config, deployable_capital)
+    base = _clone_suggestion_for_cohort(
+        source, cohort_name, config, deployable_capital)
     if not base:
-        return None
+        return None, _REJECT_RAW_INVALID
 
-    # Recompute the rank metric on the clone's OWN basis. Portfolio-blind by
-    # construction at fork time (no open-position or budget context here).
     from packages.quantum.analytics.canonical_ranker import compute_risk_adjusted_ev
     raev_view = {**base, "ev": raw_ev}
     try:
-        raw_raev = round(compute_risk_adjusted_ev(raev_view, [], 0.0), 6)
+        raw_raev = compute_risk_adjusted_ev(raev_view, [], 0.0)
     except Exception:
-        raw_raev = None  # explicit unknown, never a fabricated number
+        return None, _REJECT_RAW_RECOMPUTE
+    if raw_raev is None or not isinstance(raw_raev, (int, float)) \
+            or not math.isfinite(float(raw_raev)):
+        return None, _REJECT_RAW_INVALID
+    raw_raev = round(float(raw_raev), 6)
+    if raw_raev <= -999.0:
+        return None, _REJECT_RAW_EDGE
 
     sizing = dict(base.get("sizing_metadata") or {})
     sizing.update({
+        # EV provenance triple + identities (Blockers 3/5A): the basis is
+        # explicit; execution is described by what ACTUALLY happened
+        # (nothing) — never a claim about an intended event. The 07-13
+        # cohort-semantics lesson: execution_mode is the broker-truth
+        # discriminator, so this artifact does not carry one at all.
         "ev_basis": "raw",
-        "raev_basis": "raw_portfolio_blind" if raw_raev is not None else "unknown_recompute_failed",
-        # Full provenance triple: the raw number the clone decides on, the
-        # calibrated number the champion rejected on, and the basis label —
-        # plus the calibration identity available at source (model_version).
-        # Never inferred downstream; comparisons that need a basis and find
-        # it missing must refuse, typed (the caller's missing_ev_basis path).
+        "raev_basis": "raw_portfolio_blind",
         "ev_calibrated": source.get("ev"),
         "calibration_identity": source.get("model_version"),
-        # Routing/execution semantics are SEPARATE and both explicit — a
-        # pre-rejection clone is a simulated shadow observation and must
-        # never be read as (or become) a broker-filled outcome.
-        "routing_mode": "shadow_only",
-        "execution_mode": "internal_paper",
+        "routing_intent": "shadow_only",
+        "execution_state": "not_executed",
+        "execution_intent": "internal_paper_only",
+        "observation_scope": "entry_selection_only",
         "prerejection_fork": True,
-        "experiment_version": "e19_prerejection_v1",
+        "experiment_version": EXPERIMENT_VERSION,
         "champion_blocked_reason": source.get("blocked_reason"),
         "source_suggestion_id": source.get("id"),
+        "source_trace_id": source.get("trace_id"),
+        "source_lineage_hash": source.get("lineage_hash"),
     })
-
     base.update({
         "status": "NOT_EXECUTABLE",
         "blocked_reason": "shadow_prerejection_fork",
         "blocked_detail": (
             f"champion rejected: {source.get('blocked_reason')}; "
-            f"raw-basis shadow observation only"
+            f"raw-basis entry-selection observation only"
         ),
         "ev": raw_ev,
         "ev_raw": raw_ev,
         "risk_adjusted_ev": raw_raev,
         "sizing_metadata": sizing,
-        # Distinct fingerprint namespace: a structure could in principle
-        # appear as both a pending source and (on a later cycle) a rejected
-        # one — the clone identities must never collide.
-        "legs_fingerprint": f"{source.get('legs_fingerprint') or ''}_prerej_{cohort_name}",
+        # Version-aware clone identity (Blocker 8): a v2 experiment mints
+        # distinct rows instead of silently overwriting v1 evidence.
+        "legs_fingerprint": (
+            f"{source.get('legs_fingerprint') or ''}"
+            f"_prerej_{EXPERIMENT_VERSION}_{cohort_name}"
+        ),
     })
-    return base
+    return base, None
 
 
-def _clone_already_exists(supabase, clone: Dict) -> bool:
-    """E19-2 idempotency: one logical source candidate → at most one clone
-    per cohort per cycle. Keyed on (user, cycle_date, cohort_name,
-    legs_fingerprint) — the fingerprint already encodes source structure +
-    cohort (+ the prerejection namespace). A lookup failure returns False
-    (insert proceeds; the DB unique constraints remain the backstop)."""
-    try:
-        res = supabase.table("trade_suggestions") \
-            .select("id") \
-            .eq("user_id", clone.get("user_id")) \
-            .eq("cycle_date", clone.get("cycle_date")) \
-            .eq("cohort_name", clone.get("cohort_name")) \
-            .eq("legs_fingerprint", clone.get("legs_fingerprint")) \
-            .limit(1) \
-            .execute()
-        return bool(res.data)
-    except Exception:
+def _find_existing_clone(supabase, clone: Dict) -> Optional[Dict]:
+    """Idempotency lookup mirroring the REAL active-row unique index
+    (unique_suggestion_per_cycle_v3: user_id, window, cycle_date, ticker,
+    strategy, legs_fingerprint WHERE status NOT IN dismissed/cancelled).
+    RAISES on lookup failure — the caller fails CLOSED (Blocker 10)."""
+    res = supabase.table("trade_suggestions") \
+        .select("*") \
+        .eq("user_id", clone.get("user_id")) \
+        .eq("window", clone.get("window")) \
+        .eq("cycle_date", clone.get("cycle_date")) \
+        .eq("ticker", clone.get("ticker")) \
+        .eq("strategy", clone.get("strategy")) \
+        .eq("legs_fingerprint", clone.get("legs_fingerprint")) \
+        .limit(1) \
+        .execute()
+    rows = res.data or []
+    return rows[0] if rows else None
+
+
+def _verdict_exists(supabase, cohort_id: Optional[str], suggestion_id) -> bool:
+    if not cohort_id or not suggestion_id:
         return False
+    res = supabase.table("policy_decisions") \
+        .select("id") \
+        .eq("cohort_id", cohort_id) \
+        .eq("suggestion_id", suggestion_id) \
+        .limit(1) \
+        .execute()
+    return bool(res.data)
 
 
-def _log_prerejection_decisions(
+def _write_prerejection_verdict(
     supabase,
     user_id: str,
-    cohort_name: str,
     cohort_id: Optional[str],
-    prerejection_sources: List[Dict],
-    accepted_ids: set,
-    refused_ids: set,
+    source: Dict,
+    persisted_clone: Dict,
 ) -> None:
-    """E19-2: one decision row per (cohort, pre-rejection source) — the
-    shadow VERDICT of record. Reasons are typed: 'missing_ev_basis' for
-    refused sources (no raw basis → no silent comparison), policy filter
-    otherwise. Upsert on (cohort_id, suggestion_id) keeps re-runs
-    idempotent."""
-    if not cohort_id or not prerejection_sources:
+    """The ACCEPTED verdict of record — built from the PERSISTED clone
+    (Blocker 3). Raises on failure (the caller types it)."""
+    if not cohort_id:
+        raise RuntimeError("no cohort_id for verdict")
+    p_sizing = persisted_clone.get("sizing_metadata") or {}
+    p_order = persisted_clone.get("order_json") or {}
+    row = {
+        "cohort_id": cohort_id,
+        "suggestion_id": source.get("id"),
+        "user_id": user_id,
+        "decision": "accepted",
+        "rank_at_decision": 1,
+        "reason_codes": ["prerejection_shadow_observation"],
+        "features_snapshot": {
+            "source_suggestion_id": source.get("id"),
+            "clone_suggestion_id": persisted_clone.get("id"),
+            "source_trace_id": source.get("trace_id"),
+            "source_lineage_hash": source.get("lineage_hash"),
+            "ev": persisted_clone.get("ev"),
+            "ev_raw": persisted_clone.get("ev_raw"),
+            "ev_calibrated": p_sizing.get("ev_calibrated"),
+            "ev_basis": p_sizing.get("ev_basis"),
+            "risk_adjusted_ev": persisted_clone.get("risk_adjusted_ev"),
+            "raev_basis": p_sizing.get("raev_basis"),
+            "champion_blocked_reason": p_sizing.get("champion_blocked_reason"),
+            "routing_intent": p_sizing.get("routing_intent"),
+            "execution_state": p_sizing.get("execution_state"),
+            "calibration_identity": p_sizing.get("calibration_identity"),
+            "experiment_version": p_sizing.get("experiment_version"),
+            "cohort_name": persisted_clone.get("cohort_name"),
+            "clone_fingerprint": persisted_clone.get("legs_fingerprint"),
+            "strategy": persisted_clone.get("strategy"),
+            "ticker": persisted_clone.get("ticker"),
+            "window": persisted_clone.get("window"),
+        },
+        # simulated_fill describes the CLONE's own sizing, never the source's
+        "simulated_fill": {
+            "contracts": p_order.get("contracts"),
+            "limit_price": p_order.get("limit_price"),
+            "max_loss_total": p_sizing.get("max_loss_total"),
+            "expected_fill_price": None,
+            "expected_slippage": None,
+            "spread_width": None,
+        },
+    }
+    supabase.table("policy_decisions").upsert(
+        [row], on_conflict="cohort_id,suggestion_id"
+    ).execute()
+
+
+def _write_prerejection_reject(
+    supabase,
+    user_id: str,
+    cohort_id: Optional[str],
+    source: Dict,
+    reason: str,
+    errors: List[Dict[str, Any]],
+) -> None:
+    """Typed REJECTED verdict for a pre-rejection source that did not clone.
+    Write failure is typed into errors (never silent)."""
+    if not cohort_id:
         return
-    rows = []
-    for rank, s in enumerate(prerejection_sources, start=1):
-        sid = s.get("id")
-        if sid in accepted_ids:
-            decision, reasons = "accepted", ["prerejection_shadow_observation"]
-        elif sid in refused_ids:
-            decision, reasons = "rejected", ["missing_ev_basis"]
-        else:
-            decision, reasons = "rejected", ["filtered_by_policy"]
-        rows.append({
-            "cohort_id": cohort_id,
-            "suggestion_id": sid,
-            "user_id": user_id,
-            "decision": decision,
-            "rank_at_decision": rank,
-            "reason_codes": reasons,
-            "features_snapshot": _build_features_snapshot(s),
-            "simulated_fill": _build_simulated_fill(s),
-        })
     try:
-        supabase.table("policy_decisions").upsert(
-            rows, on_conflict="cohort_id,suggestion_id"
-        ).execute()
-        logger.info(
-            f"policy_prerejection_log: cohort={cohort_name} total={len(rows)} "
-            f"accepted={len(accepted_ids)} refused={len(refused_ids)}"
-        )
+        supabase.table("policy_decisions").upsert([{
+            "cohort_id": cohort_id,
+            "suggestion_id": source.get("id"),
+            "user_id": user_id,
+            "decision": "rejected",
+            "rank_at_decision": 1,
+            "reason_codes": [reason],
+            "features_snapshot": _build_features_snapshot(source),
+            "simulated_fill": _build_simulated_fill(source),
+        }], on_conflict="cohort_id,suggestion_id").execute()
     except Exception as e:
-        logger.error(
-            f"policy_prerejection_log_error: cohort={cohort_name} error={e}")
+        errors.append({
+            "stage": "reject_verdict_upsert_failed",
+            "ticker": source.get("ticker"),
+            "source_suggestion_id": source.get("id"),
+            "error_class": type(e).__name__, "error": str(e)[:200],
+        })
 
 
 def _get_cohort_portfolios(user_id: str, supabase) -> Dict[str, str]:

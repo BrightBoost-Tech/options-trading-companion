@@ -101,6 +101,37 @@ def _async_return(value):
     return _f
 
 
+class _FakeCashService:
+    """Broker-capital boundary. Patched at the ORCHESTRATOR's namespace
+    (patch.object(wo, 'CashService')) — class-path patches are defeated in
+    the full CI suite by earlier tests that stub sys.modules."""
+
+    def __init__(self, *_a, **_k):
+        pass
+
+    async def get_deployable_capital(self, *_a, **_k):
+        return 2000.0
+
+
+class _FakeRegimeEngine:
+    """Market-regime data boundary, anchored at the orchestrator namespace."""
+
+    def __init__(self, *_a, **_k):
+        pass
+
+    def compute_global_snapshot(self, *_a, **_k):
+        return _FakeSnap()
+
+    def compute_symbol_snapshot(self, *_a, **_k):
+        return _FakeSymSnap()
+
+    def get_effective_regime(self, *_a, **_k):
+        return _FakeState()
+
+    def map_to_scoring_regime(self, *_a, **_k):
+        return "normal"
+
+
 class TestFullProductionRoute(unittest.TestCase):
     def setUp(self):
         os.environ.pop("SHADOW_RAW_EV_ENABLED", None)
@@ -157,14 +188,8 @@ class TestFullProductionRoute(unittest.TestCase):
              patch.object(cal, "CALIBRATION_ENABLED", True), \
              patch.object(cal, "get_calibration_adjustments",
                           lambda *_a, **_k: cal_blob), \
-             patch("packages.quantum.services.cash_service.CashService."
-                   "get_deployable_capital", _async_return(2000.0)), \
-             patch("packages.quantum.services.workflow_orchestrator."
-                   "RegimeEngineV3.compute_global_snapshot",
-                   lambda *_a, **_k: _FakeSnap()), \
-             patch("packages.quantum.services.workflow_orchestrator."
-                   "RegimeEngineV3.compute_symbol_snapshot",
-                   lambda *_a, **_k: _FakeSymSnap()), \
+             patch.object(wo, "CashService", _FakeCashService), \
+             patch.object(wo, "RegimeEngineV3", _FakeRegimeEngine), \
              patch("packages.quantum.services.progression_service."
                    "ProgressionService.get_state",
                    lambda *_a, **_k: {"current_phase": "alpaca_paper"}), \

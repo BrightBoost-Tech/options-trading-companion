@@ -178,15 +178,51 @@ def run(payload: Dict[str, Any], ctx: Any = None) -> Dict[str, Any]:
                     else:
                         cycle_result = await run_midday_cycle(client, uid)
 
-                    # Policy Lab: fork scored suggestions into cohort variants
+                    # Policy Lab: fork scored suggestions into cohort variants.
+                    # E19-2 Blocker-1 (2026-07-13): the fork returns a typed
+                    # result contract; ANY experimental-path failure
+                    # (source SELECT / clone lookup / clone INSERT / verdict
+                    # UPSERT) arrives as fork_result.errors and MUST reach the
+                    # job's counts.errors — the roll-up (#1199) carries it to
+                    # the top level and the runner classifies the job partial.
+                    # The champion detail stays separate so "champion fine,
+                    # experiment broken" reads as exactly that.
                     try:
                         from packages.quantum.policy_lab.config import is_policy_lab_enabled
                         if is_policy_lab_enabled():
                             from packages.quantum.policy_lab.fork import fork_suggestions_for_cohorts
                             fork_result = fork_suggestions_for_cohorts(uid, client)
-                            if fork_result.get("status") == "ok":
-                                notes.append(f"Policy Lab fork: {fork_result.get('created', {})}")
+                            _fork_status = fork_result.get("status")
+                            if _fork_status in ("ok", "partial"):
+                                notes.append(
+                                    f"Policy Lab fork [{_fork_status}]: "
+                                    f"{fork_result.get('created', {})}")
+                            _fork_errors = int(fork_result.get("errors") or 0)
+                            if _fork_errors > 0:
+                                cycle_result = cycle_result or {}
+                                _fc = cycle_result.setdefault("counts", {})
+                                _fc["errors"] = int(_fc.get("errors") or 0) + _fork_errors
+                                cycle_result["fork_status"] = _fork_status
+                                cycle_result["fork_champion_status"] = (
+                                    fork_result.get("champion_status"))
+                                cycle_result["fork_error_details"] = (
+                                    fork_result.get("error_details") or [])[:5]
+                                notes.append(
+                                    f"Policy Lab fork DEGRADED for {uid[:8]}: "
+                                    f"errors={_fork_errors} "
+                                    f"champion={fork_result.get('champion_status')}")
                     except Exception as fork_err:
+                        # A fork CRASH is an experimental failure too — typed
+                        # into counts.errors, never a notes-only burial.
+                        cycle_result = cycle_result or {}
+                        _fc = cycle_result.setdefault("counts", {})
+                        _fc["errors"] = int(_fc.get("errors") or 0) + 1
+                        cycle_result["fork_status"] = "failed"
+                        cycle_result["fork_error_details"] = [{
+                            "stage": "fork_crashed",
+                            "error_class": type(fork_err).__name__,
+                            "error": str(fork_err)[:200],
+                        }]
                         notes.append(f"Policy Lab fork error: {fork_err}")
 
                     # Capture cycle result for observability

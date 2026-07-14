@@ -23,6 +23,81 @@ JOB_NAME = "thesis_tracker"
 
 _TRACKED_ROUTING = ("live_eligible", "shadow_only")
 
+# F-A3-4 D2/D3: the population headline splits on EXECUTION_MODE — the closing
+# order's actual routing — NEVER routing_mode (which is only cohort eligibility).
+#   alpaca_live    = broker-filled live
+#   alpaca_paper   = paper-account era
+#   internal_paper = internal / shadow fill
+# A missing / unrecognized execution_mode is isolated under a distinct
+# unknown bucket, never folded into a live one.
+_EXECUTION_MODES = ("alpaca_live", "alpaca_paper", "internal_paper")
+_UNKNOWN_EXECUTION = "unknown_execution_mode"
+_UNKNOWN_ROUTING = "unknown_routing"
+_OUTCOME_KEYS = ("hit", "miss", "in_progress", "unknown")
+
+
+def _norm_execution_mode(v) -> str:
+    """A stored execution_mode → its population bucket. Missing / unrecognized →
+    unknown_execution_mode, NEVER a live bucket: routing eligibility is not
+    broker execution (F-A3-4 D2)."""
+    return v if v in _EXECUTION_MODES else _UNKNOWN_EXECUTION
+
+
+def _norm_routing_mode(v) -> str:
+    return v if v in _TRACKED_ROUTING else _UNKNOWN_ROUTING
+
+
+def _blank_tally() -> Dict[str, int]:
+    return {k: 0 for k in _OUTCOME_KEYS}
+
+
+def _finalize_tally(t: Dict[str, int]) -> Dict[str, Any]:
+    """hit/miss/in_progress/unknown + derived scored (=hit+miss); hit_rate is
+    present ONLY when scored > 0 (never a divide-by-zero or a fabricated 0.0)."""
+    scored = t["hit"] + t["miss"]
+    out = {"hit": t["hit"], "miss": t["miss"], "scored": scored,
+           "in_progress": t["in_progress"], "unknown": t["unknown"]}
+    if scored > 0:
+        out["hit_rate"] = round(t["hit"] / scored, 4)
+    return out
+
+
+def _summarize_population(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """Full stored-population headline from position_thesis_outcomes rows (each
+    carrying thesis_outcome + execution_mode + routing_mode).
+
+    The live/paper/internal split keys on EXECUTION_MODE, never routing_mode: a
+    routing_mode='live_eligible' row whose closing order filled internally or in
+    the paper account is NOT broker-live — it is counted under its execution
+    bucket. Pooled totals live ONLY under `pooled_all_modes`, never labeled
+    'live'. Cross-tabs expose routing×execution so eligibility and execution are
+    read apart (F-A3-4 D3)."""
+    by_exec: Dict[str, Dict[str, int]] = {m: _blank_tally() for m in _EXECUTION_MODES}
+    by_exec[_UNKNOWN_EXECUTION] = _blank_tally()
+    by_cross: Dict[str, Dict[str, int]] = {}
+    pooled = _blank_tally()
+
+    for r in rows:
+        outcome = r.get("thesis_outcome")
+        if outcome not in _OUTCOME_KEYS:
+            outcome = "unknown"  # any stray verdict counts as unscored, never scored
+        em = _norm_execution_mode(r.get("execution_mode"))
+        rm = _norm_routing_mode(r.get("routing_mode"))
+        by_exec[em][outcome] += 1
+        pooled[outcome] += 1
+        by_cross.setdefault(f"{rm}/{em}", _blank_tally())[outcome] += 1
+
+    return {
+        "population_by_execution_mode": {
+            m: _finalize_tally(t) for m, t in by_exec.items()
+        },
+        "population_by_routing_x_execution": {
+            k: _finalize_tally(t) for k, t in sorted(by_cross.items())
+        },
+        "pooled_all_modes": _finalize_tally(pooled),
+        "total_rows": len(rows),
+    }
+
 
 def _parse_date(v) -> Optional[date]:
     if not v:
@@ -186,10 +261,31 @@ def run(payload: Dict[str, Any], ctx: Any = None) -> Dict[str, Any]:
           f"(hit={counts['hit']} miss={counts['miss']}) in_progress={counts['in_progress']} "
           f"unknown={counts['unknown']} errors={counts['errors']}", flush=True)
 
+    # ── Full stored-population headline (F-A3-4 D3) ──────────────────────────
+    # DISTINCT from the current-run mutation counts above: query the COMPLETE
+    # position_thesis_outcomes table and split by EXECUTION_MODE (broker-live vs
+    # paper vs internal), never routing eligibility. A summary-fetch failure
+    # increments counts.errors → the runner records PARTIAL, but the upserts
+    # above are PRESERVED (they already committed row-by-row).
+    population: Optional[Dict[str, Any]] = None
+    try:
+        pop_rows = client.table("position_thesis_outcomes") \
+            .select("thesis_outcome, execution_mode, routing_mode") \
+            .execute().data or []
+        population = _summarize_population(pop_rows)
+    except Exception as e:
+        print(f"[{JOB_NAME}] population summary fetch failed: {e}", flush=True)
+        counts["errors"] += 1
+
     # F-A4-1 typed contract: counts.errors > 0 → runner records PARTIAL.
     return {
         "status": "ok",
         "counts": {"errors": counts["errors"]},
-        "thesis": counts,
+        # (1) current-run mutation counts — only rows upserted THIS run.
+        "current_run": counts,
+        "thesis": counts,  # back-compat alias (pre-F-A3-4 key)
+        # (2) full stored-population headline — None iff the summary fetch failed
+        # (counts.errors already incremented → job PARTIAL).
+        "population": population,
         "scored": scored,
     }

@@ -303,17 +303,40 @@ class CalibrationService:
 
     # ── Data fetching ───────────────────────────────────────────────
 
-    def _fetch_outcomes(
-        self, user_id: str, window_days: int
+    def fetch_eligible_outcomes(
+        self,
+        user_id: str,
+        window_days: int,
+        *,
+        order_by_closed_at: bool = False,
     ) -> Optional[List[Dict[str, Any]]]:
-        """Fetch predicted vs realized from learning_trade_outcomes_v3 view.
+        """THE shared production cohort-selection/fetch contract (F-A3-4).
+
+        The SINGLE source of the eligible-outcome set for BOTH production
+        calibration (via `_fetch_outcomes`) and the prequential validator (via
+        `prequential_validator.fetch_live_outcomes`). No consumer may keep a
+        second copy of the is_paper / epoch / corrupted-P&L predicate — parity
+        is by DELEGATION here, not by re-implementation.
 
         Applies two floors:
         1. Rolling window cutoff = now - window_days
         2. Hard CORRUPTED_PNL_FLOOR that excludes pre-2026-04-13 rows with
            corrupted pnl_realized values (see module-level constant for full
-           rationale). The effective cutoff is max of the two so calibration
-           never regresses onto bad data even if window_days is large.
+           rationale). The effective cutoff is max of both plus the EV epoch so
+           calibration never regresses onto bad data even if window_days is large.
+
+        The live-only (is_paper=false) predicate is applied when
+        CALIBRATION_TRAIN_LIVE_ONLY is ON (default). `is_paper`'s provenance is
+        execution-mode-derived (paper_learning_ingest._resolve_is_paper: True iff
+        the closing order's execution_mode == 'alpaca_live') — so "live" here
+        means broker-filled, never a routing-eligibility label (F-A3-4 D2).
+
+        Returns:
+          None  — the query FAILED (caller MUST surface an error and MUST NOT
+                  treat this as insufficiency: no green-on-vacuum),
+          []    — success with ZERO eligible rows (legitimate insufficiency),
+          [...] — eligible rows (sorted closed_at ASC when order_by_closed_at,
+                  for prequential prefix scoring; unordered otherwise).
         """
         window_cutoff = (
             datetime.now(timezone.utc) - timedelta(days=window_days)
@@ -355,7 +378,11 @@ class CalibrationService:
             if _train_live_only_enabled():
                 query = query.eq("is_paper", False)
             result = query.execute()
-            return result.data or []
+            rows = result.data or []
+            if order_by_closed_at:
+                # ISO-8601 closed_at → lexicographic sort == chronological.
+                rows = sorted(rows, key=lambda r: r.get("closed_at") or "")
+            return rows
         except Exception as e:
             # Return None (NOT []) so the caller distinguishes a query FAILURE
             # from a legitimately-empty result: compute_calibration_adjustments
@@ -364,6 +391,15 @@ class CalibrationService:
             # A real empty result still returns [] → insufficient_data.
             logger.error(f"[CALIBRATION] Failed to fetch outcomes: {e}")
             return None
+
+    def _fetch_outcomes(
+        self, user_id: str, window_days: int
+    ) -> Optional[List[Dict[str, Any]]]:
+        """Production calibration's fetch — a thin delegator to the shared
+        `fetch_eligible_outcomes` contract. Kept as the internal name the
+        calibration report/adjustment paths (and their tests) call; order is
+        irrelevant to the aggregate fit so it takes the unordered result."""
+        return self.fetch_eligible_outcomes(user_id, window_days)
 
     # ── Metrics computation ─────────────────────────────────────────
 

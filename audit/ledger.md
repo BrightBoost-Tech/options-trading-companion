@@ -4,6 +4,57 @@ Every finding listed here is EXCLUDED from future audit runs. Re-finding a
 ledger item is a wasted slot. Runs append new findings as `status:reported`;
 the human flips them to `status:shipped` (with PR#) or `status:rejected`.
 
+## 2026-07-15 — ADJUDICATED: external full audit v1.5 · status:reported
+
+Executed the v1.5 BRIEF (`docs/review/external-full-audit-v1.5-current.md`) — it was BRIEF_ONLY (no completed
+v1.5 results existed). Full completed report: **`docs/review/external-full-audit-v1.5-results-2026-07-15.md`**.
+Audited production code at the immutable baseline **`bef2cdd`** (main moved 623044d→d18dd52 during the run =
+**docs-only** #1207+#1208, zero code). E1–E20 + W1–W5 + A1–A10 (Pass 1/2/3) + instrument-integrity + free look
+all completed; runtime adjudicated read-only. **Design score 87/100.**
+
+**RETAINED findings (exclusion memory — do not re-derive; build queue in the backlog v1.5 section):**
+- **F-MIDDAY-POSITION-READ-FAILOPEN — CONFIRMED, 2 sites, live-entry safety (HIGH).** `except → return []`:
+  Site A `workflow_orchestrator.py:_fetch_positions:2240-2270` (bare `print`, defeats `position_scope`'s
+  loud-by-contract raise → micro-tier gate bypass); Site B `paper_autopilot_service.py:_get_open_positions_for_risk_check:1328-1343`
+  (alerts, but envelopes pass green-on-vacuum). Un-hardened siblings of the 3 reads #1195 fixed. VERIFIED-CODE.
+  Site A only source-string tested.
+- **A6-2 shadow-capital parity — HIGH, THE FIRST OPERATOR DECISION.** All three cohort portfolios `net_liq=$100,000`
+  (incl. the live-eligible champion) vs the ~$2,067.86 live book (**48×**). Cross-cohort P&L/promotion/thesis is
+  basis-broken. The `or 100000` literal is INERT (stored net_liq IS $100k) — fix = re-seed shadow portfolios to
+  live scale, not remove the literal. VERIFIED-CODE + ATTESTED-RUNTIME. Strengthens F-SHADOW-CAPITAL-PARITY.
+- **A6-3 condor-EV mis-rank — HIGH, live.** Three incoherent PoP bases (credit≡$0 / debit breakeven-delta /
+  condor raw |delta|+fixed severity) all write `suggestion["ev"]`, jointly sorted by one structure-agnostic
+  ranker; cross-structure rank flips on a severity constant before any $-gate. EXTENDS-E12/⑤.
+- **A7-1 Phase-3 live-close accrual STALLED — HIGH.** 8 live closes total, last 2026-07-08, 0 in the 7 days to
+  pin; the ~10–15-fill gate is entry-rate-bound (INDETERMINATE/PAUSED), not close-instrumentation-bound.
+- **MED:** A2-1 watchdog writes terminal-cancelled on an unconfirmed cancel → double-entry (loud via ghost sweep;
+  EXTENDS-P0-A) · A4-1/A9-2 git_sha reads `GIT_SHA` not `RAILWAY_GIT_COMMIT_SHA`, 12/12 'unknown' (= GIT-SHA-
+  DECISION-PROVENANCE, one-liner) · A4-2 replay input/features hashes have a durable sink but ZERO reader (NEW) ·
+  A7-2 exit-basis stamp lands on only 2/6 closes, all 3 recent fill-only (resting-GTC bypass; EXTENDS-Phase-3) ·
+  A8-1 F-A9-5 confirmed, 56 `policy_decisions` rows carry the `ev_below_min` lie (EXTENDS-F-A9-5) · **A9-1 5th
+  typed-column-lie F-A9-6:** `model_version` = `APP_VERSION` deploy string presented as model identity (NEW) ·
+  **A9-3 F-A9-8:** champion/legacy fork path never populates `fork_errors` → champion clone/tag failure returns
+  job-green (NEW) · A10-1 `is_us_market_hours` holiday-blind → Labor Day 2026-09-07 false HIGHs (EXTENDS-area10,
+  hard trigger < 09-07) · E2 roundtrip qty-fix LIVE-INERT (default OFF) · observe-window durability: W2/W3/W4
+  arm-evidence INFO/logs-only, ephemeral (only W4 semi-durable, W3 cap-breach alarm durable).
+- **LOW/NOTE:** A1-1 replay runner input-blocked (capital/OBP/book/ev_raw uncaptured; EXTENDS-E19-2B) · A5-2 no
+  decision_runs origin column (NEW, gates replay) · A3-1 stop-vs-thesis signal readable but unconsumed (NEW) ·
+  A3-2 DTE bucket inert · A3-3 no apply-time sample re-check · A9-4 freshness alert lacks no-activity guard for
+  learning/rejection/calibration tables · OPTIMIZER_V4/ALLOCATION_V4 dead-capability cluster (free look; EXTENDS
+  FORECAST_V4 #1126 inventory) · A2-2 max_loss_total scalar-safe, canonical-position gap remains.
+
+**REJECTED (do NOT rediscover):**
+- **Internal-fill close-price sign — NOT PROVEN as a defect.** `paper_exit_evaluator._select_internal_fill_price`
+  is shadow-ONLY (P0-A guard makes it unreachable for a live close), stores the signed value consistent with the
+  system-wide signed `avg_fill_price` convention (`paper_endpoints.py:1908`), and is not read for realized-P&L
+  learning (`paper_learning_ingest` uses `realized_pl`). No positive-expecting consumer exists. Realized-P&L sign
+  is owned by #1017/#1079.
+
+**SETTLED / PASS (verified at bef2cdd; do not re-open):** E1,E3,E4,E5,E7,E9,E10,E11,E13,E14,E15,E16,E17,E18,E19,E20
+PASS; A6-1, A8-2, A8-3 PASS; A4-3 (no other non-JSON type crosses supabase-py's JSON layer — negative result);
+F-WINDOW-1 = inert identifier drift (prefix-disambiguated), not a new collision. E6 needs_manual_review is safe
+(code = critical hold, tracked, not double-fired) — the "routed-success" framing was inverted, not the code.
+
 ## 2026-07-15 (Wed, post-close) — UNIVERSE-CENSUS ADJUDICATION (read-only; corrects the same-day 18:38Z status) · status:reported
 
 STEP-0: host `20:59:06Z` ≈ DB `now()` `20:59:15Z` ≈ broker `16:59:17 ET` — agree; market CLOSED.

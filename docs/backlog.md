@@ -12,6 +12,85 @@ questions) · **RESOLVED — DO NOT REINVESTIGATE**.
 
 ---
 
+## 2026-07-15 — v1.5 EXTERNAL-AUDIT ADJUDICATION
+
+Executed the v1.5 audit brief; completed report = **`docs/review/external-full-audit-v1.5-results-2026-07-15.md`**
+(the brief `…-current.md` is the charter, not results). Audited production code at **`bef2cdd`** (main moved
+docs-only #1207/#1208). Ledger 07-15 v1.5 entry is exclusion-memory truth. **Deduplicated** against the existing
+canonical-position / ⑤ / multi-basis-cost / Phase-3 / funnel-telemetry / option-liquidity-freshness / OI-floor /
+E19-2B / F-SHADOW-CAPITAL-PARITY / F-POLICY-CAPITAL-FALLBACK / GIT-SHA-DECISION-PROVENANCE / prequential /
+F-WINDOW-1a-1b items below — those are STRENGTHENED, never re-filed.
+
+**COVERAGE MATRIX (retained findings):**
+
+| Finding | Sev | Disposition | Backlog interaction | Priority | Falsifier / owner decision |
+|---|---|---|---|---|---|
+| F-MIDDAY-POSITION-READ-FAILOPEN (2 sites) | HIGH | retained | **NEW** | **P1-safety** | read-exception test stages no entry / breaker fails closed |
+| A6-2 shadow-capital parity ($100k, 48×, champion too) | HIGH | retained | **EXTENDS-F-SHADOW-CAPITAL-PARITY** | **P1 (first operator decision)** | re-seed shadow net_liq to live scale (operator DB op) |
+| A6-3 condor-EV mis-rank | HIGH | retained | **EXTENDS-E12 / ⑤** | P1 (with ⑤) | one terminal distribution feeds both integrations |
+| A7-1 Phase-3 accrual stalled (entry-rate-bound) | HIGH | retained | EXTENDS-Phase-3 (measurement) | gated | resume entries; ETA indeterminate until live fills |
+| A2-1 watchdog cancel-ack double-entry | MED | retained | **EXTENDS-P0-A** | before 2+ live | broker-ack before terminal write |
+| A4-1/A9-2 git_sha wrong env var | MED | retained | **EXTENDS-GIT-SHA-DECISION-PROVENANCE** | one-liner | fall back to RAILWAY_GIT_COMMIT_SHA |
+| A4-2 replay hashes, zero reader | MED | retained | **NEW** | P2 | scheduled determinism check alerts on mismatch |
+| A7-2 exit-basis stamp on 2/6 closes | MED | retained | EXTENDS-Phase-3 | gated | stamp lands on resting-GTC/sweep closes |
+| A8-1 F-A9-5 (56 rows carry ev_below_min) | MED | retained | **EXTENDS-F-A9-5** | immediate tail (#1203 draft) | rejected row ev≥threshold yet stamped ev_below_min |
+| A9-1 model_version = APP_VERSION lie | MED | retained | **NEW (F-A9-6)** | P2 | model_version changes on a model change w/o APP_VERSION deploy |
+| A9-3 champion-path fork failures unmeasured | MED | retained | **NEW (F-A9-8)** | P2 | champion clone-insert exception yields status='ok' + 0 errors |
+| A10-1 is_us_market_hours holiday-blind | MED | retained | **EXTENDS-area10** | **hard trigger < 2026-09-07** | 09-07 produces 0 data_stale/job_late HIGHs |
+| E2 roundtrip qty-fix LIVE-INERT | MED | conditional | EXTENDS-W1 (observe) | observe-only | qty>1 live decision uses per-contract basis |
+| Observe-window durability (W2/W3/W4 ephemeral) | MED | retained | **NEW** | before any arm | shadow decisions write a durable DB sink, not logger.info |
+| A1-1 replay runner input-blocked | LOW | retained | EXTENDS-E19-2B / replay-runner | P2 | replay reconstructs champion set from a decision_id, 0 live reads |
+| A5-2 no decision_runs origin column | LOW | retained | NEW (gates replay) | P2 | operator re-run vs scheduled run are byte-distinguishable |
+| A3-1 stop-vs-thesis signal unconsumed | LOW | retained | NEW | research | the live query returns rows and no code path consumes them |
+| A3-2 DTE bucket inert / A3-3 no apply-time n-recheck | LOW | retained | EXTENDS-segment-n floor / E1 | P2 (trigger-owned) | a segment mult≠1.0 with sample_size<8 reaches scoring |
+| A9-4 freshness alert no-activity guard | LOW | retained | EXTENDS-§8 OUTPUT_FRESHNESS | P2 | a quiet learning-mode day fires output_stale=error |
+| OPTIMIZER_V4/ALLOCATION_V4 dead-capability | NOTE | retained | EXTENDS-FORECAST_V4 #1126 inventory | P3 | any production import of optimizer_v4/capital_allocator |
+| Internal-fill close-price sign | — | **REJECTED (NOT PROVEN)** | exclusion memory | — | a live/learning consumer reads avg_fill_price unsigned — none exists |
+
+**NEW items filed (net-new, not dupes):**
+- **F-MIDDAY-POSITION-READ-FAILOPEN (P1-safety) — do NOT implement in this docs lane.** Two live-entry authoritative
+  position reads fail OPEN (`except → return []`): `workflow_orchestrator.py:2240-2270` (silent, feeds micro-tier
+  gate) + `paper_autopilot_service.py:1328-1343` (alerts, but breaker envelopes pass green-on-vacuum). Blast radius
+  = oversized/duplicate LIVE entry. Fix: **distinguish an empty `live_ids` set from a FAILED authoritative read**;
+  require typed failure propagation to top-level job truth (raise / `capture_partial` that aborts entries), keeping
+  `live_ids==[]` as the only legitimate flat-book path. Siblings of the 3 reads #1195/F-E8-3 hardened. Own safety
+  lane, priority above observational cleanup. · origin v1.5 candidate-1 + E8 fourth-sentinel.
+- **F-A9-6 typed-column-lie #5 (P2):** `model_version` written from `os.getenv("APP_VERSION")` (deploy string) but
+  documented/consumed as model identity (`workflow_orchestrator.py:1585,3496`; `analytics_service.py:303`). Fix:
+  redocument as deploy-provenance (never `GROUP BY` in calibration) OR stamp the real calibration epoch/hash. · v1.5 A9.
+- **F-A9-8 champion-path job-truth gap (P2):** `fork.py:498` sets partial on `fork_errors`, but champion/legacy
+  tag+clone failures never populate it (`:152-153 except:pass`; `:249-296` alert-only) → champion failure reads
+  job-green (`champion_status='legacy_unmeasured'`). Fix: fold champion-path failures into the return counter. · v1.5 A9.
+- **Replay determinism reader (P2):** `decision_runs.input_hash/features_hash` written, `verify_*` has no production
+  caller → determinism regressions silent. Couples to A1-1 (the replay runner is the missing reader). · v1.5 A4-2.
+- **decision_runs origin/trigger column (P2):** no column distinguishes scheduled vs operator vs replay cycles;
+  a replay runner writing decision_runs would pollute the census unless it stamps `strategy_name='replay'`. Gates
+  the replay runner. · v1.5 A5-2.
+- **Observe-window durable sink (P2, before any arm):** route each shadow arm-decision (W2/W3/W4) to a DB sink
+  (shadow_observations / job_runs.result) instead of `logger.info`; add RISK_BASIS + BUCKET heartbeats; centralize
+  the W3 bucket seam (the `:636` + endpoint stage paths bypass it). Today 4/5 windows' arm evidence is ephemeral. · v1.5 W.
+- **A10-1 Labor Day holiday-blind (EXTENDS-area10, HARD TRIGGER < 2026-09-07):** `is_us_market_hours:46-69` gates on
+  weekday math with no `get_calendar` → 09-07 (Mon) reads market-open → false `data_stale`/`job_late` HIGHs. Fix:
+  gate the alert path on `get_calendar` before 09-07. · v1.5 A10.
+- **A2-1 watchdog cancel-ack (EXTENDS-P0-A):** `alpaca_order_handler.py:846-876` writes `watchdog_cancelled`
+  unconditionally even when `cancel_order` raises on a just-filled order; next poll excludes it → double-entry. Fix:
+  require a broker-ack (or re-GET) before the terminal write. · v1.5 A2-1.
+
+**STRENGTHENED existing items (EXTENDS, evidence/dependency only — NOT re-filed):** F-SHADOW-CAPITAL-PARITY gains the
+48× champion-too measurement + the "re-seed not remove-literal" fix shape (F-POLICY-CAPITAL-FALLBACK literal is
+INERT); E12/⑤ gains the live cross-structure mis-rank + the strict-vs-tail env disagreement; GIT-SHA gains the
+root cause (Dockerfile `ARG GIT_SHA=unknown`) + one-line RAILWAY fallback; E19-2B/replay gains the A1-1 capture gaps
+(capital/OBP/tier/book/ev_raw uncaptured); F-A9-5 gains the 56-row materialization + the raev/score secondary lie;
+Phase-3 gains A7-1 entry-rate-bound ETA + A7-2 stamp-coverage; segment-n floor gains A3-2/A3-3; OUTPUT_FRESHNESS
+gains the no-activity guard; FORECAST_V4 #1126 inventory gains OPTIMIZER_V4/ALLOCATION_V4.
+
+**Priority order (v1.5-confirmed, unchanged major ordering):** ① Canonical position representation · ② ⑤ terminal
+distribution · ③ Multi-basis cost unification · ④ Phase-3 exit-basis measurement · ⑤ Funnel telemetry truth pack ·
+⑥ Option-liquidity freshness/prune provenance · ⑦ Scanner OI-floor extension. **② and ③ may be designed in parallel;
+neither licenses a live structure/width change.** Ahead of all of these for SAFETY:
+**F-MIDDAY-POSITION-READ-FAILOPEN** (live-entry fail-closed) and **A6-2 shadow-capital parity** (the first operator
+decision — gates every honest cross-cohort comparison). No control-loosening recommended anywhere.
+
 ## 2026-07-15 (Wed post-close) — UNIVERSE-CENSUS RECONCILIATION (read-only; ledger 07-15 entry is truth)
 
 Read-only census of the 78-symbol universe + a live Aug-21 chain snapshot. **Nothing built/merged/

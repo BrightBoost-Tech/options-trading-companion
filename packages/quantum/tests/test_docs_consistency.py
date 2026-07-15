@@ -193,10 +193,12 @@ def test_e19_2b_split_out_as_separate_item(both: str):
 
 
 def test_e19_2b_is_the_full_counterfactual_selector(backlog: str):
-    m = re.search(r"E19-2B[^\n]*\n(?:[^\n]*\n){0,6}", backlog)
-    assert m, "E19-2B needs a definition block in the backlog"
-    block = m.group(0).lower()
-    assert "counterfactual" in block and "selector" in block
+    # order-robust: the full-counterfactual-selector definition must exist among
+    # the E19-2B blocks (v1.5 EXTENDS-E19-2B cross-refs may precede it).
+    blocks = re.findall(r"E19-2B[^\n]*\n(?:[^\n]*\n){0,6}", backlog)
+    assert blocks, "E19-2B needs a definition block in the backlog"
+    assert any("counterfactual" in b.lower() and "selector" in b.lower()
+               for b in blocks), "E19-2B's counterfactual-selector definition must survive"
 
 
 def test_full_experiment_stamp_moved_off_1200(both: str):
@@ -245,8 +247,10 @@ def test_arm_evidence_clock_third_restart_preserved(both: str):
 
 def test_f_a9_5_marked_draft_not_shipped(both: str):
     assert "F-A9-5" in both
-    m = re.search(r"F-A9-5[^\n]*(?:\n[^\n]*){0,3}", both)
-    assert m and "DRAFT" in m.group(0), "F-A9-5 must be marked DRAFT"
+    # order-robust: SOME F-A9-5 block marks it DRAFT (cross-references from the
+    # v1.5 adjudication may name F-A9-5 above its item definition).
+    blocks = re.findall(r"F-A9-5[^\n]*(?:\n[^\n]*){0,3}", both)
+    assert any("DRAFT" in b for b in blocks), "F-A9-5 must be marked DRAFT in its item block"
 
 
 def test_f_a9_5_not_claimed_shipped(both: str):
@@ -536,3 +540,87 @@ def test_census_funnel_pack_extends_not_duplicates(backlog: str):
     assert backlog.count("FUNNEL TELEMETRY TRUTH PACK") == 1
     assert "EXTENDS the existing" in backlog
     assert re.search(r"EXTENDS the existing[\s\S]{0,80}mislabel", backlog)
+
+
+# --------------------------------------------------------------------------
+# 13. 2026-07-15 v1.5 external-audit adjudication — brief vs results contract
+# --------------------------------------------------------------------------
+
+V15_BRIEF = REPO_ROOT / "docs" / "review" / "external-full-audit-v1.5-current.md"
+V15_RESULTS = REPO_ROOT / "docs" / "review" / "external-full-audit-v1.5-results-2026-07-15.md"
+
+
+def test_v15_one_brief_and_one_distinct_results_file():
+    """The brief is the charter; the results file is a distinct completed report."""
+    assert V15_BRIEF.is_file(), "the v1.5 brief must remain (charter)"
+    assert V15_RESULTS.is_file(), "the completed v1.5 results file must exist"
+    brief = V15_BRIEF.read_text(encoding="utf-8")
+    results = V15_RESULTS.read_text(encoding="utf-8")
+    assert brief != results
+    # the brief carries charter imperatives; the results carry completed dispositions
+    assert "THE TEN AREAS — KEEP THESE TEN" in brief
+    assert "REQUIRED OUTPUT — IN THIS ORDER" in brief
+    assert "Executive verdict" in results
+    # a v1.5 charter instruction must not be mislabeled as a finding in results
+    assert "THE TEN AREAS — KEEP THESE TEN" not in results
+
+
+def test_v15_results_has_completed_dispositions_not_brief_imperatives():
+    """Results must show completed E-dispositions (PASS/CONDITIONAL/...), not
+    the brief's 'determine/verify' imperatives as if answered."""
+    results = V15_RESULTS.read_text(encoding="utf-8")
+    assert re.search(r"E1\s*\|\s*\*\*PASS\*\*", results), "E1-E20 table with dispositions"
+    assert "CONDITIONAL" in results and "PASS" in results
+    assert "RUNNING" in results and "UNSTARTED" in results, "W1-W5 table with statuses"
+
+
+def test_v15_backlog_and_ledger_cite_the_results_file(backlog: str, ledger: str):
+    fn = "external-full-audit-v1.5-results-2026-07-15.md"
+    assert fn in backlog, "backlog must cite the results file, not the brief"
+    assert fn in ledger, "ledger must cite the results file, not the brief"
+
+
+def test_v15_adjudication_section_present_in_both(backlog: str, ledger: str):
+    assert "v1.5 EXTERNAL-AUDIT ADJUDICATION" in backlog
+    assert "ADJUDICATED: external full audit v1.5" in ledger
+
+
+def test_v15_top_safety_finding_retained_once(backlog: str, ledger: str):
+    """The headline live-entry finding is retained (not 'empty execution
+    universe'), present in both docs, and the two-site framing survives."""
+    for doc in (backlog, ledger):
+        assert "F-MIDDAY-POSITION-READ-FAILOPEN" in doc
+        assert "2 sites" in doc or "two site" in doc.lower()
+    # its safety lane is explicit, above observational cleanup
+    assert re.search(r"F-MIDDAY-POSITION-READ-FAILOPEN[\s\S]{0,400}(safety|fail-closed|fail OPEN|fail-open)",
+                     backlog, re.IGNORECASE)
+
+
+def test_v15_rejected_finding_in_exclusion_memory(ledger: str):
+    """Internal-fill sign was adjudicated NOT PROVEN — it must sit in the
+    ledger's REJECTED block so a future audit does not rediscover it."""
+    assert "Internal-fill close-price sign" in ledger
+    m = re.search(r"Internal-fill close-price sign[\s\S]{0,200}", ledger)
+    assert m and ("NOT PROVEN" in m.group(0) or "REJECTED" in m.group(0))
+
+
+def test_v15_first_operator_decision_is_shadow_capital_parity(both: str):
+    assert re.search(r"(first operator decision|FIRST OPERATOR DECISION)", both)
+    assert "shadow-capital parity" in both or "shadow capital parity" in both.lower()
+    assert "48" in both  # the $100k-vs-$2k ratio is load-bearing
+
+
+def test_v15_falsifier_grades_still_accurate(both: str):
+    """The v1.5 adjudication must not contradict the graded falsifier results."""
+    # #1200/#1201 remain PASS; #1200 stays INCONCLUSIVE-on-no-candidate rule intact
+    assert "INCONCLUSIVE" in both
+    assert "F-A9-5" in both and "56" in both  # materialized-lie count recorded
+
+
+def test_v15_results_file_no_credential_values():
+    if not V15_RESULTS.is_file():
+        pytest.skip("results file absent")
+    text = V15_RESULTS.read_text(encoding="utf-8")
+    for pattern, label in SECRET_SHAPES:
+        hit = re.search(pattern, text)
+        assert hit is None, f"v1.5 results file contains a {label}-shaped string"

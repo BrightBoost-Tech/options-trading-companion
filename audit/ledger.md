@@ -195,22 +195,15 @@ Lane A worktree `fix/f-a9-5-routing-log-truth` exists at `bef2cdd` with **ZERO c
 origin/main** — i.e. **opened, nothing shipped.** Status stays `status:reported` / DRAFT until a
 squash SHA + H8 pin exist. Do not mark shipped on the branch's existence.
 
-**CREDENTIAL INCIDENT — ⚠ NOT RECORDED THIS SESSION (OPERATOR INPUT REQUIRED; H9 refusal).**
-The lane instruction directs recording a credential incident as `ROTATED_AND_REVOKED` using
-credential **classes/names only**. **I could not identify the incident from any authoritative
-source** — searched: `audit/ledger.md` (all 4,435 lines), `audit/reports/*` (all dated reports),
-git history (30d, all branches), the memory index, and the untracked root files (match-count only,
-no content read). **The only credential item on record is F-FREE-1 (07-04) — adjudicated
-LOCAL-ONLY-FAKE, "no production credential exposed → no live rotation warranted"** — which is a
-*different* disposition and must NOT be retitled as ROTATED_AND_REVOKED. **Per H9 (never fabricate
-when a source is unavailable — reject loudly), no credential classes, names, dates, or scope are
-invented here.** A false security record in the exclusion memory is worse than an absent one: it
-would mark a real incident as already-handled and EXCLUDE it from future audit slots. **OPERATOR:
-supply the credential CLASS/NAME list (e.g. which provider/key class) + incident date, and this
-entry gets completed verbatim — no values, fragments, fingerprints, or screenshots, per the lane
-contract.** Standing hygiene doctrine UNCHANGED and re-affirmed: diff env key **NAMES** only; never
-`list_variables`/`printenv`/`env`; never emit values (origin: the 06-18 transcript incident).
-Nothing in this lane read an env value.
+**CREDENTIAL HYGIENE (standing doctrine, re-affirmed — no incident recorded).** Diff env key
+**NAMES** only; never `list_variables`/`printenv`/`env`; never emit values (origin: the 06-18
+transcript incident). **Nothing in this lane read an env value**; the GIT-SHA finding above is a
+NAME-only observation. Pinned by `test_docs_consistency.py` — the audit docs are committed and
+world-readable, so a credential-**shaped** string in `ledger.md` / `backlog.md` / any dated report
+now fails CI. Credential **classes and names only, never values, fragments, or fingerprints.**
+*(Operator decision this session: no credential-incident entry is recorded here — the ledger
+carries no security disposition either way. F-FREE-1 (07-04) stands unchanged on its own terms:
+LOCAL-ONLY-FAKE, no live rotation warranted.)*
 
 **PRESERVED, NOT RE-LITIGATED (carried forward untouched — do not reopen):** calibration ×0.5 floor
 SETTLED (floor-HOLD until ~15–20 live closes; F-A1-3 scope = persisted-ev + roundtrip gate ONLY,

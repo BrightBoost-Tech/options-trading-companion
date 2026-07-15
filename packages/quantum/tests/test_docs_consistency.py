@@ -423,17 +423,17 @@ def test_audit_docs_contain_no_credential_values(pattern: str, label: str):
         )
 
 
-def test_credential_incident_not_fabricated(ledger: str):
-    """H9: a value you cannot source must REJECT or flag, never fabricate.
-    The incident could not be identified from any authoritative source, so the
-    entry records the gap + an operator ask rather than inventing classes/dates.
-    A false security record would EXCLUDE a real incident from future audit slots."""
-    m = re.search(r"CREDENTIAL INCIDENT[^\n]*(?:\n[^\n]*){0,4}", ledger)
-    assert m, "the credential-incident disposition must be recorded"
-    block = m.group(0)
-    assert "OPERATOR INPUT REQUIRED" in block or "NOT RECORDED" in block, (
-        "the incident is unidentified — it must be flagged, not invented"
-    )
+def test_credential_hygiene_doctrine_preserved(ledger: str):
+    """Names-only diffs; never list_variables/printenv/env; never emit values.
+
+    (Replaces an earlier `test_credential_incident_not_fabricated`, deleted with
+    the credential-incident paragraph it pinned — operator decision 07-14 to drop
+    that item entirely, so no security disposition is recorded either way. The
+    standing hygiene doctrine below is independent of that item and still binds.)
+    """
+    assert "list_variables" in ledger, "the hygiene doctrine names the forbidden calls"
+    assert re.search(r"NAMES\*?\*? only", ledger), "names-only diffs"
+    assert "never values" in ledger.lower()
 
 
 def test_f_free_1_disposition_not_retitled(ledger: str):

@@ -12,6 +12,143 @@ questions) · **RESOLVED — DO NOT REINVESTIGATE**.
 
 ---
 
+## 2026-07-14 (Tue post-close) — POST-MERGE RECONCILIATION · QUEUE ①–④ CLEARED
+
+Ledger 07-14 (~19:2x CT) entry is truth. Docs-only lane from `bef2cdd`; nothing
+merged/deployed/flipped. **The v1.4 post-close build queue is FULLY CLEARED** —
+the ①–④ items in the 07-12 section below are RESOLVED and kept only as history.
+
+**RESOLVED — DO NOT REINVESTIGATE (queue ①–④):**
+
+| # | Item | PR | Squash SHA | Deploy status |
+|---|---|---|---|---|
+| ① | E8-3 typed sentinel | #1195 | `af1c5be` | superseded (REMOVED) |
+| ② | E16-3 manifests + F-REPLAY-FK | #1199 | `f34d5cd` | **falsifier PASSED 07-14** (below) |
+| ③ | E19-2 → shipped as **E19-2A** only | #1200 | `bef2cdd` | **LIVE** · falsifier 07-15 |
+| ④ | F-A3-4 prequential parity | #1201 | `9670712` | **deployed within `bef2cdd`** · falsifier 07-15 |
+
+- **② F-REPLAY-FK — CLOSED, falsifier PASSED (DB-verified 07-15 00:2xZ).** `data_blobs`
+  9 rows, **first blob ever 2026-07-14 13:00:08Z** (was 0 all-time); `decision_runs`
+  splits cleanly — 5 `failed`/`blob_never_persisted` (all 07-13, the annotated
+  unrecoverable set) vs 4 `ok`/`tape_integrity='complete'` (all 07-14). Do not re-verify.
+- **④ #1201 deployed WITHIN `bef2cdd`, not at `9670712`** — its own deployment is
+  REMOVED (superseded 37 min later). Verify it BY CONTENT at `bef2cdd`; a
+  deployment-SHA search for `9670712` reads as "never shipped" (H8 squash class).
+- **③ shipped NARROW — `raw_candidate_eligibility_only`.** NOT selection, execution,
+  fill, P&L, thesis, capacity, or joint-ranking evidence. **D②'s un-mute stays
+  PARTIAL**; the 07-12 line "③'s SHA stamps the FULL experiment" is **superseded** —
+  the full stamp waits on E19-2B.
+
+**NEW P1 · E19-2B — full counterfactual selector (the split-out dependency).**
+Joint normal-vs-prerejection ranking + capacity/slot accounting
+(`max_positions_open` / `max_suggestions_per_day`) + selection semantics —
+everything required before ANY entry-rate / conversion / P&L claim can attach to
+the prerejection fork. **Blocks the D② full un-mute.** **GATED on
+F-SHADOW-CAPITAL-PARITY + F-POLICY-CAPITAL-FALLBACK** — a selector that sizes
+against a fabricated capital basis produces fabricated selections; fix the basis
+first. · origin #1200 §15 (explicit non-goal) · done when: the fork produces a
+joint-ranked, capacity-evaluated counterfactual selection on a broker-grounded
+basis, and D② un-mutes in full.
+
+**NEW P1 · F-SHADOW-CAPITAL-PARITY (HIGH, CONFIRMED-empirically).** All three
+policy-lab cohort portfolios carry `net_liq = 100000` — **including `aggressive`,
+the LIVE CHAMPION (`routing_mode='live_eligible'`)** — while broker truth is
+**$2,067.86** (verified 07-15 00:2xZ; equity=cash=OBP=portfolio_value, positions
+`[]`). ≈**48×** the deployable basis (§5.1: deployable = live Alpaca
+`options_buying_power`, never a DB snapshot). **⚠ #1200's fail-closed
+`_normalize_capital` (`fork.py:435-442`) does NOT close this** — it removes the
+hardcoded `or 100000` *literal* and reads `net_liq` authoritatively, but the
+column *contains* the fabrication; reading a fabricated value authoritatively is
+still fabrication (H9). SCOPE (honest): the policy-lab **evidence** surface, NOT
+live sizing (live capital comes from the broker OBP path + `RiskBudgetEngine`,
+untouched). It is the quantified root under §8's "shadow ledgers are partly
+fiction / shadows fill at 5–17× live size", and it makes **champion promotion
+basis-broken** (cohorts sized at $100k compared to a $2,068 live account).
+Interacts with — does not duplicate — #1124 promotion normalization (discount
+0.31 measured). Seeding origin = `init_lab.py:12` `INITIAL_CAPITAL = 100_000.0`.
+· origin #1200 §9 disclosure, widened by DB verification · done when: cohort
+capital resolves to a broker-grounded basis (or the experiment declares its basis
+explicitly AND promotion normalizes it), and a promotion comparison states its
+capital basis.
+
+**NEW P2 · F-POLICY-CAPITAL-FALLBACK (MED, CONFIRMED-by-cite) — TWO sites, not
+one.** The `net_liq or cash_balance or 100000` fabrication survives at:
+`policy_lab/fork.py:210` (legacy normal-shadow-clone loop — **the site #1200's §9
+DISCLOSURE names**, annotated in-place at `:201`, out of its frozen scope) **and
+`policy_lab/evaluator.py:251` — a SECOND, UN-NAMED site** found by grep this
+session (#1200's PR body names only the fork site; fixing only the disclosed one
+leaves the evaluator fabricating). Shares a root with F-SHADOW-CAPITAL-PARITY
+(`init_lab.py:12`) — **fix as a family, not ad hoc.** · origin #1200 §15 · done
+when: no policy-lab capital read can fabricate a default, both sites.
+
+**NEW P2 · GIT-SHA-DECISION-PROVENANCE (MED, CONFIRMED-empirically).** The replay
+tape is now complete in CONTENT and **silent on PROVENANCE**:
+`decision_runs.git_sha` = the literal string **`'unknown'` on 9/9 rows, all-time**
+(`distinct_sha=1`) across runs spanning **four** deployed SHAs (`8d93621` →
+`1386834` → `f34d5cd` → `bef2cdd`). MECHANISM: the decision path reads **only**
+`GIT_SHA` (`suggestions_open.py:139`, `suggestions_close.py:128`, no fallback) and
+`lineage.get_code_sha` (`:264`) degrades `GIT_SHA` → `APP_VERSION` → `"unknown"`;
+**the healthcheck already solves it** (`api.py:154-157` resolves `GIT_SHA` **or**
+`RAILWAY_GIT_COMMIT_SHA`, the name Railway actually injects) — the decision path
+just doesn't reuse it. **Defeats the stated contract "③'s SHA stamps the FULL
+experiment"**: a tape that cannot name the code that produced it cannot attribute
+a decision to a SHA. Also blocks any before/after A-B read across a recycle. NOT a
+#1199 regression (#1199 delivered content integrity, never claimed provenance).
+FIX: the decision path consumes the healthcheck's existing resolution (env
+NAME-only; no value read). · origin 07-14 post-merge reconciliation · done when: a
+`decision_run` carries a real SHA MATCHING the Railway deployment SHA of the
+container that produced it.
+
+**NEW P2 (RESEARCH-adjacent, OWNER-GATED) · prequential operationalization — the
+falsifier that never runs.** **`prequential_validator` has ZERO production
+callers** (verified repo-wide): no scheduler entry, no job handler, no import
+outside its own module — the sole non-test reference is a **docstring** at
+`calibration_service.py:317`; reachable only via its own `main()`/`__main__`
+(`:242`,`:281`). **#1201 correctly repaired a validator nothing invokes** — the
+[]-green disease is closed at the seam, but the seam is on no live route (the
+#1126 costume's cousin, with the honest difference that #1201 never claimed a
+caller). Recorded so no future audit reads "prequential parity shipped" as
+"prequential validation runs". **SCHEDULING IS AN OPERATOR DECISION — not taken
+here, not recommended by default**: the validator is the designated falsifier for
+the calibration multiplier (F-A1-3/E17 family), so wiring it is live-adjacent
+(cadence, queue routing, and what a failing verdict should *do*). Options,
+unranked: (a) leave manual/on-demand — status quo, zero risk, falsifier stays
+unexercised; (b) schedule read-only on `background`, alert on divergence; (c) gate
+the multiplier on it — behavioral, needs its own PR + flag. · done when: the
+operator picks (a)/(b)/(c) and it is recorded.
+
+**★ F-WINDOW-1 — IDENTIFIER COLLISION RESOLVED (two defects were riding one
+name).** The 07-13/07-14 entries closed one while the P2 tail still carried the
+other — a silent-retirement hazard. Split, both preserved:
+- **F-WINDOW-1a — heartbeat EMISSION → CLOSED at `1386834` (#1198).** The beats
+  already existed (#1187 `log_shadow_heartbeat`) and rode a dead channel; the
+  deliverable was the handler, not new heartbeats. Proven post-close by an
+  `[ALPACA_SYNC]` INFO line reaching Railway. **This — and only this — is what the
+  07-14 nightly's "F-WINDOW-1 CLOSED" means.**
+- **F-WINDOW-1b — heartbeat COVERAGE + JOINABILITY → OPEN, stays P2 tail.** The
+  v1.4 original: only W4 (APPLY_ORDER) + a generic post-portfolio EXECUTOR_SHADOW;
+  **W1 no gate-site beat · W2 no per-consumer zero-eval beat · W3 pre-portfolio
+  miss + no candidate/reservation-order identity · no shared cycle/decision ID → W5
+  unjoinable.** A live channel does not create a shared correlation ID. **The ARM
+  decisions wait on JOINABLE evidence — 1a's closure does NOT release them.**
+  W-clocks do NOT reset for observability-only additions (unchanged). **Doctrine
+  preserved: the arm-evidence clock restarted at `1386834` — the THIRD restart.**
+
+**F-A9-5 — DRAFT, NOT SHIPPED (Lane A OPEN).** Stays P2 tail, unchanged in
+substance (`_log_cohort_decisions` compares dollar `ev` to a 0-100 score threshold,
+`fork.py:466-477` vs the real score filter `:233-236` → `ev_below_min` lies;
+routing byte-correct; the logger must CONSUME the routing predicate's result, not
+re-derive). Lane A worktree `fix/f-a9-5-routing-log-truth` exists at `bef2cdd` with
+**ZERO commits vs origin/main** — opened, nothing shipped. **Do not mark shipped on
+the branch's existence**; needs a squash SHA + H8 pin.
+
+**PENDING FALSIFIERS → the ledger's pending list owns these (not this file):**
+#1200 first calibrated-rejected candidate (**no qualifying candidate =
+INCONCLUSIVE**, base rate ~1–2/trading day) · #1201 `calibration_update` 07-15
+10:00Z · #1201 `thesis_tracker` 07-15 22:00Z (**daily 17:00 CT, not hourly**).
+
+---
+
 ## 2026-07-13 (Mon RTH, read-only) — DOCTRINAL-AUDIT ADJUDICATION (Sinclair/Natenberg)
 
 Adjudicated at `8d93621` vs repo + DB + runtime; full verdicts + scorecard in the
@@ -99,7 +236,11 @@ concentration basis cannot block today).
   handler/level at worker startup (root INFO vs targeted loggers = owner call),
   not new heartbeats. **⚠ W-clocks: [RISK_BASIS_SHADOW] has NEVER emitted; the
   d5edd50 arm-evidence window collected nothing; clocks restart at tonight's
-  fix SHA.** Supersedes the F-WINDOW-1 P2-tail item in the 07-12 section.
+  fix SHA.** ~~Supersedes the F-WINDOW-1 P2-tail item in the 07-12 section.~~
+  **CORRECTED 07-14 — this superseded ONLY the EMISSION half (now F-WINDOW-1a,
+  CLOSED at `1386834`/#1198). It did NOT supersede the P2-tail item, which is the
+  COVERAGE + JOINABILITY defect (now F-WINDOW-1b) and remains OPEN.** Reusing one
+  identifier for two defects nearly retired 1b silently; see the 07-14 section.
 
 ## 2026-07-12 (Sun night) — v1.4 EXTERNAL-AUDIT ADJUDICATION — 3 seam kills of our own weekend work
 
@@ -109,7 +250,16 @@ the ledger 07-12 v1.4 entry. All one layer BELOW this weekend's route-driving te
 + doc writes. Monday post-close BUILD QUEUE: ① E8-3 → ② E16-3 → ③ E19-2 → ④ F-A3-4
 → tail (A9-5 · F-WINDOW-1 · F-A10-4).
 
-- **P0-① · E8-3 typed sentinel (CRITICAL, <1 eve).** `_fetch_open_positions`
+> **⚠ SUPERSEDED 2026-07-14 — ①–④ ALL RESOLVED; see the 07-14 section at the top of
+> this file (authoritative) and the ledger 07-14 (~19:2x CT) entry. Kept as history:
+> the defect statements below are the shipped acceptance criteria, NOT open work.
+> Deltas the retelling must not lose: ③ shipped NARROW as **E19-2A**
+> (`raw_candidate_eligibility_only`) — the FULL experiment stamp moved to the new
+> **E19-2B**; ④ deployed **within `bef2cdd`**, not at its own SHA `9670712`; the
+> **F-WINDOW-1** tail item below is now split **1a (CLOSED at `1386834`)** /
+> **1b (OPEN — coverage + joinability)**; **F-A9-5 is DRAFT, not shipped.**
+
+- **P0-① · [RESOLVED — #1195 `af1c5be`] E8-3 typed sentinel (CRITICAL, <1 eve).** `_fetch_open_positions`
   (`intraday_risk_monitor.py:646-675`) + `_get_active_user_ids` (`:1691`) catch DB
   failures → `[]`, which `_check_user` reads as authoritative-empty → #1186's outer
   typed loop never fires → a failed book read = green q15 cycle blind to
@@ -122,7 +272,7 @@ the ledger 07-12 v1.4 entry. All one layer BELOW this weekend's route-driving te
   fills Monday before ① ships, the latent risk is live that afternoon — accepted,
   one day.** · origin v1.4 F-E8-3 (promoted; 3rd E8 layer) · done when: a failed
   read is never persisted `succeeded`, both sites, origin-to-top test.
-- **P1-② · E16-3 manifest at ALL SEVEN returns + morning + roll-up (~1 eve).**
+- **P1-② · [RESOLVED — #1199 `f34d5cd`; falsifier PASSED 07-14] E16-3 manifest at ALL SEVEN returns + morning + roll-up (~1 eve).**
   `_capture_decision_manifest` covers 2 of 7 midday returns (missing
   `micro_tier_position_open`/`capital_scan_policy_block`/`global_risk_budget_
   exhausted`/`no_candidates`/`scanner_failed` — wire it into the `:2034` early-return
@@ -133,8 +283,9 @@ the ledger 07-12 v1.4 entry. All one layer BELOW this weekend's route-driving te
   generic nested errors. Test DRIVES each production return + the classifier.
   **CORRECTION: #1188 "EVERY return / COMPLETE" is FALSE — tape complete only from
   ②'s SHA** (3rd exclusion-integrity note on E16). · origin v1.4 F-E16-3 (promoted).
-- **P1-③ · E19-2 pre-rejection cohort branching + coherent basis (design-care,
-  MED fix-risk, ~1-2 eve).** The fork queries only `status IN ('pending','staged')`
+- **P1-③ · [RESOLVED-NARROW — #1200 `bef2cdd` shipped E19-2A only; the FULL
+  experiment moved to E19-2B, see the 07-14 section] E19-2 pre-rejection cohort
+  branching + coherent basis (design-care, MED fix-risk, ~1-2 eve).** The fork queries only `status IN ('pending','staged')`
   (`fork.py:44-56`), so calibrated-rejected candidates (`NOT_EXECUTABLE`,
   `workflow_orchestrator.py:3750-3767`) never reach the raw-EV cloner → SOFI-class
   divergence cases excluded. FIX: move raw-shadow eligibility BEFORE the calibrated
@@ -145,22 +296,29 @@ the ledger 07-12 v1.4 entry. All one layer BELOW this weekend's route-driving te
   REQUIRE the shadow verdict. **D② ledger annotation gains: un-mute PARTIAL until ③
   — entry-rate evidence excludes divergence cases; `9a540ce` stamps the FLAG, ③'s
   SHA stamps the FULL experiment.** · origin v1.4 F-E19-2 (partial-FAIL promoted).
-- **P1-④ · F-A3-4 prequential cohort parity (small).** `fetch_live_outcomes`
+- **P1-④ · [RESOLVED — #1201 `9670712`, deployed within `bef2cdd`; note the
+  validator has NO production caller — see "prequential operationalization" in the
+  07-14 section] F-A3-4 prequential cohort parity (small).** `fetch_live_outcomes`
   (`prequential_validator.py:190-239`) ignores `window_days`, skips the epoch +
   corruption floor, and returns [] on failure → green `insufficient_data` (the
   E8-3 []-sentinel class — LINKED). FIX: share the production fetch predicate
   (reuse/import the calibration_service query builder — don't reconstruct) + typed
   fetch failure + honor `window_days`. CENSUS: pre_epoch=0 → NIL current numerical
   impact (structural only). · origin v1.4 F-A3-4.
-- **P2 tail:** **F-A9-5** — `_log_cohort_decisions` compares dollar `ev` to a
-  0-100 score threshold (`fork.py:466-477` vs the real score filter `:233-236`) →
-  `ev_below_min` lies; the logger must CONSUME the routing predicate's result, not
-  re-derive (join check = the test; rides ③'s fork territory if clean) · **F-WINDOW-1**
-  — per-decision-site heartbeats sharing ONE cycle/decision ID + W3 reservation-order
-  identity (the arm-evidence repair's OWN second pass; W-clocks do NOT reset for
-  observability-only additions, but the ARM decisions wait on joinable evidence) ·
-  **F-A10-4** — expiry-day 72h tracker lag; LOW (recommend: accept the documented
-  lag, OR `expiry < today+1` at a post-close run; the Aug-21 rows are the live test).
+- **P2 tail:** **F-A9-5 [DRAFT — Lane A OPEN, NOT SHIPPED]** — `_log_cohort_decisions`
+  compares dollar `ev` to a 0-100 score threshold (`fork.py:466-477` vs the real score
+  filter `:233-236`) → `ev_below_min` lies; the logger must CONSUME the routing
+  predicate's result, not re-derive (join check = the test; rides ③'s fork territory if
+  clean). Branch `fix/f-a9-5-routing-log-truth` exists at `bef2cdd` with ZERO commits vs
+  origin/main — **do not mark shipped on the branch's existence** · **F-WINDOW-1 → NOW
+  SPLIT (see the 07-14 section): 1a EMISSION = CLOSED at `1386834` (#1198); 1b COVERAGE
+  + JOINABILITY = the item that stays HERE** — per-decision-site heartbeats sharing ONE
+  cycle/decision ID + W3 reservation-order identity (the arm-evidence repair's OWN second
+  pass; W-clocks do NOT reset for observability-only additions, but the ARM decisions
+  wait on joinable evidence — **a live channel is not a correlation ID; 1a's closure does
+  NOT release the ARM decisions**) · **F-A10-4** — expiry-day 72h tracker lag; LOW
+  (recommend: accept the documented lag, OR `expiry < today+1` at a post-close run; the
+  Aug-21 rows are the live test).
 
 **MONDAY RITUAL PINS += the three prediction checks:** (h) E19 first-scan
 divergence grade · (e) E16 decision_runs↔manifest completeness + commit-err-green ·

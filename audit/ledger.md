@@ -4,6 +4,342 @@ Every finding listed here is EXCLUDED from future audit runs. Re-finding a
 ledger item is a wasted slot. Runs append new findings as `status:reported`;
 the human flips them to `status:shipped` (with PR#) or `status:rejected`.
 
+## 2026-07-14 (Tue ~19:2x CT, post-close) — POST-MERGE RECONCILIATION: ④ #1201 + ③ #1200 SHIPPED · QUEUE ①–④ CLOSED · ★ #1199 FALSIFIER PASSED · ★ NEW GIT-SHA-DECISION-PROVENANCE · status:shipped
+
+STEP-0: host `2026-07-15T00:15:42Z` = DB `now()` `00:15:44Z` = broker `2026-07-14 20:15:44 ET`
+— all three agree within ~2s; market CLOSED (next open 07-15 09:30 ET). **Premise note (not a
+correction): the invoking header's "2026-07-14" is the ET/CT session date; the UTC date is already
+07-15.** All UTC timestamps below are clock-grounded; "07-14 RTH" = the session that closed 20:00Z.
+Docs-only lane, isolated worktree from `bef2cdd`; no merge/deploy/migration/flag/env/schedule/DB/
+broker change. Deployed SHA `bef2cdd` PRESERVED for the 07-15 natural falsifiers.
+
+**H8 PIN (both PRs, verified against Railway + `origin/main`, not local):** `origin/main` =
+`bef2cdd60edbee8642fa043192fd982d4bfe4436`. Railway worker: `bef2cdd` **SUCCESS 2026-07-14
+23:05:33Z = the ONLY non-REMOVED deployment**.
+
+**④ F-A3-4 #1201 — squash `9670712`, merged 22:28:02Z. ⚠ DEPLOYED *WITHIN* `bef2cdd`, NOT AT ITS
+OWN SHA.** Its own deployment (`9670712`, 23:28:05Z record 22:28:05Z) is **REMOVED** — superseded
+37 minutes later by #1200's merge. `9670712` IS an ancestor of `bef2cdd` (verified
+`git merge-base --is-ancestor`), so the code is live; but **no container ever ran `9670712` to a
+falsifier.** Consequence for future audits: **verify #1201 behavior at `bef2cdd` BY CONTENT — a
+deployment-SHA search for `9670712` returns REMOVED and reads as "never shipped" (H8 squash-merge
+class).**
+- D1 validator fetch parity: `prequential_validator.fetch_live_outcomes` now delegates to the ONE
+  shared production cohort contract (`CalibrationService.fetch_eligible_outcomes` — rolling window ·
+  `CORRUPTED_PNL_FLOOR` · `CALIBRATION_EV_EPOCH` · `CALIBRATION_TRAIN_LIVE_ONLY`). Fetch is
+  `Optional`: `None` = failure → `status=error/fetch_failed`, `[]` = legit-empty →
+  `insufficient_data`. Closes the []-sentinel disease (E8-3 class link) at this seam.
+- D3 thesis headline: `population_by_execution_mode` + `population_by_routing_x_execution`;
+  `pooled_all_modes` is the ONLY pooled label; `routing_mode='live_eligible'` is **never** called
+  "live"; unknown mode isolated, never silently live.
+- CENSUS PRESERVED (do not re-derive): `pre_epoch=0` → **NIL current numerical impact; structural
+  only.** This does NOT weaken with time — it is a census as-of the v1.4 adjudication.
+
+**③ E19-2A #1200 — squash `bef2cdd`, merged 23:05:30Z, deployed 23:05:33Z SUCCESS. LIVE.**
+
+**★ NARROW CLAIM — PRESERVE VERBATIM; DO NOT LET IT WIDEN BY RETELLING.** #1200 delivers
+**`raw_candidate_eligibility_only`** and nothing else. It is **NOT** selection · **NOT** execution ·
+**NOT** fill simulation · **NOT** P&L evidence · **NOT** thesis evidence · **NOT** capacity/slot
+accounting (`max_positions_open` / `max_suggestions_per_day`) · **NOT** joint normal-vs-prerejection
+ranking · **NOT** entry-rate evidence. Every clone AND both verdict types carry the full contract:
+`observation_scope='raw_candidate_eligibility_only'`, `decision_semantics=
+'raw_candidate_eligibility'`, `selected_for_entry=false`, `capacity_evaluated=false`,
+`joint_rank_evaluated=false`, `execution_state='not_executed'`, `execution_intent=
+'internal_paper_only'`, `routing_intent='shadow_only'`. Accepted verdict
+`reason_codes=['raw_candidate_eligible_observation']` with `rank_at_decision=NULL` **because no
+ranking occurred**. `simulated_fill` is a sizing/TCM snapshot, **NOT an execution or fill**. Source
+boundary: `edge_below_minimum` ONLY — `marketdata_quality_gate` (stale/dark/unpriceable) and all
+scanner-level rejects are NEVER resurrected (H9: a dark leg stays unmarkable, §7 area8).
+- **D② un-mute is STILL PARTIAL — `bef2cdd` does NOT stamp "the FULL experiment."** The 07-12
+  backlog line ("`9a540ce` stamps the FLAG, ③'s SHA stamps the FULL experiment") is **superseded**:
+  ③ shipped as **E19-2A (eligibility observation)**, not the full selector. The FULL experiment
+  stamp now waits on **E19-2B** (below). Entry-rate evidence remains excluded until E19-2B.
+
+**★ E19-2B (NEW, SPLIT OUT — the full counterfactual selector) — the separate dependency.**
+#1200 explicitly scopes it out. E19-2B = joint normal-vs-prerejection ranking + capacity/slot
+accounting + selection semantics, i.e. everything required before ANY entry-rate / conversion /
+P&L claim can attach to the prerejection fork. **Blocks: the D② full un-mute.** Depends on
+F-POLICY-CAPITAL-FALLBACK + F-SHADOW-CAPITAL-PARITY (a counterfactual selector that sizes against
+a fabricated capital basis produces fabricated selections). → backlog P1.
+
+**PENDING FALSIFIERS (the recoverable runbook — all three are 07-15 events; NOT verifiable tonight):**
+- **#1200 · first post-merge midday cycle with a calibrated-rejected candidate.** EXPECT: a
+  `shadow_prerejection_fork` clone + verdict carrying the per-contract unit contract, **identical
+  `raev1` across cohort sizes**, `coverage_complete=true`, and a **byte-identical champion set**.
+  **⚠ NO QUALIFYING CANDIDATE = INCONCLUSIVE — not PASS, not FAIL.** Base rate (DB, 5d):
+  `edge_below_minimum` = 1 (07-14) · 2 (07-13) · 1 (07-10) · 0 (07-11/07-12 weekend) → **~1–2 per
+  trading day; likely but NOT guaranteed on 07-15.** Do not record a quiet day as a PASS. Any
+  champion-set deviation, or any infrastructure fault surfacing green = **REVERT**.
+- **#1201 · `calibration_update`** — schedule 05:00 CT = **10:00Z**; last run 07-14 10:00:02Z ran on
+  `f34d5cd` (**pre-#1201**). **First exercise = 07-15 10:00Z.** EXPECT: the shared
+  `fetch_eligible_outcomes` contract yields the SAME eligible rows production calibration already
+  used (pre_epoch=0 ⇒ no numerical move); a fetch failure must surface `error/fetch_failed`, never
+  a green `insufficient_data`.
+- **#1201 · `thesis_tracker`** — schedule **17:00 CT = 22:00Z, DAILY** (single run — NOT hourly;
+  the "hourly arm" in prior entries is the watchdog's expectation, not the schedule); last run
+  07-14 22:00:16Z ran on `f34d5cd` (**pre-#1201**, 12 min before the merge). **First exercise =
+  07-15 22:00Z.** EXPECT: `population_by_execution_mode` present; `pooled_all_modes` the only
+  pooled label; no `live_eligible`-as-"live"; a population-summary failure → PARTIAL with the
+  thesis upserts preserved.
+
+**★ #1199 (F-REPLAY-FK) FALSIFIER — PASSED. The 07-14 pending disposition #1 is RESOLVED
+(verified tonight, DB).** The nightly (00:00 CT) could only predict this; the RTH day delivered it:
+- `data_blobs` = **9 rows; FIRST BLOB EVER at 2026-07-14 13:00:08.800835Z** — exactly the predicted
+  13:00Z `suggestions_close`. (All-time count was **0** at the nightly.)
+- `decision_runs` clean split, no ambiguity: **5 runs `failed`/`blob_never_persisted`, ALL 07-13
+  (13:00→17:29Z, the annotated-unrecoverable set)** vs **4 runs `ok`/`tape_integrity='complete'`,
+  ALL 07-14** (13:00 close + 14:11/16:00/17:48 opens).
+- **The tape is now COMPLETE.** F-REPLAY-FK: `status:shipped`, falsifier PASSED — **do not re-find,
+  do not re-verify.**
+
+**★ NEW — GIT-SHA-DECISION-PROVENANCE (MED, CONFIRMED-empirically, evidence-integrity).**
+**The replay tape is now complete in CONTENT and silent on PROVENANCE: `decision_runs.git_sha` =
+the literal string `'unknown'` on 9/9 rows, all-time** (`distinct_sha = 1`) — across runs spanning
+**four different deployed SHAs** (`8d93621` → `1386834` → `f34d5cd` → `bef2cdd`). Every tape row
+claims the same non-SHA. MECHANISM: the decision path reads **only** `GIT_SHA`
+(`suggestions_open.py:139`, `suggestions_close.py:128` — `os.getenv("GIT_SHA")`, no fallback) and
+`lineage.get_code_sha` (`:264`) degrades `GIT_SHA` → `APP_VERSION` → `"unknown"`; the **healthcheck
+already solves this** (`api.py:154-157` resolves `GIT_SHA` **or** `RAILWAY_GIT_COMMIT_SHA`, the
+name Railway actually injects) — the decision path simply does not reuse it. **This is not
+cosmetic: it defeats the stated experiment contract "③'s SHA stamps the FULL experiment"** — a
+replay tape that cannot name the code that produced it cannot attribute a decision to a SHA, which
+is the whole point of the tape. Also blocks any before/after A-B read across a recycle. FIX SHAPE:
+the decision path consumes the healthcheck's existing resolution (env NAME-only observation; no
+value read, no env change in this lane). Falsifier: a post-fix `decision_run` carries a real
+12-char SHA that MATCHES the Railway deployment SHA of the container that produced it. → backlog
+P2 (evidence-integrity; rides the replay/tape family). **Not a #1199 regression — #1199 delivered
+content integrity and never claimed provenance.**
+
+**★ NEW — F-SHADOW-CAPITAL-PARITY (HIGH, CONFIRMED-empirically, evidence-integrity).**
+**All three policy-lab cohort portfolios carry `net_liq = 100000` — including `aggressive`, the LIVE
+CHAMPION (`routing_mode='live_eligible'`) — while broker truth is `$2,067.86`** (verified tonight:
+equity = cash = OBP = portfolio_value = 2067.86, positions `[]`, `last_equity` 2067.86,
+balance_asof 2026-07-13). DB-verified: aggressive `net_liq 100000` / `cash_balance 106883.75` ·
+neutral `100000` / `97400.82` · conservative `100000` / `100031.64`. **≈48× the deployable basis
+(§5.1: deployable = live Alpaca `options_buying_power`, never a DB snapshot).**
+- **⚠ THE SHARP EDGE — #1200's fail-closed normalizer does NOT close this.** `_normalize_capital`
+  (`fork.py:435-442`) correctly removes the hardcoded `or 100000` **literal** and treats `net_liq`
+  as authoritative — but **the column itself contains the fabrication.** Reading a fabricated value
+  authoritatively is still fabrication (H9). Removing a default that names $100,000 while the
+  source-of-truth column *is* $100,000 changes the code path, not the number.
+- SCOPE, stated honestly: this is the **policy-lab evidence surface**, NOT live sizing — live
+  entry capital comes from the broker OBP path (§5.1) and `RiskBudgetEngine`, which this does not
+  touch. It is nonetheless the quantified root under §8's "shadow ledgers are partly fiction /
+  shadows fill at 5–17× live size" and it makes **champion promotion basis-broken** (the promotion
+  compares cohorts sized against $100k to a live account at $2,068). Interacts with — does not
+  duplicate — #1124's promotion-time normalization (discount 0.31 measured).
+- **BLOCKS E19-2B**: a counterfactual *selector* sized on $100k selects trades the live account
+  could never fund. → backlog P1.
+- Falsifier: cohort capital reads resolve to a broker-grounded basis (or the experiment declares its
+  basis explicitly and promotion normalizes it), and a promotion comparison states its capital basis.
+
+**★ NEW — F-POLICY-CAPITAL-FALLBACK (MED, CONFIRMED-by-cite, evidence-integrity) — filed by #1200,
+WIDENED here: it is TWO sites, not one.** The `net_liq or cash_balance or 100000` fabrication
+survives at:
+- `policy_lab/fork.py:210` — the legacy normal-shadow-clone loop (**the one #1200's §9 DISCLOSURE
+  names**; explicitly out of #1200's narrowed/frozen scope, annotated in-place at `:201`).
+- **`policy_lab/evaluator.py:251` — a SECOND, UN-NAMED site** (`float(portfolio.get("net_liq") or
+  portfolio.get("cash_balance") or 100000)`). Found this session by grep; **#1200's PR body names
+  only the fork site.** Fixing only the disclosed site would leave the evaluator fabricating.
+- `policy_lab/init_lab.py:12` `INITIAL_CAPITAL = 100_000.0` is the **seeding origin** of
+  F-SHADOW-CAPITAL-PARITY's DB values — the two findings share a root; fix them as a family, not
+  ad hoc. → backlog P2 (rides F-SHADOW-CAPITAL-PARITY).
+
+**★ prequential_validator OPERATIONALIZATION (NEW, structural — the falsifier that never runs).**
+**`prequential_validator` has ZERO production callers** (verified repo-wide this session): no
+scheduler entry (`scheduler.py` has none), no job handler, no import outside its own module — the
+sole non-test reference is a **docstring mention** at `calibration_service.py:317`. It is reachable
+only via its own `main()` / `if __name__ == "__main__"` (`:242`, `:281`). **So #1201 correctly
+repaired a validator that nothing invokes** — the fix is real and the []-green disease is closed at
+the seam, but the seam is not on any live route. **This is the #1126/9a2cef1 costume's cousin, with
+the honest difference that #1201 never claimed a caller** — recording it so no future audit reads
+"prequential parity shipped" as "prequential validation runs."
+- **SCHEDULING IS AN OPERATOR DECISION — explicitly NOT taken here and NOT recommended by default.**
+  The validator is the designated **falsifier** for the calibration multiplier (F-A1-3 / E17
+  family); wiring it to a schedule is a live-adjacent decision (queue routing, cadence, what a
+  failing prequential verdict should *do*), and doctrine reserves that for the operator. Options,
+  unranked: (a) leave manual/on-demand — status quo, zero risk, the falsifier stays unexercised;
+  (b) schedule read-only on `background` and alert on divergence; (c) gate the multiplier on it —
+  behavioral, needs its own PR + flag. → backlog P2 (RESEARCH-adjacent; owner-gated).
+
+**QUEUE ①–④ — ALL FOUR CLOSED (the v1.4 post-close queue is fully cleared):**
+| # | Item | PR | Squash SHA | Merged (UTC) | Deploy status |
+|---|---|---|---|---|---|
+| ① | E8-3 typed sentinel | #1195 | `af1c5be` | 2026-07-13 03:42 | superseded (REMOVED) |
+| ② | E16-3 manifests + F-REPLAY-FK | #1199 | `f34d5cd` | 2026-07-13 20:08 | superseded (REMOVED) · **falsifier PASSED 07-14** |
+| ③ | E19-2 → shipped as **E19-2A** | #1200 | `bef2cdd` | 2026-07-14 23:05 | **LIVE** · falsifier 07-15 |
+| ④ | F-A3-4 prequential parity | #1201 | `9670712` | 2026-07-14 22:28 | **deployed within `bef2cdd`** · falsifier 07-15 |
+
+**★ F-WINDOW-1 — IDENTIFIER COLLISION RESOLVED (two different defects were riding one name).**
+The name was reused across two genuinely distinct defects, and the 07-13/07-14 entries closed one
+while the backlog still carried the other — a silent-retirement hazard. **Split, both preserved:**
+- **F-WINDOW-1a — heartbeat EMISSION.** "The beats exist (#1187 `log_shadow_heartbeat`) but ride a
+  dead channel (root logger unconfigured → every `logger.info` destroyed in-process)." **CLOSED at
+  `1386834` (#1198)** — the deliverable was the handler, not new heartbeats; proven post-close by
+  an `[ALPACA_SYNC]` INFO line reaching Railway. **This — and ONLY this — is what the 07-14 nightly
+  entry's "F-WINDOW-1 CLOSED" means.**
+- **F-WINDOW-1b — heartbeat COVERAGE + JOINABILITY (OPEN, P2 tail).** The v1.4 original
+  (CONFIRMED-by-cite): only W4 (APPLY_ORDER) + a generic post-portfolio EXECUTOR_SHADOW; **W1 no
+  gate-site beat · W2 no per-consumer zero-eval beat · W3 pre-portfolio miss + no candidate/
+  reservation-order identity · no shared cycle/decision ID → W5 unjoinable.** A live channel does
+  not create a shared correlation ID. **The ARM decisions wait on JOINABLE evidence — 1a's closure
+  does NOT release them.** W-clocks do NOT reset for observability-only additions (unchanged).
+- **DOCTRINE PRESERVED (unchanged, restated so the split cannot lose it): the arm-evidence clock
+  restarted at `1386834` — the THIRD restart** (`d5edd50`'s evidence never existed; the channel was
+  dead; `[RISK_BASIS_SHADOW]` has NEVER emitted).
+
+**F-A9-5 — DRAFT, NOT SHIPPED (Lane A is OPEN as of this session).** `_log_cohort_decisions`
+compares dollar `ev` to a 0-100 score threshold (`fork.py:466-477`) while the real filter compares
+`sizing_metadata.score` (`:233-236`) → `ev_below_min` is an evidentiary lie (routing byte-correct).
+Lane A worktree `fix/f-a9-5-routing-log-truth` exists at `bef2cdd` with **ZERO commits vs
+origin/main** — i.e. **opened, nothing shipped.** Status stays `status:reported` / DRAFT until a
+squash SHA + H8 pin exist. Do not mark shipped on the branch's existence.
+
+**CREDENTIAL INCIDENT — ⚠ NOT RECORDED THIS SESSION (OPERATOR INPUT REQUIRED; H9 refusal).**
+The lane instruction directs recording a credential incident as `ROTATED_AND_REVOKED` using
+credential **classes/names only**. **I could not identify the incident from any authoritative
+source** — searched: `audit/ledger.md` (all 4,435 lines), `audit/reports/*` (all dated reports),
+git history (30d, all branches), the memory index, and the untracked root files (match-count only,
+no content read). **The only credential item on record is F-FREE-1 (07-04) — adjudicated
+LOCAL-ONLY-FAKE, "no production credential exposed → no live rotation warranted"** — which is a
+*different* disposition and must NOT be retitled as ROTATED_AND_REVOKED. **Per H9 (never fabricate
+when a source is unavailable — reject loudly), no credential classes, names, dates, or scope are
+invented here.** A false security record in the exclusion memory is worse than an absent one: it
+would mark a real incident as already-handled and EXCLUDE it from future audit slots. **OPERATOR:
+supply the credential CLASS/NAME list (e.g. which provider/key class) + incident date, and this
+entry gets completed verbatim — no values, fragments, fingerprints, or screenshots, per the lane
+contract.** Standing hygiene doctrine UNCHANGED and re-affirmed: diff env key **NAMES** only; never
+`list_variables`/`printenv`/`env`; never emit values (origin: the 06-18 transcript incident).
+Nothing in this lane read an env value.
+
+**PRESERVED, NOT RE-LITIGATED (carried forward untouched — do not reopen):** calibration ×0.5 floor
+SETTLED (floor-HOLD until ~15–20 live closes; F-A1-3 scope = persisted-ev + roundtrip gate ONLY,
+selection/sizing RAW) · pool **8/8 post-epoch (1W/7L)** · close-fill-gap **3/10–15** · universe
+**78** · breaker armed-quiet (`entries_paused=false`, fingerprint [055ead84, 7dd459f8, bd895160],
+trip 07-08 21:20Z; edge-trigger; recovery OPERATOR-ONLY) · SOFI sentinel SETTLED trigger · 1-of-N
+economics SETTLED · greeks envelope DOUBLE-dormant · EXCLUDED-EVIDENCE day 07-06 · retirement
+counters **A1=6 · A2=4 · A3=6 · A4=2 · A5=4 · A6=6 · A8=5 · A9=2 · A10=6** with the nightly's
+honest read (quiet-regime artifact, NOT territory coverage — **recommend KEEP all four**;
+owner-gated, never unattended) · A10 → A11 Security-lens rotation queued · the autopilot costume
+(A5/A9, 4× on 07-13) still riding the slipping 3-in-1 observability PR.
+
+## 2026-07-14 (Tue 00:00 CT) — NIGHTLY AUDIT (v5.5, scheduled) — report audit/reports/2026-07-14.md · NO NEW FINDING
+
+STEP-0: DB `now()` 05:00:35Z = Tue 00:00:35 CT (dow=Tue) = broker 01:00:35 ET, agree to the second,
+market CLOSED. Tuesday ⇒ NIGHTLY. **Run NOT broker-blind** (interactive; Alpaca MCP surfaced — 3
+broker calls). H8 pin: run-START = run-END SHA = **`f34d5cd`** (#1199), sole non-REMOVED Railway
+deployment (SUCCESS 07-13 20:08:47Z) = local HEAD; no overnight mover.
+
+**No new finding; no ALERT file (zero new criticals).** Window audited = the full Monday 07-13 RTH
+day + the two post-close merges — the richest moved-signal window in a week, but both merges' first
+natural tests are in 07-14 RTH, not the window just closed.
+
+VERIFICATIONS (all ✅ / expected):
+- **Monday 07-13 = zero-entry day**: 6 suggestions, 0 orders, 0 opens, 0 closes, 665 rejection rows
+  (~2× over-count). Pool 8/8 (1W/7L) unchanged; close-fill-gap 3/10–15 unchanged.
+- **Broker flat, unchanged to the cent**: positions `[]`; equity=cash=OBP=portfolio_value=**$2,067.86**;
+  last_equity $2,067.86; balance_asof 2026-07-10. A2 one-beta condition holds (0 live positions).
+- **F-REPLAY-FK still-latent-through-07-13 (KNOWN, verified, not re-found)**: `data_blobs`=0 all-time;
+  `decision_runs`=5 all `failed` (latest 17:29Z) = the exact 5 unrecoverable runs the 07-13 morning
+  diagnosis named. #1199 merged 20:08Z after the last decision cycle → **first exercise = 07-14
+  13:00Z** (expect first-ever `data_blobs>0` + `tape_integrity='complete'`). VERIFY IF fired.
+- **Calibration ×0.5 confirmed in production**: every aggressive suggestion `ev = ev_raw × 0.5000`
+  exactly (F-A1-3 scope: persisted-ev + roundtrip gate ONLY; selection/sizing RAW). Out of raw mode,
+  SETTLED (floor-HOLD until ~15–20 live closes) — do NOT re-flag.
+- **Breaker armed-quiet**: `entries_paused=false`, reason NULL, unchanged since 07-09 11:53Z;
+  `streak_breaker_state.last_tripped_fingerprint` = [055ead84, 7dd459f8, bd895160], tripped_at
+  07-08 21:20Z intact. 0 closes ⇒ trailing window unchanged ⇒ edge-trigger correctly did NOT re-pause.
+  Zero flag-only-if conditions met.
+- **SOFI sentinel QUIET (A8)**: 2 SOFI debit spreads blocked at `edge_below_minimum` (upstream of the
+  roundtrip gate — did NOT clear it). The SETTLED trigger did not fire.
+- **Full learning chain + all 22 job types succeeded** Monday; no failures. H11 critical = only
+  `ops_job_never_run` ×9 (latest 21:07Z) = the known thesis_tracker hourly arm, self-resolved at its
+  22:00Z first run (thesis_tracker succeeded 22:00:02Z; none since).
+
+FREE LOOK (1 SQL): traced the sole unexplained warning class
+`paper_autopilot_cohort_per_suggestion_failed` ×4 (07-13) → metadata
+`distinct_error_classes:["EntryRoundtripCostExceedsEV"]`, ticker QQQ. **Resolved to the KNOWN 07-10
+A5/A9 "autopilot costume"**: `EntryRoundtripCostExceedsEV` (the #1101 gate) lacks a dedicated
+`except` clause in `_execute_per_cohort`, so a designed NO falls to the catch-all `except Exception`
+(paper_autopilot_service.py:1182-1191) and is dressed as "executions failed / did not execute as
+expected" — unlike the sibling enforced blocks (SymbolCooldownActive :1131, EntryUtilizationBlocked
+:1138) that each `continue` without polluting the failure aggregation. Also emits a
+`logger.error("policy_lab_execute_error…")` line per fire. NOT a new finding — fix already queued in
+the slipping 3-in-1 observability PR (now ~5th consecutive build-day slip). Recurred 4× on the first
+fully-visible RTH day, sharpening the A5 slip case.
+
+RETIREMENT COUNTERS: A1=6, A2=4, A3=6, A4=2, A5=4, A6=6, A8=5, A9=2, A10=6. **A1/A3/A6/A10 hit 6 =
+proposal territory (owner-gated).** Honest read: quiet-regime artifact (weekend + zero-entry + flat
+book), NOT territory coverage — a proposal would fail its own "covered elsewhere" test; A10's path is
+A11's Security-lens rotation. Recommend KEEP all four; owner glance only.
+
+PROMPT-STATE DRIFT (for v5.5→v5.6, movers named not alarms): running-SHA STATE still pins
+`655c9aa`/#1143 → HEAD now `f34d5cd`/#1199 · "first calibrated production scan pends 07-10 16:00Z"
+line stale (calibration ×0.5 in prod since 07-10, re-confirmed tonight).
+
+
+## 2026-07-13 (Mon ~15:1x CT, post-close) — PR-0 #1198 + PR-② #1199 SHIPPED — H8 PASS ×2 · status:shipped
+
+STEP-0: host 20:04:31Z = DB 20:04:33Z = broker 16:04 ET, market CLOSED. RTH
+premise in the queue header corrected at 18:02Z (clocks won; both PRs prepared
+on branches during RTH, merged only post-close). Single controller confirmed;
+the obsolete 20:01Z sleep loop was already dead (600s cap), replaced by a
+Monitor that fired at 20:01Z.
+
+**PR-0 #1198 (logging) — squash `1386834`, merged 20:03:07Z. H8 PASS.**
+All 3 services SUCCESS at the SHA (20:03:09-10Z). Canaries: BE 20:04:29Z
+(container start) · worker 20:05:01Z (first post-recycle job) — and the fix
+visibly WORKING: the same job's `[ALPACA_SYNC]` app INFO line reached Railway
+(impossible pre-fix). No tracebacks.
+- ⭐ **THE ARM-EVIDENCE CLOCK RESTARTS AT `1386834`** (third restart —
+  d5edd50's evidence never existed; the channel was dead).
+- **The #1187 heartbeats are LIVE at this SHA with zero code change.
+  F-WINDOW-1 CLOSED** (the deliverable was the handler).
+- Residual (minor, tunable): `rq.worker` sets its own child-logger level, so
+  the parent-`rq` WARNING pin doesn't stop propagation → RQ job lines print
+  twice (rq handler + root). Cosmetic; pin `rq.worker` if it grates.
+
+**Migration `decision_runs_tape_integrity` — applied 20:03:33Z, read-back
+PASS** (tracked as latest; backfill = exactly 5 rows `blob_never_persisted`,
+0 NULL, 5 total runs). ORDERING DEVIATION (recorded): applied while PR-0's
+deploy was still BUILDING, i.e. before PR-0 H8 completed — the load-bearing
+constraint (migration BEFORE #1199 merge) was preserved; the column is
+annotation-only and nothing at `1386834` reads it.
+
+**PR-② #1199 (tape integrity) — squash `f34d5cd`, merged 20:08:47Z (after a
+BEHIND branch-update + fresh CI green; head `33cc5aa` content unchanged,
+update was main-merge only). H8 PASS.** All 3 services SUCCESS at the SHA
+(worker+bg 20:08:46-47Z records; BE 20:08:46Z → SUCCESS). Content verified
+by grep AT the squash SHA: payload hex-encode + `_decode_bytea` (blob_store) ·
+`unpersisted_of` + capture_partial ×4 (decision_context) ·
+`_capture_decision_manifest` ×10 sites (7 midday + 2 morning + def) · both
+handler surfacings. Canaries on the NEW containers: worker 20:10:01Z · BE
+20:09:59Z; worker Error-line sweep clean. worker-background canary
+PENDING-BY-DESIGN (first job = the 21:00Z learning chain; its 20:03Z container
+start was clean).
+- **THE TAPE-COMPLETE BOUNDARY STAMPS AT `f34d5cd`** — first natural test:
+  tomorrow 13:00Z suggestions_close (expect decision_run status ok,
+  tape_integrity='complete', data_blobs > 0 for the first time ever).
+- CI note (E8-3-adjacent lesson, small): the route-driving tests initially
+  used `asyncio.get_event_loop()` — green locally on a leftover loop, red in
+  CI (`no current event loop`); fixed to `asyncio.run` (fresh loop). The
+  local pass was environment luck, not correctness.
+
+**Post-close health (20:1xZ):** broker positions [] = DB open 0 · broker open
+orders [] = DB working 0 · H11 since 18:00Z = ONLY `ops_job_never_run`
+(thesis_tracker, hourly, expected until its 22:00Z first run — P9 grades it)
+· stuck-`running` ×4 = exactly the known reaper fossils (06-11 order_sync ·
+05-18 promotion_check · 01-14/01-09 validation_eval), NO new orphans from
+tonight's two recycles · extra-runs CLASSIFIED: the 14:05/15:02/17:29Z
+suggestions_open extras carry an EXPLICIT user_id payload (scheduler runs
+carry user_id null) each followed ~90-120s by a paper_auto_execute with a
+`timestamp` payload — an API-triggered per-user chain, NOT scheduler
+duplicates; provenance (which endpoint/caller) still UNTRACED — the existing
+backlog line now has its discriminator.
+
+**③ E19-2 + ④ F-A3-4 HELD to tomorrow post-close (zero cost, sanctioned)** —
+the RTH correction compressed the evening; E19-2 is design-care/MED-risk.
+
 ## 2026-07-13 (Mon ~13:0x CT, RTH read-only) — ② PRE-BUILD DIAGNOSIS: F-REPLAY-FK ROOT CAUSE + ★ NEW F-LOG-INFO-DROP · status:reported
 
 STEP-0: DB 17:37Z / broker 13:37 ET agree; read-only + doc writes (repro script

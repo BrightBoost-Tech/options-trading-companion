@@ -84,8 +84,10 @@ when: no policy-lab capital read can fabricate a default, both sites.
 **NEW P2 · GIT-SHA-DECISION-PROVENANCE (MED, CONFIRMED-empirically).** The replay
 tape is now complete in CONTENT and **silent on PROVENANCE**:
 `decision_runs.git_sha` = the literal string **`'unknown'` on 9/9 rows, all-time**
-(`distinct_sha=1`) across runs spanning **four** deployed SHAs (`8d93621` →
-`1386834` → `f34d5cd` → `bef2cdd`). MECHANISM: the decision path reads **only**
+(`distinct_sha=1`) across runs spanning **TWO distinct deployed SHAs** (joined
+against Railway deployment windows: `8d93621` carried the five 07-13 runs,
+`f34d5cd` the four 07-14 runs) — two code SHAs, one identical non-SHA stamp.
+MECHANISM: the decision path reads **only**
 `GIT_SHA` (`suggestions_open.py:139`, `suggestions_close.py:128`, no fallback) and
 `lineage.get_code_sha` (`:264`) degrades `GIT_SHA` → `APP_VERSION` → `"unknown"`;
 **the healthcheck already solves it** (`api.py:154-157` resolves `GIT_SHA` **or**

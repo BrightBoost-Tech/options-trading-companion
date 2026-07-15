@@ -332,10 +332,32 @@ def test_shadow_capital_parity_scope_is_honest(both: str):
 
 
 def test_git_sha_provenance_is_empirically_grounded(both: str):
-    """9/9 decision_runs stamp the literal 'unknown' across four deployed SHAs."""
+    """9/9 decision_runs stamp the literal 'unknown'."""
     assert "decision_runs.git_sha" in both or "git_sha" in both
     assert "unknown" in both
     assert "api.py:154-157" in both, "the healthcheck already resolves this — cite the fix shape"
+
+
+def test_git_sha_span_claim_is_two_not_four(ledger: str, backlog: str):
+    """The run-set spans TWO deployed SHAs, not four.
+
+    Regression guard for an erratum caught pre-merge in this lane's own first
+    draft: it read the period's DEPLOYMENT LIST (8d93621 -> 1386834 -> f34d5cd ->
+    bef2cdd) and called it four. But the count of SHAs a run-set spans is a JOIN
+    against deployment WINDOWS, not a list of deployments in the period —
+    `1386834` lived ~5min with no decision cycle, and `bef2cdd` deployed after the
+    day's last cycle. The 9 runs sit under exactly two: `8d93621` (five 07-13
+    runs) and `f34d5cd` (four 07-14 runs). Two SHAs with one identical stamp is
+    already sufficient proof; overclaiming four would have been a stretch a
+    reviewer could refute in one query.
+    """
+    for name, doc in (("ledger", ledger), ("backlog", backlog)):
+        assert re.search(r"TWO distinct deployed SHAs", doc), (
+            f"the {name} must state the SHA span as TWO"
+        )
+        assert not re.search(r"(?i)\bfour\b[^\n]{0,30}deployed SHAs", doc), (
+            f"the {name} overclaims the deployed-SHA span"
+        )
 
 
 def test_prequential_operationalization_recorded(both: str):

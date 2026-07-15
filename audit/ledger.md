@@ -95,8 +95,21 @@ a fabricated capital basis produces fabricated selections). → backlog P1.
 **★ NEW — GIT-SHA-DECISION-PROVENANCE (MED, CONFIRMED-empirically, evidence-integrity).**
 **The replay tape is now complete in CONTENT and silent on PROVENANCE: `decision_runs.git_sha` =
 the literal string `'unknown'` on 9/9 rows, all-time** (`distinct_sha = 1`) — across runs spanning
-**four different deployed SHAs** (`8d93621` → `1386834` → `f34d5cd` → `bef2cdd`). Every tape row
-claims the same non-SHA. MECHANISM: the decision path reads **only** `GIT_SHA`
+**TWO distinct deployed SHAs**, cross-referenced against Railway deployment times: **`8d93621`
+carried the five 07-13 runs** (13:00→17:29Z; deployed 07-13 04:21:36Z) and **`f34d5cd` carried the
+four 07-14 runs** (13:00→17:48Z; deployed 07-13 20:08:47Z). Two different code SHAs, one identical
+non-SHA stamp — sufficient to prove the stamp does not track the running code.
+- **⚠ ERRATUM against my own first draft of this entry (caught + corrected PRE-MERGE; recorded
+  because the mistake is the instructive part).** The draft put the span at **4** SHAs, listing
+  `8d93621` → `1386834` → `f34d5cd` → `bef2cdd`. **FALSE.** That is the period's DEPLOYMENT LIST,
+  not the set the runs actually sit under: `1386834` lived ~5 minutes with no decision cycle, and
+  `bef2cdd` deployed 23:05Z — **after** the day's last cycle (17:48Z). **The number of SHAs a
+  run-set spans is a JOIN against deployment WINDOWS, not a count of deployments in the period.**
+  The corrected span (2) already carries the finding in full; the overclaim was refutable by one
+  query — a stretch where the honest smaller number was strictly better. Pinned by
+  `test_docs_consistency.test_git_sha_span_claim_is_two_not_four`.
+
+MECHANISM: the decision path reads **only** `GIT_SHA`
 (`suggestions_open.py:139`, `suggestions_close.py:128` — `os.getenv("GIT_SHA")`, no fallback) and
 `lineage.get_code_sha` (`:264`) degrades `GIT_SHA` → `APP_VERSION` → `"unknown"`; the **healthcheck
 already solves this** (`api.py:154-157` resolves `GIT_SHA` **or** `RAILWAY_GIT_COMMIT_SHA`, the

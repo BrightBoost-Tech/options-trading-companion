@@ -4,6 +4,53 @@ Every finding listed here is EXCLUDED from future audit runs. Re-finding a
 ledger item is a wasted slot. Runs append new findings as `status:reported`;
 the human flips them to `status:shipped` (with PR#) or `status:rejected`.
 
+## 2026-07-15 (Wed, post-close) — UNIVERSE-CENSUS ADJUDICATION (read-only; corrects the same-day 18:38Z status) · status:reported
+
+STEP-0: host `20:59:06Z` ≈ DB `now()` `20:59:15Z` ≈ broker `16:59:17 ET` — agree; market CLOSED.
+Deployed SHA `623044d` (docs-only over `bef2cdd`; the 07-15 falsifier code is `bef2cdd`-identical).
+Read-only census of the 78-symbol production universe + a live Aug-21 chain snapshot (19:29–19:33Z).
+Verified findings (exclusion memory — do not re-derive):
+
+1. **78 active symbols; ALL 78 SELECTED every 2026-07-15 cycle** (`universe_selection_log`
+   09:30Z/14:32Z/16:00Z: total_active=78, selected=78, dropped=0). Full breadth, no prune.
+2. **job-result `universe_size=10` = scanner-EMITTED candidate count (6 IC + 4 debit), NOT ten
+   symbols scanned** (`[APPLY_ORDER_SHADOW] n=10`, mislabeled).
+3. **`symbols_processed=98` vs `selected=78` remains NOT_PROVEN** (20-symbol gap unreconciled).
+4. **BKNG WAS scanned and RANKED** (#3; raw 42.1/47.4, calib 13.5/18.4); its actual **$20-wide
+   long-call debit spread (C175/C195 Aug-21)** was first excluded at **SIZING** — 1-contract risk
+   **$855/$885 > available budget $703/$469** → contracts=0 (both cycles). Sizing drops are
+   stdout-only (no `suggestion_rejections` row) — why the 18:38Z pass mis-called it NOT_IN_RUN.
+5. **BKNG ticker suitability is DISTINCT from structure suitability** — the symbol is
+   universe-suitable (liquid, OI-rich puts); the $20-wide debit STRUCTURE failed the budget.
+   **Do NOT record "BKNG was missed."**
+6. **A hypothetical $5-wide BKNG put spread fits the capital budget ($412 max loss) — this does NOT
+   prove positive EV or entry suitability.** Earnings (07-27) and true EV remain unresolved.
+7. **$62.04 = q15 mark-based FORCE-CLOSE threshold on open-position UPL** (`risk_envelope.py:444`,
+   `envelope="loss_per_symbol"`, iterates open positions' `unrealized_pl` and force-closes at
+   `unrealized < -$62.04`). **NOT an entry max-loss gate** — no production entry code rejects
+   `max_loss_total > $62.04` (distinct from the entry sizing param `max_risk_pct_per_trade`).
+   Reclassified as "defined payoff exceeds the mark-stop threshold" → Phase-3 exit-basis question;
+   no stop change recommended.
+8. **The census `PoP×credit − (1−PoP)×max_loss` (PoP = 1−|Δ_short|) is a BINARY MAX-LOSS LOWER
+   BOUND, not true spread EV** — it ignores the partial-payoff interval between strikes and uses
+   short-delta as a probability proxy. "Net economics negative" is a conservative lower bound,
+   NOT proven-negative.
+9. **True credit-spread EV remains NOT_PROVEN pending queue-⑤** (the payoff-circular ≡$0 class; no
+   independent terminal distribution integrated).
+10. **Two-leg verticals have PROVEN lower fees (fee-only $2.60 vs $5.20) + fewer dead-leg failure
+    modes than four-leg ICs** (BKNG IC unbuildable — C205/C215 dark wings, #1038 class); economic/EV
+    superiority is **NOT PROVEN**.
+11. **Configured $2.50/$5 widths are large for the ~$2,067.86 account; $1 widths scale risk better**
+    (~$75 vs ~$440 max loss) **but may worsen fee/credit economics. No live width change is justified.**
+12. **No ticker activation/deactivation is justified from one snapshot.** `option_liquidity_score` is
+    40 days stale (67/78 stamped 2026-06-05; all 10 zero-scores in that batch) → zero ≠ current
+    illiquidity; `get_option_contracts` OI is deep on the ETFs (SPY 34,265; TLT 65,864).
+
+Preserved as a SEPARATE VERIFIED fact: the engine executed **0** today — QQQ IC roundtrip-rejected
+(`net −$5.03`, #1101) and SOFI persisted `edge_below_minimum` — real and independent of the EV
+mislabel. XSP: broker-listed/tradable (European, cash-settled) but the feed returns null OI/close →
+data-sparse, and not in the scanner universe.
+
 ## 2026-07-14 (Tue ~19:2x CT, post-close) — POST-MERGE RECONCILIATION: ④ #1201 + ③ #1200 SHIPPED · QUEUE ①–④ CLOSED · ★ #1199 FALSIFIER PASSED · ★ NEW GIT-SHA-DECISION-PROVENANCE · status:shipped
 
 STEP-0: host `2026-07-15T00:15:42Z` = DB `now()` `00:15:44Z` = broker `2026-07-14 20:15:44 ET`

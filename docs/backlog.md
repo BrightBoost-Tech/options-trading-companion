@@ -12,6 +12,45 @@ questions) · **RESOLVED — DO NOT REINVESTIGATE**.
 
 ---
 
+## 2026-07-15 (Wed post-close) — UNIVERSE-CENSUS RECONCILIATION (read-only; ledger 07-15 entry is truth)
+
+Read-only census of the 78-symbol universe + a live Aug-21 chain snapshot. **Nothing built/merged/
+flipped.** The 12 verified findings live in the ledger 07-15 entry. Backlog consequences below are
+DEDUPLICATED against existing items — deliberately NOT filed: "empty execution universe", "BKNG
+missing", a new OI-floor item, a new terminal-distribution item, a new cost-unification item, any
+stop-loosening, or any ticker (de)activation.
+
+**PRIORITY ORDER (existing major ordering preserved):** ① Canonical position representation · ② ⑤
+independent terminal distribution / payoff integration · ③ Multi-basis cost unification · ④ Phase-3
+exit-basis measurement · ⑤ Funnel telemetry truth pack (below) · ⑥ Option-liquidity freshness +
+prune provenance (below) · ⑦ Scanner OI-floor extension (below). **② and ③ may be DESIGNED IN
+PARALLEL, but NEITHER licenses a live structure/width change.**
+
+- **SMALL-TIER WIDTH RIDER (observational; ATTACHES to ①+②+③ — NOT a separate live-width build).**
+  The configured $2.50/$5 widths give ~$440 defined max loss on the $2,067.86 book; $1 widths give
+  ~$75 but worse fee/credit. Required FUTURE shadow cohort (observe-only; **no live config change
+  until its falsifier clears**): compare $1 vs configured $2.50/$5 · qty=1 only · exact defined max
+  loss · TRUE integrated-payoff EV (needs ⑤) · fee-only AND all-in cost · cost/credit + fill rate ·
+  same symbol / expiry / directional thesis. · origin 07-15 census.
+- **FUNNEL TELEMETRY TRUTH PACK — EXTENDS the existing 06-10-triage `universe_size`=scanner_emitted
+  mislabel sub-bullet (below in the P2 batch); NOT a new identifier. Priority: supporting P1
+  observability** (learning-mode funnel evidence is currently misleading). Accept: distinguish
+  `active_universe_count` / `selected_symbol_count` / `scanner_emitted_candidate_count` /
+  `h7_passed_count` / `persisted_count` / `executable_count` (never label emissions `universe_size`);
+  PERSIST typed sizing/allocation drops (BKNG + AMD are stdout-only today) so every SELECTED symbol
+  reaches a terminal funnel disposition; reconcile or type the `98`-vs-`78` gap; retry/idempotency
+  never double-counts; zero-candidate cycles stay honest zeros; **reporting-only — no
+  gate/ranking/sizing behavior change.** · origin 06-10 meta-audit ∪ 07-15 census.
+- **OPTION-LIQUIDITY FRESHNESS + PRUNE PROVENANCE (NEW P2 package — NOT "small": provenance needs a
+  migration).** Evidence: 67/78 `option_liquidity_score` ~40 days stale (2026-06-05); all 10 zero
+  scores from that stale batch → zero did NOT prove current illiquidity; AAL/F/LYFT pruned together
+  2026-07-06 with NO persisted reason (F still scored ~93 — precisely why reason provenance matters).
+  Accept: verify + record the effective option-liquidity-WEIGHTING flag — **if weighting is OFF, mark
+  the defect LATENT and require completion BEFORE arming it**; stale/missing scores normalize to
+  UNKNOWN (never current zero-liquidity); define a refresh cadence + a freshness timestamp; every
+  activation/deactivation carries actor / source / reason / effective_at; PRESERVE history (never
+  overwrite the last state); **no automatic reactivation of AAL/F/LYFT.** · origin 07-15 census.
+
 ## 2026-07-14 (Tue post-close) — POST-MERGE RECONCILIATION · QUEUE ①–④ CLEARED
 
 Ledger 07-14 (~19:2x CT) entry is truth. Docs-only lane from `bef2cdd`; nothing
@@ -1096,7 +1135,16 @@ ops_health_check q30min-real dedup → #1114 · signal-accuracy telemetry
   the GLD strike-modulus: filter selection candidates on `oi >= floor` at
   the same `_split_chain_to_calls_puts` seam (`None` → keep; the legacy
   fallback chain carries no OI). Self-filters every symbol's dead strikes.
-  · origin 07-06 M2 recon · done when: OI floor at the seam, H9-safe.
+  **07-15 census EXTENSION (not a new item):** OI IS available read-only from
+  `get_option_contracts` (with an `open_interest_date` — carry the freshness
+  alongside the value) but is ABSENT from the snapshot path used for leg
+  selection; wire exact-LEG OI (never a symbol aggregate) into selection;
+  round-strike concentration matters (IWM 280 = 64,908 OI vs off-round
+  282/277 = 1,357/256 — prefer the deep round strike); missing/stale OI →
+  typed UNKNOWN, never zero; OBSERVE-ONLY measurement before any enforcing
+  floor; adjusted/nonstandard contracts stay excluded.
+  · origin 07-06 M2 recon ∪ 07-15 census · done when: OI floor at the seam,
+  H9-safe, observe-first.
 - **Nightly-audit dead-man ping (audit-loop ③, 07-06 night triage)** — a
   healthchecks.co cron check on the local nightly-audit schedule (report
   write → ping), same pattern as the worker's #1109. Root cause of the

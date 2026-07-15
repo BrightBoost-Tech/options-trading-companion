@@ -476,3 +476,63 @@ def test_f_free_1_disposition_not_retitled(ledger: str):
         "F-FREE-1 is LOCAL-ONLY-FAKE with no live rotation warranted — a "
         "different disposition from ROTATED_AND_REVOKED"
     )
+
+
+# --------------------------------------------------------------------------
+# 12. 2026-07-15 universe-census adjudication — durable corrections only
+#     (NO transient counts pinned as permanent strategy truth: '78 active' /
+#     'universe_size=10' are recorded as FACTS in the docs but are deliberately
+#     NOT asserted here, because they change and must not become brittle guards.)
+# --------------------------------------------------------------------------
+
+def test_census_62_is_force_close_stop_not_entry_gate(both: str):
+    """$62.04 is a q15 mark-based force-close on open-position UPL, never an
+    entry max-loss gate — the correction must not silently revert."""
+    assert "NOT an entry max-loss gate" in both
+    assert re.search(r"mark-based FORCE-CLOSE", both, re.IGNORECASE)
+    assert "risk_envelope.py:444" in both
+
+
+def test_census_binary_ev_labelled_lower_bound(both: str):
+    """The PoP*credit - (1-PoP)*max_loss calc is a lower bound, not true EV;
+    'negative economics' from it is never 'proven negative'."""
+    assert re.search(r"BINARY MAX-LOSS LOWER\s+BOUND", both, re.IGNORECASE)
+    assert "True credit-spread EV remains NOT_PROVEN pending queue-⑤" in both
+
+
+def test_census_bkng_suitability_distinction_and_not_missed(both: str):
+    """Ticker suitability != structure suitability; 'BKNG was missed' is
+    recorded ONLY as the prohibited framing, never as a fact."""
+    assert re.search(r"ticker suitability is DISTINCT from structure suitability",
+                     both, re.IGNORECASE)
+    assert 'Do NOT record "BKNG was missed."' in both
+
+
+def test_census_no_ticker_change_from_one_snapshot(both: str):
+    assert "No ticker activation/deactivation is justified from one snapshot" in both
+    assert "no automatic reactivation of AAL/F/LYFT" in both
+
+
+def test_census_width_rider_is_observe_only(both: str):
+    """The $1-vs-$5 width work is a shadow rider on ①+②+③ — no live width change."""
+    assert "SMALL-TIER WIDTH RIDER" in both
+    assert re.search(r"no live config change\s+until its falsifier clears",
+                     both, re.IGNORECASE)
+
+
+def test_census_deduped_not_filed_list_present(backlog: str):
+    """The do-not-file list guards against re-filing dupes an audit would waste
+    a slot on."""
+    assert "DEDUPLICATED" in backlog
+    assert "empty execution universe" in backlog
+    assert "stop-loosening" in backlog
+
+
+def test_census_funnel_pack_extends_not_duplicates(backlog: str):
+    """The funnel truth pack must EXTEND the existing mislabel item, not mint a
+    second identifier for the same defect."""
+    # exactly one pack (no second identifier for the same defect), and it
+    # states it EXTENDS the pre-existing mislabel item.
+    assert backlog.count("FUNNEL TELEMETRY TRUTH PACK") == 1
+    assert "EXTENDS the existing" in backlog
+    assert re.search(r"EXTENDS the existing[\s\S]{0,80}mislabel", backlog)

@@ -853,13 +853,11 @@ _REJECT_RAW_EV_INVALID = "raw_ev_invalid"
 _REJECT_MAX_LOSS_NOT_NORMALIZABLE = "max_loss_not_normalizable"
 _REJECT_CONTRACT_COUNT_MISMATCH = "contract_count_basis_mismatch"
 
-# B12 — the EXACT canonical cost assumption the eligibility computation
-# inherits from canonical_ranker at one contract: fees = 0.65 × 1 × 2 (open +
-# close, LEG-BLIND — the ranker does not scale by leg count; the multi-basis
-# unification is its own backlog item) + slippage floor = 5% of |ev| when no
-# TCM estimate exists. Stamped on every verdict so nobody later assumes
-# leg-aware costs were applied.
-_ELIGIBILITY_COST_BASIS = "leg_blind_fee_0.65_per_contract_x2_plus_5pct_ev_slippage"
+# B12 + cost-basis unification — the EXACT canonical eligibility basis at one
+# structure contract: fee = 0.65 × option-leg-count × 1 contract × 2 sides,
+# plus the 5% |ev| slippage floor when no TCM estimate exists. The leg count is
+# carried into the normalized view from the persisted source order.
+_ELIGIBILITY_COST_BASIS = "per_leg_fee_0.65_x_leg_count_x_contracts_x2_plus_5pct_ev_slippage"
 
 # B13 — tolerant numeric comparison bound for persisted-clone identity checks.
 # Values round-trip Python float → JSONB → Python; 1e-6 absolute covers that
@@ -924,7 +922,8 @@ def build_raw_eligibility_view(row: Dict) -> tuple:
         max_loss_total  = row max_loss_total / row contracts   (per contract)
         costs           = _ELIGIBILITY_COST_BASIS at contracts=1
 
-    Leg/order quantity CANNOT influence the decision. Returns (view, None) or
+    Clone quantity CANNOT influence the decision; source leg count DOES, because
+    commissions accrue per leg. Returns (view, None) or
     (None, typed_reason): non-finite/zero ev_raw → raw_ev_invalid;
     missing/zero/non-finite normalized max loss → max_loss_not_normalizable —
     never inferred, never silently defaulted.
@@ -971,9 +970,19 @@ def build_raw_eligibility_view(row: Dict) -> tuple:
     if not math.isfinite(per_contract_max_loss) or per_contract_max_loss <= 0:
         return None, _REJECT_MAX_LOSS_NOT_NORMALIZABLE
 
+    source_legs = order_json.get("legs") if isinstance(order_json, dict) else None
+    normalized_legs = [
+        {**leg, "quantity": 1}
+        for leg in (source_legs or [])
+        if isinstance(leg, dict)
+    ]
     view = {
         "ev": raw_ev_f,
         "ticker": row.get("ticker"),
+        "order_json": {
+            "contracts": 1,
+            "legs": normalized_legs,
+        },
         "sizing_metadata": {
             "contracts": 1,
             "max_loss_total": per_contract_max_loss,
@@ -1158,7 +1167,7 @@ def _build_prerejection_clone(
     and honestly rescaled risk fields; only eligibility is normalized.
 
     Gate: canonical compute_risk_adjusted_ev(view, [], 0.0) — portfolio-blind,
-    concentration penalty 1.0, the exact leg-blind canonical cost assumption
+    concentration penalty 1.0, the exact leg-aware canonical cost assumption
     (_ELIGIBILITY_COST_BASIS). -999 sentinel -> raw fails the edge too;
     exception -> typed recompute failure; None/non-finite -> typed invalid;
     non-normalizable inputs -> typed refusal. No clone, no accepted verdict,

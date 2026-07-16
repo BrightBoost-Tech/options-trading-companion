@@ -22,7 +22,56 @@ logger = logging.getLogger(__name__)
 
 CANONICAL_RANKING_ENABLED = os.environ.get("CANONICAL_RANKING_ENABLED", "1") == "1"
 MIN_EDGE_AFTER_COSTS = float(os.environ.get("MIN_EDGE_AFTER_COSTS", "15"))
-DEFAULT_FEE_PER_CONTRACT = 0.65  # typical options commission per contract
+DEFAULT_FEE_PER_CONTRACT = 0.65  # options commission per leg-contract per side
+
+
+def _ranking_round_trip_fees(
+    suggestion: Dict[str, Any],
+    fee_per_contract: float = DEFAULT_FEE_PER_CONTRACT,
+) -> float:
+    """Return total round-trip commissions on an explicit leg-count basis.
+
+    Broker commissions accrue per option leg, per structure contract, on both
+    entry and exit. Production suggestions carry order_json.legs; a
+    present-but-empty/malformed order is rejected because its cost cannot be
+    represented honestly. Legacy/unit callers that predate order_json keep
+    a clearly stamped one-leg compatibility basis instead of silently claiming
+    multi-leg coverage.
+    """
+    sizing = suggestion.get("sizing_metadata") or {}
+    contracts = int(sizing.get("contracts") or 1)
+    if contracts <= 0:
+        raise ValueError("ranking_cost_contracts_invalid")
+
+    order_json = suggestion.get("order_json")
+    basis = "per_leg_per_structure_contract_round_trip"
+    if order_json is None:
+        # Compatibility for old analytical/unit inputs only. The live writer
+        # always constructs order_json before invoking the ranker.
+        leg_count = 1
+        basis = "legacy_single_leg_input_without_order_json"
+    else:
+        legs = order_json.get("legs") if isinstance(order_json, dict) else None
+        if not isinstance(legs, list) or not legs or not all(
+            isinstance(leg, dict) for leg in legs
+        ):
+            raise ValueError("ranking_cost_leg_count_unavailable")
+        leg_count = len(legs)
+
+    fee = float(fee_per_contract)
+    if fee < 0:
+        raise ValueError("ranking_cost_fee_invalid")
+    expected_fees = fee * contracts * leg_count * 2
+    suggestion["ranking_costs"] = {
+        "commission_basis": basis,
+        "fee_per_leg_contract_side": fee,
+        "structure_contracts": contracts,
+        "leg_count": leg_count,
+        "round_trip_sides": 2,
+        "expected_fees_total": round(expected_fees, 6),
+        "currency": "USD",
+    }
+    return expected_fees
 
 
 def _vrp_live_enabled() -> bool:
@@ -62,11 +111,25 @@ def compute_risk_adjusted_ev(
     """
     ev = float(suggestion.get("ev") or 0)
     sizing = suggestion.get("sizing_metadata") or {}
-    contracts = int(sizing.get("contracts") or 1)
 
     # ── Expected P&L after costs ────────────────────────────────────
     expected_slippage = _estimate_slippage(suggestion)
-    expected_fees = fee_per_contract * contracts * 2  # open + close legs
+    try:
+        expected_fees = _ranking_round_trip_fees(suggestion, fee_per_contract)
+    except (TypeError, ValueError) as exc:
+        # A live suggestion with an unpriceable commission basis is not allowed
+        # to rank as though it were a one-leg order. Typed provenance remains on
+        # the suggestion for the persisted decision record.
+        suggestion["ranking_costs"] = {
+            "commission_basis": "unavailable",
+            "error": str(exc),
+            "currency": "USD",
+        }
+        logger.warning(
+            "[RANKING] Filtered %s: commission basis unavailable (%s)",
+            suggestion.get("ticker") or "?", exc,
+        )
+        return -999.0
     expected_pnl = ev - expected_slippage - expected_fees
 
     # ── Small-account hard filter ───────────────────────────────────

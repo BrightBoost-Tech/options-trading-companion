@@ -4,6 +4,62 @@ Every finding listed here is EXCLUDED from future audit runs. Re-finding a
 ledger item is a wasted slot. Runs append new findings as `status:reported`;
 the human flips them to `status:shipped` (with PR#) or `status:rejected`.
 
+## 2026-07-16 — POST-MERGE RECONCILIATION · status:shipped-code/runtime-pending
+
+Grounded repository truth at `main=38f6e6396de1b76de6359976d4e4996a1d839af7`.
+The following closures supersede stale `status:reported` and queue language
+below; historical entries remain exclusion memory.
+
+- #1203 shipped F-A9-5 truthful Policy-Lab reason serialization.
+- #1204 shipped the canonical position/payoff model; #1214 wired exact
+  defined-risk max loss into the risk envelope. Only that slice is closed.
+- Current main's two midday live-position reads raise a typed unavailable-state
+  error rather than returning a false-flat `[]`; handler job truth consumes the
+  failure. Runtime exception injection is pending.
+- #1215 shipped strict Policy-Lab capital reads and partial/failure propagation;
+  it removed the nominal $100k code fallback. This does **not** make existing
+  $100k shadow portfolio rows comparable to the ~$2k live book.
+- #1216 shipped the model-version/deploy-version provenance split.
+- Current main's decision writer resolves a full SHA from explicit input,
+  `GIT_SHA`, or `RAILWAY_GIT_COMMIT_SHA`; the first natural production row
+  remains the runtime falsifier.
+- #1218 shipped leg × quantity × entry/exit commission in canonical ranking.
+  Remaining scanner/gate/slippage/realized cost-basis work stays open.
+- #1219 shipped honest funnel denominators; per-selected-item terminal
+  disposition remains open.
+- #1220 shipped regular-session-close-aware thesis expiry scoring. It changes
+  evidence timing only, not trading exits.
+- #1222 shipped the durable doctrine for those three contracts.
+- #1223 is draft/test-only: restores the legacy #775 PoP suite; not counted
+  shipped until merged.
+
+### Practical effect on the next trading session
+
+- Exact payoff max loss can change risk-envelope arithmetic and can fail a
+  malformed/unbounded defined-risk candidate closed.
+- Leg-aware commissions can lower the rank/RAeV of four-leg structures relative
+  to two-leg structures and can reject a marginal candidate that previously
+  cleared on the universal $1.30 estimate. No threshold changed.
+- Position-state read failures cannot masquerade as a flat live book.
+- Provenance and funnel changes make the evidence attributable; they do not
+  select or submit a trade by themselves.
+- Expiry-day thesis scoring occurs post-close and cannot change an intraday
+  entry or exit.
+
+**Runtime boundary:** deployment/H8, first natural max-loss decision, first
+natural leg-aware cost decision, first resolved decision-tape SHA, and next
+post-close thesis run are NOT_PROVEN_RUNTIME in this GitHub-only lane. No
+broker, DB, Railway, environment, flag, threshold, stop, or schedule write was
+performed.
+
+### Exclusion memory / do not reopen as fresh findings
+
+Do not refile the shipped slices above. Reopen only on a named falsifier or on
+the explicitly listed remainder: shadow-capital parity, terminal-distribution
+source, cost phase 2, canonical-position greeks/stress/reconciliation, funnel
+terminal dispositions, or durable cross-job identity.
+
+
 ## 2026-07-15 — ADJUDICATED: external full audit v1.5 · status:reported
 
 Executed the v1.5 BRIEF (`docs/review/external-full-audit-v1.5-current.md`) — it was BRIEF_ONLY (no completed

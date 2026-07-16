@@ -3,7 +3,7 @@ Tests for Phase 3: strategy-aware probability of profit (PoP) via calculate_pop.
 
 Verifies:
 1. Credit spread PoP uses credit/width ratio
-2. Debit spread PoP uses long leg delta
+2. Debit spread PoP uses the two-leg delta midpoint
 3. Single-leg long uses raw delta
 4. Single-leg short uses 1 - delta
 5. Fallback to delta when strategy-specific data is missing
@@ -34,7 +34,7 @@ class TestCalculatePop:
         pop = calculate_pop("credit_put_spread", credit=2.0, width=5.0)
         # PR-0 (07-12): max_gain=200, max_loss=300, PoP = 300/500 = 0.60
         # (was the inverted 200/500 = 0.40 = P(loss)).
-        assert abs(pop - 0.45) < 0.01
+        assert abs(pop - 0.60) < 0.01
 
     def test_debit_spread_uses_two_leg_delta_midpoint(self):
         """Debit spread PoP uses the production two-leg delta midpoint."""
@@ -43,7 +43,7 @@ class TestCalculatePop:
             {"action": "sell", "delta": 0.30},
         ]
         pop = calculate_pop("debit_spread", legs=legs)
-        assert abs(pop - 0.60) < 0.01
+        assert abs(pop - 0.45) < 0.01
 
     def test_long_call_uses_delta(self):
         """Long call PoP ≈ delta."""

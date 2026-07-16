@@ -20,6 +20,11 @@
 -- Contract: ADDITIVE, NULLABLE, no default, no backfill, no trigger, no data
 -- mutation. Backward-compatible — deployed code that does not yet stamp these
 -- fields is unaffected; code that does stamp them now has a home for them.
--- Apply via the canonical Supabase migration procedure POST-CLOSE only.
+--
+-- APPLIED to production 2026-07-16 (operator-authorized override, mid-RTH) via
+-- mcp__supabase__apply_migration; recorded in schema_migrations as version
+-- 20260716155023 (this file renamed to match). Re-applying is a no-op
+-- (IF NOT EXISTS). The immediate live fix was the column itself; the #1231
+-- job-truth/tests/doc changes merge post-close.
 ALTER TABLE public.trade_suggestions ADD COLUMN IF NOT EXISTS ranking_costs jsonb;
 ALTER TABLE public.trade_suggestions ADD COLUMN IF NOT EXISTS vrp_ranking jsonb;

@@ -169,19 +169,27 @@ class TestFetchParity(unittest.TestCase):
         self.assertEqual(c_val.gte_calls, c_prod.gte_calls)
 
     def test_live_only_predicate_and_date_floor(self):
+        before = datetime.now(timezone.utc) - timedelta(days=120)
         with self._clean_env():
             client = _RecordingClient(rows=[_row(1, 1)])
             pv.fetch_live_outcomes(client, "u", window_days=120)
+        after = datetime.now(timezone.utc) - timedelta(days=120)
 
         # live-only predicate (is_paper=false — execution-derived provenance).
         self.assertIn(("is_paper", False), client.eq_calls)
         self.assertIn(("user_id", "u"), client.eq_calls)
-        # date floor: with a 120-day window today, the EV epoch is the binding
-        # floor (max of now-120d, corrupted floor, epoch).
+        # The binding floor changes with wall time. Assert the production
+        # contract, not today's incidental winner, so this fixture cannot rot
+        # when now-120d overtakes the fixed EV epoch.
         self.assertEqual(len(client.gte_calls), 1)
         col, cutoff = client.gte_calls[0]
         self.assertEqual(col, "closed_at")
-        self.assertEqual(cutoff, max(CORRUPTED_PNL_FLOOR, CALIBRATION_EV_EPOCH))
+        hard_floor = datetime.fromisoformat(
+            max(CORRUPTED_PNL_FLOOR, CALIBRATION_EV_EPOCH)
+        )
+        actual = datetime.fromisoformat(cutoff)
+        self.assertGreaterEqual(actual, max(before, hard_floor))
+        self.assertLessEqual(actual, max(after, hard_floor))
 
     def test_live_only_off_reverts_to_is_paper_blind_in_both(self):
         with patch.dict(os.environ, {"CALIBRATION_TRAIN_LIVE_ONLY": "0"}, clear=False):
@@ -207,10 +215,17 @@ class TestFetchParity(unittest.TestCase):
         got = [r["closed_at"] for r in out]
         self.assertEqual(got, sorted(got))                       # ASC
         self.assertEqual(got[0], "2026-03-01T00:00:00+00:00")
-        # DB-side floor that would exclude pre-epoch rows: gte cutoff == epoch
-        # (365-day window reaches older than the epoch, so the epoch binds).
+        # The DB-side floor is max(now-365d, corruption floor, EV epoch).
+        # Do not pin which term wins forever: the rolling term eventually
+        # overtakes every fixed epoch.
         _, cutoff = client.gte_calls[0]
-        self.assertEqual(cutoff, CALIBRATION_EV_EPOCH)
+        rolling = datetime.now(timezone.utc) - timedelta(days=365)
+        hard_floor = datetime.fromisoformat(
+            max(CORRUPTED_PNL_FLOOR, CALIBRATION_EV_EPOCH)
+        )
+        actual = datetime.fromisoformat(cutoff)
+        self.assertGreaterEqual(actual, max(rolling - timedelta(seconds=2), hard_floor))
+        self.assertLessEqual(actual, max(rolling + timedelta(seconds=2), hard_floor))
         self.assertIn(("is_paper", False), client.eq_calls)
 
 

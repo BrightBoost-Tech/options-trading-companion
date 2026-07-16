@@ -279,7 +279,21 @@ class CanonicalLeg:
     greeks: Optional[LegGreeks] = None
 
     def __post_init__(self) -> None:
-        strike = _finite_float(self.strike, f"leg {self.occ_symbol} strike")
+        try:
+            strike = _finite_float(
+                self.strike, f"leg {self.occ_symbol} strike"
+            )
+        except PositionNormalizationError as exc:
+            if exc.reason in (
+                RejectReason.MISSING_FIELD,
+                RejectReason.NOT_A_NUMBER,
+                RejectReason.NON_FINITE,
+            ):
+                raise PositionNormalizationError(
+                    RejectReason.MALFORMED_STRIKE,
+                    f"leg {self.occ_symbol} strike={self.strike!r}",
+                ) from exc
+            raise
         multiplier = _finite_float(
             self.multiplier, f"leg {self.occ_symbol} multiplier"
         )

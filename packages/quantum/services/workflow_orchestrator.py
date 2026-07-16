@@ -2266,8 +2266,17 @@ async def run_midday_cycle(supabase: Client, user_id: str, deployable_capital_ov
 
             return await asyncio.to_thread(_q)
         except Exception as e:
+            # F-MIDDAY-POSITION-READ-FAILOPEN: a failed authoritative read is
+            # not a flat book.  Abort before scanner/ranking/allocation can
+            # consume false-zero exposure.  A successful zero-row query above
+            # still returns [] and remains the legitimate flat-book path.
+            from packages.quantum.risk.position_scope import (
+                LivePositionStateUnavailable,
+            )
             print(f"Error fetching positions for midday risk check: {e}")
-            return []
+            raise LivePositionStateUnavailable(
+                f"midday live position state unavailable: {type(e).__name__}"
+            ) from e
 
     async def _compute_regime():
         return await asyncio.to_thread(

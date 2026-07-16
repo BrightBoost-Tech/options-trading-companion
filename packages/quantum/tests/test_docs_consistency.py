@@ -649,8 +649,9 @@ def test_v15_e1_e20_enumerated_once_with_dispositions(v15: str):
 def test_v15_w1_w5_enumerated_once_with_status(v15: str):
     for n in range(1, 6):
         assert re.search(rf"\|\s*W{n}\s*\|", v15), f"W{n} row missing"
-    for status in ("RUNNING", "START-UNVERIFIED", "UNSTARTED"):
+    for status in ("RUNNING", "START UNVERIFIED", "UNSTARTED"):
         assert status in v15, f"W-table status vocabulary incomplete: {status}"
+    assert "START-UNVERIFIED" not in v15
 
 
 def test_v15_a1_a10_have_pass_structure(v15: str):
@@ -796,12 +797,16 @@ def _g_pass_matrix(t: str):
         assert len(r) >= 9, f"pass-matrix row too few cells: {r[0]}"
         for k in (1, 2, 3):
             assert r[k] and r[k] not in ("—", "-"), f"empty Pass cell in {r[0]}"
+    a7 = next(r for r in rows if r[0] == "A7")
+    assert "DEFERRED-DORMANT" in a7[2]
+    assert "DEFERRED-DORMANT" in a7[3]
+    assert "DEFERRED-DORMANT" not in a7[6]
 
 
 def _g_register(t: str):
-    """C2 — every finding-register block has all 12 fields; FR ids unique."""
+    """C2 — exactly 22 finding blocks at this pin; all 12 fields; FR ids unique."""
     heads = re.findall(r"### (FR-\d+) ·", t)
-    assert len(heads) >= 15, f"too few register entries: {len(heads)}"
+    assert len(heads) == 22, f"finding-register count drift: {len(heads)}"
     assert len(heads) == len(set(heads)), f"duplicate FR id: {heads}"
     for part in re.split(r"\n### FR-", t)[1:]:
         block = "### FR-" + part
@@ -815,25 +820,35 @@ def _g_register(t: str):
 
 
 def _g_w_table(t: str):
-    """C3 — W1..W5 each once with all columns; sample never reuses a run-state."""
-    _h, rows = _table(t, "First-valid boundary (UTC")
-    ws = [r[0] for r in rows]
-    for w in [f"W{i}" for i in range(1, 6)]:
-        assert ws.count(w) == 1, f"{w} not exactly once"
-    for r in rows:
-        assert len(r) >= 13, f"{r[0]} too few columns"
-        assert r[5], f"{r[0]} missing sample/sufficiency"
-        assert r[5] not in ("RUNNING", "START-UNVERIFIED", "UNSTARTED"), \
-            f"{r[0]} reuses a run-state word as sample/sufficiency"
-        assert r[8], f"{r[0]} missing exact runtime check"
-        assert r[12], f"{r[0]} missing verdict"
-    assert "strictly logs-only" in t and "partially durable" in t and "semi-durable" in t
+    """C3 — W1..W5 have honest boundaries, resets, taxonomy, and verdicts."""
+    _h, rows = _table(t, "First-valid boundary")
+    by_window = {r[0]: r for r in rows}
+    assert set(by_window) == {f"W{i}" for i in range(1, 6)}
+    iso_utc = re.compile(r"\b20\d{2}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z\b")
+    full_sha = re.compile(r"\b[0-9a-f]{40}\b")
+    for window in ("W1", "W2", "W3", "W4"):
+        r = by_window[window]
+        assert len(r) >= 13, f"{window} too few columns"
+        assert full_sha.search(r[2]), f"{window} lacks a full SHA"
+        assert iso_utc.search(r[2]), f"{window} lacks an absolute UTC boundary"
+        assert r[5] not in ("RUNNING", "START UNVERIFIED", "UNSTARTED")
+        reset = r[6].lower()
+        assert "merge/recycle" in reset and "does not reset" in reset
+        assert "container restart" not in reset
+        assert r[8] and r[12]
+    w5 = by_window["W5"]
+    assert "UNSTARTED" in " ".join(w5).upper()
+    assert "strictly logs-only" in t
+    assert "partially durable" in t
+    assert "semi-durable" in t
+    assert "W1/W2/W3/W5" in t
+    assert "W2/W3/W4/W5" not in t
 
 
 def _g_runtime_table(t: str):
     """C4 — every runtime-check row has read/source/PASS/FAIL/rationale/status."""
     _h, rows = _table(t, "Exact read / query")
-    assert len(rows) >= 6, f"too few runtime checks: {len(rows)}"
+    assert [r[0] for r in rows] == [f"RC-{i}" for i in range(1, 7)]
     for r in rows:
         assert r[0].startswith("RC-"), f"bad RC id {r[0]}"
         assert len(r) >= 7, f"{r[0]} too few columns"
@@ -870,20 +885,24 @@ def _g_dep_and_top3(t: str):
 
 
 def _g_basis_unit(t: str):
-    """C6 — every economic row has a valid basis+unit; inline tags present."""
+    """C6 — exact economic bases/units; known mixed-unit defect stays explicit."""
     _h, rows = _table(t, "Economic claim")
-    assert len(rows) >= 10, f"too few basis/unit rows: {len(rows)}"
-    bases = {"raw", "calibrated", "realized", "unknown", "n/a"}
-    units = ("per-contract", "position-total", "score-points", "probability",
-             "unknown", "ratio", "ev-multiplier")
+    assert len(rows) >= 14, f"too few basis/unit rows: {len(rows)}"
+    by_name = {r[0]: r for r in rows}
     for r in rows:
         assert len(r) >= 5, f"basis/unit row too few cols: {r[0]}"
         assert r[3] and r[4], f"empty basis/unit in {r[0]}"
-        base_tok = r[3].split()[0].lower().rstrip(",")
-        assert base_tok in bases or r[3].lower() in bases, f"bad basis {r[3]!r} in {r[0]}"
-        assert any(u in r[4].lower() for u in units), f"bad unit {r[4]!r} in {r[0]}"
-    assert "[basis=realized, unit=position-total]" in t
-    assert re.search(r"\[basis=raw", t)
+
+    assert "per-structure-contract USD" in by_name["Credit-spread EV"][4]
+    assert "per-structure-contract USD" in by_name["Debit-spread EV"][4]
+    assert "per-structure-contract USD" in by_name["Condor EV rank input"][4]
+    assert "unknown across 56-row history" in by_name["`ev_below_min` LHS"][3]
+    assert by_name["`min_score_threshold` RHS"][4] == "score-points"
+    assert by_name["`rank_at_decision`"][4] == "ordinal-rank"
+    assert "dimensionless ratio" in by_name["Canonical RAeV"][4]
+    assert "account-equity USD" in by_name["Shadow/live capital snapshot"][4]
+    assert "mixed/unknown" in by_name["`MIN_EDGE_AFTER_COSTS` calculation"][4]
+    assert "position-total USD" in by_name["Realized broker-live P&L"][4]
 
 
 def _g_design_score(t: str):
@@ -901,6 +920,8 @@ def _g_design_score(t: str):
     assert m, "reproducible design-maturity scalar missing"
     assert int(m.group(1)) == esum, f"displayed {m.group(1)} != earned sum {esum}"
     assert "INFERRED" in t and "85" in t
+    assert "arithmetically reproducible" in t
+    assert "not empirically calibrated" in t
 
 
 # ---- real-file tests (each guard passes on the committed report) ----
@@ -966,6 +987,94 @@ def test_v15_charter_key_invariants_preserved(v15: str, both: str):
     assert "external-full-audit-v1.5-results-2026-07-15.md" in both
 
 
+
+def _register_id_fields(text: str) -> str:
+    fields = []
+    for match in re.finditer(
+        r"(?ms)^### FR-\d+\b.*?(?=^### FR-\d+\b|^## 16\.|\Z)",
+        text,
+    ):
+        field = re.search(r"\*\*1\. ID / area / severity:\*\*\s*(.+)", match.group(0))
+        assert field, match.group(0).splitlines()[0]
+        fields.append(field.group(1))
+    return "\n".join(fields)
+
+
+def test_v15_register_covers_retained_and_conditional_ids(v15: str):
+    declared = _register_id_fields(v15)
+    required = {
+        "F-MIDDAY-POSITION-READ-FAILOPEN",
+        "A6-2", "A6-3", "A7-1", "A7-2", "A2-1", "A2-2",
+        "A4-1", "A9-2", "A4-2", "A9-1", "F-A9-6",
+        "A9-3", "F-A9-8", "A8-1", "A10-1", "A1-1", "A5-2",
+        "A3-1", "A3-2", "A3-3", "A9-4", "F-WINDOW-1b",
+        "OBSERVE-WINDOW-DURABILITY", "FREE-LOOK",
+        "E2-QTY-FIX-LIVE-INERT",
+    }
+    missing = sorted(x for x in required if x not in declared)
+    assert not missing, f"retained/conditional findings missing register blocks: {missing}"
+
+
+def test_v15_runtime_count_agrees_across_artifacts(v15: str, ledger: str):
+    _h, rows = _table(v15, "Exact read / query")
+    assert [r[0] for r in rows] == [f"RC-{i}" for i in range(1, 7)]
+    assert "6 unrun runtime checks" in ledger.lower()
+    assert "5 unrun runtime checks" not in ledger.lower()
+    score = v15[v15.index("### 12c.") : v15.index("## 13.")]
+    assert "6 `RUNTIME CHECK — NOT RUN` rows" in score
+
+
+def test_v15_window_scope_and_dedup_are_consistent(
+    v15: str, backlog: str, ledger: str
+):
+    backlog_v15 = backlog[
+        backlog.index("## 2026-07-15 — v1.5 EXTERNAL-AUDIT ADJUDICATION"):
+        backlog.index("## 2026-07-15 (Wed post-close)")
+    ]
+    ledger_v15 = ledger[
+        ledger.index("## 2026-07-15 — ADJUDICATED: external full audit v1.5"):
+        ledger.index("## 2026-07-15 (Wed, post-close)")
+    ]
+    combined = "\n".join((v15, backlog_v15, ledger_v15))
+    assert "W2/W3/W4 ephemeral" not in combined
+    assert "W2/W3/W4/W5" not in combined
+    _h, rows = _table(backlog_v15, "Backlog interaction")
+    observe = [r for r in rows if r[0].startswith("Observe-window durability")]
+    assert len(observe) == 1
+    assert "W1/W2/W3/W5" in observe[0][0]
+    assert "W4 semi-durable" in observe[0][0]
+    assert "EXTENDS-F-WINDOW-1a/1b" in observe[0][3]
+
+    origin = [r for r in rows if r[0].startswith("A5-2")]
+    assert len(origin) == 1
+    interaction = origin[0][3].lower()
+    assert "extends" in interaction and "untraced" in interaction
+
+
+def test_v15_pr1203_runtime_prerequisite_is_not_merge_readiness(
+    v15: str, backlog: str
+):
+    combined = v15 + "\n" + backlog
+    assert "runtime prerequisite" in combined
+    assert "stale `[BLOCKED FROM MERGE]`" in combined
+    assert "rebase" in combined and "fresh CI" in combined
+    assert "block cleared by #1200" not in combined
+
+
+def test_v15_score_is_arithmetic_not_empirical(v15: str, ledger: str):
+    combined = v15 + "\n" + ledger
+    assert "arithmetically reproducible" in combined
+    assert "not empirically calibrated" in combined
+    assert "reproducible weighted scorecard" not in combined
+
+
+def test_v15_epoch_is_prospective_only(v15: str, backlog: str):
+    combined = v15 + "\n" + backlog
+    assert "later normalization pass" not in combined
+    assert "never rewrite or rescale historical" in combined
+    assert "new rows only" in combined or "newly versioned" in combined
+
+
 def test_v15_charter_mutations_each_bite(v15: str):
     """Every corrected-away defect, when reintroduced, turns its guard red."""
     mutations = [
@@ -980,16 +1089,15 @@ def test_v15_charter_mutations_each_bite(v15: str):
          _g_register),
         ("remove W3 exact runtime check",
          lambda s: s.replace(
-             "query `risk_alerts` for the bucket would-block type over an armed window "
-             "AND confirm INFO reservation-order emit", ""),
+             "query `risk_alerts` for bucket would-block rows AND confirm INFO reservation-order emits", ""),
          _g_w_table),
         ("remove expected FAIL from a runtime row",
          lambda s: s.replace("env unset/strict on the bg worker (code default)", ""),
          _g_runtime_table),
-        ("remove a basis/unit tag",
+        ("change per-contract EV to position total",
          lambda s: s.replace(
-             "| MIN_EDGE_AFTER_COSTS gate | §6 (ranker) | edge floor | raw | position-total |",
-             "| MIN_EDGE_AFTER_COSTS gate | §6 (ranker) | edge floor |  | position-total |"),
+             "| Credit-spread EV | A6-3, E12/⑤ | ≡ $0 | raw | per-structure-contract USD |",
+             "| Credit-spread EV | A6-3, E12/⑤ | ≡ $0 | raw | position-total USD |"),
          _g_basis_unit),
         ("reintroduce 8 total",
          lambda s: s + "\nlive broker closes = **8 total**\n",
@@ -1007,6 +1115,18 @@ def test_v15_charter_mutations_each_bite(v15: str):
          lambda s: s.replace("INFERRED design-maturity score = 60 / 100",
                              "INFERRED design-maturity score = 72 / 100"),
          _g_design_score),
+        ("remove score-method caveat",
+         lambda s: s.replace("the method is not empirically calibrated",
+                             "the method is empirically calibrated"),
+         _g_design_score),
+        ("put dormant state in A7 rejected cell",
+         lambda s: s.replace(
+             "none; unavailable passes are intentionally deferred, not rejected",
+             "DEFERRED-DORMANT"),
+         _g_pass_matrix),
+        ("restore wrong W incomplete set",
+         lambda s: s.replace("W1/W2/W3/W5", "W2/W3/W4/W5"),
+         _g_w_table),
     ]
     for label, mutate, guard in mutations:
         mutated = mutate(v15)

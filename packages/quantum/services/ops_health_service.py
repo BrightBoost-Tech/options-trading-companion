@@ -43,7 +43,11 @@ MAX_FRESHNESS_UNIVERSE_SIZE = int(os.getenv("OPS_MAX_FRESHNESS_UNIVERSE", "25"))
 _MARKET_TZ = ZoneInfo("America/New_York")
 
 
-def is_us_market_hours(now: Optional[datetime] = None) -> bool:
+def is_us_market_hours(
+    now: Optional[datetime] = None,
+    *,
+    broker_is_open: Optional[bool] = None,
+) -> bool:
     """US equity regular session, computed as ET WALL-CLOCK (Mon–Fri
     9:30–16:00 America/New_York) so it is DST-correct year-round.
 
@@ -54,11 +58,13 @@ def is_us_market_hours(now: Optional[datetime] = None) -> bool:
     intraday_risk_monitor._fallback_is_market_open_et (ZoneInfo, no offset
     arithmetic). For EDT dates this is byte-identical to the old UTC window.
 
-    v5-A4: gates the data_stale ALERT only. Holidays read as market hours → at
-    most one benign data_stale per holiday, cooldown-capped; the SNAPSHOT still
-    records staleness regardless, and the broker clock is the holiday-aware
-    primary gate elsewhere. A naive `now` is read as UTC (test-compat).
+    When the ops handler supplies Alpaca's broker-authoritative clock, that
+    value wins and therefore covers exchange holidays and half-days. Direct
+    callers/tests without broker access retain the DST-correct ET wall-clock
+    fallback. A naive `now` is read as UTC (test-compat).
     """
+    if broker_is_open is not None:
+        return broker_is_open
     now = now or datetime.now(timezone.utc)
     if now.tzinfo is None:
         now = now.replace(tzinfo=timezone.utc)
@@ -353,6 +359,8 @@ def _rth_job_status(
     cadence: str,
     last_success_at: Optional[datetime],
     now: datetime,
+    *,
+    broker_is_open: Optional[bool] = None,
 ) -> str:
     """Staleness verdict for an intraday RTH-only job (monitor / order_sync /
     heartbeat). DETECTION ONLY — never restarts anything.
@@ -373,7 +381,7 @@ def _rth_job_status(
     ops_health_check handler alerts through its current job_late /
     job_never_run path with no change.
     """
-    if not is_us_market_hours(now):
+    if not is_us_market_hours(now, broker_is_open=broker_is_open):
         return "ok"
     interval = _RTH_CADENCE_MINUTES.get(cadence, 15)
     threshold = timedelta(minutes=interval + OPS_INTRADAY_STALENESS_MARGIN_MIN)
@@ -424,7 +432,10 @@ def _weekend_excluded_age(last_success: datetime, now: datetime) -> timedelta:
 
 
 def get_expected_jobs(
-    client, now: Optional[datetime] = None
+    client,
+    now: Optional[datetime] = None,
+    *,
+    broker_is_open: Optional[bool] = None,
 ) -> List[ExpectedJob]:
     """
     Get status of expected scheduled jobs.
@@ -434,6 +445,8 @@ def get_expected_jobs(
         now: Optional reference time (UTC) — defaults to wall-clock now.
             Injectable so the intraday market-hours gating is deterministically
             testable.
+        broker_is_open: Optional broker-authoritative session state. When
+            present, it overrides weekday/wall-clock inference for RTH jobs.
 
     Returns:
         List of ExpectedJob with name, cadence, last_success_at, status.
@@ -469,7 +482,12 @@ def get_expected_jobs(
                     name=job_name,
                     cadence=cadence,
                     last_success_at=last_success,
-                    status=_rth_job_status(cadence, last_success, now),
+                    status=_rth_job_status(
+                        cadence,
+                        last_success,
+                        now,
+                        broker_is_open=broker_is_open,
+                    ),
                 ))
                 continue
 

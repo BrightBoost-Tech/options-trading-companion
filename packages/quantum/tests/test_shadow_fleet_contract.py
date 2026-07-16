@@ -152,3 +152,37 @@ def test_identical_account_outcomes_count_as_one_market_observation():
     assert count_unique_decision_events(
         [first, str(first), str(first).upper(), second]
     ) == 2
+
+
+@pytest.mark.parametrize(
+    "open_positions,working_orders",
+    [(True, 0), (0, False), (1.5, 0), (0, "0"), (-1, 0)],
+)
+def test_legacy_counts_must_be_exact_nonnegative_integers(
+    open_positions, working_orders
+):
+    with pytest.raises(
+        FleetContractError,
+        match="legacy_counts_must_be_nonnegative_integers",
+    ):
+        build_small_tier_fleet_plan(
+            {1: "champion:v1"},
+            legacy_open_positions=open_positions,
+            legacy_working_orders=working_orders,
+        )
+
+
+def test_active_epoch_cannot_be_reactivated_with_a_new_timestamp():
+    plan = build_small_tier_fleet_plan(
+        {1: "champion:v1"},
+        legacy_open_positions=0,
+        legacy_working_orders=0,
+    )
+    active = plan.activate(
+        datetime(2026, 7, 16, 6, 30, tzinfo=timezone.utc)
+    )
+
+    with pytest.raises(FleetContractError, match="fleet_epoch_already_active"):
+        active.activate(
+            datetime(2026, 7, 16, 7, 30, tzinfo=timezone.utc)
+        )

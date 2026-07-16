@@ -152,6 +152,16 @@ class CalibrationService:
         """
         outcomes = self._fetch_outcomes(user_id, window_days)
 
+        if outcomes is None:
+            # Fetch failure is not an empty cohort. Keep the metrics endpoint's
+            # truth vocabulary aligned with the live adjustment path so a DB
+            # outage can never render as a healthy no-data result.
+            return {
+                "status": "error",
+                "reason": "fetch_failed",
+                "window_days": window_days,
+            }
+
         if not outcomes:
             return {
                 "status": "no_data",

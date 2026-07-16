@@ -195,6 +195,41 @@ async def heartbeat_task(
     )
 
 
+@router.post("/replay/integrity-check", status_code=202)
+async def replay_integrity_check_task(
+    body: Optional[Dict] = Body(default=None),
+    auth: TaskSignatureResult = Depends(
+        verify_task_signature("tasks:replay_integrity_check")
+    ),
+):
+    """Read-only verifier for persisted decision-tape hashes.
+
+    This route is intentionally operator-triggered and unscheduled in its
+    first phase. It reads no live market data and changes no trading control.
+    """
+    now = datetime.now()
+    payload_in = body or {}
+    force_rerun = bool(payload_in.get("force_rerun", False))
+    handler_payload = {
+        "trigger_ts": now.isoformat(),
+        "limit": payload_in.get("limit", 20),
+    }
+    if payload_in.get("decision_id"):
+        handler_payload["decision_id"] = payload_in["decision_id"]
+    if force_rerun:
+        handler_payload["force_rerun"] = True
+    return enqueue_job_run(
+        job_name="replay_integrity_check",
+        idempotency_key=(
+            f"replay_integrity_check-{now.strftime('%Y-%m-%d')}-"
+            f"{handler_payload.get('decision_id', 'latest')}"
+        ),
+        payload=handler_payload,
+        queue_name=BACKGROUND_QUEUE,
+        force_rerun=force_rerun,
+    )
+
+
 @router.post("/phase2-precheck", status_code=202)
 async def phase2_precheck_task(
     auth: TaskSignatureResult = Depends(verify_task_signature("tasks:phase2_precheck"))
@@ -433,4 +468,3 @@ async def iv_historical_backfill_task(
         queue_name=BACKGROUND_QUEUE,
         force_rerun=force_rerun,
     )
-

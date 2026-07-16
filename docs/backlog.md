@@ -30,24 +30,25 @@ F-WINDOW-1a-1b items below — those are STRENGTHENED, never re-filed.
 | A6-3 condor-EV mis-rank | HIGH | retained | **EXTENDS-E12 / ⑤** | P1 (with ⑤) | one terminal distribution feeds both integrations |
 | A7-1 Phase-3 accrual stalled (entry-rate-bound) | HIGH | retained | EXTENDS-Phase-3 (measurement) | gated | resume entries; ETA indeterminate until live fills |
 | A2-1 watchdog cancel-ack double-entry | MED | retained | **EXTENDS-P0-A** | before 2+ live | broker-ack before terminal write |
+| A2-2 canonical-position semantic gap behind quantity-coherent max-loss scalar | LOW | retained | **EXTENDS-canonical-position-P1** | with ① | exact vertical/IC payoff max loss reconciles to broker legs at every quantity |
 | A4-1/A9-2 git_sha wrong env var | MED | retained | **EXTENDS-GIT-SHA-DECISION-PROVENANCE** | one-liner | fall back to RAILWAY_GIT_COMMIT_SHA |
 | A4-2 replay hashes, zero reader | MED | retained | **NEW** | P2 | scheduled determinism check alerts on mismatch |
 | A7-2 exit-basis stamp on 2/6 closes | MED | retained | EXTENDS-Phase-3 | gated | stamp lands on resting-GTC/sweep closes |
-| A8-1 F-A9-5 (56 rows carry ev_below_min) | MED | retained | **EXTENDS-F-A9-5** | immediate tail (#1203 draft) | rejected row ev≥threshold yet stamped ev_below_min |
+| A8-1 F-A9-5 (56 rows carry a dollar-vs-score label lie) | MED | retained | **EXTENDS-F-A9-5** | immediate tail (#1203 draft) | capacity-only rejection carries no score reason; score rejection uses the routing predicate's typed reason |
 | A9-1 model_version = APP_VERSION lie | MED | retained | **NEW (F-A9-6)** | P2 | model_version changes on a model change w/o APP_VERSION deploy |
 | A9-3 champion-path fork failures unmeasured | MED | retained | **NEW (F-A9-8)** | P2 | champion clone-insert exception yields status='ok' + 0 errors |
 | A10-1 is_us_market_hours holiday-blind | MED | retained | **EXTENDS-area10** | **hard trigger < 2026-09-07** | 09-07 produces 0 data_stale/job_late HIGHs |
 | E2 roundtrip qty-fix LIVE-INERT | MED | conditional | EXTENDS-W1 (observe) | observe-only | qty>1 live decision uses per-contract basis |
-| Observe-window durability (W2/W3/W4 ephemeral) | MED | retained | **NEW** | before any arm | shadow decisions write a durable DB sink, not logger.info |
+| Observe-window durability (W1/W2/W3/W5 incomplete; W4 semi-durable) | MED | retained | **EXTENDS-F-WINDOW-1a/1b** | before any arm | persist W1/W2 decisions, complete W3 beyond its alarm-only subset, preserve W4's existing count, and leave W5 UNSTARTED until designed |
 | A1-1 replay runner input-blocked | LOW | retained | EXTENDS-E19-2B / replay-runner | P2 | replay reconstructs champion set from a decision_id, 0 live reads |
-| A5-2 no decision_runs origin column | LOW | retained | NEW (gates replay) | P2 | operator re-run vs scheduled run are byte-distinguishable |
+| A5-2 no decision_runs origin column | LOW | retained | **EXTENDS-suggestions_open-untraced-extra-runs + replay-runner** | P2 | scheduled/operator/retry/replay decision runs are durably byte-distinguishable |
 | A3-1 stop-vs-thesis signal unconsumed | LOW | retained | NEW | research | the live query returns rows and no code path consumes them |
 | A3-2 DTE bucket inert / A3-3 no apply-time n-recheck | LOW | retained | EXTENDS-segment-n floor / E1 | P2 (trigger-owned) | a segment mult≠1.0 with sample_size<8 reaches scoring |
 | A9-4 freshness alert no-activity guard | LOW | retained | EXTENDS-§8 OUTPUT_FRESHNESS | P2 | a quiet learning-mode day fires output_stale=error |
 | OPTIMIZER_V4/ALLOCATION_V4 dead-capability | NOTE | retained | EXTENDS-FORECAST_V4 #1126 inventory | P3 | any production import of optimizer_v4/capital_allocator |
 | Internal-fill close-price sign | — | **REJECTED (NOT PROVEN)** | exclusion memory | — | a live/learning consumer reads avg_fill_price unsigned — none exists |
 
-**NEW items filed (net-new, not dupes):**
+**ACTIONABLE items adjudicated (NEW or explicit EXTENDS; no duplicate filings):**
 - **F-MIDDAY-POSITION-READ-FAILOPEN (P1-safety) — do NOT implement in this docs lane.** Two live-entry authoritative
   position reads fail OPEN (`except → return []`): `workflow_orchestrator.py:2240-2270` (silent, feeds scan
   concurrency/open-book risk/small-tier allocation before persist) + `paper_autopilot_service.py:1328-1343`
@@ -70,14 +71,14 @@ F-WINDOW-1a-1b items below — those are STRENGTHENED, never re-filed.
   job-green (`champion_status='legacy_unmeasured'`). Fix: fold champion-path failures into the return counter. · v1.5 A9.
 - **Replay determinism reader (P2):** `decision_runs.input_hash/features_hash` written, `verify_*` has no production
   caller → determinism regressions silent. Couples to A1-1 (the replay runner is the missing reader). · v1.5 A4-2.
-- **decision_runs origin/trigger column (P2):** no column distinguishes scheduled vs operator vs replay cycles;
-  a replay runner writing decision_runs would pollute the census unless it stamps `strategy_name='replay'`. Gates
-  the replay runner. · v1.5 A5-2.
-- **Observe-window durable sink (P2, before any arm):** route each shadow arm-decision (W2/W3/W4) to a DB sink
-  (shadow_observations / job_runs.result) instead of `logger.info`; add RISK_BASIS + BUCKET heartbeats; centralize
-  the W3 bucket seam (the `:636` + endpoint stage paths bypass it). Four of five windows lack complete durable
-  decision evidence (W1, W2, W3, W5); only W1/W2 are strictly logs-only, W3 is partially durable (cap-breach alarm
-  subset → `risk_alerts`), W4 is semi-durable (count → `job_runs.result`), and W5 is absent/unstarted. · v1.5 W.
+- **Decision-run origin provenance (EXTENDS `suggestions_open untraced extra runs` and the replay runner, P2):**
+  no durable field distinguishes scheduled, operator-triggered, retry, and replay cycles. Add versioned origin/trigger
+  provenance so those runs are byte-distinguishable without overloading `strategy_name`; this is not a new standalone
+  filing. · v1.5 A5-2.
+- **Observe-window durable evidence (EXTENDS-F-WINDOW-1a/1b, P2, before any arm):** persist W1/W2 arm decisions;
+  complete W3 beyond its current alarm-only durable subset; retain W4's existing semi-durable `job_runs.result`
+  count and correct its label; W5 remains UNSTARTED until it has an approved design. Add the shared retry-stable
+  identity owned by F-WINDOW-1b. Do not classify W4 as ephemeral or W5 as logs-only. · v1.5 W.
 - **A10-1 Labor Day holiday-blind (EXTENDS-area10, HARD TRIGGER < 2026-09-07):** `is_us_market_hours:46-69` gates on
   weekday math with no `get_calendar` → 09-07 (Mon) reads market-open → false `data_stale`/`job_late` HIGHs. Fix:
   gate the alert path on `get_calendar` before 09-07. · v1.5 A10.
@@ -91,7 +92,9 @@ F-WINDOW-1a-1b items below — those are STRENGTHENED, never re-filed.
 INERT and is a SEPARATE fail-closed code item; E12/⑤ gains the live cross-structure mis-rank + the strict-vs-tail env disagreement; GIT-SHA gains the
 root cause (Dockerfile `ARG GIT_SHA=unknown`) + one-line RAILWAY fallback; E19-2B/replay gains the A1-1 capture gaps
 (capital/OBP/tier/book/ev_raw uncaptured); F-A9-5 gains the 56-row materialization + the raev/score secondary lie;
-Phase-3 gains A7-1 entry-rate-bound ETA + A7-2 stamp-coverage; segment-n floor gains A3-2/A3-3; OUTPUT_FRESHNESS
+Phase-3 gains A7-1 entry-rate-bound ETA + A7-2 stamp-coverage; canonical-position gains A2-2's scalar-vs-structure
+semantics; segment-n floor gains A3-2/A3-3; F-WINDOW-1a/1b gains the exact durability taxonomy; the existing
+untraced-extra-runs item gains A5-2 durable origin provenance; OUTPUT_FRESHNESS
 gains the no-activity guard; FORECAST_V4 #1126 inventory gains OPTIMIZER_V4/ALLOCATION_V4.
 
 **Priority order (v1.5-confirmed, unchanged major ordering):** ① Canonical position representation · ② ⑤ terminal
@@ -100,6 +103,10 @@ distribution · ③ Multi-basis cost unification · ④ Phase-3 exit-basis measu
 neither licenses a live structure/width change.** Ahead of all of these for SAFETY:
 **F-MIDDAY-POSITION-READ-FAILOPEN** (live-entry fail-closed) and **A6-2 shadow-capital parity** (the first operator
 decision — gates every honest cross-cohort comparison). No control-loosening recommended anywhere.
+
+**Canonical ordering:** first operator decision = A6-2 prospective shadow-capital epoch; first code build =
+F-MIDDAY-POSITION-READ-FAILOPEN. #1203/#1204 follow only after rebase and adversarial review. This docs-only
+#1205 reconciliation merges last, after sibling PR status and runtime/deployment evidence are refreshed.
 
 ## 2026-07-15 (Wed post-close) — UNIVERSE-CENSUS RECONCILIATION (read-only; ledger 07-15 entry is truth)
 
@@ -268,9 +275,11 @@ other — a silent-retirement hazard. Split, both preserved:
 substance (`_log_cohort_decisions` compares dollar `ev` to a 0-100 score threshold,
 `fork.py:466-477` vs the real score filter `:233-236` → `ev_below_min` lies;
 routing byte-correct; the logger must CONSUME the routing predicate's result, not
-re-derive). Lane A = PR #1203 (`fix/f-a9-5-routing-log-truth`) is **DRAFT, 1 commit at `28e4990`**; its
-#1200-live-observation block is cleared, but it is **not shipped** — BEHIND current main, needs
-rebase + adversarial/CI review before any merge. **Do not mark shipped**; needs a squash SHA + H8 pin.
+re-derive). Lane A = PR #1203 (`fix/f-a9-5-routing-log-truth`) is **DRAFT at `28e4990`**. The #1200
+natural-observation prerequisite is VERIFIED satisfied, but #1203's title/body still carry the stale
+`[BLOCKED FROM MERGE]` marker. It remains non-mergeable by process until metadata is corrected, it is
+rebased onto current main, adversarially re-reviewed, and fresh CI passes. **Do not mark shipped**; a squash SHA
+and H8 pin remain required.
 
 **PENDING FALSIFIERS → the ledger's pending list owns these (not this file):**
 #1200 first calibrated-rejected candidate (**no qualifying candidate =
@@ -439,8 +448,9 @@ the ledger 07-12 v1.4 entry. All one layer BELOW this weekend's route-driving te
   compares dollar `ev` to a 0-100 score threshold (`fork.py:466-477` vs the real score
   filter `:233-236`) → `ev_below_min` lies; the logger must CONSUME the routing
   predicate's result, not re-derive (join check = the test; rides ③'s fork territory if
-  clean). PR #1203 `fix/f-a9-5-routing-log-truth` is **DRAFT, 1 commit at `28e4990`**, BEHIND main,
-  block cleared by #1200 but not shipped — **do not mark shipped** · **F-WINDOW-1 → NOW
+  clean). PR #1203 `fix/f-a9-5-routing-log-truth` is **DRAFT at `28e4990`**; its #1200 runtime
+  prerequisite is satisfied, but its `[BLOCKED FROM MERGE]` metadata is stale and it still needs metadata
+  correction, rebase, adversarial review, and fresh CI — **do not mark shipped** · **F-WINDOW-1 → NOW
   SPLIT (see the 07-14 section): 1a EMISSION = CLOSED at `1386834` (#1198); 1b COVERAGE
   + JOINABILITY = the item that stays HERE** — per-decision-site heartbeats sharing ONE
   cycle/decision ID + W3 reservation-order identity (the arm-evidence repair's OWN second
